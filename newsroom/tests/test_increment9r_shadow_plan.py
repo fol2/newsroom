@@ -161,7 +161,7 @@ def test_prospective_stop_and_outcome_rules_are_frozen() -> None:
         ("remove_decision", "owner decision inventory differs"),
         ("authorise_runtime", "live_shadow_authorised must remain false"),
         ("weaken_zero_tolerance", "zero-tolerance thresholds differ"),
-        ("move_dependency", "dependency wave precedes its dependency"),
+        ("move_dependency", "allocation dependencies differ"),
         ("overlap_file", "file ownership overlaps"),
         ("automatic_increment10", "Increment 10 must not start automatically"),
     ),
@@ -203,6 +203,18 @@ def test_unknown_duplicate_noncanonical_and_raw_byte_tamper_fail_closed(
     document["payload"]["unknown"] = True
     with pytest.raises(Increment9PlanError, match="payload fields differ"):
         _load_changed_document(tmp_path, monkeypatch, document)
+
+    nested = json.loads(SHADOW_PLAN_PATH.read_bytes())
+    nested["payload"]["approval"]["unknown"] = True
+    with pytest.raises(Increment9PlanError, match="approval fields differ"):
+        _load_changed_document(tmp_path, monkeypatch, nested)
+
+    nested = json.loads(SHADOW_PLAN_PATH.read_bytes())
+    nested["payload"]["non_effect_authority"]["unknown"] = True
+    with pytest.raises(
+        Increment9PlanError, match="non_effect_authority fields differ"
+    ):
+        _load_changed_document(tmp_path, monkeypatch, nested)
 
     duplicate = SHADOW_PLAN_PATH.read_text().replace(
         '"schema_version":"newsroom.increment9.shadow-plan.v1"',

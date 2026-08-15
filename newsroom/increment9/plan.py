@@ -62,6 +62,28 @@ EXPECTED_OUTCOMES = (
     "BLOCKED_ACTIVE_COVERAGE",
     "SCOPED_OPERATIONAL_ELIGIBILITY",
 )
+EXPECTED_ALLOCATION_DEPENDENCIES = {
+    488: (),
+    489: (488,),
+    490: (489,),
+    491: (488,),
+    492: (488, 489, 490, 491),
+    493: (488, 489, 490, 491, 492),
+    494: (488,),
+    495: (490, 491, 492, 493, 494),
+    496: (488,),
+    497: (493, 495, 496),
+    498: tuple(range(488, 498)),
+}
+EXPECTED_ZERO_TOLERANCE_FIELDS = {
+    "authority_cross_contamination",
+    "credential_exposure",
+    "prohibited_egress",
+    "production_authority_mutation",
+    "public_effect",
+    "rights_breach",
+    "uncontained_ambiguous_effect",
+}
 
 
 class Increment9PlanError(ValueError):
@@ -256,8 +278,12 @@ def _validate_plan(plan: Increment9ShadowPlan) -> None:
         raise Increment9PlanError("shadow plan schema differs")
     if plan.plan_id != "increment9-production-equivalent-shadow-plan-v1":
         raise Increment9PlanError("shadow plan identity differs")
+    if plan.plan_version != "increment9-shadow-plan-v1-draft-owner-decision-packet":
+        raise Increment9PlanError("shadow plan version differs")
     if plan.issue_number != 488 or plan.parent_issue_number != 149:
         raise Increment9PlanError("issue identity differs")
+    if plan.programme_issue_number != 141:
+        raise Increment9PlanError("programme issue identity differs")
     if dict(plan.planning_base) != EXPECTED_BASE:
         raise Increment9PlanError("accepted planning base differs")
     validate_sha256_digest(plan.plan_digest, field="plan_digest")
@@ -274,6 +300,25 @@ def _validate_plan(plan: Increment9ShadowPlan) -> None:
         raise Increment9PlanError("unapproved owner decision was invented")
 
     approval = plan.approval
+    _exact_keys(
+        approval,
+        {
+            "status",
+            "approved_by",
+            "approved_at",
+            "approval_record",
+            "approved_plan_digest",
+            "required_owner_decision_ids",
+            "contract_implementation_authorised",
+            "live_shadow_authorised",
+            "comparator_fault_execution_authorised",
+            "evidence_intake_authorised",
+            "publication_authorised",
+            "canary_authorised",
+            "production_activation_authorised",
+        },
+        "approval",
+    )
     if approval.get("status") != "OWNER_DECISION_REQUIRED":
         raise Increment9PlanError("draft approval status differs")
     if tuple(approval.get("required_owner_decision_ids", ())) != decision_ids:
@@ -308,6 +353,20 @@ def _validate_plan(plan: Increment9ShadowPlan) -> None:
         for issue in issues
     }
     for allocation in plan.allocations:
+        if allocation.dependencies != EXPECTED_ALLOCATION_DEPENDENCIES[
+            allocation.issue_number
+        ]:
+            raise Increment9PlanError("allocation dependencies differ")
+        if not allocation.atom or not allocation.work_kind:
+            raise Increment9PlanError("allocation identity differs")
+        if any(
+            path.startswith("/")
+            or "\\" in path
+            or "/../" in f"/{path}/"
+            or path in {".", ".."}
+            for path in allocation.file_ownership
+        ):
+            raise Increment9PlanError("file ownership path differs")
         for dependency in allocation.dependencies:
             if dependency not in wave_by_issue:
                 raise Increment9PlanError("dependency is outside Increment 9")
@@ -318,19 +377,128 @@ def _validate_plan(plan: Increment9ShadowPlan) -> None:
         raise Increment9PlanError("file ownership overlaps")
 
     non_effect = plan.non_effect_authority
+    _exact_keys(
+        non_effect,
+        {
+            "allowed_now",
+            "prohibited_until_exact_later_gate",
+            "public_effect_authorised",
+            "production_authority_mutation_authorised",
+            "production_writer_routes_required_absent",
+            "proof_rule",
+        },
+        "non_effect_authority",
+    )
     if non_effect.get("public_effect_authorised") is not False:
         raise Increment9PlanError("public effect must remain unauthorised")
     if non_effect.get("production_authority_mutation_authorised") is not False:
         raise Increment9PlanError("production mutation must remain unauthorised")
     zero_tolerance = plan.frozen_rules.get("zero_tolerance_counts")
-    if not isinstance(zero_tolerance, Mapping) or any(
-        value != 0 for value in zero_tolerance.values()
+    if (
+        not isinstance(zero_tolerance, Mapping)
+        or set(zero_tolerance) != EXPECTED_ZERO_TOLERANCE_FIELDS
+        or any(value != 0 for value in zero_tolerance.values())
     ):
         raise Increment9PlanError("zero-tolerance thresholds differ")
+    _exact_keys(
+        plan.frozen_rules,
+        {
+            "prospective_only",
+            "complete_denominators_required",
+            "hindsight_selection_allowed",
+            "post_result_threshold_change_allowed",
+            "post_result_case_substitution_allowed",
+            "material_change_closes_epoch",
+            "failed_partial_blocked_and_early_stopped_results_retained",
+            "unchanged_failed_run_retry_allowed",
+            "missing_evidence_interpretation",
+            "zero_tolerance_counts",
+        },
+        "frozen_rules",
+    )
+    if any(
+        plan.frozen_rules.get(field) is not expected
+        for field, expected in {
+            "prospective_only": True,
+            "complete_denominators_required": True,
+            "hindsight_selection_allowed": False,
+            "post_result_threshold_change_allowed": False,
+            "post_result_case_substitution_allowed": False,
+            "material_change_closes_epoch": True,
+            "failed_partial_blocked_and_early_stopped_results_retained": True,
+            "unchanged_failed_run_retry_allowed": False,
+        }.items()
+    ):
+        raise Increment9PlanError("prospective evidence rules differ")
+    if (
+        plan.frozen_rules.get("missing_evidence_interpretation")
+        != "INCONCLUSIVE_OR_BLOCKED_NEVER_PASS"
+    ):
+        raise Increment9PlanError("missing evidence rule differs")
+
+    _exact_keys(
+        plan.stop_and_recovery,
+        {
+            "stop_precedence",
+            "owner_decision_id",
+            "mandatory_behaviour",
+            "later_phase_after_early_stop_allowed",
+        },
+        "stop_and_recovery",
+    )
+    if plan.stop_and_recovery.get("owner_decision_id") != "OD-014":
+        raise Increment9PlanError("stop owner decision differs")
+    if plan.stop_and_recovery.get("later_phase_after_early_stop_allowed") is not False:
+        raise Increment9PlanError("later phases must remain stopped")
+
+    _exact_keys(
+        plan.gate_requirements,
+        {
+            "PLANNING",
+            "CONTRACT",
+            "ISOLATION_READINESS",
+            "RUNTIME",
+            "SEALED_REVIEW",
+            "EXACT_MAIN_SIGNED_CLOSEOUT",
+        },
+        "gate_requirements",
+    )
+    if any(
+        not isinstance(requirements, tuple) or not requirements
+        for requirements in plan.gate_requirements.values()
+    ):
+        raise Increment9PlanError("gate requirements differ")
     if plan.outcome_vocabulary != EXPECTED_OUTCOMES:
         raise Increment9PlanError("outcome vocabulary differs")
+    _exact_keys(
+        plan.increment10_eligibility,
+        {"automatic_transition_allowed", "required"},
+        "increment10_eligibility",
+    )
     if plan.increment10_eligibility.get("automatic_transition_allowed") is not False:
         raise Increment9PlanError("Increment 10 must not start automatically")
+    required_increment10 = plan.increment10_eligibility.get("required")
+    if not isinstance(required_increment10, tuple) or not required_increment10:
+        raise Increment9PlanError("Increment 10 requirements differ")
+    _exact_keys(
+        plan.repository_baseline,
+        {
+            "authority",
+            "derivative_systems",
+            "python_requirement",
+            "neo4j_driver",
+            "qualified_fixture_neo4j_image",
+            "graphiti_real_runtime_enabled",
+            "current_operational_profile",
+            "current_evaluation_plan",
+            "component_blobs",
+        },
+        "repository_baseline",
+    )
+    if plan.repository_baseline.get("authority") != "SQLITE_AND_GOVERNED_OBJECTS":
+        raise Increment9PlanError("repository authority differs")
+    if plan.repository_baseline.get("graphiti_real_runtime_enabled") is not False:
+        raise Increment9PlanError("real Graphiti must remain disabled")
     _validate_component_blobs(plan.repository_baseline)
 
 
@@ -383,6 +551,10 @@ def load_increment9_shadow_plan(path: Path) -> Increment9ShadowPlan:
             },
             "payload",
         )
+        planning_base = _mapping(payload["planning_base"], "planning_base")
+        _exact_keys(planning_base, set(EXPECTED_BASE), "planning_base")
+        if payload["prepared_date"] != "2026-08-15":
+            raise Increment9PlanError("prepared date differs")
         raw_decisions = payload["owner_decisions"]
         graph = _mapping(payload["execution_graph"], "execution_graph")
         _exact_keys(
@@ -395,6 +567,10 @@ def load_increment9_shadow_plan(path: Path) -> Increment9ShadowPlan:
             },
             "execution_graph",
         )
+        if graph["single_writer_per_branch"] is not True:
+            raise Increment9PlanError("single-writer rule differs")
+        if graph["next_wave_requires_dependencies_merged_to_main"] is not True:
+            raise Increment9PlanError("dependency merge rule differs")
         raw_allocations = graph["allocations"]
         raw_waves = graph["waves"]
         if not all(isinstance(item, list) for item in (raw_decisions, raw_allocations, raw_waves)):
@@ -412,19 +588,27 @@ def load_increment9_shadow_plan(path: Path) -> Increment9ShadowPlan:
             plan_version=str(payload["plan_version"]),
             issue_number=_integer(payload["issue_number"], "issue_number"),
             parent_issue_number=_integer(payload["parent_issue_number"], "parent_issue_number"),
-            programme_issue_number=_integer(payload["programme_issue_number"], "programme_issue_number"),
+            programme_issue_number=_integer(
+                payload["programme_issue_number"], "programme_issue_number"
+            ),
             planning_base=_frozen_mapping(payload["planning_base"], "planning_base"),
             approval=_frozen_mapping(payload["approval"], "approval"),
-            repository_baseline=_frozen_mapping(payload["repository_baseline"], "repository_baseline"),
+            repository_baseline=_frozen_mapping(
+                payload["repository_baseline"], "repository_baseline"
+            ),
             owner_decisions=tuple(_owner_decision(item, i) for i, item in enumerate(raw_decisions)),
             frozen_rules=_frozen_mapping(payload["frozen_rules"], "frozen_rules"),
-            non_effect_authority=_frozen_mapping(payload["non_effect_authority"], "non_effect_authority"),
+            non_effect_authority=_frozen_mapping(
+                payload["non_effect_authority"], "non_effect_authority"
+            ),
             stop_and_recovery=_frozen_mapping(payload["stop_and_recovery"], "stop_and_recovery"),
             allocations=tuple(_allocation(item, i) for i, item in enumerate(raw_allocations)),
             waves=tuple(waves),
             gate_requirements=_frozen_mapping(payload["gate_requirements"], "gate_requirements"),
             outcome_vocabulary=_strings(payload["outcome_vocabulary"], "outcome_vocabulary"),
-            increment10_eligibility=_frozen_mapping(payload["increment10_eligibility"], "increment10_eligibility"),
+            increment10_eligibility=_frozen_mapping(
+                payload["increment10_eligibility"], "increment10_eligibility"
+            ),
             plan_digest=plan_digest,
         )
     except (KeyError, TypeError, ValueError, CanonicalizationError) as exc:
