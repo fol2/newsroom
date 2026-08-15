@@ -14,7 +14,7 @@ from typing import Any, ClassVar, Self
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, digest_canonical, validate_sha256_digest
 from newsroom.authority.increment8_recovery_migrations import _helpers
-from newsroom.increment8.operations import DueWork, Urgency
+from newsroom.increment8.operations import DueWork, Urgency, WorkState
 from newsroom.increment8.readiness import INCREMENT_8_READINESS
 
 
@@ -167,6 +167,35 @@ class FaultInjectionRun(_Record):
     ID_FIELD = "fault_run_id"
     PREFIX = "fault-run"
 
+    @classmethod
+    def from_canonical_bytes(cls, raw: bytes) -> Self:
+        identifier, payload = _decode(raw, cls.SCHEMA, cls.ID_FIELD, cls.PREFIX)
+        required = {
+            "profile_digest", "scenario", "expected_outcome", "observed_outcome",
+            "completed_at", "status", "live_effect_authorised",
+        }
+        if set(payload) != required:
+            raise RecoveryError("fault Injection Run payload differs")
+        try:
+            scenario = FaultScenario(payload["scenario"])
+        except (TypeError, ValueError) as exc:
+            raise RecoveryError("fault scenario differs") from exc
+        expected = _EXPECTED_FAULT_OUTCOME[scenario]
+        observed = _token(payload["observed_outcome"], "observed_outcome")
+        status = RecoveryStatus.PASS.value if observed == expected else RecoveryStatus.FAIL.value
+        if (
+            payload["profile_digest"] != _digest(payload["profile_digest"], "profile_digest")
+            or payload["expected_outcome"] != expected
+            or payload["completed_at"] != _time(payload["completed_at"], "completed_at")
+            or payload["status"] != status
+            or payload["live_effect_authorised"] is not False
+        ):
+            raise RecoveryError("fault Injection Run semantics differ")
+        rebuilt = cls.build(dict(payload))
+        if rebuilt.identifier != identifier or rebuilt.canonical_bytes != raw:
+            raise RecoveryError("fault Injection Run identity differs")
+        return cls(identifier, raw, digest_bytes(raw), payload)
+
 
 @dataclass(frozen=True, slots=True)
 class ReplayReceipt(_Record):
@@ -232,30 +261,39 @@ def create_checked_backup(
     if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
         raise RecoveryError("source integrity check failed")
     logical = _helpers._logical_database_digest(connection)
-    destination.open("xb").close()
-    target = sqlite3.connect(destination, isolation_level=None)
+    created_destination = False
+    target: sqlite3.Connection | None = None
     try:
+        destination.open("xb").close()
+        created_destination = True
+        target = sqlite3.connect(destination, isolation_level=None)
         connection.backup(target)
         if target.execute("PRAGMA integrity_check").fetchone() != ("ok",) or _helpers._logical_database_digest(target) != logical:
             raise RecoveryError("backup integrity differs")
-    finally:
         target.close()
-    file_digest = _helpers._file_digest(destination)
-    return BackupManifest.build(
-        {
-            "profile_digest": _digest(profile_digest, "profile_digest"),
-            "authority_version_digest": _digest(authority_version_digest, "authority_version_digest"),
-            "audit_state_digest": _digest(audit_state_digest, "audit_state_digest"),
-            "authority_logical_digest": logical,
-            "backup_file_digest": file_digest,
-            "created_at": created,
-            "retain_until": retained,
-            "rpo_seconds": int(INCREMENT_8_READINESS.operational_profile["recovery"]["backup_rpo_seconds"]),  # type: ignore[index]
-            "included_state": ["AUDIT", "AUTHORITY", "BASELINE", "DEDUPE", "PENDING_WORK"],
-            "integrity_status": RecoveryStatus.PASS.value,
-            "live_effect_authorised": False,
-        }
-    )
+        target = None
+        file_digest = _helpers._file_digest(destination)
+        return BackupManifest.build(
+            {
+                "profile_digest": _digest(profile_digest, "profile_digest"),
+                "authority_version_digest": _digest(authority_version_digest, "authority_version_digest"),
+                "audit_state_digest": _digest(audit_state_digest, "audit_state_digest"),
+                "authority_logical_digest": logical,
+                "backup_file_digest": file_digest,
+                "created_at": created,
+                "retain_until": retained,
+                "rpo_seconds": int(INCREMENT_8_READINESS.operational_profile["recovery"]["backup_rpo_seconds"]),  # type: ignore[index]
+                "included_state": ["AUDIT", "AUTHORITY", "BASELINE", "DEDUPE", "PENDING_WORK"],
+                "integrity_status": RecoveryStatus.PASS.value,
+                "live_effect_authorised": False,
+            }
+        )
+    except Exception:
+        if target is not None:
+            target.close()
+        if created_destination:
+            destination.unlink(missing_ok=True)
+        raise
 
 
 def restore_checked_backup(
@@ -269,19 +307,31 @@ def restore_checked_backup(
         raise RecoveryError("backup Manifest is forged")
     if not all(isinstance(path, Path) and path.is_absolute() for path in (source, destination)) or not source.is_file() or destination.exists():
         raise RecoveryError("restore path boundary differs")
+    if not destination.parent.is_dir():
+        raise RecoveryError("restore destination parent is absent")
+    completed = _time(completed_at, "completed_at")
     if _helpers._file_digest(source) != manifest.payload["backup_file_digest"]:
         raise RecoveryError("backup file digest differs")
     incoming = sqlite3.connect(f"file:{source}?mode=ro", uri=True, isolation_level=None)
     target: sqlite3.Connection | None = None
+    created_destination = False
     try:
         if incoming.execute("PRAGMA integrity_check").fetchone() != ("ok",) or _helpers._logical_database_digest(incoming) != manifest.payload["authority_logical_digest"]:
             raise RecoveryError("backup logical state differs")
         destination.open("xb").close()
+        created_destination = True
         target = sqlite3.connect(destination, isolation_level=None)
         incoming.backup(target)
         restored = _helpers._logical_database_digest(target)
         if target.execute("PRAGMA integrity_check").fetchone() != ("ok",) or restored != manifest.payload["authority_logical_digest"]:
             raise RecoveryError("restored authority differs")
+    except Exception:
+        if target is not None:
+            target.close()
+            target = None
+        if created_destination:
+            destination.unlink(missing_ok=True)
+        raise
     finally:
         incoming.close()
         if target is not None:
@@ -291,7 +341,7 @@ def restore_checked_backup(
             "backup_id": manifest.identifier,
             "backup_manifest_digest": manifest.digest,
             "restored_logical_digest": str(manifest.payload["authority_logical_digest"]),
-            "completed_at": _time(completed_at, "completed_at"),
+            "completed_at": completed,
             "status": "RECONCILIATION_REQUIRED",
             "automatic_operation_resumed": False,
             "baselines_reconciled": False,
@@ -388,21 +438,113 @@ def build_fault_injection_run(
 def bounded_catch_up(work: Sequence[DueWork]) -> tuple[DueWork, ...]:
     if any(not isinstance(item, DueWork) for item in work):
         raise RecoveryError("catch-up requires typed due work")
+    try:
+        reconstructed = tuple(_reconstruct_due_work(item.canonical_bytes) for item in work)
+    except (TypeError, ValueError) as exc:
+        raise RecoveryError("catch-up DueWork is forged") from exc
+    if any(rebuilt != supplied for rebuilt, supplied in zip(reconstructed, work, strict=True)):
+        raise RecoveryError("catch-up DueWork is forged")
     maximum = int(INCREMENT_8_READINESS.operational_profile["schedule"]["maximum_catch_up_items"])  # type: ignore[index]
     urgency = {Urgency.URGENT.value: 0, Urgency.TIME_SENSITIVE.value: 1, Urgency.PLANNED.value: 2, Urgency.ROUTINE.value: 3}
-    ordered = sorted(work, key=lambda item: (urgency[str(item.payload["urgency"])], str(item.payload["deadline_at"]), item.work_id))
+    try:
+        ordered = sorted(reconstructed, key=lambda item: (urgency[str(item.payload["urgency"])], _dt(str(item.payload["deadline_at"])), item.work_id))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RecoveryError("catch-up DueWork semantics differ") from exc
     return tuple(ordered[:maximum])
+
+
+def _reconstruct_due_work(raw: bytes) -> DueWork:
+    work = DueWork.from_canonical_bytes(raw)
+    payload = work.payload
+    required = {
+        "work_id", "state_version", "profile_record_id", "profile_digest",
+        "logical_due_key", "scope_kind", "urgency", "state", "attempt_count",
+        "due_at", "deadline_at", "previous_digest", "authority_version_digest",
+        "editorial_rejection", "model_scheduling_used",
+    }
+    if set(payload) != required:
+        raise RecoveryError("catch-up DueWork payload differs")
+    version = _integer(payload["state_version"], "state_version", minimum=1)
+    attempts = _integer(payload["attempt_count"], "attempt_count")
+    profile_digest = _digest(payload["profile_digest"], "profile_digest")
+    profile_record_id = _token(payload["profile_record_id"], "profile_record_id")
+    key = _token(payload["logical_due_key"], "logical_due_key")
+    kind = _token(payload["scope_kind"], "scope_kind")
+    try:
+        urgency = Urgency(payload["urgency"])
+        state = WorkState(payload["state"])
+    except (TypeError, ValueError) as exc:
+        raise RecoveryError("catch-up DueWork state or urgency differs") from exc
+    due = _time(payload["due_at"], "due_at")
+    deadline = _time(payload["deadline_at"], "deadline_at")
+    expected_work_id = "work:" + digest_canonical(
+        {"profile_digest": profile_digest, "logical_due_key": key}
+    ).removeprefix("sha256:")
+    previous = payload["previous_digest"]
+    if (
+        payload["work_id"] != expected_work_id
+        or len(profile_record_id) != len("profile:") + 64
+        or not profile_record_id.startswith("profile:")
+        or any(character not in "0123456789abcdef" for character in profile_record_id.removeprefix("profile:"))
+        or kind not in INCREMENT_8_READINESS.operational_profile["scope_kinds"]
+        or payload["urgency"] != urgency.value
+        or payload["state"] != state.value
+        or _dt(deadline) < _dt(due)
+        or attempts >= version
+        or payload["authority_version_digest"]
+        != _digest(payload["authority_version_digest"], "authority_version_digest")
+        or payload["editorial_rejection"] is not False
+        or payload["model_scheduling_used"] is not False
+    ):
+        raise RecoveryError("catch-up DueWork semantics differ")
+    if version == 1:
+        if state is not WorkState.QUEUED or attempts != 0 or previous is not None:
+            raise RecoveryError("catch-up initial DueWork semantics differ")
+    elif previous != _digest(previous, "previous_digest"):
+        raise RecoveryError("catch-up DueWork predecessor differs")
+    lineage_is_reachable = (
+        (state is WorkState.QUEUED and version == 1 and attempts == 0)
+        or (state is WorkState.LEASED and attempts >= 1 and version == 2 * attempts)
+        or (
+            state in {WorkState.RETRY_PENDING, WorkState.COMPLETED}
+            and attempts >= 1
+            and version == 2 * attempts + 1
+        )
+        or (state is WorkState.EXPLICITLY_CLOSED and version == 2 * attempts + 2)
+        or (
+            state is WorkState.QUARANTINED
+            and (
+                (attempts == 0 and version == 2)
+                or (attempts >= 1 and version in {2 * attempts + 1, 2 * attempts + 2})
+            )
+        )
+    )
+    if not lineage_is_reachable:
+        raise RecoveryError("catch-up DueWork attempt lineage differs")
+    if state not in {WorkState.QUEUED, WorkState.RETRY_PENDING}:
+        raise RecoveryError("catch-up DueWork is not operationally due")
+    return work
 
 
 class RecoveryAuthority:
     """Append-only schema-v32 fixture recovery authority."""
 
     def __init__(self, connection: sqlite3.Connection) -> None:
-        if not isinstance(connection, sqlite3.Connection) or connection.in_transaction or connection.execute("PRAGMA user_version").fetchone()[0] < 32:
-            raise RecoveryError("recovery authority requires idle schema v32 connection")
+        if (
+            not isinstance(connection, sqlite3.Connection)
+            or connection.in_transaction
+            or connection.execute("PRAGMA user_version").fetchone()[0] < 32
+            or connection.execute("PRAGMA foreign_keys").fetchone() != (1,)
+        ):
+            raise RecoveryError("recovery authority requires idle foreign-key-enabled schema v32 connection")
         self._connection = connection
 
     def _insert(self, sql: str, values: tuple[object, ...]) -> None:
+        if (
+            self._connection.in_transaction
+            or self._connection.execute("PRAGMA foreign_keys").fetchone() != (1,)
+        ):
+            raise RecoveryError("recovery write requires idle foreign-key-enabled connection")
         self._connection.execute("BEGIN IMMEDIATE")
         try:
             self._connection.execute(sql, values)
