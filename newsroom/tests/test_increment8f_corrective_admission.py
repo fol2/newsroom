@@ -21,6 +21,7 @@ from newsroom.increment8.operations import CapacityEvidence
 from newsroom.increment8.recovery import ReconciliationRun
 from newsroom.tests.test_increment8f_admission import (
     _D,
+    _D3,
     _capacity,
     _health,
     _observability,
@@ -80,7 +81,7 @@ def test_packet_retains_reconstructable_evidence_and_builds_exact_decision(
     }
     decision = build_operational_admission_decision(
         packet=packet,
-        owner_identity_digest=_D,
+        owner_identity_digest=_D3,
         decision_recorded_at_digest=_D,
     )
     assert (
@@ -102,7 +103,7 @@ def test_decision_rejects_detached_packet_fields_and_missing_evidence(
     with pytest.raises(AdmissionError, match="qualification packet differs"):
         build_operational_admission_decision(
             packet=detached,
-            owner_identity_digest=_D,
+            owner_identity_digest=_D3,
             decision_recorded_at_digest=_D,
         )
 
@@ -112,7 +113,7 @@ def test_decision_rejects_detached_packet_fields_and_missing_evidence(
     with pytest.raises(AdmissionError, match="qualification packet differs"):
         build_operational_admission_decision(
             packet=incomplete,
-            owner_identity_digest=_D,
+            owner_identity_digest=_D3,
             decision_recorded_at_digest=_D,
         )
 
@@ -122,7 +123,7 @@ def test_decision_rejects_detached_packet_fields_and_missing_evidence(
     with pytest.raises(AdmissionError, match="qualification packet differs"):
         build_operational_admission_decision(
             packet=type_confused,
-            owner_identity_digest=_D,
+            owner_identity_digest=_D3,
             decision_recorded_at_digest=_D,
         )
 
@@ -144,7 +145,7 @@ def test_self_consistent_packet_cannot_rebind_retained_security(
     with pytest.raises(AdmissionError, match="qualification packet differs"):
         build_operational_admission_decision(
             packet=forged,
-            owner_identity_digest=_D,
+            owner_identity_digest=_D3,
             decision_recorded_at_digest=_D,
         )
 
@@ -162,7 +163,7 @@ def test_packet_rejects_retained_derived_fields_that_differ_from_reconstruction(
         with pytest.raises(AdmissionError, match="qualification packet differs"):
             build_operational_admission_decision(
                 packet=forged,
-                owner_identity_digest=_D,
+                owner_identity_digest=_D3,
                 decision_recorded_at_digest=_D,
             )
 
@@ -174,7 +175,7 @@ def test_packet_rejects_retained_derived_fields_that_differ_from_reconstruction(
     with pytest.raises(AdmissionError, match="qualification packet differs"):
         build_operational_admission_decision(
             packet=forged_health,
-            owner_identity_digest=_D,
+            owner_identity_digest=_D3,
             decision_recorded_at_digest=_D,
         )
 
@@ -195,7 +196,7 @@ def test_packet_sorts_and_requires_canonical_retained_evidence_order(
     with pytest.raises(AdmissionError, match="qualification packet differs"):
         build_operational_admission_decision(
             packet=reordered,
-            owner_identity_digest=_D,
+            owner_identity_digest=_D3,
             decision_recorded_at_digest=_D,
         )
 
@@ -269,7 +270,7 @@ def test_stale_expected_handoff_anchor_and_decision_tamper_fail_closed(
     packet = _packet(tmp_path / "decision")
     decision = build_operational_admission_decision(
         packet=packet,
-        owner_identity_digest=_D,
+        owner_identity_digest=_D3,
         decision_recorded_at_digest=_D,
     )
     with pytest.raises(AdmissionError, match="Operational Admission semantics"):
@@ -295,7 +296,25 @@ def test_restore_reconciliation_profile_and_admission_owner_are_exact(
     with pytest.raises(AdmissionError, match="qualification packet differs"):
         build_operational_admission_decision(
             packet=forged_restore,
-            owner_identity_digest=_D,
+            owner_identity_digest=_D3,
+            decision_recorded_at_digest=_D,
+        )
+
+    document = json.loads(packet.canonical_bytes)
+    retained = document["payload"]["retained_evidence"]
+    previous = retained["restore_reconciliation"]
+    earlier = ReconciliationRun.build(
+        {**previous["payload"], "started_at": "2042-01-05T00:00:00.000000Z"}
+    )
+    retained["restore_reconciliation"] = json.loads(earlier.canonical_bytes)
+    document["payload"]["evidence_digests"][
+        "restore_reconciliation_digest"
+    ] = earlier.digest
+    forged_time = _rebuilt_packet(packet, document)
+    with pytest.raises(AdmissionError, match="qualification packet differs"):
+        build_operational_admission_decision(
+            packet=forged_time,
+            owner_identity_digest=_D3,
             decision_recorded_at_digest=_D,
         )
 
@@ -306,7 +325,7 @@ def test_restore_reconciliation_profile_and_admission_owner_are_exact(
     with pytest.raises(AdmissionError, match="qualification packet differs"):
         build_operational_admission_decision(
             packet=forged_profile,
-            owner_identity_digest=_D,
+            owner_identity_digest=_D3,
             decision_recorded_at_digest=_D,
         )
 
@@ -314,5 +333,11 @@ def test_restore_reconciliation_profile_and_admission_owner_are_exact(
         build_operational_admission_decision(
             packet=packet,
             owner_identity_digest=_D2,
+            decision_recorded_at_digest=_D,
+        )
+    with pytest.raises(AdmissionError, match="owner is not independent"):
+        build_operational_admission_decision(
+            packet=packet,
+            owner_identity_digest=_D,
             decision_recorded_at_digest=_D,
         )

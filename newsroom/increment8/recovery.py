@@ -306,6 +306,10 @@ def build_restore_reconciliation_run(
     rebuilt_restore = RestoreRun.from_canonical_bytes(restore.canonical_bytes)
     if rebuilt_restore != restore:
         raise RecoveryError("restore reconciliation requires an exact Restore Run")
+    if _dt(_time(started_at, "started_at")) < _dt(
+        str(restore.payload["completed_at"])
+    ):
+        raise RecoveryError("restore reconciliation starts before Restore Run completion")
     base = build_reconciliation_run(
         profile_digest=profile_digest,
         authority_version_digest=authority_version_digest,

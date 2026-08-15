@@ -621,6 +621,8 @@ class QualificationPacket:
             or restore_reconciliation.payload.get("restore_digest") != restore.digest
             or restore_reconciliation.payload.get("restored_state_digest")
             != restore.payload["restored_logical_digest"]
+            or _dt(str(restore_reconciliation.payload["started_at"]))
+            < _dt(str(restore.payload["completed_at"]))
             or hardware.capacity_digest != capacity.digest
             or (hardware.cpu_cores, hardware.memory_mib, hardware.free_disk_mib)
             != (
@@ -1222,6 +1224,8 @@ def build_qualification_packet(
         or restore_reconciliation.payload.get("restore_digest") != restore.digest
         or restore_reconciliation.payload.get("restored_state_digest")
         != restore.payload["restored_logical_digest"]
+        or _dt(str(restore_reconciliation.payload["started_at"]))
+        < _dt(str(restore.payload["completed_at"]))
     ):
         raise AdmissionError("restore does not bind the exact backup")
     expected_scenarios = tuple(sorted(scenario.value for scenario in FaultScenario))
@@ -1374,8 +1378,14 @@ def build_operational_admission_decision(
     independent = IndependentVerificationEvidence.from_canonical_bytes(
         canonical_json_bytes(packet.retained_evidence["independent_verification"])
     )
+    release = ReleaseEvidenceDecision.from_canonical_bytes(
+        canonical_json_bytes(packet.retained_evidence["release_decision"])
+    )
     owner = _digest(owner_identity_digest, "owner_identity_digest")
-    if owner == independent.verifier_identity_digest:
+    if owner in {
+        independent.verifier_identity_digest,
+        release.payload["owner_identity_digest"],
+    }:
         raise AdmissionError("Operational Admission owner is not independent")
     payload = {
         "qualification_packet_digest": packet.digest,

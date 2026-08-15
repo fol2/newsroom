@@ -39,8 +39,11 @@ from newsroom.tests.test_increment8d_observability import _access, _health
 
 _D = "sha256:" + "1" * 64
 _D2 = "sha256:" + "2" * 64
+_D3 = "sha256:" + "3" * 64
 _AT = "2042-01-05T00:00:00.000000Z"
 _LATER = "2042-01-05T00:10:00.000000Z"
+_AFTER_RESTORE = "2042-01-05T00:20:00.000000Z"
+_AFTER_RECONCILIATION = "2042-01-05T00:30:00.000000Z"
 _RETAIN = "2042-02-05T00:00:00.000000Z"
 
 
@@ -180,7 +183,8 @@ def _packet(tmp_path, **changes):
                 "PENDING_HANDOFF": 0, "PROJECTION_MISMATCH": 0,
                 "STALE_WORK": 0,
             },
-            replay_item_count=10, started_at=_AT, completed_at=_LATER,
+            replay_item_count=10, started_at=_AFTER_RESTORE,
+            completed_at=_AFTER_RECONCILIATION,
         ),
         "fault_runs": _faults(operational_profile.digest),
         "handoff_anchor": anchor, "expected_handoff_anchor_digest": anchor.digest,
