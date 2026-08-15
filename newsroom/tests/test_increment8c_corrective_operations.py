@@ -773,6 +773,45 @@ def test_retry_acquisition_blocks_any_earlier_active_lease(tmp_path) -> None:
     connection.close()
 
 
+def test_closure_requires_lease_for_current_work_attempt(tmp_path) -> None:
+    _, connection = _database(tmp_path)
+    authority = OperationalAuthority(connection)
+    profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
+    authority.register_profile(profile)
+    queued = _work(profile, "lease:close-current-attempt")
+    authority.append_work(queued)
+    actual, _ = _commit_lease(authority, queued)
+    leaked = operations.WorkLease.build(
+        {**actual.payload, "lease_id": "lease:" + "e" * 64}
+    )
+    connection.execute(
+        "INSERT INTO work_leases VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            leaked.lease_id,
+            leaked.payload["lease_version"],
+            leaked.canonical_bytes,
+            leaked.digest,
+            leaked.payload["work_id"],
+            leaked.payload["owner_digest"],
+            leaked.payload["progress_digest"],
+            leaked.payload["acquired_at"],
+            leaked.payload["expires_at"],
+            leaked.payload["maximum_expires_at"],
+            leaked.payload["status"],
+            leaked.payload["previous_digest"],
+        ),
+    )
+    with pytest.raises(OperationalAuthorityError, match="current work attempt"):
+        authority.close_lease_and_transition(
+            lease=leaked,
+            lease_state=LeaseState.ORPHANED,
+            work_state=WorkState.QUARANTINED,
+            transitioned_at=_T63,
+        )
+    assert authority.active_lease_count() == 2
+    connection.close()
+
+
 def test_retry_acquisition_revalidates_legacy_failure_interval(tmp_path) -> None:
     _, connection = _database(tmp_path)
     authority = OperationalAuthority(connection)

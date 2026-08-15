@@ -1467,6 +1467,16 @@ class OperationalAuthority:
         retained_work = DueWork.from_canonical_bytes(bytes(work_row[0]))
         if retained_work.payload["state"] != WorkState.LEASED.value:
             raise OperationalAuthorityError("lease work is not LEASED")
+        expected_lease_id = "lease:" + digest_canonical(
+            {
+                "work_id": retained_work.work_id,
+                "attempt_count": retained_work.payload["attempt_count"],
+            }
+        ).removeprefix("sha256:")
+        if lease.lease_id != expected_lease_id:
+            raise OperationalAuthorityError(
+                "lease closure does not match the current work attempt"
+            )
         authority_deadline = self._leased_work_authority_deadline(retained_work)
         if (
             lease_state is LeaseState.RELEASED
