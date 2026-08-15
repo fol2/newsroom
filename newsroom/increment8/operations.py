@@ -965,7 +965,24 @@ class OperationalAuthority:
     def _insert(self, sql: str, values: tuple[object, ...]) -> int:
         return self._write(lambda: self._connection.execute(sql, values).rowcount)
 
-    def _retry_first_attempt(self, finding: RetryFinding, work_id: str) -> datetime:
+    def _retry_first_attempt(
+        self,
+        finding: RetryFinding,
+        work_id: str,
+        *,
+        require_no_active_lease: bool = False,
+    ) -> datetime:
+        if require_no_active_lease:
+            active = self._connection.execute(
+                "SELECT 1 FROM work_leases l WHERE l.work_id=? "
+                "AND l.lease_version=(SELECT MAX(x.lease_version) FROM work_leases x "
+                "WHERE x.lease_id=l.lease_id) AND l.status='ACTIVE' LIMIT 1",
+                (work_id,),
+            ).fetchone()
+            if active is not None:
+                raise OperationalAuthorityError(
+                    "retry lease history requires reconciliation"
+                )
         attempt_number = _integer(
             finding.payload.get("attempt_number"), "attempt_number", minimum=1
         )
@@ -1263,7 +1280,9 @@ class OperationalAuthority:
                     finding = RetryFinding.from_canonical_bytes(bytes(retry_row[0]))
                     next_due = finding.payload["next_due_at"]
                     retry_horizon = self._retry_first_attempt(
-                        finding, latest.work_id
+                        finding,
+                        latest.work_id,
+                        require_no_active_lease=True,
                     ) + timedelta(
                         seconds=int(
                             INCREMENT_8_READINESS.operational_profile["retry"][

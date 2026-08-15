@@ -718,6 +718,61 @@ def test_retry_acquisition_blocks_legacy_active_predecessor(tmp_path) -> None:
     connection.close()
 
 
+def test_retry_acquisition_blocks_any_earlier_active_lease(tmp_path) -> None:
+    _, connection = _database(tmp_path)
+    authority = OperationalAuthority(connection)
+    profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
+    authority.register_profile(profile)
+    queued = _work(profile, "lease:any-active-predecessor")
+    authority.append_work(queued)
+    first_lease, leased_once = _commit_lease(authority, queued)
+    finding = build_retry_finding(
+        work=leased_once,
+        classification=RetryClassification.RETRYABLE,
+        dependency_scope="FIXTURE_PROVIDER",
+        first_attempt_at=_AT,
+        failed_at=_AT,
+    )
+    authority.append_retry_finding(finding)
+    _, retry = authority.close_lease_and_transition(
+        lease=first_lease,
+        lease_state=LeaseState.RELEASED,
+        work_state=WorkState.RETRY_PENDING,
+        transitioned_at=_AT,
+    )
+    leaked = operations.WorkLease.build(
+        {**first_lease.payload, "lease_id": "lease:" + "f" * 64}
+    )
+    connection.execute(
+        "INSERT INTO work_leases VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            leaked.lease_id,
+            leaked.payload["lease_version"],
+            leaked.canonical_bytes,
+            leaked.digest,
+            leaked.payload["work_id"],
+            leaked.payload["owner_digest"],
+            leaked.payload["progress_digest"],
+            leaked.payload["acquired_at"],
+            leaked.payload["expires_at"],
+            leaked.payload["maximum_expires_at"],
+            leaked.payload["status"],
+            leaked.payload["previous_digest"],
+        ),
+    )
+    next_lease = acquire_lease(
+        work=retry,
+        owner_digest="sha256:" + "2" * 64,
+        acquired_at=_T2,
+        progress_digest="sha256:" + "3" * 64,
+        authority_deadline_at=_T120,
+    )
+    with pytest.raises(OperationalAuthorityError, match="reconciliation"):
+        authority.append_lease(next_lease)
+    assert authority.active_lease_count() == 1
+    connection.close()
+
+
 def test_retry_acquisition_revalidates_legacy_failure_interval(tmp_path) -> None:
     _, connection = _database(tmp_path)
     authority = OperationalAuthority(connection)

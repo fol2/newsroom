@@ -54,3 +54,4 @@ Fixture operational authority only. No production scheduler activation, live pro
 - Legacy retry findings without `first_attempt_at` derive it from parsed retained lease history, and legacy active leases without `closed_at` upgrade with an explicit null closure value.
 - The same legacy first-attempt derivation is used before acquiring RETRY_PENDING work, so restarted pre-correction Findings remain schedulable within their frozen horizon.
 - Before any legacy or current retry authority is consumed, the exact attempt lease is reconstructed, must be RELEASED rather than still ACTIVE, and must contain `failed_at` within its acquisition/expiry interval. Inconsistent legacy state remains reconciliation-blocked instead of leaking another host slot.
+- Pre-acquisition retry validation additionally rejects any ACTIVE lease retained for the work, not only the immediate predecessor lease ID, so older leaked attempts cannot survive beside a new host-concurrency slot.
