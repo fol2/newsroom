@@ -410,6 +410,13 @@ class QualificationPacket:
             FaultInjectionRun.from_canonical_bytes(canonical_json_bytes(item))
             for item in fault_docs
         )
+        if (
+            tuple(item.digest for item in health_records)
+            != tuple(sorted(item.digest for item in health_records))
+            or tuple(item.digest for item in fault_records)
+            != tuple(sorted(item.digest for item in fault_records))
+        ):
+            raise AdmissionError("qualification packet retained evidence order differs")
         release = _release_reconstructed(release, _metric_report_reconstructed(metric))
         capacity = _capacity_reconstructed(capacity)
         observability = _observability_reconstructed(observability)
@@ -952,7 +959,12 @@ def build_qualification_packet(
     metric_report = _metric_report_reconstructed(metric_report)
     release_decision = _release_reconstructed(release_decision, metric_report)
     capacity = _capacity_reconstructed(capacity)
-    health_postures = tuple(_health_reconstructed(item) for item in health_postures)
+    health_postures = tuple(
+        sorted(
+            (_health_reconstructed(item) for item in health_postures),
+            key=lambda item: item.digest,
+        )
+    )
     observability = _observability_reconstructed(observability)
     security = _security_reconstructed(security)
     reconciliation = _reconciliation_reconstructed(reconciliation, "reconciliation")
@@ -967,7 +979,7 @@ def build_qualification_packet(
         rebuilt_fault = _exact_record(item, FaultInjectionRun, "fault injection")
         assert isinstance(rebuilt_fault, FaultInjectionRun)
         checked_faults.append(rebuilt_fault)
-    fault_runs = tuple(checked_faults)
+    fault_runs = tuple(sorted(checked_faults, key=lambda item: item.digest))
     if not isinstance(hardware, IntendedHardwareEvidence):
         raise AdmissionError("hardware evidence is forged or non-canonical")
     hardware_rebuilt = IntendedHardwareEvidence.from_canonical_bytes(

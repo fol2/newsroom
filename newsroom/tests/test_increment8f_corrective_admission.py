@@ -168,6 +168,27 @@ def test_packet_rejects_retained_derived_fields_that_differ_from_reconstruction(
         )
 
 
+def test_packet_sorts_and_requires_canonical_retained_evidence_order(
+    tmp_path, admitted_gate
+) -> None:
+    packet = _packet(tmp_path)
+    document = json.loads(packet.canonical_bytes)
+    retained_faults = document["payload"]["retained_evidence"]["fault_runs"]
+    retained_digests = [digest_bytes(canonical_json_bytes(item)) for item in retained_faults]
+    assert retained_digests == sorted(retained_digests)
+
+    document["payload"]["retained_evidence"]["fault_runs"] = list(
+        reversed(retained_faults)
+    )
+    reordered = _rebuilt_packet(packet, document)
+    with pytest.raises(AdmissionError, match="qualification packet differs"):
+        build_operational_admission_decision(
+            packet=reordered,
+            owner_identity_digest=_D,
+            decision_recorded_at_digest=_D,
+        )
+
+
 def test_builder_reconstructs_detached_and_semantically_forged_evidence(
     tmp_path, admitted_gate
 ) -> None:
