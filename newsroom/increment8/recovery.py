@@ -166,6 +166,7 @@ class ReconciliationRun(_Record):
         }
         replay = _integer(payload["replay_item_count"], "replay_item_count")
         maximum = int(INCREMENT_8_READINESS.operational_profile["recovery"]["maximum_replay_items"])  # type: ignore[index]
+        rto_seconds = int(INCREMENT_8_READINESS.operational_profile["recovery"]["reconciliation_rto_seconds"])  # type: ignore[index]
         start = _time(payload["started_at"], "started_at")
         complete = _time(payload["completed_at"], "completed_at")
         passed = not any(findings.values())
@@ -176,6 +177,7 @@ class ReconciliationRun(_Record):
             or payload["maximum_replay_items"] != maximum
             or replay > maximum
             or _dt(complete) < _dt(start)
+            or (_dt(complete) - _dt(start)).total_seconds() > rto_seconds
             or payload["status"]
             != (RecoveryStatus.PASS.value if passed else RecoveryStatus.FAIL.value)
             or payload["automatic_operation_blocked"] is not (not passed)
@@ -272,7 +274,12 @@ def build_reconciliation_run(
     maximum = int(INCREMENT_8_READINESS.operational_profile["recovery"]["maximum_replay_items"])  # type: ignore[index]
     start = _time(started_at, "started_at")
     complete = _time(completed_at, "completed_at")
-    if _dt(complete) < _dt(start) or replay > maximum:
+    rto_seconds = int(INCREMENT_8_READINESS.operational_profile["recovery"]["reconciliation_rto_seconds"])  # type: ignore[index]
+    if (
+        _dt(complete) < _dt(start)
+        or (_dt(complete) - _dt(start)).total_seconds() > rto_seconds
+        or replay > maximum
+    ):
         raise RecoveryError("reconciliation exceeds time or replay bounds")
     passed = not any(findings.values())
     return ReconciliationRun.build(

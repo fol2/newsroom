@@ -293,7 +293,10 @@ class CostLicenceEvidence:
 @dataclass(frozen=True, slots=True)
 class RollbackEvidence:
     runbook_version_digest: str
+    restore_id: str
+    restore_digest: str
     restored_state_digest: str
+    tested_at: str
     canonical_bytes: bytes
     digest: str
 
@@ -301,11 +304,15 @@ class RollbackEvidence:
     def build(
         cls,
         *,
+        restore: RestoreRun,
         runbook_version_digest: str,
         rollback_plan_digest: str,
-        restored_state_digest: str,
-        tested_at_digest: str,
+        tested_at: str,
     ) -> RollbackEvidence:
+        rebuilt_restore = _restore_reconstructed(restore)
+        tested = _time(tested_at, "tested_at")
+        if _dt(tested) < _dt(str(rebuilt_restore.payload["completed_at"])):
+            raise AdmissionError("rollback test precedes the exact Restore Run")
         payload = {
             "runbook_version_digest": _digest(
                 runbook_version_digest, "runbook_version_digest"
@@ -313,10 +320,12 @@ class RollbackEvidence:
             "rollback_plan_digest": _digest(
                 rollback_plan_digest, "rollback_plan_digest"
             ),
-            "restored_state_digest": _digest(
-                restored_state_digest, "restored_state_digest"
-            ),
-            "tested_at_digest": _digest(tested_at_digest, "tested_at_digest"),
+            "restore_id": rebuilt_restore.identifier,
+            "restore_digest": rebuilt_restore.digest,
+            "restored_state_digest": rebuilt_restore.payload[
+                "restored_logical_digest"
+            ],
+            "tested_at": tested,
             "status": "PASS",
             "live_effect_authorised": False,
             "production_activation_authorised": False,
@@ -326,7 +335,10 @@ class RollbackEvidence:
         )
         return cls(
             str(payload["runbook_version_digest"]),
+            str(payload["restore_id"]),
+            str(payload["restore_digest"]),
             str(payload["restored_state_digest"]),
+            str(payload["tested_at"]),
             raw,
             record_digest,
         )
@@ -336,20 +348,25 @@ class RollbackEvidence:
         payload = _payload(raw, "newsroom.increment8.rollback-evidence.v1")
         required = {
             "runbook_version_digest", "rollback_plan_digest",
-            "restored_state_digest", "tested_at_digest", "status",
+            "restore_id", "restore_digest", "restored_state_digest", "tested_at",
+            "status",
             "live_effect_authorised", "production_activation_authorised",
         }
         if set(payload) != required:
             raise AdmissionError("rollback evidence payload differs")
-        rebuilt = cls.build(
-            runbook_version_digest=payload["runbook_version_digest"],  # type: ignore[arg-type]
-            rollback_plan_digest=payload["rollback_plan_digest"],  # type: ignore[arg-type]
-            restored_state_digest=payload["restored_state_digest"],  # type: ignore[arg-type]
-            tested_at_digest=payload["tested_at_digest"],  # type: ignore[arg-type]
-        )
-        if rebuilt.canonical_bytes != raw:
+        runbook = _digest(payload["runbook_version_digest"], "runbook_version_digest")
+        _digest(payload["rollback_plan_digest"], "rollback_plan_digest")
+        restore_id = _token(payload["restore_id"], "restore_id")
+        restore_digest = _digest(payload["restore_digest"], "restore_digest")
+        state = _digest(payload["restored_state_digest"], "restored_state_digest")
+        tested = _time(payload["tested_at"], "tested_at")
+        if (
+            payload["status"] != "PASS"
+            or payload["live_effect_authorised"] is not False
+            or payload["production_activation_authorised"] is not False
+        ):
             raise AdmissionError("rollback evidence semantics differ")
-        return rebuilt
+        return cls(runbook, restore_id, restore_digest, state, tested, raw, digest_bytes(raw))
 
 
 @dataclass(frozen=True, slots=True)
@@ -663,6 +680,9 @@ class QualificationPacket:
             or rollback.runbook_version_digest != evidence["runbook_version_digest"]
             or rollback.restored_state_digest
             != restore.payload["restored_logical_digest"]
+            or rollback.restore_id != restore.identifier
+            or rollback.restore_digest != restore.digest
+            or _dt(rollback.tested_at) < _dt(str(restore.payload["completed_at"]))
             or independent.verifier_identity_digest
             == release.payload["owner_identity_digest"]
             or independent.reviewed_evidence_manifest_digest
@@ -698,7 +718,16 @@ class OperationalAdmissionDecision:
     digest: str
 
     @classmethod
-    def from_canonical_bytes(cls, raw: bytes) -> OperationalAdmissionDecision:
+    def from_canonical_bytes(
+        cls, raw: bytes, *, packet: QualificationPacket
+    ) -> OperationalAdmissionDecision:
+        if not isinstance(packet, QualificationPacket):
+            raise AdmissionError("Operational Admission packet differs")
+        reconstructed_packet = QualificationPacket.from_canonical_bytes(
+            packet.canonical_bytes
+        )
+        if reconstructed_packet != packet:
+            raise AdmissionError("Operational Admission packet differs")
         payload = _payload(raw, "newsroom.increment8.operational-admission-decision.v1")
         required = {
             "qualification_packet_digest", "owner_identity_digest",
@@ -713,8 +742,24 @@ class OperationalAdmissionDecision:
             "qualification_packet_digest", "owner_identity_digest", "decision_recorded_at_digest"
         ):
             _digest(payload[field], field)
+        release = ReleaseEvidenceDecision.from_canonical_bytes(
+            canonical_json_bytes(
+                reconstructed_packet.retained_evidence["release_decision"]
+            )
+        )
+        independent = IndependentVerificationEvidence.from_canonical_bytes(
+            canonical_json_bytes(
+                reconstructed_packet.retained_evidence["independent_verification"]
+            )
+        )
         if (
-            payload["verdict"] != OperationalAdmissionVerdict.FIXTURE_OPERATIONAL_ADMITTED.value
+            payload["qualification_packet_digest"] != reconstructed_packet.digest
+            or payload["owner_identity_digest"]
+            in {
+                release.payload["owner_identity_digest"],
+                independent.verifier_identity_digest,
+            }
+            or payload["verdict"] != OperationalAdmissionVerdict.FIXTURE_OPERATIONAL_ADMITTED.value
             or payload["increment9_eligibility"]
             != Increment9Eligibility.ELIGIBLE_FOR_SEPARATE_PLAN.value
             or payload["increment9_requires_separate_owner_approved_plan"] is not True
@@ -1283,6 +1328,10 @@ def build_qualification_packet(
         or rollback_evidence.runbook_version_digest != runbook
         or rollback_evidence.restored_state_digest
         != restore.payload["restored_logical_digest"]
+        or rollback_evidence.restore_id != restore.identifier
+        or rollback_evidence.restore_digest != restore.digest
+        or _dt(rollback_evidence.tested_at)
+        < _dt(str(restore.payload["completed_at"]))
         or independent_verification.verifier_identity_digest
         == release_decision.payload["owner_identity_digest"]
         or independent_verification.reviewed_evidence_manifest_digest
@@ -1406,7 +1455,12 @@ def build_operational_admission_decision(
         raw,
         record_digest,
     )
-    if OperationalAdmissionDecision.from_canonical_bytes(decision.canonical_bytes) != decision:
+    if (
+        OperationalAdmissionDecision.from_canonical_bytes(
+            decision.canonical_bytes, packet=packet
+        )
+        != decision
+    ):
         raise AdmissionError("Operational Admission decision differs")
     return decision
 

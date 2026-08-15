@@ -117,12 +117,12 @@ def _cost():
     )
 
 
-def _rollback(restored_state_digest=_D):
+def _rollback(restore):
     return RollbackEvidence.build(
+        restore=restore,
         runbook_version_digest=_D,
         rollback_plan_digest=_D,
-        restored_state_digest=restored_state_digest,
-        tested_at_digest=_D,
+        tested_at=_AFTER_RECONCILIATION,
     )
 
 
@@ -193,7 +193,7 @@ def _packet(tmp_path, **changes):
             capacity=capacity, inventory_digest=_D, measured_at_digest=_D,
         ),
         "cost_licence": _cost(), "runbook_version_digest": _D,
-        "rollback_evidence": _rollback(str(restore.payload["restored_logical_digest"])),
+        "rollback_evidence": _rollback(restore),
         "independent_verification": _independent(
             str(release.payload["evidence_manifest_digest"])
         ),
