@@ -440,6 +440,11 @@ class QualificationPacket:
             str(observability_payload["profile_digest"]),
             *(str(item.payload["profile_digest"]) for item in fault_records),
         }
+        authority_version_digests = {
+            str(reconciliation.payload["authority_version_digest"]),
+            str(restore_reconciliation.payload["authority_version_digest"]),
+            str(backup.payload["authority_version_digest"]),
+        }
         if (
             evidence["release_decision_digest"] != release.digest
             or evidence["metric_report_digest"] != metric.digest
@@ -491,6 +496,7 @@ class QualificationPacket:
             or anchor.payload["operational_eligible"] is not True
             or cost.external_spend_pence != 0
             or len(profile_digests) != 1
+            or len(authority_version_digests) != 1
             or observability_payload["runbook_version_digest"]
             != evidence["runbook_version_digest"]
             or security_payload["runbook_version_digest"]
@@ -1038,6 +1044,11 @@ def build_qualification_packet(
         )["profile_digest"]),
         *(str(item.payload["profile_digest"]) for item in fault_runs),
     }
+    authority_version_digests = {
+        str(reconciliation.payload["authority_version_digest"]),
+        str(restore_reconciliation.payload["authority_version_digest"]),
+        str(backup.payload["authority_version_digest"]),
+    }
     observability_payload = _payload(
         observability.canonical_bytes,
         "newsroom.increment8.observability-record.v1",
@@ -1047,6 +1058,7 @@ def build_qualification_packet(
     )
     if (
         len(profile_digests) != 1
+        or len(authority_version_digests) != 1
         or observability_payload["runbook_version_digest"] != runbook
         or security_payload["runbook_version_digest"] != runbook
     ):
