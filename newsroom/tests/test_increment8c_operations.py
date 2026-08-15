@@ -150,6 +150,7 @@ def test_lease_is_bounded_renewable_only_with_progress_and_append_only(
         lease=renewed,
         lease_state=LeaseState.RELEASED,
         work_state=WorkState.COMPLETED,
+        transitioned_at=_LATER,
     )
     assert released.payload["status"] == LeaseState.RELEASED.value
     assert completed.payload["state"] == WorkState.COMPLETED.value
@@ -205,6 +206,7 @@ def test_retry_is_classified_bounded_and_never_refreshes_health(tmp_path) -> Non
         work=leased,
         classification=RetryClassification.RETRYABLE,
         dependency_scope="FIXTURE_PROVIDER",
+        first_attempt_at=_AT,
         failed_at=_AT,
     )
     assert finding.payload["next_due_at"] == "2042-01-05T00:00:02.000000Z"
@@ -222,6 +224,7 @@ def test_retry_is_classified_bounded_and_never_refreshes_health(tmp_path) -> Non
         work=exhausted,
         classification=RetryClassification.RETRYABLE,
         dependency_scope="FIXTURE_PROVIDER",
+        first_attempt_at=_AT,
         failed_at=_AT,
     )
     assert terminal.payload["retry_exhausted"] is True

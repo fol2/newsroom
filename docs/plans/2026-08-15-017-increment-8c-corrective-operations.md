@@ -36,3 +36,6 @@ Fixture operational authority only. No production scheduler activation, live pro
 - Routine fairness uses only a duplicate-class slot, preserving at least one selected item from every present higher-priority class.
 - Renewal expiry cannot extend by more than one frozen renewal interval, including for directly constructed canonical records.
 - Retry Findings require failure time within the exact active lease interval in both prevalidation and the serialised insertion predicate.
+- Lease closure retains canonical `closed_at`; RELEASED completion/retry evidence must be within the effective lease, while an expired lease can still close as ORPHANED with atomic quarantine.
+- Retry Findings bind the first retained acquisition and enforce the frozen maximum total elapsed horizon, including the scheduled backoff.
+- The Routine fairness slot selects longest-waiting `due_at` first, then deadline and identity.

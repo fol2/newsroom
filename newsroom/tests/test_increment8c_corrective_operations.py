@@ -31,6 +31,7 @@ _T2 = "2042-01-05T00:00:02.000000Z"
 _T5 = "2042-01-05T00:00:05.000000Z"
 _T6 = "2042-01-05T00:00:06.000000Z"
 _T63 = "2042-01-05T00:01:03.000000Z"
+_T121 = "2042-01-05T00:02:01.000000Z"
 
 
 def _work(profile, key: str):
@@ -76,15 +77,19 @@ def test_retry_uses_latest_work_version_and_exact_next_due_at(tmp_path) -> None:
         work=leased_once,
         classification=RetryClassification.RETRYABLE,
         dependency_scope="FIXTURE_PROVIDER",
+        first_attempt_at=_AT,
         failed_at=_AT,
     )
     authority.append_retry_finding(first_finding)
     with pytest.raises(OperationalAuthorityError, match="include its work transition"):
-        authority.append_lease(close_lease(first_lease, LeaseState.RELEASED))
+        authority.append_lease(
+            close_lease(first_lease, LeaseState.RELEASED, closed_at=_AT)
+        )
     _, retry_once = authority.close_lease_and_transition(
         lease=first_lease,
         lease_state=LeaseState.RELEASED,
         work_state=WorkState.RETRY_PENDING,
+        transitioned_at=_AT,
     )
 
     assert authority.due_work(_T1) == ()
@@ -111,6 +116,7 @@ def test_retry_uses_latest_work_version_and_exact_next_due_at(tmp_path) -> None:
         work=leased_twice,
         classification=RetryClassification.RETRYABLE,
         dependency_scope="FIXTURE_PROVIDER",
+        first_attempt_at=_AT,
         failed_at=_T2,
     )
     authority.append_retry_finding(second_finding)
@@ -118,6 +124,7 @@ def test_retry_uses_latest_work_version_and_exact_next_due_at(tmp_path) -> None:
         lease=second_lease,
         lease_state=LeaseState.RELEASED,
         work_state=WorkState.RETRY_PENDING,
+        transitioned_at=_T2,
     )
 
     assert second_finding.payload["next_due_at"] == _T6
@@ -146,6 +153,7 @@ def test_retry_attempts_cannot_jump_or_enter_pending_without_finding(tmp_path) -
             lease=lease,
             lease_state=LeaseState.RELEASED,
             work_state=WorkState.RETRY_PENDING,
+            transitioned_at=_AT,
         )
     connection.close()
 
@@ -164,6 +172,7 @@ def test_terminal_retry_finding_cannot_leave_active_retry_pending_work(
         work=leased,
         classification=RetryClassification.NON_RETRYABLE,
         dependency_scope="FIXTURE_PROVIDER",
+        first_attempt_at=_AT,
         failed_at=_AT,
     )
     authority.append_retry_finding(terminal)
@@ -172,6 +181,7 @@ def test_terminal_retry_finding_cannot_leave_active_retry_pending_work(
             lease=lease,
             lease_state=LeaseState.RELEASED,
             work_state=WorkState.RETRY_PENDING,
+            transitioned_at=_AT,
         )
     connection.close()
 
@@ -190,6 +200,7 @@ def test_retry_finding_rechecks_latest_work_inside_serialised_insert(
         work=leased,
         classification=RetryClassification.RETRYABLE,
         dependency_scope="FIXTURE_PROVIDER",
+        first_attempt_at=_AT,
         failed_at=_AT,
     )
     competing_connection = sqlite3.connect(path, isolation_level=None)
@@ -205,6 +216,7 @@ def test_retry_finding_rechecks_latest_work_inside_serialised_insert(
                 lease=lease,
                 lease_state=LeaseState.RELEASED,
                 work_state=WorkState.COMPLETED,
+                transitioned_at=_AT,
             )
         return original_insert(self, sql, values)
 
@@ -228,6 +240,7 @@ def test_retry_failure_cannot_predate_exact_active_lease(tmp_path) -> None:
         work=leased,
         classification=RetryClassification.RETRYABLE,
         dependency_scope="FIXTURE_PROVIDER",
+        first_attempt_at=_T1,
         failed_at=_T1,
     )
     with pytest.raises(OperationalAuthorityError, match="outside"):
@@ -236,10 +249,20 @@ def test_retry_failure_cannot_predate_exact_active_lease(tmp_path) -> None:
         work=leased,
         classification=RetryClassification.RETRYABLE,
         dependency_scope="FIXTURE_PROVIDER",
+        first_attempt_at=_T2,
         failed_at=_T63,
     )
     with pytest.raises(OperationalAuthorityError, match="outside"):
         authority.append_retry_finding(after_expiry)
+    elapsed = build_retry_finding(
+        work=leased,
+        classification=RetryClassification.RETRYABLE,
+        dependency_scope="FIXTURE_PROVIDER",
+        first_attempt_at=_AT,
+        failed_at=_T121,
+    )
+    assert elapsed.payload["retry_exhausted"] is True
+    assert elapsed.payload["next_due_at"] is None
     connection.close()
 
 
@@ -262,6 +285,21 @@ def test_direct_renewal_cannot_jump_to_maximum_expiry(tmp_path) -> None:
     )
     with pytest.raises(OperationalAuthorityError, match="renewal"):
         authority.append_lease(forged)
+    with pytest.raises(OperationalAuthorityError, match="exceeds expiry"):
+        authority.close_lease_and_transition(
+            lease=lease,
+            lease_state=LeaseState.RELEASED,
+            work_state=WorkState.COMPLETED,
+            transitioned_at=_T63,
+        )
+    orphaned, quarantined = authority.close_lease_and_transition(
+        lease=lease,
+        lease_state=LeaseState.ORPHANED,
+        work_state=WorkState.QUARANTINED,
+        transitioned_at=_T63,
+    )
+    assert orphaned.payload["closed_at"] == _T63
+    assert quarantined.payload["state"] == WorkState.QUARANTINED.value
     connection.close()
 
 
@@ -390,6 +428,15 @@ def test_starved_routine_work_is_promoted_before_catch_up_limit(
     profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
     authority.register_profile(profile)
     routine = _work(profile, "starvation:routine")
+    newer_routine = enqueue_due_work(
+        profile=profile,
+        logical_due_key="starvation:routine-newer",
+        scope_kind="FIXTURE_SOURCE",
+        urgency=Urgency.ROUTINE,
+        due_at=_T5,
+        deadline_at="2042-01-05T00:00:30.000000Z",
+        authority_version_digest=_D,
+    )
     urgent = tuple(
         enqueue_due_work(
             profile=profile,
@@ -403,12 +450,14 @@ def test_starved_routine_work_is_promoted_before_catch_up_limit(
         for index in range(2)
     )
     authority.append_work(routine)
+    authority.append_work(newer_routine)
     for item in urgent:
         authority.append_work(item)
     selected = authority.due_work("2042-01-05T00:00:20.000000Z")
     assert len(selected) == 2
     assert selected[0].payload["urgency"] == Urgency.URGENT.value
     assert routine in selected
+    assert newer_routine not in selected
     connection.close()
 
 

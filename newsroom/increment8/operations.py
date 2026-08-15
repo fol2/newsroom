@@ -407,6 +407,7 @@ def acquire_lease(
             "expires_at": expires,
             "maximum_expires_at": maximum,
             "status": LeaseState.ACTIVE.value,
+            "closed_at": None,
             "previous_digest": None,
         }
     )
@@ -446,7 +447,7 @@ def renew_lease(
     return WorkLease.build(payload)
 
 
-def close_lease(lease: WorkLease, state: LeaseState) -> WorkLease:
+def close_lease(lease: WorkLease, state: LeaseState, *, closed_at: str) -> WorkLease:
     if not isinstance(lease, WorkLease) or state not in {
         LeaseState.RELEASED,
         LeaseState.ORPHANED,
@@ -454,10 +455,18 @@ def close_lease(lease: WorkLease, state: LeaseState) -> WorkLease:
         raise OperationalAuthorityError("lease close state differs")
     if lease.payload["status"] != LeaseState.ACTIVE.value:
         raise OperationalAuthorityError("lease is not active")
+    closed = _time(closed_at, "closed_at")
+    if _dt(closed) < _dt(str(lease.payload["acquired_at"])):
+        raise OperationalAuthorityError("lease closure predates acquisition")
+    if state is LeaseState.RELEASED and _dt(closed) > _dt(
+        str(lease.payload["expires_at"])
+    ):
+        raise OperationalAuthorityError("released lease closure exceeds expiry")
     payload = dict(lease.payload)
     payload.update(
         lease_version=int(lease.payload["lease_version"]) + 1,
         status=state.value,
+        closed_at=closed,
         previous_digest=lease.digest,
     )
     return WorkLease.build(payload)
@@ -468,6 +477,7 @@ def build_retry_finding(
     work: DueWork,
     classification: RetryClassification,
     dependency_scope: str,
+    first_attempt_at: str,
     failed_at: str,
 ) -> RetryFinding:
     if not isinstance(work, DueWork) or not isinstance(
@@ -481,23 +491,34 @@ def build_retry_finding(
         raise OperationalAuthorityError("retry Finding requires a recorded attempt")
     retry = INCREMENT_8_READINESS.operational_profile["retry"]
     maximum = int(retry["maximum_attempts"])
+    first = _time(first_attempt_at, "first_attempt_at")
+    failed = _time(failed_at, "failed_at")
+    if _dt(failed) < _dt(first):
+        raise OperationalAuthorityError("retry failure predates first attempt")
+    maximum_elapsed = int(retry["maximum_elapsed_seconds"])
+    elapsed = _dt(failed) - _dt(first)
     next_due: str | None = None
-    if classification is RetryClassification.RETRYABLE and attempt < maximum:
+    exhausted = attempt >= maximum or elapsed >= timedelta(seconds=maximum_elapsed)
+    if classification is RetryClassification.RETRYABLE and not exhausted:
         base = int(retry["base_backoff_seconds"])
         cap = int(retry["maximum_backoff_seconds"])
         delay = min(cap, base * (2 ** (attempt - 1)))
-        next_due = _canonical_time(
-            _dt(_time(failed_at, "failed_at")) + timedelta(seconds=delay)
-        )
+        candidate_due = _dt(failed) + timedelta(seconds=delay)
+        if candidate_due <= _dt(first) + timedelta(seconds=maximum_elapsed):
+            next_due = _canonical_time(candidate_due)
+        else:
+            exhausted = True
     payload = {
         "work_id": work.work_id,
         "work_digest": work.digest,
         "attempt_number": attempt,
         "classification": classification.value,
         "dependency_scope": _token(dependency_scope, "dependency_scope"),
-        "failed_at": _time(failed_at, "failed_at"),
+        "first_attempt_at": first,
+        "failed_at": failed,
+        "elapsed_microseconds": elapsed // timedelta(microseconds=1),
         "next_due_at": next_due,
-        "retry_exhausted": attempt >= maximum,
+        "retry_exhausted": exhausted,
         "health_clock_refreshed": False,
         "editorial_no_news": False,
         "silent_fallback": False,
@@ -1168,6 +1189,7 @@ class OperationalAuthority:
                     "acquired_at",
                     "maximum_expires_at",
                     "status",
+                    "closed_at",
                 )
             }
             if any(
@@ -1203,6 +1225,7 @@ class OperationalAuthority:
         lease: WorkLease,
         lease_state: LeaseState,
         work_state: WorkState,
+        transitioned_at: str,
     ) -> tuple[WorkLease, DueWork]:
         """Atomically close an active lease and append its work transition."""
 
@@ -1214,6 +1237,7 @@ class OperationalAuthority:
             WorkState.QUARANTINED,
         }:
             raise OperationalAuthorityError("lease work close state differs")
+        transition_time = _time(transitioned_at, "transitioned_at")
         try:
             checked_lease = WorkLease.from_canonical_bytes(lease.canonical_bytes)
         except (AttributeError, TypeError, ValueError) as exc:
@@ -1230,7 +1254,12 @@ class OperationalAuthority:
         retained_work = DueWork.from_canonical_bytes(bytes(work_row[0]))
         if retained_work.payload["state"] != WorkState.LEASED.value:
             raise OperationalAuthorityError("lease work is not LEASED")
-        closed = close_lease(checked_lease, lease_state)
+        if (
+            lease_state is LeaseState.ORPHANED
+            and work_state is not WorkState.QUARANTINED
+        ):
+            raise OperationalAuthorityError("orphaned lease must quarantine its work")
+        closed = close_lease(checked_lease, lease_state, closed_at=transition_time)
         transitioned = transition_work(retained_work, state=work_state)
 
         def commit_close() -> None:
@@ -1329,6 +1358,7 @@ class OperationalAuthority:
             work=retained_work,
             classification=RetryClassification(str(finding.payload["classification"])),
             dependency_scope=str(finding.payload["dependency_scope"]),
+            first_attempt_at=str(finding.payload["first_attempt_at"]),
             failed_at=str(finding.payload["failed_at"]),
         )
         if expected != finding:
@@ -1340,9 +1370,15 @@ class OperationalAuthority:
             "ORDER BY l.acquired_at DESC,l.lease_id LIMIT 1",
             (finding.payload["work_id"],),
         ).fetchone()
+        first_attempt = self._connection.execute(
+            "SELECT MIN(acquired_at) FROM work_leases WHERE work_id=?",
+            (finding.payload["work_id"],),
+        ).fetchone()
         failure_time = _dt(str(finding.payload["failed_at"]))
         if (
             active_lease is None
+            or first_attempt is None
+            or first_attempt[0] != finding.payload["first_attempt_at"]
             or failure_time < _dt(str(active_lease[0]))
             or failure_time > _dt(str(active_lease[1]))
         ):
@@ -1356,7 +1392,8 @@ class OperationalAuthority:
             "WHERE l.work_id=? AND l.acquired_at<=? AND l.expires_at>=? "
             "AND l.status='ACTIVE' "
             "AND l.lease_version=(SELECT MAX(x.lease_version) FROM work_leases x "
-            "WHERE x.lease_id=l.lease_id))",
+            "WHERE x.lease_id=l.lease_id)) AND "
+            "(SELECT MIN(acquired_at) FROM work_leases WHERE work_id=?)=?",
             (
                 finding.finding_id,
                 finding.canonical_bytes,
@@ -1372,6 +1409,8 @@ class OperationalAuthority:
                 finding.payload["work_id"],
                 finding.payload["failed_at"],
                 finding.payload["failed_at"],
+                finding.payload["work_id"],
+                finding.payload["first_attempt_at"],
             ),
         )
         if inserted != 1:
@@ -1492,7 +1531,11 @@ class OperationalAuthority:
                 and _dt(instant) - _dt(str(item.payload["due_at"]))
                 >= timedelta(seconds=starvation_limit)
             ),
-            key=lambda item: (str(item.payload["deadline_at"]), item.work_id),
+            key=lambda item: (
+                str(item.payload["due_at"]),
+                str(item.payload["deadline_at"]),
+                item.work_id,
+            ),
         )
         if starved and starved[0] not in selected and selected:
             selected_counts = {
