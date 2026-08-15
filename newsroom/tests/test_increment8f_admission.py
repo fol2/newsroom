@@ -9,7 +9,9 @@ from newsroom.authority import migrations
 from newsroom.increment8.admission import (
     AdmissionError,
     CostLicenceEvidence,
+    IndependentVerificationEvidence,
     IntendedHardwareEvidence,
+    RollbackEvidence,
     build_operational_admission_decision,
     build_qualification_packet,
 )
@@ -109,6 +111,24 @@ def _cost():
     )
 
 
+def _rollback():
+    return RollbackEvidence.build(
+        runbook_version_digest=_D,
+        rollback_plan_digest=_D,
+        restored_state_digest=_D,
+        tested_at_digest=_D,
+    )
+
+
+def _independent():
+    return IndependentVerificationEvidence.build(
+        verifier_identity_digest=_D,
+        verification_method_digest=_D,
+        reviewed_evidence_manifest_digest=_D,
+        verified_at_digest=_D,
+    )
+
+
 def _packet(tmp_path, **changes):
     tmp_path.mkdir(parents=True, exist_ok=True)
     database = tmp_path / "authority.sqlite3"
@@ -146,7 +166,8 @@ def _packet(tmp_path, **changes):
             capacity=capacity, inventory_digest=_D, measured_at_digest=_D,
         ),
         "cost_licence": _cost(), "runbook_version_digest": _D,
-        "rollback_evidence_digest": _D, "independent_verification_digest": _D,
+        "rollback_evidence": _rollback(),
+        "independent_verification": _independent(),
         "p1_finding_count": 0, "material_p2_finding_count": 0,
     }
     values.update(changes)

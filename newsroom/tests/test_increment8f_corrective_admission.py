@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from inspect import signature
 from types import MappingProxyType
 
 import pytest
@@ -24,6 +25,7 @@ from newsroom.tests.test_increment8f_admission import (
     _observability,
     _packet,
     _reconciliation,
+    _rollback,
     _security,
 )
 
@@ -50,6 +52,10 @@ def test_packet_retains_reconstructable_evidence_and_builds_exact_decision(
     tmp_path, admitted_gate
 ) -> None:
     packet = _packet(tmp_path)
+    parameters = signature(admission_module.build_qualification_packet).parameters
+    assert "rollback_evidence_digest" not in parameters
+    assert "independent_verification_digest" not in parameters
+    assert {"rollback_evidence", "independent_verification"} <= set(parameters)
     assert QualificationPacket.from_canonical_bytes(packet.canonical_bytes) == packet
     assert set(packet.retained_evidence) == {
         "release_decision",
@@ -66,6 +72,8 @@ def test_packet_retains_reconstructable_evidence_and_builds_exact_decision(
         "handoff_anchor",
         "hardware",
         "cost_licence",
+        "rollback_evidence",
+        "independent_verification",
     }
     decision = build_operational_admission_decision(
         packet=packet,
@@ -226,6 +234,11 @@ def test_builder_reconstructs_detached_and_semantically_forged_evidence(
     )
     with pytest.raises(AdmissionError, match="reconciliation semantics"):
         _packet(tmp_path / "reconciliation", reconciliation=forged_reconciliation)
+    with pytest.raises(AdmissionError, match="evidence"):
+        _packet(
+            tmp_path / "rollback",
+            rollback_evidence=replace(_rollback(), canonical_bytes=b"{}"),
+        )
 
 
 def test_stale_expected_handoff_anchor_and_decision_tamper_fail_closed(

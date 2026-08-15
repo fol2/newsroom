@@ -290,6 +290,124 @@ class CostLicenceEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class RollbackEvidence:
+    runbook_version_digest: str
+    canonical_bytes: bytes
+    digest: str
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        runbook_version_digest: str,
+        rollback_plan_digest: str,
+        restored_state_digest: str,
+        tested_at_digest: str,
+    ) -> RollbackEvidence:
+        payload = {
+            "runbook_version_digest": _digest(
+                runbook_version_digest, "runbook_version_digest"
+            ),
+            "rollback_plan_digest": _digest(
+                rollback_plan_digest, "rollback_plan_digest"
+            ),
+            "restored_state_digest": _digest(
+                restored_state_digest, "restored_state_digest"
+            ),
+            "tested_at_digest": _digest(tested_at_digest, "tested_at_digest"),
+            "status": "PASS",
+            "live_effect_authorised": False,
+            "production_activation_authorised": False,
+        }
+        raw, record_digest = _record(
+            "newsroom.increment8.rollback-evidence.v1", payload
+        )
+        return cls(str(payload["runbook_version_digest"]), raw, record_digest)
+
+    @classmethod
+    def from_canonical_bytes(cls, raw: bytes) -> RollbackEvidence:
+        payload = _payload(raw, "newsroom.increment8.rollback-evidence.v1")
+        required = {
+            "runbook_version_digest", "rollback_plan_digest",
+            "restored_state_digest", "tested_at_digest", "status",
+            "live_effect_authorised", "production_activation_authorised",
+        }
+        if set(payload) != required:
+            raise AdmissionError("rollback evidence payload differs")
+        rebuilt = cls.build(
+            runbook_version_digest=payload["runbook_version_digest"],  # type: ignore[arg-type]
+            rollback_plan_digest=payload["rollback_plan_digest"],  # type: ignore[arg-type]
+            restored_state_digest=payload["restored_state_digest"],  # type: ignore[arg-type]
+            tested_at_digest=payload["tested_at_digest"],  # type: ignore[arg-type]
+        )
+        if rebuilt.canonical_bytes != raw:
+            raise AdmissionError("rollback evidence semantics differ")
+        return rebuilt
+
+
+@dataclass(frozen=True, slots=True)
+class IndependentVerificationEvidence:
+    verifier_identity_digest: str
+    canonical_bytes: bytes
+    digest: str
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        verifier_identity_digest: str,
+        verification_method_digest: str,
+        reviewed_evidence_manifest_digest: str,
+        verified_at_digest: str,
+    ) -> IndependentVerificationEvidence:
+        payload = {
+            "verifier_identity_digest": _digest(
+                verifier_identity_digest, "verifier_identity_digest"
+            ),
+            "verification_method_digest": _digest(
+                verification_method_digest, "verification_method_digest"
+            ),
+            "reviewed_evidence_manifest_digest": _digest(
+                reviewed_evidence_manifest_digest,
+                "reviewed_evidence_manifest_digest",
+            ),
+            "verified_at_digest": _digest(verified_at_digest, "verified_at_digest"),
+            "p1_finding_count": 0,
+            "material_p2_finding_count": 0,
+            "status": "PASS",
+            "independent": True,
+            "production_activation_authorised": False,
+        }
+        raw, record_digest = _record(
+            "newsroom.increment8.independent-verification-evidence.v1", payload
+        )
+        return cls(str(payload["verifier_identity_digest"]), raw, record_digest)
+
+    @classmethod
+    def from_canonical_bytes(cls, raw: bytes) -> IndependentVerificationEvidence:
+        payload = _payload(
+            raw, "newsroom.increment8.independent-verification-evidence.v1"
+        )
+        required = {
+            "verifier_identity_digest", "verification_method_digest",
+            "reviewed_evidence_manifest_digest", "verified_at_digest",
+            "p1_finding_count", "material_p2_finding_count", "status",
+            "independent", "production_activation_authorised",
+        }
+        if set(payload) != required:
+            raise AdmissionError("independent verification payload differs")
+        rebuilt = cls.build(
+            verifier_identity_digest=payload["verifier_identity_digest"],  # type: ignore[arg-type]
+            verification_method_digest=payload["verification_method_digest"],  # type: ignore[arg-type]
+            reviewed_evidence_manifest_digest=payload["reviewed_evidence_manifest_digest"],  # type: ignore[arg-type]
+            verified_at_digest=payload["verified_at_digest"],  # type: ignore[arg-type]
+        )
+        if rebuilt.canonical_bytes != raw:
+            raise AdmissionError("independent verification semantics differ")
+        return rebuilt
+
+
+@dataclass(frozen=True, slots=True)
 class QualificationPacket:
     evidence_digests: Mapping[str, object]
     retained_evidence: Mapping[str, object]
@@ -325,7 +443,7 @@ class QualificationPacket:
             "release_decision", "metric_report", "capacity", "health_postures",
             "observability", "security", "reconciliation", "backup", "restore",
             "restore_reconciliation", "fault_runs", "handoff_anchor", "hardware",
-            "cost_licence",
+            "cost_licence", "rollback_evidence", "independent_verification",
         }
         if set(retained) != retained_required:
             raise AdmissionError("qualification packet retained evidence differs")
@@ -395,6 +513,12 @@ class QualificationPacket:
             )
             cost = CostLicenceEvidence.from_canonical_bytes(
                 canonical_json_bytes(retained["cost_licence"])
+            )
+            rollback = RollbackEvidence.from_canonical_bytes(
+                canonical_json_bytes(retained["rollback_evidence"])
+            )
+            independent = IndependentVerificationEvidence.from_canonical_bytes(
+                canonical_json_bytes(retained["independent_verification"])
             )
         except (TypeError, ValueError) as exc:
             raise AdmissionError("qualification packet retained evidence is invalid") from exc
@@ -467,6 +591,8 @@ class QualificationPacket:
             or evidence["handoff_anchor_digest"] != anchor.digest
             or evidence["hardware_digest"] != hardware.digest
             or evidence["cost_licence_digest"] != cost.digest
+            or evidence["rollback_evidence_digest"] != rollback.digest
+            or evidence["independent_verification_digest"] != independent.digest
             or restore.payload["backup_id"] != backup.identifier
             or restore.payload["backup_manifest_digest"] != backup.digest
             or restore.payload["restored_logical_digest"]
@@ -508,6 +634,7 @@ class QualificationPacket:
             != evidence["runbook_version_digest"]
             or security_payload["runbook_version_digest"]
             != evidence["runbook_version_digest"]
+            or rollback.runbook_version_digest != evidence["runbook_version_digest"]
         ):
             raise AdmissionError("qualification packet evidence binding differs")
         canonical_evidence = dict(evidence)
@@ -945,8 +1072,8 @@ def build_qualification_packet(
     hardware: IntendedHardwareEvidence,
     cost_licence: CostLicenceEvidence,
     runbook_version_digest: str,
-    rollback_evidence_digest: str,
-    independent_verification_digest: str,
+    rollback_evidence: RollbackEvidence,
+    independent_verification: IndependentVerificationEvidence,
     p1_finding_count: int,
     material_p2_finding_count: int,
 ) -> QualificationPacket:
@@ -996,6 +1123,22 @@ def build_qualification_packet(
     if cost_rebuilt != cost_licence:
         raise AdmissionError("cost or licence evidence is forged or non-canonical")
     cost_licence = cost_rebuilt
+    if not isinstance(rollback_evidence, RollbackEvidence):
+        raise AdmissionError("rollback evidence is forged or non-canonical")
+    rollback_rebuilt = RollbackEvidence.from_canonical_bytes(
+        rollback_evidence.canonical_bytes
+    )
+    if rollback_rebuilt != rollback_evidence:
+        raise AdmissionError("rollback evidence is forged or non-canonical")
+    rollback_evidence = rollback_rebuilt
+    if not isinstance(independent_verification, IndependentVerificationEvidence):
+        raise AdmissionError("independent verification is forged or non-canonical")
+    independent_rebuilt = IndependentVerificationEvidence.from_canonical_bytes(
+        independent_verification.canonical_bytes
+    )
+    if independent_rebuilt != independent_verification:
+        raise AdmissionError("independent verification is forged or non-canonical")
+    independent_verification = independent_rebuilt
     if release_decision.payload["verdict"] != ReleaseVerdict.PASS.value or release_decision.payload["report_digest"] != metric_report.digest:
         raise AdmissionError("release evidence does not bind the passing metric report")
     if not _metric_report_exact(metric_report) or capacity.payload["status"] != "PASS":
@@ -1077,6 +1220,7 @@ def build_qualification_packet(
         or len(authority_version_digests) != 1
         or observability_payload["runbook_version_digest"] != runbook
         or security_payload["runbook_version_digest"] != runbook
+        or rollback_evidence.runbook_version_digest != runbook
     ):
         raise AdmissionError("profile or runbook evidence is contradictory")
     if _integer(p1_finding_count, "p1_finding_count") or _integer(material_p2_finding_count, "material_p2_finding_count"):
@@ -1091,8 +1235,8 @@ def build_qualification_packet(
         "fault_run_digests": sorted(item.digest for item in fault_runs), "handoff_anchor_digest": pinned_anchor,
         "hardware_digest": hardware.digest, "cost_licence_digest": cost_licence.digest,
         "runbook_version_digest": runbook,
-        "rollback_evidence_digest": _digest(rollback_evidence_digest, "rollback_evidence_digest"),
-        "independent_verification_digest": _digest(independent_verification_digest, "independent_verification_digest"),
+        "rollback_evidence_digest": rollback_evidence.digest,
+        "independent_verification_digest": independent_verification.digest,
         "schema_version": FINAL_SCHEMA_VERSION, "schema_fingerprint": FINAL_SCHEMA_FINGERPRINT,
         "migration_history_digest": FINAL_MIGRATION_HISTORY_DIGEST,
         "p1_finding_count": 0, "material_p2_finding_count": 0,
@@ -1119,6 +1263,10 @@ def build_qualification_packet(
         "handoff_anchor": dict(_document(handoff_anchor.canonical_bytes)),
         "hardware": dict(_document(hardware.canonical_bytes)),
         "cost_licence": dict(_document(cost_licence.canonical_bytes)),
+        "rollback_evidence": dict(_document(rollback_evidence.canonical_bytes)),
+        "independent_verification": dict(
+            _document(independent_verification.canonical_bytes)
+        ),
     }
     raw, record_digest = _record(
         "newsroom.increment8.qualification-packet.v1",
@@ -1190,10 +1338,12 @@ __all__ = [
     "AdmissionError",
     "CostLicenceEvidence",
     "Increment9Eligibility",
+    "IndependentVerificationEvidence",
     "IntendedHardwareEvidence",
     "OperationalAdmissionDecision",
     "OperationalAdmissionVerdict",
     "QualificationPacket",
+    "RollbackEvidence",
     "build_operational_admission_decision",
     "build_qualification_packet",
 ]

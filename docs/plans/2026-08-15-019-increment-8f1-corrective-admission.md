@@ -20,6 +20,9 @@ canary, permanent-locality or production effect.
   well as its digest inventory. Its parser verifies exact schema, key sets,
   canonical bytes, digests, passing semantics, non-effect flags, schema-v32
   identity, readiness digest and cross-evidence relationships.
+- Rollback and independent-verification gates are typed canonical evidence
+  records retained inside the packet; bare caller-supplied digests are no longer
+  accepted as proof that either artifact exists.
 - `build_operational_admission_decision()` reconstructs that entire packet and
   requires exact dataclass equality before it can emit
   `FIXTURE_OPERATIONAL_ADMITTED` and planning-only Increment 9 eligibility.
