@@ -1394,7 +1394,7 @@ class OperationalAuthority:
             "AND d.work_digest=? AND d.state='LEASED' "
             "AND d.state_version=(SELECT MAX(x.state_version) FROM due_work x "
             "WHERE x.work_id=d.work_id)) AND EXISTS(SELECT 1 FROM work_leases l "
-            "WHERE l.work_id=? AND l.acquired_at<=? AND l.expires_at>=? "
+            "WHERE l.work_id=? AND l.acquired_at=? AND l.expires_at=? "
             "AND l.status='ACTIVE' "
             "AND l.lease_version=(SELECT MAX(x.lease_version) FROM work_leases x "
             "WHERE x.lease_id=l.lease_id)) AND "
@@ -1412,8 +1412,8 @@ class OperationalAuthority:
                 finding.payload["work_id"],
                 finding.payload["work_digest"],
                 finding.payload["work_id"],
-                finding.payload["failed_at"],
-                finding.payload["failed_at"],
+                active_lease[0],
+                active_lease[1],
                 finding.payload["work_id"],
                 finding.payload["first_attempt_at"],
             ),
@@ -1538,7 +1538,7 @@ class OperationalAuthority:
             ),
             key=lambda item: (
                 _dt(str(item.payload["due_at"])),
-                str(item.payload["deadline_at"]),
+                _dt(str(item.payload["deadline_at"])),
                 item.work_id,
             ),
         )

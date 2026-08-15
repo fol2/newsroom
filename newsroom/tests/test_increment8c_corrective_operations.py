@@ -276,6 +276,26 @@ def test_retry_failure_cannot_predate_exact_active_lease(tmp_path) -> None:
     connection.close()
 
 
+def test_retry_serialised_lease_check_uses_exact_parsed_instants(tmp_path) -> None:
+    _, connection = _database(tmp_path)
+    authority = OperationalAuthority(connection)
+    profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
+    authority.register_profile(profile)
+    queued = _work(profile, "retry:timestamp-spelling")
+    authority.append_work(queued)
+    basic_acquired_at = "20420105T000001.000000Z"
+    _, leased = _commit_lease(authority, queued, acquired_at=basic_acquired_at)
+    finding = build_retry_finding(
+        work=leased,
+        classification=RetryClassification.RETRYABLE,
+        dependency_scope="FIXTURE_PROVIDER",
+        first_attempt_at=basic_acquired_at,
+        failed_at=_T2,
+    )
+    authority.append_retry_finding(finding)
+    connection.close()
+
+
 def test_direct_renewal_cannot_jump_to_maximum_expiry(tmp_path) -> None:
     _, connection = _database(tmp_path)
     authority = OperationalAuthority(connection)
@@ -484,7 +504,7 @@ def test_starved_routine_work_is_promoted_before_catch_up_limit(
         scope_kind="FIXTURE_SOURCE",
         urgency=Urgency.ROUTINE,
         due_at="20420105T000000.000000Z",
-        deadline_at="2042-01-05T01:00:00.000000Z",
+        deadline_at="20420105T003000.000000Z",
         authority_version_digest=_D,
     )
     newer_routine = enqueue_due_work(
@@ -492,8 +512,8 @@ def test_starved_routine_work_is_promoted_before_catch_up_limit(
         logical_due_key="starvation:routine-newer",
         scope_kind="FIXTURE_SOURCE",
         urgency=Urgency.ROUTINE,
-        due_at=_T5,
-        deadline_at="2042-01-05T00:00:30.000000Z",
+        due_at=_AT,
+        deadline_at="2042-01-05T00:45:00.000000Z",
         authority_version_digest=_D,
     )
     urgent = tuple(

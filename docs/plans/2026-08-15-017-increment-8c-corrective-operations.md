@@ -40,3 +40,5 @@ Fixture operational authority only. No production scheduler activation, live pro
 - Retry Findings bind the first retained acquisition and enforce the frozen maximum total elapsed horizon, including a strict bound on the scheduled backoff instant.
 - RELEASED completion and retry outcomes must not outlive either the effective lease or the retained DueWork deadline, and RETRY_PENDING closure cannot predate its exact RetryFinding failure time.
 - The Routine fairness slot selects the longest-waiting parsed canonical `due_at` instant first, then deadline and identity, so equivalent timestamp spellings cannot change priority.
+- Retry Finding insertion rechecks the exact active lease timestamps selected by parsed-instant prevalidation, avoiding lexical timestamp ordering inside the serialised predicate.
+- Starvation deadline tie-breaking also uses parsed instants, so equivalent ISO timestamp spellings cannot defer the earliest deadline.
