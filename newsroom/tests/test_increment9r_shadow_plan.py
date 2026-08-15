@@ -77,6 +77,15 @@ def test_unresolved_live_decisions_are_explicit_and_fail_closed() -> None:
         require_owner_approved_plan(plan)
 
 
+def test_owner_decision_bindings_are_explicit_and_non_overlapping() -> None:
+    decisions = INCREMENT_9_SHADOW_PLAN.owner_decisions
+    assert all(item.title and item.required_bindings for item in decisions)
+    assert all(
+        len(item.required_bindings) == len(set(item.required_bindings))
+        for item in decisions
+    )
+
+
 def test_no_runtime_or_public_effect_is_authorised() -> None:
     plan = INCREMENT_9_SHADOW_PLAN
     assert plan.approval["contract_implementation_authorised"] is False
