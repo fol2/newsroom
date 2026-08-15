@@ -167,6 +167,35 @@ class FaultInjectionRun(_Record):
     ID_FIELD = "fault_run_id"
     PREFIX = "fault-run"
 
+    @classmethod
+    def from_canonical_bytes(cls, raw: bytes) -> Self:
+        identifier, payload = _decode(raw, cls.SCHEMA, cls.ID_FIELD, cls.PREFIX)
+        required = {
+            "profile_digest", "scenario", "expected_outcome", "observed_outcome",
+            "completed_at", "status", "live_effect_authorised",
+        }
+        if set(payload) != required:
+            raise RecoveryError("fault Injection Run payload differs")
+        try:
+            scenario = FaultScenario(payload["scenario"])
+        except (TypeError, ValueError) as exc:
+            raise RecoveryError("fault scenario differs") from exc
+        expected = _EXPECTED_FAULT_OUTCOME[scenario]
+        observed = _token(payload["observed_outcome"], "observed_outcome")
+        status = RecoveryStatus.PASS.value if observed == expected else RecoveryStatus.FAIL.value
+        if (
+            payload["profile_digest"] != _digest(payload["profile_digest"], "profile_digest")
+            or payload["expected_outcome"] != expected
+            or payload["completed_at"] != _time(payload["completed_at"], "completed_at")
+            or payload["status"] != status
+            or payload["live_effect_authorised"] is not False
+        ):
+            raise RecoveryError("fault Injection Run semantics differ")
+        rebuilt = cls.build(dict(payload))
+        if rebuilt.identifier != identifier or rebuilt.canonical_bytes != raw:
+            raise RecoveryError("fault Injection Run identity differs")
+        return cls(identifier, raw, digest_bytes(raw), payload)
+
 
 @dataclass(frozen=True, slots=True)
 class ReplayReceipt(_Record):
@@ -232,30 +261,39 @@ def create_checked_backup(
     if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
         raise RecoveryError("source integrity check failed")
     logical = _helpers._logical_database_digest(connection)
-    destination.open("xb").close()
-    target = sqlite3.connect(destination, isolation_level=None)
+    created_destination = False
+    target: sqlite3.Connection | None = None
     try:
+        destination.open("xb").close()
+        created_destination = True
+        target = sqlite3.connect(destination, isolation_level=None)
         connection.backup(target)
         if target.execute("PRAGMA integrity_check").fetchone() != ("ok",) or _helpers._logical_database_digest(target) != logical:
             raise RecoveryError("backup integrity differs")
-    finally:
         target.close()
-    file_digest = _helpers._file_digest(destination)
-    return BackupManifest.build(
-        {
-            "profile_digest": _digest(profile_digest, "profile_digest"),
-            "authority_version_digest": _digest(authority_version_digest, "authority_version_digest"),
-            "audit_state_digest": _digest(audit_state_digest, "audit_state_digest"),
-            "authority_logical_digest": logical,
-            "backup_file_digest": file_digest,
-            "created_at": created,
-            "retain_until": retained,
-            "rpo_seconds": int(INCREMENT_8_READINESS.operational_profile["recovery"]["backup_rpo_seconds"]),  # type: ignore[index]
-            "included_state": ["AUDIT", "AUTHORITY", "BASELINE", "DEDUPE", "PENDING_WORK"],
-            "integrity_status": RecoveryStatus.PASS.value,
-            "live_effect_authorised": False,
-        }
-    )
+        target = None
+        file_digest = _helpers._file_digest(destination)
+        return BackupManifest.build(
+            {
+                "profile_digest": _digest(profile_digest, "profile_digest"),
+                "authority_version_digest": _digest(authority_version_digest, "authority_version_digest"),
+                "audit_state_digest": _digest(audit_state_digest, "audit_state_digest"),
+                "authority_logical_digest": logical,
+                "backup_file_digest": file_digest,
+                "created_at": created,
+                "retain_until": retained,
+                "rpo_seconds": int(INCREMENT_8_READINESS.operational_profile["recovery"]["backup_rpo_seconds"]),  # type: ignore[index]
+                "included_state": ["AUDIT", "AUTHORITY", "BASELINE", "DEDUPE", "PENDING_WORK"],
+                "integrity_status": RecoveryStatus.PASS.value,
+                "live_effect_authorised": False,
+            }
+        )
+    except Exception:
+        if target is not None:
+            target.close()
+        if created_destination:
+            destination.unlink(missing_ok=True)
+        raise
 
 
 def restore_checked_backup(
@@ -269,19 +307,30 @@ def restore_checked_backup(
         raise RecoveryError("backup Manifest is forged")
     if not all(isinstance(path, Path) and path.is_absolute() for path in (source, destination)) or not source.is_file() or destination.exists():
         raise RecoveryError("restore path boundary differs")
+    if not destination.parent.is_dir():
+        raise RecoveryError("restore destination parent is absent")
     if _helpers._file_digest(source) != manifest.payload["backup_file_digest"]:
         raise RecoveryError("backup file digest differs")
     incoming = sqlite3.connect(f"file:{source}?mode=ro", uri=True, isolation_level=None)
     target: sqlite3.Connection | None = None
+    created_destination = False
     try:
         if incoming.execute("PRAGMA integrity_check").fetchone() != ("ok",) or _helpers._logical_database_digest(incoming) != manifest.payload["authority_logical_digest"]:
             raise RecoveryError("backup logical state differs")
         destination.open("xb").close()
+        created_destination = True
         target = sqlite3.connect(destination, isolation_level=None)
         incoming.backup(target)
         restored = _helpers._logical_database_digest(target)
         if target.execute("PRAGMA integrity_check").fetchone() != ("ok",) or restored != manifest.payload["authority_logical_digest"]:
             raise RecoveryError("restored authority differs")
+    except Exception:
+        if target is not None:
+            target.close()
+            target = None
+        if created_destination:
+            destination.unlink(missing_ok=True)
+        raise
     finally:
         incoming.close()
         if target is not None:
@@ -388,9 +437,18 @@ def build_fault_injection_run(
 def bounded_catch_up(work: Sequence[DueWork]) -> tuple[DueWork, ...]:
     if any(not isinstance(item, DueWork) for item in work):
         raise RecoveryError("catch-up requires typed due work")
+    try:
+        reconstructed = tuple(DueWork.from_canonical_bytes(item.canonical_bytes) for item in work)
+    except (TypeError, ValueError) as exc:
+        raise RecoveryError("catch-up DueWork is forged") from exc
+    if any(rebuilt != supplied for rebuilt, supplied in zip(reconstructed, work, strict=True)):
+        raise RecoveryError("catch-up DueWork is forged")
     maximum = int(INCREMENT_8_READINESS.operational_profile["schedule"]["maximum_catch_up_items"])  # type: ignore[index]
     urgency = {Urgency.URGENT.value: 0, Urgency.TIME_SENSITIVE.value: 1, Urgency.PLANNED.value: 2, Urgency.ROUTINE.value: 3}
-    ordered = sorted(work, key=lambda item: (urgency[str(item.payload["urgency"])], str(item.payload["deadline_at"]), item.work_id))
+    try:
+        ordered = sorted(reconstructed, key=lambda item: (urgency[str(item.payload["urgency"])], _dt(str(item.payload["deadline_at"])), item.work_id))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RecoveryError("catch-up DueWork semantics differ") from exc
     return tuple(ordered[:maximum])
 
 
@@ -398,8 +456,13 @@ class RecoveryAuthority:
     """Append-only schema-v32 fixture recovery authority."""
 
     def __init__(self, connection: sqlite3.Connection) -> None:
-        if not isinstance(connection, sqlite3.Connection) or connection.in_transaction or connection.execute("PRAGMA user_version").fetchone()[0] < 32:
-            raise RecoveryError("recovery authority requires idle schema v32 connection")
+        if (
+            not isinstance(connection, sqlite3.Connection)
+            or connection.in_transaction
+            or connection.execute("PRAGMA user_version").fetchone()[0] < 32
+            or connection.execute("PRAGMA foreign_keys").fetchone() != (1,)
+        ):
+            raise RecoveryError("recovery authority requires idle foreign-key-enabled schema v32 connection")
         self._connection = connection
 
     def _insert(self, sql: str, values: tuple[object, ...]) -> None:

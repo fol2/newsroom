@@ -33,6 +33,7 @@ def _database(tmp_path):
     path = tmp_path / "authority.sqlite3"
     connection = sqlite3.connect(path, isolation_level=None)
     migrations.apply_pending_migrations(connection, applied_at=_AT)
+    connection.execute("PRAGMA foreign_keys=ON")
     return path, connection
 
 
