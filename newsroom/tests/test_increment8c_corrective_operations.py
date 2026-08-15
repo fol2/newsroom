@@ -617,6 +617,58 @@ def test_legacy_retry_lease_cannot_close_after_derived_horizon(tmp_path) -> None
     connection.close()
 
 
+def test_legacy_retry_finding_remains_acquirable_after_restart(tmp_path) -> None:
+    _, connection = _database(tmp_path)
+    authority = OperationalAuthority(connection)
+    profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
+    authority.register_profile(profile)
+    queued = _work(profile, "lease:legacy-retry-acquire")
+    authority.append_work(queued)
+    first_lease, leased_once = _commit_lease(authority, queued)
+    finding = build_retry_finding(
+        work=leased_once,
+        classification=RetryClassification.RETRYABLE,
+        dependency_scope="FIXTURE_PROVIDER",
+        first_attempt_at=_AT,
+        failed_at=_AT,
+    )
+    legacy_payload = dict(finding.payload)
+    legacy_payload.pop("first_attempt_at")
+    legacy_payload.pop("elapsed_microseconds")
+    legacy = operations.RetryFinding.build(legacy_payload)
+    connection.execute(
+        "INSERT INTO retry_findings VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            legacy.finding_id,
+            legacy.canonical_bytes,
+            legacy.digest,
+            legacy.payload["work_id"],
+            legacy.payload["attempt_number"],
+            legacy.payload["classification"],
+            legacy.payload["dependency_scope"],
+            legacy.payload["next_due_at"],
+            0,
+        ),
+    )
+    _, retry = authority.close_lease_and_transition(
+        lease=first_lease,
+        lease_state=LeaseState.RELEASED,
+        work_state=WorkState.RETRY_PENDING,
+        transitioned_at=_AT,
+    )
+    restarted = OperationalAuthority(connection)
+    lease = acquire_lease(
+        work=retry,
+        owner_digest="sha256:" + "2" * 64,
+        acquired_at=_T2,
+        progress_digest="sha256:" + "3" * 64,
+        authority_deadline_at=_T120,
+    )
+    restarted.append_lease(lease)
+    assert restarted.active_lease_count() == 1
+    connection.close()
+
+
 def test_release_obeys_work_deadline_and_retry_failure_chronology(tmp_path) -> None:
     _, connection = _database(tmp_path)
     authority = OperationalAuthority(connection)

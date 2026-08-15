@@ -965,6 +965,19 @@ class OperationalAuthority:
     def _insert(self, sql: str, values: tuple[object, ...]) -> int:
         return self._write(lambda: self._connection.execute(sql, values).rowcount)
 
+    def _retry_first_attempt(self, finding: RetryFinding, work_id: str) -> datetime:
+        first_attempt_at = finding.payload.get("first_attempt_at")
+        if first_attempt_at is not None:
+            return _dt(str(first_attempt_at))
+        attempt_rows = self._connection.execute(
+            "SELECT acquired_at FROM work_leases WHERE work_id=?", (work_id,)
+        ).fetchall()
+        if not attempt_rows:
+            raise OperationalAuthorityError(
+                "legacy retry first-attempt authority is absent"
+            )
+        return min(_dt(str(row[0])) for row in attempt_rows)
+
     def _leased_work_authority_deadline(self, work: DueWork) -> datetime:
         if work.payload["state"] != WorkState.LEASED.value:
             raise OperationalAuthorityError("lease work is not LEASED")
@@ -986,22 +999,9 @@ class OperationalAuthority:
         if retry_row is None:
             raise OperationalAuthorityError("lease retry authority is absent")
         retry = RetryFinding.from_canonical_bytes(bytes(retry_row[0]))
-        first_attempt_at = retry.payload.get("first_attempt_at")
-        if first_attempt_at is None:
-            attempt_rows = self._connection.execute(
-                "SELECT acquired_at FROM work_leases WHERE work_id=?",
-                (work.work_id,),
-            ).fetchall()
-            if not attempt_rows:
-                raise OperationalAuthorityError(
-                    "legacy retry first-attempt authority is absent"
-                )
-            first_attempt = min((str(row[0]) for row in attempt_rows), key=_dt)
-        else:
-            first_attempt = str(first_attempt_at)
         return min(
             authority_deadline,
-            _dt(first_attempt)
+            self._retry_first_attempt(retry, work.work_id)
             + timedelta(
                 seconds=int(
                     INCREMENT_8_READINESS.operational_profile["retry"][
@@ -1238,8 +1238,8 @@ class OperationalAuthority:
                         raise OperationalAuthorityError("retry Finding is absent")
                     finding = RetryFinding.from_canonical_bytes(bytes(retry_row[0]))
                     next_due = finding.payload["next_due_at"]
-                    retry_horizon = _dt(
-                        str(finding.payload["first_attempt_at"])
+                    retry_horizon = self._retry_first_attempt(
+                        finding, latest.work_id
                     ) + timedelta(
                         seconds=int(
                             INCREMENT_8_READINESS.operational_profile["retry"][
