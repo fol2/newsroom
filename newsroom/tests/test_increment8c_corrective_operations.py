@@ -380,8 +380,32 @@ def test_renewal_cannot_extend_active_ownership_past_work_deadline(tmp_path) -> 
         progress_digest="sha256:" + "9" * 64,
         renewed_at=_T2,
     )
+    authority.append_lease(renewed)
+    assert renewed.payload["expires_at"] == _T5
+    assert renewed.payload["maximum_expires_at"] == _T5
+    connection.close()
+
+
+def test_direct_renewal_cannot_resurrect_an_expired_predecessor(tmp_path) -> None:
+    _, connection = _database(tmp_path)
+    authority = OperationalAuthority(connection)
+    profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
+    authority.register_profile(profile)
+    queued = _work(profile, "lease:renewal-resurrection")
+    authority.append_work(queued)
+    lease, _ = _commit_lease(authority, queued)
+    forged = operations.WorkLease.build(
+        {
+            **lease.payload,
+            "lease_version": 2,
+            "progress_digest": "sha256:" + "9" * 64,
+            "expires_at": "2042-01-05T00:02:00.000000Z",
+            "renewed_at": _T63,
+            "previous_digest": lease.digest,
+        }
+    )
     with pytest.raises(OperationalAuthorityError, match="renewal"):
-        authority.append_lease(renewed)
+        authority.append_lease(forged)
     connection.close()
 
 
@@ -490,14 +514,13 @@ def test_lease_acquisition_is_due_and_atomically_advances_work(tmp_path) -> None
         authority_version_digest=_D,
     )
     authority.append_work(expired)
-    late = acquire_lease(
-        work=expired,
-        owner_digest="sha256:" + "4" * 64,
-        acquired_at=_T5,
-        progress_digest="sha256:" + "5" * 64,
-    )
     with pytest.raises(OperationalAuthorityError, match="deadline"):
-        authority.append_lease(late)
+        acquire_lease(
+            work=expired,
+            owner_digest="sha256:" + "4" * 64,
+            acquired_at=_T5,
+            progress_digest="sha256:" + "5" * 64,
+        )
     authority.append_work(transition_work(expired, state=WorkState.EXPLICITLY_CLOSED))
     due = acquire_lease(
         work=future,

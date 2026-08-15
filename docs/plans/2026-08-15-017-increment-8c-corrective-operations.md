@@ -46,3 +46,4 @@ Fixture operational authority only. No production scheduler activation, live pro
 - The retained first attempt is selected by parsed acquisition instant, and the serialised Finding insert binds the unchanged lease inventory rather than SQLite text ordering.
 - RETRY_PENDING acquisition is rejected at or beyond the frozen maximum total elapsed horizon, even when its backoff due time and work deadline would otherwise permit it.
 - Lease renewal reconstructs the latest retained work, rejects expiry beyond its deadline and rechecks both exact lease and work predecessors inside the serialised transaction.
+- Initial lease expiry and maximum ownership are capped at the retained work deadline. Every renewal retains its exact `renewed_at` instant and is reconstructed through `renew_lease`, so an expired predecessor cannot be resurrected by direct record construction.

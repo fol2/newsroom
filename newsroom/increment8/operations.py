@@ -383,12 +383,18 @@ def acquire_lease(
     }:
         raise OperationalAuthorityError("only ready work can be leased")
     acquired = _time(acquired_at, "acquired_at")
+    deadline = _dt(str(work.payload["deadline_at"]))
+    if _dt(acquired) > deadline:
+        raise OperationalAuthorityError("work deadline has expired")
     profile = INCREMENT_8_READINESS.operational_profile["execution"]
     expires = _canonical_time(
-        _dt(acquired) + timedelta(seconds=int(profile["lease_seconds"]))
+        min(deadline, _dt(acquired) + timedelta(seconds=int(profile["lease_seconds"])))
     )
     maximum = _canonical_time(
-        _dt(acquired) + timedelta(seconds=int(profile["maximum_lease_seconds"]))
+        min(
+            deadline,
+            _dt(acquired) + timedelta(seconds=int(profile["maximum_lease_seconds"])),
+        )
     )
     lease_id = "lease:" + digest_canonical(
         {
@@ -407,6 +413,7 @@ def acquire_lease(
             "expires_at": expires,
             "maximum_expires_at": maximum,
             "status": LeaseState.ACTIVE.value,
+            "renewed_at": None,
             "closed_at": None,
             "previous_digest": None,
         }
@@ -425,7 +432,9 @@ def renew_lease(
     if progress == lease.payload["progress_digest"]:
         raise OperationalAuthorityError("lease renewal requires valid progress")
     renewed = _time(renewed_at, "renewed_at")
-    if _dt(renewed) > _dt(str(lease.payload["expires_at"])):
+    if _dt(renewed) < _dt(str(lease.payload["acquired_at"])) or _dt(renewed) > _dt(
+        str(lease.payload["expires_at"])
+    ):
         raise OperationalAuthorityError("expired lease cannot be renewed")
     seconds = int(
         INCREMENT_8_READINESS.operational_profile["execution"]["lease_renewal_seconds"]
@@ -442,6 +451,7 @@ def renew_lease(
         lease_version=int(lease.payload["lease_version"]) + 1,
         progress_digest=progress,
         expires_at=_canonical_time(expires),
+        renewed_at=renewed,
         previous_digest=lease.digest,
     )
     return WorkLease.build(payload)
@@ -1210,23 +1220,17 @@ class OperationalAuthority:
                     "closed_at",
                 )
             }
-            if any(
-                lease.payload[name] != value for name, value in unchanged.items()
-            ) or (
-                retained.payload["progress_digest"] == lease.payload["progress_digest"]
-                or _dt(str(lease.payload["expires_at"]))
-                < _dt(str(retained.payload["expires_at"]))
-                or _dt(str(lease.payload["expires_at"]))
-                > _dt(str(lease.payload["maximum_expires_at"]))
-                or _dt(str(lease.payload["expires_at"]))
-                > _dt(str(retained.payload["expires_at"]))
-                + timedelta(
-                    seconds=int(
-                        INCREMENT_8_READINESS.operational_profile["execution"][
-                            "lease_renewal_seconds"
-                        ]
-                    )
+            try:
+                expected_renewal = renew_lease(
+                    retained,
+                    progress_digest=str(lease.payload["progress_digest"]),
+                    renewed_at=str(lease.payload["renewed_at"]),
                 )
+            except (KeyError, TypeError, OperationalAuthorityError) as exc:
+                raise OperationalAuthorityError("lease renewal differs") from exc
+            if (
+                any(lease.payload[name] != value for name, value in unchanged.items())
+                or expected_renewal != lease
                 or retained_work.payload["state"] != WorkState.LEASED.value
                 or retained_work.work_id != lease.payload["work_id"]
                 or _dt(str(lease.payload["expires_at"]))
