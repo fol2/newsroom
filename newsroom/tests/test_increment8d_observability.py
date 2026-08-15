@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -19,15 +20,16 @@ from newsroom.increment8.observability import (
     IncidentState,
     ManualAction,
     ManualActionReceipt,
-    ObservationOutcome,
     ObservabilityError,
     ObservabilityRecord,
+    ObservationOutcome,
     PathRole,
     SecurityAdmission,
     classify_transport_outcome,
 )
 
 _D = "sha256:" + "1" * 64
+_D2 = "sha256:" + "2" * 64
 _AT = "2042-01-05T00:00:00.000000Z"
 _RECENT = "2042-01-04T23:59:00.000000Z"
 _STALE = "2042-01-04T23:40:00.000000Z"
@@ -68,6 +70,15 @@ def test_healthy_silence_requires_complete_success_and_uses_last_success_age() -
     assert stale.last_source_change_at != stale.last_complete_success_at
 
 
+def test_freshness_uses_full_precision_before_rendering_integer_age() -> None:
+    at_threshold = _health(success="2042-01-04T23:45:00.000000Z")
+    just_over = _health(success="2042-01-04T23:44:59.999999Z")
+    assert at_threshold.complete_success_age_seconds == 900
+    assert at_threshold.verdict is HealthVerdict.HEALTHY_UNCHANGED
+    assert just_over.complete_success_age_seconds == 900
+    assert just_over.verdict is HealthVerdict.STALE
+
+
 def test_failed_or_partial_observation_is_not_healthy_silence() -> None:
     assert _health(outcome=ObservationOutcome.FAILED).verdict is HealthVerdict.DEGRADED
     states = _dimensions()
@@ -98,6 +109,7 @@ def test_transport_status_and_shape_drift_retain_distinct_meanings() -> None:
     assert classify_transport_outcome(status_code=200, body_bytes=0, valid_baseline=False, validator_contract=False, shape_valid=True) == "EMPTY_SUCCESS"
     assert classify_transport_outcome(status_code=200, body_bytes=10, valid_baseline=False, validator_contract=False, shape_valid=False) == "SHAPE_DRIFT_QUARANTINE"
     assert classify_transport_outcome(status_code=429, body_bytes=0, valid_baseline=False, validator_contract=False, shape_valid=True) == "RATE_LIMITED"
+    assert classify_transport_outcome(status_code=206, body_bytes=10, valid_baseline=False, validator_contract=True, shape_valid=True) == "PARTIAL"
 
 
 def test_access_contract_is_strict_and_contains_no_live_egress_or_credentials() -> None:
@@ -152,11 +164,37 @@ def test_incident_lifecycle_is_append_only_and_integrity_close_requires_regressi
     with pytest.raises(ObservabilityError, match="regression_case_digest"):
         recovered.transition(state=IncidentState.CLOSED, evidence_digest=_D, root_cause_digest=_D, follow_up_digest=_D)
     closed = recovered.transition(
-        state=IncidentState.CLOSED, evidence_digest=_D, root_cause_digest=_D,
+        state=IncidentState.CLOSED, evidence_digest=_D2, root_cause_digest=_D,
         follow_up_digest=_D, regression_case_digest=_D,
     )
     assert closed.previous_digest == recovered.digest
     assert closed.version == 4
+    assert closed.closure_evidence_digest == _D2
+    assert json.loads(closed.canonical_bytes)["payload"]["closure_evidence_digest"] == _D2
+    alternate = recovered.transition(
+        state=IncidentState.CLOSED, evidence_digest=_D, root_cause_digest=_D,
+        follow_up_digest=_D, regression_case_digest=_D,
+    )
+    assert alternate.digest != closed.digest
+    with pytest.raises(ObservabilityError, match="evidence_digest"):
+        recovered.transition(
+            state=IncidentState.CLOSED, evidence_digest="not-a-digest", root_cause_digest=_D,
+            follow_up_digest=_D, regression_case_digest=_D,
+        )
+
+
+def test_incident_transition_reconstructs_exact_retained_record() -> None:
+    opened = IncidentRecord.open(
+        incident_id="incident:forged", scope_digest=_D, opened_at=_AT, timeline_digest=_D,
+        integrity_related=True, near_miss=False,
+    )
+    contained = opened.transition(state=IncidentState.CONTAINED, evidence_digest=_D)
+    recovered = contained.transition(state=IncidentState.RECOVERED, evidence_digest=_D)
+    with pytest.raises(ObservabilityError, match="canonical"):
+        replace(recovered, integrity_related=False).transition(
+            state=IncidentState.CLOSED, evidence_digest=_D2, root_cause_digest=_D,
+            follow_up_digest=_D, regression_case_digest=_D,
+        )
 
 
 def test_manual_actions_are_authenticated_audited_and_never_automatic() -> None:
