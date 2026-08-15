@@ -293,7 +293,7 @@ def test_accept_replay_snapshot_and_direct_tamper_fail_closed(tmp_path: Path) ->
 
 
 @pytest.fixture(scope="module")
-def _generic_disposition_state(tmp_path_factory: pytest.TempPathFactory):
+def _generic_disposition_base(tmp_path_factory: pytest.TempPathFactory):
     tmp_path = tmp_path_factory.mktemp("feedback-disposition")
     location, args, feedback, obligation = _seed(tmp_path)
     authority = open_evaluation_feedback_authority_system(
@@ -322,6 +322,13 @@ def _generic_disposition_state(tmp_path_factory: pytest.TempPathFactory):
     candidate.close()
     advanced = _advance_candidate_head(location, version)
     assert advanced.version_id != feedback.candidate_version_id
+    return location, args, feedback, obligation, accepted, version
+
+
+def test_stale_candidate_feedback_is_rejected(
+    _generic_disposition_base,
+) -> None:
+    location, args, _, _, _, version = _generic_disposition_base
     stale_feedback, stale_obligation = _feedback_for_version(
         location,
         args,
@@ -348,6 +355,21 @@ def _generic_disposition_state(tmp_path_factory: pytest.TempPathFactory):
             stale_obligation.canonical_bytes,
             candidate_proof=location.seed[0][3],
         )
+    authority.close()
+
+
+@pytest.fixture(scope="module")
+def _generic_disposition_state(_generic_disposition_base):
+    location, args, feedback, obligation, accepted, _ = _generic_disposition_base
+    authority = open_evaluation_feedback_authority_system(
+        location.seed[1],
+        retrieval_authority=args["retrieval_authority"],
+        authenticator=args["authenticator"],
+        authorizer=args["authorizer"],
+        command_registry=args["command_registry"],
+        payload_schemas=args["payload_schemas"],
+        clock=args["clock"],
+    )
     disposition = append_reconciliation_disposition(
         accepted.obligation,
         (),
@@ -391,23 +413,8 @@ def test_disposition_is_generic_ledger_anchored_and_replay_precedes_ports(
     assert disposition.obligation_id == accepted.obligation.obligation_id
 
 
-def test_disposition_restart_chain_is_terminal(
-    _generic_disposition_state,
-) -> None:
-    location, args, feedback, obligation, accepted, disposition = (
-        _generic_disposition_state
-    )
-    reopened = open_evaluation_feedback_authority_system(
-        location.seed[1],
-        retrieval_authority=args["retrieval_authority"],
-        authenticator=args["authenticator"],
-        authorizer=args["authorizer"],
-        command_registry=args["command_registry"],
-        payload_schemas=args["payload_schemas"],
-        clock=args["clock"],
-    )
-    assert reopened.load(feedback.feedback_id) == accepted
-    blocked = append_reconciliation_disposition(
+def _blocked_disposition(obligation, feedback, disposition):
+    return append_reconciliation_disposition(
         obligation,
         (disposition,),
         outcome=ReconciliationDispositionOutcome.BLOCKED,
@@ -420,17 +427,10 @@ def test_disposition_restart_chain_is_terminal(
         expected_current_disposition_digest=disposition.canonical_digest,
         expected_current_ordinal=1,
     )
-    assert (
-        reopened.append_disposition(
-            blocked.canonical_bytes, candidate_proof=location.seed[0][3]
-        )
-        == blocked
-    )
-    assert (
-        reopened.append_disposition(blocked.canonical_bytes, candidate_proof=object())
-        == blocked
-    )
-    fulfilled = append_reconciliation_disposition(
+
+
+def _fulfilled_disposition(obligation, feedback, disposition, blocked):
+    return append_reconciliation_disposition(
         obligation,
         (disposition, blocked),
         outcome=ReconciliationDispositionOutcome.FULFILLED,
@@ -443,6 +443,73 @@ def test_disposition_restart_chain_is_terminal(
         expected_current_disposition_digest=blocked.canonical_digest,
         expected_current_ordinal=2,
     )
+
+
+def test_disposition_restart_loads_accepted_feedback(
+    _generic_disposition_state,
+) -> None:
+    location, args, feedback, _, accepted, _ = _generic_disposition_state
+    reopened = open_evaluation_feedback_authority_system(
+        location.seed[1],
+        retrieval_authority=args["retrieval_authority"],
+        authenticator=args["authenticator"],
+        authorizer=args["authorizer"],
+        command_registry=args["command_registry"],
+        payload_schemas=args["payload_schemas"],
+        clock=args["clock"],
+    )
+    assert reopened.load(feedback.feedback_id) == accepted
+    reopened.close()
+
+
+def test_disposition_restart_appends_blocked_idempotently(
+    _generic_disposition_state,
+) -> None:
+    location, args, feedback, obligation, _, disposition = _generic_disposition_state
+    reopened = open_evaluation_feedback_authority_system(
+        location.seed[1],
+        retrieval_authority=args["retrieval_authority"],
+        authenticator=args["authenticator"],
+        authorizer=args["authorizer"],
+        command_registry=args["command_registry"],
+        payload_schemas=args["payload_schemas"],
+        clock=args["clock"],
+    )
+    blocked = _blocked_disposition(obligation, feedback, disposition)
+    assert (
+        reopened.append_disposition(
+            blocked.canonical_bytes, candidate_proof=location.seed[0][3]
+        )
+        == blocked
+    )
+    assert (
+        reopened.append_disposition(blocked.canonical_bytes, candidate_proof=object())
+        == blocked
+    )
+    reopened.close()
+
+
+def test_disposition_restart_chain_is_terminal(
+    _generic_disposition_state,
+) -> None:
+    location, args, feedback, obligation, _, disposition = _generic_disposition_state
+    reopened = open_evaluation_feedback_authority_system(
+        location.seed[1],
+        retrieval_authority=args["retrieval_authority"],
+        authenticator=args["authenticator"],
+        authorizer=args["authorizer"],
+        command_registry=args["command_registry"],
+        payload_schemas=args["payload_schemas"],
+        clock=args["clock"],
+    )
+    blocked = _blocked_disposition(obligation, feedback, disposition)
+    assert (
+        reopened.append_disposition(
+            blocked.canonical_bytes, candidate_proof=location.seed[0][3]
+        )
+        == blocked
+    )
+    fulfilled = _fulfilled_disposition(obligation, feedback, disposition, blocked)
     assert (
         reopened.append_disposition(
             fulfilled.canonical_bytes, candidate_proof=location.seed[0][3]
