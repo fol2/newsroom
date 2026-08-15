@@ -163,6 +163,7 @@ def test_job_graph_is_exact_and_decision_always_reports() -> None:
     assert jobs["decision"]["permissions"] == {
         "actions": "read",
         "contents": "read",
+        "pull-requests": "read",
     }
     assert jobs["signed-closeout"]["if"] == (
         "github.event_name == 'workflow_dispatch' && "
@@ -176,6 +177,7 @@ def test_job_graph_is_exact_and_decision_always_reports() -> None:
         "attestations": "write",
         "contents": "read",
         "id-token": "write",
+        "pull-requests": "read",
     }
     assert jobs["route"]["outputs"] == {
         "service_required": "${{ steps.route_output.outputs.service_required }}"
@@ -206,9 +208,9 @@ def test_every_action_is_release_pinned_to_an_exact_sha() -> None:
             assert selected in allowed
             observed.append(selected)
     assert set(observed) == allowed
-    assert observed.count(CHECKOUT) == 6
-    assert observed.count(SETUP_PYTHON) == 6
-    assert observed.count(SETUP_UV) == 5
+    assert observed.count(CHECKOUT) == 7
+    assert observed.count(SETUP_PYTHON) == 7
+    assert observed.count(SETUP_UV) == 6
     assert observed.count(UPLOAD) == 7
     assert observed.count(DOWNLOAD) == 7
     assert observed.count(ATTEST) == 1
@@ -230,8 +232,17 @@ def test_execution_jobs_check_out_the_exact_evaluated_head_without_credentials()
         python = _uses_steps(job_id, SETUP_PYTHON)
         assert len(python) == 1
         assert python[0]["with"] == {"python-version": "3.12"}
-    assert not _uses_steps("signed-closeout", CHECKOUT)
-    assert not _uses_steps("signed-closeout", SETUP_PYTHON)
+    signed_checkout = _uses_steps("signed-closeout", CHECKOUT)
+    assert len(signed_checkout) == 1
+    assert signed_checkout[0]["with"] == {
+        "ref": "${{ github.sha }}",
+        "fetch-depth": "0",
+        "persist-credentials": "false",
+        "show-progress": "false",
+    }
+    signed_python = _uses_steps("signed-closeout", SETUP_PYTHON)
+    assert len(signed_python) == 1
+    assert signed_python[0]["with"] == {"python-version": "3.12"}
 
 
 def test_uv_cache_is_exact_observable_and_untrusted_prs_cannot_save() -> None:
@@ -349,6 +360,9 @@ def test_lane_and_decision_artifacts_are_compact_immutable_and_attempt_scoped() 
                 ".sdlc-run/increment6g-final-closeout.json",
                 ".sdlc-run/increment7g-final-closeout.json",
                 ".sdlc-run/increment8f-final-closeout.json",
+                ".sdlc-run/increment8-qualification-packet.json",
+                ".sdlc-run/increment8-operational-admission-decision.json",
+                ".sdlc-run/increment8-substantive-review.json",
             ]
 
 
@@ -416,7 +430,9 @@ def test_signed_closeout_attests_only_the_validated_exact_main_receipt() -> None
         "newsroom.increment5e2.final-closeout-receipt.v1",
         "newsroom.increment6g.final-closeout-receipt.v1",
         "newsroom.increment7.closeout-receipt.v1",
-        "newsroom.increment8.closeout-receipt.v1",
+        "newsroom.increment8.closeout-receipt.v2",
+        "newsroom.increment8.qualification-packet.v1",
+        "newsroom.increment8.operational-admission-decision.v1",
         "receipt_identity",
         "evaluated_sha",
         "EXPECTED_HEAD_SHA",
@@ -441,6 +457,9 @@ def test_signed_closeout_attests_only_the_validated_exact_main_receipt() -> None
         ".sdlc-run/signed-closeout-input/increment6g-final-closeout.json",
         ".sdlc-run/signed-closeout-input/increment7g-final-closeout.json",
         ".sdlc-run/signed-closeout-input/increment8f-final-closeout.json",
+        ".sdlc-run/signed-closeout-input/increment8-qualification-packet.json",
+        ".sdlc-run/signed-closeout-input/increment8-operational-admission-decision.json",
+        ".sdlc-run/signed-closeout-input/increment8-substantive-review.json",
     ]
     upload = _step("signed-closeout", "Retain attestation bundle")
     assert upload["uses"] == UPLOAD
@@ -520,6 +539,20 @@ def test_decision_bootstraps_locked_runtime_before_closeout_receipt() -> None:
     assert names.index("Sync locked closeout environment") < names.index(
         "Build Increment 5E2 final closeout receipt"
     )
+    review = _step("decision", "Retain exact Increment 8 substantive review")
+    assert review["if"] == (
+        "github.event_name == 'workflow_dispatch' && "
+        "github.ref == 'refs/heads/main' && "
+        "needs.route.outputs.service_required == 'true'"
+    )
+    assert review["env"] == {"GITHUB_TOKEN": "${{ github.token }}"}
+    for expected in (
+        "scripts.sdlc.increment8_review_evidence",
+        '--repository "${{ github.repository }}"',
+        '--merge-sha "${{ github.sha }}"',
+        "--output .sdlc-run/increment8-substantive-review.json",
+    ):
+        assert expected in review["run"]
     increment7 = _step("decision", "Build Increment 7G final closeout receipt")
     assert increment7["if"] == "needs.route.outputs.service_required == 'true'"
     for expected in (
@@ -673,7 +706,11 @@ def test_github_token_exists_only_on_exact_collection_step() -> None:
             environment = step.get("env")
             if isinstance(environment, dict) and "GITHUB_TOKEN" in environment:
                 locations.append((job_id, str(step.get("name"))))
-    assert locations == [("decision", "Collect exact lane evidence")]
+    assert locations == [
+        ("decision", "Collect exact lane evidence"),
+        ("decision", "Retain exact Increment 8 substantive review"),
+        ("signed-closeout", "Reconstruct exact Increment 8 admission subjects"),
+    ]
 
 
 def test_workflow_never_invokes_prohibited_product_runtime() -> None:

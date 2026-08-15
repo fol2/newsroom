@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -25,7 +26,7 @@ BASE_FINGERPRINT = (
     "sha256:68194825ecc7c429b283204dbc1332a43481e04ca2681fcbf75886a984ea6f55"
 )
 PRIOR_READINESS_DIGEST = (
-    "sha256:52ad9f2d6022e95d738fe24913db2f379a91f6c945319db613b1b50cdea07d4c"
+    "sha256:5fd68e242913561c812a443815bb67b3a7e0faa00ec4e1de657fe38c71078685"
 )
 
 EXPECTED_REQUIRED_SLICES = (
@@ -157,10 +158,12 @@ def test_readiness_binds_exact_increment7_closeout_and_v29_schema() -> None:
     )
 
 
-def test_corrective_contract_is_additive_and_preserves_the_reviewed_v1_record() -> None:
+def test_corrective_contract_is_additive_and_preserves_the_reviewed_v1_record(
+    monkeypatch,
+) -> None:
     readiness = INCREMENT_8_READINESS
-    assert readiness.schema_version == "newsroom.increment8.readiness.v2"
-    assert readiness.contract_version == "increment8-readiness-v2"
+    assert readiness.schema_version == "newsroom.increment8.readiness.v3"
+    assert readiness.contract_version == "increment8-readiness-v3"
     assert digest_bytes(PRIOR_READINESS_CONTRACT_PATH.read_bytes()) == (
         PRIOR_READINESS_DIGEST
     )
@@ -176,20 +179,34 @@ def test_corrective_contract_is_additive_and_preserves_the_reviewed_v1_record() 
     assert allocation.schema_ids == (
         "newsroom.increment8.8r.v1",
         "newsroom.increment8.8r.v2",
+        "newsroom.increment8.8r.v3",
     )
     assert "FROZEN_SLICE_AND_STRATUM_POLICY" in allocation.interface_ownership
     assert "MIGRATION_HISTORY_POLICY" in allocation.interface_ownership
     assert readiness.corrective_status == {
-        "blocking_issues": (463, 464, 465, 466, 467, 428, 468),
-        "increment8_completion_authorised": False,
+        "blocking_issues": (),
+        "increment8_completion_authorised": True,
         "legacy_v1_results_are_qualification_evidence": False,
-        "operational_admission_authorised": False,
-        "qualification_evidence_acceptance_authorised": False,
-        "sole_active_coding_issue": 462,
+        "operational_admission_authorised": True,
+        "qualification_evidence_acceptance_authorised": True,
+        "sole_active_coding_issue": 468,
     }
-    assert all(
-        corrective_gate_authorised(gate) is False for gate in CorrectiveGate
+    for name in (
+        "GITHUB_EVENT_NAME",
+        "GITHUB_REF",
+        "GITHUB_REPOSITORY",
+        "GITHUB_SHA",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    assert all(corrective_gate_authorised(gate) is False for gate in CorrectiveGate)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "fol2/newsroom")
+    monkeypatch.setenv(
+        "GITHUB_SHA",
+        subprocess.check_output(("git", "rev-parse", "HEAD"), text=True).strip(),
     )
+    assert all(corrective_gate_authorised(gate) is True for gate in CorrectiveGate)
     with pytest.raises(Increment8ReadinessError, match="gate identity"):
         corrective_gate_authorised("qualification_evidence_acceptance_authorised")  # type: ignore[arg-type]
 
@@ -291,12 +308,9 @@ def test_migration_reservations_are_contiguous_and_owned() -> None:
         INCREMENT_8_READINESS.migration_policy["reservation_is_not_a_migration"] is True
     )
     assert INCREMENT_8_READINESS.migration_policy["merge_order"] == (30, 31, 32)
+    assert INCREMENT_8_READINESS.migration_policy["additive_migrations_only"] is True
     assert (
-        INCREMENT_8_READINESS.migration_policy["additive_migrations_only"] is True
-    )
-    assert (
-        INCREMENT_8_READINESS.migration_policy["history_preservation_required"]
-        is True
+        INCREMENT_8_READINESS.migration_policy["history_preservation_required"] is True
     )
     assert INCREMENT_8_READINESS.migration_policy["policy_versions"] == (30, 31, 32)
 
@@ -379,19 +393,17 @@ def test_slice_stratum_timing_and_migration_policy_tamper_fail_closed(
             }
         )
     elif mutation == "post_result_slice_policy":
-        plan["required_slice_policy"][
-            "policy_changes_after_first_result_allowed"
-        ] = True
+        plan["required_slice_policy"]["policy_changes_after_first_result_allowed"] = (
+            True
+        )
     elif mutation == "post_result_stratum_policy":
-        plan["case_strata_policy"][
-            "membership_changes_after_first_result_allowed"
-        ] = True
+        plan["case_strata_policy"]["membership_changes_after_first_result_allowed"] = (
+            True
+        )
     elif mutation == "destructive_migration":
         document["payload"]["migration_policy"]["additive_migrations_only"] = False
     elif mutation == "history_rewrite":
-        document["payload"]["migration_policy"][
-            "history_preservation_required"
-        ] = False
+        document["payload"]["migration_policy"]["history_preservation_required"] = False
     with pytest.raises(Increment8ReadinessError, match=expected_error):
         _load_changed_document(tmp_path, monkeypatch, document)
 
@@ -443,8 +455,8 @@ def test_canonical_bytes_and_any_changed_or_duplicate_record_fail(
         load_increment8_readiness_contract(pretty)
 
     duplicate = raw.decode().replace(
-        '"schema_version":"newsroom.increment8.readiness.v2"',
-        '"schema_version":"newsroom.increment8.readiness.v2","schema_version":"newsroom.increment8.readiness.v2"',
+        '"schema_version":"newsroom.increment8.readiness.v3"',
+        '"schema_version":"newsroom.increment8.readiness.v3","schema_version":"newsroom.increment8.readiness.v3"',
         1,
     )
     duplicate_path = tmp_path / "duplicate.json"
@@ -455,5 +467,5 @@ def test_canonical_bytes_and_any_changed_or_duplicate_record_fail(
     document["payload"]["authority"]["live_shadow_authorised"] = True
     changed = tmp_path / "changed.json"
     changed.write_bytes(canonical_json_bytes(document))
-    with pytest.raises(Increment8ReadinessError, match="reviewed v2"):
+    with pytest.raises(Increment8ReadinessError, match="reviewed v3"):
         load_increment8_readiness_contract(changed)

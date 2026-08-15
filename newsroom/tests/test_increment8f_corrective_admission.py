@@ -35,7 +35,9 @@ _D2 = "sha256:" + "2" * 64
 
 @pytest.fixture
 def admitted_gate(monkeypatch):
-    monkeypatch.setattr(admission_module, "corrective_gate_authorised", lambda _gate: True)
+    monkeypatch.setattr(
+        admission_module, "corrective_gate_authorised", lambda _gate: True
+    )
 
 
 def _rebuilt_packet(packet: QualificationPacket, document: dict) -> QualificationPacket:
@@ -77,6 +79,7 @@ def test_packet_retains_reconstructable_evidence_and_builds_exact_decision(
         "cost_licence",
         "rollback_evidence",
         "independent_verification",
+        "substantive_review",
     }
     decision = build_operational_admission_decision(
         packet=packet,
@@ -157,9 +160,9 @@ def test_packet_rejects_retained_derived_fields_that_differ_from_reconstruction(
     packet = _packet(tmp_path)
     for field, value in (("alert_priority", "P1"),):
         document = json.loads(packet.canonical_bytes)
-        document["payload"]["retained_evidence"]["observability"]["payload"][
-            field
-        ] = value
+        document["payload"]["retained_evidence"]["observability"]["payload"][field] = (
+            value
+        )
         forged = _rebuilt_packet(packet, document)
         with pytest.raises(AdmissionError, match="qualification packet differs"):
             build_operational_admission_decision(
@@ -187,7 +190,9 @@ def test_packet_sorts_and_requires_canonical_retained_evidence_order(
     packet = _packet(tmp_path)
     document = json.loads(packet.canonical_bytes)
     retained_faults = document["payload"]["retained_evidence"]["fault_runs"]
-    retained_digests = [digest_bytes(canonical_json_bytes(item)) for item in retained_faults]
+    retained_digests = [
+        digest_bytes(canonical_json_bytes(item)) for item in retained_faults
+    ]
     assert retained_digests == sorted(retained_digests)
 
     document["payload"]["retained_evidence"]["fault_runs"] = list(
@@ -304,9 +309,9 @@ def test_restore_reconciliation_profile_and_admission_owner_are_exact(
         {**previous["payload"], "started_at": "2042-01-05T00:00:00.000000Z"}
     )
     retained["restore_reconciliation"] = json.loads(earlier.canonical_bytes)
-    document["payload"]["evidence_digests"][
-        "restore_reconciliation_digest"
-    ] = earlier.digest
+    document["payload"]["evidence_digests"]["restore_reconciliation_digest"] = (
+        earlier.digest
+    )
     forged_time = _rebuilt_packet(packet, document)
     with pytest.raises(AdmissionError, match="qualification packet differs"):
         build_operational_admission_decision(
@@ -319,9 +324,9 @@ def test_restore_reconciliation_profile_and_admission_owner_are_exact(
     rollback = document["payload"]["retained_evidence"]["rollback_evidence"]
     rollback["payload"]["restore_digest"] = _D2
     rollback_raw = canonical_json_bytes(rollback)
-    document["payload"]["evidence_digests"][
-        "rollback_evidence_digest"
-    ] = digest_bytes(rollback_raw)
+    document["payload"]["evidence_digests"]["rollback_evidence_digest"] = digest_bytes(
+        rollback_raw
+    )
     forged_rollback = _rebuilt_packet(packet, document)
     with pytest.raises(AdmissionError, match="qualification packet differs"):
         build_operational_admission_decision(

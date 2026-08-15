@@ -1,24 +1,35 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from newsroom.authority.canonical import canonical_json_bytes
+from newsroom.increment8.admission import (
+    SubstantiveReviewEvidence,
+    build_operational_admission_decision,
+)
 from newsroom.increment8.closeout import (
     INCREMENT8_FINAL_CLOSEOUT_INVENTORY_DIGEST,
-    INCREMENT8F_FINAL_CLOSEOUT_CASES,
     INCREMENT8_FINAL_NON_EFFECTS,
     INCREMENT8_FINAL_REQUIREMENTS,
+    INCREMENT8F_FINAL_CLOSEOUT_CASES,
     Increment8CloseoutLane,
     validate_increment8_closeout_inventory,
 )
+from newsroom.increment8.qualification_fixture import (
+    FIXTURE_ADMISSION_OWNER_DIGEST,
+    FIXTURE_DECISION_RECORDED_AT_DIGEST,
+    execute_qualification_fixture,
+)
 from newsroom.tests.test_increment6g_closeout_receipt import (
-    _RawReport,
     _clean_clone,
     _git,
+    _RawReport,
     _target_properties,
 )
 from scripts.sdlc.emit_evidence import sha256_identity
@@ -28,6 +39,7 @@ from scripts.sdlc.increment8f_closeout_receipt import (
     Increment8FCloseoutReceiptError,
     build_final_receipt,
 )
+from scripts.sdlc.increment8f_signed_subjects import validate_signed_subjects
 
 
 def _junit(
@@ -126,22 +138,61 @@ def _patch(monkeypatch, decision, transports) -> None:
     )
 
 
-def test_corrective_blockade_emits_no_final_closeout_claim(tmp_path) -> None:
+def _admission_paths(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "fol2/newsroom")
+    monkeypatch.setenv(
+        "GITHUB_SHA",
+        subprocess.check_output(("git", "rev-parse", "HEAD"), text=True).strip(),
+    )
+    packet = tmp_path / "qualification-packet.json"
+    decision = tmp_path / "operational-admission-decision.json"
+    head = subprocess.check_output(("git", "rev-parse", "HEAD"), text=True).strip()
+    review = SubstantiveReviewEvidence.build(
+        repository="fol2/newsroom",
+        pull_request_number=484,
+        merge_sha=head,
+        reviewed_head_sha=head,
+        review_provider="chatgpt-codex-connector",
+        review_authority_kind="PULL_REQUEST_REVIEW",
+        review_database_id=1,
+        review_submitted_at="2042-01-05T00:00:00.000000Z",
+        unresolved_thread_count=0,
+        p1_finding_count=0,
+        material_p2_finding_count=0,
+        other_unresolved_thread_count=0,
+    )
+    qualification_packet = execute_qualification_fixture(
+        tmp_path / "qualification-workspace", substantive_review=review
+    )
+    admission = build_operational_admission_decision(
+        packet=qualification_packet,
+        owner_identity_digest=FIXTURE_ADMISSION_OWNER_DIGEST,
+        decision_recorded_at_digest=FIXTURE_DECISION_RECORDED_AT_DIGEST,
+    )
+    packet.write_bytes(qualification_packet.canonical_bytes)
+    decision.write_bytes(admission.canonical_bytes)
+    review_path = tmp_path / "substantive-review.json"
+    review_path.write_bytes(review.canonical_bytes)
+    return packet, decision, review_path
+
+
+def test_non_main_checkout_emits_no_final_closeout_claim(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    monkeypatch.setenv("GITHUB_REF", "refs/pull/484/merge")
     repo = _clean_clone(tmp_path)
     receipt = build_final_receipt(
         repo_root=repo,
         core_transport_bundle_root=tmp_path / "absent-core",
         service_transport_bundle_root=tmp_path / "absent-service",
         decision_path=tmp_path / "absent-decision.json",
+        qualification_packet_path=tmp_path / "absent-packet.json",
+        operational_admission_decision_path=tmp_path / "absent-admission.json",
     )
     assert receipt["schema_version"] == BLOCKED_SCHEMA_VERSION
     assert receipt["status"] == "BLOCKED"
-    assert receipt["completion_authorised"] is False
-    assert receipt["operational_admission_authorised"] is False
-    assert receipt["blocking_issues"] == [463, 464, 465, 466, 467, 428, 468]
-    assert "selected_cases" not in receipt
-    unsigned = dict(receipt)
-    assert unsigned.pop("receipt_identity") == sha256_identity(unsigned)
+    assert receipt["blocking_issues"] == []
 
 
 def test_receipt_binds_exact_lanes_inventory_service_and_self_hash(
@@ -152,11 +203,14 @@ def test_receipt_binds_exact_lanes_inventory_service_and_self_hash(
     _patch(monkeypatch, decision, transports)
     decision_path = tmp_path / "decision.json"
     decision_path.write_text("{}", encoding="utf-8")
+    packet_path, admission_path, review_path = _admission_paths(tmp_path, monkeypatch)
     receipt = build_final_receipt(
         repo_root=repo,
         core_transport_bundle_root=tmp_path / "core",
         service_transport_bundle_root=tmp_path / "service",
         decision_path=decision_path,
+        qualification_packet_path=packet_path,
+        operational_admission_decision_path=admission_path,
     )
     assert receipt["schema_version"] == FINAL_SCHEMA_VERSION
     assert receipt["inventory"]["digest"] == (
@@ -166,6 +220,41 @@ def test_receipt_binds_exact_lanes_inventory_service_and_self_hash(
     assert {lane["lane_id"] for lane in receipt["lanes"]} == {"core", "service"}
     unsigned = dict(receipt)
     assert unsigned.pop("receipt_identity") == sha256_identity(unsigned)
+    receipt_path = tmp_path / "increment8-receipt.json"
+    receipt_path.write_bytes(canonical_json_bytes(receipt) + b"\n")
+    validate_signed_subjects(
+        repo_root=repo,
+        packet_path=packet_path,
+        decision_path=admission_path,
+        receipt_path=receipt_path,
+        substantive_review_path=review_path,
+        authoritative_review=SubstantiveReviewEvidence.from_canonical_bytes(
+            review_path.read_bytes()
+        ),
+    )
+    forged_authority = SubstantiveReviewEvidence.build(
+        repository="fol2/newsroom",
+        pull_request_number=484,
+        merge_sha=_git(repo, "HEAD"),
+        reviewed_head_sha=_git(repo, "HEAD"),
+        review_provider="chatgpt-codex-connector",
+        review_authority_kind="PULL_REQUEST_REVIEW",
+        review_database_id=2,
+        review_submitted_at="2042-01-05T00:00:00.000000Z",
+        unresolved_thread_count=0,
+        p1_finding_count=0,
+        material_p2_finding_count=0,
+        other_unresolved_thread_count=0,
+    )
+    with pytest.raises(ValueError, match="substantive review binding"):
+        validate_signed_subjects(
+            repo_root=repo,
+            packet_path=packet_path,
+            decision_path=admission_path,
+            receipt_path=receipt_path,
+            substantive_review_path=review_path,
+            authoritative_review=forged_authority,
+        )
 
 
 def test_receipt_rejects_a_failed_selected_case(tmp_path, monkeypatch) -> None:
@@ -188,20 +277,23 @@ def test_receipt_rejects_a_failed_selected_case(tmp_path, monkeypatch) -> None:
     _patch(monkeypatch, decision, transports)
     decision_path = tmp_path / "decision.json"
     decision_path.write_text("{}", encoding="utf-8")
+    packet_path, admission_path, _ = _admission_paths(tmp_path, monkeypatch)
     with pytest.raises(Increment8FCloseoutReceiptError, match="not_passed"):
         build_final_receipt(
             repo_root=repo,
             core_transport_bundle_root=tmp_path / "core",
             service_transport_bundle_root=tmp_path / "service",
             decision_path=decision_path,
+            qualification_packet_path=packet_path,
+            operational_admission_decision_path=admission_path,
         )
-
-
 
 
 def test_increment8_closeout_inventory_and_contract_are_exact() -> None:
     validate_increment8_closeout_inventory()
     assert len(INCREMENT8F_FINAL_CLOSEOUT_CASES) == 13
-    assert {case.requirement for case in INCREMENT8F_FINAL_CLOSEOUT_CASES} == INCREMENT8_FINAL_REQUIREMENTS
+    assert {
+        case.requirement for case in INCREMENT8F_FINAL_CLOSEOUT_CASES
+    } == INCREMENT8_FINAL_REQUIREMENTS
     assert INCREMENT8_FINAL_NON_EFFECTS == tuple(sorted(INCREMENT8_FINAL_NON_EFFECTS))
-    assert FINAL_SCHEMA_VERSION == "newsroom.increment8.closeout-receipt.v1"
+    assert FINAL_SCHEMA_VERSION == "newsroom.increment8.closeout-receipt.v2"

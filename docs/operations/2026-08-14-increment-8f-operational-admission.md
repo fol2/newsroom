@@ -42,6 +42,6 @@ The only passing verdict is `FIXTURE_OPERATIONAL_ADMITTED`. Its corresponding In
 
 ## Tier-M closeout
 
-The permanent SDLC workflow builds `newsroom.increment8.closeout-receipt.v1` from exact core and actual-Neo4j service lanes. The 13-case inventory covers 8A-8F, v32 recovery migration, the Handoff anchor, hardware/cost/licence, Operational Admission and the retained actual graph-service identity. A manual exact-`main` workflow dispatch validates and signs the decision and receipt together.
+The permanent SDLC workflow builds `newsroom.increment8.closeout-receipt.v2` from exact core and actual-Neo4j service lanes. The 13-case inventory covers 8A-8F, v32 recovery migration, the Handoff anchor, hardware/cost/licence, Operational Admission and the retained actual graph-service identity. A manual exact-`main` workflow dispatch validates and signs the decision and receipt together.
 
 Issue #428 closes only after that exact-main receipt proves the anchored Handoff version and this explicit Operational Admission. Parent #148 closes only after the same Tier-M result is retained.

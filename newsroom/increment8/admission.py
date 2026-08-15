@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -64,9 +65,17 @@ class Increment9Eligibility(StrEnum):
 
 
 FINAL_SCHEMA_VERSION = 32
-FINAL_SCHEMA_FINGERPRINT = "sha256:3439b82ec6d212116e54765d50cace4d7f147b6ecc3e6ff84146b523c6fd5676"
-FINAL_MIGRATION_HISTORY_DIGEST = "sha256:5a48fd76cd11f266e19a4b48174d0c009f320a8d00d3eeb281a558fc2d561910"
-_REQUIRED_LICENCE_COMPONENTS = ("neo4j-community", "python-runtime", "repository-components")
+FINAL_SCHEMA_FINGERPRINT = (
+    "sha256:3439b82ec6d212116e54765d50cace4d7f147b6ecc3e6ff84146b523c6fd5676"
+)
+FINAL_MIGRATION_HISTORY_DIGEST = (
+    "sha256:5a48fd76cd11f266e19a4b48174d0c009f320a8d00d3eeb281a558fc2d561910"
+)
+_REQUIRED_LICENCE_COMPONENTS = (
+    "neo4j-community",
+    "python-runtime",
+    "repository-components",
+)
 
 
 def _integer(value: object, field: str, *, minimum: int = 0) -> int:
@@ -78,7 +87,9 @@ def _integer(value: object, field: str, *, minimum: int = 0) -> int:
 def _token(value: object, field: str) -> str:
     if not isinstance(value, str) or not value or len(value.encode()) > 256:
         raise AdmissionError(f"{field} must be bounded text")
-    allowed = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-/")
+    allowed = frozenset(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-/"
+    )
     if any(character not in allowed for character in value):
         raise AdmissionError(f"{field} contains unsupported characters")
     return value
@@ -103,6 +114,12 @@ def _time(value: object, field: str) -> str:
     return value
 
 
+def _commit_sha(value: object, field: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{40}", value) is None:
+        raise AdmissionError(f"{field} must be a canonical commit SHA")
+    return value
+
+
 def _dt(value: str) -> datetime:
     return datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
 
@@ -120,7 +137,11 @@ def _payload(raw: bytes, schema: str) -> Mapping[str, object]:
     if not isinstance(value, dict) or canonical_json_bytes(value) != raw:
         raise AdmissionError("evidence bytes are not canonical JSON")
     payload = value.get("payload")
-    if set(value) != {"schema_version", "payload"} or value["schema_version"] != schema or not isinstance(payload, dict):
+    if (
+        set(value) != {"schema_version", "payload"}
+        or value["schema_version"] != schema
+        or not isinstance(payload, dict)
+    ):
         raise AdmissionError("evidence envelope differs")
     return MappingProxyType(payload)
 
@@ -170,9 +191,16 @@ class IntendedHardwareEvidence:
     def from_canonical_bytes(cls, raw: bytes) -> IntendedHardwareEvidence:
         payload = _payload(raw, "newsroom.increment8.intended-hardware-evidence.v1")
         required = {
-            "target_id", "cpu_cores", "memory_mib", "free_disk_mib",
-            "capacity_digest", "inventory_digest", "measured_at_digest", "status",
-            "fixture_execution_only", "production_activation_authorised",
+            "target_id",
+            "cpu_cores",
+            "memory_mib",
+            "free_disk_mib",
+            "capacity_digest",
+            "inventory_digest",
+            "measured_at_digest",
+            "status",
+            "fixture_execution_only",
+            "production_activation_authorised",
         }
         if set(payload) != required:
             raise AdmissionError("hardware evidence payload differs")
@@ -212,18 +240,29 @@ class IntendedHardwareEvidence:
             _integer(free_disk_mib, "free_disk_mib"),
         )
         if capacity.payload["status"] != "PASS" or checked != (
-            int(capacity.payload["cpu_cores"]), int(capacity.payload["memory_mib"]), int(capacity.payload["free_disk_mib"])
+            int(capacity.payload["cpu_cores"]),
+            int(capacity.payload["memory_mib"]),
+            int(capacity.payload["free_disk_mib"]),
         ):
             raise AdmissionError("hardware and capacity evidence differ")
         payload = {
             "target_id": _token(target_id, "target_id"),
-            "cpu_cores": checked[0], "memory_mib": checked[1], "free_disk_mib": checked[2],
-            "capacity_digest": capacity.digest, "inventory_digest": _digest(inventory_digest, "inventory_digest"),
+            "cpu_cores": checked[0],
+            "memory_mib": checked[1],
+            "free_disk_mib": checked[2],
+            "capacity_digest": capacity.digest,
+            "inventory_digest": _digest(inventory_digest, "inventory_digest"),
             "measured_at_digest": _digest(measured_at_digest, "measured_at_digest"),
-            "status": "PASS", "fixture_execution_only": True, "production_activation_authorised": False,
+            "status": "PASS",
+            "fixture_execution_only": True,
+            "production_activation_authorised": False,
         }
-        raw, record_digest = _record("newsroom.increment8.intended-hardware-evidence.v1", payload)
-        return cls(str(payload["target_id"]), *checked, capacity.digest, raw, record_digest)
+        raw, record_digest = _record(
+            "newsroom.increment8.intended-hardware-evidence.v1", payload
+        )
+        return cls(
+            str(payload["target_id"]), *checked, capacity.digest, raw, record_digest
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,20 +276,38 @@ class CostLicenceEvidence:
     def from_canonical_bytes(cls, raw: bytes) -> CostLicenceEvidence:
         payload = _payload(raw, "newsroom.increment8.cost-licence-evidence.v1")
         required = {
-            "external_spend_pence", "internal_fixture_cost_pence",
-            "licence_review_digests", "terms_review_digest", "pricing_review_digest",
-            "replacement_path_digest", "status", "live_credentials",
-            "network_egress_destinations", "production_activation_authorised",
+            "external_spend_pence",
+            "internal_fixture_cost_pence",
+            "licence_review_digests",
+            "terms_review_digest",
+            "pricing_review_digest",
+            "replacement_path_digest",
+            "status",
+            "live_credentials",
+            "network_egress_destinations",
+            "production_activation_authorised",
         }
-        if set(payload) != required or not isinstance(payload["licence_review_digests"], Mapping):
+        if set(payload) != required or not isinstance(
+            payload["licence_review_digests"], Mapping
+        ):
             raise AdmissionError("cost or licence evidence payload differs")
         rebuilt = cls.build(
-            external_spend_pence=_integer(payload["external_spend_pence"], "external_spend_pence"),
-            internal_fixture_cost_pence=_integer(payload["internal_fixture_cost_pence"], "internal_fixture_cost_pence"),
+            external_spend_pence=_integer(
+                payload["external_spend_pence"], "external_spend_pence"
+            ),
+            internal_fixture_cost_pence=_integer(
+                payload["internal_fixture_cost_pence"], "internal_fixture_cost_pence"
+            ),
             licence_review_digests=payload["licence_review_digests"],  # type: ignore[arg-type]
-            terms_review_digest=_digest(payload["terms_review_digest"], "terms_review_digest"),
-            pricing_review_digest=_digest(payload["pricing_review_digest"], "pricing_review_digest"),
-            replacement_path_digest=_digest(payload["replacement_path_digest"], "replacement_path_digest"),
+            terms_review_digest=_digest(
+                payload["terms_review_digest"], "terms_review_digest"
+            ),
+            pricing_review_digest=_digest(
+                payload["pricing_review_digest"], "pricing_review_digest"
+            ),
+            replacement_path_digest=_digest(
+                payload["replacement_path_digest"], "replacement_path_digest"
+            ),
         )
         if (
             rebuilt.canonical_bytes != raw
@@ -275,18 +332,34 @@ class CostLicenceEvidence:
     ) -> CostLicenceEvidence:
         spend = _integer(external_spend_pence, "external_spend_pence")
         internal = _integer(internal_fixture_cost_pence, "internal_fixture_cost_pence")
-        if spend != 0 or tuple(sorted(licence_review_digests)) != _REQUIRED_LICENCE_COMPONENTS:
+        if (
+            spend != 0
+            or tuple(sorted(licence_review_digests)) != _REQUIRED_LICENCE_COMPONENTS
+        ):
             raise AdmissionError("cost or licence inventory differs")
-        reviews = {name: _digest(licence_review_digests[name], name) for name in _REQUIRED_LICENCE_COMPONENTS}
+        reviews = {
+            name: _digest(licence_review_digests[name], name)
+            for name in _REQUIRED_LICENCE_COMPONENTS
+        }
         payload = {
-            "external_spend_pence": spend, "internal_fixture_cost_pence": internal,
-            "licence_review_digests": reviews, "terms_review_digest": _digest(terms_review_digest, "terms_review_digest"),
-            "pricing_review_digest": _digest(pricing_review_digest, "pricing_review_digest"),
-            "replacement_path_digest": _digest(replacement_path_digest, "replacement_path_digest"),
-            "status": "PASS", "live_credentials": 0, "network_egress_destinations": 0,
+            "external_spend_pence": spend,
+            "internal_fixture_cost_pence": internal,
+            "licence_review_digests": reviews,
+            "terms_review_digest": _digest(terms_review_digest, "terms_review_digest"),
+            "pricing_review_digest": _digest(
+                pricing_review_digest, "pricing_review_digest"
+            ),
+            "replacement_path_digest": _digest(
+                replacement_path_digest, "replacement_path_digest"
+            ),
+            "status": "PASS",
+            "live_credentials": 0,
+            "network_egress_destinations": 0,
             "production_activation_authorised": False,
         }
-        raw, record_digest = _record("newsroom.increment8.cost-licence-evidence.v1", payload)
+        raw, record_digest = _record(
+            "newsroom.increment8.cost-licence-evidence.v1", payload
+        )
         return cls(spend, MappingProxyType(reviews), raw, record_digest)
 
 
@@ -322,9 +395,7 @@ class RollbackEvidence:
             ),
             "restore_id": rebuilt_restore.identifier,
             "restore_digest": rebuilt_restore.digest,
-            "restored_state_digest": rebuilt_restore.payload[
-                "restored_logical_digest"
-            ],
+            "restored_state_digest": rebuilt_restore.payload["restored_logical_digest"],
             "tested_at": tested,
             "status": "PASS",
             "live_effect_authorised": False,
@@ -347,10 +418,15 @@ class RollbackEvidence:
     def from_canonical_bytes(cls, raw: bytes) -> RollbackEvidence:
         payload = _payload(raw, "newsroom.increment8.rollback-evidence.v1")
         required = {
-            "runbook_version_digest", "rollback_plan_digest",
-            "restore_id", "restore_digest", "restored_state_digest", "tested_at",
+            "runbook_version_digest",
+            "rollback_plan_digest",
+            "restore_id",
+            "restore_digest",
+            "restored_state_digest",
+            "tested_at",
             "status",
-            "live_effect_authorised", "production_activation_authorised",
+            "live_effect_authorised",
+            "production_activation_authorised",
         }
         if set(payload) != required:
             raise AdmissionError("rollback evidence payload differs")
@@ -366,7 +442,9 @@ class RollbackEvidence:
             or payload["production_activation_authorised"] is not False
         ):
             raise AdmissionError("rollback evidence semantics differ")
-        return cls(runbook, restore_id, restore_digest, state, tested, raw, digest_bytes(raw))
+        return cls(
+            runbook, restore_id, restore_digest, state, tested, raw, digest_bytes(raw)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,21 +497,155 @@ class IndependentVerificationEvidence:
             raw, "newsroom.increment8.independent-verification-evidence.v1"
         )
         required = {
-            "verifier_identity_digest", "verification_method_digest",
-            "reviewed_evidence_manifest_digest", "verified_at_digest",
-            "p1_finding_count", "material_p2_finding_count", "status",
-            "independent", "production_activation_authorised",
+            "verifier_identity_digest",
+            "verification_method_digest",
+            "reviewed_evidence_manifest_digest",
+            "verified_at_digest",
+            "p1_finding_count",
+            "material_p2_finding_count",
+            "status",
+            "independent",
+            "production_activation_authorised",
         }
         if set(payload) != required:
             raise AdmissionError("independent verification payload differs")
         rebuilt = cls.build(
             verifier_identity_digest=payload["verifier_identity_digest"],  # type: ignore[arg-type]
             verification_method_digest=payload["verification_method_digest"],  # type: ignore[arg-type]
-            reviewed_evidence_manifest_digest=payload["reviewed_evidence_manifest_digest"],  # type: ignore[arg-type]
+            reviewed_evidence_manifest_digest=payload[
+                "reviewed_evidence_manifest_digest"
+            ],  # type: ignore[arg-type]
             verified_at_digest=payload["verified_at_digest"],  # type: ignore[arg-type]
         )
         if rebuilt.canonical_bytes != raw:
             raise AdmissionError("independent verification semantics differ")
+        return rebuilt
+
+
+@dataclass(frozen=True, slots=True)
+class SubstantiveReviewEvidence:
+    repository: str
+    pull_request_number: int
+    merge_sha: str
+    reviewed_head_sha: str
+    review_provider: str
+    review_authority_kind: str
+    review_database_id: int
+    canonical_bytes: bytes
+    digest: str
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        repository: str,
+        pull_request_number: int,
+        merge_sha: str,
+        reviewed_head_sha: str,
+        review_provider: str,
+        review_authority_kind: str,
+        review_database_id: int,
+        review_submitted_at: str,
+        unresolved_thread_count: int,
+        p1_finding_count: int,
+        material_p2_finding_count: int,
+        other_unresolved_thread_count: int,
+    ) -> SubstantiveReviewEvidence:
+        payload = {
+            "repository": _token(repository, "repository"),
+            "pull_request_number": _integer(
+                pull_request_number, "pull_request_number", minimum=1
+            ),
+            "merge_sha": _commit_sha(merge_sha, "merge_sha"),
+            "reviewed_head_sha": _commit_sha(reviewed_head_sha, "reviewed_head_sha"),
+            "review_provider": _token(review_provider, "review_provider"),
+            "review_authority_kind": _token(
+                review_authority_kind, "review_authority_kind"
+            ),
+            "review_database_id": _integer(
+                review_database_id, "review_database_id", minimum=1
+            ),
+            "review_submitted_at": _time(review_submitted_at, "review_submitted_at"),
+            "unresolved_thread_count": _integer(
+                unresolved_thread_count, "unresolved_thread_count"
+            ),
+            "p1_finding_count": _integer(p1_finding_count, "p1_finding_count"),
+            "material_p2_finding_count": _integer(
+                material_p2_finding_count, "material_p2_finding_count"
+            ),
+            "other_unresolved_thread_count": _integer(
+                other_unresolved_thread_count,
+                "other_unresolved_thread_count",
+            ),
+            "status": "PASS",
+            "production_activation_authorised": False,
+        }
+        if (
+            payload["review_authority_kind"]
+            not in {"ISSUE_COMMENT", "PULL_REQUEST_REVIEW"}
+            or payload["unresolved_thread_count"]
+            != payload["p1_finding_count"]
+            + payload["material_p2_finding_count"]
+            + payload["other_unresolved_thread_count"]
+            or payload["unresolved_thread_count"] != 0
+        ):
+            raise AdmissionError("substantive review contains an unresolved finding")
+        raw, record_digest = _record(
+            "newsroom.increment8.substantive-review-evidence.v1", payload
+        )
+        return cls(
+            str(payload["repository"]),
+            int(payload["pull_request_number"]),
+            str(payload["merge_sha"]),
+            str(payload["reviewed_head_sha"]),
+            str(payload["review_provider"]),
+            str(payload["review_authority_kind"]),
+            int(payload["review_database_id"]),
+            raw,
+            record_digest,
+        )
+
+    @classmethod
+    def from_canonical_bytes(cls, raw: bytes) -> SubstantiveReviewEvidence:
+        payload = _payload(raw, "newsroom.increment8.substantive-review-evidence.v1")
+        required = {
+            "repository",
+            "pull_request_number",
+            "merge_sha",
+            "reviewed_head_sha",
+            "review_provider",
+            "review_authority_kind",
+            "review_database_id",
+            "review_submitted_at",
+            "unresolved_thread_count",
+            "p1_finding_count",
+            "material_p2_finding_count",
+            "other_unresolved_thread_count",
+            "status",
+            "production_activation_authorised",
+        }
+        if (
+            set(payload) != required
+            or payload["status"] != "PASS"
+            or payload["production_activation_authorised"] is not False
+        ):
+            raise AdmissionError("substantive review evidence differs")
+        rebuilt = cls.build(
+            repository=payload["repository"],  # type: ignore[arg-type]
+            pull_request_number=payload["pull_request_number"],  # type: ignore[arg-type]
+            merge_sha=payload["merge_sha"],  # type: ignore[arg-type]
+            reviewed_head_sha=payload["reviewed_head_sha"],  # type: ignore[arg-type]
+            review_provider=payload["review_provider"],  # type: ignore[arg-type]
+            review_authority_kind=payload["review_authority_kind"],  # type: ignore[arg-type]
+            review_database_id=payload["review_database_id"],  # type: ignore[arg-type]
+            review_submitted_at=payload["review_submitted_at"],  # type: ignore[arg-type]
+            unresolved_thread_count=payload["unresolved_thread_count"],  # type: ignore[arg-type]
+            p1_finding_count=payload["p1_finding_count"],  # type: ignore[arg-type]
+            material_p2_finding_count=payload["material_p2_finding_count"],  # type: ignore[arg-type]
+            other_unresolved_thread_count=payload["other_unresolved_thread_count"],  # type: ignore[arg-type]
+        )
+        if rebuilt.canonical_bytes != raw:
+            raise AdmissionError("substantive review evidence semantics differ")
         return rebuilt
 
 
@@ -456,40 +668,80 @@ class QualificationPacket:
         evidence = packet_payload["evidence_digests"]
         retained = packet_payload["retained_evidence"]
         required = {
-            "readiness_digest", "release_decision_digest", "metric_report_digest",
-            "operational_profile_digest", "capacity_digest", "health_digests",
-            "observability_digest", "security_digest",
-            "reconciliation_digest", "backup_digest", "restore_digest",
-            "restore_reconciliation_digest", "fault_run_digests", "handoff_anchor_digest",
-            "hardware_digest", "cost_licence_digest", "runbook_version_digest",
-            "rollback_evidence_digest", "independent_verification_digest", "schema_version",
-            "schema_fingerprint", "migration_history_digest", "p1_finding_count",
-            "material_p2_finding_count", "qualification_scope",
-            "live_shadow_execution_authorised", "canary_authorised",
+            "readiness_digest",
+            "release_decision_digest",
+            "metric_report_digest",
+            "operational_profile_digest",
+            "capacity_digest",
+            "health_digests",
+            "observability_digest",
+            "security_digest",
+            "reconciliation_digest",
+            "backup_digest",
+            "restore_digest",
+            "restore_reconciliation_digest",
+            "fault_run_digests",
+            "handoff_anchor_digest",
+            "hardware_digest",
+            "cost_licence_digest",
+            "runbook_version_digest",
+            "rollback_evidence_digest",
+            "independent_verification_digest",
+            "substantive_review_digest",
+            "schema_version",
+            "schema_fingerprint",
+            "migration_history_digest",
+            "p1_finding_count",
+            "material_p2_finding_count",
+            "qualification_scope",
+            "live_shadow_execution_authorised",
+            "canary_authorised",
             "production_activation_authorised",
         }
         if set(evidence) != required:
             raise AdmissionError("qualification packet evidence inventory differs")
         retained_required = {
-            "release_decision", "metric_report", "operational_profile", "capacity",
+            "release_decision",
+            "metric_report",
+            "operational_profile",
+            "capacity",
             "health_postures",
-            "observability", "security", "reconciliation", "backup", "restore",
-            "restore_reconciliation", "fault_runs", "handoff_anchor", "hardware",
-            "cost_licence", "rollback_evidence", "independent_verification",
+            "observability",
+            "security",
+            "reconciliation",
+            "backup",
+            "restore",
+            "restore_reconciliation",
+            "fault_runs",
+            "handoff_anchor",
+            "hardware",
+            "cost_licence",
+            "rollback_evidence",
+            "independent_verification",
+            "substantive_review",
         }
         if set(retained) != retained_required:
             raise AdmissionError("qualification packet retained evidence differs")
         digest_fields = required - {
-            "health_digests", "fault_run_digests", "schema_version", "p1_finding_count",
-            "material_p2_finding_count", "qualification_scope",
-            "live_shadow_execution_authorised", "canary_authorised",
+            "health_digests",
+            "fault_run_digests",
+            "schema_version",
+            "p1_finding_count",
+            "material_p2_finding_count",
+            "qualification_scope",
+            "live_shadow_execution_authorised",
+            "canary_authorised",
             "production_activation_authorised",
         }
         for field in digest_fields:
             _digest(evidence[field], field)
-        health = _digest_inventory(evidence["health_digests"], "health_digests", minimum=1)
+        health = _digest_inventory(
+            evidence["health_digests"], "health_digests", minimum=1
+        )
         faults = _digest_inventory(
-            evidence["fault_run_digests"], "fault_run_digests", minimum=len(FaultScenario)
+            evidence["fault_run_digests"],
+            "fault_run_digests",
+            minimum=len(FaultScenario),
         )
         if (
             len(faults) != len(FaultScenario)
@@ -555,8 +807,13 @@ class QualificationPacket:
             independent = IndependentVerificationEvidence.from_canonical_bytes(
                 canonical_json_bytes(retained["independent_verification"])
             )
+            substantive_review = SubstantiveReviewEvidence.from_canonical_bytes(
+                canonical_json_bytes(retained["substantive_review"])
+            )
         except (TypeError, ValueError) as exc:
-            raise AdmissionError("qualification packet retained evidence is invalid") from exc
+            raise AdmissionError(
+                "qualification packet retained evidence is invalid"
+            ) from exc
         health_docs = retained["health_postures"]
         fault_docs = retained["fault_runs"]
         if not isinstance(health_docs, list) or not isinstance(fault_docs, list):
@@ -569,11 +826,10 @@ class QualificationPacket:
             FaultInjectionRun.from_canonical_bytes(canonical_json_bytes(item))
             for item in fault_docs
         )
-        if (
-            tuple(item.digest for item in health_records)
-            != tuple(sorted(item.digest for item in health_records))
-            or tuple(item.digest for item in fault_records)
-            != tuple(sorted(item.digest for item in fault_records))
+        if tuple(item.digest for item in health_records) != tuple(
+            sorted(item.digest for item in health_records)
+        ) or tuple(item.digest for item in fault_records) != tuple(
+            sorted(item.digest for item in fault_records)
         ):
             raise AdmissionError("qualification packet retained evidence order differs")
         release = _release_reconstructed(release, _metric_report_reconstructed(metric))
@@ -617,19 +873,33 @@ class QualificationPacket:
             or evidence["metric_report_digest"] != metric.digest
             or evidence["operational_profile_digest"] != operational_profile.digest
             or evidence["capacity_digest"] != capacity.digest
-            or evidence["health_digests"] != sorted(item.digest for item in health_records)
+            or evidence["health_digests"]
+            != sorted(item.digest for item in health_records)
             or evidence["observability_digest"] != observability.digest
             or evidence["security_digest"] != security.digest
             or evidence["reconciliation_digest"] != reconciliation.digest
             or evidence["backup_digest"] != backup.digest
             or evidence["restore_digest"] != restore.digest
-            or evidence["restore_reconciliation_digest"] != restore_reconciliation.digest
-            or evidence["fault_run_digests"] != sorted(item.digest for item in fault_records)
+            or evidence["restore_reconciliation_digest"]
+            != restore_reconciliation.digest
+            or evidence["fault_run_digests"]
+            != sorted(item.digest for item in fault_records)
             or evidence["handoff_anchor_digest"] != anchor.digest
             or evidence["hardware_digest"] != hardware.digest
             or evidence["cost_licence_digest"] != cost.digest
             or evidence["rollback_evidence_digest"] != rollback.digest
             or evidence["independent_verification_digest"] != independent.digest
+            or evidence["substantive_review_digest"] != substantive_review.digest
+            or evidence["p1_finding_count"]
+            != _payload(
+                substantive_review.canonical_bytes,
+                "newsroom.increment8.substantive-review-evidence.v1",
+            )["p1_finding_count"]
+            or evidence["material_p2_finding_count"]
+            != _payload(
+                substantive_review.canonical_bytes,
+                "newsroom.increment8.substantive-review-evidence.v1",
+            )["material_p2_finding_count"]
             or restore.payload["backup_id"] != backup.identifier
             or restore.payload["backup_manifest_digest"] != backup.digest
             or restore.payload["restored_logical_digest"]
@@ -730,16 +1000,23 @@ class OperationalAdmissionDecision:
             raise AdmissionError("Operational Admission packet differs")
         payload = _payload(raw, "newsroom.increment8.operational-admission-decision.v1")
         required = {
-            "qualification_packet_digest", "owner_identity_digest",
-            "decision_recorded_at_digest", "verdict", "increment9_eligibility",
+            "qualification_packet_digest",
+            "owner_identity_digest",
+            "decision_recorded_at_digest",
+            "verdict",
+            "increment9_eligibility",
             "increment9_requires_separate_owner_approved_plan",
-            "operational_admission_is_activation", "live_shadow_execution_authorised",
-            "canary_authorised", "production_activation_authorised",
+            "operational_admission_is_activation",
+            "live_shadow_execution_authorised",
+            "canary_authorised",
+            "production_activation_authorised",
         }
         if set(payload) != required:
             raise AdmissionError("Operational Admission payload differs")
         for field in (
-            "qualification_packet_digest", "owner_identity_digest", "decision_recorded_at_digest"
+            "qualification_packet_digest",
+            "owner_identity_digest",
+            "decision_recorded_at_digest",
         ):
             _digest(payload[field], field)
         release = ReleaseEvidenceDecision.from_canonical_bytes(
@@ -759,7 +1036,8 @@ class OperationalAdmissionDecision:
                 release.payload["owner_identity_digest"],
                 independent.verifier_identity_digest,
             }
-            or payload["verdict"] != OperationalAdmissionVerdict.FIXTURE_OPERATIONAL_ADMITTED.value
+            or payload["verdict"]
+            != OperationalAdmissionVerdict.FIXTURE_OPERATIONAL_ADMITTED.value
             or payload["increment9_eligibility"]
             != Increment9Eligibility.ELIGIBLE_FOR_SEPARATE_PLAN.value
             or payload["increment9_requires_separate_owner_approved_plan"] is not True
@@ -827,20 +1105,30 @@ def _release_reconstructed(
     assert isinstance(rebuilt, ReleaseEvidenceDecision)
     payload = rebuilt.payload
     required = {
-        "run_id", "run_digest", "report_digest", "metric_report",
-        "evidence_manifest_digest", "verdict", "owner_identity_digest", "decided_at",
-        "metrics_passed", "required_slices_passed", "zero_tolerance_failure_count",
-        "early_stopped", "production_activation_authorised",
+        "run_id",
+        "run_digest",
+        "report_digest",
+        "metric_report",
+        "evidence_manifest_digest",
+        "verdict",
+        "owner_identity_digest",
+        "decided_at",
+        "metrics_passed",
+        "required_slices_passed",
+        "zero_tolerance_failure_count",
+        "early_stopped",
+        "production_activation_authorised",
     }
     try:
-        report_document = json.loads(report.canonical_bytes.decode("utf-8", errors="strict"))
+        report_document = json.loads(
+            report.canonical_bytes.decode("utf-8", errors="strict")
+        )
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise AdmissionError("metric report bytes differ") from exc
     if (
         set(payload) != required
         or _token(payload["run_id"], "run_id") != report.run_id
-        or _digest(payload["run_digest"], "run_digest")
-        != report.payload["run_digest"]
+        or _digest(payload["run_digest"], "run_digest") != report.payload["run_digest"]
         or payload["report_digest"] != report.digest
         or payload["metric_report"] != report_document
         or payload["evidence_manifest_digest"]
@@ -871,10 +1159,19 @@ def _capacity_reconstructed(capacity: CapacityEvidence) -> CapacityEvidence:
     assert isinstance(rebuilt, CapacityEvidence)
     payload = rebuilt.payload
     required = {
-        "scenario_counts", "cpu_cores", "memory_mib", "free_disk_mib",
-        "peak_queue_items", "urgent_capacity_items", "worker_throughput_per_minute",
-        "operator_minutes", "queue_capacity_items", "observed_headroom_percent",
-        "required_headroom_percent", "status", "live_execution_authorised",
+        "scenario_counts",
+        "cpu_cores",
+        "memory_mib",
+        "free_disk_mib",
+        "peak_queue_items",
+        "urgent_capacity_items",
+        "worker_throughput_per_minute",
+        "operator_minutes",
+        "queue_capacity_items",
+        "observed_headroom_percent",
+        "required_headroom_percent",
+        "status",
+        "live_execution_authorised",
     }
     if set(payload) != required or not isinstance(payload["scenario_counts"], Mapping):
         raise AdmissionError("capacity evidence payload differs")
@@ -899,9 +1196,15 @@ def _capacity_reconstructed(capacity: CapacityEvidence) -> CapacityEvidence:
 def _health_reconstructed_from_bytes(raw: bytes) -> HealthPosture:
     payload = _payload(raw, "newsroom.increment8.health-posture.v1")
     required = {
-        "scope_id", "dimension_states", "observation_outcome",
-        "last_complete_success_at", "last_source_change_at", "observed_at",
-        "complete_success_age_seconds", "freshness_objective_seconds", "verdict",
+        "scope_id",
+        "dimension_states",
+        "observation_outcome",
+        "last_complete_success_at",
+        "last_source_change_at",
+        "observed_at",
+        "complete_success_age_seconds",
+        "freshness_objective_seconds",
+        "verdict",
         "freshness_uses_last_success",
     }
     if set(payload) != required or not isinstance(payload["dimension_states"], Mapping):
@@ -938,11 +1241,22 @@ def _health_reconstructed(posture: HealthPosture) -> HealthPosture:
 def _observability_reconstructed_from_bytes(raw: bytes) -> ObservabilityRecord:
     payload = _payload(raw, "newsroom.increment8.observability-record.v1")
     required = {
-        "readiness_digest", "source_version_digest", "component_version_digest",
-        "profile_digest", "provider_version_digest", "policy_version_digest", "metrics",
-        "path_correlation", "prohibited_data_logged", "coverage_blocked",
-        "integrity_uncertain", "urgent", "alert_priority", "owner_digest",
-        "escalation_digest", "runbook_version_digest",
+        "readiness_digest",
+        "source_version_digest",
+        "component_version_digest",
+        "profile_digest",
+        "provider_version_digest",
+        "policy_version_digest",
+        "metrics",
+        "path_correlation",
+        "prohibited_data_logged",
+        "coverage_blocked",
+        "integrity_uncertain",
+        "urgent",
+        "alert_priority",
+        "owner_digest",
+        "escalation_digest",
+        "runbook_version_digest",
     }
     if (
         set(payload) != required
@@ -987,17 +1301,31 @@ def _observability_reconstructed(record: ObservabilityRecord) -> ObservabilityRe
 def _security_reconstructed_from_bytes(raw: bytes) -> SecurityAdmission:
     payload = _payload(raw, "newsroom.increment8.security-admission.v1")
     flags = (
-        "exact_version_approved", "rights_current", "terms_current", "pricing_current",
-        "credential_scope_current", "rollback_tested", "scoped_disable_tested",
+        "exact_version_approved",
+        "rights_current",
+        "terms_current",
+        "pricing_current",
+        "credential_scope_current",
+        "rollback_tested",
+        "scoped_disable_tested",
         "graph_capability_admitted",
     )
     required = {
-        "access_contract_digest", *flags, "blocking_reasons", "runbook_version_digest",
-        "canary_supported", "canary_authorised", "production_activation_authorised",
-        "live_credentials", "network_egress_destinations", "external_spend_pence",
+        "access_contract_digest",
+        *flags,
+        "blocking_reasons",
+        "runbook_version_digest",
+        "canary_supported",
+        "canary_authorised",
+        "production_activation_authorised",
+        "live_credentials",
+        "network_egress_destinations",
+        "external_spend_pence",
         "eligible",
     }
-    if set(payload) != required or any(not isinstance(payload[name], bool) for name in flags):
+    if set(payload) != required or any(
+        not isinstance(payload[name], bool) for name in flags
+    ):
         raise AdmissionError("security evidence payload differs")
     reasons = tuple(sorted(name for name in flags if payload[name] is False))
     if (
@@ -1030,14 +1358,23 @@ def _security_reconstructed(record: SecurityAdmission) -> SecurityAdmission:
     return semantic
 
 
-def _reconciliation_reconstructed(record: ReconciliationRun, field: str) -> ReconciliationRun:
+def _reconciliation_reconstructed(
+    record: ReconciliationRun, field: str
+) -> ReconciliationRun:
     rebuilt = _exact_record(record, ReconciliationRun, field)
     assert isinstance(rebuilt, ReconciliationRun)
     payload = rebuilt.payload
     required = {
-        "profile_digest", "authority_version_digest", "finding_counts",
-        "replay_item_count", "maximum_replay_items", "started_at", "completed_at",
-        "status", "automatic_operation_blocked", "model_decision_used",
+        "profile_digest",
+        "authority_version_digest",
+        "finding_counts",
+        "replay_item_count",
+        "maximum_replay_items",
+        "started_at",
+        "completed_at",
+        "status",
+        "automatic_operation_blocked",
+        "model_decision_used",
     }
     if field == "restore reconciliation":
         required |= {"restore_id", "restore_digest", "restored_state_digest"}
@@ -1051,25 +1388,40 @@ def _backup_reconstructed(record: BackupManifest) -> BackupManifest:
     assert isinstance(rebuilt, BackupManifest)
     payload = rebuilt.payload
     required = {
-        "profile_digest", "authority_version_digest", "audit_state_digest",
-        "authority_logical_digest", "backup_file_digest", "created_at", "retain_until",
-        "rpo_seconds", "included_state", "integrity_status", "live_effect_authorised",
+        "profile_digest",
+        "authority_version_digest",
+        "audit_state_digest",
+        "authority_logical_digest",
+        "backup_file_digest",
+        "created_at",
+        "retain_until",
+        "rpo_seconds",
+        "included_state",
+        "integrity_status",
+        "live_effect_authorised",
     }
     if set(payload) != required:
         raise AdmissionError("backup payload differs")
     created = _time(payload["created_at"], "created_at")
     retained = _time(payload["retain_until"], "retain_until")
     for field in (
-        "profile_digest", "authority_version_digest", "audit_state_digest",
-        "authority_logical_digest", "backup_file_digest",
+        "profile_digest",
+        "authority_version_digest",
+        "audit_state_digest",
+        "authority_logical_digest",
+        "backup_file_digest",
     ):
         _digest(payload[field], field)
     expected_state = ["AUDIT", "AUTHORITY", "BASELINE", "DEDUPE", "PENDING_WORK"]
-    retention_days = int(INCREMENT_8_READINESS.operational_profile["recovery"]["backup_retention_days"])  # type: ignore[index]
+    retention_days = int(
+        INCREMENT_8_READINESS.operational_profile["recovery"]["backup_retention_days"]
+    )  # type: ignore[index]
     if (
         _dt(retained) < _dt(created) + timedelta(days=retention_days)
         or payload["rpo_seconds"]
-        != int(INCREMENT_8_READINESS.operational_profile["recovery"]["backup_rpo_seconds"])  # type: ignore[index]
+        != int(
+            INCREMENT_8_READINESS.operational_profile["recovery"]["backup_rpo_seconds"]
+        )  # type: ignore[index]
         or payload["included_state"] != expected_state
         or payload["integrity_status"] != RecoveryStatus.PASS.value
         or payload["live_effect_authorised"] is not False
@@ -1083,14 +1435,25 @@ def _restore_reconstructed(record: RestoreRun) -> RestoreRun:
     assert isinstance(rebuilt, RestoreRun)
     payload = rebuilt.payload
     required = {
-        "backup_id", "backup_manifest_digest", "restored_logical_digest",
-        "completed_at", "status", "automatic_operation_resumed",
-        "baselines_reconciled", "leases_reconciled", "queues_reconciled",
-        "handoffs_reconciled", "coverage_reconciled",
+        "backup_id",
+        "backup_manifest_digest",
+        "restored_logical_digest",
+        "completed_at",
+        "status",
+        "automatic_operation_resumed",
+        "baselines_reconciled",
+        "leases_reconciled",
+        "queues_reconciled",
+        "handoffs_reconciled",
+        "coverage_reconciled",
     }
     false_fields = (
-        "automatic_operation_resumed", "baselines_reconciled", "leases_reconciled",
-        "queues_reconciled", "handoffs_reconciled", "coverage_reconciled",
+        "automatic_operation_resumed",
+        "baselines_reconciled",
+        "leases_reconciled",
+        "queues_reconciled",
+        "handoffs_reconciled",
+        "coverage_reconciled",
     )
     if (
         set(payload) != required
@@ -1107,14 +1470,23 @@ def _restore_reconstructed(record: RestoreRun) -> RestoreRun:
     return rebuilt
 
 
-def _anchor_reconstructed(record: HandoffRegistrationAnchor) -> HandoffRegistrationAnchor:
+def _anchor_reconstructed(
+    record: HandoffRegistrationAnchor,
+) -> HandoffRegistrationAnchor:
     rebuilt = _exact_record(record, HandoffRegistrationAnchor, "Handoff anchor")
     assert isinstance(rebuilt, HandoffRegistrationAnchor)
     payload = rebuilt.payload
     required = {
-        "handoff_id", "candidate_version_id", "governing_manifest_digest", "sink_id",
-        "max_attempts", "handoff_identity_digest", "anchor_kind", "recorded_at",
-        "operational_eligible", "original_value_claimed",
+        "handoff_id",
+        "candidate_version_id",
+        "governing_manifest_digest",
+        "sink_id",
+        "max_attempts",
+        "handoff_identity_digest",
+        "anchor_kind",
+        "recorded_at",
+        "operational_eligible",
+        "original_value_claimed",
         "production_activation_authorised",
     }
     if set(payload) != required:
@@ -1146,7 +1518,10 @@ def _metric_report_exact(report: MetricReport) -> bool:
         and report.payload["live_shadow_execution_authorised"] is False
         and report.canonical_bytes
         == canonical_json_bytes(
-            {"schema_version": "newsroom.increment8.metric-report.v1", "payload": dict(report.payload)}
+            {
+                "schema_version": "newsroom.increment8.metric-report.v1",
+                "payload": dict(report.payload),
+            }
         )
     )
 
@@ -1172,12 +1547,9 @@ def build_qualification_packet(
     runbook_version_digest: str,
     rollback_evidence: RollbackEvidence,
     independent_verification: IndependentVerificationEvidence,
-    p1_finding_count: int,
-    material_p2_finding_count: int,
+    substantive_review: SubstantiveReviewEvidence,
 ) -> QualificationPacket:
-    if not corrective_gate_authorised(
-        CorrectiveGate.QUALIFICATION_EVIDENCE_ACCEPTANCE
-    ):
+    if not corrective_gate_authorised(CorrectiveGate.QUALIFICATION_EVIDENCE_ACCEPTANCE):
         raise AdmissionError(
             "qualification packet construction is blocked by corrective readiness"
         )
@@ -1238,7 +1610,18 @@ def build_qualification_packet(
     if independent_rebuilt != independent_verification:
         raise AdmissionError("independent verification is forged or non-canonical")
     independent_verification = independent_rebuilt
-    if release_decision.payload["verdict"] != ReleaseVerdict.PASS.value or release_decision.payload["report_digest"] != metric_report.digest:
+    if not isinstance(substantive_review, SubstantiveReviewEvidence):
+        raise AdmissionError("substantive review evidence is forged or non-canonical")
+    review_rebuilt = SubstantiveReviewEvidence.from_canonical_bytes(
+        substantive_review.canonical_bytes
+    )
+    if review_rebuilt != substantive_review:
+        raise AdmissionError("substantive review evidence is forged or non-canonical")
+    substantive_review = review_rebuilt
+    if (
+        release_decision.payload["verdict"] != ReleaseVerdict.PASS.value
+        or release_decision.payload["report_digest"] != metric_report.digest
+    ):
         raise AdmissionError("release evidence does not bind the passing metric report")
     if not _metric_report_exact(metric_report) or capacity.payload["status"] != "PASS":
         raise AdmissionError("evaluation or capacity evidence did not pass")
@@ -1254,9 +1637,15 @@ def build_qualification_packet(
         raise AdmissionError("health evidence is not complete-success healthy")
     if not security.eligible:
         raise AdmissionError("security admission is blocked")
-    if reconciliation.payload["status"] != RecoveryStatus.PASS.value or restore_reconciliation.payload["status"] != RecoveryStatus.PASS.value:
+    if (
+        reconciliation.payload["status"] != RecoveryStatus.PASS.value
+        or restore_reconciliation.payload["status"] != RecoveryStatus.PASS.value
+    ):
         raise AdmissionError("reconciliation evidence did not pass")
-    if restore.payload["status"] != "RECONCILIATION_REQUIRED" or restore.payload["automatic_operation_resumed"] is not False:
+    if (
+        restore.payload["status"] != "RECONCILIATION_REQUIRED"
+        or restore.payload["automatic_operation_resumed"] is not False
+    ):
         raise AdmissionError("restore boundary differs")
     if backup.payload["integrity_status"] != RecoveryStatus.PASS.value:
         raise AdmissionError("backup integrity evidence did not pass")
@@ -1274,15 +1663,24 @@ def build_qualification_packet(
     ):
         raise AdmissionError("restore does not bind the exact backup")
     expected_scenarios = tuple(sorted(scenario.value for scenario in FaultScenario))
-    observed_scenarios = tuple(sorted(str(item.payload["scenario"]) for item in fault_runs if isinstance(item, FaultInjectionRun)))
+    observed_scenarios = tuple(
+        sorted(
+            str(item.payload["scenario"])
+            for item in fault_runs
+            if isinstance(item, FaultInjectionRun)
+        )
+    )
     if observed_scenarios != expected_scenarios or any(
         item.payload["status"] != RecoveryStatus.PASS.value for item in fault_runs
     ):
         raise AdmissionError("fault-injection inventory differs")
-    pinned_anchor = _digest(expected_handoff_anchor_digest, "expected_handoff_anchor_digest")
+    pinned_anchor = _digest(
+        expected_handoff_anchor_digest, "expected_handoff_anchor_digest"
+    )
     if (
         handoff_anchor.digest != pinned_anchor
-        or handoff_anchor.payload["anchor_kind"] != HandoffAnchorKind.ORIGINAL_REGISTRATION.value
+        or handoff_anchor.payload["anchor_kind"]
+        != HandoffAnchorKind.ORIGINAL_REGISTRATION.value
         or handoff_anchor.payload["operational_eligible"] is not True
     ):
         raise AdmissionError("Handoff registration is not exactly anchored")
@@ -1302,10 +1700,12 @@ def build_qualification_packet(
         str(reconciliation.payload["profile_digest"]),
         str(restore_reconciliation.payload["profile_digest"]),
         str(backup.payload["profile_digest"]),
-        str(_payload(
-            observability.canonical_bytes,
-            "newsroom.increment8.observability-record.v1",
-        )["profile_digest"]),
+        str(
+            _payload(
+                observability.canonical_bytes,
+                "newsroom.increment8.observability-record.v1",
+            )["profile_digest"]
+        ),
         *(str(item.payload["profile_digest"]) for item in fault_runs),
     }
     authority_version_digests = {
@@ -1330,34 +1730,46 @@ def build_qualification_packet(
         != restore.payload["restored_logical_digest"]
         or rollback_evidence.restore_id != restore.identifier
         or rollback_evidence.restore_digest != restore.digest
-        or _dt(rollback_evidence.tested_at)
-        < _dt(str(restore.payload["completed_at"]))
+        or _dt(rollback_evidence.tested_at) < _dt(str(restore.payload["completed_at"]))
         or independent_verification.verifier_identity_digest
         == release_decision.payload["owner_identity_digest"]
         or independent_verification.reviewed_evidence_manifest_digest
         != release_decision.payload["evidence_manifest_digest"]
     ):
         raise AdmissionError("qualification evidence is contradictory")
-    if _integer(p1_finding_count, "p1_finding_count") or _integer(material_p2_finding_count, "material_p2_finding_count"):
-        raise AdmissionError("substantive review contains a blocking finding")
+    review_payload = _payload(
+        substantive_review.canonical_bytes,
+        "newsroom.increment8.substantive-review-evidence.v1",
+    )
     evidence: dict[str, object] = {
         "readiness_digest": INCREMENT_8_READINESS_DIGEST,
-        "release_decision_digest": release_decision.digest, "metric_report_digest": metric_report.digest,
+        "release_decision_digest": release_decision.digest,
+        "metric_report_digest": metric_report.digest,
         "operational_profile_digest": operational_profile.digest,
-        "capacity_digest": capacity.digest, "health_digests": sorted(item.digest for item in health_postures),
-        "observability_digest": observability.digest, "security_digest": security.digest,
-        "reconciliation_digest": reconciliation.digest, "backup_digest": backup.digest, "restore_digest": restore.digest,
+        "capacity_digest": capacity.digest,
+        "health_digests": sorted(item.digest for item in health_postures),
+        "observability_digest": observability.digest,
+        "security_digest": security.digest,
+        "reconciliation_digest": reconciliation.digest,
+        "backup_digest": backup.digest,
+        "restore_digest": restore.digest,
         "restore_reconciliation_digest": restore_reconciliation.digest,
-        "fault_run_digests": sorted(item.digest for item in fault_runs), "handoff_anchor_digest": pinned_anchor,
-        "hardware_digest": hardware.digest, "cost_licence_digest": cost_licence.digest,
+        "fault_run_digests": sorted(item.digest for item in fault_runs),
+        "handoff_anchor_digest": pinned_anchor,
+        "hardware_digest": hardware.digest,
+        "cost_licence_digest": cost_licence.digest,
         "runbook_version_digest": runbook,
         "rollback_evidence_digest": rollback_evidence.digest,
         "independent_verification_digest": independent_verification.digest,
-        "schema_version": FINAL_SCHEMA_VERSION, "schema_fingerprint": FINAL_SCHEMA_FINGERPRINT,
+        "substantive_review_digest": substantive_review.digest,
+        "schema_version": FINAL_SCHEMA_VERSION,
+        "schema_fingerprint": FINAL_SCHEMA_FINGERPRINT,
         "migration_history_digest": FINAL_MIGRATION_HISTORY_DIGEST,
-        "p1_finding_count": 0, "material_p2_finding_count": 0,
+        "p1_finding_count": review_payload["p1_finding_count"],
+        "material_p2_finding_count": review_payload["material_p2_finding_count"],
         "qualification_scope": "DETERMINISTIC_FIXTURE_REPLAY_AND_DISPOSABLE_ACTUAL_SERVICE_ONLY",
-        "live_shadow_execution_authorised": False, "canary_authorised": False,
+        "live_shadow_execution_authorised": False,
+        "canary_authorised": False,
         "production_activation_authorised": False,
     }
     retained_evidence: dict[str, object] = {
@@ -1384,6 +1796,7 @@ def build_qualification_packet(
         "independent_verification": dict(
             _document(independent_verification.canonical_bytes)
         ),
+        "substantive_review": dict(_document(substantive_review.canonical_bytes)),
     }
     raw, record_digest = _record(
         "newsroom.increment8.qualification-packet.v1",
@@ -1410,15 +1823,11 @@ def build_operational_admission_decision(
     decision_recorded_at_digest: str,
 ) -> OperationalAdmissionDecision:
     if not corrective_gate_authorised(CorrectiveGate.OPERATIONAL_ADMISSION):
-        raise AdmissionError(
-            "Operational Admission is blocked by corrective readiness"
-        )
+        raise AdmissionError("Operational Admission is blocked by corrective readiness")
     if not isinstance(packet, QualificationPacket):
         raise AdmissionError("qualification packet differs")
     try:
-        reconstructed = QualificationPacket.from_canonical_bytes(
-            packet.canonical_bytes
-        )
+        reconstructed = QualificationPacket.from_canonical_bytes(packet.canonical_bytes)
     except (TypeError, ValueError) as exc:
         raise AdmissionError("qualification packet differs") from exc
     if reconstructed != packet:
@@ -1439,7 +1848,9 @@ def build_operational_admission_decision(
     payload = {
         "qualification_packet_digest": packet.digest,
         "owner_identity_digest": owner,
-        "decision_recorded_at_digest": _digest(decision_recorded_at_digest, "decision_recorded_at_digest"),
+        "decision_recorded_at_digest": _digest(
+            decision_recorded_at_digest, "decision_recorded_at_digest"
+        ),
         "verdict": OperationalAdmissionVerdict.FIXTURE_OPERATIONAL_ADMITTED.value,
         "increment9_eligibility": Increment9Eligibility.ELIGIBLE_FOR_SEPARATE_PLAN.value,
         "increment9_requires_separate_owner_approved_plan": True,
@@ -1448,7 +1859,9 @@ def build_operational_admission_decision(
         "canary_authorised": False,
         "production_activation_authorised": False,
     }
-    raw, record_digest = _record("newsroom.increment8.operational-admission-decision.v1", payload)
+    raw, record_digest = _record(
+        "newsroom.increment8.operational-admission-decision.v1", payload
+    )
     decision = OperationalAdmissionDecision(
         OperationalAdmissionVerdict.FIXTURE_OPERATIONAL_ADMITTED,
         Increment9Eligibility.ELIGIBLE_FOR_SEPARATE_PLAN,
@@ -1478,6 +1891,7 @@ __all__ = [
     "OperationalAdmissionVerdict",
     "QualificationPacket",
     "RollbackEvidence",
+    "SubstantiveReviewEvidence",
     "build_operational_admission_decision",
     "build_qualification_packet",
 ]
