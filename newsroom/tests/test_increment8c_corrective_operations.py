@@ -809,6 +809,22 @@ def test_closure_requires_lease_for_current_work_attempt(tmp_path) -> None:
             transitioned_at=_T63,
         )
     assert authority.active_lease_count() == 2
+    orphaned = authority.orphan_leaked_lease_for_reconciliation(
+        lease=leaked,
+        reconciled_at=_T63,
+        reconciliation_evidence_digest=_D,
+    )
+    assert orphaned.payload["status"] == LeaseState.ORPHANED.value
+    assert orphaned.payload["reconciliation_only"] is True
+    assert orphaned.payload["reconciliation_evidence_digest"] == _D
+    assert authority.active_lease_count() == 1
+    assert authority.due_work(_T63) == ()
+    with pytest.raises(OperationalAuthorityError, match="current attempt"):
+        authority.orphan_leaked_lease_for_reconciliation(
+            lease=actual,
+            reconciled_at=_T63,
+            reconciliation_evidence_digest=_D,
+        )
     connection.close()
 
 

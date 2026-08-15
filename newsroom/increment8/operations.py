@@ -1574,6 +1574,96 @@ class OperationalAuthority:
         self._write(commit_close)
         return closed, transitioned
 
+    def orphan_leaked_lease_for_reconciliation(
+        self,
+        *,
+        lease: WorkLease,
+        reconciled_at: str,
+        reconciliation_evidence_digest: str,
+    ) -> WorkLease:
+        """Close a non-current leaked lease without changing current work."""
+        try:
+            checked = WorkLease.from_canonical_bytes(lease.canonical_bytes)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise OperationalAuthorityError("lease is forged or non-canonical") from exc
+        if checked != lease or lease.payload["status"] != LeaseState.ACTIVE.value:
+            raise OperationalAuthorityError(
+                "reconciliation requires an active canonical lease"
+            )
+        closed_at = _time(reconciled_at, "reconciled_at")
+        evidence = _digest(
+            reconciliation_evidence_digest, "reconciliation_evidence_digest"
+        )
+        work_row = self._connection.execute(
+            "SELECT work_bytes FROM due_work WHERE work_id=? "
+            "ORDER BY state_version DESC LIMIT 1",
+            (lease.payload["work_id"],),
+        ).fetchone()
+        if work_row is None:
+            raise OperationalAuthorityError("leaked lease work is absent")
+        retained_work = DueWork.from_canonical_bytes(bytes(work_row[0]))
+        if retained_work.payload["state"] == WorkState.LEASED.value:
+            current_lease_id = "lease:" + digest_canonical(
+                {
+                    "work_id": retained_work.work_id,
+                    "attempt_count": retained_work.payload["attempt_count"],
+                }
+            ).removeprefix("sha256:")
+            if lease.lease_id == current_lease_id:
+                raise OperationalAuthorityError(
+                    "current attempt lease requires its work transition"
+                )
+        orphaned_payload = dict(
+            close_lease(checked, LeaseState.ORPHANED, closed_at=closed_at).payload
+        )
+        orphaned_payload.update(
+            reconciliation_only=True,
+            reconciliation_evidence_digest=evidence,
+        )
+        orphaned = WorkLease.build(orphaned_payload)
+        values = (
+            orphaned.lease_id,
+            orphaned.payload["lease_version"],
+            orphaned.canonical_bytes,
+            orphaned.digest,
+            orphaned.payload["work_id"],
+            orphaned.payload["owner_digest"],
+            orphaned.payload["progress_digest"],
+            orphaned.payload["acquired_at"],
+            orphaned.payload["expires_at"],
+            orphaned.payload["maximum_expires_at"],
+            orphaned.payload["status"],
+            orphaned.payload["previous_digest"],
+        )
+
+        def commit_reconciliation() -> None:
+            latest_lease_row = self._connection.execute(
+                "SELECT lease_bytes FROM work_leases WHERE lease_id=? "
+                "ORDER BY lease_version DESC LIMIT 1",
+                (lease.lease_id,),
+            ).fetchone()
+            latest_work_row = self._connection.execute(
+                "SELECT work_bytes FROM due_work WHERE work_id=? "
+                "ORDER BY state_version DESC LIMIT 1",
+                (retained_work.work_id,),
+            ).fetchone()
+            if (
+                latest_lease_row is None
+                or WorkLease.from_canonical_bytes(bytes(latest_lease_row[0])) != checked
+                or latest_work_row is None
+                or DueWork.from_canonical_bytes(bytes(latest_work_row[0]))
+                != retained_work
+            ):
+                raise OperationalAuthorityError(
+                    "leaked lease reconciliation authority changed"
+                )
+            self._connection.execute(
+                "INSERT INTO work_leases VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", values
+            )
+
+        self._write(commit_reconciliation)
+        return orphaned
+
     def append_retry_finding(self, finding: RetryFinding) -> None:
         if (
             not isinstance(finding, RetryFinding)
