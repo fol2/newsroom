@@ -39,3 +39,8 @@ substantive review with zero unresolved P1/material-P2 findings, and the
 authoritative source, 16 core shards, reducer, authenticated Neo4j service and
 decision lanes. Final completion additionally requires the same exact `main`
 SHA/tree to pass signed-closeout.
+
+The final inventory resolves every retained case identity against the current
+test modules before qualification. B01 uses the corrected report
+reconstruction case introduced by the metrics authority correction, rather
+than the superseded pre-correction test name.

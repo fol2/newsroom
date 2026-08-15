@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -291,6 +292,9 @@ def test_receipt_rejects_a_failed_selected_case(tmp_path, monkeypatch) -> None:
 
 def test_increment8_closeout_inventory_and_contract_are_exact() -> None:
     validate_increment8_closeout_inventory()
+    for case in INCREMENT8F_FINAL_CLOSEOUT_CASES:
+        module_name, test_name = case.test_id.split("::", 1)
+        assert callable(getattr(importlib.import_module(module_name), test_name))
     assert len(INCREMENT8F_FINAL_CLOSEOUT_CASES) == 13
     assert {
         case.requirement for case in INCREMENT8F_FINAL_CLOSEOUT_CASES
