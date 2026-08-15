@@ -134,6 +134,7 @@ from .recovery import (
     build_purge_receipt,
     build_reconciliation_run,
     build_replay_receipt,
+    build_restore_reconciliation_run,
     create_checked_backup,
     restore_checked_backup,
 )
@@ -245,6 +246,7 @@ __all__ = [
     "build_reconciliation_run",
     "build_release_decision",
     "build_replay_receipt",
+    "build_restore_reconciliation_run",
     "build_retry_finding",
     "build_review_label",
     "classify_transport_outcome",

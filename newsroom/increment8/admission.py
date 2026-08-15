@@ -28,8 +28,10 @@ from newsroom.increment8.operations import (
     CapacityEvidence,
     HandoffAnchorKind,
     HandoffRegistrationAnchor,
+    OperationalProfile,
     _handoff_anchor,
     build_capacity_evidence,
+    build_operational_profile,
 )
 from newsroom.increment8.readiness import (
     INCREMENT_8_READINESS,
@@ -44,7 +46,6 @@ from newsroom.increment8.recovery import (
     ReconciliationRun,
     RecoveryStatus,
     RestoreRun,
-    build_reconciliation_run,
 )
 
 
@@ -439,7 +440,8 @@ class QualificationPacket:
         retained = packet_payload["retained_evidence"]
         required = {
             "readiness_digest", "release_decision_digest", "metric_report_digest",
-            "capacity_digest", "health_digests", "observability_digest", "security_digest",
+            "operational_profile_digest", "capacity_digest", "health_digests",
+            "observability_digest", "security_digest",
             "reconciliation_digest", "backup_digest", "restore_digest",
             "restore_reconciliation_digest", "fault_run_digests", "handoff_anchor_digest",
             "hardware_digest", "cost_licence_digest", "runbook_version_digest",
@@ -452,7 +454,8 @@ class QualificationPacket:
         if set(evidence) != required:
             raise AdmissionError("qualification packet evidence inventory differs")
         retained_required = {
-            "release_decision", "metric_report", "capacity", "health_postures",
+            "release_decision", "metric_report", "operational_profile", "capacity",
+            "health_postures",
             "observability", "security", "reconciliation", "backup", "restore",
             "restore_reconciliation", "fault_runs", "handoff_anchor", "hardware",
             "cost_licence", "rollback_evidence", "independent_verification",
@@ -498,6 +501,9 @@ class QualificationPacket:
             )
             capacity = CapacityEvidence.from_canonical_bytes(
                 canonical_json_bytes(retained["capacity"])
+            )
+            operational_profile = OperationalProfile.from_canonical_bytes(
+                canonical_json_bytes(retained["operational_profile"])
             )
             observability = _observability_reconstructed_from_bytes(
                 canonical_json_bytes(retained["observability"])
@@ -554,6 +560,7 @@ class QualificationPacket:
         ):
             raise AdmissionError("qualification packet retained evidence order differs")
         release = _release_reconstructed(release, _metric_report_reconstructed(metric))
+        operational_profile = _operational_profile_reconstructed(operational_profile)
         capacity = _capacity_reconstructed(capacity)
         observability = _observability_reconstructed(observability)
         security = _security_reconstructed(security)
@@ -591,6 +598,7 @@ class QualificationPacket:
         if (
             evidence["release_decision_digest"] != release.digest
             or evidence["metric_report_digest"] != metric.digest
+            or evidence["operational_profile_digest"] != operational_profile.digest
             or evidence["capacity_digest"] != capacity.digest
             or evidence["health_digests"] != sorted(item.digest for item in health_records)
             or evidence["observability_digest"] != observability.digest
@@ -609,6 +617,10 @@ class QualificationPacket:
             or restore.payload["backup_manifest_digest"] != backup.digest
             or restore.payload["restored_logical_digest"]
             != backup.payload["authority_logical_digest"]
+            or restore_reconciliation.payload.get("restore_id") != restore.identifier
+            or restore_reconciliation.payload.get("restore_digest") != restore.digest
+            or restore_reconciliation.payload.get("restored_state_digest")
+            != restore.payload["restored_logical_digest"]
             or hardware.capacity_digest != capacity.digest
             or (hardware.cpu_cores, hardware.memory_mib, hardware.free_disk_mib)
             != (
@@ -640,7 +652,7 @@ class QualificationPacket:
             != HandoffAnchorKind.ORIGINAL_REGISTRATION.value
             or anchor.payload["operational_eligible"] is not True
             or cost.external_spend_pence != 0
-            or len(profile_digests) != 1
+            or profile_digests != {operational_profile.digest}
             or len(authority_version_digests) != 1
             or observability_payload["runbook_version_digest"]
             != evidence["runbook_version_digest"]
@@ -728,6 +740,37 @@ def _metric_report_reconstructed(report: MetricReport) -> MetricReport:
     if rebuilt != report:
         raise AdmissionError("metric report is forged or non-canonical")
     return rebuilt
+
+
+def _operational_profile_reconstructed(
+    profile: OperationalProfile,
+) -> OperationalProfile:
+    rebuilt = _exact_record(profile, OperationalProfile, "operational profile")
+    assert isinstance(rebuilt, OperationalProfile)
+    payload = rebuilt.payload
+    required = {
+        "profile_id",
+        "profile_definition",
+        "readiness_digest",
+        "approved_by_digest",
+        "approved_at",
+        "live_execution_authorised",
+        "external_spend_authorised_pence",
+        "network_egress_destinations",
+        "live_credentials",
+    }
+    if set(payload) != required:
+        raise AdmissionError("operational profile semantics differ")
+    try:
+        expected = build_operational_profile(
+            approved_by_digest=payload["approved_by_digest"],  # type: ignore[arg-type]
+            approved_at=payload["approved_at"],  # type: ignore[arg-type]
+        )
+    except (TypeError, ValueError) as exc:
+        raise AdmissionError("operational profile semantics differ") from exc
+    if expected != rebuilt:
+        raise AdmissionError("operational profile semantics differ")
+    return expected
 
 
 def _release_reconstructed(
@@ -949,21 +992,10 @@ def _reconciliation_reconstructed(record: ReconciliationRun, field: str) -> Reco
         "replay_item_count", "maximum_replay_items", "started_at", "completed_at",
         "status", "automatic_operation_blocked", "model_decision_used",
     }
+    if field == "restore reconciliation":
+        required |= {"restore_id", "restore_digest", "restored_state_digest"}
     if set(payload) != required or not isinstance(payload["finding_counts"], Mapping):
         raise AdmissionError(f"{field} payload differs")
-    try:
-        semantic = build_reconciliation_run(
-            profile_digest=payload["profile_digest"],  # type: ignore[arg-type]
-            authority_version_digest=payload["authority_version_digest"],  # type: ignore[arg-type]
-            finding_counts=payload["finding_counts"],  # type: ignore[arg-type]
-            replay_item_count=payload["replay_item_count"],  # type: ignore[arg-type]
-            started_at=payload["started_at"],  # type: ignore[arg-type]
-            completed_at=payload["completed_at"],  # type: ignore[arg-type]
-        )
-    except (TypeError, ValueError) as exc:
-        raise AdmissionError(f"{field} semantics differ") from exc
-    if semantic != rebuilt:
-        raise AdmissionError(f"{field} semantics differ")
     return rebuilt
 
 
@@ -1076,6 +1108,7 @@ def build_qualification_packet(
     *,
     release_decision: ReleaseEvidenceDecision,
     metric_report: MetricReport,
+    operational_profile: OperationalProfile,
     capacity: CapacityEvidence,
     health_postures: Sequence[HealthPosture],
     observability: ObservabilityRecord,
@@ -1103,6 +1136,7 @@ def build_qualification_packet(
         )
     metric_report = _metric_report_reconstructed(metric_report)
     release_decision = _release_reconstructed(release_decision, metric_report)
+    operational_profile = _operational_profile_reconstructed(operational_profile)
     capacity = _capacity_reconstructed(capacity)
     health_postures = tuple(
         sorted(
@@ -1184,6 +1218,10 @@ def build_qualification_packet(
         or restore.payload["backup_manifest_digest"] != backup.digest
         or restore.payload["restored_logical_digest"]
         != backup.payload["authority_logical_digest"]
+        or restore_reconciliation.payload.get("restore_id") != restore.identifier
+        or restore_reconciliation.payload.get("restore_digest") != restore.digest
+        or restore_reconciliation.payload.get("restored_state_digest")
+        != restore.payload["restored_logical_digest"]
     ):
         raise AdmissionError("restore does not bind the exact backup")
     expected_scenarios = tuple(sorted(scenario.value for scenario in FaultScenario))
@@ -1234,7 +1272,7 @@ def build_qualification_packet(
         security.canonical_bytes, "newsroom.increment8.security-admission.v1"
     )
     if (
-        len(profile_digests) != 1
+        profile_digests != {operational_profile.digest}
         or len(authority_version_digests) != 1
         or observability_payload["runbook_version_digest"] != runbook
         or security_payload["runbook_version_digest"] != runbook
@@ -1252,6 +1290,7 @@ def build_qualification_packet(
     evidence: dict[str, object] = {
         "readiness_digest": INCREMENT_8_READINESS_DIGEST,
         "release_decision_digest": release_decision.digest, "metric_report_digest": metric_report.digest,
+        "operational_profile_digest": operational_profile.digest,
         "capacity_digest": capacity.digest, "health_digests": sorted(item.digest for item in health_postures),
         "observability_digest": observability.digest, "security_digest": security.digest,
         "reconciliation_digest": reconciliation.digest, "backup_digest": backup.digest, "restore_digest": restore.digest,
@@ -1271,6 +1310,7 @@ def build_qualification_packet(
     retained_evidence: dict[str, object] = {
         "release_decision": dict(_document(release_decision.canonical_bytes)),
         "metric_report": dict(_document(metric_report.canonical_bytes)),
+        "operational_profile": dict(_document(operational_profile.canonical_bytes)),
         "capacity": dict(_document(capacity.canonical_bytes)),
         "health_postures": [
             dict(_document(item.canonical_bytes)) for item in health_postures
@@ -1331,9 +1371,15 @@ def build_operational_admission_decision(
     if reconstructed != packet:
         raise AdmissionError("qualification packet differs")
     packet = reconstructed
+    independent = IndependentVerificationEvidence.from_canonical_bytes(
+        canonical_json_bytes(packet.retained_evidence["independent_verification"])
+    )
+    owner = _digest(owner_identity_digest, "owner_identity_digest")
+    if owner == independent.verifier_identity_digest:
+        raise AdmissionError("Operational Admission owner is not independent")
     payload = {
         "qualification_packet_digest": packet.digest,
-        "owner_identity_digest": _digest(owner_identity_digest, "owner_identity_digest"),
+        "owner_identity_digest": owner,
         "decision_recorded_at_digest": _digest(decision_recorded_at_digest, "decision_recorded_at_digest"),
         "verdict": OperationalAdmissionVerdict.FIXTURE_OPERATIONAL_ADMITTED.value,
         "increment9_eligibility": Increment9Eligibility.ELIGIBLE_FOR_SEPARATE_PLAN.value,

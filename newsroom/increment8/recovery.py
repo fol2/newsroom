@@ -12,7 +12,12 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, ClassVar, Self
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, digest_canonical, validate_sha256_digest
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+    validate_sha256_digest,
+)
 from newsroom.authority.increment8_recovery_migrations import _helpers
 from newsroom.increment8.operations import DueWork, Urgency, WorkState
 from newsroom.increment8.readiness import INCREMENT_8_READINESS
@@ -139,6 +144,53 @@ class ReconciliationRun(_Record):
     ID_FIELD = "reconciliation_id"
     PREFIX = "reconciliation"
 
+    @classmethod
+    def from_canonical_bytes(cls, raw: bytes) -> Self:
+        identifier, payload = _decode(raw, cls.SCHEMA, cls.ID_FIELD, cls.PREFIX)
+        base_fields = {
+            "profile_digest", "authority_version_digest", "finding_counts",
+            "replay_item_count", "maximum_replay_items", "started_at", "completed_at",
+            "status", "automatic_operation_blocked", "model_decision_used",
+        }
+        restore_fields = {"restore_id", "restore_digest", "restored_state_digest"}
+        if frozenset(payload) not in {
+            frozenset(base_fields),
+            frozenset(base_fields | restore_fields),
+        }:
+            raise RecoveryError("reconciliation Run payload differs")
+        finding_counts = payload["finding_counts"]
+        if not isinstance(finding_counts, dict) or tuple(sorted(finding_counts)) != tuple(sorted(_FINDINGS)):
+            raise RecoveryError("reconciliation Finding inventory differs")
+        findings = {
+            name: _integer(finding_counts[name], name) for name in sorted(_FINDINGS)
+        }
+        replay = _integer(payload["replay_item_count"], "replay_item_count")
+        maximum = int(INCREMENT_8_READINESS.operational_profile["recovery"]["maximum_replay_items"])  # type: ignore[index]
+        start = _time(payload["started_at"], "started_at")
+        complete = _time(payload["completed_at"], "completed_at")
+        passed = not any(findings.values())
+        if (
+            payload["profile_digest"] != _digest(payload["profile_digest"], "profile_digest")
+            or payload["authority_version_digest"]
+            != _digest(payload["authority_version_digest"], "authority_version_digest")
+            or payload["maximum_replay_items"] != maximum
+            or replay > maximum
+            or _dt(complete) < _dt(start)
+            or payload["status"]
+            != (RecoveryStatus.PASS.value if passed else RecoveryStatus.FAIL.value)
+            or payload["automatic_operation_blocked"] is not (not passed)
+            or payload["model_decision_used"] is not False
+        ):
+            raise RecoveryError("reconciliation Run semantics differ")
+        if restore_fields <= set(payload):
+            _token(payload["restore_id"], "restore_id")
+            _digest(payload["restore_digest"], "restore_digest")
+            _digest(payload["restored_state_digest"], "restored_state_digest")
+        rebuilt = cls.build(dict(payload))
+        if rebuilt.identifier != identifier or rebuilt.canonical_bytes != raw:
+            raise RecoveryError("reconciliation Run identity differs")
+        return cls(identifier, raw, digest_bytes(raw), payload)
+
 
 @dataclass(frozen=True, slots=True)
 class BackupManifest(_Record):
@@ -235,6 +287,39 @@ def build_reconciliation_run(
             "status": RecoveryStatus.PASS.value if passed else RecoveryStatus.FAIL.value,
             "automatic_operation_blocked": not passed,
             "model_decision_used": False,
+        }
+    )
+
+
+def build_restore_reconciliation_run(
+    *,
+    restore: RestoreRun,
+    profile_digest: str,
+    authority_version_digest: str,
+    finding_counts: Mapping[str, int],
+    replay_item_count: int,
+    started_at: str,
+    completed_at: str,
+) -> ReconciliationRun:
+    if not isinstance(restore, RestoreRun):
+        raise RecoveryError("restore reconciliation requires an exact Restore Run")
+    rebuilt_restore = RestoreRun.from_canonical_bytes(restore.canonical_bytes)
+    if rebuilt_restore != restore:
+        raise RecoveryError("restore reconciliation requires an exact Restore Run")
+    base = build_reconciliation_run(
+        profile_digest=profile_digest,
+        authority_version_digest=authority_version_digest,
+        finding_counts=finding_counts,
+        replay_item_count=replay_item_count,
+        started_at=started_at,
+        completed_at=completed_at,
+    )
+    return ReconciliationRun.build(
+        {
+            **base.payload,
+            "restore_id": restore.identifier,
+            "restore_digest": restore.digest,
+            "restored_state_digest": restore.payload["restored_logical_digest"],
         }
     )
 
@@ -584,5 +669,6 @@ __all__ = [
     "BackupManifest", "FaultInjectionRun", "FaultScenario", "PurgeReceipt", "ReconciliationRun",
     "RecoveryAuthority", "RecoveryError", "RecoveryStatus", "ReplayReceipt", "RestoreRun",
     "bounded_catch_up", "build_fault_injection_run", "build_purge_receipt", "build_reconciliation_run",
-    "build_replay_receipt", "create_checked_backup", "restore_checked_backup",
+    "build_replay_receipt", "build_restore_reconciliation_run", "create_checked_backup",
+    "restore_checked_backup",
 ]

@@ -57,10 +57,12 @@ def test_packet_retains_reconstructable_evidence_and_builds_exact_decision(
     assert "rollback_evidence_digest" not in parameters
     assert "independent_verification_digest" not in parameters
     assert {"rollback_evidence", "independent_verification"} <= set(parameters)
+    assert "operational_profile" in parameters
     assert QualificationPacket.from_canonical_bytes(packet.canonical_bytes) == packet
     assert set(packet.retained_evidence) == {
         "release_decision",
         "metric_report",
+        "operational_profile",
         "capacity",
         "health_postures",
         "observability",
@@ -233,7 +235,7 @@ def test_builder_reconstructs_detached_and_semantically_forged_evidence(
             "automatic_operation_blocked": False,
         }
     )
-    with pytest.raises(AdmissionError, match="reconciliation semantics"):
+    with pytest.raises(AdmissionError, match="reconciliation"):
         _packet(tmp_path / "reconciliation", reconciliation=forged_reconciliation)
     with pytest.raises(AdmissionError, match="evidence"):
         _packet(
@@ -276,4 +278,41 @@ def test_stale_expected_handoff_anchor_and_decision_tamper_fail_closed(
                 b'"operational_admission_is_activation":false',
                 b'"operational_admission_is_activation":true',
             )
+        )
+
+
+def test_restore_reconciliation_profile_and_admission_owner_are_exact(
+    tmp_path, admitted_gate
+) -> None:
+    packet = _packet(tmp_path / "valid")
+
+    document = json.loads(packet.canonical_bytes)
+    restore_reconciliation = document["payload"]["retained_evidence"][
+        "restore_reconciliation"
+    ]
+    restore_reconciliation["payload"]["restored_state_digest"] = _D2
+    forged_restore = _rebuilt_packet(packet, document)
+    with pytest.raises(AdmissionError, match="qualification packet differs"):
+        build_operational_admission_decision(
+            packet=forged_restore,
+            owner_identity_digest=_D,
+            decision_recorded_at_digest=_D,
+        )
+
+    document = json.loads(packet.canonical_bytes)
+    profile = document["payload"]["retained_evidence"]["operational_profile"]
+    profile["payload"]["profile_definition"]["execution"]["host_concurrency"] = 99
+    forged_profile = _rebuilt_packet(packet, document)
+    with pytest.raises(AdmissionError, match="qualification packet differs"):
+        build_operational_admission_decision(
+            packet=forged_profile,
+            owner_identity_digest=_D,
+            decision_recorded_at_digest=_D,
+        )
+
+    with pytest.raises(AdmissionError, match="owner is not independent"):
+        build_operational_admission_decision(
+            packet=packet,
+            owner_identity_digest=_D2,
+            decision_recorded_at_digest=_D,
         )
