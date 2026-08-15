@@ -30,6 +30,7 @@ _T1 = "2042-01-05T00:00:01.000000Z"
 _T2 = "2042-01-05T00:00:02.000000Z"
 _T5 = "2042-01-05T00:00:05.000000Z"
 _T6 = "2042-01-05T00:00:06.000000Z"
+_T63 = "2042-01-05T00:01:03.000000Z"
 
 
 def _work(profile, key: str):
@@ -229,8 +230,38 @@ def test_retry_failure_cannot_predate_exact_active_lease(tmp_path) -> None:
         dependency_scope="FIXTURE_PROVIDER",
         failed_at=_T1,
     )
-    with pytest.raises(OperationalAuthorityError, match="predates"):
+    with pytest.raises(OperationalAuthorityError, match="outside"):
         authority.append_retry_finding(finding)
+    after_expiry = build_retry_finding(
+        work=leased,
+        classification=RetryClassification.RETRYABLE,
+        dependency_scope="FIXTURE_PROVIDER",
+        failed_at=_T63,
+    )
+    with pytest.raises(OperationalAuthorityError, match="outside"):
+        authority.append_retry_finding(after_expiry)
+    connection.close()
+
+
+def test_direct_renewal_cannot_jump_to_maximum_expiry(tmp_path) -> None:
+    _, connection = _database(tmp_path)
+    authority = OperationalAuthority(connection)
+    profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
+    authority.register_profile(profile)
+    queued = _work(profile, "lease:renewal-bound")
+    authority.append_work(queued)
+    lease, _ = _commit_lease(authority, queued)
+    forged = operations.WorkLease.build(
+        {
+            **lease.payload,
+            "lease_version": 2,
+            "progress_digest": "sha256:" + "9" * 64,
+            "expires_at": lease.payload["maximum_expires_at"],
+            "previous_digest": lease.digest,
+        }
+    )
+    with pytest.raises(OperationalAuthorityError, match="renewal"):
+        authority.append_lease(forged)
     connection.close()
 
 
@@ -306,9 +337,7 @@ def test_lease_acquisition_is_due_and_atomically_advances_work(tmp_path) -> None
     )
     with pytest.raises(OperationalAuthorityError, match="deadline"):
         authority.append_lease(late)
-    authority.append_work(
-        transition_work(expired, state=WorkState.EXPLICITLY_CLOSED)
-    )
+    authority.append_work(transition_work(expired, state=WorkState.EXPLICITLY_CLOSED))
     due = acquire_lease(
         work=future,
         owner_digest="sha256:" + "2" * 64,

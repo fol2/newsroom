@@ -1178,6 +1178,15 @@ class OperationalAuthority:
                 < _dt(str(retained.payload["expires_at"]))
                 or _dt(str(lease.payload["expires_at"]))
                 > _dt(str(lease.payload["maximum_expires_at"]))
+                or _dt(str(lease.payload["expires_at"]))
+                > _dt(str(retained.payload["expires_at"]))
+                + timedelta(
+                    seconds=int(
+                        INCREMENT_8_READINESS.operational_profile["execution"][
+                            "lease_renewal_seconds"
+                        ]
+                    )
+                )
             ):
                 raise OperationalAuthorityError("lease renewal differs")
         else:
@@ -1325,23 +1334,27 @@ class OperationalAuthority:
         if expected != finding:
             raise OperationalAuthorityError("retry Finding differs")
         active_lease = self._connection.execute(
-            "SELECT l.acquired_at FROM work_leases l WHERE l.work_id=? "
+            "SELECT l.acquired_at,l.expires_at FROM work_leases l WHERE l.work_id=? "
             "AND l.lease_version=(SELECT MAX(x.lease_version) FROM work_leases x "
             "WHERE x.lease_id=l.lease_id) AND l.status='ACTIVE' "
             "ORDER BY l.acquired_at DESC,l.lease_id LIMIT 1",
             (finding.payload["work_id"],),
         ).fetchone()
-        if active_lease is None or _dt(str(finding.payload["failed_at"])) < _dt(
-            str(active_lease[0])
+        failure_time = _dt(str(finding.payload["failed_at"]))
+        if (
+            active_lease is None
+            or failure_time < _dt(str(active_lease[0]))
+            or failure_time > _dt(str(active_lease[1]))
         ):
-            raise OperationalAuthorityError("retry failure predates its active lease")
+            raise OperationalAuthorityError("retry failure is outside its active lease")
         inserted = self._insert(
             "INSERT INTO retry_findings SELECT ?,?,?,?,?,?,?,?,? WHERE "
             "EXISTS(SELECT 1 FROM due_work d WHERE d.work_id=? "
             "AND d.work_digest=? AND d.state='LEASED' "
             "AND d.state_version=(SELECT MAX(x.state_version) FROM due_work x "
             "WHERE x.work_id=d.work_id)) AND EXISTS(SELECT 1 FROM work_leases l "
-            "WHERE l.work_id=? AND l.acquired_at<=? AND l.status='ACTIVE' "
+            "WHERE l.work_id=? AND l.acquired_at<=? AND l.expires_at>=? "
+            "AND l.status='ACTIVE' "
             "AND l.lease_version=(SELECT MAX(x.lease_version) FROM work_leases x "
             "WHERE x.lease_id=l.lease_id))",
             (
@@ -1357,6 +1370,7 @@ class OperationalAuthority:
                 finding.payload["work_id"],
                 finding.payload["work_digest"],
                 finding.payload["work_id"],
+                finding.payload["failed_at"],
                 finding.payload["failed_at"],
             ),
         )

@@ -34,3 +34,5 @@ Fixture operational authority only. No production scheduler activation, live pro
 - Acquisition now enforces the retained deadline upper bound as well as the due/backoff lower bound; expired work remains explicit-close authority.
 - Retry failure time must be on or after the exact active lease acquisition and is rechecked inside Finding insertion.
 - Routine fairness uses only a duplicate-class slot, preserving at least one selected item from every present higher-priority class.
+- Renewal expiry cannot extend by more than one frozen renewal interval, including for directly constructed canonical records.
+- Retry Findings require failure time within the exact active lease interval in both prevalidation and the serialised insertion predicate.
