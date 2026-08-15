@@ -966,6 +966,30 @@ class OperationalAuthority:
         return self._write(lambda: self._connection.execute(sql, values).rowcount)
 
     def _retry_first_attempt(self, finding: RetryFinding, work_id: str) -> datetime:
+        attempt_number = _integer(
+            finding.payload.get("attempt_number"), "attempt_number", minimum=1
+        )
+        expected_lease_id = "lease:" + digest_canonical(
+            {"work_id": work_id, "attempt_count": attempt_number}
+        ).removeprefix("sha256:")
+        lease_row = self._connection.execute(
+            "SELECT lease_bytes FROM work_leases WHERE lease_id=? "
+            "ORDER BY lease_version DESC LIMIT 1",
+            (expected_lease_id,),
+        ).fetchone()
+        if lease_row is None:
+            raise OperationalAuthorityError("retry predecessor lease is absent")
+        predecessor_lease = WorkLease.from_canonical_bytes(bytes(lease_row[0]))
+        failed_at = _dt(str(finding.payload["failed_at"]))
+        if (
+            predecessor_lease.payload["work_id"] != work_id
+            or predecessor_lease.payload["status"] != LeaseState.RELEASED.value
+            or failed_at < _dt(str(predecessor_lease.payload["acquired_at"]))
+            or failed_at > _dt(str(predecessor_lease.payload["expires_at"]))
+        ):
+            raise OperationalAuthorityError(
+                "retry predecessor lease requires reconciliation"
+            )
         first_attempt_at = finding.payload.get("first_attempt_at")
         if first_attempt_at is not None:
             return _dt(str(first_attempt_at))
