@@ -678,10 +678,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          uv run --no-sync python -m scripts.sdlc.increment8f_qualification \
-            --workspace .sdlc-run/increment8-qualification-workspace \
-            --packet .sdlc-run/increment8-qualification-packet.json \
-            --decision .sdlc-run/increment8-operational-admission-decision.json
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+            uv run --no-sync python -m scripts.sdlc.increment8f_qualification \
+              --repo-root . \
+              --core-transport-bundle-root .sdlc-run/decision-input/core-transport \
+              --service-transport-bundle-root .sdlc-run/decision-input/service-transport \
+              --sdlc-decision .sdlc-run/decision.json \
+              --workspace .sdlc-run/increment8-qualification-workspace \
+              --packet .sdlc-run/increment8-qualification-packet.json \
+              --decision .sdlc-run/increment8-operational-admission-decision.json
+          fi
           uv run --no-sync python -m scripts.sdlc.increment8f_closeout_receipt \
             --repo-root . \
             --core-transport-bundle-root .sdlc-run/decision-input/core-transport \
@@ -740,6 +746,14 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - name: Checkout exact signed source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          show-progress: false
+
       - name: Download exact final decision evidence
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -747,6 +761,29 @@ jobs:
           path: .sdlc-run/signed-closeout-input
           merge-multiple: false
           digest-mismatch: error
+
+      - name: Set up exact signed-subject validator
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up exact signed-subject environment
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.8.0'
+          github-token: ''
+          enable-cache: false
+
+      - name: Reconstruct exact Increment 8 admission subjects
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --locked --no-dev
+          uv run --no-sync python -m scripts.sdlc.increment8f_signed_subjects \
+            --repo-root . \
+            --packet .sdlc-run/signed-closeout-input/increment8-qualification-packet.json \
+            --decision .sdlc-run/signed-closeout-input/increment8-operational-admission-decision.json \
+            --receipt .sdlc-run/signed-closeout-input/increment8f-final-closeout.json
 
       - name: Validate final closeout subject
         shell: bash

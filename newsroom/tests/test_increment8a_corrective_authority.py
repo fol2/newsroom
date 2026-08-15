@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -456,7 +457,15 @@ def test_release_decision_seals_the_complete_evidence_manifest(tmp_path: Path) -
 
 def test_complete_valid_exposure_reaches_authorised_release_decision(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "fol2/newsroom")
+    monkeypatch.setenv(
+        "GITHUB_SHA",
+        subprocess.check_output(("git", "rev-parse", "HEAD"), text=True).strip(),
+    )
     connection, authority, run = _registered(tmp_path)
     try:
         _populate(authority, run)

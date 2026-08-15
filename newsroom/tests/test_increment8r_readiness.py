@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -157,7 +158,9 @@ def test_readiness_binds_exact_increment7_closeout_and_v29_schema() -> None:
     )
 
 
-def test_corrective_contract_is_additive_and_preserves_the_reviewed_v1_record() -> None:
+def test_corrective_contract_is_additive_and_preserves_the_reviewed_v1_record(
+    monkeypatch,
+) -> None:
     readiness = INCREMENT_8_READINESS
     assert readiness.schema_version == "newsroom.increment8.readiness.v3"
     assert readiness.contract_version == "increment8-readiness-v3"
@@ -188,9 +191,15 @@ def test_corrective_contract_is_additive_and_preserves_the_reviewed_v1_record() 
         "qualification_evidence_acceptance_authorised": True,
         "sole_active_coding_issue": 468,
     }
-    assert all(
-        corrective_gate_authorised(gate) is True for gate in CorrectiveGate
+    assert all(corrective_gate_authorised(gate) is False for gate in CorrectiveGate)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "fol2/newsroom")
+    monkeypatch.setenv(
+        "GITHUB_SHA",
+        subprocess.check_output(("git", "rev-parse", "HEAD"), text=True).strip(),
     )
+    assert all(corrective_gate_authorised(gate) is True for gate in CorrectiveGate)
     with pytest.raises(Increment8ReadinessError, match="gate identity"):
         corrective_gate_authorised("qualification_evidence_acceptance_authorised")  # type: ignore[arg-type]
 
@@ -292,12 +301,9 @@ def test_migration_reservations_are_contiguous_and_owned() -> None:
         INCREMENT_8_READINESS.migration_policy["reservation_is_not_a_migration"] is True
     )
     assert INCREMENT_8_READINESS.migration_policy["merge_order"] == (30, 31, 32)
+    assert INCREMENT_8_READINESS.migration_policy["additive_migrations_only"] is True
     assert (
-        INCREMENT_8_READINESS.migration_policy["additive_migrations_only"] is True
-    )
-    assert (
-        INCREMENT_8_READINESS.migration_policy["history_preservation_required"]
-        is True
+        INCREMENT_8_READINESS.migration_policy["history_preservation_required"] is True
     )
     assert INCREMENT_8_READINESS.migration_policy["policy_versions"] == (30, 31, 32)
 
@@ -380,19 +386,17 @@ def test_slice_stratum_timing_and_migration_policy_tamper_fail_closed(
             }
         )
     elif mutation == "post_result_slice_policy":
-        plan["required_slice_policy"][
-            "policy_changes_after_first_result_allowed"
-        ] = True
+        plan["required_slice_policy"]["policy_changes_after_first_result_allowed"] = (
+            True
+        )
     elif mutation == "post_result_stratum_policy":
-        plan["case_strata_policy"][
-            "membership_changes_after_first_result_allowed"
-        ] = True
+        plan["case_strata_policy"]["membership_changes_after_first_result_allowed"] = (
+            True
+        )
     elif mutation == "destructive_migration":
         document["payload"]["migration_policy"]["additive_migrations_only"] = False
     elif mutation == "history_rewrite":
-        document["payload"]["migration_policy"][
-            "history_preservation_required"
-        ] = False
+        document["payload"]["migration_policy"]["history_preservation_required"] = False
     with pytest.raises(Increment8ReadinessError, match=expected_error):
         _load_changed_document(tmp_path, monkeypatch, document)
 

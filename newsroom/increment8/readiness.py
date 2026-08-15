@@ -8,6 +8,9 @@ canary, publication, or production authority.
 from __future__ import annotations
 
 import json
+import os
+import re
+import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -25,9 +28,7 @@ from newsroom.increment5._traceability_model import (
     DEFERRED_TO_INCREMENT_8_REQUIREMENTS,
 )
 
-PRIOR_READINESS_CONTRACT_PATH = Path(__file__).with_name(
-    "increment8_readiness_v2.json"
-)
+PRIOR_READINESS_CONTRACT_PATH = Path(__file__).with_name("increment8_readiness_v2.json")
 READINESS_CONTRACT_PATH = Path(__file__).with_name("increment8_readiness_v3.json")
 PRIOR_READINESS_DIGEST = (
     "sha256:5fd68e242913561c812a443815bb67b3a7e0faa00ec4e1de657fe38c71078685"
@@ -688,9 +689,7 @@ def load_increment8_readiness_contract(path: Path) -> Increment8ReadinessContrac
                 str(correction_base["migration_history_digest"]),
                 field="correction_base.migration_history_digest",
             ),
-            corrective_status=_frozen_mapping(
-                corrective_status, "corrective_status"
-            ),
+            corrective_status=_frozen_mapping(corrective_status, "corrective_status"),
             effective_when=str(payload["effective_when"]),
             authority=_frozen_mapping(payload["authority"], "authority"),
             version_manifest=_frozen_mapping(
@@ -731,11 +730,30 @@ INCREMENT_8_READINESS_DIGEST = INCREMENT_8_READINESS.contract_digest
 
 
 def corrective_gate_authorised(gate: CorrectiveGate) -> bool:
-    """Return the exact v2 corrective gate without interpreting evidence."""
+    """Activate an armed v3 gate only in an exact-main manual workflow."""
 
     if not isinstance(gate, CorrectiveGate):
         raise Increment8ReadinessError("corrective gate identity differs")
     value = INCREMENT_8_READINESS.corrective_status.get(gate.value)
     if not isinstance(value, bool):
         raise Increment8ReadinessError("corrective gate value differs")
-    return value
+    sha = os.environ.get("GITHUB_SHA", "")
+    try:
+        checkout_sha = subprocess.run(
+            ("git", "rev-parse", "HEAD"),
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        checkout_sha = ""
+    exact_main = (
+        os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+        and os.environ.get("GITHUB_REF") == "refs/heads/main"
+        and os.environ.get("GITHUB_REPOSITORY") == "fol2/newsroom"
+        and re.fullmatch(r"[0-9a-f]{40}", sha) is not None
+        and sha == checkout_sha
+    )
+    return value and exact_main
