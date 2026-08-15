@@ -763,6 +763,7 @@ jobs:
       attestations: write
       contents: read
       id-token: write
+      pull-requests: read
     steps:
       - name: Checkout exact signed source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -794,6 +795,8 @@ jobs:
 
       - name: Reconstruct exact Increment 8 admission subjects
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           uv sync --locked --no-dev

@@ -227,7 +227,32 @@ def test_receipt_binds_exact_lanes_inventory_service_and_self_hash(
         decision_path=admission_path,
         receipt_path=receipt_path,
         substantive_review_path=review_path,
+        authoritative_review=SubstantiveReviewEvidence.from_canonical_bytes(
+            review_path.read_bytes()
+        ),
     )
+    forged_authority = SubstantiveReviewEvidence.build(
+        repository="fol2/newsroom",
+        pull_request_number=484,
+        merge_sha=_git(repo, "HEAD"),
+        reviewed_head_sha=_git(repo, "HEAD"),
+        review_provider="chatgpt-codex-connector",
+        review_database_id=2,
+        review_submitted_at="2042-01-05T00:00:00.000000Z",
+        unresolved_thread_count=0,
+        p1_finding_count=0,
+        material_p2_finding_count=0,
+        other_unresolved_thread_count=0,
+    )
+    with pytest.raises(ValueError, match="substantive review binding"):
+        validate_signed_subjects(
+            repo_root=repo,
+            packet_path=packet_path,
+            decision_path=admission_path,
+            receipt_path=receipt_path,
+            substantive_review_path=review_path,
+            authoritative_review=forged_authority,
+        )
 
 
 def test_receipt_rejects_a_failed_selected_case(tmp_path, monkeypatch) -> None:

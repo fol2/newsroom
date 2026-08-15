@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -17,6 +18,7 @@ from newsroom.increment8.admission import (
 )
 from scripts.sdlc.emit_evidence import sha256_identity
 from scripts.sdlc.increment5e2_closeout_receipt import _git_identity
+from scripts.sdlc.increment8_review_evidence import fetch_review_evidence
 from scripts.sdlc.increment8f_closeout_receipt import FINAL_SCHEMA_VERSION
 
 
@@ -31,6 +33,7 @@ def validate_signed_subjects(
     decision_path: Path,
     receipt_path: Path,
     substantive_review_path: Path,
+    authoritative_review: SubstantiveReviewEvidence | None = None,
 ) -> None:
     _, head, tree = _git_identity(repo_root)
     packet = QualificationPacket.from_canonical_bytes(packet_path.read_bytes())
@@ -40,6 +43,12 @@ def validate_signed_subjects(
     substantive_review = SubstantiveReviewEvidence.from_canonical_bytes(
         substantive_review_path.read_bytes()
     )
+    if authoritative_review is None:
+        authoritative_review = fetch_review_evidence(
+            repository="fol2/newsroom",
+            merge_sha=head,
+            token=os.environ.get("GITHUB_TOKEN", ""),
+        )
     try:
         reviewed_commit = subprocess.check_output(
             ("git", "rev-parse", f"{substantive_review.reviewed_head_sha}^{{commit}}"),
@@ -63,6 +72,7 @@ def validate_signed_subjects(
         or reviewed_commit != substantive_review.reviewed_head_sha
         or substantive_review.review_provider != "chatgpt-codex-connector"
         or reviewed_tree != tree
+        or authoritative_review.canonical_bytes != substantive_review.canonical_bytes
         or canonical_json_bytes(packet.retained_evidence["substantive_review"])
         != substantive_review.canonical_bytes
         or packet.evidence_digests["substantive_review_digest"]

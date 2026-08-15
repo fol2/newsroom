@@ -177,6 +177,7 @@ def test_job_graph_is_exact_and_decision_always_reports() -> None:
         "attestations": "write",
         "contents": "read",
         "id-token": "write",
+        "pull-requests": "read",
     }
     assert jobs["route"]["outputs"] == {
         "service_required": "${{ steps.route_output.outputs.service_required }}"
@@ -708,6 +709,7 @@ def test_github_token_exists_only_on_exact_collection_step() -> None:
     assert locations == [
         ("decision", "Collect exact lane evidence"),
         ("decision", "Retain exact Increment 8 substantive review"),
+        ("signed-closeout", "Reconstruct exact Increment 8 admission subjects"),
     ]
 
 
