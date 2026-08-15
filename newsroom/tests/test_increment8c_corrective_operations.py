@@ -292,7 +292,9 @@ def test_retry_serialised_lease_check_uses_exact_parsed_instants(tmp_path) -> No
     queued = _work(profile, "retry:timestamp-spelling")
     authority.append_work(queued)
     basic_acquired_at = "20420105T000001.000000Z"
-    first_lease, leased = _commit_lease(authority, queued, acquired_at=basic_acquired_at)
+    first_lease, leased = _commit_lease(
+        authority, queued, acquired_at=basic_acquired_at
+    )
     finding = build_retry_finding(
         work=leased,
         classification=RetryClassification.RETRYABLE,
@@ -354,6 +356,32 @@ def test_direct_renewal_cannot_jump_to_maximum_expiry(tmp_path) -> None:
     )
     assert orphaned.payload["closed_at"] == _T63
     assert quarantined.payload["state"] == WorkState.QUARANTINED.value
+    connection.close()
+
+
+def test_renewal_cannot_extend_active_ownership_past_work_deadline(tmp_path) -> None:
+    _, connection = _database(tmp_path)
+    authority = OperationalAuthority(connection)
+    profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
+    authority.register_profile(profile)
+    queued = enqueue_due_work(
+        profile=profile,
+        logical_due_key="lease:renewal-deadline",
+        scope_kind="FIXTURE_SOURCE",
+        urgency=Urgency.ROUTINE,
+        due_at=_AT,
+        deadline_at=_T5,
+        authority_version_digest=_D,
+    )
+    authority.append_work(queued)
+    lease, _ = _commit_lease(authority, queued, acquired_at=_T1)
+    renewed = operations.renew_lease(
+        lease,
+        progress_digest="sha256:" + "9" * 64,
+        renewed_at=_T2,
+    )
+    with pytest.raises(OperationalAuthorityError, match="renewal"):
+        authority.append_lease(renewed)
     connection.close()
 
 
@@ -572,20 +600,30 @@ def test_same_priority_work_uses_parsed_deadline_order(tmp_path, monkeypatch) ->
     monkeypatch.setattr(
         operations,
         "INCREMENT_8_READINESS",
-        replace(operations.INCREMENT_8_READINESS, operational_profile=profile_definition),
+        replace(
+            operations.INCREMENT_8_READINESS, operational_profile=profile_definition
+        ),
     )
     _, connection = _database(tmp_path)
     authority = OperationalAuthority(connection)
     profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
     authority.register_profile(profile)
     earlier = enqueue_due_work(
-        profile=profile, logical_due_key="deadline:earlier", scope_kind="FIXTURE_SOURCE",
-        urgency=Urgency.URGENT, due_at=_AT, deadline_at="20420105T003000.000000Z",
+        profile=profile,
+        logical_due_key="deadline:earlier",
+        scope_kind="FIXTURE_SOURCE",
+        urgency=Urgency.URGENT,
+        due_at=_AT,
+        deadline_at="20420105T003000.000000Z",
         authority_version_digest=_D,
     )
     later = enqueue_due_work(
-        profile=profile, logical_due_key="deadline:later", scope_kind="FIXTURE_SOURCE",
-        urgency=Urgency.URGENT, due_at=_AT, deadline_at="2042-01-05T00:45:00.000000Z",
+        profile=profile,
+        logical_due_key="deadline:later",
+        scope_kind="FIXTURE_SOURCE",
+        urgency=Urgency.URGENT,
+        due_at=_AT,
+        deadline_at="2042-01-05T00:45:00.000000Z",
         authority_version_digest=_D,
     )
     authority.append_work(earlier)

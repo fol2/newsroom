@@ -1189,6 +1189,14 @@ class OperationalAuthority:
         if previous is None or previous[0] != lease.payload["previous_digest"]:
             raise OperationalAuthorityError("lease predecessor differs")
         retained = WorkLease.from_canonical_bytes(bytes(previous[1]))
+        work_row = self._connection.execute(
+            "SELECT work_bytes FROM due_work WHERE work_id=? "
+            "ORDER BY state_version DESC LIMIT 1",
+            (lease.payload["work_id"],),
+        ).fetchone()
+        if work_row is None:
+            raise OperationalAuthorityError("lease work is absent")
+        retained_work = DueWork.from_canonical_bytes(bytes(work_row[0]))
         if lease.payload["status"] == LeaseState.ACTIVE.value:
             unchanged = {
                 name: retained.payload[name]
@@ -1219,15 +1227,43 @@ class OperationalAuthority:
                         ]
                     )
                 )
+                or retained_work.payload["state"] != WorkState.LEASED.value
+                or retained_work.work_id != lease.payload["work_id"]
+                or _dt(str(lease.payload["expires_at"]))
+                > _dt(str(retained_work.payload["deadline_at"]))
             ):
                 raise OperationalAuthorityError("lease renewal differs")
         else:
             raise OperationalAuthorityError(
                 "lease closure must include its work transition"
             )
-        self._insert(
-            "INSERT INTO work_leases VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", lease_values
-        )
+
+        def commit_renewal() -> None:
+            latest_lease_row = self._connection.execute(
+                "SELECT lease_bytes FROM work_leases WHERE lease_id=? "
+                "ORDER BY lease_version DESC LIMIT 1",
+                (lease.lease_id,),
+            ).fetchone()
+            latest_work_row = self._connection.execute(
+                "SELECT work_bytes FROM due_work WHERE work_id=? "
+                "ORDER BY state_version DESC LIMIT 1",
+                (lease.payload["work_id"],),
+            ).fetchone()
+            if (
+                latest_lease_row is None
+                or WorkLease.from_canonical_bytes(bytes(latest_lease_row[0]))
+                != retained
+                or latest_work_row is None
+                or DueWork.from_canonical_bytes(bytes(latest_work_row[0]))
+                != retained_work
+            ):
+                raise OperationalAuthorityError("lease renewal authority changed")
+            self._connection.execute(
+                "INSERT INTO work_leases VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                lease_values,
+            )
+
+        self._write(commit_renewal)
 
     def close_lease_and_transition(
         self,
