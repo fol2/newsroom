@@ -14,6 +14,7 @@ from newsroom.increment8.admission import (
     IntendedHardwareEvidence,
     QualificationPacket,
     RollbackEvidence,
+    SubstantiveReviewEvidence,
     build_operational_admission_decision,
     build_qualification_packet,
 )
@@ -76,6 +77,22 @@ def _capacity():
         urgent_capacity_items=200,
         worker_throughput_per_minute=20,
         operator_minutes=5,
+    )
+
+
+def _review() -> SubstantiveReviewEvidence:
+    return SubstantiveReviewEvidence.build(
+        repository="fol2/newsroom",
+        pull_request_number=484,
+        merge_sha="a" * 40,
+        reviewed_head_sha="b" * 40,
+        review_provider="chatgpt-codex-connector",
+        review_database_id=1,
+        review_submitted_at=_AT,
+        unresolved_thread_count=0,
+        p1_finding_count=0,
+        material_p2_finding_count=0,
+        other_unresolved_thread_count=0,
     )
 
 
@@ -297,8 +314,7 @@ def _packet(tmp_path, **changes):
         "independent_verification": _independent(
             str(release.payload["evidence_manifest_digest"])
         ),
-        "p1_finding_count": 0,
-        "material_p2_finding_count": 0,
+        "substantive_review": _review(),
     }
     values.update(changes)
     return build_qualification_packet(**values)
@@ -307,7 +323,7 @@ def _packet(tmp_path, **changes):
 def test_complete_packet_binds_every_gate_and_admits_only_fixture_operation(
     tmp_path,
 ) -> None:
-    packet = execute_qualification_fixture(tmp_path)
+    packet = execute_qualification_fixture(tmp_path, substantive_review=_review())
     assert QualificationPacket.from_canonical_bytes(packet.canonical_bytes) == packet
     decision = build_operational_admission_decision(
         packet=packet,
@@ -356,4 +372,18 @@ def test_handoff_anchor_digest_and_substantive_review_are_hard_gates(tmp_path) -
             packet=object(),  # type: ignore[arg-type]
             owner_identity_digest=_D,
             decision_recorded_at_digest=_D,
+        )
+    with pytest.raises(AdmissionError, match="unresolved finding"):
+        SubstantiveReviewEvidence.build(
+            repository="fol2/newsroom",
+            pull_request_number=484,
+            merge_sha="a" * 40,
+            reviewed_head_sha="b" * 40,
+            review_provider="chatgpt-codex-connector",
+            review_database_id=1,
+            review_submitted_at=_AT,
+            unresolved_thread_count=1,
+            p1_finding_count=1,
+            material_p2_finding_count=0,
+            other_unresolved_thread_count=0,
         )

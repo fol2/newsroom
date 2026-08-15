@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from newsroom.increment8.admission import build_operational_admission_decision
+from newsroom.increment8.admission import (
+    SubstantiveReviewEvidence,
+    build_operational_admission_decision,
+)
 from newsroom.increment8.closeout import Increment8CloseoutLane
 from newsroom.increment8.qualification_fixture import (
     FIXTURE_ADMISSION_OWNER_DIGEST,
@@ -35,6 +39,7 @@ def execute_fixture_qualification(
     core_transport_bundle_root: Path,
     service_transport_bundle_root: Path,
     sdlc_decision_path: Path,
+    substantive_review_path: Path,
     workspace: Path,
     packet_path: Path,
     decision_path: Path,
@@ -53,6 +58,26 @@ def execute_fixture_qualification(
         or sdlc_decision.context.evaluated_tree_sha != tree
     ):
         raise Increment8FixtureQualificationError("SDLC decision identity differs")
+    substantive_review = SubstantiveReviewEvidence.from_canonical_bytes(
+        substantive_review_path.read_bytes()
+    )
+    try:
+        reviewed_tree = subprocess.check_output(
+            ("git", "rev-parse", f"{substantive_review.reviewed_head_sha}^{{tree}}"),
+            cwd=root,
+            text=True,
+            timeout=5,
+        ).strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Increment8FixtureQualificationError(
+            "reviewed source identity is absent"
+        ) from exc
+    if (
+        substantive_review.repository != "fol2/newsroom"
+        or substantive_review.merge_sha != head
+        or reviewed_tree != tree
+    ):
+        raise Increment8FixtureQualificationError("substantive review identity differs")
     lanes = {lane.lane_id: lane for lane in sdlc_decision.lanes}
     if set(lanes) != {"core", "service"}:
         raise Increment8FixtureQualificationError("qualification lanes differ")
@@ -71,7 +96,9 @@ def execute_fixture_qualification(
             "qualification case inventory differs"
         )
 
-    packet = execute_qualification_fixture(workspace)
+    packet = execute_qualification_fixture(
+        workspace, substantive_review=substantive_review
+    )
     decision = build_operational_admission_decision(
         packet=packet,
         owner_identity_digest=FIXTURE_ADMISSION_OWNER_DIGEST,
@@ -88,6 +115,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--core-transport-bundle-root", required=True, type=Path)
     parser.add_argument("--service-transport-bundle-root", required=True, type=Path)
     parser.add_argument("--sdlc-decision", required=True, type=Path)
+    parser.add_argument("--substantive-review", required=True, type=Path)
     parser.add_argument("--workspace", required=True, type=Path)
     parser.add_argument("--packet", required=True, type=Path)
     parser.add_argument("--decision", required=True, type=Path)
@@ -98,6 +126,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             core_transport_bundle_root=arguments.core_transport_bundle_root,
             service_transport_bundle_root=arguments.service_transport_bundle_root,
             sdlc_decision_path=arguments.sdlc_decision,
+            substantive_review_path=arguments.substantive_review,
             workspace=arguments.workspace,
             packet_path=arguments.packet,
             decision_path=arguments.decision,

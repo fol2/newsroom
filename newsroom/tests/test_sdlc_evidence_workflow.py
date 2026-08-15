@@ -163,6 +163,7 @@ def test_job_graph_is_exact_and_decision_always_reports() -> None:
     assert jobs["decision"]["permissions"] == {
         "actions": "read",
         "contents": "read",
+        "pull-requests": "read",
     }
     assert jobs["signed-closeout"]["if"] == (
         "github.event_name == 'workflow_dispatch' && "
@@ -360,6 +361,7 @@ def test_lane_and_decision_artifacts_are_compact_immutable_and_attempt_scoped() 
                 ".sdlc-run/increment8f-final-closeout.json",
                 ".sdlc-run/increment8-qualification-packet.json",
                 ".sdlc-run/increment8-operational-admission-decision.json",
+                ".sdlc-run/increment8-substantive-review.json",
             ]
 
 
@@ -456,6 +458,7 @@ def test_signed_closeout_attests_only_the_validated_exact_main_receipt() -> None
         ".sdlc-run/signed-closeout-input/increment8f-final-closeout.json",
         ".sdlc-run/signed-closeout-input/increment8-qualification-packet.json",
         ".sdlc-run/signed-closeout-input/increment8-operational-admission-decision.json",
+        ".sdlc-run/signed-closeout-input/increment8-substantive-review.json",
     ]
     upload = _step("signed-closeout", "Retain attestation bundle")
     assert upload["uses"] == UPLOAD
@@ -535,6 +538,18 @@ def test_decision_bootstraps_locked_runtime_before_closeout_receipt() -> None:
     assert names.index("Sync locked closeout environment") < names.index(
         "Build Increment 5E2 final closeout receipt"
     )
+    review = _step("decision", "Retain exact Increment 8 substantive review")
+    assert review["if"] == (
+        "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'"
+    )
+    assert review["env"] == {"GITHUB_TOKEN": "${{ github.token }}"}
+    for expected in (
+        "scripts.sdlc.increment8_review_evidence",
+        '--repository "${{ github.repository }}"',
+        '--merge-sha "${{ github.sha }}"',
+        "--output .sdlc-run/increment8-substantive-review.json",
+    ):
+        assert expected in review["run"]
     increment7 = _step("decision", "Build Increment 7G final closeout receipt")
     assert increment7["if"] == "needs.route.outputs.service_required == 'true'"
     for expected in (
@@ -688,7 +703,10 @@ def test_github_token_exists_only_on_exact_collection_step() -> None:
             environment = step.get("env")
             if isinstance(environment, dict) and "GITHUB_TOKEN" in environment:
                 locations.append((job_id, str(step.get("name"))))
-    assert locations == [("decision", "Collect exact lane evidence")]
+    assert locations == [
+        ("decision", "Collect exact lane evidence"),
+        ("decision", "Retain exact Increment 8 substantive review"),
+    ]
 
 
 def test_workflow_never_invokes_prohibited_product_runtime() -> None:

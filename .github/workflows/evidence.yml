@@ -569,6 +569,7 @@ jobs:
     permissions:
       actions: read
       contents: read
+      pull-requests: read
     steps:
       - name: Checkout evaluated head
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -637,6 +638,18 @@ jobs:
             > "${RUNNER_TEMP}/decision-result.json"
           cat "${RUNNER_TEMP}/decision-result.json"
 
+      - name: Retain exact Increment 8 substantive review
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m scripts.sdlc.increment8_review_evidence \
+            --repository "${{ github.repository }}" \
+            --merge-sha "${{ github.sha }}" \
+            --output .sdlc-run/increment8-substantive-review.json
+
       - name: Build Increment 5E2 final closeout receipt
         if: needs.route.outputs.service_required == 'true'
         shell: bash
@@ -684,6 +697,7 @@ jobs:
               --core-transport-bundle-root .sdlc-run/decision-input/core-transport \
               --service-transport-bundle-root .sdlc-run/decision-input/service-transport \
               --sdlc-decision .sdlc-run/decision.json \
+              --substantive-review .sdlc-run/increment8-substantive-review.json \
               --workspace .sdlc-run/increment8-qualification-workspace \
               --packet .sdlc-run/increment8-qualification-packet.json \
               --decision .sdlc-run/increment8-operational-admission-decision.json
@@ -712,6 +726,7 @@ jobs:
             .sdlc-run/increment8f-final-closeout.json
             .sdlc-run/increment8-qualification-packet.json
             .sdlc-run/increment8-operational-admission-decision.json
+            .sdlc-run/increment8-substantive-review.json
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
@@ -783,7 +798,8 @@ jobs:
             --repo-root . \
             --packet .sdlc-run/signed-closeout-input/increment8-qualification-packet.json \
             --decision .sdlc-run/signed-closeout-input/increment8-operational-admission-decision.json \
-            --receipt .sdlc-run/signed-closeout-input/increment8f-final-closeout.json
+            --receipt .sdlc-run/signed-closeout-input/increment8f-final-closeout.json \
+            --substantive-review .sdlc-run/signed-closeout-input/increment8-substantive-review.json
 
       - name: Validate final closeout subject
         shell: bash
@@ -1360,6 +1376,7 @@ jobs:
             .sdlc-run/signed-closeout-input/increment8f-final-closeout.json
             .sdlc-run/signed-closeout-input/increment8-qualification-packet.json
             .sdlc-run/signed-closeout-input/increment8-operational-admission-decision.json
+            .sdlc-run/signed-closeout-input/increment8-substantive-review.json
 
       - name: Retain attestation bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

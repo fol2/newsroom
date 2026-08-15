@@ -246,6 +246,9 @@ def build_final_receipt(
         "operational_admission_verdict": admission.verdict.value,
         "increment9_eligibility": admission.increment9_eligibility.value,
         "qualification_packet_digest": packet.digest,
+        "substantive_review_digest": packet.evidence_digests[
+            "substantive_review_digest"
+        ],
         "decision_identity": decision.decision_identity,
         "evaluated_sha": head,
         "evaluated_tree_sha": tree,

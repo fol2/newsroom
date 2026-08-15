@@ -12,6 +12,7 @@ from newsroom.increment8.admission import (
     IndependentVerificationEvidence,
     IntendedHardwareEvidence,
     RollbackEvidence,
+    SubstantiveReviewEvidence,
     build_qualification_packet,
 )
 from newsroom.increment8.evaluation import (
@@ -523,7 +524,7 @@ def _independent(reviewed_evidence_manifest_digest=_D):
     )
 
 
-def _packet(tmp_path, **changes):
+def _packet(tmp_path, *, substantive_review: SubstantiveReviewEvidence, **changes):
     tmp_path.mkdir(parents=True, exist_ok=True)
     database = tmp_path / "authority.sqlite3"
     connection = sqlite3.connect(database, isolation_level=None)
@@ -620,16 +621,17 @@ def _packet(tmp_path, **changes):
         "independent_verification": _independent(
             str(release.payload["evidence_manifest_digest"])
         ),
-        "p1_finding_count": 0,
-        "material_p2_finding_count": 0,
+        "substantive_review": substantive_review,
     }
     values.update(changes)
     return build_qualification_packet(**values)
 
 
-def execute_qualification_fixture(workspace):
+def execute_qualification_fixture(
+    workspace, *, substantive_review: SubstantiveReviewEvidence
+):
     """Execute the frozen 120-Case fixture and return its exact packet."""
-    return _packet(workspace)
+    return _packet(workspace, substantive_review=substantive_review)
 
 
 __all__ = [

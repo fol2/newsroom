@@ -10,6 +10,7 @@ from .admission import (
     OperationalAdmissionVerdict,
     QualificationPacket,
     RollbackEvidence,
+    SubstantiveReviewEvidence,
     build_operational_admission_decision,
     build_qualification_packet,
 )
@@ -226,6 +227,7 @@ __all__ = [
     "SecurityAdmission",
     "SourceContribution",
     "SourceRole",
+    "SubstantiveReviewEvidence",
     "Urgency",
     "WorkLease",
     "WorkState",

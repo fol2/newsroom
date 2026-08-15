@@ -9,7 +9,10 @@ from types import SimpleNamespace
 import pytest
 
 from newsroom.authority.canonical import canonical_json_bytes
-from newsroom.increment8.admission import build_operational_admission_decision
+from newsroom.increment8.admission import (
+    SubstantiveReviewEvidence,
+    build_operational_admission_decision,
+)
 from newsroom.increment8.closeout import (
     INCREMENT8_FINAL_CLOSEOUT_INVENTORY_DIGEST,
     INCREMENT8_FINAL_NON_EFFECTS,
@@ -135,7 +138,7 @@ def _patch(monkeypatch, decision, transports) -> None:
     )
 
 
-def _admission_paths(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+def _admission_paths(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
     monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
     monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
     monkeypatch.setenv("GITHUB_REPOSITORY", "fol2/newsroom")
@@ -145,8 +148,22 @@ def _admission_paths(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
     )
     packet = tmp_path / "qualification-packet.json"
     decision = tmp_path / "operational-admission-decision.json"
+    head = subprocess.check_output(("git", "rev-parse", "HEAD"), text=True).strip()
+    review = SubstantiveReviewEvidence.build(
+        repository="fol2/newsroom",
+        pull_request_number=484,
+        merge_sha=head,
+        reviewed_head_sha=head,
+        review_provider="chatgpt-codex-connector",
+        review_database_id=1,
+        review_submitted_at="2042-01-05T00:00:00.000000Z",
+        unresolved_thread_count=0,
+        p1_finding_count=0,
+        material_p2_finding_count=0,
+        other_unresolved_thread_count=0,
+    )
     qualification_packet = execute_qualification_fixture(
-        tmp_path / "qualification-workspace"
+        tmp_path / "qualification-workspace", substantive_review=review
     )
     admission = build_operational_admission_decision(
         packet=qualification_packet,
@@ -155,7 +172,9 @@ def _admission_paths(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
     )
     packet.write_bytes(qualification_packet.canonical_bytes)
     decision.write_bytes(admission.canonical_bytes)
-    return packet, decision
+    review_path = tmp_path / "substantive-review.json"
+    review_path.write_bytes(review.canonical_bytes)
+    return packet, decision, review_path
 
 
 def test_non_main_checkout_emits_no_final_closeout_claim(tmp_path, monkeypatch) -> None:
@@ -183,7 +202,7 @@ def test_receipt_binds_exact_lanes_inventory_service_and_self_hash(
     _patch(monkeypatch, decision, transports)
     decision_path = tmp_path / "decision.json"
     decision_path.write_text("{}", encoding="utf-8")
-    packet_path, admission_path = _admission_paths(tmp_path, monkeypatch)
+    packet_path, admission_path, review_path = _admission_paths(tmp_path, monkeypatch)
     receipt = build_final_receipt(
         repo_root=repo,
         core_transport_bundle_root=tmp_path / "core",
@@ -207,6 +226,7 @@ def test_receipt_binds_exact_lanes_inventory_service_and_self_hash(
         packet_path=packet_path,
         decision_path=admission_path,
         receipt_path=receipt_path,
+        substantive_review_path=review_path,
     )
 
 
@@ -230,7 +250,7 @@ def test_receipt_rejects_a_failed_selected_case(tmp_path, monkeypatch) -> None:
     _patch(monkeypatch, decision, transports)
     decision_path = tmp_path / "decision.json"
     decision_path.write_text("{}", encoding="utf-8")
-    packet_path, admission_path = _admission_paths(tmp_path, monkeypatch)
+    packet_path, admission_path, _ = _admission_paths(tmp_path, monkeypatch)
     with pytest.raises(Increment8FCloseoutReceiptError, match="not_passed"):
         build_final_receipt(
             repo_root=repo,
