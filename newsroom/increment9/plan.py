@@ -1,9 +1,10 @@
 """Canonical Increment 9R shadow plan and owner-decision gate.
 
 Loading this module performs no network request, credential lookup, deployment,
-provider/model execution or shadow run.  The retained v1 document is a draft
-owner-decision packet: it deliberately fails the approval gate until every
-listed live-runtime decision is bound and explicitly approved by the owner.
+provider/model execution or shadow run.  The retained v1 document is the
+owner-approved plan.  Its conditional autonomy envelope authorises later work
+only after the exact implementation and evidence prerequisites recorded in the
+plan have passed; loading or merging these bytes creates no live effect.
 """
 
 from __future__ import annotations
@@ -24,13 +25,17 @@ from newsroom.authority.canonical import (
 )
 
 SHADOW_PLAN_PATH = Path(__file__).with_name("shadow_plan_v1.json")
+AGENT_PROFILES_PATH = Path(__file__).with_name("agent_profiles_v1.json")
 EXPECTED_SHADOW_PLAN_DIGEST = (
-    "sha256:a881b3c0da08dfa8d817f54377827879f13365d94e001c867c53bca68b32dbd8"
+    "sha256:4163ad944597dd69f433a89c2af892904258a5cd56c38afe4b295c0a82f182bd"
+)
+EXPECTED_AGENT_PROFILES_DIGEST = (
+    "sha256:c6835632cb9088167ff049325277802d1b6347bc9df44b1e5b41d1d029c56944"
 )
 
 EXPECTED_BASE = {
-    "commit": "834250f8b0e7b5ce34e0cb54236d463429bd766e",
-    "tree": "06b99d383f514db2fda95afe83f99c0e5b489ef5",
+    "commit": "3d4ace16a75e92b9f80c526f18aa811be6c2b053",
+    "tree": "4dd2b50aafd074314fbbefe3519f0707b9c5507f",
     "schema_version": 32,
     "schema_fingerprint": (
         "sha256:3439b82ec6d212116e54765d50cace4d7f147b6ecc3e6ff84146b523c6fd5676"
@@ -41,6 +46,10 @@ EXPECTED_BASE = {
     "increment8_exact_main_run": 31871581163,
     "increment8_operational_admission": "FIXTURE_OPERATIONAL_ADMITTED",
     "increment9_disposition": "ELIGIBLE_FOR_SEPARATE_PLAN",
+    "capacity_issue": 500,
+    "capacity_pull_request": 501,
+    "capacity_exact_main_run": 31900458431,
+    "deterministic_core_shards": 18,
 }
 
 EXPECTED_OWNER_DECISION_IDS = tuple(f"OD-{number:03d}" for number in range(1, 15))
@@ -227,7 +236,7 @@ def _owner_decision(value: object, index: int) -> OwnerDecision:
         title=str(raw["title"]),
         status=str(raw["status"]),
         required_bindings=_strings(raw["required_bindings"], f"{field}.required_bindings"),
-        selection=raw["selection"],
+        selection=_freeze(raw["selection"]),
         evidence_refs=_strings(raw["evidence_refs"], f"{field}.evidence_refs"),
     )
 
@@ -278,7 +287,7 @@ def _validate_plan(plan: Increment9ShadowPlan) -> None:
         raise Increment9PlanError("shadow plan schema differs")
     if plan.plan_id != "increment9-production-equivalent-shadow-plan-v1":
         raise Increment9PlanError("shadow plan identity differs")
-    if plan.plan_version != "increment9-shadow-plan-v1-draft-owner-decision-packet":
+    if plan.plan_version != "increment9-shadow-plan-v1-owner-approved":
         raise Increment9PlanError("shadow plan version differs")
     if plan.issue_number != 488 or plan.parent_issue_number != 149:
         raise Increment9PlanError("issue identity differs")
@@ -291,13 +300,17 @@ def _validate_plan(plan: Increment9ShadowPlan) -> None:
     decision_ids = tuple(item.decision_id for item in plan.owner_decisions)
     if decision_ids != EXPECTED_OWNER_DECISION_IDS:
         raise Increment9PlanError("owner decision inventory differs")
-    if any(
-        item.status != "OWNER_DECISION_REQUIRED"
-        or item.selection is not None
-        or item.evidence_refs
-        for item in plan.owner_decisions
-    ):
-        raise Increment9PlanError("unapproved owner decision was invented")
+    for item in plan.owner_decisions:
+        if item.status != "APPROVED":
+            raise Increment9PlanError("owner decision is not approved")
+        if not isinstance(item.selection, Mapping):
+            raise Increment9PlanError("owner decision selection must be an object")
+        if set(item.selection) != set(item.required_bindings):
+            raise Increment9PlanError("owner decision bindings differ")
+        if not item.evidence_refs or len(item.evidence_refs) != len(
+            set(item.evidence_refs)
+        ):
+            raise Increment9PlanError("owner decision evidence differs")
 
     approval = plan.approval
     _exact_keys(
@@ -316,21 +329,27 @@ def _validate_plan(plan: Increment9ShadowPlan) -> None:
             "publication_authorised",
             "canary_authorised",
             "production_activation_authorised",
+            "authority_grant_mode",
+            "planning_merge_creates_live_effect",
+            "conditional_authority",
         },
         "approval",
     )
-    if approval.get("status") != "OWNER_DECISION_REQUIRED":
-        raise Increment9PlanError("draft approval status differs")
+    if approval.get("status") != "OWNER_APPROVED":
+        raise Increment9PlanError("owner approval status differs")
     if tuple(approval.get("required_owner_decision_ids", ())) != decision_ids:
         raise Increment9PlanError("approval decision inventory differs")
-    for field in (
-        "approved_by",
-        "approved_at",
-        "approval_record",
-        "approved_plan_digest",
+    if approval.get("approved_by") != "github:fol2":
+        raise Increment9PlanError("owner identity differs")
+    if approval.get("approved_at") != "2026-08-15T22:51:14Z":
+        raise Increment9PlanError("owner approval time differs")
+    if approval.get("approval_record") != (
+        "https://github.com/fol2/newsroom/issues/503#issuecomment-5304608768"
     ):
-        if approval.get(field) is not None:
-            raise Increment9PlanError(f"{field} must remain unbound before owner approval")
+        raise Increment9PlanError("owner approval record differs")
+    validate_sha256_digest(
+        approval.get("approved_plan_digest"), field="approved_plan_digest"
+    )
     for field in (
         "contract_implementation_authorised",
         "live_shadow_authorised",
@@ -341,7 +360,37 @@ def _validate_plan(plan: Increment9ShadowPlan) -> None:
         "production_activation_authorised",
     ):
         if approval.get(field) is not False:
-            raise Increment9PlanError(f"{field} must remain false")
+            raise Increment9PlanError(f"{field} must remain false before later gate")
+    if approval.get("authority_grant_mode") != (
+        "CONDITIONAL_AUTONOMOUS_ACTIVATION_AFTER_EXACT_GATES"
+    ):
+        raise Increment9PlanError("authority grant mode differs")
+    if approval.get("planning_merge_creates_live_effect") is not False:
+        raise Increment9PlanError("planning merge must not create a live effect")
+    conditional = approval.get("conditional_authority")
+    if not isinstance(conditional, Mapping) or set(conditional) != {
+        "authorised_phases",
+        "effective_when",
+        "further_human_approval_required",
+    }:
+        raise Increment9PlanError("conditional authority differs")
+    if conditional.get("further_human_approval_required") is not False:
+        raise Increment9PlanError("conditional authority must be autonomous")
+    if tuple(conditional.get("authorised_phases", ())) != (
+        "CONTRACT_IMPLEMENTATION",
+        "ISOLATED_LIVE_SHADOW",
+        "COMPARATOR_AND_FAULT_CAMPAIGN",
+        "EVIDENCE_INTAKE",
+        "SEALED_AI_REVIEW",
+        "INCREMENT10_CANARY",
+        "PRODUCTION_ACTIVATION",
+        "AUTONOMOUS_PUBLICATION",
+    ):
+        raise Increment9PlanError("conditional phase inventory differs")
+    if not isinstance(conditional.get("effective_when"), tuple) or not conditional.get(
+        "effective_when"
+    ):
+        raise Increment9PlanError("conditional prerequisites differ")
 
     if tuple(item.issue_number for item in plan.allocations) != EXPECTED_ISSUES:
         raise Increment9PlanError("child issue inventory differs")
@@ -413,6 +462,8 @@ def _validate_plan(plan: Increment9ShadowPlan) -> None:
             "unchanged_failed_run_retry_allowed",
             "missing_evidence_interpretation",
             "zero_tolerance_counts",
+            "effective_manifest_change_starts_new_cohort",
+            "closeout_applies_to_final_manifest_only",
         },
         "frozen_rules",
     )
@@ -424,9 +475,11 @@ def _validate_plan(plan: Increment9ShadowPlan) -> None:
             "hindsight_selection_allowed": False,
             "post_result_threshold_change_allowed": False,
             "post_result_case_substitution_allowed": False,
-            "material_change_closes_epoch": True,
+            "material_change_closes_epoch": False,
             "failed_partial_blocked_and_early_stopped_results_retained": True,
             "unchanged_failed_run_retry_allowed": False,
+            "effective_manifest_change_starts_new_cohort": True,
+            "closeout_applies_to_final_manifest_only": True,
         }.items()
     ):
         raise Increment9PlanError("prospective evidence rules differ")
@@ -448,8 +501,8 @@ def _validate_plan(plan: Increment9ShadowPlan) -> None:
     )
     if plan.stop_and_recovery.get("owner_decision_id") != "OD-014":
         raise Increment9PlanError("stop owner decision differs")
-    if plan.stop_and_recovery.get("later_phase_after_early_stop_allowed") is not False:
-        raise Increment9PlanError("later phases must remain stopped")
+    if plan.stop_and_recovery.get("later_phase_after_early_stop_allowed") is not True:
+        raise Increment9PlanError("autonomous recovery evidence must remain allowed")
 
     _exact_keys(
         plan.gate_requirements,
@@ -475,8 +528,8 @@ def _validate_plan(plan: Increment9ShadowPlan) -> None:
         {"automatic_transition_allowed", "required"},
         "increment10_eligibility",
     )
-    if plan.increment10_eligibility.get("automatic_transition_allowed") is not False:
-        raise Increment9PlanError("Increment 10 must not start automatically")
+    if plan.increment10_eligibility.get("automatic_transition_allowed") is not True:
+        raise Increment9PlanError("Increment 10 autonomous transition differs")
     required_increment10 = plan.increment10_eligibility.get("required")
     if not isinstance(required_increment10, tuple) or not required_increment10:
         raise Increment9PlanError("Increment 10 requirements differ")
@@ -620,7 +673,7 @@ def load_increment9_shadow_plan(path: Path) -> Increment9ShadowPlan:
 
 
 def require_owner_approved_plan(plan: Increment9ShadowPlan) -> None:
-    """Fail closed until an explicitly approved successor plan is reviewed."""
+    """Fail closed unless the exact retained plan has explicit owner approval."""
 
     if not isinstance(plan, Increment9ShadowPlan):
         raise Increment9PlanError("shadow plan identity differs")
@@ -629,5 +682,125 @@ def require_owner_approved_plan(plan: Increment9ShadowPlan) -> None:
         raise OwnerApprovalRequired(f"owner approval required: {unresolved}")
 
 
+def load_increment9_agent_profiles(path: Path) -> Mapping[str, object]:
+    """Load and validate the exact provider-neutral agent profile document."""
+
+    if not isinstance(path, Path):
+        raise Increment9PlanError("agent profile path must be a pathlib.Path")
+    try:
+        raw = path.read_bytes()
+        document = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=_object_without_duplicates,
+        )
+        canonical = canonical_json_bytes(document)
+    except Increment9PlanError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError, CanonicalizationError) as exc:
+        raise Increment9PlanError("cannot read canonical Increment 9 profiles") from exc
+    if raw != canonical:
+        raise Increment9PlanError("agent profiles must use exact canonical JSON")
+    if digest_bytes(raw) != EXPECTED_AGENT_PROFILES_DIGEST:
+        raise Increment9PlanError("agent profile bytes differ from reviewed v1")
+
+    top = _mapping(document, "agent profiles")
+    _exact_keys(top, {"schema_version", "payload"}, "agent profiles")
+    if top["schema_version"] != "newsroom.increment9.agent-profiles.v1":
+        raise Increment9PlanError("agent profile schema differs")
+    payload = _mapping(top["payload"], "agent profile payload")
+    _exact_keys(
+        payload,
+        {
+            "profile_version",
+            "owner",
+            "transport_contract",
+            "profiles",
+            "result_schema",
+        },
+        "agent profile payload",
+    )
+    if payload["profile_version"] != "increment9-agent-profiles-v1":
+        raise Increment9PlanError("agent profile version differs")
+    if payload["owner"] != "newsroom":
+        raise Increment9PlanError("agent profile owner differs")
+    transport = _mapping(payload["transport_contract"], "transport contract")
+    _exact_keys(
+        transport,
+        {
+            "input",
+            "output",
+            "stdout_policy",
+            "stderr_policy",
+            "invalid_result",
+            "silent_repair_allowed",
+        },
+        "transport contract",
+    )
+    if transport != {
+        "input": "newsroom.increment9.hermes-input.v1",
+        "output": "newsroom.increment9.hermes-result.v1",
+        "stdout_policy": "ONE_SCHEMA_VALID_JSON_RESULT_ONLY",
+        "stderr_policy": "EVENT_STREAM_REDACTED_TO_AUTONOMOUS_CONTROL_LEDGER",
+        "invalid_result": "NOT_EVALUATED",
+        "silent_repair_allowed": False,
+    }:
+        raise Increment9PlanError("transport contract differs")
+    profiles = payload["profiles"]
+    if not isinstance(profiles, list) or len(profiles) != 3:
+        raise Increment9PlanError("agent profile inventory differs")
+    profile_ids: list[str] = []
+    for index, value in enumerate(profiles):
+        profile = _mapping(value, f"profiles[{index}]")
+        _exact_keys(
+            profile,
+            {
+                "profile_id",
+                "role",
+                "provider",
+                "model_selector",
+                "memory_namespace",
+                "prompt",
+                "prompt_digest",
+            },
+            f"profiles[{index}]",
+        )
+        prompt = profile["prompt"]
+        if not isinstance(prompt, str) or not prompt:
+            raise Increment9PlanError("agent profile prompt differs")
+        if digest_bytes(prompt.encode()) != profile["prompt_digest"]:
+            raise Increment9PlanError("agent profile prompt digest differs")
+        profile_ids.append(str(profile["profile_id"]))
+    if tuple(profile_ids) != (
+        "increment9-sut-v1",
+        "increment9-primary-reviewer-v1",
+        "increment9-adjudicator-v1",
+    ):
+        raise Increment9PlanError("agent profile identity differs")
+    result_schema = _mapping(payload["result_schema"], "result schema")
+    _exact_keys(
+        result_schema,
+        {"required", "statuses", "verdicts", "additional_properties"},
+        "result schema",
+    )
+    if result_schema.get("additional_properties") is not False:
+        raise Increment9PlanError("result schema must reject additional properties")
+    if _strings(result_schema.get("statuses"), "result schema statuses") != (
+        "SUCCESS",
+        "NOT_EVALUATED",
+        "FAILED",
+    ):
+        raise Increment9PlanError("result status vocabulary differs")
+    if _strings(result_schema.get("verdicts"), "result schema verdicts") != (
+        "APPROVE",
+        "BLOCK",
+        "INSUFFICIENT_EVIDENCE",
+        "NOT_APPLICABLE",
+    ):
+        raise Increment9PlanError("result verdict vocabulary differs")
+    return _frozen_mapping(document, "agent profiles")
+
+
 INCREMENT_9_SHADOW_PLAN = load_increment9_shadow_plan(SHADOW_PLAN_PATH)
 INCREMENT_9_SHADOW_PLAN_DIGEST = INCREMENT_9_SHADOW_PLAN.plan_digest
+INCREMENT_9_AGENT_PROFILES = load_increment9_agent_profiles(AGENT_PROFILES_PATH)
+INCREMENT_9_AGENT_PROFILES_DIGEST = EXPECTED_AGENT_PROFILES_DIGEST

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -9,11 +10,15 @@ import pytest
 import newsroom.increment9.plan as plan_module
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.increment9 import (
+    AGENT_PROFILES_PATH,
+    EXPECTED_AGENT_PROFILES_DIGEST,
+    INCREMENT_9_AGENT_PROFILES,
+    INCREMENT_9_AGENT_PROFILES_DIGEST,
     INCREMENT_9_SHADOW_PLAN,
     INCREMENT_9_SHADOW_PLAN_DIGEST,
     SHADOW_PLAN_PATH,
     Increment9PlanError,
-    OwnerApprovalRequired,
+    load_increment9_agent_profiles,
     load_increment9_shadow_plan,
     require_owner_approved_plan,
 )
@@ -39,8 +44,8 @@ def test_plan_is_exact_canonical_content_addressed_base() -> None:
     assert plan.parent_issue_number == 149
     assert plan.programme_issue_number == 141
     assert plan.planning_base == {
-        "commit": "834250f8b0e7b5ce34e0cb54236d463429bd766e",
-        "tree": "06b99d383f514db2fda95afe83f99c0e5b489ef5",
+        "commit": "3d4ace16a75e92b9f80c526f18aa811be6c2b053",
+        "tree": "4dd2b50aafd074314fbbefe3519f0707b9c5507f",
         "schema_version": 32,
         "schema_fingerprint": (
             "sha256:3439b82ec6d212116e54765d50cace4d7f147b6ecc3e6ff84146b523c6fd5676"
@@ -51,6 +56,10 @@ def test_plan_is_exact_canonical_content_addressed_base() -> None:
         "increment8_exact_main_run": 31871581163,
         "increment8_operational_admission": "FIXTURE_OPERATIONAL_ADMITTED",
         "increment9_disposition": "ELIGIBLE_FOR_SEPARATE_PLAN",
+        "capacity_issue": 500,
+        "capacity_pull_request": 501,
+        "capacity_exact_main_run": 31900458431,
+        "deterministic_core_shards": 18,
     }
 
 
@@ -65,16 +74,19 @@ def test_repository_component_blobs_exist_at_exact_planning_base() -> None:
         assert observed == component["git_blob"]
 
 
-def test_unresolved_live_decisions_are_explicit_and_fail_closed() -> None:
+def test_owner_decisions_are_explicit_complete_and_approved() -> None:
     plan = INCREMENT_9_SHADOW_PLAN
-    assert plan.owner_approved is False
-    assert plan.unresolved_owner_decision_ids == tuple(
-        f"OD-{number:03d}" for number in range(1, 15)
+    assert plan.owner_approved is True
+    assert plan.unresolved_owner_decision_ids == ()
+    assert all(item.status == "APPROVED" for item in plan.owner_decisions)
+    assert all(isinstance(item.selection, Mapping) for item in plan.owner_decisions)
+    assert all(
+        set(item.selection) == set(item.required_bindings)
+        for item in plan.owner_decisions
+        if isinstance(item.selection, Mapping)
     )
-    assert all(item.selection is None for item in plan.owner_decisions)
-    assert all(item.evidence_refs == () for item in plan.owner_decisions)
-    with pytest.raises(OwnerApprovalRequired, match="OD-001.*OD-014"):
-        require_owner_approved_plan(plan)
+    assert all(item.evidence_refs for item in plan.owner_decisions)
+    require_owner_approved_plan(plan)
 
 
 def test_owner_decision_bindings_are_explicit_and_non_overlapping() -> None:
@@ -86,7 +98,7 @@ def test_owner_decision_bindings_are_explicit_and_non_overlapping() -> None:
     )
 
 
-def test_no_runtime_or_public_effect_is_authorised() -> None:
+def test_planning_merge_has_no_live_effect_but_conditional_authority_is_bound() -> None:
     plan = INCREMENT_9_SHADOW_PLAN
     assert plan.approval["contract_implementation_authorised"] is False
     assert plan.approval["live_shadow_authorised"] is False
@@ -99,6 +111,17 @@ def test_no_runtime_or_public_effect_is_authorised() -> None:
     assert (
         plan.non_effect_authority["production_authority_mutation_authorised"]
         is False
+    )
+    assert plan.approval["authority_grant_mode"] == (
+        "CONDITIONAL_AUTONOMOUS_ACTIVATION_AFTER_EXACT_GATES"
+    )
+    assert plan.approval["planning_merge_creates_live_effect"] is False
+    conditional = plan.approval["conditional_authority"]
+    assert conditional["further_human_approval_required"] is False
+    assert conditional["authorised_phases"][-3:] == (
+        "INCREMENT10_CANARY",
+        "PRODUCTION_ACTIVATION",
+        "AUTONOMOUS_PUBLICATION",
     )
     assert set(plan.non_effect_authority["prohibited_until_exact_later_gate"]) >= {
         "LIVE_SOURCE_REQUEST",
@@ -145,13 +168,15 @@ def test_prospective_stop_and_outcome_rules_are_frozen() -> None:
     assert plan.frozen_rules["hindsight_selection_allowed"] is False
     assert plan.frozen_rules["post_result_threshold_change_allowed"] is False
     assert plan.frozen_rules["post_result_case_substitution_allowed"] is False
-    assert plan.frozen_rules["material_change_closes_epoch"] is True
+    assert plan.frozen_rules["material_change_closes_epoch"] is False
+    assert plan.frozen_rules["effective_manifest_change_starts_new_cohort"] is True
+    assert plan.frozen_rules["closeout_applies_to_final_manifest_only"] is True
     assert plan.frozen_rules["unchanged_failed_run_retry_allowed"] is False
     assert all(
         value == 0
         for value in plan.frozen_rules["zero_tolerance_counts"].values()
     )
-    assert plan.stop_and_recovery["later_phase_after_early_stop_allowed"] is False
+    assert plan.stop_and_recovery["later_phase_after_early_stop_allowed"] is True
     assert plan.outcome_vocabulary == (
         "FAILED",
         "INCONCLUSIVE",
@@ -160,19 +185,65 @@ def test_prospective_stop_and_outcome_rules_are_frozen() -> None:
         "BLOCKED_ACTIVE_COVERAGE",
         "SCOPED_OPERATIONAL_ELIGIBILITY",
     )
-    assert plan.increment10_eligibility["automatic_transition_allowed"] is False
+    assert plan.increment10_eligibility["automatic_transition_allowed"] is True
+
+
+def test_agent_profiles_are_canonical_content_addressed_and_provider_neutral() -> None:
+    assert INCREMENT_9_AGENT_PROFILES_DIGEST == EXPECTED_AGENT_PROFILES_DIGEST
+    assert INCREMENT_9_AGENT_PROFILES_DIGEST == digest_bytes(
+        AGENT_PROFILES_PATH.read_bytes()
+    )
+    loaded = load_increment9_agent_profiles(AGENT_PROFILES_PATH)
+    profiles = loaded["payload"]["profiles"]
+    assert tuple(profile["profile_id"] for profile in profiles) == (
+        "increment9-sut-v1",
+        "increment9-primary-reviewer-v1",
+        "increment9-adjudicator-v1",
+    )
+    assert loaded["payload"]["transport_contract"]["silent_repair_allowed"] is False
+
+
+def test_approved_model_topology_and_ai_only_review_limitation_are_exact() -> None:
+    decisions = {
+        decision.decision_id: decision.selection
+        for decision in INCREMENT_9_SHADOW_PLAN.owner_decisions
+    }
+    models = decisions["OD-005"]["provider_and_model_release"]
+    assert models["sut"]["selector"] == "gpt-5.6-terra"
+    assert models["primary_a"]["selector"] == "claude-sonnet-5"
+    assert models["primary_b"]["selector"] == "grok-4.6"
+    assert models["adjudicator"]["selector"] == "gemini-3.7-flash"
+    review = decisions["OD-009"]["independence_and_conflicts"]
+    assert review["human_labelled_anchor"] is False
+    assert review["ai_consensus_is_editorial_ground_truth"] is True
+
+
+def test_hermes_autonomy_keeps_model_credentials_outside_subprocesses() -> None:
+    decisions = {
+        decision.decision_id: decision.selection
+        for decision in INCREMENT_9_SHADOW_PLAN.owner_decisions
+    }
+    policy = decisions["OD-007"]["triage_and_relation_policy"]
+    assert policy["ai_orchestration"] == "HERMES_FULL_WORKFLOW"
+    assert policy["deterministic_veto"] is True
+    assert policy["direct_model_authority_credentials"] is False
+    credentials = decisions["OD-012"][
+        "credential_classes_and_secret_locations"
+    ]
+    assert credentials["model_visibility"] is False
 
 
 @pytest.mark.parametrize(
     ("mutation", "expected_error"),
     (
-        ("invent_approval", "unapproved owner decision was invented"),
+        ("remove_approval", "owner decision is not approved"),
+        ("remove_binding", "owner decision bindings differ"),
         ("remove_decision", "owner decision inventory differs"),
         ("authorise_runtime", "live_shadow_authorised must remain false"),
         ("weaken_zero_tolerance", "zero-tolerance thresholds differ"),
         ("move_dependency", "allocation dependencies differ"),
         ("overlap_file", "file ownership overlaps"),
-        ("automatic_increment10", "Increment 10 must not start automatically"),
+        ("disable_automatic_increment10", "Increment 10 autonomous transition differs"),
     ),
 )
 def test_material_plan_tamper_fails_closed(
@@ -183,9 +254,12 @@ def test_material_plan_tamper_fails_closed(
 ) -> None:
     document = json.loads(SHADOW_PLAN_PATH.read_bytes())
     payload = document["payload"]
-    if mutation == "invent_approval":
-        payload["owner_decisions"][0]["status"] = "APPROVED"
-        payload["owner_decisions"][0]["selection"] = {"invented": True}
+    if mutation == "remove_approval":
+        payload["owner_decisions"][0]["status"] = "OWNER_DECISION_REQUIRED"
+    elif mutation == "remove_binding":
+        del payload["owner_decisions"][0]["selection"][
+            "source_ids_and_exact_endpoints"
+        ]
     elif mutation == "remove_decision":
         payload["owner_decisions"].pop()
     elif mutation == "authorise_runtime":
@@ -198,8 +272,8 @@ def test_material_plan_tamper_fails_closed(
         payload["execution_graph"]["allocations"][1]["file_ownership"][0] = (
             payload["execution_graph"]["allocations"][0]["file_ownership"][0]
         )
-    elif mutation == "automatic_increment10":
-        payload["increment10_eligibility"]["automatic_transition_allowed"] = True
+    elif mutation == "disable_automatic_increment10":
+        payload["increment10_eligibility"]["automatic_transition_allowed"] = False
     with pytest.raises(Increment9PlanError, match=expected_error):
         _load_changed_document(tmp_path, monkeypatch, document)
 
@@ -260,6 +334,32 @@ def test_unknown_duplicate_noncanonical_and_raw_byte_tamper_fail_closed(
     )
     with pytest.raises(Increment9PlanError, match="bytes differ"):
         load_increment9_shadow_plan(tampered_path)
+
+
+def test_agent_profile_prompt_and_nested_contract_tamper_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = json.loads(AGENT_PROFILES_PATH.read_bytes())
+    document["payload"]["profiles"][0]["prompt"] += " changed"
+    changed = canonical_json_bytes(document)
+    path = tmp_path / "changed-profiles.json"
+    path.write_bytes(changed)
+    monkeypatch.setattr(
+        plan_module, "EXPECTED_AGENT_PROFILES_DIGEST", digest_bytes(changed)
+    )
+    with pytest.raises(Increment9PlanError, match="prompt digest differs"):
+        load_increment9_agent_profiles(path)
+
+    nested = json.loads(AGENT_PROFILES_PATH.read_bytes())
+    nested["payload"]["transport_contract"]["unknown"] = True
+    changed = canonical_json_bytes(nested)
+    path.write_bytes(changed)
+    monkeypatch.setattr(
+        plan_module, "EXPECTED_AGENT_PROFILES_DIGEST", digest_bytes(changed)
+    )
+    with pytest.raises(Increment9PlanError, match="transport contract fields differ"):
+        load_increment9_agent_profiles(path)
 
 
 def test_plan_contains_no_secret_value_shapes() -> None:
