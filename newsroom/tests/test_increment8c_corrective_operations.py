@@ -32,6 +32,7 @@ _T5 = "2042-01-05T00:00:05.000000Z"
 _T6 = "2042-01-05T00:00:06.000000Z"
 _T63 = "2042-01-05T00:01:03.000000Z"
 _T118 = "2042-01-05T00:01:58.000000Z"
+_T120 = "2042-01-05T00:02:00.000000Z"
 _T121 = "2042-01-05T00:02:01.000000Z"
 
 
@@ -47,12 +48,19 @@ def _work(profile, key: str):
     )
 
 
-def _commit_lease(authority: OperationalAuthority, work, *, acquired_at: str = _AT):
+def _commit_lease(
+    authority: OperationalAuthority,
+    work,
+    *,
+    acquired_at: str = _AT,
+    authority_deadline_at: str | None = None,
+):
     lease = acquire_lease(
         work=work,
         owner_digest="sha256:" + "2" * 64,
         acquired_at=acquired_at,
         progress_digest="sha256:" + "3" * 64,
+        authority_deadline_at=authority_deadline_at,
     )
     authority.append_lease(lease)
     return (
@@ -111,14 +119,25 @@ def test_retry_uses_latest_work_version_and_exact_next_due_at(tmp_path) -> None:
     )
     with pytest.raises(OperationalAuthorityError, match="backoff"):
         authority.append_lease(beyond_horizon)
+    near_horizon = acquire_lease(
+        work=retry_once,
+        owner_digest="sha256:" + "2" * 64,
+        acquired_at=_T118,
+        progress_digest="sha256:" + "3" * 64,
+        authority_deadline_at=_T120,
+    )
+    assert near_horizon.payload["expires_at"] == _T120
+    assert near_horizon.payload["maximum_expires_at"] == _T120
 
     second_lease = acquire_lease(
         work=retry_once,
         owner_digest="sha256:" + "2" * 64,
         acquired_at=_T2,
         progress_digest="sha256:" + "3" * 64,
+        authority_deadline_at=_T120,
     )
     authority.append_lease(second_lease)
+    assert second_lease.payload["maximum_expires_at"] == _T120
     leased_twice = transition_work(retry_once, state=WorkState.LEASED, attempt_count=2)
     assert authority.due_work(_T2) == ()
     second_finding = build_retry_finding(
@@ -309,7 +328,9 @@ def test_retry_serialised_lease_check_uses_exact_parsed_instants(tmp_path) -> No
         work_state=WorkState.RETRY_PENDING,
         transitioned_at=_T2,
     )
-    second_lease, leased_twice = _commit_lease(authority, retry, acquired_at=_T5)
+    second_lease, leased_twice = _commit_lease(
+        authority, retry, acquired_at=_T5, authority_deadline_at=_T121
+    )
     second_finding = build_retry_finding(
         work=leased_twice,
         classification=RetryClassification.RETRYABLE,

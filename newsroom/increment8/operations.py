@@ -375,7 +375,12 @@ def transition_work(
 
 
 def acquire_lease(
-    *, work: DueWork, owner_digest: str, acquired_at: str, progress_digest: str
+    *,
+    work: DueWork,
+    owner_digest: str,
+    acquired_at: str,
+    progress_digest: str,
+    authority_deadline_at: str | None = None,
 ) -> WorkLease:
     if not isinstance(work, DueWork) or WorkState(str(work.payload["state"])) not in {
         WorkState.QUEUED,
@@ -386,13 +391,23 @@ def acquire_lease(
     deadline = _dt(str(work.payload["deadline_at"]))
     if _dt(acquired) > deadline:
         raise OperationalAuthorityError("work deadline has expired")
+    authority_deadline = (
+        deadline
+        if authority_deadline_at is None
+        else min(deadline, _dt(_time(authority_deadline_at, "authority_deadline_at")))
+    )
+    if _dt(acquired) > authority_deadline:
+        raise OperationalAuthorityError("lease authority deadline has expired")
     profile = INCREMENT_8_READINESS.operational_profile["execution"]
     expires = _canonical_time(
-        min(deadline, _dt(acquired) + timedelta(seconds=int(profile["lease_seconds"])))
+        min(
+            authority_deadline,
+            _dt(acquired) + timedelta(seconds=int(profile["lease_seconds"])),
+        )
     )
     maximum = _canonical_time(
         min(
-            deadline,
+            authority_deadline,
             _dt(acquired) + timedelta(seconds=int(profile["maximum_lease_seconds"])),
         )
     )
@@ -412,6 +427,7 @@ def acquire_lease(
             "acquired_at": acquired,
             "expires_at": expires,
             "maximum_expires_at": maximum,
+            "authority_deadline_at": _canonical_time(authority_deadline),
             "status": LeaseState.ACTIVE.value,
             "renewed_at": None,
             "closed_at": None,
@@ -1100,6 +1116,7 @@ class OperationalAuthority:
                 owner_digest=str(lease.payload["owner_digest"]),
                 acquired_at=str(lease.payload["acquired_at"]),
                 progress_digest=str(lease.payload["progress_digest"]),
+                authority_deadline_at=str(lease.payload["authority_deadline_at"]),
             )
             if expected != lease:
                 raise OperationalAuthorityError("lease acquisition differs")
@@ -1124,6 +1141,9 @@ class OperationalAuthority:
                 if acquired > _dt(str(latest.payload["deadline_at"])):
                     raise OperationalAuthorityError("work deadline has expired")
                 if latest.payload["state"] == WorkState.QUEUED.value:
+                    expected_authority_deadline = _canonical_time(
+                        _dt(str(latest.payload["deadline_at"]))
+                    )
                     if acquired < _dt(str(latest.payload["due_at"])):
                         raise OperationalAuthorityError("queued work is not due")
                 elif latest.payload["state"] == WorkState.RETRY_PENDING.value:
@@ -1145,6 +1165,9 @@ class OperationalAuthority:
                             ]
                         )
                     )
+                    expected_authority_deadline = _canonical_time(
+                        min(_dt(str(latest.payload["deadline_at"])), retry_horizon)
+                    )
                     if (
                         finding.payload["work_digest"]
                         != latest.payload["previous_digest"]
@@ -1158,6 +1181,15 @@ class OperationalAuthority:
                         raise OperationalAuthorityError("retry backoff is not due")
                 else:
                     raise OperationalAuthorityError("only ready work can be leased")
+                if (
+                    lease.payload["authority_deadline_at"]
+                    != expected_authority_deadline
+                    or _dt(str(lease.payload["expires_at"]))
+                    > _dt(expected_authority_deadline)
+                    or _dt(str(lease.payload["maximum_expires_at"]))
+                    > _dt(expected_authority_deadline)
+                ):
+                    raise OperationalAuthorityError("lease authority bound differs")
                 if self.active_lease_count() >= limit:
                     raise OperationalAuthorityError("host concurrency is exhausted")
                 self._connection.execute(
@@ -1216,6 +1248,7 @@ class OperationalAuthority:
                     "owner_digest",
                     "acquired_at",
                     "maximum_expires_at",
+                    "authority_deadline_at",
                     "status",
                     "closed_at",
                 )
