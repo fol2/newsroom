@@ -504,7 +504,7 @@ def build_retry_finding(
         cap = int(retry["maximum_backoff_seconds"])
         delay = min(cap, base * (2 ** (attempt - 1)))
         candidate_due = _dt(failed) + timedelta(seconds=delay)
-        if candidate_due <= _dt(first) + timedelta(seconds=maximum_elapsed):
+        if candidate_due < _dt(first) + timedelta(seconds=maximum_elapsed):
             next_due = _canonical_time(candidate_due)
         else:
             exhausted = True
@@ -1254,6 +1254,10 @@ class OperationalAuthority:
         retained_work = DueWork.from_canonical_bytes(bytes(work_row[0]))
         if retained_work.payload["state"] != WorkState.LEASED.value:
             raise OperationalAuthorityError("lease work is not LEASED")
+        if lease_state is LeaseState.RELEASED and _dt(transition_time) > _dt(
+            str(retained_work.payload["deadline_at"])
+        ):
+            raise OperationalAuthorityError("released work transition exceeds deadline")
         if (
             lease_state is LeaseState.ORPHANED
             and work_state is not WorkState.QUARANTINED
@@ -1296,6 +1300,7 @@ class OperationalAuthority:
                     != RetryClassification.RETRYABLE.value
                     or finding.payload["retry_exhausted"] is not False
                     or finding.payload["next_due_at"] is None
+                    or _dt(str(finding.payload["failed_at"])) > _dt(transition_time)
                 ):
                     raise OperationalAuthorityError("retry transition Finding differs")
             self._connection.execute(
@@ -1532,7 +1537,7 @@ class OperationalAuthority:
                 >= timedelta(seconds=starvation_limit)
             ),
             key=lambda item: (
-                str(item.payload["due_at"]),
+                _dt(str(item.payload["due_at"])),
                 str(item.payload["deadline_at"]),
                 item.work_id,
             ),

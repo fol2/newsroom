@@ -31,6 +31,7 @@ _T2 = "2042-01-05T00:00:02.000000Z"
 _T5 = "2042-01-05T00:00:05.000000Z"
 _T6 = "2042-01-05T00:00:06.000000Z"
 _T63 = "2042-01-05T00:01:03.000000Z"
+_T118 = "2042-01-05T00:01:58.000000Z"
 _T121 = "2042-01-05T00:02:01.000000Z"
 
 
@@ -263,6 +264,15 @@ def test_retry_failure_cannot_predate_exact_active_lease(tmp_path) -> None:
     )
     assert elapsed.payload["retry_exhausted"] is True
     assert elapsed.payload["next_due_at"] is None
+    boundary = build_retry_finding(
+        work=leased,
+        classification=RetryClassification.RETRYABLE,
+        dependency_scope="FIXTURE_PROVIDER",
+        first_attempt_at=_AT,
+        failed_at=_T118,
+    )
+    assert boundary.payload["retry_exhausted"] is True
+    assert boundary.payload["next_due_at"] is None
     connection.close()
 
 
@@ -300,6 +310,47 @@ def test_direct_renewal_cannot_jump_to_maximum_expiry(tmp_path) -> None:
     )
     assert orphaned.payload["closed_at"] == _T63
     assert quarantined.payload["state"] == WorkState.QUARANTINED.value
+    connection.close()
+
+
+def test_release_obeys_work_deadline_and_retry_failure_chronology(tmp_path) -> None:
+    _, connection = _database(tmp_path)
+    authority = OperationalAuthority(connection)
+    profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
+    authority.register_profile(profile)
+    queued = enqueue_due_work(
+        profile=profile,
+        logical_due_key="lease:deadline-close",
+        scope_kind="FIXTURE_SOURCE",
+        urgency=Urgency.ROUTINE,
+        due_at=_AT,
+        deadline_at=_T2,
+        authority_version_digest=_D,
+    )
+    authority.append_work(queued)
+    lease, leased = _commit_lease(authority, queued, acquired_at=_T1)
+    with pytest.raises(OperationalAuthorityError, match="deadline"):
+        authority.close_lease_and_transition(
+            lease=lease,
+            lease_state=LeaseState.RELEASED,
+            work_state=WorkState.COMPLETED,
+            transitioned_at=_T5,
+        )
+    finding = build_retry_finding(
+        work=leased,
+        classification=RetryClassification.RETRYABLE,
+        dependency_scope="FIXTURE_PROVIDER",
+        first_attempt_at=_T1,
+        failed_at=_T2,
+    )
+    authority.append_retry_finding(finding)
+    with pytest.raises(OperationalAuthorityError, match="Finding differs"):
+        authority.close_lease_and_transition(
+            lease=lease,
+            lease_state=LeaseState.RELEASED,
+            work_state=WorkState.RETRY_PENDING,
+            transitioned_at=_T1,
+        )
     connection.close()
 
 
@@ -427,7 +478,15 @@ def test_starved_routine_work_is_promoted_before_catch_up_limit(
     authority = OperationalAuthority(connection)
     profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
     authority.register_profile(profile)
-    routine = _work(profile, "starvation:routine")
+    routine = enqueue_due_work(
+        profile=profile,
+        logical_due_key="starvation:routine",
+        scope_kind="FIXTURE_SOURCE",
+        urgency=Urgency.ROUTINE,
+        due_at="20420105T000000.000000Z",
+        deadline_at="2042-01-05T01:00:00.000000Z",
+        authority_version_digest=_D,
+    )
     newer_routine = enqueue_due_work(
         profile=profile,
         logical_due_key="starvation:routine-newer",
