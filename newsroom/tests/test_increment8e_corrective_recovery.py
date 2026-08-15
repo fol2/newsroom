@@ -9,6 +9,7 @@ import pytest
 from newsroom.authority import migrations
 from newsroom.authority.increment8_recovery_migrations import _helpers
 from newsroom.increment8.operations import (
+    DueWork,
     OperationalAuthority,
     Urgency,
     build_operational_profile,
@@ -130,6 +131,11 @@ def test_catch_up_reconstructs_every_due_work_before_sorting(tmp_path) -> None:
     )
     with pytest.raises(RecoveryError, match="forged"):
         bounded_catch_up([detached])
+    semantically_incomplete = DueWork.build(
+        {"work_id": "work:bogus", "urgency": "URGENT", "deadline_at": _LATER}
+    )
+    with pytest.raises(RecoveryError, match="forged"):
+        bounded_catch_up([semantically_incomplete])
     connection.close()
 
 
@@ -183,6 +189,30 @@ def test_restore_rejects_missing_parent_without_creating_partial_destination(
     with pytest.raises(RecoveryError, match="parent is absent"):
         restore_checked_backup(manifest, source, destination, completed_at=_LATER)
     assert not destination.exists()
+    connection.close()
+
+
+def test_invalid_restore_completion_time_has_no_copy_and_allows_retry(tmp_path) -> None:
+    connection, source, manifest = _manifest(tmp_path)
+    destination = (tmp_path / "restored.sqlite3").absolute()
+    with pytest.raises(RecoveryError, match="completed_at"):
+        restore_checked_backup(manifest, source, destination, completed_at="not-a-time")
+    assert not destination.exists()
+    receipt = restore_checked_backup(manifest, source, destination, completed_at=_LATER)
+    assert receipt.payload["completed_at"] == _LATER
+    connection.close()
+
+
+def test_foreign_keys_are_rechecked_immediately_before_every_write(tmp_path) -> None:
+    connection, source, manifest = _manifest(tmp_path)
+    restore = restore_checked_backup(
+        manifest, source, (tmp_path / "restored.sqlite3").absolute(), completed_at=_LATER
+    )
+    authority = RecoveryAuthority(connection)
+    connection.execute("PRAGMA foreign_keys=OFF")
+    with pytest.raises(RecoveryError, match="foreign-key-enabled"):
+        authority.append_restore(restore)
+    assert connection.execute("SELECT COUNT(*) FROM restore_runs").fetchone() == (0,)
     connection.close()
 
 

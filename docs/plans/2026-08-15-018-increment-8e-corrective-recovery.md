@@ -14,20 +14,22 @@ canary, permanent-locality or production effect.
   scenario, expected outcome, observed outcome, derived status and non-effect
   flag are checked before retained scalar columns are written.
 - `RecoveryAuthority` accepts only an idle schema-v32 SQLite connection with
-  foreign-key enforcement already enabled; the authority does not silently
-  change caller connection policy.
-- Every `DueWork` supplied to catch-up planning is reconstructed and compared
-  with the supplied object before parsed-deadline ordering or bounded selection.
+  foreign-key enforcement already enabled and rechecks that setting immediately
+  before every write; the authority does not silently change caller policy.
+- Every `DueWork` supplied to catch-up planning is reconstructed, checked against
+  the complete operational payload/state rules and compared with the supplied
+  object before parsed-deadline ordering or bounded selection.
 - A failed backup removes only the incomplete destination created by that
   attempt, so the same absent path can be retried while pre-existing paths remain
   protected by exclusive creation.
-- Restore rejects an absent destination parent and removes its own incomplete
-  destination after copy or logical-integrity failure.
+- Restore validates completion evidence before copying, rejects an absent
+  destination parent and removes its own incomplete destination after copy or
+  logical-integrity failure.
 
 ## Evidence
 
-- focused recovery suite: 14 passed;
-- complete Increment 8 suite: 129 passed;
+- focused recovery suite: 16 passed;
+- complete Increment 8 suite: 131 passed;
 - new regressions cover disabled foreign keys, active transactions,
   self-consistent fault forgery, detached DueWork, retry after failed backup,
   missing restore parent and partial-restore cleanup.
