@@ -156,6 +156,8 @@ def test_job_graph_is_exact_and_decision_always_reports() -> None:
                 "13",
                 "14",
                 "15",
+                "16",
+                "17",
             ]
         },
     }
