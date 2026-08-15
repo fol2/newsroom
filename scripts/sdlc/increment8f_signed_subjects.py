@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -39,8 +40,22 @@ def validate_signed_subjects(
     substantive_review = SubstantiveReviewEvidence.from_canonical_bytes(
         substantive_review_path.read_bytes()
     )
+    try:
+        reviewed_tree = subprocess.check_output(
+            ("git", "rev-parse", f"{substantive_review.reviewed_head_sha}^{{tree}}"),
+            cwd=repo_root,
+            text=True,
+            timeout=5,
+        ).strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Increment8SignedSubjectError(
+            "reviewed source identity is absent"
+        ) from exc
     if (
-        substantive_review.merge_sha != head
+        substantive_review.repository != "fol2/newsroom"
+        or substantive_review.merge_sha != head
+        or substantive_review.review_provider != "chatgpt-codex-connector"
+        or reviewed_tree != tree
         or canonical_json_bytes(packet.retained_evidence["substantive_review"])
         != substantive_review.canonical_bytes
         or packet.evidence_digests["substantive_review_digest"]
