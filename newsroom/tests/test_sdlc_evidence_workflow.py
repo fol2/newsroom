@@ -540,7 +540,9 @@ def test_decision_bootstraps_locked_runtime_before_closeout_receipt() -> None:
     )
     review = _step("decision", "Retain exact Increment 8 substantive review")
     assert review["if"] == (
-        "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'"
+        "github.event_name == 'workflow_dispatch' && "
+        "github.ref == 'refs/heads/main' && "
+        "needs.route.outputs.service_required == 'true'"
     )
     assert review["env"] == {"GITHUB_TOKEN": "${{ github.token }}"}
     for expected in (

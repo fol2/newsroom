@@ -639,7 +639,10 @@ jobs:
           cat "${RUNNER_TEMP}/decision-result.json"
 
       - name: Retain exact Increment 8 substantive review
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/main' &&
+          needs.route.outputs.service_required == 'true'
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
