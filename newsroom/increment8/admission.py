@@ -679,6 +679,8 @@ def _health_reconstructed_from_bytes(raw: bytes) -> HealthPosture:
         )
     except (TypeError, ValueError) as exc:
         raise AdmissionError("health evidence semantics differ") from exc
+    if semantic.canonical_bytes != raw or semantic.digest != digest_bytes(raw):
+        raise AdmissionError("health evidence retained bytes differ")
     return semantic
 
 
@@ -726,6 +728,8 @@ def _observability_reconstructed_from_bytes(raw: bytes) -> ObservabilityRecord:
         )
     except (TypeError, ValueError) as exc:
         raise AdmissionError("observability evidence semantics differ") from exc
+    if semantic.canonical_bytes != raw or semantic.digest != digest_bytes(raw):
+        raise AdmissionError("observability evidence retained bytes differ")
     return semantic
 
 

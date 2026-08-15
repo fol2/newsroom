@@ -28,8 +28,8 @@ canary, permanent-locality or production effect.
 
 ## Local evidence
 
-- focused 8F product tests: 9 passed;
-- complete Increment 8 tests: 136 passed;
+- focused 8F product tests: 10 passed;
+- complete Increment 8 tests: 137 passed;
 - Ruff and `git diff --check`: passed.
 
 Exact-head substantive review and authoritative CI/SDLC evidence are recorded
