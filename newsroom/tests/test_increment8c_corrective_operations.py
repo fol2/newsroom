@@ -516,6 +516,88 @@ def test_legacy_active_lease_is_upgraded_by_bounded_renewal(tmp_path) -> None:
     connection.close()
 
 
+def test_legacy_retry_lease_cannot_close_after_derived_horizon(tmp_path) -> None:
+    _, connection = _database(tmp_path)
+    authority = OperationalAuthority(connection)
+    profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
+    authority.register_profile(profile)
+    queued = _work(profile, "lease:legacy-retry-close")
+    authority.append_work(queued)
+    first_lease, leased_once = _commit_lease(authority, queued)
+    finding = build_retry_finding(
+        work=leased_once,
+        classification=RetryClassification.RETRYABLE,
+        dependency_scope="FIXTURE_PROVIDER",
+        first_attempt_at=_AT,
+        failed_at=_AT,
+    )
+    authority.append_retry_finding(finding)
+    _, retry = authority.close_lease_and_transition(
+        lease=first_lease,
+        lease_state=LeaseState.RELEASED,
+        work_state=WorkState.RETRY_PENDING,
+        transitioned_at=_AT,
+    )
+    current = acquire_lease(
+        work=retry,
+        owner_digest="sha256:" + "2" * 64,
+        acquired_at=_T118,
+        progress_digest="sha256:" + "3" * 64,
+        authority_deadline_at=_T120,
+    )
+    legacy_payload = dict(current.payload)
+    legacy_payload.pop("authority_deadline_at")
+    legacy_payload.pop("renewed_at")
+    legacy_payload["expires_at"] = "2042-01-05T00:02:59.000000Z"
+    legacy_payload["maximum_expires_at"] = "2042-01-05T00:06:59.000000Z"
+    legacy = operations.WorkLease.build(legacy_payload)
+    connection.execute(
+        "INSERT INTO work_leases VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            legacy.lease_id,
+            legacy.payload["lease_version"],
+            legacy.canonical_bytes,
+            legacy.digest,
+            legacy.payload["work_id"],
+            legacy.payload["owner_digest"],
+            legacy.payload["progress_digest"],
+            legacy.payload["acquired_at"],
+            legacy.payload["expires_at"],
+            legacy.payload["maximum_expires_at"],
+            legacy.payload["status"],
+            legacy.payload["previous_digest"],
+        ),
+    )
+    leased_twice = transition_work(retry, state=WorkState.LEASED, attempt_count=2)
+    connection.execute(
+        "INSERT INTO due_work VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            leased_twice.work_id,
+            leased_twice.payload["state_version"],
+            leased_twice.canonical_bytes,
+            leased_twice.digest,
+            leased_twice.payload["profile_record_id"],
+            leased_twice.payload["logical_due_key"],
+            leased_twice.payload["scope_kind"],
+            leased_twice.payload["urgency"],
+            leased_twice.payload["state"],
+            leased_twice.payload["attempt_count"],
+            leased_twice.payload["due_at"],
+            leased_twice.payload["deadline_at"],
+            leased_twice.payload["previous_digest"],
+            leased_twice.payload["authority_version_digest"],
+        ),
+    )
+    with pytest.raises(OperationalAuthorityError, match="authority deadline"):
+        authority.close_lease_and_transition(
+            lease=legacy,
+            lease_state=LeaseState.RELEASED,
+            work_state=WorkState.COMPLETED,
+            transitioned_at=_T121,
+        )
+    connection.close()
+
+
 def test_release_obeys_work_deadline_and_retry_failure_chronology(tmp_path) -> None:
     _, connection = _database(tmp_path)
     authority = OperationalAuthority(connection)

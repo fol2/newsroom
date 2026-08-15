@@ -50,3 +50,4 @@ Fixture operational authority only. No production scheduler activation, live pro
 - Retry lease records retain an exact `authority_deadline_at` equal to the earlier of the work deadline and frozen total retry horizon; both initial and maximum expiry are reconstructed and capped at that authority boundary.
 - The public lease builder requires that bound for RETRY_PENDING work rather than producing an unusable record. Renewal derives the same bound from retained DueWork and RetryFinding history, including a compatibility path that upgrades an older active lease record on its next renewal.
 - That legacy upgrade clamps an older uncapped effective expiry and maximum expiry to the derived authority deadline before validating the renewal instant.
+- Direct closure derives the same authority deadline from retained DueWork and RetryFinding history, so an older unrenewed retry lease cannot release an outcome after the frozen total elapsed horizon.

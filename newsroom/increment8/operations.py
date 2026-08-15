@@ -964,6 +964,39 @@ class OperationalAuthority:
     def _insert(self, sql: str, values: tuple[object, ...]) -> int:
         return self._write(lambda: self._connection.execute(sql, values).rowcount)
 
+    def _leased_work_authority_deadline(self, work: DueWork) -> datetime:
+        if work.payload["state"] != WorkState.LEASED.value:
+            raise OperationalAuthorityError("lease work is not LEASED")
+        authority_deadline = _dt(str(work.payload["deadline_at"]))
+        predecessor_row = self._connection.execute(
+            "SELECT work_bytes FROM due_work WHERE work_id=? AND state_version=?",
+            (work.work_id, int(work.payload["state_version"]) - 1),
+        ).fetchone()
+        if predecessor_row is None:
+            raise OperationalAuthorityError("lease work predecessor is absent")
+        predecessor = DueWork.from_canonical_bytes(bytes(predecessor_row[0]))
+        if predecessor.payload["state"] != WorkState.RETRY_PENDING.value:
+            return authority_deadline
+        retry_row = self._connection.execute(
+            "SELECT finding_bytes FROM retry_findings WHERE work_id=? "
+            "AND attempt_number=?",
+            (predecessor.work_id, predecessor.payload["attempt_count"]),
+        ).fetchone()
+        if retry_row is None:
+            raise OperationalAuthorityError("lease retry authority is absent")
+        retry = RetryFinding.from_canonical_bytes(bytes(retry_row[0]))
+        return min(
+            authority_deadline,
+            _dt(str(retry.payload["first_attempt_at"]))
+            + timedelta(
+                seconds=int(
+                    INCREMENT_8_READINESS.operational_profile["retry"][
+                        "maximum_elapsed_seconds"
+                    ]
+                )
+            ),
+        )
+
     def register_profile(self, profile: OperationalProfile) -> None:
         if (
             not isinstance(profile, OperationalProfile)
@@ -1286,43 +1319,9 @@ class OperationalAuthority:
                     "closed_at",
                 )
             }
-            derived_authority_deadline = _dt(str(retained_work.payload["deadline_at"]))
-            predecessor_row = self._connection.execute(
-                "SELECT work_bytes FROM due_work WHERE work_id=? AND state_version=?",
-                (
-                    retained_work.work_id,
-                    int(retained_work.payload["state_version"]) - 1,
-                ),
-            ).fetchone()
-            if predecessor_row is not None:
-                predecessor_work = DueWork.from_canonical_bytes(
-                    bytes(predecessor_row[0])
-                )
-                if predecessor_work.payload["state"] == WorkState.RETRY_PENDING.value:
-                    retry_row = self._connection.execute(
-                        "SELECT finding_bytes FROM retry_findings WHERE work_id=? "
-                        "AND attempt_number=?",
-                        (
-                            predecessor_work.work_id,
-                            predecessor_work.payload["attempt_count"],
-                        ),
-                    ).fetchone()
-                    if retry_row is None:
-                        raise OperationalAuthorityError(
-                            "lease renewal retry authority is absent"
-                        )
-                    retry = RetryFinding.from_canonical_bytes(bytes(retry_row[0]))
-                    derived_authority_deadline = min(
-                        derived_authority_deadline,
-                        _dt(str(retry.payload["first_attempt_at"]))
-                        + timedelta(
-                            seconds=int(
-                                INCREMENT_8_READINESS.operational_profile["retry"][
-                                    "maximum_elapsed_seconds"
-                                ]
-                            )
-                        ),
-                    )
+            derived_authority_deadline = self._leased_work_authority_deadline(
+                retained_work
+            )
             try:
                 expected_renewal = renew_lease(
                     retained,
@@ -1408,6 +1407,14 @@ class OperationalAuthority:
         retained_work = DueWork.from_canonical_bytes(bytes(work_row[0]))
         if retained_work.payload["state"] != WorkState.LEASED.value:
             raise OperationalAuthorityError("lease work is not LEASED")
+        authority_deadline = self._leased_work_authority_deadline(retained_work)
+        if (
+            lease_state is LeaseState.RELEASED
+            and _dt(transition_time) > authority_deadline
+        ):
+            raise OperationalAuthorityError(
+                "released work transition exceeds lease authority deadline"
+            )
         if lease_state is LeaseState.RELEASED and _dt(transition_time) > _dt(
             str(retained_work.payload["deadline_at"])
         ):
