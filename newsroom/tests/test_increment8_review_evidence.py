@@ -39,6 +39,7 @@ def _payload(*, resolved: bool = True, reviewed_head: str = _HEAD):
                                         }
                                     ],
                                 },
+                                "comments": {"totalCount": 0, "nodes": []},
                                 "reviewThreads": {
                                     "totalCount": 1,
                                     "pageInfo": {"hasNextPage": False},
@@ -70,6 +71,33 @@ def test_review_evidence_binds_exact_merge_head_review_and_zero_open_threads() -
     )
     assert evidence.merge_sha == _MERGE
     assert evidence.reviewed_head_sha == _HEAD
+
+
+def test_clean_codex_comment_is_exact_review_authority() -> None:
+    payload = _payload()
+    pull_request = payload["data"]["repository"]["object"]["associatedPullRequests"][
+        "nodes"
+    ][0]
+    pull_request["reviews"] = {"totalCount": 0, "nodes": []}
+    pull_request["comments"] = {
+        "totalCount": 1,
+        "nodes": [
+            {
+                "databaseId": 988,
+                "createdAt": "2042-01-05T00:01:00.000000Z",
+                "author": {"login": "chatgpt-codex-connector"},
+                "body": (
+                    "Codex Review: Didn't find any major issues. Keep them coming!\n\n"
+                    f"**Reviewed commit:** `{_HEAD[:10]}`"
+                ),
+            }
+        ],
+    }
+    evidence = build_review_evidence(
+        payload, repository="fol2/newsroom", merge_sha=_MERGE
+    )
+    assert evidence.review_authority_kind == "ISSUE_COMMENT"
+    assert evidence.review_database_id == 988
 
 
 def test_review_evidence_rejects_unresolved_findings_or_foreign_head() -> None:

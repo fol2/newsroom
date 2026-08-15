@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -26,6 +27,10 @@ query($owner:String!,$name:String!,$oid:GitObjectID!){
             reviews(last:100){
               totalCount
               nodes{databaseId state submittedAt author{login} commit{oid}}
+            }
+            comments(last:100){
+              totalCount
+              nodes{databaseId createdAt body author{login}}
             }
             reviewThreads(first:100){
               totalCount pageInfo{hasNextPage}
@@ -88,8 +93,12 @@ def build_review_evidence(
     reviews = _mapping(pull_request.get("reviews"), "reviews")
     if not isinstance(reviews.get("totalCount"), int) or reviews["totalCount"] > 100:
         raise Increment8ReviewEvidenceError("review inventory is incomplete")
-    exact_reviews = [
-        item
+    authorities = [
+        {
+            **item,
+            "authorityKind": "PULL_REQUEST_REVIEW",
+            "authorityAt": item.get("submittedAt"),
+        }
         for item in _nodes(reviews, "reviews")
         if isinstance(item.get("author"), Mapping)
         and item["author"].get("login") == _PROVIDER
@@ -97,9 +106,29 @@ def build_review_evidence(
         and item["commit"].get("oid") == head_sha
         and item.get("state") in {"APPROVED", "COMMENTED"}
     ]
-    if not exact_reviews:
+    comments = _mapping(pull_request.get("comments"), "review comments")
+    if not isinstance(comments.get("totalCount"), int) or comments["totalCount"] > 100:
+        raise Increment8ReviewEvidenceError("review comment inventory is incomplete")
+    reviewed_prefix = str(head_sha)[:10]
+    reviewed_pattern = re.compile(
+        rf"\*\*Reviewed commit:\*\*\s*`{re.escape(reviewed_prefix)}`"
+    )
+    authorities.extend(
+        {
+            **item,
+            "authorityKind": "ISSUE_COMMENT",
+            "authorityAt": item.get("createdAt"),
+        }
+        for item in _nodes(comments, "review comments")
+        if isinstance(item.get("author"), Mapping)
+        and item["author"].get("login") == _PROVIDER
+        and isinstance(item.get("body"), str)
+        and "Didn't find any major issues." in item["body"]
+        and reviewed_pattern.search(item["body"]) is not None
+    )
+    if not authorities:
         raise Increment8ReviewEvidenceError("exact-head substantive review is absent")
-    exact_review = max(exact_reviews, key=lambda item: str(item.get("submittedAt", "")))
+    exact_review = max(authorities, key=lambda item: str(item.get("authorityAt", "")))
 
     threads = _mapping(pull_request.get("reviewThreads"), "review threads")
     page_info = _mapping(threads.get("pageInfo"), "review thread page info")
@@ -128,8 +157,9 @@ def build_review_evidence(
             merge_sha=merge_sha,
             reviewed_head_sha=head_sha,
             review_provider=_PROVIDER,
+            review_authority_kind=exact_review["authorityKind"],
             review_database_id=exact_review["databaseId"],
-            review_submitted_at=exact_review["submittedAt"],
+            review_submitted_at=exact_review["authorityAt"],
             unresolved_thread_count=len(unresolved),
             p1_finding_count=p1,
             material_p2_finding_count=p2,

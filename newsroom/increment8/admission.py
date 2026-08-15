@@ -529,6 +529,7 @@ class SubstantiveReviewEvidence:
     merge_sha: str
     reviewed_head_sha: str
     review_provider: str
+    review_authority_kind: str
     review_database_id: int
     canonical_bytes: bytes
     digest: str
@@ -542,6 +543,7 @@ class SubstantiveReviewEvidence:
         merge_sha: str,
         reviewed_head_sha: str,
         review_provider: str,
+        review_authority_kind: str,
         review_database_id: int,
         review_submitted_at: str,
         unresolved_thread_count: int,
@@ -557,6 +559,9 @@ class SubstantiveReviewEvidence:
             "merge_sha": _commit_sha(merge_sha, "merge_sha"),
             "reviewed_head_sha": _commit_sha(reviewed_head_sha, "reviewed_head_sha"),
             "review_provider": _token(review_provider, "review_provider"),
+            "review_authority_kind": _token(
+                review_authority_kind, "review_authority_kind"
+            ),
             "review_database_id": _integer(
                 review_database_id, "review_database_id", minimum=1
             ),
@@ -576,7 +581,9 @@ class SubstantiveReviewEvidence:
             "production_activation_authorised": False,
         }
         if (
-            payload["unresolved_thread_count"]
+            payload["review_authority_kind"]
+            not in {"ISSUE_COMMENT", "PULL_REQUEST_REVIEW"}
+            or payload["unresolved_thread_count"]
             != payload["p1_finding_count"]
             + payload["material_p2_finding_count"]
             + payload["other_unresolved_thread_count"]
@@ -592,6 +599,7 @@ class SubstantiveReviewEvidence:
             str(payload["merge_sha"]),
             str(payload["reviewed_head_sha"]),
             str(payload["review_provider"]),
+            str(payload["review_authority_kind"]),
             int(payload["review_database_id"]),
             raw,
             record_digest,
@@ -606,6 +614,7 @@ class SubstantiveReviewEvidence:
             "merge_sha",
             "reviewed_head_sha",
             "review_provider",
+            "review_authority_kind",
             "review_database_id",
             "review_submitted_at",
             "unresolved_thread_count",
@@ -627,6 +636,7 @@ class SubstantiveReviewEvidence:
             merge_sha=payload["merge_sha"],  # type: ignore[arg-type]
             reviewed_head_sha=payload["reviewed_head_sha"],  # type: ignore[arg-type]
             review_provider=payload["review_provider"],  # type: ignore[arg-type]
+            review_authority_kind=payload["review_authority_kind"],  # type: ignore[arg-type]
             review_database_id=payload["review_database_id"],  # type: ignore[arg-type]
             review_submitted_at=payload["review_submitted_at"],  # type: ignore[arg-type]
             unresolved_thread_count=payload["unresolved_thread_count"],  # type: ignore[arg-type]
