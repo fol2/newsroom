@@ -103,6 +103,14 @@ def test_retry_uses_latest_work_version_and_exact_next_due_at(tmp_path) -> None:
     )
     with pytest.raises(OperationalAuthorityError, match="backoff"):
         authority.append_lease(early)
+    beyond_horizon = acquire_lease(
+        work=retry_once,
+        owner_digest="sha256:" + "2" * 64,
+        acquired_at=_T121,
+        progress_digest="sha256:" + "3" * 64,
+    )
+    with pytest.raises(OperationalAuthorityError, match="backoff"):
+        authority.append_lease(beyond_horizon)
 
     second_lease = acquire_lease(
         work=retry_once,
@@ -284,7 +292,7 @@ def test_retry_serialised_lease_check_uses_exact_parsed_instants(tmp_path) -> No
     queued = _work(profile, "retry:timestamp-spelling")
     authority.append_work(queued)
     basic_acquired_at = "20420105T000001.000000Z"
-    _, leased = _commit_lease(authority, queued, acquired_at=basic_acquired_at)
+    first_lease, leased = _commit_lease(authority, queued, acquired_at=basic_acquired_at)
     finding = build_retry_finding(
         work=leased,
         classification=RetryClassification.RETRYABLE,
@@ -293,6 +301,22 @@ def test_retry_serialised_lease_check_uses_exact_parsed_instants(tmp_path) -> No
         failed_at=_T2,
     )
     authority.append_retry_finding(finding)
+    _, retry = authority.close_lease_and_transition(
+        lease=first_lease,
+        lease_state=LeaseState.RELEASED,
+        work_state=WorkState.RETRY_PENDING,
+        transitioned_at=_T2,
+    )
+    second_lease, leased_twice = _commit_lease(authority, retry, acquired_at=_T5)
+    second_finding = build_retry_finding(
+        work=leased_twice,
+        classification=RetryClassification.RETRYABLE,
+        dependency_scope="FIXTURE_PROVIDER",
+        first_attempt_at=basic_acquired_at,
+        failed_at=_T5,
+    )
+    authority.append_retry_finding(second_finding)
+    assert second_lease.payload["acquired_at"] == _T5
     connection.close()
 
 
@@ -537,6 +561,36 @@ def test_starved_routine_work_is_promoted_before_catch_up_limit(
     assert selected[0].payload["urgency"] == Urgency.URGENT.value
     assert routine in selected
     assert newer_routine not in selected
+    connection.close()
+
+
+def test_same_priority_work_uses_parsed_deadline_order(tmp_path, monkeypatch) -> None:
+    profile_definition = dict(operations.INCREMENT_8_READINESS.operational_profile)
+    schedule = dict(profile_definition["schedule"])
+    schedule["maximum_catch_up_items"] = 1
+    profile_definition["schedule"] = schedule
+    monkeypatch.setattr(
+        operations,
+        "INCREMENT_8_READINESS",
+        replace(operations.INCREMENT_8_READINESS, operational_profile=profile_definition),
+    )
+    _, connection = _database(tmp_path)
+    authority = OperationalAuthority(connection)
+    profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
+    authority.register_profile(profile)
+    earlier = enqueue_due_work(
+        profile=profile, logical_due_key="deadline:earlier", scope_kind="FIXTURE_SOURCE",
+        urgency=Urgency.URGENT, due_at=_AT, deadline_at="20420105T003000.000000Z",
+        authority_version_digest=_D,
+    )
+    later = enqueue_due_work(
+        profile=profile, logical_due_key="deadline:later", scope_kind="FIXTURE_SOURCE",
+        urgency=Urgency.URGENT, due_at=_AT, deadline_at="2042-01-05T00:45:00.000000Z",
+        authority_version_digest=_D,
+    )
+    authority.append_work(earlier)
+    authority.append_work(later)
+    assert authority.due_work(_T2) == (earlier,)
     connection.close()
 
 

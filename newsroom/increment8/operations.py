@@ -1126,6 +1126,15 @@ class OperationalAuthority:
                         raise OperationalAuthorityError("retry Finding is absent")
                     finding = RetryFinding.from_canonical_bytes(bytes(retry_row[0]))
                     next_due = finding.payload["next_due_at"]
+                    retry_horizon = _dt(
+                        str(finding.payload["first_attempt_at"])
+                    ) + timedelta(
+                        seconds=int(
+                            INCREMENT_8_READINESS.operational_profile["retry"][
+                                "maximum_elapsed_seconds"
+                            ]
+                        )
+                    )
                     if (
                         finding.payload["work_digest"]
                         != latest.payload["previous_digest"]
@@ -1134,6 +1143,7 @@ class OperationalAuthority:
                         or finding.payload["retry_exhausted"] is not False
                         or next_due is None
                         or acquired < _dt(str(next_due))
+                        or acquired >= retry_horizon
                     ):
                         raise OperationalAuthorityError("retry backoff is not due")
                 else:
@@ -1368,22 +1378,29 @@ class OperationalAuthority:
         )
         if expected != finding:
             raise OperationalAuthorityError("retry Finding differs")
-        active_lease = self._connection.execute(
+        active_leases = self._connection.execute(
             "SELECT l.acquired_at,l.expires_at FROM work_leases l WHERE l.work_id=? "
             "AND l.lease_version=(SELECT MAX(x.lease_version) FROM work_leases x "
             "WHERE x.lease_id=l.lease_id) AND l.status='ACTIVE' "
-            "ORDER BY l.acquired_at DESC,l.lease_id LIMIT 1",
+            "ORDER BY l.lease_id",
             (finding.payload["work_id"],),
-        ).fetchone()
-        first_attempt = self._connection.execute(
-            "SELECT MIN(acquired_at) FROM work_leases WHERE work_id=?",
+        ).fetchall()
+        attempts = self._connection.execute(
+            "SELECT acquired_at FROM work_leases WHERE work_id=?",
             (finding.payload["work_id"],),
-        ).fetchone()
+        ).fetchall()
+        active_lease = (
+            None
+            if not active_leases
+            else max(active_leases, key=lambda row: _dt(str(row[0])))
+        )
+        first_attempt = (
+            None if not attempts else min((str(row[0]) for row in attempts), key=_dt)
+        )
         failure_time = _dt(str(finding.payload["failed_at"]))
         if (
             active_lease is None
-            or first_attempt is None
-            or first_attempt[0] != finding.payload["first_attempt_at"]
+            or first_attempt != finding.payload["first_attempt_at"]
             or failure_time < _dt(str(active_lease[0]))
             or failure_time > _dt(str(active_lease[1]))
         ):
@@ -1398,7 +1415,7 @@ class OperationalAuthority:
             "AND l.status='ACTIVE' "
             "AND l.lease_version=(SELECT MAX(x.lease_version) FROM work_leases x "
             "WHERE x.lease_id=l.lease_id)) AND "
-            "(SELECT MIN(acquired_at) FROM work_leases WHERE work_id=?)=?",
+            "(SELECT COUNT(*) FROM work_leases WHERE work_id=?)=?",
             (
                 finding.finding_id,
                 finding.canonical_bytes,
@@ -1415,7 +1432,7 @@ class OperationalAuthority:
                 active_lease[0],
                 active_lease[1],
                 finding.payload["work_id"],
-                finding.payload["first_attempt_at"],
+                len(attempts),
             ),
         )
         if inserted != 1:
@@ -1518,7 +1535,7 @@ class OperationalAuthority:
         ready.sort(
             key=lambda item: (
                 priority[str(item.payload["urgency"])],
-                str(item.payload["deadline_at"]),
+                _dt(str(item.payload["deadline_at"])),
                 item.work_id,
             )
         )

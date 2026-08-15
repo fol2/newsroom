@@ -42,3 +42,6 @@ Fixture operational authority only. No production scheduler activation, live pro
 - The Routine fairness slot selects the longest-waiting parsed canonical `due_at` instant first, then deadline and identity, so equivalent timestamp spellings cannot change priority.
 - Retry Finding insertion rechecks the exact active lease timestamps selected by parsed-instant prevalidation, avoiding lexical timestamp ordering inside the serialised predicate.
 - Starvation deadline tie-breaking also uses parsed instants, so equivalent ISO timestamp spellings cannot defer the earliest deadline.
+- General same-priority scheduling orders parsed deadline instants before applying the catch-up bound.
+- The retained first attempt is selected by parsed acquisition instant, and the serialised Finding insert binds the unchanged lease inventory rather than SQLite text ordering.
+- RETRY_PENDING acquisition is rejected at or beyond the frozen maximum total elapsed horizon, even when its backoff due time and work deadline would otherwise permit it.
