@@ -103,22 +103,30 @@ def test_retry_uses_latest_work_version_and_exact_next_due_at(tmp_path) -> None:
 
     assert authority.due_work(_T1) == ()
     assert authority.due_work(_T2) == (retry_once,)
+    with pytest.raises(OperationalAuthorityError, match="exact authority deadline"):
+        acquire_lease(
+            work=retry_once,
+            owner_digest="sha256:" + "2" * 64,
+            acquired_at=_T2,
+            progress_digest="sha256:" + "3" * 64,
+        )
     early = acquire_lease(
         work=retry_once,
         owner_digest="sha256:" + "2" * 64,
         acquired_at=_T1,
         progress_digest="sha256:" + "3" * 64,
+        authority_deadline_at=_T120,
     )
     with pytest.raises(OperationalAuthorityError, match="backoff"):
         authority.append_lease(early)
-    beyond_horizon = acquire_lease(
-        work=retry_once,
-        owner_digest="sha256:" + "2" * 64,
-        acquired_at=_T121,
-        progress_digest="sha256:" + "3" * 64,
-    )
-    with pytest.raises(OperationalAuthorityError, match="backoff"):
-        authority.append_lease(beyond_horizon)
+    with pytest.raises(OperationalAuthorityError, match="authority deadline"):
+        acquire_lease(
+            work=retry_once,
+            owner_digest="sha256:" + "2" * 64,
+            acquired_at=_T121,
+            progress_digest="sha256:" + "3" * 64,
+            authority_deadline_at=_T120,
+        )
     near_horizon = acquire_lease(
         work=retry_once,
         owner_digest="sha256:" + "2" * 64,
@@ -427,6 +435,72 @@ def test_direct_renewal_cannot_resurrect_an_expired_predecessor(tmp_path) -> Non
     )
     with pytest.raises(OperationalAuthorityError, match="renewal"):
         authority.append_lease(forged)
+    connection.close()
+
+
+def test_legacy_active_lease_is_upgraded_by_bounded_renewal(tmp_path) -> None:
+    _, connection = _database(tmp_path)
+    authority = OperationalAuthority(connection)
+    profile = build_operational_profile(approved_by_digest=_D, approved_at=_AT)
+    authority.register_profile(profile)
+    queued = _work(profile, "lease:legacy-renewal")
+    authority.append_work(queued)
+    current = acquire_lease(
+        work=queued,
+        owner_digest="sha256:" + "2" * 64,
+        acquired_at=_AT,
+        progress_digest="sha256:" + "3" * 64,
+    )
+    legacy_payload = dict(current.payload)
+    legacy_payload.pop("authority_deadline_at")
+    legacy_payload.pop("renewed_at")
+    legacy = operations.WorkLease.build(legacy_payload)
+    connection.execute(
+        "INSERT INTO work_leases VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            legacy.lease_id,
+            legacy.payload["lease_version"],
+            legacy.canonical_bytes,
+            legacy.digest,
+            legacy.payload["work_id"],
+            legacy.payload["owner_digest"],
+            legacy.payload["progress_digest"],
+            legacy.payload["acquired_at"],
+            legacy.payload["expires_at"],
+            legacy.payload["maximum_expires_at"],
+            legacy.payload["status"],
+            legacy.payload["previous_digest"],
+        ),
+    )
+    leased = transition_work(queued, state=WorkState.LEASED, attempt_count=1)
+    connection.execute(
+        "INSERT INTO due_work VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            leased.work_id,
+            leased.payload["state_version"],
+            leased.canonical_bytes,
+            leased.digest,
+            leased.payload["profile_record_id"],
+            leased.payload["logical_due_key"],
+            leased.payload["scope_kind"],
+            leased.payload["urgency"],
+            leased.payload["state"],
+            leased.payload["attempt_count"],
+            leased.payload["due_at"],
+            leased.payload["deadline_at"],
+            leased.payload["previous_digest"],
+            leased.payload["authority_version_digest"],
+        ),
+    )
+    renewed = operations.renew_lease(
+        legacy,
+        progress_digest="sha256:" + "9" * 64,
+        renewed_at=_T5,
+        authority_deadline_at=str(queued.payload["deadline_at"]),
+    )
+    authority.append_lease(renewed)
+    assert renewed.payload["authority_deadline_at"] == queued.payload["deadline_at"]
+    assert renewed.payload["renewed_at"] == _T5
     connection.close()
 
 

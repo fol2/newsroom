@@ -391,6 +391,13 @@ def acquire_lease(
     deadline = _dt(str(work.payload["deadline_at"]))
     if _dt(acquired) > deadline:
         raise OperationalAuthorityError("work deadline has expired")
+    if (
+        work.payload["state"] == WorkState.RETRY_PENDING.value
+        and authority_deadline_at is None
+    ):
+        raise OperationalAuthorityError(
+            "retry lease requires its exact authority deadline"
+        )
     authority_deadline = (
         deadline
         if authority_deadline_at is None
@@ -437,7 +444,11 @@ def acquire_lease(
 
 
 def renew_lease(
-    lease: WorkLease, *, progress_digest: str, renewed_at: str
+    lease: WorkLease,
+    *,
+    progress_digest: str,
+    renewed_at: str,
+    authority_deadline_at: str | None = None,
 ) -> WorkLease:
     if (
         not isinstance(lease, WorkLease)
@@ -452,6 +463,21 @@ def renew_lease(
         str(lease.payload["expires_at"])
     ):
         raise OperationalAuthorityError("expired lease cannot be renewed")
+    retained_authority_deadline = lease.payload.get("authority_deadline_at")
+    if retained_authority_deadline is None and authority_deadline_at is None:
+        raise OperationalAuthorityError(
+            "legacy lease renewal requires its authority deadline"
+        )
+    authority_deadline = _time(
+        retained_authority_deadline
+        if retained_authority_deadline is not None
+        else authority_deadline_at,
+        "authority_deadline_at",
+    )
+    if authority_deadline_at is not None and _dt(
+        _time(authority_deadline_at, "authority_deadline_at")
+    ) != _dt(authority_deadline):
+        raise OperationalAuthorityError("lease authority deadline differs")
     seconds = int(
         INCREMENT_8_READINESS.operational_profile["execution"]["lease_renewal_seconds"]
     )  # type: ignore[index]
@@ -467,6 +493,7 @@ def renew_lease(
         lease_version=int(lease.payload["lease_version"]) + 1,
         progress_digest=progress,
         expires_at=_canonical_time(expires),
+        authority_deadline_at=_canonical_time(_dt(authority_deadline)),
         renewed_at=renewed,
         previous_digest=lease.digest,
     )
@@ -1248,16 +1275,53 @@ class OperationalAuthority:
                     "owner_digest",
                     "acquired_at",
                     "maximum_expires_at",
-                    "authority_deadline_at",
                     "status",
                     "closed_at",
                 )
             }
+            derived_authority_deadline = _dt(str(retained_work.payload["deadline_at"]))
+            predecessor_row = self._connection.execute(
+                "SELECT work_bytes FROM due_work WHERE work_id=? AND state_version=?",
+                (
+                    retained_work.work_id,
+                    int(retained_work.payload["state_version"]) - 1,
+                ),
+            ).fetchone()
+            if predecessor_row is not None:
+                predecessor_work = DueWork.from_canonical_bytes(
+                    bytes(predecessor_row[0])
+                )
+                if predecessor_work.payload["state"] == WorkState.RETRY_PENDING.value:
+                    retry_row = self._connection.execute(
+                        "SELECT finding_bytes FROM retry_findings WHERE work_id=? "
+                        "AND attempt_number=?",
+                        (
+                            predecessor_work.work_id,
+                            predecessor_work.payload["attempt_count"],
+                        ),
+                    ).fetchone()
+                    if retry_row is None:
+                        raise OperationalAuthorityError(
+                            "lease renewal retry authority is absent"
+                        )
+                    retry = RetryFinding.from_canonical_bytes(bytes(retry_row[0]))
+                    derived_authority_deadline = min(
+                        derived_authority_deadline,
+                        _dt(str(retry.payload["first_attempt_at"]))
+                        + timedelta(
+                            seconds=int(
+                                INCREMENT_8_READINESS.operational_profile["retry"][
+                                    "maximum_elapsed_seconds"
+                                ]
+                            )
+                        ),
+                    )
             try:
                 expected_renewal = renew_lease(
                     retained,
                     progress_digest=str(lease.payload["progress_digest"]),
                     renewed_at=str(lease.payload["renewed_at"]),
+                    authority_deadline_at=_canonical_time(derived_authority_deadline),
                 )
             except (KeyError, TypeError, OperationalAuthorityError) as exc:
                 raise OperationalAuthorityError("lease renewal differs") from exc
