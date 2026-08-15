@@ -136,6 +136,17 @@ def test_catch_up_reconstructs_every_due_work_before_sorting(tmp_path) -> None:
     )
     with pytest.raises(RecoveryError, match="forged"):
         bounded_catch_up([semantically_incomplete])
+    forged_completed_v2 = DueWork.build(
+        {
+            **due.payload,
+            "state_version": 2,
+            "state": "COMPLETED",
+            "attempt_count": 1,
+            "previous_digest": due.digest,
+        }
+    )
+    with pytest.raises(RecoveryError, match="forged"):
+        bounded_catch_up([forged_completed_v2])
     connection.close()
 
 

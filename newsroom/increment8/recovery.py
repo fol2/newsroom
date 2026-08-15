@@ -502,8 +502,27 @@ def _reconstruct_due_work(raw: bytes) -> DueWork:
             raise RecoveryError("catch-up initial DueWork semantics differ")
     elif previous != _digest(previous, "previous_digest"):
         raise RecoveryError("catch-up DueWork predecessor differs")
-    if state in {WorkState.LEASED, WorkState.RETRY_PENDING, WorkState.COMPLETED} and attempts < 1:
+    lineage_is_reachable = (
+        (state is WorkState.QUEUED and version == 1 and attempts == 0)
+        or (state is WorkState.LEASED and attempts >= 1 and version == 2 * attempts)
+        or (
+            state in {WorkState.RETRY_PENDING, WorkState.COMPLETED}
+            and attempts >= 1
+            and version == 2 * attempts + 1
+        )
+        or (state is WorkState.EXPLICITLY_CLOSED and version == 2 * attempts + 2)
+        or (
+            state is WorkState.QUARANTINED
+            and (
+                (attempts == 0 and version == 2)
+                or (attempts >= 1 and version in {2 * attempts + 1, 2 * attempts + 2})
+            )
+        )
+    )
+    if not lineage_is_reachable:
         raise RecoveryError("catch-up DueWork attempt lineage differs")
+    if state not in {WorkState.QUEUED, WorkState.RETRY_PENDING}:
+        raise RecoveryError("catch-up DueWork is not operationally due")
     return work
 
 
