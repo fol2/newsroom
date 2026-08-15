@@ -9,8 +9,15 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, validate_sha256_digest
-from newsroom.increment8.readiness import INCREMENT_8_READINESS, INCREMENT_8_READINESS_DIGEST
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    validate_sha256_digest,
+)
+from newsroom.increment8.readiness import (
+    INCREMENT_8_READINESS,
+    INCREMENT_8_READINESS_DIGEST,
+)
 
 
 class ObservabilityError(ValueError):
@@ -201,16 +208,15 @@ class HealthPosture:
             raise ObservabilityError("complete success is in the future")
         if changed is not None and _dt(changed) > _dt(observed):
             raise ObservabilityError("source change is in the future")
-        age = None if success is None else int((_dt(observed) - _dt(success)).total_seconds())
+        elapsed = None if success is None else _dt(observed) - _dt(success)
+        age = None if elapsed is None else int(elapsed.total_seconds())
         freshness = int(INCREMENT_8_READINESS.operational_profile["schedule"]["freshness_objective_seconds"])  # type: ignore[index]
         states = {name: dimension_states[name].value for name in sorted(dimension_states)}
         if DimensionState.BLOCKED.value in states.values():
             verdict = HealthVerdict.BLOCKED
-        elif success is None or age is None or age > freshness:
+        elif success is None or elapsed is None or elapsed > timedelta(seconds=freshness):
             verdict = HealthVerdict.STALE
-        elif observation_outcome not in {ObservationOutcome.COMPLETE_CHANGED, ObservationOutcome.COMPLETE_UNCHANGED}:
-            verdict = HealthVerdict.DEGRADED
-        elif any(value is not DimensionState.HEALTHY for value in dimension_states.values()):
+        elif observation_outcome not in {ObservationOutcome.COMPLETE_CHANGED, ObservationOutcome.COMPLETE_UNCHANGED} or any(value is not DimensionState.HEALTHY for value in dimension_states.values()):
             verdict = HealthVerdict.DEGRADED
         elif observation_outcome is ObservationOutcome.COMPLETE_UNCHANGED:
             verdict = HealthVerdict.HEALTHY_UNCHANGED
@@ -401,6 +407,8 @@ def classify_transport_outcome(
         raise ObservabilityError("transport flags must be boolean")
     if code == 304:
         return "COMPLETE_UNCHANGED" if valid_baseline and validator_contract else "INVALID_NOT_MODIFIED"
+    if code == 206:
+        return "PARTIAL"
     if 200 <= code < 300:
         if body == 0:
             return "EMPTY_SUCCESS"
@@ -488,6 +496,7 @@ class IncidentRecord:
     root_cause_digest: str | None
     follow_up_digest: str | None
     regression_case_digest: str | None
+    closure_evidence_digest: str | None
     previous_digest: str | None
     canonical_bytes: bytes
     digest: str
@@ -510,10 +519,92 @@ class IncidentRecord:
             "scope_digest": _digest(scope_digest, "scope_digest"), "timeline_digest": _digest(timeline_digest, "timeline_digest"),
             "opened_at": _time(opened_at, "opened_at"), "containment_digest": None, "recovery_digest": None,
             "root_cause_digest": None, "follow_up_digest": None, "regression_case_digest": None,
+            "closure_evidence_digest": None,
             "integrity_related": integrity_related, "near_miss": near_miss, "previous_digest": None,
         }
-        raw, record_digest = _record("newsroom.increment8.incident-record.v1", payload)
-        return cls(str(payload["incident_id"]), 1, IncidentState.OPEN, integrity_related, near_miss, None, None, None, None, raw, record_digest)
+        raw, _ = _record("newsroom.increment8.incident-record.v1", payload)
+        return cls.from_canonical_bytes(raw)
+
+    @classmethod
+    def from_canonical_bytes(cls, canonical_bytes: bytes) -> IncidentRecord:
+        if not isinstance(canonical_bytes, bytes):
+            raise ObservabilityError("incident canonical evidence must be bytes")
+        try:
+            envelope = json.loads(canonical_bytes)
+        except (TypeError, ValueError, UnicodeDecodeError) as exc:
+            raise ObservabilityError("incident canonical evidence is malformed") from exc
+        if (
+            not isinstance(envelope, dict)
+            or set(envelope) != {"schema_version", "payload"}
+            or envelope.get("schema_version") != "newsroom.increment8.incident-record.v1"
+            or not isinstance(envelope.get("payload"), dict)
+            or canonical_json_bytes(envelope) != canonical_bytes
+        ):
+            raise ObservabilityError("incident canonical evidence differs")
+        value = envelope["payload"]
+        expected = {
+            "incident_id", "version", "state", "scope_digest", "timeline_digest", "opened_at",
+            "containment_digest", "recovery_digest", "root_cause_digest", "follow_up_digest",
+            "regression_case_digest", "closure_evidence_digest", "integrity_related", "near_miss",
+            "previous_digest",
+        }
+        if set(value) != expected:
+            raise ObservabilityError("incident canonical payload differs")
+        incident_id = _token(value["incident_id"], "incident_id")
+        version = _integer(value["version"], "version", minimum=1)
+        try:
+            state = IncidentState(value["state"])
+        except (TypeError, ValueError) as exc:
+            raise ObservabilityError("incident state differs") from exc
+        if not isinstance(value["integrity_related"], bool) or not isinstance(value["near_miss"], bool):
+            raise ObservabilityError("incident flags must be boolean")
+        _digest(value["scope_digest"], "scope_digest")
+        _digest(value["timeline_digest"], "timeline_digest")
+        _time(value["opened_at"], "opened_at")
+        digest_fields = (
+            "containment_digest", "recovery_digest", "root_cause_digest", "follow_up_digest",
+            "regression_case_digest", "closure_evidence_digest", "previous_digest",
+        )
+        for field in digest_fields:
+            if value[field] is not None:
+                _digest(value[field], field)
+        expected_version = {
+            IncidentState.OPEN: 1,
+            IncidentState.CONTAINED: 2,
+            IncidentState.RECOVERED: 3,
+            IncidentState.CLOSED: 4,
+        }[state]
+        if version != expected_version:
+            raise ObservabilityError("incident lifecycle version differs")
+        if state is IncidentState.OPEN:
+            required = ()
+            absent = digest_fields
+        elif state is IncidentState.CONTAINED:
+            required = ("containment_digest", "previous_digest")
+            absent = digest_fields[1:-1]
+        elif state is IncidentState.RECOVERED:
+            required = ("containment_digest", "recovery_digest", "previous_digest")
+            absent = digest_fields[2:-1]
+        else:
+            required = (
+                "containment_digest", "recovery_digest", "root_cause_digest", "follow_up_digest",
+                "closure_evidence_digest", "previous_digest",
+            )
+            absent = ()
+        if any(value[field] is None for field in required) or any(value[field] is not None for field in absent):
+            raise ObservabilityError("incident lifecycle evidence differs")
+        if (
+            state is IncidentState.CLOSED
+            and (value["integrity_related"] or value["near_miss"])
+            and value["regression_case_digest"] is None
+        ):
+            raise ObservabilityError("regression_case_digest must be a canonical digest")
+        return cls(
+            incident_id, version, state, value["integrity_related"], value["near_miss"],
+            value["root_cause_digest"], value["follow_up_digest"], value["regression_case_digest"],
+            value["closure_evidence_digest"], value["previous_digest"], canonical_bytes,
+            digest_bytes(canonical_bytes),
+        )
 
     def transition(
         self,
@@ -524,26 +615,28 @@ class IncidentRecord:
         follow_up_digest: str | None = None,
         regression_case_digest: str | None = None,
     ) -> IncidentRecord:
+        retained = type(self).from_canonical_bytes(self.canonical_bytes)
+        if retained != self:
+            raise ObservabilityError("incident object differs from canonical evidence")
         allowed = {IncidentState.OPEN: IncidentState.CONTAINED, IncidentState.CONTAINED: IncidentState.RECOVERED, IncidentState.RECOVERED: IncidentState.CLOSED}
-        if not isinstance(state, IncidentState) or allowed.get(self.state) is not state:
+        if not isinstance(state, IncidentState) or allowed.get(retained.state) is not state:
             raise ObservabilityError("incident transition is not allowed")
-        value = json.loads(self.canonical_bytes)["payload"]
-        value["version"] = self.version + 1
+        value = json.loads(retained.canonical_bytes)["payload"]
+        value["version"] = retained.version + 1
         value["state"] = state.value
-        value["previous_digest"] = self.digest
+        value["previous_digest"] = retained.digest
         if state is IncidentState.CONTAINED:
             value["containment_digest"] = _digest(evidence_digest, "evidence_digest")
         elif state is IncidentState.RECOVERED:
             value["recovery_digest"] = _digest(evidence_digest, "evidence_digest")
         else:
+            value["closure_evidence_digest"] = _digest(evidence_digest, "evidence_digest")
             value["root_cause_digest"] = _digest(root_cause_digest, "root_cause_digest")
             value["follow_up_digest"] = _digest(follow_up_digest, "follow_up_digest")
-            if self.integrity_related or self.near_miss:
+            if retained.integrity_related or retained.near_miss or regression_case_digest is not None:
                 value["regression_case_digest"] = _digest(regression_case_digest, "regression_case_digest")
-            elif regression_case_digest is not None:
-                value["regression_case_digest"] = _digest(regression_case_digest, "regression_case_digest")
-        raw, record_digest = _record("newsroom.increment8.incident-record.v1", value)
-        return IncidentRecord(self.incident_id, self.version + 1, state, self.integrity_related, self.near_miss, value["root_cause_digest"], value["follow_up_digest"], value["regression_case_digest"], self.digest, raw, record_digest)
+        raw, _ = _record("newsroom.increment8.incident-record.v1", value)
+        return type(self).from_canonical_bytes(raw)
 
 
 @dataclass(frozen=True, slots=True)
@@ -619,8 +712,24 @@ class SecurityAdmission:
 
 
 __all__ = [
-    "AccessContract", "AlertPriority", "CoveragePath", "CoveragePosture", "CoverageVerdict",
-    "DimensionState", "EventInputContract", "HealthDimension", "HealthPosture", "HealthVerdict", "IncidentRecord",
-    "IncidentState", "ManualAction", "ManualActionReceipt", "ObservationOutcome", "ObservabilityError",
-    "ObservabilityRecord", "PathRole", "SecurityAdmission", "classify_transport_outcome",
+    "AccessContract",
+    "AlertPriority",
+    "CoveragePath",
+    "CoveragePosture",
+    "CoverageVerdict",
+    "DimensionState",
+    "EventInputContract",
+    "HealthDimension",
+    "HealthPosture",
+    "HealthVerdict",
+    "IncidentRecord",
+    "IncidentState",
+    "ManualAction",
+    "ManualActionReceipt",
+    "ObservabilityError",
+    "ObservabilityRecord",
+    "ObservationOutcome",
+    "PathRole",
+    "SecurityAdmission",
+    "classify_transport_outcome",
 ]
