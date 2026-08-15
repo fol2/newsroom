@@ -462,6 +462,7 @@ def test_legacy_active_lease_is_upgraded_by_bounded_renewal(tmp_path) -> None:
     legacy_payload = dict(current.payload)
     legacy_payload.pop("authority_deadline_at")
     legacy_payload.pop("renewed_at")
+    legacy_payload.pop("closed_at")
     legacy_payload["expires_at"] = "2042-01-05T00:01:00.000000Z"
     legacy_payload["maximum_expires_at"] = "2042-01-05T00:05:00.000000Z"
     legacy = operations.WorkLease.build(legacy_payload)
@@ -531,7 +532,24 @@ def test_legacy_retry_lease_cannot_close_after_derived_horizon(tmp_path) -> None
         first_attempt_at=_AT,
         failed_at=_AT,
     )
-    authority.append_retry_finding(finding)
+    legacy_finding_payload = dict(finding.payload)
+    legacy_finding_payload.pop("first_attempt_at")
+    legacy_finding_payload.pop("elapsed_microseconds")
+    legacy_finding = operations.RetryFinding.build(legacy_finding_payload)
+    connection.execute(
+        "INSERT INTO retry_findings VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            legacy_finding.finding_id,
+            legacy_finding.canonical_bytes,
+            legacy_finding.digest,
+            legacy_finding.payload["work_id"],
+            legacy_finding.payload["attempt_number"],
+            legacy_finding.payload["classification"],
+            legacy_finding.payload["dependency_scope"],
+            legacy_finding.payload["next_due_at"],
+            0,
+        ),
+    )
     _, retry = authority.close_lease_and_transition(
         lease=first_lease,
         lease_state=LeaseState.RELEASED,
@@ -548,6 +566,7 @@ def test_legacy_retry_lease_cannot_close_after_derived_horizon(tmp_path) -> None
     legacy_payload = dict(current.payload)
     legacy_payload.pop("authority_deadline_at")
     legacy_payload.pop("renewed_at")
+    legacy_payload.pop("closed_at")
     legacy_payload["expires_at"] = "2042-01-05T00:02:59.000000Z"
     legacy_payload["maximum_expires_at"] = "2042-01-05T00:06:59.000000Z"
     legacy = operations.WorkLease.build(legacy_payload)

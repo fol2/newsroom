@@ -496,6 +496,7 @@ def renew_lease(
         ),
     )
     payload = dict(lease.payload)
+    payload.setdefault("closed_at", None)
     payload.update(
         lease_version=int(lease.payload["lease_version"]) + 1,
         progress_digest=progress,
@@ -985,9 +986,22 @@ class OperationalAuthority:
         if retry_row is None:
             raise OperationalAuthorityError("lease retry authority is absent")
         retry = RetryFinding.from_canonical_bytes(bytes(retry_row[0]))
+        first_attempt_at = retry.payload.get("first_attempt_at")
+        if first_attempt_at is None:
+            attempt_rows = self._connection.execute(
+                "SELECT acquired_at FROM work_leases WHERE work_id=?",
+                (work.work_id,),
+            ).fetchall()
+            if not attempt_rows:
+                raise OperationalAuthorityError(
+                    "legacy retry first-attempt authority is absent"
+                )
+            first_attempt = min((str(row[0]) for row in attempt_rows), key=_dt)
+        else:
+            first_attempt = str(first_attempt_at)
         return min(
             authority_deadline,
-            _dt(str(retry.payload["first_attempt_at"]))
+            _dt(first_attempt)
             + timedelta(
                 seconds=int(
                     INCREMENT_8_READINESS.operational_profile["retry"][
@@ -1309,7 +1323,7 @@ class OperationalAuthority:
         retained_work = DueWork.from_canonical_bytes(bytes(work_row[0]))
         if lease.payload["status"] == LeaseState.ACTIVE.value:
             unchanged = {
-                name: retained.payload[name]
+                name: retained.payload.get(name)
                 for name in (
                     "lease_id",
                     "work_id",
@@ -1332,7 +1346,10 @@ class OperationalAuthority:
             except (KeyError, TypeError, OperationalAuthorityError) as exc:
                 raise OperationalAuthorityError("lease renewal differs") from exc
             if (
-                any(lease.payload[name] != value for name, value in unchanged.items())
+                any(
+                    lease.payload.get(name) != value
+                    for name, value in unchanged.items()
+                )
                 or expected_renewal != lease
                 or retained_work.payload["state"] != WorkState.LEASED.value
                 or retained_work.work_id != lease.payload["work_id"]
