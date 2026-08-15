@@ -7,7 +7,12 @@ from dataclasses import replace
 import pytest
 
 from newsroom.authority import migrations
-from newsroom.increment8.operations import OperationalAuthority, Urgency, build_operational_profile, enqueue_due_work
+from newsroom.increment8.operations import (
+    OperationalAuthority,
+    Urgency,
+    build_operational_profile,
+    enqueue_due_work,
+)
 from newsroom.increment8.recovery import (
     FaultScenario,
     RecoveryAuthority,
@@ -82,6 +87,15 @@ def test_reconciliation_detects_every_required_class_and_blocks_automatic_operat
     authority.append_reconciliation(failed)
     assert failed.payload["status"] == "FAIL"
     assert failed.payload["automatic_operation_blocked"] is True
+    with pytest.raises(RecoveryError, match="reconciliation exceeds"):
+        build_reconciliation_run(
+            profile_digest=_D,
+            authority_version_digest=_D,
+            finding_counts=_findings(),
+            replay_item_count=10,
+            started_at=_AT,
+            completed_at="2042-01-05T01:00:00.000000Z",
+        )
     connection.close()
 
 

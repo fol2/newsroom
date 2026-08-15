@@ -9,7 +9,9 @@ from newsroom.authority import migrations
 from newsroom.increment8.admission import (
     AdmissionError,
     CostLicenceEvidence,
+    IndependentVerificationEvidence,
     IntendedHardwareEvidence,
+    RollbackEvidence,
     build_operational_admission_decision,
     build_qualification_packet,
 )
@@ -22,11 +24,13 @@ from newsroom.increment8.operations import (
     HandoffAnchorKind,
     _handoff_anchor,
     build_capacity_evidence,
+    build_operational_profile,
 )
 from newsroom.increment8.recovery import (
     FaultScenario,
     build_fault_injection_run,
     build_reconciliation_run,
+    build_restore_reconciliation_run,
     create_checked_backup,
     restore_checked_backup,
 )
@@ -34,8 +38,12 @@ from newsroom.tests.test_increment8b_metrics import _report, _run
 from newsroom.tests.test_increment8d_observability import _access, _health
 
 _D = "sha256:" + "1" * 64
+_D2 = "sha256:" + "2" * 64
+_D3 = "sha256:" + "3" * 64
 _AT = "2042-01-05T00:00:00.000000Z"
 _LATER = "2042-01-05T00:10:00.000000Z"
+_AFTER_RESTORE = "2042-01-05T00:20:00.000000Z"
+_AFTER_RECONCILIATION = "2042-01-05T00:30:00.000000Z"
 _RETAIN = "2042-02-05T00:00:00.000000Z"
 
 
@@ -47,9 +55,9 @@ def _capacity():
     )
 
 
-def _reconciliation():
+def _reconciliation(profile_digest=_D):
     return build_reconciliation_run(
-        profile_digest=_D, authority_version_digest=_D,
+        profile_digest=profile_digest, authority_version_digest=_D,
         finding_counts={
             "AMBIGUOUS_EFFECT": 0, "DUPLICATE_DELIVERY": 0, "MISSING_OUTCOME": 0,
             "ORPHANED_OWNERSHIP": 0, "PENDING_HANDOFF": 0, "PROJECTION_MISMATCH": 0,
@@ -59,7 +67,7 @@ def _reconciliation():
     )
 
 
-def _faults():
+def _faults(profile_digest=_D):
     outcomes = {
         FaultScenario.STORE_FAILURE: "FAIL_CLOSED",
         FaultScenario.ORPHANED_OWNERSHIP: "LEASE_ORPHANED",
@@ -72,17 +80,17 @@ def _faults():
     }
     return tuple(
         build_fault_injection_run(
-            profile_digest=_D, scenario=scenario, observed_outcome=outcomes[scenario], completed_at=_AT,
+            profile_digest=profile_digest, scenario=scenario, observed_outcome=outcomes[scenario], completed_at=_AT,
         )
         for scenario in FaultScenario
     )
 
 
-def _observability():
+def _observability(profile_digest=_D):
     names = ("budget", "complete_success_age", "coverage", "outcome", "parser", "queue", "reconciliation", "retry", "schedule", "storage")
     stages = ("candidate", "check", "due_trigger", "handoff", "lead", "transition", "work_item")
     return ObservabilityRecord.build(
-        source_version_digest=_D, component_version_digest=_D, profile_digest=_D,
+        source_version_digest=_D, component_version_digest=_D, profile_digest=profile_digest,
         provider_version_digest=_D, policy_version_digest=_D, metrics={name: 0 for name in names},
         path_correlation={name: _D for name in stages}, coverage_blocked=False,
         integrity_uncertain=False, urgent=False, owner_digest=_D, escalation_digest=_D,
@@ -109,14 +117,36 @@ def _cost():
     )
 
 
+def _rollback(restore):
+    return RollbackEvidence.build(
+        restore=restore,
+        runbook_version_digest=_D,
+        rollback_plan_digest=_D,
+        tested_at=_AFTER_RECONCILIATION,
+    )
+
+
+def _independent(reviewed_evidence_manifest_digest=_D):
+    return IndependentVerificationEvidence.build(
+        verifier_identity_digest=_D2,
+        verification_method_digest=_D,
+        reviewed_evidence_manifest_digest=reviewed_evidence_manifest_digest,
+        verified_at_digest=_D,
+    )
+
+
 def _packet(tmp_path, **changes):
     tmp_path.mkdir(parents=True, exist_ok=True)
     database = tmp_path / "authority.sqlite3"
     connection = sqlite3.connect(database, isolation_level=None)
     migrations.apply_pending_migrations(connection, applied_at=_AT)
+    operational_profile = build_operational_profile(
+        approved_by_digest=_D, approved_at=_AT
+    )
     backup_path = (tmp_path / "backup.sqlite3").absolute()
     backup = create_checked_backup(
-        connection, backup_path, profile_digest=_D, authority_version_digest=_D,
+        connection, backup_path, profile_digest=operational_profile.digest,
+        authority_version_digest=_D,
         audit_state_digest=_D, created_at=_AT, retain_until=_RETAIN,
     )
     restore = restore_checked_backup(
@@ -136,17 +166,37 @@ def _packet(tmp_path, **changes):
         kind=HandoffAnchorKind.ORIGINAL_REGISTRATION, recorded_at=_AT,
     )
     values = {
-        "release_decision": release, "metric_report": report, "capacity": capacity,
-        "health_postures": [_health()], "observability": _observability(), "security": _security(),
-        "reconciliation": _reconciliation(), "backup": backup, "restore": restore,
-        "restore_reconciliation": _reconciliation(), "fault_runs": _faults(),
+        "release_decision": release, "metric_report": report,
+        "operational_profile": operational_profile, "capacity": capacity,
+        "health_postures": [_health()],
+        "observability": _observability(operational_profile.digest),
+        "security": _security(),
+        "reconciliation": _reconciliation(operational_profile.digest),
+        "backup": backup, "restore": restore,
+        "restore_reconciliation": build_restore_reconciliation_run(
+            restore=restore,
+            profile_digest=operational_profile.digest,
+            authority_version_digest=_D,
+            finding_counts={
+                "AMBIGUOUS_EFFECT": 0, "DUPLICATE_DELIVERY": 0,
+                "MISSING_OUTCOME": 0, "ORPHANED_OWNERSHIP": 0,
+                "PENDING_HANDOFF": 0, "PROJECTION_MISMATCH": 0,
+                "STALE_WORK": 0,
+            },
+            replay_item_count=10, started_at=_AFTER_RESTORE,
+            completed_at=_AFTER_RECONCILIATION,
+        ),
+        "fault_runs": _faults(operational_profile.digest),
         "handoff_anchor": anchor, "expected_handoff_anchor_digest": anchor.digest,
         "hardware": IntendedHardwareEvidence.build(
             target_id="fixture-host:v1", cpu_cores=4, memory_mib=8192, free_disk_mib=10240,
             capacity=capacity, inventory_digest=_D, measured_at_digest=_D,
         ),
         "cost_licence": _cost(), "runbook_version_digest": _D,
-        "rollback_evidence_digest": _D, "independent_verification_digest": _D,
+        "rollback_evidence": _rollback(restore),
+        "independent_verification": _independent(
+            str(release.payload["evidence_manifest_digest"])
+        ),
         "p1_finding_count": 0, "material_p2_finding_count": 0,
     }
     values.update(changes)
