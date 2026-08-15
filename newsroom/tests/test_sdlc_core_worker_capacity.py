@@ -15,7 +15,7 @@ from scripts.sdlc.run_gate import GateRunResult
 from scripts.sdlc.workflow_lane import WorkflowLaneError
 
 REPO_ROOT = Path(__file__).parents[2]
-EXPECTED_CORE_SHARD_COUNT = 16
+EXPECTED_CORE_SHARD_COUNT = 18
 
 
 def _contract_data() -> dict[str, object]:
@@ -650,6 +650,7 @@ import scripts.sdlc.workflow_lane as lane
 reloaded = importlib.reload(lane)
 assert reloaded is lane
 assert reloaded._CORE_WORKER_COUNT == 2
+assert reloaded._CORE_SHARD_COUNT == 18
 assert reloaded._CORE_DISTRIBUTION == 'worksteal'
 assert reloaded._CORE_TESTS == ('newsroom/tests',)
 """
@@ -676,9 +677,41 @@ def test_core_node_partition_is_deterministic_complete_unique_and_balanced() -> 
 
     assert first == second
     assert len(first) == EXPECTED_CORE_SHARD_COUNT
+    assert all(first)
     assert tuple(sorted(flattened)) == tuple(sorted(nodes))
     assert len(flattened) == len(set(flattened))
     assert max(map(len, first)) - min(map(len, first)) == 1
+
+
+def test_core_reducer_merges_exact_shard_reports_and_preserves_node_identities(
+    tmp_path: Path,
+) -> None:
+    reports: list[Path] = []
+    expected_ids: set[str] = set()
+    for index in range(EXPECTED_CORE_SHARD_COUNT):
+        node_id = f"newsroom/tests/test_{index}.py::test_{index}"
+        junit_id = lane_module._junit_id_for_node(node_id)
+        classname, name = junit_id.rsplit("::", 1)
+        shard_report = tmp_path / f"shard-{index}.xml"
+        shard_report.write_text(
+            '<testsuite tests="1" failures="0" errors="0" skipped="0">'
+            f'<testcase classname="{classname}" name="{name}" time="0.001" />'
+            "</testsuite>",
+            encoding="utf-8",
+        )
+        reports.append(shard_report)
+        expected_ids.add(junit_id)
+
+    merged = tmp_path / "merged.xml"
+    lane_module._merge_junit_reports(
+        root=tmp_path,
+        report=merged,
+        shard_reports=reports,
+        expected_count=EXPECTED_CORE_SHARD_COUNT,
+        identity="core",
+    )
+
+    assert lane_module._junit_case_ids(merged) == frozenset(expected_ids)
 
 
 def test_core_file_inventory_is_recursive_and_rejects_symlinks(tmp_path: Path) -> None:
@@ -999,6 +1032,8 @@ def test_reducer_uses_source_shard_critical_path_plus_sequential_elapsed(
             60_000,
             50_000,
             40_000,
+            30_000,
+            20_000,
         ),
         reducer_elapsed_ms=19_000,
     )
@@ -1025,6 +1060,8 @@ def test_reducer_uses_source_shard_critical_path_plus_sequential_elapsed(
         60_000,
         50_000,
         40_000,
+        30_000,
+        20_000,
     ]
     assert accounting["reducer_lifecycle_ms"] == 19_000
     assert accounting["critical_path_ms"] == 219_000
@@ -2223,6 +2260,7 @@ def test_fragment_loader_is_input_order_deterministic_and_validates_bindings(
         ("fragment_identity", "sha256:" + "0" * 64, "core_fragment_identity", False),
         ("evaluated_sha", "1" * 40, "core_fragment_provenance", True),
         ("evaluated_tree_sha", "2" * 40, "core_fragment_provenance", True),
+        ("shard_count", 16, "core_fragment_provenance", True),
         ("route_digest", "sha256:" + "3" * 64, "core_fragment_provenance", True),
         ("contract_digest", "sha256:" + "4" * 64, "core_fragment_provenance", True),
         (
