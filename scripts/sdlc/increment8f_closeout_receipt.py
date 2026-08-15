@@ -9,6 +9,11 @@ from newsroom.authority.migrations import (
     EXPECTED_MIGRATION_HISTORY,
     SCHEMA_VERSION,
 )
+from newsroom.increment8.admission import (
+    AdmissionError,
+    OperationalAdmissionDecision,
+    QualificationPacket,
+)
 from newsroom.increment8.closeout import (
     INCREMENT8_FINAL_CLOSEOUT_INVENTORY_DIGEST,
     INCREMENT8_FINAL_MIGRATION_HISTORY_DIGEST,
@@ -17,8 +22,8 @@ from newsroom.increment8.closeout import (
     INCREMENT8_FINAL_SCHEMA_FINGERPRINT,
     INCREMENT8_FINAL_SCHEMA_VERSION,
     INCREMENT8F_FINAL_CLOSEOUT_CASES,
-    Increment8CloseoutLane,
     Increment8CloseoutError,
+    Increment8CloseoutLane,
     increment8_final_migration_history,
 )
 from newsroom.increment8.readiness import (
@@ -44,7 +49,7 @@ from scripts.sdlc.increment6g_closeout_receipt import (
 from scripts.sdlc.shadow_decision import ShadowDecisionError, validate_shadow_decision
 from scripts.sdlc.transport_replay import TransportReplayError, load_verified_transport
 
-FINAL_SCHEMA_VERSION = "newsroom.increment8.closeout-receipt.v1"
+FINAL_SCHEMA_VERSION = "newsroom.increment8.closeout-receipt.v2"
 BLOCKED_SCHEMA_VERSION = "newsroom.increment8.corrective-closeout-blocked.v1"
 
 
@@ -112,6 +117,8 @@ def build_final_receipt(
     core_transport_bundle_root: str | Path,
     service_transport_bundle_root: str | Path,
     decision_path: str | Path,
+    qualification_packet_path: str | Path,
+    operational_admission_decision_path: str | Path,
 ) -> dict[str, object]:
     try:
         root, head, tree = _git_identity(repo_root)
@@ -136,6 +143,12 @@ def build_final_receipt(
         }
         return {**blocked, "receipt_identity": sha256_identity(blocked)}
     try:
+        packet = QualificationPacket.from_canonical_bytes(
+            Path(qualification_packet_path).read_bytes()
+        )
+        admission = OperationalAdmissionDecision.from_canonical_bytes(
+            Path(operational_admission_decision_path).read_bytes(), packet=packet
+        )
         contract = load_contract(root)
         decision = validate_shadow_decision(
             _decision_payload(decision_path), contract=contract
@@ -146,6 +159,8 @@ def build_final_receipt(
         }
     except (
         ContractError,
+        AdmissionError,
+        OSError,
         Increment5E2CloseoutReceiptError,
         ShadowDecisionError,
         TransportReplayError,
@@ -156,6 +171,11 @@ def build_final_receipt(
         "service",
     }:
         raise Increment8FCloseoutReceiptError("decision_not_exact_pass")
+    if (
+        admission.verdict.value != "FIXTURE_OPERATIONAL_ADMITTED"
+        or admission.increment9_eligibility.value != "ELIGIBLE_FOR_SEPARATE_PLAN"
+    ):
+        raise Increment8FCloseoutReceiptError("operational_admission_not_exact")
     if (
         decision.context.evaluated_sha != head
         or decision.context.evaluated_tree_sha != tree
@@ -221,6 +241,11 @@ def build_final_receipt(
         raise Increment8FCloseoutReceiptError("selected_test_manifest")
 
     value = {
+        "handoff_anchor_digest": packet.evidence_digests["handoff_anchor_digest"],
+        "operational_admission_decision_digest": admission.digest,
+        "operational_admission_verdict": admission.verdict.value,
+        "increment9_eligibility": admission.increment9_eligibility.value,
+        "qualification_packet_digest": packet.digest,
         "decision_identity": decision.decision_identity,
         "evaluated_sha": head,
         "evaluated_tree_sha": tree,
@@ -243,6 +268,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--core-transport-bundle-root", required=True)
     parser.add_argument("--service-transport-bundle-root", required=True)
     parser.add_argument("--decision", required=True)
+    parser.add_argument("--qualification-packet", required=True)
+    parser.add_argument("--operational-admission-decision", required=True)
     parser.add_argument("--output", required=True)
     arguments = parser.parse_args(sys.argv[1:] if argv is None else argv)
     try:
@@ -251,6 +278,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             core_transport_bundle_root=arguments.core_transport_bundle_root,
             service_transport_bundle_root=arguments.service_transport_bundle_root,
             decision_path=arguments.decision,
+            qualification_packet_path=arguments.qualification_packet,
+            operational_admission_decision_path=arguments.operational_admission_decision,
         )
         _write_output(arguments.output, receipt)
     except (

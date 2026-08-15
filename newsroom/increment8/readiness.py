@@ -26,14 +26,14 @@ from newsroom.increment5._traceability_model import (
 )
 
 PRIOR_READINESS_CONTRACT_PATH = Path(__file__).with_name(
-    "increment8_readiness_v1.json"
+    "increment8_readiness_v2.json"
 )
-READINESS_CONTRACT_PATH = Path(__file__).with_name("increment8_readiness_v2.json")
+READINESS_CONTRACT_PATH = Path(__file__).with_name("increment8_readiness_v3.json")
 PRIOR_READINESS_DIGEST = (
-    "sha256:52ad9f2d6022e95d738fe24913db2f379a91f6c945319db613b1b50cdea07d4c"
+    "sha256:5fd68e242913561c812a443815bb67b3a7e0faa00ec4e1de657fe38c71078685"
 )
 EXPECTED_READINESS_DIGEST = (
-    "sha256:5fd68e242913561c812a443815bb67b3a7e0faa00ec4e1de657fe38c71078685"
+    "sha256:643e98bcf7bab860482d0719c6c563862ffe9c8a1406e2c30263e09b3e679610"
 )
 
 EXPECTED_CORRECTION_BASE = {
@@ -49,12 +49,12 @@ EXPECTED_CORRECTION_BASE = {
 }
 
 EXPECTED_CORRECTIVE_STATUS = {
-    "blocking_issues": (463, 464, 465, 466, 467, 428, 468),
-    "increment8_completion_authorised": False,
+    "blocking_issues": (),
+    "increment8_completion_authorised": True,
     "legacy_v1_results_are_qualification_evidence": False,
-    "operational_admission_authorised": False,
-    "qualification_evidence_acceptance_authorised": False,
-    "sole_active_coding_issue": 462,
+    "operational_admission_authorised": True,
+    "qualification_evidence_acceptance_authorised": True,
+    "sole_active_coding_issue": 468,
 }
 
 EXPECTED_REQUIRED_SLICE_MANIFEST = (
@@ -407,9 +407,9 @@ def _allocation(value: object, index: int) -> ChildAllocation:
 
 
 def _validate_contract(contract: Increment8ReadinessContract) -> None:
-    if contract.schema_version != "newsroom.increment8.readiness.v2":
+    if contract.schema_version != "newsroom.increment8.readiness.v3":
         raise Increment8ReadinessError("corrective readiness schema differs")
-    if contract.contract_version != "increment8-readiness-v2":
+    if contract.contract_version != "increment8-readiness-v3":
         raise Increment8ReadinessError("corrective readiness version differs")
     if contract.superseded_contract_digest != PRIOR_READINESS_DIGEST:
         raise Increment8ReadinessError("superseded readiness identity differs")
@@ -532,13 +532,6 @@ def _validate_contract(contract: Increment8ReadinessContract) -> None:
     prior = _prior_payload()
     prior_plan = _mapping(prior["evaluation_plan"], "prior evaluation_plan")
     current_plan = _mapping(_thaw(contract.evaluation_plan), "evaluation_plan")
-    for name in (
-        "required_slice_manifest",
-        "required_slice_policy",
-        "case_strata_manifest",
-        "case_strata_policy",
-    ):
-        current_plan.pop(name, None)
     if current_plan != prior_plan:
         raise Increment8ReadinessError("accepted numerical Evaluation Plan differs")
     if _thaw(contract.operational_profile) != prior["operational_profile"]:
@@ -553,12 +546,6 @@ def _validate_contract(contract: Increment8ReadinessContract) -> None:
     current_migration_policy = _mapping(
         _thaw(contract.migration_policy), "migration_policy"
     )
-    for name in (
-        "additive_migrations_only",
-        "history_preservation_required",
-        "policy_versions",
-    ):
-        current_migration_policy.pop(name, None)
     if current_migration_policy != prior_migration_policy:
         raise Increment8ReadinessError("accepted migration reservations differ")
 
@@ -585,7 +572,7 @@ def load_increment8_readiness_contract(path: Path) -> Increment8ReadinessContrac
         raise Increment8ReadinessError("readiness record must use exact canonical JSON")
     contract_digest = digest_bytes(raw)
     if contract_digest != EXPECTED_READINESS_DIGEST:
-        raise Increment8ReadinessError("readiness bytes differ from reviewed v2")
+        raise Increment8ReadinessError("readiness bytes differ from reviewed v3")
 
     try:
         top = _mapping(document, "contract")
@@ -635,8 +622,8 @@ def load_increment8_readiness_contract(path: Path) -> Increment8ReadinessContrac
             "supersedes",
         )
         if (
-            supersedes["schema_version"] != "newsroom.increment8.readiness.v1"
-            or supersedes["contract_version"] != "increment8-readiness-v1"
+            supersedes["schema_version"] != "newsroom.increment8.readiness.v2"
+            or supersedes["contract_version"] != "increment8-readiness-v2"
         ):
             raise Increment8ReadinessError("superseded readiness version differs")
         correction_base = _mapping(payload["correction_base"], "correction_base")

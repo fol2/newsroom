@@ -151,7 +151,7 @@ def _pass_candidate(authority: EvaluationAuthority, run):
         _TRIAGE_NAMES,
     )
 
-    rows = authority._connection.execute(  # noqa: SLF001 - authority fixture proof
+    rows = authority._connection.execute(
         "SELECT c.case_bytes,p.label_bytes,(SELECT s.label_bytes FROM evaluation_labels s "
         "WHERE s.case_id=c.case_id AND s.review_role='SECONDARY') "
         "FROM evaluation_cases c JOIN evaluation_labels p ON p.case_id=c.case_id "
@@ -454,14 +454,17 @@ def test_release_decision_seals_the_complete_evidence_manifest(tmp_path: Path) -
         connection.close()
 
 
-def test_complete_valid_exposure_reaches_only_the_corrective_blockade(
+def test_complete_valid_exposure_reaches_authorised_release_decision(
     tmp_path: Path,
 ) -> None:
     connection, authority, run = _registered(tmp_path)
     try:
         _populate(authority, run)
-        with pytest.raises(EvaluationAuthorityError, match="corrective readiness"):
-            authority.decide_release(_pass_candidate(authority, run))
+        authority.decide_release(_pass_candidate(authority, run))
+        assert connection.execute(
+            "SELECT verdict FROM evaluation_release_decisions WHERE run_id=?",
+            (run.run_id,),
+        ).fetchone() == ("PASS",)
     finally:
         connection.close()
 

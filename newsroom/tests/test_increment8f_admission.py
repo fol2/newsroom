@@ -11,6 +11,7 @@ from newsroom.increment8.admission import (
     CostLicenceEvidence,
     IndependentVerificationEvidence,
     IntendedHardwareEvidence,
+    QualificationPacket,
     RollbackEvidence,
     build_operational_admission_decision,
     build_qualification_packet,
@@ -204,8 +205,15 @@ def _packet(tmp_path, **changes):
 
 
 def test_complete_packet_binds_every_gate_and_admits_only_fixture_operation(tmp_path) -> None:
-    with pytest.raises(AdmissionError, match="corrective readiness"):
-        _packet(tmp_path)
+    packet = _packet(tmp_path)
+    assert QualificationPacket.from_canonical_bytes(packet.canonical_bytes) == packet
+    decision = build_operational_admission_decision(
+        packet=packet,
+        owner_identity_digest=_D3,
+        decision_recorded_at_digest=_D,
+    )
+    assert decision.verdict.value == "FIXTURE_OPERATIONAL_ADMITTED"
+    assert decision.increment9_eligibility.value == "ELIGIBLE_FOR_SEPARATE_PLAN"
 
 
 def test_hardware_cost_and_licence_values_are_exact_and_non_activating() -> None:
@@ -228,12 +236,12 @@ def test_missing_fault_scenario_or_blocking_security_fails_closed(tmp_path) -> N
     arguments = {
         name: None for name in signature(build_qualification_packet).parameters
     }
-    with pytest.raises(AdmissionError, match="packet construction.*corrective"):
+    with pytest.raises(AdmissionError, match="metric report"):
         build_qualification_packet(**arguments)
 
 
 def test_handoff_anchor_digest_and_substantive_review_are_hard_gates(tmp_path) -> None:
-    with pytest.raises(AdmissionError, match="Operational Admission.*corrective"):
+    with pytest.raises(AdmissionError, match="qualification packet"):
         build_operational_admission_decision(
             packet=object(),  # type: ignore[arg-type]
             owner_identity_digest=_D,

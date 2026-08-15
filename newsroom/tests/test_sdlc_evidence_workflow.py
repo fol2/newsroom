@@ -348,8 +348,10 @@ def test_lane_and_decision_artifacts_are_compact_immutable_and_attempt_scoped() 
                 ".sdlc-run/increment5e2-final-closeout.json",
                 ".sdlc-run/increment6g-final-closeout.json",
                 ".sdlc-run/increment7g-final-closeout.json",
-                ".sdlc-run/increment8f-final-closeout.json",
-            ]
+                    ".sdlc-run/increment8f-final-closeout.json",
+                    ".sdlc-run/increment8-qualification-packet.json",
+                    ".sdlc-run/increment8-operational-admission-decision.json",
+                ]
 
 
 def test_core_shards_are_exact_inputs_to_one_canonical_core_artifact() -> None:
@@ -416,7 +418,9 @@ def test_signed_closeout_attests_only_the_validated_exact_main_receipt() -> None
         "newsroom.increment5e2.final-closeout-receipt.v1",
         "newsroom.increment6g.final-closeout-receipt.v1",
         "newsroom.increment7.closeout-receipt.v1",
-        "newsroom.increment8.closeout-receipt.v1",
+            "newsroom.increment8.closeout-receipt.v2",
+            "newsroom.increment8.qualification-packet.v1",
+            "newsroom.increment8.operational-admission-decision.v1",
         "receipt_identity",
         "evaluated_sha",
         "EXPECTED_HEAD_SHA",
@@ -440,8 +444,10 @@ def test_signed_closeout_attests_only_the_validated_exact_main_receipt() -> None
         (".sdlc-run/signed-closeout-input/increment5e2-final-closeout.json"),
         ".sdlc-run/signed-closeout-input/increment6g-final-closeout.json",
         ".sdlc-run/signed-closeout-input/increment7g-final-closeout.json",
-        ".sdlc-run/signed-closeout-input/increment8f-final-closeout.json",
-    ]
+            ".sdlc-run/signed-closeout-input/increment8f-final-closeout.json",
+            ".sdlc-run/signed-closeout-input/increment8-qualification-packet.json",
+            ".sdlc-run/signed-closeout-input/increment8-operational-admission-decision.json",
+        ]
     upload = _step("signed-closeout", "Retain attestation bundle")
     assert upload["uses"] == UPLOAD
     assert upload["with"] == {

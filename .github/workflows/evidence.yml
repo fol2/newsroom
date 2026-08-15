@@ -678,11 +678,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          uv run --no-sync python -m scripts.sdlc.increment8f_qualification \
+            --workspace .sdlc-run/increment8-qualification-workspace \
+            --packet .sdlc-run/increment8-qualification-packet.json \
+            --decision .sdlc-run/increment8-operational-admission-decision.json
           uv run --no-sync python -m scripts.sdlc.increment8f_closeout_receipt \
             --repo-root . \
             --core-transport-bundle-root .sdlc-run/decision-input/core-transport \
             --service-transport-bundle-root .sdlc-run/decision-input/service-transport \
             --decision .sdlc-run/decision.json \
+            --qualification-packet .sdlc-run/increment8-qualification-packet.json \
+            --operational-admission-decision .sdlc-run/increment8-operational-admission-decision.json \
             --output .sdlc-run/increment8f-final-closeout.json
 
       - name: Upload final decision evidence
@@ -698,6 +704,8 @@ jobs:
             .sdlc-run/increment6g-final-closeout.json
             .sdlc-run/increment7g-final-closeout.json
             .sdlc-run/increment8f-final-closeout.json
+            .sdlc-run/increment8-qualification-packet.json
+            .sdlc-run/increment8-operational-admission-decision.json
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
@@ -772,6 +780,14 @@ jobs:
               '.sdlc-run/signed-closeout-input/'
               'increment8f-final-closeout.json'
           )
+          qualification_packet_subject = Path(
+              '.sdlc-run/signed-closeout-input/'
+              'increment8-qualification-packet.json'
+          )
+          operational_admission_subject = Path(
+              '.sdlc-run/signed-closeout-input/'
+              'increment8-operational-admission-decision.json'
+          )
 
           def unique_object(pairs):
               result = {}
@@ -805,6 +821,28 @@ jobs:
               if payload != canonical:
                   raise SystemExit(f'{label} subject is not canonical JSON')
               return value
+
+          def load_product_subject(path, label):
+              if path.is_symlink():
+                  raise SystemExit(f'{label} subject must not be a symlink')
+              payload = path.read_bytes()
+              if not payload or len(payload) > 8 * 1024 * 1024:
+                  raise SystemExit(f'{label} subject size is invalid')
+              value = json.loads(
+                  payload.decode('utf-8'),
+                  object_pairs_hook=unique_object,
+                  parse_constant=reject_constant,
+              )
+              canonical = json.dumps(
+                  value,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(',', ':'),
+              ).encode('utf-8')
+              if payload != canonical:
+                  raise SystemExit(f'{label} subject is not canonical JSON')
+              return value, 'sha256:' + hashlib.sha256(payload).hexdigest()
 
           value = load_subject(receipt_subject, 'closeout')
           if not isinstance(value, dict):
@@ -1097,7 +1135,7 @@ jobs:
           if (
               not isinstance(increment8, dict)
               or increment8.get('schema_version')
-              != 'newsroom.increment8.closeout-receipt.v1'
+              != 'newsroom.increment8.closeout-receipt.v2'
               or increment8.get('evaluated_sha') != expected_head
               or increment8.get('evaluated_tree_sha')
               != value.get('evaluated_tree_sha')
@@ -1199,6 +1237,58 @@ jobs:
           if increment8_claimed != increment8_actual:
               raise SystemExit('increment8 closeout self-hash mismatch')
 
+          packet, packet_digest = load_product_subject(
+              qualification_packet_subject, 'qualification packet'
+          )
+          admission, admission_digest = load_product_subject(
+              operational_admission_subject, 'operational admission'
+          )
+          packet_payload = packet.get('payload') if isinstance(packet, dict) else None
+          admission_payload = (
+              admission.get('payload') if isinstance(admission, dict) else None
+          )
+          retained = (
+              packet_payload.get('retained_evidence')
+              if isinstance(packet_payload, dict) else None
+          )
+          evidence = (
+              packet_payload.get('evidence_digests')
+              if isinstance(packet_payload, dict) else None
+          )
+          release_owner = (
+              retained.get('release_decision', {}).get('payload', {}).get(
+                  'owner_identity_digest'
+              ) if isinstance(retained, dict) else None
+          )
+          verifier = (
+              retained.get('independent_verification', {}).get('payload', {}).get(
+                  'verifier_identity_digest'
+              ) if isinstance(retained, dict) else None
+          )
+          if (
+              packet.get('schema_version')
+              != 'newsroom.increment8.qualification-packet.v1'
+              or admission.get('schema_version')
+              != 'newsroom.increment8.operational-admission-decision.v1'
+              or not isinstance(evidence, dict)
+              or not isinstance(admission_payload, dict)
+              or increment8.get('qualification_packet_digest') != packet_digest
+              or increment8.get('operational_admission_decision_digest')
+              != admission_digest
+              or increment8.get('handoff_anchor_digest')
+              != evidence.get('handoff_anchor_digest')
+              or admission_payload.get('qualification_packet_digest') != packet_digest
+              or admission_payload.get('verdict') != 'FIXTURE_OPERATIONAL_ADMITTED'
+              or admission_payload.get('increment9_eligibility')
+              != 'ELIGIBLE_FOR_SEPARATE_PLAN'
+              or admission_payload.get('owner_identity_digest')
+              in {release_owner, verifier}
+              or admission_payload.get('operational_admission_is_activation') is not False
+              or admission_payload.get('live_shadow_execution_authorised') is not False
+              or admission_payload.get('production_activation_authorised') is not False
+          ):
+              raise SystemExit('signed Operational Admission binding differs')
+
           decision = load_subject(decision_subject, 'decision')
           if (
               not isinstance(decision, dict)
@@ -1231,6 +1321,8 @@ jobs:
             .sdlc-run/signed-closeout-input/increment6g-final-closeout.json
             .sdlc-run/signed-closeout-input/increment7g-final-closeout.json
             .sdlc-run/signed-closeout-input/increment8f-final-closeout.json
+            .sdlc-run/signed-closeout-input/increment8-qualification-packet.json
+            .sdlc-run/signed-closeout-input/increment8-operational-admission-decision.json
 
       - name: Retain attestation bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
