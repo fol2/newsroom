@@ -11,6 +11,7 @@ import newsroom.increment8.admission as admission_module
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.increment8.admission import (
     AdmissionError,
+    IndependentVerificationEvidence,
     OperationalAdmissionDecision,
     QualificationPacket,
     build_operational_admission_decision,
@@ -238,6 +239,22 @@ def test_builder_reconstructs_detached_and_semantically_forged_evidence(
         _packet(
             tmp_path / "rollback",
             rollback_evidence=replace(_rollback(), canonical_bytes=b"{}"),
+        )
+    with pytest.raises(AdmissionError, match="qualification evidence is contradictory"):
+        _packet(
+            tmp_path / "unrelated-rollback",
+            rollback_evidence=_rollback(_D2),
+        )
+    self_verification = IndependentVerificationEvidence.build(
+        verifier_identity_digest=_D,
+        verification_method_digest=_D,
+        reviewed_evidence_manifest_digest=_D,
+        verified_at_digest=_D,
+    )
+    with pytest.raises(AdmissionError, match="qualification evidence is contradictory"):
+        _packet(
+            tmp_path / "self-verification",
+            independent_verification=self_verification,
         )
 
 

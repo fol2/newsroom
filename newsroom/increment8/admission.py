@@ -292,6 +292,7 @@ class CostLicenceEvidence:
 @dataclass(frozen=True, slots=True)
 class RollbackEvidence:
     runbook_version_digest: str
+    restored_state_digest: str
     canonical_bytes: bytes
     digest: str
 
@@ -322,7 +323,12 @@ class RollbackEvidence:
         raw, record_digest = _record(
             "newsroom.increment8.rollback-evidence.v1", payload
         )
-        return cls(str(payload["runbook_version_digest"]), raw, record_digest)
+        return cls(
+            str(payload["runbook_version_digest"]),
+            str(payload["restored_state_digest"]),
+            raw,
+            record_digest,
+        )
 
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> RollbackEvidence:
@@ -348,6 +354,7 @@ class RollbackEvidence:
 @dataclass(frozen=True, slots=True)
 class IndependentVerificationEvidence:
     verifier_identity_digest: str
+    reviewed_evidence_manifest_digest: str
     canonical_bytes: bytes
     digest: str
 
@@ -381,7 +388,12 @@ class IndependentVerificationEvidence:
         raw, record_digest = _record(
             "newsroom.increment8.independent-verification-evidence.v1", payload
         )
-        return cls(str(payload["verifier_identity_digest"]), raw, record_digest)
+        return cls(
+            str(payload["verifier_identity_digest"]),
+            str(payload["reviewed_evidence_manifest_digest"]),
+            raw,
+            record_digest,
+        )
 
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> IndependentVerificationEvidence:
@@ -635,6 +647,12 @@ class QualificationPacket:
             or security_payload["runbook_version_digest"]
             != evidence["runbook_version_digest"]
             or rollback.runbook_version_digest != evidence["runbook_version_digest"]
+            or rollback.restored_state_digest
+            != restore.payload["restored_logical_digest"]
+            or independent.verifier_identity_digest
+            == release.payload["owner_identity_digest"]
+            or independent.reviewed_evidence_manifest_digest
+            != release.payload["evidence_manifest_digest"]
         ):
             raise AdmissionError("qualification packet evidence binding differs")
         canonical_evidence = dict(evidence)
@@ -1221,8 +1239,14 @@ def build_qualification_packet(
         or observability_payload["runbook_version_digest"] != runbook
         or security_payload["runbook_version_digest"] != runbook
         or rollback_evidence.runbook_version_digest != runbook
+        or rollback_evidence.restored_state_digest
+        != restore.payload["restored_logical_digest"]
+        or independent_verification.verifier_identity_digest
+        == release_decision.payload["owner_identity_digest"]
+        or independent_verification.reviewed_evidence_manifest_digest
+        != release_decision.payload["evidence_manifest_digest"]
     ):
-        raise AdmissionError("profile or runbook evidence is contradictory")
+        raise AdmissionError("qualification evidence is contradictory")
     if _integer(p1_finding_count, "p1_finding_count") or _integer(material_p2_finding_count, "material_p2_finding_count"):
         raise AdmissionError("substantive review contains a blocking finding")
     evidence: dict[str, object] = {

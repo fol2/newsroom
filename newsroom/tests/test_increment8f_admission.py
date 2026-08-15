@@ -36,6 +36,7 @@ from newsroom.tests.test_increment8b_metrics import _report, _run
 from newsroom.tests.test_increment8d_observability import _access, _health
 
 _D = "sha256:" + "1" * 64
+_D2 = "sha256:" + "2" * 64
 _AT = "2042-01-05T00:00:00.000000Z"
 _LATER = "2042-01-05T00:10:00.000000Z"
 _RETAIN = "2042-02-05T00:00:00.000000Z"
@@ -111,20 +112,20 @@ def _cost():
     )
 
 
-def _rollback():
+def _rollback(restored_state_digest=_D):
     return RollbackEvidence.build(
         runbook_version_digest=_D,
         rollback_plan_digest=_D,
-        restored_state_digest=_D,
+        restored_state_digest=restored_state_digest,
         tested_at_digest=_D,
     )
 
 
-def _independent():
+def _independent(reviewed_evidence_manifest_digest=_D):
     return IndependentVerificationEvidence.build(
-        verifier_identity_digest=_D,
+        verifier_identity_digest=_D2,
         verification_method_digest=_D,
-        reviewed_evidence_manifest_digest=_D,
+        reviewed_evidence_manifest_digest=reviewed_evidence_manifest_digest,
         verified_at_digest=_D,
     )
 
@@ -166,8 +167,10 @@ def _packet(tmp_path, **changes):
             capacity=capacity, inventory_digest=_D, measured_at_digest=_D,
         ),
         "cost_licence": _cost(), "runbook_version_digest": _D,
-        "rollback_evidence": _rollback(),
-        "independent_verification": _independent(),
+        "rollback_evidence": _rollback(str(restore.payload["restored_logical_digest"])),
+        "independent_verification": _independent(
+            str(release.payload["evidence_manifest_digest"])
+        ),
         "p1_finding_count": 0, "material_p2_finding_count": 0,
     }
     values.update(changes)
