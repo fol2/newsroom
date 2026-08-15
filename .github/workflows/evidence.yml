@@ -1212,7 +1212,7 @@ jobs:
               or not isinstance(increment8_inventory, dict)
               or increment8_inventory.get('case_count') != 13
               or increment8_inventory.get('digest')
-              != 'sha256:72ea45af5392106cd40968792097d6fd85960f16686795d45857e9da618e0429'
+              != 'sha256:948b6f6224c21d5a9f015188030ce476c203e7965f2ed52bb89037fed18ed123'
               or increment8_inventory.get('schema_version') != 32
               or increment8_inventory.get('schema_fingerprint')
               != 'sha256:3439b82ec6d212116e54765d50cace4d7f147b6ecc3e6ff84146b523c6fd5676'

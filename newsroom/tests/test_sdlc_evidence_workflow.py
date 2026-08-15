@@ -7,6 +7,10 @@ from typing import Any
 
 import yaml
 
+from newsroom.increment8.closeout import (
+    INCREMENT8_FINAL_CLOSEOUT_INVENTORY_DIGEST,
+)
+
 REPO_ROOT = Path(__file__).parents[2]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "evidence.yml"
 
@@ -445,6 +449,7 @@ def test_signed_closeout_attests_only_the_validated_exact_main_receipt() -> None
         "signed decision binding differs",
     ):
         assert expected in validation
+    assert INCREMENT8_FINAL_CLOSEOUT_INVENTORY_DIGEST in validation
 
     attest = _step(
         "signed-closeout",
