@@ -158,7 +158,9 @@ def _admission_paths(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
     return packet, decision
 
 
-def test_non_main_checkout_emits_no_final_closeout_claim(tmp_path) -> None:
+def test_non_main_checkout_emits_no_final_closeout_claim(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    monkeypatch.setenv("GITHUB_REF", "refs/pull/484/merge")
     repo = _clean_clone(tmp_path)
     receipt = build_final_receipt(
         repo_root=repo,

@@ -191,6 +191,13 @@ def test_corrective_contract_is_additive_and_preserves_the_reviewed_v1_record(
         "qualification_evidence_acceptance_authorised": True,
         "sole_active_coding_issue": 468,
     }
+    for name in (
+        "GITHUB_EVENT_NAME",
+        "GITHUB_REF",
+        "GITHUB_REPOSITORY",
+        "GITHUB_SHA",
+    ):
+        monkeypatch.delenv(name, raising=False)
     assert all(corrective_gate_authorised(gate) is False for gate in CorrectiveGate)
     monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
     monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
