@@ -514,15 +514,32 @@ class ShadowScope(_NoEffect):
             raise ShadowContractError("prohibited effect closure differs")
         if set(self.outcomes) != set(ShadowOutcome):
             raise ShadowContractError("shadow outcome closure differs")
-        if not self.production_differences or tuple(
-            sorted(item.difference_id for item in self.production_differences)
-        ) != tuple(item.difference_id for item in self.production_differences):
-            raise ShadowContractError("production differences must be unique and sorted")
-        if not self.protected_artifacts or tuple(
-            sorted(
-                (item.artifact_class for item in self.protected_artifacts), key=str
+        if (
+            not self.production_differences
+            or any(
+                type(item) is not ProductionDifference
+                for item in self.production_differences
             )
-        ) != tuple(item.artifact_class for item in self.protected_artifacts):
+            or tuple(
+            sorted(item.difference_id for item in self.production_differences)
+            )
+            != tuple(item.difference_id for item in self.production_differences)
+        ):
+            raise ShadowContractError("production differences must be unique and sorted")
+        if (
+            not self.protected_artifacts
+            or any(
+                type(item) is not ProtectedArtifactRule
+                for item in self.protected_artifacts
+            )
+            or tuple(
+                sorted(
+                    (item.artifact_class for item in self.protected_artifacts),
+                    key=str,
+                )
+            )
+            != tuple(item.artifact_class for item in self.protected_artifacts)
+        ):
             raise ShadowContractError("protected artefacts must be unique and sorted")
         if type(self.stop_and_closure) is not StopAndClosurePolicy:
             raise ShadowContractError("stop and closure policy differs")
@@ -807,6 +824,8 @@ def validate_manifest_chain(
         raise ShadowContractError("manifest chain must be a non-empty tuple")
     previous: ShadowManifest | None = None
     for ordinal, manifest in enumerate(manifests, 1):
+        if type(manifest) is not ShadowManifest:
+            raise ShadowContractError("manifest chain contains an invalid record")
         validate_manifest_for_scope(scope, manifest)
         if manifest.version_ordinal != ordinal:
             raise ShadowContractError("manifest ordinal is not contiguous")

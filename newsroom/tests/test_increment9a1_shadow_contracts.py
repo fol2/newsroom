@@ -204,6 +204,13 @@ def test_strict_scope_parser_rejects_unknown_duplicate_and_noncanonical_bytes(
         ShadowScope.from_bytes(raw)
 
 
+def test_strict_parser_rejects_nested_unknown_fields() -> None:
+    value = json.loads(_scope().canonical_bytes)
+    value["access_boundary"]["unknown"] = True
+    with pytest.raises(ShadowContractError, match="access_boundary fields differ"):
+        ShadowScope.from_bytes(canonical_json_bytes(value))
+
+
 def test_contracts_are_frozen_and_have_no_effect_authority() -> None:
     scope = _scope()
     manifest = _manifest(scope)
