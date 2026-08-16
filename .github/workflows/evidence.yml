@@ -767,6 +767,63 @@ jobs:
             --subject-directory "${subject_root}" \
             --sdlc-decision .sdlc-run/decision.json
 
+      - name: Retain exact Increment 10R0 requalification subject
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/main' &&
+          needs.route.outputs.service_required == 'true'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          issue_input="${RUNNER_TEMP}/increment10r0-issue.json"
+          gh issue view 526 \
+            --repo "${{ github.repository }}" \
+            --json number,state,title,closedAt,url \
+            > "${issue_input}"
+          uv run --no-sync python - <<'PY'
+          import json
+          from pathlib import Path
+
+          from newsroom.authority.canonical import canonical_json_bytes
+          from newsroom.increment10 import (
+              REQUALIFICATION_PATH,
+              RequalificationOutcome,
+              load_requalification,
+          )
+
+          issue_input = Path('${{ runner.temp }}/increment10r0-issue.json')
+          issue = json.loads(issue_input.read_bytes())
+          if (
+              not isinstance(issue, dict)
+              or set(issue) != {'closedAt', 'number', 'state', 'title', 'url'}
+              or issue['number'] != 526
+              or issue['state'] != 'CLOSED'
+              or not isinstance(issue['closedAt'], str)
+              or not issue['closedAt'].endswith('Z')
+              or not isinstance(issue['title'], str)
+              or not issue['title']
+              or issue['url'] != 'https://github.com/fol2/newsroom/issues/526'
+          ):
+              raise SystemExit('Increment 10R0 issue is not immutably closed')
+          retained_issue = Path('.sdlc-run/increment10r0-issue.json')
+          retained_issue.write_bytes(canonical_json_bytes(issue))
+
+          packet = load_requalification(REQUALIFICATION_PATH)
+          if (
+              packet.outcome
+              is not RequalificationOutcome.ELIGIBLE_FOR_INCREMENT10_PLAN
+              or packet.permits_increment10_plan is not False
+          ):
+              raise SystemExit('Increment 10R0 packet authority differs')
+          retained = Path('.sdlc-run/increment10r0-requalification.json')
+          retained.write_bytes(REQUALIFICATION_PATH.read_bytes())
+          reconstructed = load_requalification(retained)
+          if reconstructed != packet:
+              raise SystemExit('Increment 10R0 subject reconstruction differs')
+          PY
+
       - name: Upload final decision evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -793,6 +850,8 @@ jobs:
             .sdlc-run/increment9-subjects/increment9-shadow-plan.json
             .sdlc-run/increment9-subjects/increment9-subject-manifest.json
             .sdlc-run/increment9-subjects/increment9g-final-closeout.json
+            .sdlc-run/increment10r0-requalification.json
+            .sdlc-run/increment10r0-issue.json
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
@@ -826,6 +885,7 @@ jobs:
       attestations: write
       contents: read
       id-token: write
+      issues: read
       pull-requests: read
     steps:
       - name: Checkout exact signed source
@@ -1442,6 +1502,62 @@ jobs:
             --subject-directory .sdlc-run/signed-closeout-input/increment9-subjects \
             --sdlc-decision .sdlc-run/signed-closeout-input/decision.json
 
+      - name: Reconstruct exact Increment 10R0 subject
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current_issue="${RUNNER_TEMP}/increment10r0-current-issue.json"
+          gh issue view 526 \
+            --repo "${{ github.repository }}" \
+            --json number,state,title,closedAt,url \
+            > "${current_issue}"
+          uv run --no-sync python - <<'PY'
+          import json
+          from pathlib import Path
+
+          from newsroom.authority.canonical import canonical_json_bytes
+          from newsroom.increment10 import (
+              REQUALIFICATION_PATH,
+              RequalificationOutcome,
+              load_requalification,
+          )
+
+          retained_path = Path(
+              '.sdlc-run/signed-closeout-input/'
+              'increment10r0-requalification.json'
+          )
+          retained = load_requalification(retained_path)
+          checked_out = load_requalification(REQUALIFICATION_PATH)
+          issue_path = Path(
+              '.sdlc-run/signed-closeout-input/increment10r0-issue.json'
+          )
+          issue = json.loads(issue_path.read_bytes())
+          current = json.loads(
+              Path('${{ runner.temp }}/increment10r0-current-issue.json').read_bytes()
+          )
+          if (
+              retained != checked_out
+              or retained_path.read_bytes() != REQUALIFICATION_PATH.read_bytes()
+              or retained.outcome
+              is not RequalificationOutcome.ELIGIBLE_FOR_INCREMENT10_PLAN
+              or retained.permits_increment10_plan is not False
+          ):
+              raise SystemExit('signed Increment 10R0 subject differs')
+          if (
+              issue != current
+              or issue_path.read_bytes() != canonical_json_bytes(issue)
+              or set(issue) != {'closedAt', 'number', 'state', 'title', 'url'}
+              or issue['number'] != 526
+              or issue['state'] != 'CLOSED'
+              or not isinstance(issue['closedAt'], str)
+              or not issue['closedAt'].endswith('Z')
+              or issue['url'] != 'https://github.com/fol2/newsroom/issues/526'
+          ):
+              raise SystemExit('signed Increment 10R0 issue closure differs')
+          PY
+
       - name: Attest final decision and closeout receipt
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
@@ -1465,6 +1581,8 @@ jobs:
             .sdlc-run/signed-closeout-input/increment9-subjects/increment9-shadow-plan.json
             .sdlc-run/signed-closeout-input/increment9-subjects/increment9-subject-manifest.json
             .sdlc-run/signed-closeout-input/increment9-subjects/increment9g-final-closeout.json
+            .sdlc-run/signed-closeout-input/increment10r0-requalification.json
+            .sdlc-run/signed-closeout-input/increment10r0-issue.json
 
       - name: Retain attestation bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
