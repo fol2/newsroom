@@ -21,6 +21,7 @@ from newsroom.increment9.epoch import (
     EFFECTIVE_MANIFEST_IDENTITY_KEYS,
     ChangeClassification,
     Checkpoint,
+    CohortCloseout,
     CostRecord,
     EffectIntent,
     EffectKind,
@@ -39,6 +40,7 @@ from newsroom.increment9.epoch import (
     classify_manifest_change,
     initialise_shadow_epoch_authority,
     qualify_final_cohort,
+    validate_cohort_closeout,
     validate_cohort_chain,
 )
 from newsroom.increment9.plan import INCREMENT_9_SHADOW_PLAN_DIGEST
@@ -102,12 +104,32 @@ def _cohort(
         "exposure_contract_digest": D("b"),
         "required_slices": ("HONG_KONG", "UK"),
         "opened_at": T1,
-        "closed_at": T9,
-        "final_at_closeout": True,
         "decision_bearing": manifest.decision_bearing,
     }
     values.update(changes)
     return ManifestCohort(**values)  # type: ignore[arg-type]
+
+
+def _closeout(
+    epoch: EvaluationEpoch,
+    cohorts: tuple[ManifestCohort, ...],
+    **changes: object,
+) -> CohortCloseout:
+    final = cohorts[-1]
+    values: dict[str, object] = {
+        "closeout_id": "cohort-closeout-1",
+        "epoch_id": epoch.epoch_id,
+        "epoch_digest": epoch.canonical_digest,
+        "final_cohort_digest": final.canonical_digest,
+        "observed_slice_ids": final.required_slices,
+        "exposure_minima_met": True,
+        "complete_denominators": True,
+        "unresolved_identity_count": 0,
+        "qualifies": final.decision_bearing,
+        "closed_at": T9,
+    }
+    values.update(changes)
+    return CohortCloseout(**values)  # type: ignore[arg-type]
 
 
 def _run(
@@ -213,7 +235,8 @@ def _records():
         decision_bearing=True,
         recorded_at=T4,
     )
-    return epoch, manifest, cohort, run, attempt, intent, result, checkpoint, cost, outcome
+    closeout = _closeout(epoch, (cohort,))
+    return epoch, manifest, cohort, run, attempt, intent, result, checkpoint, cost, outcome, closeout
 
 
 def test_all_public_records_round_trip_exact_canonical_bytes() -> None:
@@ -275,7 +298,7 @@ def test_cohorts_are_isolated_content_addressed_and_only_last_is_final() -> None
     epoch = _epoch()
     first_manifest = _manifest("a")
     second_manifest = _manifest("b")
-    first = _cohort(epoch, first_manifest, closed_at=T2, final_at_closeout=False)
+    first = _cohort(epoch, first_manifest)
     second = _cohort(
         epoch,
         second_manifest,
@@ -289,49 +312,51 @@ def test_cohorts_are_isolated_content_addressed_and_only_last_is_final() -> None
         second_manifest.canonical_digest: second_manifest,
     }
     assert validate_cohort_chain(epoch, manifests, (first, second)) == (first, second)
-    first_final = replace(first, final_at_closeout=True)
+    first_closeout = _closeout(
+        epoch,
+        (first,),
+        final_cohort_digest=first.canonical_digest,
+        closed_at=T2,
+    )
     with pytest.raises(EpochAuthorityError, match="only the final"):
-        validate_cohort_chain(
+        validate_cohort_closeout(
             epoch,
-            manifests,
-            (
-                first_final,
-                replace(
-                    second,
-                    previous_cohort_digest=first_final.canonical_digest,
-                ),
-            ),
+            (first, second),
+            first_closeout,
         )
 
 
 def test_final_cohort_qualifies_only_with_independent_complete_exposure() -> None:
+    epoch = _epoch()
     cohort = _cohort()
+    cohorts = (cohort,)
     assert qualify_final_cohort(
-        cohort,
-        observed_slice_ids=("HONG_KONG", "UK"),
-        exposure_minima_met=True,
-        complete_denominators=True,
-        unresolved_identity_count=0,
+        epoch,
+        cohorts,
+        _closeout(epoch, cohorts),
     ) is True
-    assert qualify_final_cohort(
-        cohort,
-        observed_slice_ids=("UK",),
-        exposure_minima_met=True,
-        complete_denominators=True,
-        unresolved_identity_count=0,
-    ) is False
-    assert qualify_final_cohort(
-        cohort,
-        observed_slice_ids=("HONG_KONG", "UK"),
-        exposure_minima_met=True,
-        complete_denominators=True,
-        unresolved_identity_count=1,
-    ) is False
+    for changes in (
+        {"observed_slice_ids": ("UK",), "qualifies": False},
+        {"unresolved_identity_count": 1, "qualifies": False},
+        {"exposure_minima_met": False, "qualifies": False},
+        {"complete_denominators": False, "qualifies": False},
+    ):
+        assert qualify_final_cohort(
+            epoch,
+            cohorts,
+            _closeout(epoch, cohorts, **changes),
+        ) is False
+    with pytest.raises(EpochAuthorityError, match="qualification truth"):
+        validate_cohort_closeout(
+            epoch,
+            cohorts,
+            _closeout(epoch, cohorts, observed_slice_ids=("UK",), qualifies=True),
+        )
 
 
 def test_partial_stale_blocked_failed_and_early_stopped_cannot_be_decision_bearing() -> None:
     records = _records()
-    complete = records[-1]
+    complete = next(record for record in records if isinstance(record, RunOutcome))
     for outcome in (
         RecordOutcome.PARTIAL,
         RecordOutcome.STALE,
@@ -359,6 +384,7 @@ def test_lost_response_and_ambiguous_effect_are_retained_explicitly() -> None:
             completed_at=T4,
             recorded_at=T4,
         )
+        assert result.response_digest is None
 
     with pytest.raises(EpochAuthorityError, match="transaction time"):
         replace(
@@ -375,7 +401,6 @@ def test_lost_response_and_ambiguous_effect_are_retained_explicitly() -> None:
             ),
             recorded_at=T3,
         )
-        assert result.response_digest is None
     with pytest.raises(EpochAuthorityError, match="missing response"):
         EffectResult(
             result_id="bad",
@@ -431,20 +456,92 @@ def test_isolated_schema_identity_checksum_and_integrity_are_exact() -> None:
 def test_authority_enforces_persist_before_effect_and_exact_correlations() -> None:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     authority = initialise_shadow_epoch_authority(connection)
-    epoch, manifest, cohort, run, attempt, intent, result, checkpoint, cost, outcome = _records()
+    epoch, manifest, cohort, run, attempt, intent, result, checkpoint, cost, outcome, closeout = _records()
     with pytest.raises(EpochAuthorityError, match="predecessor"):
         authority.append(result, epoch_id=epoch.epoch_id)
-    for record in (epoch, manifest, cohort, run, attempt, intent, result, checkpoint, cost, outcome):
-        authority.append(
-            record,
-            epoch_id=epoch.epoch_id,
-            cohort_digest=cohort.canonical_digest if record is not epoch else None,
-            run_id=run.run_id if record in (run, attempt, intent, result, checkpoint, cost, outcome) else None,
-            attempt_id=attempt.attempt_id if record in (attempt, intent, result, checkpoint, cost, outcome) else None,
-            sequence=getattr(record, "sequence", None),
-        )
+    for record in (epoch, manifest, cohort, run, attempt, intent, result, checkpoint, cost, outcome, closeout):
+        authority.append(record, epoch_id=epoch.epoch_id)
     assert authority.read(result.canonical_digest) == result
     assert set(authority.inventory(epoch.epoch_id)) == {item.canonical_digest for item in _records()}
+    rows = connection.execute(
+        "SELECT record_schema,cohort_digest,run_id,attempt_id,sequence "
+        "FROM shadow_epoch_records ORDER BY record_schema"
+    ).fetchall()
+    by_schema = {row[0]: row[1:] for row in rows}
+    assert by_schema[EffectIntent.schema_version] == (
+        cohort.canonical_digest,
+        run.run_id,
+        attempt.attempt_id,
+        intent.sequence,
+    )
+    assert by_schema[CohortCloseout.schema_version] == (
+        cohort.canonical_digest,
+        None,
+        None,
+        None,
+    )
+
+
+def test_authority_rejects_orphan_manifest_stale_cohort_run_and_false_decision() -> None:
+    orphan = initialise_shadow_epoch_authority(
+        sqlite3.connect(":memory:", isolation_level=None)
+    )
+    with pytest.raises(EpochAuthorityError, match="predecessor"):
+        orphan.append(_manifest(), epoch_id=_epoch().epoch_id)
+
+    authority = initialise_shadow_epoch_authority(
+        sqlite3.connect(":memory:", isolation_level=None)
+    )
+    epoch = _epoch()
+    first_manifest = _manifest("a")
+    first = _cohort(epoch, first_manifest)
+    second_manifest = _manifest("b", resolved=False)
+    second = _cohort(
+        epoch,
+        second_manifest,
+        cohort_id="cohort-2",
+        ordinal=2,
+        previous_cohort_digest=first.canonical_digest,
+        opened_at=T3,
+    )
+    for record in (epoch, first_manifest, first, second_manifest, second):
+        authority.append(record, epoch_id=epoch.epoch_id)
+    with pytest.raises(EpochAuthorityError, match="not current"):
+        authority.append(_run(epoch, first, first_manifest), epoch_id=epoch.epoch_id)
+
+    run = _run(epoch, second, second_manifest)
+    attempt = _attempt(run)
+    authority.append(run, epoch_id=epoch.epoch_id)
+    authority.append(attempt, epoch_id=epoch.epoch_id)
+    invalid = RunOutcome(
+        outcome_id="false-decision",
+        run_id=run.run_id,
+        run_digest=run.canonical_digest,
+        attempt_digest=attempt.canonical_digest,
+        cohort_digest=second.canonical_digest,
+        outcome=RecordOutcome.COMPLETE,
+        evidence_inventory_digest=D("5"),
+        production_nonmutation_after_digest=D("d"),
+        decision_bearing=True,
+        recorded_at=T4,
+    )
+    with pytest.raises(EpochAuthorityError, match="outcome binding"):
+        authority.append(invalid, epoch_id=epoch.epoch_id)
+
+
+def test_closeout_seals_epoch_and_authority_rechecks_schema_on_every_use() -> None:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    authority = initialise_shadow_epoch_authority(connection)
+    records = _records()
+    controller = ReplayController(authority)
+    controller.replay(records, epoch_id=records[0].epoch_id)
+    with pytest.raises(EpochAuthorityError, match="already closed out"):
+        authority.append(_manifest("b"), epoch_id=records[0].epoch_id)
+    connection.execute("DROP TRIGGER immutable_shadow_epoch_records")
+    with pytest.raises(Increment9ShadowMigrationError, match="fingerprint"):
+        authority.read(records[0].canonical_digest)
+    with pytest.raises(Increment9ShadowMigrationError, match="fingerprint"):
+        authority.inventory(records[0].epoch_id)
 
 
 def test_authority_records_are_immutable_retained_and_idempotency_conflicts_fail() -> None:
@@ -481,21 +578,11 @@ def test_authority_rejects_pre_cutoff_valid_time_for_prospective_result() -> Non
     )
     epoch, manifest, cohort, run, attempt, intent, result, *_ = _records()
     for record in (epoch, manifest, cohort, run, attempt, intent):
-        authority.append(
-            record,
-            epoch_id=epoch.epoch_id,
-            cohort_digest=cohort.canonical_digest,
-            run_id=run.run_id if isinstance(record, (ShadowRun, RunAttempt, EffectIntent)) else None,
-            attempt_id=attempt.attempt_id if isinstance(record, (RunAttempt, EffectIntent)) else None,
-            sequence=getattr(record, "sequence", None),
-        )
+        authority.append(record, epoch_id=epoch.epoch_id)
     with pytest.raises(EpochAuthorityError, match="prospective cutoff"):
         authority.append(
             replace(result, observed_valid_at="2041-12-31T23:59:59.000000Z"),
             epoch_id=epoch.epoch_id,
-            cohort_digest=cohort.canonical_digest,
-            run_id=run.run_id,
-            attempt_id=attempt.attempt_id,
         )
 
 

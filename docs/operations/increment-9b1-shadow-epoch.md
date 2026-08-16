@@ -41,9 +41,13 @@ retrieval, triage, Candidate and Handoff identities.
 An unresolved identity is explicitly non-decision-bearing. Compatible changes
 to those implementation identities create a new `ManifestCohort` inside the
 same Epoch. They never alter an existing cohort. Each cohort has an ordinal,
-exact predecessor, exposure contract and required slices.
+exact predecessor, opening instant, exposure contract and required slices. A
+cohort does not carry a predicted closing instant; a successor opening or the
+final `CohortCloseout` supplies that later fact.
 
-Only the last cohort may be marked final at closeout. It qualifies only when:
+No cohort predicts at creation whether it will be final. A separate immutable
+`CohortCloseout` selects the last retained cohort only after its evidence has
+closed. That final cohort qualifies only when:
 
 - its manifest identity is resolved;
 - its own exposure minima pass;
@@ -52,7 +56,8 @@ Only the last cohort may be marked final at closeout. It qualifies only when:
 - it has no unresolved identity.
 
 Earlier cohorts remain retained comparative evidence and are never pooled to
-qualify the final manifest.
+qualify the final manifest. The closeout seals the Epoch authority, so no later
+cohort or evidence record can be appended under the closed Epoch.
 
 ## Run and Attempt lineage
 

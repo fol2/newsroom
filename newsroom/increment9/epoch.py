@@ -357,8 +357,6 @@ class ManifestCohort(_Record):
     exposure_contract_digest: str
     required_slices: tuple[str, ...]
     opened_at: str
-    closed_at: str | None
-    final_at_closeout: bool
     decision_bearing: bool
 
     def __post_init__(self) -> None:
@@ -372,20 +370,70 @@ class ManifestCohort(_Record):
             _digest(self.previous_cohort_digest, "previous_cohort_digest")
         _tokens(self.required_slices, "required_slices")
         _timestamp(self.opened_at, "opened_at")
-        if self.closed_at is not None:
-            _timestamp(self.closed_at, "closed_at")
-            if _instant(self.closed_at) <= _instant(self.opened_at):
-                raise EpochAuthorityError("cohort chronology differs")
-        _boolean(self.final_at_closeout, "final_at_closeout")
         _boolean(self.decision_bearing, "decision_bearing")
 
     def primitive(self) -> dict[str, object]:
-        return {"schema_version": self.schema_version, "cohort_id": self.cohort_id, "epoch_id": self.epoch_id, "epoch_digest": self.epoch_digest, "manifest_digest": self.manifest_digest, "ordinal": self.ordinal, "previous_cohort_digest": self.previous_cohort_digest, "exposure_contract_digest": self.exposure_contract_digest, "required_slices": list(self.required_slices), "opened_at": self.opened_at, "closed_at": self.closed_at, "final_at_closeout": self.final_at_closeout, "decision_bearing": self.decision_bearing}
+        return {"schema_version": self.schema_version, "cohort_id": self.cohort_id, "epoch_id": self.epoch_id, "epoch_digest": self.epoch_digest, "manifest_digest": self.manifest_digest, "ordinal": self.ordinal, "previous_cohort_digest": self.previous_cohort_digest, "exposure_contract_digest": self.exposure_contract_digest, "required_slices": list(self.required_slices), "opened_at": self.opened_at, "decision_bearing": self.decision_bearing}
 
     @classmethod
     def from_bytes(cls, raw: bytes) -> Self:
         value = cls._document(raw, frozenset(name for name in cls.__dataclass_fields__ if name != "schema_version"))
         value["required_slices"] = _tokens(value["required_slices"], "required_slices")
+        return cls(**value)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True, slots=True)
+class CohortCloseout(_Record):
+    schema_version: ClassVar[str] = "newsroom.increment9.cohort-closeout.v1"
+    closeout_id: str
+    epoch_id: str
+    epoch_digest: str
+    final_cohort_digest: str
+    observed_slice_ids: tuple[str, ...]
+    exposure_minima_met: bool
+    complete_denominators: bool
+    unresolved_identity_count: int
+    qualifies: bool
+    closed_at: str
+
+    def __post_init__(self) -> None:
+        _token(self.closeout_id, "closeout_id")
+        _token(self.epoch_id, "epoch_id")
+        _digest(self.epoch_digest, "epoch_digest")
+        _digest(self.final_cohort_digest, "final_cohort_digest")
+        _tokens(self.observed_slice_ids, "observed_slice_ids", allow_empty=True)
+        _boolean(self.exposure_minima_met, "exposure_minima_met")
+        _boolean(self.complete_denominators, "complete_denominators")
+        _integer(self.unresolved_identity_count, "unresolved_identity_count")
+        _boolean(self.qualifies, "qualifies")
+        _timestamp(self.closed_at, "closed_at")
+
+    def primitive(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "closeout_id": self.closeout_id,
+            "epoch_id": self.epoch_id,
+            "epoch_digest": self.epoch_digest,
+            "final_cohort_digest": self.final_cohort_digest,
+            "observed_slice_ids": list(self.observed_slice_ids),
+            "exposure_minima_met": self.exposure_minima_met,
+            "complete_denominators": self.complete_denominators,
+            "unresolved_identity_count": self.unresolved_identity_count,
+            "qualifies": self.qualifies,
+            "closed_at": self.closed_at,
+        }
+
+    @classmethod
+    def from_bytes(cls, raw: bytes) -> Self:
+        value = cls._document(
+            raw,
+            frozenset(
+                name for name in cls.__dataclass_fields__ if name != "schema_version"
+            ),
+        )
+        value["observed_slice_ids"] = _tokens(
+            value["observed_slice_ids"], "observed_slice_ids", allow_empty=True
+        )
         return cls(**value)  # type: ignore[arg-type]
 
 
@@ -548,7 +596,7 @@ class RunOutcome(_Record):
         v=cls._document(raw,frozenset(n for n in cls.__dataclass_fields__ if n!="schema_version"));v["outcome"]=_enum(RecordOutcome,v["outcome"],"outcome");return cls(**v)  # type: ignore[arg-type]
 
 
-RECORD_TYPES: Mapping[str,type[_Record]]=MappingProxyType({c.schema_version:c for c in (EvaluationEpoch,EffectiveManifest,ManifestCohort,ShadowRun,RunAttempt,EffectIntent,EffectResult,Checkpoint,CostRecord,RunOutcome)})
+RECORD_TYPES: Mapping[str,type[_Record]]=MappingProxyType({c.schema_version:c for c in (EvaluationEpoch,EffectiveManifest,ManifestCohort,CohortCloseout,ShadowRun,RunAttempt,EffectIntent,EffectResult,Checkpoint,CostRecord,RunOutcome)})
 
 
 def classify_manifest_change(changed_dimensions: tuple[str,...], *, identities_resolved: bool)->ChangeClassification:
@@ -564,21 +612,31 @@ def classify_manifest_change(changed_dimensions: tuple[str,...], *, identities_r
 def validate_cohort_chain(epoch:EvaluationEpoch, manifests:Mapping[str,EffectiveManifest], cohorts:tuple[ManifestCohort,...])->tuple[ManifestCohort,...]:
     if type(cohorts) is not tuple or not cohorts:raise EpochAuthorityError("cohort chain must be non-empty")
     previous=None
-    final_count=0
     for ordinal,cohort in enumerate(cohorts,1):
         if type(cohort) is not ManifestCohort or cohort.epoch_id!=epoch.epoch_id or cohort.epoch_digest!=epoch.canonical_digest or cohort.ordinal!=ordinal:raise EpochAuthorityError("cohort Epoch binding differs")
         expected=None if previous is None else previous.canonical_digest
         if cohort.previous_cohort_digest!=expected:raise EpochAuthorityError("cohort predecessor differs")
         manifest=manifests.get(cohort.manifest_digest)
         if type(manifest) is not EffectiveManifest or cohort.decision_bearing!=manifest.decision_bearing:raise EpochAuthorityError("cohort manifest identity differs")
-        final_count+=int(cohort.final_at_closeout);previous=cohort
-    if final_count>1 or (final_count==1 and not cohorts[-1].final_at_closeout):raise EpochAuthorityError("only the final cohort may qualify")
+        if not (_instant(epoch.cutoff_at)<=_instant(cohort.opened_at)<_instant(epoch.closes_at)):raise EpochAuthorityError("cohort Epoch chronology differs")
+        if previous is not None and _instant(previous.opened_at)>=_instant(cohort.opened_at):raise EpochAuthorityError("cohort transition chronology differs")
+        previous=cohort
     return cohorts
 
 
-def qualify_final_cohort(cohort:ManifestCohort, *, observed_slice_ids:tuple[str,...], exposure_minima_met:bool, complete_denominators:bool, unresolved_identity_count:int)->bool:
-    observed=_tokens(observed_slice_ids,"observed_slice_ids",allow_empty=True);_integer(unresolved_identity_count,"unresolved_identity_count")
-    return bool(cohort.final_at_closeout and cohort.decision_bearing and set(observed)==set(cohort.required_slices) and exposure_minima_met is True and complete_denominators is True and unresolved_identity_count==0)
+def validate_cohort_closeout(epoch:EvaluationEpoch, cohorts:tuple[ManifestCohort,...], closeout:CohortCloseout)->CohortCloseout:
+    if type(closeout) is not CohortCloseout or not cohorts:raise EpochAuthorityError("cohort closeout differs")
+    final=cohorts[-1]
+    if closeout.epoch_id!=epoch.epoch_id or closeout.epoch_digest!=epoch.canonical_digest or closeout.final_cohort_digest!=final.canonical_digest:raise EpochAuthorityError("only the final cohort may close out")
+    if _instant(closeout.closed_at)<=_instant(final.opened_at):raise EpochAuthorityError("final cohort is not closed")
+    expected=bool(final.decision_bearing and set(closeout.observed_slice_ids)==set(final.required_slices) and closeout.exposure_minima_met and closeout.complete_denominators and closeout.unresolved_identity_count==0)
+    if closeout.qualifies is not expected:raise EpochAuthorityError("cohort qualification truth differs")
+    if _instant(closeout.closed_at)>_instant(epoch.closes_at):raise EpochAuthorityError("cohort closeout exceeds Epoch")
+    return closeout
+
+
+def qualify_final_cohort(epoch:EvaluationEpoch, cohorts:tuple[ManifestCohort,...], closeout:CohortCloseout)->bool:
+    validate_cohort_closeout(epoch,cohorts,closeout);return closeout.qualifies
 
 
 class ShadowEpochAuthority(_NoExternalEffect):
@@ -586,20 +644,17 @@ class ShadowEpochAuthority(_NoExternalEffect):
     def __init__(self,connection:sqlite3.Connection)->None:
         if not isinstance(connection,sqlite3.Connection):raise EpochAuthorityError("SQLite connection is required")
         verify_increment9_shadow_schema(connection);self.__connection=connection
-    def append(self,record:_Record,*,epoch_id:str,cohort_digest:str|None=None,run_id:str|None=None,attempt_id:str|None=None,sequence:int|None=None)->str:
+    def append(self,record:_Record,*,epoch_id:str)->str:
+        verify_increment9_shadow_schema(self.__connection)
         if type(record) not in set(RECORD_TYPES.values()):raise EpochAuthorityError("record type is not admitted")
         _token(epoch_id,"epoch_id")
-        for value,field in ((cohort_digest,"cohort_digest"),):
-            if value is not None:_digest(value,field)
-        for value,field in ((run_id,"run_id"),(attempt_id,"attempt_id")):
-            if value is not None:_token(value,field)
-        if sequence is not None:_integer(sequence,"sequence",minimum=0)
         raw=record.canonical_bytes;digest=record.canonical_digest
         try:
             self.__connection.execute("BEGIN IMMEDIATE")
+            if self.__connection.execute("SELECT 1 FROM shadow_epoch_records WHERE epoch_id=? AND record_schema=? LIMIT 1",(epoch_id,CohortCloseout.schema_version)).fetchone() is not None:raise EpochAuthorityError("Epoch is already closed out")
             count=self.__connection.execute("SELECT count(*) FROM shadow_epoch_records WHERE epoch_id=?",(epoch_id,)).fetchone()[0]
             if count>=MAX_EPOCH_RECORDS:raise EpochAuthorityError("Epoch record inventory limit reached")
-            self._validate_dependencies(record, epoch_id)
+            cohort_digest,run_id,attempt_id,sequence=self._validate_dependencies(record,epoch_id)
             self.__connection.execute("INSERT INTO shadow_epoch_records(record_schema,record_id,record_bytes,record_digest,epoch_id,cohort_digest,run_id,attempt_id,sequence) VALUES(?,?,?,?,?,?,?,?,?)",(record.schema_version,_record_id(record),raw,digest,epoch_id,cohort_digest,run_id,attempt_id,sequence))
             self.__connection.commit()
         except sqlite3.Error as exc:
@@ -613,30 +668,56 @@ class ShadowEpochAuthority(_NoExternalEffect):
         row=self.__connection.execute("SELECT record_schema,record_bytes FROM shadow_epoch_records WHERE record_digest=?",(digest,)).fetchone()
         if row is None or row[0]!=schema:raise EpochAuthorityError("required predecessor record is absent")
         kind=RECORD_TYPES[schema];return kind.from_bytes(bytes(row[1]))
-    def _validate_dependencies(self,record:_Record,epoch_id:str)->None:
+    def _required_id(self,schema:str,record_id:str)->_Record:
+        row=self.__connection.execute("SELECT record_bytes FROM shadow_epoch_records WHERE record_schema=? AND record_id=?",(schema,record_id)).fetchone()
+        if row is None:raise EpochAuthorityError("required predecessor record is absent")
+        return RECORD_TYPES[schema].from_bytes(bytes(row[0]))
+    def _run_for_attempt(self,attempt:RunAttempt,epoch_id:str)->ShadowRun:
+        run=self._required(attempt.run_digest,ShadowRun.schema_version)
+        if not isinstance(run,ShadowRun) or run.run_id!=attempt.run_id or run.epoch_id!=epoch_id:raise EpochAuthorityError("Attempt Run binding differs")
+        return run
+    def _validate_dependencies(self,record:_Record,epoch_id:str)->tuple[str|None,str|None,str|None,int|None]:
         if isinstance(record,EvaluationEpoch):
             if record.epoch_id!=epoch_id:raise EpochAuthorityError("Epoch persistence identity differs")
-            return
-        if isinstance(record,EffectiveManifest):return
+            return None,None,None,None
+        persisted_epoch=self._required_id(EvaluationEpoch.schema_version,epoch_id)
+        if not isinstance(persisted_epoch,EvaluationEpoch):raise EpochAuthorityError("Epoch persistence identity differs")
+        if isinstance(record,EffectiveManifest):return None,None,None,None
         if isinstance(record,ManifestCohort):
             epoch=self._required(record.epoch_digest,EvaluationEpoch.schema_version)
             self._required(record.manifest_digest,EffectiveManifest.schema_version)
             if not isinstance(epoch,EvaluationEpoch) or epoch.epoch_id!=record.epoch_id or record.epoch_id!=epoch_id:raise EpochAuthorityError("cohort persistence binding differs")
             if record.previous_cohort_digest is not None:self._required(record.previous_cohort_digest,ManifestCohort.schema_version)
-            return
+            prior=tuple(sorted((ManifestCohort.from_bytes(bytes(row[0])) for row in self.__connection.execute("SELECT record_bytes FROM shadow_epoch_records WHERE epoch_id=? AND record_schema=?",(epoch_id,ManifestCohort.schema_version))),key=lambda item:item.ordinal))
+            cohorts=prior+(record,)
+            manifests={cohort.manifest_digest:self._required(cohort.manifest_digest,EffectiveManifest.schema_version) for cohort in cohorts}
+            validate_cohort_chain(epoch,manifests,cohorts)
+            return record.canonical_digest,None,None,None
+        if isinstance(record,CohortCloseout):
+            epoch=self._required(record.epoch_digest,EvaluationEpoch.schema_version);self._required(record.final_cohort_digest,ManifestCohort.schema_version)
+            if not isinstance(epoch,EvaluationEpoch) or epoch.epoch_id!=record.epoch_id:raise EpochAuthorityError("cohort closeout persistence binding differs")
+            cohorts=tuple(sorted((ManifestCohort.from_bytes(bytes(row[0])) for row in self.__connection.execute("SELECT record_bytes FROM shadow_epoch_records WHERE epoch_id=? AND record_schema=?",(epoch_id,ManifestCohort.schema_version))),key=lambda item:item.ordinal))
+            manifests={cohort.manifest_digest:self._required(cohort.manifest_digest,EffectiveManifest.schema_version) for cohort in cohorts}
+            validate_cohort_chain(epoch,manifests,cohorts)
+            validate_cohort_closeout(epoch,cohorts,record)
+            return record.final_cohort_digest,None,None,None
         if isinstance(record,ShadowRun):
             epoch=self._required(record.epoch_digest,EvaluationEpoch.schema_version);cohort=self._required(record.cohort_digest,ManifestCohort.schema_version);self._required(record.manifest_digest,EffectiveManifest.schema_version)
-            if not isinstance(epoch,EvaluationEpoch) or not isinstance(cohort,ManifestCohort) or epoch.epoch_id!=record.epoch_id or cohort.cohort_id!=record.cohort_id or epoch_id!=record.epoch_id:raise EpochAuthorityError("Run persistence binding differs")
-            return
+            if not isinstance(epoch,EvaluationEpoch) or not isinstance(cohort,ManifestCohort) or epoch.epoch_id!=record.epoch_id or cohort.cohort_id!=record.cohort_id or cohort.manifest_digest!=record.manifest_digest or epoch_id!=record.epoch_id:raise EpochAuthorityError("Run persistence binding differs")
+            cohorts=tuple(ManifestCohort.from_bytes(bytes(row[0])) for row in self.__connection.execute("SELECT record_bytes FROM shadow_epoch_records WHERE epoch_id=? AND record_schema=?",(epoch_id,ManifestCohort.schema_version)))
+            if not cohorts or max(cohorts,key=lambda item:item.ordinal).canonical_digest!=record.cohort_digest:raise EpochAuthorityError("Run cohort is not current")
+            return record.cohort_digest,record.run_id,None,None
         if isinstance(record,RunAttempt):
-            run=self._required(record.run_digest,ShadowRun.schema_version)
-            if not isinstance(run,ShadowRun) or run.run_id!=record.run_id:raise EpochAuthorityError("Attempt Run binding differs")
-            if record.previous_attempt_digest is not None:self._required(record.previous_attempt_digest,RunAttempt.schema_version)
-            return
+            run=self._run_for_attempt(record,epoch_id)
+            if record.previous_attempt_digest is not None:
+                previous=self._required(record.previous_attempt_digest,RunAttempt.schema_version)
+                if not isinstance(previous,RunAttempt) or previous.run_id!=record.run_id or previous.ordinal+1!=record.ordinal:raise EpochAuthorityError("Attempt predecessor binding differs")
+            return run.cohort_digest,run.run_id,record.attempt_id,None
         if isinstance(record,EffectIntent):
             attempt=self._required(record.attempt_digest,RunAttempt.schema_version)
-            if not isinstance(attempt,RunAttempt) or attempt.attempt_id!=record.attempt_id:raise EpochAuthorityError("intent Attempt binding differs")
-            return
+            if not isinstance(attempt,RunAttempt) or attempt.attempt_id!=record.attempt_id or _instant(record.persisted_at)<_instant(attempt.started_at):raise EpochAuthorityError("intent Attempt binding differs")
+            run=self._run_for_attempt(attempt,epoch_id)
+            return run.cohort_digest,run.run_id,attempt.attempt_id,record.sequence
         if isinstance(record,EffectResult):
             intent=self._required(record.intent_digest,EffectIntent.schema_version)
             if not isinstance(intent,EffectIntent) or intent.intent_id!=record.intent_id or _instant(record.completed_at)<_instant(intent.persisted_at):raise EpochAuthorityError("result intent binding differs")
@@ -646,13 +727,24 @@ class ShadowEpochAuthority(_NoExternalEffect):
             if not isinstance(run,ShadowRun):raise EpochAuthorityError("result Run binding differs")
             epoch=self._required(run.epoch_digest,EvaluationEpoch.schema_version)
             if not isinstance(epoch,EvaluationEpoch) or (run.prospective and _instant(record.observed_valid_at)<_instant(epoch.cutoff_at)):raise EpochAuthorityError("result prospective cutoff differs")
-            return
-        if isinstance(record,Checkpoint):self._required(record.attempt_digest,RunAttempt.schema_version);return
-        if isinstance(record,CostRecord):self._required(record.intent_digest,EffectIntent.schema_version);return
+            return run.cohort_digest,run.run_id,attempt.attempt_id,intent.sequence
+        if isinstance(record,Checkpoint):
+            attempt=self._required(record.attempt_digest,RunAttempt.schema_version)
+            if not isinstance(attempt,RunAttempt) or attempt.attempt_id!=record.attempt_id or _instant(record.recorded_at)<_instant(attempt.started_at):raise EpochAuthorityError("checkpoint Attempt binding differs")
+            run=self._run_for_attempt(attempt,epoch_id);return run.cohort_digest,run.run_id,attempt.attempt_id,record.sequence
+        if isinstance(record,CostRecord):
+            intent=self._required(record.intent_digest,EffectIntent.schema_version)
+            if not isinstance(intent,EffectIntent) or intent.attempt_id!=record.attempt_id or _instant(record.recorded_at)<_instant(intent.persisted_at):raise EpochAuthorityError("cost intent binding differs")
+            attempt=self._required(intent.attempt_digest,RunAttempt.schema_version)
+            if not isinstance(attempt,RunAttempt):raise EpochAuthorityError("cost Attempt binding differs")
+            run=self._run_for_attempt(attempt,epoch_id);return run.cohort_digest,run.run_id,attempt.attempt_id,intent.sequence
         if isinstance(record,RunOutcome):
-            self._required(record.run_digest,ShadowRun.schema_version);self._required(record.attempt_digest,RunAttempt.schema_version);self._required(record.cohort_digest,ManifestCohort.schema_version);return
+            run=self._required(record.run_digest,ShadowRun.schema_version);attempt=self._required(record.attempt_digest,RunAttempt.schema_version);cohort=self._required(record.cohort_digest,ManifestCohort.schema_version)
+            if not isinstance(run,ShadowRun) or not isinstance(attempt,RunAttempt) or not isinstance(cohort,ManifestCohort) or run.run_id!=record.run_id or run.epoch_id!=epoch_id or attempt.run_digest!=record.run_digest or record.cohort_digest!=run.cohort_digest or (record.decision_bearing and (record.outcome is not RecordOutcome.COMPLETE or not cohort.decision_bearing)) or _instant(record.recorded_at)<_instant(attempt.started_at):raise EpochAuthorityError("Run outcome binding differs")
+            return run.cohort_digest,run.run_id,attempt.attempt_id,None
         raise EpochAuthorityError("record dependency policy is absent")
     def read(self,digest:str)->_Record:
+        verify_increment9_shadow_schema(self.__connection)
         digest=_digest(digest,"record_digest");row=self.__connection.execute("SELECT record_schema,record_bytes FROM shadow_epoch_records WHERE record_digest=?",(digest,)).fetchone()
         if row is None:raise EpochAuthorityError("record is absent")
         kind=RECORD_TYPES.get(row[0])
@@ -661,14 +753,26 @@ class ShadowEpochAuthority(_NoExternalEffect):
         if record.canonical_digest!=digest:raise EpochAuthorityError("stored record digest differs")
         return record
     def inventory(self,epoch_id:str)->tuple[str,...]:
-        _token(epoch_id,"epoch_id");return tuple(row[0] for row in self.__connection.execute("SELECT record_digest FROM shadow_epoch_records WHERE epoch_id=? ORDER BY record_schema,record_id",(epoch_id,)))
+        verify_increment9_shadow_schema(self.__connection);_token(epoch_id,"epoch_id");return tuple(row[0] for row in self.__connection.execute("SELECT record_digest FROM shadow_epoch_records WHERE epoch_id=? ORDER BY record_schema,record_id",(epoch_id,)))
 
 
 def _record_id(record:_Record)->str:
-    for name in ("epoch_id","manifest_id","cohort_id","run_id","attempt_id","intent_id","result_id","checkpoint_id","cost_id","outcome_id"):
-        value=getattr(record,name,None)
-        if value is not None:return _token(value,"record_id")
-    raise EpochAuthorityError("record identity is absent")
+    fields:Mapping[type[_Record],str]=MappingProxyType({
+        EvaluationEpoch:"epoch_id",
+        EffectiveManifest:"manifest_id",
+        ManifestCohort:"cohort_id",
+        CohortCloseout:"closeout_id",
+        ShadowRun:"run_id",
+        RunAttempt:"attempt_id",
+        EffectIntent:"intent_id",
+        EffectResult:"result_id",
+        Checkpoint:"checkpoint_id",
+        CostRecord:"cost_id",
+        RunOutcome:"outcome_id",
+    })
+    name=fields.get(type(record))
+    if name is None:raise EpochAuthorityError("record identity is absent")
+    return _token(getattr(record,name),"record_id")
 
 
 def initialise_shadow_epoch_authority(connection:sqlite3.Connection)->ShadowEpochAuthority:
@@ -679,11 +783,7 @@ class ReplayController(_NoExternalEffect):
     """Deterministic fake/replay recorder; it never executes an intent."""
     def __init__(self,authority:ShadowEpochAuthority)->None:self._authority=authority
     def replay(self,records:tuple[_Record,...],*,epoch_id:str)->tuple[str,...]:
-        digests=[];cohort_digest=None;run_id=None;attempt_id=None
+        digests=[]
         for record in records:
-            if isinstance(record,ManifestCohort):cohort_digest=record.canonical_digest
-            if isinstance(record,ShadowRun):run_id=record.run_id
-            if isinstance(record,RunAttempt):attempt_id=record.attempt_id
-            record_sequence=getattr(record,"sequence",None) if attempt_id is not None else None
-            digests.append(self._authority.append(record,epoch_id=epoch_id,cohort_digest=cohort_digest,run_id=run_id,attempt_id=attempt_id,sequence=record_sequence))
+            digests.append(self._authority.append(record,epoch_id=epoch_id))
         return tuple(digests)
