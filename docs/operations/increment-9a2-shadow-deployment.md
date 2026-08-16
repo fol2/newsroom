@@ -175,14 +175,21 @@ a pass.
 
 ## Gate and handoff
 
-Native blocker #512 / PR #513 established the dedicated exact-service gate.
-Its exact-head run `31921339865` proved Neo4j `5.26.2` Community, the isolated
-`increment9` database, both online index types and zero-orphan teardown, and
-retained a secret-free component receipt. Standard SDLC run `31921339857`
-passed 4,008 outcomes with zero failures, errors or required skips, including
-42 authenticated service cases and source integrity. That GitHub-hosted x86
-receipt is explicitly component-scoped; it is not Mac M4/arm64 host proof.
-The separate `CAPACITY_MACM4` actual-host observation remains mandatory.
+Native blocker #512 / PRs #513 and #515 established and corrected the dedicated
+exact-service gate. Bootstrap run `31921339865` proved Neo4j `5.26.2`
+Community, the isolated `increment9` database, both online index types and
+zero-orphan teardown. The first repository-probe integration run `31921673573`
+then failed closed because the generic runner temporary directory was not a
+private evidence parent. It uploaded no artefact and is not passing evidence.
+PR #515 introduced the dedicated mode-`0700` parent without relaxing the
+mode-`0600` file rule. Changed-head dedicated run `31921768763` passed through
+upload and purge; standard SDLC run `31921768749` passed 4,008 outcomes with
+zero failures, errors or required skips, including 42 authenticated service
+cases and source integrity.
+
+Those GitHub-hosted x86 receipts are explicitly component-scoped; they are not
+Mac M4/arm64 host proof. The separate `CAPACITY_MACM4` actual-host observation
+remains mandatory.
 
 The 9A2 delivery gate requires exact-head deterministic tests, source
 integrity, authenticated isolated Neo4j `5.26.2` evidence, protected output,
