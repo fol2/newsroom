@@ -687,14 +687,14 @@ def _apply_plan(
             raise GithubApiError(
                 f"pull request #{action.pr_number} lifecycle changed after planning"
             )
-        if lifecycle.branch_retention.value != "keep":
-            raise GithubApiError(
-                f"pull request #{action.pr_number} requests unsupported "
-                "automatic branch deletion"
-            )
         if not lifecycle.is_disposable:
             raise GithubApiError(
                 f"pull request #{action.pr_number} is no longer disposable"
+            )
+        if lifecycle.branch_retention.value != "keep":
+            raise GithubApiError(
+                f"pull request #{action.pr_number} requests housekeeping "
+                "Git-ref deletion"
             )
         if HOUSEKEEPING_LABEL not in current.labels:
             raise GithubApiError(

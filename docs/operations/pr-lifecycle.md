@@ -18,7 +18,7 @@ Delivery-Atom: increment-5b3
 Canonical-PR: self
 Checkpoint-Ref: checkpoint/increment-5b3-final-YYYYMMDD
 Close-When: merged
-Branch-Retention: keep
+Branch-Retention: delete-after-merge
 ```
 
 There may be only one open canonical PR for the same `Delivery-Atom`. A canonical
@@ -92,12 +92,17 @@ Valid close conditions are:
 - `canonical-merged`: disposable PR closes only after its canonical PR is
   independently revalidated as merged.
 
-`Branch-Retention` has exactly one supported value: `keep`. Automated branch
-cleanup is deliberately unsupported. GitHub's ref deletion endpoint has no
-compare-and-delete operation, so a check followed by deletion cannot safely bind
-the mutation to the checked commit. Branch cleanup is therefore a separate manual
-owner action outside this automation; checkpoint refs and disposable branches are
-retained by every automated closure.
+`Branch-Retention` has two supported values:
+
+- `delete-after-merge`: canonical PRs only. GitHub's repository setting
+  `delete_branch_on_merge` deletes the head branch at merge time.
+- `keep`: disposable support/preflight PRs only. Those PRs are never merged, so
+  GitHub does not delete their heads.
+
+`delete-after-checkpoint` is unsupported. Housekeeping never calls GitHub's ref
+deletion endpoint: that API has no compare-and-delete operation, so a check
+followed by deletion cannot safely bind the mutation to the checked commit.
+Checkpoint refs and disposable branches remain until an owner deletes them.
 
 ## Operating limits
 
@@ -108,7 +113,8 @@ retained by every automated closure.
   satisfied.
 - No unexplained open PR may remain older than seven days.
 - Canonical PRs are never closed by automation.
-- Automated housekeeping never deletes a Git ref.
+- Canonical head branches are deleted by GitHub at merge time
+  (`delete_branch_on_merge`). Automated housekeeping never deletes a Git ref.
 
 ## Automation
 
@@ -154,7 +160,9 @@ disposable PR; repository contents remain read-only. It then re-reads the curren
 target PR state, body, labels, head repository, head SHA, checkpoint and canonical
 binding before every effect. The re-read head SHA must equal the exact SHA embedded
 in the reviewed close action; any drift fails closed before a comment or closure.
-It never merges or closes a canonical PR and never deletes a branch.
+It never merges or closes a canonical PR and never deletes a Git ref. GitHub
+itself may delete a merged canonical head when `delete_branch_on_merge` is
+enabled.
 
 ## Recovery
 

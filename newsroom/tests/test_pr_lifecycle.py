@@ -36,8 +36,12 @@ def body(
     canonical: str = "self",
     checkpoint: str = "checkpoint/increment-5b2",
     close_when: str = "merged",
-    retention: str = "keep",
+    retention: str | None = None,
 ) -> str:
+    if retention is None:
+        retention = (
+            "keep" if lifecycle != "canonical" else "delete-after-merge"
+        )
     return "\n".join(
         (
             f"Lifecycle: {lifecycle}",
@@ -84,7 +88,7 @@ def test_parse_canonical_lifecycle() -> None:
     assert lifecycle.canonical_pr is None
     assert lifecycle.checkpoint_ref == "checkpoint/increment-5b2"
     assert lifecycle.close_when is CloseWhen.MERGED
-    assert lifecycle.branch_retention is BranchRetention.KEEP
+    assert lifecycle.branch_retention is BranchRetention.DELETE_AFTER_MERGE
 
 
 def test_parser_rejects_reserved_delivery_atom_placeholder() -> None:
@@ -738,7 +742,24 @@ def test_plan_rejects_malformed_checkpoint_head_sha() -> None:
 def test_automatic_branch_deletion_metadata_is_rejected() -> None:
     with pytest.raises(
         PrLifecycleError,
-        match="automatic branch deletion is unsupported",
+        match="canonical lifecycle must delete its branch after merge",
+    ):
+        parse_pr_lifecycle(body(retention="keep"))
+    with pytest.raises(
+        PrLifecycleError,
+        match="disposable Branch-Retention must be keep",
+    ):
+        parse_pr_lifecycle(
+            body(
+                lifecycle="support",
+                canonical="#10",
+                close_when="canonical-merged",
+                retention="delete-after-merge",
+            )
+        )
+    with pytest.raises(
+        PrLifecycleError,
+        match="disposable Branch-Retention must be keep",
     ):
         parse_pr_lifecycle(
             body(
