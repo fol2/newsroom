@@ -383,6 +383,13 @@ def test_lane_and_decision_artifacts_are_compact_immutable_and_attempt_scoped() 
                 ".sdlc-run/increment9-subjects/increment9g-final-closeout.json",
                 ".sdlc-run/increment10r0-requalification.json",
                 ".sdlc-run/increment10r0-issue.json",
+                ".sdlc-run/increment10-subjects/increment10-issue-inventory.json",
+                ".sdlc-run/increment10-subjects/increment10-plan.json",
+                ".sdlc-run/increment10-subjects/increment10-transport-deployment.json",
+                ".sdlc-run/increment10-subjects/increment10-run-inventory.json",
+                ".sdlc-run/increment10-subjects/increment10-review-metric-decision.json",
+                ".sdlc-run/increment10-subjects/increment10g-final-closeout.json",
+                ".sdlc-run/increment10-subjects/increment10-subject-manifest.json",
             ]
 
 
@@ -493,6 +500,13 @@ def test_signed_closeout_attests_only_the_validated_exact_main_receipt() -> None
         ".sdlc-run/signed-closeout-input/increment9-subjects/increment9g-final-closeout.json",
         ".sdlc-run/signed-closeout-input/increment10r0-requalification.json",
         ".sdlc-run/signed-closeout-input/increment10r0-issue.json",
+        ".sdlc-run/signed-closeout-input/increment10-subjects/increment10-issue-inventory.json",
+        ".sdlc-run/signed-closeout-input/increment10-subjects/increment10-plan.json",
+        ".sdlc-run/signed-closeout-input/increment10-subjects/increment10-transport-deployment.json",
+        ".sdlc-run/signed-closeout-input/increment10-subjects/increment10-run-inventory.json",
+        ".sdlc-run/signed-closeout-input/increment10-subjects/increment10-review-metric-decision.json",
+        ".sdlc-run/signed-closeout-input/increment10-subjects/increment10g-final-closeout.json",
+        ".sdlc-run/signed-closeout-input/increment10-subjects/increment10-subject-manifest.json",
     ]
     upload = _step("signed-closeout", "Retain attestation bundle")
     assert upload["uses"] == UPLOAD
@@ -826,9 +840,11 @@ def test_github_token_exists_only_on_exact_collection_step() -> None:
         ("decision", "Collect exact lane evidence"),
         ("decision", "Retain exact Increment 8 substantive review"),
         ("decision", "Collect exact Increment 9G closeout inputs"),
-        ("decision", "Retain exact Increment 10R0 requalification subject"),
-        ("signed-closeout", "Reconstruct exact Increment 8 admission subjects"),
-        ("signed-closeout", "Reconstruct exact Increment 10R0 subject"),
+            ("decision", "Retain exact Increment 10R0 requalification subject"),
+            ("decision", "Build and verify exact Increment 10G subjects"),
+            ("signed-closeout", "Reconstruct exact Increment 8 admission subjects"),
+            ("signed-closeout", "Reconstruct exact Increment 10R0 subject"),
+            ("signed-closeout", "Reconstruct exact Increment 10G subjects"),
     ]
 
 
@@ -892,3 +908,28 @@ def test_service_test_child_has_no_admin_credential_file() -> None:
     assert 'source "${projector_file}"' in execute
     assert 'source "${admin_file}"' not in execute
     assert 'test ! -e "${RUNNER_TEMP}/newsroom-sdlc-neo4j-admin.env"' in execute
+
+def test_increment10g_subjects_are_exact_main_reconstructed_and_attested() -> None:
+    condition = (
+        "github.event_name == 'workflow_dispatch' && "
+        "github.ref == 'refs/heads/main' && "
+        "needs.route.outputs.service_required == 'true'"
+    )
+    build = _step("decision", "Build and verify exact Increment 10G subjects")
+    assert build["if"] == condition
+    assert build["env"] == {"GITHUB_TOKEN": "${{ github.token }}"}
+    for expected in (
+        "for number in {526..536}",
+        "scripts.sdlc.increment10g_closeout_receipt build",
+        "--sdlc-decision .sdlc-run/decision.json",
+        "scripts.sdlc.increment10g_closeout_receipt verify",
+    ):
+        assert expected in build["run"]
+    reconstruct = _step("signed-closeout", "Reconstruct exact Increment 10G subjects")
+    assert reconstruct["env"] == {"GITHUB_TOKEN": "${{ github.token }}"}
+    assert "for number in {526..536}" in reconstruct["run"]
+    assert "--current-issue-directory" in reconstruct["run"]
+    attest = _step("signed-closeout", "Attest final decision and closeout receipt")
+    subjects = attest["with"]["subject-path"].splitlines()
+    assert ".sdlc-run/signed-closeout-input/increment10-subjects/increment10g-final-closeout.json" in subjects
+    assert ".sdlc-run/signed-closeout-input/increment10-subjects/increment10-subject-manifest.json" in subjects
