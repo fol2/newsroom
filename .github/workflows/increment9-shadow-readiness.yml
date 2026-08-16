@@ -215,15 +215,88 @@ jobs:
           PY
           fi
 
+      - name: Restart exact service and reconcile zero-orphan state
+        run: |
+          set -euo pipefail
+          credential_file="${RUNNER_TEMP}/increment9-neo4j.env"
+          set -a
+          source "${credential_file}"
+          set +a
+          docker restart increment9-neo4j-readiness
+          uv run python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import time
+          from pathlib import Path
+          from neo4j import GraphDatabase
+
+          last_error = None
+          observed = None
+          for _ in range(120):
+              driver = GraphDatabase.driver(
+                  os.environ["NEWSROOM_INCREMENT9_NEO4J_URI"],
+                  auth=(
+                      os.environ["NEWSROOM_INCREMENT9_NEO4J_USERNAME"],
+                      os.environ["NEWSROOM_INCREMENT9_NEO4J_PASSWORD"],
+                  ),
+              )
+              try:
+                  driver.verify_connectivity()
+                  with driver.session(database="increment9") as session:
+                      component = session.run(
+                          "CALL dbms.components() YIELD versions, edition "
+                          "RETURN versions[0] AS version, edition"
+                      ).single(strict=True)
+                      nodes = session.run(
+                          "MATCH (n:Increment9ReadinessProbe) RETURN count(n) AS count"
+                      ).single(strict=True)["count"]
+                      indexes = session.run(
+                          "SHOW INDEXES YIELD name WHERE name STARTS WITH 'i9_' RETURN name"
+                      ).data()
+                      observed = {
+                          "database": "increment9",
+                          "edition": component["edition"],
+                          "namespace": "increment9_shadow",
+                          "remaining_probe_indexes": len(indexes),
+                          "remaining_probe_nodes": nodes,
+                          "restart_count": 1,
+                          "secret_value_count": 0,
+                          "server_version": component["version"],
+                      }
+                  break
+              except Exception as exc:
+                  last_error = exc
+                  time.sleep(2)
+              finally:
+                  driver.close()
+          else:
+              raise RuntimeError("post-restart reconciliation timed out") from last_error
+
+          assert observed is not None
+          assert observed["server_version"] == "5.26.2"
+          assert observed["edition"].lower() == "community"
+          assert observed["remaining_probe_nodes"] == 0
+          assert observed["remaining_probe_indexes"] == 0
+          observed["evidence_digest"] = "sha256:" + hashlib.sha256(
+              json.dumps(observed, sort_keys=True, separators=(",", ":")).encode()
+          ).hexdigest()
+          output = Path(os.environ["NEWSROOM_INCREMENT9_EVIDENCE_DIR"]) / "increment9-neo4j-restart.json"
+          output.write_text(json.dumps(observed, sort_keys=True, separators=(",", ":")))
+          output.chmod(0o600)
+          PY
+
       - name: Verify exact service identity, cleanup and protected evidence
         if: always()
         run: |
           set -euo pipefail
           credential_file="${RUNNER_TEMP}/increment9-neo4j.env"
           evidence="${NEWSROOM_INCREMENT9_EVIDENCE_DIR}/increment9-neo4j-readiness.json"
+          restart_evidence="${NEWSROOM_INCREMENT9_EVIDENCE_DIR}/increment9-neo4j-restart.json"
           test "$(stat -c '%a' "${NEWSROOM_INCREMENT9_EVIDENCE_DIR}")" = 700
           test "$(stat -c '%a' "${credential_file}")" = 600
           test "$(stat -c '%a' "${evidence}")" = 600
+          test "$(stat -c '%a' "${restart_evidence}")" = 600
           set -a
           source "${credential_file}"
           set +a
@@ -245,6 +318,25 @@ jobs:
           assert value["remaining_probe_nodes"] == 0
           assert value["secret_value_count"] == 0
           assert os.environ["NEWSROOM_INCREMENT9_NEO4J_PASSWORD"] not in raw.decode()
+
+          restart_path = (
+              Path(os.environ["NEWSROOM_INCREMENT9_EVIDENCE_DIR"])
+              / "increment9-neo4j-restart.json"
+          )
+          restart_raw = restart_path.read_bytes()
+          restart = json.loads(restart_raw)
+          assert restart_raw == json.dumps(
+              restart, sort_keys=True, separators=(",", ":")
+          ).encode()
+          assert restart["server_version"] == "5.26.2"
+          assert restart["edition"].lower() == "community"
+          assert restart["database"] == "increment9"
+          assert restart["namespace"] == "increment9_shadow"
+          assert restart["restart_count"] == 1
+          assert restart["remaining_probe_nodes"] == 0
+          assert restart["remaining_probe_indexes"] == 0
+          assert restart["secret_value_count"] == 0
+          assert os.environ["NEWSROOM_INCREMENT9_NEO4J_PASSWORD"] not in restart_raw.decode()
 
           driver = GraphDatabase.driver(
               os.environ["NEWSROOM_INCREMENT9_NEO4J_URI"],
@@ -281,12 +373,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: increment9-neo4j-5262-readiness-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.sha }}
-          path: ${{ env.NEWSROOM_INCREMENT9_EVIDENCE_DIR }}/increment9-neo4j-readiness.json
+          path: ${{ env.NEWSROOM_INCREMENT9_EVIDENCE_DIR }}/increment9-neo4j-*.json
           if-no-files-found: error
           retention-days: 30
 
       - name: Purge protected readiness workspace
         if: always()
         run: |
-          rm -f "${NEWSROOM_INCREMENT9_EVIDENCE_DIR}/increment9-neo4j-readiness.json"
+          rm -f "${NEWSROOM_INCREMENT9_EVIDENCE_DIR}"/increment9-neo4j-*.json
           rmdir "${NEWSROOM_INCREMENT9_EVIDENCE_DIR}"
