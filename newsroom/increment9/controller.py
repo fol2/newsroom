@@ -722,18 +722,48 @@ BEFORE UPDATE ON controller_ledger BEGIN SELECT RAISE(ABORT, 'immutable'); END;
 CREATE TRIGGER controller_ledger_no_delete
 BEFORE DELETE ON controller_ledger BEGIN SELECT RAISE(ABORT, 'immutable'); END;
 """
+_EXPECTED_JOURNAL_SCHEMA = (
+    (
+        "table",
+        "controller_ledger",
+        "controller_ledger",
+        "CREATE TABLE controller_ledger ( ordinal INTEGER PRIMARY KEY CHECK "
+        "(ordinal > 0), entry_digest TEXT NOT NULL UNIQUE, entry_bytes BLOB NOT NULL )",
+    ),
+    (
+        "trigger",
+        "controller_ledger_no_delete",
+        "controller_ledger",
+        "CREATE TRIGGER controller_ledger_no_delete BEFORE DELETE ON "
+        "controller_ledger BEGIN SELECT RAISE(ABORT, 'immutable'); END",
+    ),
+    (
+        "trigger",
+        "controller_ledger_no_update",
+        "controller_ledger",
+        "CREATE TRIGGER controller_ledger_no_update BEFORE UPDATE ON "
+        "controller_ledger BEGIN SELECT RAISE(ABORT, 'immutable'); END",
+    ),
+)
+
+
+def _normalise_schema_sql(value: object) -> str:
+    if type(value) is not str:
+        raise ControllerError("controller journal schema differs")
+    return " ".join(value.split())
 
 
 def _verify_journal_schema(connection: sqlite3.Connection) -> None:
     application_id = int(connection.execute("PRAGMA application_id").fetchone()[0])
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    names = tuple(
-        row[0]
-        for row in connection.execute(
-            "SELECT name FROM sqlite_schema "
+    schema = tuple(
+        (str(kind), str(name), str(table), _normalise_schema_sql(sql))
+        for kind, name, table, sql in connection.execute(
+            "SELECT type,name,tbl_name,sql FROM sqlite_schema "
             "WHERE name NOT LIKE 'sqlite_%' ORDER BY name"
         )
     )
+    names = tuple(row[1] for row in schema)
     if (
         application_id != CONTROLLER_JOURNAL_APPLICATION_ID
         or version != CONTROLLER_JOURNAL_SCHEMA_VERSION
@@ -743,6 +773,7 @@ def _verify_journal_schema(connection: sqlite3.Connection) -> None:
             "controller_ledger_no_delete",
             "controller_ledger_no_update",
         )
+        or schema != _EXPECTED_JOURNAL_SCHEMA
     ):
         raise ControllerError("controller journal schema differs")
 
@@ -1370,6 +1401,8 @@ def qualify_controller(
 __all__ = [
     "CHECK_IDS",
     "CONTROLLER_STAGES",
+    "CONTROLLER_JOURNAL_APPLICATION_ID",
+    "CONTROLLER_JOURNAL_SCHEMA_VERSION",
     "RECOVERY_SCENARIOS",
     "STAGE_MANIFEST_DIMENSIONS",
     "CheckOutcome",

@@ -71,12 +71,13 @@ ordinal and the exact predecessor digest.
 
 `ControllerEvidenceJournal` is a dedicated, separately supplied SQLite
 authority with its own application ID and schema version. It accepts only a
-pristine database, uses `BEGIN IMMEDIATE`, stores exact canonical bytes and has
-triggers rejecting update and delete. Reopening reconstructs and verifies every
-byte, digest, ordinal and predecessor. A non-empty journal cannot be reused as
-a fresh qualification attempt. It must live in the isolated protected evidence
-area; it is not installed into or aliased with the production or 9B1 Epoch
-schema.
+pristine database, verifies the exact table/constraint/trigger definitions,
+uses `BEGIN IMMEDIATE`, stores exact canonical bytes and has triggers rejecting
+update and delete. Reopening reconstructs and verifies every byte, digest,
+ordinal and predecessor. A same-name lookalike schema fails closed. A non-empty
+journal cannot be reused as a fresh qualification attempt. It must live in the
+isolated protected evidence area; it is not installed into or aliased with the
+production or 9B1 Epoch schema.
 
 ## Controls and missing evidence
 

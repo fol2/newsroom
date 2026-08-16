@@ -14,6 +14,8 @@ from newsroom.increment9.controller import (
     STAGE_MANIFEST_DIMENSIONS,
     ControllerError,
     ControllerEvidenceJournal,
+    CONTROLLER_JOURNAL_APPLICATION_ID,
+    CONTROLLER_JOURNAL_SCHEMA_VERSION,
     ControllerQualificationDisposition,
     ControllerQualificationPlan,
     ControllerQualificationReceipt,
@@ -458,3 +460,24 @@ def test_append_only_journal_survives_restart_and_rejects_mutation(tmp_path) -> 
     reopened.rollback()
     with pytest.raises(ControllerError, match="empty journal"):
         ReplayIntegrationController(plan, journal)
+
+
+def test_lookalike_journal_schema_is_rejected() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.executescript(
+        """
+        CREATE TABLE controller_ledger (
+            ordinal INTEGER,
+            entry_digest TEXT,
+            entry_bytes BLOB
+        );
+        CREATE TRIGGER controller_ledger_no_update
+        BEFORE UPDATE ON controller_ledger BEGIN SELECT 1; END;
+        CREATE TRIGGER controller_ledger_no_delete
+        BEFORE DELETE ON controller_ledger BEGIN SELECT 1; END;
+        """
+    )
+    connection.execute(f"PRAGMA application_id={CONTROLLER_JOURNAL_APPLICATION_ID}")
+    connection.execute(f"PRAGMA user_version={CONTROLLER_JOURNAL_SCHEMA_VERSION}")
+    with pytest.raises(ControllerError, match="schema"):
+        ControllerEvidenceJournal(connection)
