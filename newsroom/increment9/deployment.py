@@ -1015,7 +1015,12 @@ def _write_protected_bytes(path: str | os.PathLike[str], payload: bytes) -> None
 def _copy_protected_file(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
     source_text = os.fspath(source)
     target_text = os.fspath(target)
-    if os.path.islink(source_text) or not os.path.isfile(source_text):
+    if (
+        os.path.islink(source_text)
+        or not os.path.isfile(source_text)
+        or os.path.exists(source_text + "-wal")
+        or os.path.exists(source_text + "-shm")
+    ):
         raise DeploymentError("production snapshot export must be a regular file")
     descriptor = os.open(target_text, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
@@ -1102,6 +1107,9 @@ def materialise_isolated_deployment(
 
     if type(plan) is not DeploymentPlan:
         raise DeploymentError("deployment plan type differs")
+    _timestamp(created_at, "created_at")
+    if not (_instant(plan.created_at) <= _instant(created_at) <= _instant(plan.expires_at)):
+        raise DeploymentError("materialisation is outside the deployment window")
     root_text = os.path.abspath(os.fspath(root))
     if os.path.basename(root_text) != plan.deployment_id or os.path.lexists(root_text):
         raise DeploymentError("isolated root identity differs or already exists")
@@ -1429,15 +1437,24 @@ def probe_macm4_capacity(*, root: str = "/") -> Mapping[str, object]:
         import subprocess
 
         result = subprocess.run(
-            ["/usr/sbin/sysctl", "-n", "hw.model", "machdep.cpu.brand_string"],
+            [
+                "/usr/sbin/sysctl",
+                "-n",
+                "hw.model",
+                "machdep.cpu.brand_string",
+                "hw.physicalcpu",
+                "hw.logicalcpu",
+            ],
             check=True,
             capture_output=True,
             text=True,
             timeout=5,
         )
         lines = result.stdout.splitlines()
-        if len(lines) == 2:
-            values["machine_model"], values["chip"] = lines
+        if len(lines) == 4:
+            values["machine_model"], values["chip"] = lines[:2]
+            values["physical_cores"] = int(lines[2])
+            values["reported_logical_cores"] = int(lines[3])
     except (FileNotFoundError, OSError, subprocess.SubprocessError):
         values["chip"] = "UNAVAILABLE"
     values["matches_od003"] = (
@@ -1445,6 +1462,8 @@ def probe_macm4_capacity(*, root: str = "/") -> Mapping[str, object]:
         and values.get("logical_cores") == 10
         and values.get("machine_model") == "Mac16,10"
         and values.get("chip") == "Apple M4"
+        and values.get("physical_cores") == 10
+        and values.get("reported_logical_cores") == 10
         and memory_bytes >= 17_179_869_184
         and int(values["root_available_bytes"]) >= 10_240 * 1024 * 1024
     )
