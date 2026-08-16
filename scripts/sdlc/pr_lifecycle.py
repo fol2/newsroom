@@ -239,6 +239,7 @@ def _verified_merged_canonical_prs(
             pr_number=canonical_pr.number,
             draft=canonical_pr.draft,
             head_ref=canonical_pr.head_ref,
+            merged=True,
         )
         if not canonical_lifecycle.canonical_is_self:
             raise GithubApiError(
@@ -632,6 +633,7 @@ def _validated_current_canonical(
         pr_number=canonical_pr.number,
         draft=canonical_pr.draft,
         head_ref=canonical_pr.head_ref,
+        merged=raw_canonical.get("merged_at") is not None,
     )
     if (
         not canonical_lifecycle.canonical_is_self

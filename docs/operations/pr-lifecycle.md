@@ -99,6 +99,10 @@ Valid close conditions are:
 - `keep`: disposable support/preflight PRs only. Those PRs are never merged, so
   GitHub does not delete their heads.
 
+Open canonical PRs must declare `delete-after-merge`. Inventory still accepts
+`keep` on an independently verified merged canonical so historical bodies created
+under the previous template do not abort housekeeping.
+
 `delete-after-checkpoint` is unsupported. Housekeeping never calls GitHub's ref
 deletion endpoint: that API has no compare-and-delete operation, so a check
 followed by deletion cannot safely bind the mutation to the checked commit.

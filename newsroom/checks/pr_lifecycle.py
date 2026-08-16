@@ -227,6 +227,7 @@ def validate_pull_request_lifecycle(
     pr_number: int,
     draft: bool,
     head_ref: str,
+    merged: bool = False,
 ) -> None:
     """Validate metadata against the actual pull-request surface."""
 
@@ -236,6 +237,8 @@ def validate_pull_request_lifecycle(
         raise PrLifecycleError("pull-request number must be positive")
     if not isinstance(draft, bool):
         raise PrLifecycleError("pull-request draft state must be boolean")
+    if not isinstance(merged, bool):
+        raise PrLifecycleError("pull-request merged state must be boolean")
     _validate_ref(head_ref, field="head_ref")
 
     if lifecycle.kind is LifecycleKind.CANONICAL:
@@ -243,7 +246,10 @@ def validate_pull_request_lifecycle(
             raise PrLifecycleError("canonical PR must declare Canonical-PR: self")
         if lifecycle.close_when is not CloseWhen.MERGED:
             raise PrLifecycleError("canonical PR must close only when merged")
-        if lifecycle.branch_retention is not BranchRetention.DELETE_AFTER_MERGE:
+        allowed_retention = {BranchRetention.DELETE_AFTER_MERGE}
+        if merged:
+            allowed_retention.add(BranchRetention.KEEP)
+        if lifecycle.branch_retention not in allowed_retention:
             raise PrLifecycleError(
                 "canonical branch retention must be delete-after-merge"
             )
@@ -529,9 +535,12 @@ def _validate_lifecycle_shape(lifecycle: PrLifecycle) -> None:
             raise PrLifecycleError("canonical lifecycle must reference self")
         if lifecycle.close_when is not CloseWhen.MERGED:
             raise PrLifecycleError("canonical lifecycle must close when merged")
-        if lifecycle.branch_retention is not BranchRetention.DELETE_AFTER_MERGE:
+        if lifecycle.branch_retention not in {
+            BranchRetention.KEEP,
+            BranchRetention.DELETE_AFTER_MERGE,
+        }:
             raise PrLifecycleError(
-                "canonical lifecycle must delete its branch after merge"
+                "canonical lifecycle must keep or delete-after-merge"
             )
         return
     if lifecycle.branch_retention is not BranchRetention.KEEP:

@@ -740,11 +740,30 @@ def test_plan_rejects_malformed_checkpoint_head_sha() -> None:
 
 
 def test_automatic_branch_deletion_metadata_is_rejected() -> None:
+    legacy = parse_pr_lifecycle(body(retention="keep"))
+    assert legacy.branch_retention is BranchRetention.KEEP
     with pytest.raises(
         PrLifecycleError,
-        match="canonical lifecycle must delete its branch after merge",
+        match="canonical branch retention must be delete-after-merge",
     ):
-        parse_pr_lifecycle(body(retention="keep"))
+        validate_pull_request_lifecycle(
+            legacy,
+            pr_number=10,
+            draft=False,
+            head_ref="agent/increment-5b2",
+        )
+    validate_pull_request_lifecycle(
+        legacy,
+        pr_number=10,
+        draft=False,
+        head_ref="agent/increment-5b2",
+        merged=True,
+    )
+    with pytest.raises(
+        PrLifecycleError,
+        match="canonical lifecycle must keep or delete-after-merge",
+    ):
+        parse_pr_lifecycle(body(retention="delete-after-checkpoint"))
     with pytest.raises(
         PrLifecycleError,
         match="disposable Branch-Retention must be keep",
@@ -769,6 +788,72 @@ def test_automatic_branch_deletion_metadata_is_rejected() -> None:
                 retention="delete-after-checkpoint",
             )
         )
+
+
+def test_plan_rejects_open_canonical_keep_retention() -> None:
+    with pytest.raises(
+        PrLifecycleError,
+        match="canonical branch retention must be delete-after-merge",
+    ):
+        plan_housekeeping(
+            (
+                open_pr(
+                    10,
+                    pr_body=body(retention="keep"),
+                    draft=False,
+                    head_ref="agent/increment-5b2",
+                ),
+            ),
+            now=NOW,
+        )
+
+
+def test_merged_canonical_legacy_keep_does_not_abort_inventory() -> None:
+    module = _load_lifecycle_cli("test_pr_lifecycle_legacy_keep_cli")
+    support = module._open_pr_from_json(
+        {
+            "number": 11,
+            "body": body(
+                lifecycle="support",
+                canonical="#10",
+                close_when="canonical-merged",
+            ),
+            "draft": True,
+            "head": {
+                "ref": "support/increment-5b2",
+                "sha": "a" * 40,
+                "repo": {"full_name": "fol2/newsroom"},
+            },
+            "labels": [{"name": HOUSEKEEPING_LABEL}],
+            "created_at": "2026-08-05T12:00:00Z",
+        }
+    )
+
+    class FakeClient:
+        def get_pull_request(self, number: int):
+            assert number == 10
+            return {
+                "number": 10,
+                "body": body(retention="keep"),
+                "draft": False,
+                "head": {
+                    "ref": "agent/increment-5b2",
+                    "sha": "b" * 40,
+                    "repo": {"full_name": "fol2/newsroom"},
+                },
+                "labels": [],
+                "created_at": "2026-08-01T12:00:00Z",
+                "merged_at": "2026-08-02T12:00:00Z",
+            }
+
+    verified = module._verified_merged_canonical_prs(
+        FakeClient(),
+        open_prs=(support,),
+        lifecycles={support.number: module.parse_pr_lifecycle(support.body)},
+    )
+    assert set(verified) == {10}
+    assert verified[10][1].branch_retention.value == "keep"
+
 
 def test_plan_rejects_unknown_or_mismatched_canonical_reference() -> None:
     support = open_pr(
