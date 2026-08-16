@@ -51,6 +51,8 @@ def verify(*,repo_root:Path,subject_directory:Path,sdlc_decision:Path,current_is
  if not isinstance(context,dict):raise CloseoutError("SDLC context differs")
  manifest=_load(subject_directory/"increment10-subject-manifest.json");subjects=manifest.get("subjects")
  if not isinstance(subjects,dict):raise CloseoutError("subject manifest differs")
+ expected_subject_names={"increment10-issue-inventory.json",*SUBJECT_SOURCES,"increment10g-final-closeout.json"}
+ if set(subjects)!=expected_subject_names or set(manifest)!={"schema_version","source_commit","source_tree","subjects"} or manifest["schema_version"]!="newsroom.increment10.subject-manifest.v1":raise CloseoutError("subject manifest inventory differs")
  for name,digest in subjects.items():
   path=subject_directory/name
   if digest_bytes(path.read_bytes())!=digest:_load(path);raise CloseoutError(f"{name} digest differs")
@@ -58,8 +60,39 @@ def verify(*,repo_root:Path,subject_directory:Path,sdlc_decision:Path,current_is
  for name,relative in SUBJECT_SOURCES.items():
   if (subject_directory/name).read_bytes()!=(repo_root/relative).read_bytes():raise CloseoutError(f"{name} differs from checked-out source")
  if manifest.get("source_commit")!=context.get("evaluated_sha") or manifest.get("source_tree")!=context.get("evaluated_tree_sha"):raise CloseoutError("manifest source differs")
+ issue_inventory=_load(subject_directory/"increment10-issue-inventory.json")
+ issues=issue_inventory.get("issues")
+ if set(issue_inventory)!={"schema_version","issues"} or issue_inventory["schema_version"]!="newsroom.increment10.issue-inventory.v1" or not isinstance(issues,list) or len(issues)!=11:raise CloseoutError("issue inventory differs")
+ for number,issue in zip(range(526,537),issues):
+  if not isinstance(issue,dict) or set(issue)!={"closedAt","number","state","title","url"} or issue["number"]!=number or issue["state"]!="CLOSED" or issue["url"]!=f"https://github.com/fol2/newsroom/issues/{number}":raise CloseoutError("retained issue closure differs")
+ plan=load_plan(subject_directory/"increment10-plan.json")
+ run=_load(subject_directory/"increment10-run-inventory.json")
+ report=_load(subject_directory/"increment10-review-metric-decision.json")
+ authority=_load(subject_directory/"increment10-transport-deployment.json")
+ if digest_bytes(canonical_json_bytes(authority))!=EXPECTED_DIGESTS["increment10-transport-deployment.json"] or digest_bytes(canonical_json_bytes(run))!=EXPECTED_DIGESTS["increment10-run-inventory.json"] or digest_bytes(canonical_json_bytes(report))!=EXPECTED_DIGESTS["increment10-review-metric-decision.json"]:raise CloseoutError("reviewed product subject differs")
  receipt=_load(subject_directory/"increment10g-final-closeout.json")
- if receipt.get("disposition")!="BLOCKED_ACTIVE_COVERAGE" or receipt.get("increment11_eligible") is not False or any(receipt.get("non_effects",{}).values()):raise CloseoutError("closeout authority differs")
+ expected_receipt_fields={"schema_version","source","observed_at","schema","subjects","plan_digest","cohort","review","residual_blockers","disposition","increment11_eligible","non_effects","production_equivalence_differences"}
+ precursor_digests={name:digest for name,digest in subjects.items() if name!="increment10g-final-closeout.json"}
+ expected_zero=[[name,0] for name in EXPECTED_ZERO_TOLERANCE]
+ if (
+  set(receipt)!=expected_receipt_fields
+  or receipt["schema_version"]!="newsroom.increment10.closeout.v1"
+  or receipt["source"]!={"commit":context.get("evaluated_sha"),"tree":context.get("evaluated_tree_sha"),"sdlc_decision_digest":digest_bytes(sdlc_decision.read_bytes())}
+  or not isinstance(receipt["observed_at"],str) or not receipt["observed_at"]
+  or receipt["schema"]!={"version":SCHEMA_VERSION,"migration_checksum":CHECKSUM}
+  or receipt["subjects"]!=precursor_digests
+  or receipt["plan_digest"]!=plan.plan_digest
+  or receipt["cohort"]!={"denominator":3,"sealed_inventory_digest":EXPECTED_DIGESTS["increment10-run-inventory.json"]}
+  or receipt["review"]!={"metric_count":11,"review_record_count":6,"zero_tolerance":expected_zero}
+  or receipt["residual_blockers"]!=list(EXPECTED_RESIDUAL_GATES)
+  or receipt["disposition"]!="BLOCKED_ACTIVE_COVERAGE"
+  or receipt["increment11_eligible"] is not False
+  or receipt["non_effects"]!={"publication":False,"public_dispatch":False,"production_mutation":False,"production_activation":False,"legacy_retirement":False}
+  or receipt["production_equivalence_differences"]!=report.get("production_equivalence_differences")
+  or run.get("denominator")!=3 or run.get("terminal_outcome")!="COMPLETE"
+  or report.get("disposition")!="BLOCKED_ACTIVE_COVERAGE" or report.get("increment11_eligible") is not False
+ ):
+  raise CloseoutError("complete closeout reconstruction differs")
  if current_issue_directory:
   retained=_load(subject_directory/"increment10-issue-inventory.json")["issues"]
   current=[_read_issue(current_issue_directory/f"issue-{n}.json") for n in range(526,537)]
