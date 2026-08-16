@@ -36,6 +36,9 @@ def test_workflow_uses_ephemeral_masked_credentials_and_loopback_only() -> None:
         "bolt://localhost:7687",
         'rm -f "${credential_file}"',
         "test ! -e \"${RUNNER_TEMP}/increment9-neo4j.env\"",
+        "NEWSROOM_INCREMENT9_EVIDENCE_DIR: /tmp/increment9-protected-evidence-${{ github.run_id }}-${{ github.run_attempt }}",
+        'install -d -m 0700 "${NEWSROOM_INCREMENT9_EVIDENCE_DIR}"',
+        'stat -c \'%a\' "${NEWSROOM_INCREMENT9_EVIDENCE_DIR}"',
     )
     for statement in required:
         assert statement in text
@@ -83,6 +86,8 @@ def test_workflow_retains_canonical_secret_free_component_evidence() -> None:
         "if: success() && steps.probe.outcome == 'success'",
         "sort_keys=True",
         "not in raw.decode()",
+        "Purge protected readiness workspace",
+        'rmdir "${NEWSROOM_INCREMENT9_EVIDENCE_DIR}"',
     )
     for statement in required:
         assert statement in text
