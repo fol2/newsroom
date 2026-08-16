@@ -175,8 +175,8 @@ def _git(repo: Path) -> tuple[str, str]:
         r"[0-9a-f]{40}", tree
     ):
         raise CampaignError("checkout identity differs")
-    if run("status", "--porcelain", "--untracked-files=no"):
-        raise CampaignError("tracked checkout is not clean")
+    if run("status", "--porcelain"):
+        raise CampaignError("checkout is not clean")
     return head, tree
 
 
@@ -465,6 +465,17 @@ def build_bundle(
 
 def verify_bundle(raw: bytes) -> dict[str, object]:
     value = _exact_document(raw, schema=CAMPAIGN_BUNDLE_SCHEMA)
+    if set(value) != {
+        "bundle_digest",
+        "campaign_id",
+        "evidence_digests",
+        "launch_receipt",
+        "outcome",
+        "plan_digest",
+        "report",
+        "schema_version",
+    }:
+        raise CampaignError("campaign bundle fields differ")
     body = dict(value)
     claimed = _digest(body.pop("bundle_digest", None), "bundle_digest")
     if digest_bytes(canonical_json_bytes(body)) != claimed:
