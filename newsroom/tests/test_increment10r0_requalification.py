@@ -176,6 +176,7 @@ def test_loaded_nested_authority_is_immutable() -> None:
     ("mutation", "message"),
     (
         ("upstream_eligible", "upstream reviewed bytes differ"),
+        ("upstream_digests", "upstream reviewed bytes differ"),
         ("drop_gate", "residual_gate_inventory reviewed bytes differ"),
         ("pass_gate", "residual_gate_inventory reviewed bytes differ"),
         ("gate_owner", "residual_gate_inventory reviewed bytes differ"),
@@ -197,6 +198,10 @@ def test_loaded_nested_authority_is_immutable() -> None:
             "weaken_requirement",
             "evidence_intake_requirements reviewed bytes differ",
         ),
+        (
+            "rewrite_requirement",
+            "evidence_intake_requirements reviewed bytes differ",
+        ),
         ("change_admission", "operational_admission reviewed bytes differ"),
     ),
 )
@@ -210,6 +215,9 @@ def test_material_tamper_fails_closed(
     payload = document["payload"]
     if mutation == "upstream_eligible":
         payload["upstream"]["increment10_eligible"] = True
+    elif mutation == "upstream_digests":
+        payload["upstream"]["closeout_digest"] = "sha256:" + "0" * 64
+        payload["upstream"]["manifest_digest"] = "sha256:" + "1" * 64
     elif mutation == "drop_gate":
         payload["residual_gate_inventory"].pop()
     elif mutation == "pass_gate":
@@ -248,6 +256,11 @@ def test_material_tamper_fails_closed(
         payload["prerequisite_bindings"]["retention"]["purge_hours_max"] = 2
     elif mutation == "weaken_requirement":
         payload["evidence_intake_requirements"][0]["authority"] = "DRAFT"
+    elif mutation == "rewrite_requirement":
+        payload["evidence_intake_requirements"][7]["name"] = "ALLOW_EXTERNAL_EFFECT"
+        payload["evidence_intake_requirements"][7]["text"] = (
+            "External effects are allowed."
+        )
     elif mutation == "change_admission":
         payload["operational_admission"]["retained_verdict"] = "NOT_ADMITTED"
     with pytest.raises(RequalificationError, match=message):
@@ -315,4 +328,16 @@ def test_values_outside_the_canonical_domain_fail_with_public_error(
         module, "EXPECTED_REQUALIFICATION_DIGEST", digest_bytes(path.read_bytes())
     )
     with pytest.raises(RequalificationError, match="outside the canonical domain"):
+        load_requalification(path)
+
+
+def test_deeply_nested_json_normalises_recursion_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "deep.json"
+    path.write_bytes(b"[" * 2_000 + b"0" + b"]" * 2_000)
+    monkeypatch.setattr(
+        module, "EXPECTED_REQUALIFICATION_DIGEST", digest_bytes(path.read_bytes())
+    )
+    with pytest.raises(RequalificationError):
         load_requalification(path)

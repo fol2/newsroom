@@ -461,11 +461,11 @@ def load_requalification(path: Path = REQUALIFICATION_PATH) -> RequalificationPa
         )
     except RequalificationError:
         raise
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
         raise RequalificationError("cannot read requalification packet") from exc
     try:
         canonical = canonical_json_bytes(value)
-    except CanonicalizationError as exc:
+    except (CanonicalizationError, RecursionError) as exc:
         raise RequalificationError(
             "requalification packet is outside the canonical domain"
         ) from exc
