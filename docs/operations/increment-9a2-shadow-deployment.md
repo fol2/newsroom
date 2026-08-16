@@ -197,6 +197,15 @@ run `31922358934` passed the restart, two-receipt upload and purge; standard
 SDLC run `31922358840` again passed 4,008 outcomes with zero failures, errors
 or required skips, source integrity and 42 authenticated service cases.
 
+Exact-head SDLC run `31922687091` subsequently failed closed because the 9A2
+readiness module directly imported the official Neo4j driver outside the
+repository's sole private production driver adapter. Its dedicated
+actual-service run `31922686872` passed, but neither run is final pass evidence.
+The changed head keeps the bounded query and result validation in the 9A2
+module while the owned readiness CLI injects the locked driver factory. This
+preserves the production import boundary without changing test selection,
+timeouts or budgets.
+
 Those GitHub-hosted x86 receipts are explicitly component-scoped; they are not
 Mac M4/arm64 host proof. The separate `CAPACITY_MACM4` actual-host observation
 remains mandatory.

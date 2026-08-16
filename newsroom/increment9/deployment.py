@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import ClassVar, Mapping, Self
+from typing import Callable, ClassVar, Mapping, Self
 from urllib.parse import urlsplit
 
 from newsroom.authority import migrations as production_migrations
@@ -1513,6 +1513,7 @@ def probe_increment9_neo4j(
     password: str,
     database: str = "increment9",
     namespace: str = "increment9_shadow",
+    driver_factory: Callable[..., object] | None = None,
 ) -> Mapping[str, object]:
     """Run a bounded, self-cleaning actual-service readiness probe.
 
@@ -1532,14 +1533,12 @@ def probe_increment9_neo4j(
         ) from None
     if not username or not password:
         raise DeploymentError("actual-service connection inputs differ")
-    try:
-        from neo4j import GraphDatabase
-    except ImportError as exc:  # pragma: no cover - locked dependency in qualification
-        raise DeploymentError("neo4j driver is unavailable") from exc
+    if driver_factory is None:
+        raise DeploymentError("Neo4j readiness driver factory is absent")
     nonce = uuid.uuid4().hex
     fulltext = f"i9_readiness_fulltext_{nonce}"
     vector = f"i9_readiness_vector_{nonce}"
-    driver = GraphDatabase.driver(uri, auth=(username, password))
+    driver = driver_factory(uri, auth=(username, password))
     observed: dict[str, object] = {}
     probe_failed = False
     cleanup_failed = False

@@ -52,6 +52,10 @@ def _write_protected(path: Path, value: Mapping[str, object]) -> None:
 
 
 def _neo4j(output: Path) -> None:
+    try:
+        from neo4j import GraphDatabase
+    except ImportError as exc:  # pragma: no cover - locked qualification dependency
+        raise DeploymentError("neo4j driver is unavailable") from exc
     password = os.environ.get("NEWSROOM_INCREMENT9_NEO4J_PASSWORD")
     if not password:
         raise DeploymentError("Neo4j readiness credential is absent")
@@ -59,6 +63,7 @@ def _neo4j(output: Path) -> None:
         uri=os.environ.get("NEWSROOM_INCREMENT9_NEO4J_URI", "bolt://localhost:7687"),
         username=os.environ.get("NEWSROOM_INCREMENT9_NEO4J_USERNAME", "neo4j"),
         password=password,
+        driver_factory=GraphDatabase.driver,
     )
     _write_protected(output, observed)
 
