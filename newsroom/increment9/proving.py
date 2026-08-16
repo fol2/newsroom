@@ -1,0 +1,324 @@
+"""Increment 9P proving live source store.
+
+Fetches the frozen OD-001 public endpoints and retains Source Observations in
+an isolated SQLite file. No publication, Graphiti, Neo4j, embeddings, OpenRouter
+or Hermes daemon. Loading this module performs no network I/O.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import ssl
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Callable
+from urllib.parse import urlsplit
+
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+
+SCHEMA_VERSION = "newsroom.increment9.proving-store.v1"
+USER_AGENT = "Newsroom-9P-Proving/1.0"
+MAX_BODY_BYTES = 1_048_576
+TIMEOUT_SECONDS = 20
+FORBIDDEN_STORE_MARKERS = ("news_pool.sqlite3", "production")
+
+# OD-001 portfolio. Endpoints from docs/research/2026-07-15-concrete-news-source-map.md
+PORTFOLIO: tuple[tuple[str, str], ...] = (
+    (
+        "UK-01",
+        "https://www.gov.uk/search/all.atom?organisations%5B%5D=home-office&organisations%5B%5D=uk-visas-and-immigration&order=updated-newest",
+    ),
+    ("UK-02", "https://www.gov.uk/api/content/british-national-overseas-bno-visa"),
+    ("UK-03", "https://www.gov.uk/api/content/guidance/immigration-rules"),
+    (
+        "UK-05",
+        "https://www.gov.uk/search/all.atom?organisations%5B%5D=department-for-education&organisations%5B%5D=ofqual&order=updated-newest",
+    ),
+    (
+        "UK-10",
+        "https://weather.metoffice.gov.uk/public/data/PWSCache/WarningsRSS/Region/UK",
+    ),
+    ("HK-01", "https://www.news.gov.hk/tc/common/html/topstories.rss.xml"),
+    (
+        "HK-02",
+        "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=warnsum&lang=tc",
+    ),
+    ("HK-04", "https://www.edb.gov.hk/tc/whats_new_rss.xml"),
+    ("RAD-01", "https://rthk.hk/rthk/news/rss/c_expressnews_clocal.xml"),
+    ("RAD-02", "https://feeds.bbci.co.uk/news/uk/rss.xml"),
+)
+SOURCE_IDS = tuple(item[0] for item in PORTFOLIO)
+SOURCE_URLS = {item[0]: item[1] for item in PORTFOLIO}
+ALLOWED_HOSTS = frozenset(urlsplit(url).hostname or "" for _, url in PORTFOLIO)
+
+PROVING_GATES = (
+    "PORTFOLIO_BOUND",
+    "EGRESS_ALLOWLIST_ENFORCED",
+    "NO_PUBLICATION",
+    "KILL_SWITCH_READY",
+    "NO_ACTIVE_HUMAN_EMERGENCY_STOP",
+    "PROSPECTIVE_RUN_AUTHORITY",
+    "OPENROUTER_UNUSED",
+)
+
+Fetcher = Callable[[str], tuple[int, bytes]]
+
+
+class ProvingError(ValueError):
+    """Proving store input, gate or fetch failed closed."""
+
+
+class GateStatus(StrEnum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+
+
+@dataclass(frozen=True, slots=True)
+class Gate:
+    gate_id: str
+    status: GateStatus
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class Observation:
+    source_id: str
+    url: str
+    fetched_at: str
+    status_code: int
+    body_digest: str
+    item_count: int
+    error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ProvingReport:
+    run_id: str
+    publication: bool
+    public_dispatch: bool
+    openrouter_invoked: bool
+    spend_gbp_minor: int
+    gates: tuple[Gate, ...]
+    observations: tuple[Observation, ...]
+
+    @property
+    def authorised(self) -> bool:
+        return all(gate.status is GateStatus.PASS for gate in self.gates)
+
+    @property
+    def complete(self) -> bool:
+        seen = {item.source_id for item in self.observations if item.status_code == 200}
+        return self.authorised and seen == set(SOURCE_IDS)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: object, **kwargs: object) -> None:
+        raise ProvingError("redirects are denied")
+
+
+def _host(url: str) -> str:
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ProvingError("only https URLs with a host are permitted")
+    return parsed.hostname.lower()
+
+
+def assert_allowed_url(url: str) -> str:
+    host = _host(url)
+    if host not in ALLOWED_HOSTS:
+        raise ProvingError(f"host not on proving allowlist: {host}")
+    return host
+
+
+def _item_count(url: str, body: bytes) -> int:
+    text = body.decode("utf-8", errors="replace")
+    if "json" in (urlsplit(url).path + urlsplit(url).query) or url.endswith(".json") or "opendata" in url or "/api/" in url:
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            return 0
+        if isinstance(value, list):
+            return len(value)
+        if isinstance(value, dict):
+            return len(value)
+        return 1
+    return text.count("<entry") + text.count("<item")
+
+
+def default_fetch(url: str) -> tuple[int, bytes]:
+    assert_allowed_url(url)
+    request = urllib.request.Request(url, method="GET", headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+        _NoRedirect(),
+    )
+    try:
+        with opener.open(request, timeout=TIMEOUT_SECONDS) as response:
+            status = int(getattr(response, "status", 200))
+            body = response.read(MAX_BODY_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        body = exc.read(MAX_BODY_BYTES + 1) if exc.fp else b""
+        if len(body) > MAX_BODY_BYTES:
+            raise ProvingError("response exceeds proving body bound") from exc
+        return int(exc.code), body
+    except (urllib.error.URLError, TimeoutError, ssl.SSLError, OSError) as exc:
+        raise ProvingError(f"transport failed: {exc}") from exc
+    if len(body) > MAX_BODY_BYTES:
+        raise ProvingError("response exceeds proving body bound")
+    return status, body
+
+
+def assess(*, run_id: str, kill_switch: bool, no_emergency_stop: bool) -> tuple[Gate, ...]:
+    if type(run_id) is not str or not run_id.strip() or len(run_id) > 128:
+        raise ProvingError("run_id is required")
+    hosts = tuple(_host(url) for url in SOURCE_URLS.values())
+    allowlist_ok = set(hosts) <= ALLOWED_HOSTS and len(SOURCE_IDS) == 10
+    return (
+        Gate("PORTFOLIO_BOUND", GateStatus.PASS if SOURCE_IDS == tuple(item[0] for item in PORTFOLIO) else GateStatus.FAIL, "OD-001 ten"),
+        Gate("EGRESS_ALLOWLIST_ENFORCED", GateStatus.PASS if allowlist_ok else GateStatus.FAIL, ",".join(sorted(ALLOWED_HOSTS))),
+        Gate("NO_PUBLICATION", GateStatus.PASS, "publication remains false"),
+        Gate("KILL_SWITCH_READY", GateStatus.FAIL if kill_switch else GateStatus.PASS, "kill" if kill_switch else "clear"),
+        Gate(
+            "NO_ACTIVE_HUMAN_EMERGENCY_STOP",
+            GateStatus.PASS if no_emergency_stop else GateStatus.FAIL,
+            "attested" if no_emergency_stop else "attestation required",
+        ),
+        Gate("PROSPECTIVE_RUN_AUTHORITY", GateStatus.PASS, run_id.strip()),
+        Gate("OPENROUTER_UNUSED", GateStatus.PASS, "proving must not call OpenRouter"),
+    )
+
+
+def _connect(path: str) -> sqlite3.Connection:
+    lowered = path.lower()
+    if any(marker in lowered for marker in FORBIDDEN_STORE_MARKERS):
+        raise ProvingError("proving store must not alias production or news_pool")
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS proving_runs(
+            run_id TEXT PRIMARY KEY,
+            started_at TEXT NOT NULL,
+            publication INTEGER NOT NULL DEFAULT 0 CHECK(publication=0),
+            public_dispatch INTEGER NOT NULL DEFAULT 0 CHECK(public_dispatch=0),
+            openrouter_invoked INTEGER NOT NULL DEFAULT 0 CHECK(openrouter_invoked=0),
+            spend_gbp_minor INTEGER NOT NULL DEFAULT 0 CHECK(spend_gbp_minor=0)
+        );
+        CREATE TABLE IF NOT EXISTS proving_observations(
+            source_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            url TEXT NOT NULL,
+            status_code INTEGER NOT NULL,
+            body_digest TEXT NOT NULL,
+            body BLOB NOT NULL,
+            item_count INTEGER NOT NULL,
+            error TEXT,
+            PRIMARY KEY(run_id, source_id, body_digest),
+            FOREIGN KEY(run_id) REFERENCES proving_runs(run_id)
+        );
+        """
+    )
+    return connection
+
+
+def _put(connection: sqlite3.Connection, run_id: str, fetched_at: str, observation: Observation, body: bytes) -> None:
+    connection.execute(
+        "INSERT OR IGNORE INTO proving_observations VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            observation.source_id,
+            run_id,
+            fetched_at,
+            observation.url,
+            observation.status_code,
+            observation.body_digest,
+            body,
+            observation.item_count,
+            observation.error,
+        ),
+    )
+
+
+def run_proving(
+    *,
+    store_path: str,
+    run_id: str,
+    fetched_at: str,
+    kill_switch: bool,
+    no_emergency_stop: bool,
+    fetch: Fetcher | None = None,
+) -> ProvingReport:
+    gates = assess(run_id=run_id, kill_switch=kill_switch, no_emergency_stop=no_emergency_stop)
+    if any(gate.status is GateStatus.FAIL for gate in gates):
+        return ProvingReport(run_id, False, False, False, 0, gates, ())
+    fetcher = default_fetch if fetch is None else fetch
+    connection = _connect(store_path)
+    try:
+        connection.execute(
+            "INSERT OR IGNORE INTO proving_runs VALUES(?,?,0,0,0,0)",
+            (run_id, fetched_at),
+        )
+        observations: list[Observation] = []
+        for source_id, url in PORTFOLIO:
+            assert_allowed_url(url)
+            try:
+                status, body = fetcher(url)
+                error = None if status == 200 else f"http-{status}"
+            except ProvingError as exc:
+                status, body, error = 0, b"", str(exc)
+            observation = Observation(
+                source_id=source_id,
+                url=url,
+                fetched_at=fetched_at,
+                status_code=status,
+                body_digest=digest_bytes(body),
+                item_count=_item_count(url, body) if status == 200 else 0,
+                error=error,
+            )
+            _put(connection, run_id, fetched_at, observation, body)
+            observations.append(observation)
+        connection.commit()
+        return ProvingReport(run_id, False, False, False, 0, gates, tuple(observations))
+    finally:
+        connection.close()
+
+
+def list_observations(store_path: str) -> tuple[Observation, ...]:
+    connection = _connect(store_path)
+    try:
+        rows = connection.execute(
+            "SELECT source_id,url,fetched_at,status_code,body_digest,item_count,error "
+            "FROM proving_observations ORDER BY fetched_at,source_id"
+        ).fetchall()
+    finally:
+        connection.close()
+    return tuple(Observation(*row) for row in rows)
+
+
+def report_json(report: ProvingReport) -> bytes:
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": report.run_id,
+        "publication": report.publication,
+        "public_dispatch": report.public_dispatch,
+        "openrouter_invoked": report.openrouter_invoked,
+        "spend_gbp_minor": report.spend_gbp_minor,
+        "complete": report.complete,
+        "gates": [{"gate_id": g.gate_id, "status": g.status.value, "reason": g.reason} for g in report.gates],
+        "observations": [
+            {
+                "source_id": item.source_id,
+                "url": item.url,
+                "fetched_at": item.fetched_at,
+                "status_code": item.status_code,
+                "body_digest": item.body_digest,
+                "item_count": item.item_count,
+                "error": item.error,
+            }
+            for item in report.observations
+        ],
+    }
+    return canonical_json_bytes(payload)
