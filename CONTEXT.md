@@ -249,6 +249,26 @@ projection or target credentials and it rejects any command that fails a frozen
 veto. A model subprocess is not the Hermes Control Plane.
 _Avoid_: Individual model, unrestricted agent, model-held database credential
 
+**First I/O Gate**:
+One named Increment 9 precondition that must PASS before the shadow campaign may perform decision-bearing live I/O. The current inventory is ten runtime gates plus ten OD-001 source-rights gates. A namesake PASS in another packet does not satisfy it.
+_Avoid_: Proving Gate, Increment 10 fixture residual gate, HTTP 200, curl success
+
+**Qualification Evidence**:
+Retained proof that one First I/O Gate can later be sealed. It is not a First I/O Gate Record and does not authorise campaign launch.
+_Avoid_: GateRecord, campaign PASS, Proving Gate PASS, GitHub comment as proof
+
+**First I/O Gate Record**:
+An immutable sealed PASS or non-PASS for one First I/O Gate on one exact main SHA and tree. Records are minted only at a freeze of one checkout, after the Qualification Evidence exists.
+_Avoid_: Proving Gate, Qualification Evidence, issue comment, HTTP 200
+
+**Increment 9Q Packet**:
+One authorised issue and pull request that produces Qualification Evidence for one First I/O Gate, or for one named cluster that shares a single evidence object. It does not mint a First I/O Gate Record and does not launch the shadow campaign.
+_Avoid_: Increment 9P, Increment 11, campaign launch, GateRecord mint
+
+**Proving Gate**:
+A named fail-closed check for one isolated proving packet. It authorises only that packet's fetch or store. It is not a First I/O Gate and does not pass Increment 9 campaign launch.
+_Avoid_: First I/O Gate, campaign PASS, live-coverage closeout
+
 **Effective Manifest**:
 The exact observed combination of Hermes, adapter, prompt, model, memory,
 policy, source, index and runtime identities that produced one result. An Epoch
