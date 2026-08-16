@@ -25,6 +25,12 @@ def _load(path:Path)->dict[str,object]:
  if type(v) is not dict or path.read_bytes()!=canonical_json_bytes(v):raise CloseoutError(f"{path.name} is not canonical")
  return v
 
+def _load_sdlc_decision(path:Path)->dict[str,object]:
+ try:raw=path.read_bytes();v=json.loads(raw)
+ except (OSError,ValueError,UnicodeError) as exc:raise CloseoutError("cannot read SDLC decision") from exc
+ if type(v) is not dict or raw!=canonical_json_bytes(v)+b"\n":raise CloseoutError("SDLC decision is not workflow-canonical")
+ return v
+
 def _read_issue(path:Path)->dict[str,object]:
  try:v=json.loads(path.read_bytes())
  except (OSError,ValueError,UnicodeError) as exc:raise CloseoutError(f"cannot read {path.name}") from exc
@@ -32,7 +38,7 @@ def _read_issue(path:Path)->dict[str,object]:
  return v
 
 def build(*,repo_root:Path,issue_directory:Path,sdlc_decision:Path,observed_at:str,output_directory:Path)->dict[str,object]:
- decision=_load(sdlc_decision); context=_validated_sdlc_context(decision,repo_root)
+ decision=_load_sdlc_decision(sdlc_decision); context=_validated_sdlc_context(decision,repo_root)
  if context.get("event_name")!="workflow_dispatch" or context.get("ref")!="refs/heads/main":raise CloseoutError("SDLC decision is not exact-main PASS")
  sha=str(context.get("evaluated_sha"));tree=str(context.get("evaluated_tree_sha"))
  observed_sha=subprocess.check_output(("git","rev-parse","HEAD"),cwd=repo_root,text=True).strip();observed_tree=subprocess.check_output(("git","rev-parse","HEAD^{tree}"),cwd=repo_root,text=True).strip()
@@ -56,7 +62,7 @@ def build(*,repo_root:Path,issue_directory:Path,sdlc_decision:Path,observed_at:s
  manifest={"schema_version":"newsroom.increment10.subject-manifest.v1","source_commit":sha,"source_tree":tree,"subjects":subjects};(output_directory/"increment10-subject-manifest.json").write_bytes(canonical_json_bytes(manifest));verify(repo_root=repo_root,subject_directory=output_directory,sdlc_decision=sdlc_decision);return receipt
 
 def verify(*,repo_root:Path,subject_directory:Path,sdlc_decision:Path,current_issue_directory:Path|None=None)->None:
- decision=_load(sdlc_decision);context=_validated_sdlc_context(decision,repo_root)
+ decision=_load_sdlc_decision(sdlc_decision);context=_validated_sdlc_context(decision,repo_root)
  observed_sha=subprocess.check_output(("git","rev-parse","HEAD"),cwd=repo_root,text=True).strip()
  observed_tree=subprocess.check_output(("git","rev-parse","HEAD^{tree}"),cwd=repo_root,text=True).strip()
  if (
