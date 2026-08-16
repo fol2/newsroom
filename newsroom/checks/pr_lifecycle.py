@@ -27,6 +27,7 @@ class CloseWhen(StrEnum):
 
 class BranchRetention(StrEnum):
     KEEP = "keep"
+    DELETE_AFTER_MERGE = "delete-after-merge"
     DELETE_AFTER_CHECKPOINT = "delete-after-checkpoint"
 
 
@@ -226,6 +227,7 @@ def validate_pull_request_lifecycle(
     pr_number: int,
     draft: bool,
     head_ref: str,
+    merged: bool = False,
 ) -> None:
     """Validate metadata against the actual pull-request surface."""
 
@@ -235,24 +237,31 @@ def validate_pull_request_lifecycle(
         raise PrLifecycleError("pull-request number must be positive")
     if not isinstance(draft, bool):
         raise PrLifecycleError("pull-request draft state must be boolean")
+    if not isinstance(merged, bool):
+        raise PrLifecycleError("pull-request merged state must be boolean")
     _validate_ref(head_ref, field="head_ref")
-    if lifecycle.branch_retention is not BranchRetention.KEEP:
-        raise PrLifecycleError(
-            "automatic branch deletion is unsupported; "
-            "Branch-Retention must be keep"
-        )
 
     if lifecycle.kind is LifecycleKind.CANONICAL:
         if lifecycle.canonical_pr is not None:
             raise PrLifecycleError("canonical PR must declare Canonical-PR: self")
         if lifecycle.close_when is not CloseWhen.MERGED:
             raise PrLifecycleError("canonical PR must close only when merged")
-        if lifecycle.branch_retention is not BranchRetention.KEEP:
-            raise PrLifecycleError("canonical branch retention must be keep")
+        allowed_retention = {BranchRetention.DELETE_AFTER_MERGE}
+        if merged:
+            allowed_retention.add(BranchRetention.KEEP)
+        if lifecycle.branch_retention not in allowed_retention:
+            raise PrLifecycleError(
+                "canonical branch retention must be delete-after-merge"
+            )
         if head_ref.startswith(("support/", "preflight/")):
             raise PrLifecycleError("canonical PR cannot use a disposable branch prefix")
         return
 
+    if lifecycle.branch_retention is not BranchRetention.KEEP:
+        raise PrLifecycleError(
+            "disposable Branch-Retention must be keep; "
+            "housekeeping never deletes Git refs"
+        )
     if lifecycle.canonical_pr is None:
         raise PrLifecycleError("disposable PR must reference a canonical PR")
     if lifecycle.canonical_pr == pr_number:
@@ -521,19 +530,24 @@ def _validate_lifecycle_shape(lifecycle: PrLifecycle) -> None:
         raise PrLifecycleError(
             "checkpoint ref must use the dedicated checkpoint/ namespace"
         )
-    if lifecycle.branch_retention is not BranchRetention.KEEP:
-        raise PrLifecycleError(
-            "automatic branch deletion is unsupported; "
-            "Branch-Retention must be keep"
-        )
     if lifecycle.kind is LifecycleKind.CANONICAL:
         if lifecycle.canonical_pr is not None:
             raise PrLifecycleError("canonical lifecycle must reference self")
         if lifecycle.close_when is not CloseWhen.MERGED:
             raise PrLifecycleError("canonical lifecycle must close when merged")
-        if lifecycle.branch_retention is not BranchRetention.KEEP:
-            raise PrLifecycleError("canonical lifecycle must retain its branch")
+        if lifecycle.branch_retention not in {
+            BranchRetention.KEEP,
+            BranchRetention.DELETE_AFTER_MERGE,
+        }:
+            raise PrLifecycleError(
+                "canonical lifecycle must keep or delete-after-merge"
+            )
         return
+    if lifecycle.branch_retention is not BranchRetention.KEEP:
+        raise PrLifecycleError(
+            "disposable Branch-Retention must be keep; "
+            "housekeeping never deletes Git refs"
+        )
     if lifecycle.canonical_pr is None:
         raise PrLifecycleError("disposable lifecycle requires canonical PR")
     if lifecycle.close_when is CloseWhen.MERGED:

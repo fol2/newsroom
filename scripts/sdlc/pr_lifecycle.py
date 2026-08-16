@@ -239,6 +239,7 @@ def _verified_merged_canonical_prs(
             pr_number=canonical_pr.number,
             draft=canonical_pr.draft,
             head_ref=canonical_pr.head_ref,
+            merged=True,
         )
         if not canonical_lifecycle.canonical_is_self:
             raise GithubApiError(
@@ -632,6 +633,7 @@ def _validated_current_canonical(
         pr_number=canonical_pr.number,
         draft=canonical_pr.draft,
         head_ref=canonical_pr.head_ref,
+        merged=raw_canonical.get("merged_at") is not None,
     )
     if (
         not canonical_lifecycle.canonical_is_self
@@ -687,14 +689,14 @@ def _apply_plan(
             raise GithubApiError(
                 f"pull request #{action.pr_number} lifecycle changed after planning"
             )
-        if lifecycle.branch_retention.value != "keep":
-            raise GithubApiError(
-                f"pull request #{action.pr_number} requests unsupported "
-                "automatic branch deletion"
-            )
         if not lifecycle.is_disposable:
             raise GithubApiError(
                 f"pull request #{action.pr_number} is no longer disposable"
+            )
+        if lifecycle.branch_retention.value != "keep":
+            raise GithubApiError(
+                f"pull request #{action.pr_number} requests housekeeping "
+                "Git-ref deletion"
             )
         if HOUSEKEEPING_LABEL not in current.labels:
             raise GithubApiError(
