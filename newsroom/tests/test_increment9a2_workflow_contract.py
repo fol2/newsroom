@@ -69,6 +69,11 @@ def test_workflow_proves_actual_indexes_round_trip_and_zero_orphans() -> None:
         "WHERE name STARTS WITH 'i9_'",
         "assert names == []",
         "docker rm --force --volumes increment9-neo4j-readiness",
+        "Restart exact service and reconcile zero-orphan state",
+        "docker restart increment9-neo4j-readiness",
+        '"restart_count": 1',
+        "post-restart reconciliation timed out",
+        "increment9-neo4j-restart.json",
     )
     for statement in required:
         assert statement in text
@@ -88,6 +93,7 @@ def test_workflow_retains_canonical_secret_free_component_evidence() -> None:
         "not in raw.decode()",
         "Purge protected readiness workspace",
         'rmdir "${NEWSROOM_INCREMENT9_EVIDENCE_DIR}"',
+        "increment9-neo4j-*.json",
     )
     for statement in required:
         assert statement in text
