@@ -131,7 +131,7 @@ def test_narrow_scope_and_operational_admission_do_not_claim_external_coverage()
 def test_requalification_authorises_only_later_planning_after_signed_close() -> None:
     packet = INCREMENT_10_REQUALIFICATION
     assert packet.outcome is RequalificationOutcome.ELIGIBLE_FOR_INCREMENT10_PLAN
-    assert packet.permits_increment10_plan is True
+    assert packet.permits_increment10_plan is False
     assert packet.decision["runtime_authorised"] is False
     assert packet.approval["implementation_after_10r0_authorised"] is False
     assert packet.approval["live_effect_authorised"] is False
@@ -340,4 +340,22 @@ def test_deeply_nested_json_normalises_recursion_failure(
         module, "EXPECTED_REQUALIFICATION_DIGEST", digest_bytes(path.read_bytes())
     )
     with pytest.raises(RequalificationError):
+        load_requalification(path)
+
+
+def test_semantic_validation_failures_use_the_public_error_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = json.loads(REQUALIFICATION_PATH.read_bytes())
+    document["payload"]["decision"]["reason_ids"] = 7
+    raw = canonical_json_bytes(document)
+    path = tmp_path / "malformed-semantics.json"
+    path.write_bytes(raw)
+    section_digests = dict(module.EXPECTED_SECTION_DIGESTS)
+    section_digests["decision"] = digest_bytes(
+        canonical_json_bytes(document["payload"]["decision"])
+    )
+    monkeypatch.setattr(module, "EXPECTED_SECTION_DIGESTS", section_digests)
+    monkeypatch.setattr(module, "EXPECTED_REQUALIFICATION_DIGEST", digest_bytes(raw))
+    with pytest.raises(RequalificationError, match="payload is malformed"):
         load_requalification(path)

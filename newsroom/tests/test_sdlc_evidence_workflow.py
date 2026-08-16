@@ -380,6 +380,7 @@ def test_lane_and_decision_artifacts_are_compact_immutable_and_attempt_scoped() 
                 ".sdlc-run/increment9-subjects/increment9-shadow-plan.json",
                 ".sdlc-run/increment9-subjects/increment9-subject-manifest.json",
                 ".sdlc-run/increment9-subjects/increment9g-final-closeout.json",
+                ".sdlc-run/increment10r0-requalification.json",
             ]
 
 
@@ -488,6 +489,7 @@ def test_signed_closeout_attests_only_the_validated_exact_main_receipt() -> None
         ".sdlc-run/signed-closeout-input/increment9-subjects/increment9-shadow-plan.json",
         ".sdlc-run/signed-closeout-input/increment9-subjects/increment9-subject-manifest.json",
         ".sdlc-run/signed-closeout-input/increment9-subjects/increment9g-final-closeout.json",
+        ".sdlc-run/signed-closeout-input/increment10r0-requalification.json",
     ]
     upload = _step("signed-closeout", "Retain attestation bundle")
     assert upload["uses"] == UPLOAD
@@ -540,6 +542,42 @@ def test_increment9g_subjects_are_built_only_for_exact_main_tier_m() -> None:
         "--subject-directory .sdlc-run/signed-closeout-input/increment9-subjects"
         in reconstruct["run"]
     )
+
+
+def test_increment10r0_subject_is_reconstructed_and_attested_only_on_exact_main() -> (
+    None
+):
+    condition = (
+        "github.event_name == 'workflow_dispatch' && "
+        "github.ref == 'refs/heads/main' && "
+        "needs.route.outputs.service_required == 'true'"
+    )
+    retain = _step("decision", "Retain exact Increment 10R0 requalification subject")
+    assert retain["if"] == condition
+    for expected in (
+        "load_requalification(REQUALIFICATION_PATH)",
+        "ELIGIBLE_FOR_INCREMENT10_PLAN",
+        "packet.permits_increment10_plan is not False",
+        ".sdlc-run/increment10r0-requalification.json",
+        "load_requalification(retained)",
+    ):
+        assert expected in retain["run"]
+
+    upload = _step("decision", "Upload final decision evidence")
+    assert (
+        ".sdlc-run/increment10r0-requalification.json"
+        in upload["with"]["path"].splitlines()
+    )
+
+    reconstruct = _step("signed-closeout", "Reconstruct exact Increment 10R0 subject")
+    for expected in (
+        ".sdlc-run/signed-closeout-input/",
+        "increment10r0-requalification.json",
+        "load_requalification(retained_path)",
+        "retained_path.read_bytes() != REQUALIFICATION_PATH.read_bytes()",
+        "retained.permits_increment10_plan is not False",
+    ):
+        assert expected in reconstruct["run"]
 
 
 def test_only_signed_closeout_receives_oidc_and_attestation_permissions() -> None:

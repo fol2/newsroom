@@ -63,6 +63,11 @@ implementation, Evidence Intake, a decision-bearing canary or any external or
 public effect. Runtime remains separately gated through #529–#534 and an exact
 #533 execution-authority record.
 
+The packet's `permits_increment10_plan` property therefore remains false. A
+manual exact-main Tier-M run must independently reconstruct the retained packet
+from the evaluated checkout and include it in the OIDC/Sigstore subject bundle.
+Only that verified signed closeout plus closed #526 may activate #527.
+
 `REMAIN_BLOCKED` and `RETURN_TO_BOUNDED_SHADOW` remain valid closed alternatives
 for any future superseding requalification. Missing or not-evaluated evidence
 never becomes PASS by default.

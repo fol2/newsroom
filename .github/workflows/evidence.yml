@@ -767,6 +767,37 @@ jobs:
             --subject-directory "${subject_root}" \
             --sdlc-decision .sdlc-run/decision.json
 
+      - name: Retain exact Increment 10R0 requalification subject
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/main' &&
+          needs.route.outputs.service_required == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python - <<'PY'
+          from pathlib import Path
+
+          from newsroom.increment10 import (
+              REQUALIFICATION_PATH,
+              RequalificationOutcome,
+              load_requalification,
+          )
+
+          packet = load_requalification(REQUALIFICATION_PATH)
+          if (
+              packet.outcome
+              is not RequalificationOutcome.ELIGIBLE_FOR_INCREMENT10_PLAN
+              or packet.permits_increment10_plan is not False
+          ):
+              raise SystemExit('Increment 10R0 packet authority differs')
+          retained = Path('.sdlc-run/increment10r0-requalification.json')
+          retained.write_bytes(REQUALIFICATION_PATH.read_bytes())
+          reconstructed = load_requalification(retained)
+          if reconstructed != packet:
+              raise SystemExit('Increment 10R0 subject reconstruction differs')
+          PY
+
       - name: Upload final decision evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -793,6 +824,7 @@ jobs:
             .sdlc-run/increment9-subjects/increment9-shadow-plan.json
             .sdlc-run/increment9-subjects/increment9-subject-manifest.json
             .sdlc-run/increment9-subjects/increment9g-final-closeout.json
+            .sdlc-run/increment10r0-requalification.json
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
@@ -1442,6 +1474,35 @@ jobs:
             --subject-directory .sdlc-run/signed-closeout-input/increment9-subjects \
             --sdlc-decision .sdlc-run/signed-closeout-input/decision.json
 
+      - name: Reconstruct exact Increment 10R0 subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python - <<'PY'
+          from pathlib import Path
+
+          from newsroom.increment10 import (
+              REQUALIFICATION_PATH,
+              RequalificationOutcome,
+              load_requalification,
+          )
+
+          retained_path = Path(
+              '.sdlc-run/signed-closeout-input/'
+              'increment10r0-requalification.json'
+          )
+          retained = load_requalification(retained_path)
+          checked_out = load_requalification(REQUALIFICATION_PATH)
+          if (
+              retained != checked_out
+              or retained_path.read_bytes() != REQUALIFICATION_PATH.read_bytes()
+              or retained.outcome
+              is not RequalificationOutcome.ELIGIBLE_FOR_INCREMENT10_PLAN
+              or retained.permits_increment10_plan is not False
+          ):
+              raise SystemExit('signed Increment 10R0 subject differs')
+          PY
+
       - name: Attest final decision and closeout receipt
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
@@ -1465,6 +1526,7 @@ jobs:
             .sdlc-run/signed-closeout-input/increment9-subjects/increment9-shadow-plan.json
             .sdlc-run/signed-closeout-input/increment9-subjects/increment9-subject-manifest.json
             .sdlc-run/signed-closeout-input/increment9-subjects/increment9g-final-closeout.json
+            .sdlc-run/signed-closeout-input/increment10r0-requalification.json
 
       - name: Retain attestation bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

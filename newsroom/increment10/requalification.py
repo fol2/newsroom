@@ -146,12 +146,9 @@ class RequalificationPacket:
 
     @property
     def permits_increment10_plan(self) -> bool:
-        return (
-            self.outcome is RequalificationOutcome.ELIGIBLE_FOR_INCREMENT10_PLAN
-            and self.decision["downstream_plan_authorised_after_signed_10r0_close"]
-            is True
-            and self.decision["runtime_authorised"] is False
-        )
+        """The packet alone never proves the required signed exact-main closeout."""
+
+        return False
 
 
 def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -531,11 +528,11 @@ def load_requalification(path: Path = REQUALIFICATION_PATH) -> RequalificationPa
             non_effects=_mapping(payload["non_effects"], "non-effects"),
             packet_digest=digest_bytes(raw),
         )
-    except (TypeError, ValueError, KeyError) as exc:
+        _validate(packet)
+    except (TypeError, ValueError, KeyError, RecursionError) as exc:
         if isinstance(exc, RequalificationError):
             raise
         raise RequalificationError("requalification payload is malformed") from exc
-    _validate(packet)
     return packet
 
 
