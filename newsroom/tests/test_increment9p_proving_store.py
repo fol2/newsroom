@@ -7,6 +7,7 @@ from newsroom.increment9.proving import (
     ProvingError,
     assess,
     assert_allowed_url,
+    assert_allowed_redirect,
     list_observations,
     report_json,
     run_proving,
@@ -36,8 +37,17 @@ def test_portfolio_is_exactly_od001_ten():
     for _, url in PORTFOLIO:
         assert_allowed_url(url)
     assert "www.gov.uk" in ALLOWED_HOSTS
+    assert "www.metoffice.gov.uk" in ALLOWED_HOSTS
+    assert "rthk9.rthk.hk" in ALLOWED_HOSTS
     with pytest.raises(ProvingError, match="allowlist"):
         assert_allowed_url("https://discord.com/")
+    assert_allowed_redirect(
+        "https://www.metoffice.gov.uk/public/data/PWSCache/WarningsRSS/Region/UK"
+    )
+    with pytest.raises(ProvingError, match="https"):
+        assert_allowed_redirect("http://rthk9.rthk.hk/rthk/news/rss/c_expressnews_clocal.xml")
+    with pytest.raises(ProvingError, match="allowlist"):
+        assert_allowed_redirect("https://discord.com/api")
 
 
 def test_assess_fails_closed_without_stop_attestation_and_with_kill():

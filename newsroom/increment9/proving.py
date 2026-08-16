@@ -23,6 +23,7 @@ SCHEMA_VERSION = "newsroom.increment9.proving-store.v1"
 USER_AGENT = "Newsroom-9P-Proving/1.0"
 MAX_BODY_BYTES = 1_048_576
 TIMEOUT_SECONDS = 20
+MAX_REDIRECTS = 3
 FORBIDDEN_STORE_MARKERS = ("news_pool.sqlite3", "production")
 
 # OD-001 portfolio. Endpoints from docs/research/2026-07-15-concrete-news-source-map.md
@@ -39,7 +40,7 @@ PORTFOLIO: tuple[tuple[str, str], ...] = (
     ),
     (
         "UK-10",
-        "https://weather.metoffice.gov.uk/public/data/PWSCache/WarningsRSS/Region/UK",
+        "https://www.metoffice.gov.uk/public/data/PWSCache/WarningsRSS/Region/UK",
     ),
     ("HK-01", "https://www.news.gov.hk/tc/common/html/topstories.rss.xml"),
     (
@@ -47,7 +48,7 @@ PORTFOLIO: tuple[tuple[str, str], ...] = (
         "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=warnsum&lang=tc",
     ),
     ("HK-04", "https://www.edb.gov.hk/tc/whats_new_rss.xml"),
-    ("RAD-01", "https://rthk.hk/rthk/news/rss/c_expressnews_clocal.xml"),
+    ("RAD-01", "https://rthk9.rthk.hk/rthk/news/rss/c_expressnews_clocal.xml"),
     ("RAD-02", "https://feeds.bbci.co.uk/news/uk/rss.xml"),
 )
 SOURCE_IDS = tuple(item[0] for item in PORTFOLIO)
@@ -114,9 +115,18 @@ class ProvingReport:
         return self.authorised and seen == set(SOURCE_IDS)
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args: object, **kwargs: object) -> None:
-        raise ProvingError("redirects are denied")
+class _AllowlistedHttpsRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        hops = int(getattr(req, "proving_hops", 0)) + 1
+        if hops > MAX_REDIRECTS:
+            raise ProvingError("too many redirects")
+        assert_allowed_redirect(newurl)
+        nxt = urllib.request.HTTPRedirectHandler.redirect_request(
+            self, req, fp, code, msg, headers, newurl
+        )
+        if nxt is not None:
+            nxt.proving_hops = hops
+        return nxt
 
 
 def _host(url: str) -> str:
@@ -131,6 +141,13 @@ def assert_allowed_url(url: str) -> str:
     if host not in ALLOWED_HOSTS:
         raise ProvingError(f"host not on proving allowlist: {host}")
     return host
+
+
+def assert_allowed_redirect(url: str) -> str:
+    parsed = urlsplit(url)
+    if parsed.scheme != "https":
+        raise ProvingError("redirects must stay on https")
+    return assert_allowed_url(url)
 
 
 def _item_count(url: str, body: bytes) -> int:
@@ -151,14 +168,17 @@ def _item_count(url: str, body: bytes) -> int:
 def default_fetch(url: str) -> tuple[int, bytes]:
     assert_allowed_url(url)
     request = urllib.request.Request(url, method="GET", headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
+    request.proving_hops = 0
     opener = urllib.request.build_opener(
         urllib.request.HTTPSHandler(context=ssl.create_default_context()),
-        _NoRedirect(),
+        _AllowlistedHttpsRedirect(),
     )
     try:
         with opener.open(request, timeout=TIMEOUT_SECONDS) as response:
             status = int(getattr(response, "status", 200))
             body = response.read(MAX_BODY_BYTES + 1)
+    except ProvingError:
+        raise
     except urllib.error.HTTPError as exc:
         body = exc.read(MAX_BODY_BYTES + 1) if exc.fp else b""
         if len(body) > MAX_BODY_BYTES:
