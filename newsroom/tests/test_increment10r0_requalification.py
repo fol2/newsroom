@@ -175,18 +175,29 @@ def test_loaded_nested_authority_is_immutable() -> None:
 @pytest.mark.parametrize(
     ("mutation", "message"),
     (
-        ("upstream_eligible", "upstream blocked authority differs"),
-        ("drop_gate", "twenty-gate inventory differs"),
-        ("pass_gate", "residual gate truth differs"),
-        ("drop_zero", "zero-tolerance inventory differs"),
-        ("weaken_zero", "zero-tolerance prospective path differs"),
-        ("live_rights", "local fixture canary scope differs"),
-        ("authorise_runtime", "requalification decision differs"),
-        ("authorise_effect", "10R0 creates a prohibited effect"),
-        ("allow_egress", "closed-world prerequisite boundary differs"),
-        ("spend", "closed-world prerequisite boundary differs"),
-        ("weaken_requirement", "Evidence Intake requirement authority differs"),
-        ("change_admission", "Operational Admission binding differs"),
+        ("upstream_eligible", "upstream reviewed bytes differ"),
+        ("drop_gate", "residual_gate_inventory reviewed bytes differ"),
+        ("pass_gate", "residual_gate_inventory reviewed bytes differ"),
+        ("gate_owner", "residual_gate_inventory reviewed bytes differ"),
+        ("gate_classification", "residual_gate_inventory reviewed bytes differ"),
+        ("drop_zero", "zero_tolerance_remediation reviewed bytes differ"),
+        ("weaken_zero", "zero_tolerance_remediation reviewed bytes differ"),
+        ("live_rights", "proposed_canary_scope reviewed bytes differ"),
+        ("decision_scope", "proposed_canary_scope reviewed bytes differ"),
+        ("intake_version", "proposed_canary_scope reviewed bytes differ"),
+        ("authorise_runtime", "decision reviewed bytes differ"),
+        ("authorise_effect", "non_effects reviewed bytes differ"),
+        ("allow_egress", "prerequisite_bindings reviewed bytes differ"),
+        ("spend", "prerequisite_bindings reviewed bytes differ"),
+        ("live_reviewer", "prerequisite_bindings reviewed bytes differ"),
+        ("live_fixture_rights", "prerequisite_bindings reviewed bytes differ"),
+        ("weaken_containment", "prerequisite_bindings reviewed bytes differ"),
+        ("weaken_retention", "prerequisite_bindings reviewed bytes differ"),
+        (
+            "weaken_requirement",
+            "evidence_intake_requirements reviewed bytes differ",
+        ),
+        ("change_admission", "operational_admission reviewed bytes differ"),
     ),
 )
 def test_material_tamper_fails_closed(
@@ -203,12 +214,20 @@ def test_material_tamper_fails_closed(
         payload["residual_gate_inventory"].pop()
     elif mutation == "pass_gate":
         payload["residual_gate_inventory"][0]["retained_status"] = "PASS"
+    elif mutation == "gate_owner":
+        payload["residual_gate_inventory"][0]["downstream_owner"] = ""
+    elif mutation == "gate_classification":
+        payload["residual_gate_inventory"][0]["classification"] = "BUDGET"
     elif mutation == "drop_zero":
         payload["zero_tolerance_remediation"].pop()
     elif mutation == "weaken_zero":
         payload["zero_tolerance_remediation"][0]["required_observed_count"] = 1
     elif mutation == "live_rights":
         payload["proposed_canary_scope"]["excluded"].remove("LIVE_SOURCE_BYTES")
+    elif mutation == "decision_scope":
+        payload["proposed_canary_scope"]["decision_bearing_for"] = ["PUBLICATION"]
+    elif mutation == "intake_version":
+        payload["proposed_canary_scope"]["intake_version"] = "unreviewed-v2"
     elif mutation == "authorise_runtime":
         payload["decision"]["runtime_authorised"] = True
     elif mutation == "authorise_effect":
@@ -217,6 +236,16 @@ def test_material_tamper_fails_closed(
         payload["prerequisite_bindings"]["egress"]["allowed_hosts"] = ["example.test"]
     elif mutation == "spend":
         payload["prerequisite_bindings"]["budget"]["gross_gbp_minor_units"] = 1
+    elif mutation == "live_reviewer":
+        payload["prerequisite_bindings"]["reviewers"]["live_reviewer_access"] = True
+    elif mutation == "live_fixture_rights":
+        payload["prerequisite_bindings"]["rights"]["live_source_bytes_allowed"] = True
+    elif mutation == "weaken_containment":
+        payload["prerequisite_bindings"]["containment"][
+            "teardown_residual_count_max"
+        ] = 1
+    elif mutation == "weaken_retention":
+        payload["prerequisite_bindings"]["retention"]["purge_hours_max"] = 2
     elif mutation == "weaken_requirement":
         payload["evidence_intake_requirements"][0]["authority"] = "DRAFT"
     elif mutation == "change_admission":

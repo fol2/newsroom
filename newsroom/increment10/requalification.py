@@ -68,6 +68,19 @@ EXPECTED_OUTCOMES = (
     "RETURN_TO_BOUNDED_SHADOW",
     "ELIGIBLE_FOR_INCREMENT10_PLAN",
 )
+EXPECTED_SECTION_DIGESTS = {
+    "approval": "sha256:342eb2445d83d88f1d1d4a06dabf722cd1f8798a31677c7d047ff8e26a769fec",
+    "decision": "sha256:530b08fe28f6bee23c204c98cf935306d86f3b1e217390b04a7644ac3e5e78a6",
+    "evidence_intake_requirements": "sha256:49b2aaea7b38a25de083ff5ab77e37bf25474de7782619e2674437c8f5498d1c",
+    "non_effects": "sha256:8fdf11376548b452a33765655d23f13450ffcc50fe4b94eb4018f61533c5e3f2",
+    "operational_admission": "sha256:2c6a9bc0548276f5fc38ecbfc5853c182578e3b520f4f47eeeab96d6bb3e80eb",
+    "outcome_vocabulary": "sha256:085b1d633346120a6b4ed47443a0dcb25f987e7375ae2e168879186fa73ae26d",
+    "prerequisite_bindings": "sha256:ec06c15c57db2c7c3bf15d329dc33d87499b8736f77253d1de41ce23c9c45a82",
+    "proposed_canary_scope": "sha256:084032c79c3bab0eda43d1ec5000ac4ee8f9a52b19dbc1641ca74366a1193dc9",
+    "residual_gate_inventory": "sha256:c5b7612b908378020cd72cc2b15e7e044fb08966f1b12ab7a2c1f7b75564debf",
+    "upstream": "sha256:249042f76ae68d5179d2a6d26c4c33efc0b9a2d5f9d2a301e45c4c14ed1cd90e",
+    "zero_tolerance_remediation": "sha256:6ce79e802b41b3687495beb8f76b379f91130c3a8ee361b82a7e68fe7cb5f557",
+}
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
@@ -482,6 +495,9 @@ def load_requalification(path: Path = REQUALIFICATION_PATH) -> RequalificationPa
         },
         "payload",
     )
+    for field, expected_digest in EXPECTED_SECTION_DIGESTS.items():
+        if digest_bytes(canonical_json_bytes(payload[field])) != expected_digest:
+            raise RequalificationError(f"{field} reviewed bytes differ")
     try:
         packet = RequalificationPacket(
             schema_version=str(value["schema_version"]),
