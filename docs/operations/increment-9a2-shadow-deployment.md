@@ -190,6 +190,13 @@ upload and purge; standard SDLC run `31921768749` passed 4,008 outcomes with
 zero failures, errors or required skips, including 42 authenticated service
 cases and source integrity.
 
+Final completeness review classified restart reconciliation as actual-service
+rather than inferred evidence. PR #516 added a real restart, re-authentication,
+exact identity check and post-restart zero-node/zero-index receipt. Dedicated
+run `31922358934` passed the restart, two-receipt upload and purge; standard
+SDLC run `31922358840` again passed 4,008 outcomes with zero failures, errors
+or required skips, source integrity and 42 authenticated service cases.
+
 Those GitHub-hosted x86 receipts are explicitly component-scoped; they are not
 Mac M4/arm64 host proof. The separate `CAPACITY_MACM4` actual-host observation
 remains mandatory.
