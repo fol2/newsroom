@@ -27,7 +27,7 @@ from newsroom.authority.canonical import (
 SHADOW_PLAN_PATH = Path(__file__).with_name("shadow_plan_v1.json")
 AGENT_PROFILES_PATH = Path(__file__).with_name("agent_profiles_v1.json")
 EXPECTED_SHADOW_PLAN_DIGEST = (
-    "sha256:4163ad944597dd69f433a89c2af892904258a5cd56c38afe4b295c0a82f182bd"
+    "sha256:92510c8b3989bb25cfce187b3477a71d8909a691ad8f3b88ae4917e456e9216d"
 )
 EXPECTED_AGENT_PROFILES_DIGEST = (
     "sha256:c6835632cb9088167ff049325277802d1b6347bc9df44b1e5b41d1d029c56944"
@@ -495,13 +495,28 @@ def _validate_plan(plan: Increment9ShadowPlan) -> None:
             "stop_precedence",
             "owner_decision_id",
             "mandatory_behaviour",
-            "later_phase_after_early_stop_allowed",
+            "decision_bearing_later_phase_after_early_stop_allowed",
+            "autonomous_recovery_evidence_after_early_stop_allowed",
         },
         "stop_and_recovery",
     )
     if plan.stop_and_recovery.get("owner_decision_id") != "OD-014":
         raise Increment9PlanError("stop owner decision differs")
-    if plan.stop_and_recovery.get("later_phase_after_early_stop_allowed") is not True:
+    if (
+        plan.stop_and_recovery.get(
+            "decision_bearing_later_phase_after_early_stop_allowed"
+        )
+        is not False
+    ):
+        raise Increment9PlanError(
+            "decision-bearing later phases after early stop must remain blocked"
+        )
+    if (
+        plan.stop_and_recovery.get(
+            "autonomous_recovery_evidence_after_early_stop_allowed"
+        )
+        is not True
+    ):
         raise Increment9PlanError("autonomous recovery evidence must remain allowed")
 
     _exact_keys(

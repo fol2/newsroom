@@ -6,7 +6,7 @@
 - **Owner decision:** [Bind Increment 9 owner decisions and the Hermes autonomy envelope](https://github.com/fol2/newsroom/issues/503)
 - **Canonical PR:** [Increment 9R: prepare immutable shadow plan](https://github.com/fol2/newsroom/pull/499)
 - **Machine record:** `newsroom/increment9/shadow_plan_v1.json`
-- **Machine-record digest:** `sha256:4163ad944597dd69f433a89c2af892904258a5cd56c38afe4b295c0a82f182bd`
+- **Machine-record digest:** `sha256:92510c8b3989bb25cfce187b3477a71d8909a691ad8f3b88ae4917e456e9216d`
 - **Agent-profile digest:** `sha256:c6835632cb9088167ff049325277802d1b6347bc9df44b1e5b41d1d029c56944`
 
 ## Decision
@@ -271,7 +271,10 @@ cause permits at most two autonomous recoveries before escalation.
 
 Recovery never erases the original failure. A failed Epoch remains failed.
 Resumed work is recovery evidence unless a new final manifest independently
-qualifies. Any authenticated Human Accountable Owner may issue a signed global
+qualifies. An early stop blocks every later decision-bearing campaign phase;
+autonomous containment, restore and recovery-proof work remains permitted but
+cannot be counted as a later phase or as passing evidence. Any authenticated
+Human Accountable Owner may issue a signed global
 or scoped emergency stop. Hermes may resume after deterministic repair proof
 unless the stop explicitly says `HUMAN_RELEASE_REQUIRED`.
 

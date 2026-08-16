@@ -176,7 +176,18 @@ def test_prospective_stop_and_outcome_rules_are_frozen() -> None:
         value == 0
         for value in plan.frozen_rules["zero_tolerance_counts"].values()
     )
-    assert plan.stop_and_recovery["later_phase_after_early_stop_allowed"] is True
+    assert (
+        plan.stop_and_recovery[
+            "decision_bearing_later_phase_after_early_stop_allowed"
+        ]
+        is False
+    )
+    assert (
+        plan.stop_and_recovery[
+            "autonomous_recovery_evidence_after_early_stop_allowed"
+        ]
+        is True
+    )
     assert plan.outcome_vocabulary == (
         "FAILED",
         "INCONCLUSIVE",
@@ -241,6 +252,8 @@ def test_hermes_autonomy_keeps_model_credentials_outside_subprocesses() -> None:
         ("remove_decision", "owner decision inventory differs"),
         ("authorise_runtime", "live_shadow_authorised must remain false"),
         ("weaken_zero_tolerance", "zero-tolerance thresholds differ"),
+        ("continue_after_early_stop", "later phases after early stop"),
+        ("disable_recovery_evidence", "recovery evidence must remain allowed"),
         ("move_dependency", "allocation dependencies differ"),
         ("overlap_file", "file ownership overlaps"),
         ("disable_automatic_increment10", "Increment 10 autonomous transition differs"),
@@ -266,6 +279,14 @@ def test_material_plan_tamper_fails_closed(
         payload["approval"]["live_shadow_authorised"] = True
     elif mutation == "weaken_zero_tolerance":
         payload["frozen_rules"]["zero_tolerance_counts"]["rights_breach"] = 1
+    elif mutation == "continue_after_early_stop":
+        payload["stop_and_recovery"][
+            "decision_bearing_later_phase_after_early_stop_allowed"
+        ] = True
+    elif mutation == "disable_recovery_evidence":
+        payload["stop_and_recovery"][
+            "autonomous_recovery_evidence_after_early_stop_allowed"
+        ] = False
     elif mutation == "move_dependency":
         payload["execution_graph"]["allocations"][1]["dependencies"] = [498]
     elif mutation == "overlap_file":
