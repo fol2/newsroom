@@ -135,6 +135,8 @@ _CORE_NODE_INVENTORY_FILE = "node-inventory.json"
 _CORE_NODE_INVENTORY_PATH_ENV = "NEWSROOM_SDLC_CORE_NODE_INVENTORY_PATH"
 _CORE_NODE_INVENTORY_DIGEST_ENV = "NEWSROOM_SDLC_CORE_NODE_INVENTORY_DIGEST"
 _CORE_DISTRIBUTION = "worksteal"
+_CORE_PARTITION_SALT = b"newsroom-18-shard-v1\0"
+_CORE_MAX_NODE_LOAD_SKEW_PERCENT = 15
 _CORE_FRAGMENT_SCHEMA = "newsroom.sdlc.core-shard-fragment.v1"
 _CORE_SHARD_LIFECYCLE_SCHEMA = "newsroom.sdlc.core-shard-lifecycle.v1"
 _SOURCE_FRAGMENT_SCHEMA = "newsroom.sdlc.source-fragment.v1"
@@ -1087,20 +1089,54 @@ def _core_node_shards(node_ids: Sequence[str]) -> tuple[tuple[str, ...], ...]:
     inventory = tuple(sorted(node_ids))
     if not inventory or len(inventory) != len(set(inventory)):
         raise WorkflowLaneError("core_node_inventory")
-    ordered = sorted(
-        inventory,
-        key=lambda value: (hashlib.sha256(value.encode("utf-8")).digest(), value),
-    )
-    shards = tuple(
-        tuple(sorted(ordered[index::_CORE_SHARD_COUNT]))
-        for index in range(_CORE_SHARD_COUNT)
-    )
+    mutable_shards: list[list[str]] = [[] for _ in range(_CORE_SHARD_COUNT)]
+    for node_id in inventory:
+        digest = hashlib.sha256(
+            _CORE_PARTITION_SALT + node_id.encode("utf-8")
+        ).digest()
+        shard_index = int.from_bytes(digest[:8], "big") % _CORE_SHARD_COUNT
+        mutable_shards[shard_index].append(node_id)
+
+    # The complete repository inventory should populate every shard naturally.
+    # Deterministic repair keeps small synthetic inventories usable and is a
+    # no-op for the real suite, so additions do not move existing real nodes.
+    for empty_index in (
+        index for index, values in enumerate(mutable_shards) if not values
+    ):
+        donor_index = max(
+            range(_CORE_SHARD_COUNT),
+            key=lambda index: (len(mutable_shards[index]), -index),
+        )
+        if len(mutable_shards[donor_index]) <= 1:
+            raise WorkflowLaneError("core_node_coverage")
+        moved = max(
+            mutable_shards[donor_index],
+            key=lambda value: (
+                hashlib.sha256(
+                    b"empty-shard-repair\0" + value.encode("utf-8")
+                ).digest(),
+                value,
+            ),
+        )
+        mutable_shards[donor_index].remove(moved)
+        mutable_shards[empty_index].append(moved)
+
+    shards = tuple(tuple(sorted(values)) for values in mutable_shards)
     flattened = tuple(item for shard in shards for item in shard)
+    denominator = 100 * _CORE_SHARD_COUNT
+    maximum_numerator = len(inventory) * (
+        100 + _CORE_MAX_NODE_LOAD_SKEW_PERCENT
+    )
+    maximum = (maximum_numerator + denominator - 1) // denominator
+    minimum = (
+        len(inventory) * (100 - _CORE_MAX_NODE_LOAD_SKEW_PERCENT) // denominator
+    )
     if (
         any(not shard for shard in shards)
         or len(flattened) != len(set(flattened))
         or tuple(sorted(flattened)) != inventory
-        or max(map(len, shards)) - min(map(len, shards)) > 1
+        or max(map(len, shards)) > maximum
+        or min(map(len, shards)) < minimum
     ):
         raise WorkflowLaneError("core_node_coverage")
     return shards
