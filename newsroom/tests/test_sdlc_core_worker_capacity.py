@@ -666,7 +666,7 @@ assert reloaded._CORE_TESTS == ('newsroom/tests',)
     assert completed.returncode == 0, completed.stderr
 
 
-def test_core_node_partition_is_deterministic_complete_unique_and_balanced() -> None:
+def test_core_node_partition_is_deterministic_complete_unique_and_bounded() -> None:
     nodes = tuple(
         f"newsroom/tests/test_{index}.py::test_{index}" for index in range(19)
     )
@@ -681,6 +681,56 @@ def test_core_node_partition_is_deterministic_complete_unique_and_balanced() -> 
     assert tuple(sorted(flattened)) == tuple(sorted(nodes))
     assert len(flattened) == len(set(flattened))
     assert max(map(len, first)) - min(map(len, first)) == 1
+
+
+def test_core_node_partition_is_stable_when_unrelated_nodes_are_added() -> None:
+    nodes = tuple(
+        f"newsroom/tests/test_{index}.py::test_{index}" for index in range(3_600)
+    )
+    before = lane_module._core_node_shards(nodes)
+    added = "newsroom/tests/test_new.py::test_new"
+    after = lane_module._core_node_shards((*nodes, added))
+    before_assignment = {
+        node_id: index for index, shard in enumerate(before) for node_id in shard
+    }
+    after_assignment = {
+        node_id: index for index, shard in enumerate(after) for node_id in shard
+    }
+
+    assert all(
+        after_assignment[node_id] == index
+        for node_id, index in before_assignment.items()
+    )
+    assert added in after_assignment
+    removed = nodes[-1]
+    after_removal = lane_module._core_node_shards(nodes[:-1])
+    removal_assignment = {
+        node_id: index
+        for index, shard in enumerate(after_removal)
+        for node_id in shard
+    }
+    assert all(
+        removal_assignment[node_id] == index
+        for node_id, index in before_assignment.items()
+        if node_id != removed
+    )
+
+
+def test_core_node_partition_fails_closed_on_adversarial_load_skew(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ConcentratedDigest:
+        def digest(self) -> bytes:
+            return bytes(32)
+
+    monkeypatch.setattr(
+        lane_module.hashlib, "sha256", lambda _value: ConcentratedDigest()
+    )
+    nodes = tuple(
+        f"newsroom/tests/test_{index}.py::test_{index}" for index in range(360)
+    )
+    with pytest.raises(WorkflowLaneError, match="core_node_coverage"):
+        lane_module._core_node_shards(nodes)
 
 
 def test_core_reducer_merges_exact_shard_reports_and_preserves_node_identities(

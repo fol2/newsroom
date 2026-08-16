@@ -223,7 +223,8 @@ def validate_contract_data(
     core = _mapping(lanes.get("core"), "lanes.core")
     if (
         core.get("shard_count") != 18
-        or core.get("partition") != "sha256_node_id_balanced"
+        or core.get("partition") != "sha256_node_id_stable_v1"
+        or core.get("max_node_count_skew_percent") != 15
         or core.get("workers_per_shard") != 2
         or core.get("distribution") != "worksteal"
         or core.get("max_worker_restart") != 0

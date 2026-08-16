@@ -79,7 +79,8 @@ def test_every_gate_lane_resolves_and_core_budget_is_below_six_minutes() -> None
     assert lanes["core"] == {
         "bootstrap_once": True,
         "shard_count": 18,
-        "partition": "sha256_node_id_balanced",
+        "partition": "sha256_node_id_stable_v1",
+        "max_node_count_skew_percent": 15,
         "workers_per_shard": 2,
         "distribution": "worksteal",
         "max_worker_restart": 0,
