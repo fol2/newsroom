@@ -7,7 +7,12 @@ import argparse
 import sys
 from pathlib import Path
 
-from newsroom.increment9.qualification import QualificationError, assess, evidence_json
+from newsroom.increment9.qualification import (
+    PACKAGE_FIXTURES,
+    QualificationError,
+    assess,
+    evidence_json,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -15,7 +20,7 @@ def main(argv: list[str] | None = None) -> int:
         description="PRODUCTION_NONMUTATION_BASELINE qualification evidence."
     )
     parser.add_argument("command", choices=("assess",))
-    parser.add_argument("--inventory")
+    parser.add_argument("--inventory", default=str(PACKAGE_FIXTURES))
     parser.add_argument("--output")
     args = parser.parse_args(argv)
     if not args.inventory:

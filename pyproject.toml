@@ -56,6 +56,7 @@ packages = ["newsroom", "scripts"]
 
 [tool.hatch.build.force-include]
 "newsroom/increment5/data" = "newsroom/increment5/data"
+"newsroom/increment9/fixtures" = "newsroom/increment9/fixtures"
 
 [tool.pytest.ini_options]
 testpaths = ["newsroom/tests"]

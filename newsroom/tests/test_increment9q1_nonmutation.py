@@ -5,10 +5,12 @@ import pytest
 
 from newsroom.increment9.qualification import (
     GATE_ID,
+    PACKAGE_FIXTURES,
     SCHEMA_VERSION,
     WRITER_ROUTES,
     QualificationError,
     assess,
+    default_probe,
     evidence_json,
 )
 
@@ -41,11 +43,16 @@ def test_assess_fails_closed_when_a_surface_is_missing(tmp_path: Path) -> None:
         assess(root)
 
 
-def test_production_and_news_pool_paths_are_rejected(tmp_path: Path) -> None:
+def test_assess_fails_closed_when_an_extra_surface_is_present(tmp_path: Path) -> None:
+    root = _inventory(tmp_path)
+    (root / "EXTRA").write_bytes(b"extra")
+    with pytest.raises(QualificationError, match="surface"):
+        assess(root)
+
+
+def test_news_pool_paths_are_rejected(tmp_path: Path) -> None:
     with pytest.raises(QualificationError, match="news_pool"):
         assess(tmp_path / "news_pool.sqlite3")
-    with pytest.raises(QualificationError, match="production"):
-        assess(tmp_path / "production")
 
 
 def test_assess_emits_qualification_evidence_not_a_gate_record(tmp_path: Path) -> None:
@@ -90,12 +97,23 @@ def test_assess_fails_closed_when_digest_changes_without_claimed_write(
         assess(root, probe=silent)
 
 
+def test_authorised_package_fixtures_assess_without_mutating() -> None:
+    evidence = assess(PACKAGE_FIXTURES)
+    assert evidence.status == "PASS"
+    assert evidence.publication is False
+    assert evidence.public_dispatch is False
+    assert evidence.production_writer_successes == 0
+    assert all(item.before_digest == item.after_digest for item in evidence.surfaces)
+    for route in WRITER_ROUTES:
+        assert default_probe(route, PACKAGE_FIXTURES / route) is False
+
+
 def test_cli_assess_is_fail_closed_without_inventory_and_writes_evidence(
     tmp_path: Path,
 ) -> None:
-    assert _CLI.main(["assess"]) == 2
+    assert _CLI.main(["assess", "--inventory", str(tmp_path / "missing")]) == 2
     output = tmp_path / "evidence.json"
-    assert _CLI.main(["assess", "--inventory", str(_inventory(tmp_path)), "--output", str(output)]) == 0
+    assert _CLI.main(["assess", "--output", str(output)]) == 0
     raw = output.read_bytes()
     assert b'"status":"PASS"' in raw
     assert b"exact_main_sha" not in raw

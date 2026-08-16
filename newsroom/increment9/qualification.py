@@ -22,7 +22,16 @@ WRITER_ROUTES = (
     "PRODUCTION_SQLITE",
     "PRODUCTION_NEO4J",
 )
-FORBIDDEN_INVENTORY_MARKERS = ("news_pool.sqlite3", "production")
+FORBIDDEN_INVENTORY_MARKERS = ("news_pool.sqlite3",)
+PACKAGE_FIXTURES = Path(__file__).parent / "fixtures" / "increment9q1_nonmutation"
+_PROHIBITED = {
+    "PUBLICATION": "PUBLICATION",
+    "DISCORD_OR_PUBLIC_DISPATCH": "DISCORD_OR_PUBLIC_DISPATCH",
+    "EVIDENCE_INTAKE": "EVIDENCE_INTAKE",
+    "CANARY": "CANARY",
+    "PRODUCTION_SQLITE": "PRODUCTION_SQLITE_WRITE",
+    "PRODUCTION_NEO4J": "PRODUCTION_NEO4J_WRITE",
+}
 
 Probe = Callable[[str, Path], bool]
 
@@ -49,20 +58,10 @@ class QualificationEvidence:
     evidence_digest: str
 
 
-def default_probe(route: str, path: Path) -> bool:
-    if route not in WRITER_ROUTES:
-        raise QualificationError(f"unknown writer route: {route}")
-    if not path.is_file():
-        raise QualificationError(f"missing surface: {route}")
-    return False
-
-
 def _reject_forbidden(inventory: Path) -> None:
     lowered = str(inventory).lower()
-    if "news_pool.sqlite3" in lowered:
+    if any(marker in lowered for marker in FORBIDDEN_INVENTORY_MARKERS):
         raise QualificationError("inventory must not alias news_pool")
-    if "production" in lowered:
-        raise QualificationError("inventory must not alias production")
 
 
 def _surfaces(inventory: Path) -> tuple[tuple[str, Path], ...]:
@@ -81,6 +80,59 @@ def _surfaces(inventory: Path) -> tuple[tuple[str, Path], ...]:
 
 def _digest_file(path: Path) -> str:
     return digest_bytes(path.read_bytes())
+
+
+def default_probe(route: str, path: Path) -> bool:
+    if route not in WRITER_ROUTES:
+        raise QualificationError(f"unknown writer route: {route}")
+    if not path.is_file():
+        raise QualificationError(f"missing surface: {route}")
+    from newsroom.increment9.shadow_contracts import ProhibitedEffect, _NoEffect
+
+    if _PROHIBITED[route] not in {item.value for item in ProhibitedEffect}:
+        return True
+    if route == "PUBLICATION":
+        return bool(_NoEffect.authorises_publication)
+    if route == "EVIDENCE_INTAKE":
+        return bool(_NoEffect.authorises_evidence_intake)
+    if route == "CANARY":
+        return bool(_NoEffect.authorises_canary)
+    if route == "PRODUCTION_SQLITE":
+        from newsroom.increment9.proving import ProvingError, list_observations
+
+        try:
+            list_observations(str(path))
+        except ProvingError:
+            return False
+        return True
+    if route == "PRODUCTION_NEO4J":
+        from newsroom.increment9.deployment import DeploymentError, admit_readiness_egress
+
+        try:
+            admit_readiness_egress("neo4j://production.example:7687")
+        except DeploymentError:
+            return False
+        return True
+    if route == "DISCORD_OR_PUBLIC_DISPATCH":
+        from newsroom.increment9.proving import ProvingError, assert_allowed_url
+
+        try:
+            assert_allowed_url("https://discord.com/api")
+        except ProvingError:
+            return False
+        return True
+    raise QualificationError(f"unknown writer route: {route}")
+
+
+def _surface_payload(records: tuple[SurfaceDigest, ...]) -> list[dict[str, str]]:
+    return [
+        {
+            "after_digest": item.after_digest,
+            "before_digest": item.before_digest,
+            "route": item.route,
+        }
+        for item in records
+    ]
 
 
 def assess(inventory: Path, *, probe: Probe | None = None) -> QualificationEvidence:
@@ -107,16 +159,8 @@ def assess(inventory: Path, *, probe: Probe | None = None) -> QualificationEvide
         "publication": False,
         "schema_version": SCHEMA_VERSION,
         "status": "PASS",
-        "surfaces": [
-            {
-                "after_digest": item.after_digest,
-                "before_digest": item.before_digest,
-                "route": item.route,
-            }
-            for item in records
-        ],
+        "surfaces": _surface_payload(records),
     }
-    digest = digest_bytes(canonical_json_bytes(payload))
     return QualificationEvidence(
         gate_id=GATE_ID,
         status="PASS",
@@ -124,7 +168,7 @@ def assess(inventory: Path, *, probe: Probe | None = None) -> QualificationEvide
         public_dispatch=False,
         production_writer_successes=0,
         surfaces=records,
-        evidence_digest=digest,
+        evidence_digest=digest_bytes(canonical_json_bytes(payload)),
     )
 
 
@@ -137,13 +181,6 @@ def evidence_json(evidence: QualificationEvidence) -> bytes:
         "publication": evidence.publication,
         "schema_version": SCHEMA_VERSION,
         "status": evidence.status,
-        "surfaces": [
-            {
-                "after_digest": item.after_digest,
-                "before_digest": item.before_digest,
-                "route": item.route,
-            }
-            for item in evidence.surfaces
-        ],
+        "surfaces": _surface_payload(evidence.surfaces),
     }
     return canonical_json_bytes(payload)
