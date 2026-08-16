@@ -3,6 +3,7 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+/.sdlc-run/
 .env
 .env.*
 !.env.example
