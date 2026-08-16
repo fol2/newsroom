@@ -22,6 +22,7 @@ jobs:
       NEO4J_INCREMENT9_IMAGE_DIGEST: neo4j@sha256:099b9f74968c123209972835417985ed2a1cc19c0422c0753a313e26a736c365
       NEWSROOM_INCREMENT9_NEO4J_URI: bolt://localhost:7687
       NEWSROOM_INCREMENT9_NEO4J_USERNAME: neo4j
+      NEWSROOM_INCREMENT9_EVIDENCE_DIR: ${{ runner.temp }}/increment9-protected-evidence
 
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +56,8 @@ jobs:
           umask 077
           printf 'NEWSROOM_INCREMENT9_NEO4J_PASSWORD=%s\n' "${password}" > "${credential_file}"
           chmod 600 "${credential_file}"
+          install -d -m 0700 "${NEWSROOM_INCREMENT9_EVIDENCE_DIR}"
+          test "$(stat -c '%a' "${NEWSROOM_INCREMENT9_EVIDENCE_DIR}")" = 700
           docker pull "${NEO4J_INCREMENT9_IMAGE}"
           docker image inspect "${NEO4J_INCREMENT9_IMAGE}" \
             --format '{{json .RepoDigests}}' > "${RUNNER_TEMP}/increment9-image-digests.json"
@@ -111,7 +114,7 @@ jobs:
           set -a
           source "${credential_file}"
           set +a
-          evidence="${RUNNER_TEMP}/increment9-neo4j-readiness.json"
+          evidence="${NEWSROOM_INCREMENT9_EVIDENCE_DIR}/increment9-neo4j-readiness.json"
           if test -f scripts/increment9_shadow_deployment.py; then
             uv run python scripts/increment9_shadow_deployment.py \
               neo4j --output "${evidence}"
@@ -206,7 +209,7 @@ jobs:
           observed["evidence_digest"] = "sha256:" + hashlib.sha256(
               json.dumps(observed, sort_keys=True, separators=(",", ":")).encode()
           ).hexdigest()
-          output = Path(os.environ["RUNNER_TEMP"]) / "increment9-neo4j-readiness.json"
+          output = Path(os.environ["NEWSROOM_INCREMENT9_EVIDENCE_DIR"]) / "increment9-neo4j-readiness.json"
           output.write_text(json.dumps(observed, sort_keys=True, separators=(",", ":")))
           output.chmod(0o600)
           PY
@@ -217,7 +220,8 @@ jobs:
         run: |
           set -euo pipefail
           credential_file="${RUNNER_TEMP}/increment9-neo4j.env"
-          evidence="${RUNNER_TEMP}/increment9-neo4j-readiness.json"
+          evidence="${NEWSROOM_INCREMENT9_EVIDENCE_DIR}/increment9-neo4j-readiness.json"
+          test "$(stat -c '%a' "${NEWSROOM_INCREMENT9_EVIDENCE_DIR}")" = 700
           test "$(stat -c '%a' "${credential_file}")" = 600
           test "$(stat -c '%a' "${evidence}")" = 600
           set -a
@@ -229,7 +233,7 @@ jobs:
           from pathlib import Path
           from neo4j import GraphDatabase
 
-          evidence = Path(os.environ["RUNNER_TEMP"]) / "increment9-neo4j-readiness.json"
+          evidence = Path(os.environ["NEWSROOM_INCREMENT9_EVIDENCE_DIR"]) / "increment9-neo4j-readiness.json"
           raw = evidence.read_bytes()
           value = json.loads(raw)
           assert raw == json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
@@ -277,6 +281,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: increment9-neo4j-5262-readiness-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.sha }}
-          path: ${{ runner.temp }}/increment9-neo4j-readiness.json
+          path: ${{ env.NEWSROOM_INCREMENT9_EVIDENCE_DIR }}/increment9-neo4j-readiness.json
           if-no-files-found: error
           retention-days: 30
+
+      - name: Purge protected readiness workspace
+        if: always()
+        run: |
+          rm -f "${NEWSROOM_INCREMENT9_EVIDENCE_DIR}/increment9-neo4j-readiness.json"
+          rmdir "${NEWSROOM_INCREMENT9_EVIDENCE_DIR}"
