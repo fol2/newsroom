@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -8,7 +9,8 @@ from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
-from newsroom.authority.canonical import canonical_json_bytes
+from newsroom.authority import migrations as production_migrations
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.increment9.deployment import (
     ACTUAL_HOST_PROBES,
     ACTUAL_SERVICE_PROBES,
@@ -66,7 +68,7 @@ def _decisions() -> dict[str, object]:
     return {item.decision_id: item.selection for item in INCREMENT_9_SHADOW_PLAN.owner_decisions}
 
 
-def _scope() -> ShadowScope:
+def _scope(production_snapshot_digest: str = D("1")) -> ShadowScope:
     decisions = _decisions()
     od2 = decisions["OD-002"]
     od3 = decisions["OD-003"]
@@ -109,7 +111,7 @@ def _scope() -> ShadowScope:
             schema_version=od2["schema_version_and_fingerprint"]["schema_version"],
             schema_fingerprint=od2["schema_version_and_fingerprint"]["schema_fingerprint"],
             migration_history_digest=od2["migration_history_digest"],
-            snapshot_digest=D("1"),
+            snapshot_digest=production_snapshot_digest,
             export_digest=D("2"),
             cutoff_at="2042-01-01T00:00:00.000000Z",
             watermark="ledger:42",
@@ -189,8 +191,8 @@ def _manifest(scope: ShadowScope) -> ShadowManifest:
     )
 
 
-def _plan() -> DeploymentPlan:
-    scope = _scope()
+def _plan(production_snapshot_digest: str = D("1")) -> DeploymentPlan:
+    scope = _scope(production_snapshot_digest)
     return build_deployment_plan(
         scope,
         _manifest(scope),
@@ -315,22 +317,37 @@ def test_sqlite_backup_restore_uses_exact_schema_identity() -> None:
     assert result.startswith("sha256:") and len(result) == 71
 
 
+def _production_snapshot(tmp_path):
+    path = tmp_path / "frozen-production-v32.sqlite3"
+    connection = sqlite3.connect(path, isolation_level=None)
+    try:
+        production_migrations.apply_pending_migrations(
+            connection, applied_at="2042-01-01T00:00:00.000000Z"
+        )
+    finally:
+        connection.close()
+    path.chmod(0o600)
+    return path, digest_bytes(path.read_bytes())
+
+
 def _materialise(tmp_path):
-    plan = _plan()
+    snapshot, snapshot_digest = _production_snapshot(tmp_path)
+    plan = _plan(snapshot_digest)
     parent = tmp_path / "protected"
     parent.mkdir(mode=0o700)
     root = parent / plan.deployment_id
     receipt = materialise_isolated_deployment(
         plan,
         root=root,
+        production_snapshot=snapshot,
         receipt_id="increment9-isolated-deployment-receipt",
         created_at="2042-01-01T00:03:00.000000Z",
     )
-    return plan, root, receipt
+    return plan, root, receipt, snapshot
 
 
 def test_materialised_deployment_is_private_exact_and_restorable(tmp_path) -> None:
-    plan, root, receipt = _materialise(tmp_path)
+    plan, root, receipt, _ = _materialise(tmp_path)
     assert IsolatedDeploymentReceipt.from_bytes(receipt.canonical_bytes) == receipt
     assert receipt.directory_inventory == ISOLATED_DIRECTORY_INVENTORY
     assert tuple(sorted(receipt.protected_file_digests)) == ISOLATED_FILE_INVENTORY
@@ -338,16 +355,26 @@ def test_materialised_deployment_is_private_exact_and_restorable(tmp_path) -> No
     assert receipt.production_path_count == 0
     assert receipt.public_effect_adapter_count == 0
     assert receipt.encryption_access_audit_still_required is True
+    assert receipt.epoch_schema_version == 1
+    assert receipt.production_snapshot_schema_version == 32
+    assert receipt.production_snapshot_digest == plan.production_snapshot_digest
     assert (root / "graphiti" / plan.graphiti_workspace).is_dir()
     assert stat.S_IMODE(root.stat().st_mode) == 0o700
     for relative in ISOLATED_FILE_INVENTORY:
         assert stat.S_IMODE((root / relative).stat().st_mode) == 0o600
     result = verify_materialised_deployment(plan, receipt, root=root)
     assert result.startswith("sha256:")
+    forged = replace(
+        receipt,
+        protected_file_digests=dict(receipt.protected_file_digests),
+        production_snapshot_backup_restore_digest=D("9"),
+    )
+    with pytest.raises(DeploymentError, match="backup and restore"):
+        verify_materialised_deployment(plan, forged, root=root)
 
 
 def test_materialised_deployment_rejects_tamper_extra_files_and_symlinks(tmp_path) -> None:
-    plan, root, receipt = _materialise(tmp_path)
+    plan, root, receipt, snapshot = _materialise(tmp_path)
     (root / "deployment-plan.json").write_bytes(b"tampered")
     with pytest.raises(DeploymentError, match="digest"):
         verify_materialised_deployment(plan, receipt, root=root)
@@ -358,6 +385,7 @@ def test_materialised_deployment_rejects_tamper_extra_files_and_symlinks(tmp_pat
     second = materialise_isolated_deployment(
         plan,
         root=second_root,
+        production_snapshot=snapshot,
         receipt_id="increment9-second-receipt",
         created_at="2042-01-01T00:03:00.000000Z",
     )
@@ -366,15 +394,35 @@ def test_materialised_deployment_rejects_tamper_extra_files_and_symlinks(tmp_pat
         verify_materialised_deployment(plan, second, root=second_root)
 
 
+def test_materialisation_rejects_wrong_or_non_v32_frozen_snapshot(tmp_path) -> None:
+    protected = tmp_path / "snapshot-negative"
+    protected.mkdir(mode=0o700)
+    wrong = protected / "wrong.sqlite3"
+    sqlite3.connect(wrong).close()
+    wrong.chmod(0o600)
+    plan = _plan(digest_bytes(wrong.read_bytes()))
+    root = protected / plan.deployment_id
+    with pytest.raises(DeploymentError, match="production snapshot"):
+        materialise_isolated_deployment(
+            plan,
+            root=root,
+            production_snapshot=wrong,
+            receipt_id="wrong-snapshot-receipt",
+            created_at="2042-01-01T00:03:00.000000Z",
+        )
+    assert not root.exists()
+
+
 def test_teardown_proves_purge_and_no_resurrection(tmp_path) -> None:
-    plan, root, receipt = _materialise(tmp_path)
+    plan, root, receipt, _ = _materialise(tmp_path)
     digest = teardown_isolated_deployment(plan, receipt, root=root)
     assert digest.startswith("sha256:")
     assert not root.exists()
 
 
 def test_cli_materialises_verifies_and_tears_down_exact_authority(tmp_path) -> None:
-    plan = _plan()
+    snapshot, snapshot_digest = _production_snapshot(tmp_path)
+    plan = _plan(snapshot_digest)
     protected = tmp_path / "protected-cli"
     protected.mkdir(mode=0o700)
     plan_path = protected / "plan.json"
@@ -393,6 +441,8 @@ def test_cli_materialises_verifies_and_tears_down_exact_authority(tmp_path) -> N
             str(plan_path),
             "--root",
             str(root),
+            "--production-snapshot",
+            str(snapshot),
             "--receipt-id",
             "increment9-cli-materialised-receipt",
             "--created-at",

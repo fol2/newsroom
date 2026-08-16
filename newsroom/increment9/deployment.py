@@ -18,10 +18,12 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from types import MappingProxyType
 from typing import ClassVar, Mapping, Self
 from urllib.parse import urlsplit
 
+from newsroom.authority import migrations as production_migrations
 from newsroom.authority.canonical import (
     CanonicalizationError,
     canonical_json_bytes,
@@ -29,6 +31,7 @@ from newsroom.authority.canonical import (
     validate_sha256_digest,
 )
 from newsroom.authority.increment9_shadow_migrations import (
+    INCREMENT9_SHADOW_MIGRATION_CHECKSUM,
     INCREMENT9_SHADOW_SCHEMA_FINGERPRINT,
     INCREMENT9_SHADOW_SCHEMA_VERSION,
     install_increment9_shadow_schema,
@@ -101,16 +104,28 @@ ISOLATED_DIRECTORY_INVENTORY = (
     "objects",
 )
 ISOLATED_FILE_INVENTORY = (
-    "authority/shadow.sqlite3",
-    "backups/shadow.sqlite3",
+    "authority/epoch.sqlite3",
+    "authority/production-snapshot.sqlite3",
+    "backups/epoch.sqlite3",
+    "backups/production-snapshot.sqlite3",
     "deployment-plan.json",
     "egress-policy.json",
+)
+PRODUCTION_SCHEMA_VERSION = 32
+PRODUCTION_SCHEMA_FINGERPRINT = (
+    "sha256:3439b82ec6d212116e54765d50cace4d7f147b6ecc3e6ff84146b523c6fd5676"
+)
+PRODUCTION_MIGRATION_HISTORY_DIGEST = (
+    "sha256:5a48fd76cd11f266e19a4b48174d0c009f320a8d00d3eeb281a558fc2d561910"
 )
 EXPECTED_COMPONENT_LOCKS = MappingProxyType(
     {
         "embedding_dimensions": "1024",
         "embedding_model": "text-embedding-3-large",
         "embedding_sdk": "3.1.0",
+        "epoch_sqlite_migration_checksum": INCREMENT9_SHADOW_MIGRATION_CHECKSUM,
+        "epoch_sqlite_schema_fingerprint": INCREMENT9_SHADOW_SCHEMA_FINGERPRINT,
+        "epoch_sqlite_schema_version": str(INCREMENT9_SHADOW_SCHEMA_VERSION),
         "graphiti_package": "graphiti-core==0.29.3",
         "graphiti_wheel_sha256": "0210510e8043b5b4fa57aa038934e849b2e61d31d298200b0074faf7ca793ed5",
         "neo4j_arm64_digest": "sha256:a731d66b956a4155333eb09badfb3b17ad51d1aedaaf2c1530e24fd24e5559a9",
@@ -121,6 +136,9 @@ EXPECTED_COMPONENT_LOCKS = MappingProxyType(
         "ontology": "INCREMENT4_GOVERNED_ONTOLOGY_V1",
         "projection_mapping": "INCREMENT4_PROJECTION_V1",
         "projector": "ADMITTED_GENERATION_ONLY",
+        "production_sqlite_migration_history_digest": PRODUCTION_MIGRATION_HISTORY_DIGEST,
+        "production_sqlite_schema_fingerprint": PRODUCTION_SCHEMA_FINGERPRINT,
+        "production_sqlite_schema_version": str(PRODUCTION_SCHEMA_VERSION),
         "vector_similarity": "COSINE",
     }
 )
@@ -532,6 +550,9 @@ def build_deployment_plan(
     permit = _admit_for_later_deployment(scope, manifest)
     if permit.construction_module != "newsroom.increment9.deployment":
         raise DeploymentError("9A1 construction permit differs")
+    _timestamp(created_at, "created_at")
+    if not (_instant(manifest.created_at) <= _instant(created_at) < _instant(manifest.expires_at)):
+        raise DeploymentError("deployment creation is outside the manifest window")
     return DeploymentPlan(
         deployment_id=deployment_id,
         owner_plan_digest=scope.plan_digest,
@@ -746,9 +767,14 @@ class IsolatedDeploymentReceipt(_Record):
     root_identity_digest: str
     directory_inventory: tuple[str, ...]
     protected_file_digests: Mapping[str, str]
-    sqlite_schema_version: int
-    sqlite_schema_fingerprint: str
-    sqlite_backup_restore_digest: str
+    epoch_schema_version: int
+    epoch_schema_fingerprint: str
+    epoch_backup_restore_digest: str
+    production_snapshot_digest: str
+    production_snapshot_schema_version: int
+    production_snapshot_schema_fingerprint: str
+    production_snapshot_migration_history_digest: str
+    production_snapshot_backup_restore_digest: str
     graphiti_workspace: str
     neo4j_database: str
     neo4j_namespace: str
@@ -763,8 +789,12 @@ class IsolatedDeploymentReceipt(_Record):
         for field in (
             "deployment_plan_digest",
             "root_identity_digest",
-            "sqlite_schema_fingerprint",
-            "sqlite_backup_restore_digest",
+            "epoch_schema_fingerprint",
+            "epoch_backup_restore_digest",
+            "production_snapshot_digest",
+            "production_snapshot_schema_fingerprint",
+            "production_snapshot_migration_history_digest",
+            "production_snapshot_backup_restore_digest",
         ):
             _digest(getattr(self, field), field)
         if type(self.directory_inventory) is not tuple or self.directory_inventory != ISOLATED_DIRECTORY_INVENTORY:
@@ -778,12 +808,24 @@ class IsolatedDeploymentReceipt(_Record):
             for path, value in self.protected_file_digests.items()
         }
         object.__setattr__(self, "protected_file_digests", MappingProxyType(dict(sorted(files.items()))))
-        _integer(self.sqlite_schema_version, "sqlite_schema_version")
+        _integer(self.epoch_schema_version, "epoch_schema_version")
         if (
-            self.sqlite_schema_version != INCREMENT9_SHADOW_SCHEMA_VERSION
-            or self.sqlite_schema_fingerprint != INCREMENT9_SHADOW_SCHEMA_FINGERPRINT
+            self.epoch_schema_version != INCREMENT9_SHADOW_SCHEMA_VERSION
+            or self.epoch_schema_fingerprint != INCREMENT9_SHADOW_SCHEMA_FINGERPRINT
         ):
-            raise DeploymentError("materialised SQLite identity differs")
+            raise DeploymentError("materialised Epoch SQLite identity differs")
+        _integer(
+            self.production_snapshot_schema_version,
+            "production_snapshot_schema_version",
+        )
+        if (
+            self.production_snapshot_schema_version != PRODUCTION_SCHEMA_VERSION
+            or self.production_snapshot_schema_fingerprint
+            != PRODUCTION_SCHEMA_FINGERPRINT
+            or self.production_snapshot_migration_history_digest
+            != PRODUCTION_MIGRATION_HISTORY_DIGEST
+        ):
+            raise DeploymentError("materialised production snapshot identity differs")
         if (
             self.graphiti_workspace != "increment9-graphiti-proposal-workspace-v1"
             or self.neo4j_database != "increment9"
@@ -808,19 +850,24 @@ class IsolatedDeploymentReceipt(_Record):
             "deployment_plan_digest": self.deployment_plan_digest,
             "directory_inventory": list(self.directory_inventory),
             "encryption_access_audit_still_required": self.encryption_access_audit_still_required,
+            "epoch_backup_restore_digest": self.epoch_backup_restore_digest,
+            "epoch_schema_fingerprint": self.epoch_schema_fingerprint,
+            "epoch_schema_version": self.epoch_schema_version,
             "graphiti_workspace": self.graphiti_workspace,
             "neo4j_database": self.neo4j_database,
             "neo4j_namespace": self.neo4j_namespace,
             "production_path_count": self.production_path_count,
+            "production_snapshot_backup_restore_digest": self.production_snapshot_backup_restore_digest,
+            "production_snapshot_digest": self.production_snapshot_digest,
+            "production_snapshot_migration_history_digest": self.production_snapshot_migration_history_digest,
+            "production_snapshot_schema_fingerprint": self.production_snapshot_schema_fingerprint,
+            "production_snapshot_schema_version": self.production_snapshot_schema_version,
             "protected_file_digests": dict(self.protected_file_digests),
             "public_effect_adapter_count": self.public_effect_adapter_count,
             "receipt_id": self.receipt_id,
             "root_identity_digest": self.root_identity_digest,
             "schema_version": self.schema_version,
             "secret_value_count": self.secret_value_count,
-            "sqlite_backup_restore_digest": self.sqlite_backup_restore_digest,
-            "sqlite_schema_fingerprint": self.sqlite_schema_fingerprint,
-            "sqlite_schema_version": self.sqlite_schema_version,
         }
 
     @classmethod
@@ -965,6 +1012,62 @@ def _write_protected_bytes(path: str | os.PathLike[str], payload: bytes) -> None
         raise
 
 
+def _copy_protected_file(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+    source_text = os.fspath(source)
+    target_text = os.fspath(target)
+    if os.path.islink(source_text) or not os.path.isfile(source_text):
+        raise DeploymentError("production snapshot export must be a regular file")
+    descriptor = os.open(target_text, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with open(source_text, "rb") as reader, os.fdopen(descriptor, "wb") as writer:
+            shutil.copyfileobj(reader, writer, length=1024 * 1024)
+            writer.flush()
+            os.fsync(writer.fileno())
+    except Exception:
+        try:
+            os.unlink(target_text)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _file_digest(path: str | os.PathLike[str]) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _sqlite_read_only_uri(path: str | os.PathLike[str]) -> str:
+    return Path(os.path.abspath(os.fspath(path))).as_uri() + "?mode=ro&immutable=1"
+
+
+def _verify_production_snapshot(path: str | os.PathLike[str]) -> str:
+    connection = sqlite3.connect(_sqlite_read_only_uri(path), uri=True, isolation_level=None)
+    try:
+        history = connection.execute(
+            "SELECT version,name,checksum FROM authority_migrations ORDER BY version"
+        ).fetchall()
+        history_digest = digest_bytes(canonical_json_bytes(history))
+        if (
+            connection.execute("PRAGMA user_version").fetchone()[0]
+            != PRODUCTION_SCHEMA_VERSION
+            or production_migrations.schema_fingerprint(connection)
+            != PRODUCTION_SCHEMA_FINGERPRINT
+            or history_digest != PRODUCTION_MIGRATION_HISTORY_DIGEST
+            or connection.execute("PRAGMA quick_check").fetchone()[0] != "ok"
+        ):
+            raise DeploymentError("frozen production snapshot identity differs")
+        return history_digest
+    except sqlite3.Error as exc:
+        raise DeploymentError("frozen production snapshot is unreadable") from exc
+    finally:
+        connection.close()
+
+
 def _isolated_inventory(root: str | os.PathLike[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
     root_text = os.fspath(root)
     directories: list[str] = []
@@ -991,6 +1094,7 @@ def materialise_isolated_deployment(
     plan: DeploymentPlan,
     *,
     root: str | os.PathLike[str],
+    production_snapshot: str | os.PathLike[str],
     receipt_id: str,
     created_at: str,
 ) -> IsolatedDeploymentReceipt:
@@ -1014,22 +1118,53 @@ def materialise_isolated_deployment(
             os.path.join(root_text, "egress-policy.json"),
             canonical_json_bytes(plan.egress_policy.primitive()),
         )
-        sqlite_path = os.path.join(root_text, "authority", "shadow.sqlite3")
-        descriptor = os.open(sqlite_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        snapshot_path = os.path.join(
+            root_text, "authority", "production-snapshot.sqlite3"
+        )
+        _copy_protected_file(production_snapshot, snapshot_path)
+        snapshot_digest = _file_digest(snapshot_path)
+        if snapshot_digest != plan.production_snapshot_digest:
+            raise DeploymentError("frozen production snapshot digest differs")
+        snapshot_history_digest = _verify_production_snapshot(snapshot_path)
+        snapshot_backup_path = os.path.join(
+            root_text, "backups", "production-snapshot.sqlite3"
+        )
+        descriptor = os.open(
+            snapshot_backup_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
         os.close(descriptor)
-        database = sqlite3.connect(sqlite_path)
+        snapshot_source = sqlite3.connect(
+            _sqlite_read_only_uri(snapshot_path), uri=True, isolation_level=None
+        )
+        snapshot_backup = sqlite3.connect(snapshot_backup_path, isolation_level=None)
+        try:
+            snapshot_source.backup(snapshot_backup)
+        finally:
+            snapshot_backup.close()
+            snapshot_source.close()
+        os.chmod(snapshot_backup_path, 0o600)
+        _verify_production_snapshot(snapshot_backup_path)
+
+        epoch_path = os.path.join(root_text, "authority", "epoch.sqlite3")
+        descriptor = os.open(epoch_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(descriptor)
+        database = sqlite3.connect(epoch_path)
         try:
             install_increment9_shadow_schema(database)
             verify_increment9_shadow_schema(database)
             database.commit()
         finally:
             database.close()
-        os.chmod(sqlite_path, 0o600)
-        backup_path = os.path.join(root_text, "backups", "shadow.sqlite3")
-        descriptor = os.open(backup_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.chmod(epoch_path, 0o600)
+        epoch_backup_path = os.path.join(root_text, "backups", "epoch.sqlite3")
+        descriptor = os.open(
+            epoch_backup_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+        )
         os.close(descriptor)
-        source = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
-        backup = sqlite3.connect(backup_path)
+        source = sqlite3.connect(_sqlite_read_only_uri(epoch_path), uri=True)
+        backup = sqlite3.connect(epoch_backup_path)
         try:
             source.backup(backup)
             verify_increment9_shadow_schema(backup)
@@ -1037,7 +1172,7 @@ def materialise_isolated_deployment(
         finally:
             backup.close()
             source.close()
-        os.chmod(backup_path, 0o600)
+        os.chmod(epoch_backup_path, 0o600)
         directories, files = _isolated_inventory(root_text)
         if directories != ISOLATED_DIRECTORY_INVENTORY or files != ISOLATED_FILE_INVENTORY:
             raise DeploymentError("materialised isolated inventory differs")
@@ -1048,13 +1183,26 @@ def materialise_isolated_deployment(
                 raise DeploymentError("protected file mode differs")
             with open(candidate, "rb") as stream:
                 file_digests[relative] = digest_bytes(stream.read())
-        backup_restore_digest = digest_bytes(
+        epoch_backup_restore_digest = digest_bytes(
             canonical_json_bytes(
                 {
-                    "authority_digest": file_digests["authority/shadow.sqlite3"],
-                    "backup_digest": file_digests["backups/shadow.sqlite3"],
+                    "authority_digest": file_digests["authority/epoch.sqlite3"],
+                    "backup_digest": file_digests["backups/epoch.sqlite3"],
                     "schema_fingerprint": INCREMENT9_SHADOW_SCHEMA_FINGERPRINT,
                     "schema_version": INCREMENT9_SHADOW_SCHEMA_VERSION,
+                }
+            )
+        )
+        production_backup_restore_digest = digest_bytes(
+            canonical_json_bytes(
+                {
+                    "authority_digest": snapshot_digest,
+                    "backup_digest": file_digests[
+                        "backups/production-snapshot.sqlite3"
+                    ],
+                    "migration_history_digest": snapshot_history_digest,
+                    "schema_fingerprint": PRODUCTION_SCHEMA_FINGERPRINT,
+                    "schema_version": PRODUCTION_SCHEMA_VERSION,
                 }
             )
         )
@@ -1064,9 +1212,14 @@ def materialise_isolated_deployment(
             root_identity_digest=_root_identity_digest(root_text),
             directory_inventory=directories,
             protected_file_digests=file_digests,
-            sqlite_schema_version=INCREMENT9_SHADOW_SCHEMA_VERSION,
-            sqlite_schema_fingerprint=INCREMENT9_SHADOW_SCHEMA_FINGERPRINT,
-            sqlite_backup_restore_digest=backup_restore_digest,
+            epoch_schema_version=INCREMENT9_SHADOW_SCHEMA_VERSION,
+            epoch_schema_fingerprint=INCREMENT9_SHADOW_SCHEMA_FINGERPRINT,
+            epoch_backup_restore_digest=epoch_backup_restore_digest,
+            production_snapshot_digest=snapshot_digest,
+            production_snapshot_schema_version=PRODUCTION_SCHEMA_VERSION,
+            production_snapshot_schema_fingerprint=PRODUCTION_SCHEMA_FINGERPRINT,
+            production_snapshot_migration_history_digest=snapshot_history_digest,
+            production_snapshot_backup_restore_digest=production_backup_restore_digest,
             graphiti_workspace=plan.graphiti_workspace,
             neo4j_database=plan.neo4j_database,
             neo4j_namespace=plan.neo4j_namespace,
@@ -1109,16 +1262,22 @@ def verify_materialised_deployment(
             observed[relative] = digest_bytes(stream.read())
     if observed != dict(receipt.protected_file_digests):
         raise DeploymentError("protected file digest differs")
+    if (
+        receipt.production_snapshot_digest != plan.production_snapshot_digest
+        or observed["authority/production-snapshot.sqlite3"]
+        != plan.production_snapshot_digest
+    ):
+        raise DeploymentError("production snapshot binding differs")
     with open(os.path.join(root_text, "deployment-plan.json"), "rb") as stream:
         materialised_plan = stream.read()
     if materialised_plan != plan.canonical_bytes:
         raise DeploymentError("materialised deployment plan differs")
     database = sqlite3.connect(
-        f"file:{os.path.join(root_text, 'authority', 'shadow.sqlite3')}?mode=ro",
+        _sqlite_read_only_uri(os.path.join(root_text, "authority", "epoch.sqlite3")),
         uri=True,
     )
     backup = sqlite3.connect(
-        f"file:{os.path.join(root_text, 'backups', 'shadow.sqlite3')}?mode=ro",
+        _sqlite_read_only_uri(os.path.join(root_text, "backups", "epoch.sqlite3")),
         uri=True,
     )
     try:
@@ -1127,6 +1286,48 @@ def verify_materialised_deployment(
     finally:
         backup.close()
         database.close()
+    history = _verify_production_snapshot(
+        os.path.join(root_text, "authority", "production-snapshot.sqlite3")
+    )
+    backup_history = _verify_production_snapshot(
+        os.path.join(root_text, "backups", "production-snapshot.sqlite3")
+    )
+    if (
+        history != receipt.production_snapshot_migration_history_digest
+        or backup_history != history
+    ):
+        raise DeploymentError("production snapshot restore identity differs")
+    expected_epoch_backup = digest_bytes(
+        canonical_json_bytes(
+            {
+                "authority_digest": observed["authority/epoch.sqlite3"],
+                "backup_digest": observed["backups/epoch.sqlite3"],
+                "schema_fingerprint": INCREMENT9_SHADOW_SCHEMA_FINGERPRINT,
+                "schema_version": INCREMENT9_SHADOW_SCHEMA_VERSION,
+            }
+        )
+    )
+    expected_production_backup = digest_bytes(
+        canonical_json_bytes(
+            {
+                "authority_digest": observed[
+                    "authority/production-snapshot.sqlite3"
+                ],
+                "backup_digest": observed[
+                    "backups/production-snapshot.sqlite3"
+                ],
+                "migration_history_digest": history,
+                "schema_fingerprint": PRODUCTION_SCHEMA_FINGERPRINT,
+                "schema_version": PRODUCTION_SCHEMA_VERSION,
+            }
+        )
+    )
+    if (
+        receipt.epoch_backup_restore_digest != expected_epoch_backup
+        or receipt.production_snapshot_backup_restore_digest
+        != expected_production_backup
+    ):
+        raise DeploymentError("backup and restore receipt differs")
     return digest_bytes(
         canonical_json_bytes(
             {

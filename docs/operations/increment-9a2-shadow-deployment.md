@@ -60,12 +60,18 @@ only class, scope and digest metadata may enter evidence.
 
 Materialisation creates one mode-`0700` root named exactly for the deployment,
 with separate authority, backup, evidence, Graphiti proposal and object-store
-directories. Its only mode-`0600` files are the canonical deployment plan,
-egress policy, v32 SQLite authority and verified SQLite backup. The immutable
-materialisation receipt binds every relative path and file digest without
-recording the absolute root. Unexpected files, links, modes, schema drift or
-byte changes fail verification. Storage encryption and access audit remain an
-explicit required probe; successful file creation does not infer them.
+directories. It takes one already-frozen SQLite export; it never connects to a
+production path. The export is copied once, must match the manifest snapshot
+digest, schema v32 fingerprint and complete 32-entry migration-history digest,
+and is then read-only shadow input. A distinct v1 SQLite database stores the
+append-only Increment 9 Epoch records and cannot alias the production schema.
+Both databases receive verified backups. All files are mode `0600`.
+
+The immutable materialisation receipt binds every relative path and file
+digest without recording the absolute root. Unexpected files, links, modes,
+schema drift or byte changes fail verification. Storage encryption and access
+audit remain an explicit required probe; successful file creation does not
+infer them.
 
 ## Readiness evidence inventory
 
@@ -115,6 +121,7 @@ becomes an optimistic pass.
 PYTHONPATH=. .venv/bin/python scripts/increment9_shadow_deployment.py \
   materialise --plan PLAN.json \
   --root PROTECTED_PARENT/increment9-deployment-ID \
+  --production-snapshot FROZEN_V32_EXPORT.sqlite3 \
   --receipt-id RECEIPT_ID --created-at TIMESTAMP \
   --output PROTECTED_DIR/materialised-receipt.json
 

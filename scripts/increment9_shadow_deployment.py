@@ -89,6 +89,9 @@ def main() -> int:
         if command != "materialise":
             deployment_parser.add_argument("--receipt", type=Path, required=True)
         else:
+            deployment_parser.add_argument(
+                "--production-snapshot", type=Path, required=True
+            )
             deployment_parser.add_argument("--receipt-id", required=True)
             deployment_parser.add_argument("--created-at", required=True)
     args = parser.parse_args()
@@ -107,6 +110,7 @@ def main() -> int:
         receipt = materialise_isolated_deployment(
             _read_plan(args.plan),
             root=args.root,
+            production_snapshot=args.production_snapshot,
             receipt_id=args.receipt_id,
             created_at=args.created_at,
         )
