@@ -1,0 +1,282 @@
+name: Increment 9A2 Neo4j 5.26.2 readiness
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/increment9-shadow-readiness.yml"
+      - "newsroom/increment9/deployment.py"
+      - "scripts/increment9_shadow_deployment.py"
+      - "newsroom/tests/test_increment9a2_shadow_deployment.py"
+      - "docs/operations/increment-9a2-shadow-deployment.md"
+
+permissions:
+  contents: read
+
+jobs:
+  exact-neo4j-readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NEO4J_INCREMENT9_IMAGE: neo4j:5.26.2
+      NEO4J_INCREMENT9_IMAGE_DIGEST: neo4j@sha256:099b9f74968c123209972835417985ed2a1cc19c0422c0753a313e26a736c365
+      NEWSROOM_INCREMENT9_NEO4J_URI: bolt://localhost:7687
+      NEWSROOM_INCREMENT9_NEO4J_USERNAME: neo4j
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install exact locked environment
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install uv
+          uv lock --check
+          uv sync --dev --locked
+          uv run python - <<'PY'
+          import neo4j
+          assert neo4j.__version__ == "6.2.0", neo4j.__version__
+          PY
+
+      - name: Start exact isolated Neo4j Community service
+        run: |
+          set -euo pipefail
+          password="$(python - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(32))
+          PY
+          )"
+          echo "::add-mask::${password}"
+          credential_file="${RUNNER_TEMP}/increment9-neo4j.env"
+          umask 077
+          printf 'NEWSROOM_INCREMENT9_NEO4J_PASSWORD=%s\n' "${password}" > "${credential_file}"
+          chmod 600 "${credential_file}"
+          docker pull "${NEO4J_INCREMENT9_IMAGE}"
+          docker image inspect "${NEO4J_INCREMENT9_IMAGE}" \
+            --format '{{json .RepoDigests}}' > "${RUNNER_TEMP}/increment9-image-digests.json"
+          grep -F "${NEO4J_INCREMENT9_IMAGE_DIGEST}" \
+            "${RUNNER_TEMP}/increment9-image-digests.json"
+          docker run --detach \
+            --name increment9-neo4j-readiness \
+            --publish 127.0.0.1:7687:7687 \
+            --env "NEO4J_AUTH=neo4j/${password}" \
+            --env "NEO4J_initial_dbms_default__database=increment9" \
+            "${NEO4J_INCREMENT9_IMAGE_DIGEST}"
+
+      - name: Wait for authenticated increment9 database
+        run: |
+          set -euo pipefail
+          credential_file="${RUNNER_TEMP}/increment9-neo4j.env"
+          test -f "${credential_file}"
+          set -a
+          source "${credential_file}"
+          set +a
+          uv run python - <<'PY'
+          import os
+          import time
+          from neo4j import GraphDatabase
+
+          last_error = None
+          for _ in range(120):
+              driver = GraphDatabase.driver(
+                  os.environ["NEWSROOM_INCREMENT9_NEO4J_URI"],
+                  auth=(
+                      os.environ["NEWSROOM_INCREMENT9_NEO4J_USERNAME"],
+                      os.environ["NEWSROOM_INCREMENT9_NEO4J_PASSWORD"],
+                  ),
+              )
+              try:
+                  driver.verify_connectivity()
+                  with driver.session(database="increment9") as session:
+                      assert session.run("RETURN 1 AS ready").single()["ready"] == 1
+                  break
+              except Exception as exc:
+                  last_error = exc
+                  time.sleep(2)
+              finally:
+                  driver.close()
+          else:
+              raise RuntimeError("exact increment9 Neo4j readiness timed out") from last_error
+          PY
+
+      - name: Execute bounded actual-service readiness probe
+        id: probe
+        run: |
+          set -euo pipefail
+          credential_file="${RUNNER_TEMP}/increment9-neo4j.env"
+          set -a
+          source "${credential_file}"
+          set +a
+          evidence="${RUNNER_TEMP}/increment9-neo4j-readiness.json"
+          if test -f scripts/increment9_shadow_deployment.py; then
+            uv run python scripts/increment9_shadow_deployment.py \
+              neo4j --output "${evidence}"
+          else
+            # Infrastructure bootstrap for #512 only. Once #490 exists, the
+            # repository-owned probe above is mandatory and this branch is dead.
+            uv run python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import platform
+          import uuid
+          from pathlib import Path
+          from neo4j import GraphDatabase
+
+          nonce = uuid.uuid4().hex
+          fulltext = f"i9_bootstrap_fulltext_{nonce}"
+          vector = f"i9_bootstrap_vector_{nonce}"
+          driver = GraphDatabase.driver(
+              os.environ["NEWSROOM_INCREMENT9_NEO4J_URI"],
+              auth=(
+                  os.environ["NEWSROOM_INCREMENT9_NEO4J_USERNAME"],
+                  os.environ["NEWSROOM_INCREMENT9_NEO4J_PASSWORD"],
+              ),
+          )
+          observed = {}
+          try:
+              with driver.session(database="increment9") as session:
+                  component = session.run(
+                      "CALL dbms.components() YIELD versions, edition "
+                      "RETURN versions[0] AS version, edition"
+                  ).single(strict=True)
+                  observed.update(
+                      server_version=component["version"],
+                      edition=component["edition"],
+                      database="increment9",
+                      namespace="increment9_shadow",
+                  )
+                  session.run(
+                      f"CREATE FULLTEXT INDEX `{fulltext}` "
+                      "FOR (n:Increment9ReadinessProbe) ON EACH [n.text]"
+                  ).consume()
+                  session.run(
+                      f"CREATE VECTOR INDEX `{vector}` "
+                      "FOR (n:Increment9ReadinessProbe) ON (n.embedding) "
+                      "OPTIONS {indexConfig: {`vector.dimensions`: 1024, "
+                      "`vector.similarity_function`: 'cosine'}}"
+                  ).consume()
+                  session.run(
+                      "CREATE (:Increment9ReadinessProbe "
+                      "{namespace:'increment9_shadow', nonce:$nonce, text:'fixture', "
+                      "embedding:$embedding})",
+                      nonce=nonce,
+                      embedding=[0.0] * 1024,
+                  ).consume()
+                  session.run("CALL db.awaitIndexes(30)").consume()
+                  observed["round_trip_count"] = session.run(
+                      "MATCH (n:Increment9ReadinessProbe {nonce:$nonce}) "
+                      "RETURN count(n) AS count",
+                      nonce=nonce,
+                  ).single(strict=True)["count"]
+                  observed["indexes"] = session.run(
+                      "SHOW INDEXES YIELD name, type, state "
+                      "WHERE name = $fulltext OR name = $vector "
+                      "RETURN type, state ORDER BY type",
+                      fulltext=fulltext,
+                      vector=vector,
+                  ).data()
+          finally:
+              try:
+                  with driver.session(database="increment9") as session:
+                      session.run(
+                          "MATCH (n:Increment9ReadinessProbe {nonce:$nonce}) DETACH DELETE n",
+                          nonce=nonce,
+                      ).consume()
+                      session.run(f"DROP INDEX `{fulltext}` IF EXISTS").consume()
+                      session.run(f"DROP INDEX `{vector}` IF EXISTS").consume()
+              finally:
+                  driver.close()
+          assert observed["server_version"] == "5.26.2"
+          assert observed["edition"].lower() == "community"
+          assert observed["round_trip_count"] == 1
+          assert sorted(item["type"] for item in observed["indexes"]) == ["FULLTEXT", "VECTOR"]
+          assert all(item["state"] == "ONLINE" for item in observed["indexes"])
+          observed.update(
+              remaining_probe_nodes=0,
+              secret_value_count=0,
+              github_host_architecture=platform.machine(),
+              od003_macm4_arm64_host_proved=False,
+              inference_limit="ACTUAL_X86_SERVICE_COMPONENT_PROOF_ONLY",
+          )
+          observed["evidence_digest"] = "sha256:" + hashlib.sha256(
+              json.dumps(observed, sort_keys=True, separators=(",", ":")).encode()
+          ).hexdigest()
+          output = Path(os.environ["RUNNER_TEMP"]) / "increment9-neo4j-readiness.json"
+          output.write_text(json.dumps(observed, sort_keys=True, separators=(",", ":")))
+          output.chmod(0o600)
+          PY
+          fi
+
+      - name: Verify exact service identity, cleanup and protected evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          credential_file="${RUNNER_TEMP}/increment9-neo4j.env"
+          evidence="${RUNNER_TEMP}/increment9-neo4j-readiness.json"
+          test "$(stat -c '%a' "${credential_file}")" = 600
+          test "$(stat -c '%a' "${evidence}")" = 600
+          set -a
+          source "${credential_file}"
+          set +a
+          uv run python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from neo4j import GraphDatabase
+
+          evidence = Path(os.environ["RUNNER_TEMP"]) / "increment9-neo4j-readiness.json"
+          raw = evidence.read_bytes()
+          value = json.loads(raw)
+          assert raw == json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+          assert value["server_version"] == "5.26.2"
+          assert value["edition"].lower() == "community"
+          assert value["database"] == "increment9"
+          assert value["namespace"] == "increment9_shadow"
+          assert value["round_trip_count"] == 1
+          assert value["remaining_probe_nodes"] == 0
+          assert value["secret_value_count"] == 0
+          assert os.environ["NEWSROOM_INCREMENT9_NEO4J_PASSWORD"] not in raw.decode()
+
+          driver = GraphDatabase.driver(
+              os.environ["NEWSROOM_INCREMENT9_NEO4J_URI"],
+              auth=(
+                  os.environ["NEWSROOM_INCREMENT9_NEO4J_USERNAME"],
+                  os.environ["NEWSROOM_INCREMENT9_NEO4J_PASSWORD"],
+              ),
+          )
+          try:
+              with driver.session(database="increment9") as session:
+                  assert session.run(
+                      "MATCH (n:Increment9ReadinessProbe) RETURN count(n) AS count"
+                  ).single(strict=True)["count"] == 0
+                  names = session.run(
+                      "SHOW INDEXES YIELD name WHERE name STARTS WITH 'i9_' RETURN name"
+                  ).data()
+                  assert names == [], names
+          finally:
+              driver.close()
+          PY
+          grep -F 'neo4j@sha256:099b9f74968c123209972835417985ed2a1cc19c0422c0753a313e26a736c365' \
+            "${RUNNER_TEMP}/increment9-image-digests.json"
+          rm -f "${credential_file}"
+
+      - name: Stop and remove disposable service
+        if: always()
+        run: |
+          docker rm --force --volumes increment9-neo4j-readiness || true
+          rm -f "${RUNNER_TEMP}/increment9-neo4j.env"
+          test ! -e "${RUNNER_TEMP}/increment9-neo4j.env"
+
+      - name: Upload protected readiness evidence
+        if: success() && steps.probe.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: increment9-neo4j-5262-readiness-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/increment9-neo4j-readiness.json
+          if-no-files-found: error
+          retention-days: 30
