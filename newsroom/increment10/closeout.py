@@ -6,9 +6,18 @@ from newsroom.authority.canonical import canonical_json_bytes,digest_bytes
 from newsroom.authority.increment10_canary_migrations import CHECKSUM,SCHEMA_VERSION
 from newsroom.increment10.plan import EXPECTED_PLAN_DIGEST,load_plan
 from newsroom.increment10.requalification import EXPECTED_RESIDUAL_GATES,EXPECTED_ZERO_TOLERANCE
+from scripts.sdlc.contracts import ContractError,load_contract
+from scripts.sdlc.shadow_decision import ShadowDecisionError,validate_shadow_decision
 class CloseoutError(ValueError):pass
 SUBJECT_SOURCES={"increment10-plan.json":"newsroom/increment10/plan_v1.json","increment10-transport-deployment.json":"newsroom/increment10/authority_v1.json","increment10-run-inventory.json":"newsroom/increment10/sealed_inventory_v1.json","increment10-review-metric-decision.json":"newsroom/increment10/decision_v1.json"}
 EXPECTED_DIGESTS={"increment10-plan.json":EXPECTED_PLAN_DIGEST,"increment10-transport-deployment.json":"sha256:b28dd704cbf5eebefd262109762a195359f988815973893e6c5bba96e2d83d64","increment10-run-inventory.json":"sha256:84bd7e619e9345f07f2d9b4749663240ec54cf6078aed0fec406e1cf7b95bfdb","increment10-review-metric-decision.json":"sha256:054a0ae42fe2070823a8a6e17ffbf71039b7b66d18da6af31b58feee60bb3720"}
+
+def _validated_sdlc_context(decision:dict[str,object],repo_root:Path)->dict[str,object]:
+ try:validated=validate_shadow_decision(decision,contract=load_contract(repo_root))
+ except (ShadowDecisionError,ContractError,OSError) as exc:raise CloseoutError("SDLC decision is not canonical contract evidence") from exc
+ context=decision.get("context")
+ if validated.result!="PASS" or not isinstance(context,dict):raise CloseoutError("SDLC decision is not PASS")
+ return context
 
 def _load(path:Path)->dict[str,object]:
  try:v=json.loads(path.read_bytes())
@@ -23,8 +32,8 @@ def _read_issue(path:Path)->dict[str,object]:
  return v
 
 def build(*,repo_root:Path,issue_directory:Path,sdlc_decision:Path,observed_at:str,output_directory:Path)->dict[str,object]:
- decision=_load(sdlc_decision); context=decision.get("context")
- if decision.get("result")!="PASS" or not isinstance(context,dict) or context.get("event_name")!="workflow_dispatch" or context.get("ref")!="refs/heads/main":raise CloseoutError("SDLC decision is not exact-main PASS")
+ decision=_load(sdlc_decision); context=_validated_sdlc_context(decision,repo_root)
+ if context.get("event_name")!="workflow_dispatch" or context.get("ref")!="refs/heads/main":raise CloseoutError("SDLC decision is not exact-main PASS")
  sha=str(context.get("evaluated_sha"));tree=str(context.get("evaluated_tree_sha"))
  observed_sha=subprocess.check_output(("git","rev-parse","HEAD"),cwd=repo_root,text=True).strip();observed_tree=subprocess.check_output(("git","rev-parse","HEAD^{tree}"),cwd=repo_root,text=True).strip()
  if (sha,tree)!=(observed_sha,observed_tree):raise CloseoutError("checked-out exact-main identity differs")
@@ -47,14 +56,11 @@ def build(*,repo_root:Path,issue_directory:Path,sdlc_decision:Path,observed_at:s
  manifest={"schema_version":"newsroom.increment10.subject-manifest.v1","source_commit":sha,"source_tree":tree,"subjects":subjects};(output_directory/"increment10-subject-manifest.json").write_bytes(canonical_json_bytes(manifest));verify(repo_root=repo_root,subject_directory=output_directory,sdlc_decision=sdlc_decision);return receipt
 
 def verify(*,repo_root:Path,subject_directory:Path,sdlc_decision:Path,current_issue_directory:Path|None=None)->None:
- decision=_load(sdlc_decision);context=decision.get("context")
+ decision=_load(sdlc_decision);context=_validated_sdlc_context(decision,repo_root)
  observed_sha=subprocess.check_output(("git","rev-parse","HEAD"),cwd=repo_root,text=True).strip()
  observed_tree=subprocess.check_output(("git","rev-parse","HEAD^{tree}"),cwd=repo_root,text=True).strip()
  if (
-  decision.get("schema_version")!="newsroom.sdlc.shadow-decision.v1"
-  or decision.get("result")!="PASS"
-  or not isinstance(context,dict)
-  or context.get("event_name")!="workflow_dispatch"
+  context.get("event_name")!="workflow_dispatch"
   or context.get("ref")!="refs/heads/main"
   or context.get("evaluated_sha")!=observed_sha
   or context.get("evaluated_tree_sha")!=observed_tree
