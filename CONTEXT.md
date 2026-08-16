@@ -1,8 +1,11 @@
 # Newsroom domain language
 
-**Status:** Proposed vocabulary
+**Status:** Proposed vocabulary; Increment 9 autonomy terms accepted 2026-08-15
 
 This glossary proposes the canonical meanings of editorial records that connect evidence, decisions, publication and derived newsroom intelligence. The product owner has not accepted this vocabulary yet.
+
+The product owner has accepted the Increment 9 terms in the final section. That
+acceptance does not implicitly accept every earlier proposed term.
 
 ## Discovery
 
@@ -235,6 +238,58 @@ _Avoid_: Login session, stored receipt, permanent token
 **Access Decision**:
 A time-specific result produced by resolving an Access Policy Assignment and, where paid access is required, a valid Store Entitlement or Access Grant. It does not change editorial content identity.
 _Avoid_: Paywall flag, publication decision
+
+## Autonomous evaluation and control
+
+**Hermes Control Plane**:
+The complete local autonomous authority comprising an AI controller and an
+inseparable deterministic policy-and-effect boundary. The AI controller may
+decide and orchestrate; only the deterministic boundary holds authority-store,
+projection or target credentials and it rejects any command that fails a frozen
+veto. A model subprocess is not the Hermes Control Plane.
+_Avoid_: Individual model, unrestricted agent, model-held database credential
+
+**Effective Manifest**:
+The exact observed combination of Hermes, adapter, prompt, model, memory,
+policy, source, index and runtime identities that produced one result. An Epoch
+may contain more than one Effective Manifest, but qualification applies only to
+a manifest cohort that independently satisfies its complete exposure contract.
+_Avoid_: Latest configuration, approximate version, Epoch-wide average
+
+**Effective Manifest Cohort**:
+All decision-bearing cases produced under one exact Effective Manifest. The
+final cohort is the cohort for the Effective Manifest active at closeout; older
+cohorts remain comparative evidence and cannot qualify the final manifest.
+_Avoid_: Mixed-version sample, pooled latest results
+
+**AI Review Consensus**:
+The sealed agreement of both authorised, provider-independent primary AI
+reviewers, or a valid authorised AI adjudication of their disagreement. For the
+accepted Increment 9 evaluation it is the editorial-quality ground truth; it is
+not a human label and must never be described as human review.
+_Avoid_: Human approval, majority vote with a missing primary, model confidence
+
+**Hermes Publication Admission**:
+The Hermes Control Plane's terminal decision that one exact Publication Bundle
+meets `AUTO_PUBLISH`. It atomically commits the Publication Decision and Target
+Operations, after which the deterministic target adapter dispatches without a
+second approval. Claim Admission Decisions and Relation Admission Decisions are
+not Hermes Publication Admissions and do not themselves cause publication.
+_Avoid_: Claim admission, publish suggestion, model sending directly
+
+**Autonomy Envelope**:
+An owner-signed, ledgered grant defining the scope in which Hermes may create
+and close Epochs, deliver reviewed changes, recover, create canaries and promote
+qualified production behaviour without waiting for a further human reply. It
+never removes deterministic vetoes or an authenticated emergency stop.
+_Avoid_: Unlimited permission, one-off run approval, silent production access
+
+**Conditional Activation Authority**:
+The part of an Autonomy Envelope that becomes effective automatically when all
+named implementation, identity, rights, evidence, budget, ledger and emergency-
+stop prerequisites hold. Possessing the planning record before those conditions
+hold is not a live effect or a claim that the target exists.
+_Avoid_: Immediate activation, manual approval queue, aspirational readiness
 
 ## Ledger, dispatch and projections
 
