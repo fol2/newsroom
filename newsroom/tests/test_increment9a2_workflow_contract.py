@@ -36,7 +36,7 @@ def test_workflow_uses_ephemeral_masked_credentials_and_loopback_only() -> None:
         "bolt://localhost:7687",
         'rm -f "${credential_file}"',
         "test ! -e \"${RUNNER_TEMP}/increment9-neo4j.env\"",
-        'NEWSROOM_INCREMENT9_EVIDENCE_DIR: ${{ runner.temp }}/increment9-protected-evidence',
+        "NEWSROOM_INCREMENT9_EVIDENCE_DIR: /tmp/increment9-protected-evidence-${{ github.run_id }}-${{ github.run_attempt }}",
         'install -d -m 0700 "${NEWSROOM_INCREMENT9_EVIDENCE_DIR}"',
         'stat -c \'%a\' "${NEWSROOM_INCREMENT9_EVIDENCE_DIR}"',
     )

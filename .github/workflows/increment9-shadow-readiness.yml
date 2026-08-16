@@ -22,7 +22,7 @@ jobs:
       NEO4J_INCREMENT9_IMAGE_DIGEST: neo4j@sha256:099b9f74968c123209972835417985ed2a1cc19c0422c0753a313e26a736c365
       NEWSROOM_INCREMENT9_NEO4J_URI: bolt://localhost:7687
       NEWSROOM_INCREMENT9_NEO4J_USERNAME: neo4j
-      NEWSROOM_INCREMENT9_EVIDENCE_DIR: ${{ runner.temp }}/increment9-protected-evidence
+      NEWSROOM_INCREMENT9_EVIDENCE_DIR: /tmp/increment9-protected-evidence-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
       - uses: actions/checkout@v4
