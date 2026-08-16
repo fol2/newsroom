@@ -16,7 +16,7 @@ def inputs(tmp_path:Path):
   value={"number":n,"state":"CLOSED","title":f"issue {n}","closedAt":"2026-08-16T10:00:00Z","url":f"https://github.com/fol2/newsroom/issues/{n}"}
   (issues/f"issue-{n}.json").write_text(json.dumps(value,indent=2))
  sha=subprocess.check_output(("git","rev-parse","HEAD"),text=True).strip();tree=subprocess.check_output(("git","rev-parse","HEAD^{tree}"),text=True).strip()
- decision=tmp_path/"decision.json";decision.write_bytes(canonical_json_bytes({"schema_version":"newsroom.sdlc.shadow-decision.v1","result":"PASS","context":{"event_name":"workflow_dispatch","ref":"refs/heads/main","evaluated_sha":sha,"evaluated_tree_sha":tree}}))
+ decision=tmp_path/"decision.json";decision.write_bytes(canonical_json_bytes({"schema_version":"newsroom.sdlc.shadow-decision.v1","result":"PASS","context":{"event_name":"workflow_dispatch","ref":"refs/heads/main","evaluated_sha":sha,"evaluated_tree_sha":tree}})+b"\n")
  return issues,decision
 
 def test_closed_world_subjects_build_and_reconstruct(tmp_path):
@@ -48,7 +48,7 @@ def test_receipt_and_manifest_cannot_be_forged_together(tmp_path):
 
 def test_forged_non_main_failed_decision_cannot_be_rebound(tmp_path):
  issues,decision=inputs(tmp_path);out=tmp_path/"out";build(repo_root=Path.cwd(),issue_directory=issues,sdlc_decision=decision,observed_at="x",output_directory=out)
- value=json.loads(decision.read_bytes());value["result"]="FAIL";value["context"]["event_name"]="pull_request";value["context"]["ref"]="refs/pull/548/merge";decision.write_bytes(canonical_json_bytes(value))
+ value=json.loads(decision.read_bytes());value["result"]="FAIL";value["context"]["event_name"]="pull_request";value["context"]["ref"]="refs/pull/548/merge";decision.write_bytes(canonical_json_bytes(value)+b"\n")
  receipt_path=out/"increment10g-final-closeout.json";receipt=json.loads(receipt_path.read_bytes());receipt["source"]["sdlc_decision_digest"]=digest_bytes(decision.read_bytes());receipt_path.write_bytes(canonical_json_bytes(receipt))
  manifest_path=out/"increment10-subject-manifest.json";manifest=json.loads(manifest_path.read_bytes());manifest["subjects"][receipt_path.name]=digest_bytes(receipt_path.read_bytes());manifest_path.write_bytes(canonical_json_bytes(manifest))
  with pytest.raises(CloseoutError,match="exact checked-out main PASS"):verify(repo_root=Path.cwd(),subject_directory=out,sdlc_decision=decision)
@@ -56,3 +56,7 @@ def test_forged_non_main_failed_decision_cannot_be_rebound(tmp_path):
 def test_incomplete_decision_is_rejected_by_canonical_sdlc_validator(tmp_path):
  _,decision=inputs(tmp_path)
  with pytest.raises(CloseoutError,match="canonical contract evidence"):REAL_DECISION_VALIDATOR(json.loads(decision.read_bytes()),Path.cwd())
+
+def test_sdlc_decision_requires_exact_workflow_canonical_newline(tmp_path):
+ issues,decision=inputs(tmp_path);decision.write_bytes(decision.read_bytes().removesuffix(b"\n"))
+ with pytest.raises(CloseoutError,match="workflow-canonical"):build(repo_root=Path.cwd(),issue_directory=issues,sdlc_decision=decision,observed_at="x",output_directory=tmp_path/"out")
