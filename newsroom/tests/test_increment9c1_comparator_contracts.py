@@ -134,7 +134,7 @@ def _campaign():
         effective_manifest=manifest,
         production_snapshot_digest=D("b"),
         injection_scope_digests=scopes,
-        sealed_at=T1,
+        sealed_at=T0,
     )
     return plan, epoch, manifest, cohort, campaign
 
@@ -204,6 +204,23 @@ def test_comparator_plan_rejects_reordering_and_retrospective_selection(
 ) -> None:
     with pytest.raises(ComparatorContractError, match=message):
         _plan(**{field: value})
+
+
+def test_plan_and_fault_campaign_must_be_sealed_before_exposure() -> None:
+    with pytest.raises(ComparatorContractError, match="before exposure"):
+        _plan(sealed_at=T1)
+    plan, epoch, manifest, cohort, _ = _campaign()
+    with pytest.raises(ComparatorContractError, match="before exposure"):
+        build_fault_campaign_manifest(
+            campaign_id="late",
+            comparator_plan=plan,
+            epoch=epoch,
+            cohort=cohort,
+            effective_manifest=manifest,
+            production_snapshot_digest=D("1"),
+            injection_scope_digests={kind: D("1") for kind in EXPECTED_FAULT_INVENTORY},
+            sealed_at=T1,
+        )
 
 
 def test_exposure_contract_rejects_relaxed_minimum_maximum_or_missing_policy() -> None:
@@ -284,6 +301,14 @@ def test_fault_manifest_is_complete_ordered_unique_and_sealed_before_results() -
         replace(campaign, phases=tuple(reversed(campaign.phases)))
     with pytest.raises(ComparatorContractError, match="before results"):
         replace(campaign, observations_seen_before_seal=1)
+    with pytest.raises(ComparatorContractError, match="behaviour"):
+        replace(
+            campaign,
+            phases=(
+                replace(campaign.phases[0], expected_observation="OPTIMISTIC_PASS"),
+                *campaign.phases[1:],
+            ),
+        )
 
 
 def test_fault_campaign_builder_rejects_missing_scope_and_cross_epoch_binding() -> None:
@@ -549,6 +574,25 @@ def test_request_round_trip_and_unknown_run_kind_rejected() -> None:
         epoch, manifest, cohort, parsed
     )
     assert receipt.disposition is AdmissionDisposition.REJECTED
+
+
+def test_request_outside_pre_registered_window_is_rejected() -> None:
+    plan, epoch, manifest, cohort, campaign = _campaign()
+    receipt = ApprovedPhaseAdmissionController(plan, campaign).admit(
+        epoch,
+        manifest,
+        cohort,
+        _request(
+            plan,
+            epoch,
+            manifest,
+            cohort,
+            campaign,
+            requested_at="2042-01-30T00:00:00.000000Z",
+        ),
+    )
+    assert receipt.disposition is AdmissionDisposition.REJECTED
+    assert receipt.stop_reason is StopReason.MANIFEST_IDENTITY
 
 
 def test_epoch_manifest_and_cohort_tampering_rejects_admission() -> None:

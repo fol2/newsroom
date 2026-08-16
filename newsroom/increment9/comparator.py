@@ -465,6 +465,10 @@ class ComparatorPlan(_NoEffect):
         if type(self.budgets) is not BudgetCaps:
             raise ComparatorContractError("budget contract differs")
         _timestamp(self.sealed_at, "sealed_at")
+        if _instant(self.sealed_at) > _instant(self.exposure.window_opens_at):
+            raise ComparatorContractError(
+                "Comparator Plan was not sealed before exposure"
+            )
         if self.assignment != "DETERMINISTIC_DIGEST_SAMPLE":
             raise ComparatorContractError("assignment differs from OD-010")
         if self.purpose != "BOUNDED_RECALL_AND_GAP_MEASUREMENT_ONLY":
@@ -581,6 +585,14 @@ class FaultPhase(_NoEffect):
         _token(self.recovery_action, "recovery_action")
         _integer(self.maximum_effect_attempts, "maximum_effect_attempts", minimum=1)
         _integer(self.maximum_amplification, "maximum_amplification", minimum=1)
+        if (
+            self.expected_observation,
+            self.containment_action,
+            self.recovery_action,
+        ) != EXPECTED_FAULT_BEHAVIOUR[self.fault_kind]:
+            raise ComparatorContractError("fault phase behaviour differs")
+        if (self.maximum_effect_attempts, self.maximum_amplification) != (3, 3):
+            raise ComparatorContractError("fault phase amplification limits differ")
         if (
             self.isolated,
             self.public_effect_allowed,
@@ -711,6 +723,11 @@ def build_fault_campaign_manifest(
         raise ComparatorContractError("cohort Epoch binding differs")
     if cohort.manifest_digest != effective_manifest.canonical_digest:
         raise ComparatorContractError("cohort Effective Manifest binding differs")
+    _timestamp(sealed_at, "sealed_at")
+    if _instant(sealed_at) > _instant(comparator_plan.exposure.window_opens_at):
+        raise ComparatorContractError(
+            "fault campaign was not sealed before exposure"
+        )
     phases = tuple(
         FaultPhase(
             phase_id=f"fault-{ordinal:02d}-{kind.value.lower().replace('_', '-')}",
@@ -1005,6 +1022,16 @@ class ApprovedPhaseAdmissionController(_NoEffect):
             RunKind.RECOVERY_PROOF,
         }:
             return self._receipt(request, AdmissionDisposition.REJECTED, StopReason.ORDINARY_FAILURE)
+        if not (
+            _instant(self._plan.exposure.window_opens_at)
+            <= _instant(request.requested_at)
+            <= _instant(self._plan.exposure.window_closes_at)
+        ) or _instant(request.requested_at) < _instant(self._campaign.sealed_at):
+            return self._receipt(
+                request,
+                AdmissionDisposition.REJECTED,
+                StopReason.MANIFEST_IDENTITY,
+            )
         phase = fault_phase
         recovery = (
             phase is not None
