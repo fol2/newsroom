@@ -114,9 +114,13 @@ def _scope() -> ShadowScope:
         access_boundary=ShadowAccessBoundary(
             purpose_identity="increment9-evaluation-only",
             principal_identity_digest=principal,
-            credential_classes=tuple(
-                sorted(od12["credential_classes_and_secret_locations"]["classes"])
+            permitted_credential_classes=tuple(
+                sorted(
+                    set(od12["credential_classes_and_secret_locations"]["classes"])
+                    - {"PUBLICATION_TARGET_ADAPTER"}
+                )
             ),
+            prohibited_credential_classes=("PUBLICATION_TARGET_ADAPTER",),
             egress_policy_digest=D("8"),
             artefact_policy_digest=D("9"),
         ),
@@ -267,7 +271,26 @@ def test_owner_bound_credentials_differences_artifacts_and_deadlines_fail_closed
             scope,
             access_boundary=replace(
                 scope.access_boundary,
-                credential_classes=scope.access_boundary.credential_classes[:-1],
+                permitted_credential_classes=(
+                    scope.access_boundary.permitted_credential_classes[:-1]
+                ),
+            ),
+        )
+    with pytest.raises(ShadowContractError, match="publication credential"):
+        replace(
+            scope,
+            access_boundary=replace(
+                scope.access_boundary,
+                permitted_credential_classes=tuple(
+                    sorted(
+                        (
+                            set(scope.access_boundary.permitted_credential_classes)
+                            - {"NEO4J_SHADOW_WRITER"}
+                        )
+                        | {"PUBLICATION_TARGET_ADAPTER"}
+                    )
+                ),
+                prohibited_credential_classes=("NEO4J_SHADOW_WRITER",),
             ),
         )
     with pytest.raises(ShadowContractError, match="production-equivalence"):

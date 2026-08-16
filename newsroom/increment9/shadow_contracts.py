@@ -298,21 +298,30 @@ class ShadowAuthorityIdentity(_NoEffect):
 class ShadowAccessBoundary(_NoEffect):
     purpose_identity: str
     principal_identity_digest: str
-    credential_classes: tuple[str, ...]
+    permitted_credential_classes: tuple[str, ...]
+    prohibited_credential_classes: tuple[str, ...]
     egress_policy_digest: str
     artefact_policy_digest: str
 
     def __post_init__(self) -> None:
         _token(self.purpose_identity, "purpose_identity")
         _digest(self.principal_identity_digest, "principal_identity_digest")
-        _tokens(self.credential_classes, "credential_classes")
+        permitted = _tokens(
+            self.permitted_credential_classes, "permitted_credential_classes"
+        )
+        prohibited = _tokens(
+            self.prohibited_credential_classes, "prohibited_credential_classes"
+        )
+        if set(permitted) & set(prohibited):
+            raise ShadowContractError("credential class boundaries overlap")
         _digest(self.egress_policy_digest, "egress_policy_digest")
         _digest(self.artefact_policy_digest, "artefact_policy_digest")
 
     def primitive(self) -> dict[str, object]:
         return {
             "artefact_policy_digest": self.artefact_policy_digest,
-            "credential_classes": list(self.credential_classes),
+            "permitted_credential_classes": list(self.permitted_credential_classes),
+            "prohibited_credential_classes": list(self.prohibited_credential_classes),
             "egress_policy_digest": self.egress_policy_digest,
             "principal_identity_digest": self.principal_identity_digest,
             "purpose_identity": self.purpose_identity,
@@ -325,7 +334,12 @@ class ShadowAccessBoundary(_NoEffect):
         return cls(
             purpose_identity=raw["purpose_identity"],  # type: ignore[arg-type]
             principal_identity_digest=raw["principal_identity_digest"],  # type: ignore[arg-type]
-            credential_classes=_tokens(raw["credential_classes"], "credential_classes"),
+            permitted_credential_classes=_tokens(
+                raw["permitted_credential_classes"], "permitted_credential_classes"
+            ),
+            prohibited_credential_classes=_tokens(
+                raw["prohibited_credential_classes"], "prohibited_credential_classes"
+            ),
             egress_policy_digest=raw["egress_policy_digest"],  # type: ignore[arg-type]
             artefact_policy_digest=raw["artefact_policy_digest"],  # type: ignore[arg-type]
         )
@@ -742,8 +756,12 @@ def validate_scope_against_owner_plan(scope: ShadowScope) -> ShadowScope:
     expected_credentials = set(
         od12["credential_classes_and_secret_locations"]["classes"]
     )
-    if set(scope.access_boundary.credential_classes) != expected_credentials:
+    permitted_credentials = set(scope.access_boundary.permitted_credential_classes)
+    prohibited_credentials = set(scope.access_boundary.prohibited_credential_classes)
+    if permitted_credentials | prohibited_credentials != expected_credentials:
         raise ShadowContractError("credential classes differ from OD-012")
+    if prohibited_credentials != {"PUBLICATION_TARGET_ADAPTER"}:
+        raise ShadowContractError("publication credential must remain prohibited")
     od14 = decisions["OD-014"]["containment_owner_and_deadline"]
     stop = scope.stop_and_closure
     if (

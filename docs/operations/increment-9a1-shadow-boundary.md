@@ -54,8 +54,10 @@ collapse into a successful no-match result.
 ## Principal, purpose, credentials and egress
 
 `ShadowAccessBoundary` binds one purpose, principal digest, the complete
-owner-approved credential-class inventory, an egress-policy digest and an
-artefact-policy digest. It is descriptive: every no-effect flag remains false.
+owner-approved credential-class inventory split into permitted shadow classes
+and prohibited classes, an egress-policy digest and an artefact-policy digest.
+`PUBLICATION_TARGET_ADAPTER` is always prohibited in the shadow. The boundary
+is descriptive: every no-effect flag remains false.
 A later manifest must carry the same principal, purpose and policy identities.
 No secret value may appear in the contract.
 
