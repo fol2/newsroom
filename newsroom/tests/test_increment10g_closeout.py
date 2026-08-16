@@ -39,3 +39,10 @@ def test_receipt_and_manifest_cannot_be_forged_together(tmp_path):
  receipt_path=out/"increment10g-final-closeout.json";receipt=json.loads(receipt_path.read_bytes());receipt["schema"]["version"]=999;receipt["residual_blockers"]=[];receipt_path.write_bytes(canonical_json_bytes(receipt))
  manifest_path=out/"increment10-subject-manifest.json";manifest=json.loads(manifest_path.read_bytes());manifest["subjects"][receipt_path.name]=digest_bytes(receipt_path.read_bytes());manifest_path.write_bytes(canonical_json_bytes(manifest))
  with pytest.raises(CloseoutError,match="complete closeout reconstruction differs"):verify(repo_root=Path.cwd(),subject_directory=out,sdlc_decision=decision)
+
+def test_forged_non_main_failed_decision_cannot_be_rebound(tmp_path):
+ issues,decision=inputs(tmp_path);out=tmp_path/"out";build(repo_root=Path.cwd(),issue_directory=issues,sdlc_decision=decision,observed_at="x",output_directory=out)
+ value=json.loads(decision.read_bytes());value["result"]="FAIL";value["context"]["event_name"]="pull_request";value["context"]["ref"]="refs/pull/548/merge";decision.write_bytes(canonical_json_bytes(value))
+ receipt_path=out/"increment10g-final-closeout.json";receipt=json.loads(receipt_path.read_bytes());receipt["source"]["sdlc_decision_digest"]=digest_bytes(decision.read_bytes());receipt_path.write_bytes(canonical_json_bytes(receipt))
+ manifest_path=out/"increment10-subject-manifest.json";manifest=json.loads(manifest_path.read_bytes());manifest["subjects"][receipt_path.name]=digest_bytes(receipt_path.read_bytes());manifest_path.write_bytes(canonical_json_bytes(manifest))
+ with pytest.raises(CloseoutError,match="exact checked-out main PASS"):verify(repo_root=Path.cwd(),subject_directory=out,sdlc_decision=decision)

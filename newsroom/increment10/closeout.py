@@ -48,7 +48,18 @@ def build(*,repo_root:Path,issue_directory:Path,sdlc_decision:Path,observed_at:s
 
 def verify(*,repo_root:Path,subject_directory:Path,sdlc_decision:Path,current_issue_directory:Path|None=None)->None:
  decision=_load(sdlc_decision);context=decision.get("context")
- if not isinstance(context,dict):raise CloseoutError("SDLC context differs")
+ observed_sha=subprocess.check_output(("git","rev-parse","HEAD"),cwd=repo_root,text=True).strip()
+ observed_tree=subprocess.check_output(("git","rev-parse","HEAD^{tree}"),cwd=repo_root,text=True).strip()
+ if (
+  decision.get("schema_version")!="newsroom.sdlc.shadow-decision.v1"
+  or decision.get("result")!="PASS"
+  or not isinstance(context,dict)
+  or context.get("event_name")!="workflow_dispatch"
+  or context.get("ref")!="refs/heads/main"
+  or context.get("evaluated_sha")!=observed_sha
+  or context.get("evaluated_tree_sha")!=observed_tree
+ ):
+  raise CloseoutError("SDLC decision is not exact checked-out main PASS")
  manifest=_load(subject_directory/"increment10-subject-manifest.json");subjects=manifest.get("subjects")
  if not isinstance(subjects,dict):raise CloseoutError("subject manifest differs")
  expected_subject_names={"increment10-issue-inventory.json",*SUBJECT_SOURCES,"increment10g-final-closeout.json"}
