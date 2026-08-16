@@ -186,7 +186,28 @@ ACTUAL_SERVICE_PROBES = frozenset(
         "VECTOR_GENERATION_1024_COSINE",
     }
 )
-ACTUAL_HOST_PROBES = frozenset({"CAPACITY_MACM4"})
+ACTUAL_HOST_PROBES = frozenset(
+    {
+        "ARTIFACT_ENCRYPTION_ACCESS_AUDIT",
+        "BACKUP_RESTORE_RECONCILIATION",
+        "CAPACITY_MACM4",
+        "CREDENTIAL_VALUES_ABSENT",
+        "EGRESS_ALLOWLIST_BOUNDED",
+        "EGRESS_DEFAULT_DENY",
+        "EVIDENCE_INTAKE_PATH_DENIED",
+        "EXACT_COMPONENT_IDENTITIES",
+        "FILESYSTEM_SEPARATION",
+        "GRAPHITI_PROPOSAL_ONLY",
+        "KILL_SWITCH_AND_CONTAINMENT",
+        "PRODUCTION_CREDENTIAL_DENIED",
+        "PRODUCTION_NEO4J_DENIED",
+        "PRODUCTION_NONMUTATION",
+        "PRODUCTION_SQLITE_WRITE_DENIED",
+        "PUBLICATION_PATH_DENIED",
+        "PURGE_NO_RESURRECTION",
+        "SQLITE_ISOLATED_SCHEMA",
+    }
+)
 
 
 class _NoPublicEffect:
@@ -704,6 +725,7 @@ class DeploymentReadinessReceipt(_Record):
     disposition: ReadinessDisposition
     reason: str
     actual_service_probe_ids: tuple[str, ...]
+    actual_host_probe_ids: tuple[str, ...]
     production_nonmutation_proved: bool
     teardown_complete: bool
     completed_at: str
@@ -717,6 +739,10 @@ class DeploymentReadinessReceipt(_Record):
         _token(self.reason, "reason")
         actual = _tokens(self.actual_service_probe_ids, "actual_service_probe_ids", allow_empty=True)
         object.__setattr__(self, "actual_service_probe_ids", actual)
+        actual_host = _tokens(
+            self.actual_host_probe_ids, "actual_host_probe_ids", allow_empty=True
+        )
+        object.__setattr__(self, "actual_host_probe_ids", actual_host)
         _boolean(self.production_nonmutation_proved, "production_nonmutation_proved")
         _boolean(self.teardown_complete, "teardown_complete")
         _timestamp(self.completed_at, "completed_at")
@@ -725,6 +751,7 @@ class DeploymentReadinessReceipt(_Record):
         ready = self.disposition is ReadinessDisposition.READY_FOR_9B2_CONTROLLER_QUALIFICATION
         if ready and (
             set(actual) != ACTUAL_SERVICE_PROBES
+            or set(actual_host) != ACTUAL_HOST_PROBES
             or not self.production_nonmutation_proved
             or not self.teardown_complete
             or self.reason != "ALL_READINESS_PROBES_PASS"
@@ -735,6 +762,7 @@ class DeploymentReadinessReceipt(_Record):
 
     def primitive(self) -> dict[str, object]:
         return {
+            "actual_host_probe_ids": list(self.actual_host_probe_ids),
             "actual_service_probe_ids": list(self.actual_service_probe_ids),
             "completed_at": self.completed_at,
             "deployment_plan_digest": self.deployment_plan_digest,
@@ -753,6 +781,7 @@ class DeploymentReadinessReceipt(_Record):
         fields = frozenset(name for name in cls.__dataclass_fields__ if name != "schema_version")
         value = _document(raw, cls.schema_version, fields)
         value["disposition"] = _enum(ReadinessDisposition, value["disposition"], "disposition")
+        value["actual_host_probe_ids"] = tuple(value["actual_host_probe_ids"])  # type: ignore[arg-type]
         value["actual_service_probe_ids"] = tuple(value["actual_service_probe_ids"])  # type: ignore[arg-type]
         return cls(**value)  # type: ignore[arg-type]
 
@@ -910,6 +939,11 @@ def qualify_deployment(
         for item in bundle.probes
         if item.service_class is ServiceClass.ACTUAL_ISOLATED_SERVICE
     )
+    actual_host = tuple(
+        item.probe_id
+        for item in bundle.probes
+        if item.service_class is ServiceClass.ACTUAL_ISOLATED_HOST
+    )
     observations_clean = all(
         item.outcome is ProbeOutcome.PASS
         and item.secret_value_count == 0
@@ -954,6 +988,7 @@ def qualify_deployment(
             else ReadinessDisposition.NOT_READY
         ),
         reason=reason,
+        actual_host_probe_ids=tuple(sorted(actual_host)),
         actual_service_probe_ids=tuple(sorted(actual)),
         production_nonmutation_proved=production_clean,
         teardown_complete=all(item.orphan_resource_count == 0 for item in bundle.probes),

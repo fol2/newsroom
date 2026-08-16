@@ -104,9 +104,12 @@ A complete bundle contains the following exact ordered inventory:
 25. `VECTOR_GENERATION_1024_COSINE`
 
 The six Neo4j/index/restart/teardown probes must be actual isolated-service
-observations. `CAPACITY_MACM4` must be an actual isolated-host observation.
-All other probes are deterministic fixture/contract observations. A ready
-receipt additionally requires exact scope and manifest binding, the frozen
+observations. Eighteen storage, backup, capacity, credential, egress,
+filesystem, Graphiti, containment, production-denial, publication-denial,
+purge and SQLite probes must be actual isolated-host observations. Only the
+fixed DNS/TLS/redirect/body/timeout/rate contract is deterministic-only. Both
+actual-service and actual-host probe inventories are explicit in the receipt.
+A ready receipt additionally requires exact scope and manifest binding, the frozen
 production snapshot as the before digest, byte-identical before/after
 production digests, in-window chronology, every outcome `PASS`, and zero
 secret, production mutation, public effect and orphan counts.

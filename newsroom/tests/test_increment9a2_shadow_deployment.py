@@ -536,6 +536,7 @@ def test_exact_clean_bundle_grants_only_9b2_controller_qualification() -> None:
     receipt = qualify_deployment(plan, bundle, receipt_id="increment9-readiness-receipt-fixture")
     assert receipt.disposition is ReadinessDisposition.READY_FOR_9B2_CONTROLLER_QUALIFICATION
     assert set(receipt.actual_service_probe_ids) == ACTUAL_SERVICE_PROBES
+    assert set(receipt.actual_host_probe_ids) == ACTUAL_HOST_PROBES
     assert receipt.production_nonmutation_proved is True
     assert receipt.teardown_complete is True
     assert receipt.runtime_campaign_authority_still_required is True
