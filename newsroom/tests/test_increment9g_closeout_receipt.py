@@ -61,6 +61,13 @@ def test_generated_sdlc_evidence_does_not_weaken_exact_source_cleanliness(
         _git(repository)
     unrelated.unlink()
 
+    nested = repository / "newsroom" / ".sdlc-run" / "unexpected.py"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("unexpected = True\n", encoding="utf-8")
+    with pytest.raises(Increment9CloseoutCommandError, match="checkout is not clean"):
+        _git(repository)
+    nested.unlink()
+
     tracked.write_text("changed\n", encoding="utf-8")
     with pytest.raises(Increment9CloseoutCommandError, match="checkout is not clean"):
         _git(repository)
