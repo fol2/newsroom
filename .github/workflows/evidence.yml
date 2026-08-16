@@ -569,6 +569,7 @@ jobs:
     permissions:
       actions: read
       contents: read
+      issues: read
       pull-requests: read
     steps:
       - name: Checkout evaluated head
@@ -714,6 +715,58 @@ jobs:
             --operational-admission-decision .sdlc-run/increment8-operational-admission-decision.json \
             --output .sdlc-run/increment8f-final-closeout.json
 
+      - name: Collect exact Increment 9G closeout inputs
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/main' &&
+          needs.route.outputs.service_required == 'true'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          issue_root=".sdlc-run/increment9-issues"
+          deployment_root=".sdlc-run/increment9-deployment"
+          mkdir -p "${issue_root}" "${deployment_root}"
+          chmod 700 "${issue_root}" "${deployment_root}"
+          for number in {488..497} 500 521; do
+            gh issue view "${number}" \
+              --repo "${{ github.repository }}" \
+              --json number,state,title,closedAt,url \
+              > "${issue_root}/issue-${number}.json"
+            chmod 600 "${issue_root}/issue-${number}.json"
+          done
+          gh run download 31923002243 \
+            --repo "${{ github.repository }}" \
+            --name increment9-neo4j-5262-readiness-31923002243-1-390237b9183f5ee77da363669de3ddef964d0c32 \
+            --dir "${deployment_root}"
+          chmod 600 "${deployment_root}"/*.json
+
+      - name: Build and verify exact Increment 9G subjects
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/main' &&
+          needs.route.outputs.service_required == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          subject_root=".sdlc-run/increment9-subjects"
+          observed_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%6NZ')"
+          mkdir -p "${subject_root}"
+          chmod 700 "${subject_root}"
+          uv run --no-sync python -m scripts.sdlc.increment9g_closeout_receipt build \
+            --repo-root . \
+            --issue-directory .sdlc-run/increment9-issues \
+            --sdlc-decision .sdlc-run/decision.json \
+            --deployment-readiness .sdlc-run/increment9-deployment/increment9-neo4j-readiness.json \
+            --deployment-restart .sdlc-run/increment9-deployment/increment9-neo4j-restart.json \
+            --observed-at "${observed_at}" \
+            --output-directory "${subject_root}"
+          uv run --no-sync python -m scripts.sdlc.increment9g_closeout_receipt verify \
+            --repo-root . \
+            --subject-directory "${subject_root}" \
+            --sdlc-decision .sdlc-run/decision.json
+
       - name: Upload final decision evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -730,6 +783,16 @@ jobs:
             .sdlc-run/increment8-qualification-packet.json
             .sdlc-run/increment8-operational-admission-decision.json
             .sdlc-run/increment8-substantive-review.json
+            .sdlc-run/increment9-subjects/increment9-campaign-bundle.json
+            .sdlc-run/increment9-subjects/increment9-deployment-receipt.json
+            .sdlc-run/increment9-subjects/increment9-fault-bundle.json
+            .sdlc-run/increment9-subjects/increment9-issue-inventory.json
+            .sdlc-run/increment9-subjects/increment9-review-metric-report.json
+            .sdlc-run/increment9-subjects/increment9-run-inventory.json
+            .sdlc-run/increment9-subjects/increment9-shadow-decision.json
+            .sdlc-run/increment9-subjects/increment9-shadow-plan.json
+            .sdlc-run/increment9-subjects/increment9-subject-manifest.json
+            .sdlc-run/increment9-subjects/increment9g-final-closeout.json
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
@@ -1370,6 +1433,15 @@ jobs:
               raise SystemExit('signed decision context differs')
           PY
 
+      - name: Reconstruct exact Increment 9G subjects
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m scripts.sdlc.increment9g_closeout_receipt verify \
+            --repo-root . \
+            --subject-directory .sdlc-run/signed-closeout-input/increment9-subjects \
+            --sdlc-decision .sdlc-run/signed-closeout-input/decision.json
+
       - name: Attest final decision and closeout receipt
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
@@ -1383,6 +1455,16 @@ jobs:
             .sdlc-run/signed-closeout-input/increment8-qualification-packet.json
             .sdlc-run/signed-closeout-input/increment8-operational-admission-decision.json
             .sdlc-run/signed-closeout-input/increment8-substantive-review.json
+            .sdlc-run/signed-closeout-input/increment9-subjects/increment9-campaign-bundle.json
+            .sdlc-run/signed-closeout-input/increment9-subjects/increment9-deployment-receipt.json
+            .sdlc-run/signed-closeout-input/increment9-subjects/increment9-fault-bundle.json
+            .sdlc-run/signed-closeout-input/increment9-subjects/increment9-issue-inventory.json
+            .sdlc-run/signed-closeout-input/increment9-subjects/increment9-review-metric-report.json
+            .sdlc-run/signed-closeout-input/increment9-subjects/increment9-run-inventory.json
+            .sdlc-run/signed-closeout-input/increment9-subjects/increment9-shadow-decision.json
+            .sdlc-run/signed-closeout-input/increment9-subjects/increment9-shadow-plan.json
+            .sdlc-run/signed-closeout-input/increment9-subjects/increment9-subject-manifest.json
+            .sdlc-run/signed-closeout-input/increment9-subjects/increment9g-final-closeout.json
 
       - name: Retain attestation bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

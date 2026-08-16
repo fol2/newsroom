@@ -169,6 +169,7 @@ def test_job_graph_is_exact_and_decision_always_reports() -> None:
     assert jobs["decision"]["permissions"] == {
         "actions": "read",
         "contents": "read",
+        "issues": "read",
         "pull-requests": "read",
     }
     assert jobs["signed-closeout"]["if"] == (
@@ -369,6 +370,16 @@ def test_lane_and_decision_artifacts_are_compact_immutable_and_attempt_scoped() 
                 ".sdlc-run/increment8-qualification-packet.json",
                 ".sdlc-run/increment8-operational-admission-decision.json",
                 ".sdlc-run/increment8-substantive-review.json",
+                ".sdlc-run/increment9-subjects/increment9-campaign-bundle.json",
+                ".sdlc-run/increment9-subjects/increment9-deployment-receipt.json",
+                ".sdlc-run/increment9-subjects/increment9-fault-bundle.json",
+                ".sdlc-run/increment9-subjects/increment9-issue-inventory.json",
+                ".sdlc-run/increment9-subjects/increment9-review-metric-report.json",
+                ".sdlc-run/increment9-subjects/increment9-run-inventory.json",
+                ".sdlc-run/increment9-subjects/increment9-shadow-decision.json",
+                ".sdlc-run/increment9-subjects/increment9-shadow-plan.json",
+                ".sdlc-run/increment9-subjects/increment9-subject-manifest.json",
+                ".sdlc-run/increment9-subjects/increment9g-final-closeout.json",
             ]
 
 
@@ -467,6 +478,16 @@ def test_signed_closeout_attests_only_the_validated_exact_main_receipt() -> None
         ".sdlc-run/signed-closeout-input/increment8-qualification-packet.json",
         ".sdlc-run/signed-closeout-input/increment8-operational-admission-decision.json",
         ".sdlc-run/signed-closeout-input/increment8-substantive-review.json",
+        ".sdlc-run/signed-closeout-input/increment9-subjects/increment9-campaign-bundle.json",
+        ".sdlc-run/signed-closeout-input/increment9-subjects/increment9-deployment-receipt.json",
+        ".sdlc-run/signed-closeout-input/increment9-subjects/increment9-fault-bundle.json",
+        ".sdlc-run/signed-closeout-input/increment9-subjects/increment9-issue-inventory.json",
+        ".sdlc-run/signed-closeout-input/increment9-subjects/increment9-review-metric-report.json",
+        ".sdlc-run/signed-closeout-input/increment9-subjects/increment9-run-inventory.json",
+        ".sdlc-run/signed-closeout-input/increment9-subjects/increment9-shadow-decision.json",
+        ".sdlc-run/signed-closeout-input/increment9-subjects/increment9-shadow-plan.json",
+        ".sdlc-run/signed-closeout-input/increment9-subjects/increment9-subject-manifest.json",
+        ".sdlc-run/signed-closeout-input/increment9-subjects/increment9g-final-closeout.json",
     ]
     upload = _step("signed-closeout", "Retain attestation bundle")
     assert upload["uses"] == UPLOAD
@@ -484,6 +505,41 @@ def test_signed_closeout_attests_only_the_validated_exact_main_receipt() -> None
         "archive": "true",
     }
     assert job["steps"][-1] == upload
+
+
+def test_increment9g_subjects_are_built_only_for_exact_main_tier_m() -> None:
+    condition = (
+        "github.event_name == 'workflow_dispatch' && "
+        "github.ref == 'refs/heads/main' && "
+        "needs.route.outputs.service_required == 'true'"
+    )
+    collect = _step("decision", "Collect exact Increment 9G closeout inputs")
+    assert collect["if"] == condition
+    assert collect["env"] == {"GITHUB_TOKEN": "${{ github.token }}"}
+    for expected in (
+        "for number in {488..497} 500 521",
+        'gh issue view "${number}"',
+        "gh run download 31923002243",
+        "increment9-neo4j-5262-readiness-31923002243-1-390237b9183f5ee77da363669de3ddef964d0c32",
+    ):
+        assert expected in collect["run"]
+
+    build = _step("decision", "Build and verify exact Increment 9G subjects")
+    assert build["if"] == condition
+    for expected in (
+        "scripts.sdlc.increment9g_closeout_receipt build",
+        "--sdlc-decision .sdlc-run/decision.json",
+        "--deployment-readiness .sdlc-run/increment9-deployment/increment9-neo4j-readiness.json",
+        "scripts.sdlc.increment9g_closeout_receipt verify",
+    ):
+        assert expected in build["run"]
+
+    reconstruct = _step("signed-closeout", "Reconstruct exact Increment 9G subjects")
+    assert "scripts.sdlc.increment9g_closeout_receipt verify" in reconstruct["run"]
+    assert (
+        "--subject-directory .sdlc-run/signed-closeout-input/increment9-subjects"
+        in reconstruct["run"]
+    )
 
 
 def test_only_signed_closeout_receives_oidc_and_attestation_permissions() -> None:
@@ -716,6 +772,7 @@ def test_github_token_exists_only_on_exact_collection_step() -> None:
     assert locations == [
         ("decision", "Collect exact lane evidence"),
         ("decision", "Retain exact Increment 8 substantive review"),
+        ("decision", "Collect exact Increment 9G closeout inputs"),
         ("signed-closeout", "Reconstruct exact Increment 8 admission subjects"),
     ]
 
