@@ -263,3 +263,27 @@ def test_unknown_duplicate_noncanonical_and_raw_byte_changes_fail_closed(
     )
     with pytest.raises(RequalificationError, match="bytes differ"):
         load_requalification(changed)
+
+
+@pytest.mark.parametrize("unsafe_value", (1.5, 9_007_199_254_740_992))
+def test_values_outside_the_canonical_domain_fail_with_public_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_value: object,
+) -> None:
+    path = tmp_path / "unsafe.json"
+    path.write_text(
+        json.dumps(
+            {
+                "payload": unsafe_value,
+                "schema_version": "newsroom.increment10.requalification.v1",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+    monkeypatch.setattr(
+        module, "EXPECTED_REQUALIFICATION_DIGEST", digest_bytes(path.read_bytes())
+    )
+    with pytest.raises(RequalificationError, match="outside the canonical domain"):
+        load_requalification(path)

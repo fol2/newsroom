@@ -16,7 +16,11 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import (
+    CanonicalizationError,
+    canonical_json_bytes,
+    digest_bytes,
+)
 
 REQUALIFICATION_PATH = Path(__file__).with_name("requalification_v1.json")
 EXPECTED_REQUALIFICATION_DIGEST = (
@@ -446,7 +450,13 @@ def load_requalification(path: Path = REQUALIFICATION_PATH) -> RequalificationPa
         raise
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RequalificationError("cannot read requalification packet") from exc
-    if type(value) is not dict or canonical_json_bytes(value) != raw:
+    try:
+        canonical = canonical_json_bytes(value)
+    except CanonicalizationError as exc:
+        raise RequalificationError(
+            "requalification packet is outside the canonical domain"
+        ) from exc
+    if type(value) is not dict or canonical != raw:
         raise RequalificationError("requalification packet is not exact canonical JSON")
     if digest_bytes(raw) != EXPECTED_REQUALIFICATION_DIGEST:
         raise RequalificationError("requalification packet bytes differ")
