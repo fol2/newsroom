@@ -27,6 +27,9 @@ from newsroom.increment9.closeout import (
     exact_json,
     validate_sdlc_decision,
     verify_closeout_receipt,
+    verify_deployment_receipt,
+    verify_review_report,
+    verify_run_inventory,
 )
 from newsroom.increment9.decision import BlockedShadowDecision
 from newsroom.increment9.plan import (
@@ -145,6 +148,8 @@ def _issue_inventory(issue_directory: Path) -> tuple[dict[str, object], dict[int
         value = _load_issue(raw_path)
         if value["number"] != number or value["state"] != "CLOSED" or not value["closedAt"]:
             raise Increment9CloseoutCommandError(f"issue #{number} is not closed")
+        if value["url"] != f"https://github.com/fol2/newsroom/issues/{number}":
+            raise Increment9CloseoutCommandError(f"issue #{number} URL differs")
         issues[number] = value
         entries.append(
             {
@@ -399,15 +404,35 @@ def verify_subjects(
     closeout = verify_closeout_receipt((subject_directory / "increment9g-final-closeout.json").read_bytes())
     sdlc = json.loads(sdlc_decision_path.read_bytes())
     sdlc_identity = validate_sdlc_decision(sdlc, head=head, tree=tree)
+    run_inventory = verify_run_inventory(
+        (subject_directory / "increment9-run-inventory.json").read_bytes()
+    )
+    review_report = verify_review_report(
+        (subject_directory / "increment9-review-metric-report.json").read_bytes()
+    )
+    deployment = verify_deployment_receipt(
+        (subject_directory / "increment9-deployment-receipt.json").read_bytes()
+    )
+    issue_inventory = exact_json(
+        (subject_directory / "increment9-issue-inventory.json").read_bytes()
+    )
+    issue_body = dict(issue_inventory)
+    issue_claimed = issue_body.pop("inventory_digest", None)
+    issue_entries = issue_inventory.get("issues")
+    if (
+        issue_inventory.get("schema_version") != ISSUE_INVENTORY_SCHEMA
+        or not isinstance(issue_entries, list)
+        or tuple(item.get("number") for item in issue_entries) != EXPECTED_ISSUES
+        or digest_bytes(canonical_json_bytes(issue_body)) != issue_claimed
+    ):
+        raise Increment9CloseoutCommandError("signed issue inventory differs")
     if (
         closeout["sdlc_decision_identity"] != sdlc_identity
         or closeout["shadow_decision_digest"] != decision.canonical_digest
-        or closeout["run_inventory_digest"]
-        != exact_json((subject_directory / "increment9-run-inventory.json").read_bytes())["inventory_digest"]
-        or closeout["review_report_digest"]
-        != exact_json((subject_directory / "increment9-review-metric-report.json").read_bytes())["report_digest"]
-        or closeout["deployment_receipt_digest"]
-        != exact_json((subject_directory / "increment9-deployment-receipt.json").read_bytes())["receipt_digest"]
+        or closeout["run_inventory_digest"] != run_inventory["inventory_digest"]
+        or closeout["review_report_digest"] != review_report["report_digest"]
+        or closeout["deployment_receipt_digest"] != deployment["receipt_digest"]
+        or closeout["issue_evidence_digest"] != issue_inventory["inventory_digest"]
         or closeout["shadow_disposition"] != decision.disposition.value
         or campaign["outcome"]["outcome"] != "BLOCKED"
         or fault["outcome"]["campaign_outcome"] != "BLOCKED"

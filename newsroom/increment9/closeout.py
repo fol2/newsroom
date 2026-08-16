@@ -174,6 +174,25 @@ def build_deployment_receipt(
     return {**body, "receipt_digest": digest_bytes(canonical_json_bytes(body))}
 
 
+def verify_deployment_receipt(raw: bytes) -> dict[str, object]:
+    value = exact_json(raw)
+    body = dict(value)
+    claimed = _digest(body.pop("receipt_digest", None), "deployment receipt")
+    if digest_bytes(canonical_json_bytes(body)) != claimed:
+        raise Increment9CloseoutError("deployment receipt digest differs")
+    if (
+        value.get("schema_version") != DEPLOYMENT_RECEIPT_SCHEMA
+        or value.get("deployment_run_id") != EXPECTED_DEPLOYMENT_RUN
+        or value.get("deployment_head") != EXPECTED_DEPLOYMENT_HEAD
+        or value.get("actual_service_ready") is not True
+        or value.get("production_nonmutation") is not True
+        or value.get("secret_value_count") != 0
+        or value.get("teardown_residual_count") != 0
+    ):
+        raise Increment9CloseoutError("deployment receipt outcome differs")
+    return value
+
+
 def build_run_inventory(
     *, campaign: Mapping[str, object], fault: Mapping[str, object]
 ) -> dict[str, object]:
@@ -213,6 +232,30 @@ def build_run_inventory(
     return {**body, "inventory_digest": digest_bytes(canonical_json_bytes(body))}
 
 
+def verify_run_inventory(raw: bytes) -> dict[str, object]:
+    value = exact_json(raw)
+    body = dict(value)
+    claimed = _digest(body.pop("inventory_digest", None), "run inventory")
+    if digest_bytes(canonical_json_bytes(body)) != claimed:
+        raise Increment9CloseoutError("run inventory digest differs")
+    if (
+        value.get("schema_version") != RUN_INVENTORY_SCHEMA
+        or value.get("campaign_outcome") != "BLOCKED"
+        or value.get("runs") != []
+        or value.get("attempts") != []
+        or value.get("checkpoints") != []
+        or value.get("decision_bearing_case_count") != 0
+        or value.get("fault_executed_count") != 0
+        or value.get("fault_not_run_count") != 26
+        or value.get("gross_gbp_minor_units") != 0
+        or value.get("source_http_attempts") != 0
+        or value.get("inventory_reconciled") is not True
+        or value.get("original_stop_retained") is not True
+    ):
+        raise Increment9CloseoutError("run inventory outcome differs")
+    return value
+
+
 def build_review_report(decision: BlockedShadowDecision) -> dict[str, object]:
     if decision.disposition is not ShadowDisposition.BLOCKED_ACTIVE_COVERAGE:
         raise Increment9CloseoutError("review disposition differs")
@@ -232,6 +275,32 @@ def build_review_report(decision: BlockedShadowDecision) -> dict[str, object]:
         "zero_tolerance_pass_claimed": False,
     }
     return {**body, "report_digest": digest_bytes(canonical_json_bytes(body))}
+
+
+def verify_review_report(raw: bytes) -> dict[str, object]:
+    value = exact_json(raw)
+    body = dict(value)
+    claimed = _digest(body.pop("report_digest", None), "review report")
+    if digest_bytes(canonical_json_bytes(body)) != claimed:
+        raise Increment9CloseoutError("review report digest differs")
+    costs = value.get("cost_and_capacity")
+    if (
+        value.get("schema_version") != REVIEW_REPORT_SCHEMA
+        or value.get("disposition") != "BLOCKED_ACTIVE_COVERAGE"
+        or value.get("metric_count") != 12
+        or value.get("slice_count") != 14
+        or value.get("ablation_count") != 16
+        or value.get("reviewer_count") != 3
+        or value.get("reviewer_invocation_count") != 0
+        or value.get("zero_tolerance_count") != 12
+        or value.get("zero_tolerance_pass_claimed") is not False
+        or value.get("all_values_not_evaluated") is not True
+        or value.get("production_equivalence_claim_permitted") is not False
+        or not isinstance(costs, Mapping)
+        or any(item != 0 for item in costs.values())
+    ):
+        raise Increment9CloseoutError("review report outcome differs")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
