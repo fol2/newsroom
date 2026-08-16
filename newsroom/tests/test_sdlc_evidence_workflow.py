@@ -184,6 +184,7 @@ def test_job_graph_is_exact_and_decision_always_reports() -> None:
         "attestations": "write",
         "contents": "read",
         "id-token": "write",
+        "issues": "read",
         "pull-requests": "read",
     }
     assert jobs["route"]["outputs"] == {
@@ -381,6 +382,7 @@ def test_lane_and_decision_artifacts_are_compact_immutable_and_attempt_scoped() 
                 ".sdlc-run/increment9-subjects/increment9-subject-manifest.json",
                 ".sdlc-run/increment9-subjects/increment9g-final-closeout.json",
                 ".sdlc-run/increment10r0-requalification.json",
+                ".sdlc-run/increment10r0-issue.json",
             ]
 
 
@@ -490,6 +492,7 @@ def test_signed_closeout_attests_only_the_validated_exact_main_receipt() -> None
         ".sdlc-run/signed-closeout-input/increment9-subjects/increment9-subject-manifest.json",
         ".sdlc-run/signed-closeout-input/increment9-subjects/increment9g-final-closeout.json",
         ".sdlc-run/signed-closeout-input/increment10r0-requalification.json",
+        ".sdlc-run/signed-closeout-input/increment10r0-issue.json",
     ]
     upload = _step("signed-closeout", "Retain attestation bundle")
     assert upload["uses"] == UPLOAD
@@ -554,7 +557,13 @@ def test_increment10r0_subject_is_reconstructed_and_attested_only_on_exact_main(
     )
     retain = _step("decision", "Retain exact Increment 10R0 requalification subject")
     assert retain["if"] == condition
+    assert retain["env"] == {"GITHUB_TOKEN": "${{ github.token }}"}
     for expected in (
+        "gh issue view 526",
+        "number,state,title,closedAt,url",
+        "issue['state'] != 'CLOSED'",
+        "increment10r0-issue.json",
+        "canonical_json_bytes(issue)",
         "load_requalification(REQUALIFICATION_PATH)",
         "ELIGIBLE_FOR_INCREMENT10_PLAN",
         "packet.permits_increment10_plan is not False",
@@ -564,18 +573,24 @@ def test_increment10r0_subject_is_reconstructed_and_attested_only_on_exact_main(
         assert expected in retain["run"]
 
     upload = _step("decision", "Upload final decision evidence")
-    assert (
-        ".sdlc-run/increment10r0-requalification.json"
-        in upload["with"]["path"].splitlines()
-    )
+    uploaded = upload["with"]["path"].splitlines()
+    assert ".sdlc-run/increment10r0-requalification.json" in uploaded
+    assert ".sdlc-run/increment10r0-issue.json" in uploaded
 
     reconstruct = _step("signed-closeout", "Reconstruct exact Increment 10R0 subject")
+    assert reconstruct["env"] == {"GITHUB_TOKEN": "${{ github.token }}"}
     for expected in (
+        "gh issue view 526",
+        "number,state,title,closedAt,url",
         ".sdlc-run/signed-closeout-input/",
         "increment10r0-requalification.json",
+        "increment10r0-issue.json",
         "load_requalification(retained_path)",
         "retained_path.read_bytes() != REQUALIFICATION_PATH.read_bytes()",
         "retained.permits_increment10_plan is not False",
+        "issue != current",
+        "issue['state'] != 'CLOSED'",
+        "canonical_json_bytes(issue)",
     ):
         assert expected in reconstruct["run"]
 
@@ -811,7 +826,9 @@ def test_github_token_exists_only_on_exact_collection_step() -> None:
         ("decision", "Collect exact lane evidence"),
         ("decision", "Retain exact Increment 8 substantive review"),
         ("decision", "Collect exact Increment 9G closeout inputs"),
+        ("decision", "Retain exact Increment 10R0 requalification subject"),
         ("signed-closeout", "Reconstruct exact Increment 8 admission subjects"),
+        ("signed-closeout", "Reconstruct exact Increment 10R0 subject"),
     ]
 
 
