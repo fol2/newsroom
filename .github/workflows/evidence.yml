@@ -824,6 +824,39 @@ jobs:
               raise SystemExit('Increment 10R0 subject reconstruction differs')
           PY
 
+      - name: Build and verify exact Increment 10G subjects
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/main' &&
+          needs.route.outputs.service_required == 'true'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          issue_root=".sdlc-run/increment10-issues"
+          subject_root=".sdlc-run/increment10-subjects"
+          mkdir -p "${issue_root}"
+          chmod 700 "${issue_root}"
+          for number in {526..536}; do
+            gh issue view "${number}" \
+              --repo "${{ github.repository }}" \
+              --json number,state,title,closedAt,url \
+              > "${issue_root}/issue-${number}.json"
+            chmod 600 "${issue_root}/issue-${number}.json"
+          done
+          observed_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%6NZ')"
+          uv run --no-sync python -m scripts.sdlc.increment10g_closeout_receipt build \
+            --repo-root . \
+            --issue-directory "${issue_root}" \
+            --sdlc-decision .sdlc-run/decision.json \
+            --observed-at "${observed_at}" \
+            --output-directory "${subject_root}"
+          uv run --no-sync python -m scripts.sdlc.increment10g_closeout_receipt verify \
+            --repo-root . \
+            --subject-directory "${subject_root}" \
+            --sdlc-decision .sdlc-run/decision.json
+
       - name: Upload final decision evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -852,6 +885,13 @@ jobs:
             .sdlc-run/increment9-subjects/increment9g-final-closeout.json
             .sdlc-run/increment10r0-requalification.json
             .sdlc-run/increment10r0-issue.json
+            .sdlc-run/increment10-subjects/increment10-issue-inventory.json
+            .sdlc-run/increment10-subjects/increment10-plan.json
+            .sdlc-run/increment10-subjects/increment10-transport-deployment.json
+            .sdlc-run/increment10-subjects/increment10-run-inventory.json
+            .sdlc-run/increment10-subjects/increment10-review-metric-decision.json
+            .sdlc-run/increment10-subjects/increment10g-final-closeout.json
+            .sdlc-run/increment10-subjects/increment10-subject-manifest.json
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
@@ -1558,6 +1598,27 @@ jobs:
               raise SystemExit('signed Increment 10R0 issue closure differs')
           PY
 
+      - name: Reconstruct exact Increment 10G subjects
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current_root="${RUNNER_TEMP}/increment10-current-issues"
+          mkdir -p "${current_root}"
+          chmod 700 "${current_root}"
+          for number in {526..536}; do
+            gh issue view "${number}" \
+              --repo "${{ github.repository }}" \
+              --json number,state,title,closedAt,url \
+              > "${current_root}/issue-${number}.json"
+          done
+          uv run --no-sync python -m scripts.sdlc.increment10g_closeout_receipt verify \
+            --repo-root . \
+            --subject-directory .sdlc-run/signed-closeout-input/increment10-subjects \
+            --sdlc-decision .sdlc-run/signed-closeout-input/decision.json \
+            --current-issue-directory "${current_root}"
+
       - name: Attest final decision and closeout receipt
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
@@ -1583,6 +1644,13 @@ jobs:
             .sdlc-run/signed-closeout-input/increment9-subjects/increment9g-final-closeout.json
             .sdlc-run/signed-closeout-input/increment10r0-requalification.json
             .sdlc-run/signed-closeout-input/increment10r0-issue.json
+            .sdlc-run/signed-closeout-input/increment10-subjects/increment10-issue-inventory.json
+            .sdlc-run/signed-closeout-input/increment10-subjects/increment10-plan.json
+            .sdlc-run/signed-closeout-input/increment10-subjects/increment10-transport-deployment.json
+            .sdlc-run/signed-closeout-input/increment10-subjects/increment10-run-inventory.json
+            .sdlc-run/signed-closeout-input/increment10-subjects/increment10-review-metric-decision.json
+            .sdlc-run/signed-closeout-input/increment10-subjects/increment10g-final-closeout.json
+            .sdlc-run/signed-closeout-input/increment10-subjects/increment10-subject-manifest.json
 
       - name: Retain attestation bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
