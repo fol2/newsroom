@@ -22,7 +22,8 @@ choose a different bounded-search provider.
 Increment 11C is not a compatibility window for this legacy stack. Dual-write
 and historical import are refused. Old Discord posts are not Story Versions.
 Working-tree deletion of this legacy code is authorised separately and does not
-block Increment 11B; git history is the inspirational archive.
+block Increment 11B; git history is the inspirational archive. This ADR does
+not authorise Increment 11B, 11R, or production activation.
 
 Rejected alternatives: keeping OpenClaw and Discord live until 11B; an
 Increment 11C dual-run; Discord as a non-production observer; importing
