@@ -302,6 +302,46 @@ _Avoid_: Editorial review, bare boolean attestation, GateRecord, terms screensho
 An owner-approved, versioned production-policy artefact stating permitted access method, use classes, destinations and retention for one Source Definition, dataset or asset provider. It is not a Rights Review Record, First I/O Gate Record or Qualification Evidence; a 9Q PASS does not mint one.
 _Avoid_: Rights Review Record, terms checkbox, GateRecord
 
+**Protected Storage**:
+The isolated shadow store for protected artefacts, enforcing no group or public access, append-only access audit on every read and write, deterministic purge against retention and rights-revocation bounds, and no-resurrection after purge with a retained tombstone. All `ProtectedArtifactClass` entries must carry a matching `ProtectedArtifactRule` bound to the OD-012 inventory. It is not the production authority store, not the Keychain credential store and not general backups.
+_Avoid_: Production authority store, Keychain, backup volume, unencrypted cache
+
+**Credential Class**:
+The governed category identity of one secret. Ledger and evidence carry class, scope and digest only, never secret bytes. Resolution returns a metadata `CredentialRef`, not the secret itself. It is not a credential value, not a model subprocess handle and not a production store name.
+_Avoid_: Secret bytes, API key, password, production SQLite
+
+**Isolated Principal**:
+The shadow campaign's sole access identity, bound by its principal digest to `ShadowAccessBoundary.principal_identity_digest`. Authority-store, projection and target credentials resolve only through this principal under least-privilege rules. It is not a production service identity and not a `purpose_identity`.
+_Avoid_: Production service account, purpose identity, human owner account
+
+**Egress Allow-list**:
+The OD-012-frozen inventory of permitted egress destination classes together with request bounds. Every outbound request must pass per-request admission; any destination not on the allow-list is default-denied. Config validation alone does not satisfy enforcement. It is not a firewall rule list and not a readiness-only destination set in isolation.
+_Avoid_: Default-allow, config flag, DNS blocklist, HTTP 200
+
+**Egress Receipt**:
+The metadata-only admission record of one outbound request: destination class, host, policy digest and applicable bounds. It never carries secret bytes. It is not a network packet capture, not a Target Acknowledgement and not a First I/O Gate Record.
+_Avoid_: HTTP log, secret bytes, GateRecord, worker success
+
+**Prefunded Wallet**:
+The sole funding pool for incremental paid-API spend within an Epoch: fixed capacity at the OD-011 £250 cap, prefunded at opening, non-replenishing and non-transferable. Subscription-class usage is ledgered but never debited from it. It is not a live provider prepaid balance and not an unlimited or replenishable budget.
+_Avoid_: Provider prepaid balance, subscription wallet, top-up account, credit line
+
+**Budget Reservation**:
+A ledgered reservation that must exist and show sufficient remaining balance before any metered spend; spend debits only against it. It is not spend authority by itself and not a subscription-class ledger entry.
+_Avoid_: Spend authority, wallet top-up, subscription usage, implicit debit
+
+**Provider Terms Record**:
+One sealed record of current provider terms for one admitted commercial/API provider class: class, terms URL, terms digest and a validity window. It covers terms of use, acceptable use and data-handling terms only, not pricing. It is not a Rights Review Record, not a Rights Gate verdict and not a boolean `terms_current` flag.
+_Avoid_: Rights Review Record, terms checkbox, pricing table, boolean flag
+
+**No-Provider Declaration**:
+One sealed statement that one named route admits zero of the six OD-012 commercial/API provider classes; official-source HTTP and local readiness destinations may remain. Silent absence of terms is not this declaration, and it cannot be presented together with Provider Terms Records. It is not a Provider Terms Record and not an implicit no-provider assumption.
+_Avoid_: Missing terms, Provider Terms Record, implicit no-provider, terms checkbox
+
+**Prospective Run Authority**:
+An exact `run_id` bound to a persisted execution-authority chain — a prospective `ShadowRun` under a valid `EvaluationEpoch` and the current `ManifestCohort`, with budgets and stop rules bound through the Epoch's `budget_rules_digest` and `thresholds_digest` and destination through the cohort's `exposure_contract_digest` — before any execution. It is not a First I/O Gate Record and grants no spend or publication by itself.
+_Avoid_: First I/O Gate Record, bare non-empty run_id, campaign launch authority, GateRecord
+
 **Proving Gate**:
 A named fail-closed check for one isolated proving packet. It authorises only that packet's fetch or store. It is not a First I/O Gate and does not pass Increment 9 campaign launch.
 _Avoid_: First I/O Gate, campaign PASS, live-coverage closeout
