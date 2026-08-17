@@ -1,8 +1,9 @@
 # Content generation and presentation specification
 
-**Status:** Draft  
+**Status:** Accepted  
 **Owner:** Product owner  
-**Last updated:** 2026-07-15
+**Last updated:** 2026-08-17  
+**Accepted by owner:** 2026-08-17  
 **Canonical language:** English  
 **Related plan:** None  
 **Related reference:** [`product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 8 and 10  
@@ -40,9 +41,11 @@ This specification covers writing authority, originality, attribution, quotation
 
 **CONT-013 — Unknown translation.** Where no settled Chinese translation exists, the system MUST retain the official English term rather than invent a misleading translation.
 
-**CONT-014 — Named entities.** People, organisations, places, statutes and programmes MUST be rendered consistently within an article and, where a maintained terminology record exists, across the product.
+**CONT-014 — Named entities and Terminology Registry.** People, organisations, places, statutes and programmes MUST be rendered consistently within an article. Where a Terminology Registry entry exists, the article MUST use it. The Terminology Registry is a versioned production-policy artefact of bilingual renderings for named entities, institutions, statutes and programmes. It is not a Canonical Entity and does not create identity. The Human Accountable Owner approves additions and revisions; a model MUST NOT add, alter or infer entries. Where no entry exists, `CONT-012` and `CONT-013` apply. An empty or sparse registry is a valid launch state; completeness is not a publication gate.
 
 **CONT-015 — Cross-language meaning.** Translation or paraphrase MUST preserve legal stage, uncertainty, attribution, quantity, time, negation and source qualification. A fluent sentence that changes any of those meanings MUST fail validation.
+
+**CONT-016 — Terminology Registry validation.** A draft that contradicts an applicable Terminology Registry entry MUST fail validation. A draft that invents a Chinese translation for an official English term with no registry entry, where `CONT-012` or `CONT-013` require retention of the official English term, MUST fail validation.
 
 ### Neutrality and attribution
 
@@ -108,6 +111,8 @@ These are content checks, not mandatory visible headings.
 
 **CONT-054 — Paragraph support.** Each factual paragraph MUST be supportable by the evidence package. A paragraph containing mixed source statuses MUST preserve the distinction.
 
+**CONT-055 — Launch article type.** At launch, the only publishable article type is an original news report. A development story that explains a policy, deadline or official action remains a news report under `CONT-050` and `CONT-051`. Explainer, official action guide, how-to, opinion or editorial payloads are not publishable types and MUST fail closed. A future article type requires its own Accepted specification.
+
 ### Dates, times and numbers
 
 **CONT-060 — Event-local time.** Event times MUST use the local time at the event location unless another convention is clearly more useful and labelled.
@@ -139,9 +144,9 @@ The reader delivery contract MUST bind this exact payload digest to authoritativ
 
 **CONT-071 — Source footer.** Full source links approved for reader display MUST remain attached to the article `SurfacePayload`.
 
-**CONT-072 — Production honesty.** A human MUST NOT be identified as author, editor or approver unless the audit record shows that the person performed that role.
+**CONT-072 — Production honesty.** A human MUST NOT be identified as author, editor or approver unless the audit record shows that the person performed that role. When the audit record shows no human performed author, editor or approver, the `SurfacePayload` identity field MUST be the automated newsroom identity and MUST NOT name a human.
 
-**CONT-073 — Automation explanation.** The product MUST provide an accessible product-level explanation of automated production. Per-article model logs are not required unless another requirement mandates disclosure.
+**CONT-073 — Automation explanation.** The product MUST provide an accessible product-level explanation of automated production. At launch, the article MUST NOT carry an extra per-article automation badge, model name, prompt or production log. Synthetic-visual disclosure remains `CONT-074`. Law, contract, platform or provider overrides remain `LIFE-044`.
 
 **CONT-074 — Synthetic visual disclosure.** Any permitted factual graphic or other non-photographic visual MUST carry the description and source label required by the visual specification.
 
@@ -157,7 +162,7 @@ The reader delivery contract MUST bind this exact payload digest to authoritativ
 
 **CONT-083 — Quote check.** Every quoted string MUST match or be an approved translation of the source passage and MUST retain attribution.
 
-**CONT-084 — Originality check.** The system MUST assess whether the draft is excessively close to source wording, order or distinctive expression. A failed originality check blocks publication.
+**CONT-084 — Originality check.** The system MUST assess whether the draft is excessively close to source wording, order or distinctive expression using a hybrid, deterministic-primary, fail-closed method. The check MUST strip allowed overlap first: approved quotations, official names and abbreviations, Terminology Registry entries, numbers with units, dates, statutory or instrument titles and Source Definition display names. Remaining text is publication-blocked when any of the following apply: (1) paragraph-to-paragraph or sentence-to-sentence alignment with one source article; (2) remaining n-gram or sequence overlap above the versioned production-policy threshold; (3) reproducing one source's distinctive selection or analysis as a substitute (`CONT-003`). A model MAY flag suspected close paraphrase for tightening only and MUST NOT waive a deterministic fail. A missing originality check or missing policy threshold MUST NOT permit `AUTO_PUBLISH`. Numeric thresholds live in production policy, not this specification. Rights-side close-paraphrase remains in the rights and visuals specification.
 
 **CONT-085 — Repair and revalidation.** A repaired draft MUST run through all content validators again. Repair MUST NOT merely suppress a validation error without resolving the underlying text.
 
@@ -176,6 +181,12 @@ The reader delivery contract MUST bind this exact payload digest to authoritativ
 9. A development article omits repetitive background that adds no understanding of the new fact.
 10. Every central headline and introduction claim is traceable to the evidence package.
 11. A paid article's preview is an exact validated continuous leading prefix within one quarter of the canonical narrative-body Unicode-grapheme count, excludes headline, byline, metadata, sources, related links, images and captions from its denominator, uses the last complete sentence or list item that fits and otherwise falls back to the last word boundary or exact grapheme boundary. It includes an indivisible non-text block only when its exact governed asset or derivative is `PREVIEW_ALLOWED`, never skips a restricted block and neither blocks publication nor permits client-side rederivation when text or media cannot be shown.
+12. A draft that contradicts a Terminology Registry entry fails validation.
+13. An invented Chinese translation for an unregistered official English term fails validation.
+14. Remaining-text overlap consisting only of official names and numbers after allowed-overlap stripping does not fail originality.
+15. A missing originality-check threshold blocks `AUTO_PUBLISH`.
+16. An explainer or official action guide payload fails article-type validation.
+17. A human named as author, editor or approver when the audit record shows no such role fails production-honesty validation.
 
 ## Non-goals
 
@@ -183,9 +194,11 @@ This specification does not prescribe a prompt template, model, article renderer
 
 It does not define visual licensing, legal escalation or source retrieval implementation.
 
-## Open questions
+## Completion record
 
-- Should the product maintain a versioned bilingual terminology registry, and who approves changes?
-- What quantitative or hybrid method should enforce originality without rejecting common factual language?
-- Which article-level automation disclosures, if any, will be required at launch?
-- Should future article types such as explainers or official action guides receive separate output contracts?
+The product owner accepted this specification on 2026-08-17 with the following decisions:
+
+- the Terminology Registry is a versioned production-policy artefact of bilingual renderings; the Human Accountable Owner approves additions and revisions, a model MUST NOT add, alter or infer entries, an empty or sparse registry is a valid launch state and completeness is not a publication gate;
+- originality enforcement is hybrid, deterministic-primary and fail-closed, strips allowed overlap first, blocks on paragraph or sentence alignment, remaining n-gram or sequence overlap above the versioned production-policy threshold or reproducing one source's distinctive selection or analysis, a model MAY tighten but MUST NOT waive a deterministic fail and a missing check or threshold MUST NOT permit `AUTO_PUBLISH`;
+- article-level automation disclosure at launch is limited to the `SurfacePayload` identity field when no human performed author, editor or approver, with no extra per-article badge, model name, prompt or production log, while product-level explanation, synthetic-visual disclosure and legal overrides remain as specified elsewhere; and
+- at launch the only publishable article type is an original news report; explainer, official action guide, how-to, opinion or editorial payloads fail closed and a future type requires its own Accepted specification.
