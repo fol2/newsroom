@@ -275,8 +275,20 @@ The automated stop signal inside the Increment 9 runtime. Its propagation must e
 _Avoid_: Human Emergency Stop, Hermes signed stop, OWNER_STOP, feature flag
 
 **Human Emergency Stop**:
-A signed global or scoped stop issued by an authenticated Human Accountable Owner and executed by Hermes immediately. In production every Human Emergency Stop carries `HUMAN_RELEASE_REQUIRED`: resumption needs an explicit authenticated human release, and deterministic repair proof is a precondition of release, never a substitute for it. It is not the Kill Switch and not the Hermes Control Plane signed stop.
-_Avoid_: Kill Switch, Hermes signed stop, auto-resume, pause flag
+A signed global or scoped stop issued by an authenticated Human Accountable Owner and executed by Hermes immediately. While one is active, no decision-bearing run may launch: the `NO_ACTIVE_HUMAN_EMERGENCY_STOP` gate fails closed. In production every Human Emergency Stop carries `HUMAN_RELEASE_REQUIRED`: resumption needs an explicit authenticated human release, and deterministic repair proof is a precondition of release, never a substitute for it. It is not the Kill Switch and not the Hermes Control Plane signed stop.
+_Avoid_: Kill Switch, Hermes signed stop, auto-resume, pause flag, operator preference
+
+**No-Stop Assertion**:
+An owner-signed, time-bounded statement that no Human Emergency Stop is active for one exact execution-authority record. It must be current and bound to that record, and a later signed stop supersedes it. It is not a First I/O Gate Record and grants no run authority by itself.
+_Avoid_: Bare boolean attestation, permanent waiver, run authority, GateRecord
+
+**Rights Gate**:
+One of the ten OD-001 source-rights First I/O Gates. It PASSes only through three sealed Rights Review Records for its exact Source Definition and endpoint, from three distinct provider families, unanimously. It is not the `PROVIDER_TERMS_CURRENT` gate and not a Proving Gate rights check.
+_Avoid_: Terms checkbox, licence assumption, Proving Gate PASS
+
+**Rights Review Record**:
+One sealed AI rights review for one Rights Gate, bound to the exact endpoint and terms-document digest and current within its validity window, recording terms, access method, data class, destinations and retention with a verdict. It is not ADR 0006 editorial consensus, not a First I/O Gate Record, and authorises no fetch.
+_Avoid_: Editorial review, bare boolean attestation, GateRecord, terms screenshot
 
 **Proving Gate**:
 A named fail-closed check for one isolated proving packet. It authorises only that packet's fetch or store. It is not a First I/O Gate and does not pass Increment 9 campaign launch.
@@ -309,6 +321,15 @@ Operations, after which the deterministic target adapter dispatches without a
 second approval. Claim Admission Decisions and Relation Admission Decisions are
 not Hermes Publication Admissions and do not themselves cause publication.
 _Avoid_: Claim admission, publish suggestion, model sending directly
+
+**Production Operational Admission**:
+The separate owner decision that admits the exact deployment identities
+production activation will use, on evidence including the live Evidence Intake
+canary closeout and re-evaluated component qualifications. Identities are
+current only on the exact plan-freeze checkout and again at activation
+admission; drift forces re-evaluation. `FIXTURE_OPERATIONAL_ADMITTED` never
+inherits to it.
+_Avoid_: Fixture admission inheritance, re-binding without re-evaluation, wall-clock expiry, activation authority
 
 **Autonomy Envelope**:
 An owner-signed, ledgered grant defining the scope in which Hermes may create
