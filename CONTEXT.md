@@ -290,6 +290,10 @@ _Avoid_: Terms checkbox, licence assumption, Proving Gate PASS
 One sealed AI rights review for one Rights Gate, bound to the exact endpoint and terms-document digest and current within its validity window, recording terms, access method, data class, destinations and retention with a verdict. It is not ADR 0006 editorial consensus, not a First I/O Gate Record, and authorises no fetch.
 _Avoid_: Editorial review, bare boolean attestation, GateRecord, terms screenshot
 
+**Protected Storage**:
+The isolated store holding Increment 9 protected artefacts under their declared per-class rules: no group or public access, an append-only access audit, deterministic purge within retention and rights-revocation bounds, and no resurrection after purge while the tombstone's non-content proof is retained. It is not the production authority store, not the Keychain credential store and not a general backup.
+_Avoid_: General backup, cache, Keychain, production authority store, evidence directory
+
 **Proving Gate**:
 A named fail-closed check for one isolated proving packet. It authorises only that packet's fetch or store. It is not a First I/O Gate and does not pass Increment 9 campaign launch.
 _Avoid_: First I/O Gate, campaign PASS, live-coverage closeout
