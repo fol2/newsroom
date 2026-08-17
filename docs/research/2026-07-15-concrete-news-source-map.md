@@ -1,6 +1,7 @@
 # Concrete news source evidence map
 
-**Status:** Research appendix; not a launch commitment  
+**Status:** Research appendix; not a launch commitment. Brave and GDELT eligibility superseded by [ADR 0009](../adr/0009-legacy-operational-newsroom-dead.md).
+
 **As of:** 2026-07-15  
 **Audience:** Hong Kong people and families in the UK  
 **Scope:** Discovery interfaces only; no database, scoring, locality, evidence-store or RAG design

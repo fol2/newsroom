@@ -183,14 +183,10 @@ def test_sdlc_workflow_retains_dynamic_complete_evidence_topology() -> None:
     assert ".sdlc-run/service" in rendered
 
 
-def test_clustering_evaluator_dependencies_select_the_sdlc_regression_gate() -> None:
+def test_retired_clustering_path_group_selects_no_evaluator_dependencies() -> None:
     contract = tomllib.loads(GATES_PATH.read_text(encoding="utf-8"))
     clustering_paths = set(contract["classification"]["paths"]["clustering"])
-    assert {
-        "newsroom/eval_dataset.py",
-        "newsroom/eval_metrics.py",
-        "newsroom/lang_hint.py",
-    } <= clustering_paths
+    assert clustering_paths == {"newsroom/legacy_operational_stack_retired.py"}
 
 
 def test_pr_admission_does_not_mislabel_core_evidence_as_signed() -> None:

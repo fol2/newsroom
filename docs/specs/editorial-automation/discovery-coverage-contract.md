@@ -10,6 +10,8 @@
 **Related reference:** [`../../reference/editorial/product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 3–6  
 **Supersedes:** None
 
+**Brave / GDELT / news_pool eligibility:** Superseded by [ADR 0009](../../adr/0009-legacy-operational-newsroom-dead.md). Those systems are dead and permanently ineligible as clocks, indexes, pools, comparators, Evidence Intake channels or Source Definitions. RSS/Atom remains a Source Definition transport. Git history is the archive.
+
 ## Purpose
 
 Define what launch news discovery is responsible for actively seeking, what remains best effort, what is an explicit deferred coverage gap and what is outside the product. This contract describes editorial coverage obligations independently from source selection, transport, search provider, polling cadence, model, database or orchestration technology.
@@ -167,7 +169,7 @@ A later workflow specification must decide queueing, batching and escalation beh
 8. A routine company earnings release, share-price move or AI product announcement is out of scope unless it independently passes an approved practical-impact, policy, safety, outage or exceptional-importance test.
 9. Launch documentation states that exhaustive UK local-source coverage is incomplete unless and until Topic 11 accepts a locality boundary.
 10. A long source list or a high number of media results cannot be used as evidence that the accepted coverage obligations are complete.
-11. The coverage contract remains independent of Hermes, RSS, Brave, GDELT, database, numeric scoring and polling-interval choices.
+11. The coverage contract remains independent of Hermes, RSS/Atom transport, database, numeric scoring and polling-interval choices.
 12. A missing detection path or systemic failure for an active class blocks launch, while an isolated miss creates a Coverage Gap unless it demonstrates the systemic deficiency.
 
 ## Completion record

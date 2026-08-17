@@ -1,7 +1,8 @@
 # OpenClaw Newsroom -- Architecture Review
 
 **Date**: 2026-02-09
-**Scope**: Full repo structural review of `openclaw-newsroom/`
+**Status:** Historical review of a stack that is now dead. Do not treat this document as current architecture or as permission to restore OpenClaw, Discord, Brave, GDELT or `news_pool`. See [ADR 0009](docs/adr/0009-legacy-operational-newsroom-dead.md). Git history is the archive.
+**Scope**: Full repo structural review of `openclaw-newsroom/` as of 2026-02-09
 **Codebase snapshot**: 18 modules (11,271 LOC), 9 scripts (2,230 LOC), 19 test files (3,776 LOC), 6 validators (978 LOC), 22 prompt templates, 2 JSON schemas
 
 ---

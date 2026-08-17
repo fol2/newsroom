@@ -73,7 +73,7 @@ A link does not make an entire reference or research document normative. A merge
 
 ## Current-system documentation
 
-`ARCHITECTURE.md`, `AGENTS.md` and `PROMPTS.md` describe the existing Brave, RSS, GDELT, Gemini and Discord system. `CONTRIBUTING.md` describes contribution procedures. `docs/evaluation/` and `docs/cleanup_runs/` retain current evaluation and run evidence.
+`ARCHITECTURE.md` and `AGENTS.md` describe the Hermes Control Plane as the operational Newsroom and record that the OpenClaw / Discord / Brave / GDELT / `news_pool` stack is dead ([ADR 0009](adr/0009-legacy-operational-newsroom-dead.md)). `CONTRIBUTING.md` describes contribution procedures. `docs/cleanup_runs/` retains dated historical run evidence only.
 
 Future requirements normally belong under `docs/specs/`; implementation programmes under `docs/plans/`; dated investigations under `docs/research/`; and broader retained background under `docs/reference/`.
 

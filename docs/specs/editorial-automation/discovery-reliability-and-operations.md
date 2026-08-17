@@ -47,16 +47,7 @@ Topic 12 maps these requirements to implementation and migration. Operational ad
 
 ## Current-system replacement boundary
 
-The legacy system contains useful implementation experience but does not satisfy this contract:
-
-- `newsroom/rss_news.py` silently falls back to broad built-in feeds when configuration is missing, empty or invalid;
-- malformed RSS or Atom XML becomes an empty article list and may then be recorded as a successful fetch;
-- RSS collection has no source-specific validator, watermark, health or revision contract;
-- the current fixed inter-request delay is not a source- and host-specific rate, retry and circuit policy;
-- `scripts/news_pool_update.py` may advance shared fetch state after one page succeeds while other pages fail; and
-- SQLite WAL and connection timeout do not prove leases, atomic downstream delivery, reconciliation, backup, restore or recovery.
-
-These are current-state observations, not implementation instructions.
+The OpenClaw / Discord / Brave / GDELT / `news_pool` stack is deleted from the working tree. It was already not this contract and must not return. See [ADR 0009](../../adr/0009-legacy-operational-newsroom-dead.md). RSS/Atom remains a Source Definition transport; the new-world parsers live under `newsroom/discovery_adapters/`. Historical observations of the deleted stack (silent RSS fallback, empty-parse-as-success, `news_pool_update` page-partial fetch state) remain in git history only.
 
 ## Operational principles
 

@@ -1,36 +1,31 @@
-# openclaw-newsroom
+# Newsroom
 
-Automated AI newsroom: LLM clustering, multi-source news pool, Discord publishing.
+Automated AI newsroom: governed ledger, GraphRAG, Hermes Control Plane.
 
-## Key Documentation
+## Key documentation
 
 - [README.md](README.md) -- Project overview, installation, configuration
-- [ARCHITECTURE.md](ARCHITECTURE.md) -- Technical architecture and data flow
-- [AGENTS.md](AGENTS.md) -- Cron agent system, planner/runner architecture
-- [PROMPTS.md](PROMPTS.md) -- Prompt template system and validator reference
+- [ARCHITECTURE.md](ARCHITECTURE.md) -- Architecture and the dead legacy stack
+- [AGENTS.md](AGENTS.md) -- Agent workflow and operational Newsroom
+- [docs/README.md](docs/README.md) -- Documentation map
 
-## Project Structure
+## Project structure
 
-- `newsroom/` -- Core Python package (18 modules)
-- `newsroom/prompts/` -- LLM prompt templates (Mustache-style `{{VAR}}`)
-- `newsroom/schemas/` -- JSON schemas for job files
-- `newsroom/validators/` -- Output validators for LLM responses
+- `newsroom/` -- Core Python package (authority, projection, discovery adapters, increments)
 - `newsroom/tests/` -- Test suite
-- `scripts/` -- CLI entry points (9 scripts)
+- `scripts/` -- Increment and SDLC entry points
+- `docs/adr/` -- Accepted architecture decisions
 
 ## Development
 
 - Python 3.12+, deps in `pyproject.toml` (locked in `uv.lock`)
 - Install (dev): `uv sync --dev`
 - Tests: `uv run pytest newsroom/tests/ -v`
-- All prompt template paths use `{{OPENCLAW_HOME}}` (resolved at runtime)
-- `_render_template()` in runner.py auto-injects `OPENCLAW_HOME`
 
-## Code Style
+## Code style
 
 - No auto-formatting enforced; follow existing patterns
-- Validators must inherit structure from `newsroom/validators/`
-- New prompts need entries in `prompt_registry.json` + a matching validator
+- Repository documents and code use UK English
 
 ## Agent skills
 
@@ -45,3 +40,6 @@ Use the five canonical triage labels: `needs-triage`, `needs-info`, `ready-for-a
 ### Domain docs
 
 This is a single-context repository, using a root `CONTEXT.md` and system-wide ADRs under `docs/adr/`. See `docs/agents/domain.md`.
+
+The OpenClaw / Discord / Brave / GDELT / `news_pool` operational stack is dead.
+See [ADR 0009](docs/adr/0009-legacy-operational-newsroom-dead.md).

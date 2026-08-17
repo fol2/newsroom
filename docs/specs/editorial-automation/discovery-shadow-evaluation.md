@@ -14,9 +14,10 @@
 **Accepted triage contract:** [`discovery-triage-and-event-grouping.md`](discovery-triage-and-event-grouping.md)  
 **Accepted search contract:** [`discovery-search-and-coverage-audit.md`](discovery-search-and-coverage-audit.md)  
 **Related quality specification:** [`quality-evaluation-and-change-control.md`](quality-evaluation-and-change-control.md) (`Draft`)  
-**Related current evaluation:** [`../../evaluation/clustering_eval_dataset_v1.md`](../../evaluation/clustering_eval_dataset_v1.md)  
 **Implementation authority:** None. Acceptance defines evaluation semantics and release-evidence requirements; it authorises no source collection, search, model call, provider use, spending, shadow execution or production activation.  
 **Supersedes:** None
+
+**Brave / GDELT / news_pool eligibility:** Superseded by [ADR 0009](../../adr/0009-legacy-operational-newsroom-dead.md). Those systems are dead and permanently ineligible as clocks, indexes, pools, comparators, Evidence Intake channels or Source Definitions. The legacy clustering evaluation dataset is archived in git history only. RSS/Atom remains a Source Definition transport.
 
 ## Purpose
 
@@ -57,7 +58,7 @@ Numerical thresholds for an executable qualification Epoch are set in an owner-a
 ## Core principles
 
 1. **Shadow has no public effect.** It cannot publish, notify readers or create production authority.
-2. **No comparator is truth.** Search, media, GDELT, the legacy pipeline and editor-selected stories all have omissions and bias.
+2. **No comparator is truth.** Search, media and editor-selected stories all have omissions and bias. Brave, GDELT and the deleted `news_pool` pipeline are not comparators.
 3. **Prospective precedes retrospective.** Quantitative coverage claims use methods fixed before outcomes are known.
 4. **Events and transitions are the units.** Duplicate URLs and repeated results do not multiply discoveries.
 5. **Stages remain attributable.** Adapter, change, gate, triage, grouping, Candidate and operational errors are measured separately.
@@ -470,7 +471,7 @@ Failed and superseded Runs remain traceable. Confirmed errors and material near 
 13. A source with no unique event may remain for justified resilience.
 14. A rare-event Anchor is not removed solely for a short quiet period.
 15. Rights-restricted provider results are not retained in a prohibited persistent corpus.
-16. The legacy pipeline may be compared but cannot define correctness.
+16. The deleted OpenClaw / Discord / Brave / GDELT / `news_pool` pipeline is not a comparator and cannot define correctness.
 17. Failed qualification evidence remains available after a later pass.
 18. Topic 9 receives scoped eligibility, unresolved blockers and explicit operational evidence needs.
 19. Acceptance authorises no source, search provider, model, schedule, spending, run or production activation.
@@ -493,7 +494,7 @@ The product owner accepted this specification on 2026-07-15 with these decisions
 - non-zero thresholds are owner-approved before qualification review, calibration Runs are not release evidence and changed Epochs cannot be pooled post hoc;
 - source contribution and ablation use unique and earlier detection, resilience, overlap, noise, rights, cost and reviewer burden rather than raw item count;
 - Comparators and search providers do not become Anchors merely by returning more results, and rights-incompatible provider data cannot form a persistent evaluation corpus;
-- the legacy pipeline and v1 clustering dataset are comparison or regression aids only and do not satisfy the accepted relationship and route evaluation contract;
+- the deleted OpenClaw / Discord / Brave / GDELT / `news_pool` pipeline and v1 clustering dataset are not comparison or regression aids and do not satisfy the accepted relationship and route evaluation contract;
 - release-evidence outcomes are explicit and include insufficient, failed, continue shadow, Comparator-only, scoped Topic 9 eligibility, rejected and launch-blocked;
 - reports are reproducible and rights-limited, failed Runs remain retained and confirmed errors feed regression Cases; and
 - Topic 8 authorises no run. Execution still requires an approved Plan, rights, budgets and Topic 9 operational controls.

@@ -17,6 +17,8 @@
 **Implementation authority:** None. Acceptance defines search roles, records, budgets and coverage-audit semantics; it authorises no provider, query, account, spending, shadow operation or production use.  
 **Supersedes:** None
 
+**Brave / GDELT / news_pool eligibility:** Superseded by [ADR 0009](../../adr/0009-legacy-operational-newsroom-dead.md). Those systems are dead and permanently ineligible as clocks, indexes, pools, comparators, Evidence Intake channels or Source Definitions. RSS/Atom remains a Source Definition transport. Git history is the archive.
+
 ## Purpose
 
 Define the limited roles that web search and media indexes may play in discovery, the controls on every query and result, and how search-assisted coverage auditing may identify real omissions without treating another index as ground truth.
@@ -36,8 +38,9 @@ This specification defines:
 - request, result, cost and downstream-work budgets;
 - result deduplication, dependency and normal workflow entry;
 - prospective versus retrospective coverage audit;
-- Coverage Gap review and interpretation; and
-- the current candidate status of GDELT, Brave, SearXNG and unofficial wrappers.
+- Coverage Gap review and interpretation;
+- the permanent ineligibility of Brave and GDELT (ADR 0009); and
+- the current candidate status of SearXNG and unofficial wrappers.
 
 It does not define the Topic 8 shadow protocol and thresholds, Topic 9 schedules and provider failover, Topic 10 reason vocabulary, Topic 11 locality expansion, evidence extraction, implementation, credentials, billing accounts or physical schema.
 
@@ -214,15 +217,11 @@ Only the minimum permitted result data is retained. Provider permission never gr
 
 ### GDELT DOC 2.0
 
-GDELT is a Held multilingual media-index Comparator candidate. It is not a publisher or recall ground truth; machine translation, source selection and indexing may create noise and omissions; underlying publisher rights remain separate; and the newsroom-host smoke test returned `429`.
-
-Its rate behaviour, attribution, noise, unique contribution and reliability must pass Topics 8 and 9.
+GDELT is permanently ineligible as a clock, index, pool, comparator, Evidence Intake channel or Source Definition ([ADR 0009](../../adr/0009-legacy-operational-newsroom-dead.md)). Topic 7 may still choose a different bounded-search provider.
 
 ### Brave Search and News API
 
-Brave is Rights Review Required for bounded, transient gap, supplemental or audit use. Current standard terms must not be assumed to permit persistent result storage, a shadow corpus or AI-model evaluation.
-
-Monthly credits do not create authority or expand the approved gross budget. Any use requires approved terms, retention, model-destination and audit handling. Brave is not the recurring primary clock or silent fallback.
+Brave is permanently ineligible as a clock, index, pool, comparator, Evidence Intake channel or Source Definition ([ADR 0009](../../adr/0009-legacy-operational-newsroom-dead.md)). Topic 7 may still choose a different bounded-search provider.
 
 ### Self-hosted SearXNG
 
@@ -385,9 +384,9 @@ Reviewed Gaps should improve direct sources, adapters or workflow where feasible
 
 ### Candidate providers
 
-**SRCH-050 — GDELT candidate status.** GDELT remains a Held Comparator until rate behaviour, attribution, noise, shadow contribution and operations pass review.
+**SRCH-050 — GDELT candidate status.** GDELT is permanently ineligible (ADR 0009). It is not a Held Comparator, clock, index, pool, Evidence Intake channel or Source Definition.
 
-**SRCH-051 — Brave rights status.** Brave remains Rights Review Required; standard terms MUST NOT be assumed to permit persistent corpora or model evaluation.
+**SRCH-051 — Brave rights status.** Brave is permanently ineligible (ADR 0009). It is not a Rights Review Required candidate for any Newsroom role.
 
 **SRCH-052 — SearXNG status.** SearXNG remains Research and MUST NOT be treated as an independent index, SLA or rights solution.
 
@@ -406,8 +405,8 @@ Reviewed Gaps should improve direct sources, adapters or workflow where feasible
 9. A model-proposed query cannot execute before deterministic validation.
 10. One result cannot trigger unbounded recursive search.
 11. Budget exhaustion cannot switch provider or weaken controls.
-12. Brave standard terms are not used for a persistent evaluation corpus without approved permission.
-13. GDELT attribution is preserved and publisher rights remain separate.
+12. Brave and GDELT remain permanently ineligible (ADR 0009) and cannot form an evaluation corpus.
+13. Publisher rights remain separate from any later Topic 7 provider.
 14. SearXNG is not assumed to remove upstream blocking or terms risk.
 15. A comparator hit creates no Gap without review.
 16. A late-indexed result is not timely discovery.
@@ -429,7 +428,7 @@ The product owner accepted this specification on 2026-07-15 with these decisions
 - results enter the normal workflow, ranks and snippets are non-authoritative, and duplicate or shared-origin results do not multiply independence;
 - prospective and retrospective audit remain separate, and a Coverage Gap requires committed relevance, timing, expected-path and health review;
 - search is not recall ground truth, zero results are neutral and direct-source or workflow improvement is preferred after a reviewed Gap;
-- GDELT is a Held media-index Comparator candidate;
-- Brave is Rights Review Required rather than an approved persistent shadow comparator under assumed standard terms;
+- GDELT is permanently ineligible (ADR 0009);
+- Brave is permanently ineligible (ADR 0009);
 - SearXNG and unofficial wrappers remain Research candidates rather than independent indexes, Anchors, SLAs or free fallbacks; and
-- Topic 7 authorises no provider, schedule, spending or run. Final admission follows Topic 8 evidence and Topic 9 readiness.
+- Topic 7 authorises no provider, schedule, spending or run, and may not select Brave or GDELT. Final admission follows Topic 8 evidence and Topic 9 readiness.

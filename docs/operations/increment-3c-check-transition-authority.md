@@ -155,10 +155,6 @@ uv run python -m pytest -q \
   newsroom/tests/test_check_3c_semantic_chronology.py \
   newsroom/tests/test_check_3c_traceability.py
 uv run python -m pytest -q
-uv run python scripts/eval_clustering_metrics.py \
-  --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
-  --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
-  --fail-on-regression
 ```
 
 Required exact-head evidence includes all permanent repository workflows, zero required skips, migration history and fingerprint checks, canonical/normalized observed-item tie-out, raw-SQL tamper rejection, exact replay, crash-prefix recovery, semantic chronology under reverse commit order, competing-worker convergence, one transition classification per Outcome/item, and current-head substantive review with zero unresolved P1/P2 findings or review threads.

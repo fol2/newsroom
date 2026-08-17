@@ -2522,19 +2522,8 @@ def core_shard_tests(
         completed = subprocess.run(command, cwd=root, check=False, env=environment)
     except OSError as exc:
         raise WorkflowLaneError("core_worker_process") from exc
-    if completed.returncode or not clustering or shard_index != 0:
-        return completed.returncode
-    return _run_subprocess(
-        (
-            sys.executable,
-            "scripts/eval_clustering_metrics.py",
-            "--dataset",
-            "newsroom/evals/clustering_eval_dataset_v1.jsonl",
-            "--baseline",
-            "newsroom/evals/clustering_eval_metrics_baseline_v1.json",
-            "--fail-on-regression",
-        )
-    )
+    _ = clustering
+    return completed.returncode
 
 
 def core_tests(*, repo_root: str | Path, report: str | Path, clustering: bool) -> int:
@@ -2542,20 +2531,8 @@ def core_tests(*, repo_root: str | Path, report: str | Path, clustering: bool) -
     report_path = Path(report).resolve()
     if not report_path.is_relative_to(root):
         raise WorkflowLaneError("report_path")
-    code = _run_core_pytest_workers(root=root, report=report_path)
-    if code or not clustering:
-        return code
-    return _run_subprocess(
-        (
-            sys.executable,
-            "scripts/eval_clustering_metrics.py",
-            "--dataset",
-            "newsroom/evals/clustering_eval_dataset_v1.jsonl",
-            "--baseline",
-            "newsroom/evals/clustering_eval_metrics_baseline_v1.json",
-            "--fail-on-regression",
-        )
-    )
+    _ = clustering
+    return _run_core_pytest_workers(root=root, report=report_path)
 
 
 def _service_test_files(
