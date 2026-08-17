@@ -1,8 +1,9 @@
 # Story eligibility and evidence specification
 
-**Status:** Draft  
+**Status:** Accepted  
 **Owner:** Product owner  
-**Last updated:** 2026-07-15
+**Last updated:** 2026-08-17  
+**Accepted by owner:** 2026-08-17  
 **Canonical language:** English  
 **Related plan:** None  
 **Related reference:** [`product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 3–7  
@@ -80,7 +81,7 @@ This specification covers geography, category, exclusions, newsworthiness, sourc
 
 **EVID-024 — Lead-only boundary.** A tier-four or lead-only source MAY trigger discovery but MUST NOT support a central factual claim, identity, allegation, number or publication decision.
 
-**EVID-025 — Source independence.** Multiple publications derived from the same wire report, press release, pool report, syndication or originating article MUST count as one evidential origin for corroboration.
+**EVID-025 — Source independence.** Evidential-origin independence is a deterministic gate. Multiple publications derived from the same wire report, press release, pool report, syndication or originating article MUST count as one evidential origin for corroboration. A model MAY flag suspected shared origin to tighten corroboration only and MUST NOT create independence. Deterministic MUST signals include: Source Registry / `SRC-004` recorded dependency; identical canonical URL or document identifier; identical originating-artefact digest; structured wire, syndication, byline or copyright metadata; and the `EVID-020` originating-report field. Fail-closed: if two sources are not deterministically independent, they count as one evidential origin. Model silence is not independence.
 
 **EVID-026 — Current version.** For rules, deadlines, official guidance and datasets, the package MUST identify the version, reference period or effective date needed to show that the evidence is current for the claim.
 
@@ -102,7 +103,7 @@ This specification covers geography, category, exclusions, newsworthiness, sourc
 
 ### Claim-to-evidence contract
 
-**EVID-040 — Central claims.** Before publication validation, the package MUST enumerate every central claim required by the headline, introduction and material conclusions.
+**EVID-040 — Central claims.** Before publication validation, the package MUST enumerate every central claim required by the headline, introduction and material conclusions. Each central claim MUST be bound to a Governed Claim admitted for that Evidence Package's publication-evidence use.
 
 **EVID-041 — Evidence links.** Every central claim MUST link to one or more source records and to the exact extracted passage, table, field or structured fact that supports it.
 
@@ -142,7 +143,7 @@ This specification covers geography, category, exclusions, newsworthiness, sourc
 
 **EVID-061 — Definition consistency.** Figures MUST NOT be presented as directly comparable across a material definition, methodology, coverage or collection change unless an authoritative source itself makes and explains the comparison.
 
-**EVID-062 — Derived calculations.** Under this draft, the system MUST NOT publish newly calculated rates, ratios, rankings, per-capita figures or comparisons unless a later accepted specification explicitly defines permitted arithmetic, validation and labelling.
+**EVID-062 — Derived calculations.** The system MUST NOT publish newly calculated rates, ratios, rankings, per-capita figures or comparisons.
 
 **EVID-063 — Rounding and units.** A reproduced numerical claim MUST preserve material units, scale, reference period, currency and source qualification. Automated formatting MUST NOT change its meaning.
 
@@ -154,9 +155,25 @@ This specification covers geography, category, exclusions, newsworthiness, sourc
 
 **EVID-072 — No inaccessible reconstruction.** The system MUST NOT reconstruct a paywalled or inaccessible report from snippets, secondary quotations or search-result fragments as a substitute for lawful access.
 
-**EVID-073 — Evidence freshness.** Each evidence class MUST have a configured freshness or current-version rule appropriate to the claim. Stale evidence MUST block or qualify the claim rather than being silently reused.
+**EVID-073 — Evidence freshness.** Freshness is governed by claim-class currency families, not global wall-clock minutes. A missing applicable rule MUST fail closed. Stale evidence MUST block or qualify the claim and MUST NOT be silently reused.
+
+- **Current-version:** rules, deadlines, official guidance and datasets — bound to the effective instrument or stated reference period or series version. A still-in-force instrument is not stale by wall-clock age; a superseded instrument fails.
+- **Observed-state:** developing incidents, service disruptions, warnings and official social statements — `publication_time` (else `retrieval_time`) MUST fall within that Source Definition's approved currency window; a missing window fails closed.
+- **Completed historical event:** the originating record MAY support what happened then and MUST NOT be treated as live status.
+
+Serious allegations also require the sensitive-content specification. Published analysis MUST use the source's dated current version and MUST NOT be silently treated as still current.
 
 **EVID-074 — Package hash.** The package MUST have a stable version or content hash referenced by drafting, validation, review and publication records.
+
+### Chart and map evidence
+
+**EVID-080 — Visual element claims.** Every plotted or mapped element MUST be a central claim in the same Evidence Package, bound as a Governed Claim admitted for that package's publication-evidence use.
+
+**EVID-081 — Visual evidence fields.** Each visual element MUST record claim identity, source-record identity, exact extracted passage, table or field, unit, reference period, provisional or revision marker, dataset or release identity, and package hash.
+
+**EVID-082 — Map geography.** Each map location or boundary MUST record its evidenced geography and the `EVID-002` precision ceiling.
+
+**EVID-083 — Source-published values only.** Charts and maps MUST plot only source-published values and MUST NOT plot newsroom-derived series. Base-map and icon licensing remain in the rights-and-visuals specification.
 
 ## Acceptance criteria
 
@@ -170,16 +187,14 @@ This specification covers geography, category, exclusions, newsworthiness, sourc
 8. An ordinary short train delay fails the material-disruption test and produces no story.
 9. A Hong Kong policy story is not rejected merely because it lacks a direct UK effect.
 10. A missing or truncated primary document invalidates dependent claims and blocks publication.
+11. A writer-derived rate fails validation.
+12. Two wire copies count as one evidential origin without a model flag.
+13. Observed-state evidence with no currency window fails.
+14. A superseded instrument fails current-version.
+15. A chart element without a Governed Claim link fails.
 
 ## Non-goals
 
 This specification does not define crawler implementation, source licensing terms, storage topology, semantic-search technology or specific LLM prompts.
 
 It does not authorise investigation, witness contact, private-document collection or anonymous-source reporting.
-
-## Open questions
-
-- Should a later spec permit simple reproducible arithmetic labelled as the newsroom's calculation?
-- What freshness rules apply to each source and claim class?
-- Which source-origin dependency signals can be detected deterministically versus by a model?
-- What exact evidence fields are required for charts and maps?
