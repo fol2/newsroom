@@ -1,6 +1,6 @@
 # Newsroom domain language
 
-**Status:** Proposed vocabulary; Increment 9 autonomy terms accepted 2026-08-15; Active Coverage accepted 2026-08-17
+**Status:** Proposed vocabulary; Increment 9 autonomy terms accepted 2026-08-15; Active Coverage accepted 2026-08-17; Evaluation Threshold Schedule accepted 2026-08-17
 
 This glossary proposes the canonical meanings of editorial records that connect evidence, decisions, publication and derived newsroom intelligence. The product owner has not accepted this vocabulary yet.
 
@@ -313,6 +313,10 @@ reviewers, or a valid authorised AI adjudication of their disagreement. For the
 accepted Increment 9 evaluation it is the editorial-quality ground truth; it is
 not a human label and must never be described as human review.
 _Avoid_: Human approval, majority vote with a missing primary, model confidence
+
+**Evaluation Threshold Schedule**:
+An owner-approved, versioned production-policy artefact that names each non-zero-tolerance evaluation metric, its threshold, and the evaluated version and product scope it binds. Missing metric or schedule fails closed. It is not ADR 0006 AI Review Consensus, not a QA-041 zero-tolerance defect, and not the CONT-084 originality overlap threshold.
+_Avoid_: Confidence interval, Increment 9 Evaluation Plan, calibration result, aggregate score, originality threshold
 
 **Hermes Publication Admission**:
 The Hermes Control Plane's terminal decision that one exact Publication Bundle
