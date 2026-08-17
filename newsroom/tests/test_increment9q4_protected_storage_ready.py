@@ -1,0 +1,215 @@
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+
+import pytest
+
+from newsroom.increment9.protected_storage_ready import (
+    GATE_ID,
+    PACKAGE_FIXTURES,
+    REFUSAL_CLASSES,
+    SCHEMA_VERSION,
+    QualificationError,
+    assess,
+    default_probe,
+    evidence_json,
+)
+
+_SPEC = spec_from_file_location(
+    "increment9q4_protected_storage_ready",
+    Path(__file__).resolve().parents[2] / "scripts" / "increment9q4_protected_storage_ready.py",
+)
+assert _SPEC is not None and _SPEC.loader is not None
+_CLI = module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_CLI)
+
+
+def _inventory(tmp_path: Path) -> Path:
+    root = tmp_path / "fixtures"
+    root.mkdir()
+    for rc in REFUSAL_CLASSES:
+        (root / rc).write_bytes(f"refusal:{rc}\n".encode())
+    return root
+
+
+def test_assess_fails_closed_without_inventory(tmp_path: Path) -> None:
+    with pytest.raises(QualificationError, match="inventory"):
+        assess(tmp_path / "missing")
+
+
+def test_assess_fails_closed_when_a_refusal_class_is_missing(tmp_path: Path) -> None:
+    root = _inventory(tmp_path)
+    (root / REFUSAL_CLASSES[0]).unlink()
+    with pytest.raises(QualificationError, match="refusal"):
+        assess(root)
+
+
+def test_assess_fails_closed_when_an_extra_refusal_class_is_present(
+    tmp_path: Path,
+) -> None:
+    root = _inventory(tmp_path)
+    (root / "EXTRA").write_bytes(b"extra")
+    with pytest.raises(QualificationError, match="refusal"):
+        assess(root)
+
+
+def test_news_pool_paths_are_rejected(tmp_path: Path) -> None:
+    with pytest.raises(QualificationError, match="news_pool"):
+        assess(tmp_path / "news_pool.sqlite3")
+
+
+def test_assess_emits_qualification_evidence_not_a_gate_record(tmp_path: Path) -> None:
+    # Create proper fixtures that will pass the probes
+    root = tmp_path / "fixtures"
+    root.mkdir()
+    for rc in REFUSAL_CLASSES:
+        if rc == "RULE_ENCRYPTION_MISSING":
+            (root / rc).write_bytes(b"rule_encryption_missing")
+        elif rc == "RULE_LINEAGE_MISSING":
+            (root / rc).write_bytes(b"rule_lineage_missing")
+        elif rc == "RULE_RETENTION_INVALID":
+            (root / rc).write_bytes(b"rule_retention_invalid")
+        elif rc == "INVENTORY_DRIFT":
+            (root / rc).write_bytes(b"inventory_drift")
+        elif rc == "ISOLATION_GROUP_WORLD_ACCESSIBLE":
+            (root / rc).write_bytes(b"isolation_group_world_accessible")
+        elif rc == "MATERIALISATION_AUDIT_UNSATISFIED":
+            (root / rc).write_bytes(b"materialisation_audit_unsatisfied")
+        elif rc == "AUDIT_ENTRY_MISSING":
+            (root / rc).write_bytes(b"audit_entry_missing")
+        elif rc == "ARTEFACT_RETENTION_EXCEEDED":
+            (root / rc).write_bytes(b"artefact_retention_exceeded")
+        elif rc == "PURGE_LEAVES_ORPHAN":
+            (root / rc).write_bytes(b"purge_leaves_orphan")
+        elif rc == "RESURRECTION_DETECTED":
+            (root / rc).write_bytes(b"resurrection_detected")
+        elif rc == "TOMBSTONE_MISSING":
+            (root / rc).write_bytes(b"tombstone_missing")
+
+    evidence = assess(root)
+    assert evidence.gate_id == GATE_ID
+    assert evidence.status == "PASS"
+    assert evidence.refusals_engaged == len(REFUSAL_CLASSES)
+    assert tuple(item.refusal_class for item in evidence.refusals) == REFUSAL_CLASSES
+    assert all(item.before_digest == item.after_digest for item in evidence.refusals)
+    payload = evidence_json(evidence)
+    assert SCHEMA_VERSION.encode() in payload
+    assert b'"refusals_engaged":11' in payload
+    assert b"exact_main_sha" not in payload
+    assert b"campaign-gate" not in payload
+    assert b"qualification-evidence" in payload
+
+
+def test_assess_fails_closed_when_a_probe_mutates(tmp_path: Path) -> None:
+    root = _inventory(tmp_path)
+
+    def mutate(rc: str, path: Path) -> bool:
+        path.write_bytes(path.read_bytes() + b"mutated")
+        return True
+
+    with pytest.raises(QualificationError, match="mutated"):
+        assess(root, probe=mutate)
+
+
+def test_assess_fails_closed_when_digest_changes_without_engagement(
+    tmp_path: Path,
+) -> None:
+    root = _inventory(tmp_path)
+
+    def silent_mutate(rc: str, path: Path) -> bool:
+        if rc == "RULE_ENCRYPTION_MISSING":
+            path.write_bytes(b"changed")
+        return False
+
+    with pytest.raises(QualificationError, match="mutated"):
+        assess(root, probe=silent_mutate)
+
+
+def test_assess_fails_closed_when_not_all_refusals_engage(tmp_path: Path) -> None:
+    root = _inventory(tmp_path)
+
+    def partial_engage(rc: str, path: Path) -> bool:
+        # Only engage first few refusal classes
+        return rc in REFUSAL_CLASSES[:5]
+
+    with pytest.raises(QualificationError, match="not all refusals"):
+        assess(root, probe=partial_engage)
+
+
+def test_authorised_package_fixtures_assess_without_mutating() -> None:
+    evidence = assess(PACKAGE_FIXTURES)
+    assert evidence.status == "PASS"
+    assert evidence.refusals_engaged == len(REFUSAL_CLASSES)
+    assert all(item.before_digest == item.after_digest for item in evidence.refusals)
+    for rc in REFUSAL_CLASSES:
+        assert default_probe(rc, PACKAGE_FIXTURES / rc) is True
+
+
+def test_cli_assess_is_fail_closed_without_inventory_and_writes_evidence(
+    tmp_path: Path,
+) -> None:
+    assert _CLI.main(["assess", "--inventory", str(tmp_path / "missing")]) == 2
+    output = tmp_path / "evidence.json"
+    assert _CLI.main(["assess", "--output", str(output)]) == 0
+    raw = output.read_bytes()
+    assert b'"status":"PASS"' in raw
+    assert b"exact_main_sha" not in raw
+
+
+def test_campaign_bundle_lands_at_exact_requested_path(tmp_path: Path) -> None:
+    """Bug 1: verify campaign bundle lands exactly at the --output path."""
+    from newsroom.increment9.protected_storage import write_protected_artefact
+
+    root = tmp_path / "storage"
+    root.mkdir(mode=0o700)
+    output_path = tmp_path / "bundle.json"
+
+    payload = {"gate_id": "TEST", "status": "PASS"}
+    write_protected_artefact(
+        root,
+        artefact_class="CAMPAIGN_EVIDENCE",
+        artefact_id="bundle.json",
+        payload=payload,
+        target_path=output_path,
+    )
+
+    assert output_path.is_file()
+    content = output_path.read_bytes()
+    assert b'"status":"PASS"' in content
+    assert b"TEST" in content
+
+
+def test_campaign_bundle_rewrite_succeeds_with_fresh_audit_entry(tmp_path: Path) -> None:
+    """Bug 2: verify second write to same path succeeds (idempotent rerun)."""
+    from newsroom.increment9.protected_storage import write_protected_artefact, list_audit_entries
+
+    root = tmp_path / "storage"
+    root.mkdir(mode=0o700)
+    output_path = tmp_path / "bundle.json"
+
+    payload1 = {"gate_id": "TEST", "status": "PASS", "attempt": 1}
+    write_protected_artefact(
+        root,
+        artefact_class="CAMPAIGN_EVIDENCE",
+        artefact_id="bundle.json",
+        payload=payload1,
+        target_path=output_path,
+    )
+
+    first_content = output_path.read_bytes()
+    assert b'"attempt":1' in first_content
+
+    payload2 = {"gate_id": "TEST", "status": "PASS", "attempt": 2}
+    write_protected_artefact(
+        root,
+        artefact_class="CAMPAIGN_EVIDENCE",
+        artefact_id="bundle.json",
+        payload=payload2,
+        target_path=output_path,
+    )
+
+    second_content = output_path.read_bytes()
+    assert b'"attempt":2' in second_content
+
+    entries = list_audit_entries(root)
+    write_entries = [e for e in entries if e.operation == "WRITE"]
+    assert len(write_entries) == 2
