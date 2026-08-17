@@ -1,6 +1,6 @@
 # Newsroom domain language
 
-**Status:** Proposed vocabulary; Increment 9 autonomy terms accepted 2026-08-15; Active Coverage accepted 2026-08-17; Evaluation Threshold Schedule accepted 2026-08-17; Retention Schedule accepted 2026-08-17
+**Status:** Proposed vocabulary; Increment 9 autonomy terms accepted 2026-08-15; Active Coverage accepted 2026-08-17; Evaluation Threshold Schedule accepted 2026-08-17; Retention Schedule accepted 2026-08-17; Rights Record and Asset Record accepted 2026-08-17
 
 This glossary proposes the canonical meanings of editorial records that connect evidence, decisions, publication and derived newsroom intelligence. The product owner has not accepted this vocabulary yet.
 
@@ -98,6 +98,10 @@ Entity mentions MUST be resolved by an effective entity-resolution decision befo
 **Evidence Package**:
 An immutable set of governed source passages, claim mappings, permissions and provenance approved as input to a particular editorial decision.
 _Avoid_: Search result, context dump
+
+**Asset Record**:
+The governed record for one public visual, including provenance, licence, platform and territory limits, credit, subject-risk checks and, where generated, input provenance. Incomplete rights or subject-risk status blocks automatic publication.
+_Avoid_: Image metadata, model-declared safe asset
 
 **Story Version**:
 An immutable public content state for one stable story identity.
@@ -293,6 +297,10 @@ _Avoid_: Terms checkbox, licence assumption, Proving Gate PASS
 **Rights Review Record**:
 One sealed AI rights review for one Rights Gate, bound to the exact endpoint and terms-document digest and current within its validity window, recording terms, access method, data class, destinations and retention with a verdict. It is not ADR 0006 editorial consensus, not a First I/O Gate Record, and authorises no fetch.
 _Avoid_: Editorial review, bare boolean attestation, GateRecord, terms screenshot
+
+**Rights Record**:
+An owner-approved, versioned production-policy artefact stating permitted access method, use classes, destinations and retention for one Source Definition, dataset or asset provider. It is not a Rights Review Record, First I/O Gate Record or Qualification Evidence; a 9Q PASS does not mint one.
+_Avoid_: Rights Review Record, terms checkbox, GateRecord
 
 **Proving Gate**:
 A named fail-closed check for one isolated proving packet. It authorises only that packet's fetch or store. It is not a First I/O Gate and does not pass Increment 9 campaign launch.
