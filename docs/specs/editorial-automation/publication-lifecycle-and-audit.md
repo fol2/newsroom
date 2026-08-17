@@ -1,8 +1,9 @@
 # Publication lifecycle and audit specification
 
-**Status:** Draft
+**Status:** Accepted
 **Owner:** Product owner
-**Last updated:** 2026-07-15
+**Last updated:** 2026-08-17
+**Accepted by owner:** 2026-08-17
 **Canonical language:** English
 **Related plan:** [`../../plans/2026-07-15-001-integrated-newsroom-architecture.md`](../../plans/2026-07-15-001-integrated-newsroom-architecture.md)
 **Related reference:** [`product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 12 and 13
@@ -56,13 +57,18 @@ This specification covers article identity and versions, feed behaviour, filters
 
 **LIFE-023 — Publication-bundle binding.** A notification MUST use an exact validated notification `SurfacePayload` included in the authorised `PublicationBundle` for the same evidence package and story version. A target adapter MUST NOT generate or rewrite notification copy at dispatch time.
 
-**LIFE-024 — Correction propagation.** If a notification contains a materially wrong claim, the correction process MUST determine whether recipients require a correction notification and record the outcome.
+**LIFE-024 — Correction propagation.** The correction process MUST apply correction notification consistently:
+
+- The system MUST dispatch a correction notification Surface Payload when (a) a previously dispatched notification Surface Payload contained the materially wrong claim and this action is a `LIFE-051` material correction, or (b) a previously notified story is withdrawn or removed. If the target cannot deliver, the system MUST record `TERMINAL_LIMITATION`; that MUST NOT count as full `LIFE-055` completion.
+- The system MUST NOT dispatch a correction notification for a `LIFE-050` non-substantive correction; MUST NOT notify readers who never received the original notification; and MUST NOT treat an article or feed-card correction as a notification.
+- A material new development remains a new article (`LIFE-030`), not a correction notice.
+- `LIFE-023` stands: when a notification exists, it is an exact bundle Surface Payload. At launch there is no notification target (see Launch controlled surfaces); these MUST classes are unused until one is admitted.
 
 ### Developments and related stories
 
-**LIFE-030 — Material development.** A new article MUST be created for a newly confirmed decision, rule, deadline, official finding, charge, judgment, measurable change or substantive incident outcome.
+**LIFE-030 — Material development.** A new article MUST be created for a newly confirmed decision, rule, deadline, official finding, charge, judgment, measurable change or substantive incident outcome. At launch, a material development MUST create a new article with related-story linkage. It MUST NOT rewrite the original article into a timestamped live page.
 
-**LIFE-031 — No continuous rewrite by default.** The original article MUST NOT be silently rewritten to absorb every later development.
+**LIFE-031 — No continuous rewrite by default.** The original article MUST NOT be silently rewritten to absorb every later development. A live-page product revision is explicitly **Deferred**. It requires a later specification change. Fail-closed: in-place live-blog mutation is refused.
 
 **LIFE-032 — Background restraint.** A development article MUST repeat only the background needed to understand the new fact.
 
@@ -158,7 +164,29 @@ This specification covers article identity and versions, feed behaviour, filters
 
 **AUDIT-006 — Sensitive access.** Access to held candidates, personal data, legal-risk notes, complaints and reviewer identities MUST be restricted and logged.
 
-**AUDIT-007 — Retention policy.** Audit, source and content records MUST follow a documented retention schedule that balances provenance, rights, privacy, legal need and operational recovery.
+**AUDIT-007 — Retention policy.** Audit, source and content records MUST follow an owner-approved **Retention Schedule** that balances provenance, rights, privacy, legal need and operational recovery.
+
+A production Retention Schedule is an owner-approved, versioned production-policy artefact. Missing class or period fails closed: that class MUST NOT be retained; a publication-path class with no schedule entry MUST NOT be published (`AUDIT-005` remains).
+
+A legal or privacy hold MUST suspend purge of the covered records until the hold is released by an authorised decision.
+
+Source expression retention remains the Rights Record ceiling (see [`rights-and-visuals.md`](rights-and-visuals.md)). This specification MUST NOT restate per-source expression periods.
+
+The Retention Schedule names the following locked classes; it does not silently replace them:
+
+| Class | Period |
+|---|---|
+| Publication, correction, withdrawal, removal and reassessment decision records, plus tombstones | Permanent; no wall-clock TTL |
+| Non-expressive provenance for any record that reached a public decision (source identity, URL, digest, retrieval time, Rights Record version, decision IDs, Target Attempt / Acknowledgement / Observation identities) | Permanent |
+| Published Story Version, Surface Payload and Publication Bundle bytes | Retained while archived (`LIFE-064`); complete removal follows `LIFE-062` |
+| Unpublished draft content bytes | 90 days, or earlier where a Rights Record requires ([`autonomy-and-publication-control.md`](autonomy-and-publication-control.md)) |
+| Rejected-candidate decision records | Permanent; draft bytes follow the 90-day row |
+| Unused reader leads not promoted to a News Lead or Story Candidate | 90 days |
+| Complaints and error reports | Two years after closure, or while related public decision records remain, whichever is longer |
+
+Support Case retention, cryptographic erasure, physical deletion and projection tombstones belong to [`publication-engineering-and-projection-control.md`](publication-engineering-and-projection-control.md). This specification does not define those periods.
+
+After rights-driven deletion of source expression, audit MUST NOT claim it can reconstruct source wording (`RIGHTS-016`).
 
 **AUDIT-008 — Export.** The system SHOULD support a machine-readable export of a story's provenance and decision history for review, complaint handling and incident investigation.
 
@@ -172,9 +200,21 @@ This specification covers article identity and versions, feed behaviour, filters
 
 **AUDIT-013 — Orphan detection.** A public item with no valid internal story and decision record MUST raise an operational incident.
 
+### Launch controlled surfaces
+
+**LIFE-075 — Launch target publication.** At launch, the product has one public Target Publication: the integrated Newsroom app-serving system. Launch Surface Payloads on that target are the article and feed card.
+
+**LIFE-076 — Client targets.** Native iPhone, iPad and Android readers are clients of that target, not separate publication targets. Reconciliation is against the serving store.
+
+**LIFE-077 — Non-public and refused surfaces.** Web Admin is not a public publication surface. At launch there is no reader Web client, Discord, OpenClaw, social network or other secondary external message target (ADR 0007 / ADR 0009).
+
+**LIFE-078 — Notification target deferred.** Push notifications and `LIFE-020` as a launch Target Operation are explicitly **Deferred**, fail-closed. Launch MUST NOT create notification Target Operations. Optional geography-following notifications remain the product model but are not a launch reconciliation target. Admitting a notification target requires a later specification or policy change.
+
+**LIFE-079 — Launch cross-surface consistency.** At launch, `LIFE-055` applies to the article, feed card and caches on the app-serving target. Notification and external-message rows apply only if those payloads were dispatched.
+
 ## Acceptance criteria
 
-1. The same story published to the app article service and a secondary controlled target maps both target identifiers to one story version.
+1. The app-serving article and feed-card Surface Payloads for one story version map to one story version on the single launch Target Publication.
 2. A retry after one target succeeds and another fails does not duplicate the successful target.
 3. A material headline correction creates a new version, visible note and cross-surface update.
 4. A typo correction can be applied automatically only after meaning-preservation validation.
@@ -184,16 +224,16 @@ This specification covers article identity and versions, feed behaviour, filters
 8. Every public story can be reconstructed to its evidence, validators, policy version and decision actor.
 9. Failure to save the audit record prevents publication.
 10. Feed order and the reader-facing “Published” label use `primary_feed_published_at`; an earlier public effect found by reconciliation is preserved separately as `first_public_effect_at`, and acknowledgement time remains per target attempt.
+11. A material development creates a new article, not an in-place live page.
+12. Rewriting an original article into a live blog fails.
+13. A `LIFE-050` typo correction does not trigger a correction notification.
+14. A material correction of a never-notified story does not send a correction notification.
+15. A missing Retention Schedule class or period cannot retain that class; a missing publication-path schedule entry cannot publish.
+16. A launch notification Target Operation fails closed.
+17. A Discord or other secondary public target is refused.
 
 ## Non-goals
 
 This specification does not define a public comment system, recommendation engine, popularity ranking, emergency alert service or final complaints service-level agreement.
 
 It does not prescribe the database, event log, queue or storage implementation.
-
-## Open questions
-
-- What retention periods apply to each audit and content class?
-- Should an active incident use one timestamped live page in a future product revision, or retain the charter's new-article model?
-- Which correction classes require a direct notification to original recipients?
-- Which external publication surfaces will be controlled and reconciled at launch?
