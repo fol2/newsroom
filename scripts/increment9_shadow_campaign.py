@@ -33,6 +33,7 @@ from newsroom.increment9.plan import (
     INCREMENT_9_SHADOW_PLAN,
     INCREMENT_9_SHADOW_PLAN_DIGEST,
 )
+from newsroom.increment9.protected_storage import write_protected_artefact
 
 GATE_RECORD_SCHEMA = "newsroom.increment9.campaign-gate.v1"
 CAMPAIGN_BUNDLE_SCHEMA = "newsroom.increment9.campaign-evidence-bundle.v1"
@@ -525,28 +526,18 @@ def verify_bundle(raw: bytes) -> dict[str, object]:
 
 
 def _write_protected(path: Path, value: Mapping[str, object]) -> None:
+    from newsroom.increment9.protected_storage import ProtectedStorageError
+
     path = path.resolve()
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if stat.S_IMODE(path.parent.stat().st_mode) & 0o077:
-        raise CampaignError("protected evidence parent permits group or public access")
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(canonical_json_bytes(dict(value)))
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+        write_protected_artefact(
+            path.parent,
+            artefact_class="CAMPAIGN_EVIDENCE",
+            artefact_id=path.name,
+            payload=dict(value),
+        )
+    except ProtectedStorageError as exc:
+        raise CampaignError(f"protected storage write failed: {exc}")
 
 
 def _self_test() -> None:
