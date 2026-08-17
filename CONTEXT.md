@@ -1,6 +1,6 @@
 # Newsroom domain language
 
-**Status:** Proposed vocabulary; Increment 9 autonomy terms accepted 2026-08-15
+**Status:** Proposed vocabulary; Increment 9 autonomy terms accepted 2026-08-15; Active Coverage accepted 2026-08-17
 
 This glossary proposes the canonical meanings of editorial records that connect evidence, decisions, publication and derived newsroom intelligence. The product owner has not accepted this vocabulary yet.
 
@@ -246,8 +246,9 @@ The complete local autonomous authority comprising an AI controller and an
 inseparable deterministic policy-and-effect boundary. The AI controller may
 decide and orchestrate; only the deterministic boundary holds authority-store,
 projection or target credentials and it rejects any command that fails a frozen
-veto. A model subprocess is not the Hermes Control Plane.
-_Avoid_: Individual model, unrestricted agent, model-held database credential
+veto. A model subprocess is not the Hermes Control Plane. An operator console
+is not the Hermes Control Plane.
+_Avoid_: Individual model, unrestricted agent, model-held database credential, Hermes Agent CLI, newsroom-hub, official messaging gateway
 
 **First I/O Gate**:
 One named Increment 9 precondition that must PASS before the shadow campaign may perform decision-bearing live I/O. The current inventory is ten runtime gates plus ten OD-001 source-rights gates. A namesake PASS in another packet does not satisfy it.
@@ -261,9 +262,21 @@ _Avoid_: GateRecord, campaign PASS, Proving Gate PASS, GitHub comment as proof
 An immutable sealed PASS or non-PASS for one First I/O Gate on one exact main SHA and tree. Records are minted only at a freeze of one checkout, after the Qualification Evidence exists.
 _Avoid_: Proving Gate, Qualification Evidence, issue comment, HTTP 200
 
+**Active Coverage**:
+Retained proof that decision-bearing live I/O ran under sealed First I/O Gate Records and closed with a qualifying evaluation disposition. Qualification Evidence, a First I/O Gate Record, a Proving Gate PASS and a fixture canary are not Active Coverage.
+_Avoid_: Qualification Evidence, GateRecord mint, Proving Gate PASS, fixture canary, HTTP 200
+
 **Increment 9Q Packet**:
 One authorised issue and pull request that produces Qualification Evidence for one First I/O Gate, or for one named cluster that shares a single evidence object. It does not mint a First I/O Gate Record and does not launch the shadow campaign.
 _Avoid_: Increment 9P, Increment 11, campaign launch, GateRecord mint
+
+**Kill Switch**:
+The automated stop signal inside the Increment 9 runtime. Its propagation must early-stop the run with the original failure retained and zero public effect, zero production mutation and zero orphan resources, and an engaged Kill Switch fails the launch assessment closed. It is not the human emergency stop and not the Hermes Control Plane signed stop.
+_Avoid_: Human Emergency Stop, Hermes signed stop, OWNER_STOP, feature flag
+
+**Human Emergency Stop**:
+A signed global or scoped stop issued by an authenticated Human Accountable Owner and executed by Hermes immediately. In production every Human Emergency Stop carries `HUMAN_RELEASE_REQUIRED`: resumption needs an explicit authenticated human release, and deterministic repair proof is a precondition of release, never a substitute for it. It is not the Kill Switch and not the Hermes Control Plane signed stop.
+_Avoid_: Kill Switch, Hermes signed stop, auto-resume, pause flag
 
 **Proving Gate**:
 A named fail-closed check for one isolated proving packet. It authorises only that packet's fetch or store. It is not a First I/O Gate and does not pass Increment 9 campaign launch.
