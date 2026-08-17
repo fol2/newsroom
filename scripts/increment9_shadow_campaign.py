@@ -29,6 +29,10 @@ from newsroom.authority.canonical import (
     digest_bytes,
     validate_sha256_digest,
 )
+from newsroom.increment9.credential_scopes import (
+    CredentialScopeError,
+    bind_campaign_credential_classes,
+)
 from newsroom.increment9.plan import (
     INCREMENT_9_SHADOW_PLAN,
     INCREMENT_9_SHADOW_PLAN_DIGEST,
@@ -64,11 +68,6 @@ RUNTIME_GATES = (
     "KILL_SWITCH_READY",
     "NO_ACTIVE_HUMAN_EMERGENCY_STOP",
     "PRODUCTION_NONMUTATION_BASELINE",
-)
-BASELINE_CREDENTIAL_CLASSES = (
-    "NEO4J_SHADOW_WRITER",
-    "OPENAI_CODEX_LOGIN",
-    "OPENAI_EMBEDDINGS_API",
 )
 
 
@@ -347,11 +346,11 @@ def _gate_findings(
                 findings.append(f"RIGHTS_SUBJECT_MISMATCH:{source_id}")
             if len(record.reviewer_families) != 3:
                 findings.append(f"RIGHTS_REVIEW_INDEPENDENCE_MISSING:{source_id}")
-        if (
-            gate_id == "BASELINE_CREDENTIAL_SCOPES"
-            and record.credential_classes != BASELINE_CREDENTIAL_CLASSES
-        ):
-            findings.append("BASELINE_CREDENTIAL_CLASSES_DIFFER")
+        if gate_id == "BASELINE_CREDENTIAL_SCOPES":
+            try:
+                bind_campaign_credential_classes(record.credential_classes)
+            except CredentialScopeError:
+                findings.append("BASELINE_CREDENTIAL_CLASSES_DIFFER")
     return sorted(set(findings))
 
 
