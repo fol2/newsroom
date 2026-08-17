@@ -1,8 +1,9 @@
 # Autonomy and publication control specification
 
-**Status:** Draft
+**Status:** Accepted
 **Owner:** Product owner
-**Last updated:** 2026-07-15
+**Last updated:** 2026-08-17
+**Accepted by owner:** 2026-08-17
 **Canonical language:** English
 **Related plan:** [`../../plans/2026-07-15-001-integrated-newsroom-architecture.md`](../../plans/2026-07-15-001-integrated-newsroom-architecture.md)
 **Related reference:** [`product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 2, 13 and 14
@@ -99,7 +100,7 @@ The controller MUST validate those committed references and current authority be
 
 ### Human exception review
 
-**AUTO-050 — Defined reviewer authority.** Reviewer roles and the decisions each role may make MUST be configured and auditable. A reviewer MUST NOT receive broader authority merely because a queue item is urgent.
+**AUTO-050 — Defined reviewer authority.** Reviewer roles and the decisions each role may make MUST be configured and auditable. A reviewer MUST NOT receive broader authority merely because a queue item is urgent. At launch, one role, `owner-reviewer`, held by the Human Accountable Owner, MUST be authorised to resolve every hold-reason class and to exercise all four review actions in AUTO-051. The role registry is versioned in production policy; additional roles, including sensitive-content reviewer roles, are policy changes covered by the sensitive-content specification, not this specification.
 
 **AUTO-051 — Review actions.** An authorised reviewer MAY approve, reject, redact or request regeneration of a held candidate only within the authority granted to that role.
 
@@ -107,7 +108,7 @@ The controller MUST validate those committed references and current authority be
 
 **AUTO-053 — Revalidation after change.** Any human or automated change to a held draft MUST pass the applicable evidence, content, rights, risk and package-integrity checks before publication.
 
-**AUTO-054 — No reviewer available.** A held candidate MUST remain unpublished or expire under a documented retention policy when no authorised reviewer is available. It MUST NOT age into `AUTO_PUBLISH`.
+**AUTO-054 — No reviewer available.** A held candidate MUST remain unpublished when no authorised reviewer is available. It MUST NOT age into `AUTO_PUBLISH`. A held candidate with no authorised decision MUST expire after 14 days into `REJECT` with a stable reason code such as `REVIEW_EXPIRED`.
 
 **AUTO-055 — Policy override visibility.** If a reviewer uses an explicitly permitted override, the audit record MUST identify the overridden requirement and the authority permitting that override. A generic “approved” note is insufficient.
 
@@ -119,13 +120,17 @@ The controller MUST validate those committed references and current authority be
 
 **AUTO-060 — Global pause.** The operator MUST have a control that immediately prevents new autonomous publications and notifications across all targets.
 
-**AUTO-061 — Scoped pause.** The system SHOULD support pausing by publication target, source adapter, content category, jurisdiction, model or policy version.
+**AUTO-061 — Scoped pause.** At launch, the system MUST support pausing by publication target in addition to the global pause (AUTO-060). The system SHOULD support pausing by source adapter, content category, jurisdiction, model or policy version. Until those finer scopes exist, operators MUST use the global pause; absence of a finer scope MUST NOT be interpreted as permission to continue publishing elsewhere (fail-closed, Deferred).
 
 **AUTO-062 — Preserve evidence.** Pausing MUST NOT delete candidates, source evidence, generated drafts, decision records or publication history.
 
 **AUTO-063 — Resume action.** Resuming a paused scope MUST require an explicit, authenticated and logged action. Queued packages MUST be rechecked against current policy before release.
 
 **AUTO-064 — Credential revocation.** The operator MUST be able to revoke or rotate publication credentials independently of model or agent deployment.
+
+**AUTO-065 — Retention of rejected work.** A rejected candidate's decision record is permanent audit history; storage mechanics belong to the publication-lifecycle specification. Draft content bytes MAY be purged after 90 days, or earlier where rights-side retention requires.
+
+**AUTO-066 — No launch automatic-publication exceptions.** No formal-procedural-fact or other automatic-publication exception is defined at launch. Any future exception requires legal review and a versioned policy change, and a model MUST NOT create or widen one (AUTO-003).
 
 ## Acceptance criteria
 
@@ -147,9 +152,12 @@ This specification does not select an agent framework, workflow engine, queue, d
 
 It does not require a human to review every story and does not authorise full autonomy outside the accepted policy boundary.
 
-## Open questions
+## Completion record
 
-- Which reviewer roles are required at launch, and which hold reasons can each resolve?
-- Which scopes must the emergency control support beyond a global pause?
-- How long may held and rejected candidates remain before expiry or deletion?
-- Should any formal procedural facts receive narrowly defined automatic-publication exceptions after legal review?
+The product owner accepted this specification on 2026-08-17 with these decisions:
+
+1. **Launch reviewer roles.** One launch role: `owner-reviewer`, held by the Human Accountable Owner, authorised to resolve every hold-reason class and to exercise all four review actions (approve, reject, redact, request regeneration). The role registry is versioned in production policy. Additional roles, including sensitive-content reviewer roles, belong to the sensitive-content specification.
+2. **Emergency-control scopes.** Launch MUST support the global pause (AUTO-060) plus a per-publication-target pause. Source-adapter, content-category, jurisdiction, model and policy-version scopes remain SHOULD — explicitly Deferred, fail-closed: where a finer scope is needed, the global pause is used.
+3. **Retention of held and rejected candidates.** A held candidate with no authorised decision expires after 14 days into `REJECT` with a stable reason code such as `REVIEW_EXPIRED` and never ages into `AUTO_PUBLISH` (AUTO-054). A rejected candidate's decision record is permanent audit history; storage mechanics belong to the publication-lifecycle specification. Draft content bytes may be purged after 90 days, or earlier where rights-side retention requires.
+4. **Automatic-publication exceptions.** None at launch. Any future formal-procedural-fact exception requires legal review and a versioned policy change; a model can never create or widen one (AUTO-003).
+5. Acceptance authorises no live source, credential, spend, publication or activation authority.
