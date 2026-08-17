@@ -535,6 +535,7 @@ def _write_protected(path: Path, value: Mapping[str, object]) -> None:
             artefact_class="CAMPAIGN_EVIDENCE",
             artefact_id=path.name,
             payload=dict(value),
+            target_path=path,
         )
     except ProtectedStorageError as exc:
         raise CampaignError(f"protected storage write failed: {exc}")

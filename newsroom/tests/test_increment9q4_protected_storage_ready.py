@@ -153,3 +153,63 @@ def test_cli_assess_is_fail_closed_without_inventory_and_writes_evidence(
     raw = output.read_bytes()
     assert b'"status":"PASS"' in raw
     assert b"exact_main_sha" not in raw
+
+
+def test_campaign_bundle_lands_at_exact_requested_path(tmp_path: Path) -> None:
+    """Bug 1: verify campaign bundle lands exactly at the --output path."""
+    from newsroom.increment9.protected_storage import write_protected_artefact
+
+    root = tmp_path / "storage"
+    root.mkdir(mode=0o700)
+    output_path = tmp_path / "bundle.json"
+
+    payload = {"gate_id": "TEST", "status": "PASS"}
+    write_protected_artefact(
+        root,
+        artefact_class="CAMPAIGN_EVIDENCE",
+        artefact_id="bundle.json",
+        payload=payload,
+        target_path=output_path,
+    )
+
+    assert output_path.is_file()
+    content = output_path.read_bytes()
+    assert b'"status":"PASS"' in content
+    assert b"TEST" in content
+
+
+def test_campaign_bundle_rewrite_succeeds_with_fresh_audit_entry(tmp_path: Path) -> None:
+    """Bug 2: verify second write to same path succeeds (idempotent rerun)."""
+    from newsroom.increment9.protected_storage import write_protected_artefact, list_audit_entries
+
+    root = tmp_path / "storage"
+    root.mkdir(mode=0o700)
+    output_path = tmp_path / "bundle.json"
+
+    payload1 = {"gate_id": "TEST", "status": "PASS", "attempt": 1}
+    write_protected_artefact(
+        root,
+        artefact_class="CAMPAIGN_EVIDENCE",
+        artefact_id="bundle.json",
+        payload=payload1,
+        target_path=output_path,
+    )
+
+    first_content = output_path.read_bytes()
+    assert b'"attempt":1' in first_content
+
+    payload2 = {"gate_id": "TEST", "status": "PASS", "attempt": 2}
+    write_protected_artefact(
+        root,
+        artefact_class="CAMPAIGN_EVIDENCE",
+        artefact_id="bundle.json",
+        payload=payload2,
+        target_path=output_path,
+    )
+
+    second_content = output_path.read_bytes()
+    assert b'"attempt":2' in second_content
+
+    entries = list_audit_entries(root)
+    write_entries = [e for e in entries if e.operation == "WRITE"]
+    assert len(write_entries) == 2

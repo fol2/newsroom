@@ -12,6 +12,7 @@ No daemon or scheduler. Wall-clock purge scheduling is Hermes Control Plane scop
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -60,19 +61,37 @@ def write_protected_artefact(
     payload: dict[str, Any],
     *,
     now: datetime | None = None,
+    target_path: Path | None = None,
 ) -> None:
     """Write a protected artefact to isolated storage with append-only audit entry.
+
+    If target_path is provided, write directly to that path (with atomic replace
+    semantics) instead of root/artefact_class/artefact_id. Useful for campaign
+    operator-specified output paths that must land exactly where requested.
 
     Fails closed if:
     - Storage root is inaccessible or not 0o700
     - Write creates group/world-accessible files
     - Payload cannot be serialised
+    - target_path is specified but outside root hierarchy
     """
     if now is None:
         now = datetime.now(UTC)
 
     _check_directory_isolation(root)
 
+    canonical = canonical_json_bytes(payload)
+
+    if target_path is not None:
+        _write_protected_to_target_path(root, target_path, canonical, now)
+    else:
+        _write_protected_to_artefact(root, artefact_class, artefact_id, canonical, now)
+
+
+def _write_protected_to_artefact(
+    root: Path, artefact_class: str, artefact_id: str, canonical: bytes, now: datetime
+) -> None:
+    """Write to root/artefact_class/artefact_id with write-once semantics."""
     artefact_dir = root / artefact_class
     artefact_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
@@ -90,7 +109,6 @@ def write_protected_artefact(
     audit_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     try:
-        canonical = canonical_json_bytes(payload)
         fd = os.open(str(artefact_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             os.write(fd, canonical)
@@ -111,6 +129,65 @@ def write_protected_artefact(
 
     except OSError as exc:
         raise ProtectedStorageError(f"cannot write protected artefact: {exc}")
+
+
+def _write_protected_to_target_path(root: Path, target_path: Path, canonical: bytes, now: datetime) -> None:
+    """Write to exact target path with atomic replace semantics, audited against root.
+    
+    Target path may be outside the root (e.g. campaign operator-specified --output).
+    Isolation is enforced on target_path itself (0o600 file, 0o700 parent dir).
+    """
+    target = target_path.resolve()
+    root_resolved = root.resolve()
+
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    try:
+        mode = target.parent.stat().st_mode
+        if mode & 0o077:
+            raise ProtectedStorageError("target directory permits group or public access")
+    except OSError as exc:
+        raise ProtectedStorageError(f"cannot verify target directory isolation: {exc}")
+
+    audit_dir = root_resolved / ".audit"
+    audit_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=str(target.parent))
+        temporary_path = Path(temporary)
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, canonical)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+        os.replace(str(temporary_path), str(target))
+
+        directory_fd = os.open(str(target.parent), os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+        _check_file_isolation(target)
+
+        entry = AuditEntry(
+            timestamp=now.isoformat(),
+            operation="WRITE",
+            artefact_class="TARGET_PATH",
+            bytes_written=len(canonical),
+            entry_digest=digest_bytes(canonical),
+        )
+        _append_audit_entry(audit_dir, entry)
+
+    except OSError as exc:
+        try:
+            os.unlink(str(temporary_path))
+        except (NameError, FileNotFoundError):
+            pass
+        raise ProtectedStorageError(f"cannot write to target path: {exc}")
+
 
 
 def read_protected_artefact(root: Path, artefact_class: str, artefact_id: str) -> bytes:
