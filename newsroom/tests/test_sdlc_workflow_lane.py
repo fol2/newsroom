@@ -409,13 +409,13 @@ def test_source_check_compiles_exact_sources_and_runs_locked_integrity(
         )
 
 
-def test_core_test_command_runs_persistent_workers_and_conditional_clustering(
+def test_core_test_command_runs_persistent_workers_without_clustering_evaluator(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     report = tmp_path / "report.xml"
     worker_calls: list[tuple[Path, Path]] = []
-    clustering_calls: list[tuple[str, ...]] = []
+    extra_calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(
         lane_module,
         "_run_core_pytest_workers",
@@ -424,24 +424,21 @@ def test_core_test_command_runs_persistent_workers_and_conditional_clustering(
     monkeypatch.setattr(
         lane_module,
         "_run_subprocess",
-        lambda argv: clustering_calls.append(
-            tuple(str(item) for item in argv)
-        ) or 0,
+        lambda argv: extra_calls.append(tuple(str(item) for item in argv)) or 0,
     )
 
     assert core_tests(repo_root=tmp_path, report=report, clustering=True) == 0
     assert worker_calls == [(tmp_path.resolve(), report.resolve())]
-    assert len(clustering_calls) == 1
-    assert clustering_calls[0][1] == "scripts/eval_clustering_metrics.py"
+    assert extra_calls == []
 
     monkeypatch.setattr(
         lane_module,
         "_run_core_pytest_workers",
         lambda **_kwargs: 7,
     )
-    clustering_calls.clear()
+    extra_calls.clear()
     assert core_tests(repo_root=tmp_path, report=report, clustering=True) == 7
-    assert clustering_calls == []
+    assert extra_calls == []
 
 
 def test_core_test_inventory_is_sorted_complete_and_rejects_symlinks(

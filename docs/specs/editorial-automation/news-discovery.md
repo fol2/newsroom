@@ -22,7 +22,7 @@ A conflict is resolved in this order:
 3. an accepted implementation plan for sequencing only; then
 4. this non-normative navigation file.
 
-The current Brave, RSS, GDELT, Gemini and Discord implementation is not evidence that the target contracts are implemented or qualified.
+The OpenClaw / Discord / Brave / GDELT / `news_pool` implementation is dead and is not evidence that the target contracts are implemented or qualified. See [ADR 0009](../../adr/0009-legacy-operational-newsroom-dead.md). RSS/Atom remains a Source Definition transport.
 
 ## Canonical focused specifications
 

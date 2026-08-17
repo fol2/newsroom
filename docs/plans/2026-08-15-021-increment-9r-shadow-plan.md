@@ -80,8 +80,9 @@ Manifest exist.
 
 ### OD-002 — SQLite authority snapshot and export
 
-Schema-v32 governed authority is canonical. The legacy `news_pool.sqlite3` is a
-frozen, read-only comparator. The first Epoch freezes one verified SQLite backup
+Schema-v32 governed authority is canonical. The legacy `news_pool.sqlite3` is
+dead and is not a comparator ([ADR 0009](../adr/0009-legacy-operational-newsroom-dead.md)).
+The first Epoch freezes one verified SQLite backup
 plus a canonical JSONL inventory at a contiguous ledger watermark. After that
 snapshot, qualification performs no production read or write. Restore uses a
 verified authority backup, reconciles before resume and rebuilds every

@@ -48,7 +48,7 @@ The 2026-07-17 correction records implementation-contract details discovered whi
 | Superseded | Plans 003 and 004 | Historical only. Graph-less or POC staging cannot control implementation. |
 | Consolidated navigation | `news-discovery.md` | Non-normative index only; no duplicate requirement namespace. |
 | Research/reference | `docs/research/`, `docs/reference/` | Evidence and context only unless an Accepted record adopts a constraint. |
-| Current system | Legacy runner, `ARCHITECTURE.md`, `AGENTS.md`, `PROMPTS.md` | Current Brave/RSS/GDELT/Gemini/Discord behaviour, not target authority. |
+| Current system | Hermes Control Plane; OpenClaw/Discord/Brave/GDELT/`news_pool` dead (ADR 0009) | Dead stack is not target authority and must not return. |
 | Pull requests | Merged PR #77; open PR #75 | Merge state alone creates no product authority. PR #75 is donor material only. |
 
 ### 2.2 Canonical source by decision

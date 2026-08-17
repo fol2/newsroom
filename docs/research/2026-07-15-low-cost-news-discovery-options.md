@@ -1,6 +1,7 @@
 # Low-cost news discovery for a beat-first newsroom
 
-**Status:** Research recommendation  
+**Status:** Research recommendation; Brave and GDELT eligibility superseded by [ADR 0009](../adr/0009-legacy-operational-newsroom-dead.md).
+
 **Owner:** Product owner  
 **Canonical language:** UK English  
 **As of:** 2026-07-15  

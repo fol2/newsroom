@@ -38,7 +38,7 @@ The architecture should treat graph, vector and full-text data as **rebuildable 
 
 ## Newsroom-specific requirement
 
-The existing Newsroom already has a short-lived relational discovery model, with `links`, `events`, clustering decisions and a deterministic token/anchor candidate retriever. Its pool has a default 48-hour link TTL and a seven-day hard event TTL, so it is not a durable knowledge archive. See [`../../newsroom/news_pool_db.py`](../../newsroom/news_pool_db.py) and [`../../newsroom/event_manager.py`](../../newsroom/event_manager.py).
+The OpenClaw / Discord / Brave / GDELT / `news_pool` discovery pool is deleted from the working tree. It was a short-lived relational discovery model, not a durable knowledge archive. See [ADR 0009](../adr/0009-legacy-operational-newsroom-dead.md). Git history is the archive.
 
 The target specs create a stronger requirement than generic “chat with documents” RAG:
 

@@ -137,10 +137,6 @@ uv lock --check
 uv sync --dev --locked
 python -m compileall -q newsroom scripts
 python -m pytest -q
-python scripts/eval_clustering_metrics.py \
-  --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
-  --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
-  --fail-on-regression
 git diff --check
 ```
 

@@ -1,5 +1,7 @@
 # Cleanup Run 2026-02-11
 
+**Status:** Historical evidence of a one-off `news_pool` maintenance run. That stack is dead and must not be restarted. See [ADR 0009](../../adr/0009-legacy-operational-newsroom-dead.md). Git history is the archive.
+
 This folder captures a one-off maintenance run to improve the semantic quality of the newsroom event pool after the DB integrity fixes and clustering retrieval tightening.
 
 ## Safety

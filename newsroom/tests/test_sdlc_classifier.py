@@ -133,12 +133,7 @@ def test_unknown_path_fails_closed_to_r3() -> None:
 
 @pytest.mark.parametrize(
     "path",
-    (
-        "newsroom/event_manager.py",
-        "newsroom/eval_dataset.py",
-        "newsroom/eval_metrics.py",
-        "newsroom/lang_hint.py",
-    ),
+    ("newsroom/legacy_operational_stack_retired.py",),
 )
 def test_clustering_change_selects_the_clustering_gate_without_over_escalation(
     path: str,

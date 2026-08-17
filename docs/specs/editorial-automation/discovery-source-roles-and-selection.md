@@ -14,6 +14,8 @@
 **Implementation authority:** None. Acceptance defines source roles, selection rules and candidate work; it does not authorise collection, shadow operation or production use.  
 **Supersedes:** None
 
+**Brave / GDELT / news_pool eligibility:** Superseded by [ADR 0009](../../adr/0009-legacy-operational-newsroom-dead.md). Those systems are dead and permanently ineligible as clocks, indexes, pools, comparators, Evidence Intake channels or Source Definitions. RSS/Atom remains a Source Definition transport. Git history is the archive.
+
 ## Purpose
 
 Define why a source is monitored, how sources combine into a credible discovery portfolio and what must be proven before a source may enter shadow or production use.
@@ -251,7 +253,7 @@ Topic 8 must be able to evaluate:
 
 **SRC-033 — Manual lead boundary.** Manual, editor and reader leads use the accepted workflow and do not bypass identity, rights, gates, triage or evidence intake.
 
-**SRC-034 — Search boundary reserved.** Search and GDELT remain outside the clocked source portfolio until Topic 7 is accepted.
+**SRC-034 — Search boundary reserved.** Search remains outside the clocked source portfolio until Topic 7 is accepted. Brave and GDELT are permanently ineligible (ADR 0009).
 
 ### Evaluation and change control
 
@@ -335,7 +337,7 @@ An unresolved Active path remains a visible design gap and cannot be hidden behi
 | HKSAR all-government press-release RSS | Strict TLS failed from the newsroom host and HTTP fallback failed | Does not count as available; do not disable verification |
 | CHP press-release RSS | Strict TLS failed from the newsroom host | Health contingency remains partial and the gap stays explicit |
 | National Rail disruption feeds | Registration and live credentialled smoke test required | Does not count as available until terms and access pass |
-| GDELT DOC 2.0 | Newsroom-host test returned `429` | Reserved for Topics 7 and 8; not an Anchor |
+| GDELT DOC 2.0 | Permanently ineligible (ADR 0009) | Not an Anchor, Comparator, clock, index, pool, Evidence Intake channel or Source Definition |
 
 ### Not selected by default
 
@@ -344,7 +346,8 @@ An unresolved Active path remains a visible design gap and cannot be hidden behi
 - broad default feeds dominated by entertainment, sport, ordinary finance or general technology;
 - paywalled or snippet-only publishers without approved discovery-use rights;
 - social accounts as recurring sources before authenticity and source-role review;
-- Brave, DDGS, SearXNG or another search provider before Topic 7; and
+- Brave or GDELT in any role (ADR 0009);
+- DDGS, SearXNG or another search provider before Topic 7, excluding Brave; and
 - any source reached by bypassing TLS, authentication, robots or access controls.
 
 ## Acceptance criteria

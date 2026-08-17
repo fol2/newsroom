@@ -26,10 +26,6 @@ uv lock --check
 uv sync --dev --locked
 uv run python -m pytest -q newsroom/tests/test_discovery_projection_3e_*.py
 uv run python -m pytest -q
-uv run python scripts/eval_clustering_metrics.py \
-  --dataset newsroom/evals/clustering_eval_dataset_v1.jsonl \
-  --baseline newsroom/evals/clustering_eval_metrics_baseline_v1.json \
-  --fail-on-regression
 ```
 
 The permanent authenticated Neo4j workflow must execute all eight allow-listed `test_projection_b3_neo4j_service` cases exactly once, including both Increment 3E lineage cases, with zero skips, failures or errors.
