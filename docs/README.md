@@ -73,7 +73,7 @@ A link does not make an entire reference or research document normative. A merge
 
 ## Current-system documentation
 
-`ARCHITECTURE.md`, `AGENTS.md` and `PROMPTS.md` describe the existing Brave, RSS, GDELT, Gemini and Discord system. `CONTRIBUTING.md` describes contribution procedures. `docs/evaluation/` and `docs/cleanup_runs/` retain current evaluation and run evidence.
+The legacy Brave, RSS-pool, GDELT, Gemini and Discord operational system is dead and deleted from the working tree ([`adr/0009-legacy-operational-newsroom-dead.md`](adr/0009-legacy-operational-newsroom-dead.md)); git history is its archive. `CONTRIBUTING.md` describes contribution procedures. `docs/evaluation/` and `docs/cleanup_runs/` retain dated evaluation and run evidence for that dead stack.
 
 Future requirements normally belong under `docs/specs/`; implementation programmes under `docs/plans/`; dated investigations under `docs/research/`; and broader retained background under `docs/reference/`.
 

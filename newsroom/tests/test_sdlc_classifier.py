@@ -131,23 +131,16 @@ def test_unknown_path_fails_closed_to_r3() -> None:
     ]
 
 
-@pytest.mark.parametrize(
-    "path",
-    (
-        "newsroom/event_manager.py",
-        "newsroom/eval_dataset.py",
-        "newsroom/eval_metrics.py",
-        "newsroom/lang_hint.py",
-    ),
-)
-def test_clustering_change_selects_the_clustering_gate_without_over_escalation(
-    path: str,
-) -> None:
-    route = _route(path)
+def test_deleted_legacy_clustering_module_escalates_fail_closed() -> None:
+    # The legacy clustering stack is deleted (ADR 0009). A change that names one
+    # of its old paths cannot resolve a dependency edge and must fail closed.
+    route = _route("newsroom/event_manager.py")
 
-    assert route["risk_tier"] == "R1_LOCAL_CODE"
-    assert route["clustering_required"] is True
-    assert route["service_required"] is False
+    assert route["risk_tier"] == "R3_EXTERNAL_SERVICE_SECURITY"
+    assert any(
+        reason.startswith("unknown_dependency_edge:")
+        for reason in route["reasons"]
+    )
 
 
 def test_adding_a_path_never_lowers_risk_metamorphic() -> None:

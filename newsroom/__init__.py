@@ -1,2 +1,1 @@
-# Newsroom package (planner + runner assets live under this folder).
-
+# Newsroom package: governed authority/GraphRAG foundation.

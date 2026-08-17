@@ -1,36 +1,33 @@
-# openclaw-newsroom
+# newsroom
 
-Automated AI newsroom: LLM clustering, multi-source news pool, Discord publishing.
+Governed authority/GraphRAG newsroom foundation. The legacy OpenClaw / Discord
+/ Brave / GDELT / `news_pool` operational stack is dead (ADR 0009); git history
+is its archive.
 
 ## Key Documentation
 
-- [README.md](README.md) -- Project overview, installation, configuration
-- [ARCHITECTURE.md](ARCHITECTURE.md) -- Technical architecture and data flow
-- [AGENTS.md](AGENTS.md) -- Cron agent system, planner/runner architecture
-- [PROMPTS.md](PROMPTS.md) -- Prompt template system and validator reference
+- [README.md](README.md) -- Project overview, installation, repository status
+- [docs/README.md](docs/README.md) -- Documentation map and authority rules
+- [AGENTS.md](AGENTS.md) -- Agent workflow notes and dead-stack boundary
 
 ## Project Structure
 
-- `newsroom/` -- Core Python package (18 modules)
-- `newsroom/prompts/` -- LLM prompt templates (Mustache-style `{{VAR}}`)
-- `newsroom/schemas/` -- JSON schemas for job files
-- `newsroom/validators/` -- Output validators for LLM responses
+- `newsroom/` -- Core Python package (authority, projection, retrieval, sources, increments)
 - `newsroom/tests/` -- Test suite
-- `scripts/` -- CLI entry points (9 scripts)
+- `scripts/` -- Increment qualification CLIs and SDLC tooling
+- `docs/` -- Specs, plans, ADRs, operations and research records
 
 ## Development
 
 - Python 3.12+, deps in `pyproject.toml` (locked in `uv.lock`)
-- Install (dev): `uv sync --dev`
-- Tests: `uv run pytest newsroom/tests/ -v`
-- All prompt template paths use `{{OPENCLAW_HOME}}` (resolved at runtime)
-- `_render_template()` in runner.py auto-injects `OPENCLAW_HOME`
+- Install (dev): `uv sync --dev --locked`
+- Tests: `uv run --no-sync python -m pytest -q newsroom/tests`
 
 ## Code Style
 
-- No auto-formatting enforced; follow existing patterns
-- Validators must inherit structure from `newsroom/validators/`
-- New prompts need entries in `prompt_registry.json` + a matching validator
+- UK English; no auto-formatting enforced; follow existing patterns
+- SQLite authority is canonical; Neo4j projections are rebuildable
+- Fail closed: refusals are the default for unresolved or drifted identity
 
 ## Agent skills
 
