@@ -1,6 +1,6 @@
 # Newsroom domain language
 
-**Status:** Proposed vocabulary; Increment 9 autonomy terms accepted 2026-08-15; Active Coverage accepted 2026-08-17; Evaluation Threshold Schedule accepted 2026-08-17
+**Status:** Proposed vocabulary; Increment 9 autonomy terms accepted 2026-08-15; Active Coverage accepted 2026-08-17; Evaluation Threshold Schedule accepted 2026-08-17; Retention Schedule accepted 2026-08-17
 
 This glossary proposes the canonical meanings of editorial records that connect evidence, decisions, publication and derived newsroom intelligence. The product owner has not accepted this vocabulary yet.
 
@@ -114,6 +114,10 @@ _Avoid_: Generic article, delivery job
 **Publication Decision**:
 A separate governed record that authorises one exact authoritative publication-bundle digest, or refuses one exact staged candidate-manifest digest, under a stated policy version.
 _Avoid_: Approved story, publish flag
+
+**Retention Schedule**:
+An owner-approved, versioned production-policy artefact that names each audit and content retention class, its period, deletion behaviour and fail-closed rule. Missing class or period fails closed. It is not a Rights Record and does not authorise retaining source expression beyond that Rights Record.
+_Avoid_: Rights Record, backup policy, TTL flag, retention_scope
 
 **Target Publication**:
 The desired and observed delivery lifecycle of one publication-bundle payload on one controlled public target.
