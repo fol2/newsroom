@@ -1,8 +1,9 @@
 # Sensitive content and escalation specification
 
-**Status:** Draft  
+**Status:** Accepted  
 **Owner:** Product owner  
-**Last updated:** 2026-07-11  
+**Last updated:** 2026-08-17  
+**Accepted by owner:** 2026-08-17  
 **Canonical language:** English  
 **Related plan:** None  
 **Related reference:** [`product-editorial-charter.zh-HK.md`](../../reference/editorial/product-editorial-charter.zh-HK.md), sections 11 and 14  
@@ -38,7 +39,7 @@ This specification covers identifiable people, private persons, public office-ho
 - legal jurisdiction; and
 - potential reporting restriction or privacy harm.
 
-**RISK-003 — Jurisdiction.** The system MUST identify every materially relevant jurisdiction for defamation, privacy, child protection, court reporting and distribution. Unknown or conflicting jurisdiction MUST block automatic publication.
+**RISK-003 — Jurisdiction.** The system MUST identify every materially relevant jurisdiction for defamation, privacy, child protection, court reporting and distribution. Unknown or conflicting jurisdiction MUST block automatic publication. At launch, jurisdiction identification is deterministic from the Source Definition's territory and the candidate's content signals under the versioned jurisdiction rule set recorded per RISK-094.
 
 **RISK-004 — No generic UK assumption.** England and Wales, Scotland and Northern Ireland MUST NOT be treated as one legal rule set where the applicable requirement differs. Hong Kong and any other material territory MUST be evaluated separately.
 
@@ -63,7 +64,7 @@ This specification covers identifiable people, private persons, public office-ho
 
 **RISK-014 — Identity uncertainty.** Unresolved entity matching, spelling, transliteration or same-name risk MUST block identification. The story MAY proceed without the identity if it remains useful and accurate.
 
-**RISK-015 — Organisation allegations.** A serious allegation concerning an organisation remains within the hold boundary unless a later accepted policy defines a narrow automatic path based on appropriate public findings or formal procedural facts.
+**RISK-015 — Organisation allegations.** A serious allegation concerning an organisation remains within the hold boundary unless a later accepted policy defines a narrow automatic path based on appropriate public findings or formal procedural facts. At launch, no such path exists.
 
 ### Serious allegations and disputed conduct
 
@@ -77,7 +78,7 @@ This specification covers identifiable people, private persons, public office-ho
 
 **RISK-024 — Formal procedural fact.** Arrest, charge, filing, investigation, trial, judgment and sentence MAY be reported only as the precise procedural fact established by an appropriate source and subject to current jurisdictional restrictions.
 
-**RISK-025 — Exception policy.** Any future automatic-publication exception for a formal procedural fact MUST define source type, permitted language, jurisdiction, identity treatment, current-check method and disqualifying conditions. Absence of such an accepted rule means hold.
+**RISK-025 — Exception policy.** Any future automatic-publication exception for a formal procedural fact MUST define source type, permitted language, jurisdiction, identity treatment, current-check method and disqualifying conditions. Absence of such an accepted rule means hold. At launch, no automatic-publication exception for a formal procedural fact is defined. Any future exception requires legal review and a versioned policy change, and a model MUST NOT create or widen one (RISK-006).
 
 ### Children, schools, victims and protected identities
 
@@ -104,6 +105,8 @@ This specification covers identifiable people, private persons, public office-ho
 - jigsaw identification;
 - prejudice to the current or linked proceeding; and
 - the applicable jurisdiction.
+
+At launch, no external legal or restriction data source is approved to satisfy this check automatically. A candidate touching current or contemplated proceedings or protected court material therefore cannot complete this check autonomously and MUST be held under RISK-042.
 
 **RISK-042 — Indeterminate check.** If the current legal check cannot establish a reliable position, the candidate MUST be held. A search that simply finds no named order is insufficient.
 
@@ -151,11 +154,11 @@ This specification covers identifiable people, private persons, public office-ho
 
 **RISK-082 — No simplistic causation.** The story MUST NOT reduce the event to a single cause, romanticise it, reproduce a note or unnecessarily identify the person or family.
 
-**RISK-083 — Support information.** Whether and how to include support information MUST be defined by a later accepted presentation policy appropriate to the distribution territory.
+**RISK-083 — Support information.** Territory-specific support-information content for each distribution territory (UK, HK) is an owner-approved, versioned production-policy artefact, not spec text. A suicide or self-harm story MUST NOT be published while the applicable territory's entry is missing. At launch, every candidate that passes the RISK-080 public-importance gate is `HOLD_FOR_REVIEW` for `owner-reviewer`; there is no autonomous publication path for this category.
 
 ### Escalation record
 
-**RISK-090 — Hold reason.** Every sensitive-content hold MUST identify the risk class, affected content, jurisdiction, failed or indeterminate check and authorised reviewer role required.
+**RISK-090 — Hold reason.** Every sensitive-content hold MUST identify the risk class, affected content, jurisdiction, failed or indeterminate check and authorised reviewer role required. At launch, `owner-reviewer`, held by the Human Accountable Owner ([`autonomy-and-publication-control.md`](autonomy-and-publication-control.md)), resolves privacy, court, allegation and child-protection holds. The hold record MUST still name the required reviewer role class (privacy, court, allegation or child protection) so later specialist roles arrive through the versioned production-policy role registry, not a spec change.
 
 **RISK-091 — Rejection reason.** A rejection MUST distinguish prohibited content, insufficient evidence, known legal or rights barrier and unresolved risk that cannot be cured through the permitted workflow.
 
@@ -184,9 +187,12 @@ This specification is not legal advice and does not encode the final law of any 
 
 It does not establish a general investigative, whistleblowing or confidential-source workflow.
 
-## Open questions
+## Completion record
 
-- Which procedural facts, if any, may receive a narrow automatic-publication rule after legal review?
-- Which external legal or restriction data sources can support reliable automated jurisdictional checks?
-- Which reviewer roles are required for privacy, court, allegation and child-protection holds?
-- What territory-specific support-information policy should apply to suicide and self-harm coverage?
+The product owner accepted this specification on 2026-08-17 with these decisions:
+
+1. **Procedural-fact automatic publication.** None at launch ([`autonomy-and-publication-control.md`](autonomy-and-publication-control.md)). No formal-procedural-fact exception is defined; RISK-025 stands — absence of an accepted exception means hold — and RISK-015 keeps organisation allegations within the hold boundary. RISK-024 neutral procedural reporting remains subject to the RISK-020 hold and the RISK-041 current legal check. Any future exception requires legal review and a versioned policy change; a model can never create or widen one.
+2. **Jurisdictional-check data sources.** None at launch. No external legal or restriction data source is approved to satisfy the RISK-041 current legal check automatically, so a candidate touching current or contemplated proceedings or protected court material cannot complete that check autonomously and is held under RISK-042. Jurisdiction identification (RISK-003 / RISK-004) is deterministic from the Source Definition's territory and the candidate's content signals under the versioned jurisdiction rule set recorded per RISK-094; unknown or conflicting jurisdiction blocks automatic publication. Adopting an external legal data source later is a versioned production-policy change after legal review, not a hanging Open question.
+3. **Reviewer roles.** No additional roles at launch. The single launch role `owner-reviewer`, held by the Human Accountable Owner, resolves privacy, court, allegation and child-protection holds. A RISK-090 hold record must still name the required reviewer role class so later specialist roles arrive through the versioned production-policy role registry, not a spec change.
+4. **Suicide and self-harm support information.** Deferred fail-closed. Territory-specific support-information content for the distribution territories (UK, HK) is an owner-approved, versioned production-policy artefact, not spec text. A suicide or self-harm story must not be published while the applicable territory's entry is missing, and at launch every candidate that passes the RISK-080 public-importance gate is `HOLD_FOR_REVIEW` for `owner-reviewer` — no autonomous publication path for this category.
+5. Acceptance authorises no live source, credential, spend, publication or activation authority.
