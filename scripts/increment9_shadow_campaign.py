@@ -41,6 +41,10 @@ from newsroom.increment9.plan import (
     INCREMENT_9_SHADOW_PLAN,
     INCREMENT_9_SHADOW_PLAN_DIGEST,
 )
+from newsroom.increment9.prefunded_wallet import (
+    PrefundedWalletError,
+    bind_campaign_prefunded_wallet,
+)
 from newsroom.increment9.protected_storage import write_protected_artefact
 
 GATE_RECORD_SCHEMA = "newsroom.increment9.campaign-gate.v1"
@@ -360,6 +364,11 @@ def _gate_findings(
                 bind_campaign_egress_allowlist()
             except EgressAllowlistError:
                 findings.append("EGRESS_ALLOWLIST_UNBOUND")
+        if gate_id == "PREFUNDED_WALLET_AVAILABLE":
+            try:
+                bind_campaign_prefunded_wallet()
+            except PrefundedWalletError:
+                findings.append("PREFUNDED_WALLET_UNBOUND")
     return sorted(set(findings))
 
 
