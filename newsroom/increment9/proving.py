@@ -25,6 +25,7 @@ from newsroom.increment9.prospective_run_authority import (
 )
 from newsroom.increment9.rights import (
     GATE_ID as RIGHTS_UK_01,
+    UK_02_GATE_ID as RIGHTS_UK_02,
     assess_rights,
 )
 
@@ -72,6 +73,7 @@ PROVING_GATES = (
     "NO_ACTIVE_HUMAN_EMERGENCY_STOP",
     "PROSPECTIVE_RUN_AUTHORITY",
     "RIGHTS_UK-01",
+    "RIGHTS_UK-02",
     "OPENROUTER_UNUSED",
 )
 
@@ -208,6 +210,7 @@ def assess(
     no_emergency_stop: bool,
     run_authority: RunAuthorityResolver | None = None,
     rights: object | None = None,
+    rights_uk_02: object | None = None,
     now: str | None = None,
 ) -> tuple[Gate, ...]:
     if type(run_id) is not str or not run_id.strip():
@@ -222,6 +225,12 @@ def assess(
     rights_status = (
         GateStatus.PASS if rights_verdict.status == "PASS" else GateStatus.FAIL
     )
+    rights_uk_02_verdict = assess_rights(
+        RIGHTS_UK_02, inventory=rights_uk_02, now=now
+    )
+    rights_uk_02_status = (
+        GateStatus.PASS if rights_uk_02_verdict.status == "PASS" else GateStatus.FAIL
+    )
     return (
         Gate("PORTFOLIO_BOUND", GateStatus.PASS if SOURCE_IDS == tuple(item[0] for item in PORTFOLIO) else GateStatus.FAIL, "OD-001 ten"),
         Gate("EGRESS_ALLOWLIST_ENFORCED", GateStatus.PASS if allowlist_ok else GateStatus.FAIL, ",".join(sorted(ALLOWED_HOSTS))),
@@ -234,6 +243,7 @@ def assess(
         ),
         Gate(RUN_AUTHORITY_GATE, authority_status, verdict.reason),
         Gate(RIGHTS_UK_01, rights_status, rights_verdict.reason),
+        Gate(RIGHTS_UK_02, rights_uk_02_status, rights_uk_02_verdict.reason),
         Gate("OPENROUTER_UNUSED", GateStatus.PASS, "proving must not call OpenRouter"),
     )
 
@@ -299,6 +309,7 @@ def run_proving(
     fetch: Fetcher | None = None,
     run_authority: RunAuthorityResolver | None = None,
     rights: object | None = None,
+    rights_uk_02: object | None = None,
     now: str | None = None,
 ) -> ProvingReport:
     gates = assess(
@@ -307,6 +318,7 @@ def run_proving(
         no_emergency_stop=no_emergency_stop,
         run_authority=run_authority,
         rights=rights,
+        rights_uk_02=rights_uk_02,
         now=now,
     )
     if any(gate.status is GateStatus.FAIL for gate in gates):
