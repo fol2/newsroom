@@ -23,6 +23,10 @@ from newsroom.increment9.prospective_run_authority import (
     RunAuthorityResolver,
     assess_run_authority,
 )
+from newsroom.increment9.rights import (
+    GATE_ID as RIGHTS_UK_01,
+    assess_rights,
+)
 
 SCHEMA_VERSION = "newsroom.increment9.proving-store.v1"
 USER_AGENT = "Newsroom-9P-Proving/1.0"
@@ -67,6 +71,7 @@ PROVING_GATES = (
     "KILL_SWITCH_READY",
     "NO_ACTIVE_HUMAN_EMERGENCY_STOP",
     "PROSPECTIVE_RUN_AUTHORITY",
+    "RIGHTS_UK-01",
     "OPENROUTER_UNUSED",
 )
 
@@ -202,6 +207,8 @@ def assess(
     kill_switch: bool,
     no_emergency_stop: bool,
     run_authority: RunAuthorityResolver | None = None,
+    rights: object | None = None,
+    now: str | None = None,
 ) -> tuple[Gate, ...]:
     if type(run_id) is not str or not run_id.strip():
         raise ProvingError("run_id is required")
@@ -210,6 +217,10 @@ def assess(
     verdict = assess_run_authority(run_id, resolver=run_authority)
     authority_status = (
         GateStatus.PASS if verdict.status == "PASS" else GateStatus.FAIL
+    )
+    rights_verdict = assess_rights(RIGHTS_UK_01, inventory=rights, now=now)
+    rights_status = (
+        GateStatus.PASS if rights_verdict.status == "PASS" else GateStatus.FAIL
     )
     return (
         Gate("PORTFOLIO_BOUND", GateStatus.PASS if SOURCE_IDS == tuple(item[0] for item in PORTFOLIO) else GateStatus.FAIL, "OD-001 ten"),
@@ -222,6 +233,7 @@ def assess(
             "attested" if no_emergency_stop else "attestation required",
         ),
         Gate(RUN_AUTHORITY_GATE, authority_status, verdict.reason),
+        Gate(RIGHTS_UK_01, rights_status, rights_verdict.reason),
         Gate("OPENROUTER_UNUSED", GateStatus.PASS, "proving must not call OpenRouter"),
     )
 
@@ -286,12 +298,16 @@ def run_proving(
     no_emergency_stop: bool,
     fetch: Fetcher | None = None,
     run_authority: RunAuthorityResolver | None = None,
+    rights: object | None = None,
+    now: str | None = None,
 ) -> ProvingReport:
     gates = assess(
         run_id=run_id,
         kill_switch=kill_switch,
         no_emergency_stop=no_emergency_stop,
         run_authority=run_authority,
+        rights=rights,
+        now=now,
     )
     if any(gate.status is GateStatus.FAIL for gate in gates):
         return ProvingReport(run_id, False, False, False, 0, gates, ())
