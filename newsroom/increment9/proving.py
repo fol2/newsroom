@@ -18,6 +18,11 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.increment9.prospective_run_authority import (
+    GATE_ID as RUN_AUTHORITY_GATE,
+    RunAuthorityResolver,
+    assess_run_authority,
+)
 
 SCHEMA_VERSION = "newsroom.increment9.proving-store.v1"
 USER_AGENT = "Newsroom-9P-Proving/1.0"
@@ -191,11 +196,21 @@ def default_fetch(url: str) -> tuple[int, bytes]:
     return status, body
 
 
-def assess(*, run_id: str, kill_switch: bool, no_emergency_stop: bool) -> tuple[Gate, ...]:
-    if type(run_id) is not str or not run_id.strip() or len(run_id) > 128:
+def assess(
+    *,
+    run_id: str,
+    kill_switch: bool,
+    no_emergency_stop: bool,
+    run_authority: RunAuthorityResolver | None = None,
+) -> tuple[Gate, ...]:
+    if type(run_id) is not str or not run_id.strip():
         raise ProvingError("run_id is required")
     hosts = tuple(_host(url) for url in SOURCE_URLS.values())
     allowlist_ok = set(hosts) <= ALLOWED_HOSTS and len(SOURCE_IDS) == 10
+    verdict = assess_run_authority(run_id, resolver=run_authority)
+    authority_status = (
+        GateStatus.PASS if verdict.status == "PASS" else GateStatus.FAIL
+    )
     return (
         Gate("PORTFOLIO_BOUND", GateStatus.PASS if SOURCE_IDS == tuple(item[0] for item in PORTFOLIO) else GateStatus.FAIL, "OD-001 ten"),
         Gate("EGRESS_ALLOWLIST_ENFORCED", GateStatus.PASS if allowlist_ok else GateStatus.FAIL, ",".join(sorted(ALLOWED_HOSTS))),
@@ -206,7 +221,7 @@ def assess(*, run_id: str, kill_switch: bool, no_emergency_stop: bool) -> tuple[
             GateStatus.PASS if no_emergency_stop else GateStatus.FAIL,
             "attested" if no_emergency_stop else "attestation required",
         ),
-        Gate("PROSPECTIVE_RUN_AUTHORITY", GateStatus.PASS, run_id.strip()),
+        Gate(RUN_AUTHORITY_GATE, authority_status, verdict.reason),
         Gate("OPENROUTER_UNUSED", GateStatus.PASS, "proving must not call OpenRouter"),
     )
 
@@ -270,8 +285,14 @@ def run_proving(
     kill_switch: bool,
     no_emergency_stop: bool,
     fetch: Fetcher | None = None,
+    run_authority: RunAuthorityResolver | None = None,
 ) -> ProvingReport:
-    gates = assess(run_id=run_id, kill_switch=kill_switch, no_emergency_stop=no_emergency_stop)
+    gates = assess(
+        run_id=run_id,
+        kill_switch=kill_switch,
+        no_emergency_stop=no_emergency_stop,
+        run_authority=run_authority,
+    )
     if any(gate.status is GateStatus.FAIL for gate in gates):
         return ProvingReport(run_id, False, False, False, 0, gates, ())
     fetcher = default_fetch if fetch is None else fetch

@@ -1,5 +1,6 @@
 from pathlib import Path
 import pytest
+from newsroom.increment9.prospective_run_authority import persist_authorised_chain
 from newsroom.increment9.proving import (
     ALLOWED_HOSTS,
     PORTFOLIO,
@@ -52,10 +53,20 @@ def test_portfolio_is_exactly_od001_ten():
 
 def test_assess_fails_closed_without_stop_attestation_and_with_kill():
     blocked = assess(run_id="r1", kill_switch=False, no_emergency_stop=False)
-    assert {g.gate_id: g.status.value for g in blocked}["NO_ACTIVE_HUMAN_EMERGENCY_STOP"] == "FAIL"
+    by_id = {g.gate_id: g.status.value for g in blocked}
+    assert by_id["NO_ACTIVE_HUMAN_EMERGENCY_STOP"] == "FAIL"
+    assert by_id["PROSPECTIVE_RUN_AUTHORITY"] == "FAIL"
     killed = assess(run_id="r1", kill_switch=True, no_emergency_stop=True)
-    assert {g.gate_id: g.status.value for g in killed}["KILL_SWITCH_READY"] == "FAIL"
-    ok = assess(run_id="r1", kill_switch=False, no_emergency_stop=True)
+    by_id = {g.gate_id: g.status.value for g in killed}
+    assert by_id["KILL_SWITCH_READY"] == "FAIL"
+    assert by_id["PROSPECTIVE_RUN_AUTHORITY"] == "FAIL"
+    chain = persist_authorised_chain(run_id="r1")
+    ok = assess(
+        run_id="r1",
+        kill_switch=False,
+        no_emergency_stop=True,
+        run_authority=chain.resolver,
+    )
     assert all(g.status.value == "PASS" for g in ok)
 
 
@@ -75,6 +86,17 @@ def test_fetch_is_blocked_until_gates_pass(tmp_path: Path):
 
 def test_fetch_stores_ten_observations_without_publication(tmp_path: Path):
     store = str(tmp_path / "proving.sqlite3")
+    unauthorised = run_proving(
+        store_path=store,
+        run_id="r1",
+        fetched_at="2026-08-16T20:00:00.000000Z",
+        kill_switch=False,
+        no_emergency_stop=True,
+        fetch=_fetch_ok,
+    )
+    assert not unauthorised.authorised and unauthorised.observations == ()
+    assert list_observations(store) == ()
+    chain = persist_authorised_chain(run_id="r1")
     report = run_proving(
         store_path=store,
         run_id="r1",
@@ -82,6 +104,7 @@ def test_fetch_stores_ten_observations_without_publication(tmp_path: Path):
         kill_switch=False,
         no_emergency_stop=True,
         fetch=_fetch_ok,
+        run_authority=chain.resolver,
     )
     assert report.complete
     assert report.publication is False
@@ -98,6 +121,7 @@ def test_fetch_stores_ten_observations_without_publication(tmp_path: Path):
 
 
 def test_production_and_news_pool_paths_are_rejected(tmp_path: Path):
+    chain = persist_authorised_chain(run_id="r1")
     with pytest.raises(ProvingError, match="news_pool"):
         run_proving(
             store_path=str(tmp_path / "news_pool.sqlite3"),
@@ -106,4 +130,5 @@ def test_production_and_news_pool_paths_are_rejected(tmp_path: Path):
             kill_switch=False,
             no_emergency_stop=True,
             fetch=_fetch_ok,
+            run_authority=chain.resolver,
         )
