@@ -13,7 +13,19 @@ from newsroom.increment9.proving import (
     report_json,
     run_proving,
 )
-from newsroom.increment9.rights import FIXTURE_NOW, fixture_inventory as rights_inventory
+from newsroom.increment9.rights import (
+    FIXTURE_NOW,
+    UK_02_GATE_ID,
+    fixture_inventory as rights_inventory,
+)
+
+
+def _rights_pair() -> dict[str, object]:
+    return {
+        "rights": rights_inventory(),
+        "rights_uk_02": rights_inventory(gate=UK_02_GATE_ID),
+        "now": FIXTURE_NOW,
+    }
 
 
 def _fetch_ok(url: str) -> tuple[int, bytes]:
@@ -58,19 +70,20 @@ def test_assess_fails_closed_without_stop_attestation_and_with_kill():
     assert by_id["NO_ACTIVE_HUMAN_EMERGENCY_STOP"] == "FAIL"
     assert by_id["PROSPECTIVE_RUN_AUTHORITY"] == "FAIL"
     assert by_id["RIGHTS_UK-01"] == "FAIL"
+    assert by_id["RIGHTS_UK-02"] == "FAIL"
     killed = assess(run_id="r1", kill_switch=True, no_emergency_stop=True)
     by_id = {g.gate_id: g.status.value for g in killed}
     assert by_id["KILL_SWITCH_READY"] == "FAIL"
     assert by_id["PROSPECTIVE_RUN_AUTHORITY"] == "FAIL"
     assert by_id["RIGHTS_UK-01"] == "FAIL"
+    assert by_id["RIGHTS_UK-02"] == "FAIL"
     chain = persist_authorised_chain(run_id="r1")
     ok = assess(
         run_id="r1",
         kill_switch=False,
         no_emergency_stop=True,
         run_authority=chain.resolver,
-        rights=rights_inventory(),
-        now=FIXTURE_NOW,
+        **_rights_pair(),
     )
     assert all(g.status.value == "PASS" for g in ok)
 
@@ -110,8 +123,7 @@ def test_fetch_stores_ten_observations_without_publication(tmp_path: Path):
         no_emergency_stop=True,
         fetch=_fetch_ok,
         run_authority=chain.resolver,
-        rights=rights_inventory(),
-        now=FIXTURE_NOW,
+        **_rights_pair(),
     )
     assert report.complete
     assert report.publication is False
@@ -138,6 +150,5 @@ def test_production_and_news_pool_paths_are_rejected(tmp_path: Path):
             no_emergency_stop=True,
             fetch=_fetch_ok,
             run_authority=chain.resolver,
-            rights=rights_inventory(),
-            now=FIXTURE_NOW,
+            **_rights_pair(),
         )

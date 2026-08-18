@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Increment 9Q-11 Rights Review assess CLI. No network I/O."""
+"""Increment 9Q Rights Review assess CLI. No network I/O."""
 
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ import sys
 from pathlib import Path
 
 from newsroom.increment9.rights import (
-    PACKAGE_FIXTURES,
     QualificationError,
     assess,
     evidence_json,
+    fixtures_for,
 )
 
 
@@ -24,18 +24,19 @@ def _write_output(path: Path, payload: bytes) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="RIGHTS_UK-01 qualification evidence."
+        description="RIGHTS_UK-01 and RIGHTS_UK-02 qualification evidence."
     )
     parser.add_argument("command", choices=("assess",))
     parser.add_argument("--gate", required=True)
-    parser.add_argument("--inventory", default=str(PACKAGE_FIXTURES))
+    parser.add_argument("--inventory")
     parser.add_argument("--output")
     args = parser.parse_args(argv)
-    if not args.inventory:
+    if args.inventory is not None and not args.inventory:
         print("inventory is required", file=sys.stderr)
         return 2
     try:
-        evidence = assess(Path(args.inventory), gate=args.gate)
+        inventory = Path(args.inventory) if args.inventory else fixtures_for(args.gate)
+        evidence = assess(inventory, gate=args.gate)
     except QualificationError as exc:
         print(str(exc), file=sys.stderr)
         return 2

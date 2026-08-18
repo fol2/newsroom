@@ -1,13 +1,14 @@
-"""Increment 9Q-11 RIGHTS_UK-01 qualification evidence.
+"""Increment 9Q Rights Review qualification evidence.
 
 Parameterised Rights Review validator for the ten OD-001 Rights Gates.
-This packet emits Qualification Evidence only for RIGHTS_UK-01.
+This module emits Qualification Evidence only for RIGHTS_UK-01 and
+RIGHTS_UK-02.
 
 CI fixture digests only. Does not mint First I/O Gate Records. Loading this
 module performs no network I/O and no production writes.
 
-RIGHTS_UK-01 PASSes only through three sealed, independent AI Rights Review
-Records for the exact Home Office and UKVI authority-anchor role and exact
+Each emitted Rights Gate PASSes only through three sealed, independent AI
+Rights Review Records for that gate's exact OD-001 source role and exact
 PORTFOLIO endpoint. The validator is wired into proving.assess; a boolean, a
 sealer listing, or a Gate Record namesake cannot PASS.
 """
@@ -33,6 +34,7 @@ from newsroom.increment9.provider_terms import PROVIDER_CLASSES
 
 SCHEMA_VERSION = "newsroom.increment9.qualification-evidence.v1"
 GATE_ID = "RIGHTS_UK-01"
+UK_02_GATE_ID = "RIGHTS_UK-02"
 INVENTORY_NAME = "inventory.json"
 HMAC_KEY_NAME = "hmac.key"
 FIXTURE_HMAC_KEY = b"newsroom.increment9.rights.fixture-hmac-key"
@@ -42,6 +44,9 @@ FIXTURE_EXPIRES_AT = "2026-08-19T00:00:00.000000Z"
 FIXTURE_TERMS_URL = "https://terms.govuk.fixture.invalid/uk-01"
 FIXTURE_TERMS_BYTES = b"newsroom.increment9.rights.uk-01.fixture-terms\n"
 FIXTURE_ACCESS_METHOD = "HTTPS_GET_PUBLIC_ATOM"
+UK_02_ACCESS_METHOD = "HTTPS_GET_PUBLIC_CONTENT_API_JSON"
+UK_02_TERMS_URL = "https://terms.govuk.fixture.invalid/uk-02"
+UK_02_TERMS_BYTES = b"newsroom.increment9.rights.uk-02.fixture-terms\n"
 FIXTURE_DATA_CLASS = "PUBLIC_OFFICIAL_PUBLICATION_METADATA"
 FIXTURE_DESTINATIONS = ("TEN_APPROVED_SOURCE_ENDPOINTS",)
 FIXTURE_RETENTION = "RAW_HTTP_MAX_7_DAYS"
@@ -55,6 +60,10 @@ UK_01_ENDPOINT = (
     "&organisations%5B%5D=uk-visas-and-immigration&order=updated-newest"
 )
 UK_01_SOURCE_ROLE = "Home Office and UKVI authority anchor"
+UK_02_ENDPOINT = (
+    "https://www.gov.uk/api/content/british-national-overseas-bno-visa"
+)
+UK_02_SOURCE_ROLE = "BN(O) authority anchor"
 
 # Exact PORTFOLIO endpoints. Tests assert equality with proving.SOURCE_URLS.
 BINDINGS: dict[str, tuple[str, str, str]] = {
@@ -84,11 +93,7 @@ BINDINGS: dict[str, tuple[str, str, str]] = {
         "https://feeds.bbci.co.uk/news/uk/rss.xml",
     ),
     "RIGHTS_UK-01": ("UK-01", UK_01_SOURCE_ROLE, UK_01_ENDPOINT),
-    "RIGHTS_UK-02": (
-        "UK-02",
-        "BN(O) authority anchor",
-        "https://www.gov.uk/api/content/british-national-overseas-bno-visa",
-    ),
+    "RIGHTS_UK-02": ("UK-02", UK_02_SOURCE_ROLE, UK_02_ENDPOINT),
     "RIGHTS_UK-03": (
         "UK-03",
         "Immigration Rules authority anchor",
@@ -131,7 +136,29 @@ PROBE_COUNTS = {
     "EXPIRED_OR_FUTURE": 2,
     "ANTI_NAMESAKE": 3,
 }
+EMITTED_GATES = frozenset({GATE_ID, UK_02_GATE_ID})
 PACKAGE_FIXTURES = Path(__file__).parent / "fixtures" / "increment9q11_rights_uk_01"
+PACKAGE_FIXTURES_UK_02 = (
+    Path(__file__).parent / "fixtures" / "increment9q12_rights_uk_02"
+)
+PACKAGE_FIXTURES_BY_GATE = {
+    GATE_ID: PACKAGE_FIXTURES,
+    UK_02_GATE_ID: PACKAGE_FIXTURES_UK_02,
+}
+PROBE_COUNTS_BY_GATE = {
+    GATE_ID: PROBE_COUNTS,
+    UK_02_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 4},
+}
+_FIXTURE_ACCESS = {
+    GATE_ID: FIXTURE_ACCESS_METHOD,
+    UK_02_GATE_ID: UK_02_ACCESS_METHOD,
+}
+_FIXTURE_TERMS = {
+    GATE_ID: (FIXTURE_TERMS_URL, FIXTURE_TERMS_BYTES),
+    UK_02_GATE_ID: (UK_02_TERMS_URL, UK_02_TERMS_BYTES),
+}
+_FIXTURE_PACKET = {GATE_ID: "9q11", UK_02_GATE_ID: "9q12"}
+_PROVING_INVENTORY_KW = {GATE_ID: "rights", UK_02_GATE_ID: "rights_uk_02"}
 _MARKERS = {
     "NO_RECORDS": b"no_records",
     "FEWER_THAN_THREE": b"fewer_than_three",
@@ -291,32 +318,49 @@ def _window(issued_at: str, expires_at: str, now: str) -> None:
         raise RightsError("record is expired or future-dated")
 
 
-def terms_digest_for(terms_url: str = FIXTURE_TERMS_URL) -> str:
-    return digest_bytes(FIXTURE_TERMS_BYTES + terms_url.encode("utf-8"))
+def terms_digest_for(terms_url: str = FIXTURE_TERMS_URL, *, gate: str = GATE_ID) -> str:
+    _, payload = _FIXTURE_TERMS[gate]
+    return digest_bytes(payload + terms_url.encode("utf-8"))
 
 
-def bound_terms_identity() -> dict[str, str]:
+def bound_terms_identity(*, gate: str = GATE_ID) -> dict[str, str]:
+    url, payload = _FIXTURE_TERMS[gate]
     return {
-        "terms_digest": terms_digest_for(),
-        "terms_url": FIXTURE_TERMS_URL,
+        "terms_digest": digest_bytes(payload + url.encode("utf-8")),
+        "terms_url": url,
     }
 
 
-def fixture_review(family: str, *, reviewer_id: str | None = None, **changes: object) -> dict[str, object]:
-    identity = bound_terms_identity()
+def fixtures_for(gate: str) -> Path:
+    try:
+        return PACKAGE_FIXTURES_BY_GATE[gate]
+    except KeyError as exc:
+        raise QualificationError(
+            "this packet emits RIGHTS_UK-01 and RIGHTS_UK-02 only"
+        ) from exc
+
+
+def fixture_review(
+    family: str,
+    *,
+    reviewer_id: str | None = None,
+    gate: str = GATE_ID,
+    **changes: object,
+) -> dict[str, object]:
+    identity = bound_terms_identity(gate=gate)
     suffix = family.lower().replace("_", "-")
     unsigned: dict[str, object] = {
-        "access_method": FIXTURE_ACCESS_METHOD,
+        "access_method": _FIXTURE_ACCESS[gate],
         "data_class": FIXTURE_DATA_CLASS,
         "destinations": list(FIXTURE_DESTINATIONS),
-        "endpoint": UK_01_ENDPOINT,
+        "endpoint": BINDINGS[gate][2],
         "expires_at": FIXTURE_EXPIRES_AT,
-        "gate_id": GATE_ID,
+        "gate_id": gate,
         "issued_at": FIXTURE_ISSUED_AT,
         "retention": FIXTURE_RETENTION,
         "reviewer_family": family,
-        "reviewer_id": reviewer_id or f"reviewer-{suffix}-9q11",
-        "source_role": UK_01_SOURCE_ROLE,
+        "reviewer_id": reviewer_id or f"reviewer-{suffix}-{_FIXTURE_PACKET[gate]}",
+        "source_role": BINDINGS[gate][1],
         "terms_digest": identity["terms_digest"],
         "terms_url": identity["terms_url"],
         "verdict": "PASS",
@@ -329,11 +373,11 @@ def fixture_review(family: str, *, reviewer_id: str | None = None, **changes: ob
     return record
 
 
-def fixture_inventory() -> dict[str, object]:
+def fixture_inventory(*, gate: str = GATE_ID) -> dict[str, object]:
     return {
-        "bound_terms": bound_terms_identity(),
+        "bound_terms": bound_terms_identity(gate=gate),
         "now": FIXTURE_NOW,
-        "reviews": [fixture_review(family) for family in FIXTURE_FAMILIES],
+        "reviews": [fixture_review(family, gate=gate) for family in FIXTURE_FAMILIES],
     }
 
 
@@ -475,14 +519,16 @@ def assess_rights(
     )
 
 
-def refuse_namesake_satisfaction(gates: tuple[str, ...] | list[str]) -> None:
+def refuse_namesake_satisfaction(
+    gates: tuple[str, ...] | list[str], *, gate: str = GATE_ID
+) -> None:
     """Refuse required_gate_ids listing as this Rights Gate."""
 
-    if GATE_ID in gates:
+    if gate in gates:
         raise RightsError(
             "required_gate_ids listing cannot satisfy this Rights Gate"
         )
-    raise RightsError("RIGHTS_UK-01 is absent from required_gate_ids")
+    raise RightsError(f"{gate} is absent from required_gate_ids")
 
 
 def refuse_boolean(value: bool) -> None:
@@ -563,151 +609,220 @@ def _verdict_fail(
 def default_probe(refusal_class: str, path: Path) -> bool:
     """Verify that a rights-review refusal class engages on the real contracts."""
 
-    if refusal_class not in REFUSAL_CLASSES:
-        raise QualificationError(f"unknown refusal class: {refusal_class}")
-    if not path.is_file():
-        raise QualificationError(f"missing refusal class: {refusal_class}")
-    if _MARKERS[refusal_class] not in path.read_bytes():
-        return False
-    probes = {
-        "NO_RECORDS": _should_engage_no_records,
-        "FEWER_THAN_THREE": _should_engage_fewer_than_three,
-        "DUPLICATE_FAMILY": _should_engage_duplicate_family,
-        "MALFORMED_RECORD": _should_engage_malformed_record,
-        "INVALID_SEAL": _should_engage_invalid_seal,
-        "NON_PASS_VERDICT": _should_engage_non_pass_verdict,
-        "BINDING_MISMATCH": _should_engage_binding_mismatch,
-        "TERMS_DIGEST_DRIFT": _should_engage_terms_digest_drift,
-        "EXPIRED_OR_FUTURE": _should_engage_expired_or_future,
-        "ANTI_NAMESAKE": _should_engage_anti_namesake,
-    }
-    return bool(probes[refusal_class]())
+    return probe_for(GATE_ID)(refusal_class, path)
 
 
-def _with_reviews(reviews: list[object]) -> dict[str, object]:
-    inventory = fixture_inventory()
+def probe_for(gate: str) -> Probe:
+    """Return the refusal-class probe bound to one emitted Rights Gate."""
+
+    def writer(refusal_class: str, path: Path) -> bool:
+        if refusal_class not in REFUSAL_CLASSES:
+            raise QualificationError(f"unknown refusal class: {refusal_class}")
+        if not path.is_file():
+            raise QualificationError(f"missing refusal class: {refusal_class}")
+        if _MARKERS[refusal_class] not in path.read_bytes():
+            return False
+        probes = {
+            "NO_RECORDS": _should_engage_no_records,
+            "FEWER_THAN_THREE": _should_engage_fewer_than_three,
+            "DUPLICATE_FAMILY": _should_engage_duplicate_family,
+            "MALFORMED_RECORD": _should_engage_malformed_record,
+            "INVALID_SEAL": _should_engage_invalid_seal,
+            "NON_PASS_VERDICT": _should_engage_non_pass_verdict,
+            "BINDING_MISMATCH": _should_engage_binding_mismatch,
+            "TERMS_DIGEST_DRIFT": _should_engage_terms_digest_drift,
+            "EXPIRED_OR_FUTURE": _should_engage_expired_or_future,
+            "ANTI_NAMESAKE": _should_engage_anti_namesake,
+        }
+        return bool(probes[refusal_class](gate))
+
+    return writer
+
+
+def _with_reviews(reviews: list[object], *, gate: str = GATE_ID) -> dict[str, object]:
+    inventory = fixture_inventory(gate=gate)
     inventory["reviews"] = reviews
     return inventory
 
 
-def _should_engage_no_records() -> bool:
+def _should_engage_no_records(gate: str) -> bool:
     from newsroom.increment9.proving import GateStatus
     from newsroom.increment9.proving import assess as proving_assess
 
-    empty = _with_reviews([])
+    empty = _with_reviews([], gate=gate)
     gates = proving_assess(run_id="r1", kill_switch=False, no_emergency_stop=True)
-    proving = next(g for g in gates if g.gate_id == GATE_ID)
+    proving = next(g for g in gates if g.gate_id == gate)
     return all(
         (
-            _verdict_fail(None),
-            _verdict_fail(empty),
+            _verdict_fail(None, gate_id=gate),
+            _verdict_fail(empty, gate_id=gate),
             proving.status is GateStatus.FAIL,
         )
     )
 
 
-def _should_engage_fewer_than_three() -> bool:
-    one = _with_reviews([fixture_review(FIXTURE_FAMILIES[0])])
+def _should_engage_fewer_than_three(gate: str) -> bool:
+    one = _with_reviews([fixture_review(FIXTURE_FAMILIES[0], gate=gate)], gate=gate)
     two = _with_reviews(
-        [fixture_review(FIXTURE_FAMILIES[0]), fixture_review(FIXTURE_FAMILIES[1])]
+        [
+            fixture_review(FIXTURE_FAMILIES[0], gate=gate),
+            fixture_review(FIXTURE_FAMILIES[1], gate=gate),
+        ],
+        gate=gate,
     )
-    return _verdict_fail(one) and _verdict_fail(two)
+    return _verdict_fail(one, gate_id=gate) and _verdict_fail(two, gate_id=gate)
 
 
-def _should_engage_duplicate_family() -> bool:
+def _should_engage_duplicate_family(gate: str) -> bool:
     reviews = [
-        fixture_review(FIXTURE_FAMILIES[0]),
-        fixture_review(FIXTURE_FAMILIES[1]),
-        fixture_review(FIXTURE_FAMILIES[0], reviewer_id="reviewer-duplicate-9q11"),
+        fixture_review(FIXTURE_FAMILIES[0], gate=gate),
+        fixture_review(FIXTURE_FAMILIES[1], gate=gate),
+        fixture_review(
+            FIXTURE_FAMILIES[0],
+            gate=gate,
+            reviewer_id=f"reviewer-duplicate-{_FIXTURE_PACKET[gate]}",
+        ),
     ]
-    return _verdict_fail(_with_reviews(reviews))
+    return _verdict_fail(_with_reviews(reviews, gate=gate), gate_id=gate)
 
 
-def _should_engage_malformed_record() -> bool:
-    missing = fixture_review(FIXTURE_FAMILIES[0])
+def _should_engage_malformed_record(gate: str) -> bool:
+    missing = fixture_review(FIXTURE_FAMILIES[0], gate=gate)
     del missing["retention"]
-    extra = fixture_review(FIXTURE_FAMILIES[0])
+    extra = fixture_review(FIXTURE_FAMILIES[0], gate=gate)
     extra["extra"] = "field"
-    vacant = fixture_review(FIXTURE_FAMILIES[0], destinations=[])
-    authorised = fixture_inventory()["reviews"]
+    vacant = fixture_review(FIXTURE_FAMILIES[0], gate=gate, destinations=[])
+    authorised = fixture_inventory(gate=gate)["reviews"]
     return all(
         (
-            _verdict_fail(_with_reviews([missing, authorised[1], authorised[2]])),
-            _verdict_fail(_with_reviews([extra, authorised[1], authorised[2]])),
-            _verdict_fail(_with_reviews([vacant, authorised[1], authorised[2]])),
+            _verdict_fail(
+                _with_reviews([missing, authorised[1], authorised[2]], gate=gate),
+                gate_id=gate,
+            ),
+            _verdict_fail(
+                _with_reviews([extra, authorised[1], authorised[2]], gate=gate),
+                gate_id=gate,
+            ),
+            _verdict_fail(
+                _with_reviews([vacant, authorised[1], authorised[2]], gate=gate),
+                gate_id=gate,
+            ),
         )
     )
 
 
-def _should_engage_invalid_seal() -> bool:
-    bad = fixture_review(FIXTURE_FAMILIES[0], seal="hmac-sha256:" + "0" * 64)
-    authorised = fixture_inventory()["reviews"]
-    return _verdict_fail(_with_reviews([bad, authorised[1], authorised[2]]))
-
-
-def _should_engage_non_pass_verdict() -> bool:
-    authorised = fixture_inventory()["reviews"]
-    failed = fixture_review(FIXTURE_FAMILIES[0], verdict="FAIL")
-    waived = fixture_review(FIXTURE_FAMILIES[0], verdict="WAIVE")
+def _should_engage_invalid_seal(gate: str) -> bool:
+    bad = fixture_review(
+        FIXTURE_FAMILIES[0], gate=gate, seal="hmac-sha256:" + "0" * 64
+    )
+    authorised = fixture_inventory(gate=gate)["reviews"]
     return _verdict_fail(
-        _with_reviews([failed, authorised[1], authorised[2]])
-    ) and _verdict_fail(_with_reviews([waived, authorised[1], authorised[2]]))
+        _with_reviews([bad, authorised[1], authorised[2]], gate=gate), gate_id=gate
+    )
 
 
-def _should_engage_binding_mismatch() -> bool:
-    authorised = fixture_inventory()["reviews"]
-    gate = fixture_review(FIXTURE_FAMILIES[0], gate_id="RIGHTS_UK-02")
-    role = fixture_review(FIXTURE_FAMILIES[0], source_role="BN(O) authority anchor")
+def _should_engage_non_pass_verdict(gate: str) -> bool:
+    authorised = fixture_inventory(gate=gate)["reviews"]
+    failed = fixture_review(FIXTURE_FAMILIES[0], gate=gate, verdict="FAIL")
+    waived = fixture_review(FIXTURE_FAMILIES[0], gate=gate, verdict="WAIVE")
+    return _verdict_fail(
+        _with_reviews([failed, authorised[1], authorised[2]], gate=gate), gate_id=gate
+    ) and _verdict_fail(
+        _with_reviews([waived, authorised[1], authorised[2]], gate=gate), gate_id=gate
+    )
+
+
+def _should_engage_binding_mismatch(gate: str) -> bool:
+    authorised = fixture_inventory(gate=gate)["reviews"]
+    other = UK_02_GATE_ID if gate == GATE_ID else GATE_ID
+    other_role = BINDINGS[other][1]
+    other_endpoint = BINDINGS[other][2]
+    mismatched = fixture_review(FIXTURE_FAMILIES[0], gate=gate, gate_id=other)
+    role = fixture_review(FIXTURE_FAMILIES[0], gate=gate, source_role=other_role)
     endpoint = fixture_review(
-        FIXTURE_FAMILIES[0],
-        endpoint="https://www.gov.uk/api/content/british-national-overseas-bno-visa",
+        FIXTURE_FAMILIES[0], gate=gate, endpoint=other_endpoint
     )
-    return all(
+    engaged = all(
         (
-            _verdict_fail(_with_reviews([gate, authorised[1], authorised[2]])),
-            _verdict_fail(_with_reviews([role, authorised[1], authorised[2]])),
-            _verdict_fail(_with_reviews([endpoint, authorised[1], authorised[2]])),
+            _verdict_fail(
+                _with_reviews([mismatched, authorised[1], authorised[2]], gate=gate),
+                gate_id=gate,
+            ),
+            _verdict_fail(
+                _with_reviews([role, authorised[1], authorised[2]], gate=gate),
+                gate_id=gate,
+            ),
+            _verdict_fail(
+                _with_reviews([endpoint, authorised[1], authorised[2]], gate=gate),
+                gate_id=gate,
+            ),
         )
     )
+    if gate != UK_02_GATE_ID:
+        return engaged
+    from newsroom.increment9.proving import GateStatus
+    from newsroom.increment9.proving import assess as proving_assess
 
-
-def _should_engage_terms_digest_drift() -> bool:
-    authorised = fixture_inventory()["reviews"]
-    drifted = fixture_review(
-        FIXTURE_FAMILIES[0], terms_digest="sha256:" + "0" * 64
+    uk01 = fixture_inventory(gate=GATE_ID)
+    gates = proving_assess(
+        run_id="r1",
+        kill_switch=False,
+        no_emergency_stop=True,
+        rights_uk_02=uk01,
+        now=FIXTURE_NOW,
     )
-    return _verdict_fail(_with_reviews([drifted, authorised[1], authorised[2]]))
+    proving = next(g for g in gates if g.gate_id == UK_02_GATE_ID)
+    return engaged and _verdict_fail(uk01, gate_id=UK_02_GATE_ID) and (
+        proving.status is GateStatus.FAIL
+    )
 
 
-def _should_engage_expired_or_future() -> bool:
-    authorised = fixture_inventory()["reviews"]
-    expired = fixture_review(FIXTURE_FAMILIES[0], expires_at=FIXTURE_NOW)
-    future = fixture_review(
-        FIXTURE_FAMILIES[0], issued_at="2026-08-18T12:00:00.000001Z"
+def _should_engage_terms_digest_drift(gate: str) -> bool:
+    authorised = fixture_inventory(gate=gate)["reviews"]
+    drifted = fixture_review(
+        FIXTURE_FAMILIES[0], gate=gate, terms_digest="sha256:" + "0" * 64
     )
     return _verdict_fail(
-        _with_reviews([expired, authorised[1], authorised[2]])
-    ) and _verdict_fail(_with_reviews([future, authorised[1], authorised[2]]))
+        _with_reviews([drifted, authorised[1], authorised[2]], gate=gate),
+        gate_id=gate,
+    )
 
 
-def _should_engage_anti_namesake() -> bool:
+def _should_engage_expired_or_future(gate: str) -> bool:
+    authorised = fixture_inventory(gate=gate)["reviews"]
+    expired = fixture_review(FIXTURE_FAMILIES[0], gate=gate, expires_at=FIXTURE_NOW)
+    future = fixture_review(
+        FIXTURE_FAMILIES[0], gate=gate, issued_at="2026-08-18T12:00:00.000001Z"
+    )
+    return _verdict_fail(
+        _with_reviews([expired, authorised[1], authorised[2]], gate=gate),
+        gate_id=gate,
+    ) and _verdict_fail(
+        _with_reviews([future, authorised[1], authorised[2]], gate=gate),
+        gate_id=gate,
+    )
+
+
+def _should_engage_anti_namesake(gate: str) -> bool:
     from newsroom.increment9.proving import GateStatus
     from newsroom.increment9.proving import assess as proving_assess
     from scripts.increment9_shadow_campaign import required_gate_ids
 
     namesake_closed = _refused(
-        lambda: refuse_namesake_satisfaction(required_gate_ids())
+        lambda: refuse_namesake_satisfaction(required_gate_ids(), gate=gate)
     )
-    boolean_closed = _refused(lambda: refuse_boolean(True)) and _verdict_fail(True)
+    boolean_closed = _refused(lambda: refuse_boolean(True)) and _verdict_fail(
+        True, gate_id=gate
+    )
     record_closed = _refused(
         lambda: refuse_gate_record_namesake(
             {"reviewer_families": list(FIXTURE_FAMILIES), "subject_digest": "sha256:" + "0" * 64}
         )
     )
     gates = proving_assess(run_id="r1", kill_switch=False, no_emergency_stop=True)
-    proving = next(g for g in gates if g.gate_id == GATE_ID)
-    listed = GATE_ID in required_gate_ids()
-    return (
+    proving = next(g for g in gates if g.gate_id == gate)
+    listed = gate in required_gate_ids()
+    engaged = (
         namesake_closed
         and boolean_closed
         and record_closed
@@ -715,6 +830,18 @@ def _should_engage_anti_namesake() -> bool:
         and proving.status is GateStatus.FAIL
         and proving.reason == "inventory is required"
     )
+    if gate != UK_02_GATE_ID:
+        return engaged
+    isolated = proving_assess(
+        run_id="r1",
+        kill_switch=False,
+        no_emergency_stop=True,
+        rights=fixture_inventory(gate=GATE_ID),
+        now=FIXTURE_NOW,
+    )
+    uk01 = next(g for g in isolated if g.gate_id == GATE_ID)
+    uk02 = next(g for g in isolated if g.gate_id == UK_02_GATE_ID)
+    return engaged and uk01.status is GateStatus.PASS and uk02.status is GateStatus.FAIL
 
 
 def _refusal_payload(
@@ -732,9 +859,9 @@ def _refusal_payload(
     ]
 
 
-def _demonstrate(inventory: Mapping[str, object]) -> RightsVerdict:
-    first = assess_rights(GATE_ID, inventory=inventory, now=FIXTURE_NOW)
-    second = assess_rights(GATE_ID, inventory=inventory, now=FIXTURE_NOW)
+def _demonstrate(inventory: Mapping[str, object], *, gate: str = GATE_ID) -> RightsVerdict:
+    first = assess_rights(gate, inventory=inventory, now=FIXTURE_NOW)
+    second = assess_rights(gate, inventory=inventory, now=FIXTURE_NOW)
     if first.status != "PASS" or first != second:
         raise QualificationError("inventory is required")
     from newsroom.increment9.proving import GateStatus
@@ -744,10 +871,10 @@ def _demonstrate(inventory: Mapping[str, object]) -> RightsVerdict:
         run_id="r1",
         kill_switch=False,
         no_emergency_stop=True,
-        rights=inventory,
         now=FIXTURE_NOW,
+        **{_PROVING_INVENTORY_KW[gate]: inventory},
     )
-    proving = next(g for g in gates if g.gate_id == GATE_ID)
+    proving = next(g for g in gates if g.gate_id == gate)
     if proving.status is not GateStatus.PASS:
         raise QualificationError("inventory is required")
     return first
@@ -760,10 +887,10 @@ def _evidence_body(
 ) -> dict[str, object]:
     return {
         "deterministic_pass": True,
-        "gate_id": GATE_ID,
+        "gate_id": bound.gate_id,
         "pass_derivation": {
             "endpoint": bound.endpoint,
-            "gate_id": GATE_ID,
+            "gate_id": bound.gate_id,
             "reviewer_count": 3,
             "reviewer_families": list(bound.families),
             "reviewer_ids": list(bound.reviewer_ids),
@@ -785,10 +912,12 @@ def assess(
     gate: str = GATE_ID,
     rights_inventory: Mapping[str, object] | None = None,
 ) -> QualificationEvidence:
-    """Assess that RIGHTS_UK-01 refusal classes engage deterministically."""
+    """Assess that an emitted Rights Gate's refusal classes engage deterministically."""
 
-    if gate != GATE_ID:
-        raise QualificationError("this packet emits RIGHTS_UK-01 only")
+    if gate not in EMITTED_GATES:
+        raise QualificationError(
+            "this packet emits RIGHTS_UK-01 and RIGHTS_UK-02 only"
+        )
     _reject_forbidden(inventory)
     surfaces = _refusal_surfaces(inventory)
     _require_hmac_key(inventory)
@@ -799,7 +928,7 @@ def assess(
             raise QualificationError("inventory is required") from exc
     else:
         bound_inventory = _load_inventory(inventory)
-    writer = default_probe if probe is None else probe
+    writer = probe_for(gate) if probe is None else probe
     before = {rc: _digest_file(path) for rc, path in surfaces}
     engaged_count = 0
     for rc, path in surfaces:
@@ -813,7 +942,7 @@ def assess(
             f"not all refusals engaged: {engaged_count}/{len(REFUSAL_CLASSES)}"
         )
     records = tuple(
-        RefusalDigest(rc, before[rc], after[rc], True, PROBE_COUNTS[rc])
+        RefusalDigest(rc, before[rc], after[rc], True, PROBE_COUNTS_BY_GATE[gate][rc])
         for rc in REFUSAL_CLASSES
     )
     raw = {
@@ -821,10 +950,10 @@ def assess(
         "now": bound_inventory["now"],
         "reviews": bound_inventory["reviews"],
     }
-    bound = _demonstrate(raw)
+    bound = _demonstrate(raw, gate=gate)
     payload = _evidence_body(bound, records, engaged_count)
     return QualificationEvidence(
-        gate_id=GATE_ID,
+        gate_id=gate,
         status="PASS",
         endpoint=str(bound.endpoint),
         source_role=str(bound.source_role),
