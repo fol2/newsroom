@@ -46,6 +46,10 @@ from newsroom.increment9.prefunded_wallet import (
     bind_campaign_prefunded_wallet,
 )
 from newsroom.increment9.protected_storage import write_protected_artefact
+from newsroom.increment9.provider_terms import (
+    ProviderTermsError,
+    bind_campaign_provider_terms,
+)
 
 GATE_RECORD_SCHEMA = "newsroom.increment9.campaign-gate.v1"
 CAMPAIGN_BUNDLE_SCHEMA = "newsroom.increment9.campaign-evidence-bundle.v1"
@@ -369,6 +373,11 @@ def _gate_findings(
                 bind_campaign_prefunded_wallet()
             except PrefundedWalletError:
                 findings.append("PREFUNDED_WALLET_UNBOUND")
+        if gate_id == "PROVIDER_TERMS_CURRENT":
+            try:
+                bind_campaign_provider_terms()
+            except ProviderTermsError:
+                findings.append("PROVIDER_TERMS_UNBOUND")
     return sorted(set(findings))
 
 
