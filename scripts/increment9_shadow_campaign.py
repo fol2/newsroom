@@ -33,6 +33,10 @@ from newsroom.increment9.credential_scopes import (
     CredentialScopeError,
     bind_campaign_credential_classes,
 )
+from newsroom.increment9.egress_allowlist import (
+    EgressAllowlistError,
+    bind_campaign_egress_allowlist,
+)
 from newsroom.increment9.plan import (
     INCREMENT_9_SHADOW_PLAN,
     INCREMENT_9_SHADOW_PLAN_DIGEST,
@@ -351,6 +355,11 @@ def _gate_findings(
                 bind_campaign_credential_classes(record.credential_classes)
             except CredentialScopeError:
                 findings.append("BASELINE_CREDENTIAL_CLASSES_DIFFER")
+        if gate_id == "EGRESS_ALLOWLIST_ENFORCED":
+            try:
+                bind_campaign_egress_allowlist()
+            except EgressAllowlistError:
+                findings.append("EGRESS_ALLOWLIST_UNBOUND")
     return sorted(set(findings))
 
 
