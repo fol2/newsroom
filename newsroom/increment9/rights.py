@@ -2,7 +2,7 @@
 
 Parameterised Rights Review validator for the ten OD-001 Rights Gates.
 This module emits Qualification Evidence only for RIGHTS_UK-01,
-RIGHTS_UK-02 and RIGHTS_UK-03.
+RIGHTS_UK-02, RIGHTS_UK-03 and RIGHTS_UK-05.
 
 CI fixture digests only. Does not mint First I/O Gate Records. Loading this
 module performs no network I/O and no production writes.
@@ -36,6 +36,7 @@ SCHEMA_VERSION = "newsroom.increment9.qualification-evidence.v1"
 GATE_ID = "RIGHTS_UK-01"
 UK_02_GATE_ID = "RIGHTS_UK-02"
 UK_03_GATE_ID = "RIGHTS_UK-03"
+UK_05_GATE_ID = "RIGHTS_UK-05"
 INVENTORY_NAME = "inventory.json"
 HMAC_KEY_NAME = "hmac.key"
 FIXTURE_HMAC_KEY = b"newsroom.increment9.rights.fixture-hmac-key"
@@ -51,6 +52,9 @@ UK_02_TERMS_URL = "https://terms.govuk.fixture.invalid/uk-02"
 UK_02_TERMS_BYTES = b"newsroom.increment9.rights.uk-02.fixture-terms\n"
 UK_03_TERMS_URL = "https://terms.govuk.fixture.invalid/uk-03"
 UK_03_TERMS_BYTES = b"newsroom.increment9.rights.uk-03.fixture-terms\n"
+UK_05_ACCESS_METHOD = FIXTURE_ACCESS_METHOD
+UK_05_TERMS_URL = "https://terms.govuk.fixture.invalid/uk-05"
+UK_05_TERMS_BYTES = b"newsroom.increment9.rights.uk-05.fixture-terms\n"
 FIXTURE_DATA_CLASS = "PUBLIC_OFFICIAL_PUBLICATION_METADATA"
 FIXTURE_DESTINATIONS = ("TEN_APPROVED_SOURCE_ENDPOINTS",)
 FIXTURE_RETENTION = "RAW_HTTP_MAX_7_DAYS"
@@ -70,8 +74,14 @@ UK_02_ENDPOINT = (
 UK_02_SOURCE_ROLE = "BN(O) authority anchor"
 UK_03_ENDPOINT = "https://www.gov.uk/api/content/guidance/immigration-rules"
 UK_03_SOURCE_ROLE = "Immigration Rules authority anchor"
+UK_05_ENDPOINT = (
+    "https://www.gov.uk/search/all.atom?organisations%5B%5D=department-for-education"
+    "&organisations%5B%5D=ofqual&order=updated-newest"
+)
+UK_05_SOURCE_ROLE = "DfE and Ofqual education anchor"
 _EMITTED_ONLY = (
-    "this packet emits RIGHTS_UK-01, RIGHTS_UK-02 and RIGHTS_UK-03 only"
+    "this packet emits RIGHTS_UK-01, RIGHTS_UK-02, RIGHTS_UK-03 and "
+    "RIGHTS_UK-05 only"
 )
 
 # Exact PORTFOLIO endpoints. Tests assert equality with proving.SOURCE_URLS.
@@ -104,12 +114,7 @@ BINDINGS: dict[str, tuple[str, str, str]] = {
     "RIGHTS_UK-01": ("UK-01", UK_01_SOURCE_ROLE, UK_01_ENDPOINT),
     "RIGHTS_UK-02": ("UK-02", UK_02_SOURCE_ROLE, UK_02_ENDPOINT),
     UK_03_GATE_ID: ("UK-03", UK_03_SOURCE_ROLE, UK_03_ENDPOINT),
-    "RIGHTS_UK-05": (
-        "UK-05",
-        "DfE and Ofqual education anchor",
-        "https://www.gov.uk/search/all.atom?organisations%5B%5D=department-for-education"
-        "&organisations%5B%5D=ofqual&order=updated-newest",
-    ),
+    UK_05_GATE_ID: ("UK-05", UK_05_SOURCE_ROLE, UK_05_ENDPOINT),
     "RIGHTS_UK-10": (
         "UK-10",
         "Met Office warning anchor",
@@ -141,7 +146,7 @@ PROBE_COUNTS = {
     "EXPIRED_OR_FUTURE": 2,
     "ANTI_NAMESAKE": 3,
 }
-EMITTED_GATES = frozenset({GATE_ID, UK_02_GATE_ID, UK_03_GATE_ID})
+EMITTED_GATES = frozenset({GATE_ID, UK_02_GATE_ID, UK_03_GATE_ID, UK_05_GATE_ID})
 PACKAGE_FIXTURES = Path(__file__).parent / "fixtures" / "increment9q11_rights_uk_01"
 PACKAGE_FIXTURES_UK_02 = (
     Path(__file__).parent / "fixtures" / "increment9q12_rights_uk_02"
@@ -149,40 +154,50 @@ PACKAGE_FIXTURES_UK_02 = (
 PACKAGE_FIXTURES_UK_03 = (
     Path(__file__).parent / "fixtures" / "increment9q13_rights_uk_03"
 )
+PACKAGE_FIXTURES_UK_05 = (
+    Path(__file__).parent / "fixtures" / "increment9q14_rights_uk_05"
+)
 PACKAGE_FIXTURES_BY_GATE = {
     GATE_ID: PACKAGE_FIXTURES,
     UK_02_GATE_ID: PACKAGE_FIXTURES_UK_02,
     UK_03_GATE_ID: PACKAGE_FIXTURES_UK_03,
+    UK_05_GATE_ID: PACKAGE_FIXTURES_UK_05,
 }
 PROBE_COUNTS_BY_GATE = {
     GATE_ID: PROBE_COUNTS,
     UK_02_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 4},
     UK_03_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 4},
+    UK_05_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 4},
 }
 _FIXTURE_ACCESS = {
     GATE_ID: FIXTURE_ACCESS_METHOD,
     UK_02_GATE_ID: UK_02_ACCESS_METHOD,
     UK_03_GATE_ID: UK_03_ACCESS_METHOD,
+    UK_05_GATE_ID: UK_05_ACCESS_METHOD,
 }
 _FIXTURE_TERMS = {
     GATE_ID: (FIXTURE_TERMS_URL, FIXTURE_TERMS_BYTES),
     UK_02_GATE_ID: (UK_02_TERMS_URL, UK_02_TERMS_BYTES),
     UK_03_GATE_ID: (UK_03_TERMS_URL, UK_03_TERMS_BYTES),
+    UK_05_GATE_ID: (UK_05_TERMS_URL, UK_05_TERMS_BYTES),
 }
 _FIXTURE_PACKET = {
     GATE_ID: "9q11",
     UK_02_GATE_ID: "9q12",
     UK_03_GATE_ID: "9q13",
+    UK_05_GATE_ID: "9q14",
 }
 _PROVING_INVENTORY_KW = {
     GATE_ID: "rights",
     UK_02_GATE_ID: "rights_uk_02",
     UK_03_GATE_ID: "rights_uk_03",
+    UK_05_GATE_ID: "rights_uk_05",
 }
 _CROSS_OTHER = {
     GATE_ID: UK_02_GATE_ID,
     UK_02_GATE_ID: GATE_ID,
     UK_03_GATE_ID: UK_02_GATE_ID,
+    UK_05_GATE_ID: GATE_ID,
 }
 _MARKERS = {
     "NO_RECORDS": b"no_records",
@@ -859,8 +874,10 @@ def _should_engage_anti_namesake(gate: str) -> bool:
         "rights": fixture_inventory(gate=GATE_ID),
         "now": FIXTURE_NOW,
     }
-    if gate == UK_03_GATE_ID:
+    if gate in {UK_03_GATE_ID, UK_05_GATE_ID}:
         extra["rights_uk_02"] = fixture_inventory(gate=UK_02_GATE_ID)
+    if gate == UK_05_GATE_ID:
+        extra["rights_uk_03"] = fixture_inventory(gate=UK_03_GATE_ID)
     isolated = proving_assess(
         run_id="r1",
         kill_switch=False,
@@ -874,7 +891,10 @@ def _should_engage_anti_namesake(gate: str) -> bool:
     if gate == UK_02_GATE_ID:
         return engaged
     uk02 = next(g for g in isolated if g.gate_id == UK_02_GATE_ID)
-    return engaged and uk02.status is GateStatus.PASS
+    if gate == UK_03_GATE_ID:
+        return engaged and uk02.status is GateStatus.PASS
+    uk03 = next(g for g in isolated if g.gate_id == UK_03_GATE_ID)
+    return engaged and uk02.status is GateStatus.PASS and uk03.status is GateStatus.PASS
 
 
 def _refusal_payload(
