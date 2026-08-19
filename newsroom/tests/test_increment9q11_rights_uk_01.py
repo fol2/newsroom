@@ -204,7 +204,7 @@ def test_cli_assess_is_fail_closed_without_inventory_and_writes_evidence(
         )
         == 2
     )
-    assert _CLI.main(["assess", "--gate", "RIGHTS_HK-02"]) == 2
+    assert _CLI.main(["assess", "--gate", "RIGHTS_HK-04"]) == 2
     output = tmp_path / "evidence.json"
     assert _CLI.main(["assess", "--gate", GATE_ID, "--output", str(output)]) == 0
     raw = output.read_bytes()
@@ -369,7 +369,7 @@ def test_bindings_match_portfolio_and_proving_assess_wires_uk_01_uk_02_and_uk_03
     assert GATE_ID in ids
     assert "RIGHTS_UK-02" in ids
     assert "RIGHTS_UK-03" in ids
-    assert "RIGHTS_HK-02" not in ids
+    assert "RIGHTS_HK-04" not in ids
 
 
 def test_no_parallel_rights_modules_were_added() -> None:

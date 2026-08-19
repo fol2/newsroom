@@ -26,6 +26,7 @@ from newsroom.increment9.prospective_run_authority import (
 from newsroom.increment9.rights import (
     GATE_ID as RIGHTS_UK_01,
     HK_01_GATE_ID as RIGHTS_HK_01,
+    HK_02_GATE_ID as RIGHTS_HK_02,
     UK_02_GATE_ID as RIGHTS_UK_02,
     UK_03_GATE_ID as RIGHTS_UK_03,
     UK_05_GATE_ID as RIGHTS_UK_05,
@@ -82,6 +83,7 @@ PROVING_GATES = (
     "RIGHTS_UK-05",
     "RIGHTS_UK-10",
     "RIGHTS_HK-01",
+    "RIGHTS_HK-02",
     "OPENROUTER_UNUSED",
 )
 
@@ -223,6 +225,7 @@ def assess(
     rights_uk_05: object | None = None,
     rights_uk_10: object | None = None,
     rights_hk_01: object | None = None,
+    rights_hk_02: object | None = None,
     now: str | None = None,
 ) -> tuple[Gate, ...]:
     if type(run_id) is not str or not run_id.strip():
@@ -267,6 +270,12 @@ def assess(
     rights_hk_01_status = (
         GateStatus.PASS if rights_hk_01_verdict.status == "PASS" else GateStatus.FAIL
     )
+    rights_hk_02_verdict = assess_rights(
+        RIGHTS_HK_02, inventory=rights_hk_02, now=now
+    )
+    rights_hk_02_status = (
+        GateStatus.PASS if rights_hk_02_verdict.status == "PASS" else GateStatus.FAIL
+    )
     return (
         Gate("PORTFOLIO_BOUND", GateStatus.PASS if SOURCE_IDS == tuple(item[0] for item in PORTFOLIO) else GateStatus.FAIL, "OD-001 ten"),
         Gate("EGRESS_ALLOWLIST_ENFORCED", GateStatus.PASS if allowlist_ok else GateStatus.FAIL, ",".join(sorted(ALLOWED_HOSTS))),
@@ -284,6 +293,7 @@ def assess(
         Gate(RIGHTS_UK_05, rights_uk_05_status, rights_uk_05_verdict.reason),
         Gate(RIGHTS_UK_10, rights_uk_10_status, rights_uk_10_verdict.reason),
         Gate(RIGHTS_HK_01, rights_hk_01_status, rights_hk_01_verdict.reason),
+        Gate(RIGHTS_HK_02, rights_hk_02_status, rights_hk_02_verdict.reason),
         Gate("OPENROUTER_UNUSED", GateStatus.PASS, "proving must not call OpenRouter"),
     )
 
@@ -354,6 +364,7 @@ def run_proving(
     rights_uk_05: object | None = None,
     rights_uk_10: object | None = None,
     rights_hk_01: object | None = None,
+    rights_hk_02: object | None = None,
     now: str | None = None,
 ) -> ProvingReport:
     gates = assess(
@@ -367,6 +378,7 @@ def run_proving(
         rights_uk_05=rights_uk_05,
         rights_uk_10=rights_uk_10,
         rights_hk_01=rights_hk_01,
+        rights_hk_02=rights_hk_02,
         now=now,
     )
     if any(gate.status is GateStatus.FAIL for gate in gates):
