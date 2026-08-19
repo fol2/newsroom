@@ -2,14 +2,14 @@
 
 Parameterised Rights Review validator for the ten OD-001 Rights Gates.
 This module emits Qualification Evidence only for RIGHTS_UK-01,
-RIGHTS_UK-02, RIGHTS_UK-03 and RIGHTS_UK-05.
+RIGHTS_UK-02, RIGHTS_UK-03, RIGHTS_UK-05 and RIGHTS_UK-10.
 
 CI fixture digests only. Does not mint First I/O Gate Records. Loading this
 module performs no network I/O and no production writes.
 
 Each emitted Rights Gate PASSes only through three sealed, independent AI
 Rights Review Records for that gate's exact OD-001 source role and exact
-PORTFOLIO endpoint. The validator is wired into proving.assess; a boolean, a
+bound endpoint. The validator is wired into proving.assess; a boolean, a
 sealer listing, or a Gate Record namesake cannot PASS.
 """
 
@@ -37,6 +37,7 @@ GATE_ID = "RIGHTS_UK-01"
 UK_02_GATE_ID = "RIGHTS_UK-02"
 UK_03_GATE_ID = "RIGHTS_UK-03"
 UK_05_GATE_ID = "RIGHTS_UK-05"
+UK_10_GATE_ID = "RIGHTS_UK-10"
 INVENTORY_NAME = "inventory.json"
 HMAC_KEY_NAME = "hmac.key"
 FIXTURE_HMAC_KEY = b"newsroom.increment9.rights.fixture-hmac-key"
@@ -55,6 +56,9 @@ UK_03_TERMS_BYTES = b"newsroom.increment9.rights.uk-03.fixture-terms\n"
 UK_05_ACCESS_METHOD = FIXTURE_ACCESS_METHOD
 UK_05_TERMS_URL = "https://terms.govuk.fixture.invalid/uk-05"
 UK_05_TERMS_BYTES = b"newsroom.increment9.rights.uk-05.fixture-terms\n"
+UK_10_ACCESS_METHOD = "HTTPS_GET_PUBLIC_WARNINGS_RSS"
+UK_10_TERMS_URL = "https://terms.metoffice.fixture.invalid/uk-10"
+UK_10_TERMS_BYTES = b"newsroom.increment9.rights.uk-10.fixture-terms\n"
 FIXTURE_DATA_CLASS = "PUBLIC_OFFICIAL_PUBLICATION_METADATA"
 FIXTURE_DESTINATIONS = ("TEN_APPROVED_SOURCE_ENDPOINTS",)
 FIXTURE_RETENTION = "RAW_HTTP_MAX_7_DAYS"
@@ -79,12 +83,20 @@ UK_05_ENDPOINT = (
     "&organisations%5B%5D=ofqual&order=updated-newest"
 )
 UK_05_SOURCE_ROLE = "DfE and Ofqual education anchor"
+UK_10_ENDPOINT = (
+    "https://weather.metoffice.gov.uk/public/data/PWSCache/WarningsRSS/Region/UK"
+)
+UK_10_NINE_P_ENDPOINT = (
+    "https://www.metoffice.gov.uk/public/data/PWSCache/WarningsRSS/Region/UK"
+)
+UK_10_SOURCE_ROLE = "Met Office warning anchor"
 _EMITTED_ONLY = (
-    "this packet emits RIGHTS_UK-01, RIGHTS_UK-02, RIGHTS_UK-03 and "
-    "RIGHTS_UK-05 only"
+    "this packet emits RIGHTS_UK-01, RIGHTS_UK-02, RIGHTS_UK-03, "
+    "RIGHTS_UK-05 and RIGHTS_UK-10 only"
 )
 
-# Exact PORTFOLIO endpoints. Tests assert equality with proving.SOURCE_URLS.
+# Exact OD-001 endpoints. Tests assert equality with proving.SOURCE_URLS
+# except RIGHTS_UK-10, which binds the weather host (#578), not the 9P www host.
 BINDINGS: dict[str, tuple[str, str, str]] = {
     "RIGHTS_HK-01": (
         "HK-01",
@@ -115,11 +127,7 @@ BINDINGS: dict[str, tuple[str, str, str]] = {
     "RIGHTS_UK-02": ("UK-02", UK_02_SOURCE_ROLE, UK_02_ENDPOINT),
     UK_03_GATE_ID: ("UK-03", UK_03_SOURCE_ROLE, UK_03_ENDPOINT),
     UK_05_GATE_ID: ("UK-05", UK_05_SOURCE_ROLE, UK_05_ENDPOINT),
-    "RIGHTS_UK-10": (
-        "UK-10",
-        "Met Office warning anchor",
-        "https://www.metoffice.gov.uk/public/data/PWSCache/WarningsRSS/Region/UK",
-    ),
+    UK_10_GATE_ID: ("UK-10", UK_10_SOURCE_ROLE, UK_10_ENDPOINT),
 }
 
 REFUSAL_CLASSES = (
@@ -146,7 +154,9 @@ PROBE_COUNTS = {
     "EXPIRED_OR_FUTURE": 2,
     "ANTI_NAMESAKE": 3,
 }
-EMITTED_GATES = frozenset({GATE_ID, UK_02_GATE_ID, UK_03_GATE_ID, UK_05_GATE_ID})
+EMITTED_GATES = frozenset(
+    {GATE_ID, UK_02_GATE_ID, UK_03_GATE_ID, UK_05_GATE_ID, UK_10_GATE_ID}
+)
 PACKAGE_FIXTURES = Path(__file__).parent / "fixtures" / "increment9q11_rights_uk_01"
 PACKAGE_FIXTURES_UK_02 = (
     Path(__file__).parent / "fixtures" / "increment9q12_rights_uk_02"
@@ -157,47 +167,57 @@ PACKAGE_FIXTURES_UK_03 = (
 PACKAGE_FIXTURES_UK_05 = (
     Path(__file__).parent / "fixtures" / "increment9q14_rights_uk_05"
 )
+PACKAGE_FIXTURES_UK_10 = (
+    Path(__file__).parent / "fixtures" / "increment9q15_rights_uk_10"
+)
 PACKAGE_FIXTURES_BY_GATE = {
     GATE_ID: PACKAGE_FIXTURES,
     UK_02_GATE_ID: PACKAGE_FIXTURES_UK_02,
     UK_03_GATE_ID: PACKAGE_FIXTURES_UK_03,
     UK_05_GATE_ID: PACKAGE_FIXTURES_UK_05,
+    UK_10_GATE_ID: PACKAGE_FIXTURES_UK_10,
 }
 PROBE_COUNTS_BY_GATE = {
     GATE_ID: PROBE_COUNTS,
     UK_02_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 4},
     UK_03_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 4},
     UK_05_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 4},
+    UK_10_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 5},
 }
 _FIXTURE_ACCESS = {
     GATE_ID: FIXTURE_ACCESS_METHOD,
     UK_02_GATE_ID: UK_02_ACCESS_METHOD,
     UK_03_GATE_ID: UK_03_ACCESS_METHOD,
     UK_05_GATE_ID: UK_05_ACCESS_METHOD,
+    UK_10_GATE_ID: UK_10_ACCESS_METHOD,
 }
 _FIXTURE_TERMS = {
     GATE_ID: (FIXTURE_TERMS_URL, FIXTURE_TERMS_BYTES),
     UK_02_GATE_ID: (UK_02_TERMS_URL, UK_02_TERMS_BYTES),
     UK_03_GATE_ID: (UK_03_TERMS_URL, UK_03_TERMS_BYTES),
     UK_05_GATE_ID: (UK_05_TERMS_URL, UK_05_TERMS_BYTES),
+    UK_10_GATE_ID: (UK_10_TERMS_URL, UK_10_TERMS_BYTES),
 }
 _FIXTURE_PACKET = {
     GATE_ID: "9q11",
     UK_02_GATE_ID: "9q12",
     UK_03_GATE_ID: "9q13",
     UK_05_GATE_ID: "9q14",
+    UK_10_GATE_ID: "9q15",
 }
 _PROVING_INVENTORY_KW = {
     GATE_ID: "rights",
     UK_02_GATE_ID: "rights_uk_02",
     UK_03_GATE_ID: "rights_uk_03",
     UK_05_GATE_ID: "rights_uk_05",
+    UK_10_GATE_ID: "rights_uk_10",
 }
 _CROSS_OTHER = {
     GATE_ID: UK_02_GATE_ID,
     UK_02_GATE_ID: GATE_ID,
     UK_03_GATE_ID: UK_02_GATE_ID,
     UK_05_GATE_ID: GATE_ID,
+    UK_10_GATE_ID: GATE_ID,
 }
 _MARKERS = {
     "NO_RECORDS": b"no_records",
@@ -810,8 +830,30 @@ def _should_engage_binding_mismatch(gate: str) -> bool:
         **{_PROVING_INVENTORY_KW[gate]: sibling},
     )
     proving = next(g for g in gates if g.gate_id == gate)
-    return engaged and _verdict_fail(sibling, gate_id=gate) and (
+    crossed = engaged and _verdict_fail(sibling, gate_id=gate) and (
         proving.status is GateStatus.FAIL
+    )
+    if gate != UK_10_GATE_ID:
+        return crossed
+    aliased = _with_reviews(
+        [
+            fixture_review(family, gate=gate, endpoint=UK_10_NINE_P_ENDPOINT)
+            for family in FIXTURE_FAMILIES
+        ],
+        gate=gate,
+    )
+    alias_gates = proving_assess(
+        run_id="r1",
+        kill_switch=False,
+        no_emergency_stop=True,
+        now=FIXTURE_NOW,
+        **{_PROVING_INVENTORY_KW[gate]: aliased},
+    )
+    alias_proving = next(g for g in alias_gates if g.gate_id == gate)
+    return (
+        crossed
+        and _verdict_fail(aliased, gate_id=gate)
+        and alias_proving.status is GateStatus.FAIL
     )
 
 
@@ -874,10 +916,13 @@ def _should_engage_anti_namesake(gate: str) -> bool:
         "rights": fixture_inventory(gate=GATE_ID),
         "now": FIXTURE_NOW,
     }
-    if gate in {UK_03_GATE_ID, UK_05_GATE_ID}:
-        extra["rights_uk_02"] = fixture_inventory(gate=UK_02_GATE_ID)
-    if gate == UK_05_GATE_ID:
-        extra["rights_uk_03"] = fixture_inventory(gate=UK_03_GATE_ID)
+    prior = {
+        UK_03_GATE_ID: (UK_02_GATE_ID,),
+        UK_05_GATE_ID: (UK_02_GATE_ID, UK_03_GATE_ID),
+        UK_10_GATE_ID: (UK_02_GATE_ID, UK_03_GATE_ID, UK_05_GATE_ID),
+    }
+    for sibling in prior.get(gate, ()):
+        extra[_PROVING_INVENTORY_KW[sibling]] = fixture_inventory(gate=sibling)
     isolated = proving_assess(
         run_id="r1",
         kill_switch=False,
@@ -888,13 +933,10 @@ def _should_engage_anti_namesake(gate: str) -> bool:
     target = next(g for g in isolated if g.gate_id == gate)
     if uk01.status is not GateStatus.PASS or target.status is not GateStatus.FAIL:
         return False
-    if gate == UK_02_GATE_ID:
-        return engaged
-    uk02 = next(g for g in isolated if g.gate_id == UK_02_GATE_ID)
-    if gate == UK_03_GATE_ID:
-        return engaged and uk02.status is GateStatus.PASS
-    uk03 = next(g for g in isolated if g.gate_id == UK_03_GATE_ID)
-    return engaged and uk02.status is GateStatus.PASS and uk03.status is GateStatus.PASS
+    return engaged and all(
+        next(g for g in isolated if g.gate_id == sibling).status is GateStatus.PASS
+        for sibling in prior.get(gate, ())
+    )
 
 
 def _refusal_payload(
