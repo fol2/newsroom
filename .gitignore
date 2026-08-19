@@ -9,7 +9,7 @@ venv/
 !.env.example
 newsroom/rss_feeds.yaml
 secrets/
-data/
+/data/
 logs/
 workspace/jobs/
 *.sqlite3
