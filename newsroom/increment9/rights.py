@@ -2,7 +2,8 @@
 
 Parameterised Rights Review validator for the ten OD-001 Rights Gates.
 This module emits Qualification Evidence only for RIGHTS_UK-01,
-RIGHTS_UK-02, RIGHTS_UK-03, RIGHTS_UK-05, RIGHTS_UK-10 and RIGHTS_HK-01.
+RIGHTS_UK-02, RIGHTS_UK-03, RIGHTS_UK-05, RIGHTS_UK-10, RIGHTS_HK-01
+and RIGHTS_HK-02.
 
 CI fixture digests only. Does not mint First I/O Gate Records. Loading this
 module performs no network I/O and no production writes.
@@ -39,6 +40,7 @@ UK_03_GATE_ID = "RIGHTS_UK-03"
 UK_05_GATE_ID = "RIGHTS_UK-05"
 UK_10_GATE_ID = "RIGHTS_UK-10"
 HK_01_GATE_ID = "RIGHTS_HK-01"
+HK_02_GATE_ID = "RIGHTS_HK-02"
 INVENTORY_NAME = "inventory.json"
 HMAC_KEY_NAME = "hmac.key"
 FIXTURE_HMAC_KEY = b"newsroom.increment9.rights.fixture-hmac-key"
@@ -63,6 +65,9 @@ UK_10_TERMS_BYTES = b"newsroom.increment9.rights.uk-10.fixture-terms\n"
 HK_01_ACCESS_METHOD = "HTTPS_GET_PUBLIC_TC_RSS_XML"
 HK_01_TERMS_URL = "https://terms.newsgovhk.fixture.invalid/hk-01"
 HK_01_TERMS_BYTES = b"newsroom.increment9.rights.hk-01.fixture-terms\n"
+HK_02_ACCESS_METHOD = "HTTPS_GET_PUBLIC_HKO_WARNSUM_JSON"
+HK_02_TERMS_URL = "https://terms.hko.fixture.invalid/hk-02"
+HK_02_TERMS_BYTES = b"newsroom.increment9.rights.hk-02.fixture-terms\n"
 FIXTURE_DATA_CLASS = "PUBLIC_OFFICIAL_PUBLICATION_METADATA"
 FIXTURE_DESTINATIONS = ("TEN_APPROVED_SOURCE_ENDPOINTS",)
 FIXTURE_RETENTION = "RAW_HTTP_MAX_7_DAYS"
@@ -96,9 +101,13 @@ UK_10_NINE_P_ENDPOINT = (
 UK_10_SOURCE_ROLE = "Met Office warning anchor"
 HK_01_ENDPOINT = "https://www.news.gov.hk/tc/common/html/topstories.rss.xml"
 HK_01_SOURCE_ROLE = "news.gov.hk official editorial radar"
+HK_02_ENDPOINT = (
+    "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=warnsum&lang=tc"
+)
+HK_02_SOURCE_ROLE = "HKO warning anchor"
 _EMITTED_ONLY = (
     "this packet emits RIGHTS_UK-01, RIGHTS_UK-02, RIGHTS_UK-03, "
-    "RIGHTS_UK-05, RIGHTS_UK-10 and RIGHTS_HK-01 only"
+    "RIGHTS_UK-05, RIGHTS_UK-10, RIGHTS_HK-01 and RIGHTS_HK-02 only"
 )
 
 # Exact OD-001 endpoints. Tests assert equality with proving.SOURCE_URLS
@@ -109,10 +118,10 @@ BINDINGS: dict[str, tuple[str, str, str]] = {
         HK_01_SOURCE_ROLE,
         HK_01_ENDPOINT,
     ),
-    "RIGHTS_HK-02": (
+    HK_02_GATE_ID: (
         "HK-02",
-        "HKO warning anchor",
-        "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=warnsum&lang=tc",
+        HK_02_SOURCE_ROLE,
+        HK_02_ENDPOINT,
     ),
     "RIGHTS_HK-04": (
         "HK-04",
@@ -168,6 +177,7 @@ EMITTED_GATES = frozenset(
         UK_05_GATE_ID,
         UK_10_GATE_ID,
         HK_01_GATE_ID,
+        HK_02_GATE_ID,
     }
 )
 PACKAGE_FIXTURES = Path(__file__).parent / "fixtures" / "increment9q11_rights_uk_01"
@@ -186,6 +196,9 @@ PACKAGE_FIXTURES_UK_10 = (
 PACKAGE_FIXTURES_HK_01 = (
     Path(__file__).parent / "fixtures" / "increment9q16_rights_hk_01"
 )
+PACKAGE_FIXTURES_HK_02 = (
+    Path(__file__).parent / "fixtures" / "increment9q17_rights_hk_02"
+)
 PACKAGE_FIXTURES_BY_GATE = {
     GATE_ID: PACKAGE_FIXTURES,
     UK_02_GATE_ID: PACKAGE_FIXTURES_UK_02,
@@ -193,6 +206,7 @@ PACKAGE_FIXTURES_BY_GATE = {
     UK_05_GATE_ID: PACKAGE_FIXTURES_UK_05,
     UK_10_GATE_ID: PACKAGE_FIXTURES_UK_10,
     HK_01_GATE_ID: PACKAGE_FIXTURES_HK_01,
+    HK_02_GATE_ID: PACKAGE_FIXTURES_HK_02,
 }
 PROBE_COUNTS_BY_GATE = {
     GATE_ID: PROBE_COUNTS,
@@ -201,6 +215,7 @@ PROBE_COUNTS_BY_GATE = {
     UK_05_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 4},
     UK_10_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 5},
     HK_01_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 4},
+    HK_02_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 4},
 }
 _FIXTURE_ACCESS = {
     GATE_ID: FIXTURE_ACCESS_METHOD,
@@ -209,6 +224,7 @@ _FIXTURE_ACCESS = {
     UK_05_GATE_ID: UK_05_ACCESS_METHOD,
     UK_10_GATE_ID: UK_10_ACCESS_METHOD,
     HK_01_GATE_ID: HK_01_ACCESS_METHOD,
+    HK_02_GATE_ID: HK_02_ACCESS_METHOD,
 }
 _FIXTURE_TERMS = {
     GATE_ID: (FIXTURE_TERMS_URL, FIXTURE_TERMS_BYTES),
@@ -217,6 +233,7 @@ _FIXTURE_TERMS = {
     UK_05_GATE_ID: (UK_05_TERMS_URL, UK_05_TERMS_BYTES),
     UK_10_GATE_ID: (UK_10_TERMS_URL, UK_10_TERMS_BYTES),
     HK_01_GATE_ID: (HK_01_TERMS_URL, HK_01_TERMS_BYTES),
+    HK_02_GATE_ID: (HK_02_TERMS_URL, HK_02_TERMS_BYTES),
 }
 _FIXTURE_PACKET = {
     GATE_ID: "9q11",
@@ -225,6 +242,7 @@ _FIXTURE_PACKET = {
     UK_05_GATE_ID: "9q14",
     UK_10_GATE_ID: "9q15",
     HK_01_GATE_ID: "9q16",
+    HK_02_GATE_ID: "9q17",
 }
 _PROVING_INVENTORY_KW = {
     GATE_ID: "rights",
@@ -233,6 +251,7 @@ _PROVING_INVENTORY_KW = {
     UK_05_GATE_ID: "rights_uk_05",
     UK_10_GATE_ID: "rights_uk_10",
     HK_01_GATE_ID: "rights_hk_01",
+    HK_02_GATE_ID: "rights_hk_02",
 }
 _CROSS_OTHER = {
     GATE_ID: UK_02_GATE_ID,
@@ -241,6 +260,7 @@ _CROSS_OTHER = {
     UK_05_GATE_ID: GATE_ID,
     UK_10_GATE_ID: GATE_ID,
     HK_01_GATE_ID: UK_10_GATE_ID,
+    HK_02_GATE_ID: UK_02_GATE_ID,
 }
 _MARKERS = {
     "NO_RECORDS": b"no_records",
@@ -948,6 +968,13 @@ def _should_engage_anti_namesake(gate: str) -> bool:
             UK_03_GATE_ID,
             UK_05_GATE_ID,
             UK_10_GATE_ID,
+        ),
+        HK_02_GATE_ID: (
+            UK_02_GATE_ID,
+            UK_03_GATE_ID,
+            UK_05_GATE_ID,
+            UK_10_GATE_ID,
+            HK_01_GATE_ID,
         ),
     }
     for sibling in prior.get(gate, ()):
