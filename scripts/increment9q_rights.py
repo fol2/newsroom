@@ -25,8 +25,8 @@ def _write_output(path: Path, payload: bytes) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "RIGHTS_UK-01, RIGHTS_UK-02, RIGHTS_UK-03 and RIGHTS_UK-05 "
-            "qualification evidence."
+            "RIGHTS_UK-01, RIGHTS_UK-02, RIGHTS_UK-03, RIGHTS_UK-05 and "
+            "RIGHTS_UK-10 qualification evidence."
         )
     )
     parser.add_argument("command", choices=("assess",))

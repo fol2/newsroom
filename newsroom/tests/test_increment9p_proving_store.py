@@ -18,6 +18,7 @@ from newsroom.increment9.rights import (
     UK_02_GATE_ID,
     UK_03_GATE_ID,
     UK_05_GATE_ID,
+    UK_10_GATE_ID,
     fixture_inventory as rights_inventory,
 )
 
@@ -28,6 +29,7 @@ def _rights_inventories() -> dict[str, object]:
         "rights_uk_02": rights_inventory(gate=UK_02_GATE_ID),
         "rights_uk_03": rights_inventory(gate=UK_03_GATE_ID),
         "rights_uk_05": rights_inventory(gate=UK_05_GATE_ID),
+        "rights_uk_10": rights_inventory(gate=UK_10_GATE_ID),
         "now": FIXTURE_NOW,
     }
 
@@ -77,6 +79,7 @@ def test_assess_fails_closed_without_stop_attestation_and_with_kill():
     assert by_id["RIGHTS_UK-02"] == "FAIL"
     assert by_id["RIGHTS_UK-03"] == "FAIL"
     assert by_id["RIGHTS_UK-05"] == "FAIL"
+    assert by_id["RIGHTS_UK-10"] == "FAIL"
     killed = assess(run_id="r1", kill_switch=True, no_emergency_stop=True)
     by_id = {g.gate_id: g.status.value for g in killed}
     assert by_id["KILL_SWITCH_READY"] == "FAIL"
@@ -85,6 +88,7 @@ def test_assess_fails_closed_without_stop_attestation_and_with_kill():
     assert by_id["RIGHTS_UK-02"] == "FAIL"
     assert by_id["RIGHTS_UK-03"] == "FAIL"
     assert by_id["RIGHTS_UK-05"] == "FAIL"
+    assert by_id["RIGHTS_UK-10"] == "FAIL"
     chain = persist_authorised_chain(run_id="r1")
     ok = assess(
         run_id="r1",
