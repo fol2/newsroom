@@ -66,7 +66,6 @@ from scripts.increment9_shadow_campaign import required_gate_ids, _gate_findings
 
 _COUNTS = PROBE_COUNTS_BY_GATE[HK_02_GATE_ID]
 _UNEMITTED = (
-    "RIGHTS_HK-04",
     "RIGHTS_RAD-01",
     "RIGHTS_RAD-02",
 )
@@ -489,7 +488,7 @@ def test_bindings_match_od001_and_proving_assess_wires_hk_02_independently() -> 
     assert UK_10_GATE_ID in ids
     assert HK_01_GATE_ID in ids
     assert HK_02_GATE_ID in ids
-    assert "RIGHTS_HK-04" not in ids
+    assert "RIGHTS_RAD-01" not in ids
     hk02 = fixture_inventory(gate=HK_02_GATE_ID)
     hk02_only = proving_assess(
         run_id="r1",

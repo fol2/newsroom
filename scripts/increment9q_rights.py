@@ -26,7 +26,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "RIGHTS_UK-01, RIGHTS_UK-02, RIGHTS_UK-03, RIGHTS_UK-05, "
-            "RIGHTS_UK-10, RIGHTS_HK-01 and RIGHTS_HK-02 qualification evidence."
+            "RIGHTS_UK-10, RIGHTS_HK-01, RIGHTS_HK-02 and RIGHTS_HK-04 "
+            "qualification evidence."
         )
     )
     parser.add_argument("command", choices=("assess",))
