@@ -18,6 +18,7 @@ from newsroom.increment9.rights import (
     HK_01_GATE_ID,
     HK_02_GATE_ID,
     HK_04_GATE_ID,
+    RAD_01_GATE_ID,
     UK_02_GATE_ID,
     UK_03_GATE_ID,
     UK_05_GATE_ID,
@@ -36,6 +37,7 @@ def _rights_inventories() -> dict[str, object]:
         "rights_hk_01": rights_inventory(gate=HK_01_GATE_ID),
         "rights_hk_02": rights_inventory(gate=HK_02_GATE_ID),
         "rights_hk_04": rights_inventory(gate=HK_04_GATE_ID),
+        "rights_rad_01": rights_inventory(gate=RAD_01_GATE_ID),
         "now": FIXTURE_NOW,
     }
 
@@ -89,6 +91,7 @@ def test_assess_fails_closed_without_stop_attestation_and_with_kill():
     assert by_id["RIGHTS_HK-01"] == "FAIL"
     assert by_id["RIGHTS_HK-02"] == "FAIL"
     assert by_id["RIGHTS_HK-04"] == "FAIL"
+    assert by_id["RIGHTS_RAD-01"] == "FAIL"
     killed = assess(run_id="r1", kill_switch=True, no_emergency_stop=True)
     by_id = {g.gate_id: g.status.value for g in killed}
     assert by_id["KILL_SWITCH_READY"] == "FAIL"
@@ -101,6 +104,7 @@ def test_assess_fails_closed_without_stop_attestation_and_with_kill():
     assert by_id["RIGHTS_HK-01"] == "FAIL"
     assert by_id["RIGHTS_HK-02"] == "FAIL"
     assert by_id["RIGHTS_HK-04"] == "FAIL"
+    assert by_id["RIGHTS_RAD-01"] == "FAIL"
     chain = persist_authorised_chain(run_id="r1")
     ok = assess(
         run_id="r1",

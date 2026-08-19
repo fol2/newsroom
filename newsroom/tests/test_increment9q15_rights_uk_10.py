@@ -62,10 +62,7 @@ _PROVING_SPEC.loader.exec_module(_PROVING_CLI)
 from scripts.increment9_shadow_campaign import required_gate_ids, _gate_findings
 
 _COUNTS = PROBE_COUNTS_BY_GATE[UK_10_GATE_ID]
-_UNEMITTED = (
-    "RIGHTS_RAD-01",
-    "RIGHTS_RAD-02",
-)
+_UNEMITTED = ("RIGHTS_RAD-02",)
 
 
 def _inventory_bytes() -> bytes:
@@ -482,7 +479,7 @@ def test_bindings_match_od001_weather_host_not_nine_p_www() -> None:
     assert UK_03_GATE_ID in ids
     assert UK_05_GATE_ID in ids
     assert UK_10_GATE_ID in ids
-    assert "RIGHTS_RAD-01" not in ids
+    assert "RIGHTS_RAD-02" not in ids
     uk10 = fixture_inventory(gate=UK_10_GATE_ID)
     uk10_only = proving_assess(
         run_id="r1",
