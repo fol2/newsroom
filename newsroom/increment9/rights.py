@@ -3,7 +3,7 @@
 Parameterised Rights Review validator for the ten OD-001 Rights Gates.
 This module emits Qualification Evidence only for RIGHTS_UK-01,
 RIGHTS_UK-02, RIGHTS_UK-03, RIGHTS_UK-05, RIGHTS_UK-10, RIGHTS_HK-01,
-RIGHTS_HK-02 and RIGHTS_HK-04.
+RIGHTS_HK-02, RIGHTS_HK-04 and RIGHTS_RAD-01.
 
 CI fixture digests only. Does not mint First I/O Gate Records. Loading this
 module performs no network I/O and no production writes.
@@ -42,6 +42,7 @@ UK_10_GATE_ID = "RIGHTS_UK-10"
 HK_01_GATE_ID = "RIGHTS_HK-01"
 HK_02_GATE_ID = "RIGHTS_HK-02"
 HK_04_GATE_ID = "RIGHTS_HK-04"
+RAD_01_GATE_ID = "RIGHTS_RAD-01"
 INVENTORY_NAME = "inventory.json"
 HMAC_KEY_NAME = "hmac.key"
 FIXTURE_HMAC_KEY = b"newsroom.increment9.rights.fixture-hmac-key"
@@ -72,6 +73,9 @@ HK_02_TERMS_BYTES = b"newsroom.increment9.rights.hk-02.fixture-terms\n"
 HK_04_ACCESS_METHOD = HK_01_ACCESS_METHOD
 HK_04_TERMS_URL = "https://terms.edb.fixture.invalid/hk-04"
 HK_04_TERMS_BYTES = b"newsroom.increment9.rights.hk-04.fixture-terms\n"
+RAD_01_ACCESS_METHOD = HK_01_ACCESS_METHOD
+RAD_01_TERMS_URL = "https://terms.rthk.fixture.invalid/rad-01"
+RAD_01_TERMS_BYTES = b"newsroom.increment9.rights.rad-01.fixture-terms\n"
 FIXTURE_DATA_CLASS = "PUBLIC_OFFICIAL_PUBLICATION_METADATA"
 FIXTURE_DESTINATIONS = ("TEN_APPROVED_SOURCE_ENDPOINTS",)
 FIXTURE_RETENTION = "RAW_HTTP_MAX_7_DAYS"
@@ -111,14 +115,21 @@ HK_02_ENDPOINT = (
 HK_02_SOURCE_ROLE = "HKO warning anchor"
 HK_04_ENDPOINT = "https://www.edb.gov.hk/tc/whats_new_rss.xml"
 HK_04_SOURCE_ROLE = "EDB education anchor"
+RAD_01_ENDPOINT = "https://rthk.hk/rthk/news/rss/c_expressnews_clocal.xml"
+RAD_01_NINE_P_ENDPOINT = (
+    "https://rthk9.rthk.hk/rthk/news/rss/c_expressnews_clocal.xml"
+)
+RAD_01_SOURCE_ROLE = "RTHK lead-only comparator"
 _EMITTED_ONLY = (
     "this packet emits RIGHTS_UK-01, RIGHTS_UK-02, RIGHTS_UK-03, "
-    "RIGHTS_UK-05, RIGHTS_UK-10, RIGHTS_HK-01, RIGHTS_HK-02 and "
-    "RIGHTS_HK-04 only"
+    "RIGHTS_UK-05, RIGHTS_UK-10, RIGHTS_HK-01, RIGHTS_HK-02, "
+    "RIGHTS_HK-04 and RIGHTS_RAD-01 only"
 )
 
 # Exact OD-001 endpoints. Tests assert equality with proving.SOURCE_URLS
-# except RIGHTS_UK-10, which binds the weather host (#578), not the 9P www host.
+# except RIGHTS_UK-10, which binds the weather host (#578), not the 9P www
+# host, and RIGHTS_RAD-01, which binds the rthk.hk host (#582), not the 9P
+# rthk9 host. These are two named host-alias exceptions, not one generic rule.
 BINDINGS: dict[str, tuple[str, str, str]] = {
     HK_01_GATE_ID: (
         "HK-01",
@@ -135,10 +146,10 @@ BINDINGS: dict[str, tuple[str, str, str]] = {
         HK_04_SOURCE_ROLE,
         HK_04_ENDPOINT,
     ),
-    "RIGHTS_RAD-01": (
+    RAD_01_GATE_ID: (
         "RAD-01",
-        "RTHK lead-only comparator",
-        "https://rthk9.rthk.hk/rthk/news/rss/c_expressnews_clocal.xml",
+        RAD_01_SOURCE_ROLE,
+        RAD_01_ENDPOINT,
     ),
     "RIGHTS_RAD-02": (
         "RAD-02",
@@ -186,6 +197,7 @@ EMITTED_GATES = frozenset(
         HK_01_GATE_ID,
         HK_02_GATE_ID,
         HK_04_GATE_ID,
+        RAD_01_GATE_ID,
     }
 )
 PACKAGE_FIXTURES = Path(__file__).parent / "fixtures" / "increment9q11_rights_uk_01"
@@ -210,6 +222,9 @@ PACKAGE_FIXTURES_HK_02 = (
 PACKAGE_FIXTURES_HK_04 = (
     Path(__file__).parent / "fixtures" / "increment9q18_rights_hk_04"
 )
+PACKAGE_FIXTURES_RAD_01 = (
+    Path(__file__).parent / "fixtures" / "increment9q19_rights_rad_01"
+)
 PACKAGE_FIXTURES_BY_GATE = {
     GATE_ID: PACKAGE_FIXTURES,
     UK_02_GATE_ID: PACKAGE_FIXTURES_UK_02,
@@ -219,6 +234,7 @@ PACKAGE_FIXTURES_BY_GATE = {
     HK_01_GATE_ID: PACKAGE_FIXTURES_HK_01,
     HK_02_GATE_ID: PACKAGE_FIXTURES_HK_02,
     HK_04_GATE_ID: PACKAGE_FIXTURES_HK_04,
+    RAD_01_GATE_ID: PACKAGE_FIXTURES_RAD_01,
 }
 PROBE_COUNTS_BY_GATE = {
     GATE_ID: PROBE_COUNTS,
@@ -229,6 +245,7 @@ PROBE_COUNTS_BY_GATE = {
     HK_01_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 4},
     HK_02_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 4},
     HK_04_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 4},
+    RAD_01_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 5},
 }
 _FIXTURE_ACCESS = {
     GATE_ID: FIXTURE_ACCESS_METHOD,
@@ -239,6 +256,7 @@ _FIXTURE_ACCESS = {
     HK_01_GATE_ID: HK_01_ACCESS_METHOD,
     HK_02_GATE_ID: HK_02_ACCESS_METHOD,
     HK_04_GATE_ID: HK_04_ACCESS_METHOD,
+    RAD_01_GATE_ID: RAD_01_ACCESS_METHOD,
 }
 _FIXTURE_TERMS = {
     GATE_ID: (FIXTURE_TERMS_URL, FIXTURE_TERMS_BYTES),
@@ -249,6 +267,7 @@ _FIXTURE_TERMS = {
     HK_01_GATE_ID: (HK_01_TERMS_URL, HK_01_TERMS_BYTES),
     HK_02_GATE_ID: (HK_02_TERMS_URL, HK_02_TERMS_BYTES),
     HK_04_GATE_ID: (HK_04_TERMS_URL, HK_04_TERMS_BYTES),
+    RAD_01_GATE_ID: (RAD_01_TERMS_URL, RAD_01_TERMS_BYTES),
 }
 _FIXTURE_PACKET = {
     GATE_ID: "9q11",
@@ -259,6 +278,7 @@ _FIXTURE_PACKET = {
     HK_01_GATE_ID: "9q16",
     HK_02_GATE_ID: "9q17",
     HK_04_GATE_ID: "9q18",
+    RAD_01_GATE_ID: "9q19",
 }
 _PROVING_INVENTORY_KW = {
     GATE_ID: "rights",
@@ -269,6 +289,7 @@ _PROVING_INVENTORY_KW = {
     HK_01_GATE_ID: "rights_hk_01",
     HK_02_GATE_ID: "rights_hk_02",
     HK_04_GATE_ID: "rights_hk_04",
+    RAD_01_GATE_ID: "rights_rad_01",
 }
 _CROSS_OTHER = {
     GATE_ID: UK_02_GATE_ID,
@@ -279,6 +300,7 @@ _CROSS_OTHER = {
     HK_01_GATE_ID: UK_10_GATE_ID,
     HK_02_GATE_ID: UK_02_GATE_ID,
     HK_04_GATE_ID: HK_01_GATE_ID,
+    RAD_01_GATE_ID: HK_01_GATE_ID,
 }
 _MARKERS = {
     "NO_RECORDS": b"no_records",
@@ -894,28 +916,49 @@ def _should_engage_binding_mismatch(gate: str) -> bool:
     crossed = engaged and _verdict_fail(sibling, gate_id=gate) and (
         proving.status is GateStatus.FAIL
     )
-    if gate != UK_10_GATE_ID:
-        return crossed
-    aliased = _with_reviews(
-        [
-            fixture_review(family, gate=gate, endpoint=UK_10_NINE_P_ENDPOINT)
-            for family in FIXTURE_FAMILIES
-        ],
-        gate=gate,
-    )
-    alias_gates = proving_assess(
-        run_id="r1",
-        kill_switch=False,
-        no_emergency_stop=True,
-        now=FIXTURE_NOW,
-        **{_PROVING_INVENTORY_KW[gate]: aliased},
-    )
-    alias_proving = next(g for g in alias_gates if g.gate_id == gate)
-    return (
-        crossed
-        and _verdict_fail(aliased, gate_id=gate)
-        and alias_proving.status is GateStatus.FAIL
-    )
+    if gate == UK_10_GATE_ID:
+        aliased = _with_reviews(
+            [
+                fixture_review(family, gate=gate, endpoint=UK_10_NINE_P_ENDPOINT)
+                for family in FIXTURE_FAMILIES
+            ],
+            gate=gate,
+        )
+        alias_gates = proving_assess(
+            run_id="r1",
+            kill_switch=False,
+            no_emergency_stop=True,
+            now=FIXTURE_NOW,
+            **{_PROVING_INVENTORY_KW[gate]: aliased},
+        )
+        alias_proving = next(g for g in alias_gates if g.gate_id == gate)
+        return (
+            crossed
+            and _verdict_fail(aliased, gate_id=gate)
+            and alias_proving.status is GateStatus.FAIL
+        )
+    if gate == RAD_01_GATE_ID:
+        aliased = _with_reviews(
+            [
+                fixture_review(family, gate=gate, endpoint=RAD_01_NINE_P_ENDPOINT)
+                for family in FIXTURE_FAMILIES
+            ],
+            gate=gate,
+        )
+        alias_gates = proving_assess(
+            run_id="r1",
+            kill_switch=False,
+            no_emergency_stop=True,
+            now=FIXTURE_NOW,
+            **{_PROVING_INVENTORY_KW[gate]: aliased},
+        )
+        alias_proving = next(g for g in alias_gates if g.gate_id == gate)
+        return (
+            crossed
+            and _verdict_fail(aliased, gate_id=gate)
+            and alias_proving.status is GateStatus.FAIL
+        )
+    return crossed
 
 
 def _should_engage_terms_digest_drift(gate: str) -> bool:
@@ -1001,6 +1044,15 @@ def _should_engage_anti_namesake(gate: str) -> bool:
             UK_10_GATE_ID,
             HK_01_GATE_ID,
             HK_02_GATE_ID,
+        ),
+        RAD_01_GATE_ID: (
+            UK_02_GATE_ID,
+            UK_03_GATE_ID,
+            UK_05_GATE_ID,
+            UK_10_GATE_ID,
+            HK_01_GATE_ID,
+            HK_02_GATE_ID,
+            HK_04_GATE_ID,
         ),
     }
     for sibling in prior.get(gate, ()):

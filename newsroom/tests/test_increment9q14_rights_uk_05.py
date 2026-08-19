@@ -211,7 +211,7 @@ def test_cli_assess_is_fail_closed_without_inventory_and_writes_evidence(
         )
         == 2
     )
-    assert _CLI.main(["assess", "--gate", "RIGHTS_RAD-01"]) == 2
+    assert _CLI.main(["assess", "--gate", "RIGHTS_RAD-02"]) == 2
     output = tmp_path / "evidence.json"
     assert _CLI.main(["assess", "--gate", UK_05_GATE_ID, "--output", str(output)]) == 0
     raw = output.read_bytes()
@@ -449,7 +449,7 @@ def test_bindings_match_portfolio_and_proving_assess_wires_uk_05_independently()
     assert UK_02_GATE_ID in ids
     assert UK_03_GATE_ID in ids
     assert UK_05_GATE_ID in ids
-    assert "RIGHTS_RAD-01" not in ids
+    assert "RIGHTS_RAD-02" not in ids
     uk05 = fixture_inventory(gate=UK_05_GATE_ID)
     uk05_only = proving_assess(
         run_id="r1",
