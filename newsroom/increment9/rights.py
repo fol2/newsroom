@@ -1,9 +1,9 @@
 """Increment 9Q Rights Review qualification evidence.
 
 Parameterised Rights Review validator for the ten OD-001 Rights Gates.
-This module emits Qualification Evidence only for RIGHTS_UK-01,
+This module emits Qualification Evidence for RIGHTS_UK-01,
 RIGHTS_UK-02, RIGHTS_UK-03, RIGHTS_UK-05, RIGHTS_UK-10, RIGHTS_HK-01,
-RIGHTS_HK-02, RIGHTS_HK-04 and RIGHTS_RAD-01.
+RIGHTS_HK-02, RIGHTS_HK-04, RIGHTS_RAD-01 and RIGHTS_RAD-02.
 
 CI fixture digests only. Does not mint First I/O Gate Records. Loading this
 module performs no network I/O and no production writes.
@@ -43,6 +43,7 @@ HK_01_GATE_ID = "RIGHTS_HK-01"
 HK_02_GATE_ID = "RIGHTS_HK-02"
 HK_04_GATE_ID = "RIGHTS_HK-04"
 RAD_01_GATE_ID = "RIGHTS_RAD-01"
+RAD_02_GATE_ID = "RIGHTS_RAD-02"
 INVENTORY_NAME = "inventory.json"
 HMAC_KEY_NAME = "hmac.key"
 FIXTURE_HMAC_KEY = b"newsroom.increment9.rights.fixture-hmac-key"
@@ -76,6 +77,9 @@ HK_04_TERMS_BYTES = b"newsroom.increment9.rights.hk-04.fixture-terms\n"
 RAD_01_ACCESS_METHOD = HK_01_ACCESS_METHOD
 RAD_01_TERMS_URL = "https://terms.rthk.fixture.invalid/rad-01"
 RAD_01_TERMS_BYTES = b"newsroom.increment9.rights.rad-01.fixture-terms\n"
+RAD_02_ACCESS_METHOD = "HTTPS_GET_PUBLIC_BBC_RSS_XML"
+RAD_02_TERMS_URL = "https://terms.bbc.fixture.invalid/rad-02"
+RAD_02_TERMS_BYTES = b"newsroom.increment9.rights.rad-02.fixture-terms\n"
 FIXTURE_DATA_CLASS = "PUBLIC_OFFICIAL_PUBLICATION_METADATA"
 FIXTURE_DESTINATIONS = ("TEN_APPROVED_SOURCE_ENDPOINTS",)
 FIXTURE_RETENTION = "RAW_HTTP_MAX_7_DAYS"
@@ -120,10 +124,12 @@ RAD_01_NINE_P_ENDPOINT = (
     "https://rthk9.rthk.hk/rthk/news/rss/c_expressnews_clocal.xml"
 )
 RAD_01_SOURCE_ROLE = "RTHK lead-only comparator"
+RAD_02_ENDPOINT = "https://feeds.bbci.co.uk/news/uk/rss.xml"
+RAD_02_SOURCE_ROLE = "BBC UK lead-only comparator"
 _EMITTED_ONLY = (
     "this packet emits RIGHTS_UK-01, RIGHTS_UK-02, RIGHTS_UK-03, "
     "RIGHTS_UK-05, RIGHTS_UK-10, RIGHTS_HK-01, RIGHTS_HK-02, "
-    "RIGHTS_HK-04 and RIGHTS_RAD-01 only"
+    "RIGHTS_HK-04, RIGHTS_RAD-01 and RIGHTS_RAD-02 only"
 )
 
 # Exact OD-001 endpoints. Tests assert equality with proving.SOURCE_URLS
@@ -151,10 +157,10 @@ BINDINGS: dict[str, tuple[str, str, str]] = {
         RAD_01_SOURCE_ROLE,
         RAD_01_ENDPOINT,
     ),
-    "RIGHTS_RAD-02": (
+    RAD_02_GATE_ID: (
         "RAD-02",
-        "BBC UK lead-only comparator",
-        "https://feeds.bbci.co.uk/news/uk/rss.xml",
+        RAD_02_SOURCE_ROLE,
+        RAD_02_ENDPOINT,
     ),
     "RIGHTS_UK-01": ("UK-01", UK_01_SOURCE_ROLE, UK_01_ENDPOINT),
     "RIGHTS_UK-02": ("UK-02", UK_02_SOURCE_ROLE, UK_02_ENDPOINT),
@@ -198,6 +204,7 @@ EMITTED_GATES = frozenset(
         HK_02_GATE_ID,
         HK_04_GATE_ID,
         RAD_01_GATE_ID,
+        RAD_02_GATE_ID,
     }
 )
 PACKAGE_FIXTURES = Path(__file__).parent / "fixtures" / "increment9q11_rights_uk_01"
@@ -225,6 +232,9 @@ PACKAGE_FIXTURES_HK_04 = (
 PACKAGE_FIXTURES_RAD_01 = (
     Path(__file__).parent / "fixtures" / "increment9q19_rights_rad_01"
 )
+PACKAGE_FIXTURES_RAD_02 = (
+    Path(__file__).parent / "fixtures" / "increment9q20_rights_rad_02"
+)
 PACKAGE_FIXTURES_BY_GATE = {
     GATE_ID: PACKAGE_FIXTURES,
     UK_02_GATE_ID: PACKAGE_FIXTURES_UK_02,
@@ -235,6 +245,7 @@ PACKAGE_FIXTURES_BY_GATE = {
     HK_02_GATE_ID: PACKAGE_FIXTURES_HK_02,
     HK_04_GATE_ID: PACKAGE_FIXTURES_HK_04,
     RAD_01_GATE_ID: PACKAGE_FIXTURES_RAD_01,
+    RAD_02_GATE_ID: PACKAGE_FIXTURES_RAD_02,
 }
 PROBE_COUNTS_BY_GATE = {
     GATE_ID: PROBE_COUNTS,
@@ -246,6 +257,7 @@ PROBE_COUNTS_BY_GATE = {
     HK_02_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 4},
     HK_04_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 4},
     RAD_01_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 5},
+    RAD_02_GATE_ID: {**PROBE_COUNTS, "BINDING_MISMATCH": 4},
 }
 _FIXTURE_ACCESS = {
     GATE_ID: FIXTURE_ACCESS_METHOD,
@@ -257,6 +269,7 @@ _FIXTURE_ACCESS = {
     HK_02_GATE_ID: HK_02_ACCESS_METHOD,
     HK_04_GATE_ID: HK_04_ACCESS_METHOD,
     RAD_01_GATE_ID: RAD_01_ACCESS_METHOD,
+    RAD_02_GATE_ID: RAD_02_ACCESS_METHOD,
 }
 _FIXTURE_TERMS = {
     GATE_ID: (FIXTURE_TERMS_URL, FIXTURE_TERMS_BYTES),
@@ -268,6 +281,7 @@ _FIXTURE_TERMS = {
     HK_02_GATE_ID: (HK_02_TERMS_URL, HK_02_TERMS_BYTES),
     HK_04_GATE_ID: (HK_04_TERMS_URL, HK_04_TERMS_BYTES),
     RAD_01_GATE_ID: (RAD_01_TERMS_URL, RAD_01_TERMS_BYTES),
+    RAD_02_GATE_ID: (RAD_02_TERMS_URL, RAD_02_TERMS_BYTES),
 }
 _FIXTURE_PACKET = {
     GATE_ID: "9q11",
@@ -279,6 +293,7 @@ _FIXTURE_PACKET = {
     HK_02_GATE_ID: "9q17",
     HK_04_GATE_ID: "9q18",
     RAD_01_GATE_ID: "9q19",
+    RAD_02_GATE_ID: "9q20",
 }
 _PROVING_INVENTORY_KW = {
     GATE_ID: "rights",
@@ -290,6 +305,7 @@ _PROVING_INVENTORY_KW = {
     HK_02_GATE_ID: "rights_hk_02",
     HK_04_GATE_ID: "rights_hk_04",
     RAD_01_GATE_ID: "rights_rad_01",
+    RAD_02_GATE_ID: "rights_rad_02",
 }
 _CROSS_OTHER = {
     GATE_ID: UK_02_GATE_ID,
@@ -301,6 +317,7 @@ _CROSS_OTHER = {
     HK_02_GATE_ID: UK_02_GATE_ID,
     HK_04_GATE_ID: HK_01_GATE_ID,
     RAD_01_GATE_ID: HK_01_GATE_ID,
+    RAD_02_GATE_ID: RAD_01_GATE_ID,
 }
 _MARKERS = {
     "NO_RECORDS": b"no_records",
@@ -1053,6 +1070,16 @@ def _should_engage_anti_namesake(gate: str) -> bool:
             HK_01_GATE_ID,
             HK_02_GATE_ID,
             HK_04_GATE_ID,
+        ),
+        RAD_02_GATE_ID: (
+            UK_02_GATE_ID,
+            UK_03_GATE_ID,
+            UK_05_GATE_ID,
+            UK_10_GATE_ID,
+            HK_01_GATE_ID,
+            HK_02_GATE_ID,
+            HK_04_GATE_ID,
+            RAD_01_GATE_ID,
         ),
     }
     for sibling in prior.get(gate, ()):
