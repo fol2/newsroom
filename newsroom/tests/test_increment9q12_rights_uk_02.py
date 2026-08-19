@@ -208,7 +208,7 @@ def test_cli_assess_is_fail_closed_without_inventory_and_writes_evidence(
         )
         == 2
     )
-    assert _CLI.main(["assess", "--gate", "RIGHTS_UK-03"]) == 2
+    assert _CLI.main(["assess", "--gate", "RIGHTS_HK-01"]) == 2
     output = tmp_path / "evidence.json"
     assert _CLI.main(["assess", "--gate", UK_02_GATE_ID, "--output", str(output)]) == 0
     raw = output.read_bytes()
@@ -431,7 +431,7 @@ def test_bindings_match_portfolio_and_proving_assess_wires_uk_02_independently()
     ids = tuple(g.gate_id for g in gates)
     assert GATE_ID in ids
     assert UK_02_GATE_ID in ids
-    assert "RIGHTS_UK-03" not in ids
+    assert "RIGHTS_UK-03" in ids
     assert "RIGHTS_HK-01" not in ids
     uk02 = fixture_inventory(gate=UK_02_GATE_ID)
     uk02_only = proving_assess(
@@ -445,6 +445,9 @@ def test_bindings_match_portfolio_and_proving_assess_wires_uk_02_independently()
     assert (
         next(g for g in uk02_only if g.gate_id == UK_02_GATE_ID).status is GateStatus.PASS
     )
+    assert (
+        next(g for g in uk02_only if g.gate_id == "RIGHTS_UK-03").status is GateStatus.FAIL
+    )
 
 
 def test_no_parallel_rights_modules_were_added() -> None:
@@ -452,6 +455,7 @@ def test_no_parallel_rights_modules_were_added() -> None:
     assert not (root / "rights_review.py").exists()
     assert not (root / "rights_uk_01.py").exists()
     assert not (root / "rights_uk_02.py").exists()
+    assert not (root / "rights_uk_03.py").exists()
     assert not (root / "qualification_rights.py").exists()
     assert (root / "rights.py").is_file()
 
