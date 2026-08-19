@@ -26,8 +26,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "RIGHTS_UK-01, RIGHTS_UK-02, RIGHTS_UK-03, RIGHTS_UK-05, "
-            "RIGHTS_UK-10, RIGHTS_HK-01, RIGHTS_HK-02, RIGHTS_HK-04 and "
-            "RIGHTS_RAD-01 "
+            "RIGHTS_UK-10, RIGHTS_HK-01, RIGHTS_HK-02, RIGHTS_HK-04, "
+            "RIGHTS_RAD-01 and RIGHTS_RAD-02 "
             "qualification evidence."
         )
     )
