@@ -621,8 +621,6 @@ class ProducedExtraction:
             )
         if self.proposals and self.validation is not ExtractionOutputValidation.VALID:
             raise ExtractionContractError("proposals require valid structured output")
-        if self.outcome is ExtractionOutcome.SUCCESS and not self.proposals:
-            raise ExtractionContractError("successful fixture extraction needs proposals")
         if self.outcome is ExtractionOutcome.INVALID_OUTPUT:
             if self.validation is not ExtractionOutputValidation.INVALID:
                 raise ExtractionContractError("invalid outcome needs INVALID validation")

@@ -321,6 +321,84 @@ def test_deterministic_episode_is_created_once_then_reused_on_retry() -> None:
     assert tuple(retained) == ("deterministic-id",)
 
 
+def test_pending_episode_cleanup_uses_graphiti_cleanup_and_proves_removal() -> None:
+    from newsroom.graphiti_adapter.real import _discard_pending_episode
+
+    class Missing(Exception):
+        pass
+
+    removed: list[str] = []
+
+    class EpisodicNode:
+        @staticmethod
+        async def get_by_uuid(_driver: object, episode_id: str) -> object:
+            raise Missing(episode_id)
+
+    async def remove_episode(episode_id: str) -> None:
+        removed.append(episode_id)
+
+    runtime = SimpleNamespace(EpisodicNode=EpisodicNode, NodeNotFoundError=Missing)
+    episode = SimpleNamespace(
+        uuid="episode-pending",
+        episode_metadata={"newsroom_ingest_state": "PENDING"},
+    )
+    asyncio.run(
+        _discard_pending_episode(
+            graphiti=SimpleNamespace(driver=object(), remove_episode=remove_episode),
+            runtime=runtime,
+            episode=episode,
+        )
+    )
+    assert removed == ["episode-pending"]
+
+
+def test_completed_episode_restores_original_provider_metering() -> None:
+    from newsroom.graphiti_adapter.real import (
+        _EpisodeTelemetry,
+        _restore_episode_telemetry,
+    )
+
+    telemetry = _EpisodeTelemetry()
+    episode = SimpleNamespace(
+        episode_metadata={
+            "newsroom_ingest_state": "COMPLETE",
+            "newsroom_chat_invocations": [{"provider": "cursor-agent-cli"}],
+            "newsroom_embedding_usage": {
+                "usage_basis": "PROVIDER_REPORTED",
+                "request_count": 1,
+                "cost_usd_microunits": 17,
+            },
+            "newsroom_provider_attempt_number": 1,
+        }
+    )
+    _restore_episode_telemetry(telemetry, episode)
+    assert telemetry.provider_attempt_number == 1
+    assert telemetry.embedding_usage["cost_usd_microunits"] == 17
+    assert telemetry.chat_invocations == [{"provider": "cursor-agent-cli"}]
+
+
+def test_only_completed_episodes_enter_extraction_context() -> None:
+    from newsroom.graphiti_adapter.real import _completed_episode_ids
+
+    episodes = [
+        SimpleNamespace(
+            uuid="complete",
+            episode_metadata={"newsroom_ingest_state": "COMPLETE"},
+        ),
+        SimpleNamespace(
+            uuid="pending",
+            episode_metadata={"newsroom_ingest_state": "PENDING"},
+        ),
+        SimpleNamespace(uuid="unmarked", episode_metadata={}),
+    ]
+    assert _completed_episode_ids(
+        episodes, exclude_episode_id="different"
+    ) == ["complete"]
+    assert _completed_episode_ids(
+        episodes, exclude_episode_id="complete"
+    ) == []
+
+
 def test_embedding_meter_retains_provider_tokens_and_native_usd_cost() -> None:
     from newsroom.graphiti_adapter.embedding_meter import MeteredOpenAIEmbedder
 
@@ -358,6 +436,7 @@ def test_embedding_meter_retains_provider_tokens_and_native_usd_cost() -> None:
                 "total_tokens": 19,
                 "cost_usd_microunits": 17,
                 "cost_reported": True,
+                "outcome": "COMPLETE",
             }
         ],
         "request_count": 1,
@@ -365,6 +444,29 @@ def test_embedding_meter_retains_provider_tokens_and_native_usd_cost() -> None:
         "cost_usd_microunits": 17,
         "usage_basis": "PROVIDER_REPORTED",
     }
+
+
+def test_embedding_meter_retains_ambiguous_failed_provider_request() -> None:
+    from newsroom.graphiti_adapter.embedding_meter import MeteredOpenAIEmbedder
+
+    class Embeddings:
+        async def create(self, **_values: object) -> object:
+            raise RuntimeError("provider response was lost")
+
+    delegate = SimpleNamespace(
+        client=SimpleNamespace(embeddings=Embeddings()),
+        config=SimpleNamespace(
+            embedding_model="openai/text-embedding-3-large",
+            embedding_dim=2,
+        ),
+    )
+    meter = MeteredOpenAIEmbedder(delegate)
+    with pytest.raises(RuntimeError, match="response was lost"):
+        asyncio.run(meter.create("retained text"))
+    receipt = meter.receipt()
+    assert receipt["usage_basis"] == "PROVIDER_PARTIALLY_UNREPORTED"
+    assert receipt["request_count"] == 1
+    assert receipt["requests"][0]["outcome"] == "UNOBSERVED"
 
 
 def test_else_branch_constructs_real_adapter_instead_of_unreachable_assertion() -> None:
@@ -470,7 +572,7 @@ def test_retryable_failure_returns_diagnostic_receipt_without_structured_output(
     assert produced.attempt_receipt_value["usage_basis"] == "NO_EMBEDDING_CALL"
 
 
-def test_relations_without_exact_evidence_are_retained_as_invalid_output(
+def test_relations_without_exact_evidence_are_retained_without_proposals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import newsroom.graphiti_adapter.real as real
@@ -511,12 +613,46 @@ def test_relations_without_exact_evidence_are_retained_as_invalid_output(
         evaluation_attempt_for(("A retained source passage.",)),
         UtcTimestamp.parse("2026-08-20T00:00:00.000000Z"),
     )
-    assert produced.outcome is ExtractionOutcome.INVALID_OUTPUT
+    assert produced.outcome is ExtractionOutcome.SUCCESS
     assert produced.proposals == ()
     assert produced.raw_output_value is not None
     assert produced.raw_output_value["relations"][0]["proposal_status"] == (
         "HELD_NO_EXACT_EVIDENCE"
     )
+
+
+def test_true_empty_graphiti_extraction_is_a_valid_zero_proposal_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    async def empty_graph(**values: object) -> object:
+        values["telemetry"].embedding_usage = {
+            "usage_basis": "NO_EMBEDDING_CALL",
+            "request_count": 0,
+            "embedding_tokens": 0,
+            "cost_usd_microunits": 0,
+            "requests": [],
+        }
+        return SimpleNamespace(
+            episode=SimpleNamespace(uuid=values["episode_id"]),
+            nodes=(),
+            edges=(),
+        )
+
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(real, "openrouter_api_key", lambda: "key")
+    monkeypatch.setattr(real, "neo4j_community_password", lambda: "password")
+    monkeypatch.setattr(real, "_add_episode", empty_graph)
+    produced = RealGraphitiAdapter()._produce(
+        evaluation_attempt_for(("A retained source passage.",)),
+        UtcTimestamp.parse("2026-08-20T00:00:00.000000Z"),
+    )
+    assert produced.outcome is ExtractionOutcome.SUCCESS
+    assert produced.proposals == ()
+    assert produced.raw_output_value is not None
+    assert produced.raw_output_value["entity_count"] == 0
+    assert produced.raw_output_value["relation_count"] == 0
 
 
 def test_cursor_cli_runs_outside_repository_cwd(
@@ -538,3 +674,32 @@ def test_cursor_cli_runs_outside_repository_cwd(
     assert isinstance(cwd, str)
     assert Path(cwd) != _REPOSITORY_ROOT
     assert "newsroom-cursor-graphiti-" in cwd
+    assert observed["timeout"] == cli_client.CLI_CALL_TIMEOUT_SECONDS
+
+    observed.clear()
+    assert cli_client.run_grok_llm("untrusted source", None) == "{}"
+    grok_cwd = observed["cwd"]
+    assert isinstance(grok_cwd, str)
+    assert Path(grok_cwd) != _REPOSITORY_ROOT
+    assert "newsroom-grok-graphiti-" in grok_cwd
+    assert observed["timeout"] == cli_client.CLI_CALL_TIMEOUT_SECONDS
+
+
+def test_async_cli_child_is_terminated_when_attempt_deadline_cancels() -> None:
+    from newsroom.graphiti_adapter.cli_client import run_cli_async
+
+    async def cancelled_call() -> str:
+        return await asyncio.wait_for(
+            run_cli_async(
+                (
+                    sys.executable,
+                    "-c",
+                    "import time; time.sleep(10)",
+                ),
+                timeout=5,
+            ),
+            timeout=0.05,
+        )
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(cancelled_call())

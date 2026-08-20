@@ -50,21 +50,31 @@ class MeteredOpenAIEmbedder:
         self.requests: list[dict[str, object]] = []
 
     async def _create(self, input_data: object) -> Any:
+        request: dict[str, object] = {
+            "provider": "openrouter",
+            "model": self._delegate.config.embedding_model,
+            "request_id": "",
+            "prompt_tokens": None,
+            "total_tokens": None,
+            "cost_usd_microunits": None,
+            "cost_reported": False,
+            "outcome": "UNOBSERVED",
+        }
+        self.requests.append(request)
         response = await self._delegate.client.embeddings.create(
             input=input_data,
             model=self._delegate.config.embedding_model,
         )
         usage = _usage_value(response)
         cost = _usd_microunits(usage.get("cost"))
-        self.requests.append(
+        request.update(
             {
-                "provider": "openrouter",
-                "model": self._delegate.config.embedding_model,
                 "request_id": str(getattr(response, "id", "") or ""),
                 "prompt_tokens": _integer(usage.get("prompt_tokens")),
                 "total_tokens": _integer(usage.get("total_tokens")),
                 "cost_usd_microunits": cost,
                 "cost_reported": cost is not None,
+                "outcome": "COMPLETE",
             }
         )
         return response

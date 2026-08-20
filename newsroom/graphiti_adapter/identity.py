@@ -132,35 +132,32 @@ def observation_authority_ids(
     SourceRevisionId,
     DiscoveryRepresentationId,
 ]:
+    revision_id = _typed(
+        SourceRevisionId,
+        "revision",
+        source_id,
+        item_key,
+        revision_digest,
+        published_at or "",
+        updated_at or "",
+    )
     return (
         _typed(
             ObjectAdmissionId,
             "proving-admission",
-            source_id,
-            item_key,
-            revision_digest,
+            str(revision_id),
         ),
         _typed(
             ObjectAccessDecisionId,
             "proving-access",
-            source_id,
-            item_key,
-            revision_digest,
+            str(revision_id),
             rights_authority_run_id,
             rights_gate_id,
             rights_gate_reason,
         ),
         _typed(SourceDefinitionId, "definition", source_id),
         _typed(SourceItemId, "item", source_id, item_key),
-        _typed(
-            SourceRevisionId,
-            "revision",
-            source_id,
-            item_key,
-            revision_digest,
-            published_at or "",
-            updated_at or "",
-        ),
+        revision_id,
         _typed(
             DiscoveryRepresentationId,
             "representation",

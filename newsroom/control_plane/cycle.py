@@ -98,6 +98,8 @@ def _bind_result(
     temporal = unit.temporal()
     if result.attempt_number != unit.attempt_number:
         raise ValueError("graphiti result attempt differs from ingest unit")
+    if not 1 <= result.provider_attempt_number <= unit.attempt_number:
+        raise ValueError("graphiti provider attempt is outside the ingest retry history")
     if result.generation_id != GRAPHITI_GENERATION_ID:
         raise ValueError("graphiti result generation differs from authorised generation")
     if result.workspace_group != GRAPHITI_WORKSPACE_GROUP:
@@ -125,6 +127,7 @@ def _bind_result(
         or raw.get("temporal_basis") != temporal.basis
         or raw.get("reference_time") != temporal.reference_time.to_text()
         or raw.get("attempt_number") != unit.attempt_number
+        or raw.get("provider_attempt_number") != result.provider_attempt_number
         or raw.get("predecessor_episode_uuid") != unit.predecessor_ingest_id
         or raw.get("framework") != result.framework
         or raw.get("chat") != result.chat
@@ -206,6 +209,7 @@ def _receipt(
         "chunk_count": unit.chunk_count,
         "predecessor_ingest_id": unit.predecessor_ingest_id,
         "attempt_number": unit.attempt_number,
+        "provider_attempt_number": result.provider_attempt_number,
         "revision_id": unit.revision_id,
         "authority_record_ids": (
             []
@@ -263,7 +267,7 @@ def _queue(
             continue
         queued.append(
             (
-                int(retries > 0),
+                int(retries == 0),
                 unit.observed_at,
                 unit.revision_id,
                 unit.chunk_ordinal,
@@ -392,12 +396,41 @@ def _ingest(
             append_ledger(unpublished, "GRAPHITI_EVALUATION_ATTEMPT", failure_receipt)
             unpublished.commit()
             continue
-        accounting = reconcile_graphiti_spend(
-            unpublished,
-            spend_id=spend_id,
-            embedding_usage=result.embedding_usage,
-        )
-        append_ledger(unpublished, "GRAPHITI_SPEND_RECONCILE", accounting)
+        provider_spend_id = f"{unit.ingest_id}:{result.provider_attempt_number}"
+        if provider_spend_id == spend_id:
+            accounting = reconcile_graphiti_spend(
+                unpublished,
+                spend_id=spend_id,
+                embedding_usage=result.embedding_usage,
+            )
+            append_ledger(unpublished, "GRAPHITI_SPEND_RECONCILE", accounting)
+        else:
+            provider_accounting = reconcile_graphiti_spend(
+                unpublished,
+                spend_id=provider_spend_id,
+                embedding_usage=result.embedding_usage,
+            )
+            current_accounting = reconcile_graphiti_spend(
+                unpublished,
+                spend_id=spend_id,
+                embedding_usage={
+                    "requests": [],
+                    "request_count": 0,
+                    "embedding_tokens": 0,
+                    "cost_usd_microunits": 0,
+                    "usage_basis": "NO_EMBEDDING_CALL",
+                },
+            )
+            append_ledger(
+                unpublished, "GRAPHITI_SPEND_RECONCILE", provider_accounting
+            )
+            append_ledger(
+                unpublished, "GRAPHITI_SPEND_RECONCILE", current_accounting
+            )
+            accounting = {
+                "provider_attempt": provider_accounting,
+                "current_attempt": current_accounting,
+            }
         receipt = _receipt(unit, result, accounting=accounting)
         final_digest = insert_graphiti_attempt_receipt(
             unpublished,

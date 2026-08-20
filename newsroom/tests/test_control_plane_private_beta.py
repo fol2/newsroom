@@ -367,7 +367,7 @@ def test_cycle_retries_failed_graphiti_extract(tmp_path: Path) -> None:
         max_graphiti=1,
     )
     assert second.graphiti == 1
-    assert calls[0] != calls[1]
+    assert calls[0] == calls[1]
     connection = __import__("sqlite3").connect(unpublished)
     stored = connection.execute(
         "SELECT outcome, proposal_count FROM unpublished_graphiti_ingest"

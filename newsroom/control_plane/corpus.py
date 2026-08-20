@@ -223,7 +223,6 @@ def units_from(
                 "definition_id": str(definition_id),
                 "source_id": base.source_id,
                 "item_key": base.item_key,
-                "canonical_url": base.canonical_url,
             },
             {
                 "record_type": "SOURCE_REVISION",
@@ -232,11 +231,8 @@ def units_from(
                 "source_id": base.source_id,
                 "item_key": base.item_key,
                 "revision_digest": revision_digest,
-                "observation_digest": base.observation_digest,
                 "published_at": base.published_at,
                 "updated_at": base.updated_at,
-                "observed_at": base.observed_at,
-                "proving_run_id": base.proving_run_id,
             },
             {
                 "record_type": "DISCOVERY_REPRESENTATION",

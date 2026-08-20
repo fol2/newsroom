@@ -140,6 +140,7 @@ def _complete(
         "generation_id": GRAPHITI_GENERATION_ID,
         "episode_uuid": unit.ingest_id,
         "attempt_number": unit.attempt_number,
+        "provider_attempt_number": unit.attempt_number,
         "predecessor_episode_uuid": unit.predecessor_ingest_id,
         "temporal_basis": unit.temporal().basis,
         "reference_time": unit.temporal().reference_time.to_text(),
@@ -184,6 +185,7 @@ def _complete(
         embedding_usage=dict(embedding_receipt),
         usage_basis=str(embedding_receipt["usage_basis"]),
         attempt_number=unit.attempt_number,
+        provider_attempt_number=unit.attempt_number,
         predecessor_episode_uuid=unit.predecessor_ingest_id,
         raw_receipt=raw,
     )
@@ -463,6 +465,109 @@ def test_authority_records_bind_each_item_and_source_definition_version() -> Non
     )
 
 
+def test_revision_time_changes_rebind_admission_and_access_identities() -> None:
+    first_row = GroupedObservation(
+        "UK-01",
+        "sha256:response",
+        SourceItem(
+            "UK-01",
+            "one",
+            "One",
+            "Body one",
+            "https://item/one",
+            published_at="2026-08-20T00:00:00.000000Z",
+        ),
+        "2026-08-20T00:01:00.000000Z",
+    )
+    changed_row = replace(
+        first_row,
+        item=replace(
+            first_row.item,
+            published_at="2026-08-20T00:02:00.000000Z",
+        ),
+    )
+    first = units_from((first_row,), proving_run_id="run-1")[0]
+    changed = units_from((changed_row,), proving_run_id="run-1")[0]
+    assert first.authority is not None
+    assert changed.authority is not None
+    assert first.authority.revision_id != changed.authority.revision_id
+    assert first.authority.admission_id != changed.authority.admission_id
+    assert first.authority.access_decision_id != changed.authority.access_decision_id
+
+
+def test_source_item_authority_excludes_mutable_canonical_url(tmp_path: Path) -> None:
+    from newsroom.control_plane.store import connect, retain_graphiti_authority_records
+
+    first_row = GroupedObservation(
+        "UK-01",
+        "sha256:response-one",
+        SourceItem("UK-01", "one", "One", "Body", "https://item/one"),
+        "2026-08-20T00:00:00.000000Z",
+    )
+    changed_row = replace(
+        first_row,
+        observation_digest="sha256:response-two",
+        item=replace(first_row.item, canonical_url="https://item/renamed"),
+    )
+    first = units_from((first_row,), proving_run_id="run-1")[0]
+    changed = units_from((changed_row,), proving_run_id="run-2")[0]
+    assert first.authority is not None
+    assert changed.authority is not None
+    first_item = next(
+        record
+        for record in first.authority.records
+        if record["record_type"] == "SOURCE_ITEM"
+    )
+    changed_item = next(
+        record
+        for record in changed.authority.records
+        if record["record_type"] == "SOURCE_ITEM"
+    )
+    assert first_item == changed_item
+    assert "canonical_url" not in first_item
+    connection = connect(str(tmp_path / "authority.sqlite3"))
+    retain_graphiti_authority_records(connection, first.authority.records)
+    retain_graphiti_authority_records(connection, changed.authority.records)
+    connection.close()
+
+
+def test_source_revision_authority_is_stable_across_repeat_observations(
+    tmp_path: Path,
+) -> None:
+    from newsroom.control_plane.store import connect, retain_graphiti_authority_records
+
+    first_row = GroupedObservation(
+        "UK-01",
+        "sha256:response-one",
+        SourceItem("UK-01", "one", "One", "Body", "https://item/one"),
+        "2026-08-20T00:00:00.000000Z",
+    )
+    repeated_row = replace(
+        first_row,
+        observation_digest="sha256:response-two",
+        observed_at="2026-08-20T01:00:00.000000Z",
+    )
+    first = units_from((first_row,), proving_run_id="run-1")[0]
+    repeated = units_from((repeated_row,), proving_run_id="run-2")[0]
+    assert first.authority is not None
+    assert repeated.authority is not None
+    first_revision = next(
+        record
+        for record in first.authority.records
+        if record["record_type"] == "SOURCE_REVISION"
+    )
+    repeated_revision = next(
+        record
+        for record in repeated.authority.records
+        if record["record_type"] == "SOURCE_REVISION"
+    )
+    assert first_revision == repeated_revision
+    connection = connect(str(tmp_path / "revision-authority.sqlite3"))
+    retain_graphiti_authority_records(connection, first.authority.records)
+    retain_graphiti_authority_records(connection, repeated.authority.records)
+    connection.close()
+
+
 def test_same_immutable_revision_is_not_reingested_after_polling() -> None:
     first = CorpusIngestUnit(
         source_id="HK-04",
@@ -616,6 +721,28 @@ def test_coverage_uses_revision_denominator_and_contiguous_input_watermark(
     assert coverage["ingest_watermark_at"] is None
     assert coverage["oldest_unresolved_gap"]["revision_id"] == "revision-1"
     assert coverage["admission_backlog"] == 4
+
+
+def test_coverage_batches_large_ingest_id_sets(tmp_path: Path) -> None:
+    from newsroom.control_plane.store import connect, graphiti_coverage
+
+    connection = connect(str(tmp_path / "large-coverage.sqlite3"))
+    revisions = tuple(
+        EligibleCorpusRevision(
+            f"revision-{index}",
+            "UK-01",
+            f"item-{index}",
+            "2026-08-20T00:00:00.000000Z",
+            "2026-08-20T00:00:00.000000Z",
+            (f"chunk-{index}",),
+        )
+        for index in range(1_201)
+    )
+    coverage = graphiti_coverage(connection, revisions=revisions)
+    connection.close()
+    assert coverage["eligible_source_revisions"] == 1_201
+    assert coverage["eligible_ingest_chunks"] == 1_201
+    assert coverage["unresolved_gap"] == 1_201
 
 
 def test_older_run_backlog_remains_queued_after_a_new_run_arrives(
@@ -824,6 +951,73 @@ def test_provider_reported_embedding_cost_is_reconciled_and_debited(
     assert coverage["outstanding_reserved_spend_gbp_microunits"] == 0
 
 
+def test_completed_retry_reconciles_original_metering_and_releases_retry_reserve(
+    tmp_path: Path,
+) -> None:
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "recovered-spend.sqlite3"
+    calls = 0
+
+    class ReconciledStub:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("response lost after provider write")
+            usage = {
+                "usage_basis": "PROVIDER_REPORTED",
+                "request_count": 1,
+                "embedding_tokens": 25,
+                "cost_usd_microunits": 9,
+                "requests": [],
+            }
+            result = _complete(unit, embedding_usage=usage)
+            assert result.raw_receipt is not None
+            raw = dict(result.raw_receipt)
+            raw["provider_attempt_number"] = 1
+            raw_without_digest = dict(raw)
+            raw_without_digest.pop("raw_output_digest")
+            raw["raw_output_digest"] = digest_bytes(
+                canonical_json_bytes(raw_without_digest)
+            )
+            return replace(
+                result,
+                provider_attempt_number=1,
+                receipt_digest=str(raw["raw_output_digest"]),
+                raw_receipt=raw,
+            )
+
+    for _ in range(2):
+        run_cycle(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            writer=FixtureWriter(),
+            max_writes=0,
+            graphiti=ReconciledStub(),
+            max_graphiti=1,
+        )
+    connection = __import__("sqlite3").connect(unpublished)
+    spend = connection.execute(
+        """
+        SELECT attempt_number, status, actual_usd_microunits, usage_basis
+        FROM unpublished_graphiti_spend ORDER BY attempt_number
+        """
+    ).fetchall()
+    receipt = json.loads(
+        connection.execute(
+            "SELECT receipt_json FROM unpublished_graphiti_receipts"
+        ).fetchone()[0]
+    )
+    connection.close()
+    assert spend == [
+        (1, "RECONCILED", 9, "PROVIDER_REPORTED"),
+        (2, "RECONCILED", 0, "NO_EMBEDDING_CALL"),
+    ]
+    assert receipt["provider_attempt_number"] == 1
+    assert receipt["accounting"]["provider_attempt"]["spend_id"].endswith(":1")
+    assert receipt["accounting"]["current_attempt"]["spend_id"].endswith(":2")
+
+
 def test_max_graphiti_counts_failed_attempts(tmp_path: Path) -> None:
     proving = _proving(tmp_path)
     unpublished = tmp_path / "unpublished_store.sqlite3"
@@ -953,7 +1147,7 @@ def test_ingest_survives_writer_veto(tmp_path: Path) -> None:
     assert stored == 1
 
 
-def test_unattempted_units_run_before_retries(tmp_path: Path) -> None:
+def test_retries_are_bounded_before_fresh_units_run(tmp_path: Path) -> None:
     proving = _proving(tmp_path)
     unpublished = tmp_path / "unpublished_store.sqlite3"
     calls: list[str] = []
@@ -971,16 +1165,18 @@ def test_unattempted_units_run_before_retries(tmp_path: Path) -> None:
         graphiti=AlwaysFail(),
         max_graphiti=1,
     )
-    run_cycle(
-        proving_store=str(proving),
-        unpublished_store=str(unpublished),
-        writer=FixtureWriter(),
-        max_writes=0,
-        graphiti=AlwaysFail(),
-        max_graphiti=1,
-    )
-    assert len(calls) == 2
-    assert calls[0] != calls[1]
+    for _ in range(3):
+        run_cycle(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            writer=FixtureWriter(),
+            max_writes=0,
+            graphiti=AlwaysFail(),
+            max_graphiti=1,
+        )
+    assert len(calls) == 4
+    assert calls[0] == calls[1] == calls[2]
+    assert calls[3] != calls[0]
 
 
 def test_dead_letter_stops_retrying_a_unit(tmp_path: Path) -> None:

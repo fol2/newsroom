@@ -52,6 +52,7 @@ class GraphitiCycleResult:
     chat_fallback: str = GRAPHITI_CHAT_FALLBACK
     embedding: str = GRAPHITI_EMBEDDING_MODEL
     attempt_number: int = 1
+    provider_attempt_number: int = 1
     predecessor_episode_uuid: str | None = None
     raw_receipt: dict[str, object] | None = None
 
@@ -99,6 +100,12 @@ class EvaluationGraphitiRunner:
                 )
             ),
             attempt_number=unit.attempt_number,
+            provider_attempt_number=(
+                int(payload["provider_attempt_number"])
+                if isinstance(payload.get("provider_attempt_number"), int)
+                and not isinstance(payload.get("provider_attempt_number"), bool)
+                else unit.attempt_number
+            ),
             predecessor_episode_uuid=unit.predecessor_ingest_id,
         )
         with TemporaryDirectory() as root:

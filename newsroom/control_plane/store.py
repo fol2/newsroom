@@ -16,6 +16,14 @@ from newsroom.control_plane.veto import VetoError, assert_private_store, refuse_
 SCHEMA_VERSION = "newsroom.control-plane.unpublished.v7"
 LEDGER_GENESIS = "sha256:" + ("0" * 64)
 GRAPHITI_MAX_FAILURES = 3
+_SQLITE_BIND_BATCH_SIZE = 500
+
+
+def _bind_batches(values: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
+    return tuple(
+        values[offset : offset + _SQLITE_BIND_BATCH_SIZE]
+        for offset in range(0, len(values), _SQLITE_BIND_BATCH_SIZE)
+    )
 
 _PAYLOAD_SQL = """
 CREATE TABLE IF NOT EXISTS unpublished_surface_payloads(
@@ -489,14 +497,19 @@ def graphiti_coverage(
     ingested_ids: set[str] = set()
     proposal_counts: dict[str, int] = {}
     if eligible_ids:
-        placeholders = ",".join("?" * len(eligible_ids))
-        rows = connection.execute(
-            f"""
-            SELECT ingest_id, proposal_count FROM unpublished_graphiti_ingest
-            WHERE outcome IN ('COMPLETE','PARTIAL') AND ingest_id IN ({placeholders})
-            """,
-            eligible_ids,
-        ).fetchall()
+        rows: list[tuple[object, ...]] = []
+        for batch in _bind_batches(eligible_ids):
+            placeholders = ",".join("?" * len(batch))
+            rows.extend(
+                connection.execute(
+                    f"""
+                    SELECT ingest_id, proposal_count FROM unpublished_graphiti_ingest
+                    WHERE outcome IN ('COMPLETE','PARTIAL')
+                      AND ingest_id IN ({placeholders})
+                    """,
+                    batch,
+                ).fetchall()
+            )
         ingested_ids = {row[0] for row in rows}
         proposal_counts = {str(row[0]): int(row[1]) for row in rows}
     successful = tuple(
@@ -539,18 +552,19 @@ def graphiti_coverage(
             continue
     failure_rows: list[tuple[str, int, int]] = []
     if eligible_ids:
-        placeholders = ",".join("?" * len(eligible_ids))
-        failure_rows = [
-            (str(row[0]), int(row[1]), int(row[2]))
-            for row in connection.execute(
-                f"""
-                SELECT ingest_id, retry_count, dead_lettered
-                FROM unpublished_graphiti_failures
-                WHERE ingest_id IN ({placeholders})
-                """,
-                eligible_ids,
+        for batch in _bind_batches(eligible_ids):
+            placeholders = ",".join("?" * len(batch))
+            failure_rows.extend(
+                (str(row[0]), int(row[1]), int(row[2]))
+                for row in connection.execute(
+                    f"""
+                    SELECT ingest_id, retry_count, dead_lettered
+                    FROM unpublished_graphiti_failures
+                    WHERE ingest_id IN ({placeholders})
+                    """,
+                    batch,
+                )
             )
-        ]
     if retry_count is None:
         retry_count = sum(row[1] for row in failure_rows)
     failed_ids = {row[0] for row in failure_rows}

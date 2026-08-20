@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import subprocess
 import tempfile
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Any, Awaitable, Protocol
 
 from newsroom.graphiti_adapter.evaluation_packet import (
     CURSOR_AGENT_MODEL_ID,
@@ -20,9 +21,12 @@ CURSOR_AGENT_BIN = os.environ.get(
     "NEWSROOM_CURSOR_AGENT_BIN", "/Users/jamesto/.local/bin/cursor-agent"
 )
 GROK_BIN = os.environ.get("NEWSROOM_GROK_BIN", "/Users/jamesto/.grok/bin/grok")
+CLI_CALL_TIMEOUT_SECONDS = 80
 
 CliRunner = Callable[[str], str]
 GrokRunner = Callable[[str, str | None], str]
+AsyncCliRunner = Callable[[str], Awaitable[str]]
+AsyncGrokRunner = Callable[[str, str | None], Awaitable[str]]
 
 
 class CliResponseError(RuntimeError):
@@ -69,50 +73,112 @@ def run_cli(command: tuple[str, ...], *, timeout: int, cwd: str | None = None) -
     return result.stdout
 
 
+async def run_cli_async(
+    command: tuple[str, ...], *, timeout: int, cwd: str | None = None
+) -> str:
+    """Run a cancellable CLI child so the extraction deadline remains authoritative."""
+
+    name = os.path.basename(command[0])
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+    )
+    try:
+        stdout, _stderr = await asyncio.wait_for(
+            process.communicate(), timeout=timeout
+        )
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+        raise RuntimeError(f"{name} Graphiti LLM timed out") from None
+    except asyncio.CancelledError:
+        process.kill()
+        await process.wait()
+        raise
+    if process.returncode != 0:
+        raise RuntimeError(f"{name} Graphiti LLM failed")
+    text = stdout.decode("utf-8")
+    if not text.strip():
+        raise RuntimeError("Graphiti LLM returned empty stdout")
+    return text
+
+
+def _cursor_command(prompt: str) -> tuple[str, ...]:
+    return (
+        CURSOR_AGENT_BIN,
+        "--print",
+        "--mode",
+        "ask",
+        "--output-format",
+        "text",
+        "--sandbox",
+        "enabled",
+        "--trust",
+        "--model",
+        CURSOR_AGENT_MODEL_ID,
+        prompt,
+    )
+
+
+def _grok_command(*, prompt: str, schema: str | None, cwd: str) -> tuple[str, ...]:
+    path = os.path.join(cwd, "prompt.txt")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(prompt)
+    command = [
+        GROK_BIN,
+        "--prompt-file",
+        path,
+        "-m",
+        GROK_CHAT_MODEL_ID,
+        "--disable-web-search",
+        "--no-plan",
+        "--max-turns",
+        "3",
+        "--no-subagents",
+        "--reasoning-effort",
+        GROK_CHAT_REASONING,
+    ]
+    if schema:
+        command.extend(["--json-schema", schema])
+    return tuple(command)
+
+
 def run_cursor_agent_llm(prompt: str) -> str:
     with tempfile.TemporaryDirectory(prefix="newsroom-cursor-graphiti-") as cwd:
         return run_cli(
-            (
-                CURSOR_AGENT_BIN,
-                "--print",
-                "--mode",
-                "ask",
-                "--output-format",
-                "text",
-                "--sandbox",
-                "enabled",
-                "--trust",
-                "--model",
-                CURSOR_AGENT_MODEL_ID,
-                prompt,
-            ),
-            timeout=180,
+            _cursor_command(prompt),
+            timeout=CLI_CALL_TIMEOUT_SECONDS,
+            cwd=cwd,
+        )
+
+
+async def run_cursor_agent_llm_async(prompt: str) -> str:
+    with tempfile.TemporaryDirectory(prefix="newsroom-cursor-graphiti-") as cwd:
+        return await run_cli_async(
+            _cursor_command(prompt),
+            timeout=CLI_CALL_TIMEOUT_SECONDS,
             cwd=cwd,
         )
 
 
 def run_grok_llm(prompt: str, schema: str | None) -> str:
     with tempfile.TemporaryDirectory(prefix="newsroom-grok-graphiti-") as cwd:
-        path = os.path.join(cwd, "prompt.txt")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(prompt)
-        command = [
-            GROK_BIN,
-            "--prompt-file",
-            path,
-            "-m",
-            GROK_CHAT_MODEL_ID,
-            "--disable-web-search",
-            "--no-plan",
-            "--max-turns",
-            "3",
-            "--no-subagents",
-            "--reasoning-effort",
-            GROK_CHAT_REASONING,
-        ]
-        if schema:
-            command.extend(["--json-schema", schema])
-        return run_cli(tuple(command), timeout=300, cwd=cwd)
+        return run_cli(
+            _grok_command(prompt=prompt, schema=schema, cwd=cwd),
+            timeout=CLI_CALL_TIMEOUT_SECONDS,
+            cwd=cwd,
+        )
+
+
+async def run_grok_llm_async(prompt: str, schema: str | None) -> str:
+    with tempfile.TemporaryDirectory(prefix="newsroom-grok-graphiti-") as cwd:
+        return await run_cli_async(
+            _grok_command(prompt=prompt, schema=schema, cwd=cwd),
+            timeout=CLI_CALL_TIMEOUT_SECONDS,
+            cwd=cwd,
+        )
 
 
 def messages_to_prompt(messages: list[Any]) -> str:
@@ -134,14 +200,17 @@ async def run_cli_chain(
     *,
     prompt: str,
     schema: str | None,
-    cursor_runner: CliRunner,
-    grok_runner: GrokRunner,
+    cursor_runner: CliRunner | AsyncCliRunner,
+    grok_runner: GrokRunner | AsyncGrokRunner,
     invocations: list[dict[str, object]],
 ) -> dict[str, Any]:
     """Execute cursor then Grok fallback while retaining every call outcome."""
 
     try:
-        raw = await asyncio.to_thread(cursor_runner, prompt)
+        if inspect.iscoroutinefunction(cursor_runner):
+            raw = await cursor_runner(prompt)
+        else:
+            raw = await asyncio.to_thread(cursor_runner, prompt)
     except (RuntimeError, OSError) as exc:
         invocations.append(
             {
@@ -165,7 +234,10 @@ async def run_cli_chain(
         return payload
 
     try:
-        raw = await asyncio.to_thread(grok_runner, prompt, schema)
+        if inspect.iscoroutinefunction(grok_runner):
+            raw = await grok_runner(prompt, schema)
+        else:
+            raw = await asyncio.to_thread(grok_runner, prompt, schema)
     except (RuntimeError, OSError) as exc:
         invocations.append(
             {
@@ -201,8 +273,8 @@ def build_cli_llm_client(
     from graphiti_core.llm_client.errors import EmptyResponseError
     from pydantic import BaseModel
 
-    cursor = cursor_runner or run_cursor_agent_llm
-    grok = grok_runner or run_grok_llm
+    cursor: CliRunner | AsyncCliRunner = cursor_runner or run_cursor_agent_llm_async
+    grok: GrokRunner | AsyncGrokRunner = grok_runner or run_grok_llm_async
 
     class CliChainGraphitiLlmClient(LLMClient):
         def __init__(self) -> None:
