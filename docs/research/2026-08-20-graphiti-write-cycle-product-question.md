@@ -1,11 +1,17 @@
 # Should Graphiti ingest the source corpus on its own schedule?
 
-**Status:** Research / product question  
-**Canonical language:** English  
-**Issue:** [#722](https://github.com/fol2/newsroom/issues/722) (`wayfinder:grilling`, `ready-for-human`)  
-**Code base discussed:** `main` @ `46d7d67` (#721)  
-**Closed maps:** [#690](https://github.com/fol2/newsroom/issues/690), spec [#707](https://github.com/fol2/newsroom/issues/707)  
-**Host freeze:** [2026-08-20-unpublished-beta-store-snapshot](2026-08-20-unpublished-beta-store-snapshot/)  
+**Status:** Research / product question
+
+**Canonical language:** English
+
+**Issue:** [#722](https://github.com/fol2/newsroom/issues/722) (`wayfinder:grilling`, `ready-for-human`)
+
+**Code base discussed:** `main` @ `46d7d67` (#721)
+
+**Closed maps:** [#690](https://github.com/fol2/newsroom/issues/690), spec [#707](https://github.com/fol2/newsroom/issues/707)
+
+**Host freeze:** [2026-08-20-unpublished-beta-store-snapshot](2026-08-20-unpublished-beta-store-snapshot/)
+
 **Implementation authority:** None. Do not change Control Plane logic until #722 records a PM answer.
 
 ## Why this exists

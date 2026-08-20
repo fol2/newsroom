@@ -1,10 +1,15 @@
 # Unpublished beta store snapshot (host freeze)
 
-**Status:** Research evidence  
-**Canonical language:** English  
-**Issue:** [#722](https://github.com/fol2/newsroom/issues/722)  
-**Captured at:** 2026-08-20T10:54:41Z  
-**Git HEAD at capture:** `46d7d67` (#721)  
+**Status:** Research evidence
+
+**Canonical language:** English
+
+**Issue:** [#722](https://github.com/fol2/newsroom/issues/722)
+
+**Captured at:** 2026-08-20T10:54:41Z
+
+**Git HEAD at capture:** `46d7d67` (#721)
+
 **Implementation authority:** None
 
 This package is a **small, rights-safe freeze** of the private unpublished beta so that `main` can show store status without the live SQLite or Neo4j files.
