@@ -896,6 +896,45 @@ def test_latest_rights_decision_blocks_historical_backlog(tmp_path: Path) -> Non
     assert report.eligible == 2
 
 
+@pytest.mark.parametrize(
+    "gate_id",
+    [
+        "KILL_SWITCH_READY",
+        "NO_ACTIVE_HUMAN_EMERGENCY_STOP",
+        "PROSPECTIVE_RUN_AUTHORITY",
+    ],
+)
+def test_latest_global_veto_blocks_all_corpus_ingest(
+    tmp_path: Path, gate_id: str
+) -> None:
+    proving = _proving(tmp_path)
+    connection = __import__("sqlite3").connect(proving)
+    connection.execute(
+        "UPDATE proving_gates SET status='FAIL' WHERE gate_id=?", (gate_id,)
+    )
+    connection.commit()
+    connection.close()
+    seen: list[str] = []
+
+    class Stub:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            seen.append(unit.ingest_id)
+            return _complete(unit)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(tmp_path / f"{gate_id}.sqlite3"),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=Stub(),
+        max_graphiti=10,
+    )
+
+    assert seen == []
+    assert report.graphiti == 0
+    assert report.eligible == 0
+
+
 def test_ordered_chunks_wait_for_predecessor_completion(tmp_path: Path) -> None:
     proving = _proving(tmp_path)
     connection = __import__("sqlite3").connect(proving)
@@ -905,7 +944,10 @@ def test_ordered_chunks_wait_for_predecessor_completion(tmp_path: Path) -> None:
         f"<description>{long_body}</description></item></channel></rss>"
     ).encode()
     connection.execute("DELETE FROM proving_observations WHERE source_id!='UK-01'")
-    connection.execute("DELETE FROM proving_gates WHERE gate_id!='RIGHTS_UK-01'")
+    connection.execute(
+        "DELETE FROM proving_gates "
+        "WHERE gate_id LIKE 'RIGHTS_%' AND gate_id!='RIGHTS_UK-01'"
+    )
     connection.execute(
         "UPDATE proving_observations SET body=?, body_digest=? WHERE source_id='UK-01'",
         (feed, digest_bytes(feed)),
@@ -1224,7 +1266,10 @@ def test_dead_letter_stops_retrying_a_unit(tmp_path: Path) -> None:
     proving = _proving(tmp_path)
     connection = __import__("sqlite3").connect(proving)
     connection.execute("DELETE FROM proving_observations WHERE source_id!='UK-01'")
-    connection.execute("DELETE FROM proving_gates WHERE gate_id!='RIGHTS_UK-01'")
+    connection.execute(
+        "DELETE FROM proving_gates "
+        "WHERE gate_id LIKE 'RIGHTS_%' AND gate_id!='RIGHTS_UK-01'"
+    )
     connection.commit()
     connection.close()
     unpublished = tmp_path / "unpublished_store.sqlite3"

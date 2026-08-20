@@ -37,6 +37,7 @@ from newsroom.graphiti_adapter.types import (
     GraphitiEgressPolicy,
     GraphitiRuntimeNotAuthorized,
 )
+from newsroom.increment9.proving import PROVING_GATES
 
 ATOM = b"""<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
@@ -145,6 +146,13 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
                 1,
                 None,
             ),
+        )
+    for gate_id in PROVING_GATES:
+        if gate_id.startswith("RIGHTS_"):
+            continue
+        connection.execute(
+            "INSERT INTO proving_gates VALUES(?,?,?,?)",
+            ("run-1", gate_id, "PASS", "fixture"),
         )
     for source_id, _url, _digest, _body in rows:
         connection.execute(

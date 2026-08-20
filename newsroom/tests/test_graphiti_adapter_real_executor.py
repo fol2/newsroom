@@ -271,6 +271,46 @@ def test_both_cli_malformed_json_results_fail_after_recording_both_calls() -> No
     ]
 
 
+@pytest.mark.parametrize("cancelled_provider", ["cursor", "grok"])
+def test_cli_deadline_cancellation_is_recorded(cancelled_provider: str) -> None:
+    from newsroom.graphiti_adapter.cli_client import run_cli_chain
+
+    async def cancelled_cursor(_prompt: str) -> str:
+        raise asyncio.CancelledError
+
+    async def malformed_cursor(_prompt: str) -> str:
+        return "not-json"
+
+    async def cancelled_grok(_prompt: str, _schema: str | None) -> str:
+        raise asyncio.CancelledError
+
+    invocations: list[dict[str, object]] = []
+    cursor = cancelled_cursor if cancelled_provider == "cursor" else malformed_cursor
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            run_cli_chain(
+                prompt="prompt",
+                schema=None,
+                cursor_runner=cursor,
+                grok_runner=cancelled_grok,
+                invocations=invocations,
+            )
+        )
+
+    expected_provider = (
+        "cursor-agent-cli" if cancelled_provider == "cursor" else "grok-build-cli"
+    )
+    assert invocations[-1]["provider"] == expected_provider
+    assert invocations[-1]["outcome"] == "CANCELLED"
+    assert invocations[-1]["failure"] == "CancelledError"
+    expected_outcomes = (
+        ["CANCELLED"]
+        if cancelled_provider == "cursor"
+        else ["MALFORMED_OUTPUT", "CANCELLED"]
+    )
+    assert [item["outcome"] for item in invocations] == expected_outcomes
+
+
 def test_deterministic_episode_is_created_once_then_reused_on_retry() -> None:
     from newsroom.graphiti_adapter.real import _ensure_episode
 

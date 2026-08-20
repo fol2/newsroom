@@ -211,6 +211,16 @@ async def run_cli_chain(
             raw = await cursor_runner(prompt)
         else:
             raw = await asyncio.to_thread(cursor_runner, prompt)
+    except asyncio.CancelledError as exc:
+        invocations.append(
+            {
+                "provider": "cursor-agent-cli",
+                "model": CURSOR_AGENT_MODEL_ID,
+                "outcome": "CANCELLED",
+                "failure": type(exc).__name__,
+            }
+        )
+        raise
     except (RuntimeError, OSError) as exc:
         invocations.append(
             {
@@ -238,6 +248,16 @@ async def run_cli_chain(
             raw = await grok_runner(prompt, schema)
         else:
             raw = await asyncio.to_thread(grok_runner, prompt, schema)
+    except asyncio.CancelledError as exc:
+        invocations.append(
+            {
+                "provider": "grok-build-cli",
+                "model": GROK_CHAT_MODEL_ID,
+                "outcome": "CANCELLED",
+                "failure": type(exc).__name__,
+            }
+        )
+        raise
     except (RuntimeError, OSError) as exc:
         invocations.append(
             {

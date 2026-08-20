@@ -52,7 +52,12 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     OD_011_CASH_CEILING_GBP,
     OPENROUTER_API,
 )
-from newsroom.increment9.proving import FORBIDDEN_STORE_MARKERS
+from newsroom.increment9.proving import FORBIDDEN_STORE_MARKERS, PROVING_GATES
+
+
+GLOBAL_PROVING_GATES = frozenset(
+    gate_id for gate_id in PROVING_GATES if not gate_id.startswith("RIGHTS_")
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -498,12 +503,21 @@ def _permitted_rows(
     if not runs:
         raise ValueError("proving store has no runs")
     latest_run_id = str(runs[-1][0])
-    current_rights = {
+    current_gates = {
         str(gate_id): (str(status), str(reason))
         for gate_id, status, reason in proving.execute(
             "SELECT gate_id, status, reason FROM proving_gates WHERE run_id=?",
             (latest_run_id,),
         )
+    }
+    if any(
+        current_gates.get(gate_id, ("MISSING", ""))[0] != "PASS"
+        for gate_id in GLOBAL_PROVING_GATES
+    ):
+        return latest_run_id, (), ()
+    current_rights = {
+        gate_id: decision
+        for gate_id, decision in current_gates.items()
         if str(gate_id).startswith("RIGHTS_")
     }
     all_rows: list[_ProvingObservation] = []
