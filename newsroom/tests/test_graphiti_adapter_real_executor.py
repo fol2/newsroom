@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,7 +11,11 @@ from types import SimpleNamespace
 import pytest
 
 from newsroom.authority._graphiti_adapter_boundary import _GraphitiAdapterBoundary
-from newsroom.authority.canonical import digest_canonical
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+)
 from newsroom.authority.types import UtcTimestamp
 from newsroom.extraction.types import (
     ExtractionFailureCode,
@@ -57,6 +62,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
 )
 from newsroom.graphiti_adapter.evaluation_attempt import evaluation_attempt_for
 from newsroom.graphiti_adapter.real import RealGraphitiAdapter
+from newsroom.graphiti_adapter.temporal_vocabulary import TemporalBasis
 
 from .extraction_4a_helpers import contract_request, run_request, seed_extraction_fixture
 from .graphiti_adapter_4d_helpers import FAKE_CONFIGURATION_ID
@@ -212,6 +218,60 @@ def test_cli_llm_client_is_wired_for_graphiti_chat() -> None:
     assert "GRAPHITI_EXTRACTION_INSTRUCTIONS" in source
 
 
+def test_guarded_graphiti_never_invalidates_or_reuses_existing_edges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import graphiti_core.edges as edges_module
+    import graphiti_core.utils.bulk_utils as bulk_utils
+    import graphiti_core.utils.maintenance.edge_operations as edge_operations
+    from newsroom.graphiti_adapter.real import _load_graphiti
+
+    proposed = SimpleNamespace(
+        source_node_uuid="source",
+        target_node_uuid="target",
+        fact="same fact as a pre-existing edge",
+    )
+    calls: list[str] = []
+
+    async def extract(*_args: object, **_values: object) -> list[object]:
+        calls.append("extract")
+        return [proposed]
+
+    def resolve(values: list[object], _uuid_map: dict[str, str]) -> list[object]:
+        calls.append("resolve")
+        return values
+
+    async def embed(_embedder: object, values: list[object]) -> None:
+        assert values == [proposed]
+        calls.append("embed")
+
+    monkeypatch.setattr(edge_operations, "extract_edges", extract)
+    monkeypatch.setattr(bulk_utils, "resolve_edge_pointers", resolve)
+    monkeypatch.setattr(edges_module, "create_entity_edge_embeddings", embed)
+    runtime = _load_graphiti()
+    receiver = SimpleNamespace(clients=SimpleNamespace(embedder=object()))
+    new_edges, invalidated, episode_edges = asyncio.run(
+        runtime.Graphiti._extract_and_resolve_edges(
+            receiver,
+            SimpleNamespace(),
+            [],
+            [],
+            {},
+            GRAPHITI_WORKSPACE_GROUP,
+            None,
+            [],
+            {},
+        )
+    )
+    assert calls == ["extract", "resolve", "embed"]
+    assert new_edges == [proposed]
+    assert invalidated == []
+    assert episode_edges == [proposed]
+    for module_name in tuple(sys.modules):
+        if module_name == "graphiti_core" or module_name.startswith("graphiti_core."):
+            sys.modules.pop(module_name, None)
+
+
 def test_cursor_malformed_json_executes_grok_fallback_and_records_both_calls() -> None:
     from newsroom.graphiti_adapter.cli_client import run_cli_chain
 
@@ -311,7 +371,7 @@ def test_cli_deadline_cancellation_is_recorded(cancelled_provider: str) -> None:
     assert [item["outcome"] for item in invocations] == expected_outcomes
 
 
-def test_deterministic_episode_is_created_once_then_reused_on_retry() -> None:
+def test_deterministic_episode_creation_rejects_unmarked_retained_identity() -> None:
     from newsroom.graphiti_adapter.real import _ensure_episode
 
     class Missing(Exception):
@@ -352,120 +412,35 @@ def test_deterministic_episode_is_created_once_then_reused_on_retry() -> None:
     }
     _episode, first_state = asyncio.run(_ensure_episode(**arguments))
     _episode, retained_state = asyncio.run(_ensure_episode(**arguments))
-    retained_episode = retained["deterministic-id"]
-    retained_episode.episode_metadata = {
-        "newsroom_ingest_state": "COMPLETE",
-        "newsroom_validation_status": "PASSED",
-    }
-    _episode, completed_state = asyncio.run(_ensure_episode(**arguments))
     assert first_state == "CREATED"
-    assert retained_state == "PENDING"
-    assert completed_state == "COMPLETE"
+    assert retained_state == "RETAINED"
     assert saves == ["deterministic-id"]
     assert tuple(retained) == ("deterministic-id",)
 
 
-def test_pending_episode_cleanup_uses_graphiti_cleanup_and_proves_removal() -> None:
-    from newsroom.graphiti_adapter.real import _discard_pending_episode
-
-    class Missing(Exception):
-        pass
-
-    removed: list[str] = []
-
-    class EpisodicNode:
-        @staticmethod
-        async def get_by_uuid(_driver: object, episode_id: str) -> object:
-            raise Missing(episode_id)
-
-    async def remove_episode(episode_id: str) -> None:
-        removed.append(episode_id)
-
-    runtime = SimpleNamespace(EpisodicNode=EpisodicNode, NodeNotFoundError=Missing)
-    episode = SimpleNamespace(
-        uuid="episode-pending",
-        episode_metadata={"newsroom_ingest_state": "PENDING"},
-    )
-    asyncio.run(
-        _discard_pending_episode(
-            graphiti=SimpleNamespace(driver=object(), remove_episode=remove_episode),
-            runtime=runtime,
-            episode=episode,
-        )
-    )
-    assert removed == ["episode-pending"]
-
-
-def test_completed_episode_restores_original_provider_metering() -> None:
+def test_durable_guard_marker_restores_original_provider_metering() -> None:
     from newsroom.graphiti_adapter.real import (
         _EpisodeTelemetry,
-        _restore_episode_telemetry,
+        _restore_marker_telemetry,
     )
+    from newsroom.graphiti_adapter.neo4j_guard import GuardMarker, GuardState
 
     telemetry = _EpisodeTelemetry()
-    episode = SimpleNamespace(
-        episode_metadata={
-            "newsroom_ingest_state": "COMPLETE",
-            "newsroom_validation_status": "PASSED",
-            "newsroom_chat_invocations": [{"provider": "cursor-agent-cli"}],
-            "newsroom_embedding_usage": {
-                "usage_basis": "PROVIDER_REPORTED",
-                "request_count": 1,
-                "cost_usd_microunits": 17,
-            },
-            "newsroom_provider_attempt_number": 1,
-        }
+    marker = GuardMarker(
+        state=GuardState.COMPLETE,
+        attempt_number=1,
+        input_digest="sha256:" + "0" * 64,
+        chat_invocations=({"provider": "cursor-agent-cli"},),
+        embedding_usage={
+            "usage_basis": "PROVIDER_REPORTED",
+            "request_count": 1,
+            "cost_usd_microunits": 17,
+        },
     )
-    _restore_episode_telemetry(telemetry, episode)
+    _restore_marker_telemetry(telemetry, marker)
     assert telemetry.provider_attempt_number == 1
     assert telemetry.embedding_usage["cost_usd_microunits"] == 17
     assert telemetry.chat_invocations == [{"provider": "cursor-agent-cli"}]
-
-
-def test_completed_episode_rebuild_uses_retained_exact_node_inventory() -> None:
-    from newsroom.graphiti_adapter.real import _reconciled_result
-
-    requested: list[list[str]] = []
-
-    class EntityEdge:
-        @staticmethod
-        async def get_by_uuids(_driver: object, uuids: list[str]) -> list[object]:
-            assert uuids == ["edge-1"]
-            return [SimpleNamespace(uuid="edge-1")]
-
-    class EntityNode:
-        @staticmethod
-        async def get_by_uuids(_driver: object, uuids: list[str]) -> list[object]:
-            requested.append(uuids)
-            return [SimpleNamespace(uuid=value) for value in uuids]
-
-    class EpisodicEdge:
-        @staticmethod
-        async def get_by_group_ids(*_args: object, **_values: object) -> list[object]:
-            raise AssertionError("group-wide episodic edge scans are not exact recovery")
-
-    episode = SimpleNamespace(
-        uuid="episode-1",
-        entity_edges=["edge-1"],
-        episode_metadata={
-            "newsroom_ingest_state": "COMPLETE",
-            "newsroom_entity_node_uuids": ["node-2", "node-1"],
-        },
-    )
-    result = asyncio.run(
-        _reconciled_result(
-            graphiti=SimpleNamespace(driver=object()),
-            runtime=SimpleNamespace(
-                EntityEdge=EntityEdge,
-                EntityNode=EntityNode,
-                EpisodicEdge=EpisodicEdge,
-            ),
-            episode=episode,
-        )
-    )
-    assert requested == [["node-2", "node-1"]]
-    assert [item.uuid for item in result.nodes] == ["node-2", "node-1"]
-    assert [item.uuid for item in result.edges] == ["edge-1"]
 
 
 def test_episode_uses_default_database_and_validates_before_complete(
@@ -477,7 +452,8 @@ def test_episode_uses_default_database_and_validates_before_complete(
         pass
 
     retained: dict[str, object] = {}
-    saved_metadata: list[dict[str, object]] = []
+    saves: list[str] = []
+    guard_events: list[str] = []
 
     class Episode:
         def __init__(self, **values: object) -> None:
@@ -493,7 +469,7 @@ def test_episode_uses_default_database_and_validates_before_complete(
 
         async def save(self, _driver: object) -> None:
             retained[str(self.uuid)] = self
-            saved_metadata.append(dict(self.episode_metadata))
+            saves.append(str(self.uuid))
 
     class Driver:
         _database = "neo4j"
@@ -525,6 +501,25 @@ def test_episode_uses_default_database_and_validates_before_complete(
         async def close(self) -> None:
             return None
 
+    class Guard:
+        async def begin(self) -> object:
+            guard_events.append("begin")
+            return real.GuardMarker(
+                state=real.GuardState.CREATED,
+                attempt_number=1,
+                input_digest="sha256:" + "0" * 64,
+            )
+
+        async def record_pending_telemetry(self, **_values: object) -> None:
+            guard_events.append("metered")
+
+        async def restore_preexisting(self) -> None:
+            guard_events.append("restored")
+
+        async def complete(self, raw: dict[str, object]) -> None:
+            assert raw == {"provider_attempt_number": 1}
+            guard_events.append("complete")
+
     delegate = SimpleNamespace(
         client=SimpleNamespace(embeddings=SimpleNamespace()),
         config=SimpleNamespace(
@@ -540,6 +535,7 @@ def test_episode_uses_default_database_and_validates_before_complete(
         EpisodeType=SimpleNamespace(text="text"),
         EpisodicNode=Episode,
         NodeNotFoundError=Missing,
+        MutationGuard=lambda *_args, **_values: Guard(),
     )
     monkeypatch.setattr(real, "_load_graphiti", lambda: runtime)
     monkeypatch.setattr(
@@ -550,8 +546,9 @@ def test_episode_uses_default_database_and_validates_before_complete(
     telemetry = real._EpisodeTelemetry()
     validation_states: list[str] = []
 
-    def validate(result: object, _telemetry: object) -> None:
-        validation_states.append(result.episode.episode_metadata["newsroom_ingest_state"])
+    def validate(_result: object, _telemetry: object) -> dict[str, object]:
+        validation_states.append(guard_events[-1])
+        return {"provider_attempt_number": 1}
 
     result = asyncio.run(
         real._add_episode(
@@ -564,27 +561,170 @@ def test_episode_uses_default_database_and_validates_before_complete(
             telemetry=telemetry,
             attempt_number=1,
             validate_result=validate,
+            restore_result=lambda _raw, _telemetry: None,
         )
     )
     assert result.episode.uuid == "episode-id"
-    assert validation_states == ["PENDING"]
-    assert saved_metadata == [
-        {"newsroom_ingest_state": "PENDING"},
-        {
-            "newsroom_ingest_state": "COMPLETE",
-            "newsroom_validation_status": "PASSED",
-            "newsroom_chat_invocations": [],
-            "newsroom_embedding_usage": {
-                "requests": [],
-                "request_count": 0,
-                "embedding_tokens": 0,
-                "cost_usd_microunits": 0,
-                "usage_basis": "NO_EMBEDDING_CALL",
-            },
-            "newsroom_provider_attempt_number": 1,
-            "newsroom_entity_node_uuids": [],
-        },
-    ]
+    assert validation_states == ["restored"]
+    assert guard_events == ["begin", "metered", "restored", "complete"]
+    assert saves == ["episode-id"]
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_event"),
+    [
+        ("COMPLETE", "restore_complete"),
+        ("PENDING", "rollback_pending"),
+    ],
+)
+def test_process_recovery_uses_durable_guard_before_provider_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    expected_event: str,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    events: list[str] = []
+
+    class Graphiti:
+        def __init__(self, *_args: object, **_values: object) -> None:
+            self.driver = object()
+
+        async def add_episode(self, **_values: object) -> object:
+            raise AssertionError("recovery must happen before provider dispatch")
+
+        async def close(self) -> None:
+            events.append("close")
+
+    class Guard:
+        async def begin(self) -> object:
+            return real.GuardMarker(
+                state=real.GuardState(state),
+                attempt_number=1,
+                input_digest="sha256:" + "0" * 64,
+                embedding_usage={
+                    "usage_basis": "PROVIDER_REPORTED",
+                    "request_count": 1,
+                    "cost_usd_microunits": 7,
+                },
+            )
+
+        async def completed_raw(self) -> dict[str, object]:
+            return {"immutable": True}
+
+        async def rollback_pending(self, **_values: object) -> None:
+            events.append("rollback_pending")
+
+    delegate = SimpleNamespace(
+        client=SimpleNamespace(embeddings=SimpleNamespace()),
+        config=SimpleNamespace(embedding_model="model", embedding_dim=2),
+    )
+    runtime = SimpleNamespace(
+        Graphiti=Graphiti,
+        OpenAIEmbedder=lambda **_values: delegate,
+        OpenAIEmbedderConfig=lambda **values: SimpleNamespace(**values),
+        IdentityCrossEncoder=lambda: object(),
+        MutationGuard=lambda *_args, **_values: Guard(),
+    )
+    monkeypatch.setattr(real, "_load_graphiti", lambda: runtime)
+    monkeypatch.setattr(
+        real, "build_cli_llm_client", lambda: SimpleNamespace(invocations=[])
+    )
+
+    def restore(raw: dict[str, object], _telemetry: object) -> None:
+        assert raw == {"immutable": True}
+        events.append("restore_complete")
+
+    call = real._add_episode(
+        api_key="key",
+        password="password",
+        body="Body",
+        name="episode-id",
+        episode_id="episode-id",
+        reference_time=datetime(2026, 8, 20, tzinfo=UTC),
+        telemetry=real._EpisodeTelemetry(),
+        attempt_number=1,
+        validate_result=lambda _result, _telemetry: {},
+        restore_result=restore,
+    )
+    if state == "PENDING":
+        with pytest.raises(real.AmbiguousEpisodeEffect, match="process ended"):
+            asyncio.run(call)
+    else:
+        asyncio.run(call)
+    assert events == [expected_event, "close"]
+
+
+def test_complete_guard_recovery_requires_byte_exact_canonical_snapshot() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import (
+        GuardError,
+        Neo4jMutationGuard,
+    )
+
+    raw = {"provider_attempt_number": 1, "result": "fixed"}
+    raw_json = canonical_json_bytes(raw).decode("utf-8")
+    marker = {
+        "state": "COMPLETE",
+        "validated_raw_json": raw_json,
+        "validated_raw_digest": digest_bytes(raw_json.encode("utf-8")),
+    }
+
+    class Driver:
+        async def execute_query(
+            self,
+            _query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            assert params == {"episode_uuid": "episode-id"}
+            assert routing_ == "w"
+            return ([{"marker": marker}], None, None)
+
+    guard = Neo4jMutationGuard(
+        Driver(),
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        episode_uuid="episode-id",
+        attempt_number=1,
+        input_digest="sha256:" + "0" * 64,
+    )
+    assert asyncio.run(guard.completed_raw()) == raw
+    marker["validated_raw_json"] = '{"provider_attempt_number": 1, "result": "fixed"}'
+    with pytest.raises(GuardError, match="digest differs"):
+        asyncio.run(guard.completed_raw())
+
+
+def test_immutable_completion_snapshot_restores_without_graph_rehydration(
+    tmp_path: Path,
+) -> None:
+    from newsroom.graphiti_adapter.real import _EpisodeTelemetry, _raw_receipt
+    from newsroom.graphiti_adapter.result_snapshot import restore_validated_snapshot
+
+    instant = UtcTimestamp(datetime(2026, 8, 20, tzinfo=UTC))
+    attempt = replace(
+        _real_attempt(tmp_path),
+        reference_time=instant,
+        temporal_basis=TemporalBasis.SOURCE_PUBLISHED,
+    )
+    raw = _raw_receipt(
+        attempt,
+        started_at=instant,
+        telemetry=_EpisodeTelemetry(provider_attempt_number=1),
+        result=None,
+        proposals=(),
+    )
+    restored = restore_validated_snapshot(raw=raw, attempt=attempt)
+    assert restored.produced.raw_output_value == raw
+    assert restored.provider_attempt_number == 1
+    assert restored.recovery_classification == "RECOVERED_IMMUTABLE_COMPLETE"
+
+    corrupted = dict(raw)
+    corrupted["framework"] = "graphiti-core==mutated"
+    unsigned = dict(corrupted)
+    unsigned.pop("raw_output_digest")
+    corrupted["raw_output_digest"] = digest_bytes(canonical_json_bytes(unsigned))
+    with pytest.raises(GraphitiAdapterContractError, match="immutable attempt"):
+        restore_validated_snapshot(raw=corrupted, attempt=attempt)
 
 
 def test_embedding_meter_retains_provider_tokens_and_native_usd_cost() -> None:

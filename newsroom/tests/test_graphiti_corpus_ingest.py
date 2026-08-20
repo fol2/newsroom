@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,11 @@ from newsroom.control_plane.editorial import (
 from newsroom.control_plane.evidence import EvidencePackage, package_for
 from newsroom.control_plane.graphiti import EvaluationGraphitiRunner, GraphitiCycleResult
 from newsroom.control_plane.items import SourceItem, parse_observation, parse_source_time
+from newsroom.control_plane.store import (
+    connect,
+    next_graphiti_attempt_number,
+    reserve_graphiti_spend,
+)
 from newsroom.control_plane.veto import VetoError
 from newsroom.control_plane.writer import FixtureWriter, WriterCopy
 from newsroom.graphiti_adapter.evaluation_attempt import (
@@ -62,6 +68,29 @@ DATED_RSS = """<?xml version="1.0" encoding="UTF-8"?>
   </item>
 </channel></rss>
 """.encode("utf-8")
+
+
+def test_content_api_keeps_description_for_drafting_and_details_for_corpus() -> None:
+    payload = json.dumps(
+        {
+            "title": "Immigration Rules",
+            "base_path": "/guidance/immigration-rules",
+            "content_id": "rules-v1",
+            "description": "Short drafting summary.",
+            "details": {
+                "body": "<p>Complete retained policy body with material changes.</p>"
+            },
+        }
+    ).encode("utf-8")
+    item = parse_observation(
+        source_id="UK-03",
+        url="https://www.gov.uk/api/content/guidance/immigration-rules",
+        body=payload,
+    )[0]
+    assert item.body == "Short drafting summary."
+    assert item.retained_corpus_body == (
+        "Complete retained policy body with material changes."
+    )
 
 
 def _complete(
@@ -838,6 +867,13 @@ def test_older_run_backlog_remains_queued_after_a_new_run_arrives(
         SELECT 'run-2', gate_id, status, reason FROM proving_gates WHERE run_id='run-1'
         """
     )
+    connection.execute(
+        """
+        INSERT INTO proving_rights_packets
+        SELECT 'run-2', gate_id, packet_digest, packet_json, assessed_at
+        FROM proving_rights_packets WHERE run_id='run-1'
+        """
+    )
     connection.commit()
     connection.close()
 
@@ -874,6 +910,14 @@ def test_latest_rights_decision_blocks_historical_backlog(tmp_path: Path) -> Non
         INSERT INTO proving_gates
         SELECT 'run-2', gate_id, status, reason
         FROM proving_gates WHERE run_id='run-1' AND gate_id!='RIGHTS_UK-01'
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO proving_rights_packets
+        SELECT 'run-2', gate_id, packet_digest, packet_json, assessed_at
+        FROM proving_rights_packets
+        WHERE run_id='run-1' AND gate_id!='RIGHTS_UK-01'
         """
     )
     connection.commit()
@@ -925,6 +969,53 @@ def test_current_rights_decision_does_not_authorise_a_different_endpoint(
     )
     assert "UK-01" not in seen
     assert report.eligible == 2
+
+
+def test_expired_rights_are_rechecked_at_actual_dispatch_time(tmp_path: Path) -> None:
+    proving = _proving(tmp_path)
+    seen: list[str] = []
+
+    class Stub:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            seen.append(unit.source_id)
+            return _complete(unit)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(tmp_path / "unpublished.sqlite3"),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=Stub(),
+        max_graphiti=10,
+        clock=lambda: datetime(2100, 1, 1, tzinfo=UTC),
+    )
+    assert seen == []
+    assert report.eligible == 0
+
+
+def test_process_death_reenters_unreceipted_reserved_attempt(tmp_path: Path) -> None:
+    connection = connect(str(tmp_path / "unpublished.sqlite3"))
+    assert reserve_graphiti_spend(
+        connection,
+        spend_id="ingest-1:1",
+        ingest_id="ingest-1",
+        attempt_number=1,
+        proving_run_id="run-1",
+        reserved_gbp_microunits=500_000,
+        ceiling_gbp_microunits=5_000_000,
+    )
+    connection.commit()
+    assert next_graphiti_attempt_number(connection, "ingest-1") == 1
+    connection.execute(
+        """
+        INSERT INTO unpublished_graphiti_attempt_receipts(
+            ingest_id, attempt_number, outcome, receipt_digest, receipt_json, at
+        ) VALUES(?,?,?,?,?,?)
+        """,
+        ("ingest-1", 1, "FAILED", "sha256:receipt", "{}", "2026-08-21T00:00:00Z"),
+    )
+    assert next_graphiti_attempt_number(connection, "ingest-1") == 2
+    connection.close()
 
 
 @pytest.mark.parametrize(

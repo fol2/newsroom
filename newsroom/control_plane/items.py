@@ -141,12 +141,11 @@ def _from_mapping(source_id: str, payload: dict[str, object], *, fallback_key: s
         return None
     description = payload.get("description") or payload.get("summary") or ""
     if not isinstance(description, str) or not description.strip():
-        details = payload.get("details")
-        if isinstance(details, dict):
-            raw = details.get("body")
-            description = raw if isinstance(raw, str) else title
-        else:
-            description = title
+        description = title
+    details = payload.get("details")
+    retained_body = details.get("body") if isinstance(details, dict) else None
+    if not isinstance(retained_body, str) or not retained_body.strip():
+        retained_body = description
     path = payload.get("base_path") or payload.get("url") or payload.get("link") or ""
     url = path if isinstance(path, str) else ""
     if url.startswith("/"):
@@ -158,12 +157,13 @@ def _from_mapping(source_id: str, payload: dict[str, object], *, fallback_key: s
         or payload.get("public_timestamp")
     )
     updated_raw = payload.get("public_updated_at") or payload.get("updated_at")
-    corpus_body = _plain(description)
+    drafting_body = _plain(description)
+    corpus_body = _plain(retained_body)
     return SourceItem(
         source_id,
         key,
         _clip(_plain(title), MAX_HEADLINE_CHARS),
-        _clip(corpus_body, MAX_DRAFTING_BODY_CHARS),
+        _clip(drafting_body, MAX_DRAFTING_BODY_CHARS),
         url,
         parse_source_time(published_raw) if isinstance(published_raw, str) else None,
         parse_source_time(updated_raw) if isinstance(updated_raw, str) else None,

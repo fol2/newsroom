@@ -379,6 +379,9 @@ class RightsVerdict:
     source_role: str | None = None
     families: tuple[str, ...] = ()
     reviewer_ids: tuple[str, ...] = ()
+    expires_at: str | None = None
+    terms_url: str | None = None
+    terms_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -674,6 +677,9 @@ def assess_rights(
         source_role=str(ordered[0]["source_role"]),
         families=tuple(str(item["reviewer_family"]) for item in ordered),
         reviewer_ids=tuple(str(item["reviewer_id"]) for item in ordered),
+        expires_at=min(str(item["expires_at"]) for item in ordered),
+        terms_url=str(ordered[0]["terms_url"]),
+        terms_digest=str(ordered[0]["terms_digest"]),
     )
 
 

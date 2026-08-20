@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import uuid
+
 import pytest
 
 from newsroom.control_plane.broker import (
     NEO4J_KEYCHAIN_SKIP,
     OPENROUTER_KEYCHAIN_SKIP,
+    neo4j_community_password,
     neo4j_keychain_ready,
     openrouter_keychain_ready,
     prove_neo4j_keychain,
@@ -40,3 +44,94 @@ def test_neo4j_keychain_injects_and_bolt_accepts() -> None:
     from neo4j import GraphDatabase
 
     prove_neo4j_keychain(driver_factory=GraphDatabase.driver)
+
+
+@pytest.mark.skipif(not neo4j_keychain_ready(), reason=NEO4J_KEYCHAIN_SKIP)
+def test_graphiti_mutation_guard_restores_preexisting_values() -> None:
+    graphiti_driver = pytest.importorskip("graphiti_core.driver.neo4j_driver")
+    from newsroom.graphiti_adapter.neo4j_guard import Neo4jMutationGuard
+
+    async def exercise() -> None:
+        suffix = str(uuid.uuid4())
+        group_id = f"newsroom-guard-service-{suffix}"
+        episode_uuid = str(uuid.uuid4())
+        driver = graphiti_driver.Neo4jDriver(
+            "bolt://127.0.0.1:7687",
+            "neo4j",
+            neo4j_community_password(),
+        )
+
+        async def query(cypher: str, **parameters: object) -> object:
+            return await driver.execute_query(
+                cypher, params=parameters, routing_="w"
+            )
+
+        try:
+            await query(
+                """
+                CREATE (a:Entity {uuid:$a, group_id:$group_id, name:'before'}),
+                       (b:Entity {uuid:$b, group_id:$group_id, name:'other'}),
+                       (a)-[:REL {uuid:$relationship, fact:'before'}]->(b)
+                """,
+                a=f"a-{suffix}",
+                b=f"b-{suffix}",
+                relationship=f"relationship-{suffix}",
+                group_id=group_id,
+            )
+            guard = Neo4jMutationGuard(
+                driver,
+                group_id=group_id,
+                episode_uuid=episode_uuid,
+                attempt_number=1,
+                input_digest="sha256:" + "1" * 64,
+            )
+            assert (await guard.begin()).state.value == "CREATED"
+            await query(
+                """
+                MATCH (a {uuid:$a})-[r]->()
+                SET a.name='after', r.fact='after'
+                CREATE (:Entity {uuid:$new, group_id:$group_id, name:'new'})
+                """,
+                a=f"a-{suffix}",
+                new=f"new-{suffix}",
+                group_id=group_id,
+            )
+            await guard.rollback_pending(
+                chat_invocations=[],
+                embedding_usage={
+                    "usage_basis": "NO_EMBEDDING_CALL",
+                    "request_count": 0,
+                },
+                reason="SERVICE_TEST",
+            )
+            result = await query(
+                """
+                MATCH (n {group_id:$group_id})
+                WHERE n.uuid IS NOT NULL
+                OPTIONAL MATCH (n)-[r]->()
+                RETURN collect(DISTINCT [n.uuid,n.name]) AS nodes,
+                       collect(DISTINCT [r.uuid,r.fact]) AS relationships
+                """,
+                group_id=group_id,
+            )
+            record = result.records[0]
+            assert sorted(record["nodes"]) == sorted(
+                [[f"a-{suffix}", "before"], [f"b-{suffix}", "other"]]
+            )
+            assert [
+                item for item in record["relationships"] if item[0] is not None
+            ] == [[f"relationship-{suffix}", "before"]]
+        finally:
+            await query(
+                """
+                MATCH (n)
+                WHERE n.group_id=$group_id OR n.episode_uuid=$episode_uuid
+                DETACH DELETE n
+                """,
+                group_id=group_id,
+                episode_uuid=episode_uuid,
+            )
+            await driver.close()
+
+    asyncio.run(exercise())
+    neo4j_community_password,

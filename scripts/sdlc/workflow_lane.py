@@ -86,6 +86,7 @@ _OPTIONAL_CORE_TEST_IDS = (
     "newsroom.tests.test_control_plane_keychain::test_cursor_agent_cli_is_logged_in",
     "newsroom.tests.test_control_plane_keychain::test_grok_build_cli_is_logged_in",
     "newsroom.tests.test_control_plane_keychain::test_neo4j_keychain_injects_and_bolt_accepts",
+    "newsroom.tests.test_control_plane_keychain::test_graphiti_mutation_guard_restores_preexisting_values",
     "newsroom.tests.test_control_plane_keychain::test_openrouter_keychain_injects_and_is_accepted",
     "newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_admitted_state_projects_exactly_and_replays",
     "newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_graph_loss_requires_isolated_replacement",

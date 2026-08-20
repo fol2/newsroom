@@ -365,6 +365,15 @@ def _connect(path: str) -> sqlite3.Connection:
             PRIMARY KEY(run_id, gate_id),
             FOREIGN KEY(run_id) REFERENCES proving_runs(run_id)
         );
+        CREATE TABLE IF NOT EXISTS proving_rights_packets(
+            run_id TEXT NOT NULL,
+            gate_id TEXT NOT NULL,
+            packet_digest TEXT NOT NULL,
+            packet_json TEXT NOT NULL,
+            assessed_at TEXT NOT NULL,
+            PRIMARY KEY(run_id, gate_id),
+            FOREIGN KEY(run_id) REFERENCES proving_runs(run_id)
+        );
         """
     )
     return connection
@@ -402,6 +411,34 @@ def _put_gates(
         connection.execute(
             "INSERT OR REPLACE INTO proving_gates VALUES(?,?,?,?)",
             (run_id, gate.gate_id, gate.status.value, gate.reason),
+        )
+
+
+def _put_rights_packets(
+    connection: sqlite3.Connection,
+    run_id: str,
+    assessed_at: str,
+    packets: dict[str, object | None],
+) -> None:
+    """Retain exact review packets for dispatch-time expiry evaluation."""
+
+    for gate_id, packet in packets.items():
+        if not isinstance(packet, dict):
+            continue
+        packet_bytes = canonical_json_bytes(packet)
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO proving_rights_packets(
+                run_id, gate_id, packet_digest, packet_json, assessed_at
+            ) VALUES(?,?,?,?,?)
+            """,
+            (
+                run_id,
+                gate_id,
+                digest_bytes(packet_bytes),
+                packet_bytes.decode("utf-8"),
+                assessed_at,
+            ),
         )
 
 
@@ -467,6 +504,23 @@ def run_proving(
             (run_id, fetched_at),
         )
         _put_gates(connection, run_id, gates)
+        _put_rights_packets(
+            connection,
+            run_id,
+            now or fetched_at,
+            {
+                RIGHTS_UK_01: rights,
+                RIGHTS_UK_02: rights_uk_02,
+                RIGHTS_UK_03: rights_uk_03,
+                RIGHTS_UK_05: rights_uk_05,
+                RIGHTS_UK_10: rights_uk_10,
+                RIGHTS_HK_01: rights_hk_01,
+                RIGHTS_HK_02: rights_hk_02,
+                RIGHTS_HK_04: rights_hk_04,
+                RIGHTS_RAD_01: rights_rad_01,
+                RIGHTS_RAD_02: rights_rad_02,
+            },
+        )
         if any(gate.status is GateStatus.FAIL for gate in gates):
             connection.commit()
             return ProvingReport(run_id, False, False, False, 0, gates, ())

@@ -1,9 +1,11 @@
 from pathlib import Path
 import json
 import os
+from datetime import UTC, datetime
 
 import pytest
 
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.cycle import run_cycle
 from newsroom.control_plane.corpus import CorpusIngestUnit
 from newsroom.control_plane.editorial import StoryCandidateRecord
@@ -38,6 +40,12 @@ from newsroom.graphiti_adapter.types import (
     GraphitiRuntimeNotAuthorized,
 )
 from newsroom.increment9.proving import PROVING_GATES, SOURCE_URLS
+from newsroom.increment9.rights import (
+    FIXTURE_FAMILIES,
+    FIXTURE_NOW,
+    bound_terms_identity,
+    fixture_review,
+)
 
 ATOM = b"""<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
@@ -103,6 +111,14 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
             reason TEXT NOT NULL,
             PRIMARY KEY(run_id, gate_id)
         );
+        CREATE TABLE proving_rights_packets(
+            run_id TEXT NOT NULL,
+            gate_id TEXT NOT NULL,
+            packet_digest TEXT NOT NULL,
+            packet_json TEXT NOT NULL,
+            assessed_at TEXT NOT NULL,
+            PRIMARY KEY(run_id, gate_id)
+        );
         """
     )
     connection.execute(
@@ -155,9 +171,34 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
             ("run-1", gate_id, "PASS", "fixture"),
         )
     for source_id, _url, _digest, _body in rows:
+        gate_id = f"RIGHTS_{source_id}"
         connection.execute(
             "INSERT INTO proving_gates VALUES(?,?,?,?)",
-            ("run-1", f"RIGHTS_{source_id}", "PASS", "fixture"),
+            ("run-1", gate_id, "PASS", "fixture"),
+        )
+        packet = {
+            "bound_terms": bound_terms_identity(gate=gate_id),
+            "now": "2026-08-20T00:00:00.000000Z",
+            "reviews": [
+                fixture_review(
+                    family,
+                    gate=gate_id,
+                    issued_at="2026-01-01T00:00:00.000000Z",
+                    expires_at="2099-01-01T00:00:00.000000Z",
+                )
+                for family in FIXTURE_FAMILIES
+            ],
+        }
+        packet_bytes = canonical_json_bytes(packet)
+        connection.execute(
+            "INSERT INTO proving_rights_packets VALUES(?,?,?,?,?)",
+            (
+                "run-1",
+                gate_id,
+                digest_bytes(packet_bytes),
+                packet_bytes.decode("utf-8"),
+                "2026-08-20T00:00:00.000000Z",
+            ),
         )
     connection.commit()
     connection.close()
@@ -530,7 +571,11 @@ def test_intake_fetches_when_gates_pass(tmp_path: Path) -> None:
             return 200, RSS
         return 200, JSON_DOC
 
-    report = run_intake(proving_store=str(proving), fetch=fetch)
+    report = run_intake(
+        proving_store=str(proving),
+        fetch=fetch,
+        clock=lambda: datetime.fromisoformat(FIXTURE_NOW.replace("Z", "+00:00")),
+    )
     assert report.authorised
     assert report.sources == 10
     assert report.ok == 10

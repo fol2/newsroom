@@ -254,12 +254,28 @@ def next_graphiti_attempt_number(
 ) -> int:
     row = connection.execute(
         """
-        SELECT COALESCE(MAX(attempt_number), 0)
-        FROM unpublished_graphiti_spend WHERE ingest_id=?
+        SELECT s.attempt_number, s.status,
+               EXISTS(
+                   SELECT 1 FROM unpublished_graphiti_attempt_receipts r
+                   WHERE r.ingest_id=s.ingest_id
+                     AND r.attempt_number=s.attempt_number
+               ) AS has_receipt
+        FROM unpublished_graphiti_spend s
+        WHERE s.ingest_id=?
+        ORDER BY s.attempt_number DESC
+        LIMIT 1
         """,
         (ingest_id,),
     ).fetchone()
-    return (int(row[0]) if row else 0) + 1
+    if row is None:
+        return 1
+    attempt_number = int(row[0])
+    if str(row[1]) == "RESERVED" and not bool(row[2]):
+        # A process may have ended after the provider/Neo4j effect but before
+        # its SQLite receipt. Re-enter that durable attempt identity first so
+        # COMPLETE can be recovered or PENDING can be classified and charged.
+        return attempt_number
+    return attempt_number + 1
 
 
 def reconcile_graphiti_spend(

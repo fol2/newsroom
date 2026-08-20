@@ -9,6 +9,7 @@ import json
 import sqlite3
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from typing import Callable
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.corpus import (
@@ -58,6 +59,7 @@ from newsroom.increment9.proving import (
     PROVING_GATES,
     SOURCE_URLS,
 )
+from newsroom.increment9.rights import assess_rights
 
 
 GLOBAL_PROVING_GATES = frozenset(
@@ -94,6 +96,10 @@ class _ProvingObservation:
 
 def _now() -> str:
     return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _utc_text(value: datetime) -> str:
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _bind_result(
@@ -371,6 +377,7 @@ def _ingest(
     graphiti: GraphitiPort,
     units: tuple[CorpusIngestUnit, ...],
     max_graphiti: int,
+    rights_check: Callable[[CorpusIngestUnit], dict[str, object] | None],
 ) -> int:
     attempted = 0
     for (
@@ -384,6 +391,32 @@ def _ingest(
     ) in _queue(unpublished, units):
         if attempted >= max_graphiti:
             break
+        dispatch_rights = rights_check(unit)
+        if dispatch_rights is None:
+            append_ledger(
+                unpublished,
+                "GRAPHITI_RIGHTS_HOLD",
+                {
+                    "ingest_id": unit.ingest_id,
+                    "source_id": unit.source_id,
+                    "proving_run_id": unit.proving_run_id,
+                    "reason": "NO_CURRENT_DISPATCH_RIGHTS",
+                    "provider_dispatched": False,
+                },
+            )
+            unpublished.commit()
+            continue
+        append_ledger(
+            unpublished,
+            "GRAPHITI_RIGHTS_DISPATCH",
+            {
+                **dispatch_rights,
+                "ingest_id": unit.ingest_id,
+                "proving_run_id": unit.proving_run_id,
+                "provider_dispatched": False,
+            },
+        )
+        unpublished.commit()
         attempt_number = next_graphiti_attempt_number(unpublished, unit.ingest_id)
         unit = replace(unit, attempt_number=attempt_number)
         if unit.authority is None:
@@ -499,6 +532,7 @@ def _ingest(
                 "authority_record_ids": [
                     str(item["record_id"]) for item in unit.authority.records
                 ],
+                "dispatch_rights": dispatch_rights,
                 "receipt_digest": "",
             }
             final_digest = insert_graphiti_attempt_receipt(
@@ -519,6 +553,7 @@ def _ingest(
             result=result,
         )
         receipt = _receipt(unit, result, accounting=accounting)
+        receipt["dispatch_rights"] = dispatch_rights
         final_digest = insert_graphiti_attempt_receipt(
             unpublished,
             ingest_id=unit.ingest_id,
@@ -576,8 +611,74 @@ def _parsed_observations(
     return tuple(observations)
 
 
+def _current_rights_decision(
+    proving: sqlite3.Connection,
+    *,
+    run_id: str,
+    source_id: str,
+    source_url: str,
+    evaluated_at: str,
+) -> dict[str, object] | None:
+    """Re-evaluate the retained packet at the actual provider-dispatch time."""
+
+    gate_id = f"RIGHTS_{source_id}"
+    gate = proving.execute(
+        "SELECT status FROM proving_gates WHERE run_id=? AND gate_id=?",
+        (run_id, gate_id),
+    ).fetchone()
+    if gate is None or str(gate[0]) != "PASS":
+        return None
+    try:
+        retained = proving.execute(
+            """
+            SELECT packet_digest, packet_json
+            FROM proving_rights_packets
+            WHERE run_id=? AND gate_id=?
+            """,
+            (run_id, gate_id),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if retained is None:
+        return None
+    packet_digest, packet_json = str(retained[0]), str(retained[1])
+    try:
+        packet = json.loads(packet_json)
+    except json.JSONDecodeError:
+        return None
+    if (
+        digest_bytes(canonical_json_bytes(packet)) != packet_digest
+        or source_url != SOURCE_URLS.get(source_id)
+    ):
+        return None
+    verdict = assess_rights(gate_id, inventory=packet, now=evaluated_at)
+    if (
+        verdict.status != "PASS"
+        or verdict.gate_id != gate_id
+        or not verdict.endpoint
+        or not verdict.expires_at
+        or not verdict.terms_url
+        or not verdict.terms_digest
+    ):
+        return None
+    return {
+        "status": "PASS",
+        "gate_id": gate_id,
+        "source_id": source_id,
+        "source_definition_url": source_url,
+        "rights_endpoint": verdict.endpoint,
+        "packet_digest": packet_digest,
+        "expires_at": verdict.expires_at,
+        "terms_url": verdict.terms_url,
+        "terms_digest": verdict.terms_digest,
+        "evaluated_at": evaluated_at,
+    }
+
+
 def _permitted_rows(
     proving: sqlite3.Connection,
+    *,
+    evaluated_at: str,
 ) -> tuple[str, tuple[_ProvingObservation, ...], tuple[_ProvingObservation, ...]]:
     runs = proving.execute(
         "SELECT run_id FROM proving_runs ORDER BY started_at, run_id"
@@ -597,11 +698,6 @@ def _permitted_rows(
         for gate_id in GLOBAL_PROVING_GATES
     ):
         return latest_run_id, (), ()
-    current_rights = {
-        gate_id: decision
-        for gate_id, decision in current_gates.items()
-        if str(gate_id).startswith("RIGHTS_")
-    }
     all_rows: list[_ProvingObservation] = []
     latest_rows: list[_ProvingObservation] = []
     for (raw_run_id,) in runs:
@@ -616,27 +712,35 @@ def _permitted_rows(
             (run_id,),
         ).fetchall()
         for source_id, url, fetched_at, status_code, body_digest, body in values:
-            gate_id = f"RIGHTS_{source_id}"
-            current = current_rights.get(gate_id)
+            source_id_text = str(source_id)
+            source_url = str(url)
+            current = _current_rights_decision(
+                proving,
+                run_id=latest_run_id,
+                source_id=source_id_text,
+                source_url=source_url,
+                evaluated_at=evaluated_at,
+            )
             if (
                 current is None
-                or current[0] != "PASS"
-                or str(url) != SOURCE_URLS.get(str(source_id))
                 or int(status_code) != 200
                 or not body
             ):
                 continue
+            stable_rights = dict(current)
+            stable_rights.pop("evaluated_at", None)
+            gate_id = str(current["gate_id"])
             row = _ProvingObservation(
                 run_id=run_id,
-                source_id=str(source_id),
-                url=str(url),
+                source_id=source_id_text,
+                url=source_url,
                 fetched_at=str(fetched_at),
                 status_code=int(status_code),
                 body_digest=str(body_digest),
                 body=bytes(body),
                 rights_authority_run_id=latest_run_id,
                 rights_gate_id=gate_id,
-                rights_gate_reason=current[1],
+                rights_gate_reason=canonical_json_bytes(stable_rights).decode("utf-8"),
             )
             all_rows.append(row)
             if run_id == latest_run_id:
@@ -652,6 +756,7 @@ def run_cycle(
     max_writes: int = 5,
     graphiti: GraphitiPort | None = None,
     max_graphiti: int = 1,
+    clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
 ) -> CycleReport:
     assert_private_store(unpublished_store)
     lowered = proving_store.lower()
@@ -660,9 +765,25 @@ def run_cycle(
     proving = sqlite3.connect(proving_store)
     proving.execute("PRAGMA query_only=ON")
     try:
-        run_id, latest_rows, corpus_rows = _permitted_rows(proving)
+        run_id, latest_rows, corpus_rows = _permitted_rows(
+            proving, evaluated_at=_utc_text(clock())
+        )
     finally:
         proving.close()
+
+    def rights_check(unit: CorpusIngestUnit) -> dict[str, object] | None:
+        current = sqlite3.connect(proving_store)
+        current.execute("PRAGMA query_only=ON")
+        try:
+            return _current_rights_decision(
+                current,
+                run_id=run_id,
+                source_id=unit.source_id,
+                source_url=unit.source_definition_url,
+                evaluated_at=_utc_text(clock()),
+            )
+        finally:
+            current.close()
 
     observations = _parsed_observations(latest_rows)
     unit_by_id: dict[str, CorpusIngestUnit] = {}
@@ -707,6 +828,7 @@ def run_cycle(
                 graphiti=graphiti,
                 units=units,
                 max_graphiti=max_graphiti,
+                rights_check=rights_check,
             )
             unpublished.commit()
         for candidate in candidates:
