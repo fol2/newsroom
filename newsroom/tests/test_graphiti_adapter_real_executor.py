@@ -713,6 +713,31 @@ def test_retryable_failure_returns_diagnostic_receipt_without_structured_output(
     assert produced.attempt_receipt_value["usage_basis"] == "NO_EMBEDDING_CALL"
 
 
+def test_pre_dispatch_setup_failure_is_a_proved_no_call_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    def missing_runtime() -> object:
+        raise GraphitiAdapterContractError("graphiti runtime is absent")
+
+    monkeypatch.setattr(real, "_load_graphiti", missing_runtime)
+    produced = RealGraphitiAdapter()._produce(
+        evaluation_attempt_for(("A retained source passage.",)),
+        UtcTimestamp.parse("2026-08-20T00:00:00.000000Z"),
+    )
+
+    receipt = produced.attempt_receipt_value
+    assert produced.outcome is ExtractionOutcome.RETRYABLE_FAILURE
+    assert receipt is not None
+    assert receipt["dispatch_state"] == "NOT_DISPATCHED"
+    assert receipt["setup_failure"] == "GraphitiAdapterContractError"
+    assert receipt["chat_invocation_count"] == 0
+    assert receipt["embedding_usage"]["request_count"] == 0
+    assert receipt["embedding_usage"]["cost_usd_microunits"] == 0
+    assert receipt["usage_basis"] == "NO_EMBEDDING_CALL"
+
+
 def test_relations_without_exact_evidence_are_retained_without_proposals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1249,6 +1249,45 @@ def test_graphiti_cash_ceiling_holds_ingest_but_writer_continues(
     assert "PRIVATE_CYCLE_CLOSE" in ledger_kinds
 
 
+def test_pre_dispatch_failure_releases_graphiti_reservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    def missing_runtime() -> object:
+        raise GraphitiAdapterContractError("graphiti runtime is absent")
+
+    monkeypatch.setattr(real, "_load_graphiti", missing_runtime)
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "pre-dispatch.sqlite3"
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=EvaluationGraphitiRunner(),
+        max_graphiti=1,
+    )
+
+    connection = __import__("sqlite3").connect(unpublished)
+    spend = connection.execute(
+        "SELECT status, actual_usd_microunits, actual_gbp_microunits, usage_basis "
+        "FROM unpublished_graphiti_spend"
+    ).fetchone()
+    receipt = json.loads(
+        connection.execute(
+            "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts"
+        ).fetchone()[0]
+    )
+    connection.close()
+    assert report.graphiti == 1
+    assert spend == ("RECONCILED", 0, 0, "NO_EMBEDDING_CALL")
+    assert receipt["dispatch_state"] == "NOT_DISPATCHED"
+    assert receipt["embedding_usage"]["request_count"] == 0
+    assert receipt["accounting"]["unused_reservation_released"] is True
+
+
 def test_ingest_commits_when_writer_fails(tmp_path: Path) -> None:
     proving = _proving(tmp_path)
     unpublished = tmp_path / "unpublished_store.sqlite3"

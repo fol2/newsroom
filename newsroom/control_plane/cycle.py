@@ -202,7 +202,7 @@ def _receipt(
     *,
     accounting: dict[str, object],
 ) -> dict[str, object]:
-    return {
+    receipt: dict[str, object] = {
         "ingest_id": unit.ingest_id,
         "source_id": unit.source_id,
         "item_key": unit.item_key,
@@ -253,6 +253,12 @@ def _receipt(
         "receipt_digest": "",
         "profile": "EVALUATION",
     }
+    raw = result.raw_receipt
+    if isinstance(raw, dict):
+        for key in ("dispatch_state", "setup_failure"):
+            if key in raw:
+                receipt[key] = raw[key]
+    return receipt
 
 
 def _queue(

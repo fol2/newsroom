@@ -92,10 +92,20 @@ _REASON_BY_OUTCOME = {
 _is_source_registry_name = is_source_registry_name
 
 
+def _no_embedding_usage() -> dict[str, object]:
+    return {
+        "requests": [],
+        "request_count": 0,
+        "embedding_tokens": 0,
+        "cost_usd_microunits": 0,
+        "usage_basis": "NO_EMBEDDING_CALL",
+    }
+
+
 @dataclass(slots=True)
 class _EpisodeTelemetry:
     chat_invocations: list[dict[str, object]] = field(default_factory=list)
-    embedding_usage: dict[str, object] = field(default_factory=dict)
+    embedding_usage: dict[str, object] = field(default_factory=_no_embedding_usage)
     predecessor_episode_uuid: str | None = None
     provider_attempt_number: int | None = None
 
@@ -660,6 +670,29 @@ class RealGraphitiAdapter:
             _load_graphiti()
             api_key = openrouter_api_key()
             password = neo4j_community_password()
+        except (BrokerError, GraphitiAdapterContractError) as exc:
+            raw = _raw_receipt(
+                attempt,
+                started_at=started_at,
+                telemetry=telemetry,
+                result=None,
+                proposals=(),
+            )
+            raw.pop("raw_output_digest", None)
+            raw["dispatch_state"] = "NOT_DISPATCHED"
+            raw["setup_failure"] = type(exc).__name__
+            raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
+            return produced_extraction(
+                attempt,
+                outcome=ExtractionOutcome.RETRYABLE_FAILURE,
+                failure_code=ExtractionFailureCode.PRODUCER_INTERNAL_ERROR,
+                validation=None,
+                raw=None,
+                proposals=(),
+                embedding_usage=telemetry.embedding_usage,
+                attempt_receipt=raw,
+            )
+        try:
             result = asyncio.run(
                 asyncio.wait_for(
                     _add_episode(
