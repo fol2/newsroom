@@ -28,10 +28,14 @@ WRITER_SCHEMA = {
 }
 _PROMPT = (
     "你係 Newsroom 嘅 CONT 原創記者，唔係 Graphiti。"
-    "用香港繁體中文寫一篇未出版新聞稿。必須原創改寫，唔好複製來源標題或 dateline 模板。"
+    "用香港繁體中文寫一篇已經完成嘅未出版新聞稿。"
+    "JSON 嘅 title 同 body 必須係完稿正文，唔係計劃、核對清單、任務說明或工作備註。"
+    "禁止輸出含有「計劃」「核對」「任務」「先查」嘅標題或正文。"
+    "必須原創改寫，唔好複製來源標題或 dateline 模板。"
     "唔准 AUTO_PUBLISH，唔准當公開發行。"
     "只輸出 JSON 物件，欄位 title 同 body。"
 )
+_RESIDUE_MARKERS = ("計劃", "核對", "任務", "先查")
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,24 +98,33 @@ def _copy_fields(payload: object) -> tuple[str, str] | None:
     return None
 
 
+def _finished_copy(title: str, body: str) -> tuple[str, str]:
+    if not title or not body:
+        raise RuntimeError("writer JSON missing title or body")
+    haystack = f"{title}\n{body}"
+    if any(marker in haystack for marker in _RESIDUE_MARKERS):
+        raise RuntimeError("writer returned planning residue, not unpublished copy")
+    return title, body
+
+
 def _parse_copy(raw: str) -> tuple[str, str]:
     payload = json.loads(_extract_json(raw))
     found = _copy_fields(payload)
     if found:
-        return found
+        return _finished_copy(*found)
     for key in ("structured_output", "structuredOutput"):
         found = _copy_fields(payload.get(key))
         if found:
-            return found
+            return _finished_copy(*found)
     text = payload.get("text")
     if isinstance(text, str) and text.strip():
         found = _copy_fields(json.loads(_extract_json(text)))
         if found:
-            return found
+            return _finished_copy(*found)
     raise RuntimeError("writer JSON missing title or body")
 
 
-def _run(command: tuple[str, ...], *, timeout: int) -> str:
+def _run(command: tuple[str, ...], *, timeout: int, cwd: str | None = None) -> str:
     name = os.path.basename(command[0])
     try:
         result = subprocess.run(
@@ -120,6 +133,7 @@ def _run(command: tuple[str, ...], *, timeout: int) -> str:
             capture_output=True,
             text=True,
             timeout=timeout,
+            cwd=cwd,
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"{name} writer timed out") from None
@@ -132,12 +146,10 @@ def _run(command: tuple[str, ...], *, timeout: int) -> str:
 
 def run_grok_cli(prompt: str) -> str:
     schema = json.dumps(WRITER_SCHEMA, ensure_ascii=False)
-    with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", suffix=".txt", delete=False
-    ) as handle:
-        handle.write(prompt)
-        path = handle.name
-    try:
+    with tempfile.TemporaryDirectory(prefix="newsroom-grok-writer-") as cwd:
+        path = os.path.join(cwd, "prompt.txt")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(prompt)
         return _run(
             (
                 GROK_BIN,
@@ -150,13 +162,14 @@ def run_grok_cli(prompt: str) -> str:
                 "--disable-web-search",
                 "--no-plan",
                 "--max-turns",
-                "1",
+                "3",
                 "--no-subagents",
+                "--reasoning-effort",
+                "low",
             ),
-            timeout=180,
+            timeout=300,
+            cwd=cwd,
         )
-    finally:
-        os.unlink(path)
 
 
 def run_cursor_agent_cli(prompt: str) -> str:

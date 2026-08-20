@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 
 import pytest
 
@@ -10,7 +11,7 @@ from newsroom.control_plane.reports import news_report
 from newsroom.control_plane.store import connect, list_payloads, mark_public_dispatch
 from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.veto import VetoError, refuse_public_effect
-from newsroom.control_plane.writer import CliChainWriter, FixtureWriter
+from newsroom.control_plane.writer import CliChainWriter, FixtureWriter, run_grok_cli
 from newsroom.graphiti_adapter.evaluation_packet import (
     EVALUATION_GRAPHITI_PACKET,
     EVALUATION_WORKSPACE_POLICY,
@@ -195,6 +196,38 @@ def test_cycle_mints_unpublished_payloads_with_evidence(tmp_path: Path) -> None:
     assert second.minted == 0
     assert second.duplicate == 3
     assert len(list_payloads(str(unpublished))) == 3
+
+
+def test_cycle_continues_after_one_writer_failure(tmp_path: Path) -> None:
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "unpublished_store.sqlite3"
+
+    class FlakyWriter:
+        writer_id = "test-flaky-writer"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def write(self, candidate, package):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("grok writer timed out")
+            return FixtureWriter().write(candidate, package)
+
+    writer = FlakyWriter()
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=writer,
+        max_writes=10,
+    )
+    assert writer.calls >= 2
+    assert report.minted == 2
+    assert report.candidates == 3
+    payloads = list_payloads(str(unpublished))
+    assert len(payloads) == 2
+    assert all(item.auto_publish is False for item in payloads)
+    assert all(item.status == "UNPUBLISHED" for item in payloads)
 
 
 def test_same_event_url_consolidates_to_one_candidate(tmp_path: Path) -> None:
@@ -410,6 +443,64 @@ def test_cli_writer_prefers_grok_build_cli() -> None:
     copy = CliChainWriter(primary=grok, fallback=cursor).write(*_sample_candidate_package())
     assert copy.writer_id == "grok-build-cli-cont-writer"
     assert "Grok" in copy.title
+
+
+def test_cli_writer_rejects_planning_residue_and_falls_back() -> None:
+    def grok(_prompt: str) -> str:
+        return json.dumps(
+            {"title": "新聞稿任務", "body": "先查 CONT 記者稿例，再核對官方數據。"}
+        )
+
+    def cursor(_prompt: str) -> str:
+        return json.dumps(
+            {
+                "title": "【未出版】立法會教育議案",
+                "body": "【未出版原創】立法會通過教育議案，本報根據證據包改寫。",
+            },
+            ensure_ascii=False,
+        )
+
+    copy = CliChainWriter(primary=grok, fallback=cursor).write(*_sample_candidate_package())
+    assert copy.writer_id == "cursor-agent-cli-cont-writer"
+    assert copy.title == "【未出版】立法會教育議案"
+    assert "任務" not in copy.title
+    assert "先查" not in copy.body
+    assert "核對" not in copy.body
+
+
+def test_grok_cli_uses_empty_cwd_and_three_turns(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class Result:
+        returncode = 0
+        stdout = json.dumps({"title": "t", "body": "b"})
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["timeout"] = kwargs.get("timeout")
+        captured["cwd"] = kwargs.get("cwd")
+        captured["entries"] = os.listdir(kwargs["cwd"]) if kwargs.get("cwd") else []
+        return Result()
+
+    monkeypatch.setattr("newsroom.control_plane.writer.subprocess.run", fake_run)
+    run_grok_cli("prompt")
+    command = captured["command"]
+    assert isinstance(command, tuple)
+    assert captured["timeout"] == 300
+    assert command[command.index("--max-turns") + 1] == "3"
+    assert command[command.index("--reasoning-effort") + 1] == "low"
+    assert "--json-schema" in command
+    assert "--no-plan" in command
+    assert "--disable-web-search" in command
+    assert "--no-subagents" in command
+    assert "--always-approve" not in command
+    assert "--force" not in command
+    assert "--yolo" not in command
+    assert captured["entries"] == ["prompt.txt"]
+    cwd = captured["cwd"]
+    assert isinstance(cwd, str)
+    assert cwd != os.getcwd()
 
 
 def test_cli_writer_reads_title_from_grok_text_envelope() -> None:
