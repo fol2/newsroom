@@ -51,6 +51,9 @@ class GraphitiCycleResult:
     chat: str = GRAPHITI_CHAT_MODEL
     chat_fallback: str = GRAPHITI_CHAT_FALLBACK
     embedding: str = GRAPHITI_EMBEDDING_MODEL
+    attempt_number: int = 1
+    predecessor_episode_uuid: str | None = None
+    raw_receipt: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.temporal_basis, TemporalBasis):
@@ -79,13 +82,34 @@ class EvaluationGraphitiRunner:
             published_at=unit.published_at,
             updated_at=unit.updated_at,
             observed_at=unit.observed_at,
+            canonical_url=unit.canonical_url,
+            revision_digest=unit.revision_digest,
+            representation_digest=unit.representation_digest,
+            authority_ids=(
+                None
+                if unit.authority is None
+                else (
+                    unit.authority.admission_id,
+                    unit.authority.access_decision_id,
+                    unit.authority.definition_id,
+                    unit.authority.definition_version_id,
+                    unit.authority.item_id,
+                    unit.authority.revision_id,
+                    unit.authority.representation_id,
+                )
+            ),
+            attempt_number=unit.attempt_number,
+            predecessor_episode_uuid=unit.predecessor_ingest_id,
         )
         with TemporaryDirectory() as root:
             execution = RealGraphitiAdapter().execute(
                 attempt=attempt,
                 workspace_root=Path(root),
             )
-        raw = execution.produced.raw_output_value
+        raw = (
+            execution.produced.raw_output_value
+            or execution.produced.attempt_receipt_value
+        )
         payload = raw if isinstance(raw, dict) else {}
         relations = (
             tuple(payload["relations"])
@@ -138,6 +162,9 @@ class EvaluationGraphitiRunner:
             cost_microunits=usage.cost_microunits,
             usage_basis=str(usage_basis) if isinstance(usage_basis, str) else "UNOBSERVED",
             prompt_version=GRAPHITI_PROMPT_COMPONENT.component_version,
+            attempt_number=unit.attempt_number,
+            predecessor_episode_uuid=unit.predecessor_ingest_id,
+            raw_receipt=payload,
         )
 
 

@@ -123,9 +123,9 @@ def relation_proposals(
             continue
         if is_source_registry_name(subject) or is_source_registry_name(obj):
             continue
-        evidence = (
-            _evidence_for(fact_text, attempt) if fact_text else None
-        ) or _evidence_for(subject, attempt)
+        # A subject mention proves only that the entity text occurred.  Relation
+        # authority needs the exact extracted fact expression in a retained passage.
+        evidence = _evidence_for(fact_text, attempt) if fact_text else None
         if evidence is None:
             continue
         drafts.append(
@@ -223,6 +223,7 @@ def produced_extraction(
     raw: dict[str, object] | None,
     proposals: tuple[ProposalDraft, ...],
     embedding_usage: dict[str, object] | None = None,
+    attempt_receipt: dict[str, object] | None = None,
 ) -> ProducedExtraction:
     return ProducedExtraction(
         outcome=outcome,
@@ -231,6 +232,7 @@ def produced_extraction(
         raw_output_value=raw,
         proposals=proposals,
         usage=extraction_usage(attempt, raw, proposals, embedding_usage),
+        attempt_receipt_value=attempt_receipt,
     )
 
 

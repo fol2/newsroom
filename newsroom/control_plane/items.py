@@ -15,6 +15,7 @@ _XML_PARSER = etree.XMLParser(
     resolve_entities=False, no_network=True, recover=True, huge_tree=False
 )
 MAX_HEADLINE_CHARS = 240
+MAX_DRAFTING_BODY_CHARS = 4_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +27,13 @@ class SourceItem:
     canonical_url: str
     published_at: str | None = None
     updated_at: str | None = None
+    corpus_body: str | None = None
+
+    @property
+    def retained_corpus_body(self) -> str:
+        """Return the full retained expression reserved for corpus processing."""
+
+        return self.body if self.corpus_body is None else self.corpus_body
 
 
 def _plain(text: str) -> str:
@@ -96,7 +104,7 @@ def _from_entry(source_id: str, element: etree._Element) -> SourceItem | None:
                 link = child.get("href", "").strip()
                 break
     key = _child_text(element, ("guid", "id")) or link or headline
-    body = (
+    corpus_body = (
         _child_text(element, ("description", "summary", "content", "encoded"))
         or headline
     ).strip()
@@ -104,7 +112,16 @@ def _from_entry(source_id: str, element: etree._Element) -> SourceItem | None:
         _child_text(element, ("published", "pubdate", "date"))
     )
     updated = parse_source_time(_child_text(element, ("updated",)))
-    return SourceItem(source_id, key, headline, body, link, published, updated)
+    return SourceItem(
+        source_id,
+        key,
+        headline,
+        _clip(corpus_body, MAX_DRAFTING_BODY_CHARS),
+        link,
+        published,
+        updated,
+        corpus_body,
+    )
 
 
 def _from_xml(source_id: str, body: bytes) -> tuple[SourceItem, ...]:
@@ -141,14 +158,16 @@ def _from_mapping(source_id: str, payload: dict[str, object], *, fallback_key: s
         or payload.get("public_timestamp")
     )
     updated_raw = payload.get("public_updated_at") or payload.get("updated_at")
+    corpus_body = _plain(description)
     return SourceItem(
         source_id,
         key,
         _clip(_plain(title), MAX_HEADLINE_CHARS),
-        _plain(description),
+        _clip(corpus_body, MAX_DRAFTING_BODY_CHARS),
         url,
         parse_source_time(published_raw) if isinstance(published_raw, str) else None,
         parse_source_time(updated_raw) if isinstance(updated_raw, str) else None,
+        corpus_body,
     )
 
 

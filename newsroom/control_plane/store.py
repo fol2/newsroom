@@ -13,7 +13,7 @@ from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.corpus import EligibleCorpusRevision
 from newsroom.control_plane.veto import VetoError, assert_private_store, refuse_public_effect
 
-SCHEMA_VERSION = "newsroom.control-plane.unpublished.v6"
+SCHEMA_VERSION = "newsroom.control-plane.unpublished.v7"
 LEDGER_GENESIS = "sha256:" + ("0" * 64)
 GRAPHITI_MAX_FAILURES = 3
 
@@ -68,6 +68,22 @@ CREATE TABLE IF NOT EXISTS unpublished_graphiti_receipts(
     ingest_id TEXT PRIMARY KEY,
     receipt_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS unpublished_graphiti_attempt_receipts(
+    ingest_id TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL,
+    outcome TEXT NOT NULL,
+    receipt_digest TEXT NOT NULL,
+    receipt_json TEXT NOT NULL,
+    at TEXT NOT NULL,
+    PRIMARY KEY(ingest_id, attempt_number)
+);
+CREATE TABLE IF NOT EXISTS unpublished_graphiti_authority_records(
+    record_id TEXT PRIMARY KEY,
+    record_type TEXT NOT NULL,
+    record_digest TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    retained_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS unpublished_graphiti_coverage(
     seq INTEGER PRIMARY KEY,
     at TEXT NOT NULL,
@@ -87,6 +103,7 @@ CREATE TABLE IF NOT EXISTS unpublished_graphiti_spend(
     spend_id TEXT PRIMARY KEY,
     ingest_id TEXT NOT NULL,
     attempt_number INTEGER NOT NULL,
+    proving_run_id TEXT NOT NULL,
     reserved_gbp_microunits INTEGER NOT NULL,
     actual_usd_microunits INTEGER,
     actual_gbp_microunits INTEGER,
@@ -125,6 +142,15 @@ def connect(path: str) -> sqlite3.Connection:
     connection = sqlite3.connect(path)
     connection.execute("PRAGMA journal_mode=WAL")
     connection.executescript(_PAYLOAD_SQL)
+    columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(unpublished_graphiti_spend)")
+    }
+    if "proving_run_id" not in columns:
+        connection.execute(
+            "ALTER TABLE unpublished_graphiti_spend "
+            "ADD COLUMN proving_run_id TEXT NOT NULL DEFAULT 'LEGACY_UNKNOWN'"
+        )
     return connection
 
 
@@ -166,6 +192,7 @@ def reserve_graphiti_spend(
     spend_id: str,
     ingest_id: str,
     attempt_number: int,
+    proving_run_id: str,
     reserved_gbp_microunits: int,
     ceiling_gbp_microunits: int,
 ) -> bool:
@@ -191,11 +218,19 @@ def reserve_graphiti_spend(
         """
         INSERT INTO unpublished_graphiti_spend(
             spend_id, ingest_id, attempt_number, reserved_gbp_microunits,
+            proving_run_id,
             actual_usd_microunits, actual_gbp_microunits, usage_basis,
             status, provider_usage_json, at
-        ) VALUES(?,?,?,?,NULL,NULL,'PENDING_PROVIDER_REPORT','RESERVED',NULL,?)
+        ) VALUES(?,?,?,?,?,NULL,NULL,'PENDING_PROVIDER_REPORT','RESERVED',NULL,?)
         """,
-        (spend_id, ingest_id, attempt_number, reserved_gbp_microunits, _now()),
+        (
+            spend_id,
+            ingest_id,
+            attempt_number,
+            reserved_gbp_microunits,
+            proving_run_id,
+            _now(),
+        ),
     )
     return True
 
@@ -222,13 +257,14 @@ def reconcile_graphiti_spend(
     usage = embedding_usage or {}
     usage_basis = str(usage.get("usage_basis") or "UNREPORTED")
     raw_cost = usage.get("cost_usd_microunits")
+    no_call = usage_basis == "NO_EMBEDDING_CALL" and usage.get("request_count", 0) == 0
     reported = usage_basis == "PROVIDER_REPORTED" and isinstance(raw_cost, int)
     # Conservative versioned parity conversion until a separately accepted FX
     # table supersedes this policy: USD 1.00 reserves/debits GBP 1.00.
     fx_policy = "USD_GBP_CONSERVATIVE_PARITY_V1"
-    actual_usd = int(raw_cost) if reported else None
+    actual_usd = 0 if no_call else (int(raw_cost) if reported else None)
     actual_gbp = actual_usd
-    status = "RECONCILED" if reported else "UNRECONCILED"
+    status = "RECONCILED" if reported or no_call else "UNRECONCILED"
     connection.execute(
         """
         UPDATE unpublished_graphiti_spend
@@ -253,8 +289,70 @@ def reconcile_graphiti_spend(
         "actual_usd_microunits": actual_usd,
         "actual_gbp_microunits": actual_gbp,
         "fx_policy": fx_policy,
-        "unused_reservation_released": reported,
+        "unused_reservation_released": reported or no_call,
     }
+
+
+def retain_graphiti_authority_records(
+    connection: sqlite3.Connection,
+    records: tuple[dict[str, object], ...],
+) -> None:
+    """Retain authority records and reject an identifier reused for new semantics."""
+
+    for record in records:
+        record_id = str(record.get("record_id") or "")
+        record_type = str(record.get("record_type") or "")
+        if not record_id or not record_type:
+            raise ValueError("Graphiti authority record identity and type are required")
+        record_json = canonical_json_bytes(record).decode("utf-8")
+        record_digest = digest_bytes(record_json.encode("utf-8"))
+        retained = connection.execute(
+            "SELECT record_digest FROM unpublished_graphiti_authority_records "
+            "WHERE record_id=?",
+            (record_id,),
+        ).fetchone()
+        if retained is not None and str(retained[0]) != record_digest:
+            raise ValueError("Graphiti authority record identity was reused")
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO unpublished_graphiti_authority_records(
+                record_id, record_type, record_digest, record_json, retained_at
+            ) VALUES(?,?,?,?,?)
+            """,
+            (record_id, record_type, record_digest, record_json, _now()),
+        )
+
+
+def insert_graphiti_attempt_receipt(
+    connection: sqlite3.Connection,
+    *,
+    ingest_id: str,
+    attempt_number: int,
+    outcome: str,
+    receipt: dict[str, object],
+) -> str:
+    value = dict(receipt)
+    supplied_digest = value.pop("receipt_digest", None)
+    receipt_digest = digest_bytes(canonical_json_bytes(value))
+    if supplied_digest not in (None, "", receipt_digest):
+        raise ValueError("Graphiti final receipt digest differs from retained receipt")
+    value["receipt_digest"] = receipt_digest
+    connection.execute(
+        """
+        INSERT INTO unpublished_graphiti_attempt_receipts(
+            ingest_id, attempt_number, outcome, receipt_digest, receipt_json, at
+        ) VALUES(?,?,?,?,?,?)
+        """,
+        (
+            ingest_id,
+            attempt_number,
+            outcome,
+            receipt_digest,
+            json.dumps(value, ensure_ascii=False, sort_keys=True),
+            _now(),
+        ),
+    )
+    return receipt_digest
 
 
 def has_graphiti_ingest(connection: sqlite3.Connection, ingest_id: str) -> bool:

@@ -26,10 +26,17 @@ from newsroom.graphiti_adapter.identity import (
     content_digest,
     ingest_key,
     observation_authority_ids,
+    source_definition_version_id,
     typed_id,
 )
 from newsroom.graphiti_adapter.temporal import map_reference_time
-from newsroom.sources.types import SourceDefinitionVersionId
+from newsroom.sources.types import (
+    DiscoveryRepresentationId,
+    SourceDefinitionId,
+    SourceDefinitionVersionId,
+    SourceItemId,
+    SourceRevisionId,
+)
 
 from .contracts import (
     GRAPHITI_ADAPTER_CODE_COMPONENT,
@@ -110,6 +117,12 @@ def evaluation_attempt_for_body(
     published_at: str | None,
     updated_at: str | None,
     observed_at: str,
+    canonical_url: str = "",
+    revision_digest: str | None = None,
+    representation_digest: str | None = None,
+    authority_ids: tuple[str, str, str, str, str, str, str] | None = None,
+    attempt_number: int = 1,
+    predecessor_episode_uuid: str | None = None,
 ) -> GraphitiAttemptRequest:
     text = " ".join(episode_body.split())
     if not text:
@@ -122,22 +135,55 @@ def evaluation_attempt_for_body(
         updated_at=updated_at,
         observed_at=observed_at,
     )
-    attempt_id, workspace_id, cleanup_id = attempt_ids(ingest_id)
-    (
-        admission_id,
-        access_id,
-        definition_id,
-        item_id,
-        revision_id,
-        representation_id,
-    ) = observation_authority_ids(
-        proving_run_id=proving_run_id,
-        source_id=source_id,
-        item_key=item_key,
-        observation_digest=observation_digest,
-        published_at=published_at,
-        updated_at=updated_at,
+    attempt_id, workspace_id, cleanup_id = attempt_ids(ingest_id, attempt_number)
+    previous_attempt_id = (
+        None if attempt_number == 1 else attempt_ids(ingest_id, attempt_number - 1)[0]
     )
+    if authority_ids is None:
+        revision_digest = revision_digest or content_digest(
+            headline="", body=text, canonical_url=canonical_url
+        )
+        representation_digest = representation_digest or digest_canonical(
+            {
+                "source_id": source_id,
+                "item_key": item_key,
+                "revision_digest": revision_digest,
+                "published_at": published_at,
+                "updated_at": updated_at,
+            }
+        )
+        generated = observation_authority_ids(
+            source_id=source_id,
+            item_key=item_key,
+            revision_digest=revision_digest,
+            representation_digest=representation_digest,
+            rights_authority_run_id=proving_run_id,
+            rights_gate_id=f"RIGHTS_{source_id}",
+            rights_gate_reason="evaluation fixture",
+            published_at=published_at,
+            updated_at=updated_at,
+        )
+        definition_version_id = source_definition_version_id(
+            source_id=source_id, source_url=canonical_url
+        )
+    else:
+        admission_id = ObjectAdmissionId.parse(authority_ids[0])
+        access_id = ObjectAccessDecisionId.parse(authority_ids[1])
+        definition_id = SourceDefinitionId.parse(authority_ids[2])
+        definition_version_id = SourceDefinitionVersionId.parse(authority_ids[3])
+        item_id = SourceItemId.parse(authority_ids[4])
+        revision_id = SourceRevisionId.parse(authority_ids[5])
+        representation_id = DiscoveryRepresentationId.parse(authority_ids[6])
+        generated = None
+    if generated is not None:
+        (
+            admission_id,
+            access_id,
+            definition_id,
+            item_id,
+            revision_id,
+            representation_id,
+        ) = generated
     bound = (
         _passage(
             text,
@@ -187,9 +233,7 @@ def evaluation_attempt_for_body(
         contract_id=contract.contract_id,
         input_binding=ExtractionInputBinding(
             definition_id=definition_id,
-            definition_version_id=typed_id(
-                SourceDefinitionVersionId, "definition-version", source_id
-            ),
+            definition_version_id=definition_version_id,
             item_id=item_id,
             revision_id=revision_id,
             representation_id=representation_id,
@@ -209,8 +253,8 @@ def evaluation_attempt_for_body(
     )
     return GraphitiAttemptRequest(
         attempt_id=attempt_id,
-        attempt_number=1,
-        expected_previous_attempt_id=None,
+        attempt_number=attempt_number,
+        expected_previous_attempt_id=previous_attempt_id,
         configuration=configuration,
         workspace_id=workspace_id,
         cleanup_receipt_id=cleanup_id,
@@ -228,6 +272,7 @@ def evaluation_attempt_for_body(
         temporal_basis=temporal.basis,
         episode_uuid=ingest_id,
         generation_id=GRAPHITI_GENERATION_ID,
+        predecessor_episode_uuid=predecessor_episode_uuid,
     )
 
 
@@ -241,10 +286,10 @@ def evaluation_attempt_for(passages: tuple[str, ...]) -> GraphitiAttemptRequest:
         source_id="evaluation",
         item_key="passages",
         content_digest_value=digest,
-        observation_digest=digest,
+        revision_id=digest,
+        representation_digest=digest,
         published_at=None,
         updated_at=None,
-        observed_at=observed_at,
     )
     return evaluation_attempt_for_body(
         episode_body=body,

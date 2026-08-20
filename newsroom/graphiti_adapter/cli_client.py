@@ -70,23 +70,25 @@ def run_cli(command: tuple[str, ...], *, timeout: int, cwd: str | None = None) -
 
 
 def run_cursor_agent_llm(prompt: str) -> str:
-    return run_cli(
-        (
-            CURSOR_AGENT_BIN,
-            "--print",
-            "--mode",
-            "ask",
-            "--output-format",
-            "text",
-            "--sandbox",
-            "enabled",
-            "--trust",
-            "--model",
-            CURSOR_AGENT_MODEL_ID,
-            prompt,
-        ),
-        timeout=180,
-    )
+    with tempfile.TemporaryDirectory(prefix="newsroom-cursor-graphiti-") as cwd:
+        return run_cli(
+            (
+                CURSOR_AGENT_BIN,
+                "--print",
+                "--mode",
+                "ask",
+                "--output-format",
+                "text",
+                "--sandbox",
+                "enabled",
+                "--trust",
+                "--model",
+                CURSOR_AGENT_MODEL_ID,
+                prompt,
+            ),
+            timeout=180,
+            cwd=cwd,
+        )
 
 
 def run_grok_llm(prompt: str, schema: str | None) -> str:

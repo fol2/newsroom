@@ -35,6 +35,7 @@ from newsroom.graphiti_adapter.cli_client import build_cli_llm_client
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
 from newsroom.graphiti_adapter.embedding_meter import MeteredOpenAIEmbedder
 from newsroom.graphiti_adapter.evaluation_packet import (
+    GRAPHITI_CHAT_FALLBACK,
     GRAPHITI_CHAT_MODEL,
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_EMBEDDING_MODEL,
@@ -72,6 +73,9 @@ from .workspace import DisposableProposalWorkspace
 
 _GRAPHITI_CORE_VERSION = "0.29.3"
 _NEO4J_USER = "neo4j"
+_EPISODE_STATE_KEY = "newsroom_ingest_state"
+_EPISODE_PENDING = "PENDING"
+_EPISODE_COMPLETE = "COMPLETE"
 _REASON_BY_OUTCOME = {
     "COMPLETE": GraphitiCleanupReason.NORMAL,
     "PARTIAL": GraphitiCleanupReason.PARTIAL,
@@ -91,6 +95,11 @@ _is_source_registry_name = is_source_registry_name
 class _EpisodeTelemetry:
     chat_invocations: list[dict[str, object]] = field(default_factory=list)
     embedding_usage: dict[str, object] = field(default_factory=dict)
+    predecessor_episode_uuid: str | None = None
+
+
+class AmbiguousEpisodeEffect(RuntimeError):
+    """The deterministic episode exists without a completed ingest marker."""
 
 
 def _load_graphiti() -> SimpleNamespace:
@@ -99,7 +108,9 @@ def _load_graphiti() -> SimpleNamespace:
         from graphiti_core.cross_encoder.client import CrossEncoderClient
         from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
         from graphiti_core.errors import NodeNotFoundError
+        from graphiti_core.edges import EntityEdge, EpisodicEdge
         from graphiti_core.nodes import EpisodeType, EpisodicNode
+        from graphiti_core.nodes import EntityNode
     except ImportError as exc:
         raise GraphitiAdapterContractError(
             "graphiti extra (graphiti-core 0.29.3) is required for real Graphiti execution"
@@ -123,6 +134,9 @@ def _load_graphiti() -> SimpleNamespace:
         IdentityCrossEncoder=IdentityCrossEncoder,
         EpisodeType=EpisodeType,
         EpisodicNode=EpisodicNode,
+        EpisodicEdge=EpisodicEdge,
+        EntityEdge=EntityEdge,
+        EntityNode=EntityNode,
         NodeNotFoundError=NodeNotFoundError,
     )
 
@@ -139,7 +153,7 @@ async def _ensure_episode(
     name: str,
     body: str,
     reference_time: datetime,
-) -> None:
+) -> tuple[Any, str]:
     """Create the deterministic episode once, or validate the retained identity."""
 
     try:
@@ -155,9 +169,10 @@ async def _ensure_episode(
             content=body,
             created_at=datetime.now(tz=UTC),
             valid_at=reference_time,
+            episode_metadata={_EPISODE_STATE_KEY: _EPISODE_PENDING},
         )
         await retained.save(graphiti.driver)
-        return
+        return retained, "CREATED"
     if (
         retained.name != name
         or retained.group_id != GRAPHITI_WORKSPACE_GROUP
@@ -168,6 +183,43 @@ async def _ensure_episode(
         raise GraphitiAdapterContractError(
             "deterministic Graphiti episode identity was reused for different input"
         )
+    metadata = getattr(retained, "episode_metadata", None)
+    state = metadata.get(_EPISODE_STATE_KEY) if isinstance(metadata, dict) else None
+    if state == _EPISODE_COMPLETE:
+        return retained, _EPISODE_COMPLETE
+    return retained, _EPISODE_PENDING
+
+
+async def _reconciled_result(
+    *, graphiti: Any, runtime: SimpleNamespace, episode: Any
+) -> SimpleNamespace:
+    """Rebuild the graphiti result only from a completed retained episode."""
+
+    metadata = getattr(episode, "episode_metadata", None)
+    if not isinstance(metadata, dict) or metadata.get(_EPISODE_STATE_KEY) != _EPISODE_COMPLETE:
+        raise AmbiguousEpisodeEffect("Graphiti episode effect is not completed")
+    entity_edge_ids = [str(item) for item in getattr(episode, "entity_edges", ())]
+    edges = (
+        await runtime.EntityEdge.get_by_uuids(graphiti.driver, entity_edge_ids)
+        if entity_edge_ids
+        else []
+    )
+    episodic = await runtime.EpisodicEdge.get_by_group_ids(
+        graphiti.driver, [GRAPHITI_WORKSPACE_GROUP], limit=20_000
+    )
+    node_ids = sorted(
+        {
+            str(item.target_node_uuid)
+            for item in episodic
+            if str(getattr(item, "source_node_uuid", "")) == str(episode.uuid)
+        }
+    )
+    nodes = (
+        await runtime.EntityNode.get_by_uuids(graphiti.driver, node_ids)
+        if node_ids
+        else []
+    )
+    return SimpleNamespace(episode=episode, nodes=nodes, edges=edges)
 
 
 async def _add_episode(
@@ -199,6 +251,9 @@ async def _add_episode(
         embedder=embedder,
         cross_encoder=runtime.IdentityCrossEncoder(),
     )
+    if getattr(graphiti.driver, "_database", None) != GRAPHITI_WORKSPACE_GROUP:
+        graphiti.driver = graphiti.driver.clone(database=GRAPHITI_WORKSPACE_GROUP)
+        graphiti.clients.driver = graphiti.driver
     try:
         previous = await graphiti.retrieve_episodes(
             reference_time,
@@ -211,7 +266,7 @@ async def _add_episode(
             for item in previous
             if str(getattr(item, "uuid", "")) != episode_id
         ]
-        await _ensure_episode(
+        retained, state = await _ensure_episode(
             graphiti=graphiti,
             runtime=runtime,
             episode_id=episode_id,
@@ -219,18 +274,47 @@ async def _add_episode(
             body=body,
             reference_time=reference_time,
         )
-        return await graphiti.add_episode(
-            name=name,
-            episode_body=body,
-            source_description=GRAPHITI_WORKSPACE_GROUP,
-            reference_time=reference_time,
-            source=runtime.EpisodeType.text,
-            group_id=GRAPHITI_WORKSPACE_GROUP,
-            uuid=episode_id,
-            previous_episode_uuids=previous_episode_ids,
-            update_communities=False,
-            custom_extraction_instructions=GRAPHITI_EXTRACTION_INSTRUCTIONS,
-        )
+        if state == _EPISODE_COMPLETE:
+            return await _reconciled_result(
+                graphiti=graphiti, runtime=runtime, episode=retained
+            )
+        if state == _EPISODE_PENDING:
+            raise AmbiguousEpisodeEffect(
+                "Graphiti episode exists without a completed ingest marker"
+            )
+        # Ordered chunks explicitly name their predecessor; corpus context
+        # otherwise retains Graphiti's bounded temporal episode window.
+        predecessor = telemetry.predecessor_episode_uuid
+        if isinstance(predecessor, str) and predecessor:
+            previous_episode_ids.insert(0, predecessor)
+        try:
+            result = await graphiti.add_episode(
+                name=name,
+                episode_body=body,
+                source_description=GRAPHITI_WORKSPACE_GROUP,
+                reference_time=reference_time,
+                source=runtime.EpisodeType.text,
+                group_id=GRAPHITI_WORKSPACE_GROUP,
+                uuid=episode_id,
+                previous_episode_uuids=list(dict.fromkeys(previous_episode_ids)),
+                update_communities=False,
+                custom_extraction_instructions=GRAPHITI_EXTRACTION_INSTRUCTIONS,
+            )
+        except Exception as exc:
+            try:
+                retained = await runtime.EpisodicNode.get_by_uuid(
+                    graphiti.driver, episode_id
+                )
+                return await _reconciled_result(
+                    graphiti=graphiti, runtime=runtime, episode=retained
+                )
+            except AmbiguousEpisodeEffect:
+                raise AmbiguousEpisodeEffect(
+                    "Graphiti write effect is ambiguous; retry must not re-extract"
+                ) from exc
+        result.episode.episode_metadata = {_EPISODE_STATE_KEY: _EPISODE_COMPLETE}
+        await result.episode.save(graphiti.driver)
+        return result
     finally:
         telemetry.chat_invocations = list(getattr(llm_client, "invocations", ()))
         telemetry.embedding_usage = embedder.receipt()
@@ -257,19 +341,47 @@ def _raw_receipt(
             raise GraphitiAdapterContractError(
                 "graphiti-core returned a different deterministic episode identity"
             )
+    proposal_values = {item.local_id: item.canonical_value() for item in proposals}
+    entity_values = tuple(
+        {
+            **item,
+            "episode_uuid": actual_episode,
+            "passage_evidence": proposal_values.get(
+                str(item.get("local_id")), {}
+            ).get("evidence", []),
+        }
+        for item in entities
+    )
+    relation_values = tuple(
+        {
+            **item,
+            "episode_uuid": actual_episode,
+            "passage_evidence": proposal_values.get(
+                str(item.get("local_id")), {}
+            ).get("evidence", []),
+            "proposal_status": (
+                "PROPOSED"
+                if str(item.get("local_id")) in proposal_values
+                else "HELD_NO_EXACT_EVIDENCE"
+            ),
+        }
+        for item in relations
+    )
     raw: dict[str, object] = {
         "workspace_group": GRAPHITI_WORKSPACE_GROUP,
         "generation_id": attempt.generation_id or GRAPHITI_GENERATION_ID,
         "episode_uuid": actual_episode,
+        "attempt_number": attempt.attempt_number,
+        "predecessor_episode_uuid": attempt.predecessor_episode_uuid,
         "temporal_basis": attempt.temporal_basis,
         "reference_time": reference.to_text(),
         "ingest_started_at": started_at.to_text(),
         "passages": [item.canonical_value() for item in attempt.manifest.passages],
         "proposals": [item.canonical_value() for item in proposals],
-        "entities": list(entities),
-        "relations": list(relations),
-        "entity_count": len(entities),
-        "relation_count": len(relations),
+        "entities": list(entity_values),
+        "relations": list(relation_values),
+        "entity_count": len(entity_values),
+        "relation_count": len(relation_values),
         "proposal_count": len(proposals),
         "chat_invocations": list(telemetry.chat_invocations),
         "chat_invocation_count": len(telemetry.chat_invocations),
@@ -278,6 +390,10 @@ def _raw_receipt(
         "usage_basis": str(
             telemetry.embedding_usage.get("usage_basis", "UNREPORTED")
         ),
+        "framework": GRAPHITI_CORE_RELEASE,
+        "chat": GRAPHITI_CHAT_MODEL,
+        "chat_fallback": GRAPHITI_CHAT_FALLBACK,
+        "embedding": GRAPHITI_EMBEDDING_MODEL,
         "prompt_version": GRAPHITI_PROMPT_COMPONENT.component_version,
     }
     raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
@@ -403,7 +519,9 @@ class RealGraphitiAdapter:
             )
         reference = attempt.reference_time
         deterministic_episode_id = attempt.episode_uuid or str(attempt.attempt_id)
-        telemetry = _EpisodeTelemetry()
+        telemetry = _EpisodeTelemetry(
+            predecessor_episode_uuid=attempt.predecessor_episode_uuid
+        )
         try:
             _load_graphiti()
             api_key = openrouter_api_key()
@@ -435,12 +553,31 @@ class RealGraphitiAdapter:
                 outcome=ExtractionOutcome.RETRYABLE_FAILURE,
                 failure_code=ExtractionFailureCode.EXECUTION_TIMEOUT,
                 validation=None,
-                raw=raw,
+                raw=None,
                 proposals=(),
                 embedding_usage=telemetry.embedding_usage,
+                attempt_receipt=raw,
             )
         except (BrokerError, GraphitiAdapterContractError):
             raise
+        except AmbiguousEpisodeEffect:
+            raw = _raw_receipt(
+                attempt,
+                started_at=started_at,
+                telemetry=telemetry,
+                result=None,
+                proposals=(),
+            )
+            return produced_extraction(
+                attempt,
+                outcome=ExtractionOutcome.RETRYABLE_FAILURE,
+                failure_code=ExtractionFailureCode.AMBIGUOUS_EFFECT,
+                validation=None,
+                raw=None,
+                proposals=(),
+                embedding_usage=telemetry.embedding_usage,
+                attempt_receipt=raw,
+            )
         except Exception:
             raw = _raw_receipt(
                 attempt,
@@ -454,9 +591,10 @@ class RealGraphitiAdapter:
                 outcome=ExtractionOutcome.RETRYABLE_FAILURE,
                 failure_code=ExtractionFailureCode.PRODUCER_INTERNAL_ERROR,
                 validation=None,
-                raw=raw,
+                raw=None,
                 proposals=(),
                 embedding_usage=telemetry.embedding_usage,
+                attempt_receipt=raw,
             )
 
         proposals = tuple(
@@ -472,8 +610,7 @@ class RealGraphitiAdapter:
             result=result,
             proposals=proposals,
         )
-        relations = raw["relations"]
-        if not proposals and not relations:
+        if not proposals:
             return produced_extraction(
                 attempt,
                 outcome=ExtractionOutcome.INVALID_OUTPUT,

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.types import UtcTimestamp
 from newsroom.control_plane.corpus import (
     CorpusIngestUnit,
@@ -13,14 +14,29 @@ from newsroom.control_plane.corpus import (
     revisions_from,
     units_from,
 )
-from newsroom.control_plane.cycle import run_cycle
-from newsroom.control_plane.editorial import GroupedObservation, StoryCandidateRecord
-from newsroom.control_plane.evidence import EvidencePackage
+from newsroom.control_plane.cycle import _bind_result, run_cycle
+from newsroom.control_plane.editorial import (
+    GroupedObservation,
+    StoryCandidateRecord,
+    form_candidates,
+)
+from newsroom.control_plane.evidence import EvidencePackage, package_for
 from newsroom.control_plane.graphiti import GraphitiCycleResult
 from newsroom.control_plane.items import SourceItem, parse_observation, parse_source_time
 from newsroom.control_plane.veto import VetoError
 from newsroom.control_plane.writer import FixtureWriter, WriterCopy
-from newsroom.graphiti_adapter.evaluation_attempt import evaluation_attempt_for
+from newsroom.graphiti_adapter.evaluation_attempt import (
+    evaluation_attempt_for,
+    evaluation_attempt_for_body,
+)
+from newsroom.graphiti_adapter.evaluation_packet import (
+    GRAPHITI_CHAT_FALLBACK,
+    GRAPHITI_CHAT_MODEL,
+    GRAPHITI_CORE_RELEASE,
+    GRAPHITI_EMBEDDING_MODEL,
+    GRAPHITI_GENERATION_ID,
+    GRAPHITI_WORKSPACE_GROUP,
+)
 from newsroom.graphiti_adapter.identity import MAX_EPISODE_BYTES
 from newsroom.graphiti_adapter.models import GraphitiAdapterContractError
 from newsroom.graphiti_adapter.real import _is_source_registry_name
@@ -44,6 +60,133 @@ DATED_RSS = """<?xml version="1.0" encoding="UTF-8"?>
   </item>
 </channel></rss>
 """.encode("utf-8")
+
+
+def _complete(
+    unit: CorpusIngestUnit,
+    *,
+    proposal_count: int = 1,
+    entity_count: int = 1,
+    relation_count: int = 0,
+    proposals: tuple[dict[str, object], ...] = (),
+    entities: tuple[dict[str, object], ...] = (),
+    relations: tuple[dict[str, object], ...] = (),
+    chat_invocations: tuple[dict[str, object], ...] = (),
+    embedding_usage: dict[str, object] | None = None,
+) -> GraphitiCycleResult:
+    authority_ids = None
+    if unit.authority is not None:
+        authority_ids = (
+            unit.authority.admission_id,
+            unit.authority.access_decision_id,
+            unit.authority.definition_id,
+            unit.authority.definition_version_id,
+            unit.authority.item_id,
+            unit.authority.revision_id,
+            unit.authority.representation_id,
+        )
+    attempt = evaluation_attempt_for_body(
+        episode_body=unit.episode_body,
+        ingest_id=unit.ingest_id,
+        proving_run_id=unit.proving_run_id,
+        source_id=unit.source_id,
+        item_key=unit.item_key,
+        observation_digest=unit.observation_digest,
+        published_at=unit.published_at,
+        updated_at=unit.updated_at,
+        observed_at=unit.observed_at,
+        canonical_url=unit.canonical_url,
+        revision_digest=unit.revision_digest,
+        representation_digest=unit.representation_digest,
+        authority_ids=authority_ids,
+        attempt_number=unit.attempt_number,
+        predecessor_episode_uuid=unit.predecessor_ingest_id,
+    )
+    passage_id = str(attempt.manifest.passages[0].passage_id)
+    if len(proposals) < proposal_count:
+        proposals = (*proposals, *tuple(
+            {
+                "local_id": f"entity.{index:04d}",
+                "evidence": [
+                    {
+                        "passage_id": passage_id,
+                        "start_byte": 0,
+                        "end_byte": 1,
+                    }
+                ],
+            }
+            for index in range(len(proposals) + 1, proposal_count + 1)
+        ))
+    bound_proposals: tuple[dict[str, object], ...] = tuple(
+        {
+            **proposal,
+            "evidence": [
+                {**item, "passage_id": passage_id}
+                for item in proposal.get("evidence", [])
+                if isinstance(item, dict)
+            ],
+        }
+        for proposal in proposals
+    )
+    embedding_receipt = embedding_usage or {
+        "usage_basis": "NO_EMBEDDING_CALL",
+        "request_count": 0,
+        "embedding_tokens": 0,
+        "cost_usd_microunits": 0,
+        "requests": [],
+    }
+    raw: dict[str, object] = {
+        "workspace_group": GRAPHITI_WORKSPACE_GROUP,
+        "generation_id": GRAPHITI_GENERATION_ID,
+        "episode_uuid": unit.ingest_id,
+        "attempt_number": unit.attempt_number,
+        "predecessor_episode_uuid": unit.predecessor_ingest_id,
+        "temporal_basis": unit.temporal().basis,
+        "reference_time": unit.temporal().reference_time.to_text(),
+        "passages": [
+            passage.canonical_value() for passage in attempt.manifest.passages
+        ],
+        "proposals": list(bound_proposals),
+        "entities": list(entities),
+        "relations": list(relations),
+        "chat_invocations": list(chat_invocations),
+        "entity_count": entity_count,
+        "relation_count": relation_count,
+        "proposal_count": proposal_count,
+        "chat_invocation_count": len(chat_invocations),
+        "embedding_usage": embedding_receipt,
+        "usage_basis": str(embedding_receipt["usage_basis"]),
+        "framework": GRAPHITI_CORE_RELEASE,
+        "chat": GRAPHITI_CHAT_MODEL,
+        "chat_fallback": GRAPHITI_CHAT_FALLBACK,
+        "embedding": GRAPHITI_EMBEDDING_MODEL,
+        "prompt_version": "v1",
+    }
+    raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
+    return GraphitiCycleResult(
+        ingest_id=unit.ingest_id,
+        source_id=unit.source_id,
+        item_key=unit.item_key,
+        outcome="COMPLETE",
+        proposal_count=proposal_count,
+        entity_count=entity_count,
+        relation_count=relation_count,
+        failure_code="NONE",
+        temporal_basis=unit.temporal().basis,
+        reference_time=unit.temporal().reference_time.to_text(),
+        receipt_digest=str(raw["raw_output_digest"]),
+        episode_uuid=unit.ingest_id,
+        proposals=bound_proposals,
+        passages=tuple(raw["passages"]),
+        entities=entities,
+        relations=relations,
+        chat_invocations=chat_invocations,
+        embedding_usage=dict(embedding_receipt),
+        usage_basis=str(embedding_receipt["usage_basis"]),
+        attempt_number=unit.attempt_number,
+        predecessor_episode_uuid=unit.predecessor_ingest_id,
+        raw_receipt=raw,
+    )
 
 
 def test_parse_source_time_rfc822_and_iso() -> None:
@@ -143,17 +286,11 @@ def test_cycle_ingests_corpus_without_writes(tmp_path: Path) -> None:
         def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
             calls.append(unit.ingest_id)
             assert unit.source_id not in unit.episode_body
-            return GraphitiCycleResult(
-                ingest_id=unit.ingest_id,
-                source_id=unit.source_id,
-                item_key=unit.item_key,
-                outcome="COMPLETE",
+            return _complete(
+                unit,
                 proposal_count=3,
                 entity_count=2,
                 relation_count=1,
-                failure_code="NONE",
-                temporal_basis=unit.temporal().basis,
-                reference_time=unit.temporal().reference_time.to_text(),
                 entities=({"name": "Example", "uuid": "node-1"},),
                 relations=(
                     {
@@ -164,7 +301,6 @@ def test_cycle_ingests_corpus_without_writes(tmp_path: Path) -> None:
                         "invalid_at": None,
                     },
                 ),
-                episode_uuid=unit.ingest_id,
                 proposals=(
                     {
                         "local_id": "relation.0001",
@@ -175,13 +311,6 @@ def test_cycle_ingests_corpus_without_writes(tmp_path: Path) -> None:
                                 "end_byte": 7,
                             }
                         ],
-                    },
-                ),
-                passages=(
-                    {
-                        "passage_id": "passage-1",
-                        "byte_offset": 0,
-                        "byte_length": len(unit.episode_body.encode("utf-8")),
                     },
                 ),
                 chat_invocations=(
@@ -228,6 +357,14 @@ def test_cycle_ingests_corpus_without_writes(tmp_path: Path) -> None:
             "SELECT coverage_json FROM unpublished_graphiti_coverage ORDER BY seq DESC"
         ).fetchone()[0]
     )
+    authority_count = connection.execute(
+        "SELECT COUNT(*) FROM unpublished_graphiti_authority_records"
+    ).fetchone()[0]
+    attempt_receipt = json.loads(
+        connection.execute(
+            "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts"
+        ).fetchone()[0]
+    )
     connection.close()
     assert kinds.count("GRAPHITI_EVALUATION_ATTEMPT") == 1
     assert close is not None
@@ -236,25 +373,31 @@ def test_cycle_ingests_corpus_without_writes(tmp_path: Path) -> None:
     assert stored["relations"][0]["fact"] == "Example relates to curriculum"
     assert stored["relations"][0]["source_node_uuid"] == "node-1"
     assert stored["episode_uuid"] == calls[0]
-    assert stored["proposals"][0]["evidence"][0]["passage_id"] == "passage-1"
-    assert stored["passages"][0]["passage_id"] == "passage-1"
+    assert stored["proposals"][0]["evidence"][0]["passage_id"] == (
+        stored["passages"][0]["passage_id"]
+    )
     assert [item["outcome"] for item in stored["chat_invocations"]] == [
         "MALFORMED_OUTPUT",
         "COMPLETE",
     ]
     assert stored["chat_subscription_not_debited"] is True
-    assert stored["usage_basis"] == "UNOBSERVED"
+    assert stored["usage_basis"] == "NO_EMBEDDING_CALL"
     assert stored["prompt_version"]
     assert stored["proving_run_id"] == "run-1"
     assert stored["observed_at"]
     assert stored["chunk_ordinal"] == 1
+    assert authority_count == 7
+    assert len(stored["authority_record_ids"]) == 7
+    retained_digest = attempt_receipt.pop("receipt_digest")
+    assert retained_digest == digest_bytes(canonical_json_bytes(attempt_receipt))
     assert coverage["eligible_source_revisions"] == 3
     assert coverage["successfully_ingested_revisions"] == 1
     assert coverage["unresolved_gap"] == 2
     assert coverage["payload_count_is_not_coverage"] is True
     assert coverage["unpublished_payload_count"] == 0
     assert coverage["unpublished_payload_count"] != coverage["successfully_ingested_revisions"]
-    assert coverage["reserved_spend"] is True
+    assert coverage["reserved_spend"] is False
+    assert coverage["outstanding_reserved_spend_gbp_microunits"] == 0
     assert coverage["actual_metered_spend_microunits"] == 0
     assert coverage["admission_backlog"] == 3
     assert coverage["retry_count"] == 0
@@ -275,22 +418,52 @@ def test_units_from_observations_cover_items_not_candidates() -> None:
     assert {unit.source_id for unit in units} == {"HK-04", "RAD-02"}
 
 
-def _complete(unit: CorpusIngestUnit) -> GraphitiCycleResult:
-    return GraphitiCycleResult(
-        ingest_id=unit.ingest_id,
-        source_id=unit.source_id,
-        item_key=unit.item_key,
-        outcome="COMPLETE",
-        proposal_count=1,
-        entity_count=1,
-        relation_count=0,
-        failure_code="NONE",
-        temporal_basis=unit.temporal().basis,
-        reference_time=unit.temporal().reference_time.to_text(),
+def test_authority_records_bind_each_item_and_source_definition_version() -> None:
+    rows = (
+        GroupedObservation(
+            "UK-01",
+            "sha256:response",
+            SourceItem("UK-01", "one", "One", "Body one", "https://item/one"),
+            "2026-08-20T00:00:00.000000Z",
+        ),
+        GroupedObservation(
+            "UK-01",
+            "sha256:response",
+            SourceItem("UK-01", "two", "Two", "Body two", "https://item/two"),
+            "2026-08-20T00:00:00.000000Z",
+        ),
+    )
+    first = units_from(
+        rows,
+        proving_run_id="run-1",
+        rights_authority_run_id="run-2",
+        source_definition_url="https://source/feed-v1",
+    )
+    changed = units_from(
+        rows[:1],
+        proving_run_id="run-1",
+        rights_authority_run_id="run-2",
+        source_definition_url="https://source/feed-v2",
+    )[0]
+    assert first[0].authority is not None
+    assert first[1].authority is not None
+    assert {str(item["record_type"]) for item in first[0].authority.records} == {
+        "SOURCE_DEFINITION",
+        "SOURCE_DEFINITION_VERSION",
+        "SOURCE_ITEM",
+        "SOURCE_REVISION",
+        "DISCOVERY_REPRESENTATION",
+        "OBJECT_ADMISSION",
+        "OBJECT_ACCESS_DECISION",
+    }
+    assert first[0].authority.representation_id != first[1].authority.representation_id
+    assert (
+        first[0].authority.definition_version_id
+        != changed.authority.definition_version_id
     )
 
 
-def test_same_body_new_observation_is_a_new_ingest() -> None:
+def test_same_immutable_revision_is_not_reingested_after_polling() -> None:
     first = CorpusIngestUnit(
         source_id="HK-04",
         item_key="q7",
@@ -324,7 +497,7 @@ def test_same_body_new_observation_is_a_new_ingest() -> None:
         proving_run_id="run-1",
         published_at="2026-03-01T00:00:00.000000Z",
     )
-    assert first.ingest_id != second.ingest_id
+    assert first.ingest_id == second.ingest_id
     assert first.ingest_id != third.ingest_id
 
 
@@ -360,7 +533,22 @@ def test_parser_retains_long_corpus_text_before_ordered_chunking() -> None:
     item = parse_observation(
         source_id="UK-01", url="https://example.invalid/feed.rss", body=feed
     )[0]
-    assert item.body == retained
+    assert len(item.body) == 4_000
+    assert item.retained_corpus_body == retained
+    package = package_for(
+        form_candidates(
+            (
+                GroupedObservation(
+                    "UK-01",
+                    "sha256:long-parser",
+                    item,
+                    "2026-08-16T21:41:34.000000Z",
+                ),
+            )
+        )[0]
+    )
+    assert retained not in package.passages[0]
+    assert len(item.body) == 4_000
     units = units_from(
         (
             GroupedObservation(
@@ -493,8 +681,91 @@ def test_older_run_backlog_remains_queued_after_a_new_run_arrives(
         max_graphiti=1,
     )
     assert report.proving_run_id == "run-2"
-    assert report.eligible == 6
+    assert report.eligible == 3
     assert calls[1][0] == "run-1"
+    connection = __import__("sqlite3").connect(unpublished)
+    spend_runs = [
+        row[0]
+        for row in connection.execute(
+            "SELECT proving_run_id FROM unpublished_graphiti_spend ORDER BY at"
+        )
+    ]
+    connection.close()
+    assert spend_runs == ["run-1", "run-1"]
+
+
+def test_latest_rights_decision_blocks_historical_backlog(tmp_path: Path) -> None:
+    proving = _proving(tmp_path)
+    connection = __import__("sqlite3").connect(proving)
+    connection.execute(
+        "INSERT INTO proving_runs VALUES('run-2','2026-08-20T00:00:00.000000Z',0,0,0,0)"
+    )
+    connection.execute(
+        """
+        INSERT INTO proving_gates
+        SELECT 'run-2', gate_id, status, reason
+        FROM proving_gates WHERE run_id='run-1' AND gate_id!='RIGHTS_UK-01'
+        """
+    )
+    connection.commit()
+    connection.close()
+    seen: list[str] = []
+
+    class Stub:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            seen.append(unit.source_id)
+            return _complete(unit)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(tmp_path / "unpublished.sqlite3"),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=Stub(),
+        max_graphiti=10,
+    )
+    assert "UK-01" not in seen
+    assert report.eligible == 2
+
+
+def test_ordered_chunks_wait_for_predecessor_completion(tmp_path: Path) -> None:
+    proving = _proving(tmp_path)
+    connection = __import__("sqlite3").connect(proving)
+    long_body = "ordered-corpus-" * 2_000
+    feed = (
+        "<rss><channel><item><guid>long</guid><title>Long</title>"
+        f"<description>{long_body}</description></item></channel></rss>"
+    ).encode()
+    connection.execute("DELETE FROM proving_observations WHERE source_id!='UK-01'")
+    connection.execute("DELETE FROM proving_gates WHERE gate_id!='RIGHTS_UK-01'")
+    connection.execute(
+        "UPDATE proving_observations SET body=?, body_digest=? WHERE source_id='UK-01'",
+        (feed, digest_bytes(feed)),
+    )
+    connection.commit()
+    connection.close()
+    calls: list[tuple[int, str | None, str]] = []
+
+    class Stub:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            calls.append(
+                (unit.chunk_ordinal, unit.predecessor_ingest_id, unit.ingest_id)
+            )
+            return _complete(unit)
+
+    unpublished = tmp_path / "ordered.sqlite3"
+    for _ in range(2):
+        run_cycle(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            writer=FixtureWriter(),
+            max_writes=0,
+            graphiti=Stub(),
+            max_graphiti=10,
+        )
+    assert calls[0][0:2] == (1, None)
+    assert calls[1][0] == 2
+    assert calls[1][1] == calls[0][2]
 
 
 def test_provider_reported_embedding_cost_is_reconciled_and_debited(
@@ -505,16 +776,16 @@ def test_provider_reported_embedding_cost_is_reconciled_and_debited(
 
     class MeteredStub:
         def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
-            result = _complete(unit)
+            usage = {
+                "usage_basis": "PROVIDER_REPORTED",
+                "request_count": 2,
+                "embedding_tokens": 125,
+                "cost_usd_microunits": 17,
+                "requests": [],
+            }
+            result = _complete(unit, embedding_usage=usage)
             return replace(
                 result,
-                embedding_usage={
-                    "usage_basis": "PROVIDER_REPORTED",
-                    "request_count": 2,
-                    "embedding_tokens": 125,
-                    "cost_usd_microunits": 17,
-                    "requests": [],
-                },
                 request_tokens=125,
                 cost_microunits=17,
                 usage_basis="PROVIDER_REPORTED",
@@ -751,6 +1022,13 @@ def test_dead_letter_stops_retrying_a_unit(tmp_path: Path) -> None:
     dead = connection.execute(
         "SELECT COUNT(*) FROM unpublished_graphiti_failures WHERE dead_lettered=1"
     ).fetchone()[0]
+    receipts = connection.execute(
+        """
+        SELECT attempt_number, outcome
+        FROM unpublished_graphiti_attempt_receipts
+        ORDER BY attempt_number
+        """
+    ).fetchall()
     coverage = json.loads(
         connection.execute(
             "SELECT coverage_json FROM unpublished_graphiti_coverage ORDER BY seq DESC"
@@ -758,6 +1036,7 @@ def test_dead_letter_stops_retrying_a_unit(tmp_path: Path) -> None:
     )
     connection.close()
     assert dead == 1
+    assert receipts == [(1, "FAILED"), (2, "FAILED"), (3, "FAILED")]
     assert coverage["dead_letter_count"] == 1
 
 
@@ -808,3 +1087,27 @@ def test_attempt_canonical_digest_covers_temporal_episode_and_generation() -> No
     assert replace(base, generation_id="changedgen").canonical_digest != base.canonical_digest
     with pytest.raises(GraphitiAdapterContractError, match="temporal_basis"):
         replace(base, temporal_basis="STARTED_AT")
+
+
+def test_result_binding_rejects_generation_and_receipt_digest_drift() -> None:
+    unit = units_from(
+        (
+            GroupedObservation(
+                "UK-01",
+                "sha256:observation",
+                SourceItem("UK-01", "item", "Headline", "Body", "https://item"),
+                "2026-08-20T00:00:00.000000Z",
+            ),
+        ),
+        proving_run_id="run-1",
+        rights_authority_run_id="run-2",
+        rights_gate_reason="current PASS",
+        source_definition_url="https://source/feed",
+    )[0]
+    result = _complete(unit)
+    with pytest.raises(ValueError, match="generation"):
+        _bind_result(unit, replace(result, generation_id="stale-generation"))
+    assert result.raw_receipt is not None
+    tampered = {**result.raw_receipt, "episode_uuid": "foreign"}
+    with pytest.raises(ValueError, match="digest"):
+        _bind_result(unit, replace(result, raw_receipt=tampered))

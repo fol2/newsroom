@@ -397,6 +397,7 @@ def _attempt_payload(value: Any) -> bytes:
             "temporal_basis",
             "episode_uuid",
             "generation_id",
+            "predecessor_episode_uuid",
         }
     )
     item = _object(value, field="graphiti_adapter_attempt", keys=keys)
@@ -463,6 +464,13 @@ def _attempt_payload(value: Any) -> bytes:
     episode_uuid = item["episode_uuid"]
     if episode_uuid is not None:
         _string(episode_uuid, field="episode_uuid")
+    predecessor_episode_uuid = item["predecessor_episode_uuid"]
+    if predecessor_episode_uuid is not None:
+        _string(predecessor_episode_uuid, field="predecessor_episode_uuid")
+        if predecessor_episode_uuid == episode_uuid:
+            raise PayloadSchemaValidationError(
+                "episode predecessor cannot name the current episode"
+            )
     _string(item["generation_id"], field="generation_id")
     return canonical_json_bytes(item)
 
@@ -579,6 +587,7 @@ def _golden_attempt_value() -> dict[str, object]:
         "temporal_basis": "UNSET",
         "episode_uuid": None,
         "generation_id": "",
+        "predecessor_episode_uuid": None,
     }
 
 

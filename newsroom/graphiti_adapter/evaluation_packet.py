@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from newsroom.authority.canonical import digest_canonical
 from newsroom.graphiti_adapter.contracts import (
+    GRAPHITI_ADAPTER_CODE_COMPONENT,
     GRAPHITI_ADAPTER_OUTPUT_SCHEMA_COMPONENT,
     GRAPHITI_PROMPT_COMPONENT,
 )
@@ -57,6 +58,7 @@ GRAPHITI_GENERATION_DIGEST = digest_canonical(
         "temporal": TEMPORAL_POLICY_VERSION,
         "prompt": GRAPHITI_PROMPT_COMPONENT.contract_digest,
         "ontology": GRAPHITI_ADAPTER_OUTPUT_SCHEMA_COMPONENT.canonical_value(),
+        "adapter_code": GRAPHITI_ADAPTER_CODE_COMPONENT.canonical_value(),
         "extraction_instructions": GRAPHITI_EXTRACTION_INSTRUCTIONS,
         "input_watermark": GRAPHITI_INPUT_WATERMARK,
     }

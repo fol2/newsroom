@@ -24,6 +24,7 @@ from newsroom.graphiti_adapter.types import (
 from newsroom.sources.types import (
     DiscoveryRepresentationId,
     SourceDefinitionId,
+    SourceDefinitionVersionId,
     SourceItemId,
     SourceRevisionId,
 )
@@ -77,10 +78,10 @@ def ingest_key(
     source_id: str,
     item_key: str,
     content_digest_value: str,
-    observation_digest: str,
+    revision_id: str,
+    representation_digest: str,
     published_at: str | None,
     updated_at: str | None,
-    observed_at: str,
     chunk_ordinal: int = 1,
 ) -> str:
     digest = digest_bytes(
@@ -88,10 +89,10 @@ def ingest_key(
             {
                 "source_id": source_id,
                 "item_key": item_key,
-                "observation_digest": observation_digest,
+                "revision_id": revision_id,
+                "representation_digest": representation_digest,
                 "published_at": published_at,
                 "updated_at": updated_at,
-                "observed_at": observed_at,
                 "content_digest": content_digest_value,
                 "chunk_ordinal": chunk_ordinal,
                 "configuration": configuration_digest(),
@@ -102,22 +103,25 @@ def ingest_key(
     return str(uuid4_from_digest(bytes.fromhex(digest.removeprefix("sha256:")[:32])))
 
 
-def attempt_ids(ingest_id: str) -> tuple[
+def attempt_ids(ingest_id: str, attempt_number: int = 1) -> tuple[
     GraphitiAttemptId, GraphitiWorkspaceId, GraphitiCleanupReceiptId
 ]:
     return (
-        _typed(GraphitiAttemptId, "attempt", ingest_id),
-        _typed(GraphitiWorkspaceId, "workspace", ingest_id),
-        _typed(GraphitiCleanupReceiptId, "cleanup", ingest_id),
+        _typed(GraphitiAttemptId, "attempt", ingest_id, attempt_number),
+        _typed(GraphitiWorkspaceId, "workspace", ingest_id, attempt_number),
+        _typed(GraphitiCleanupReceiptId, "cleanup", ingest_id, attempt_number),
     )
 
 
 def observation_authority_ids(
     *,
-    proving_run_id: str,
     source_id: str,
     item_key: str,
-    observation_digest: str,
+    revision_digest: str,
+    representation_digest: str,
+    rights_authority_run_id: str,
+    rights_gate_id: str,
+    rights_gate_reason: str,
     published_at: str | None,
     updated_at: str | None,
 ) -> tuple[
@@ -132,16 +136,19 @@ def observation_authority_ids(
         _typed(
             ObjectAdmissionId,
             "proving-admission",
-            proving_run_id,
             source_id,
-            observation_digest,
+            item_key,
+            revision_digest,
         ),
         _typed(
             ObjectAccessDecisionId,
             "proving-access",
-            proving_run_id,
             source_id,
-            observation_digest,
+            item_key,
+            revision_digest,
+            rights_authority_run_id,
+            rights_gate_id,
+            rights_gate_reason,
         ),
         _typed(SourceDefinitionId, "definition", source_id),
         _typed(SourceItemId, "item", source_id, item_key),
@@ -150,7 +157,7 @@ def observation_authority_ids(
             "revision",
             source_id,
             item_key,
-            observation_digest,
+            revision_digest,
             published_at or "",
             updated_at or "",
         ),
@@ -158,6 +165,13 @@ def observation_authority_ids(
             DiscoveryRepresentationId,
             "representation",
             source_id,
-            observation_digest,
+            item_key,
+            representation_digest,
         ),
     )
+
+
+def source_definition_version_id(*, source_id: str, source_url: str) -> SourceDefinitionVersionId:
+    """Bind a version identity to the retained source endpoint definition."""
+
+    return _typed(SourceDefinitionVersionId, "definition-version", source_id, source_url)

@@ -1161,6 +1161,7 @@ class GraphitiAttemptRequest:
     temporal_basis: TemporalBasis = TemporalBasis.UNSET
     episode_uuid: str | None = None
     generation_id: str = ""
+    predecessor_episode_uuid: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.attempt_id, GraphitiAttemptId):
@@ -1240,6 +1241,16 @@ class GraphitiAttemptRequest:
             raise GraphitiAdapterContractError("reference_time must be typed")
         if self.episode_uuid is not None:
             text(self.episode_uuid, field="episode_uuid", maximum_bytes=128)
+        if self.predecessor_episode_uuid is not None:
+            text(
+                self.predecessor_episode_uuid,
+                field="predecessor_episode_uuid",
+                maximum_bytes=128,
+            )
+            if self.predecessor_episode_uuid == self.episode_uuid:
+                raise GraphitiAdapterContractError(
+                    "episode predecessor cannot name the current episode"
+                )
         text(
             self.generation_id,
             field="generation_id",
@@ -1285,6 +1296,7 @@ class GraphitiAttemptRequest:
             "temporal_basis": self.temporal_basis,
             "episode_uuid": self.episode_uuid,
             "generation_id": self.generation_id,
+            "predecessor_episode_uuid": self.predecessor_episode_uuid,
         }
         reject_private_graph_state(value)
         return value
@@ -1384,6 +1396,8 @@ def adapter_outcome_for(produced: ProducedExtraction) -> GraphitiAdapterOutcome:
     if produced.outcome is ExtractionOutcome.INVALID_OUTPUT:
         return GraphitiAdapterOutcome.MALFORMED_OUTPUT
     if produced.outcome is ExtractionOutcome.RETRYABLE_FAILURE:
+        if produced.failure_code is ExtractionFailureCode.AMBIGUOUS_EFFECT:
+            return GraphitiAdapterOutcome.AMBIGUOUS_EFFECT
         if produced.failure_code is ExtractionFailureCode.EXECUTION_TIMEOUT:
             return GraphitiAdapterOutcome.TIMEOUT
         return GraphitiAdapterOutcome.FAILED

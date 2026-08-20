@@ -330,6 +330,7 @@ def test_cycle_reserves_graphiti_spend_before_stub_extract(tmp_path: Path) -> No
 
 def test_cycle_retries_failed_graphiti_extract(tmp_path: Path) -> None:
     from newsroom.control_plane.graphiti import GraphitiCycleResult
+    from newsroom.tests.test_graphiti_corpus_ingest import _complete
 
     proving = _proving(tmp_path)
     unpublished = tmp_path / "unpublished_store.sqlite3"
@@ -339,30 +340,8 @@ def test_cycle_retries_failed_graphiti_extract(tmp_path: Path) -> None:
         def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
             calls.append(unit.ingest_id)
             if len(calls) == 1:
-                return GraphitiCycleResult(
-                    ingest_id=unit.ingest_id,
-                    source_id=unit.source_id,
-                    item_key=unit.item_key,
-                    outcome="FAILED",
-                    proposal_count=0,
-                    entity_count=0,
-                    relation_count=0,
-                    failure_code="PRODUCER_INTERNAL_ERROR",
-                    temporal_basis=OBSERVED_FALLBACK,
-                    reference_time=unit.observed_at,
-                )
-            return GraphitiCycleResult(
-                ingest_id=unit.ingest_id,
-                source_id=unit.source_id,
-                item_key=unit.item_key,
-                outcome="COMPLETE",
-                proposal_count=1,
-                entity_count=1,
-                relation_count=0,
-                failure_code="NONE",
-                temporal_basis=OBSERVED_FALLBACK,
-                reference_time=unit.observed_at,
-            )
+                raise RuntimeError("provider failed before returning a result")
+            return _complete(unit)
 
     first = run_cycle(
         proving_store=str(proving),

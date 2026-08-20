@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.corpus import (
     CorpusIngestUnit,
     revisions_from,
@@ -28,12 +29,14 @@ from newsroom.control_plane.store import (
     has_candidate,
     has_graphiti_ingest,
     insert_graphiti_ingest,
+    insert_graphiti_attempt_receipt,
     insert_payload,
     next_graphiti_attempt_number,
     record_graphiti_coverage,
     record_graphiti_failure,
     reconcile_graphiti_spend,
     reserve_graphiti_spend,
+    retain_graphiti_authority_records,
 )
 from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.veto import VetoError, assert_private_store
@@ -49,7 +52,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     OD_011_CASH_CEILING_GBP,
     OPENROUTER_API,
 )
-from newsroom.increment9.proving import FORBIDDEN_STORE_MARKERS, rights_permitted_sources
+from newsroom.increment9.proving import FORBIDDEN_STORE_MARKERS
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +77,9 @@ class _ProvingObservation:
     status_code: int
     body_digest: str
     body: bytes
+    rights_authority_run_id: str
+    rights_gate_id: str
+    rights_gate_reason: str
 
 
 def _now() -> str:
@@ -89,6 +95,95 @@ def _bind_result(
         unit.item_key,
     ):
         raise ValueError("graphiti result identity differs from ingest unit")
+    temporal = unit.temporal()
+    if result.attempt_number != unit.attempt_number:
+        raise ValueError("graphiti result attempt differs from ingest unit")
+    if result.generation_id != GRAPHITI_GENERATION_ID:
+        raise ValueError("graphiti result generation differs from authorised generation")
+    if result.workspace_group != GRAPHITI_WORKSPACE_GROUP:
+        raise ValueError("graphiti result workspace differs from authorised generation")
+    if (result.temporal_basis, result.reference_time) != (
+        temporal.basis,
+        temporal.reference_time.to_text(),
+    ):
+        raise ValueError("graphiti result temporal mapping differs from ingest unit")
+    if result.episode_uuid != unit.ingest_id:
+        raise ValueError("graphiti result episode UUID differs from ingest identity")
+    if result.predecessor_episode_uuid != unit.predecessor_ingest_id:
+        raise ValueError("graphiti result predecessor differs from ordered corpus chunk")
+    raw = result.raw_receipt
+    if not isinstance(raw, dict):
+        raise ValueError("graphiti result needs a retained raw attempt receipt")
+    raw_value = dict(raw)
+    supplied_digest = raw_value.pop("raw_output_digest", None)
+    calculated_digest = digest_bytes(canonical_json_bytes(raw_value))
+    if supplied_digest != calculated_digest or result.receipt_digest != calculated_digest:
+        raise ValueError("graphiti raw receipt digest differs from canonical content")
+    if (
+        raw.get("generation_id") != GRAPHITI_GENERATION_ID
+        or raw.get("episode_uuid") != unit.ingest_id
+        or raw.get("temporal_basis") != temporal.basis
+        or raw.get("reference_time") != temporal.reference_time.to_text()
+        or raw.get("attempt_number") != unit.attempt_number
+        or raw.get("predecessor_episode_uuid") != unit.predecessor_ingest_id
+        or raw.get("framework") != result.framework
+        or raw.get("chat") != result.chat
+        or raw.get("chat_fallback") != result.chat_fallback
+        or raw.get("embedding") != result.embedding
+        or raw.get("prompt_version") != result.prompt_version
+        or raw.get("usage_basis") != result.usage_basis
+    ):
+        raise ValueError("graphiti raw receipt binding differs from ingest unit")
+    passages = raw.get("passages")
+    if not isinstance(passages, list) or len(passages) != 1:
+        raise ValueError("graphiti result needs exact single-passage provenance")
+    passage = passages[0]
+    expected_text = " ".join(unit.episode_body.split())
+    expected_digest = digest_bytes(expected_text.encode("utf-8"))
+    if not isinstance(passage, dict) or (
+        passage.get("byte_offset") != 0
+        or passage.get("byte_length") != len(expected_text.encode("utf-8"))
+        or passage.get("blob_digest") != expected_digest
+        or passage.get("text_digest") != expected_digest
+    ):
+        raise ValueError("graphiti passage provenance differs from ingest bytes")
+    if unit.authority is not None and (
+        passage.get("admission_id") != unit.authority.admission_id
+        or passage.get("access_decision_id") != unit.authority.access_decision_id
+    ):
+        raise ValueError("graphiti passage authority differs from retained records")
+    if tuple(raw.get("proposals", ())) != result.proposals:
+        raise ValueError("graphiti proposal receipt differs from bound raw receipt")
+    if result.proposal_count != len(result.proposals):
+        raise ValueError("graphiti proposal count differs from retained proposals")
+    if (
+        tuple(raw.get("entities", ())) != result.entities
+        or tuple(raw.get("relations", ())) != result.relations
+        or tuple(raw.get("passages", ())) != result.passages
+        or tuple(raw.get("chat_invocations", ())) != result.chat_invocations
+        or raw.get("embedding_usage") != result.embedding_usage
+        or raw.get("entity_count") != result.entity_count
+        or raw.get("relation_count") != result.relation_count
+        or raw.get("proposal_count") != result.proposal_count
+        or raw.get("chat_invocation_count") != len(result.chat_invocations)
+    ):
+        raise ValueError("graphiti result fields differ from bound raw receipt")
+    passage_id = passage.get("passage_id")
+    for proposal in result.proposals:
+        evidence = proposal.get("evidence")
+        if not isinstance(evidence, list) or not evidence:
+            raise ValueError("graphiti proposal needs retained passage evidence")
+        for item in evidence:
+            if (
+                not isinstance(item, dict)
+                or item.get("passage_id") != passage_id
+                or not isinstance(item.get("start_byte"), int)
+                or not isinstance(item.get("end_byte"), int)
+                or int(item["start_byte"]) < 0
+                or int(item["end_byte"]) > int(passage["byte_length"])
+                or int(item["start_byte"]) >= int(item["end_byte"])
+            ):
+                raise ValueError("graphiti proposal evidence is outside the bound passage")
     return result
 
 
@@ -108,7 +203,15 @@ def _receipt(
         "updated_at": unit.updated_at,
         "observed_at": unit.observed_at,
         "chunk_ordinal": unit.chunk_ordinal,
+        "chunk_count": unit.chunk_count,
+        "predecessor_ingest_id": unit.predecessor_ingest_id,
+        "attempt_number": unit.attempt_number,
         "revision_id": unit.revision_id,
+        "authority_record_ids": (
+            []
+            if unit.authority is None
+            else [str(item["record_id"]) for item in unit.authority.records]
+        ),
         "outcome": result.outcome,
         "proposal_count": result.proposal_count,
         "entity_count": result.entity_count,
@@ -136,7 +239,8 @@ def _receipt(
         "chat": result.chat or GRAPHITI_CHAT_MODEL,
         "chat_fallback": result.chat_fallback or GRAPHITI_CHAT_FALLBACK,
         "embedding": result.embedding or GRAPHITI_EMBEDDING_MODEL,
-        "receipt_digest": result.receipt_digest,
+        "raw_output_digest": result.receipt_digest,
+        "receipt_digest": "",
         "profile": "EVALUATION",
     }
 
@@ -144,15 +248,30 @@ def _receipt(
 def _queue(
     unpublished: sqlite3.Connection,
     units: tuple[CorpusIngestUnit, ...],
-) -> list[tuple[str, int, str, CorpusIngestUnit]]:
-    queued: list[tuple[str, int, str, CorpusIngestUnit]] = []
+) -> list[tuple[int, str, str, int, int, str, CorpusIngestUnit]]:
+    queued: list[tuple[int, str, str, int, int, str, CorpusIngestUnit]] = []
     for unit in units:
         if has_graphiti_ingest(unpublished, unit.ingest_id):
             continue
         retries, dead = graphiti_failure_state(unpublished, unit.ingest_id)
         if dead:
             continue
-        queued.append((unit.observed_at, retries, unit.ingest_id, unit))
+        if (
+            unit.predecessor_ingest_id is not None
+            and not has_graphiti_ingest(unpublished, unit.predecessor_ingest_id)
+        ):
+            continue
+        queued.append(
+            (
+                int(retries > 0),
+                unit.observed_at,
+                unit.revision_id,
+                unit.chunk_ordinal,
+                retries,
+                unit.ingest_id,
+                unit,
+            )
+        )
     queued.sort()
     return queued
 
@@ -180,20 +299,32 @@ def _ingest(
     graphiti: GraphitiPort,
     units: tuple[CorpusIngestUnit, ...],
     max_graphiti: int,
-    proving_run_id: str,
 ) -> int:
     attempted = 0
-    for _observed_at, _retries, _ingest_id, unit in _queue(unpublished, units):
+    for (
+        _is_retry,
+        _observed_at,
+        _revision_id,
+        _chunk_ordinal,
+        _retries,
+        _ingest_id,
+        unit,
+    ) in _queue(unpublished, units):
         if attempted >= max_graphiti:
             break
         attempted += 1
         attempt_number = next_graphiti_attempt_number(unpublished, unit.ingest_id)
+        unit = replace(unit, attempt_number=attempt_number)
+        if unit.authority is None:
+            raise ValueError("corpus ingest requires retained authority records")
+        retain_graphiti_authority_records(unpublished, unit.authority.records)
         spend_id = f"{unit.ingest_id}:{attempt_number}"
         reserved = reserve_graphiti_spend(
             unpublished,
             spend_id=spend_id,
             ingest_id=unit.ingest_id,
             attempt_number=attempt_number,
+            proving_run_id=unit.proving_run_id,
             reserved_gbp_microunits=500_000,
             ceiling_gbp_microunits=OD_011_CASH_CEILING_GBP * 1_000_000,
         )
@@ -216,7 +347,7 @@ def _ingest(
                     "prespent": False,
                     "hosts": ["openrouter.ai"],
                     "generation_id": GRAPHITI_GENERATION_ID,
-                    "proving_run_id": proving_run_id,
+                    "proving_run_id": unit.proving_run_id,
                 },
             )
             unpublished.commit()
@@ -235,6 +366,31 @@ def _ingest(
                 outcome="FAILED",
                 failure_code="PRODUCER_INTERNAL_ERROR",
             )
+            failure_receipt = {
+                "ingest_id": unit.ingest_id,
+                "source_id": unit.source_id,
+                "item_key": unit.item_key,
+                "proving_run_id": unit.proving_run_id,
+                "attempt_number": attempt_number,
+                "outcome": "FAILED",
+                "failure_code": "PRODUCER_INTERNAL_ERROR",
+                "embedding_usage": None,
+                "accounting": accounting,
+                "authority_record_ids": [
+                    str(item["record_id"]) for item in unit.authority.records
+                ],
+                "receipt_digest": "",
+            }
+            final_digest = insert_graphiti_attempt_receipt(
+                unpublished,
+                ingest_id=unit.ingest_id,
+                attempt_number=attempt_number,
+                outcome="FAILED",
+                receipt=failure_receipt,
+            )
+            failure_receipt["receipt_digest"] = final_digest
+            append_ledger(unpublished, "GRAPHITI_EVALUATION_ATTEMPT", failure_receipt)
+            unpublished.commit()
             continue
         accounting = reconcile_graphiti_spend(
             unpublished,
@@ -243,6 +399,14 @@ def _ingest(
         )
         append_ledger(unpublished, "GRAPHITI_SPEND_RECONCILE", accounting)
         receipt = _receipt(unit, result, accounting=accounting)
+        final_digest = insert_graphiti_attempt_receipt(
+            unpublished,
+            ingest_id=unit.ingest_id,
+            attempt_number=attempt_number,
+            outcome=result.outcome,
+            receipt=receipt,
+        )
+        receipt["receipt_digest"] = final_digest
         append_ledger(unpublished, "GRAPHITI_EVALUATION_ATTEMPT", receipt)
         if result.outcome in {"COMPLETE", "PARTIAL"}:
             insert_graphiti_ingest(
@@ -258,7 +422,7 @@ def _ingest(
                 temporal_basis=result.temporal_basis,
                 reference_time=result.reference_time,
                 generation_id=result.generation_id,
-                receipt_digest=result.receipt_digest,
+                receipt_digest=final_digest,
                 receipt=receipt,
             )
             clear_graphiti_failure(unpublished, unit.ingest_id)
@@ -269,6 +433,7 @@ def _ingest(
                 outcome=result.outcome,
                 failure_code=result.failure_code,
             )
+        unpublished.commit()
     return attempted
 
 
@@ -300,11 +465,18 @@ def _permitted_rows(
     if not runs:
         raise ValueError("proving store has no runs")
     latest_run_id = str(runs[-1][0])
+    current_rights = {
+        str(gate_id): (str(status), str(reason))
+        for gate_id, status, reason in proving.execute(
+            "SELECT gate_id, status, reason FROM proving_gates WHERE run_id=?",
+            (latest_run_id,),
+        )
+        if str(gate_id).startswith("RIGHTS_")
+    }
     all_rows: list[_ProvingObservation] = []
     latest_rows: list[_ProvingObservation] = []
     for (raw_run_id,) in runs:
         run_id = str(raw_run_id)
-        permitted = rights_permitted_sources(proving, run_id)
         values = proving.execute(
             """
             SELECT source_id, url, fetched_at, status_code, body_digest, body
@@ -315,7 +487,14 @@ def _permitted_rows(
             (run_id,),
         ).fetchall()
         for source_id, url, fetched_at, status_code, body_digest, body in values:
-            if source_id not in permitted or int(status_code) != 200 or not body:
+            gate_id = f"RIGHTS_{source_id}"
+            current = current_rights.get(gate_id)
+            if (
+                current is None
+                or current[0] != "PASS"
+                or int(status_code) != 200
+                or not body
+            ):
                 continue
             row = _ProvingObservation(
                 run_id=run_id,
@@ -325,6 +504,9 @@ def _permitted_rows(
                 status_code=int(status_code),
                 body_digest=str(body_digest),
                 body=bytes(body),
+                rights_authority_run_id=latest_run_id,
+                rights_gate_id=gate_id,
+                rights_gate_reason=current[1],
             )
             all_rows.append(row)
             if run_id == latest_run_id:
@@ -353,14 +535,16 @@ def run_cycle(
         proving.close()
 
     observations = _parsed_observations(latest_rows)
-    corpus_observations_by_run: dict[str, list[GroupedObservation]] = {}
-    for row in corpus_rows:
-        corpus_observations_by_run.setdefault(row.run_id, []).extend(
-            _parsed_observations((row,))
-        )
     unit_by_id: dict[str, CorpusIngestUnit] = {}
-    for proving_run_id, run_observations in corpus_observations_by_run.items():
-        for unit in units_from(tuple(run_observations), proving_run_id=proving_run_id):
+    for row in corpus_rows:
+        for unit in units_from(
+            _parsed_observations((row,)),
+            proving_run_id=row.run_id,
+            rights_authority_run_id=row.rights_authority_run_id,
+            rights_gate_id=row.rights_gate_id,
+            rights_gate_reason=row.rights_gate_reason,
+            source_definition_url=row.url,
+        ):
             unit_by_id.setdefault(unit.ingest_id, unit)
     units = tuple(
         sorted(
@@ -393,7 +577,6 @@ def run_cycle(
                 graphiti=graphiti,
                 units=units,
                 max_graphiti=max_graphiti,
-                proving_run_id=run_id,
             )
             unpublished.commit()
         for candidate in candidates:

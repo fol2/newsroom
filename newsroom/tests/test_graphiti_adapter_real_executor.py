@@ -11,7 +11,12 @@ import pytest
 
 from newsroom.authority._graphiti_adapter_boundary import _GraphitiAdapterBoundary
 from newsroom.authority.canonical import digest_canonical
-from newsroom.extraction.types import VersionedExtractionComponent
+from newsroom.authority.types import UtcTimestamp
+from newsroom.extraction.types import (
+    ExtractionFailureCode,
+    ExtractionOutcome,
+    VersionedExtractionComponent,
+)
 from newsroom.extraction.models import ExtractorContractRequest
 from newsroom.graphiti_adapter import (
     DeterministicFakeGraphitiAdapter,
@@ -49,6 +54,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_EMBEDDING_MODEL,
 )
+from newsroom.graphiti_adapter.evaluation_attempt import evaluation_attempt_for
 from newsroom.graphiti_adapter.real import RealGraphitiAdapter
 
 from .extraction_4a_helpers import contract_request, run_request, seed_extraction_fixture
@@ -303,8 +309,14 @@ def test_deterministic_episode_is_created_once_then_reused_on_retry() -> None:
         "body": "retained body",
         "reference_time": reference,
     }
-    asyncio.run(_ensure_episode(**arguments))
-    asyncio.run(_ensure_episode(**arguments))
+    _episode, first_state = asyncio.run(_ensure_episode(**arguments))
+    _episode, retained_state = asyncio.run(_ensure_episode(**arguments))
+    retained_episode = retained["deterministic-id"]
+    retained_episode.episode_metadata = {"newsroom_ingest_state": "COMPLETE"}
+    _episode, completed_state = asyncio.run(_ensure_episode(**arguments))
+    assert first_state == "CREATED"
+    assert retained_state == "PENDING"
+    assert completed_state == "COMPLETE"
     assert saves == ["deterministic-id"]
     assert tuple(retained) == ("deterministic-id",)
 
@@ -416,3 +428,113 @@ def test_authorised_evaluation_attempt_does_not_import_graphiti_core(tmp_path: P
     assert attempt.configuration.workspace_policy.namespace_prefix == GRAPHITI_WORKSPACE_GROUP
     assert "graphiti_core" not in sys.modules
     assert REAL_GRAPHITI_RUNTIME_ENABLED is True
+
+
+def test_retryable_failure_returns_diagnostic_receipt_without_structured_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    async def fail(**values: object) -> object:
+        telemetry = values["telemetry"]
+        telemetry.chat_invocations.append(
+            {
+                "provider": "cursor-agent-cli",
+                "model": "composer-2.5",
+                "outcome": "FAILED",
+            }
+        )
+        telemetry.embedding_usage = {
+            "usage_basis": "NO_EMBEDDING_CALL",
+            "request_count": 0,
+            "embedding_tokens": 0,
+            "cost_usd_microunits": 0,
+            "requests": [],
+        }
+        raise RuntimeError("chat failed")
+
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(real, "openrouter_api_key", lambda: "key")
+    monkeypatch.setattr(real, "neo4j_community_password", lambda: "password")
+    monkeypatch.setattr(real, "_add_episode", fail)
+    attempt = evaluation_attempt_for(("A retained source passage.",))
+    produced = RealGraphitiAdapter()._produce(
+        attempt,
+        UtcTimestamp.parse("2026-08-20T00:00:00.000000Z"),
+    )
+    assert produced.outcome is ExtractionOutcome.RETRYABLE_FAILURE
+    assert produced.failure_code is ExtractionFailureCode.PRODUCER_INTERNAL_ERROR
+    assert produced.raw_output_value is None
+    assert produced.attempt_receipt_value is not None
+    assert produced.attempt_receipt_value["chat_invocation_count"] == 1
+    assert produced.attempt_receipt_value["usage_basis"] == "NO_EMBEDDING_CALL"
+
+
+def test_relations_without_exact_evidence_are_retained_as_invalid_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    async def relation_without_evidence(**values: object) -> object:
+        values["telemetry"].embedding_usage = {
+            "usage_basis": "NO_EMBEDDING_CALL",
+            "request_count": 0,
+            "embedding_tokens": 0,
+            "cost_usd_microunits": 0,
+            "requests": [],
+        }
+        return SimpleNamespace(
+            episode=SimpleNamespace(uuid=values["episode_id"]),
+            nodes=(
+                SimpleNamespace(uuid="node-a", name="Absent A", summary="A"),
+                SimpleNamespace(uuid="node-b", name="Absent B", summary="B"),
+            ),
+            edges=(
+                SimpleNamespace(
+                    uuid="edge-1",
+                    name="ABOUT_EVENT",
+                    fact="This exact fact is absent from the retained passage.",
+                    source_node_uuid="node-a",
+                    target_node_uuid="node-b",
+                    valid_at=None,
+                    invalid_at=None,
+                    expired_at=None,
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(real, "openrouter_api_key", lambda: "key")
+    monkeypatch.setattr(real, "neo4j_community_password", lambda: "password")
+    monkeypatch.setattr(real, "_add_episode", relation_without_evidence)
+    produced = RealGraphitiAdapter()._produce(
+        evaluation_attempt_for(("A retained source passage.",)),
+        UtcTimestamp.parse("2026-08-20T00:00:00.000000Z"),
+    )
+    assert produced.outcome is ExtractionOutcome.INVALID_OUTPUT
+    assert produced.proposals == ()
+    assert produced.raw_output_value is not None
+    assert produced.raw_output_value["relations"][0]["proposal_status"] == (
+        "HELD_NO_EXACT_EVIDENCE"
+    )
+
+
+def test_cursor_cli_runs_outside_repository_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from newsroom.graphiti_adapter import cli_client
+
+    observed: dict[str, object] = {}
+
+    def capture(
+        command: tuple[str, ...], *, timeout: int, cwd: str | None = None
+    ) -> str:
+        observed.update(command=command, timeout=timeout, cwd=cwd)
+        return "{}"
+
+    monkeypatch.setattr(cli_client, "run_cli", capture)
+    assert cli_client.run_cursor_agent_llm("untrusted source") == "{}"
+    cwd = observed["cwd"]
+    assert isinstance(cwd, str)
+    assert Path(cwd) != _REPOSITORY_ROOT
+    assert "newsroom-cursor-graphiti-" in cwd
