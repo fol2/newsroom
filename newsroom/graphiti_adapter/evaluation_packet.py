@@ -1,9 +1,9 @@
 """EVALUATION packet for the private unpublished GraphRAG beta.
 
-Metered model and embedding calls use OpenRouter (`OPENROUTER_API`).
-Does not flip REAL_GRAPHITI_RUNTIME_ENABLED. Completeness of this packet is
-not execution authority (#700). Increment 9P proving still must not call
-OpenRouter (`OPENROUTER_UNUSED`).
+Metered Graphiti chat and embedding calls use OpenRouter (`OPENROUTER_API`).
+The CONT writer is Grok Build CLI (`grok-4.6`), with cursor-agent CLI fallback.
+Does not flip REAL_GRAPHITI_RUNTIME_ENABLED. Increment 9P proving still must not
+call OpenRouter (`OPENROUTER_UNUSED`).
 """
 
 from __future__ import annotations
@@ -26,10 +26,10 @@ from newsroom.graphiti_adapter.types import (
 GRAPHITI_CORE_RELEASE = "graphiti-core-0.29.3"
 GRAPHITI_CHAT_MODEL = "openrouter:openai.gpt-5-mini"
 GRAPHITI_EMBEDDING_MODEL = "openrouter:openai.text-embedding-3-large"
-WRITER_MODEL = "openrouter:x-ai.grok-4.6"
+WRITER_MODEL = "grok-build-cli:grok-4.6"
+WRITER_FALLBACK = "cursor-agent-cli"
 OPENROUTER_CHAT_SLUG = "openai/gpt-5-mini"
 OPENROUTER_EMBEDDING_SLUG = "openai/text-embedding-3-large"
-OPENROUTER_WRITER_SLUG = "x-ai/grok-4.6"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 GRAPHITI_WORKSPACE_GROUP = "newsroom-eval-proposal"
 OPENROUTER_API = "OPENROUTER_API"
@@ -82,6 +82,7 @@ EVALUATION_GRAPHITI_PACKET = RealGraphitiRuntimeAuthority(
             "metered_api": OPENROUTER_API,
             "keychain_service": OPENROUTER_KEYCHAIN_SERVICE,
             "writer": WRITER_MODEL,
+            "writer_fallback": WRITER_FALLBACK,
             "neo4j": NEO4J_COMMUNITY_LOCAL,
         }
     ),
@@ -122,6 +123,7 @@ EVALUATION_GRAPHITI_PACKET = RealGraphitiRuntimeAuthority(
             "od_011_cash_ceiling_gbp": OD_011_CASH_CEILING_GBP,
             "pre_spend": False,
             "provider": OPENROUTER_API,
+            "writer_subscription_not_debited": True,
         }
     ),
     evaluation_plan_digest=_digest(

@@ -10,7 +10,7 @@ from newsroom.control_plane.reports import news_report
 from newsroom.control_plane.store import connect, list_payloads, mark_public_dispatch
 from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.veto import VetoError, refuse_public_effect
-from newsroom.control_plane.writer import FixtureWriter, OpenRouterWriter
+from newsroom.control_plane.writer import CliChainWriter, FixtureWriter
 from newsroom.graphiti_adapter.evaluation_packet import (
     EVALUATION_GRAPHITI_PACKET,
     EVALUATION_WORKSPACE_POLICY,
@@ -18,6 +18,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_EMBEDDING_MODEL,
     OPENROUTER_API,
+    WRITER_FALLBACK,
     WRITER_MODEL,
 )
 from newsroom.graphiti_adapter.models import REAL_GRAPHITI_RUNTIME_ENABLED
@@ -285,7 +286,8 @@ def test_evaluation_packet_is_real_but_flag_stays_false() -> None:
     assert OPENROUTER_API == "OPENROUTER_API"
     assert GRAPHITI_CHAT_MODEL == "openrouter:openai.gpt-5-mini"
     assert GRAPHITI_EMBEDDING_MODEL == "openrouter:openai.text-embedding-3-large"
-    assert WRITER_MODEL == "openrouter:x-ai.grok-4.6"
+    assert WRITER_MODEL == "grok-build-cli:grok-4.6"
+    assert WRITER_FALLBACK == "cursor-agent-cli"
     assert EVALUATION_GRAPHITI_PACKET.model_release == GRAPHITI_CHAT_MODEL
     assert "placeholder" not in EVALUATION_GRAPHITI_PACKET.framework_release
     assert EVALUATION_WORKSPACE_POLICY.egress_policy is GraphitiEgressPolicy.APPROVED_PROVIDER_ONLY
@@ -339,7 +341,7 @@ def test_intake_fetches_when_gates_pass(tmp_path: Path) -> None:
     assert report.ok == 10
 
 
-def test_openrouter_writer_does_not_call_graphiti() -> None:
+def _sample_candidate_package():
     from newsroom.control_plane.editorial import (
         DiscoverySignalRecord,
         NewsLeadRecord,
@@ -347,16 +349,6 @@ def test_openrouter_writer_does_not_call_graphiti() -> None:
     )
     from newsroom.control_plane.evidence import EvidencePackage
 
-    seen: dict[str, str] = {}
-
-    def post(*, prompt: str, api_key: str) -> str:
-        seen["prompt"] = prompt
-        seen["api_key"] = api_key
-        return json.dumps(
-                {"title": "【未出版】測試稿", "body": "【未出版原創】根據證據包改寫，唔係來源標題複本。"}
-        )
-
-    writer = OpenRouterWriter(post=post, api_key=lambda: "test-openrouter-token")
     candidate = StoryCandidateRecord(
         candidate_id="c1",
         hypothesis_id="h1",
@@ -383,12 +375,35 @@ def test_openrouter_writer_does_not_call_graphiti() -> None:
         observation_digests=("sha256:" + ("b" * 64),),
         passages=("UK-01: retained",),
     )
-    copy = writer.write(candidate, package)
-    assert copy.writer_id.startswith("openrouter-")
+    return candidate, package
+
+
+def test_cli_writer_uses_grok_then_falls_back_to_cursor_agent() -> None:
+    def grok(_prompt: str) -> str:
+        raise RuntimeError("grok writer failed")
+
+    def cursor(_prompt: str) -> str:
+        return json.dumps(
+            {"title": "【未出版】測試稿", "body": "【未出版原創】根據證據包改寫，唔係來源標題複本。"}
+        )
+
+    copy = CliChainWriter(primary=grok, fallback=cursor).write(*_sample_candidate_package())
+    assert copy.writer_id == "cursor-agent-cli-cont-writer"
     assert copy.title.startswith("【未出版】")
-    assert "來源標題複本" in copy.body
-    assert seen["api_key"] == "test-openrouter-token"
-    assert "Graphiti" in seen["prompt"]
+
+
+def test_cli_writer_prefers_grok_build_cli() -> None:
+    def grok(_prompt: str) -> str:
+        return json.dumps(
+            {"title": "【未出版】Grok稿", "body": "【未出版原創】Grok Build CLI 正文。"}
+        )
+
+    def cursor(_prompt: str) -> str:
+        raise AssertionError("fallback must not run")
+
+    copy = CliChainWriter(primary=grok, fallback=cursor).write(*_sample_candidate_package())
+    assert copy.writer_id == "grok-build-cli-cont-writer"
+    assert "Grok" in copy.title
 
 
 def test_broker_error_does_not_include_secret(monkeypatch) -> None:
