@@ -26,6 +26,7 @@ from newsroom.control_plane.store import (
     connect,
     graphiti_coverage,
     graphiti_failure_state,
+    GraphitiSpendCeilingExceeded,
     has_candidate,
     has_graphiti_ingest,
     insert_graphiti_ingest,
@@ -302,6 +303,58 @@ def _fail(
     )
 
 
+def _reconcile_result_spend(
+    unpublished: sqlite3.Connection,
+    *,
+    unit: CorpusIngestUnit,
+    attempt_number: int,
+    result: GraphitiCycleResult,
+) -> dict[str, object]:
+    """Attribute returned provider telemetry without trusting invalid identity fields."""
+
+    spend_id = f"{unit.ingest_id}:{attempt_number}"
+    reported_attempt = result.provider_attempt_number
+    provider_spend_id = f"{unit.ingest_id}:{reported_attempt}"
+    provider_exists = unpublished.execute(
+        "SELECT 1 FROM unpublished_graphiti_spend WHERE spend_id=?",
+        (provider_spend_id,),
+    ).fetchone()
+    if provider_spend_id == spend_id or provider_exists is None:
+        accounting = reconcile_graphiti_spend(
+            unpublished,
+            spend_id=spend_id,
+            embedding_usage=result.embedding_usage,
+        )
+        if provider_exists is None and provider_spend_id != spend_id:
+            accounting["reported_provider_attempt_number"] = reported_attempt
+            accounting["reconciled_to_current_attempt"] = True
+        append_ledger(unpublished, "GRAPHITI_SPEND_RECONCILE", accounting)
+        return accounting
+
+    provider_accounting = reconcile_graphiti_spend(
+        unpublished,
+        spend_id=provider_spend_id,
+        embedding_usage=result.embedding_usage,
+    )
+    current_accounting = reconcile_graphiti_spend(
+        unpublished,
+        spend_id=spend_id,
+        embedding_usage={
+            "requests": [],
+            "request_count": 0,
+            "embedding_tokens": 0,
+            "cost_usd_microunits": 0,
+            "usage_basis": "NO_EMBEDDING_CALL",
+        },
+    )
+    append_ledger(unpublished, "GRAPHITI_SPEND_RECONCILE", provider_accounting)
+    append_ledger(unpublished, "GRAPHITI_SPEND_RECONCILE", current_accounting)
+    return {
+        "provider_attempt": provider_accounting,
+        "current_attempt": current_accounting,
+    }
+
+
 def _ingest(
     unpublished: sqlite3.Connection,
     *,
@@ -321,22 +374,40 @@ def _ingest(
     ) in _queue(unpublished, units):
         if attempted >= max_graphiti:
             break
-        attempted += 1
         attempt_number = next_graphiti_attempt_number(unpublished, unit.ingest_id)
         unit = replace(unit, attempt_number=attempt_number)
         if unit.authority is None:
             raise ValueError("corpus ingest requires retained authority records")
         retain_graphiti_authority_records(unpublished, unit.authority.records)
         spend_id = f"{unit.ingest_id}:{attempt_number}"
-        reserved = reserve_graphiti_spend(
-            unpublished,
-            spend_id=spend_id,
-            ingest_id=unit.ingest_id,
-            attempt_number=attempt_number,
-            proving_run_id=unit.proving_run_id,
-            reserved_gbp_microunits=500_000,
-            ceiling_gbp_microunits=OD_011_CASH_CEILING_GBP * 1_000_000,
-        )
+        try:
+            reserved = reserve_graphiti_spend(
+                unpublished,
+                spend_id=spend_id,
+                ingest_id=unit.ingest_id,
+                attempt_number=attempt_number,
+                proving_run_id=unit.proving_run_id,
+                reserved_gbp_microunits=500_000,
+                ceiling_gbp_microunits=OD_011_CASH_CEILING_GBP * 1_000_000,
+            )
+        except GraphitiSpendCeilingExceeded:
+            append_ledger(
+                unpublished,
+                "GRAPHITI_SPEND_HOLD",
+                {
+                    "ingest_id": unit.ingest_id,
+                    "attempt_number": attempt_number,
+                    "proving_run_id": unit.proving_run_id,
+                    "reason": "OD_011_CASH_CEILING",
+                    "ceiling_gbp_microunits": (
+                        OD_011_CASH_CEILING_GBP * 1_000_000
+                    ),
+                    "writer_continues": True,
+                },
+            )
+            unpublished.commit()
+            break
+        attempted += 1
         if reserved:
             append_ledger(
                 unpublished,
@@ -360,15 +431,25 @@ def _ingest(
                 },
             )
             unpublished.commit()
+        returned_result: GraphitiCycleResult | None = None
         try:
-            result = _bind_result(unit, graphiti.ingest(unit))
+            returned_result = graphiti.ingest(unit)
+            result = _bind_result(unit, returned_result)
         except VetoError:
             raise
-        except (RuntimeError, ValueError, OSError, json.JSONDecodeError):
-            accounting = reconcile_graphiti_spend(
-                unpublished, spend_id=spend_id, embedding_usage=None
-            )
-            append_ledger(unpublished, "GRAPHITI_SPEND_RECONCILE", accounting)
+        except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as exc:
+            if returned_result is None:
+                accounting = reconcile_graphiti_spend(
+                    unpublished, spend_id=spend_id, embedding_usage=None
+                )
+                append_ledger(unpublished, "GRAPHITI_SPEND_RECONCILE", accounting)
+            else:
+                accounting = _reconcile_result_spend(
+                    unpublished,
+                    unit=unit,
+                    attempt_number=attempt_number,
+                    result=returned_result,
+                )
             _fail(
                 unpublished,
                 unit,
@@ -383,7 +464,27 @@ def _ingest(
                 "attempt_number": attempt_number,
                 "outcome": "FAILED",
                 "failure_code": "PRODUCER_INTERNAL_ERROR",
-                "embedding_usage": None,
+                "binding_failure": str(exc),
+                "returned_raw_receipt": (
+                    None
+                    if returned_result is None
+                    else returned_result.raw_receipt
+                ),
+                "chat_invocations": (
+                    []
+                    if returned_result is None
+                    else list(returned_result.chat_invocations)
+                ),
+                "embedding_usage": (
+                    None
+                    if returned_result is None
+                    else returned_result.embedding_usage
+                ),
+                "provider_attempt_number": (
+                    None
+                    if returned_result is None
+                    else returned_result.provider_attempt_number
+                ),
                 "accounting": accounting,
                 "authority_record_ids": [
                     str(item["record_id"]) for item in unit.authority.records
@@ -401,41 +502,12 @@ def _ingest(
             append_ledger(unpublished, "GRAPHITI_EVALUATION_ATTEMPT", failure_receipt)
             unpublished.commit()
             continue
-        provider_spend_id = f"{unit.ingest_id}:{result.provider_attempt_number}"
-        if provider_spend_id == spend_id:
-            accounting = reconcile_graphiti_spend(
-                unpublished,
-                spend_id=spend_id,
-                embedding_usage=result.embedding_usage,
-            )
-            append_ledger(unpublished, "GRAPHITI_SPEND_RECONCILE", accounting)
-        else:
-            provider_accounting = reconcile_graphiti_spend(
-                unpublished,
-                spend_id=provider_spend_id,
-                embedding_usage=result.embedding_usage,
-            )
-            current_accounting = reconcile_graphiti_spend(
-                unpublished,
-                spend_id=spend_id,
-                embedding_usage={
-                    "requests": [],
-                    "request_count": 0,
-                    "embedding_tokens": 0,
-                    "cost_usd_microunits": 0,
-                    "usage_basis": "NO_EMBEDDING_CALL",
-                },
-            )
-            append_ledger(
-                unpublished, "GRAPHITI_SPEND_RECONCILE", provider_accounting
-            )
-            append_ledger(
-                unpublished, "GRAPHITI_SPEND_RECONCILE", current_accounting
-            )
-            accounting = {
-                "provider_attempt": provider_accounting,
-                "current_attempt": current_accounting,
-            }
+        accounting = _reconcile_result_spend(
+            unpublished,
+            unit=unit,
+            attempt_number=attempt_number,
+            result=result,
+        )
         receipt = _receipt(unit, result, accounting=accounting)
         final_digest = insert_graphiti_attempt_receipt(
             unpublished,

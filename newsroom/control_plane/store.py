@@ -141,6 +141,10 @@ class UnpublishedDraft:
     status: str
 
 
+class GraphitiSpendCeilingExceeded(RuntimeError):
+    """A new Graphiti reservation would exceed the fixed OD-011 ceiling."""
+
+
 def _now() -> str:
     return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
@@ -221,7 +225,9 @@ def reserve_graphiti_spend(
     ).fetchone()
     committed = int(row[0]) if row else 0
     if committed + reserved_gbp_microunits > ceiling_gbp_microunits:
-        raise RuntimeError("OD-011 Graphiti embedding cash ceiling would be exceeded")
+        raise GraphitiSpendCeilingExceeded(
+            "OD-011 Graphiti embedding cash ceiling would be exceeded"
+        )
     connection.execute(
         """
         INSERT INTO unpublished_graphiti_spend(

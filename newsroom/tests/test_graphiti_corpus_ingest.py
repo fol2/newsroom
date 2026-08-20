@@ -37,6 +37,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_EMBEDDING_MODEL,
     GRAPHITI_GENERATION_ID,
     GRAPHITI_WORKSPACE_GROUP,
+    OD_011_CASH_CEILING_GBP,
 )
 from newsroom.graphiti_adapter.identity import MAX_EPISODE_BYTES
 from newsroom.graphiti_adapter.models import GraphitiAdapterContractError
@@ -1126,21 +1127,33 @@ def test_max_graphiti_counts_failed_attempts(tmp_path: Path) -> None:
 def test_cycle_rejects_foreign_graphiti_identity(tmp_path: Path) -> None:
     proving = _proving(tmp_path)
     unpublished = tmp_path / "unpublished_store.sqlite3"
+    returned: list[GraphitiCycleResult] = []
 
     class Liar:
         def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
-            return GraphitiCycleResult(
-                ingest_id="00000000-0000-4000-8000-000000000099",
-                source_id="XX-99",
-                item_key="foreign",
-                outcome="COMPLETE",
-                proposal_count=1,
-                entity_count=1,
-                relation_count=0,
-                failure_code="NONE",
-                temporal_basis=unit.temporal().basis,
-                reference_time=unit.temporal().reference_time.to_text(),
+            result = _complete(
+                unit,
+                chat_invocations=(
+                    {
+                        "provider": "cursor-agent-cli",
+                        "model": "composer-2.5",
+                        "outcome": "COMPLETE",
+                    },
+                ),
+                embedding_usage={
+                    "usage_basis": "PROVIDER_REPORTED",
+                    "request_count": 1,
+                    "embedding_tokens": 11,
+                    "cost_usd_microunits": 17,
+                    "requests": [],
+                },
             )
+            rejected = replace(
+                result,
+                ingest_id="00000000-0000-4000-8000-000000000099",
+            )
+            returned.append(rejected)
+            return rejected
 
     report = run_cycle(
         proving_store=str(proving),
@@ -1158,9 +1171,82 @@ def test_cycle_rejects_foreign_graphiti_identity(tmp_path: Path) -> None:
     failed = connection.execute(
         "SELECT COUNT(*) FROM unpublished_graphiti_failures"
     ).fetchone()[0]
+    attempt = json.loads(
+        connection.execute(
+            "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts"
+        ).fetchone()[0]
+    )
+    spend = connection.execute(
+        "SELECT status, actual_usd_microunits, usage_basis "
+        "FROM unpublished_graphiti_spend"
+    ).fetchone()
     connection.close()
     assert stored == 0
     assert failed == 1
+    assert attempt["returned_raw_receipt"] == returned[0].raw_receipt
+    assert attempt["chat_invocations"][0]["outcome"] == "COMPLETE"
+    assert attempt["embedding_usage"]["cost_usd_microunits"] == 17
+    assert attempt["accounting"]["actual_usd_microunits"] == 17
+    assert spend == ("RECONCILED", 17, "PROVIDER_REPORTED")
+
+
+def test_graphiti_cash_ceiling_holds_ingest_but_writer_continues(
+    tmp_path: Path,
+) -> None:
+    from newsroom.control_plane.store import (
+        connect,
+        reconcile_graphiti_spend,
+        reserve_graphiti_spend,
+    )
+
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "cash-ceiling.sqlite3"
+    connection = connect(str(unpublished))
+    assert reserve_graphiti_spend(
+        connection,
+        spend_id="prior:1",
+        ingest_id="prior",
+        attempt_number=1,
+        proving_run_id="run-1",
+        reserved_gbp_microunits=500_000,
+        ceiling_gbp_microunits=OD_011_CASH_CEILING_GBP * 1_000_000,
+    )
+    reconcile_graphiti_spend(
+        connection,
+        spend_id="prior:1",
+        embedding_usage={
+            "usage_basis": "PROVIDER_REPORTED",
+            "request_count": 1,
+            "embedding_tokens": 1,
+            "cost_usd_microunits": OD_011_CASH_CEILING_GBP * 1_000_000,
+            "requests": [],
+        },
+    )
+    connection.commit()
+    connection.close()
+
+    class MustNotRun:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            raise AssertionError(f"Graphiti ran above its ceiling: {unit.ingest_id}")
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=1,
+        graphiti=MustNotRun(),
+        max_graphiti=1,
+    )
+
+    connection = __import__("sqlite3").connect(unpublished)
+    ledger_kinds = [
+        row[0] for row in connection.execute("SELECT kind FROM ledger ORDER BY seq")
+    ]
+    connection.close()
+    assert report.graphiti == 0
+    assert report.minted == 1
+    assert "GRAPHITI_SPEND_HOLD" in ledger_kinds
+    assert "PRIVATE_CYCLE_CLOSE" in ledger_kinds
 
 
 def test_ingest_commits_when_writer_fails(tmp_path: Path) -> None:

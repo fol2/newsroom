@@ -298,6 +298,8 @@ def test_cycle_reserves_graphiti_spend_before_stub_extract(tmp_path: Path) -> No
                 failure_code="NONE",
                 temporal_basis=OBSERVED_FALLBACK,
                 reference_time=unit.observed_at,
+                attempt_number=unit.attempt_number,
+                provider_attempt_number=unit.attempt_number,
             )
 
     first = run_cycle(
