@@ -192,21 +192,30 @@ def build_cli_llm_client() -> Any:
                 if response_model is not None
                 else None
             )
+
+            def _parse(raw: str) -> dict[str, Any] | None:
+                try:
+                    payload = json.loads(_extract_json(raw))
+                except (RuntimeError, json.JSONDecodeError, TypeError, ValueError):
+                    return None
+                return payload if isinstance(payload, dict) else None
+
+            payload = None
             try:
                 raw = await asyncio.to_thread(_run_cursor_agent_llm, prompt)
                 self.invocations.append(
                     {"provider": "cursor-agent-cli", "model": CURSOR_AGENT_MODEL_ID}
                 )
+                payload = _parse(raw)
             except (RuntimeError, OSError):
+                payload = None
+            if payload is None:
                 raw = await asyncio.to_thread(_run_grok_llm, prompt, schema=schema)
                 self.invocations.append(
                     {"provider": "grok-build-cli", "model": GROK_CHAT_MODEL_ID}
                 )
-            try:
-                payload = json.loads(_extract_json(raw))
-            except json.JSONDecodeError as exc:
-                raise EmptyResponseError("Graphiti CLI returned malformed JSON") from exc
-            if not isinstance(payload, dict):
+                payload = _parse(raw)
+            if payload is None:
                 raise EmptyResponseError("Graphiti CLI JSON was not an object")
             return payload
 
