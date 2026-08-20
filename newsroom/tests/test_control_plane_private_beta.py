@@ -246,6 +246,57 @@ def test_same_event_url_consolidates_to_one_candidate(tmp_path: Path) -> None:
     assert "RAD-01" in home[0].source_lineage
 
 
+def test_cycle_reserves_graphiti_spend_before_stub_extract(tmp_path: Path) -> None:
+    from newsroom.control_plane.graphiti import GraphitiCycleResult
+
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "unpublished_store.sqlite3"
+    calls: list[str] = []
+
+    class StubGraphiti:
+        def extract(self, package):
+            calls.append(package.candidate_id)
+            return GraphitiCycleResult(
+                candidate_id=package.candidate_id,
+                outcome="COMPLETE",
+                proposal_count=2,
+                failure_code="NONE",
+            )
+
+    first = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=10,
+        graphiti=StubGraphiti(),
+        max_graphiti=1,
+    )
+    assert first.graphiti == 1
+    assert first.minted == 3
+    assert len(calls) == 1
+    connection = __import__("sqlite3").connect(unpublished)
+    kinds = [row[0] for row in connection.execute("SELECT kind FROM ledger ORDER BY seq")]
+    connection.close()
+    assert kinds.count("GRAPHITI_SPEND_RESERVE") == 1
+    assert kinds.count("GRAPHITI_EVALUATION_ATTEMPT") == 1
+    assert kinds.index("GRAPHITI_SPEND_RESERVE") < kinds.index("GRAPHITI_EVALUATION_ATTEMPT")
+    second = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=10,
+        graphiti=StubGraphiti(),
+        max_graphiti=1,
+    )
+    assert second.graphiti == 1
+    assert len(calls) == 2
+    connection = __import__("sqlite3").connect(unpublished)
+    kinds = [row[0] for row in connection.execute("SELECT kind FROM ledger ORDER BY seq")]
+    connection.close()
+    assert kinds.count("GRAPHITI_SPEND_RESERVE") == 1
+    assert kinds.count("GRAPHITI_EVALUATION_ATTEMPT") == 2
+
+
 def test_surface_payload_refuses_dateline_dump_and_publication_bundle() -> None:
     with pytest.raises(ValueError, match="dateline dump"):
         UnpublishedSurfacePayload(
@@ -298,7 +349,7 @@ def test_news_report_dateline_is_not_the_cycle_writer() -> None:
     assert report.startswith("London — Home Office and UKVI, 2026-08-19 — ")
 
 
-def test_evaluation_packet_is_real_but_flag_stays_false() -> None:
+def test_evaluation_packet_authorises_evaluation_and_refuses_production() -> None:
     from newsroom.authority.canonical import digest_canonical
     from newsroom.extraction.types import VersionedExtractionComponent
     from newsroom.graphiti_adapter.contracts import (
@@ -314,7 +365,7 @@ def test_evaluation_packet_is_real_but_flag_stays_false() -> None:
     from newsroom.tests.extraction_4a_helpers import contract_request
     from newsroom.tests.graphiti_adapter_4d_helpers import FAKE_CONFIGURATION_ID
 
-    assert REAL_GRAPHITI_RUNTIME_ENABLED is False
+    assert REAL_GRAPHITI_RUNTIME_ENABLED is True
     assert GRAPHITI_CORE_RELEASE == "graphiti-core-0.29.3"
     assert OPENROUTER_API == "OPENROUTER_API"
     assert GRAPHITI_CHAT_MODEL == "openrouter:openai.gpt-5-mini"
@@ -329,7 +380,6 @@ def test_evaluation_packet_is_real_but_flag_stays_false() -> None:
         is GraphitiCredentialClass.PROPOSAL_WORKSPACE_ONLY
     )
     assert EVALUATION_GRAPHITI_PACKET.framework_release == GRAPHITI_CORE_RELEASE
-    assert "placeholder" not in EVALUATION_GRAPHITI_PACKET.framework_release
     contract = contract_request()
     digest = digest_canonical({"contract": "evaluation-component"})
     configuration = GraphitiAdapterConfiguration(
@@ -352,10 +402,33 @@ def test_evaluation_packet_is_real_but_flag_stays_false() -> None:
         workspace_policy=EVALUATION_WORKSPACE_POLICY,
         fixture_case=None,
         real_runtime_authority=EVALUATION_GRAPHITI_PACKET,
-        idempotency_key="evaluation-packet-refuses-until-flag",
+        idempotency_key="evaluation-packet-authorises-evaluation",
     )
-    with pytest.raises(GraphitiRuntimeNotAuthorized, match="disabled and unqualified"):
-        configuration.require_execution_authorized()
+    configuration.require_execution_authorized()
+    production = GraphitiAdapterConfiguration(
+        configuration_id=FAKE_CONFIGURATION_ID,
+        runtime_mode=GraphitiRuntimeMode.REAL_GRAPHITI,
+        execution_profile=GraphitiExecutionProfile.PRODUCTION,
+        framework=VersionedExtractionComponent("graphiti.framework", GRAPHITI_CORE_RELEASE, digest),
+        model=VersionedExtractionComponent("graphiti.model", GRAPHITI_CHAT_MODEL, digest),
+        embedding=VersionedExtractionComponent(
+            "graphiti.embedding", GRAPHITI_EMBEDDING_MODEL, digest
+        ),
+        prompt=GRAPHITI_PROMPT_COMPONENT,
+        output_schema=GRAPHITI_ADAPTER_OUTPUT_SCHEMA_COMPONENT,
+        code=GRAPHITI_ADAPTER_CODE_COMPONENT,
+        normalisation=GRAPHITI_ADAPTER_NORMALISATION_COMPONENT,
+        temporal_policy=GRAPHITI_ADAPTER_TEMPORAL_COMPONENT,
+        adapter_policy=GRAPHITI_ADAPTER_POLICY_COMPONENT,
+        extractor_contract_id=contract.contract_id,
+        extractor_contract_digest=contract.digest,
+        workspace_policy=EVALUATION_WORKSPACE_POLICY,
+        fixture_case=None,
+        real_runtime_authority=EVALUATION_GRAPHITI_PACKET,
+        idempotency_key="evaluation-packet-refuses-production",
+    )
+    with pytest.raises(GraphitiRuntimeNotAuthorized, match="EVALUATION"):
+        production.require_execution_authorized()
 
 
 def test_intake_fetches_when_gates_pass(tmp_path: Path) -> None:

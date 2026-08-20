@@ -9,6 +9,8 @@ Increment 4D provides a private adapter that can produce retained Extraction Run
 
 The repository contains no Graphiti package or model-provider runtime in this boundary. `REAL_GRAPHITI_RUNTIME_ENABLED = False`. A structurally valid real-runtime configuration is still rejected until a separate owner decision binds every required framework, model, prompt, rights, destination, credential, security, budget, evaluation and rollback value.
 
+Map #690 reviewed flip: Control Plane Graphiti may execute under EVALUATION with `REAL_GRAPHITI_RUNTIME_ENABLED = True`. Increment 4D qualification remains deterministic fake and approved replay. PRODUCTION stays closed. `graphiti-core==0.29.3` is an optional extra.
+
 ## Public boundary
 
 Open the authority through the dedicated submodule:

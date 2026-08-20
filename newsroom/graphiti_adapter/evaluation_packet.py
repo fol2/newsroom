@@ -2,8 +2,8 @@
 
 Metered Graphiti chat and embedding calls use OpenRouter (`OPENROUTER_API`).
 The CONT writer is Grok Build CLI (`grok-4.6`), with cursor-agent CLI fallback.
-Does not flip REAL_GRAPHITI_RUNTIME_ENABLED. Increment 9P proving still must not
-call OpenRouter (`OPENROUTER_UNUSED`).
+`REAL_GRAPHITI_RUNTIME_ENABLED` is True for EVALUATION only. PRODUCTION stays
+closed. Increment 9P proving still must not call OpenRouter (`OPENROUTER_UNUSED`).
 """
 
 from __future__ import annotations

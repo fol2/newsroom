@@ -65,7 +65,7 @@ from .types import (
 )
 
 
-REAL_GRAPHITI_RUNTIME_ENABLED = False
+REAL_GRAPHITI_RUNTIME_ENABLED = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,6 +335,10 @@ class GraphitiAdapterConfiguration:
             if not REAL_GRAPHITI_RUNTIME_ENABLED:
                 raise GraphitiRuntimeNotAuthorized(
                     "real Graphiti/model execution remains disabled and unqualified"
+                )
+            if self.execution_profile is not GraphitiExecutionProfile.EVALUATION:
+                raise GraphitiRuntimeNotAuthorized(
+                    "real Graphiti is authorised only under EVALUATION"
                 )
 
     def canonical_value(self) -> dict[str, object]:

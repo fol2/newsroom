@@ -259,7 +259,7 @@ def test_claim_proposals_are_outside_this_admission_slice() -> None:
 
 
 def test_real_adapter_cannot_mutate_ledger_or_admitted_labels() -> None:
-    assert REAL_GRAPHITI_RUNTIME_ENABLED is False
+    assert REAL_GRAPHITI_RUNTIME_ENABLED is True
     assert GRAPHITI_WORKSPACE_GROUP == "newsroom-eval-proposal"
     assert inspect.signature(RealGraphitiAdapter.execute).parameters.keys() == {
         "self",
