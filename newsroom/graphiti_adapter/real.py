@@ -100,6 +100,9 @@ class _EpisodeTelemetry:
     provider_attempt_number: int | None = None
 
 
+ResultValidator = Callable[[Any, _EpisodeTelemetry], None]
+
+
 class AmbiguousEpisodeEffect(RuntimeError):
     """The deterministic episode exists without a completed ingest marker."""
 
@@ -234,7 +237,8 @@ def _restore_episode_telemetry(
     embedding_usage = metadata.get("newsroom_embedding_usage")
     provider_attempt = metadata.get("newsroom_provider_attempt_number")
     if (
-        not isinstance(invocations, list)
+        metadata.get("newsroom_validation_status") != "PASSED"
+        or not isinstance(invocations, list)
         or any(not isinstance(item, dict) for item in invocations)
         or not isinstance(embedding_usage, dict)
         or not isinstance(provider_attempt, int)
@@ -261,6 +265,7 @@ def _completed_episode_ids(
             and episode_id != exclude_episode_id
             and isinstance(metadata, dict)
             and metadata.get(_EPISODE_STATE_KEY) == _EPISODE_COMPLETE
+            and metadata.get("newsroom_validation_status") == "PASSED"
         ):
             retained.append(episode_id)
     return retained
@@ -297,6 +302,7 @@ async def _add_episode(
     reference_time: datetime,
     telemetry: _EpisodeTelemetry,
     attempt_number: int,
+    validate_result: ResultValidator,
 ) -> Any:
     os.environ.setdefault("GRAPHITI_TELEMETRY_ENABLED", "false")
     runtime = _load_graphiti()
@@ -317,9 +323,6 @@ async def _add_episode(
         embedder=embedder,
         cross_encoder=runtime.IdentityCrossEncoder(),
     )
-    if getattr(graphiti.driver, "_database", None) != GRAPHITI_WORKSPACE_GROUP:
-        graphiti.driver = graphiti.driver.clone(database=GRAPHITI_WORKSPACE_GROUP)
-        graphiti.clients.driver = graphiti.driver
     try:
         retained, state = await _ensure_episode(
             graphiti=graphiti,
@@ -331,9 +334,11 @@ async def _add_episode(
         )
         if state == _EPISODE_COMPLETE:
             _restore_episode_telemetry(telemetry, retained)
-            return await _reconciled_result(
+            reconciled = await _reconciled_result(
                 graphiti=graphiti, runtime=runtime, episode=retained
             )
+            validate_result(reconciled, telemetry)
+            return reconciled
         if state == _EPISODE_PENDING:
             await _discard_pending_episode(
                 graphiti=graphiti, runtime=runtime, episode=retained
@@ -394,8 +399,16 @@ async def _add_episode(
         telemetry.chat_invocations = list(getattr(llm_client, "invocations", ()))
         telemetry.embedding_usage = embedder.receipt()
         telemetry.provider_attempt_number = attempt_number
+        try:
+            validate_result(result, telemetry)
+        except ExtractionContractError:
+            await _discard_pending_episode(
+                graphiti=graphiti, runtime=runtime, episode=result.episode
+            )
+            raise
         result.episode.episode_metadata = {
             _EPISODE_STATE_KEY: _EPISODE_COMPLETE,
+            "newsroom_validation_status": "PASSED",
             "newsroom_chat_invocations": telemetry.chat_invocations,
             "newsroom_embedding_usage": telemetry.embedding_usage,
             "newsroom_provider_attempt_number": attempt_number,
@@ -613,6 +626,63 @@ class RealGraphitiAdapter:
         telemetry = _EpisodeTelemetry(
             predecessor_episode_uuid=attempt.predecessor_episode_uuid
         )
+        validated: dict[str, ProducedExtraction] = {}
+
+        def validate_result(
+            result: Any, current_telemetry: _EpisodeTelemetry
+        ) -> None:
+            proposals = tuple(
+                sorted(
+                    (
+                        *entity_proposals(result, attempt),
+                        *relation_proposals(result, attempt),
+                    ),
+                    key=lambda item: item.local_id,
+                )
+            )
+            raw = _raw_receipt(
+                attempt,
+                started_at=started_at,
+                telemetry=current_telemetry,
+                result=result,
+                proposals=proposals,
+            )
+            produced = produced_extraction(
+                attempt,
+                outcome=ExtractionOutcome.SUCCESS,
+                failure_code=ExtractionFailureCode.NONE,
+                validation=ExtractionOutputValidation.VALID,
+                raw=raw,
+                proposals=proposals,
+                embedding_usage=current_telemetry.embedding_usage,
+            )
+            try:
+                produced.usage.require_within(attempt.extraction_request.budget)
+            except ExtractionContractError:
+                diagnostic = _raw_receipt(
+                    attempt,
+                    started_at=started_at,
+                    telemetry=current_telemetry,
+                    result=None,
+                    proposals=(),
+                )
+                diagnostic.pop("raw_output_digest", None)
+                diagnostic["budget_status"] = "EXCEEDED"
+                diagnostic["raw_output_digest"] = digest_bytes(
+                    canonical_json_bytes(diagnostic)
+                )
+                validated["produced"] = produced_extraction(
+                    attempt,
+                    outcome=ExtractionOutcome.INVALID_OUTPUT,
+                    failure_code=ExtractionFailureCode.OUTPUT_SCHEMA_INVALID,
+                    validation=ExtractionOutputValidation.INVALID,
+                    raw=diagnostic,
+                    proposals=(),
+                    embedding_usage=current_telemetry.embedding_usage,
+                )
+                raise
+            validated["produced"] = produced
+
         try:
             _load_graphiti()
             api_key = openrouter_api_key()
@@ -628,6 +698,7 @@ class RealGraphitiAdapter:
                         reference_time=reference.value,
                         telemetry=telemetry,
                         attempt_number=attempt.attempt_number,
+                        validate_result=validate_result,
                     ),
                     timeout=timeout_s,
                 )
@@ -652,6 +723,11 @@ class RealGraphitiAdapter:
             )
         except (BrokerError, GraphitiAdapterContractError):
             raise
+        except ExtractionContractError:
+            produced = validated.get("produced")
+            if produced is None:
+                raise
+            return produced
         except AmbiguousEpisodeEffect:
             raw = _raw_receipt(
                 attempt,
@@ -689,51 +765,10 @@ class RealGraphitiAdapter:
                 attempt_receipt=raw,
             )
 
-        proposals = tuple(
-            sorted(
-                (*entity_proposals(result, attempt), *relation_proposals(result, attempt)),
-                key=lambda item: item.local_id,
-            )
-        )
-        raw = _raw_receipt(
-            attempt,
-            started_at=started_at,
-            telemetry=telemetry,
-            result=result,
-            proposals=proposals,
-        )
-        produced = produced_extraction(
-            attempt,
-            outcome=ExtractionOutcome.SUCCESS,
-            failure_code=ExtractionFailureCode.NONE,
-            validation=ExtractionOutputValidation.VALID,
-            raw=raw,
-            proposals=proposals,
-            embedding_usage=telemetry.embedding_usage,
-        )
-        try:
-            produced.usage.require_within(attempt.extraction_request.budget)
-        except ExtractionContractError:
-            diagnostic = _raw_receipt(
-                attempt,
-                started_at=started_at,
-                telemetry=telemetry,
-                result=None,
-                proposals=(),
-            )
-            diagnostic.pop("raw_output_digest", None)
-            diagnostic["budget_status"] = "EXCEEDED"
-            diagnostic["raw_output_digest"] = digest_bytes(
-                canonical_json_bytes(diagnostic)
-            )
-            return produced_extraction(
-                attempt,
-                outcome=ExtractionOutcome.INVALID_OUTPUT,
-                failure_code=ExtractionFailureCode.OUTPUT_SCHEMA_INVALID,
-                validation=ExtractionOutputValidation.INVALID,
-                raw=diagnostic,
-                proposals=(),
-                embedding_usage=telemetry.embedding_usage,
+        produced = validated.get("produced")
+        if produced is None:
+            raise GraphitiAdapterContractError(
+                "Graphiti result was not validated before completion"
             )
         return produced
 

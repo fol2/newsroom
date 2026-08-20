@@ -53,6 +53,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_MODEL,
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_EMBEDDING_MODEL,
+    GRAPHITI_WORKSPACE_GROUP,
 )
 from newsroom.graphiti_adapter.evaluation_attempt import evaluation_attempt_for
 from newsroom.graphiti_adapter.real import RealGraphitiAdapter
@@ -312,7 +313,10 @@ def test_deterministic_episode_is_created_once_then_reused_on_retry() -> None:
     _episode, first_state = asyncio.run(_ensure_episode(**arguments))
     _episode, retained_state = asyncio.run(_ensure_episode(**arguments))
     retained_episode = retained["deterministic-id"]
-    retained_episode.episode_metadata = {"newsroom_ingest_state": "COMPLETE"}
+    retained_episode.episode_metadata = {
+        "newsroom_ingest_state": "COMPLETE",
+        "newsroom_validation_status": "PASSED",
+    }
     _episode, completed_state = asyncio.run(_ensure_episode(**arguments))
     assert first_state == "CREATED"
     assert retained_state == "PENDING"
@@ -362,6 +366,7 @@ def test_completed_episode_restores_original_provider_metering() -> None:
     episode = SimpleNamespace(
         episode_metadata={
             "newsroom_ingest_state": "COMPLETE",
+            "newsroom_validation_status": "PASSED",
             "newsroom_chat_invocations": [{"provider": "cursor-agent-cli"}],
             "newsroom_embedding_usage": {
                 "usage_basis": "PROVIDER_REPORTED",
@@ -383,7 +388,10 @@ def test_only_completed_episodes_enter_extraction_context() -> None:
     episodes = [
         SimpleNamespace(
             uuid="complete",
-            episode_metadata={"newsroom_ingest_state": "COMPLETE"},
+            episode_metadata={
+                "newsroom_ingest_state": "COMPLETE",
+                "newsroom_validation_status": "PASSED",
+            },
         ),
         SimpleNamespace(
             uuid="pending",
@@ -397,6 +405,119 @@ def test_only_completed_episodes_enter_extraction_context() -> None:
     assert _completed_episode_ids(
         episodes, exclude_episode_id="complete"
     ) == []
+
+
+def test_episode_uses_default_database_and_validates_before_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    class Missing(Exception):
+        pass
+
+    retained: dict[str, object] = {}
+    saved_metadata: list[dict[str, object]] = []
+
+    class Episode:
+        def __init__(self, **values: object) -> None:
+            for key, value in values.items():
+                setattr(self, key, value)
+            self.entity_edges = []
+
+        @classmethod
+        async def get_by_uuid(cls, _driver: object, episode_id: str) -> object:
+            if episode_id not in retained:
+                raise Missing(episode_id)
+            return retained[episode_id]
+
+        async def save(self, _driver: object) -> None:
+            retained[str(self.uuid)] = self
+            saved_metadata.append(dict(self.episode_metadata))
+
+    class Driver:
+        _database = "neo4j"
+
+        def clone(self, **_values: object) -> object:
+            raise AssertionError("group_id must not replace the configured database")
+
+    class Graphiti:
+        def __init__(self, *_args: object, **_values: object) -> None:
+            self.driver = Driver()
+            self.clients = SimpleNamespace(driver=self.driver)
+
+        async def retrieve_episodes(self, *_args: object, **_values: object) -> list[object]:
+            return []
+
+        async def add_episode(self, **values: object) -> object:
+            assert values["group_id"] == GRAPHITI_WORKSPACE_GROUP
+            return SimpleNamespace(
+                episode=retained[str(values["uuid"])],
+                nodes=(),
+                edges=(),
+            )
+
+        async def close(self) -> None:
+            return None
+
+    delegate = SimpleNamespace(
+        client=SimpleNamespace(embeddings=SimpleNamespace()),
+        config=SimpleNamespace(
+            embedding_model="openai/text-embedding-3-large",
+            embedding_dim=2,
+        ),
+    )
+    runtime = SimpleNamespace(
+        Graphiti=Graphiti,
+        OpenAIEmbedder=lambda **_values: delegate,
+        OpenAIEmbedderConfig=lambda **values: SimpleNamespace(**values),
+        IdentityCrossEncoder=lambda: object(),
+        EpisodeType=SimpleNamespace(text="text"),
+        EpisodicNode=Episode,
+        NodeNotFoundError=Missing,
+    )
+    monkeypatch.setattr(real, "_load_graphiti", lambda: runtime)
+    monkeypatch.setattr(
+        real,
+        "build_cli_llm_client",
+        lambda: SimpleNamespace(invocations=[]),
+    )
+    telemetry = real._EpisodeTelemetry()
+    validation_states: list[str] = []
+
+    def validate(result: object, _telemetry: object) -> None:
+        validation_states.append(result.episode.episode_metadata["newsroom_ingest_state"])
+
+    result = asyncio.run(
+        real._add_episode(
+            api_key="key",
+            password="password",
+            body="Body",
+            name="episode-id",
+            episode_id="episode-id",
+            reference_time=datetime(2026, 8, 20, tzinfo=UTC),
+            telemetry=telemetry,
+            attempt_number=1,
+            validate_result=validate,
+        )
+    )
+    assert result.episode.uuid == "episode-id"
+    assert validation_states == ["PENDING"]
+    assert saved_metadata == [
+        {"newsroom_ingest_state": "PENDING"},
+        {
+            "newsroom_ingest_state": "COMPLETE",
+            "newsroom_validation_status": "PASSED",
+            "newsroom_chat_invocations": [],
+            "newsroom_embedding_usage": {
+                "requests": [],
+                "request_count": 0,
+                "embedding_tokens": 0,
+                "cost_usd_microunits": 0,
+                "usage_basis": "NO_EMBEDDING_CALL",
+            },
+            "newsroom_provider_attempt_number": 1,
+        },
+    ]
 
 
 def test_embedding_meter_retains_provider_tokens_and_native_usd_cost() -> None:
@@ -585,7 +706,7 @@ def test_relations_without_exact_evidence_are_retained_without_proposals(
             "cost_usd_microunits": 0,
             "requests": [],
         }
-        return SimpleNamespace(
+        result = SimpleNamespace(
             episode=SimpleNamespace(uuid=values["episode_id"]),
             nodes=(
                 SimpleNamespace(uuid="node-a", name="Absent A", summary="A"),
@@ -604,6 +725,8 @@ def test_relations_without_exact_evidence_are_retained_without_proposals(
                 ),
             ),
         )
+        values["validate_result"](result, values["telemetry"])
+        return result
 
     monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
     monkeypatch.setattr(real, "openrouter_api_key", lambda: "key")
@@ -634,11 +757,13 @@ def test_true_empty_graphiti_extraction_is_a_valid_zero_proposal_success(
             "cost_usd_microunits": 0,
             "requests": [],
         }
-        return SimpleNamespace(
+        result = SimpleNamespace(
             episode=SimpleNamespace(uuid=values["episode_id"]),
             nodes=(),
             edges=(),
         )
+        values["validate_result"](result, values["telemetry"])
+        return result
 
     monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
     monkeypatch.setattr(real, "openrouter_api_key", lambda: "key")
@@ -668,11 +793,13 @@ def test_success_over_fixed_provider_budget_is_retained_as_invalid(
             "cost_usd_microunits": 500_001,
             "requests": [],
         }
-        return SimpleNamespace(
+        result = SimpleNamespace(
             episode=SimpleNamespace(uuid=values["episode_id"]),
             nodes=(),
             edges=(),
         )
+        values["validate_result"](result, values["telemetry"])
+        return result
 
     monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
     monkeypatch.setattr(real, "openrouter_api_key", lambda: "key")
