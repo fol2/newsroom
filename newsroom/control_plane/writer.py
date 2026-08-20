@@ -1,22 +1,22 @@
-"""CONT writer port. Graphiti is never the writer. Live copy uses OpenRouter."""
+"""CONT writer: Grok Build CLI, then cursor-agent CLI. Graphiti is never the writer."""
 
 from __future__ import annotations
 
 import json
 import os
-import urllib.error
-import urllib.request
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Callable, Protocol
 
-from newsroom.control_plane.broker import openrouter_api_key
 from newsroom.control_plane.editorial import StoryCandidateRecord
 from newsroom.control_plane.evidence import EvidencePackage
-from newsroom.graphiti_adapter.evaluation_packet import (
-    OPENROUTER_BASE_URL,
-    OPENROUTER_WRITER_SLUG,
-)
 
+GROK_BIN = os.environ.get("NEWSROOM_GROK_BIN", "/Users/jamesto/.grok/bin/grok")
+CURSOR_AGENT_BIN = os.environ.get(
+    "NEWSROOM_CURSOR_AGENT_BIN", "/Users/jamesto/.local/bin/cursor-agent"
+)
 WRITER_SCHEMA = {
     "type": "object",
     "properties": {
@@ -26,6 +26,12 @@ WRITER_SCHEMA = {
     "required": ["title", "body"],
     "additionalProperties": False,
 }
+_PROMPT = (
+    "你係 Newsroom 嘅 CONT 原創記者，唔係 Graphiti。"
+    "用香港繁體中文寫一篇未出版新聞稿。必須原創改寫，唔好複製來源標題或 dateline 模板。"
+    "唔准 AUTO_PUBLISH，唔准當公開發行。"
+    "只輸出 JSON 物件，欄位 title 同 body。"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,8 +50,6 @@ class WriterPort(Protocol):
 
 
 class FixtureWriter:
-    """Deterministic evaluation writer. Not live OpenRouter. Not Graphiti."""
-
     writer_id = "evaluation-fixture-writer-v1"
 
     def write(
@@ -65,8 +69,23 @@ class FixtureWriter:
         )
 
 
+def _prompt(candidate: StoryCandidateRecord, package: EvidencePackage) -> str:
+    return (
+        f"{_PROMPT}\n題旨：{candidate.headline}\n證據：\n"
+        + "\n---\n".join(package.passages)
+    )
+
+
+def _extract_json(raw: str) -> str:
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end <= start:
+        raise RuntimeError("writer returned no JSON object")
+    return raw[start : end + 1]
+
+
 def _parse_copy(raw: str) -> tuple[str, str]:
-    payload = json.loads(raw)
+    payload = json.loads(_extract_json(raw))
     title = payload.get("title")
     body = payload.get("body")
     if not isinstance(title, str) or not isinstance(body, str):
@@ -74,68 +93,134 @@ def _parse_copy(raw: str) -> tuple[str, str]:
     return title.strip(), body.strip()
 
 
-class OpenRouterWriter:
-    """CONT writer via OpenRouter `x-ai/grok-4.6`. Injects OPENROUTER_API only."""
+def _run(command: tuple[str, ...], *, timeout: int) -> str:
+    result = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        name = os.path.basename(command[0])
+        raise RuntimeError(f"{name} writer failed")
+    if not result.stdout.strip():
+        raise RuntimeError("writer returned empty stdout")
+    return result.stdout
 
-    writer_id = "openrouter-x-ai.grok-4.6-cont-writer"
 
-    def __init__(self, *, post=None, api_key=None) -> None:
-        self._post = post or _openrouter_chat
-        self._api_key = api_key
+def run_grok_cli(prompt: str) -> str:
+    schema = json.dumps(WRITER_SCHEMA, ensure_ascii=False)
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", suffix=".txt", delete=False
+    ) as handle:
+        handle.write(prompt)
+        path = handle.name
+    try:
+        return _run(
+            (
+                GROK_BIN,
+                "--prompt-file",
+                path,
+                "-m",
+                "grok-4.6",
+                "--json-schema",
+                schema,
+                "--disable-web-search",
+                "--permission-mode",
+                "plan",
+                "--max-turns",
+                "1",
+                "--no-subagents",
+            ),
+            timeout=180,
+        )
+    finally:
+        os.unlink(path)
+
+
+def run_cursor_agent_cli(prompt: str) -> str:
+    return _run(
+        (
+            CURSOR_AGENT_BIN,
+            "--print",
+            "--mode",
+            "ask",
+            "--output-format",
+            "text",
+            "--sandbox",
+            "enabled",
+            "--trust",
+            prompt,
+        ),
+        timeout=180,
+    )
+
+
+class CliChainWriter:
+    """Primary: Grok Build CLI. Fallback: cursor-agent CLI."""
+
+    writer_id = "grok-build-cli-cont-writer"
+
+    def __init__(
+        self,
+        *,
+        primary: Callable[[str], str] | None = None,
+        fallback: Callable[[str], str] | None = None,
+    ) -> None:
+        self._primary = primary or run_grok_cli
+        self._fallback = fallback or run_cursor_agent_cli
 
     def write(
         self, candidate: StoryCandidateRecord, package: EvidencePackage
     ) -> WriterCopy:
-        prompt = (
-            "你係 Newsroom 嘅 CONT 原創記者，唔係 Graphiti。"
-            "用香港繁體中文寫一篇未出版新聞稿。必須原創改寫，唔好複製來源標題或 dateline 模板。"
-            "唔准 AUTO_PUBLISH，唔准當公開發行。"
-            "只輸出 JSON 物件，欄位 title 同 body。"
-            f"\n題旨：{candidate.headline}\n證據：\n"
-            + "\n---\n".join(package.passages)
-        )
-        secret = self._api_key() if self._api_key else openrouter_api_key()
-        raw = self._post(prompt=prompt, api_key=secret)
-        title, body = _parse_copy(raw)
-        return WriterCopy(title=title, body=body, writer_id=self.writer_id)
+        prompt = _prompt(candidate, package)
+        try:
+            title, body = _parse_copy(self._primary(prompt))
+            return WriterCopy(title=title, body=body, writer_id=self.writer_id)
+        except (RuntimeError, json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
+            title, body = _parse_copy(self._fallback(prompt))
+            return WriterCopy(
+                title=title,
+                body=body,
+                writer_id="cursor-agent-cli-cont-writer",
+            )
 
 
-def _openrouter_chat(*, prompt: str, api_key: str) -> str:
-    payload = json.dumps(
-        {
-            "model": OPENROUTER_WRITER_SLUG,
-            "messages": [{"role": "user", "content": prompt}],
-            "response_format": {"type": "json_object"},
-        }
-    ).encode("utf-8")
-    request = urllib.request.Request(
-        f"{OPENROUTER_BASE_URL}/chat/completions",
-        data=payload,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/fol2/newsroom",
-            "X-Title": "newsroom-unpublished-beta",
-        },
+def grok_cli_ready() -> bool:
+    return shutil.which(GROK_BIN) is not None or os.path.isfile(GROK_BIN)
+
+
+def cursor_agent_cli_ready() -> bool:
+    return shutil.which(CURSOR_AGENT_BIN) is not None or os.path.isfile(CURSOR_AGENT_BIN)
+
+
+def prove_grok_cli() -> None:
+    result = subprocess.run(
+        (GROK_BIN, "version"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
     )
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"OpenRouter writer HTTP {exc.code}") from exc
-    choices = body.get("choices")
-    if not isinstance(choices, list) or not choices:
-        raise RuntimeError("OpenRouter writer returned no choices")
-    message = choices[0].get("message") if isinstance(choices[0], dict) else None
-    content = message.get("content") if isinstance(message, dict) else None
-    if not isinstance(content, str) or not content.strip():
-        raise RuntimeError("OpenRouter writer returned empty content")
-    return content
+    if result.returncode != 0 or "grok" not in result.stdout.lower():
+        raise RuntimeError("Grok Build CLI is not logged in or not runnable")
+
+
+def prove_cursor_agent_cli() -> None:
+    result = subprocess.run(
+        (CURSOR_AGENT_BIN, "--list-models"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    if result.returncode != 0 or "Available models" not in result.stdout:
+        raise RuntimeError("cursor-agent CLI is not logged in or not runnable")
 
 
 def default_writer() -> WriterPort:
-    name = os.environ.get("NEWSROOM_WRITER", "openrouter").strip().lower()
+    name = os.environ.get("NEWSROOM_WRITER", "grok").strip().lower()
     if name == "fixture":
         return FixtureWriter()
-    return OpenRouterWriter()
+    return CliChainWriter()
