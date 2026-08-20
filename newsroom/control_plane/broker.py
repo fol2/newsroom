@@ -71,21 +71,26 @@ def keychain_present(*, account: str, service: str) -> bool:
 
 
 def _keychain_password(*, account: str, service: str) -> str:
-    result = subprocess.run(
-        [
-            "security",
-            "find-generic-password",
-            "-a",
-            account,
-            "-s",
-            service,
-            "-w",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "security",
+                "find-generic-password",
+                "-a",
+                account,
+                "-s",
+                service,
+                "-w",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        raise BrokerError(f"Keychain class {account} lookup timed out") from None
+    except OSError:
+        raise BrokerError(f"Keychain class {account} lookup failed") from None
     if result.returncode != 0:
         raise BrokerError(f"Keychain class {account} is absent")
     secret = result.stdout.strip()

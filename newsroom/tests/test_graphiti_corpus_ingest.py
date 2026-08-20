@@ -1252,12 +1252,14 @@ def test_graphiti_cash_ceiling_holds_ingest_but_writer_continues(
 def test_pre_dispatch_failure_releases_graphiti_reservation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from newsroom.control_plane import broker
     import newsroom.graphiti_adapter.real as real
 
-    def missing_runtime() -> object:
-        raise GraphitiAdapterContractError("graphiti runtime is absent")
+    def timeout(*_args: object, **_values: object) -> object:
+        raise broker.subprocess.TimeoutExpired("security", 10)
 
-    monkeypatch.setattr(real, "_load_graphiti", missing_runtime)
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(broker.subprocess, "run", timeout)
     proving = _proving(tmp_path)
     unpublished = tmp_path / "pre-dispatch.sqlite3"
 

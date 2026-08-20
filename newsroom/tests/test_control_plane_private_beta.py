@@ -721,3 +721,14 @@ def test_broker_error_does_not_include_secret(
     with pytest.raises(broker.BrokerError, match="OPENROUTER_API is absent") as caught:
         broker.openrouter_api_key()
     assert "super-secret-openrouter-key" not in str(caught.value)
+
+
+def test_keychain_timeout_is_a_broker_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from newsroom.control_plane import broker
+
+    def timeout(*_args: object, **_values: object) -> object:
+        raise broker.subprocess.TimeoutExpired("security", 10)
+
+    monkeypatch.setattr(broker.subprocess, "run", timeout)
+    with pytest.raises(broker.BrokerError, match="OPENROUTER_API lookup timed out"):
+        broker.openrouter_api_key()
