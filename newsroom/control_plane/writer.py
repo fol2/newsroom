@@ -30,12 +30,15 @@ _PROMPT = (
     "你係 Newsroom 嘅 CONT 原創記者，唔係 Graphiti。"
     "用香港繁體中文寫一篇已經完成嘅未出版新聞稿。"
     "JSON 嘅 title 同 body 必須係完稿正文，唔係計劃、核對清單、任務說明或工作備註。"
-    "禁止輸出含有「計劃」「核對」「任務」「先查」嘅標題或正文。"
+    "標題唔可以「正在」「搜集」「查核」「先查」開頭，亦唔可以係「新聞稿任務」。"
+    "正文唔可以「先查」「先核」「正在核」開頭。"
     "必須原創改寫，唔好複製來源標題或 dateline 模板。"
     "唔准 AUTO_PUBLISH，唔准當公開發行。"
     "只輸出 JSON 物件，欄位 title 同 body。"
 )
-_RESIDUE_MARKERS = ("計劃", "核對", "任務", "先查")
+_TITLE_RESIDUE_PREFIXES = ("正在", "搜集", "查核", "先查")
+_TITLE_RESIDUE_EXACT = frozenset({"新聞稿任務", "Newsroom 原創稿"})
+_BODY_RESIDUE_PREFIXES = ("先查", "先核", "正在核")
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,8 +104,9 @@ def _copy_fields(payload: object) -> tuple[str, str] | None:
 def _finished_copy(title: str, body: str) -> tuple[str, str]:
     if not title or not body:
         raise RuntimeError("writer JSON missing title or body")
-    haystack = f"{title}\n{body}"
-    if any(marker in haystack for marker in _RESIDUE_MARKERS):
+    if title.startswith(_TITLE_RESIDUE_PREFIXES) or title in _TITLE_RESIDUE_EXACT:
+        raise RuntimeError("writer returned planning residue, not unpublished copy")
+    if body.startswith(_BODY_RESIDUE_PREFIXES):
         raise RuntimeError("writer returned planning residue, not unpublished copy")
     return title, body
 

@@ -448,7 +448,7 @@ def test_cli_writer_prefers_grok_build_cli() -> None:
 def test_cli_writer_rejects_planning_residue_and_falls_back() -> None:
     def grok(_prompt: str) -> str:
         return json.dumps(
-            {"title": "新聞稿任務", "body": "先查 CONT 記者稿例，再核對官方數據。"}
+            {"title": "正在核實幼稚園收生與家長智Net來源", "body": "先查 CONT 記者稿例。"}
         )
 
     def cursor(_prompt: str) -> str:
@@ -463,9 +463,26 @@ def test_cli_writer_rejects_planning_residue_and_falls_back() -> None:
     copy = CliChainWriter(primary=grok, fallback=cursor).write(*_sample_candidate_package())
     assert copy.writer_id == "cursor-agent-cli-cont-writer"
     assert copy.title == "【未出版】立法會教育議案"
-    assert "任務" not in copy.title
-    assert "先查" not in copy.body
-    assert "核對" not in copy.body
+    assert not copy.title.startswith("正在")
+    assert not copy.body.startswith("先查")
+
+
+def test_cli_writer_accepts_finished_copy_that_mentions_verification() -> None:
+    def grok(_prompt: str) -> str:
+        return json.dumps(
+            {
+                "title": "英國入境規則公開更新",
+                "body": "申請人須按現行版本核實資格，本報根據證據包改寫。",
+            },
+            ensure_ascii=False,
+        )
+
+    def cursor(_prompt: str) -> str:
+        raise AssertionError("fallback must not run")
+
+    copy = CliChainWriter(primary=grok, fallback=cursor).write(*_sample_candidate_package())
+    assert copy.writer_id == "grok-build-cli-cont-writer"
+    assert "核實資格" in copy.body
 
 
 def test_grok_cli_uses_empty_cwd_and_three_turns(monkeypatch) -> None:
