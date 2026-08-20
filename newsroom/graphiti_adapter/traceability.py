@@ -123,9 +123,9 @@ _ROWS = (
     ),
     (
         "GRAG-023",
-        "newsroom.authority._graphiti_adapter_facade:GovernedGraphitiProposalAdapter",
-        "newsroom/tests/test_projection_b1_graphiti_adapter.py",
-        "IMPLEMENTED_NO_ADMISSION_COMMAND_OR_CREDENTIAL_ON_ADAPTER_FACADE",
+        "newsroom.graphiti_adapter.admission:GraphitiProposalAdmissionDecision",
+        "newsroom/tests/test_graphiti_adapter_admission.py",
+        "IMPLEMENTED_EXPLICIT_ADMIT_REJECT_HOLD_BEFORE_ADMITTED_PROJECTOR_WRITE",
     ),
     (
         "GRAG-024",
