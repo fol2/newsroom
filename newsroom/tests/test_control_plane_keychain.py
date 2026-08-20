@@ -37,4 +37,6 @@ def test_openrouter_keychain_injects_and_is_accepted() -> None:
 
 @pytest.mark.skipif(not neo4j_keychain_ready(), reason=NEO4J_KEYCHAIN_SKIP)
 def test_neo4j_keychain_injects_and_bolt_accepts() -> None:
-    prove_neo4j_keychain()
+    from neo4j import GraphDatabase
+
+    prove_neo4j_keychain(driver_factory=GraphDatabase.driver)
