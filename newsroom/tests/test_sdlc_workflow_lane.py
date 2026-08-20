@@ -658,7 +658,7 @@ def test_parallel_service_runner_merges_all_shards_and_propagates_failure(
     assert not tuple(tmp_path.glob("pytest-shard-*.xml"))
 
 
-def test_optional_core_skips_are_exact_actual_service_cases() -> None:
+def test_optional_core_skips_are_exact_external_environment_cases() -> None:
     expected = (
         'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_complete_generation_queries_and_promotes_exact_state',
         'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_partial_or_contract_mismatched_state_fails_closed[deleted-document]',
@@ -668,6 +668,10 @@ def test_optional_core_skips_are_exact_actual_service_cases() -> None:
         'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_replacement_generation_recovers_from_authority_only',
         'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_revocation_and_tombstone_remove_current_derivatives',
         'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_wrong_watermark_generation_and_vector_dimension_fail_closed',
+        'newsroom.tests.test_control_plane_keychain::test_cursor_agent_cli_is_logged_in',
+        'newsroom.tests.test_control_plane_keychain::test_grok_build_cli_is_logged_in',
+        'newsroom.tests.test_control_plane_keychain::test_neo4j_keychain_injects_and_bolt_accepts',
+        'newsroom.tests.test_control_plane_keychain::test_openrouter_keychain_injects_and_is_accepted',
         'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_admitted_state_projects_exactly_and_replays',
         'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_graph_loss_requires_isolated_replacement',
         'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_replacement_generation_is_only_serving_state',
