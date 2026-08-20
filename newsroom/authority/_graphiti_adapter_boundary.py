@@ -42,6 +42,7 @@ from newsroom.graphiti_adapter.policy import (
     GRAPHITI_REPLAY_APPROVE_COMMAND,
 )
 from newsroom.graphiti_adapter.producer import GraphitiProposalProducerBridge
+from newsroom.graphiti_adapter.real import RealGraphitiAdapter
 
 from ._graphiti_adapter_store import _GraphitiAdapterAuthorityStore
 
@@ -220,7 +221,7 @@ class _GraphitiAdapterBoundary:
             )
         else:
             attempt.configuration.require_execution_authorized()
-            raise AssertionError("unreachable real Graphiti execution path")
+            adapter = RealGraphitiAdapter(clock=self._clock)
 
         bridge = GraphitiProposalProducerBridge(
             adapter=adapter,

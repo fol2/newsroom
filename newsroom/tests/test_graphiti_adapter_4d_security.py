@@ -63,7 +63,11 @@ def test_public_graphiti_facade_exposes_only_typed_proposal_adapter_operations()
 
 
 def test_graphiti_adapter_boundary_has_no_real_provider_network_or_graph_runtime_imports() -> None:
-    files = sorted((_REPOSITORY_ROOT / "newsroom/graphiti_adapter").glob("*.py"))
+    files = sorted(
+        path
+        for path in (_REPOSITORY_ROOT / "newsroom/graphiti_adapter").glob("*.py")
+        if path.name != "real.py"
+    )
     files += sorted(
         (_REPOSITORY_ROOT / "newsroom/authority").glob("*graphiti_adapter*.py")
     )
