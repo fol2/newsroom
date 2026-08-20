@@ -4,6 +4,19 @@ Real Graphiti/model execution is deliberately disabled.  The public package
 exports deterministic fake and approved replay implementations only.
 """
 
+from .admission import (
+    ADMITTED_NEO4J_LABELS,
+    ADMITTED_OD006_VECTOR_DIMENSIONS,
+    AdmittedGraphitiProjectorWrite,
+    GRAPHITI_ADMITTED_PROJECTOR_FAMILY_ID,
+    GraphitiProposalAdmissionAction,
+    GraphitiProposalAdmissionDecision,
+    GraphitiProposalAdmissionDecisionId,
+    GraphitiProposalAdmissionError,
+    admit_graphiti_proposals_for_projectors,
+    increment4_batches_for_admitted_graphiti,
+    require_admitted_projector_write,
+)
 from .contracts import (
     GRAPHITI_ADAPTER_CONTRACT_VERSION,
     GRAPHITI_ADAPTER_POLICY_VERSION,
@@ -73,9 +86,13 @@ from .types import (
 from .workspace import DisposableProposalWorkspace
 
 __all__ = [
+    "ADMITTED_NEO4J_LABELS",
+    "ADMITTED_OD006_VECTOR_DIMENSIONS",
+    "AdmittedGraphitiProjectorWrite",
     "ApprovedReplayBundle",
     "ApprovedReplayGraphitiAdapter",
     "DeterministicFakeGraphitiAdapter",
+    "GRAPHITI_ADMITTED_PROJECTOR_FAMILY_ID",
     "DisposableProposalWorkspace",
     "GRAPHITI_ADAPTER_CONTRACT_VERSION",
     "GRAPHITI_ADAPTER_POLICY_VERSION",
@@ -120,6 +137,10 @@ __all__ = [
     "GraphitiCleanupReceipt",
     "GraphitiInputManifest",
     "GraphitiManifestPassage",
+    "GraphitiProposalAdmissionAction",
+    "GraphitiProposalAdmissionDecision",
+    "GraphitiProposalAdmissionDecisionId",
+    "GraphitiProposalAdmissionError",
     "GraphitiProposalProducerBridge",
     "GraphitiReplayApprovalRequest",
     "GraphitiReplaySource",
@@ -130,6 +151,9 @@ __all__ = [
     "REAL_GRAPHITI_RUNTIME_ENABLED",
     "REPLAY_WORKSPACE_POLICY",
     "RealGraphitiRuntimeAuthority",
+    "admit_graphiti_proposals_for_projectors",
+    "increment4_batches_for_admitted_graphiti",
     "qualification_configuration",
     "replay_configuration",
+    "require_admitted_projector_write",
 ]
