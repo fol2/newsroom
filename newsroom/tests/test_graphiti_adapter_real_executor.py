@@ -382,31 +382,6 @@ def test_completed_episode_restores_original_provider_metering() -> None:
     assert telemetry.chat_invocations == [{"provider": "cursor-agent-cli"}]
 
 
-def test_only_completed_episodes_enter_extraction_context() -> None:
-    from newsroom.graphiti_adapter.real import _completed_episode_ids
-
-    episodes = [
-        SimpleNamespace(
-            uuid="complete",
-            episode_metadata={
-                "newsroom_ingest_state": "COMPLETE",
-                "newsroom_validation_status": "PASSED",
-            },
-        ),
-        SimpleNamespace(
-            uuid="pending",
-            episode_metadata={"newsroom_ingest_state": "PENDING"},
-        ),
-        SimpleNamespace(uuid="unmarked", episode_metadata={}),
-    ]
-    assert _completed_episode_ids(
-        episodes, exclude_episode_id="different"
-    ) == ["complete"]
-    assert _completed_episode_ids(
-        episodes, exclude_episode_id="complete"
-    ) == []
-
-
 def test_episode_uses_default_database_and_validates_before_complete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -445,11 +420,16 @@ def test_episode_uses_default_database_and_validates_before_complete(
             self.driver = Driver()
             self.clients = SimpleNamespace(driver=self.driver)
 
-        async def retrieve_episodes(self, *_args: object, **_values: object) -> list[object]:
-            return []
+        async def retrieve_episodes(
+            self, *_args: object, **_values: object
+        ) -> list[object]:
+            raise AssertionError(
+                "ambient episodes have no current rights proof and must not be reused"
+            )
 
         async def add_episode(self, **values: object) -> object:
             assert values["group_id"] == GRAPHITI_WORKSPACE_GROUP
+            assert values["previous_episode_uuids"] == []
             return SimpleNamespace(
                 episode=retained[str(values["uuid"])],
                 nodes=(),

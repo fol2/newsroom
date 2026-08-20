@@ -128,6 +128,7 @@ def observation_authority_ids(
     rights_gate_reason: str,
     published_at: str | None,
     updated_at: str | None,
+    observed_at: str,
 ) -> tuple[
     ObjectAdmissionId,
     ObjectAccessDecisionId,
@@ -144,6 +145,7 @@ def observation_authority_ids(
         revision_digest,
         published_at or "",
         updated_at or "",
+        observed_at if published_at is None and updated_at is None else "",
     )
     return (
         _typed(

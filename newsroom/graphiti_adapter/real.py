@@ -251,26 +251,6 @@ def _restore_episode_telemetry(
     telemetry.provider_attempt_number = provider_attempt
 
 
-def _completed_episode_ids(
-    episodes: list[Any], *, exclude_episode_id: str
-) -> list[str]:
-    """Keep in-flight or failed episodes out of extraction context."""
-
-    retained: list[str] = []
-    for episode in episodes:
-        episode_id = str(getattr(episode, "uuid", ""))
-        metadata = getattr(episode, "episode_metadata", None)
-        if (
-            episode_id
-            and episode_id != exclude_episode_id
-            and isinstance(metadata, dict)
-            and metadata.get(_EPISODE_STATE_KEY) == _EPISODE_COMPLETE
-            and metadata.get("newsroom_validation_status") == "PASSED"
-        ):
-            retained.append(episode_id)
-    return retained
-
-
 async def _discard_pending_episode(
     *, graphiti: Any, runtime: SimpleNamespace, episode: Any
 ) -> None:
@@ -355,17 +335,10 @@ async def _add_episode(
                 raise AmbiguousEpisodeEffect(
                     "pending Graphiti episode cleanup did not permit recreation"
                 )
-        previous = await graphiti.retrieve_episodes(
-            reference_time,
-            last_n=10,
-            group_ids=[GRAPHITI_WORKSPACE_GROUP],
-            source=runtime.EpisodeType.text,
-        )
-        previous_episode_ids = _completed_episode_ids(
-            previous, exclude_episode_id=episode_id
-        )
-        # Ordered chunks explicitly name their predecessor; corpus context
-        # otherwise retains Graphiti's bounded temporal episode window.
+        # Do not reuse ambient completed episodes: their source rights may have
+        # changed since retention. Ordered chunks may use only their explicit,
+        # currently permitted predecessor.
+        previous_episode_ids: list[str] = []
         predecessor = telemetry.predecessor_episode_uuid
         if isinstance(predecessor, str) and predecessor:
             previous_episode_ids.insert(0, predecessor)

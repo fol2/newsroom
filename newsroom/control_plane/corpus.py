@@ -109,6 +109,11 @@ class CorpusIngestUnit:
                 "revision_digest": self.revision_digest,
                 "published_at": self.published_at,
                 "updated_at": self.updated_at,
+                "observed_fallback_at": (
+                    self.observed_at
+                    if self.published_at is None and self.updated_at is None
+                    else None
+                ),
             }
         )
 
@@ -143,6 +148,7 @@ class CorpusIngestUnit:
                 rights_gate_reason="evaluation fixture",
                 published_at=self.published_at,
                 updated_at=self.updated_at,
+                observed_at=self.observed_at,
             )[4]
         )
 
@@ -200,6 +206,7 @@ def units_from(
             rights_gate_reason=rights_gate_reason,
             published_at=base.published_at,
             updated_at=base.updated_at,
+            observed_at=base.observed_at,
         )
         definition_version_id = source_definition_version_id(
             source_id=base.source_id,
@@ -234,6 +241,11 @@ def units_from(
                 "revision_digest": revision_digest,
                 "published_at": base.published_at,
                 "updated_at": base.updated_at,
+                "observed_fallback_at": (
+                    base.observed_at
+                    if base.published_at is None and base.updated_at is None
+                    else None
+                ),
             },
             {
                 "record_type": "DISCOVERY_REPRESENTATION",

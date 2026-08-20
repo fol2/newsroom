@@ -150,6 +150,11 @@ def evaluation_attempt_for_body(
                 "revision_digest": revision_digest,
                 "published_at": published_at,
                 "updated_at": updated_at,
+                "observed_fallback_at": (
+                    observed_at
+                    if published_at is None and updated_at is None
+                    else None
+                ),
             }
         )
         generated = observation_authority_ids(
@@ -162,6 +167,7 @@ def evaluation_attempt_for_body(
             rights_gate_reason="evaluation fixture",
             published_at=published_at,
             updated_at=updated_at,
+            observed_at=observed_at,
         )
         definition_version_id = source_definition_version_id(
             source_id=source_id, source_url=canonical_url

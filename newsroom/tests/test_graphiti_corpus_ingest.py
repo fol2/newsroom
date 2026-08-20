@@ -540,7 +540,14 @@ def test_source_revision_authority_is_stable_across_repeat_observations(
     first_row = GroupedObservation(
         "UK-01",
         "sha256:response-one",
-        SourceItem("UK-01", "one", "One", "Body", "https://item/one"),
+        SourceItem(
+            "UK-01",
+            "one",
+            "One",
+            "Body",
+            "https://item/one",
+            published_at="2026-08-19T00:00:00.000000Z",
+        ),
         "2026-08-20T00:00:00.000000Z",
     )
     repeated_row = replace(
@@ -615,6 +622,29 @@ def test_same_immutable_revision_is_not_reingested_after_polling() -> None:
         observed_at="2026-08-19T00:00:00.000000Z",
     )
     assert fallback_later.ingest_id != fallback_earlier.ingest_id
+    assert fallback_later.revision_id != fallback_earlier.revision_id
+
+
+def test_fallback_observations_are_separate_coverage_revisions() -> None:
+    first_row = GroupedObservation(
+        "UK-01",
+        "sha256:response-one",
+        SourceItem("UK-01", "one", "One", "Body", "https://item/one"),
+        "2026-08-20T00:00:00.000000Z",
+    )
+    repeated_row = replace(
+        first_row,
+        observation_digest="sha256:response-two",
+        observed_at="2026-08-20T01:00:00.000000Z",
+    )
+
+    revisions = revisions_from(
+        units_from((first_row, repeated_row), proving_run_id="run-1")
+    )
+
+    assert len(revisions) == 2
+    assert revisions[0].revision_id != revisions[1].revision_id
+    assert all(len(revision.ingest_ids) == 1 for revision in revisions)
 
 
 def test_long_body_is_chunked_not_truncated() -> None:
@@ -819,7 +849,7 @@ def test_older_run_backlog_remains_queued_after_a_new_run_arrives(
         max_graphiti=1,
     )
     assert report.proving_run_id == "run-2"
-    assert report.eligible == 3
+    assert report.eligible == 6
     assert calls[1][0] == "run-1"
     connection = __import__("sqlite3").connect(unpublished)
     spend_runs = [
