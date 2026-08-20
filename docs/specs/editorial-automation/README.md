@@ -2,7 +2,7 @@
 
 **Status:** Draft suite; authority is controlled by each individual file  
 **Owner:** Product owner  
-**Last updated:** 2026-07-16  
+**Last updated:** 2026-08-20
 **Canonical language:** English  
 **Completed architecture review:** [`../../plans/2026-07-15-002-discovery-specification-review.md`](../../plans/2026-07-15-002-discovery-specification-review.md)  
 **Accepted Topic 13 plan:** [`../../plans/2026-07-16-005-native-graphrag-production-implementation.md`](../../plans/2026-07-16-005-native-graphrag-production-implementation.md)  
@@ -35,6 +35,7 @@ Requirement identifiers are stable. Existing identifiers should not be renumbere
 | [`discovery-prioritisation-and-outcomes.md`](discovery-prioritisation-and-outcomes.md) | **Accepted:** decision order, canonical outcomes, reasons, ordinal lanes and scoring boundary |
 | [`discovery-locality-scope-and-expansion.md`](discovery-locality-scope-and-expansion.md) | **Accepted:** locality-aware launch, Coverage Units, Event-Scoped Watch and expansion |
 | [`governed-graphrag-and-knowledge-projection.md`](governed-graphrag-and-knowledge-projection.md) | **Accepted:** authority, trust, ontology, proposal/admission, projection and hybrid retrieval |
+| [`graphiti-corpus-ingestion-amendment.md`](graphiti-corpus-ingestion-amendment.md) | **Accepted:** Slice A Graphiti corpus ingest locks (`GING-*`); SSOT is [`../../decisions/2026-08-20-graphiti.md`](../../decisions/2026-08-20-graphiti.md). Does not rewrite `GRAG-*` or `CONT-001` |
 | [`graphrag-native-production-deployment.md`](graphrag-native-production-deployment.md) | **Accepted:** initial production target, repository ownership, graph-required profiles, CI and release mechanics |
 | [`news-discovery.md`](news-discovery.md) | **Consolidated Draft:** non-normative navigation across the focused Accepted specifications and ADRs |
 | [`story-eligibility-and-evidence.md`](story-eligibility-and-evidence.md) | Story qualification, source authority, corroboration and evidence |

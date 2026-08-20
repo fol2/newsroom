@@ -1156,6 +1156,10 @@ class GraphitiAttemptRequest:
     extraction_request: ExtractionRunRequest
     replay_source: GraphitiReplaySource | None
     idempotency_key: str
+    reference_time: UtcTimestamp | None = None
+    temporal_basis: str = "UNSET"
+    episode_uuid: str | None = None
+    generation_id: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.attempt_id, GraphitiAttemptId):

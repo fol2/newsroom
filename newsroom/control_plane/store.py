@@ -11,7 +11,7 @@ from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.veto import VetoError, assert_private_store, refuse_public_effect
 
-SCHEMA_VERSION = "newsroom.control-plane.unpublished.v2"
+SCHEMA_VERSION = "newsroom.control-plane.unpublished.v4"
 LEDGER_GENESIS = "sha256:" + ("0" * 64)
 
 _PAYLOAD_SQL = """
@@ -45,6 +45,30 @@ CREATE TABLE IF NOT EXISTS unpublished_graphiti_attempts(
     proposal_count INTEGER NOT NULL,
     failure_code TEXT NOT NULL,
     at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS unpublished_graphiti_ingest(
+    ingest_id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    item_key TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    proposal_count INTEGER NOT NULL,
+    entity_count INTEGER NOT NULL,
+    relation_count INTEGER NOT NULL,
+    failure_code TEXT NOT NULL,
+    temporal_basis TEXT NOT NULL,
+    reference_time TEXT NOT NULL,
+    generation_id TEXT NOT NULL,
+    receipt_digest TEXT NOT NULL,
+    at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS unpublished_graphiti_receipts(
+    ingest_id TEXT PRIMARY KEY,
+    receipt_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS unpublished_graphiti_coverage(
+    seq INTEGER PRIMARY KEY,
+    at TEXT NOT NULL,
+    coverage_json TEXT NOT NULL
 );
 """
 
@@ -107,33 +131,140 @@ def spend_reserved(connection: sqlite3.Connection) -> bool:
     return row is not None
 
 
-def has_graphiti_attempt(connection: sqlite3.Connection, candidate_id: str) -> bool:
+def has_graphiti_ingest(connection: sqlite3.Connection, ingest_id: str) -> bool:
     row = connection.execute(
-        "SELECT 1 FROM unpublished_graphiti_attempts WHERE story_candidate_id=?",
-        (candidate_id,),
+        "SELECT 1 FROM unpublished_graphiti_ingest WHERE ingest_id=?",
+        (ingest_id,),
     ).fetchone()
     return row is not None
 
 
-def insert_graphiti_attempt(
+def insert_graphiti_ingest(
     connection: sqlite3.Connection,
     *,
-    candidate_id: str,
+    ingest_id: str,
+    source_id: str,
+    item_key: str,
     outcome: str,
     proposal_count: int,
+    entity_count: int,
+    relation_count: int,
     failure_code: str,
+    temporal_basis: str,
+    reference_time: str,
+    generation_id: str,
+    receipt_digest: str,
+    receipt: dict[str, object] | None = None,
 ) -> bool:
-    if has_graphiti_attempt(connection, candidate_id):
+    if has_graphiti_ingest(connection, ingest_id):
         return False
     connection.execute(
         """
-        INSERT INTO unpublished_graphiti_attempts(
-            story_candidate_id, outcome, proposal_count, failure_code, at
-        ) VALUES(?,?,?,?,?)
+        INSERT INTO unpublished_graphiti_ingest(
+            ingest_id, source_id, item_key, outcome, proposal_count, entity_count,
+            relation_count, failure_code, temporal_basis, reference_time,
+            generation_id, receipt_digest, at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
-        (candidate_id, outcome, proposal_count, failure_code, _now()),
+        (
+            ingest_id,
+            source_id,
+            item_key,
+            outcome,
+            proposal_count,
+            entity_count,
+            relation_count,
+            failure_code,
+            temporal_basis,
+            reference_time,
+            generation_id,
+            receipt_digest,
+            _now(),
+        ),
     )
+    if receipt is not None:
+        connection.execute(
+            "INSERT INTO unpublished_graphiti_receipts(ingest_id, receipt_json) VALUES(?,?)",
+            (ingest_id, json.dumps(receipt, ensure_ascii=False, sort_keys=True)),
+        )
     return True
+
+
+def graphiti_coverage(
+    connection: sqlite3.Connection,
+    *,
+    eligible_ids: tuple[str, ...],
+    observed_at: tuple[str, ...] = (),
+    retry_count: int = 0,
+    dead_letter_count: int = 0,
+) -> dict[str, object]:
+    eligible = len(eligible_ids)
+    ingested_ids: set[str] = set()
+    watermark_at: str | None = None
+    if eligible_ids:
+        placeholders = ",".join("?" * len(eligible_ids))
+        rows = connection.execute(
+            f"""
+            SELECT ingest_id, at FROM unpublished_graphiti_ingest
+            WHERE outcome IN ('COMPLETE','PARTIAL') AND ingest_id IN ({placeholders})
+            """,
+            eligible_ids,
+        ).fetchall()
+        ingested_ids = {row[0] for row in rows}
+        times = [row[1] for row in rows if row[1]]
+        watermark_at = max(times) if times else None
+    payloads = connection.execute(
+        "SELECT COUNT(*) FROM unpublished_surface_payloads"
+    ).fetchone()[0]
+    metered = 0
+    for (blob,) in connection.execute(
+        "SELECT receipt_json FROM unpublished_graphiti_receipts"
+    ):
+        try:
+            payload = json.loads(blob)
+        except json.JSONDecodeError:
+            continue
+        cost = payload.get("cost_microunits")
+        if isinstance(cost, int) and cost > 0:
+            metered += cost
+    pending = [
+        observed_at[index]
+        for index, ingest_id in enumerate(eligible_ids)
+        if ingest_id not in ingested_ids and index < len(observed_at)
+    ]
+    lag_seconds = 0
+    if pending:
+        try:
+            oldest = min(pending)
+            then = datetime.fromisoformat(oldest.replace("Z", "+00:00"))
+            if then.tzinfo is None:
+                then = then.replace(tzinfo=UTC)
+            lag_seconds = max(int((datetime.now(tz=UTC) - then).total_seconds()), 0)
+        except ValueError:
+            lag_seconds = 0
+    return {
+        "eligible_source_revisions": eligible,
+        "successfully_ingested_revisions": len(ingested_ids),
+        "unresolved_gap": eligible - len(ingested_ids),
+        "ingest_watermark_at": watermark_at,
+        "lag_seconds": lag_seconds,
+        "retry_count": retry_count,
+        "dead_letter_count": dead_letter_count,
+        "admission_backlog": len(ingested_ids),
+        "reserved_spend": spend_reserved(connection),
+        "actual_metered_spend_microunits": metered,
+        "unpublished_payload_count": payloads,
+        "payload_count_is_not_coverage": True,
+    }
+
+
+def record_graphiti_coverage(
+    connection: sqlite3.Connection, coverage: dict[str, object]
+) -> None:
+    connection.execute(
+        "INSERT INTO unpublished_graphiti_coverage(at, coverage_json) VALUES(?,?)",
+        (_now(), json.dumps(coverage, ensure_ascii=False, sort_keys=True)),
+    )
 
 
 def has_candidate(connection: sqlite3.Connection, candidate_id: str) -> bool:

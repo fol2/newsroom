@@ -254,13 +254,19 @@ def test_cycle_reserves_graphiti_spend_before_stub_extract(tmp_path: Path) -> No
     calls: list[str] = []
 
     class StubGraphiti:
-        def extract(self, package):
-            calls.append(package.candidate_id)
+        def ingest(self, unit):
+            calls.append(unit.ingest_id)
             return GraphitiCycleResult(
-                candidate_id=package.candidate_id,
+                ingest_id=unit.ingest_id,
+                source_id=unit.source_id,
+                item_key=unit.item_key,
                 outcome="COMPLETE",
                 proposal_count=2,
+                entity_count=2,
+                relation_count=0,
                 failure_code="NONE",
+                temporal_basis="OBSERVED_FALLBACK",
+                reference_time=unit.observed_at,
             )
 
     first = run_cycle(
@@ -305,20 +311,32 @@ def test_cycle_retries_failed_graphiti_extract(tmp_path: Path) -> None:
     calls: list[str] = []
 
     class FlakyGraphiti:
-        def extract(self, package):
-            calls.append(package.candidate_id)
+        def ingest(self, unit):
+            calls.append(unit.ingest_id)
             if len(calls) == 1:
                 return GraphitiCycleResult(
-                    candidate_id=package.candidate_id,
+                    ingest_id=unit.ingest_id,
+                    source_id=unit.source_id,
+                    item_key=unit.item_key,
                     outcome="FAILED",
                     proposal_count=0,
+                    entity_count=0,
+                    relation_count=0,
                     failure_code="PRODUCER_INTERNAL_ERROR",
+                    temporal_basis="OBSERVED_FALLBACK",
+                    reference_time=unit.observed_at,
                 )
             return GraphitiCycleResult(
-                candidate_id=package.candidate_id,
+                ingest_id=unit.ingest_id,
+                source_id=unit.source_id,
+                item_key=unit.item_key,
                 outcome="COMPLETE",
                 proposal_count=1,
+                entity_count=1,
+                relation_count=0,
                 failure_code="NONE",
+                temporal_basis="OBSERVED_FALLBACK",
+                reference_time=unit.observed_at,
             )
 
     first = run_cycle(
@@ -332,7 +350,7 @@ def test_cycle_retries_failed_graphiti_extract(tmp_path: Path) -> None:
     assert first.graphiti == 1
     connection = __import__("sqlite3").connect(unpublished)
     stored = connection.execute(
-        "SELECT COUNT(*) FROM unpublished_graphiti_attempts"
+        "SELECT COUNT(*) FROM unpublished_graphiti_ingest"
     ).fetchone()[0]
     connection.close()
     assert stored == 0
@@ -348,7 +366,7 @@ def test_cycle_retries_failed_graphiti_extract(tmp_path: Path) -> None:
     assert calls[0] == calls[1]
     connection = __import__("sqlite3").connect(unpublished)
     stored = connection.execute(
-        "SELECT outcome, proposal_count FROM unpublished_graphiti_attempts"
+        "SELECT outcome, proposal_count FROM unpublished_graphiti_ingest"
     ).fetchone()
     connection.close()
     assert stored == ("COMPLETE", 1)
@@ -425,7 +443,7 @@ def test_evaluation_packet_authorises_evaluation_and_refuses_production() -> Non
     assert REAL_GRAPHITI_RUNTIME_ENABLED is True
     assert GRAPHITI_CORE_RELEASE == "graphiti-core-0.29.3"
     assert OPENROUTER_API == "OPENROUTER_API"
-    assert GRAPHITI_CHAT_MODEL == "openrouter:openai.gpt-5-mini"
+    assert GRAPHITI_CHAT_MODEL == "cursor-agent-cli:composer-2.5"
     assert GRAPHITI_EMBEDDING_MODEL == "openrouter:openai.text-embedding-3-large"
     assert WRITER_MODEL == "grok-build-cli:grok-4.6"
     assert WRITER_FALLBACK == "cursor-agent-cli"

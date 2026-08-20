@@ -1,4 +1,7 @@
-"""Governed unpublished cycle: Signal → Lead → Hypothesis → Candidate → Evidence → write."""
+"""Governed unpublished cycle: Signal → Lead → Hypothesis → Candidate → Evidence → write.
+
+Graphiti corpus ingest is independent of CONT writes (GING-001).
+"""
 
 from __future__ import annotations
 
@@ -7,6 +10,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from newsroom.control_plane.corpus import units_from
 from newsroom.control_plane.editorial import GroupedObservation, form_candidates
 from newsroom.control_plane.evidence import package_for
 from newsroom.control_plane.graphiti import GraphitiPort
@@ -14,16 +18,23 @@ from newsroom.control_plane.items import parse_observation
 from newsroom.control_plane.store import (
     append_ledger,
     connect,
+    graphiti_coverage,
     has_candidate,
-    has_graphiti_attempt,
-    insert_graphiti_attempt,
+    has_graphiti_ingest,
+    insert_graphiti_ingest,
     insert_payload,
+    record_graphiti_coverage,
     spend_reserved,
 )
 from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.veto import VetoError, assert_private_store
 from newsroom.control_plane.writer import WriterPort
 from newsroom.graphiti_adapter.evaluation_packet import (
+    GRAPHITI_CHAT_FALLBACK,
+    GRAPHITI_CHAT_MODEL,
+    GRAPHITI_CORE_RELEASE,
+    GRAPHITI_EMBEDDING_MODEL,
+    GRAPHITI_GENERATION_ID,
     GRAPHITI_WORKSPACE_GROUP,
     OD_011_CASH_CEILING_GBP,
     OPENROUTER_API,
@@ -41,6 +52,7 @@ class CycleReport:
     ledger_digest: str
     writer_id: str
     graphiti: int = 0
+    eligible: int = 0
 
 
 def _latest_run(connection: sqlite3.Connection) -> str | None:
@@ -87,7 +99,7 @@ def run_cycle(
 
     observations: list[GroupedObservation] = []
     sources = 0
-    for source_id, url, _fetched_at, status_code, body_digest, body in rows:
+    for source_id, url, fetched_at, status_code, body_digest, body in rows:
         if int(status_code) != 200 or not body:
             continue
         sources += 1
@@ -97,10 +109,12 @@ def run_cycle(
                     source_id=source_id,
                     observation_digest=body_digest,
                     item=item,
+                    observed_at=str(fetched_at),
                 )
             )
 
     candidates = form_candidates(tuple(observations))
+    units = units_from(tuple(observations))
     unpublished = connect(unpublished_store)
     minted = 0
     duplicate = 0
@@ -112,6 +126,7 @@ def run_cycle(
                 "proving_run_id": run_id,
                 "observations": len(rows),
                 "candidates": len(candidates),
+                "eligible_source_revisions": len(units),
                 "writer_id": writer.writer_id,
             },
         )
@@ -150,6 +165,8 @@ def run_cycle(
             else:
                 duplicate += 1
         graphiti_ok = 0
+        retry_count = 0
+        dead_letter_count = 0
         if graphiti is not None:
             if not spend_reserved(unpublished):
                 append_ledger(
@@ -158,45 +175,85 @@ def run_cycle(
                     {
                         "profile": "EVALUATION",
                         "metered_api": OPENROUTER_API,
+                        "metered_use": "embeddings",
+                        "chat": GRAPHITI_CHAT_MODEL,
+                        "chat_fallback": GRAPHITI_CHAT_FALLBACK,
+                        "chat_subscription_not_debited": True,
                         "od_011_cash_ceiling_gbp": OD_011_CASH_CEILING_GBP,
                         "prespent": False,
                         "hosts": ["openrouter.ai"],
+                        "generation_id": GRAPHITI_GENERATION_ID,
                     },
                 )
-            for candidate in candidates:
+            for unit in units:
                 if graphiti_ok >= max_graphiti:
                     break
-                if has_graphiti_attempt(unpublished, candidate.candidate_id):
+                if has_graphiti_ingest(unpublished, unit.ingest_id):
                     continue
-                package = package_for(candidate)
                 try:
-                    result = graphiti.extract(package)
+                    result = graphiti.ingest(unit)
                 except VetoError:
                     raise
                 except (RuntimeError, ValueError, OSError, json.JSONDecodeError):
+                    retry_count += 1
                     continue
-                append_ledger(
-                    unpublished,
-                    "GRAPHITI_EVALUATION_ATTEMPT",
-                    {
-                        "story_candidate_id": candidate.candidate_id,
-                        "evidence_package_digest": package.digest,
-                        "outcome": result.outcome,
-                        "proposal_count": result.proposal_count,
-                        "failure_code": result.failure_code,
-                        "workspace_group": GRAPHITI_WORKSPACE_GROUP,
-                        "profile": "EVALUATION",
-                    },
-                )
+                receipt = {
+                    "ingest_id": result.ingest_id,
+                    "source_id": result.source_id,
+                    "item_key": result.item_key,
+                    "outcome": result.outcome,
+                    "proposal_count": result.proposal_count,
+                    "entity_count": result.entity_count,
+                    "relation_count": result.relation_count,
+                    "failure_code": result.failure_code,
+                    "temporal_basis": result.temporal_basis,
+                    "reference_time": result.reference_time,
+                    "generation_id": result.generation_id,
+                    "workspace_group": GRAPHITI_WORKSPACE_GROUP,
+                    "episode_uuid": result.episode_uuid or result.ingest_id,
+                    "entities": list(result.entities),
+                    "relations": list(result.relations),
+                    "chat_invocations": list(result.chat_invocations),
+                    "request_tokens": result.request_tokens,
+                    "response_tokens": result.response_tokens,
+                    "cost_microunits": result.cost_microunits,
+                    "chat_subscription_not_debited": True,
+                    "framework": result.framework or GRAPHITI_CORE_RELEASE,
+                    "chat": result.chat or GRAPHITI_CHAT_MODEL,
+                    "chat_fallback": result.chat_fallback or GRAPHITI_CHAT_FALLBACK,
+                    "embedding": result.embedding or GRAPHITI_EMBEDDING_MODEL,
+                    "receipt_digest": result.receipt_digest,
+                    "profile": "EVALUATION",
+                }
+                append_ledger(unpublished, "GRAPHITI_EVALUATION_ATTEMPT", receipt)
                 if result.outcome in {"COMPLETE", "PARTIAL"}:
-                    insert_graphiti_attempt(
+                    insert_graphiti_ingest(
                         unpublished,
-                        candidate_id=candidate.candidate_id,
+                        ingest_id=result.ingest_id,
+                        source_id=result.source_id,
+                        item_key=result.item_key,
                         outcome=result.outcome,
                         proposal_count=result.proposal_count,
+                        entity_count=result.entity_count,
+                        relation_count=result.relation_count,
                         failure_code=result.failure_code,
+                        temporal_basis=result.temporal_basis,
+                        reference_time=result.reference_time,
+                        generation_id=result.generation_id,
+                        receipt_digest=result.receipt_digest,
+                        receipt=receipt,
                     )
+                else:
+                    retry_count += 1
                 graphiti_ok += 1
+        coverage = graphiti_coverage(
+            unpublished,
+            eligible_ids=tuple(unit.ingest_id for unit in units),
+            observed_at=tuple(unit.observed_at for unit in units),
+            retry_count=retry_count,
+            dead_letter_count=dead_letter_count,
+        )
+        record_graphiti_coverage(unpublished, coverage)
         digest = append_ledger(
             unpublished,
             "PRIVATE_CYCLE_CLOSE",
@@ -208,6 +265,7 @@ def run_cycle(
                 "candidates": len(candidates),
                 "writer_id": writer.writer_id,
                 "graphiti": graphiti_ok,
+                **coverage,
             },
         )
         unpublished.commit()
@@ -222,4 +280,5 @@ def run_cycle(
         digest,
         writer.writer_id,
         graphiti_ok,
+        len(units),
     )

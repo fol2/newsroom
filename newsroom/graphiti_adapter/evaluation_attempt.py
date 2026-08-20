@@ -1,4 +1,4 @@
-"""Build an EVALUATION Graphiti attempt from unpublished Evidence Package text."""
+"""Build an EVALUATION Graphiti attempt from one corpus ingest unit."""
 
 from __future__ import annotations
 
@@ -20,13 +20,14 @@ from newsroom.extraction.types import (
     ExtractorContractId,
     VersionedExtractionComponent,
 )
-from newsroom.sources.types import (
-    DiscoveryRepresentationId,
-    SourceDefinitionId,
-    SourceDefinitionVersionId,
-    SourceItemId,
-    SourceRevisionId,
+from newsroom.graphiti_adapter.identity import (
+    content_digest,
+    ingest_key,
+    typed_id,
+    typed_ids,
 )
+from newsroom.graphiti_adapter.temporal import map_reference_time
+from newsroom.sources.types import SourceDefinitionVersionId
 
 from .contracts import (
     GRAPHITI_ADAPTER_CODE_COMPONENT,
@@ -42,16 +43,14 @@ from .evaluation_packet import (
     GRAPHITI_CHAT_MODEL,
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_EMBEDDING_MODEL,
+    GRAPHITI_GENERATION_ID,
 )
 from .models import GraphitiAdapterConfiguration, GraphitiAttemptRequest, GraphitiInputManifest
 from .types import (
     GraphitiAdapterConfigurationId,
-    GraphitiAttemptId,
-    GraphitiCleanupReceiptId,
     GraphitiExecutionProfile,
     GraphitiInputManifestId,
     GraphitiRuntimeMode,
-    GraphitiWorkspaceId,
 )
 
 _PIN = digest_canonical(
@@ -61,8 +60,7 @@ _PIN = digest_canonical(
         "embedding": GRAPHITI_EMBEDDING_MODEL,
     }
 )
-_HYDRATION = digest_canonical({"policy": "graphiti-evaluation-passage-v1"})
-_MAX_PASSAGES = 8
+_HYDRATION = digest_canonical({"policy": "graphiti-evaluation-passage-v2"})
 _MAX_PASSAGE_BYTES = 8 * 1024
 
 
@@ -70,17 +68,17 @@ def _component(component_id: str, version: str) -> VersionedExtractionComponent:
     return VersionedExtractionComponent(component_id, version, _PIN)
 
 
-def _passage(text: str) -> ExtractionPassageInput:
+def _passage(text: str, *, ingest_id: str) -> ExtractionPassageInput:
     encoded = text.encode("utf-8")
     blob = digest_bytes(encoded)
     return ExtractionPassageInput(
-        passage_id=ExtractionPassageId.new(),
-        admission_id=ObjectAdmissionId.new(),
-        access_decision_id=ObjectAccessDecisionId.new(),
+        passage_id=typed_id(ExtractionPassageId, "passage", ingest_id),
+        admission_id=typed_id(ObjectAdmissionId, "admission", ingest_id),
+        access_decision_id=typed_id(ObjectAccessDecisionId, "access", ingest_id),
         hydration_policy_contract_digest=_HYDRATION,
         principal_id="newsroom.control-plane",
         authority_domain="newsroom.evaluation",
-        purpose="graphiti.evaluation",
+        purpose="graphiti.corpus-ingest",
         object_class="source.expression",
         allowed_use="proposal.extraction",
         security_scope="evaluation",
@@ -94,24 +92,39 @@ def _passage(text: str) -> ExtractionPassageInput:
     )
 
 
-def evaluation_attempt_for(passages: tuple[str, ...]) -> GraphitiAttemptRequest:
-    if not passages:
+def evaluation_attempt_for_body(
+    *,
+    episode_body: str,
+    ingest_id: str,
+    published_at: str | None,
+    updated_at: str | None,
+    observed_at: str,
+) -> GraphitiAttemptRequest:
+    text = " ".join(episode_body.split())
+    if not text:
         raise ValueError("EVALUATION Graphiti attempt needs retained passages")
-    clipped: list[str] = []
-    for raw in passages[:_MAX_PASSAGES]:
-        text = " ".join(raw.split())
-        if not text:
-            continue
-        encoded = text.encode("utf-8")
-        if len(encoded) > _MAX_PASSAGE_BYTES:
-            text = encoded[:_MAX_PASSAGE_BYTES].decode("utf-8", errors="ignore").rstrip()
-        if text:
-            clipped.append(text)
-    if not clipped:
+    encoded = text.encode("utf-8")
+    if len(encoded) > _MAX_PASSAGE_BYTES:
+        text = encoded[:_MAX_PASSAGE_BYTES].decode("utf-8", errors="ignore").rstrip()
+    if not text:
         raise ValueError("EVALUATION Graphiti attempt needs non-empty passages")
-    bound = tuple(sorted((_passage(item) for item in clipped), key=lambda item: str(item.passage_id)))
+    temporal = map_reference_time(
+        published_at=published_at,
+        updated_at=updated_at,
+        observed_at=observed_at,
+    )
+    (
+        attempt_id,
+        workspace_id,
+        cleanup_id,
+        definition_id,
+        item_id,
+        revision_id,
+        representation_id,
+    ) = typed_ids(ingest_id)
+    bound = (_passage(text, ingest_id=ingest_id),)
     contract = ExtractorContractRequest(
-        contract_id=ExtractorContractId.new(),
+        contract_id=typed_id(ExtractorContractId, "contract", ingest_id),
         framework=_component("graphiti.framework", GRAPHITI_CORE_RELEASE),
         model=_component("graphiti.model", GRAPHITI_CHAT_MODEL),
         prompt=GRAPHITI_PROMPT_COMPONENT,
@@ -121,10 +134,10 @@ def evaluation_attempt_for(passages: tuple[str, ...]) -> GraphitiAttemptRequest:
         policy=GRAPHITI_ADAPTER_POLICY_COMPONENT,
         execution_profile=ExtractionExecutionProfile.FIXTURE_REPLAY_ONLY,
         producer_kind="GRAPHITI_EVALUATION",
-        idempotency_key="evaluation-graphiti-contract-v1",
+        idempotency_key="evaluation-graphiti-contract-v2",
     )
     configuration = GraphitiAdapterConfiguration(
-        configuration_id=GraphitiAdapterConfigurationId.new(),
+        configuration_id=typed_id(GraphitiAdapterConfigurationId, "config", ingest_id),
         runtime_mode=GraphitiRuntimeMode.REAL_GRAPHITI,
         execution_profile=GraphitiExecutionProfile.EVALUATION,
         framework=contract.framework,
@@ -141,24 +154,26 @@ def evaluation_attempt_for(passages: tuple[str, ...]) -> GraphitiAttemptRequest:
         workspace_policy=EVALUATION_WORKSPACE_POLICY,
         fixture_case=None,
         real_runtime_authority=EVALUATION_GRAPHITI_PACKET,
-        idempotency_key="evaluation-graphiti-configuration-v1",
+        idempotency_key="evaluation-graphiti-configuration-v2",
     )
     request = ExtractionRunRequest(
-        run_id=ExtractionRunId.new(),
-        run_version_id=ExtractionRunVersionId.new(),
+        run_id=typed_id(ExtractionRunId, "run", ingest_id),
+        run_version_id=typed_id(ExtractionRunVersionId, "run-version", ingest_id),
         version_number=1,
         expected_previous_version_id=None,
         contract_id=contract.contract_id,
         input_binding=ExtractionInputBinding(
-            definition_id=SourceDefinitionId.new(),
-            definition_version_id=SourceDefinitionVersionId.new(),
-            item_id=SourceItemId.new(),
-            revision_id=SourceRevisionId.new(),
-            representation_id=DiscoveryRepresentationId.new(),
+            definition_id=definition_id,
+            definition_version_id=typed_id(
+                SourceDefinitionVersionId, "definition-version", ingest_id
+            ),
+            item_id=item_id,
+            revision_id=revision_id,
+            representation_id=representation_id,
             passages=bound,
         ),
         budget=ExtractionBudget(
-            timeout_ms=120_000,
+            timeout_ms=180_000,
             max_input_bytes=64 * 1024,
             max_output_bytes=256 * 1024,
             max_proposals=100,
@@ -167,17 +182,17 @@ def evaluation_attempt_for(passages: tuple[str, ...]) -> GraphitiAttemptRequest:
             max_response_tokens=4_000,
             max_cost_microunits=500_000,
         ),
-        idempotency_key="evaluation-graphiti-run-v1",
+        idempotency_key="evaluation-graphiti-run-v2",
     )
     return GraphitiAttemptRequest(
-        attempt_id=GraphitiAttemptId.new(),
+        attempt_id=attempt_id,
         attempt_number=1,
         expected_previous_attempt_id=None,
         configuration=configuration,
-        workspace_id=GraphitiWorkspaceId.new(),
-        cleanup_receipt_id=GraphitiCleanupReceiptId.new(),
+        workspace_id=workspace_id,
+        cleanup_receipt_id=cleanup_id,
         manifest=GraphitiInputManifest.from_run_request(
-            manifest_id=GraphitiInputManifestId.new(),
+            manifest_id=typed_id(GraphitiInputManifestId, "manifest", ingest_id),
             configuration=configuration,
             contract=contract,
             request=request,
@@ -185,8 +200,31 @@ def evaluation_attempt_for(passages: tuple[str, ...]) -> GraphitiAttemptRequest:
         extraction_contract=contract,
         extraction_request=request,
         replay_source=None,
-        idempotency_key="evaluation-graphiti-attempt-v1",
+        idempotency_key=f"evaluation-graphiti-attempt-{ingest_id}",
+        reference_time=temporal.reference_time,
+        temporal_basis=temporal.basis,
+        episode_uuid=ingest_id,
+        generation_id=GRAPHITI_GENERATION_ID,
     )
 
 
-__all__ = ["evaluation_attempt_for"]
+def evaluation_attempt_for(passages: tuple[str, ...]) -> GraphitiAttemptRequest:
+    if not passages:
+        raise ValueError("EVALUATION Graphiti attempt needs retained passages")
+    body = "\n\n".join(" ".join(item.split()) for item in passages if item.split())
+    digest = content_digest(headline="", body=body, canonical_url="")
+    ingest_id = ingest_key(
+        source_id="evaluation",
+        item_key="passages",
+        content_digest_value=digest,
+    )
+    return evaluation_attempt_for_body(
+        episode_body=body,
+        ingest_id=ingest_id,
+        published_at=None,
+        updated_at=None,
+        observed_at="2026-08-20T00:00:00.000000Z",
+    )
+
+
+__all__ = ["evaluation_attempt_for", "evaluation_attempt_for_body"]

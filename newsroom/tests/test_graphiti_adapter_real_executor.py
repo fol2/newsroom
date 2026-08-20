@@ -176,12 +176,25 @@ def test_flag_is_true_for_evaluation_and_graphiti_core_is_an_optional_extra() ->
     assert 'version = "0.29.3"' in lock
 
 
-def test_openrouter_generic_client_uses_json_object_mode() -> None:
+def test_cli_llm_client_is_wired_for_graphiti_chat() -> None:
+    from newsroom.graphiti_adapter.evaluation_packet import (
+        CURSOR_AGENT_MODEL_ID,
+        GRAPHITI_CHAT_FALLBACK,
+        GRAPHITI_CHAT_MODEL,
+        GROK_CHAT_REASONING,
+    )
     from newsroom.graphiti_adapter.real import _add_episode
 
     source = inspect.getsource(_add_episode)
-    assert 'structured_output_mode="json_object"' in source
-    assert "OpenAIGenericClient" in source
+    assert "build_cli_llm_client" in source
+    assert "OpenAIGenericClient" not in source
+    assert "reference_time or started_at" not in inspect.getsource(
+        RealGraphitiAdapter._produce
+    )
+    assert GRAPHITI_CHAT_MODEL == "cursor-agent-cli:composer-2.5"
+    assert GRAPHITI_CHAT_FALLBACK == "grok-build-cli:grok-4.6-medium"
+    assert CURSOR_AGENT_MODEL_ID == "composer-2.5"
+    assert GROK_CHAT_REASONING == "medium"
 
 
 def test_else_branch_constructs_real_adapter_instead_of_unreachable_assertion() -> None:
@@ -213,7 +226,7 @@ def test_placeholder_packet_still_fails_closed(tmp_path: Path) -> None:
         workspace_policy=policy,
     )
     attempt.configuration.require_execution_authorized()
-    with pytest.raises(GraphitiAdapterContractError, match="EVALUATION OpenRouter packet pins"):
+    with pytest.raises(GraphitiAdapterContractError, match="EVALUATION CLI packet pins"):
         RealGraphitiAdapter().execute(
             attempt=attempt,
             workspace_root=(tmp_path / "workspace").resolve(),

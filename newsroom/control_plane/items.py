@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 
 from lxml import etree
 
@@ -23,6 +25,8 @@ class SourceItem:
     headline: str
     body: str
     canonical_url: str
+    published_at: str | None = None
+    updated_at: str | None = None
 
 
 def _plain(text: str) -> str:
@@ -34,6 +38,34 @@ def _clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1].rstrip() + "…"
+
+
+def parse_source_time(raw: str) -> str | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if len(text) == 10 and text[4] == "-" and text[7] == "-":
+        text = text + "T00:00:00.000000Z"
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC).isoformat(timespec="microseconds").replace(
+            "+00:00", "Z"
+        )
+    except ValueError:
+        pass
+    try:
+        parsed = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def _local(tag: object) -> str:
@@ -70,7 +102,11 @@ def _from_entry(source_id: str, element: etree._Element) -> SourceItem | None:
         or headline,
         MAX_BODY_CHARS,
     )
-    return SourceItem(source_id, key, headline, body, link)
+    published = parse_source_time(
+        _child_text(element, ("published", "pubdate", "date"))
+    )
+    updated = parse_source_time(_child_text(element, ("updated",)))
+    return SourceItem(source_id, key, headline, body, link, published, updated)
 
 
 def _from_xml(source_id: str, body: bytes) -> tuple[SourceItem, ...]:
@@ -101,12 +137,20 @@ def _from_mapping(source_id: str, payload: dict[str, object], *, fallback_key: s
     if url.startswith("/"):
         url = "https://www.gov.uk" + url
     key = str(payload.get("content_id") or payload.get("code") or fallback_key)
+    published_raw = (
+        payload.get("first_published_at")
+        or payload.get("published_at")
+        or payload.get("public_timestamp")
+    )
+    updated_raw = payload.get("public_updated_at") or payload.get("updated_at")
     return SourceItem(
         source_id,
         key,
         _clip(_plain(title), MAX_HEADLINE_CHARS),
         _clip(_plain(description), MAX_BODY_CHARS),
         url,
+        parse_source_time(published_raw) if isinstance(published_raw, str) else None,
+        parse_source_time(updated_raw) if isinstance(updated_raw, str) else None,
     )
 
 

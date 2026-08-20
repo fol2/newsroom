@@ -61,6 +61,7 @@ class GroupedObservation:
     source_id: str
     observation_digest: str
     item: SourceItem
+    observed_at: str
 
 
 def form_candidates(

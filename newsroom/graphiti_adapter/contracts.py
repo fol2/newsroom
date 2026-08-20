@@ -113,11 +113,15 @@ GRAPHITI_ADAPTER_NORMALISATION_COMPONENT = _component(
 )
 GRAPHITI_ADAPTER_TEMPORAL_COMPONENT = _component(
     "newsroom.graphiti.adapter-temporal-policy",
-    "v1",
+    "v2",
     {
         "source_time_is_metadata": True,
         "authority_time_is_separate": True,
         "workspace_state_is_disposable": True,
+        "reference_time_from_source": True,
+        "started_at_forbidden": True,
+        "observed_fallback_labelled": True,
+        "policy": "graphiti-source-reference-time-v1",
     },
 )
 GRAPHITI_ADAPTER_POLICY_COMPONENT = _component(
