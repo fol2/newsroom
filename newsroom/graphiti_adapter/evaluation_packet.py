@@ -1,7 +1,9 @@
 """EVALUATION packet for the private unpublished GraphRAG beta.
 
+Metered model and embedding calls use OpenRouter (`OPENROUTER_API`).
 Does not flip REAL_GRAPHITI_RUNTIME_ENABLED. Completeness of this packet is
-not execution authority (#700).
+not execution authority (#700). Increment 9P proving still must not call
+OpenRouter (`OPENROUTER_UNUSED`).
 """
 
 from __future__ import annotations
@@ -22,10 +24,16 @@ from newsroom.graphiti_adapter.types import (
 )
 
 GRAPHITI_CORE_RELEASE = "graphiti-core-0.29.3"
-GRAPHITI_CHAT_MODEL = "openai:gpt-5-mini"
-GRAPHITI_EMBEDDING_MODEL = "openai:text-embedding-3-large"
+GRAPHITI_CHAT_MODEL = "openrouter:openai.gpt-5-mini"
+GRAPHITI_EMBEDDING_MODEL = "openrouter:openai.text-embedding-3-large"
+WRITER_MODEL = "openrouter:x-ai.grok-4.6"
+OPENROUTER_CHAT_SLUG = "openai/gpt-5-mini"
+OPENROUTER_EMBEDDING_SLUG = "openai/text-embedding-3-large"
+OPENROUTER_WRITER_SLUG = "x-ai/grok-4.6"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 GRAPHITI_WORKSPACE_GROUP = "newsroom-eval-proposal"
-OPENAI_GRAPHITI_CHAT_API = "OPENAI_GRAPHITI_CHAT_API"
+OPENROUTER_API = "OPENROUTER_API"
+OPENROUTER_KEYCHAIN_SERVICE = "newsroom.shadow.v1"
 NEO4J_COMMUNITY_LOCAL = "NEO4J_COMMUNITY_LOCAL"
 OD_011_CASH_CEILING_GBP = 250
 
@@ -53,6 +61,7 @@ EVALUATION_GRAPHITI_PACKET = RealGraphitiRuntimeAuthority(
             "map": "private-unpublished-graphrag-editorial-beta",
             "profile": "EVALUATION",
             "issues": [693, 698, 699, 700, 707],
+            "provider": OPENROUTER_API,
         }
     ),
     framework_release=GRAPHITI_CORE_RELEASE,
@@ -70,9 +79,9 @@ EVALUATION_GRAPHITI_PACKET = RealGraphitiRuntimeAuthority(
     ),
     data_processing_terms_digest=_digest(
         {
-            "openai_chat": OPENAI_GRAPHITI_CHAT_API,
-            "openai_embeddings": "OPENAI_EMBEDDINGS_API",
-            "writer": "XAI_GROK_BUILD_LOGIN",
+            "metered_api": OPENROUTER_API,
+            "keychain_service": OPENROUTER_KEYCHAIN_SERVICE,
+            "writer": WRITER_MODEL,
             "neo4j": NEO4J_COMMUNITY_LOCAL,
         }
     ),
@@ -98,14 +107,12 @@ EVALUATION_GRAPHITI_PACKET = RealGraphitiRuntimeAuthority(
         {
             "default_deny": True,
             "hosts": (
-                "api.openai.com",
+                "openrouter.ai",
                 "127.0.0.1",
                 "localhost",
             ),
             "credential_classes": (
-                OPENAI_GRAPHITI_CHAT_API,
-                "OPENAI_EMBEDDINGS_API",
-                "XAI_GROK_BUILD_LOGIN",
+                OPENROUTER_API,
                 NEO4J_COMMUNITY_LOCAL,
             ),
         }
@@ -114,13 +121,14 @@ EVALUATION_GRAPHITI_PACKET = RealGraphitiRuntimeAuthority(
         {
             "od_011_cash_ceiling_gbp": OD_011_CASH_CEILING_GBP,
             "pre_spend": False,
-            "grok_subscription_not_debited": True,
+            "provider": OPENROUTER_API,
         }
     ),
     evaluation_plan_digest=_digest(
         {
             "profile": "EVALUATION",
             "production_forbidden": True,
+            "proving_openrouter_unused": True,
         }
     ),
     rollback_digest=_digest(
