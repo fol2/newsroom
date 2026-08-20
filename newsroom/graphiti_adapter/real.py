@@ -228,11 +228,16 @@ async def _add_episode(
         small_model=OPENROUTER_CHAT_SLUG,
         base_url=OPENROUTER_BASE_URL,
     )
+    # OpenRouter's gpt-5-mini rejects Graphiti's native json_schema (additionalProperties).
+    llm_client = runtime.OpenAIGenericClient(
+        config=llm_config,
+        structured_output_mode="json_object",
+    )
     graphiti = runtime.Graphiti(
         f"bolt://{NEO4J_BOLT_HOST}:{NEO4J_BOLT_PORT}",
         _NEO4J_USER,
         password,
-        llm_client=runtime.OpenAIGenericClient(config=llm_config),
+        llm_client=llm_client,
         embedder=runtime.OpenAIEmbedder(
             config=runtime.OpenAIEmbedderConfig(
                 api_key=api_key,
@@ -385,13 +390,13 @@ class RealGraphitiAdapter:
             )
         except (BrokerError, GraphitiAdapterContractError):
             raise
-        except Exception:
+        except Exception as exc:
             return _produced(
                 attempt,
                 outcome=ExtractionOutcome.RETRYABLE_FAILURE,
                 failure_code=ExtractionFailureCode.PRODUCER_INTERNAL_ERROR,
                 validation=None,
-                raw=None,
+                raw={"error_type": type(exc).__name__},
                 proposals=(),
             )
 

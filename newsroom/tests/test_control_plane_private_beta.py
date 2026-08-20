@@ -297,6 +297,63 @@ def test_cycle_reserves_graphiti_spend_before_stub_extract(tmp_path: Path) -> No
     assert kinds.count("GRAPHITI_EVALUATION_ATTEMPT") == 2
 
 
+def test_cycle_retries_failed_graphiti_extract(tmp_path: Path) -> None:
+    from newsroom.control_plane.graphiti import GraphitiCycleResult
+
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "unpublished_store.sqlite3"
+    calls: list[str] = []
+
+    class FlakyGraphiti:
+        def extract(self, package):
+            calls.append(package.candidate_id)
+            if len(calls) == 1:
+                return GraphitiCycleResult(
+                    candidate_id=package.candidate_id,
+                    outcome="FAILED",
+                    proposal_count=0,
+                    failure_code="PRODUCER_INTERNAL_ERROR",
+                )
+            return GraphitiCycleResult(
+                candidate_id=package.candidate_id,
+                outcome="COMPLETE",
+                proposal_count=1,
+                failure_code="NONE",
+            )
+
+    first = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=10,
+        graphiti=FlakyGraphiti(),
+        max_graphiti=1,
+    )
+    assert first.graphiti == 1
+    connection = __import__("sqlite3").connect(unpublished)
+    stored = connection.execute(
+        "SELECT COUNT(*) FROM unpublished_graphiti_attempts"
+    ).fetchone()[0]
+    connection.close()
+    assert stored == 0
+    second = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=10,
+        graphiti=FlakyGraphiti(),
+        max_graphiti=1,
+    )
+    assert second.graphiti == 1
+    assert calls[0] == calls[1]
+    connection = __import__("sqlite3").connect(unpublished)
+    stored = connection.execute(
+        "SELECT outcome, proposal_count FROM unpublished_graphiti_attempts"
+    ).fetchone()
+    connection.close()
+    assert stored == ("COMPLETE", 1)
+
+
 def test_surface_payload_refuses_dateline_dump_and_publication_bundle() -> None:
     with pytest.raises(ValueError, match="dateline dump"):
         UnpublishedSurfacePayload(
