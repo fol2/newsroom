@@ -35,6 +35,7 @@ from newsroom.extraction.types import (
 from newsroom.graphiti_adapter.cli_client import build_cli_llm_client
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
 from newsroom.graphiti_adapter.embedding_meter import MeteredOpenAIEmbedder
+from newsroom.graphiti_adapter.edge_guard import guard_extracted_edges
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_FALLBACK,
     GRAPHITI_CHAT_MODEL,
@@ -176,20 +177,13 @@ def _load_graphiti() -> SimpleNamespace:
                 edge_types,
                 custom_extraction_instructions,
             )
-            resolved = resolve_edge_pointers(extracted, uuid_map)
-            unique: dict[tuple[str, str, str], Any] = {}
-            for edge in resolved:
-                key = (
-                    str(edge.source_node_uuid),
-                    str(edge.target_node_uuid),
-                    " ".join(str(edge.fact).split()),
-                )
-                unique.setdefault(key, edge)
-            guarded = list(unique.values())
-            await create_entity_edge_embeddings(self.clients.embedder, guarded)
-            # Every corpus assertion remains an episode-owned proposal edge.
-            # No existing edge is reused, expired, invalidated or mutated.
-            return guarded, [], guarded
+            return await guard_extracted_edges(
+                extracted_edges=extracted,
+                uuid_map=uuid_map,
+                embedder=self.clients.embedder,
+                resolve_pointers=resolve_edge_pointers,
+                create_embeddings=create_entity_edge_embeddings,
+            )
 
     return SimpleNamespace(
         Graphiti=GuardedGraphiti,

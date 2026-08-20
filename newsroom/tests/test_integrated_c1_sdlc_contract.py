@@ -134,7 +134,7 @@ def test_complete_actual_service_cases_are_optional_only_in_core() -> None:
     } <= set(optional)
     assert complete <= set(optional)
     assert optional == tuple(sorted(optional))
-    assert len(optional) == 46
+    assert len(optional) == 47
 
     route = _route("newsroom/projection/neo4j/_complete_adapter.py")
     assert route["service_required"] is True

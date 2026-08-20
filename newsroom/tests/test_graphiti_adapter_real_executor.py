@@ -219,12 +219,8 @@ def test_cli_llm_client_is_wired_for_graphiti_chat() -> None:
 
 
 def test_guarded_graphiti_never_invalidates_or_reuses_existing_edges(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import graphiti_core.edges as edges_module
-    import graphiti_core.utils.bulk_utils as bulk_utils
-    import graphiti_core.utils.maintenance.edge_operations as edge_operations
-    from newsroom.graphiti_adapter.real import _load_graphiti
+    from newsroom.graphiti_adapter.edge_guard import guard_extracted_edges
 
     proposed = SimpleNamespace(
         source_node_uuid="source",
@@ -232,10 +228,6 @@ def test_guarded_graphiti_never_invalidates_or_reuses_existing_edges(
         fact="same fact as a pre-existing edge",
     )
     calls: list[str] = []
-
-    async def extract(*_args: object, **_values: object) -> list[object]:
-        calls.append("extract")
-        return [proposed]
 
     def resolve(values: list[object], _uuid_map: dict[str, str]) -> list[object]:
         calls.append("resolve")
@@ -245,31 +237,19 @@ def test_guarded_graphiti_never_invalidates_or_reuses_existing_edges(
         assert values == [proposed]
         calls.append("embed")
 
-    monkeypatch.setattr(edge_operations, "extract_edges", extract)
-    monkeypatch.setattr(bulk_utils, "resolve_edge_pointers", resolve)
-    monkeypatch.setattr(edges_module, "create_entity_edge_embeddings", embed)
-    runtime = _load_graphiti()
-    receiver = SimpleNamespace(clients=SimpleNamespace(embedder=object()))
     new_edges, invalidated, episode_edges = asyncio.run(
-        runtime.Graphiti._extract_and_resolve_edges(
-            receiver,
-            SimpleNamespace(),
-            [],
-            [],
-            {},
-            GRAPHITI_WORKSPACE_GROUP,
-            None,
-            [],
-            {},
+        guard_extracted_edges(
+            extracted_edges=[proposed],
+            uuid_map={},
+            embedder=object(),
+            resolve_pointers=resolve,
+            create_embeddings=embed,
         )
     )
-    assert calls == ["extract", "resolve", "embed"]
+    assert calls == ["resolve", "embed"]
     assert new_edges == [proposed]
     assert invalidated == []
     assert episode_edges == [proposed]
-    for module_name in tuple(sys.modules):
-        if module_name == "graphiti_core" or module_name.startswith("graphiti_core."):
-            sys.modules.pop(module_name, None)
 
 
 def test_cursor_malformed_json_executes_grok_fallback_and_records_both_calls() -> None:

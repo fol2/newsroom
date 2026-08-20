@@ -669,6 +669,7 @@ def test_optional_core_skips_are_exact_external_environment_cases() -> None:
         'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_revocation_and_tombstone_remove_current_derivatives',
         'newsroom.tests.test_complete_projection_2b_neo4j_service::test_actual_service_wrong_watermark_generation_and_vector_dimension_fail_closed',
         'newsroom.tests.test_control_plane_keychain::test_cursor_agent_cli_is_logged_in',
+        'newsroom.tests.test_control_plane_keychain::test_graphiti_mutation_guard_restores_preexisting_values',
         'newsroom.tests.test_control_plane_keychain::test_grok_build_cli_is_logged_in',
         'newsroom.tests.test_control_plane_keychain::test_neo4j_keychain_injects_and_bolt_accepts',
         'newsroom.tests.test_control_plane_keychain::test_openrouter_keychain_injects_and_is_accepted',
