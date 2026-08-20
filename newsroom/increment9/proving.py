@@ -460,9 +460,6 @@ def run_proving(
         rights_rad_02=rights_rad_02,
         now=now,
     )
-    if any(gate.status is GateStatus.FAIL for gate in gates):
-        return ProvingReport(run_id, False, False, False, 0, gates, ())
-    fetcher = default_fetch if fetch is None else fetch
     connection = _connect(store_path)
     try:
         connection.execute(
@@ -470,6 +467,10 @@ def run_proving(
             (run_id, fetched_at),
         )
         _put_gates(connection, run_id, gates)
+        if any(gate.status is GateStatus.FAIL for gate in gates):
+            connection.commit()
+            return ProvingReport(run_id, False, False, False, 0, gates, ())
+        fetcher = default_fetch if fetch is None else fetch
         observations: list[Observation] = []
         for source_id, url in PORTFOLIO:
             assert_allowed_url(url)

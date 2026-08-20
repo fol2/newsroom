@@ -27,6 +27,7 @@ from newsroom.control_plane.broker import (
 )
 from newsroom.extraction.models import ProducedExtraction, ProposalDraft
 from newsroom.extraction.types import (
+    ExtractionContractError,
     ExtractionFailureCode,
     ExtractionOutcome,
     ExtractionOutputValidation,
@@ -701,7 +702,7 @@ class RealGraphitiAdapter:
             result=result,
             proposals=proposals,
         )
-        return produced_extraction(
+        produced = produced_extraction(
             attempt,
             outcome=ExtractionOutcome.SUCCESS,
             failure_code=ExtractionFailureCode.NONE,
@@ -710,6 +711,31 @@ class RealGraphitiAdapter:
             proposals=proposals,
             embedding_usage=telemetry.embedding_usage,
         )
+        try:
+            produced.usage.require_within(attempt.extraction_request.budget)
+        except ExtractionContractError:
+            diagnostic = _raw_receipt(
+                attempt,
+                started_at=started_at,
+                telemetry=telemetry,
+                result=None,
+                proposals=(),
+            )
+            diagnostic.pop("raw_output_digest", None)
+            diagnostic["budget_status"] = "EXCEEDED"
+            diagnostic["raw_output_digest"] = digest_bytes(
+                canonical_json_bytes(diagnostic)
+            )
+            return produced_extraction(
+                attempt,
+                outcome=ExtractionOutcome.INVALID_OUTPUT,
+                failure_code=ExtractionFailureCode.OUTPUT_SCHEMA_INVALID,
+                validation=ExtractionOutputValidation.INVALID,
+                raw=diagnostic,
+                proposals=(),
+                embedding_usage=telemetry.embedding_usage,
+            )
+        return produced
 
 
 __all__ = ["RealGraphitiAdapter"]

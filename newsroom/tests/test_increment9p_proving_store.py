@@ -132,6 +132,16 @@ def test_fetch_is_blocked_until_gates_pass(tmp_path: Path):
     )
     assert not blocked.authorised and blocked.observations == ()
     assert list_observations(store) == ()
+    connection = __import__("sqlite3").connect(store)
+    failed = connection.execute(
+        "SELECT COUNT(*) FROM proving_gates WHERE run_id='r1' AND status='FAIL'"
+    ).fetchone()[0]
+    run = connection.execute(
+        "SELECT run_id FROM proving_runs WHERE run_id='r1'"
+    ).fetchone()
+    connection.close()
+    assert failed > 0
+    assert run == ("r1",)
 
 
 def test_fetch_stores_ten_observations_without_publication(tmp_path: Path):

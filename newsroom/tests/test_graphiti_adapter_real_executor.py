@@ -655,6 +655,40 @@ def test_true_empty_graphiti_extraction_is_a_valid_zero_proposal_success(
     assert produced.raw_output_value["relation_count"] == 0
 
 
+def test_success_over_fixed_provider_budget_is_retained_as_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    async def over_budget(**values: object) -> object:
+        values["telemetry"].embedding_usage = {
+            "usage_basis": "PROVIDER_REPORTED",
+            "request_count": 1,
+            "embedding_tokens": 1,
+            "cost_usd_microunits": 500_001,
+            "requests": [],
+        }
+        return SimpleNamespace(
+            episode=SimpleNamespace(uuid=values["episode_id"]),
+            nodes=(),
+            edges=(),
+        )
+
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(real, "openrouter_api_key", lambda: "key")
+    monkeypatch.setattr(real, "neo4j_community_password", lambda: "password")
+    monkeypatch.setattr(real, "_add_episode", over_budget)
+    produced = RealGraphitiAdapter()._produce(
+        evaluation_attempt_for(("A retained source passage.",)),
+        UtcTimestamp.parse("2026-08-20T00:00:00.000000Z"),
+    )
+    assert produced.outcome is ExtractionOutcome.INVALID_OUTPUT
+    assert produced.failure_code is ExtractionFailureCode.OUTPUT_SCHEMA_INVALID
+    assert produced.proposals == ()
+    assert produced.raw_output_value is not None
+    assert produced.raw_output_value["budget_status"] == "EXCEEDED"
+
+
 def test_cursor_cli_runs_outside_repository_cwd(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
