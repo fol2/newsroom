@@ -22,6 +22,7 @@ from newsroom.graphiti_adapter.types import (
     GraphitiEgressPolicy,
     GraphitiWorkspacePolicyId,
 )
+from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_VERSION
 from newsroom.increment9.proving import PORTFOLIO
 
 GRAPHITI_CORE_RELEASE = "graphiti-core-0.29.3"
@@ -39,7 +40,6 @@ OPENROUTER_API = "OPENROUTER_API"
 OPENROUTER_KEYCHAIN_SERVICE = "newsroom.shadow.v1"
 NEO4J_COMMUNITY_LOCAL = "NEO4J_COMMUNITY_LOCAL"
 OD_011_CASH_CEILING_GBP = 250
-TEMPORAL_POLICY_VERSION = "graphiti-source-reference-time-v1"
 GRAPHITI_EXTRACTION_INSTRUCTIONS = (
     "Extract people, organisations, places, events, policies and their relations "
     "from the source content. Do not treat newsroom source-registry identifiers "

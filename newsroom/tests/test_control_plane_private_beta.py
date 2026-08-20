@@ -5,13 +5,21 @@ import os
 import pytest
 
 from newsroom.control_plane.cycle import run_cycle
+from newsroom.control_plane.corpus import CorpusIngestUnit
+from newsroom.control_plane.editorial import StoryCandidateRecord
+from newsroom.control_plane.evidence import EvidencePackage
 from newsroom.control_plane.intake import run_intake
 from newsroom.control_plane.items import parse_observation
 from newsroom.control_plane.reports import news_report
 from newsroom.control_plane.store import connect, list_payloads, mark_public_dispatch
 from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.veto import VetoError, refuse_public_effect
-from newsroom.control_plane.writer import CliChainWriter, FixtureWriter, run_grok_cli
+from newsroom.control_plane.writer import (
+    CliChainWriter,
+    FixtureWriter,
+    WriterCopy,
+    run_grok_cli,
+)
 from newsroom.graphiti_adapter.evaluation_packet import (
     EVALUATION_GRAPHITI_PACKET,
     EVALUATION_WORKSPACE_POLICY,
@@ -23,6 +31,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     WRITER_MODEL,
 )
 from newsroom.graphiti_adapter.models import REAL_GRAPHITI_RUNTIME_ENABLED
+from newsroom.graphiti_adapter.temporal import OBSERVED_FALLBACK
 from newsroom.graphiti_adapter.types import (
     GraphitiCredentialClass,
     GraphitiEgressPolicy,
@@ -220,7 +229,9 @@ def test_cycle_continues_after_one_writer_failure(tmp_path: Path) -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        def write(self, candidate, package):
+        def write(
+            self, candidate: StoryCandidateRecord, package: EvidencePackage
+        ) -> WriterCopy:
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("grok writer timed out")
@@ -266,7 +277,7 @@ def test_cycle_reserves_graphiti_spend_before_stub_extract(tmp_path: Path) -> No
     calls: list[str] = []
 
     class StubGraphiti:
-        def ingest(self, unit):
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
             calls.append(unit.ingest_id)
             return GraphitiCycleResult(
                 ingest_id=unit.ingest_id,
@@ -277,7 +288,7 @@ def test_cycle_reserves_graphiti_spend_before_stub_extract(tmp_path: Path) -> No
                 entity_count=2,
                 relation_count=0,
                 failure_code="NONE",
-                temporal_basis="OBSERVED_FALLBACK",
+                temporal_basis=OBSERVED_FALLBACK,
                 reference_time=unit.observed_at,
             )
 
@@ -296,6 +307,7 @@ def test_cycle_reserves_graphiti_spend_before_stub_extract(tmp_path: Path) -> No
     kinds = [row[0] for row in connection.execute("SELECT kind FROM ledger ORDER BY seq")]
     connection.close()
     assert kinds.count("GRAPHITI_SPEND_RESERVE") == 1
+    assert kinds.count("GRAPHITI_SPEND_RECONCILE") == 1
     assert kinds.count("GRAPHITI_EVALUATION_ATTEMPT") == 1
     assert kinds.index("GRAPHITI_SPEND_RESERVE") < kinds.index("GRAPHITI_EVALUATION_ATTEMPT")
     second = run_cycle(
@@ -311,7 +323,8 @@ def test_cycle_reserves_graphiti_spend_before_stub_extract(tmp_path: Path) -> No
     connection = __import__("sqlite3").connect(unpublished)
     kinds = [row[0] for row in connection.execute("SELECT kind FROM ledger ORDER BY seq")]
     connection.close()
-    assert kinds.count("GRAPHITI_SPEND_RESERVE") == 1
+    assert kinds.count("GRAPHITI_SPEND_RESERVE") == 2
+    assert kinds.count("GRAPHITI_SPEND_RECONCILE") == 2
     assert kinds.count("GRAPHITI_EVALUATION_ATTEMPT") == 2
 
 
@@ -323,7 +336,7 @@ def test_cycle_retries_failed_graphiti_extract(tmp_path: Path) -> None:
     calls: list[str] = []
 
     class FlakyGraphiti:
-        def ingest(self, unit):
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
             calls.append(unit.ingest_id)
             if len(calls) == 1:
                 return GraphitiCycleResult(
@@ -335,7 +348,7 @@ def test_cycle_retries_failed_graphiti_extract(tmp_path: Path) -> None:
                     entity_count=0,
                     relation_count=0,
                     failure_code="PRODUCER_INTERNAL_ERROR",
-                    temporal_basis="OBSERVED_FALLBACK",
+                    temporal_basis=OBSERVED_FALLBACK,
                     reference_time=unit.observed_at,
                 )
             return GraphitiCycleResult(
@@ -347,7 +360,7 @@ def test_cycle_retries_failed_graphiti_extract(tmp_path: Path) -> None:
                 entity_count=1,
                 relation_count=0,
                 failure_code="NONE",
-                temporal_basis="OBSERVED_FALLBACK",
+                temporal_basis=OBSERVED_FALLBACK,
                 reference_time=unit.observed_at,
             )
 
@@ -534,7 +547,7 @@ def test_intake_fetches_when_gates_pass(tmp_path: Path) -> None:
     assert report.ok == 10
 
 
-def _sample_candidate_package():
+def _sample_candidate_package() -> tuple[StoryCandidateRecord, EvidencePackage]:
     from newsroom.control_plane.editorial import (
         DiscoverySignalRecord,
         NewsLeadRecord,
@@ -645,7 +658,9 @@ def test_cli_writer_accepts_finished_copy_that_mentions_verification() -> None:
     assert "核實資格" in copy.body
 
 
-def test_grok_cli_uses_empty_cwd_and_three_turns(monkeypatch) -> None:
+def test_grok_cli_uses_empty_cwd_and_three_turns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: dict[str, object] = {}
 
     class Result:
@@ -653,11 +668,12 @@ def test_grok_cli_uses_empty_cwd_and_three_turns(monkeypatch) -> None:
         stdout = json.dumps({"title": "t", "body": "b"})
         stderr = ""
 
-    def fake_run(command, **kwargs):
+    def fake_run(command: tuple[str, ...], **kwargs: object) -> Result:
         captured["command"] = command
         captured["timeout"] = kwargs.get("timeout")
         captured["cwd"] = kwargs.get("cwd")
-        captured["entries"] = os.listdir(kwargs["cwd"]) if kwargs.get("cwd") else []
+        cwd = kwargs.get("cwd")
+        captured["entries"] = os.listdir(cwd) if isinstance(cwd, str) else []
         return Result()
 
     monkeypatch.setattr("newsroom.control_plane.writer.subprocess.run", fake_run)
@@ -698,7 +714,9 @@ def test_cli_writer_reads_title_from_grok_text_envelope() -> None:
     assert copy.title == "【未出版】信封稿"
 
 
-def test_broker_error_does_not_include_secret(monkeypatch) -> None:
+def test_broker_error_does_not_include_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from newsroom.control_plane import broker
 
     class Result:
@@ -714,4 +732,3 @@ def test_broker_error_does_not_include_secret(monkeypatch) -> None:
     with pytest.raises(broker.BrokerError, match="OPENROUTER_API is absent") as caught:
         broker.openrouter_api_key()
     assert "super-secret-openrouter-key" not in str(caught.value)
-

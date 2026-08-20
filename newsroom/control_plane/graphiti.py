@@ -17,6 +17,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_GENERATION_ID,
     GRAPHITI_WORKSPACE_GROUP,
 )
+from newsroom.graphiti_adapter.temporal_vocabulary import TemporalBasis
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,7 +30,7 @@ class GraphitiCycleResult:
     entity_count: int
     relation_count: int
     failure_code: str
-    temporal_basis: str
+    temporal_basis: TemporalBasis
     reference_time: str
     generation_id: str = GRAPHITI_GENERATION_ID
     receipt_digest: str = ""
@@ -37,7 +38,10 @@ class GraphitiCycleResult:
     episode_uuid: str = ""
     entities: tuple[dict[str, object], ...] = ()
     relations: tuple[dict[str, object], ...] = ()
-    chat_invocations: tuple[dict[str, str], ...] = ()
+    proposals: tuple[dict[str, object], ...] = ()
+    passages: tuple[dict[str, object], ...] = ()
+    chat_invocations: tuple[dict[str, object], ...] = ()
+    embedding_usage: dict[str, object] | None = None
     request_tokens: int = 0
     response_tokens: int = 0
     cost_microunits: int = 0
@@ -47,6 +51,10 @@ class GraphitiCycleResult:
     chat: str = GRAPHITI_CHAT_MODEL
     chat_fallback: str = GRAPHITI_CHAT_FALLBACK
     embedding: str = GRAPHITI_EMBEDDING_MODEL
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.temporal_basis, TemporalBasis):
+            raise TypeError("GraphitiCycleResult.temporal_basis must be typed")
 
 
 class GraphitiPort(Protocol):
@@ -90,6 +98,9 @@ class EvaluationGraphitiRunner:
             else ()
         )
         invocations = payload.get("chat_invocations")
+        proposal_receipts = payload.get("proposals")
+        passage_receipts = payload.get("passages")
+        embedding_usage = payload.get("embedding_usage")
         usage = execution.produced.usage
         usage_basis = payload.get("usage_basis")
         return GraphitiCycleResult(
@@ -108,7 +119,20 @@ class EvaluationGraphitiRunner:
             episode_uuid=str(payload.get("episode_uuid") or ""),
             entities=entities,
             relations=relations,
+            proposals=(
+                tuple(proposal_receipts)
+                if isinstance(proposal_receipts, list)
+                else ()
+            ),
+            passages=(
+                tuple(passage_receipts)
+                if isinstance(passage_receipts, list)
+                else ()
+            ),
             chat_invocations=tuple(invocations) if isinstance(invocations, list) else (),
+            embedding_usage=(
+                embedding_usage if isinstance(embedding_usage, dict) else None
+            ),
             request_tokens=usage.request_tokens,
             response_tokens=usage.response_tokens,
             cost_microunits=usage.cost_microunits,

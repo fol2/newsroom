@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-
 from newsroom.authority.types import UtcTimestamp
-from newsroom.graphiti_adapter.evaluation_packet import TEMPORAL_POLICY_VERSION
+from newsroom.graphiti_adapter.temporal_vocabulary import (
+    TEMPORAL_POLICY_VERSION,
+    TemporalBasis,
+    parse_temporal_basis,
+)
 
-SOURCE_UPDATED = "SOURCE_UPDATED"
-SOURCE_PUBLISHED = "SOURCE_PUBLISHED"
-OBSERVED_FALLBACK = "OBSERVED_FALLBACK"
+
+SOURCE_UPDATED = TemporalBasis.SOURCE_UPDATED
+SOURCE_PUBLISHED = TemporalBasis.SOURCE_PUBLISHED
+OBSERVED_FALLBACK = TemporalBasis.OBSERVED_FALLBACK
 
 
 @dataclass(frozen=True, slots=True)
 class TemporalMapping:
     policy_version: str
-    basis: str
+    basis: TemporalBasis
     reference_time: UtcTimestamp
     published_at: str | None
     updated_at: str | None
@@ -69,3 +73,14 @@ def map_reference_time(
         updated_at,
         observed_at,
     )
+
+
+__all__ = [
+    "OBSERVED_FALLBACK",
+    "SOURCE_PUBLISHED",
+    "SOURCE_UPDATED",
+    "TemporalBasis",
+    "TemporalMapping",
+    "map_reference_time",
+    "parse_temporal_basis",
+]

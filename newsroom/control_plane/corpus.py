@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from newsroom.control_plane.editorial import GroupedObservation
-from newsroom.graphiti_adapter.identity import MAX_EPISODE_BYTES, content_digest, ingest_key
+from newsroom.graphiti_adapter.identity import (
+    MAX_EPISODE_BYTES,
+    content_digest,
+    ingest_key,
+    observation_authority_ids,
+)
 from newsroom.graphiti_adapter.temporal import TemporalMapping, map_reference_time
 
 
@@ -79,6 +84,21 @@ class CorpusIngestUnit:
             chunk_ordinal=self.chunk_ordinal,
         )
 
+    @property
+    def revision_id(self) -> str:
+        """Stable SourceRevision identity shared by all chunks of this revision."""
+
+        return str(
+            observation_authority_ids(
+                proving_run_id=self.proving_run_id,
+                source_id=self.source_id,
+                item_key=self.item_key,
+                observation_digest=self.observation_digest,
+                published_at=self.published_at,
+                updated_at=self.updated_at,
+            )[4]
+        )
+
     def temporal(self) -> TemporalMapping:
         return map_reference_time(
             published_at=self.published_at,
@@ -124,3 +144,40 @@ def units_from(
                 )
             )
     return tuple(sorted(units, key=lambda item: item.ingest_id))
+
+
+@dataclass(frozen=True, slots=True)
+class EligibleCorpusRevision:
+    """Coverage denominator entry; chunks remain implementation-level work."""
+
+    revision_id: str
+    source_id: str
+    item_key: str
+    observed_at: str
+    source_time: str
+    ingest_ids: tuple[str, ...]
+
+
+def revisions_from(
+    units: tuple[CorpusIngestUnit, ...],
+) -> tuple[EligibleCorpusRevision, ...]:
+    grouped: dict[str, list[CorpusIngestUnit]] = {}
+    for unit in units:
+        grouped.setdefault(unit.revision_id, []).append(unit)
+    revisions = []
+    for revision_id, chunks in grouped.items():
+        ordered = sorted(chunks, key=lambda item: item.chunk_ordinal)
+        first = ordered[0]
+        revisions.append(
+            EligibleCorpusRevision(
+                revision_id=revision_id,
+                source_id=first.source_id,
+                item_key=first.item_key,
+                observed_at=first.observed_at,
+                source_time=first.temporal().reference_time.to_text(),
+                ingest_ids=tuple(item.ingest_id for item in ordered),
+            )
+        )
+    return tuple(
+        sorted(revisions, key=lambda item: (item.observed_at, item.revision_id))
+    )

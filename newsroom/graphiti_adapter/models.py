@@ -63,12 +63,10 @@ from .types import (
     text,
     token,
 )
+from .temporal_vocabulary import TemporalBasis
 
 
 REAL_GRAPHITI_RUNTIME_ENABLED = True
-_TEMPORAL_BASES = frozenset(
-    {"UNSET", "SOURCE_UPDATED", "SOURCE_PUBLISHED", "OBSERVED_FALLBACK"}
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1160,7 +1158,7 @@ class GraphitiAttemptRequest:
     replay_source: GraphitiReplaySource | None
     idempotency_key: str
     reference_time: UtcTimestamp | None = None
-    temporal_basis: str = "UNSET"
+    temporal_basis: TemporalBasis = TemporalBasis.UNSET
     episode_uuid: str | None = None
     generation_id: str = ""
 
@@ -1232,7 +1230,7 @@ class GraphitiAttemptRequest:
             raise GraphitiAdapterContractError(
                 "only approved replay attempts can name replay source authority"
             )
-        if self.temporal_basis not in _TEMPORAL_BASES:
+        if not isinstance(self.temporal_basis, TemporalBasis):
             raise GraphitiAdapterContractError(
                 "temporal_basis must be a labelled mapping"
             )

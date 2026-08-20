@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.surface import UnpublishedSurfacePayload
+from newsroom.control_plane.corpus import EligibleCorpusRevision
 from newsroom.control_plane.veto import VetoError, assert_private_store, refuse_public_effect
 
-SCHEMA_VERSION = "newsroom.control-plane.unpublished.v5"
+SCHEMA_VERSION = "newsroom.control-plane.unpublished.v6"
 LEDGER_GENESIS = "sha256:" + ("0" * 64)
 GRAPHITI_MAX_FAILURES = 3
 
@@ -81,6 +83,19 @@ CREATE TABLE IF NOT EXISTS unpublished_graphiti_failures(
     dead_lettered INTEGER NOT NULL DEFAULT 0 CHECK(dead_lettered IN (0,1)),
     at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS unpublished_graphiti_spend(
+    spend_id TEXT PRIMARY KEY,
+    ingest_id TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL,
+    reserved_gbp_microunits INTEGER NOT NULL,
+    actual_usd_microunits INTEGER,
+    actual_gbp_microunits INTEGER,
+    usage_basis TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('RESERVED','RECONCILED','UNRECONCILED')),
+    provider_usage_json TEXT,
+    at TEXT NOT NULL,
+    UNIQUE(ingest_id, attempt_number)
+);
 """
 
 
@@ -137,9 +152,109 @@ def append_ledger(connection: sqlite3.Connection, kind: str, payload: dict[str, 
 
 def spend_reserved(connection: sqlite3.Connection) -> bool:
     row = connection.execute(
-        "SELECT 1 FROM ledger WHERE kind='GRAPHITI_SPEND_RESERVE' LIMIT 1"
+        """
+        SELECT 1 FROM unpublished_graphiti_spend
+        WHERE status IN ('RESERVED','UNRECONCILED') LIMIT 1
+        """
     ).fetchone()
     return row is not None
+
+
+def reserve_graphiti_spend(
+    connection: sqlite3.Connection,
+    *,
+    spend_id: str,
+    ingest_id: str,
+    attempt_number: int,
+    reserved_gbp_microunits: int,
+    ceiling_gbp_microunits: int,
+) -> bool:
+    existing = connection.execute(
+        "SELECT 1 FROM unpublished_graphiti_spend WHERE spend_id=?", (spend_id,)
+    ).fetchone()
+    if existing is not None:
+        return False
+    row = connection.execute(
+        """
+        SELECT COALESCE(SUM(
+            CASE WHEN status='RECONCILED'
+                 THEN COALESCE(actual_gbp_microunits, 0)
+                 ELSE reserved_gbp_microunits END
+        ), 0)
+        FROM unpublished_graphiti_spend
+        """
+    ).fetchone()
+    committed = int(row[0]) if row else 0
+    if committed + reserved_gbp_microunits > ceiling_gbp_microunits:
+        raise RuntimeError("OD-011 Graphiti embedding cash ceiling would be exceeded")
+    connection.execute(
+        """
+        INSERT INTO unpublished_graphiti_spend(
+            spend_id, ingest_id, attempt_number, reserved_gbp_microunits,
+            actual_usd_microunits, actual_gbp_microunits, usage_basis,
+            status, provider_usage_json, at
+        ) VALUES(?,?,?,?,NULL,NULL,'PENDING_PROVIDER_REPORT','RESERVED',NULL,?)
+        """,
+        (spend_id, ingest_id, attempt_number, reserved_gbp_microunits, _now()),
+    )
+    return True
+
+
+def next_graphiti_attempt_number(
+    connection: sqlite3.Connection, ingest_id: str
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COALESCE(MAX(attempt_number), 0)
+        FROM unpublished_graphiti_spend WHERE ingest_id=?
+        """,
+        (ingest_id,),
+    ).fetchone()
+    return (int(row[0]) if row else 0) + 1
+
+
+def reconcile_graphiti_spend(
+    connection: sqlite3.Connection,
+    *,
+    spend_id: str,
+    embedding_usage: dict[str, object] | None,
+) -> dict[str, object]:
+    usage = embedding_usage or {}
+    usage_basis = str(usage.get("usage_basis") or "UNREPORTED")
+    raw_cost = usage.get("cost_usd_microunits")
+    reported = usage_basis == "PROVIDER_REPORTED" and isinstance(raw_cost, int)
+    # Conservative versioned parity conversion until a separately accepted FX
+    # table supersedes this policy: USD 1.00 reserves/debits GBP 1.00.
+    fx_policy = "USD_GBP_CONSERVATIVE_PARITY_V1"
+    actual_usd = int(raw_cost) if reported else None
+    actual_gbp = actual_usd
+    status = "RECONCILED" if reported else "UNRECONCILED"
+    connection.execute(
+        """
+        UPDATE unpublished_graphiti_spend
+        SET actual_usd_microunits=?, actual_gbp_microunits=?, usage_basis=?,
+            status=?, provider_usage_json=?, at=?
+        WHERE spend_id=?
+        """,
+        (
+            actual_usd,
+            actual_gbp,
+            usage_basis,
+            status,
+            json.dumps(usage, ensure_ascii=False, sort_keys=True),
+            _now(),
+            spend_id,
+        ),
+    )
+    return {
+        "spend_id": spend_id,
+        "usage_basis": usage_basis,
+        "status": status,
+        "actual_usd_microunits": actual_usd,
+        "actual_gbp_microunits": actual_gbp,
+        "fx_policy": fx_policy,
+        "unused_reservation_released": reported,
+    }
 
 
 def has_graphiti_ingest(connection: sqlite3.Connection, ingest_id: str) -> bool:
@@ -266,76 +381,134 @@ def clear_graphiti_failure(connection: sqlite3.Connection, ingest_id: str) -> No
 def graphiti_coverage(
     connection: sqlite3.Connection,
     *,
-    eligible_ids: tuple[str, ...],
-    observed_at: tuple[str, ...] = (),
+    revisions: tuple[EligibleCorpusRevision, ...],
     retry_count: int | None = None,
     dead_letter_count: int | None = None,
 ) -> dict[str, object]:
-    eligible = len(eligible_ids)
+    eligible_ids = tuple(
+        ingest_id for revision in revisions for ingest_id in revision.ingest_ids
+    )
     ingested_ids: set[str] = set()
-    watermark_at: str | None = None
+    proposal_counts: dict[str, int] = {}
     if eligible_ids:
         placeholders = ",".join("?" * len(eligible_ids))
         rows = connection.execute(
             f"""
-            SELECT ingest_id, at FROM unpublished_graphiti_ingest
+            SELECT ingest_id, proposal_count FROM unpublished_graphiti_ingest
             WHERE outcome IN ('COMPLETE','PARTIAL') AND ingest_id IN ({placeholders})
             """,
             eligible_ids,
         ).fetchall()
         ingested_ids = {row[0] for row in rows}
-        times = [row[1] for row in rows if row[1]]
-        watermark_at = max(times) if times else None
+        proposal_counts = {str(row[0]): int(row[1]) for row in rows}
+    successful = tuple(
+        revision
+        for revision in revisions
+        if all(ingest_id in ingested_ids for ingest_id in revision.ingest_ids)
+    )
+    successful_ids = {item.revision_id for item in successful}
+    unresolved = tuple(
+        item for item in revisions if item.revision_id not in successful_ids
+    )
+    contiguous = None
+    for revision in revisions:
+        if revision.revision_id not in successful_ids:
+            break
+        contiguous = revision
     payloads = connection.execute(
         "SELECT COUNT(*) FROM unpublished_surface_payloads"
     ).fetchone()[0]
-    metered = 0
-    for (blob,) in connection.execute(
-        "SELECT receipt_json FROM unpublished_graphiti_receipts"
-    ):
+    spend = connection.execute(
+        """
+        SELECT
+          COALESCE(SUM(CASE WHEN status='RECONCILED' THEN actual_gbp_microunits ELSE 0 END),0),
+          COALESCE(SUM(
+            CASE WHEN status IN ('RESERVED','UNRECONCILED')
+                 THEN reserved_gbp_microunits ELSE 0 END
+          ),0),
+          SUM(CASE WHEN status='UNRECONCILED' THEN 1 ELSE 0 END)
+        FROM unpublished_graphiti_spend
+        """
+    ).fetchone()
+    lags: list[int] = []
+    for revision in unresolved:
         try:
-            payload = json.loads(blob)
-        except json.JSONDecodeError:
-            continue
-        cost = payload.get("cost_microunits")
-        if isinstance(cost, int) and cost > 0:
-            metered += cost
-    pending = [
-        observed_at[index]
-        for index, ingest_id in enumerate(eligible_ids)
-        if ingest_id not in ingested_ids and index < len(observed_at)
-    ]
-    lag_seconds = 0
-    if pending:
-        try:
-            oldest = min(pending)
-            then = datetime.fromisoformat(oldest.replace("Z", "+00:00"))
+            then = datetime.fromisoformat(revision.observed_at.replace("Z", "+00:00"))
             if then.tzinfo is None:
                 then = then.replace(tzinfo=UTC)
-            lag_seconds = max(int((datetime.now(tz=UTC) - then).total_seconds()), 0)
+            lags.append(max(int((datetime.now(tz=UTC) - then).total_seconds()), 0))
         except ValueError:
-            lag_seconds = 0
+            continue
+    failure_rows: list[tuple[str, int, int]] = []
+    if eligible_ids:
+        placeholders = ",".join("?" * len(eligible_ids))
+        failure_rows = [
+            (str(row[0]), int(row[1]), int(row[2]))
+            for row in connection.execute(
+                f"""
+                SELECT ingest_id, retry_count, dead_lettered
+                FROM unpublished_graphiti_failures
+                WHERE ingest_id IN ({placeholders})
+                """,
+                eligible_ids,
+            )
+        ]
     if retry_count is None:
-        retry_row = connection.execute(
-            "SELECT COALESCE(SUM(retry_count), 0) FROM unpublished_graphiti_failures"
-        ).fetchone()
-        retry_count = int(retry_row[0]) if retry_row else 0
+        retry_count = sum(row[1] for row in failure_rows)
+    failed_ids = {row[0] for row in failure_rows}
+    dead_ids = {row[0] for row in failure_rows if row[2] == 1}
+    calculated_dead_revisions = sum(
+        any(ingest_id in dead_ids for ingest_id in revision.ingest_ids)
+        for revision in unresolved
+    )
     if dead_letter_count is None:
-        dead_row = connection.execute(
-            "SELECT COUNT(*) FROM unpublished_graphiti_failures WHERE dead_lettered=1"
-        ).fetchone()
-        dead_letter_count = int(dead_row[0]) if dead_row else 0
+        dead_letter_count = calculated_dead_revisions
+    held_or_failed = sum(
+        any(ingest_id in failed_ids for ingest_id in revision.ingest_ids)
+        for revision in unresolved
+    )
+    p95_lag = (
+        sorted(lags)[max(math.ceil(len(lags) * 0.95) - 1, 0)] if lags else 0
+    )
+    oldest_gap = unresolved[0] if unresolved else None
     return {
-        "eligible_source_revisions": eligible,
-        "successfully_ingested_revisions": len(ingested_ids),
-        "unresolved_gap": eligible - len(ingested_ids),
-        "ingest_watermark_at": watermark_at,
-        "lag_seconds": lag_seconds,
+        "eligible_source_revisions": len(revisions),
+        "eligible_ingest_chunks": len(eligible_ids),
+        "successfully_ingested_revisions": len(successful),
+        "held_or_failed_revisions": held_or_failed,
+        "unresolved_gap": len(unresolved),
+        "contiguous_input_watermark": (
+            None if contiguous is None else contiguous.revision_id
+        ),
+        "ingest_watermark_at": None if contiguous is None else contiguous.observed_at,
+        "oldest_unresolved_gap": (
+            None
+            if oldest_gap is None
+            else {
+                "revision_id": oldest_gap.revision_id,
+                "source_id": oldest_gap.source_id,
+                "item_key": oldest_gap.item_key,
+                "observed_at": oldest_gap.observed_at,
+            }
+        ),
+        "latest_source_time_covered": (
+            max(item.source_time for item in successful) if successful else None
+        ),
+        "oldest_ingest_lag_seconds": max(lags) if lags else 0,
+        "p95_ingest_lag_seconds": p95_lag,
+        "lag_seconds": max(lags) if lags else 0,
         "retry_count": retry_count,
+        "retry_attempt_count": retry_count,
         "dead_letter_count": dead_letter_count,
-        "admission_backlog": len(ingested_ids),
+        "dead_letter_revisions": dead_letter_count,
+        "dead_letter_chunks": len(dead_ids),
+        "admission_backlog": sum(proposal_counts.values()),
+        "governed_projection_watermark": None,
         "reserved_spend": spend_reserved(connection),
-        "actual_metered_spend_microunits": metered,
+        "outstanding_reserved_spend_gbp_microunits": int(spend[1]) if spend else 0,
+        "actual_metered_spend_microunits": int(spend[0]) if spend else 0,
+        "actual_metered_spend_gbp_microunits": int(spend[0]) if spend else 0,
+        "unreconciled_embedding_attempts": int(spend[2]) if spend and spend[2] else 0,
         "unpublished_payload_count": payloads,
         "payload_count_is_not_coverage": True,
     }

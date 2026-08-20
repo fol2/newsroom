@@ -47,6 +47,7 @@ from .types import (
     GraphitiWorkspaceId,
     GraphitiWorkspacePolicyId,
 )
+from .temporal_vocabulary import parse_temporal_basis
 
 GRAPHITI_CONFIGURATION_REGISTER_COMMAND = "graphiti.adapter.configuration.register"
 GRAPHITI_ATTEMPT_EXECUTE_COMMAND = "graphiti.adapter.attempt.execute"
@@ -449,13 +450,13 @@ def _attempt_payload(value: Any) -> bytes:
     else:
         _digest(replay_digest, field="replay_source_digest")
     basis = _string(item["temporal_basis"], field="temporal_basis")
-    if basis not in {
-        "UNSET",
-        "SOURCE_UPDATED",
-        "SOURCE_PUBLISHED",
-        "OBSERVED_FALLBACK",
-    }:
-        raise PayloadSchemaValidationError("temporal_basis must be a labelled mapping")
+    try:
+        parse_temporal_basis(basis)
+    except ValueError as exc:
+        raise PayloadSchemaValidationError(
+            "temporal_basis must be a labelled mapping"
+        ) from exc
+
     reference_time = item["reference_time"]
     if reference_time is not None:
         _string(reference_time, field="reference_time")

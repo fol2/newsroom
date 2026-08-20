@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from typing import TypeVar
 from uuid import UUID
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.objects import ObjectAccessDecisionId
-from newsroom.authority.types import ObjectAdmissionId
+from newsroom.authority.types import ObjectAdmissionId, UUIDv4Id
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_FALLBACK,
     GRAPHITI_CHAT_MODEL,
@@ -28,6 +29,7 @@ from newsroom.sources.types import (
 )
 
 MAX_EPISODE_BYTES = 8 * 1024
+TypedId = TypeVar("TypedId", bound=UUIDv4Id)
 
 
 def uuid4_from_digest(digest: bytes) -> UUID:
@@ -37,13 +39,13 @@ def uuid4_from_digest(digest: bytes) -> UUID:
     return UUID(bytes=bytes(raw))
 
 
-def typed_id(factory, *parts: object):
+def typed_id(factory: type[TypedId], *parts: object) -> TypedId:
     digest = digest_bytes(canonical_json_bytes(list(parts)))
     hex_part = digest.removeprefix("sha256:")
     return factory.parse(str(uuid4_from_digest(bytes.fromhex(hex_part[:32]))))
 
 
-def _typed(factory, *parts: object):
+def _typed(factory: type[TypedId], *parts: object) -> TypedId:
     return typed_id(factory, *parts)
 
 

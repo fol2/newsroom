@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from newsroom.authority.canonical import digest_bytes, digest_canonical
+from newsroom.authority.objects import ObjectAccessDecisionId
+from newsroom.authority.types import ObjectAdmissionId
 from newsroom.extraction.models import (
     ExtractionInputBinding,
     ExtractionPassageInput,
@@ -71,8 +73,8 @@ def _passage(
     text: str,
     *,
     ingest_id: str,
-    admission_id,
-    access_decision_id,
+    admission_id: ObjectAdmissionId,
+    access_decision_id: ObjectAccessDecisionId,
 ) -> ExtractionPassageInput:
     encoded = text.encode("utf-8")
     blob = digest_bytes(encoded)

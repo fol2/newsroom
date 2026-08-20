@@ -14,7 +14,6 @@ _TAG = re.compile(r"<[^>]+>")
 _XML_PARSER = etree.XMLParser(
     resolve_entities=False, no_network=True, recover=True, huge_tree=False
 )
-MAX_BODY_CHARS = 4_000
 MAX_HEADLINE_CHARS = 240
 
 
@@ -97,11 +96,10 @@ def _from_entry(source_id: str, element: etree._Element) -> SourceItem | None:
                 link = child.get("href", "").strip()
                 break
     key = _child_text(element, ("guid", "id")) or link or headline
-    body = _clip(
+    body = (
         _child_text(element, ("description", "summary", "content", "encoded"))
-        or headline,
-        MAX_BODY_CHARS,
-    )
+        or headline
+    ).strip()
     published = parse_source_time(
         _child_text(element, ("published", "pubdate", "date"))
     )
@@ -147,7 +145,7 @@ def _from_mapping(source_id: str, payload: dict[str, object], *, fallback_key: s
         source_id,
         key,
         _clip(_plain(title), MAX_HEADLINE_CHARS),
-        _clip(_plain(description), MAX_BODY_CHARS),
+        _plain(description),
         url,
         parse_source_time(published_raw) if isinstance(published_raw, str) else None,
         parse_source_time(updated_raw) if isinstance(updated_raw, str) else None,

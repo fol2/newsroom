@@ -10,7 +10,11 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from newsroom.control_plane.corpus import units_from
+from newsroom.control_plane.corpus import (
+    CorpusIngestUnit,
+    revisions_from,
+    units_from,
+)
 from newsroom.control_plane.editorial import GroupedObservation, form_candidates
 from newsroom.control_plane.evidence import package_for
 from newsroom.control_plane.graphiti import GraphitiCycleResult, GraphitiPort
@@ -25,9 +29,11 @@ from newsroom.control_plane.store import (
     has_graphiti_ingest,
     insert_graphiti_ingest,
     insert_payload,
+    next_graphiti_attempt_number,
     record_graphiti_coverage,
     record_graphiti_failure,
-    spend_reserved,
+    reconcile_graphiti_spend,
+    reserve_graphiti_spend,
 )
 from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.veto import VetoError, assert_private_store
@@ -59,18 +65,24 @@ class CycleReport:
     eligible: int = 0
 
 
-def _latest_run(connection: sqlite3.Connection) -> str | None:
-    row = connection.execute(
-        "SELECT run_id FROM proving_runs ORDER BY started_at DESC LIMIT 1"
-    ).fetchone()
-    return row[0] if row else None
+@dataclass(frozen=True, slots=True)
+class _ProvingObservation:
+    run_id: str
+    source_id: str
+    url: str
+    fetched_at: str
+    status_code: int
+    body_digest: str
+    body: bytes
 
 
 def _now() -> str:
     return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def _bind_result(unit, result: GraphitiCycleResult) -> GraphitiCycleResult:
+def _bind_result(
+    unit: CorpusIngestUnit, result: GraphitiCycleResult
+) -> GraphitiCycleResult:
     if (result.ingest_id, result.source_id, result.item_key) != (
         unit.ingest_id,
         unit.source_id,
@@ -80,7 +92,12 @@ def _bind_result(unit, result: GraphitiCycleResult) -> GraphitiCycleResult:
     return result
 
 
-def _receipt(unit, result: GraphitiCycleResult) -> dict[str, object]:
+def _receipt(
+    unit: CorpusIngestUnit,
+    result: GraphitiCycleResult,
+    *,
+    accounting: dict[str, object],
+) -> dict[str, object]:
     return {
         "ingest_id": unit.ingest_id,
         "source_id": unit.source_id,
@@ -91,6 +108,7 @@ def _receipt(unit, result: GraphitiCycleResult) -> dict[str, object]:
         "updated_at": unit.updated_at,
         "observed_at": unit.observed_at,
         "chunk_ordinal": unit.chunk_ordinal,
+        "revision_id": unit.revision_id,
         "outcome": result.outcome,
         "proposal_count": result.proposal_count,
         "entity_count": result.entity_count,
@@ -103,7 +121,11 @@ def _receipt(unit, result: GraphitiCycleResult) -> dict[str, object]:
         "episode_uuid": result.episode_uuid,
         "entities": list(result.entities),
         "relations": list(result.relations),
+        "proposals": list(result.proposals),
+        "passages": list(result.passages),
         "chat_invocations": list(result.chat_invocations),
+        "embedding_usage": result.embedding_usage,
+        "accounting": accounting,
         "request_tokens": result.request_tokens,
         "response_tokens": result.response_tokens,
         "cost_microunits": result.cost_microunits,
@@ -119,20 +141,29 @@ def _receipt(unit, result: GraphitiCycleResult) -> dict[str, object]:
     }
 
 
-def _queue(unpublished: sqlite3.Connection, units):
-    queued = []
+def _queue(
+    unpublished: sqlite3.Connection,
+    units: tuple[CorpusIngestUnit, ...],
+) -> list[tuple[str, int, str, CorpusIngestUnit]]:
+    queued: list[tuple[str, int, str, CorpusIngestUnit]] = []
     for unit in units:
         if has_graphiti_ingest(unpublished, unit.ingest_id):
             continue
         retries, dead = graphiti_failure_state(unpublished, unit.ingest_id)
         if dead:
             continue
-        queued.append((retries, unit.ingest_id, unit))
+        queued.append((unit.observed_at, retries, unit.ingest_id, unit))
     queued.sort()
     return queued
 
 
-def _fail(unpublished: sqlite3.Connection, unit, *, outcome: str, failure_code: str) -> None:
+def _fail(
+    unpublished: sqlite3.Connection,
+    unit: CorpusIngestUnit,
+    *,
+    outcome: str,
+    failure_code: str,
+) -> None:
     record_graphiti_failure(
         unpublished,
         ingest_id=unit.ingest_id,
@@ -147,38 +178,57 @@ def _ingest(
     unpublished: sqlite3.Connection,
     *,
     graphiti: GraphitiPort,
-    units,
+    units: tuple[CorpusIngestUnit, ...],
     max_graphiti: int,
     proving_run_id: str,
 ) -> int:
-    if not spend_reserved(unpublished):
-        append_ledger(
-            unpublished,
-            "GRAPHITI_SPEND_RESERVE",
-            {
-                "profile": "EVALUATION",
-                "metered_api": OPENROUTER_API,
-                "metered_use": "embeddings",
-                "chat": GRAPHITI_CHAT_MODEL,
-                "chat_fallback": GRAPHITI_CHAT_FALLBACK,
-                "chat_subscription_not_debited": True,
-                "od_011_cash_ceiling_gbp": OD_011_CASH_CEILING_GBP,
-                "prespent": False,
-                "hosts": ["openrouter.ai"],
-                "generation_id": GRAPHITI_GENERATION_ID,
-                "proving_run_id": proving_run_id,
-            },
-        )
     attempted = 0
-    for _retries, _ingest_id, unit in _queue(unpublished, units):
+    for _observed_at, _retries, _ingest_id, unit in _queue(unpublished, units):
         if attempted >= max_graphiti:
             break
         attempted += 1
+        attempt_number = next_graphiti_attempt_number(unpublished, unit.ingest_id)
+        spend_id = f"{unit.ingest_id}:{attempt_number}"
+        reserved = reserve_graphiti_spend(
+            unpublished,
+            spend_id=spend_id,
+            ingest_id=unit.ingest_id,
+            attempt_number=attempt_number,
+            reserved_gbp_microunits=500_000,
+            ceiling_gbp_microunits=OD_011_CASH_CEILING_GBP * 1_000_000,
+        )
+        if reserved:
+            append_ledger(
+                unpublished,
+                "GRAPHITI_SPEND_RESERVE",
+                {
+                    "spend_id": spend_id,
+                    "ingest_id": unit.ingest_id,
+                    "attempt_number": attempt_number,
+                    "profile": "EVALUATION",
+                    "metered_api": OPENROUTER_API,
+                    "metered_use": "embeddings",
+                    "reserved_gbp_microunits": 500_000,
+                    "chat": GRAPHITI_CHAT_MODEL,
+                    "chat_fallback": GRAPHITI_CHAT_FALLBACK,
+                    "chat_subscription_not_debited": True,
+                    "od_011_cash_ceiling_gbp": OD_011_CASH_CEILING_GBP,
+                    "prespent": False,
+                    "hosts": ["openrouter.ai"],
+                    "generation_id": GRAPHITI_GENERATION_ID,
+                    "proving_run_id": proving_run_id,
+                },
+            )
+            unpublished.commit()
         try:
             result = _bind_result(unit, graphiti.ingest(unit))
         except VetoError:
             raise
         except (RuntimeError, ValueError, OSError, json.JSONDecodeError):
+            accounting = reconcile_graphiti_spend(
+                unpublished, spend_id=spend_id, embedding_usage=None
+            )
+            append_ledger(unpublished, "GRAPHITI_SPEND_RECONCILE", accounting)
             _fail(
                 unpublished,
                 unit,
@@ -186,7 +236,13 @@ def _ingest(
                 failure_code="PRODUCER_INTERNAL_ERROR",
             )
             continue
-        receipt = _receipt(unit, result)
+        accounting = reconcile_graphiti_spend(
+            unpublished,
+            spend_id=spend_id,
+            embedding_usage=result.embedding_usage,
+        )
+        append_ledger(unpublished, "GRAPHITI_SPEND_RECONCILE", accounting)
+        receipt = _receipt(unit, result, accounting=accounting)
         append_ledger(unpublished, "GRAPHITI_EVALUATION_ATTEMPT", receipt)
         if result.outcome in {"COMPLETE", "PARTIAL"}:
             insert_graphiti_ingest(
@@ -216,6 +272,66 @@ def _ingest(
     return attempted
 
 
+def _parsed_observations(
+    rows: tuple[_ProvingObservation, ...],
+) -> tuple[GroupedObservation, ...]:
+    observations: list[GroupedObservation] = []
+    for row in rows:
+        for item in parse_observation(
+            source_id=row.source_id, url=row.url, body=row.body
+        ):
+            observations.append(
+                GroupedObservation(
+                    source_id=row.source_id,
+                    observation_digest=row.body_digest,
+                    item=item,
+                    observed_at=row.fetched_at,
+                )
+            )
+    return tuple(observations)
+
+
+def _permitted_rows(
+    proving: sqlite3.Connection,
+) -> tuple[str, tuple[_ProvingObservation, ...], tuple[_ProvingObservation, ...]]:
+    runs = proving.execute(
+        "SELECT run_id FROM proving_runs ORDER BY started_at, run_id"
+    ).fetchall()
+    if not runs:
+        raise ValueError("proving store has no runs")
+    latest_run_id = str(runs[-1][0])
+    all_rows: list[_ProvingObservation] = []
+    latest_rows: list[_ProvingObservation] = []
+    for (raw_run_id,) in runs:
+        run_id = str(raw_run_id)
+        permitted = rights_permitted_sources(proving, run_id)
+        values = proving.execute(
+            """
+            SELECT source_id, url, fetched_at, status_code, body_digest, body
+            FROM proving_observations
+            WHERE run_id=?
+            ORDER BY source_id, fetched_at, body_digest
+            """,
+            (run_id,),
+        ).fetchall()
+        for source_id, url, fetched_at, status_code, body_digest, body in values:
+            if source_id not in permitted or int(status_code) != 200 or not body:
+                continue
+            row = _ProvingObservation(
+                run_id=run_id,
+                source_id=str(source_id),
+                url=str(url),
+                fetched_at=str(fetched_at),
+                status_code=int(status_code),
+                body_digest=str(body_digest),
+                body=bytes(body),
+            )
+            all_rows.append(row)
+            if run_id == latest_run_id:
+                latest_rows.append(row)
+    return latest_run_id, tuple(latest_rows), tuple(all_rows)
+
+
 def run_cycle(
     *,
     proving_store: str,
@@ -232,42 +348,28 @@ def run_cycle(
     proving = sqlite3.connect(proving_store)
     proving.execute("PRAGMA query_only=ON")
     try:
-        run_id = _latest_run(proving)
-        if run_id is None:
-            raise ValueError("proving store has no runs")
-        permitted = rights_permitted_sources(proving, run_id)
-        rows = proving.execute(
-            """
-            SELECT source_id, url, fetched_at, status_code, body_digest, body
-            FROM proving_observations
-            WHERE run_id=?
-            ORDER BY source_id
-            """,
-            (run_id,),
-        ).fetchall()
+        run_id, latest_rows, corpus_rows = _permitted_rows(proving)
     finally:
         proving.close()
 
-    observations: list[GroupedObservation] = []
-    sources = 0
-    for source_id, url, fetched_at, status_code, body_digest, body in rows:
-        if source_id not in permitted:
-            continue
-        if int(status_code) != 200 or not body:
-            continue
-        sources += 1
-        for item in parse_observation(source_id=source_id, url=url, body=body):
-            observations.append(
-                GroupedObservation(
-                    source_id=source_id,
-                    observation_digest=body_digest,
-                    item=item,
-                    observed_at=str(fetched_at),
-                )
-            )
-
-    candidates = form_candidates(tuple(observations))
-    units = units_from(tuple(observations), proving_run_id=run_id)
+    observations = _parsed_observations(latest_rows)
+    corpus_observations_by_run: dict[str, list[GroupedObservation]] = {}
+    for row in corpus_rows:
+        corpus_observations_by_run.setdefault(row.run_id, []).extend(
+            _parsed_observations((row,))
+        )
+    unit_by_id: dict[str, CorpusIngestUnit] = {}
+    for proving_run_id, run_observations in corpus_observations_by_run.items():
+        for unit in units_from(tuple(run_observations), proving_run_id=proving_run_id):
+            unit_by_id.setdefault(unit.ingest_id, unit)
+    units = tuple(
+        sorted(
+            unit_by_id.values(), key=lambda item: (item.observed_at, item.ingest_id)
+        )
+    )
+    revisions = revisions_from(units)
+    candidates = form_candidates(observations)
+    sources = len({row.source_id for row in latest_rows})
     unpublished = connect(unpublished_store)
     minted = 0
     duplicate = 0
@@ -278,9 +380,10 @@ def run_cycle(
             "PRIVATE_CYCLE_START",
             {
                 "proving_run_id": run_id,
-                "observations": len(rows),
+                "observations": len(latest_rows),
                 "candidates": len(candidates),
-                "eligible_source_revisions": len(units),
+                "eligible_source_revisions": len(revisions),
+                "eligible_ingest_chunks": len(units),
                 "writer_id": writer.writer_id,
             },
         )
@@ -329,8 +432,7 @@ def run_cycle(
                 duplicate += 1
         coverage = graphiti_coverage(
             unpublished,
-            eligible_ids=tuple(unit.ingest_id for unit in units),
-            observed_at=tuple(unit.observed_at for unit in units),
+            revisions=revisions,
         )
         record_graphiti_coverage(unpublished, coverage)
         digest = append_ledger(
@@ -359,5 +461,5 @@ def run_cycle(
         digest,
         writer.writer_id,
         graphiti_ok,
-        len(units),
+        len(revisions),
     )
