@@ -1,0 +1,223 @@
+{
+  "group_id": "newsroom-eval-proposal",
+  "captured_at": "2026-08-20T10:54:41.186978Z",
+  "counts": {
+    "nodes": 14,
+    "edges": 18,
+    "episodes": 4
+  },
+  "nodes": [
+    {
+      "name": "eval-probe-json-object-001",
+      "labels": [
+        "Episodic"
+      ]
+    },
+    {
+      "name": "香港天文台",
+      "labels": [
+        "Entity"
+      ]
+    },
+    {
+      "name": "強烈季候風信號",
+      "labels": [
+        "Entity"
+      ]
+    },
+    {
+      "name": "a55b6643-ea96-4a52-af0f-33c581daea17",
+      "labels": [
+        "Episodic"
+      ]
+    },
+    {
+      "name": "HK-04",
+      "labels": [
+        "Entity"
+      ]
+    },
+    {
+      "name": "立法會七題",
+      "labels": [
+        "Entity"
+      ]
+    },
+    {
+      "name": "科技與生活科課程",
+      "labels": [
+        "Entity"
+      ]
+    },
+    {
+      "name": "1e9191dc-7451-432d-88dc-a4ec45e7025c",
+      "labels": [
+        "Episodic"
+      ]
+    },
+    {
+      "name": "RAD-02",
+      "labels": [
+        "Entity"
+      ]
+    },
+    {
+      "name": "United Kingdom",
+      "labels": [
+        "Entity"
+      ]
+    },
+    {
+      "name": "Simon King",
+      "labels": [
+        "Entity"
+      ]
+    },
+    {
+      "name": "71f94aae-1d00-4574-b4cd-4a67badafcc4",
+      "labels": [
+        "Episodic"
+      ]
+    },
+    {
+      "name": "UK-01: Registration as a British Overseas Territories citizen Guidance",
+      "labels": [
+        "Entity"
+      ]
+    },
+    {
+      "name": "British Overseas Territories citizen",
+      "labels": [
+        "Entity"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "eval-probe-json-object-001",
+      "type": "MENTIONS",
+      "to": "香港天文台",
+      "fact": ""
+    },
+    {
+      "from": "eval-probe-json-object-001",
+      "type": "MENTIONS",
+      "to": "強烈季候風信號",
+      "fact": ""
+    },
+    {
+      "from": "香港天文台",
+      "type": "RELATES_TO",
+      "to": "強烈季候風信號",
+      "fact": "香港天文台發出強烈季候風信號。"
+    },
+    {
+      "from": "a55b6643-ea96-4a52-af0f-33c581daea17",
+      "type": "MENTIONS",
+      "to": "HK-04",
+      "fact": ""
+    },
+    {
+      "from": "a55b6643-ea96-4a52-af0f-33c581daea17",
+      "type": "MENTIONS",
+      "to": "立法會七題",
+      "fact": ""
+    },
+    {
+      "from": "a55b6643-ea96-4a52-af0f-33c581daea17",
+      "type": "MENTIONS",
+      "to": "科技與生活科課程",
+      "fact": ""
+    },
+    {
+      "from": "HK-04",
+      "type": "RELATES_TO",
+      "to": "立法會七題",
+      "fact": "HK-04 被標示為「立法會七題」。"
+    },
+    {
+      "from": "立法會七題",
+      "type": "RELATES_TO",
+      "to": "科技與生活科課程",
+      "fact": "立法會七題 的主題是 科技與生活科課程。"
+    },
+    {
+      "from": "HK-04",
+      "type": "RELATES_TO",
+      "to": "科技與生活科課程",
+      "fact": "HK-04 與 科技與生活科課程 有關。"
+    },
+    {
+      "from": "1e9191dc-7451-432d-88dc-a4ec45e7025c",
+      "type": "MENTIONS",
+      "to": "RAD-02",
+      "fact": ""
+    },
+    {
+      "from": "1e9191dc-7451-432d-88dc-a4ec45e7025c",
+      "type": "MENTIONS",
+      "to": "United Kingdom",
+      "fact": ""
+    },
+    {
+      "from": "1e9191dc-7451-432d-88dc-a4ec45e7025c",
+      "type": "MENTIONS",
+      "to": "Simon King",
+      "fact": ""
+    },
+    {
+      "from": "RAD-02",
+      "type": "RELATES_TO",
+      "to": "United Kingdom",
+      "fact": "RAD-02 reports that rain is arriving for some and asks whether another United Kingdom heatwave could be on the way in September; it notes some long-range forecasts suggesting the United Kingdom's autumn could be hotter and drier than average."
+    },
+    {
+      "from": "Simon King",
+      "type": "RELATES_TO",
+      "to": "United Kingdom",
+      "fact": "Simon King explores whether a warm spell might be on the cards for the United Kingdom."
+    },
+    {
+      "from": "RAD-02",
+      "type": "RELATES_TO",
+      "to": "Simon King",
+      "fact": "RAD-02 features a segment in which Simon King explores whether a warm spell might be on the cards."
+    },
+    {
+      "from": "71f94aae-1d00-4574-b4cd-4a67badafcc4",
+      "type": "MENTIONS",
+      "to": "UK-01: Registration as a British Overseas Territories citizen Guidance",
+      "fact": ""
+    },
+    {
+      "from": "71f94aae-1d00-4574-b4cd-4a67badafcc4",
+      "type": "MENTIONS",
+      "to": "British Overseas Territories citizen",
+      "fact": ""
+    },
+    {
+      "from": "UK-01: Registration as a British Overseas Territories citizen Guidance",
+      "type": "RELATES_TO",
+      "to": "British Overseas Territories citizen",
+      "fact": "The 'UK-01: Registration as a British Overseas Territories citizen Guidance' provides guidance about registration as a British Overseas Territories citizen for people born before July 2006 to unmarried fathers connected to a British overseas territory."
+    }
+  ],
+  "episodes": [
+    {
+      "name": "eval-probe-json-object-001",
+      "src": "newsroom-eval-proposal"
+    },
+    {
+      "name": "a55b6643-ea96-4a52-af0f-33c581daea17",
+      "src": "newsroom-eval-proposal"
+    },
+    {
+      "name": "1e9191dc-7451-432d-88dc-a4ec45e7025c",
+      "src": "newsroom-eval-proposal"
+    },
+    {
+      "name": "71f94aae-1d00-4574-b4cd-4a67badafcc4",
+      "src": "newsroom-eval-proposal"
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "captured_at": "2026-08-20T10:54:41.186978Z",
+  "git_head": "46d7d67a0a7bac11fa00903437582ae33b956b13",
+  "note": "Host freeze of unpublished Control Plane store plus disposable Graphiti workspace counts. Article bodies omitted. Not a Neo4j dump and not admitted GraphRAG.",
+  "omitted": [
+    "unpublished_surface_payloads.body",
+    "live Neo4j Community database files",
+    "Keychain secrets",
+    "OpenRouter invoices / token counts",
+    "admitted governed graph (none expected for this workspace)"
+  ],
+  "schedule_on_host": {
+    "launchagent": "com.jamesto.newsroom-control-plane",
+    "interval_seconds_after_cycle": 300,
+    "max_writes_per_cycle": 5,
+    "max_graphiti_extracts_per_cycle": 1,
+    "graphiti_position": "after unpublished writes in the same cycle"
+  },
+  "cost_policy": {
+    "od_011_cash_ceiling_gbp": 250,
+    "pre_spend": false,
+    "graphiti_metered": "OpenRouter gpt-5-mini + text-embedding-3-large",
+    "writer_not_debited_from_od_011": true,
+    "ledgered_spend_reserve_rows": 1,
+    "per_extract_token_invoice": "not in ledger"
+  },
+  "unpublished_store": {
+    "payloads": 176,
+    "graphiti_attempts": 3,
+    "ledger_rows": 137,
+    "ledger_by_kind": {
+      "GRAPHITI_EVALUATION_ATTEMPT": 4,
+      "GRAPHITI_SPEND_RESERVE": 1,
+      "PRIVATE_CYCLE_CLOSE": 66,
+      "PRIVATE_CYCLE_START": 66
+    },
+    "payloads_by_source_lineage": {
+      "[\"HK-04\"]": 102,
+      "[\"RAD-02\"]": 30,
+      "[\"UK-05\"]": 12,
+      "[\"RAD-01\"]": 12,
+      "[\"HK-01\"]": 11,
+      "[\"UK-01\"]": 6,
+      "[\"UK-10\"]": 1,
+      "[\"UK-03\"]": 1,
+      "[\"UK-02\"]": 1
+    }
+  },
+  "proving_store": {
+    "runs": 69,
+    "observations": 690,
+    "latest_run_id": "proving-9p-private-beta-20260820T104249Z",
+    "latest_run_started_at": "2026-08-20T10:42:50.392710Z"
+  },
+  "neo4j_eval_workspace": {
+    "group_id": "newsroom-eval-proposal",
+    "nodes": 14,
+    "edges": 18,
+    "episodes": 4,
+    "trust": "PROPOSED / disposable Graphiti workspace, not admitted GraphRAG"
+  }
+}
