@@ -395,7 +395,13 @@ def test_cli_writer_uses_grok_then_falls_back_to_cursor_agent() -> None:
 def test_cli_writer_prefers_grok_build_cli() -> None:
     def grok(_prompt: str) -> str:
         return json.dumps(
-            {"title": "【未出版】Grok稿", "body": "【未出版原創】Grok Build CLI 正文。"}
+            {
+                "text": "",
+                "structured_output": {
+                    "title": "【未出版】Grok稿",
+                    "body": "【未出版原創】Grok Build CLI 正文。",
+                },
+            }
         )
 
     def cursor(_prompt: str) -> str:
@@ -404,6 +410,24 @@ def test_cli_writer_prefers_grok_build_cli() -> None:
     copy = CliChainWriter(primary=grok, fallback=cursor).write(*_sample_candidate_package())
     assert copy.writer_id == "grok-build-cli-cont-writer"
     assert "Grok" in copy.title
+
+
+def test_cli_writer_reads_title_from_grok_text_envelope() -> None:
+    def grok(_prompt: str) -> str:
+        return json.dumps(
+            {
+                "text": json.dumps(
+                    {"title": "【未出版】信封稿", "body": "【未出版原創】text 欄。"},
+                    ensure_ascii=False,
+                )
+            }
+        )
+
+    def cursor(_prompt: str) -> str:
+        raise AssertionError("fallback must not run")
+
+    copy = CliChainWriter(primary=grok, fallback=cursor).write(*_sample_candidate_package())
+    assert copy.title == "【未出版】信封稿"
 
 
 def test_broker_error_does_not_include_secret(monkeypatch) -> None:

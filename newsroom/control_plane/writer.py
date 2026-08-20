@@ -84,25 +84,46 @@ def _extract_json(raw: str) -> str:
     return raw[start : end + 1]
 
 
-def _parse_copy(raw: str) -> tuple[str, str]:
-    payload = json.loads(_extract_json(raw))
+def _copy_fields(payload: object) -> tuple[str, str] | None:
+    if not isinstance(payload, dict):
+        return None
     title = payload.get("title")
     body = payload.get("body")
-    if not isinstance(title, str) or not isinstance(body, str):
-        raise RuntimeError("writer JSON missing title or body")
-    return title.strip(), body.strip()
+    if isinstance(title, str) and isinstance(body, str):
+        return title.strip(), body.strip()
+    return None
+
+
+def _parse_copy(raw: str) -> tuple[str, str]:
+    payload = json.loads(_extract_json(raw))
+    found = _copy_fields(payload)
+    if found:
+        return found
+    for key in ("structured_output", "structuredOutput"):
+        found = _copy_fields(payload.get(key))
+        if found:
+            return found
+    text = payload.get("text")
+    if isinstance(text, str) and text.strip():
+        found = _copy_fields(json.loads(_extract_json(text)))
+        if found:
+            return found
+    raise RuntimeError("writer JSON missing title or body")
 
 
 def _run(command: tuple[str, ...], *, timeout: int) -> str:
-    result = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    name = os.path.basename(command[0])
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{name} writer timed out") from None
     if result.returncode != 0:
-        name = os.path.basename(command[0])
         raise RuntimeError(f"{name} writer failed")
     if not result.stdout.strip():
         raise RuntimeError("writer returned empty stdout")
@@ -127,8 +148,7 @@ def run_grok_cli(prompt: str) -> str:
                 "--json-schema",
                 schema,
                 "--disable-web-search",
-                "--permission-mode",
-                "plan",
+                "--no-plan",
                 "--max-turns",
                 "1",
                 "--no-subagents",
