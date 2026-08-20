@@ -122,6 +122,7 @@ class CorpusIngestUnit:
             representation_digest=self.representation_digest,
             published_at=self.published_at,
             updated_at=self.updated_at,
+            observed_at=self.observed_at,
             chunk_ordinal=self.chunk_ordinal,
         )
 

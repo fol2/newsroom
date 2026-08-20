@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,7 +22,7 @@ from newsroom.control_plane.editorial import (
     form_candidates,
 )
 from newsroom.control_plane.evidence import EvidencePackage, package_for
-from newsroom.control_plane.graphiti import GraphitiCycleResult
+from newsroom.control_plane.graphiti import EvaluationGraphitiRunner, GraphitiCycleResult
 from newsroom.control_plane.items import SourceItem, parse_observation, parse_source_time
 from newsroom.control_plane.veto import VetoError
 from newsroom.control_plane.writer import FixtureWriter, WriterCopy
@@ -604,6 +605,16 @@ def test_same_immutable_revision_is_not_reingested_after_polling() -> None:
     )
     assert first.ingest_id == second.ingest_id
     assert first.ingest_id != third.ingest_id
+    fallback_later = replace(
+        first,
+        published_at=None,
+        observed_at="2026-08-20T00:00:00.000000Z",
+    )
+    fallback_earlier = replace(
+        fallback_later,
+        observed_at="2026-08-19T00:00:00.000000Z",
+    )
+    assert fallback_later.ingest_id != fallback_earlier.ingest_id
 
 
 def test_long_body_is_chunked_not_truncated() -> None:
@@ -1307,3 +1318,63 @@ def test_result_binding_rejects_generation_and_receipt_digest_drift() -> None:
     tampered = {**result.raw_receipt, "episode_uuid": "foreign"}
     with pytest.raises(ValueError, match="digest"):
         _bind_result(unit, replace(result, raw_receipt=tampered))
+
+
+def test_evaluation_runner_reads_provider_attempt_after_adapter_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    calls: list[str] = []
+    payload = {
+        "provider_attempt_number": 1,
+        "episode_uuid": "episode",
+        "entities": [],
+        "relations": [],
+        "proposals": [],
+        "passages": [],
+        "chat_invocations": [],
+        "embedding_usage": {
+            "usage_basis": "NO_EMBEDDING_CALL",
+            "request_count": 0,
+        },
+        "usage_basis": "NO_EMBEDDING_CALL",
+        "raw_output_digest": "sha256:receipt",
+    }
+
+    class Adapter:
+        def execute(self, *, attempt: object, workspace_root: object) -> object:
+            del attempt, workspace_root
+            calls.append("execute")
+            return SimpleNamespace(
+                outcome=SimpleNamespace(value="COMPLETE"),
+                failure_code="NONE",
+                produced=SimpleNamespace(
+                    raw_output_value=payload,
+                    attempt_receipt_value=None,
+                    proposals=(),
+                    usage=SimpleNamespace(
+                        request_tokens=0,
+                        response_tokens=0,
+                        cost_microunits=0,
+                    ),
+                ),
+            )
+
+    monkeypatch.setattr(real, "RealGraphitiAdapter", Adapter)
+    unit = CorpusIngestUnit(
+        source_id="UK-01",
+        item_key="item",
+        headline="Headline",
+        body="Body",
+        canonical_url="https://item",
+        observation_digest="sha256:observation",
+        observed_at="2026-08-20T00:00:00.000000Z",
+        proving_run_id="run-1",
+        published_at="2026-08-19T00:00:00.000000Z",
+        attempt_number=2,
+    )
+    result = EvaluationGraphitiRunner().ingest(unit)
+    assert calls == ["execute"]
+    assert result.attempt_number == 2
+    assert result.provider_attempt_number == 1

@@ -100,12 +100,6 @@ class EvaluationGraphitiRunner:
                 )
             ),
             attempt_number=unit.attempt_number,
-            provider_attempt_number=(
-                int(payload["provider_attempt_number"])
-                if isinstance(payload.get("provider_attempt_number"), int)
-                and not isinstance(payload.get("provider_attempt_number"), bool)
-                else unit.attempt_number
-            ),
             predecessor_episode_uuid=unit.predecessor_ingest_id,
         )
         with TemporaryDirectory() as root:
@@ -170,6 +164,12 @@ class EvaluationGraphitiRunner:
             usage_basis=str(usage_basis) if isinstance(usage_basis, str) else "UNOBSERVED",
             prompt_version=GRAPHITI_PROMPT_COMPONENT.component_version,
             attempt_number=unit.attempt_number,
+            provider_attempt_number=(
+                int(payload["provider_attempt_number"])
+                if isinstance(payload.get("provider_attempt_number"), int)
+                and not isinstance(payload.get("provider_attempt_number"), bool)
+                else unit.attempt_number
+            ),
             predecessor_episode_uuid=unit.predecessor_ingest_id,
             raw_receipt=payload,
         )

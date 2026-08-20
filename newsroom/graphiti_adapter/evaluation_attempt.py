@@ -290,6 +290,7 @@ def evaluation_attempt_for(passages: tuple[str, ...]) -> GraphitiAttemptRequest:
         representation_digest=digest,
         published_at=None,
         updated_at=None,
+        observed_at=observed_at,
     )
     return evaluation_attempt_for_body(
         episode_body=body,

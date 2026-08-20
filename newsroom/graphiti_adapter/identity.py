@@ -82,6 +82,7 @@ def ingest_key(
     representation_digest: str,
     published_at: str | None,
     updated_at: str | None,
+    observed_at: str,
     chunk_ordinal: int = 1,
 ) -> str:
     digest = digest_bytes(
@@ -93,6 +94,9 @@ def ingest_key(
                 "representation_digest": representation_digest,
                 "published_at": published_at,
                 "updated_at": updated_at,
+                "observed_fallback_at": (
+                    observed_at if published_at is None and updated_at is None else None
+                ),
                 "content_digest": content_digest_value,
                 "chunk_ordinal": chunk_ordinal,
                 "configuration": configuration_digest(),
