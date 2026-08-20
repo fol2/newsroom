@@ -9,10 +9,12 @@ import sys
 import time
 
 from newsroom.control_plane.cycle import run_cycle
+from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
 from newsroom.control_plane.intake import run_intake
 from newsroom.control_plane.store import list_payloads
 from newsroom.control_plane.veto import VetoError
 from newsroom.control_plane.writer import default_writer
+from newsroom.graphiti_adapter.models import REAL_GRAPHITI_RUNTIME_ENABLED
 
 DEFAULT_PROVING = "data/newsroom/proving_store.sqlite3"
 DEFAULT_UNPUBLISHED = "data/newsroom/unpublished_store.sqlite3"
@@ -24,6 +26,8 @@ def _cycle(args: argparse.Namespace):
         unpublished_store=args.unpublished,
         writer=default_writer(),
         max_writes=args.max_writes,
+        graphiti=EvaluationGraphitiRunner() if REAL_GRAPHITI_RUNTIME_ENABLED else None,
+        max_graphiti=1,
     )
 
 
@@ -88,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
                     "sources": report.sources,
                     "candidates": report.candidates,
                     "writer_id": report.writer_id,
+                    "graphiti": report.graphiti,
                     "ledger_digest": report.ledger_digest,
                     "public_dispatch": False,
                     "auto_publish": False,
@@ -109,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"cycle run={report.proving_run_id} minted={report.minted} "
                 f"duplicate={report.duplicate} candidates={report.candidates} "
-                f"writer={report.writer_id}",
+                f"writer={report.writer_id} graphiti={report.graphiti}",
                 flush=True,
             )
         except (VetoError, ValueError, OSError, RuntimeError) as exc:

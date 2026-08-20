@@ -103,7 +103,7 @@ def test_increment_4e_traceability_is_exact_and_non_overclaiming() -> None:
     assert statuses["GRAG-028"].startswith("IMPLEMENTED_TOMBSTONE_PURGE")
     assert statuses["GRPROD-016"].startswith("IMPLEMENTED_PERMANENT_AUTHENTICATED")
     assert statuses["GRPROD-030"].endswith("DEFERRED")
-    assert REAL_GRAPHITI_RUNTIME_ENABLED is False
+    assert REAL_GRAPHITI_RUNTIME_ENABLED is True
 
 
 def test_traceability_uses_only_accepted_requirement_identifiers() -> None:

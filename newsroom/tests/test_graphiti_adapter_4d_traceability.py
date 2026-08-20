@@ -73,8 +73,8 @@ def test_increment_4d_traceability_is_exact_and_non_overclaiming() -> None:
     assert statuses["GRAG-021"].startswith("IMPLEMENTED_LOGICALLY_ISOLATED")
     assert statuses["GRAG-025"].endswith("DEFERRED_4E")
     assert statuses["GRPROD-015"].startswith("IMPLEMENTED_EVALUATION_PRODUCTION")
-    assert "DISABLED_AND_UNQUALIFIED" in statuses["GRPROD-016"]
-    assert REAL_GRAPHITI_RUNTIME_ENABLED is False
+    assert "EVALUATION_REAL_GRAPHITI_ENABLED" in statuses["GRPROD-016"]
+    assert REAL_GRAPHITI_RUNTIME_ENABLED is True
 
 
 def test_traceability_uses_only_accepted_requirement_identifiers() -> None:

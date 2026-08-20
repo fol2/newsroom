@@ -1,7 +1,7 @@
 """Private proposal-only Graphiti adapter contracts.
 
-Real Graphiti/model execution is deliberately disabled.  The public package
-exports deterministic fake and approved replay implementations only.
+Public exports remain deterministic fake and approved replay. Real Graphiti
+execution is EVALUATION-only when REAL_GRAPHITI_RUNTIME_ENABLED is True.
 """
 
 from .admission import (

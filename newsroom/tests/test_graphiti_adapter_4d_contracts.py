@@ -136,7 +136,7 @@ def test_fake_and_replay_profiles_cannot_receive_network_or_credentials() -> Non
         )
 
 
-def test_real_runtime_configuration_is_structurally_bound_but_execution_disabled() -> None:
+def test_real_runtime_evaluation_is_authorized_production_stays_closed() -> None:
     contract = contract_request()
     online_policy = GraphitiWorkspacePolicy(
         policy_id=GraphitiWorkspacePolicyId.parse(
@@ -185,8 +185,14 @@ def test_real_runtime_configuration_is_structurally_bound_but_execution_disabled
         real_runtime_authority=_real_authority(),
         idempotency_key="real-evaluation-placeholder-v1",
     )
-    with pytest.raises(GraphitiRuntimeNotAuthorized, match="disabled and unqualified"):
-        configuration.require_execution_authorized()
+    configuration.require_execution_authorized()
+    production = replace(
+        configuration,
+        execution_profile=GraphitiExecutionProfile.PRODUCTION,
+        idempotency_key="real-production-placeholder-v1",
+    )
+    with pytest.raises(GraphitiRuntimeNotAuthorized, match="EVALUATION"):
+        production.require_execution_authorized()
 
 
 def test_manifest_is_digest_only_and_attempt_is_exact(tmp_path) -> None:

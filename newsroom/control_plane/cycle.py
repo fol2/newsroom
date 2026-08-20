@@ -9,11 +9,25 @@ from datetime import UTC, datetime
 
 from newsroom.control_plane.editorial import GroupedObservation, form_candidates
 from newsroom.control_plane.evidence import package_for
+from newsroom.control_plane.graphiti import GraphitiPort
 from newsroom.control_plane.items import parse_observation
-from newsroom.control_plane.store import append_ledger, connect, has_candidate, insert_payload
+from newsroom.control_plane.store import (
+    append_ledger,
+    connect,
+    has_candidate,
+    has_graphiti_attempt,
+    insert_graphiti_attempt,
+    insert_payload,
+    spend_reserved,
+)
 from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.veto import VetoError, assert_private_store
 from newsroom.control_plane.writer import WriterPort
+from newsroom.graphiti_adapter.evaluation_packet import (
+    GRAPHITI_WORKSPACE_GROUP,
+    OD_011_CASH_CEILING_GBP,
+    OPENROUTER_API,
+)
 from newsroom.increment9.proving import FORBIDDEN_STORE_MARKERS
 
 
@@ -26,6 +40,7 @@ class CycleReport:
     candidates: int
     ledger_digest: str
     writer_id: str
+    graphiti: int = 0
 
 
 def _latest_run(connection: sqlite3.Connection) -> str | None:
@@ -45,6 +60,8 @@ def run_cycle(
     unpublished_store: str,
     writer: WriterPort,
     max_writes: int = 5,
+    graphiti: GraphitiPort | None = None,
+    max_graphiti: int = 1,
 ) -> CycleReport:
     assert_private_store(unpublished_store)
     lowered = proving_store.lower()
@@ -132,6 +149,53 @@ def run_cycle(
                 minted += 1
             else:
                 duplicate += 1
+        graphiti_ok = 0
+        if graphiti is not None:
+            if not spend_reserved(unpublished):
+                append_ledger(
+                    unpublished,
+                    "GRAPHITI_SPEND_RESERVE",
+                    {
+                        "profile": "EVALUATION",
+                        "metered_api": OPENROUTER_API,
+                        "od_011_cash_ceiling_gbp": OD_011_CASH_CEILING_GBP,
+                        "prespent": False,
+                        "hosts": ["openrouter.ai"],
+                    },
+                )
+            for candidate in candidates:
+                if graphiti_ok >= max_graphiti:
+                    break
+                if has_graphiti_attempt(unpublished, candidate.candidate_id):
+                    continue
+                package = package_for(candidate)
+                try:
+                    result = graphiti.extract(package)
+                except VetoError:
+                    raise
+                except (RuntimeError, ValueError, OSError, json.JSONDecodeError):
+                    continue
+                if insert_graphiti_attempt(
+                    unpublished,
+                    candidate_id=candidate.candidate_id,
+                    outcome=result.outcome,
+                    proposal_count=result.proposal_count,
+                    failure_code=result.failure_code,
+                ):
+                    append_ledger(
+                        unpublished,
+                        "GRAPHITI_EVALUATION_ATTEMPT",
+                        {
+                            "story_candidate_id": candidate.candidate_id,
+                            "evidence_package_digest": package.digest,
+                            "outcome": result.outcome,
+                            "proposal_count": result.proposal_count,
+                            "failure_code": result.failure_code,
+                            "workspace_group": GRAPHITI_WORKSPACE_GROUP,
+                            "profile": "EVALUATION",
+                        },
+                    )
+                    graphiti_ok += 1
         digest = append_ledger(
             unpublished,
             "PRIVATE_CYCLE_CLOSE",
@@ -142,11 +206,19 @@ def run_cycle(
                 "sources": sources,
                 "candidates": len(candidates),
                 "writer_id": writer.writer_id,
+                "graphiti": graphiti_ok,
             },
         )
         unpublished.commit()
     finally:
         unpublished.close()
     return CycleReport(
-        run_id, minted, duplicate, sources, len(candidates), digest, writer.writer_id
+        run_id,
+        minted,
+        duplicate,
+        sources,
+        len(candidates),
+        digest,
+        writer.writer_id,
+        graphiti_ok,
     )

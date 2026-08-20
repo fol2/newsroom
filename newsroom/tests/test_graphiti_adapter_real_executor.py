@@ -166,8 +166,8 @@ def _real_attempt(
     )
 
 
-def test_flag_stays_false_and_graphiti_core_is_an_optional_extra() -> None:
-    assert REAL_GRAPHITI_RUNTIME_ENABLED is False
+def test_flag_is_true_for_evaluation_and_graphiti_core_is_an_optional_extra() -> None:
+    assert REAL_GRAPHITI_RUNTIME_ENABLED is True
     pyproject = (_REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert "graphiti-core==0.29.3" in pyproject
     assert "[project.optional-dependencies]" in pyproject
@@ -186,8 +186,7 @@ def test_else_branch_constructs_real_adapter_instead_of_unreachable_assertion() 
     )
 
 
-def test_placeholder_packet_still_fails_closed() -> None:
-    contract = contract_request()
+def test_placeholder_packet_still_fails_closed(tmp_path: Path) -> None:
     policy = GraphitiWorkspacePolicy(
         policy_id=GraphitiWorkspacePolicyId.parse(
             "00000000-0000-4000-8000-000000004935"
@@ -200,38 +199,22 @@ def test_placeholder_packet_still_fails_closed() -> None:
         egress_policy=GraphitiEgressPolicy.APPROVED_PROVIDER_ONLY,
         credential_class=GraphitiCredentialClass.PROPOSAL_WORKSPACE_ONLY,
     )
-    configuration = GraphitiAdapterConfiguration(
-        configuration_id=FAKE_CONFIGURATION_ID,
-        runtime_mode=GraphitiRuntimeMode.REAL_GRAPHITI,
-        execution_profile=GraphitiExecutionProfile.EVALUATION,
-        framework=VersionedExtractionComponent(
-            "graphiti.framework", "placeholder-release", _digest("framework")
-        ),
-        model=VersionedExtractionComponent(
-            "graphiti.model", "placeholder-release", _digest("model")
-        ),
-        embedding=VersionedExtractionComponent(
-            "graphiti.embedding", "placeholder-release", _digest("embedding")
-        ),
-        prompt=GRAPHITI_PROMPT_COMPONENT,
-        output_schema=GRAPHITI_ADAPTER_OUTPUT_SCHEMA_COMPONENT,
-        code=GRAPHITI_ADAPTER_CODE_COMPONENT,
-        normalisation=GRAPHITI_ADAPTER_NORMALISATION_COMPONENT,
-        temporal_policy=GRAPHITI_ADAPTER_TEMPORAL_COMPONENT,
-        adapter_policy=GRAPHITI_ADAPTER_POLICY_COMPONENT,
-        extractor_contract_id=contract.contract_id,
-        extractor_contract_digest=contract.digest,
+    attempt = _real_attempt(
+        tmp_path,
+        authority=_placeholder_authority(),
         workspace_policy=policy,
-        fixture_case=None,
-        real_runtime_authority=_placeholder_authority(),
-        idempotency_key="real-evaluation-placeholder-v1",
     )
-    with pytest.raises(GraphitiRuntimeNotAuthorized, match="disabled and unqualified"):
-        configuration.require_execution_authorized()
+    attempt.configuration.require_execution_authorized()
+    with pytest.raises(GraphitiAdapterContractError, match="EVALUATION OpenRouter packet pins"):
+        RealGraphitiAdapter().execute(
+            attempt=attempt,
+            workspace_root=(tmp_path / "workspace").resolve(),
+        )
+    assert "graphiti_core" not in sys.modules
 
 
 def test_evaluation_packet_is_the_only_authorised_real_profile(tmp_path: Path) -> None:
-    assert REAL_GRAPHITI_RUNTIME_ENABLED is False
+    assert REAL_GRAPHITI_RUNTIME_ENABLED is True
     production = _real_attempt(
         tmp_path, execution_profile=GraphitiExecutionProfile.PRODUCTION
     )
@@ -240,17 +223,17 @@ def test_evaluation_packet_is_the_only_authorised_real_profile(tmp_path: Path) -
             attempt=production,
             workspace_root=(tmp_path / "workspace").resolve(),
         )
+    with pytest.raises(GraphitiRuntimeNotAuthorized, match="EVALUATION"):
+        production.configuration.require_execution_authorized()
 
 
-def test_real_execute_refuses_before_graphiti_import_while_flag_is_false(
-    tmp_path: Path,
-) -> None:
+def test_authorised_evaluation_attempt_does_not_import_graphiti_core(tmp_path: Path) -> None:
     assert "graphiti_core" not in sys.modules
-    attempt = _real_attempt(tmp_path)
-    with pytest.raises(GraphitiRuntimeNotAuthorized, match="disabled and unqualified"):
-        RealGraphitiAdapter().execute(
-            attempt=attempt,
-            workspace_root=(tmp_path / "workspace").resolve(),
-        )
+    from newsroom.graphiti_adapter.evaluation_attempt import evaluation_attempt_for
+    from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_WORKSPACE_GROUP
+
+    attempt = evaluation_attempt_for(("香港天文台發出強烈季候風信號。",))
+    attempt.configuration.require_execution_authorized()
+    assert attempt.configuration.workspace_policy.namespace_prefix == GRAPHITI_WORKSPACE_GROUP
     assert "graphiti_core" not in sys.modules
-    assert REAL_GRAPHITI_RUNTIME_ENABLED is False
+    assert REAL_GRAPHITI_RUNTIME_ENABLED is True

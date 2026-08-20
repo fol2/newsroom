@@ -39,6 +39,13 @@ CREATE TABLE IF NOT EXISTS ledger(
     prev_digest TEXT NOT NULL,
     digest TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS unpublished_graphiti_attempts(
+    story_candidate_id TEXT PRIMARY KEY,
+    outcome TEXT NOT NULL,
+    proposal_count INTEGER NOT NULL,
+    failure_code TEXT NOT NULL,
+    at TEXT NOT NULL
+);
 """
 
 
@@ -91,6 +98,42 @@ def append_ledger(connection: sqlite3.Connection, kind: str, payload: dict[str, 
         (at, kind, payload_digest, prev, digest),
     )
     return digest
+
+
+def spend_reserved(connection: sqlite3.Connection) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM ledger WHERE kind='GRAPHITI_SPEND_RESERVE' LIMIT 1"
+    ).fetchone()
+    return row is not None
+
+
+def has_graphiti_attempt(connection: sqlite3.Connection, candidate_id: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM unpublished_graphiti_attempts WHERE story_candidate_id=?",
+        (candidate_id,),
+    ).fetchone()
+    return row is not None
+
+
+def insert_graphiti_attempt(
+    connection: sqlite3.Connection,
+    *,
+    candidate_id: str,
+    outcome: str,
+    proposal_count: int,
+    failure_code: str,
+) -> bool:
+    if has_graphiti_attempt(connection, candidate_id):
+        return False
+    connection.execute(
+        """
+        INSERT INTO unpublished_graphiti_attempts(
+            story_candidate_id, outcome, proposal_count, failure_code, at
+        ) VALUES(?,?,?,?,?)
+        """,
+        (candidate_id, outcome, proposal_count, failure_code, _now()),
+    )
+    return True
 
 
 def has_candidate(connection: sqlite3.Connection, candidate_id: str) -> bool:
