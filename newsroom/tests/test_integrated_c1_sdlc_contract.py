@@ -126,9 +126,15 @@ def test_complete_actual_service_cases_are_optional_only_in_core() -> None:
         "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_3e_projects_complete_lineage_and_recovers_graph_loss",
         "newsroom.tests.test_projection_b3_neo4j_service::test_actual_service_3e_replacement_generation_becomes_only_active_lineage",
     } <= set(optional)
+    assert {
+        "newsroom.tests.test_control_plane_keychain::test_cursor_agent_cli_is_logged_in",
+        "newsroom.tests.test_control_plane_keychain::test_grok_build_cli_is_logged_in",
+        "newsroom.tests.test_control_plane_keychain::test_neo4j_keychain_injects_and_bolt_accepts",
+        "newsroom.tests.test_control_plane_keychain::test_openrouter_keychain_injects_and_is_accepted",
+    } <= set(optional)
     assert complete <= set(optional)
     assert optional == tuple(sorted(optional))
-    assert len(optional) == 42
+    assert len(optional) == 46
 
     route = _route("newsroom/projection/neo4j/_complete_adapter.py")
     assert route["service_required"] is True
