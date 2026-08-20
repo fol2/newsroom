@@ -176,6 +176,14 @@ def test_flag_is_true_for_evaluation_and_graphiti_core_is_an_optional_extra() ->
     assert 'version = "0.29.3"' in lock
 
 
+def test_openrouter_generic_client_uses_json_object_mode() -> None:
+    from newsroom.graphiti_adapter.real import _add_episode
+
+    source = inspect.getsource(_add_episode)
+    assert 'structured_output_mode="json_object"' in source
+    assert "OpenAIGenericClient" in source
+
+
 def test_else_branch_constructs_real_adapter_instead_of_unreachable_assertion() -> None:
     source = inspect.getsource(_GraphitiAdapterBoundary._execute_attempt_locked)
     assert "unreachable real Graphiti execution path" not in source

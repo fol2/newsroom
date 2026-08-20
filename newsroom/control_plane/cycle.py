@@ -175,27 +175,28 @@ def run_cycle(
                     raise
                 except (RuntimeError, ValueError, OSError, json.JSONDecodeError):
                     continue
-                if insert_graphiti_attempt(
+                append_ledger(
                     unpublished,
-                    candidate_id=candidate.candidate_id,
-                    outcome=result.outcome,
-                    proposal_count=result.proposal_count,
-                    failure_code=result.failure_code,
-                ):
-                    append_ledger(
+                    "GRAPHITI_EVALUATION_ATTEMPT",
+                    {
+                        "story_candidate_id": candidate.candidate_id,
+                        "evidence_package_digest": package.digest,
+                        "outcome": result.outcome,
+                        "proposal_count": result.proposal_count,
+                        "failure_code": result.failure_code,
+                        "workspace_group": GRAPHITI_WORKSPACE_GROUP,
+                        "profile": "EVALUATION",
+                    },
+                )
+                if result.outcome in {"COMPLETE", "PARTIAL"}:
+                    insert_graphiti_attempt(
                         unpublished,
-                        "GRAPHITI_EVALUATION_ATTEMPT",
-                        {
-                            "story_candidate_id": candidate.candidate_id,
-                            "evidence_package_digest": package.digest,
-                            "outcome": result.outcome,
-                            "proposal_count": result.proposal_count,
-                            "failure_code": result.failure_code,
-                            "workspace_group": GRAPHITI_WORKSPACE_GROUP,
-                            "profile": "EVALUATION",
-                        },
+                        candidate_id=candidate.candidate_id,
+                        outcome=result.outcome,
+                        proposal_count=result.proposal_count,
+                        failure_code=result.failure_code,
                     )
-                    graphiti_ok += 1
+                graphiti_ok += 1
         digest = append_ledger(
             unpublished,
             "PRIVATE_CYCLE_CLOSE",
