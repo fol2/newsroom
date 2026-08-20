@@ -1,17 +1,22 @@
-"""CONT writer port. Graphiti is never the writer."""
+"""CONT writer port. Graphiti is never the writer. Live copy uses OpenRouter."""
 
 from __future__ import annotations
 
 import json
 import os
-import subprocess
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Protocol
 
+from newsroom.control_plane.broker import openrouter_api_key
 from newsroom.control_plane.editorial import StoryCandidateRecord
 from newsroom.control_plane.evidence import EvidencePackage
+from newsroom.graphiti_adapter.evaluation_packet import (
+    OPENROUTER_BASE_URL,
+    OPENROUTER_WRITER_SLUG,
+)
 
-GROK_BIN = os.environ.get("NEWSROOM_GROK_BIN", "/Users/jamesto/.grok/bin/grok")
 WRITER_SCHEMA = {
     "type": "object",
     "properties": {
@@ -39,7 +44,7 @@ class WriterPort(Protocol):
 
 
 class FixtureWriter:
-    """Deterministic evaluation writer. Not live Grok. Not Graphiti."""
+    """Deterministic evaluation writer. Not live OpenRouter. Not Graphiti."""
 
     writer_id = "evaluation-fixture-writer-v1"
 
@@ -60,8 +65,23 @@ class FixtureWriter:
         )
 
 
-class GrokWriter:
-    writer_id = "grok-4.6-cont-writer"
+def _parse_copy(raw: str) -> tuple[str, str]:
+    payload = json.loads(raw)
+    title = payload.get("title")
+    body = payload.get("body")
+    if not isinstance(title, str) or not isinstance(body, str):
+        raise RuntimeError("writer JSON missing title or body")
+    return title.strip(), body.strip()
+
+
+class OpenRouterWriter:
+    """CONT writer via OpenRouter `x-ai/grok-4.6`. Injects OPENROUTER_API only."""
+
+    writer_id = "openrouter-x-ai.grok-4.6-cont-writer"
+
+    def __init__(self, *, post=None, api_key=None) -> None:
+        self._post = post or _openrouter_chat
+        self._api_key = api_key
 
     def write(
         self, candidate: StoryCandidateRecord, package: EvidencePackage
@@ -69,39 +89,53 @@ class GrokWriter:
         prompt = (
             "你係 Newsroom 嘅 CONT 原創記者，唔係 Graphiti。"
             "用香港繁體中文寫一篇未出版新聞稿。必須原創改寫，唔好複製來源標題或 dateline 模板。"
-            "唔准 AUTO_PUBLISH，唔准當公開發行。只輸出 JSON。"
+            "唔准 AUTO_PUBLISH，唔准當公開發行。"
+            "只輸出 JSON 物件，欄位 title 同 body。"
             f"\n題旨：{candidate.headline}\n證據：\n"
             + "\n---\n".join(package.passages)
         )
-        result = subprocess.run(
-            [
-                GROK_BIN,
-                "--single",
-                prompt,
-                "--output-format",
-                "json",
-                "--json-schema",
-                json.dumps(WRITER_SCHEMA, ensure_ascii=False),
-                "--disable-web-search",
-                "--always-approve",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "grok writer failed")
-        payload = json.loads(result.stdout)
-        title = payload.get("title")
-        body = payload.get("body")
-        if not isinstance(title, str) or not isinstance(body, str):
-            raise RuntimeError("grok writer JSON missing title or body")
-        return WriterCopy(title=title.strip(), body=body.strip(), writer_id=self.writer_id)
+        secret = self._api_key() if self._api_key else openrouter_api_key()
+        raw = self._post(prompt=prompt, api_key=secret)
+        title, body = _parse_copy(raw)
+        return WriterCopy(title=title, body=body, writer_id=self.writer_id)
+
+
+def _openrouter_chat(*, prompt: str, api_key: str) -> str:
+    payload = json.dumps(
+        {
+            "model": OPENROUTER_WRITER_SLUG,
+            "messages": [{"role": "user", "content": prompt}],
+            "response_format": {"type": "json_object"},
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        f"{OPENROUTER_BASE_URL}/chat/completions",
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/fol2/newsroom",
+            "X-Title": "newsroom-unpublished-beta",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"OpenRouter writer HTTP {exc.code}") from exc
+    choices = body.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError("OpenRouter writer returned no choices")
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("OpenRouter writer returned empty content")
+    return content
 
 
 def default_writer() -> WriterPort:
-    name = os.environ.get("NEWSROOM_WRITER", "grok").strip().lower()
+    name = os.environ.get("NEWSROOM_WRITER", "openrouter").strip().lower()
     if name == "fixture":
         return FixtureWriter()
-    return GrokWriter()
+    return OpenRouterWriter()

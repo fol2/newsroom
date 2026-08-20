@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import pytest
 
@@ -9,13 +10,15 @@ from newsroom.control_plane.reports import news_report
 from newsroom.control_plane.store import connect, list_payloads, mark_public_dispatch
 from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.veto import VetoError, refuse_public_effect
-from newsroom.control_plane.writer import FixtureWriter
+from newsroom.control_plane.writer import FixtureWriter, OpenRouterWriter
 from newsroom.graphiti_adapter.evaluation_packet import (
     EVALUATION_GRAPHITI_PACKET,
     EVALUATION_WORKSPACE_POLICY,
     GRAPHITI_CHAT_MODEL,
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_EMBEDDING_MODEL,
+    OPENROUTER_API,
+    WRITER_MODEL,
 )
 from newsroom.graphiti_adapter.models import REAL_GRAPHITI_RUNTIME_ENABLED
 from newsroom.graphiti_adapter.types import (
@@ -279,8 +282,12 @@ def test_evaluation_packet_is_real_but_flag_stays_false() -> None:
 
     assert REAL_GRAPHITI_RUNTIME_ENABLED is False
     assert GRAPHITI_CORE_RELEASE == "graphiti-core-0.29.3"
-    assert GRAPHITI_CHAT_MODEL == "openai:gpt-5-mini"
-    assert GRAPHITI_EMBEDDING_MODEL == "openai:text-embedding-3-large"
+    assert OPENROUTER_API == "OPENROUTER_API"
+    assert GRAPHITI_CHAT_MODEL == "openrouter:openai.gpt-5-mini"
+    assert GRAPHITI_EMBEDDING_MODEL == "openrouter:openai.text-embedding-3-large"
+    assert WRITER_MODEL == "openrouter:x-ai.grok-4.6"
+    assert EVALUATION_GRAPHITI_PACKET.model_release == GRAPHITI_CHAT_MODEL
+    assert "placeholder" not in EVALUATION_GRAPHITI_PACKET.framework_release
     assert EVALUATION_WORKSPACE_POLICY.egress_policy is GraphitiEgressPolicy.APPROVED_PROVIDER_ONLY
     assert (
         EVALUATION_WORKSPACE_POLICY.credential_class
@@ -330,3 +337,74 @@ def test_intake_fetches_when_gates_pass(tmp_path: Path) -> None:
     assert report.authorised
     assert report.sources == 10
     assert report.ok == 10
+
+
+def test_openrouter_writer_does_not_call_graphiti() -> None:
+    from newsroom.control_plane.editorial import (
+        DiscoverySignalRecord,
+        NewsLeadRecord,
+        StoryCandidateRecord,
+    )
+    from newsroom.control_plane.evidence import EvidencePackage
+
+    seen: dict[str, str] = {}
+
+    def post(*, prompt: str, api_key: str) -> str:
+        seen["prompt"] = prompt
+        seen["api_key"] = api_key
+        return json.dumps(
+                {"title": "【未出版】測試稿", "body": "【未出版原創】根據證據包改寫，唔係來源標題複本。"}
+        )
+
+    writer = OpenRouterWriter(post=post, api_key=lambda: "test-openrouter-token")
+    candidate = StoryCandidateRecord(
+        candidate_id="c1",
+        hypothesis_id="h1",
+        headline="Home Office update",
+        items=parse_observation(
+            source_id="UK-01", url="https://www.gov.uk/search/all.atom", body=ATOM
+        ),
+        signals=(
+            DiscoverySignalRecord(
+                signal_id="s1",
+                source_id="UK-01",
+                item_key="k",
+                observation_digest="sha256:" + ("b" * 64),
+            ),
+        ),
+        leads=(NewsLeadRecord(lead_id="l1", signal_id="s1", headline="Home Office update"),),
+    )
+    package = EvidencePackage(
+        candidate_id="c1",
+        hypothesis_id="h1",
+        signal_ids=("s1",),
+        lead_ids=("l1",),
+        source_ids=("UK-01",),
+        observation_digests=("sha256:" + ("b" * 64),),
+        passages=("UK-01: retained",),
+    )
+    copy = writer.write(candidate, package)
+    assert copy.writer_id.startswith("openrouter-")
+    assert copy.title.startswith("【未出版】")
+    assert "來源標題複本" in copy.body
+    assert seen["api_key"] == "test-openrouter-token"
+    assert "Graphiti" in seen["prompt"]
+
+
+def test_broker_error_does_not_include_secret(monkeypatch) -> None:
+    from newsroom.control_plane import broker
+
+    class Result:
+        returncode = 1
+        stdout = "super-secret-openrouter-key\n"
+        stderr = "not found"
+
+    monkeypatch.setattr(
+        broker.subprocess,
+        "run",
+        lambda *args, **kwargs: Result(),
+    )
+    with pytest.raises(broker.BrokerError, match="OPENROUTER_API is absent") as caught:
+        broker.openrouter_api_key()
+    assert "super-secret-openrouter-key" not in str(caught.value)
+
