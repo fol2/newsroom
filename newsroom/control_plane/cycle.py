@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,7 +12,7 @@ from newsroom.control_plane.evidence import package_for
 from newsroom.control_plane.items import parse_observation
 from newsroom.control_plane.store import append_ledger, connect, has_candidate, insert_payload
 from newsroom.control_plane.surface import UnpublishedSurfacePayload
-from newsroom.control_plane.veto import assert_private_store
+from newsroom.control_plane.veto import VetoError, assert_private_store
 from newsroom.control_plane.writer import WriterPort
 from newsroom.increment9.proving import FORBIDDEN_STORE_MARKERS
 
@@ -104,22 +105,29 @@ def run_cycle(
                 duplicate += 1
                 continue
             package = package_for(candidate)
-            copy = writer.write(candidate, package)
-            payload = UnpublishedSurfacePayload(
-                payload_kind="unpublished_surface_payload",
-                publication_bundle=False,
-                auto_publish=False,
-                language="ZH_HANT_HK",
-                title=copy.title,
-                body=copy.body,
-                evidence_package_digest=package.digest,
-                story_candidate_id=candidate.candidate_id,
-                event_hypothesis_id=candidate.hypothesis_id,
-                source_lineage=tuple(sorted({item.source_id for item in candidate.items})),
-                generated_at=_now(),
-                status="UNPUBLISHED",
-                writer_id=copy.writer_id,
-            )
+            try:
+                copy = writer.write(candidate, package)
+                payload = UnpublishedSurfacePayload(
+                    payload_kind="unpublished_surface_payload",
+                    publication_bundle=False,
+                    auto_publish=False,
+                    language="ZH_HANT_HK",
+                    title=copy.title,
+                    body=copy.body,
+                    evidence_package_digest=package.digest,
+                    story_candidate_id=candidate.candidate_id,
+                    event_hypothesis_id=candidate.hypothesis_id,
+                    source_lineage=tuple(
+                        sorted({item.source_id for item in candidate.items})
+                    ),
+                    generated_at=_now(),
+                    status="UNPUBLISHED",
+                    writer_id=copy.writer_id,
+                )
+            except VetoError:
+                raise
+            except (RuntimeError, ValueError, OSError, json.JSONDecodeError):
+                continue
             if insert_payload(unpublished, payload):
                 minted += 1
             else:
