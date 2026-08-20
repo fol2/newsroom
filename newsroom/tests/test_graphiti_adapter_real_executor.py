@@ -16,6 +16,7 @@ from newsroom.authority.canonical import (
     digest_bytes,
     digest_canonical,
 )
+from newsroom.authority.objects import ObjectAccessDecisionId
 from newsroom.authority.types import UtcTimestamp
 from newsroom.extraction.types import (
     ExtractionFailureCode,
@@ -674,6 +675,36 @@ def test_complete_guard_recovery_requires_byte_exact_canonical_snapshot() -> Non
         asyncio.run(guard.completed_raw())
 
 
+def test_guard_completion_checks_the_committed_transition() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import Neo4jMutationGuard
+
+    queries: list[str] = []
+
+    class Driver:
+        async def execute_query(
+            self,
+            query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            del params, routing_
+            queries.append(query)
+            records = [{"state": "COMPLETE"}] if "RETURN m.state" in query else []
+            return records, None, None
+
+    guard = Neo4jMutationGuard(
+        Driver(),
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        episode_uuid="episode-id",
+        attempt_number=1,
+        input_digest="sha256:" + "0" * 64,
+    )
+    asyncio.run(guard.complete({"provider_attempt_number": 1}))
+    assert any("SET m.state = 'COMPLETE'" in query for query in queries)
+    assert any("NewsroomSnapshot" in query and "DELETE s" in query for query in queries)
+
+
 def test_immutable_completion_snapshot_restores_without_graph_rehydration(
     tmp_path: Path,
 ) -> None:
@@ -705,6 +736,63 @@ def test_immutable_completion_snapshot_restores_without_graph_rehydration(
     corrupted["raw_output_digest"] = digest_bytes(canonical_json_bytes(unsigned))
     with pytest.raises(GraphitiAdapterContractError, match="immutable attempt"):
         restore_validated_snapshot(raw=corrupted, attempt=attempt)
+
+
+def test_immutable_completion_preserves_original_access_after_rights_renewal(
+    tmp_path: Path,
+) -> None:
+    from newsroom.graphiti_adapter.real import _EpisodeTelemetry, _raw_receipt
+    from newsroom.graphiti_adapter.result_snapshot import restore_validated_snapshot
+
+    instant = UtcTimestamp(datetime(2026, 8, 20, tzinfo=UTC))
+    original = replace(
+        _real_attempt(tmp_path),
+        reference_time=instant,
+        temporal_basis=TemporalBasis.SOURCE_PUBLISHED,
+    )
+    raw = _raw_receipt(
+        original,
+        started_at=instant,
+        telemetry=_EpisodeTelemetry(provider_attempt_number=1),
+        result=None,
+        proposals=(),
+    )
+    old_access = raw["passages"][0]["access_decision_id"]
+    current_passages = tuple(
+        replace(
+            passage,
+            access_decision_id=ObjectAccessDecisionId.parse(
+                f"00000000-0000-4000-8000-{9_900 + index:012d}"
+            ),
+        )
+        for index, passage in enumerate(
+            original.extraction_request.input_binding.passages,
+            start=1,
+        )
+    )
+    current_binding = replace(
+        original.extraction_request.input_binding,
+        passages=current_passages,
+    )
+    current_request = replace(
+        original.extraction_request,
+        input_binding=current_binding,
+    )
+    current_manifest = GraphitiInputManifest.from_run_request(
+        manifest_id=original.manifest.manifest_id,
+        configuration=original.configuration,
+        contract=original.extraction_contract,
+        request=current_request,
+    )
+    renewed = replace(
+        original,
+        manifest=current_manifest,
+        extraction_request=current_request,
+    )
+    restored = restore_validated_snapshot(raw=raw, attempt=renewed)
+    assert restored.produced.raw_output_value["passages"][0][
+        "access_decision_id"
+    ] == old_access
 
 
 def test_embedding_meter_retains_provider_tokens_and_native_usd_cost() -> None:

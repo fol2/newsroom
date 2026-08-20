@@ -26,6 +26,7 @@ from newsroom.control_plane.evidence import EvidencePackage, package_for
 from newsroom.control_plane.graphiti import EvaluationGraphitiRunner, GraphitiCycleResult
 from newsroom.control_plane.items import SourceItem, parse_observation, parse_source_time
 from newsroom.control_plane.store import (
+    claim_graphiti_attempt,
     connect,
     next_graphiti_attempt_number,
     reserve_graphiti_spend,
@@ -1018,6 +1019,86 @@ def test_process_death_reenters_unreceipted_reserved_attempt(tmp_path: Path) -> 
     connection.close()
 
 
+def test_unreceipted_attempt_requires_expired_dispatch_lease(
+    tmp_path: Path,
+) -> None:
+    connection = connect(str(tmp_path / "unpublished.sqlite3"))
+    assert reserve_graphiti_spend(
+        connection,
+        spend_id="ingest-1:1",
+        ingest_id="ingest-1",
+        attempt_number=1,
+        proving_run_id="run-1",
+        reserved_gbp_microunits=500_000,
+        ceiling_gbp_microunits=5_000_000,
+    )
+    assert claim_graphiti_attempt(
+        connection,
+        spend_id="ingest-1:1",
+        owner_id="owner-1",
+        claimed_at="2026-08-21T00:00:00.000000Z",
+        lease_expires_at="2026-08-21T00:15:00.000000Z",
+    )
+    connection.commit()
+    assert not claim_graphiti_attempt(
+        connection,
+        spend_id="ingest-1:1",
+        owner_id="owner-2",
+        claimed_at="2026-08-21T00:05:00.000000Z",
+        lease_expires_at="2026-08-21T00:20:00.000000Z",
+    )
+    assert claim_graphiti_attempt(
+        connection,
+        spend_id="ingest-1:1",
+        owner_id="owner-2",
+        claimed_at="2026-08-21T00:15:00.000000Z",
+        lease_expires_at="2026-08-21T00:30:00.000000Z",
+    )
+    connection.close()
+
+
+def test_new_failed_global_gate_is_re_read_before_next_dispatch(
+    tmp_path: Path,
+) -> None:
+    proving = _proving(tmp_path)
+    seen: list[str] = []
+
+    class Stub:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            seen.append(unit.ingest_id)
+            if len(seen) == 1:
+                connection = __import__("sqlite3").connect(proving)
+                connection.execute(
+                    """
+                    INSERT INTO proving_runs
+                    VALUES('run-2','2026-08-21T00:00:00.000000Z',0,0,0,0)
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO proving_gates
+                    SELECT 'run-2', gate_id,
+                           CASE WHEN gate_id='KILL_SWITCH_READY' THEN 'FAIL' ELSE status END,
+                           'new current veto'
+                    FROM proving_gates WHERE run_id='run-1'
+                    """
+                )
+                connection.commit()
+                connection.close()
+            return _complete(unit)
+
+    run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(tmp_path / "unpublished.sqlite3"),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=Stub(),
+        max_graphiti=10,
+        clock=lambda: datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    assert len(seen) == 1
+
+
 @pytest.mark.parametrize(
     "gate_id",
     [
@@ -1641,6 +1722,62 @@ def test_result_binding_rejects_generation_and_receipt_digest_drift() -> None:
     tampered = {**result.raw_receipt, "episode_uuid": "foreign"}
     with pytest.raises(ValueError, match="digest"):
         _bind_result(unit, replace(result, raw_receipt=tampered))
+
+
+def test_result_binding_accepts_retained_original_access_after_renewal(
+    tmp_path: Path,
+) -> None:
+    unit = units_from(
+        (
+            GroupedObservation(
+                "UK-01",
+                "sha256:observation",
+                SourceItem("UK-01", "item", "Headline", "Body", "https://item"),
+                "2026-08-20T00:00:00.000000Z",
+            ),
+        ),
+        proving_run_id="run-1",
+        rights_authority_run_id="run-current",
+        rights_gate_reason="current PASS",
+        source_definition_url="https://source/feed",
+    )[0]
+    assert unit.authority is not None
+    result = _complete(unit)
+    assert result.raw_receipt is not None
+    raw = json.loads(json.dumps(result.raw_receipt))
+    old_access = "00000000-0000-4000-8000-000000009998"
+    raw["passages"][0]["access_decision_id"] = old_access
+    raw.pop("raw_output_digest")
+    raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
+    recovered = replace(
+        result,
+        raw_receipt=raw,
+        receipt_digest=str(raw["raw_output_digest"]),
+        passages=tuple(raw["passages"]),
+    )
+    with pytest.raises(ValueError, match="neither current nor retained"):
+        _bind_result(unit, recovered)
+    connection = connect(str(tmp_path / "unpublished.sqlite3"))
+    connection.execute(
+        """
+        INSERT INTO unpublished_graphiti_authority_records(
+            record_id, record_type, record_digest, record_json, retained_at
+        ) VALUES(?,?,?,?,?)
+        """,
+        (
+            old_access,
+            "OBJECT_ACCESS_DECISION",
+            "sha256:retained",
+            "{}",
+            "2026-08-20T00:00:00.000000Z",
+        ),
+    )
+    assert _bind_result(
+        unit,
+        recovered,
+        authority_connection=connection,
+    ) == recovered
+    connection.close()
 
 
 def test_evaluation_runner_reads_provider_attempt_after_adapter_execution(

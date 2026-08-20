@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Callable
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
@@ -23,6 +24,7 @@ from newsroom.control_plane.graphiti import GraphitiCycleResult, GraphitiPort
 from newsroom.control_plane.items import parse_observation
 from newsroom.control_plane.store import (
     append_ledger,
+    claim_graphiti_attempt,
     clear_graphiti_failure,
     connect,
     graphiti_coverage,
@@ -103,7 +105,10 @@ def _utc_text(value: datetime) -> str:
 
 
 def _bind_result(
-    unit: CorpusIngestUnit, result: GraphitiCycleResult
+    unit: CorpusIngestUnit,
+    result: GraphitiCycleResult,
+    *,
+    authority_connection: sqlite3.Connection | None = None,
 ) -> GraphitiCycleResult:
     if (result.ingest_id, result.source_id, result.item_key) != (
         unit.ingest_id,
@@ -166,11 +171,26 @@ def _bind_result(
         or passage.get("text_digest") != expected_digest
     ):
         raise ValueError("graphiti passage provenance differs from ingest bytes")
-    if unit.authority is not None and (
-        passage.get("admission_id") != unit.authority.admission_id
-        or passage.get("access_decision_id") != unit.authority.access_decision_id
-    ):
-        raise ValueError("graphiti passage authority differs from retained records")
+    if unit.authority is not None:
+        if passage.get("admission_id") != unit.authority.admission_id:
+            raise ValueError("graphiti passage admission differs from retained records")
+        retained_access = passage.get("access_decision_id")
+        if retained_access != unit.authority.access_decision_id:
+            retained = (
+                None
+                if authority_connection is None or not isinstance(retained_access, str)
+                else authority_connection.execute(
+                    """
+                    SELECT 1 FROM unpublished_graphiti_authority_records
+                    WHERE record_id=? AND record_type='OBJECT_ACCESS_DECISION'
+                    """,
+                    (retained_access,),
+                ).fetchone()
+            )
+            if retained is None:
+                raise ValueError(
+                    "graphiti passage access decision is neither current nor retained"
+                )
     if tuple(raw.get("proposals", ())) != result.proposals:
         raise ValueError("graphiti proposal receipt differs from bound raw receipt")
     if result.proposal_count != len(result.proposals):
@@ -378,6 +398,7 @@ def _ingest(
     units: tuple[CorpusIngestUnit, ...],
     max_graphiti: int,
     rights_check: Callable[[CorpusIngestUnit], dict[str, object] | None],
+    clock: Callable[[], datetime],
 ) -> int:
     attempted = 0
     for (
@@ -450,7 +471,6 @@ def _ingest(
             )
             unpublished.commit()
             break
-        attempted += 1
         if reserved:
             append_ledger(
                 unpublished,
@@ -473,11 +493,53 @@ def _ingest(
                     "proving_run_id": unit.proving_run_id,
                 },
             )
+        claim_instant = clock().astimezone(UTC)
+        owner_id = f"graphiti-dispatch-{uuid.uuid4()}"
+        claimed = claim_graphiti_attempt(
+            unpublished,
+            spend_id=spend_id,
+            owner_id=owner_id,
+            claimed_at=_utc_text(claim_instant),
+            lease_expires_at=_utc_text(claim_instant + timedelta(minutes=15)),
+        )
+        if not claimed:
+            append_ledger(
+                unpublished,
+                "GRAPHITI_ATTEMPT_BUSY",
+                {
+                    "spend_id": spend_id,
+                    "ingest_id": unit.ingest_id,
+                    "attempt_number": attempt_number,
+                    "reason": "ACTIVE_DISPATCH_LEASE",
+                    "provider_dispatched": False,
+                },
+            )
             unpublished.commit()
+            continue
+        append_ledger(
+            unpublished,
+            "GRAPHITI_ATTEMPT_CLAIM",
+            {
+                "spend_id": spend_id,
+                "ingest_id": unit.ingest_id,
+                "attempt_number": attempt_number,
+                "owner_id": owner_id,
+                "lease_expires_at": _utc_text(
+                    claim_instant + timedelta(minutes=15)
+                ),
+                "provider_dispatched": False,
+            },
+        )
+        unpublished.commit()
+        attempted += 1
         returned_result: GraphitiCycleResult | None = None
         try:
             returned_result = graphiti.ingest(unit)
-            result = _bind_result(unit, returned_result)
+            result = _bind_result(
+                unit,
+                returned_result,
+                authority_connection=unpublished,
+            )
         except VetoError:
             raise
         except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as exc:
@@ -672,7 +734,32 @@ def _current_rights_decision(
         "terms_url": verdict.terms_url,
         "terms_digest": verdict.terms_digest,
         "evaluated_at": evaluated_at,
+        "rights_authority_run_id": run_id,
     }
+
+
+def _latest_run_with_global_authority(
+    proving: sqlite3.Connection,
+) -> str | None:
+    row = proving.execute(
+        """
+        SELECT run_id FROM proving_runs
+        ORDER BY started_at DESC, run_id DESC LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    run_id = str(row[0])
+    gates = {
+        str(gate_id): str(status)
+        for gate_id, status in proving.execute(
+            "SELECT gate_id, status FROM proving_gates WHERE run_id=?",
+            (run_id,),
+        ).fetchall()
+    }
+    if any(gates.get(gate_id) != "PASS" for gate_id in GLOBAL_PROVING_GATES):
+        return None
+    return run_id
 
 
 def _permitted_rows(
@@ -686,17 +773,7 @@ def _permitted_rows(
     if not runs:
         raise ValueError("proving store has no runs")
     latest_run_id = str(runs[-1][0])
-    current_gates = {
-        str(gate_id): (str(status), str(reason))
-        for gate_id, status, reason in proving.execute(
-            "SELECT gate_id, status, reason FROM proving_gates WHERE run_id=?",
-            (latest_run_id,),
-        )
-    }
-    if any(
-        current_gates.get(gate_id, ("MISSING", ""))[0] != "PASS"
-        for gate_id in GLOBAL_PROVING_GATES
-    ):
+    if _latest_run_with_global_authority(proving) != latest_run_id:
         return latest_run_id, (), ()
     all_rows: list[_ProvingObservation] = []
     latest_rows: list[_ProvingObservation] = []
@@ -775,9 +852,12 @@ def run_cycle(
         current = sqlite3.connect(proving_store)
         current.execute("PRAGMA query_only=ON")
         try:
+            latest_authorised_run = _latest_run_with_global_authority(current)
+            if latest_authorised_run is None:
+                return None
             return _current_rights_decision(
                 current,
-                run_id=run_id,
+                run_id=latest_authorised_run,
                 source_id=unit.source_id,
                 source_url=unit.source_definition_url,
                 evaluated_at=_utc_text(clock()),
@@ -829,6 +909,7 @@ def run_cycle(
                 units=units,
                 max_graphiti=max_graphiti,
                 rights_check=rights_check,
+                clock=clock,
             )
             unpublished.commit()
         for candidate in candidates:

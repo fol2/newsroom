@@ -13,7 +13,7 @@ from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.corpus import EligibleCorpusRevision
 from newsroom.control_plane.veto import VetoError, assert_private_store, refuse_public_effect
 
-SCHEMA_VERSION = "newsroom.control-plane.unpublished.v7"
+SCHEMA_VERSION = "newsroom.control-plane.unpublished.v8"
 LEDGER_GENESIS = "sha256:" + ("0" * 64)
 GRAPHITI_MAX_FAILURES = 3
 _SQLITE_BIND_BATCH_SIZE = 500
@@ -118,6 +118,8 @@ CREATE TABLE IF NOT EXISTS unpublished_graphiti_spend(
     usage_basis TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('RESERVED','RECONCILED','UNRECONCILED')),
     provider_usage_json TEXT,
+    dispatch_owner TEXT,
+    dispatch_lease_expires_at TEXT,
     at TEXT NOT NULL,
     UNIQUE(ingest_id, attempt_number)
 );
@@ -163,6 +165,14 @@ def connect(path: str) -> sqlite3.Connection:
             "ALTER TABLE unpublished_graphiti_spend "
             "ADD COLUMN proving_run_id TEXT NOT NULL DEFAULT 'LEGACY_UNKNOWN'"
         )
+    for column, declaration in (
+        ("dispatch_owner", "TEXT"),
+        ("dispatch_lease_expires_at", "TEXT"),
+    ):
+        if column not in columns:
+            connection.execute(
+                f"ALTER TABLE unpublished_graphiti_spend ADD COLUMN {column} {declaration}"
+            )
     return connection
 
 
@@ -278,6 +288,33 @@ def next_graphiti_attempt_number(
     return attempt_number + 1
 
 
+def claim_graphiti_attempt(
+    connection: sqlite3.Connection,
+    *,
+    spend_id: str,
+    owner_id: str,
+    claimed_at: str,
+    lease_expires_at: str,
+) -> bool:
+    """Atomically claim a new or proved-stale reservation before dispatch."""
+
+    row = connection.execute(
+        """
+        UPDATE unpublished_graphiti_spend
+        SET dispatch_owner=?, dispatch_lease_expires_at=?
+        WHERE spend_id=? AND status='RESERVED'
+          AND (
+              dispatch_owner IS NULL
+              OR dispatch_lease_expires_at IS NULL
+              OR dispatch_lease_expires_at <= ?
+          )
+        RETURNING spend_id
+        """,
+        (owner_id, lease_expires_at, spend_id, claimed_at),
+    ).fetchone()
+    return row is not None
+
+
 def reconcile_graphiti_spend(
     connection: sqlite3.Connection,
     *,
@@ -299,7 +336,8 @@ def reconcile_graphiti_spend(
         """
         UPDATE unpublished_graphiti_spend
         SET actual_usd_microunits=?, actual_gbp_microunits=?, usage_basis=?,
-            status=?, provider_usage_json=?, at=?
+            status=?, provider_usage_json=?, dispatch_owner=NULL,
+            dispatch_lease_expires_at=NULL, at=?
         WHERE spend_id=?
         """,
         (

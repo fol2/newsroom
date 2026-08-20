@@ -122,7 +122,6 @@ def restore_validated_snapshot(
         "predecessor_episode_uuid": attempt.predecessor_episode_uuid,
         "temporal_basis": attempt.temporal_basis,
         "reference_time": None if reference is None else reference.to_text(),
-        "passages": [item.canonical_value() for item in attempt.manifest.passages],
         "framework": GRAPHITI_CORE_RELEASE,
         "chat": GRAPHITI_CHAT_MODEL,
         "chat_fallback": GRAPHITI_CHAT_FALLBACK,
@@ -132,6 +131,33 @@ def restore_validated_snapshot(
     if any(raw.get(key) != value for key, value in expected.items()):
         raise GraphitiAdapterContractError(
             "retained Graphiti result differs from the current immutable attempt"
+        )
+    retained_passages = raw.get("passages")
+    current_passages = [item.canonical_value() for item in attempt.manifest.passages]
+    if (
+        not isinstance(retained_passages, list)
+        or len(retained_passages) != len(current_passages)
+        or any(not isinstance(item, dict) for item in retained_passages)
+    ):
+        raise GraphitiAdapterContractError("retained Graphiti passages are malformed")
+    # A renewed current rights decision has a new access-decision identity.
+    # Completion recovery preserves the original authority receipt while the
+    # control plane separately proves the latest global/source gates at dispatch.
+    stable_retained = [
+        {key: value for key, value in item.items() if key != "access_decision_id"}
+        for item in retained_passages
+    ]
+    stable_current = [
+        {key: value for key, value in item.items() if key != "access_decision_id"}
+        for item in current_passages
+    ]
+    if stable_retained != stable_current or any(
+        not isinstance(item.get("access_decision_id"), str)
+        or not item["access_decision_id"]
+        for item in retained_passages
+    ):
+        raise GraphitiAdapterContractError(
+            "retained Graphiti passage content or original authority differs"
         )
     recovered_raw = dict(raw)
     if retained_attempt != attempt.attempt_number:

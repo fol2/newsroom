@@ -268,7 +268,7 @@ class Neo4jMutationGuard:
         chat_invocations: list[dict[str, object]],
         embedding_usage: dict[str, object],
     ) -> None:
-        completed = await self._query(
+        await self._query(
             f"""
             MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
             WHERE m.state = 'PENDING'
@@ -478,7 +478,7 @@ class Neo4jMutationGuard:
 
     async def complete(self, raw: dict[str, object]) -> None:
         raw_bytes = canonical_json_bytes(raw)
-        await self._query(
+        completed = await self._query(
             f"""
             MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
             WHERE m.state = 'PENDING'
