@@ -897,6 +897,36 @@ def test_latest_rights_decision_blocks_historical_backlog(tmp_path: Path) -> Non
     assert report.eligible == 2
 
 
+def test_current_rights_decision_does_not_authorise_a_different_endpoint(
+    tmp_path: Path,
+) -> None:
+    proving = _proving(tmp_path)
+    connection = __import__("sqlite3").connect(proving)
+    connection.execute(
+        "UPDATE proving_observations SET url=? WHERE source_id='UK-01'",
+        ("https://www.gov.uk/retired-feed",),
+    )
+    connection.commit()
+    connection.close()
+    seen: list[str] = []
+
+    class Stub:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            seen.append(unit.source_id)
+            return _complete(unit)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(tmp_path / "unpublished.sqlite3"),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=Stub(),
+        max_graphiti=10,
+    )
+    assert "UK-01" not in seen
+    assert report.eligible == 2
+
+
 @pytest.mark.parametrize(
     "gate_id",
     [

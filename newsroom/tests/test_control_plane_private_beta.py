@@ -37,7 +37,7 @@ from newsroom.graphiti_adapter.types import (
     GraphitiEgressPolicy,
     GraphitiRuntimeNotAuthorized,
 )
-from newsroom.increment9.proving import PROVING_GATES
+from newsroom.increment9.proving import PROVING_GATES, SOURCE_URLS
 
 ATOM = b"""<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
@@ -111,7 +111,7 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
     rows = (
         (
             "UK-01",
-            "https://www.gov.uk/search/all.atom",
+            SOURCE_URLS["UK-01"],
             "sha256:feed",
             ATOM,
         ),
@@ -128,7 +128,7 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
             JSON_DOC,
         ),
         *tuple(
-            (source_id, "https://example.invalid/feed", f"sha256:{source_id}", body)
+            (source_id, SOURCE_URLS[source_id], f"sha256:{source_id}", body)
             for source_id, body in extra
         ),
     )

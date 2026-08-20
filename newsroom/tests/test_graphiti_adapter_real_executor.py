@@ -422,6 +422,52 @@ def test_completed_episode_restores_original_provider_metering() -> None:
     assert telemetry.chat_invocations == [{"provider": "cursor-agent-cli"}]
 
 
+def test_completed_episode_rebuild_uses_retained_exact_node_inventory() -> None:
+    from newsroom.graphiti_adapter.real import _reconciled_result
+
+    requested: list[list[str]] = []
+
+    class EntityEdge:
+        @staticmethod
+        async def get_by_uuids(_driver: object, uuids: list[str]) -> list[object]:
+            assert uuids == ["edge-1"]
+            return [SimpleNamespace(uuid="edge-1")]
+
+    class EntityNode:
+        @staticmethod
+        async def get_by_uuids(_driver: object, uuids: list[str]) -> list[object]:
+            requested.append(uuids)
+            return [SimpleNamespace(uuid=value) for value in uuids]
+
+    class EpisodicEdge:
+        @staticmethod
+        async def get_by_group_ids(*_args: object, **_values: object) -> list[object]:
+            raise AssertionError("group-wide episodic edge scans are not exact recovery")
+
+    episode = SimpleNamespace(
+        uuid="episode-1",
+        entity_edges=["edge-1"],
+        episode_metadata={
+            "newsroom_ingest_state": "COMPLETE",
+            "newsroom_entity_node_uuids": ["node-2", "node-1"],
+        },
+    )
+    result = asyncio.run(
+        _reconciled_result(
+            graphiti=SimpleNamespace(driver=object()),
+            runtime=SimpleNamespace(
+                EntityEdge=EntityEdge,
+                EntityNode=EntityNode,
+                EpisodicEdge=EpisodicEdge,
+            ),
+            episode=episode,
+        )
+    )
+    assert requested == [["node-2", "node-1"]]
+    assert [item.uuid for item in result.nodes] == ["node-2", "node-1"]
+    assert [item.uuid for item in result.edges] == ["edge-1"]
+
+
 def test_episode_uses_default_database_and_validates_before_complete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -536,6 +582,7 @@ def test_episode_uses_default_database_and_validates_before_complete(
                 "usage_basis": "NO_EMBEDDING_CALL",
             },
             "newsroom_provider_attempt_number": 1,
+            "newsroom_entity_node_uuids": [],
         },
     ]
 

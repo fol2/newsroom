@@ -208,30 +208,29 @@ async def _ensure_episode(
 async def _reconciled_result(
     *, graphiti: Any, runtime: SimpleNamespace, episode: Any
 ) -> SimpleNamespace:
-    """Rebuild the graphiti result only from a completed retained episode."""
+    """Rebuild the exact validated result retained with a completed episode."""
 
     metadata = getattr(episode, "episode_metadata", None)
     if not isinstance(metadata, dict) or metadata.get(_EPISODE_STATE_KEY) != _EPISODE_COMPLETE:
         raise AmbiguousEpisodeEffect("Graphiti episode effect is not completed")
+    entity_node_ids = metadata.get("newsroom_entity_node_uuids")
+    if (
+        not isinstance(entity_node_ids, list)
+        or any(not isinstance(item, str) or not item for item in entity_node_ids)
+        or len(entity_node_ids) != len(set(entity_node_ids))
+    ):
+        raise AmbiguousEpisodeEffect(
+            "completed Graphiti episode has no exact validated node inventory"
+        )
     entity_edge_ids = [str(item) for item in getattr(episode, "entity_edges", ())]
     edges = (
         await runtime.EntityEdge.get_by_uuids(graphiti.driver, entity_edge_ids)
         if entity_edge_ids
         else []
     )
-    episodic = await runtime.EpisodicEdge.get_by_group_ids(
-        graphiti.driver, [GRAPHITI_WORKSPACE_GROUP], limit=20_000
-    )
-    node_ids = sorted(
-        {
-            str(item.target_node_uuid)
-            for item in episodic
-            if str(getattr(item, "source_node_uuid", "")) == str(episode.uuid)
-        }
-    )
     nodes = (
-        await runtime.EntityNode.get_by_uuids(graphiti.driver, node_ids)
-        if node_ids
+        await runtime.EntityNode.get_by_uuids(graphiti.driver, entity_node_ids)
+        if entity_node_ids
         else []
     )
     return SimpleNamespace(episode=episode, nodes=nodes, edges=edges)
@@ -374,6 +373,7 @@ async def _add_episode(
                     graphiti=graphiti, runtime=runtime, episode=retained
                 )
                 _restore_episode_telemetry(telemetry, retained)
+                validate_result(reconciled, telemetry)
                 return reconciled
             except AmbiguousEpisodeEffect:
                 raise AmbiguousEpisodeEffect(
@@ -395,6 +395,9 @@ async def _add_episode(
             "newsroom_chat_invocations": telemetry.chat_invocations,
             "newsroom_embedding_usage": telemetry.embedding_usage,
             "newsroom_provider_attempt_number": attempt_number,
+            "newsroom_entity_node_uuids": list(
+                dict.fromkeys(str(item.uuid) for item in result.nodes)
+            ),
         }
         await result.episode.save(graphiti.driver)
         return result

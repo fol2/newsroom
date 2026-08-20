@@ -53,7 +53,11 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     OD_011_CASH_CEILING_GBP,
     OPENROUTER_API,
 )
-from newsroom.increment9.proving import FORBIDDEN_STORE_MARKERS, PROVING_GATES
+from newsroom.increment9.proving import (
+    FORBIDDEN_STORE_MARKERS,
+    PROVING_GATES,
+    SOURCE_URLS,
+)
 
 
 GLOBAL_PROVING_GATES = frozenset(
@@ -617,6 +621,7 @@ def _permitted_rows(
             if (
                 current is None
                 or current[0] != "PASS"
+                or str(url) != SOURCE_URLS.get(str(source_id))
                 or int(status_code) != 200
                 or not body
             ):
