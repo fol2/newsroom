@@ -11,8 +11,9 @@ from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.veto import VetoError, assert_private_store, refuse_public_effect
 
-SCHEMA_VERSION = "newsroom.control-plane.unpublished.v4"
+SCHEMA_VERSION = "newsroom.control-plane.unpublished.v5"
 LEDGER_GENESIS = "sha256:" + ("0" * 64)
+GRAPHITI_MAX_FAILURES = 3
 
 _PAYLOAD_SQL = """
 CREATE TABLE IF NOT EXISTS unpublished_surface_payloads(
@@ -69,6 +70,16 @@ CREATE TABLE IF NOT EXISTS unpublished_graphiti_coverage(
     seq INTEGER PRIMARY KEY,
     at TEXT NOT NULL,
     coverage_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS unpublished_graphiti_failures(
+    ingest_id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    item_key TEXT NOT NULL,
+    retry_count INTEGER NOT NULL,
+    last_outcome TEXT NOT NULL,
+    last_failure_code TEXT NOT NULL,
+    dead_lettered INTEGER NOT NULL DEFAULT 0 CHECK(dead_lettered IN (0,1)),
+    at TEXT NOT NULL
 );
 """
 
@@ -190,13 +201,75 @@ def insert_graphiti_ingest(
     return True
 
 
+def graphiti_failure_state(
+    connection: sqlite3.Connection, ingest_id: str
+) -> tuple[int, bool]:
+    row = connection.execute(
+        """
+        SELECT retry_count, dead_lettered
+        FROM unpublished_graphiti_failures
+        WHERE ingest_id=?
+        """,
+        (ingest_id,),
+    ).fetchone()
+    if row is None:
+        return 0, False
+    return int(row[0]), bool(row[1])
+
+
+def record_graphiti_failure(
+    connection: sqlite3.Connection,
+    *,
+    ingest_id: str,
+    source_id: str,
+    item_key: str,
+    outcome: str,
+    failure_code: str,
+) -> int:
+    previous, _dead = graphiti_failure_state(connection, ingest_id)
+    retry_count = previous + 1
+    dead = 1 if retry_count >= GRAPHITI_MAX_FAILURES else 0
+    connection.execute(
+        """
+        INSERT INTO unpublished_graphiti_failures(
+            ingest_id, source_id, item_key, retry_count, last_outcome,
+            last_failure_code, dead_lettered, at
+        ) VALUES(?,?,?,?,?,?,?,?)
+        ON CONFLICT(ingest_id) DO UPDATE SET
+            retry_count=excluded.retry_count,
+            last_outcome=excluded.last_outcome,
+            last_failure_code=excluded.last_failure_code,
+            dead_lettered=excluded.dead_lettered,
+            at=excluded.at
+        """,
+        (
+            ingest_id,
+            source_id,
+            item_key,
+            retry_count,
+            outcome,
+            failure_code,
+            dead,
+            _now(),
+        ),
+    )
+    return retry_count
+
+
+def clear_graphiti_failure(connection: sqlite3.Connection, ingest_id: str) -> None:
+    connection.execute(
+        "DELETE FROM unpublished_graphiti_failures WHERE ingest_id=?",
+        (ingest_id,),
+    )
+
+
 def graphiti_coverage(
     connection: sqlite3.Connection,
     *,
     eligible_ids: tuple[str, ...],
     observed_at: tuple[str, ...] = (),
-    retry_count: int = 0,
-    dead_letter_count: int = 0,
+    retry_count: int | None = None,
+    dead_letter_count: int | None = None,
 ) -> dict[str, object]:
     eligible = len(eligible_ids)
     ingested_ids: set[str] = set()
@@ -242,6 +315,16 @@ def graphiti_coverage(
             lag_seconds = max(int((datetime.now(tz=UTC) - then).total_seconds()), 0)
         except ValueError:
             lag_seconds = 0
+    if retry_count is None:
+        retry_row = connection.execute(
+            "SELECT COALESCE(SUM(retry_count), 0) FROM unpublished_graphiti_failures"
+        ).fetchone()
+        retry_count = int(retry_row[0]) if retry_row else 0
+    if dead_letter_count is None:
+        dead_row = connection.execute(
+            "SELECT COUNT(*) FROM unpublished_graphiti_failures WHERE dead_lettered=1"
+        ).fetchone()
+        dead_letter_count = int(dead_row[0]) if dead_row else 0
     return {
         "eligible_source_revisions": eligible,
         "successfully_ingested_revisions": len(ingested_ids),

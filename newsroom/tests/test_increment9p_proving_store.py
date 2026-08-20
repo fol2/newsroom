@@ -166,6 +166,12 @@ def test_fetch_stores_ten_observations_without_publication(tmp_path: Path):
     assert all(item.status_code == 200 for item in report.observations)
     retained = list_observations(store)
     assert len(retained) == 10
+    connection = __import__("sqlite3").connect(store)
+    stored_gates = connection.execute(
+        "SELECT COUNT(*) FROM proving_gates WHERE run_id='r1'"
+    ).fetchone()[0]
+    connection.close()
+    assert stored_gates == len(report.gates)
     payload = report_json(report)
     assert b'"publication":false' in payload
     assert b"openrouter" in payload

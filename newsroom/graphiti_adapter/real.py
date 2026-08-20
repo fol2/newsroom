@@ -35,12 +35,15 @@ from newsroom.extraction.types import (
     ExtractionOutputValidation,
     ExtractionProposalKind,
     ExtractionUsage,
+    ProposalPredicateHint,
 )
+from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
 from newsroom.graphiti_adapter.evaluation_packet import (
     CURSOR_AGENT_MODEL_ID,
     GRAPHITI_CHAT_MODEL,
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_EMBEDDING_MODEL,
+    GRAPHITI_EXTRACTION_INSTRUCTIONS,
     GRAPHITI_GENERATION_ID,
     GRAPHITI_WORKSPACE_GROUP,
     GROK_CHAT_MODEL_ID,
@@ -66,12 +69,7 @@ from .workspace import DisposableProposalWorkspace
 _GRAPHITI_CORE_VERSION = "0.29.3"
 _NEO4J_USER = "neo4j"
 _SOURCE_REGISTRY_ID = re.compile(r"^[A-Z]{2,3}-\d{2}(?::.*)?$")
-_EXTRACTION_INSTRUCTIONS = (
-    "Extract people, organisations, places, events, policies and their relations "
-    "from the source content. Do not treat newsroom source-registry identifiers "
-    "(for example HK-04, RAD-02, UK-01) as world entities or relations. "
-    "Do not extract SourceItem, SourceRevision, DERIVED_FROM or OBSERVED_IN lineage."
-)
+_PREDICATE_HINTS = {item.value: item for item in ProposalPredicateHint}
 CURSOR_AGENT_BIN = os.environ.get(
     "NEWSROOM_CURSOR_AGENT_BIN", "/Users/jamesto/.local/bin/cursor-agent"
 )
@@ -307,6 +305,76 @@ def _proposals_from_result(
     return tuple(sorted(drafts, key=lambda item: item.local_id))
 
 
+def _predicate_hint(name: object) -> ProposalPredicateHint:
+    if isinstance(name, str):
+        token = name.strip().upper().replace(" ", "_")
+        hint = _PREDICATE_HINTS.get(token)
+        if hint is not None:
+            return hint
+    return ProposalPredicateHint.ABOUT_EVENT
+
+
+def _node_names(result: Any) -> dict[str, str]:
+    names: dict[str, str] = {}
+    for node in getattr(result, "nodes", ()) or ():
+        uuid = getattr(node, "uuid", None)
+        raw_name = getattr(node, "name", None)
+        if uuid is None or not isinstance(raw_name, str):
+            continue
+        name = " ".join(raw_name.split())
+        if name:
+            names[str(uuid)] = name
+    return names
+
+
+def _relation_proposals(
+    result: Any, attempt: GraphitiAttemptRequest
+) -> tuple[ProposalDraft, ...]:
+    drafts: list[ProposalDraft] = []
+    names = _node_names(result)
+    edges = getattr(result, "edges", ()) or ()
+    for index, edge in enumerate(edges, start=1):
+        fact = getattr(edge, "fact", None)
+        fact_text = " ".join(str(fact).split()) if fact else ""
+        source_uuid = str(getattr(edge, "source_node_uuid", "") or "")
+        target_uuid = str(getattr(edge, "target_node_uuid", "") or "")
+        subject = names.get(source_uuid) or source_uuid
+        obj = names.get(target_uuid) or target_uuid
+        if not subject or not obj:
+            continue
+        if _is_source_registry_name(subject) or _is_source_registry_name(obj):
+            continue
+        evidence = (
+            _evidence_for(fact_text, attempt)
+            if fact_text
+            else None
+        ) or _evidence_for(subject, attempt)
+        if evidence is None:
+            continue
+        drafts.append(
+            ProposalDraft(
+                local_id=f"relation.{index:04d}",
+                kind=ExtractionProposalKind.RELATION,
+                subject_placeholder=subject,
+                object_placeholder=obj,
+                predicate_hint=_predicate_hint(getattr(edge, "name", None)),
+                confidence_basis_points=None,
+                uncertainty_codes=("REQUIRES_RELATION_ADMISSION",),
+                rationale_codes=("GRAPHITI_EVALUATION_SPAN",),
+                evidence=(evidence,),
+            )
+        )
+    return tuple(drafts)
+
+
+def _episode_uuid(result: Any) -> str:
+    episode = getattr(result, "episode", None)
+    if episode is None:
+        return ""
+    uuid = getattr(episode, "uuid", None)
+    return "" if uuid is None else str(uuid)
+
+
 def _iso(value: object) -> str | None:
     if value is None:
         return None
@@ -429,7 +497,6 @@ async def _add_episode(
     body: str,
     name: str,
     reference_time: datetime,
-    episode_uuid: str,
 ) -> tuple[Any, list[dict[str, str]]]:
     os.environ.setdefault("GRAPHITI_TELEMETRY_ENABLED", "false")
     runtime = _load_graphiti()
@@ -456,9 +523,8 @@ async def _add_episode(
             reference_time=reference_time,
             source=runtime.EpisodeType.text,
             group_id=GRAPHITI_WORKSPACE_GROUP,
-            uuid=episode_uuid,
             update_communities=False,
-            custom_extraction_instructions=_EXTRACTION_INSTRUCTIONS,
+            custom_extraction_instructions=GRAPHITI_EXTRACTION_INSTRUCTIONS,
         )
         return result, list(getattr(llm_client, "invocations", ()))
     finally:
@@ -574,7 +640,7 @@ class RealGraphitiAdapter:
                 "source reference_time is required; started_at must not replace it"
             )
         reference = attempt.reference_time
-        episode_uuid = attempt.episode_uuid or str(attempt.attempt_id)
+        episode_name = attempt.episode_uuid or str(attempt.attempt_id)
         try:
             _load_graphiti()
             api_key = openrouter_api_key()
@@ -585,9 +651,8 @@ class RealGraphitiAdapter:
                         api_key=api_key,
                         password=password,
                         body=_episode_body(attempt),
-                        name=episode_uuid,
+                        name=episode_name,
                         reference_time=reference.value,
-                        episode_uuid=episode_uuid,
                     ),
                     timeout=timeout_s,
                 )
@@ -603,23 +668,30 @@ class RealGraphitiAdapter:
             )
         except (BrokerError, GraphitiAdapterContractError):
             raise
-        except Exception as exc:
+        except Exception:
             return _produced(
                 attempt,
                 outcome=ExtractionOutcome.RETRYABLE_FAILURE,
                 failure_code=ExtractionFailureCode.PRODUCER_INTERNAL_ERROR,
                 validation=None,
-                raw={"error_type": type(exc).__name__},
+                raw=None,
                 proposals=(),
             )
 
-        proposals = _proposals_from_result(result, attempt)
+        entity_proposals = _proposals_from_result(result, attempt)
+        relation_proposals = _relation_proposals(result, attempt)
+        proposals = tuple(
+            sorted(
+                (*entity_proposals, *relation_proposals),
+                key=lambda item: item.local_id,
+            )
+        )
         relations = _relation_receipts(result)
         entities = _entity_receipts(result)
         raw: dict[str, object] = {
             "workspace_group": GRAPHITI_WORKSPACE_GROUP,
             "generation_id": attempt.generation_id or GRAPHITI_GENERATION_ID,
-            "episode_uuid": episode_uuid,
+            "episode_uuid": _episode_uuid(result),
             "temporal_basis": attempt.temporal_basis,
             "reference_time": reference.to_text(),
             "ingest_started_at": started_at.to_text(),
@@ -627,9 +699,11 @@ class RealGraphitiAdapter:
             "relations": list(relations),
             "entity_count": len(entities),
             "relation_count": len(relations),
-            "proposal_count": len(proposals) + len(relations),
+            "proposal_count": len(proposals),
             "chat_invocations": invocations,
             "chat_subscription_not_debited": True,
+            "usage_basis": "UNOBSERVED",
+            "prompt_version": GRAPHITI_PROMPT_COMPONENT.component_version,
         }
         raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
         if not proposals and not relations:

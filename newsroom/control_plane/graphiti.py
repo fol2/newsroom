@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 from typing import Protocol
 
 from newsroom.control_plane.corpus import CorpusIngestUnit
+from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_FALLBACK,
     GRAPHITI_CHAT_MODEL,
@@ -40,6 +41,8 @@ class GraphitiCycleResult:
     request_tokens: int = 0
     response_tokens: int = 0
     cost_microunits: int = 0
+    usage_basis: str = "UNOBSERVED"
+    prompt_version: str = GRAPHITI_PROMPT_COMPONENT.component_version
     framework: str = GRAPHITI_CORE_RELEASE
     chat: str = GRAPHITI_CHAT_MODEL
     chat_fallback: str = GRAPHITI_CHAT_FALLBACK
@@ -61,6 +64,10 @@ class EvaluationGraphitiRunner:
         attempt = evaluation_attempt_for_body(
             episode_body=unit.episode_body,
             ingest_id=unit.ingest_id,
+            proving_run_id=unit.proving_run_id,
+            source_id=unit.source_id,
+            item_key=unit.item_key,
+            observation_digest=unit.observation_digest,
             published_at=unit.published_at,
             updated_at=unit.updated_at,
             observed_at=unit.observed_at,
@@ -84,12 +91,13 @@ class EvaluationGraphitiRunner:
         )
         invocations = payload.get("chat_invocations")
         usage = execution.produced.usage
+        usage_basis = payload.get("usage_basis")
         return GraphitiCycleResult(
             ingest_id=unit.ingest_id,
             source_id=unit.source_id,
             item_key=unit.item_key,
             outcome=execution.outcome.value,
-            proposal_count=len(execution.produced.proposals) + len(relations),
+            proposal_count=len(execution.produced.proposals),
             entity_count=len(entities),
             relation_count=len(relations),
             failure_code=execution.failure_code,
@@ -97,13 +105,15 @@ class EvaluationGraphitiRunner:
             reference_time=temporal.reference_time.to_text(),
             generation_id=GRAPHITI_GENERATION_ID,
             receipt_digest=str(payload.get("raw_output_digest") or ""),
-            episode_uuid=str(payload.get("episode_uuid") or unit.ingest_id),
+            episode_uuid=str(payload.get("episode_uuid") or ""),
             entities=entities,
             relations=relations,
             chat_invocations=tuple(invocations) if isinstance(invocations, list) else (),
             request_tokens=usage.request_tokens,
             response_tokens=usage.response_tokens,
             cost_microunits=usage.cost_microunits,
+            usage_basis=str(usage_basis) if isinstance(usage_basis, str) else "UNOBSERVED",
+            prompt_version=GRAPHITI_PROMPT_COMPONENT.component_version,
         )
 
 

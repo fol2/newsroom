@@ -66,6 +66,9 @@ from .types import (
 
 
 REAL_GRAPHITI_RUNTIME_ENABLED = True
+_TEMPORAL_BASES = frozenset(
+    {"UNSET", "SOURCE_UPDATED", "SOURCE_PUBLISHED", "OBSERVED_FALLBACK"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1229,6 +1232,22 @@ class GraphitiAttemptRequest:
             raise GraphitiAdapterContractError(
                 "only approved replay attempts can name replay source authority"
             )
+        if self.temporal_basis not in _TEMPORAL_BASES:
+            raise GraphitiAdapterContractError(
+                "temporal_basis must be a labelled mapping"
+            )
+        if self.reference_time is not None and not isinstance(
+            self.reference_time, UtcTimestamp
+        ):
+            raise GraphitiAdapterContractError("reference_time must be typed")
+        if self.episode_uuid is not None:
+            text(self.episode_uuid, field="episode_uuid", maximum_bytes=128)
+        text(
+            self.generation_id,
+            field="generation_id",
+            maximum_bytes=128,
+            allow_empty=True,
+        )
 
     def canonical_value(self) -> dict[str, object]:
         value = {
@@ -1260,6 +1279,14 @@ class GraphitiAttemptRequest:
                 if self.replay_source is None
                 else self.replay_source.canonical_digest
             ),
+            "reference_time": (
+                None
+                if self.reference_time is None
+                else self.reference_time.to_text()
+            ),
+            "temporal_basis": self.temporal_basis,
+            "episode_uuid": self.episode_uuid,
+            "generation_id": self.generation_id,
         }
         reject_private_graph_state(value)
         return value

@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from newsroom.authority.types import UtcTimestamp
 from newsroom.control_plane.corpus import CorpusIngestUnit, units_from
 from newsroom.control_plane.cycle import run_cycle
 from newsroom.control_plane.editorial import GroupedObservation
 from newsroom.control_plane.graphiti import GraphitiCycleResult
 from newsroom.control_plane.items import SourceItem, parse_observation, parse_source_time
+from newsroom.control_plane.veto import VetoError
 from newsroom.control_plane.writer import FixtureWriter
 from newsroom.graphiti_adapter.evaluation_attempt import evaluation_attempt_for
+from newsroom.graphiti_adapter.identity import MAX_EPISODE_BYTES
+from newsroom.graphiti_adapter.models import GraphitiAdapterContractError
 from newsroom.graphiti_adapter.real import _is_source_registry_name
 from newsroom.graphiti_adapter.temporal import (
     OBSERVED_FALLBACK,
@@ -94,6 +99,7 @@ def test_ingest_identity_is_deterministic_and_episode_omits_source_id() -> None:
         canonical_url="https://www.edb.gov.hk/example",
         observation_digest="sha256:obs",
         observed_at="2026-08-16T21:41:34.000000Z",
+        proving_run_id="run-1",
     )
     again = CorpusIngestUnit(
         source_id="HK-04",
@@ -103,6 +109,7 @@ def test_ingest_identity_is_deterministic_and_episode_omits_source_id() -> None:
         canonical_url="https://www.edb.gov.hk/example",
         observation_digest="sha256:obs",
         observed_at="2026-08-16T21:41:34.000000Z",
+        proving_run_id="run-1",
     )
     assert unit.ingest_id == again.ingest_id
     assert "HK-04" not in unit.episode_body
@@ -191,6 +198,11 @@ def test_cycle_ingests_corpus_without_writes(tmp_path: Path) -> None:
     assert stored["relations"][0]["fact"] == "Example relates to curriculum"
     assert stored["relations"][0]["source_node_uuid"] == "node-1"
     assert stored["chat_subscription_not_debited"] is True
+    assert stored["usage_basis"] == "UNOBSERVED"
+    assert stored["prompt_version"]
+    assert stored["proving_run_id"] == "run-1"
+    assert stored["observed_at"]
+    assert stored["chunk_ordinal"] == 1
     assert coverage["eligible_source_revisions"] == 3
     assert coverage["successfully_ingested_revisions"] == 1
     assert coverage["unresolved_gap"] == 2
@@ -213,6 +225,331 @@ def test_units_from_observations_cover_items_not_candidates() -> None:
     )
     # Same URL/item_key would collapse candidates; ingest still has two source rows
     # because source_id differs in ingest_key.
-    units = units_from(rows)
+    units = units_from(rows, proving_run_id="run-1")
     assert len(units) == 2
     assert {unit.source_id for unit in units} == {"HK-04", "RAD-02"}
+
+
+def _complete(unit) -> GraphitiCycleResult:
+    return GraphitiCycleResult(
+        ingest_id=unit.ingest_id,
+        source_id=unit.source_id,
+        item_key=unit.item_key,
+        outcome="COMPLETE",
+        proposal_count=1,
+        entity_count=1,
+        relation_count=0,
+        failure_code="NONE",
+        temporal_basis=unit.temporal().basis,
+        reference_time=unit.temporal().reference_time.to_text(),
+    )
+
+
+def test_same_body_new_observation_is_a_new_ingest() -> None:
+    first = CorpusIngestUnit(
+        source_id="HK-04",
+        item_key="q7",
+        headline="立法會質詢",
+        body="科技與生活科課程",
+        canonical_url="https://www.edb.gov.hk/example",
+        observation_digest="sha256:obs-a",
+        observed_at="2026-08-16T21:41:34.000000Z",
+        proving_run_id="run-1",
+        published_at="2026-01-01T00:00:00.000000Z",
+    )
+    second = CorpusIngestUnit(
+        source_id="HK-04",
+        item_key="q7",
+        headline="立法會質詢",
+        body="科技與生活科課程",
+        canonical_url="https://www.edb.gov.hk/example",
+        observation_digest="sha256:obs-b",
+        observed_at="2026-08-20T00:00:00.000000Z",
+        proving_run_id="run-1",
+        published_at="2026-01-01T00:00:00.000000Z",
+    )
+    third = CorpusIngestUnit(
+        source_id="HK-04",
+        item_key="q7",
+        headline="立法會質詢",
+        body="科技與生活科課程",
+        canonical_url="https://www.edb.gov.hk/example",
+        observation_digest="sha256:obs-a",
+        observed_at="2026-08-16T21:41:34.000000Z",
+        proving_run_id="run-1",
+        published_at="2026-03-01T00:00:00.000000Z",
+    )
+    assert first.ingest_id != second.ingest_id
+    assert first.ingest_id != third.ingest_id
+
+
+def test_long_body_is_chunked_not_truncated() -> None:
+    body = "a" * (MAX_EPISODE_BYTES + 50)
+    item = SourceItem("UK-01", "long", "headline", body, "https://example.invalid/long")
+    rows = (
+        GroupedObservation(
+            "UK-01", "sha256:long", item, "2026-08-16T21:41:34.000000Z"
+        ),
+    )
+    units = units_from(rows, proving_run_id="run-1")
+    assert len(units) >= 2
+    assert {unit.chunk_ordinal for unit in units} == {1, 2}
+    joined = "".join(
+        unit.episode_body for unit in sorted(units, key=lambda item: item.chunk_ordinal)
+    )
+    assert "headline" in joined
+    assert body in joined
+    assert all(len(unit.episode_body.encode()) <= MAX_EPISODE_BYTES for unit in units)
+
+
+def test_max_graphiti_counts_failed_attempts(tmp_path: Path) -> None:
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "unpublished_store.sqlite3"
+    calls: list[str] = []
+
+    class Boom:
+        def ingest(self, unit):
+            calls.append(unit.ingest_id)
+            raise RuntimeError("provider")
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=Boom(),
+        max_graphiti=1,
+    )
+    assert len(calls) == 1
+    assert report.graphiti == 1
+
+
+def test_cycle_rejects_foreign_graphiti_identity(tmp_path: Path) -> None:
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "unpublished_store.sqlite3"
+
+    class Liar:
+        def ingest(self, unit):
+            return GraphitiCycleResult(
+                ingest_id="00000000-0000-4000-8000-000000000099",
+                source_id="XX-99",
+                item_key="foreign",
+                outcome="COMPLETE",
+                proposal_count=1,
+                entity_count=1,
+                relation_count=0,
+                failure_code="NONE",
+                temporal_basis=unit.temporal().basis,
+                reference_time=unit.temporal().reference_time.to_text(),
+            )
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=Liar(),
+        max_graphiti=1,
+    )
+    assert report.graphiti == 1
+    connection = __import__("sqlite3").connect(unpublished)
+    stored = connection.execute(
+        "SELECT COUNT(*) FROM unpublished_graphiti_ingest"
+    ).fetchone()[0]
+    failed = connection.execute(
+        "SELECT COUNT(*) FROM unpublished_graphiti_failures"
+    ).fetchone()[0]
+    connection.close()
+    assert stored == 0
+    assert failed == 1
+
+
+def test_ingest_commits_when_writer_fails(tmp_path: Path) -> None:
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "unpublished_store.sqlite3"
+
+    class BrokenWriter:
+        writer_id = "broken"
+
+        def write(self, candidate, package):
+            raise RuntimeError("writer down")
+
+    class Stub:
+        def ingest(self, unit):
+            return _complete(unit)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=BrokenWriter(),
+        max_writes=5,
+        graphiti=Stub(),
+        max_graphiti=1,
+    )
+    assert report.minted == 0
+    assert report.graphiti == 1
+    connection = __import__("sqlite3").connect(unpublished)
+    stored = connection.execute(
+        "SELECT COUNT(*) FROM unpublished_graphiti_ingest"
+    ).fetchone()[0]
+    connection.close()
+    assert stored == 1
+
+
+def test_ingest_survives_writer_veto(tmp_path: Path) -> None:
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "unpublished_store.sqlite3"
+
+    class VetoWriter:
+        writer_id = "veto"
+
+        def write(self, candidate, package):
+            raise VetoError("PUBLIC_DISPATCH")
+
+    class Stub:
+        def ingest(self, unit):
+            return _complete(unit)
+
+    with pytest.raises(VetoError, match="PUBLIC_DISPATCH"):
+        run_cycle(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            writer=VetoWriter(),
+            max_writes=5,
+            graphiti=Stub(),
+            max_graphiti=1,
+        )
+    connection = __import__("sqlite3").connect(unpublished)
+    stored = connection.execute(
+        "SELECT COUNT(*) FROM unpublished_graphiti_ingest"
+    ).fetchone()[0]
+    connection.close()
+    assert stored == 1
+
+
+def test_unattempted_units_run_before_retries(tmp_path: Path) -> None:
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "unpublished_store.sqlite3"
+    calls: list[str] = []
+
+    class AlwaysFail:
+        def ingest(self, unit):
+            calls.append(unit.ingest_id)
+            raise RuntimeError("timeout")
+
+    run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=AlwaysFail(),
+        max_graphiti=1,
+    )
+    run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=AlwaysFail(),
+        max_graphiti=1,
+    )
+    assert len(calls) == 2
+    assert calls[0] != calls[1]
+
+
+def test_dead_letter_stops_retrying_a_unit(tmp_path: Path) -> None:
+    proving = _proving(tmp_path)
+    connection = __import__("sqlite3").connect(proving)
+    connection.execute("DELETE FROM proving_observations WHERE source_id!='UK-01'")
+    connection.execute("DELETE FROM proving_gates WHERE gate_id!='RIGHTS_UK-01'")
+    connection.commit()
+    connection.close()
+    unpublished = tmp_path / "unpublished_store.sqlite3"
+    calls: list[str] = []
+
+    class AlwaysFail:
+        def ingest(self, unit):
+            calls.append(unit.ingest_id)
+            raise RuntimeError("timeout")
+
+    for _ in range(3):
+        run_cycle(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            writer=FixtureWriter(),
+            max_writes=0,
+            graphiti=AlwaysFail(),
+            max_graphiti=1,
+        )
+    fourth = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=AlwaysFail(),
+        max_graphiti=1,
+    )
+    assert fourth.graphiti == 0
+    assert len(calls) == 3
+    assert len(set(calls)) == 1
+    connection = __import__("sqlite3").connect(unpublished)
+    dead = connection.execute(
+        "SELECT COUNT(*) FROM unpublished_graphiti_failures WHERE dead_lettered=1"
+    ).fetchone()[0]
+    coverage = json.loads(
+        connection.execute(
+            "SELECT coverage_json FROM unpublished_graphiti_coverage ORDER BY seq DESC"
+        ).fetchone()[0]
+    )
+    connection.close()
+    assert dead == 1
+    assert coverage["dead_letter_count"] == 1
+
+
+def test_missing_rights_gate_skips_source(tmp_path: Path) -> None:
+    proving = _proving(tmp_path)
+    connection = __import__("sqlite3").connect(proving)
+    connection.execute("DELETE FROM proving_gates WHERE gate_id='RIGHTS_UK-02'")
+    connection.commit()
+    connection.close()
+    unpublished = tmp_path / "unpublished_store.sqlite3"
+
+    class Stub:
+        def ingest(self, unit):
+            assert unit.source_id != "UK-02"
+            return _complete(unit)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=Stub(),
+        max_graphiti=1,
+    )
+    assert report.eligible == 2
+    assert report.sources == 2
+
+
+def test_attempt_canonical_digest_covers_temporal_episode_and_generation() -> None:
+    base = evaluation_attempt_for(("Hong Kong Observatory issued a warning.",))
+    assert (
+        replace(base, temporal_basis=SOURCE_PUBLISHED).canonical_digest
+        != base.canonical_digest
+    )
+    assert (
+        replace(
+            base,
+            reference_time=UtcTimestamp.parse("2026-01-01T00:00:00.000000Z"),
+        ).canonical_digest
+        != base.canonical_digest
+    )
+    assert (
+        replace(
+            base, episode_uuid="00000000-0000-4000-8000-000000000001"
+        ).canonical_digest
+        != base.canonical_digest
+    )
+    assert replace(base, generation_id="changedgen").canonical_digest != base.canonical_digest
+    with pytest.raises(GraphitiAdapterContractError, match="temporal_basis"):
+        replace(base, temporal_basis="STARTED_AT")

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from newsroom.authority.canonical import digest_bytes, digest_canonical
-from newsroom.authority.objects import ObjectAccessDecisionId
-from newsroom.authority.types import ObjectAdmissionId
 from newsroom.extraction.models import (
     ExtractionInputBinding,
     ExtractionPassageInput,
@@ -21,10 +19,12 @@ from newsroom.extraction.types import (
     VersionedExtractionComponent,
 )
 from newsroom.graphiti_adapter.identity import (
+    MAX_EPISODE_BYTES,
+    attempt_ids,
     content_digest,
     ingest_key,
+    observation_authority_ids,
     typed_id,
-    typed_ids,
 )
 from newsroom.graphiti_adapter.temporal import map_reference_time
 from newsroom.sources.types import SourceDefinitionVersionId
@@ -61,20 +61,25 @@ _PIN = digest_canonical(
     }
 )
 _HYDRATION = digest_canonical({"policy": "graphiti-evaluation-passage-v2"})
-_MAX_PASSAGE_BYTES = 8 * 1024
 
 
 def _component(component_id: str, version: str) -> VersionedExtractionComponent:
     return VersionedExtractionComponent(component_id, version, _PIN)
 
 
-def _passage(text: str, *, ingest_id: str) -> ExtractionPassageInput:
+def _passage(
+    text: str,
+    *,
+    ingest_id: str,
+    admission_id,
+    access_decision_id,
+) -> ExtractionPassageInput:
     encoded = text.encode("utf-8")
     blob = digest_bytes(encoded)
     return ExtractionPassageInput(
         passage_id=typed_id(ExtractionPassageId, "passage", ingest_id),
-        admission_id=typed_id(ObjectAdmissionId, "admission", ingest_id),
-        access_decision_id=typed_id(ObjectAccessDecisionId, "access", ingest_id),
+        admission_id=admission_id,
+        access_decision_id=access_decision_id,
         hydration_policy_contract_digest=_HYDRATION,
         principal_id="newsroom.control-plane",
         authority_domain="newsroom.evaluation",
@@ -96,6 +101,10 @@ def evaluation_attempt_for_body(
     *,
     episode_body: str,
     ingest_id: str,
+    proving_run_id: str,
+    source_id: str,
+    item_key: str,
+    observation_digest: str,
     published_at: str | None,
     updated_at: str | None,
     observed_at: str,
@@ -104,25 +113,37 @@ def evaluation_attempt_for_body(
     if not text:
         raise ValueError("EVALUATION Graphiti attempt needs retained passages")
     encoded = text.encode("utf-8")
-    if len(encoded) > _MAX_PASSAGE_BYTES:
-        text = encoded[:_MAX_PASSAGE_BYTES].decode("utf-8", errors="ignore").rstrip()
-    if not text:
-        raise ValueError("EVALUATION Graphiti attempt needs non-empty passages")
+    if len(encoded) > MAX_EPISODE_BYTES:
+        raise ValueError("EVALUATION Graphiti attempt exceeds the episode chunk bound")
     temporal = map_reference_time(
         published_at=published_at,
         updated_at=updated_at,
         observed_at=observed_at,
     )
+    attempt_id, workspace_id, cleanup_id = attempt_ids(ingest_id)
     (
-        attempt_id,
-        workspace_id,
-        cleanup_id,
+        admission_id,
+        access_id,
         definition_id,
         item_id,
         revision_id,
         representation_id,
-    ) = typed_ids(ingest_id)
-    bound = (_passage(text, ingest_id=ingest_id),)
+    ) = observation_authority_ids(
+        proving_run_id=proving_run_id,
+        source_id=source_id,
+        item_key=item_key,
+        observation_digest=observation_digest,
+        published_at=published_at,
+        updated_at=updated_at,
+    )
+    bound = (
+        _passage(
+            text,
+            ingest_id=ingest_id,
+            admission_id=admission_id,
+            access_decision_id=access_id,
+        ),
+    )
     contract = ExtractorContractRequest(
         contract_id=typed_id(ExtractorContractId, "contract", ingest_id),
         framework=_component("graphiti.framework", GRAPHITI_CORE_RELEASE),
@@ -165,7 +186,7 @@ def evaluation_attempt_for_body(
         input_binding=ExtractionInputBinding(
             definition_id=definition_id,
             definition_version_id=typed_id(
-                SourceDefinitionVersionId, "definition-version", ingest_id
+                SourceDefinitionVersionId, "definition-version", source_id
             ),
             item_id=item_id,
             revision_id=revision_id,
@@ -213,17 +234,26 @@ def evaluation_attempt_for(passages: tuple[str, ...]) -> GraphitiAttemptRequest:
         raise ValueError("EVALUATION Graphiti attempt needs retained passages")
     body = "\n\n".join(" ".join(item.split()) for item in passages if item.split())
     digest = content_digest(headline="", body=body, canonical_url="")
+    observed_at = "2026-08-20T00:00:00.000000Z"
     ingest_id = ingest_key(
         source_id="evaluation",
         item_key="passages",
         content_digest_value=digest,
+        observation_digest=digest,
+        published_at=None,
+        updated_at=None,
+        observed_at=observed_at,
     )
     return evaluation_attempt_for_body(
         episode_body=body,
         ingest_id=ingest_id,
+        proving_run_id="evaluation",
+        source_id="evaluation",
+        item_key="passages",
+        observation_digest=digest,
         published_at=None,
         updated_at=None,
-        observed_at="2026-08-20T00:00:00.000000Z",
+        observed_at=observed_at,
     )
 
 

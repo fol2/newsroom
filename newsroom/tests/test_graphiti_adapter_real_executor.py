@@ -195,6 +195,8 @@ def test_cli_llm_client_is_wired_for_graphiti_chat() -> None:
     assert GRAPHITI_CHAT_FALLBACK == "grok-build-cli:grok-4.6-medium"
     assert CURSOR_AGENT_MODEL_ID == "composer-2.5"
     assert GROK_CHAT_REASONING == "medium"
+    assert "uuid=" not in source
+    assert "GRAPHITI_EXTRACTION_INSTRUCTIONS" in source
 
 
 def test_else_branch_constructs_real_adapter_instead_of_unreachable_assertion() -> None:

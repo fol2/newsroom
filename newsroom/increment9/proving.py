@@ -357,9 +357,52 @@ def _connect(path: str) -> sqlite3.Connection:
             PRIMARY KEY(run_id, source_id, body_digest),
             FOREIGN KEY(run_id) REFERENCES proving_runs(run_id)
         );
+        CREATE TABLE IF NOT EXISTS proving_gates(
+            run_id TEXT NOT NULL,
+            gate_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            PRIMARY KEY(run_id, gate_id),
+            FOREIGN KEY(run_id) REFERENCES proving_runs(run_id)
+        );
         """
     )
     return connection
+
+
+def rights_permitted_sources(
+    connection: sqlite3.Connection, run_id: str
+) -> frozenset[str]:
+    names = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "proving_gates" not in names:
+        return frozenset()
+    rows = connection.execute(
+        "SELECT gate_id FROM proving_gates WHERE run_id=? AND status=?",
+        (run_id, GateStatus.PASS.value),
+    )
+    permitted: set[str] = set()
+    for (gate_id,) in rows:
+        if not str(gate_id).startswith("RIGHTS_"):
+            continue
+        source_id = str(gate_id).removeprefix("RIGHTS_")
+        if source_id in SOURCE_IDS:
+            permitted.add(source_id)
+    return frozenset(permitted)
+
+
+def _put_gates(
+    connection: sqlite3.Connection, run_id: str, gates: tuple[Gate, ...]
+) -> None:
+    for gate in gates:
+        connection.execute(
+            "INSERT OR REPLACE INTO proving_gates VALUES(?,?,?,?)",
+            (run_id, gate.gate_id, gate.status.value, gate.reason),
+        )
 
 
 def _put(connection: sqlite3.Connection, run_id: str, fetched_at: str, observation: Observation, body: bytes) -> None:
@@ -426,6 +469,7 @@ def run_proving(
             "INSERT OR IGNORE INTO proving_runs VALUES(?,?,0,0,0,0)",
             (run_id, fetched_at),
         )
+        _put_gates(connection, run_id, gates)
         observations: list[Observation] = []
         for source_id, url in PORTFOLIO:
             assert_allowed_url(url)

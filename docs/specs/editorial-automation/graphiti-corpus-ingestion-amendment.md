@@ -24,7 +24,7 @@ Lock Graphiti as a corpus-owned temporal proposal engine with exact ingest ident
 
 **GING-001 — Corpus-owned scheduling.** Graphiti ingest MUST be driven by rights-permitted `SourceRevision` / `DiscoveryRepresentation` readiness. It MUST NOT be driven by draft count or writer completion. An EVALUATION throttle MAY cap ingest units per cycle. That throttle is not the target corpus schedule.
 
-**GING-002 — Exact ingest identity.** Each Graphiti episode MUST bind one immutable source revision or representation. It MUST NOT mix several source revisions. Episode UUID and idempotency MUST be deterministic from source identity, representation digest, chunk digest or ordinal, Graphiti configuration semantic digest and temporal policy digest.
+**GING-002 — Exact ingest identity.** Each Graphiti episode MUST bind one immutable source revision or representation. It MUST NOT mix several source revisions. Episode identity and idempotency MUST be deterministic from source identity, observation or representation digest, source timestamps, chunk digest or ordinal, Graphiti configuration semantic digest and temporal policy digest. Newsroom retains that key. graphiti-core 0.29.3 `add_episode(uuid=...)` is lookup, not create, so a never-written UUID MUST NOT be passed on first ingest.
 
 **GING-003 — Versioned temporal mapping.** `reference_time` MUST be derived from retained source times by a versioned policy. Adapter start time MUST NOT replace source time. Missing source time MAY fall back to `observed_at` only when labelled `OBSERVED_FALLBACK`. Published, updated, asserted, observed, ledger-recorded and ingested times MUST remain distinct.
 

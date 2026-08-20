@@ -5,6 +5,8 @@ from __future__ import annotations
 from uuid import UUID
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.objects import ObjectAccessDecisionId
+from newsroom.authority.types import ObjectAdmissionId
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_FALLBACK,
     GRAPHITI_CHAT_MODEL,
@@ -24,6 +26,8 @@ from newsroom.sources.types import (
     SourceItemId,
     SourceRevisionId,
 )
+
+MAX_EPISODE_BYTES = 8 * 1024
 
 
 def uuid4_from_digest(digest: bytes) -> UUID:
@@ -71,6 +75,10 @@ def ingest_key(
     source_id: str,
     item_key: str,
     content_digest_value: str,
+    observation_digest: str,
+    published_at: str | None,
+    updated_at: str | None,
+    observed_at: str,
     chunk_ordinal: int = 1,
 ) -> str:
     digest = digest_bytes(
@@ -78,6 +86,10 @@ def ingest_key(
             {
                 "source_id": source_id,
                 "item_key": item_key,
+                "observation_digest": observation_digest,
+                "published_at": published_at,
+                "updated_at": updated_at,
+                "observed_at": observed_at,
                 "content_digest": content_digest_value,
                 "chunk_ordinal": chunk_ordinal,
                 "configuration": configuration_digest(),
@@ -88,21 +100,62 @@ def ingest_key(
     return str(uuid4_from_digest(bytes.fromhex(digest.removeprefix("sha256:")[:32])))
 
 
-def typed_ids(ingest_id: str) -> tuple[
-    GraphitiAttemptId,
-    GraphitiWorkspaceId,
-    GraphitiCleanupReceiptId,
+def attempt_ids(ingest_id: str) -> tuple[
+    GraphitiAttemptId, GraphitiWorkspaceId, GraphitiCleanupReceiptId
+]:
+    return (
+        _typed(GraphitiAttemptId, "attempt", ingest_id),
+        _typed(GraphitiWorkspaceId, "workspace", ingest_id),
+        _typed(GraphitiCleanupReceiptId, "cleanup", ingest_id),
+    )
+
+
+def observation_authority_ids(
+    *,
+    proving_run_id: str,
+    source_id: str,
+    item_key: str,
+    observation_digest: str,
+    published_at: str | None,
+    updated_at: str | None,
+) -> tuple[
+    ObjectAdmissionId,
+    ObjectAccessDecisionId,
     SourceDefinitionId,
     SourceItemId,
     SourceRevisionId,
     DiscoveryRepresentationId,
 ]:
     return (
-        _typed(GraphitiAttemptId, "attempt", ingest_id),
-        _typed(GraphitiWorkspaceId, "workspace", ingest_id),
-        _typed(GraphitiCleanupReceiptId, "cleanup", ingest_id),
-        _typed(SourceDefinitionId, "definition", ingest_id),
-        _typed(SourceItemId, "item", ingest_id),
-        _typed(SourceRevisionId, "revision", ingest_id),
-        _typed(DiscoveryRepresentationId, "representation", ingest_id),
+        _typed(
+            ObjectAdmissionId,
+            "proving-admission",
+            proving_run_id,
+            source_id,
+            observation_digest,
+        ),
+        _typed(
+            ObjectAccessDecisionId,
+            "proving-access",
+            proving_run_id,
+            source_id,
+            observation_digest,
+        ),
+        _typed(SourceDefinitionId, "definition", source_id),
+        _typed(SourceItemId, "item", source_id, item_key),
+        _typed(
+            SourceRevisionId,
+            "revision",
+            source_id,
+            item_key,
+            observation_digest,
+            published_at or "",
+            updated_at or "",
+        ),
+        _typed(
+            DiscoveryRepresentationId,
+            "representation",
+            source_id,
+            observation_digest,
+        ),
     )

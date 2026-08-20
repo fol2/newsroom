@@ -86,6 +86,13 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
             item_count INTEGER NOT NULL,
             error TEXT
         );
+        CREATE TABLE proving_gates(
+            run_id TEXT NOT NULL,
+            gate_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            PRIMARY KEY(run_id, gate_id)
+        );
         """
     )
     connection.execute(
@@ -129,6 +136,11 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
                 1,
                 None,
             ),
+        )
+    for source_id, _url, _digest, _body in rows:
+        connection.execute(
+            "INSERT INTO proving_gates VALUES(?,?,?,?)",
+            ("run-1", f"RIGHTS_{source_id}", "PASS", "fixture"),
         )
     connection.commit()
     connection.close()
@@ -363,7 +375,7 @@ def test_cycle_retries_failed_graphiti_extract(tmp_path: Path) -> None:
         max_graphiti=1,
     )
     assert second.graphiti == 1
-    assert calls[0] == calls[1]
+    assert calls[0] != calls[1]
     connection = __import__("sqlite3").connect(unpublished)
     stored = connection.execute(
         "SELECT outcome, proposal_count FROM unpublished_graphiti_ingest"

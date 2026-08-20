@@ -22,6 +22,7 @@ from newsroom.graphiti_adapter.types import (
     GraphitiEgressPolicy,
     GraphitiWorkspacePolicyId,
 )
+from newsroom.increment9.proving import PORTFOLIO
 
 GRAPHITI_CORE_RELEASE = "graphiti-core-0.29.3"
 GRAPHITI_CHAT_MODEL = "cursor-agent-cli:composer-2.5"
@@ -39,6 +40,13 @@ OPENROUTER_KEYCHAIN_SERVICE = "newsroom.shadow.v1"
 NEO4J_COMMUNITY_LOCAL = "NEO4J_COMMUNITY_LOCAL"
 OD_011_CASH_CEILING_GBP = 250
 TEMPORAL_POLICY_VERSION = "graphiti-source-reference-time-v1"
+GRAPHITI_EXTRACTION_INSTRUCTIONS = (
+    "Extract people, organisations, places, events, policies and their relations "
+    "from the source content. Do not treat newsroom source-registry identifiers "
+    "(for example HK-04, RAD-02, UK-01) as world entities or relations. "
+    "Do not extract SourceItem, SourceRevision, DERIVED_FROM or OBSERVED_IN lineage."
+)
+GRAPHITI_INPUT_WATERMARK = digest_canonical({"portfolio": list(PORTFOLIO)})
 
 GRAPHITI_GENERATION_DIGEST = digest_canonical(
     {
@@ -48,7 +56,9 @@ GRAPHITI_GENERATION_DIGEST = digest_canonical(
         "embedding": GRAPHITI_EMBEDDING_MODEL,
         "temporal": TEMPORAL_POLICY_VERSION,
         "prompt": GRAPHITI_PROMPT_COMPONENT.contract_digest,
-        "output_schema": GRAPHITI_ADAPTER_OUTPUT_SCHEMA_COMPONENT.contract_digest,
+        "ontology": GRAPHITI_ADAPTER_OUTPUT_SCHEMA_COMPONENT.canonical_value(),
+        "extraction_instructions": GRAPHITI_EXTRACTION_INSTRUCTIONS,
+        "input_watermark": GRAPHITI_INPUT_WATERMARK,
     }
 )
 GRAPHITI_GENERATION_ID = GRAPHITI_GENERATION_DIGEST.removeprefix("sha256:")[:12]
