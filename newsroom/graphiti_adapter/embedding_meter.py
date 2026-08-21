@@ -72,14 +72,15 @@ def is_exact_provider_reported_usage(
             request["provider"] != "openrouter"
             or request["model"] != OPENROUTER_EMBEDDING_SLUG
             or not isinstance(request["request_id"], str)
-            or (
-                prompt_tokens is not None
-                and not _is_non_negative_int(prompt_tokens)
-            )
             or not _is_non_negative_int(total_tokens)
             or not _is_non_negative_int(item_cost)
             or request["cost_reported"] is not True
             or request["outcome"] != "COMPLETE"
+        ):
+            return False
+        if prompt_tokens is not None and (
+            not _is_non_negative_int(prompt_tokens)
+            or prompt_tokens > total_tokens
         ):
             return False
         request_tokens += total_tokens

@@ -2215,6 +2215,12 @@ def test_no_call_reconciliation_requires_exact_zero_usage_shape(
         ),
         pytest.param(
             _provider_usage_variant(
+                request_updates={"prompt_tokens": 26},
+            ),
+            id="prompt-tokens-exceed-total",
+        ),
+        pytest.param(
+            _provider_usage_variant(
                 request_updates={"cost_usd_microunits": "9"}
             ),
             id="malformed-request-cost",
