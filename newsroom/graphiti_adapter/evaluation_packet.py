@@ -8,6 +8,8 @@ Increment 9P proving still must not call OpenRouter (`OPENROUTER_UNUSED`).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from newsroom.authority.canonical import digest_canonical
 from newsroom.graphiti_adapter.contracts import (
     GRAPHITI_ADAPTER_CODE_COMPONENT,
@@ -33,6 +35,33 @@ CURSOR_AGENT_MODEL_ID = "composer-2.5"
 GROK_CHAT_MODEL_ID = "grok-4.6"
 GROK_CHAT_REASONING = "medium"
 GRAPHITI_EMBEDDING_MODEL = "openrouter:openai.text-embedding-3-large"
+
+
+@dataclass(frozen=True, slots=True)
+class GraphitiEvaluationProviderDestination:
+    """One EVALUATION Graphiti route and its retained rights destination token."""
+
+    route: str
+    destination_token: str
+
+
+GRAPHITI_EVALUATION_PROVIDER_DESTINATIONS = (
+    GraphitiEvaluationProviderDestination(
+        route=GRAPHITI_CHAT_MODEL,
+        destination_token="EVALUATION_CURSOR_AGENT_CLI",
+    ),
+    GraphitiEvaluationProviderDestination(
+        route=GRAPHITI_CHAT_FALLBACK,
+        destination_token="EVALUATION_GROK_BUILD_CLI",
+    ),
+    GraphitiEvaluationProviderDestination(
+        route=GRAPHITI_EMBEDDING_MODEL,
+        destination_token="EVALUATION_OPENROUTER_EMBEDDINGS",
+    ),
+)
+GRAPHITI_EVALUATION_DESTINATION_TOKENS = frozenset(
+    item.destination_token for item in GRAPHITI_EVALUATION_PROVIDER_DESTINATIONS
+)
 WRITER_MODEL = "grok-build-cli:grok-4.6"
 WRITER_FALLBACK = "cursor-agent-cli"
 OPENROUTER_EMBEDDING_SLUG = "openai/text-embedding-3-large"

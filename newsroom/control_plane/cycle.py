@@ -51,6 +51,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_MODEL,
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_EMBEDDING_MODEL,
+    GRAPHITI_EVALUATION_DESTINATION_TOKENS,
     GRAPHITI_GENERATION_ID,
     GRAPHITI_WORKSPACE_GROUP,
     OD_011_CASH_CEILING_GBP,
@@ -60,10 +61,7 @@ from newsroom.increment9.proving import (
     FORBIDDEN_STORE_MARKERS,
     PROVING_GATES,
 )
-from newsroom.increment9.rights import (
-    GRAPHITI_EVALUATION_DESTINATIONS,
-    assess_rights,
-)
+from newsroom.increment9.rights import assess_rights
 
 
 GLOBAL_PROVING_GATES = frozenset(
@@ -877,7 +875,7 @@ def _dispatch_rights_decision(
     if decision is None:
         return None
     destinations = decision.get("rights_destinations")
-    if not isinstance(destinations, tuple) or not GRAPHITI_EVALUATION_DESTINATIONS.issubset(
+    if not isinstance(destinations, tuple) or not GRAPHITI_EVALUATION_DESTINATION_TOKENS.issubset(
         destinations
     ):
         return None

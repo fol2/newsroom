@@ -314,6 +314,25 @@ def test_ten_refusal_classes_fail_closed_on_the_real_contracts() -> None:
         )
 
 
+def test_assess_rights_rejects_valid_reviews_whose_destinations_differ() -> None:
+    source_only = fixture_inventory()
+    extra = fixture_inventory(
+        destinations=("OTHER_APPROVED_SURFACE", "TEN_APPROVED_SOURCE_ENDPOINTS")
+    )
+    assert assess_rights(GATE_ID, inventory=source_only, now=FIXTURE_NOW).status == "PASS"
+    assert extra["reviews"][0]["destinations"] != source_only["reviews"][0]["destinations"]
+    assert assess_rights(GATE_ID, inventory=extra, now=FIXTURE_NOW).status == "PASS"
+    mixed = dict(source_only)
+    mixed["reviews"] = [
+        source_only["reviews"][0],
+        extra["reviews"][1],
+        source_only["reviews"][2],
+    ]
+    verdict = assess_rights(GATE_ID, inventory=mixed, now=FIXTURE_NOW)
+    assert verdict.status == "FAIL"
+    assert verdict.reason == "record is malformed"
+
+
 def test_campaign_namesake_list_membership_cannot_pass() -> None:
     with pytest.raises(RightsError, match="required_gate_ids"):
         refuse_namesake_satisfaction(required_gate_ids())

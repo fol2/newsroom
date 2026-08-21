@@ -82,14 +82,6 @@ RAD_02_TERMS_URL = "https://terms.bbc.fixture.invalid/rad-02"
 RAD_02_TERMS_BYTES = b"newsroom.increment9.rights.rad-02.fixture-terms\n"
 FIXTURE_DATA_CLASS = "PUBLIC_OFFICIAL_PUBLICATION_METADATA"
 FIXTURE_DESTINATIONS = ("TEN_APPROVED_SOURCE_ENDPOINTS",)
-# Evaluation-only Graphiti destinations; not live or production authority.
-GRAPHITI_EVALUATION_DESTINATIONS = frozenset(
-    {
-        "EVALUATION_CURSOR_AGENT_CLI",
-        "EVALUATION_GROK_BUILD_CLI",
-        "EVALUATION_OPENROUTER_EMBEDDINGS",
-    }
-)
 FIXTURE_RETENTION = "RAW_HTTP_MAX_7_DAYS"
 FIXTURE_FAMILIES = (
     "ANTHROPIC_AGENT_SDK",
@@ -543,17 +535,30 @@ def fixture_review(
     return record
 
 
-def evaluation_rights_destinations() -> tuple[str, ...]:
-    """Return source-endpoint plus explicit EVALUATION Graphiti destinations."""
-
-    return tuple(sorted({*FIXTURE_DESTINATIONS, *GRAPHITI_EVALUATION_DESTINATIONS}))
-
-
-def fixture_inventory(*, gate: str = GATE_ID) -> dict[str, object]:
+def fixture_inventory(
+    *,
+    gate: str = GATE_ID,
+    destinations: tuple[str, ...] | None = None,
+    now: str = FIXTURE_NOW,
+    issued_at: str = FIXTURE_ISSUED_AT,
+    expires_at: str = FIXTURE_EXPIRES_AT,
+) -> dict[str, object]:
+    destination_list = sorted(
+        set(FIXTURE_DESTINATIONS if destinations is None else destinations)
+    )
     return {
         "bound_terms": bound_terms_identity(gate=gate),
-        "now": FIXTURE_NOW,
-        "reviews": [fixture_review(family, gate=gate) for family in FIXTURE_FAMILIES],
+        "now": now,
+        "reviews": [
+            fixture_review(
+                family,
+                gate=gate,
+                destinations=destination_list,
+                issued_at=issued_at,
+                expires_at=expires_at,
+            )
+            for family in FIXTURE_FAMILIES
+        ],
     }
 
 

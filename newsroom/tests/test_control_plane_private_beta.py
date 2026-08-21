@@ -28,6 +28,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_MODEL,
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_EMBEDDING_MODEL,
+    GRAPHITI_EVALUATION_DESTINATION_TOKENS,
     OPENROUTER_API,
     WRITER_FALLBACK,
     WRITER_MODEL,
@@ -42,11 +43,9 @@ from newsroom.graphiti_adapter.types import (
 from newsroom.increment9.proving import PROVING_GATES, SOURCE_URLS
 from newsroom.increment9.rights import (
     BINDINGS,
-    FIXTURE_FAMILIES,
+    FIXTURE_DESTINATIONS,
     FIXTURE_NOW,
-    bound_terms_identity,
-    evaluation_rights_destinations,
-    fixture_review,
+    fixture_inventory,
 )
 
 ATOM = b"""<?xml version="1.0" encoding="UTF-8"?>
@@ -80,6 +79,25 @@ SAME_URL_RSS = """<?xml version="1.0" encoding="UTF-8"?>
   </item>
 </channel></rss>
 """.encode("utf-8")
+
+
+def _evaluation_cycle_destinations() -> tuple[str, ...]:
+    return tuple(sorted({*FIXTURE_DESTINATIONS, *GRAPHITI_EVALUATION_DESTINATION_TOKENS}))
+
+
+def _cycle_rights_inventory(
+    gate: str,
+    destinations: tuple[str, ...] | None = None,
+) -> dict[str, object]:
+    return fixture_inventory(
+        gate=gate,
+        destinations=(
+            _evaluation_cycle_destinations() if destinations is None else destinations
+        ),
+        now="2026-08-20T00:00:00.000000Z",
+        issued_at="2026-01-01T00:00:00.000000Z",
+        expires_at="2099-01-01T00:00:00.000000Z",
+    )
 
 
 def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
@@ -189,20 +207,7 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
             "INSERT INTO proving_gates VALUES(?,?,?,?)",
             ("run-1", gate_id, "PASS", "fixture"),
         )
-        packet = {
-            "bound_terms": bound_terms_identity(gate=gate_id),
-            "now": "2026-08-20T00:00:00.000000Z",
-            "reviews": [
-                fixture_review(
-                    family,
-                    gate=gate_id,
-                    issued_at="2026-01-01T00:00:00.000000Z",
-                    expires_at="2099-01-01T00:00:00.000000Z",
-                    destinations=list(evaluation_rights_destinations()),
-                )
-                for family in FIXTURE_FAMILIES
-            ],
-        }
+        packet = _cycle_rights_inventory(gate_id)
         packet_bytes = canonical_json_bytes(packet)
         connection.execute(
             "INSERT INTO proving_rights_packets VALUES(?,?,?,?,?)",

@@ -49,6 +49,8 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_MODEL,
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_EMBEDDING_MODEL,
+    GRAPHITI_EVALUATION_DESTINATION_TOKENS,
+    GRAPHITI_EVALUATION_PROVIDER_DESTINATIONS,
     GRAPHITI_GENERATION_ID,
     GRAPHITI_WORKSPACE_GROUP,
     OD_011_CASH_CEILING_GBP,
@@ -65,15 +67,14 @@ from newsroom.graphiti_adapter.temporal import (
 from newsroom.increment9.proving import SOURCE_URLS
 from newsroom.increment9.rights import (
     FIXTURE_DESTINATIONS,
-    FIXTURE_FAMILIES,
-    GRAPHITI_EVALUATION_DESTINATIONS,
     RAD_01_ENDPOINT,
     UK_10_ENDPOINT,
-    bound_terms_identity,
-    evaluation_rights_destinations,
-    fixture_review,
 )
-from newsroom.tests.test_control_plane_private_beta import _proving
+from newsroom.tests.test_control_plane_private_beta import (
+    _cycle_rights_inventory,
+    _evaluation_cycle_destinations,
+    _proving,
+)
 
 
 DATED_RSS = """<?xml version="1.0" encoding="UTF-8"?>
@@ -1268,20 +1269,7 @@ def _retain_source(
     destinations: tuple[str, ...],
 ) -> None:
     gate_id = f"RIGHTS_{source_id}"
-    packet = {
-        "bound_terms": bound_terms_identity(gate=gate_id),
-        "now": "2026-08-20T00:00:00.000000Z",
-        "reviews": [
-            fixture_review(
-                family,
-                gate=gate_id,
-                issued_at="2026-01-01T00:00:00.000000Z",
-                expires_at="2099-01-01T00:00:00.000000Z",
-                destinations=list(destinations),
-            )
-            for family in FIXTURE_FAMILIES
-        ],
-    }
+    packet = _cycle_rights_inventory(gate_id, destinations)
     packet_bytes = canonical_json_bytes(packet)
     connection = __import__("sqlite3").connect(proving)
     connection.execute(
@@ -1322,20 +1310,7 @@ def _rewrite_destinations(proving: Path, destinations: tuple[str, ...]) -> None:
         "SELECT gate_id FROM proving_rights_packets WHERE run_id='run-1'"
     ).fetchall()
     for (gate_id,) in rows:
-        packet = {
-            "bound_terms": bound_terms_identity(gate=str(gate_id)),
-            "now": "2026-08-20T00:00:00.000000Z",
-            "reviews": [
-                fixture_review(
-                    family,
-                    gate=str(gate_id),
-                    issued_at="2026-01-01T00:00:00.000000Z",
-                    expires_at="2099-01-01T00:00:00.000000Z",
-                    destinations=list(destinations),
-                )
-                for family in FIXTURE_FAMILIES
-            ],
-        }
+        packet = _cycle_rights_inventory(str(gate_id), destinations)
         packet_bytes = canonical_json_bytes(packet)
         connection.execute(
             """
@@ -1388,10 +1363,15 @@ def test_graphiti_dispatch_requires_every_evaluation_provider_destination(
     tmp_path: Path,
 ) -> None:
     proving = _proving(tmp_path)
+    embedding_token = next(
+        item.destination_token
+        for item in GRAPHITI_EVALUATION_PROVIDER_DESTINATIONS
+        if item.route == GRAPHITI_EMBEDDING_MODEL
+    )
     missing_openrouter = tuple(
         destination
-        for destination in evaluation_rights_destinations()
-        if destination != "EVALUATION_OPENROUTER_EMBEDDINGS"
+        for destination in _evaluation_cycle_destinations()
+        if destination != embedding_token
     )
     _rewrite_destinations(proving, missing_openrouter)
     connection = __import__("sqlite3").connect(proving)
@@ -1402,8 +1382,8 @@ def test_graphiti_dispatch_requires_every_evaluation_provider_destination(
         evaluated_at="2026-08-21T00:00:00.000000Z",
     )
     connection.close()
-    assert GRAPHITI_EVALUATION_DESTINATIONS - set(missing_openrouter) == {
-        "EVALUATION_OPENROUTER_EMBEDDINGS"
+    assert GRAPHITI_EVALUATION_DESTINATION_TOKENS - set(missing_openrouter) == {
+        embedding_token
     }
     assert decision is None
 
@@ -1412,7 +1392,7 @@ def test_uk10_and_rad01_nine_p_hosts_cannot_use_reviewed_endpoint_rights(
     tmp_path: Path,
 ) -> None:
     proving = _proving(tmp_path)
-    destinations = evaluation_rights_destinations()
+    destinations = _evaluation_cycle_destinations()
     _retain_source(
         proving,
         source_id="UK-10",
@@ -1451,7 +1431,7 @@ def test_reviewed_uk10_and_rad01_endpoints_dispatch_with_evaluation_destinations
     tmp_path: Path,
 ) -> None:
     proving = _proving(tmp_path)
-    destinations = evaluation_rights_destinations()
+    destinations = _evaluation_cycle_destinations()
     _retain_source(
         proving,
         source_id="UK-10",
@@ -1482,7 +1462,7 @@ def test_reviewed_uk10_and_rad01_endpoints_dispatch_with_evaluation_destinations
     connection.close()
     assert uk10 is not None
     assert uk10["rights_endpoint"] == UK_10_ENDPOINT
-    assert GRAPHITI_EVALUATION_DESTINATIONS.issubset(uk10["rights_destinations"])
+    assert GRAPHITI_EVALUATION_DESTINATION_TOKENS.issubset(uk10["rights_destinations"])
     assert rad01 is not None
     assert rad01["rights_endpoint"] == RAD_01_ENDPOINT
 
