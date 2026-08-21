@@ -1,7 +1,7 @@
 # Graphiti Cursor SDK no-tool calibration (#746)
 
 - Role: Dated research harness, setup instructions and owner-gated packet
-- Status: Provider-free harness checked in; live calibration requires an explicit owner instruction on the local host
+- Status: Provider-free harness checked in; owner-authorised eight-leaf live packet completed on 2026-08-22; recommendation `REJECT`
 - Owner: fol2
 - Canonical language: English
 - Date: 2026-08-21
@@ -24,9 +24,9 @@ uv run python -m scripts.graphiti_sdk_no_tool_calibration \
 
 Live dispatch is refused unless `--execute`, `--call-cap` and `--authorised-by-owner` are all supplied. The committed packet keeps `"authorised": false`. A later live run records owner authorisation on that run's aggregate only.
 
-On 2026-08-21 the owner authorised the local eight-leaf packet in-session. The measuring shell had no purpose-created `CURSOR_API_KEY`, so the runner made **zero** provider calls rather than falling back to ambient Cursor login or Keychain tokens.
+On 2026-08-21 the owner authorised the local eight-leaf packet in-session. A purpose-created User API key was supplied on 2026-08-22. The live execute completed with eight `composer-2.5` leaves and recommendation `REJECT`. Redacted receipts: [`2026-08-21-graphiti-sdk-no-tool-calibration-receipts/`](2026-08-21-graphiti-sdk-no-tool-calibration-receipts/).
 
-Live command after the key is exported:
+Live command:
 
 ```text
 uv pip install cursor-sdk==1.0.28
@@ -80,13 +80,22 @@ Allowed recommendations: `ADOPT_FOR_QUALIFICATION`, `RESEARCH_ONLY`, `REJECT`. D
 
 ### Per-path comparison against #739 CLI receipts
 
-| SDK leaf | CLI counterpart | CLI input / chat total | SDK tokens |
-|---|---|---:|---|
-| `sdk-no-tool-tiny` | `hermetic-tiny` | 20,103 input | live / `UNREPORTED` until executed |
-| `sdk-upstream-combined-zero` | `hermetic-combined` | 23,674 input / 25,000 chat | live / `UNREPORTED` until executed |
-| remaining six leaves | none in the six-call CLI packet | — | live / `UNREPORTED` until executed |
+Live execute on 2026-08-22, `cursor-sdk==1.0.28`, `composer-2.5`, `tools=[]`, `setting_sources` omitted, eight provider-reported leaves, zero tool calls, isolation counts all zero.
 
-The dry-run aggregate writes this table as `cli_path_comparison` with `UNREPORTED` SDK usage. A later authorised execute fills the SDK columns without rewriting the CLI baselines.
+| SDK leaf | CLI counterpart | CLI input / chat total | SDK input / total | Semantic |
+|---|---|---:|---:|---|
+| `sdk-no-tool-tiny` | `hermetic-tiny` | 20,103 input | 3,430 / 3,878 | PASS |
+| `sdk-upstream-combined-zero` | `hermetic-combined` | 23,674 input / 25,000 chat | 7,152 / 8,002 | FAIL |
+| `sdk-upstream-combined-relations` | none | — | 7,100 / 7,810 | PASS |
+| `sdk-upstream-batch-timestamps` | none | — | 3,984 / 4,778 | PASS |
+| `sdk-compact-temporal-zero` | none | — | 17,356 / 29,322 | FAIL |
+| `sdk-compact-temporal-relations` | none | — | 21,758 / 31,912 | FAIL |
+| `sdk-compact-temporal-long` | none | — | 4,958 / 10,169 | FAIL (`json_valid` false) |
+| `sdk-predeclared-repeat` | exact repeat of leaf 6 | — | 28,221 / 35,705 | PASS |
+
+Tiny-prompt input fell 82.9% below the CLI floor of 20,103, which meets both the 50% minimum and the 75% preferred reduction. Upstream combined input also fell well below the hermetic CLI 23,674 / 25,000 observation. The packet still recommends `REJECT`: compact leaves failed the gold contracts, the exact repeat of leaf 6 did not reproduce leaf 6's tokens or semantic result, and cheaper-but-invalid JSON is not success.
+
+The no-tool SDK floor is therefore a useful research transport. It does not by itself qualify the compact combined-temporal contract. That remains #747.
 
 ## 4. Non-effects
 
