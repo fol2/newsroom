@@ -1,0 +1,111 @@
+{
+  "schema_version": "newsroom.graphiti-sdk-no-tool-calibration-packet.v1",
+  "issue": 746,
+  "parent_issue": 739,
+  "created_at": "2026-08-21",
+  "status": "OWNER_GATED_LIVE_CALIBRATION",
+  "sdk_version": "1.0.28",
+  "bridge_protocol": "sdk.v1",
+  "model": "composer-2.5",
+  "lifecycle": "Agent.prompt",
+  "runtime": "local",
+  "tools": [],
+  "mcp_servers": {},
+  "agents": {},
+  "custom_tools": {},
+  "setting_sources": "OMITTED",
+  "live_authority": {
+    "authorised": false,
+    "requires_explicit_owner_instruction": true,
+    "maximum_cursor_sdk_model_leaves": 8,
+    "maximum_grok_model_leaves": 0,
+    "maximum_openrouter_calls": 0,
+    "adaptive_extra_calls_permitted": false,
+    "unchanged_request_retry_permitted": false,
+    "neo4j_mutation_permitted": false,
+    "publication_permitted": false
+  },
+  "experiments": [
+    {
+      "ordinal": 1,
+      "label": "sdk-no-tool-tiny",
+      "fixture": "49-character JSON prompt",
+      "purpose": "Measure the fixed no-tool SDK input floor."
+    },
+    {
+      "ordinal": 2,
+      "label": "sdk-upstream-combined-zero",
+      "fixture": "368-byte valid zero-result revision",
+      "purpose": "Compare the upstream combined prompt on the no-tool route."
+    },
+    {
+      "ordinal": 3,
+      "label": "sdk-upstream-combined-relations",
+      "fixture": "Several source-safe entities and relations",
+      "purpose": "Measure the initial upstream combined leaf on a non-zero result."
+    },
+    {
+      "ordinal": 4,
+      "label": "sdk-upstream-batch-timestamps",
+      "fixture": "Predeclared facts from experiment 3",
+      "purpose": "Measure the conditional graphiti-core timestamp leaf separately."
+    },
+    {
+      "ordinal": 5,
+      "label": "sdk-compact-temporal-zero",
+      "fixture": "368-byte valid zero-result revision",
+      "purpose": "Qualify the compact one-leaf zero-result contract."
+    },
+    {
+      "ordinal": 6,
+      "label": "sdk-compact-temporal-relations",
+      "fixture": "Several source-safe entities, relations and temporal bounds",
+      "purpose": "Qualify one-leaf non-zero entity/relation/temporal output."
+    },
+    {
+      "ordinal": 7,
+      "label": "sdk-compact-temporal-long",
+      "fixture": "Source-safe retained chunk at the 8192-byte boundary",
+      "purpose": "Prove no silent content truncation at the existing chunk limit."
+    },
+    {
+      "ordinal": 8,
+      "label": "sdk-predeclared-repeat",
+      "fixture": "Exact repeat of experiment 6",
+      "purpose": "Measure repeatability and cache behaviour without session reuse."
+    }
+  ],
+  "decision_rule": {
+    "minimum_tiny_input_reduction_fraction": 0.5,
+    "preferred_tiny_input_reduction_fraction": 0.75,
+    "maximum_tiny_input_tokens_for_minimum_effect": 10051,
+    "missing_usage_is_zero": false,
+    "allowed_recommendations": [
+      "ADOPT_FOR_QUALIFICATION",
+      "RESEARCH_ONLY",
+      "REJECT"
+    ]
+  },
+  "receipt_redaction": {
+    "retain": [
+      "sdk_and_bridge_versions",
+      "model_catalog_identity",
+      "route_option_digest",
+      "prompt_bytes_and_sha256",
+      "schema_bytes_and_sha256",
+      "input_output_cache_total_reasoning_tokens",
+      "usage_status_and_provenance",
+      "latency",
+      "json_and_semantic_fixture_result",
+      "stream_message_classes_and_tool_call_count"
+    ],
+    "forbid": [
+      "api_key",
+      "account_email",
+      "full_prompt",
+      "full_model_result",
+      "session_transcript",
+      "local_home_path"
+    ]
+  }
+}
