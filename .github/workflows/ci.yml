@@ -132,3 +132,23 @@ jobs:
           if status != "PASS" or os.environ["SMOKE_OUTCOME"] != "success":
               raise SystemExit(f"CI compatibility smoke did not pass: {status}")
           PY
+
+      - name: Sync Graphiti extra
+        run: uv sync --dev --extra graphiti --locked
+
+      - name: Verify pinned Graphiti dependency
+        run: |
+          .venv/bin/python - <<'PY'
+          import importlib.metadata
+
+          version = importlib.metadata.version("graphiti-core")
+          if version != "0.29.3":
+              raise SystemExit(f"expected graphiti-core 0.29.3, got {version}")
+          PY
+
+      - name: Run provider-free Graphiti research fixtures
+        run: |
+          .venv/bin/python -m pytest -q \
+            newsroom/tests/test_graphiti_core_0293_call_shape.py \
+            newsroom/tests/test_graphiti_core_0293_nonzero_combined_call_shape.py \
+            newsroom/tests/test_graphiti_token_meter.py
