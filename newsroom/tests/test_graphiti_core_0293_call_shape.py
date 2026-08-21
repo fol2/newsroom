@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import importlib.metadata
 import json
+import re
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -43,6 +45,96 @@ pytestmark = pytest.mark.skipif(
     importlib.metadata.version("graphiti-core") != "0.29.3",
     reason="call-shape fixtures are pinned to graphiti-core 0.29.3",
 )
+
+
+_CALIBRATION_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "docs"
+    / "research"
+    / "2026-08-21-graphiti-cursor-subscription-bootstrap-calibration.json"
+)
+_USAGE_KEYS = (
+    "inputTokens",
+    "outputTokens",
+    "cacheReadTokens",
+    "cacheWriteTokens",
+)
+
+
+def _calibration() -> dict[str, Any]:
+    return json.loads(_CALIBRATION_PATH.read_text(encoding="utf-8"))
+
+
+def _chat_total(call: dict[str, Any]) -> int:
+    usage = call["usage"]
+    return sum(usage[key] for key in _USAGE_KEYS)
+
+
+def test_calibration_receipt_is_bounded_and_redacted() -> None:
+    payload = _calibration()
+    calls = payload["calls"]
+
+    assert payload["issue"] == 739
+    assert payload["approved_by"] == "owner"
+    assert payload["cursor_agent"] == "2026.08.11-e8db854"
+    assert payload["model"] == "composer-2.5"
+    assert payload["print_mode_calls_used"] == len(calls) == 6
+    assert len(calls) <= payload["print_mode_call_cap"] == 8
+    assert payload["no_grok"] is True
+    assert payload["no_openrouter"] is True
+
+    raw = _CALIBRATION_PATH.read_text(encoding="utf-8")
+    for forbidden in (
+        "/Users/",
+        '"prompt":',
+        '"result":',
+        '"session_id":',
+        '"request_id":',
+        '"email":',
+    ):
+        assert forbidden not in raw
+
+    assert [call["n"] for call in calls] == list(range(1, len(calls) + 1))
+    assert len({call["label"] for call in calls}) == len(calls)
+    for call in calls:
+        assert call["returncode"] == 0
+        assert call["extract_json_ok"] is True
+        assert re.fullmatch(r"[0-9a-f]{64}", call["prompt_sha256"])
+        assert call["prompt_bytes"] >= call["prompt_chars"] > 0
+        assert call["elapsed_ms"] > 0
+        usage = call["usage"]
+        assert set(usage) == set(_USAGE_KEYS)
+        assert all(
+            isinstance(usage[key], int) and usage[key] >= 0
+            for key in _USAGE_KEYS
+        )
+
+
+def test_calibration_arithmetic_matches_research_table() -> None:
+    calls = {call["label"]: call for call in _calibration()["calls"]}
+
+    ambient_pair = _chat_total(calls["ambient-nodes"]) + _chat_total(
+        calls["ambient-edges"]
+    )
+    hermetic_pair = _chat_total(calls["hermetic-nodes"]) + _chat_total(
+        calls["hermetic-edges"]
+    )
+
+    assert ambient_pair == 51_058
+    assert hermetic_pair == 46_105
+    assert ambient_pair - hermetic_pair == 4_953
+    combined_total = _chat_total(calls["hermetic-combined"])
+    assert combined_total == 25_000
+    assert hermetic_pair - combined_total == 21_105
+
+    ambient_nodes_input = calls["ambient-nodes"]["usage"]["inputTokens"]
+    hermetic_nodes_input = calls["hermetic-nodes"]["usage"]["inputTokens"]
+    ambient_edges_input = calls["ambient-edges"]["usage"]["inputTokens"]
+    hermetic_edges_input = calls["hermetic-edges"]["usage"]["inputTokens"]
+
+    assert ambient_nodes_input - hermetic_nodes_input == 2_284
+    assert ambient_edges_input - hermetic_edges_input == 2_281
+    assert calls["hermetic-tiny"]["usage"]["inputTokens"] == 20_103
 
 
 class _RecordingLlm(LLMClient):
