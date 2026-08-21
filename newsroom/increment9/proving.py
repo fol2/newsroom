@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import ssl
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -42,6 +43,7 @@ USER_AGENT = "Newsroom-9P-Proving/1.0"
 MAX_BODY_BYTES = 1_048_576
 TIMEOUT_SECONDS = 20
 MAX_REDIRECTS = 3
+PROVING_WRITE_TIMEOUT_SECONDS = 205.0
 FORBIDDEN_STORE_MARKERS = ("news_pool.sqlite3", "production")
 
 # OD-001 portfolio. Endpoints from docs/research/2026-07-15-concrete-news-source-map.md
@@ -332,8 +334,23 @@ def _connect(path: str) -> sqlite3.Connection:
     lowered = path.lower()
     if any(marker in lowered for marker in FORBIDDEN_STORE_MARKERS):
         raise ProvingError("proving store must not alias production or news_pool")
-    connection = sqlite3.connect(path)
-    connection.execute("PRAGMA journal_mode=WAL")
+    connection = sqlite3.connect(path, timeout=PROVING_WRITE_TIMEOUT_SECONDS)
+    connection.execute(
+        f"PRAGMA busy_timeout={int(PROVING_WRITE_TIMEOUT_SECONDS * 1_000)}"
+    )
+    deadline = time.monotonic() + PROVING_WRITE_TIMEOUT_SECONDS
+    while True:
+        try:
+            journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
+            if journal_mode is None or str(journal_mode[0]).lower() != "wal":
+                connection.execute("PRAGMA journal_mode=WAL")
+            break
+        except sqlite3.OperationalError as exc:
+            remaining = deadline - time.monotonic()
+            if "locked" not in str(exc).lower() or remaining <= 0:
+                connection.close()
+                raise ProvingError("proving store writer lock timed out") from exc
+            time.sleep(min(0.05, remaining))
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS proving_runs(
@@ -555,6 +572,11 @@ def run_proving(
             observations.append(observation)
         connection.commit()
         return ProvingReport(run_id, False, False, False, 0, gates, tuple(observations))
+    except sqlite3.OperationalError as exc:
+        connection.rollback()
+        if "locked" in str(exc).lower():
+            raise ProvingError("proving store writer lock timed out") from exc
+        raise
     finally:
         connection.close()
 

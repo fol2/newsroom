@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import importlib.metadata
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,6 +40,7 @@ from newsroom.graphiti_adapter.edge_guard import guard_extracted_edges
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_FALLBACK,
     GRAPHITI_CHAT_MODEL,
+    GRAPHITI_CLEANUP_TIMEOUT_MS,
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_EMBEDDING_MODEL,
     GRAPHITI_EXTRACTION_INSTRUCTIONS,
@@ -327,6 +329,7 @@ async def _add_episode(
         attempt_number=attempt_number,
         input_digest=input_digest,
     )
+    cancellation_cleanup_active = False
     try:
         marker = await guard.begin()
         if marker.state is GuardState.COMPLETE:
@@ -398,22 +401,29 @@ async def _add_episode(
             raw = validate_result(result, telemetry)
             await guard.complete(raw)
         except asyncio.CancelledError:
-            await asyncio.shield(
-                _record_guard_telemetry(
+            cancellation_cleanup_active = True
+
+            async def cleanup_cancelled_attempt() -> None:
+                await _record_guard_telemetry(
                     guard=guard,
                     llm_client=llm_client,
                     embedder=embedder,
                     telemetry=telemetry,
                     attempt_number=attempt_number,
                 )
-            )
-            await asyncio.shield(
-                guard.rollback_pending(
+                await guard.rollback_pending(
                     chat_invocations=telemetry.chat_invocations,
                     embedding_usage=telemetry.embedding_usage,
                     reason="CANCELLED_OR_TIMED_OUT",
                 )
-            )
+
+            try:
+                await asyncio.wait_for(
+                    cleanup_cancelled_attempt(),
+                    timeout=GRAPHITI_CLEANUP_TIMEOUT_MS / 1_000,
+                )
+            except asyncio.TimeoutError:
+                pass
             raise
         except ExtractionContractError:
             await guard.rollback_pending(
@@ -448,7 +458,16 @@ async def _add_episode(
         if telemetry.provider_attempt_number is None:
             telemetry.chat_invocations = list(getattr(llm_client, "invocations", ()))
             telemetry.embedding_usage = embedder.receipt()
-        await graphiti.close()
+        try:
+            await asyncio.wait_for(
+                graphiti.close(),
+                timeout=GRAPHITI_CLEANUP_TIMEOUT_MS / 1_000,
+            )
+        except asyncio.TimeoutError:
+            if not cancellation_cleanup_active:
+                raise GraphitiAdapterContractError(
+                    "Graphiti connection cleanup timed out"
+                ) from None
 
 
 def _raw_receipt(
@@ -538,14 +557,18 @@ def _raw_receipt(
 class RealGraphitiAdapter:
     """Repository-owned real Graphiti adapter for EVALUATION only."""
 
-    __slots__ = ("_clock",)
+    __slots__ = ("_clock", "_execution_deadline", "_monotonic")
 
     def __init__(
         self,
         *,
         clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
+        monotonic: Callable[[], float] = time.monotonic,
+        execution_deadline: datetime | None = None,
     ) -> None:
         self._clock = clock
+        self._monotonic = monotonic
+        self._execution_deadline = execution_deadline
 
     def execute(
         self,
@@ -583,6 +606,25 @@ class RealGraphitiAdapter:
             )
 
         started_at = self._clock()
+        remaining_timeout_s = attempt.extraction_request.budget.timeout_ms / 1_000
+        if self._execution_deadline is not None:
+            if (
+                self._execution_deadline.tzinfo is None
+                or self._execution_deadline.utcoffset() is None
+            ):
+                raise GraphitiAdapterContractError(
+                    "real adapter execution deadline must have an explicit offset"
+                )
+            remaining_timeout_s = min(
+                remaining_timeout_s,
+                max(
+                    0.0,
+                    (
+                        self._execution_deadline.astimezone(UTC) - started_at.value
+                    ).total_seconds(),
+                ),
+            )
+        monotonic_deadline = self._monotonic() + remaining_timeout_s
         workspace = GraphitiWorkspaceDescriptor(
             workspace_id=attempt.workspace_id,
             configuration_id=configuration.configuration_id,
@@ -601,7 +643,11 @@ class RealGraphitiAdapter:
         )
         private.activate()
         try:
-            produced = self._produce(attempt, started_at)
+            produced = self._produce(
+                attempt,
+                started_at,
+                execution_deadline=monotonic_deadline,
+            )
             outcome = adapter_outcome_for(produced)
             raw = (
                 produced.raw_output_value
@@ -646,8 +692,12 @@ class RealGraphitiAdapter:
         self,
         attempt: GraphitiAttemptRequest,
         started_at: UtcTimestamp,
+        *,
+        execution_deadline: float | None = None,
     ) -> ProducedExtraction:
         timeout_s = attempt.extraction_request.budget.timeout_ms / 1000
+        if execution_deadline is None:
+            execution_deadline = self._monotonic() + timeout_s
         if attempt.reference_time is None:
             raise GraphitiAdapterContractError(
                 "source reference_time is required; started_at must not replace it"
@@ -658,6 +708,25 @@ class RealGraphitiAdapter:
             predecessor_episode_uuid=attempt.predecessor_episode_uuid
         )
         validated: dict[str, ProducedExtraction] = {}
+
+        def timeout_result() -> ProducedExtraction:
+            raw = _raw_receipt(
+                attempt,
+                started_at=started_at,
+                telemetry=telemetry,
+                result=None,
+                proposals=(),
+            )
+            return produced_extraction(
+                attempt,
+                outcome=ExtractionOutcome.RETRYABLE_FAILURE,
+                failure_code=ExtractionFailureCode.EXECUTION_TIMEOUT,
+                validation=None,
+                raw=None,
+                proposals=(),
+                embedding_usage=telemetry.embedding_usage,
+                attempt_receipt=raw,
+            )
 
         def validate_result(
             result: Any, current_telemetry: _EpisodeTelemetry
@@ -759,6 +828,9 @@ class RealGraphitiAdapter:
                 embedding_usage=telemetry.embedding_usage,
                 attempt_receipt=raw,
             )
+        remaining_timeout_s = execution_deadline - self._monotonic()
+        if remaining_timeout_s <= 0:
+            return timeout_result()
         try:
             result = asyncio.run(
                 asyncio.wait_for(
@@ -774,27 +846,11 @@ class RealGraphitiAdapter:
                         validate_result=validate_result,
                         restore_result=restore_result,
                     ),
-                    timeout=timeout_s,
+                    timeout=remaining_timeout_s,
                 )
             )
         except asyncio.TimeoutError:
-            raw = _raw_receipt(
-                attempt,
-                started_at=started_at,
-                telemetry=telemetry,
-                result=None,
-                proposals=(),
-            )
-            return produced_extraction(
-                attempt,
-                outcome=ExtractionOutcome.RETRYABLE_FAILURE,
-                failure_code=ExtractionFailureCode.EXECUTION_TIMEOUT,
-                validation=None,
-                raw=None,
-                proposals=(),
-                embedding_usage=telemetry.embedding_usage,
-                attempt_receipt=raw,
-            )
+            return timeout_result()
         except (BrokerError, GraphitiAdapterContractError):
             raise
         except ExtractionContractError:

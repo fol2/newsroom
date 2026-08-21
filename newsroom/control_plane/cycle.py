@@ -21,8 +21,16 @@ from newsroom.control_plane.corpus import (
 )
 from newsroom.control_plane.editorial import GroupedObservation, form_candidates
 from newsroom.control_plane.evidence import package_for
-from newsroom.control_plane.graphiti import GraphitiCycleResult, GraphitiPort
+from newsroom.control_plane.graphiti import (
+    GovernedRealGraphitiPort,
+    GraphitiCycleResult,
+    GraphitiPort,
+)
 from newsroom.control_plane.items import parse_observation
+from newsroom.control_plane.paths import (
+    require_canonical_proving_store,
+    require_canonical_unpublished_store,
+)
 from newsroom.control_plane.store import (
     append_ledger,
     claim_graphiti_attempt,
@@ -40,6 +48,7 @@ from newsroom.control_plane.store import (
     record_graphiti_coverage,
     record_graphiti_failure,
     reconcile_graphiti_spend,
+    release_graphiti_attempt_claim,
     reserve_graphiti_spend,
     retain_graphiti_authority_records,
 )
@@ -53,13 +62,13 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_EMBEDDING_MODEL,
     GRAPHITI_EVALUATION_DESTINATION_TOKENS,
+    GRAPHITI_EXTRACTION_TIMEOUT_MS,
     GRAPHITI_GENERATION_ID,
     GRAPHITI_WORKSPACE_GROUP,
     OD_011_CASH_CEILING_GBP,
     OPENROUTER_API,
 )
 from newsroom.graphiti_adapter.recovery_vocabulary import (
-    DURABLE_NO_DISPATCH_RECOVERIES,
     GraphitiRecoveryClassification,
 )
 from newsroom.increment9.proving import (
@@ -72,8 +81,8 @@ from newsroom.increment9.rights import assess_rights
 GLOBAL_PROVING_GATES = frozenset(
     gate_id for gate_id in PROVING_GATES if not gate_id.startswith("RIGHTS_")
 )
-_PROVING_RUN_LATEST_ORDER = "started_at DESC, rowid DESC"
-_PROVING_RUN_EARLIEST_ORDER = "started_at ASC, rowid ASC"
+_PROVING_RUN_LATEST_ORDER = "rowid DESC"
+_PROVING_RUN_EARLIEST_ORDER = "rowid ASC"
 _PROVING_FENCE_TIMEOUT_SECONDS = 5.0
 
 
@@ -87,6 +96,12 @@ class _ProviderAttemptRecoveryAccounting(TypedDict):
     retained_attempt_receipt: bool
     reconciled_again: bool
     accounting: dict[str, object] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _DispatchAuthority:
+    rights: dict[str, object]
+    deadline: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +137,12 @@ def _now() -> str:
 
 def _utc_text(value: datetime) -> str:
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _dispatch_valid_until(evaluated_at: datetime) -> str:
+    return _utc_text(
+        evaluated_at + timedelta(milliseconds=GRAPHITI_EXTRACTION_TIMEOUT_MS)
+    )
 
 
 def _bind_result(
@@ -415,6 +436,103 @@ def _reconcile_no_embedding_spend(
     return accounting
 
 
+def _proves_no_provider_dispatch(result: GraphitiCycleResult) -> bool:
+    raw = result.raw_receipt if isinstance(result.raw_receipt, dict) else {}
+    usage = result.embedding_usage if isinstance(result.embedding_usage, dict) else {}
+    return (
+        raw.get("dispatch_state") == "NOT_DISPATCHED"
+        and usage.get("usage_basis") == "NO_EMBEDDING_CALL"
+        and usage.get("request_count") == 0
+        and usage.get("cost_usd_microunits", 0) == 0
+        and not result.chat_invocations
+    )
+
+
+def _preserve_reused_unresolved_spend(
+    unpublished: sqlite3.Connection,
+    *,
+    spend_id: str,
+    owner_id: str,
+) -> dict[str, object]:
+    released = release_graphiti_attempt_claim(
+        unpublished,
+        spend_id=spend_id,
+        owner_id=owner_id,
+    )
+    accounting: dict[str, object] = {
+        "spend_id": spend_id,
+        "status": "RESERVED",
+        "usage_basis": "PENDING_PROVIDER_REPORT",
+        "reused_unresolved_reservation": True,
+        "dispatch_claim_released": released,
+    }
+    append_ledger(unpublished, "GRAPHITI_SPEND_UNRESOLVED", accounting)
+    return accounting
+
+
+def _retained_provider_raw_digest(
+    *,
+    unit: CorpusIngestUnit,
+    result: GraphitiCycleResult,
+    provider_attempt: int,
+    receipt_digest: object,
+    receipt_json: object,
+) -> str | None:
+    if not isinstance(receipt_digest, str) or not isinstance(receipt_json, str):
+        return None
+    try:
+        retained = json.loads(receipt_json)
+        if not isinstance(retained, dict):
+            return None
+        unsigned = dict(retained)
+        supplied_digest = unsigned.pop("receipt_digest", None)
+        calculated_digest = digest_bytes(canonical_json_bytes(unsigned))
+    except (TypeError, ValueError, UnicodeError):
+        return None
+    envelope_matches = (
+        supplied_digest == receipt_digest == calculated_digest
+        and retained.get("ingest_id") == unit.ingest_id
+        and retained.get("attempt_number") == provider_attempt
+        and retained.get("provider_attempt_number") == provider_attempt
+        and retained.get("embedding_usage") == result.embedding_usage
+        and retained.get("chat_invocations") == list(result.chat_invocations)
+    )
+    if not envelope_matches:
+        return None
+    nested = retained.get("returned_raw_receipt")
+    if isinstance(nested, dict):
+        nested_unsigned = dict(nested)
+        nested_digest = nested_unsigned.pop("raw_output_digest", None)
+        try:
+            calculated_nested_digest = digest_bytes(
+                canonical_json_bytes(nested_unsigned)
+            )
+        except (TypeError, ValueError, UnicodeError):
+            return None
+        if (
+            isinstance(nested_digest, str)
+            and calculated_nested_digest == nested_digest
+            and nested.get("generation_id") == GRAPHITI_GENERATION_ID
+            and nested.get("workspace_group") == GRAPHITI_WORKSPACE_GROUP
+            and nested.get("episode_uuid") == unit.ingest_id
+            and nested.get("attempt_number") == provider_attempt
+            and nested.get("provider_attempt_number") == provider_attempt
+            and nested.get("embedding_usage") == result.embedding_usage
+            and nested.get("chat_invocations") == list(result.chat_invocations)
+        ):
+            return nested_digest
+        return None
+    raw_output_digest = retained.get("raw_output_digest")
+    if (
+        isinstance(raw_output_digest, str)
+        and retained.get("generation_id") == GRAPHITI_GENERATION_ID
+        and retained.get("workspace_group") == GRAPHITI_WORKSPACE_GROUP
+        and retained.get("episode_uuid") == unit.ingest_id
+    ):
+        return raw_output_digest
+    return None
+
+
 def _reconcile_result_spend(
     unpublished: sqlite3.Connection,
     *,
@@ -431,8 +549,15 @@ def _reconcile_result_spend(
     provider_state = unpublished.execute(
         """
         SELECT status,
-               EXISTS(
-                   SELECT 1 FROM unpublished_graphiti_attempt_receipts AS receipt
+               (
+                   SELECT receipt.receipt_digest
+                   FROM unpublished_graphiti_attempt_receipts AS receipt
+                   WHERE receipt.ingest_id=spend.ingest_id
+                     AND receipt.attempt_number=spend.attempt_number
+               ),
+               (
+                   SELECT receipt.receipt_json
+                   FROM unpublished_graphiti_attempt_receipts AS receipt
                    WHERE receipt.ingest_id=spend.ingest_id
                      AND receipt.attempt_number=spend.attempt_number
                )
@@ -449,19 +574,26 @@ def _reconcile_result_spend(
     except ValueError:
         recovery_classification = None
     recovered_digest = raw.get("recovered_validated_raw_digest")
+    retained_raw_digest = (
+        _retained_provider_raw_digest(
+            unit=unit,
+            result=result,
+            provider_attempt=reported_attempt,
+            receipt_digest=provider_state[1],
+            receipt_json=provider_state[2],
+        )
+        if provider_state is not None
+        else None
+    )
+    retained_provider_receipt = retained_raw_digest is not None
     validated_no_dispatch_recovery = (
         binding_validated
         and provider_spend_id != spend_id
         and provider_state is not None
-        and recovery_classification in DURABLE_NO_DISPATCH_RECOVERIES
-        and (
-            recovery_classification
-            is not GraphitiRecoveryClassification.RECOVERED_IMMUTABLE_COMPLETE
-            or (
-                isinstance(recovered_digest, str)
-                and recovered_digest.startswith("sha256:")
-            )
-        )
+        and retained_provider_receipt
+        and recovery_classification
+        is GraphitiRecoveryClassification.RECOVERED_IMMUTABLE_COMPLETE
+        and recovered_digest == retained_raw_digest
     )
     if provider_spend_id == spend_id or not validated_no_dispatch_recovery:
         accounting = reconcile_graphiti_spend(
@@ -479,7 +611,7 @@ def _reconcile_result_spend(
         provider_attempt: _ProviderAttemptRecoveryAccounting = {
             "spend_id": provider_spend_id,
             "status": "RECONCILED",
-            "retained_attempt_receipt": bool(provider_state[1]),
+            "retained_attempt_receipt": retained_provider_receipt,
             "reconciled_again": False,
             "accounting": None,
         }
@@ -495,7 +627,7 @@ def _reconcile_result_spend(
         provider_attempt = {
             "spend_id": provider_spend_id,
             "status": str(provider_accounting["status"]),
-            "retained_attempt_receipt": bool(provider_state[1]),
+            "retained_attempt_receipt": retained_provider_receipt,
             "reconciled_again": True,
             "accounting": provider_accounting,
         }
@@ -517,7 +649,7 @@ def _ingest(
     max_graphiti: int,
     rights_check: Callable[[CorpusIngestUnit], dict[str, object] | None],
     rights_fence: Callable[
-        [CorpusIngestUnit], ContextManager[dict[str, object] | None]
+        [CorpusIngestUnit], ContextManager[_DispatchAuthority | None]
     ],
     clock: Callable[[], datetime],
 ) -> int:
@@ -617,10 +749,31 @@ def _ingest(
             )
         unpublished.commit()
         returned_result: GraphitiCycleResult | None = None
+        owner_id: str | None = None
         try:
             # Re-read under a proving-writer fence after all local commits, then
             # retain the fence through the synchronous provider handoff.
-            with rights_fence(unit) as final_dispatch_rights:
+            with rights_fence(unit) as dispatch_authority:
+                if dispatch_authority is None:
+                    if reserved:
+                        _reconcile_no_embedding_spend(
+                            unpublished, spend_id=spend_id
+                        )
+                    append_ledger(
+                        unpublished,
+                        "GRAPHITI_RIGHTS_HOLD",
+                        {
+                            "ingest_id": unit.ingest_id,
+                            "source_id": unit.source_id,
+                            "attempt_number": attempt_number,
+                            "proving_run_id": unit.proving_run_id,
+                            "reason": "AUTHORITY_REVOKED_BEFORE_PROVIDER_DISPATCH",
+                            "provider_dispatched": False,
+                        },
+                    )
+                    unpublished.commit()
+                    continue
+                final_dispatch_rights = dispatch_authority.rights
                 claim_instant = clock().astimezone(UTC)
                 owner_id = f"graphiti-dispatch-{uuid.uuid4()}"
                 lease_expires_at = claim_instant + timedelta(minutes=15)
@@ -659,27 +812,15 @@ def _ingest(
                     },
                 )
                 unpublished.commit()
-                if final_dispatch_rights is None:
-                    _reconcile_no_embedding_spend(
-                        unpublished, spend_id=spend_id
-                    )
-                    append_ledger(
-                        unpublished,
-                        "GRAPHITI_RIGHTS_HOLD",
-                        {
-                            "ingest_id": unit.ingest_id,
-                            "source_id": unit.source_id,
-                            "attempt_number": attempt_number,
-                            "proving_run_id": unit.proving_run_id,
-                            "reason": "AUTHORITY_REVOKED_BEFORE_PROVIDER_DISPATCH",
-                            "provider_dispatched": False,
-                        },
-                    )
-                    unpublished.commit()
-                    continue
                 dispatch_rights = final_dispatch_rights
                 attempted += 1
-                returned_result = graphiti.ingest(unit)
+                if isinstance(graphiti, GovernedRealGraphitiPort):
+                    returned_result = graphiti.ingest_until(
+                        unit,
+                        deadline=dispatch_authority.deadline,
+                    )
+                else:
+                    returned_result = graphiti.ingest(unit)
             result = _bind_result(
                 unit,
                 returned_result,
@@ -705,6 +846,39 @@ def _ingest(
         except VetoError:
             raise
         except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as exc:
+            preserve_unresolved = (
+                not reserved
+                and owner_id is not None
+                and (
+                    returned_result is None
+                    or _proves_no_provider_dispatch(returned_result)
+                )
+            )
+            if preserve_unresolved:
+                dispatch_state = (
+                    "NOT_DISPATCHED"
+                    if returned_result is not None
+                    and _proves_no_provider_dispatch(returned_result)
+                    else "UNKNOWN"
+                )
+                accounting = _preserve_reused_unresolved_spend(
+                    unpublished,
+                    spend_id=spend_id,
+                    owner_id=owner_id,
+                )
+                append_ledger(
+                    unpublished,
+                    "GRAPHITI_EVALUATION_RETRY_HELD",
+                    {
+                        "ingest_id": unit.ingest_id,
+                        "attempt_number": attempt_number,
+                        "failure": type(exc).__name__,
+                        "accounting": accounting,
+                        "provider_dispatch_state": dispatch_state,
+                    },
+                )
+                unpublished.commit()
+                continue
             if returned_result is None:
                 accounting = reconcile_graphiti_spend(
                     unpublished, spend_id=spend_id, embedding_usage=None
@@ -769,6 +943,29 @@ def _ingest(
             )
             failure_receipt["receipt_digest"] = final_digest
             append_ledger(unpublished, "GRAPHITI_EVALUATION_ATTEMPT", failure_receipt)
+            unpublished.commit()
+            continue
+        if (
+            not reserved
+            and owner_id is not None
+            and _proves_no_provider_dispatch(result)
+        ):
+            accounting = _preserve_reused_unresolved_spend(
+                unpublished,
+                spend_id=spend_id,
+                owner_id=owner_id,
+            )
+            append_ledger(
+                unpublished,
+                "GRAPHITI_EVALUATION_RETRY_HELD",
+                {
+                    "ingest_id": unit.ingest_id,
+                    "attempt_number": attempt_number,
+                    "failure_code": result.failure_code,
+                    "accounting": accounting,
+                    "provider_dispatch_state": "NOT_DISPATCHED",
+                },
+            )
             unpublished.commit()
             continue
         accounting = _reconcile_result_spend(
@@ -844,6 +1041,7 @@ def _current_rights_decision(
     source_id: str,
     source_url: str,
     evaluated_at: str,
+    required_valid_until: str | None = None,
 ) -> dict[str, object] | None:
     """Re-evaluate one run's retained source packet."""
 
@@ -870,6 +1068,7 @@ def _current_rights_decision(
         evaluated_at=evaluated_at,
         packet_digest=str(retained[1]),
         packet_json=str(retained[2]),
+        required_valid_until=required_valid_until,
     )
 
 
@@ -881,6 +1080,7 @@ def _rights_decision_from_packet(
     evaluated_at: str,
     packet_digest: str,
     packet_json: str,
+    required_valid_until: str | None = None,
 ) -> dict[str, object] | None:
     gate_id = f"RIGHTS_{source_id}"
     try:
@@ -898,6 +1098,10 @@ def _rights_decision_from_packet(
         or not verdict.expires_at
         or not verdict.terms_url
         or not verdict.terms_digest
+        or (
+            required_valid_until is not None
+            and verdict.expires_at <= required_valid_until
+        )
     ):
         return None
     return {
@@ -922,6 +1126,7 @@ def _dispatch_rights_decision(
     source_id: str,
     source_url: str,
     evaluated_at: str,
+    required_valid_until: str | None = None,
 ) -> dict[str, object] | None:
     """Read latest-run vetoes and source rights in one SQLite snapshot."""
 
@@ -969,6 +1174,7 @@ def _dispatch_rights_decision(
         evaluated_at=evaluated_at,
         packet_digest=str(retained[2]),
         packet_json=str(retained[3]),
+        required_valid_until=required_valid_until,
     )
     if decision is None:
         return None
@@ -1011,6 +1217,7 @@ def _permitted_rows(
     proving: sqlite3.Connection,
     *,
     evaluated_at: str,
+    required_valid_until: str | None = None,
 ) -> tuple[str, tuple[_ProvingObservation, ...], tuple[_ProvingObservation, ...]]:
     runs = proving.execute(
         f"SELECT run_id FROM proving_runs ORDER BY {_PROVING_RUN_EARLIEST_ORDER}"
@@ -1042,6 +1249,7 @@ def _permitted_rows(
                 source_id=source_id_text,
                 source_url=source_url,
                 evaluated_at=evaluated_at,
+                required_valid_until=required_valid_until,
             )
             if (
                 current is None
@@ -1080,15 +1288,21 @@ def run_cycle(
     max_graphiti: int = 1,
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
 ) -> CycleReport:
+    if isinstance(graphiti, GovernedRealGraphitiPort):
+        require_canonical_proving_store(proving_store)
+        require_canonical_unpublished_store(unpublished_store)
     assert_private_store(unpublished_store)
     lowered = proving_store.lower()
     if any(marker in lowered for marker in FORBIDDEN_STORE_MARKERS):
         raise ValueError("proving store must not alias production or news_pool")
+    admission_evaluated_at = clock().astimezone(UTC)
     proving = sqlite3.connect(proving_store)
     proving.execute("PRAGMA query_only=ON")
     try:
         run_id, latest_rows, corpus_rows = _permitted_rows(
-            proving, evaluated_at=_utc_text(clock())
+            proving,
+            evaluated_at=_utc_text(admission_evaluated_at),
+            required_valid_until=_dispatch_valid_until(admission_evaluated_at),
         )
     finally:
         proving.close()
@@ -1097,11 +1311,13 @@ def run_cycle(
         current = sqlite3.connect(proving_store)
         current.execute("PRAGMA query_only=ON")
         try:
+            evaluated_at = clock().astimezone(UTC)
             return _dispatch_rights_decision(
                 current,
                 source_id=unit.source_id,
                 source_url=unit.source_definition_url,
-                evaluated_at=_utc_text(clock()),
+                evaluated_at=_utc_text(evaluated_at),
+                required_valid_until=_dispatch_valid_until(evaluated_at),
             )
         finally:
             current.close()
@@ -1109,7 +1325,7 @@ def run_cycle(
     @contextmanager
     def rights_fence(
         unit: CorpusIngestUnit,
-    ) -> Iterator[dict[str, object] | None]:
+    ) -> Iterator[_DispatchAuthority | None]:
         timeout_ms = max(1, int(_PROVING_FENCE_TIMEOUT_SECONDS * 1_000))
         current = sqlite3.connect(
             proving_store, timeout=_PROVING_FENCE_TIMEOUT_SECONDS
@@ -1122,11 +1338,22 @@ def run_cycle(
                 raise _ProvingFenceUnavailable(
                     "proving writer fence was unavailable"
                 ) from exc
-            yield _dispatch_rights_decision(
+            evaluated_at = clock().astimezone(UTC)
+            decision = _dispatch_rights_decision(
                 current,
                 source_id=unit.source_id,
                 source_url=unit.source_definition_url,
-                evaluated_at=_utc_text(clock()),
+                evaluated_at=_utc_text(evaluated_at),
+                required_valid_until=_dispatch_valid_until(evaluated_at),
+            )
+            yield (
+                None
+                if decision is None
+                else _DispatchAuthority(
+                    rights=decision,
+                    deadline=evaluated_at
+                    + timedelta(milliseconds=GRAPHITI_EXTRACTION_TIMEOUT_MS),
+                )
             )
         finally:
             if current.in_transaction:

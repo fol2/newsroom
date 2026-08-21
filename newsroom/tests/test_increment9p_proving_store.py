@@ -1,8 +1,12 @@
 from pathlib import Path
+import sqlite3
+
 import pytest
+import newsroom.increment9.proving as proving_module
 from newsroom.increment9.prospective_run_authority import persist_authorised_chain
 from newsroom.increment9.proving import (
     ALLOWED_HOSTS,
+    Observation,
     PORTFOLIO,
     SOURCE_IDS,
     ProvingError,
@@ -217,6 +221,53 @@ def test_duplicate_run_id_does_not_replace_failed_gates(tmp_path: Path) -> None:
     ).fetchone()
     connection.close()
     assert kill == ("FAIL",)
+
+
+def test_writer_lock_after_connect_is_normalised_and_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = str(tmp_path / "post-connect-lock.sqlite3")
+    original_connect = proving_module._connect
+    blockers: list[sqlite3.Connection] = []
+    monkeypatch.setattr(proving_module, "PROVING_WRITE_TIMEOUT_SECONDS", 0.01)
+
+    def connect_then_lock(path: str) -> sqlite3.Connection:
+        connection = original_connect(path)
+        blocker = sqlite3.connect(path)
+        blocker.execute("BEGIN IMMEDIATE")
+        blockers.append(blocker)
+        return connection
+
+    monkeypatch.setattr(proving_module, "_connect", connect_then_lock)
+    try:
+        with pytest.raises(ProvingError, match="writer lock timed out"):
+            run_proving(
+                store_path=store,
+                run_id="locked-run",
+                fetched_at="2026-08-21T00:00:00.000000Z",
+                kill_switch=True,
+                no_emergency_stop=True,
+            )
+    finally:
+        for blocker in blockers:
+            blocker.rollback()
+            blocker.close()
+
+
+def test_proving_cli_default_writes_the_shared_canonical_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.increment9_proving_store as proving_cli
+
+    observed: list[str] = []
+
+    def capture_list(store_path: str) -> tuple[Observation, ...]:
+        observed.append(store_path)
+        return ()
+
+    monkeypatch.setattr(proving_cli, "list_observations", capture_list)
+    assert proving_cli.main(["list"]) == 0
+    assert observed == [proving_cli.DEFAULT_PROVING_STORE]
 
 
 def test_production_and_news_pool_paths_are_rejected(tmp_path: Path):

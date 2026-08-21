@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import sys
+import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -66,6 +67,7 @@ from newsroom.graphiti_adapter.real import RealGraphitiAdapter
 from newsroom.graphiti_adapter.recovery_vocabulary import (
     GraphitiRecoveryClassification,
 )
+from newsroom.graphiti_adapter.neo4j_guard import GuardMarker, GuardState
 from newsroom.graphiti_adapter.temporal_vocabulary import TemporalBasis
 
 from .extraction_4a_helpers import contract_request, run_request, seed_extraction_fixture
@@ -313,6 +315,86 @@ def test_both_cli_malformed_json_results_fail_after_recording_both_calls() -> No
         "MALFORMED_OUTPUT",
         "MALFORMED_OUTPUT",
     ]
+
+
+def test_non_utf8_cursor_is_recorded_before_grok_fallback() -> None:
+    from newsroom.graphiti_adapter.cli_client import run_cli_async, run_cli_chain
+
+    async def invalid_cursor(_prompt: str) -> str:
+        return await run_cli_async(
+            (
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write(b'\\xff')",
+            ),
+            timeout=5,
+        )
+
+    invocations: list[dict[str, object]] = []
+    result = asyncio.run(
+        run_cli_chain(
+            prompt="prompt",
+            schema=None,
+            cursor_runner=invalid_cursor,
+            grok_runner=lambda _prompt, _schema: '{"value":"fallback"}',
+            invocations=invocations,
+        )
+    )
+    assert result == {"value": "fallback"}
+    assert [item["outcome"] for item in invocations] == ["FAILED", "COMPLETE"]
+    assert invocations[0]["failure"] == "CliOutputDecodeError"
+
+
+def test_non_utf8_grok_is_recorded_before_chain_failure() -> None:
+    from newsroom.graphiti_adapter.cli_client import (
+        CliResponseError,
+        run_cli_async,
+        run_cli_chain,
+    )
+
+    async def invalid_grok(_prompt: str, _schema: str | None) -> str:
+        return await run_cli_async(
+            (
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write(b'\\xff')",
+            ),
+            timeout=5,
+        )
+
+    invocations: list[dict[str, object]] = []
+    with pytest.raises(CliResponseError, match="fallback CLI failed"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="prompt",
+                schema=None,
+                cursor_runner=lambda _prompt: "not-json",
+                grok_runner=invalid_grok,
+                invocations=invocations,
+            )
+        )
+    assert [item["outcome"] for item in invocations] == [
+        "MALFORMED_OUTPUT",
+        "FAILED",
+    ]
+    assert invocations[1]["failure"] == "CliOutputDecodeError"
+
+
+def test_sync_cli_rejects_non_utf8_output_with_typed_failure() -> None:
+    from newsroom.graphiti_adapter.cli_client import (
+        CliOutputDecodeError,
+        run_cli,
+    )
+
+    with pytest.raises(CliOutputDecodeError, match="malformed UTF-8"):
+        run_cli(
+            (
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write(b'\\xff')",
+            ),
+            timeout=5,
+        )
 
 
 @pytest.mark.parametrize("cancelled_provider", ["cursor", "grok"])
@@ -637,6 +719,93 @@ def test_process_recovery_uses_durable_guard_before_provider_dispatch(
     else:
         asyncio.run(call)
     assert events == [expected_event, "close"]
+
+
+@pytest.mark.parametrize("slow_cleanup", (False, True))
+def test_cancelled_episode_cleanup_is_ordered_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    slow_cleanup: bool,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    events: list[str] = []
+
+    class Graphiti:
+        def __init__(self, *_args: object, **_values: object) -> None:
+            self.driver = object()
+
+        async def add_episode(self, **_values: object) -> SimpleNamespace:
+            events.append("provider-start")
+            await asyncio.Event().wait()
+            raise AssertionError("cancelled provider unexpectedly resumed")
+
+        async def close(self) -> None:
+            events.append("close")
+            if slow_cleanup:
+                await asyncio.Event().wait()
+
+    class Guard:
+        async def begin(self) -> GuardMarker:
+            return GuardMarker(
+                state=GuardState.CREATED,
+                attempt_number=1,
+                input_digest="sha256:" + "0" * 64,
+            )
+
+        async def record_pending_telemetry(self, **_values: object) -> None:
+            events.append("telemetry")
+
+        async def rollback_pending(self, **_values: object) -> None:
+            events.append("rollback")
+            if slow_cleanup:
+                await asyncio.Event().wait()
+
+    async def created_episode(**_values: object) -> tuple[SimpleNamespace, str]:
+        return SimpleNamespace(uuid="episode-id"), "CREATED"
+
+    delegate = SimpleNamespace(
+        client=SimpleNamespace(embeddings=SimpleNamespace()),
+        config=SimpleNamespace(embedding_model="model", embedding_dim=2),
+    )
+    runtime = SimpleNamespace(
+        Graphiti=Graphiti,
+        OpenAIEmbedder=lambda **_values: delegate,
+        OpenAIEmbedderConfig=lambda **values: SimpleNamespace(**values),
+        IdentityCrossEncoder=lambda: object(),
+        EpisodeType=SimpleNamespace(text="text"),
+        MutationGuard=lambda *_args, **_values: Guard(),
+    )
+    monkeypatch.setattr(real, "_load_graphiti", lambda: runtime)
+    monkeypatch.setattr(real, "_ensure_episode", created_episode)
+    monkeypatch.setattr(
+        real, "build_cli_llm_client", lambda: SimpleNamespace(invocations=[])
+    )
+    if slow_cleanup:
+        monkeypatch.setattr(real, "GRAPHITI_CLEANUP_TIMEOUT_MS", 10)
+
+    started = time.monotonic()
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(
+            asyncio.wait_for(
+                real._add_episode(
+                    api_key="key",
+                    password="password",
+                    body="Body",
+                    name="episode-id",
+                    episode_id="episode-id",
+                    reference_time=datetime(2026, 8, 20, tzinfo=UTC),
+                    telemetry=real._EpisodeTelemetry(),
+                    attempt_number=1,
+                    validate_result=lambda _result, _telemetry: {},
+                    restore_result=lambda _raw, _telemetry: None,
+                ),
+                timeout=0.01,
+            )
+        )
+    elapsed = time.monotonic() - started
+    assert events == ["provider-start", "telemetry", "rollback", "close"]
+    if slow_cleanup:
+        assert elapsed < 0.2
 
 
 def test_pending_guard_recovery_uses_retained_attempt_snapshot() -> None:
@@ -1104,7 +1273,17 @@ def test_else_branch_constructs_real_adapter_instead_of_unreachable_assertion() 
     )
 
 
-def test_placeholder_packet_still_fails_closed(tmp_path: Path) -> None:
+def test_placeholder_packet_still_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    runtime_loads: list[str] = []
+    monkeypatch.setattr(
+        real,
+        "_load_graphiti",
+        lambda: runtime_loads.append("loaded"),
+    )
     policy = GraphitiWorkspacePolicy(
         policy_id=GraphitiWorkspacePolicyId.parse(
             "00000000-0000-4000-8000-000000004935"
@@ -1128,7 +1307,7 @@ def test_placeholder_packet_still_fails_closed(tmp_path: Path) -> None:
             attempt=attempt,
             workspace_root=(tmp_path / "workspace").resolve(),
         )
-    assert "graphiti_core" not in sys.modules
+    assert runtime_loads == []
 
 
 def test_evaluation_packet_is_the_only_authorised_real_profile(tmp_path: Path) -> None:
@@ -1145,15 +1324,15 @@ def test_evaluation_packet_is_the_only_authorised_real_profile(tmp_path: Path) -
         production.configuration.require_execution_authorized()
 
 
-def test_authorised_evaluation_attempt_does_not_import_graphiti_core(tmp_path: Path) -> None:
-    assert "graphiti_core" not in sys.modules
+def test_authorised_evaluation_attempt_does_not_import_graphiti_core() -> None:
+    graphiti_was_loaded = "graphiti_core" in sys.modules
     from newsroom.graphiti_adapter.evaluation_attempt import evaluation_attempt_for
     from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_WORKSPACE_GROUP
 
     attempt = evaluation_attempt_for(("香港天文台發出強烈季候風信號。",))
     attempt.configuration.require_execution_authorized()
     assert attempt.configuration.workspace_policy.namespace_prefix == GRAPHITI_WORKSPACE_GROUP
-    assert "graphiti_core" not in sys.modules
+    assert ("graphiti_core" in sys.modules) is graphiti_was_loaded
     assert REAL_GRAPHITI_RUNTIME_ENABLED is True
 
 
@@ -1220,6 +1399,83 @@ def test_pre_dispatch_setup_failure_is_a_proved_no_call_receipt(
     assert receipt["embedding_usage"]["request_count"] == 0
     assert receipt["embedding_usage"]["cost_usd_microunits"] == 0
     assert receipt["usage_basis"] == "NO_EMBEDDING_CALL"
+
+
+def test_credential_time_is_deducted_from_absolute_extraction_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    class MonotonicClock:
+        value = 0.0
+
+        def __call__(self) -> float:
+            return self.value
+
+        def advance(self) -> None:
+            self.value += 100.0
+
+    monotonic = MonotonicClock()
+    provider_calls = 0
+
+    def delayed_api_key() -> str:
+        monotonic.advance()
+        return "key"
+
+    def delayed_password() -> str:
+        monotonic.advance()
+        return "password"
+
+    async def must_not_dispatch(**_values: object) -> object:
+        nonlocal provider_calls
+        provider_calls += 1
+        raise AssertionError("expired extraction deadline reached provider")
+
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(real, "openrouter_api_key", delayed_api_key)
+    monkeypatch.setattr(real, "neo4j_community_password", delayed_password)
+    monkeypatch.setattr(real, "_add_episode", must_not_dispatch)
+    produced = RealGraphitiAdapter(monotonic=monotonic)._produce(
+        evaluation_attempt_for(("A retained source passage.",)),
+        UtcTimestamp.parse("2026-08-20T00:00:00.000000Z"),
+    )
+
+    assert provider_calls == 0
+    assert produced.outcome is ExtractionOutcome.RETRYABLE_FAILURE
+    assert produced.failure_code is ExtractionFailureCode.EXECUTION_TIMEOUT
+    assert produced.attempt_receipt_value is not None
+    assert produced.attempt_receipt_value["embedding_usage"]["request_count"] == 0
+
+
+def test_public_execute_honours_expired_absolute_rights_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    fixed = UtcTimestamp.parse("2026-08-21T00:03:00.000000Z")
+    provider_calls = 0
+
+    async def must_not_dispatch(**_values: object) -> object:
+        nonlocal provider_calls
+        provider_calls += 1
+        raise AssertionError("expired absolute deadline reached provider")
+
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(real, "openrouter_api_key", lambda: "key")
+    monkeypatch.setattr(real, "neo4j_community_password", lambda: "password")
+    monkeypatch.setattr(real, "_add_episode", must_not_dispatch)
+    execution = RealGraphitiAdapter(
+        clock=lambda: fixed,
+        execution_deadline=fixed.value,
+    ).execute(
+        attempt=evaluation_attempt_for(("A retained source passage.",)),
+        workspace_root=tmp_path / "expired-workspace",
+    )
+
+    assert provider_calls == 0
+    assert execution.outcome.value == "TIMEOUT"
+    assert execution.produced.failure_code is ExtractionFailureCode.EXECUTION_TIMEOUT
+    assert list((tmp_path / "expired-workspace").iterdir()) == []
 
 
 def test_relations_without_exact_evidence_are_retained_without_proposals(

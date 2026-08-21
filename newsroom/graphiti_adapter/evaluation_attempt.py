@@ -52,6 +52,7 @@ from .evaluation_packet import (
     GRAPHITI_CHAT_MODEL,
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_EMBEDDING_MODEL,
+    GRAPHITI_EXTRACTION_TIMEOUT_MS,
     GRAPHITI_GENERATION_ID,
 )
 from .models import GraphitiAdapterConfiguration, GraphitiAttemptRequest, GraphitiInputManifest
@@ -246,7 +247,7 @@ def evaluation_attempt_for_body(
             passages=bound,
         ),
         budget=ExtractionBudget(
-            timeout_ms=180_000,
+            timeout_ms=GRAPHITI_EXTRACTION_TIMEOUT_MS,
             max_input_bytes=64 * 1024,
             max_output_bytes=256 * 1024,
             max_proposals=100,

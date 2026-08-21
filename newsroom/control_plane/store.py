@@ -342,6 +342,26 @@ def claim_graphiti_attempt(
     return row is not None
 
 
+def release_graphiti_attempt_claim(
+    connection: sqlite3.Connection,
+    *,
+    spend_id: str,
+    owner_id: str,
+) -> bool:
+    """Release only the caller's lease without changing unresolved spend."""
+
+    row = connection.execute(
+        """
+        UPDATE unpublished_graphiti_spend
+        SET dispatch_owner=NULL, dispatch_lease_expires_at=NULL, at=?
+        WHERE spend_id=? AND status='RESERVED' AND dispatch_owner=?
+        RETURNING spend_id
+        """,
+        (_now(), spend_id, owner_id),
+    ).fetchone()
+    return row is not None
+
+
 def reconcile_graphiti_spend(
     connection: sqlite3.Connection,
     *,

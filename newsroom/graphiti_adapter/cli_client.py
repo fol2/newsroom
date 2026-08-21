@@ -33,6 +33,10 @@ class CliResponseError(RuntimeError):
     """Both subscription CLI responses failed the Graphiti JSON contract."""
 
 
+class CliOutputDecodeError(RuntimeError):
+    """A dispatched subscription CLI returned non-UTF-8 output."""
+
+
 class GraphitiCliClient(Protocol):
     invocations: list[dict[str, object]]
 
@@ -60,7 +64,7 @@ def run_cli(command: tuple[str, ...], *, timeout: int, cwd: str | None = None) -
             command,
             check=False,
             capture_output=True,
-            text=True,
+            text=False,
             timeout=timeout,
             cwd=cwd,
         )
@@ -68,9 +72,19 @@ def run_cli(command: tuple[str, ...], *, timeout: int, cwd: str | None = None) -
         raise RuntimeError(f"{name} Graphiti LLM timed out") from None
     if result.returncode != 0:
         raise RuntimeError(f"{name} Graphiti LLM failed")
-    if not result.stdout.strip():
+    text = _decode_stdout(result.stdout, name=name)
+    if not text.strip():
         raise RuntimeError("Graphiti LLM returned empty stdout")
-    return result.stdout
+    return text
+
+
+def _decode_stdout(stdout: bytes, *, name: str) -> str:
+    try:
+        return stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        raise CliOutputDecodeError(
+            f"{name} Graphiti LLM returned malformed UTF-8"
+        ) from None
 
 
 async def run_cli_async(
@@ -99,7 +113,7 @@ async def run_cli_async(
         raise
     if process.returncode != 0:
         raise RuntimeError(f"{name} Graphiti LLM failed")
-    text = stdout.decode("utf-8")
+    text = _decode_stdout(stdout, name=name)
     if not text.strip():
         raise RuntimeError("Graphiti LLM returned empty stdout")
     return text
@@ -334,6 +348,7 @@ def build_cli_llm_client(
 
 __all__ = [
     "build_cli_llm_client",
+    "CliOutputDecodeError",
     "CliResponseError",
     "extract_json",
     "run_cli",

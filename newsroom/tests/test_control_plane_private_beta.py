@@ -1,7 +1,9 @@
 from pathlib import Path
 import json
 import os
+import stat
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -221,6 +223,119 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
     connection.commit()
     connection.close()
     return path
+
+
+def test_real_graphiti_cycle_requires_canonical_shared_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.control_plane import paths as control_paths
+    import scripts.hermes_control_plane as hermes
+
+    anchored_default = Path(hermes.DEFAULT_UNPUBLISHED)
+    anchored_proving = Path(hermes.DEFAULT_PROVING)
+    assert anchored_default.is_absolute()
+    assert anchored_proving.is_absolute()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert Path(hermes.DEFAULT_UNPUBLISHED) == anchored_default
+    assert Path(hermes.DEFAULT_PROVING) == anchored_proving
+
+    canonical = tmp_path / "canonical" / "unpublished.sqlite3"
+    canonical.parent.mkdir()
+    canonical.touch()
+    alias = tmp_path / "canonical-alias.sqlite3"
+    alias.symlink_to(canonical)
+    canonical_proving = tmp_path / "canonical" / "proving.sqlite3"
+    canonical_proving.touch()
+    proving_alias = tmp_path / "proving-alias.sqlite3"
+    proving_alias.symlink_to(canonical_proving)
+    monkeypatch.setattr(control_paths, "CANONICAL_PROVING_STORE", canonical_proving)
+    monkeypatch.setattr(control_paths, "CANONICAL_UNPUBLISHED_STORE", canonical)
+    control_paths.require_canonical_proving_store(str(proving_alias))
+    control_paths.require_canonical_unpublished_store(str(alias))
+    with pytest.raises(ValueError, match="canonical proving store"):
+        control_paths.require_canonical_proving_store(
+            str(tmp_path / "other-proving.sqlite3")
+        )
+    with pytest.raises(ValueError, match="canonical unpublished store"):
+        control_paths.require_canonical_unpublished_store(
+            str(tmp_path / "other.sqlite3")
+        )
+
+
+def test_control_plane_state_root_preserves_legacy_pair_or_bootstraps_fresh(
+    tmp_path: Path,
+) -> None:
+    from newsroom.control_plane.paths import (
+        _canonical_state_root,
+        _ensure_private_directory,
+    )
+
+    fresh_home = tmp_path / "fresh"
+    assert _canonical_state_root(fresh_home) == (
+        fresh_home / ".local" / "share" / "newsroom"
+    )
+
+    legacy = tmp_path / "legacy" / "Coding" / "newsroom" / "data" / "newsroom"
+    legacy.mkdir(parents=True)
+    (legacy / "proving_store.sqlite3").write_bytes(b"proving")
+    with pytest.raises(RuntimeError, match="store pair is incomplete"):
+        _canonical_state_root(tmp_path / "legacy")
+    (legacy / "unpublished_store.sqlite3").write_bytes(b"unpublished")
+    assert _canonical_state_root(tmp_path / "legacy") == legacy
+
+    conflict_home = tmp_path / "conflict"
+    conflict_legacy = (
+        conflict_home / "Coding" / "newsroom" / "data" / "newsroom"
+    )
+    conflict_fresh = conflict_home / ".local" / "share" / "newsroom"
+    conflict_legacy.mkdir(parents=True)
+    conflict_fresh.mkdir(parents=True)
+    for name in ("proving_store.sqlite3", "unpublished_store.sqlite3"):
+        (conflict_legacy / name).write_bytes(b"legacy")
+        (conflict_fresh / name).write_bytes(b"fresh")
+    with pytest.raises(RuntimeError, match="ambiguous authority"):
+        _canonical_state_root(conflict_home)
+
+    for name in ("proving_store.sqlite3", "unpublished_store.sqlite3"):
+        (conflict_fresh / name).unlink()
+        (conflict_fresh / name).symlink_to(conflict_legacy / name)
+    assert _canonical_state_root(conflict_home) == conflict_legacy
+
+    private_root = tmp_path / "fresh-private"
+    _ensure_private_directory(private_root)
+    assert stat.S_IMODE(private_root.stat().st_mode) == 0o700
+
+
+def test_real_graphiti_run_cycle_rejects_alternate_authority_or_ledger_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.control_plane import paths as control_paths
+    from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
+
+    canonical_proving = tmp_path / "canonical-proving.sqlite3"
+    canonical_unpublished = tmp_path / "canonical-unpublished.sqlite3"
+    monkeypatch.setattr(control_paths, "CANONICAL_PROVING_STORE", canonical_proving)
+    monkeypatch.setattr(
+        control_paths, "CANONICAL_UNPUBLISHED_STORE", canonical_unpublished
+    )
+    runner = EvaluationGraphitiRunner()
+
+    with pytest.raises(ValueError, match="canonical proving store"):
+        run_cycle(
+            proving_store=str(tmp_path / "stale-pass.sqlite3"),
+            unpublished_store=str(canonical_unpublished),
+            writer=FixtureWriter(),
+            graphiti=runner,
+        )
+    with pytest.raises(ValueError, match="canonical unpublished store"):
+        run_cycle(
+            proving_store=str(canonical_proving),
+            unpublished_store=str(tmp_path / "alternate-ledger.sqlite3"),
+            writer=FixtureWriter(),
+            graphiti=runner,
+        )
 
 
 def test_veto_refuses_public_intents() -> None:

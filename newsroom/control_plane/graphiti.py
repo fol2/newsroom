@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from newsroom.control_plane.corpus import CorpusIngestUnit
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
@@ -65,10 +66,31 @@ class GraphitiPort(Protocol):
     def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult: ...
 
 
+@runtime_checkable
+class GovernedRealGraphitiPort(GraphitiPort, Protocol):
+    requires_canonical_control_plane_stores: bool
+
+    def ingest_until(
+        self, unit: CorpusIngestUnit, *, deadline: datetime
+    ) -> GraphitiCycleResult: ...
+
+
 class EvaluationGraphitiRunner:
     """Real Graphiti under EVALUATION. Does not write the ledger or admitted labels."""
 
+    requires_canonical_control_plane_stores = True
+
     def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+        return self._ingest(unit, deadline=None)
+
+    def ingest_until(
+        self, unit: CorpusIngestUnit, *, deadline: datetime
+    ) -> GraphitiCycleResult:
+        return self._ingest(unit, deadline=deadline)
+
+    def _ingest(
+        self, unit: CorpusIngestUnit, *, deadline: datetime | None
+    ) -> GraphitiCycleResult:
         from newsroom.graphiti_adapter.evaluation_attempt import evaluation_attempt_for_body
         from newsroom.graphiti_adapter.real import RealGraphitiAdapter
 
@@ -103,7 +125,7 @@ class EvaluationGraphitiRunner:
             predecessor_episode_uuid=unit.predecessor_ingest_id,
         )
         with TemporaryDirectory() as root:
-            execution = RealGraphitiAdapter().execute(
+            execution = RealGraphitiAdapter(execution_deadline=deadline).execute(
                 attempt=attempt,
                 workspace_root=Path(root),
             )
