@@ -1,0 +1,154 @@
+{
+  "schema_version": "newsroom.graphiti-token-effectiveness-experiment-plan.v1",
+  "parent_issue": 739,
+  "pull_request": 745,
+  "created_at": "2026-08-21",
+  "status": "OWNER_GATED_LIVE_CALIBRATION",
+  "serial_issues": [746, 747, 748],
+  "baseline": {
+    "cursor_agent_version": "2026.08.11-e8db854",
+    "model": "composer-2.5",
+    "historic_terminal_revision_total_tokens": 54287,
+    "ambient_separate_chat_tokens": 51058,
+    "hermetic_separate_chat_tokens": 46105,
+    "hermetic_combined_zero_edge_chat_tokens": 25000,
+    "hermetic_tiny_prompt_characters": 49,
+    "hermetic_tiny_input_tokens": 20103,
+    "ambient_to_hermetic_input_saving_range": [2281, 2284],
+    "notes": [
+      "The 25,000-token combined sample returned zero edges.",
+      "graphiti-core 0.29.3 conditionally dispatches BatchEdgeTimestamps after a non-empty combined result.",
+      "Historical chat usage before exact metering remains incomplete."
+    ]
+  },
+  "sdk_candidate": {
+    "official_bridge_manifest_version_observed": "1.0.28",
+    "protocol": "sdk.v1",
+    "runtime": "local",
+    "lifecycle": "Agent.prompt",
+    "model": "composer-2.5",
+    "tools": [],
+    "mcp_servers": {},
+    "agents": {},
+    "custom_tools": {},
+    "setting_sources": "OMITTED",
+    "cwd": "FRESH_EMPTY_NON_GIT_DIRECTORY_PER_LEAF",
+    "prior_messages": 0,
+    "authentication": "PURPOSE_CREATED_CURSOR_API_KEY",
+    "required_stream_tool_call_count": 0
+  },
+  "live_authority": {
+    "authorised": false,
+    "requires_explicit_owner_instruction": true,
+    "maximum_cursor_sdk_model_leaves": 8,
+    "maximum_grok_model_leaves": 0,
+    "maximum_openrouter_calls": 0,
+    "adaptive_extra_calls_permitted": false,
+    "unchanged_request_retry_permitted": false,
+    "neo4j_mutation_permitted": false,
+    "publication_permitted": false
+  },
+  "call_shape": {
+    "graphiti_core_version": "0.29.3",
+    "upstream_combined_zero_edge_chat_leaves": 1,
+    "upstream_combined_nonzero_edge_chat_leaves": 2,
+    "upstream_nonzero_second_class": "BatchEdgeTimestamps",
+    "candidate_compact_combined_temporal_zero_edge_chat_leaves": 1,
+    "candidate_compact_combined_temporal_nonzero_edge_chat_leaves": 1
+  },
+  "experiments": [
+    {
+      "ordinal": 1,
+      "label": "sdk-no-tool-tiny",
+      "fixture": "49-character JSON prompt",
+      "purpose": "Measure the fixed no-tool SDK input floor."
+    },
+    {
+      "ordinal": 2,
+      "label": "sdk-upstream-combined-zero",
+      "fixture": "368-byte valid zero-result revision",
+      "purpose": "Compare the upstream combined prompt on the no-tool route."
+    },
+    {
+      "ordinal": 3,
+      "label": "sdk-upstream-combined-relations",
+      "fixture": "Several source-safe entities and relations",
+      "purpose": "Measure the initial upstream combined leaf on a non-zero result."
+    },
+    {
+      "ordinal": 4,
+      "label": "sdk-upstream-batch-timestamps",
+      "fixture": "Predeclared facts from experiment 3",
+      "purpose": "Measure the conditional graphiti-core timestamp leaf separately."
+    },
+    {
+      "ordinal": 5,
+      "label": "sdk-compact-temporal-zero",
+      "fixture": "368-byte valid zero-result revision",
+      "purpose": "Qualify the compact one-leaf zero-result contract."
+    },
+    {
+      "ordinal": 6,
+      "label": "sdk-compact-temporal-relations",
+      "fixture": "Several source-safe entities, relations and temporal bounds",
+      "purpose": "Qualify one-leaf non-zero entity/relation/temporal output."
+    },
+    {
+      "ordinal": 7,
+      "label": "sdk-compact-temporal-long",
+      "fixture": "Source-safe retained chunk at the 8192-byte boundary",
+      "purpose": "Prove no silent content truncation at the existing chunk limit."
+    },
+    {
+      "ordinal": 8,
+      "label": "sdk-predeclared-repeat",
+      "fixture": "Exact repeat of experiment 6",
+      "purpose": "Measure repeatability and cache behavior without session reuse."
+    }
+  ],
+  "decision_rule": {
+    "minimum_tiny_input_reduction_fraction": 0.5,
+    "preferred_tiny_input_reduction_fraction": 0.75,
+    "maximum_tiny_input_tokens_for_minimum_effect": 10051,
+    "quality_must_not_regress": true,
+    "source_content_must_not_be_truncated": true,
+    "zero_result_is_terminal_success": true,
+    "nonzero_result_must_include_temporal_and_evidence_validation": true,
+    "tool_call_count_must_equal": 0,
+    "missing_usage_is_zero": false,
+    "allowed_recommendations": [
+      "ADOPT_FOR_QUALIFICATION",
+      "RESEARCH_ONLY",
+      "REJECT"
+    ]
+  },
+  "receipt_redaction": {
+    "retain": [
+      "sdk_and_bridge_versions",
+      "model_catalog_identity",
+      "route_option_digest",
+      "prompt_bytes_and_sha256",
+      "schema_bytes_and_sha256",
+      "input_output_cache_total_reasoning_tokens",
+      "usage_status_and_provenance",
+      "latency",
+      "json_and_semantic_fixture_result",
+      "stream_message_classes_and_tool_call_count"
+    ],
+    "forbid": [
+      "api_key",
+      "account_email",
+      "full_prompt",
+      "full_model_result",
+      "session_transcript",
+      "local_home_path"
+    ]
+  },
+  "sources": [
+    "https://cursor.com/docs/sdk/python",
+    "https://cursor.com/docs/models-and-pricing",
+    "https://github.com/cursor/sdk-bridge/blob/main/proto/manifest.json",
+    "https://github.com/getzep/graphiti/blob/v0.29.3/graphiti_core/utils/maintenance/combined_extraction.py",
+    "https://github.com/getzep/graphiti/blob/v0.29.3/graphiti_core/prompts/extract_edges.py"
+  ]
+}

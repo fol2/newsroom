@@ -150,6 +150,7 @@ jobs:
         run: |
           .venv/bin/python -m pytest -q \
             newsroom/tests/test_graphiti_core_0293_call_shape.py \
+            newsroom/tests/test_graphiti_core_0293_nonzero_combined_call_shape.py \
             newsroom/tests/test_graphiti_token_meter.py \
             newsroom/tests/test_graphiti_combined_temporal_extraction.py \
             newsroom/tests/test_graphiti_combined_temporal_pipeline.py
