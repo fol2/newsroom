@@ -436,14 +436,22 @@ def _reconcile_no_embedding_spend(
     return accounting
 
 
-def _proves_no_provider_dispatch(result: GraphitiCycleResult) -> bool:
-    raw = result.raw_receipt if isinstance(result.raw_receipt, dict) else {}
+def _reports_no_embedding_call(result: GraphitiCycleResult) -> bool:
     usage = result.embedding_usage if isinstance(result.embedding_usage, dict) else {}
     return (
-        raw.get("dispatch_state") == "NOT_DISPATCHED"
-        and usage.get("usage_basis") == "NO_EMBEDDING_CALL"
+        usage.get("usage_basis") == "NO_EMBEDDING_CALL"
+        and usage.get("requests") == []
         and usage.get("request_count") == 0
-        and usage.get("cost_usd_microunits", 0) == 0
+        and usage.get("embedding_tokens") == 0
+        and usage.get("cost_usd_microunits") == 0
+    )
+
+
+def _proves_no_provider_dispatch(result: GraphitiCycleResult) -> bool:
+    raw = result.raw_receipt if isinstance(result.raw_receipt, dict) else {}
+    return (
+        raw.get("dispatch_state") == "NOT_DISPATCHED"
+        and _reports_no_embedding_call(result)
         and not result.chat_invocations
     )
 
@@ -851,7 +859,7 @@ def _ingest(
                 and owner_id is not None
                 and (
                     returned_result is None
-                    or _proves_no_provider_dispatch(returned_result)
+                    or _reports_no_embedding_call(returned_result)
                 )
             )
             if preserve_unresolved:
@@ -875,6 +883,16 @@ def _ingest(
                         "failure": type(exc).__name__,
                         "accounting": accounting,
                         "provider_dispatch_state": dispatch_state,
+                        "chat_invocations": (
+                            []
+                            if returned_result is None
+                            else list(returned_result.chat_invocations)
+                        ),
+                        "embedding_usage": (
+                            None
+                            if returned_result is None
+                            else returned_result.embedding_usage
+                        ),
                     },
                 )
                 unpublished.commit()
@@ -945,10 +963,12 @@ def _ingest(
             append_ledger(unpublished, "GRAPHITI_EVALUATION_ATTEMPT", failure_receipt)
             unpublished.commit()
             continue
+        terminal_outcome = result.outcome in {"COMPLETE", "PARTIAL"}
         if (
             not reserved
             and owner_id is not None
-            and _proves_no_provider_dispatch(result)
+            and not terminal_outcome
+            and _reports_no_embedding_call(result)
         ):
             accounting = _preserve_reused_unresolved_spend(
                 unpublished,
@@ -963,7 +983,13 @@ def _ingest(
                     "attempt_number": attempt_number,
                     "failure_code": result.failure_code,
                     "accounting": accounting,
-                    "provider_dispatch_state": "NOT_DISPATCHED",
+                    "chat_invocations": list(result.chat_invocations),
+                    "embedding_usage": result.embedding_usage,
+                    "provider_dispatch_state": (
+                        "NOT_DISPATCHED"
+                        if _proves_no_provider_dispatch(result)
+                        else "UNKNOWN"
+                    ),
                 },
             )
             unpublished.commit()
@@ -986,7 +1012,7 @@ def _ingest(
         )
         receipt["receipt_digest"] = final_digest
         append_ledger(unpublished, "GRAPHITI_EVALUATION_ATTEMPT", receipt)
-        if result.outcome in {"COMPLETE", "PARTIAL"}:
+        if terminal_outcome:
             insert_graphiti_ingest(
                 unpublished,
                 ingest_id=unit.ingest_id,

@@ -91,6 +91,8 @@ def _keychain_password(*, account: str, service: str) -> str:
         raise BrokerError(f"Keychain class {account} lookup timed out") from None
     except OSError:
         raise BrokerError(f"Keychain class {account} lookup failed") from None
+    except UnicodeError:
+        raise BrokerError(f"Keychain class {account} lookup failed") from None
     if result.returncode != 0:
         raise BrokerError(f"Keychain class {account} is absent")
     secret = result.stdout.strip()

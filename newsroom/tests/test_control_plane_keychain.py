@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 import uuid
+from pathlib import Path
+from typing import Literal
 
 import pytest
 
 from newsroom.control_plane.broker import (
     NEO4J_KEYCHAIN_SKIP,
     OPENROUTER_KEYCHAIN_SKIP,
+    BrokerError,
     neo4j_community_password,
     neo4j_keychain_ready,
+    openrouter_api_key,
     openrouter_keychain_ready,
     prove_neo4j_keychain,
     prove_openrouter_keychain,
@@ -22,6 +28,31 @@ from newsroom.control_plane.writer import (
     prove_cursor_agent_cli,
     prove_grok_cli,
 )
+
+
+@pytest.mark.parametrize("file_descriptor", [1, 2], ids=["stdout", "stderr"])
+def test_non_utf8_keychain_output_is_a_secret_safe_broker_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    file_descriptor: Literal[1, 2],
+) -> None:
+    security = tmp_path / "security"
+    security.write_text(
+        f"#!{sys.executable}\n"
+        "import os\n"
+        f"os.write({file_descriptor}, b'\\xffprivate-output')\n",
+        encoding="utf-8",
+    )
+    security.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+    with pytest.raises(
+        BrokerError, match=r"^Keychain class OPENROUTER_API lookup failed$"
+    ) as raised:
+        openrouter_api_key()
+
+    message = str(raised.value)
+    assert "private-output" not in message
 
 
 @pytest.mark.skipif(not grok_cli_ready(), reason="Grok Build CLI not on this host")

@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal, Never
 
 import pytest
 
@@ -1574,6 +1575,34 @@ def test_reused_unreceipted_reservation_survives_unknown_and_setup_no_call(
                 raw_receipt=raw,
             )
 
+    class TimeoutNoCall:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            timeout_chat = ({"provider": "cursor-agent-cli", "status": "FAILED"},)
+            result = replace(
+                _complete(unit, chat_invocations=timeout_chat),
+                outcome="FAILED",
+                failure_code="EXECUTION_TIMEOUT",
+            )
+            raw = dict(result.raw_receipt or {})
+            assert "dispatch_state" not in raw
+            raw.pop("raw_output_digest", None)
+            raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
+            return replace(
+                result,
+                receipt_digest=str(raw["raw_output_digest"]),
+                raw_receipt=raw,
+            )
+
+    run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=TimeoutNoCall(),
+        max_graphiti=1,
+        clock=lambda: datetime(2026, 8, 21, 0, 32, tzinfo=UTC),
+    )
+
     run_cycle(
         proving_store=str(proving),
         unpublished_store=str(unpublished),
@@ -1581,7 +1610,7 @@ def test_reused_unreceipted_reservation_survives_unknown_and_setup_no_call(
         max_writes=0,
         graphiti=SetupNoCall(),
         max_graphiti=1,
-        clock=lambda: datetime(2026, 8, 21, 0, 32, tzinfo=UTC),
+        clock=lambda: datetime(2026, 8, 21, 0, 48, tzinfo=UTC),
     )
     connection = sqlite3.connect(unpublished)
     retained = connection.execute(
@@ -1595,8 +1624,8 @@ def test_reused_unreceipted_reservation_survives_unknown_and_setup_no_call(
         "SELECT COUNT(*) FROM unpublished_graphiti_attempt_receipts"
     ).fetchone()[0]
     connection.close()
-    held_states = [
-        payload["provider_dispatch_state"]
+    held_attempts = [
+        payload
         for kind, payload in events
         if kind == "GRAPHITI_EVALUATION_RETRY_HELD"
     ]
@@ -1608,7 +1637,84 @@ def test_reused_unreceipted_reservation_survives_unknown_and_setup_no_call(
         None,
     )
     assert attempt_receipts == 0
-    assert held_states == ["UNKNOWN", "NOT_DISPATCHED"]
+    assert [item["provider_dispatch_state"] for item in held_attempts] == [
+        "UNKNOWN",
+        "UNKNOWN",
+        "NOT_DISPATCHED",
+    ]
+    assert held_attempts[1]["chat_invocations"] == [
+        {"provider": "cursor-agent-cli", "status": "FAILED"}
+    ]
+    assert held_attempts[1]["embedding_usage"] == {
+        "usage_basis": "NO_EMBEDDING_CALL",
+        "request_count": 0,
+        "embedding_tokens": 0,
+        "cost_usd_microunits": 0,
+        "requests": [],
+    }
+
+
+@pytest.mark.parametrize("terminal_outcome", ["COMPLETE", "PARTIAL"])
+def test_reused_unreceipted_reservation_accepts_bound_terminal_no_call(
+    tmp_path: Path,
+    terminal_outcome: Literal["COMPLETE", "PARTIAL"],
+) -> None:
+    class ProcessDeath(BaseException):
+        pass
+
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / f"reused-{terminal_outcome.lower()}-no-call.sqlite3"
+
+    class DiesAfterClaim:
+        def ingest(self, _unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            raise ProcessDeath
+
+    with pytest.raises(ProcessDeath):
+        run_cycle(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            writer=FixtureWriter(),
+            max_writes=0,
+            graphiti=DiesAfterClaim(),
+            max_graphiti=1,
+            clock=lambda: datetime(2026, 8, 21, tzinfo=UTC),
+        )
+
+    class TerminalSameAttempt:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            assert unit.attempt_number == 1
+            return replace(_complete(unit), outcome=terminal_outcome)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=TerminalSameAttempt(),
+        max_graphiti=1,
+        clock=lambda: datetime(2026, 8, 21, 0, 16, tzinfo=UTC),
+    )
+
+    connection = sqlite3.connect(unpublished)
+    spend = connection.execute(
+        """
+        SELECT status, usage_basis, actual_usd_microunits,
+               dispatch_owner, dispatch_lease_expires_at
+        FROM unpublished_graphiti_spend
+        """
+    ).fetchone()
+    attempt_receipts = connection.execute(
+        "SELECT COUNT(*) FROM unpublished_graphiti_attempt_receipts"
+    ).fetchone()[0]
+    ingests = connection.execute(
+        "SELECT COUNT(*) FROM unpublished_graphiti_ingest"
+    ).fetchone()[0]
+    connection.close()
+
+    assert report.graphiti == 1
+    assert spend == ("RECONCILED", "NO_EMBEDDING_CALL", 0, None, None)
+    assert attempt_receipts == 1
+    assert ingests == 1
 
 
 def test_proving_writer_cannot_commit_during_provider_handoff(
@@ -3062,18 +3168,23 @@ def test_graphiti_cash_ceiling_holds_ingest_but_writer_continues(
     assert "PRIVATE_CYCLE_CLOSE" in ledger_kinds
 
 
+@pytest.mark.parametrize("failure_kind", ["timeout", "non_utf8"])
 def test_pre_dispatch_failure_releases_graphiti_reservation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: Literal["timeout", "non_utf8"],
 ) -> None:
     from newsroom.control_plane import broker
     from newsroom.control_plane import paths as control_paths
-    import newsroom.graphiti_adapter.real as real
+    from newsroom.graphiti_adapter import real
 
-    def timeout(*_args: object, **_values: object) -> object:
-        raise broker.subprocess.TimeoutExpired("security", 10)
+    def fail_keychain_decode(*_args: object, **_values: object) -> Never:
+        if failure_kind == "timeout":
+            raise broker.subprocess.TimeoutExpired("security", 10)
+        raise UnicodeDecodeError("utf-8", b"\xffsecret", 0, 1, "invalid start byte")
 
     monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
-    monkeypatch.setattr(broker.subprocess, "run", timeout)
+    monkeypatch.setattr(broker.subprocess, "run", fail_keychain_decode)
     proving = _proving(tmp_path)
     unpublished = tmp_path / "pre-dispatch.sqlite3"
     monkeypatch.setattr(control_paths, "CANONICAL_PROVING_STORE", proving)
