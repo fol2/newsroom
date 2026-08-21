@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "newsroom.graphiti-sdk-no-tool-calibration.v1",
+  "title": "Redacted Cursor SDK no-tool calibration receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ordinal",
+    "label",
+    "prompt_bytes",
+    "prompt_sha256",
+    "schema_bytes",
+    "schema_sha256",
+    "usage",
+    "usage_status",
+    "tool_call_count",
+    "isolation"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "newsroom.graphiti-sdk-no-tool-calibration.v1"
+    },
+    "ordinal": { "type": "integer", "minimum": 1, "maximum": 8 },
+    "label": { "type": "string" },
+    "prompt_class": { "type": "string" },
+    "fixture_id": { "type": "string" },
+    "prompt_chars": { "type": "integer", "minimum": 0 },
+    "prompt_bytes": { "type": "integer", "minimum": 0 },
+    "prompt_sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "schema_bytes": { "type": "integer", "minimum": 0 },
+    "schema_sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "route_option_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "isolation_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "environment_allow_list_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "sdk_version": { "type": "string" },
+    "bridge_protocol": { "type": "string" },
+    "model": { "const": "composer-2.5" },
+    "agent_id_sha256": {
+      "type": ["string", "null"],
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "usage_status": { "enum": ["PROVIDER_REPORTED", "UNREPORTED"] },
+    "latency_ms": { "type": ["integer", "null"], "minimum": 0 },
+    "json_valid": { "type": ["boolean", "null"] },
+    "semantic_fixture_result": {
+      "enum": ["PASS", "FAIL", "PENDING", "UNRESOLVED"]
+    },
+    "stream_message_classes": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "tool_call_count": { "type": "integer", "minimum": 0 },
+    "status": { "type": "string" },
+    "failure": { "type": "string" },
+    "usage": {
+      "type": "object",
+      "required": ["usage_basis"],
+      "properties": {
+        "usage_basis": { "enum": ["PROVIDER_REPORTED", "UNREPORTED"] },
+        "input_tokens": { "type": ["integer", "null"], "minimum": 0 },
+        "output_tokens": { "type": ["integer", "null"], "minimum": 0 },
+        "cached_read_tokens": { "type": ["integer", "null"], "minimum": 0 },
+        "cached_write_tokens": { "type": ["integer", "null"], "minimum": 0 },
+        "total_tokens": { "type": ["integer", "null"], "minimum": 0 },
+        "reasoning_tokens": { "type": ["integer", "null"], "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "isolation": {
+      "type": "object",
+      "required": [
+        "hook_count",
+        "tool_count",
+        "mcp_count",
+        "subagent_count",
+        "custom_tool_count",
+        "prior_message_count",
+        "prior_store_entry_count"
+      ],
+      "properties": {
+        "hook_count": { "type": "integer", "const": 0 },
+        "tool_count": { "type": "integer", "const": 0 },
+        "mcp_count": { "type": "integer", "const": 0 },
+        "subagent_count": { "type": "integer", "const": 0 },
+        "custom_tool_count": { "type": "integer", "const": 0 },
+        "prior_message_count": { "type": "integer", "const": 0 },
+        "prior_store_entry_count": { "type": "integer", "minimum": 0 },
+        "setting_sources": { "const": "OMITTED" },
+        "cwd_empty": { "type": "boolean" },
+        "cwd_has_git": { "type": "boolean" },
+        "home_cursor_entry_count": { "type": "integer", "minimum": 0 },
+        "cwd_cursor_entry_count": { "type": "integer", "minimum": 0 },
+        "unclassified_cursor_entry_count": { "type": "integer", "minimum": 0 },
+        "environment_allow_list": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
