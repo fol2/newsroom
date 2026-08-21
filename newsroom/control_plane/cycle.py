@@ -72,6 +72,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
 from newsroom.graphiti_adapter.recovery_vocabulary import (
     GraphitiRecoveryClassification,
 )
+from newsroom.graphiti_adapter.usage_meter import summarise_graphiti_usage
 from newsroom.increment9.proving import (
     FORBIDDEN_STORE_MARKERS,
     PROVING_GATES,
@@ -282,6 +283,7 @@ def _bind_result(
         or tuple(raw.get("passages", ())) != result.passages
         or tuple(raw.get("chat_invocations", ())) != result.chat_invocations
         or raw.get("embedding_usage") != result.embedding_usage
+        or raw.get("token_usage") != result.token_usage
         or raw.get("entity_count") != result.entity_count
         or raw.get("relation_count") != result.relation_count
         or raw.get("proposal_count") != result.proposal_count
@@ -313,6 +315,13 @@ def _bind_result(
                     "graphiti proposal evidence digest differs from passage bytes"
                 )
     return result
+
+
+def _result_token_usage(result: GraphitiCycleResult) -> dict[str, object]:
+    return result.token_usage or summarise_graphiti_usage(
+        chat_invocations=result.chat_invocations,
+        embedding_usage=result.embedding_usage,
+    )
 
 
 def _receipt(
@@ -357,6 +366,7 @@ def _receipt(
         "passages": list(result.passages),
         "chat_invocations": list(result.chat_invocations),
         "embedding_usage": result.embedding_usage,
+        "token_usage": _result_token_usage(result),
         "accounting": accounting,
         "request_tokens": result.request_tokens,
         "response_tokens": result.response_tokens,
@@ -928,6 +938,11 @@ def _ingest(
                             if returned_result is None
                             else returned_result.embedding_usage
                         ),
+                        "token_usage": (
+                            None
+                            if returned_result is None
+                            else _result_token_usage(returned_result)
+                        ),
                     },
                 )
                 unpublished.commit()
@@ -974,6 +989,11 @@ def _ingest(
                     None
                     if returned_result is None
                     else returned_result.embedding_usage
+                ),
+                "token_usage": (
+                    None
+                    if returned_result is None
+                    else _result_token_usage(returned_result)
                 ),
                 "provider_attempt_number": (
                     None
@@ -1023,6 +1043,7 @@ def _ingest(
                 "accounting": accounting,
                 "chat_invocations": list(result.chat_invocations),
                 "embedding_usage": result.embedding_usage,
+                "token_usage": _result_token_usage(result),
                 "provider_dispatch_state": (
                     "NOT_DISPATCHED"
                     if _proves_no_provider_dispatch(result)

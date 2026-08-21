@@ -18,6 +18,7 @@ from newsroom.control_plane.paths import (
     ensure_control_plane_state_root,
 )
 from newsroom.control_plane.store import list_payloads
+from newsroom.control_plane.usage import graphiti_usage_report
 from newsroom.control_plane.veto import VetoError
 from newsroom.control_plane.writer import default_writer
 from newsroom.graphiti_adapter.models import REAL_GRAPHITI_RUNTIME_ENABLED
@@ -47,13 +48,29 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Private unpublished editorial beta (no AUTO_PUBLISH)."
     )
-    parser.add_argument("command", choices=("cycle", "status", "serve", "intake"))
+    parser.add_argument(
+        "command", choices=("cycle", "status", "serve", "intake", "usage")
+    )
     parser.add_argument("--proving", default=DEFAULT_PROVING)
     parser.add_argument("--unpublished", default=DEFAULT_UNPUBLISHED)
     parser.add_argument("--interval", type=int, default=300)
     parser.add_argument("--max-writes", type=int, default=5)
+    parser.add_argument("--usage-window", type=int, default=300)
     args = parser.parse_args(argv)
     ensure_control_plane_state_root()
+    if args.command == "usage":
+        sys.stdout.write(
+            json.dumps(
+                graphiti_usage_report(
+                    args.unpublished,
+                    window_seconds=args.usage_window,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n"
+        )
+        return 0
     if args.command == "status":
         payloads = list_payloads(args.unpublished)
         body = {
