@@ -9,7 +9,7 @@ import sqlite3
 import uuid
 
 import pytest
-from neo4j import EagerResult
+from neo4j import AsyncDriver, AsyncGraphDatabase, EagerResult
 
 from newsroom.increment4 import (
     Increment4Neo4jActiveReadRequest,
@@ -41,6 +41,29 @@ from .source_3a_helpers import SOURCE_NOW
 
 _REQUIRED_FLAG = "NEWSROOM_NEO4J_SERVICE_REQUIRED"
 _PROJECTOR_DRIVER = None
+
+
+class _DatabaseBoundAsyncDriver:
+    def __init__(self, driver: AsyncDriver, *, database: str) -> None:
+        self._database = database
+        self._driver = driver
+
+    async def execute_query(
+        self,
+        cypher: str,
+        *,
+        params: dict[str, object],
+        routing_: str,
+    ) -> EagerResult:
+        return await self._driver.execute_query(
+            cypher,
+            parameters_=params,
+            routing_=routing_,
+            database_=self._database,
+        )
+
+    async def close(self) -> None:
+        await self._driver.close()
 
 
 @lru_cache(maxsize=1)
@@ -139,7 +162,6 @@ def _event_count(path: Path) -> int:
 
 
 def test_actual_service_guard_rollback_does_not_promote_snapshot_copies() -> None:
-    graphiti_driver = pytest.importorskip("graphiti_core.driver.neo4j_driver")
     from newsroom.graphiti_adapter.neo4j_guard import Neo4jMutationGuard
 
     async def exercise() -> None:
@@ -148,10 +170,11 @@ def test_actual_service_guard_rollback_does_not_promote_snapshot_copies() -> Non
         group_id = f"newsroom-guard-service-{suffix}"
         episode_uuid = f"episode-{suffix}"
         snapshot_id = f"{episode_uuid}:1"
-        driver = graphiti_driver.Neo4jDriver(
-            config.uri,
-            config.username,
-            config.password,
+        driver = _DatabaseBoundAsyncDriver(
+            AsyncGraphDatabase.driver(
+                config.uri,
+                auth=(config.username, config.password),
+            ),
             database=config.database,
         )
 
@@ -231,19 +254,21 @@ def test_actual_service_guard_rollback_does_not_promote_snapshot_copies() -> Non
             ] == [[f"relationship-{suffix}", "before"]]
             assert int(snapshots.records[0]["count"]) == 0
         finally:
-            await query(
-                """
-                MATCH (n)
-                WHERE n.group_id=$group_id
-                   OR n.episode_uuid=$episode_uuid
-                   OR n._newsroom_snapshot_id=$snapshot_id
-                DETACH DELETE n
-                """,
-                group_id=group_id,
-                episode_uuid=episode_uuid,
-                snapshot_id=snapshot_id,
-            )
-            await driver.close()
+            try:
+                await query(
+                    """
+                    MATCH (n)
+                    WHERE n.group_id=$group_id
+                       OR n.episode_uuid=$episode_uuid
+                       OR n._newsroom_snapshot_id=$snapshot_id
+                    DETACH DELETE n
+                    """,
+                    group_id=group_id,
+                    episode_uuid=episode_uuid,
+                    snapshot_id=snapshot_id,
+                )
+            finally:
+                await driver.close()
 
     asyncio.run(exercise())
 
