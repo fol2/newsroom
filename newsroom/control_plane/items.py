@@ -139,6 +139,9 @@ def _from_mapping(source_id: str, payload: dict[str, object], *, fallback_key: s
     title = payload.get("title") or payload.get("name") or payload.get("code")
     if not isinstance(title, str) or not title.strip():
         return None
+    headline = _plain(title)
+    if not headline:
+        return None
     description = payload.get("description") or payload.get("summary") or ""
     if not isinstance(description, str) or not description.strip():
         description = title
@@ -162,7 +165,7 @@ def _from_mapping(source_id: str, payload: dict[str, object], *, fallback_key: s
     return SourceItem(
         source_id,
         key,
-        _clip(_plain(title), MAX_HEADLINE_CHARS),
+        _clip(headline, MAX_HEADLINE_CHARS),
         _clip(drafting_body, MAX_DRAFTING_BODY_CHARS),
         url,
         parse_source_time(published_raw) if isinstance(published_raw, str) else None,
