@@ -802,6 +802,12 @@ def test_cli_writes_private_non_overwriting_receipt(
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     monkeypatch.setattr(receipt_module, "context_from_environment", lambda _root: consumer)
     monkeypatch.setattr(receipt_module, "load_contract", lambda _root: contract)
+    verify_at_fixture_time = receipt_module.verify_artifact
+    monkeypatch.setattr(
+        receipt_module,
+        "verify_artifact",
+        lambda **values: verify_at_fixture_time(**values, now=NOW),
+    )
     arguments = (
         "--repo-root",
         str(repo),
