@@ -132,9 +132,13 @@ def test_complete_actual_service_cases_are_optional_only_in_core() -> None:
         "newsroom.tests.test_control_plane_keychain::test_neo4j_keychain_injects_and_bolt_accepts",
         "newsroom.tests.test_control_plane_keychain::test_openrouter_keychain_injects_and_is_accepted",
     } <= set(optional)
+    assert (
+        "newsroom.tests.test_increment4e_neo4j_service::"
+        "test_actual_service_guard_rollback_does_not_promote_snapshot_copies"
+    ) in optional
     assert complete <= set(optional)
     assert optional == tuple(sorted(optional))
-    assert len(optional) == 47
+    assert len(optional) == 48
 
     route = _route("newsroom/projection/neo4j/_complete_adapter.py")
     assert route["service_required"] is True

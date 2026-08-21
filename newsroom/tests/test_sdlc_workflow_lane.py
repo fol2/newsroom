@@ -673,6 +673,7 @@ def test_optional_core_skips_are_exact_external_environment_cases() -> None:
         'newsroom.tests.test_control_plane_keychain::test_grok_build_cli_is_logged_in',
         'newsroom.tests.test_control_plane_keychain::test_neo4j_keychain_injects_and_bolt_accepts',
         'newsroom.tests.test_control_plane_keychain::test_openrouter_keychain_injects_and_is_accepted',
+        'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_guard_rollback_does_not_promote_snapshot_copies',
         'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_admitted_state_projects_exactly_and_replays',
         'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_graph_loss_requires_isolated_replacement',
         'newsroom.tests.test_increment4e_neo4j_service::test_actual_service_increment4_replacement_generation_is_only_serving_state',
