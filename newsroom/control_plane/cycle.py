@@ -69,6 +69,8 @@ from newsroom.increment9.rights import (
 GLOBAL_PROVING_GATES = frozenset(
     gate_id for gate_id in PROVING_GATES if not gate_id.startswith("RIGHTS_")
 )
+_PROVING_RUN_LATEST_ORDER = "started_at DESC, rowid DESC"
+_PROVING_RUN_EARLIEST_ORDER = "started_at ASC, rowid ASC"
 
 
 @dataclass(frozen=True, slots=True)
@@ -836,7 +838,7 @@ def _dispatch_rights_decision(
             WITH latest AS (
                 SELECT run_id
                 FROM proving_runs
-                ORDER BY started_at DESC, run_id DESC
+                ORDER BY {_PROVING_RUN_LATEST_ORDER}
                 LIMIT 1
             ),
             global_authority AS (
@@ -882,18 +884,21 @@ def _dispatch_rights_decision(
     return decision
 
 
-def _latest_run_with_global_authority(
-    proving: sqlite3.Connection,
-) -> str | None:
+def _latest_run_id(proving: sqlite3.Connection) -> str | None:
     row = proving.execute(
-        """
-        SELECT run_id FROM proving_runs
-        ORDER BY started_at DESC, run_id DESC LIMIT 1
-        """
+        f"SELECT run_id FROM proving_runs ORDER BY {_PROVING_RUN_LATEST_ORDER} LIMIT 1"
     ).fetchone()
     if row is None:
         return None
-    run_id = str(row[0])
+    return str(row[0])
+
+
+def _latest_run_with_global_authority(
+    proving: sqlite3.Connection,
+) -> str | None:
+    run_id = _latest_run_id(proving)
+    if run_id is None:
+        return None
     gates = {
         str(gate_id): str(status)
         for gate_id, status in proving.execute(
@@ -912,11 +917,11 @@ def _permitted_rows(
     evaluated_at: str,
 ) -> tuple[str, tuple[_ProvingObservation, ...], tuple[_ProvingObservation, ...]]:
     runs = proving.execute(
-        "SELECT run_id FROM proving_runs ORDER BY started_at, run_id"
+        f"SELECT run_id FROM proving_runs ORDER BY {_PROVING_RUN_EARLIEST_ORDER}"
     ).fetchall()
-    if not runs:
+    latest_run_id = _latest_run_id(proving)
+    if not runs or latest_run_id is None:
         raise ValueError("proving store has no runs")
-    latest_run_id = str(runs[-1][0])
     if _latest_run_with_global_authority(proving) != latest_run_id:
         return latest_run_id, (), ()
     all_rows: list[_ProvingObservation] = []

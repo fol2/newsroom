@@ -337,7 +337,8 @@ def _connect(path: str) -> sqlite3.Connection:
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS proving_runs(
-            run_id TEXT PRIMARY KEY,
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL UNIQUE,
             started_at TEXT NOT NULL,
             publication INTEGER NOT NULL DEFAULT 0 CHECK(publication=0),
             public_dispatch INTEGER NOT NULL DEFAULT 0 CHECK(public_dispatch=0),
@@ -501,7 +502,12 @@ def run_proving(
     try:
         try:
             connection.execute(
-                "INSERT INTO proving_runs VALUES(?,?,0,0,0,0)",
+                """
+                INSERT INTO proving_runs(
+                    run_id, started_at, publication, public_dispatch,
+                    openrouter_invoked, spend_gbp_minor
+                ) VALUES(?,?,0,0,0,0)
+                """,
                 (run_id, fetched_at),
             )
             _put_gates(connection, run_id, gates)

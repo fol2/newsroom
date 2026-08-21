@@ -19,6 +19,8 @@ from newsroom.control_plane.corpus import (
 from newsroom.control_plane.cycle import (
     _bind_result,
     _dispatch_rights_decision,
+    _latest_run_id,
+    _latest_run_with_global_authority,
     _reconcile_result_spend,
     run_cycle,
 )
@@ -978,7 +980,12 @@ def test_older_run_backlog_remains_queued_after_a_new_run_arrives(
     )
     connection = __import__("sqlite3").connect(proving)
     connection.execute(
-        "INSERT INTO proving_runs VALUES('run-2','2026-08-20T00:00:00.000000Z',0,0,0,0)"
+        """
+        INSERT INTO proving_runs(
+            run_id, started_at, publication, public_dispatch,
+            openrouter_invoked, spend_gbp_minor
+        ) VALUES('run-2','2026-08-20T00:00:00.000000Z',0,0,0,0)
+        """
     )
     for row in connection.execute(
         """
@@ -1043,7 +1050,12 @@ def test_latest_rights_decision_blocks_historical_backlog(tmp_path: Path) -> Non
     proving = _proving(tmp_path)
     connection = __import__("sqlite3").connect(proving)
     connection.execute(
-        "INSERT INTO proving_runs VALUES('run-2','2026-08-20T00:00:00.000000Z',0,0,0,0)"
+        """
+        INSERT INTO proving_runs(
+            run_id, started_at, publication, public_dispatch,
+            openrouter_invoked, spend_gbp_minor
+        ) VALUES('run-2','2026-08-20T00:00:00.000000Z',0,0,0,0)
+        """
     )
     connection.execute(
         """
@@ -1121,7 +1133,12 @@ def test_newer_failed_proving_run_blocks_dispatch_despite_older_pass(
         evaluated_at="2026-08-21T00:00:00.000000Z",
     )
     connection.execute(
-        "INSERT INTO proving_runs VALUES('run-2','2026-08-21T00:00:00.000000Z',0,0,0,0)"
+        """
+        INSERT INTO proving_runs(
+            run_id, started_at, publication, public_dispatch,
+            openrouter_invoked, spend_gbp_minor
+        ) VALUES('run-2','2026-08-21T00:00:00.000000Z',0,0,0,0)
+        """
     )
     connection.execute(
         """
@@ -1169,6 +1186,77 @@ def test_newer_failed_proving_run_blocks_dispatch_despite_older_pass(
     assert seen == []
     assert report.graphiti == 0
     assert report.eligible == 0
+
+
+def test_same_timestamp_later_fail_blocks_despite_smaller_run_id(
+    tmp_path: Path,
+) -> None:
+    proving = _proving(tmp_path)
+    started_at = "2026-08-16T21:41:34.000000Z"
+    later_fail_id = "aaa-later-fail"
+    connection = __import__("sqlite3").connect(proving)
+    assert started_at == connection.execute(
+        "SELECT started_at FROM proving_runs WHERE run_id='run-1'"
+    ).fetchone()[0]
+    connection.execute(
+        """
+        INSERT INTO proving_runs(
+            run_id, started_at, publication, public_dispatch,
+            openrouter_invoked, spend_gbp_minor
+        ) VALUES(?,?,0,0,0,0)
+        """,
+        (later_fail_id, started_at),
+    )
+    connection.execute(
+        """
+        INSERT INTO proving_gates
+        SELECT ?, gate_id,
+               CASE WHEN gate_id='KILL_SWITCH_READY' THEN 'FAIL' ELSE status END,
+               'later same-timestamp veto'
+        FROM proving_gates WHERE run_id='run-1'
+        """,
+        (later_fail_id,),
+    )
+    connection.execute(
+        """
+        INSERT INTO proving_rights_packets
+        SELECT ?, gate_id, packet_digest, packet_json, assessed_at
+        FROM proving_rights_packets WHERE run_id='run-1'
+        """,
+        (later_fail_id,),
+    )
+    connection.commit()
+    assert later_fail_id < "run-1"
+    assert _latest_run_id(connection) == later_fail_id
+    assert _latest_run_with_global_authority(connection) is None
+    decision = _dispatch_rights_decision(
+        connection,
+        source_id="UK-01",
+        source_url=SOURCE_URLS["UK-01"],
+        evaluated_at="2026-08-21T00:00:00.000000Z",
+    )
+    connection.close()
+    assert decision is None
+    seen: list[str] = []
+
+    class Stub:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            seen.append(unit.ingest_id)
+            return _complete(unit)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(tmp_path / "unpublished.sqlite3"),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=Stub(),
+        max_graphiti=10,
+        clock=lambda: datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    assert seen == []
+    assert report.graphiti == 0
+    assert report.eligible == 0
+    assert report.proving_run_id == later_fail_id
 
 
 def _retain_source(
@@ -1575,8 +1663,10 @@ def test_new_failed_global_gate_is_re_read_before_next_dispatch(
                 connection = __import__("sqlite3").connect(proving)
                 connection.execute(
                     """
-                    INSERT INTO proving_runs
-                    VALUES('run-2','2026-08-21T00:00:00.000000Z',0,0,0,0)
+                    INSERT INTO proving_runs(
+                        run_id, started_at, publication, public_dispatch,
+                        openrouter_invoked, spend_gbp_minor
+                    ) VALUES('run-2','2026-08-21T00:00:00.000000Z',0,0,0,0)
                     """
                 )
                 connection.execute(

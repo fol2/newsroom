@@ -557,18 +557,6 @@ def fixture_inventory(*, gate: str = GATE_ID) -> dict[str, object]:
     }
 
 
-def evaluation_fixture_inventory(*, gate: str = GATE_ID) -> dict[str, object]:
-    destinations = list(evaluation_rights_destinations())
-    return {
-        "bound_terms": bound_terms_identity(gate=gate),
-        "now": FIXTURE_NOW,
-        "reviews": [
-            fixture_review(family, gate=gate, destinations=destinations)
-            for family in FIXTURE_FAMILIES
-        ],
-    }
-
-
 def bind_inventory(raw: object) -> dict[str, object]:
     """Refuse an envelope that is not a valid fixture inventory."""
 
