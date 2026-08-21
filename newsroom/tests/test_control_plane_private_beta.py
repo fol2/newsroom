@@ -44,7 +44,11 @@ from newsroom.graphiti_adapter.types import (
     GraphitiEgressPolicy,
     GraphitiRuntimeNotAuthorized,
 )
-from newsroom.increment9.proving import PROVING_GATES, SOURCE_URLS
+from newsroom.increment9.proving import (
+    FETCH_MAX_ATTEMPTS,
+    PROVING_GATES,
+    SOURCE_URLS,
+)
 from newsroom.increment9.rights import (
     BINDINGS,
     FIXTURE_DESTINATIONS,
@@ -764,6 +768,11 @@ def test_intake_fetches_when_gates_pass(tmp_path: Path) -> None:
     assert report.authorised
     assert report.sources == 10
     assert report.ok == 10
+    assert report.health == "ACTIVE"
+    assert report.active == 10
+    assert report.degraded == 0
+    assert report.held == 0
+    assert report.blocked == 0
     assert report.proving_run_id.startswith("proving-9p-private-beta-")
     second = run_intake(
         proving_store=str(proving),
@@ -771,6 +780,80 @@ def test_intake_fetches_when_gates_pass(tmp_path: Path) -> None:
         clock=lambda: datetime.fromisoformat(FIXTURE_NOW.replace("Z", "+00:00")),
     )
     assert second.proving_run_id != report.proving_run_id
+
+
+@pytest.mark.parametrize(
+    ("source_id", "bad_body"),
+    [
+        ("UK-02", b""),
+        ("UK-02", b"{bad"),
+        ("UK-01", b"<rss><open"),
+        ("UK-01", b"<html><body>error</body></html>"),
+    ],
+)
+def test_intake_degrades_unusable_content_without_global_block(
+    tmp_path: Path, source_id: str, bad_body: bytes
+) -> None:
+    proving = tmp_path / "proving_store.sqlite3"
+    target_url = SOURCE_URLS[source_id]
+    attempts: dict[str, int] = {}
+
+    def fetch(url: str) -> tuple[int, bytes]:
+        attempts[url] = attempts.get(url, 0) + 1
+        if url == target_url:
+            return 200, bad_body
+        if "atom" in url:
+            return 200, ATOM
+        if url.endswith(".xml") or "rss" in url.lower() or "WarningsRSS" in url:
+            return 200, RSS
+        return 200, JSON_DOC
+
+    report = run_intake(
+        proving_store=str(proving),
+        fetch=fetch,
+        clock=lambda: datetime.fromisoformat(FIXTURE_NOW.replace("Z", "+00:00")),
+    )
+
+    assert report.authorised
+    assert report.sources == 10
+    assert report.ok == 9
+    assert report.health == "DEGRADED"
+    assert report.active == 9
+    assert report.degraded == 1
+    assert report.held == 0
+    assert report.blocked == 0
+    assert not report.complete
+    assert attempts[target_url] == FETCH_MAX_ATTEMPTS
+
+
+def test_intake_counts_only_usable_200_observations_as_ok(tmp_path: Path) -> None:
+    proving = tmp_path / "proving_store.sqlite3"
+    target_url = SOURCE_URLS["UK-02"]
+    attempts: dict[str, int] = {}
+
+    def fetch(url: str) -> tuple[int, bytes]:
+        attempts[url] = attempts.get(url, 0) + 1
+        if url == target_url and attempts[url] < 3:
+            return 200, b"{bad"
+        if "atom" in url:
+            return 200, ATOM
+        if url.endswith(".xml") or "rss" in url.lower() or "WarningsRSS" in url:
+            return 200, RSS
+        return 200, JSON_DOC
+
+    report = run_intake(
+        proving_store=str(proving),
+        fetch=fetch,
+        clock=lambda: datetime.fromisoformat(FIXTURE_NOW.replace("Z", "+00:00")),
+    )
+
+    assert report.authorised
+    assert report.ok == 10
+    assert report.complete
+    assert report.health == "ACTIVE"
+    assert report.active == 10
+    assert report.degraded == 0
+    assert attempts[target_url] == 3
 
 
 def _sample_candidate_package() -> tuple[StoryCandidateRecord, EvidencePackage]:

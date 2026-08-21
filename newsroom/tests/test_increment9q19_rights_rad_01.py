@@ -26,7 +26,7 @@ from newsroom.increment9.rights import (
     RAD_01_ACCESS_METHOD,
     RAD_01_ENDPOINT,
     RAD_01_GATE_ID,
-    RAD_01_NINE_P_ENDPOINT,
+    RAD_01_RETIRED_ENDPOINT,
     RAD_01_SOURCE_ROLE,
     REFUSAL_CLASSES,
     SCHEMA_VERSION,
@@ -48,6 +48,13 @@ from newsroom.increment9.rights import (
     refuse_boolean,
     refuse_gate_record_namesake,
     refuse_namesake_satisfaction,
+)
+
+_SIGNED_PLAN = (
+    Path(__file__).resolve().parents[2]
+    / "docs"
+    / "plans"
+    / "2026-08-15-021-increment-9r-shadow-plan.md"
 )
 
 _SPEC = spec_from_file_location(
@@ -171,7 +178,8 @@ def test_assess_emits_qualification_evidence_not_a_gate_record(tmp_path: Path) -
     assert b'"gate_id":"RIGHTS_RAD-01"' in payload
     assert b'"unanimous":true' in payload
     assert RAD_01_ENDPOINT.encode() in payload
-    assert b"rthk9.rthk.hk" not in payload
+    assert b"rthk9.rthk.hk" in payload
+    assert b'"endpoint":"https://rthk.hk/' not in payload
     assert b"HTTPS_GET_PUBLIC_ATOM" not in payload
     assert b"HTTPS_GET_PUBLIC_CONTENT_API_JSON" not in payload
     assert b"HTTPS_GET_PUBLIC_WARNINGS_RSS" not in payload
@@ -339,7 +347,7 @@ def test_ten_refusal_classes_fail_closed_on_the_real_contracts() -> None:
     assert assess_rights(RAD_01_GATE_ID, inventory=hk01, now=FIXTURE_NOW).status == "FAIL"
     aliased = dict(authorised)
     aliased["reviews"] = [
-        fixture_review(family, gate=RAD_01_GATE_ID, endpoint=RAD_01_NINE_P_ENDPOINT)
+        fixture_review(family, gate=RAD_01_GATE_ID, endpoint=RAD_01_RETIRED_ENDPOINT)
         for family in FIXTURE_FAMILIES
     ]
     assert (
@@ -490,8 +498,8 @@ def test_package_inventory_matches_fixture_inventory() -> None:
     assert bound["now"] == FIXTURE_NOW
     for item in bound["reviews"]:
         assert item["endpoint"] == RAD_01_ENDPOINT
-        assert item["endpoint"] != RAD_01_NINE_P_ENDPOINT
-        assert "rthk9.rthk.hk" not in item["endpoint"]
+        assert item["endpoint"] != RAD_01_RETIRED_ENDPOINT
+        assert "rthk9.rthk.hk" in item["endpoint"]
         assert item["source_role"] == RAD_01_SOURCE_ROLE
         assert item["gate_id"] == RAD_01_GATE_ID
         assert item["access_method"] == RAD_01_ACCESS_METHOD == HK_01_ACCESS_METHOD
@@ -502,13 +510,16 @@ def test_package_inventory_matches_fixture_inventory() -> None:
         assert item["verdict"] == "PASS"
 
 
-def test_bindings_match_od001_rthk_host_not_nine_p_rthk9() -> None:
+def test_bindings_and_proving_share_current_rthk_endpoint() -> None:
     assert BINDINGS[RAD_01_GATE_ID][1] == RAD_01_SOURCE_ROLE
-    assert BINDINGS[RAD_01_GATE_ID][2] == RAD_01_ENDPOINT
-    assert RAD_01_ENDPOINT != SOURCE_URLS["RAD-01"] == RAD_01_NINE_P_ENDPOINT
-    assert RAD_01_NINE_P_ENDPOINT == next(
+    assert BINDINGS[RAD_01_GATE_ID][2] == RAD_01_ENDPOINT == SOURCE_URLS["RAD-01"]
+    assert RAD_01_ENDPOINT == next(
         url for source_id, url in PORTFOLIO if source_id == "RAD-01"
     )
+    assert RAD_01_RETIRED_ENDPOINT != RAD_01_ENDPOINT
+    assert RAD_01_RETIRED_ENDPOINT != SOURCE_URLS["RAD-01"]
+    assert RAD_01_RETIRED_ENDPOINT in _SIGNED_PLAN.read_text(encoding="utf-8")
+    assert RAD_01_ENDPOINT not in _SIGNED_PLAN.read_text(encoding="utf-8")
     from newsroom.increment9.proving import GateStatus
     from newsroom.increment9.proving import assess as proving_assess
 

@@ -27,7 +27,7 @@ from newsroom.increment9.rights import (
     UK_10_ACCESS_METHOD,
     UK_10_ENDPOINT,
     UK_10_GATE_ID,
-    UK_10_NINE_P_ENDPOINT,
+    UK_10_RETIRED_ENDPOINT,
     UK_10_SOURCE_ROLE,
     QualificationError,
     RightsError,
@@ -41,6 +41,13 @@ from newsroom.increment9.rights import (
     refuse_boolean,
     refuse_gate_record_namesake,
     refuse_namesake_satisfaction,
+)
+
+_SIGNED_PLAN = (
+    Path(__file__).resolve().parents[2]
+    / "docs"
+    / "plans"
+    / "2026-08-15-021-increment-9r-shadow-plan.md"
 )
 
 _SPEC = spec_from_file_location(
@@ -160,7 +167,8 @@ def test_assess_emits_qualification_evidence_not_a_gate_record(tmp_path: Path) -
     assert b'"gate_id":"RIGHTS_UK-10"' in payload
     assert b'"unanimous":true' in payload
     assert UK_10_ENDPOINT.encode() in payload
-    assert b"www.metoffice.gov.uk" not in payload
+    assert b"www.metoffice.gov.uk" in payload
+    assert b"weather.metoffice.gov.uk" not in payload
     assert b"HTTPS_GET_PUBLIC_ATOM" not in payload
     assert b"HTTPS_GET_PUBLIC_CONTENT_API_JSON" not in payload
     assert b"exact_main_sha" not in payload
@@ -321,7 +329,7 @@ def test_ten_refusal_classes_fail_closed_on_the_real_contracts() -> None:
     assert assess_rights(UK_10_GATE_ID, inventory=uk01, now=FIXTURE_NOW).status == "FAIL"
     aliased = dict(authorised)
     aliased["reviews"] = [
-        fixture_review(family, gate=UK_10_GATE_ID, endpoint=UK_10_NINE_P_ENDPOINT)
+        fixture_review(family, gate=UK_10_GATE_ID, endpoint=UK_10_RETIRED_ENDPOINT)
         for family in FIXTURE_FAMILIES
     ]
     assert (
@@ -452,23 +460,26 @@ def test_package_inventory_matches_fixture_inventory() -> None:
     assert bound["now"] == FIXTURE_NOW
     for item in bound["reviews"]:
         assert item["endpoint"] == UK_10_ENDPOINT
-        assert item["endpoint"] != UK_10_NINE_P_ENDPOINT
+        assert item["endpoint"] != UK_10_RETIRED_ENDPOINT
         assert item["source_role"] == UK_10_SOURCE_ROLE
         assert item["gate_id"] == UK_10_GATE_ID
         assert item["access_method"] == UK_10_ACCESS_METHOD
         assert item["access_method"] != FIXTURE_ACCESS_METHOD
         assert item["access_method"] != UK_02_ACCESS_METHOD
         assert item["verdict"] == "PASS"
-        assert "www.metoffice.gov.uk" not in item["endpoint"]
+        assert "www.metoffice.gov.uk" in item["endpoint"]
 
 
-def test_bindings_match_od001_weather_host_not_nine_p_www() -> None:
+def test_bindings_and_proving_share_current_met_office_endpoint() -> None:
     assert BINDINGS[UK_10_GATE_ID][1] == UK_10_SOURCE_ROLE
-    assert BINDINGS[UK_10_GATE_ID][2] == UK_10_ENDPOINT
-    assert UK_10_ENDPOINT != SOURCE_URLS["UK-10"] == UK_10_NINE_P_ENDPOINT
-    assert UK_10_NINE_P_ENDPOINT == next(
+    assert BINDINGS[UK_10_GATE_ID][2] == UK_10_ENDPOINT == SOURCE_URLS["UK-10"]
+    assert UK_10_ENDPOINT == next(
         url for source_id, url in PORTFOLIO if source_id == "UK-10"
     )
+    assert UK_10_RETIRED_ENDPOINT != UK_10_ENDPOINT
+    assert UK_10_RETIRED_ENDPOINT != SOURCE_URLS["UK-10"]
+    assert UK_10_RETIRED_ENDPOINT in _SIGNED_PLAN.read_text(encoding="utf-8")
+    assert UK_10_ENDPOINT not in _SIGNED_PLAN.read_text(encoding="utf-8")
     from newsroom.increment9.proving import GateStatus
     from newsroom.increment9.proving import assess as proving_assess
 

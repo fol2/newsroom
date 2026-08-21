@@ -13,7 +13,9 @@ import ssl
 import time
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Callable
 from urllib.parse import urlsplit
@@ -25,6 +27,7 @@ from newsroom.increment9.prospective_run_authority import (
     assess_run_authority,
 )
 from newsroom.increment9.rights import (
+    BINDINGS,
     GATE_ID as RIGHTS_UK_01,
     HK_01_GATE_ID as RIGHTS_HK_01,
     HK_02_GATE_ID as RIGHTS_HK_02,
@@ -43,37 +46,39 @@ USER_AGENT = "Newsroom-9P-Proving/1.0"
 MAX_BODY_BYTES = 1_048_576
 TIMEOUT_SECONDS = 20
 MAX_REDIRECTS = 3
-PROVING_WRITE_TIMEOUT_SECONDS = 205.0
+FETCH_MAX_ATTEMPTS = 3
+FETCH_RETRY_DELAYS_SECONDS = (0.25, 1.0)
+SOURCE_RETRY_SECONDS = 300
 FORBIDDEN_STORE_MARKERS = ("news_pool.sqlite3", "production")
 
-# OD-001 portfolio. Endpoints from docs/research/2026-07-15-concrete-news-source-map.md
-PORTFOLIO: tuple[tuple[str, str], ...] = (
-    (
-        "UK-01",
-        "https://www.gov.uk/search/all.atom?organisations%5B%5D=home-office&organisations%5B%5D=uk-visas-and-immigration&order=updated-newest",
-    ),
-    ("UK-02", "https://www.gov.uk/api/content/british-national-overseas-bno-visa"),
-    ("UK-03", "https://www.gov.uk/api/content/guidance/immigration-rules"),
-    (
-        "UK-05",
-        "https://www.gov.uk/search/all.atom?organisations%5B%5D=department-for-education&organisations%5B%5D=ofqual&order=updated-newest",
-    ),
-    (
-        "UK-10",
-        "https://www.metoffice.gov.uk/public/data/PWSCache/WarningsRSS/Region/UK",
-    ),
-    ("HK-01", "https://www.news.gov.hk/tc/common/html/topstories.rss.xml"),
-    (
-        "HK-02",
-        "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=warnsum&lang=tc",
-    ),
-    ("HK-04", "https://www.edb.gov.hk/tc/whats_new_rss.xml"),
-    ("RAD-01", "https://rthk9.rthk.hk/rthk/news/rss/c_expressnews_clocal.xml"),
-    ("RAD-02", "https://feeds.bbci.co.uk/news/uk/rss.xml"),
+_PORTFOLIO_GATE_ORDER = (
+    RIGHTS_UK_01,
+    RIGHTS_UK_02,
+    RIGHTS_UK_03,
+    RIGHTS_UK_05,
+    RIGHTS_UK_10,
+    RIGHTS_HK_01,
+    RIGHTS_HK_02,
+    RIGHTS_HK_04,
+    RIGHTS_RAD_01,
+    RIGHTS_RAD_02,
+)
+PORTFOLIO: tuple[tuple[str, str], ...] = tuple(
+    (BINDINGS[gate_id][0], BINDINGS[gate_id][2])
+    for gate_id in _PORTFOLIO_GATE_ORDER
 )
 SOURCE_IDS = tuple(item[0] for item in PORTFOLIO)
 SOURCE_URLS = {item[0]: item[1] for item in PORTFOLIO}
 ALLOWED_HOSTS = frozenset(urlsplit(url).hostname or "" for _, url in PORTFOLIO)
+
+PROVING_MAX_FETCH_BUDGET_SECONDS = len(SOURCE_IDS) * (
+    FETCH_MAX_ATTEMPTS * TIMEOUT_SECONDS
+    + sum(FETCH_RETRY_DELAYS_SECONDS[: FETCH_MAX_ATTEMPTS - 1])
+)
+PROVING_WRITE_TIMEOUT_MARGIN_SECONDS = 30.0
+PROVING_WRITE_TIMEOUT_SECONDS = (
+    PROVING_MAX_FETCH_BUDGET_SECONDS + PROVING_WRITE_TIMEOUT_MARGIN_SECONDS
+)
 
 PROVING_GATES = (
     "PORTFOLIO_BOUND",
@@ -82,18 +87,15 @@ PROVING_GATES = (
     "KILL_SWITCH_READY",
     "NO_ACTIVE_HUMAN_EMERGENCY_STOP",
     "PROSPECTIVE_RUN_AUTHORITY",
-    "RIGHTS_UK-01",
-    "RIGHTS_UK-02",
-    "RIGHTS_UK-03",
-    "RIGHTS_UK-05",
-    "RIGHTS_UK-10",
-    "RIGHTS_HK-01",
-    "RIGHTS_HK-02",
-    "RIGHTS_HK-04",
-    "RIGHTS_RAD-01",
-    "RIGHTS_RAD-02",
+    *_PORTFOLIO_GATE_ORDER,
     "OPENROUTER_UNUSED",
 )
+GLOBAL_PROVING_GATES = frozenset(
+    gate_id for gate_id in PROVING_GATES if not gate_id.startswith("RIGHTS_")
+)
+RIGHTS_GATE_BY_SOURCE = {
+    BINDINGS[gate_id][0]: gate_id for gate_id in _PORTFOLIO_GATE_ORDER
+}
 
 Fetcher = Callable[[str], tuple[int, bytes]]
 
@@ -107,11 +109,25 @@ class GateStatus(StrEnum):
     FAIL = "FAIL"
 
 
+class SourceHealthStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    DEGRADED = "DEGRADED"
+    HELD = "HELD"
+    BLOCKED = "BLOCKED"
+
+
 @dataclass(frozen=True, slots=True)
 class Gate:
     gate_id: str
     status: GateStatus
     reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class ContentAssessment:
+    usable: bool
+    item_count: int
+    error: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +142,18 @@ class Observation:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceHealth:
+    source_id: str
+    run_id: str
+    status: SourceHealthStatus
+    endpoint: str
+    attempts: int
+    reason: str | None
+    next_retry_at: str | None
+    recovered_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ProvingReport:
     run_id: str
     publication: bool
@@ -134,6 +162,7 @@ class ProvingReport:
     spend_gbp_minor: int
     gates: tuple[Gate, ...]
     observations: tuple[Observation, ...]
+    source_health: tuple[SourceHealth, ...] = ()
 
     @property
     def authorised(self) -> bool:
@@ -141,7 +170,11 @@ class ProvingReport:
 
     @property
     def complete(self) -> bool:
-        seen = {item.source_id for item in self.observations if item.status_code == 200}
+        seen = {
+            item.source_id
+            for item in self.observations
+            if item.status_code == 200 and item.error is None
+        }
         return self.authorised and seen == set(SOURCE_IDS)
 
 
@@ -180,19 +213,75 @@ def assert_allowed_redirect(url: str) -> str:
     return assert_allowed_url(url)
 
 
-def _item_count(url: str, body: bytes) -> int:
-    text = body.decode("utf-8", errors="replace")
-    if "json" in (urlsplit(url).path + urlsplit(url).query) or url.endswith(".json") or "opendata" in url or "/api/" in url:
+def _json_url(url: str) -> bool:
+    path_query = urlsplit(url).path + urlsplit(url).query
+    return (
+        "json" in path_query
+        or url.endswith(".json")
+        or "opendata" in url
+        or "/api/" in url
+    )
+
+
+def _xml_root_tag(root: ET.Element) -> str:
+    tag = root.tag
+    if "}" in tag:
+        tag = tag.rsplit("}", 1)[-1]
+    return tag.lower()
+
+
+def _feed_item_count(root: ET.Element) -> int:
+    count = 0
+    for element in root.iter():
+        tag = element.tag
+        if "}" in tag:
+            tag = tag.rsplit("}", 1)[-1]
+        if tag.lower() in {"item", "entry"}:
+            count += 1
+    return count
+
+
+def _usable_json_record(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    title = value.get("title") or value.get("name") or value.get("code")
+    return isinstance(title, str) and bool(title.strip())
+
+
+def assess_content(url: str, body: bytes) -> ContentAssessment:
+    if not body:
+        return ContentAssessment(False, 0, "content-empty")
+    if _json_url(url):
+        try:
+            text = body.decode("utf-8")
+        except UnicodeDecodeError:
+            return ContentAssessment(False, 0, "content-non-utf8")
         try:
             value = json.loads(text)
         except json.JSONDecodeError:
-            return 0
+            return ContentAssessment(False, 0, "content-malformed-json")
         if isinstance(value, list):
-            return len(value)
+            if all(_usable_json_record(item) for item in value):
+                return ContentAssessment(True, len(value), None)
+            return ContentAssessment(False, 0, "content-malformed-json")
         if isinstance(value, dict):
-            return len(value)
-        return 1
-    return text.count("<entry") + text.count("<item")
+            if not value:
+                return ContentAssessment(True, 0, None)
+            if "error" in value:
+                return ContentAssessment(False, 0, "content-malformed-json")
+            if _usable_json_record(value):
+                return ContentAssessment(True, 1, None)
+            if all(_usable_json_record(item) for item in value.values()):
+                return ContentAssessment(True, len(value), None)
+        return ContentAssessment(False, 0, "content-malformed-json")
+    try:
+        root = ET.fromstring(body)
+    except (ET.ParseError, LookupError):
+        return ContentAssessment(False, 0, "content-malformed-xml")
+    root_tag = _xml_root_tag(root)
+    if root_tag not in {"rss", "feed"}:
+        return ContentAssessment(False, 0, f"content-unexpected-root:{root_tag}")
+    return ContentAssessment(True, _feed_item_count(root), None)
 
 
 def default_fetch(url: str) -> tuple[int, bytes]:
@@ -221,6 +310,73 @@ def default_fetch(url: str) -> tuple[int, bytes]:
     return status, body
 
 
+def _retryable_status(status: int) -> bool:
+    return status in {408, 425, 429} or 500 <= status <= 599
+
+
+def _fetch_with_repair(
+    fetcher: Fetcher,
+    url: str,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[int, bytes, str | None, int]:
+    """Retry transient source failures before returning a degraded result."""
+
+    last_error: str | None = None
+    status, body = 0, b""
+    for attempt in range(1, FETCH_MAX_ATTEMPTS + 1):
+        try:
+            status, body = fetcher(url)
+        except ProvingError as exc:
+            status, body, last_error = 0, b"", str(exc)
+        else:
+            if status == 200:
+                assessment = assess_content(url, body)
+                if assessment.usable:
+                    return status, body, None, attempt
+                last_error = assessment.error or "content-unusable"
+            else:
+                last_error = f"http-{status}"
+                if not _retryable_status(status):
+                    return status, body, last_error, attempt
+        if attempt < FETCH_MAX_ATTEMPTS:
+            sleep(FETCH_RETRY_DELAYS_SECONDS[attempt - 1])
+    return status, body, last_error, FETCH_MAX_ATTEMPTS
+
+
+def _rights_packets(
+    *,
+    rights: object | None,
+    rights_uk_02: object | None,
+    rights_uk_03: object | None,
+    rights_uk_05: object | None,
+    rights_uk_10: object | None,
+    rights_hk_01: object | None,
+    rights_hk_02: object | None,
+    rights_hk_04: object | None,
+    rights_rad_01: object | None,
+    rights_rad_02: object | None,
+) -> dict[str, object | None]:
+    return {
+        RIGHTS_UK_01: rights,
+        RIGHTS_UK_02: rights_uk_02,
+        RIGHTS_UK_03: rights_uk_03,
+        RIGHTS_UK_05: rights_uk_05,
+        RIGHTS_UK_10: rights_uk_10,
+        RIGHTS_HK_01: rights_hk_01,
+        RIGHTS_HK_02: rights_hk_02,
+        RIGHTS_HK_04: rights_hk_04,
+        RIGHTS_RAD_01: rights_rad_01,
+        RIGHTS_RAD_02: rights_rad_02,
+    }
+
+
+def _rights_gate(gate_id: str, inventory: object | None, now: str | None) -> Gate:
+    verdict = assess_rights(gate_id, inventory=inventory, now=now)
+    status = GateStatus.PASS if verdict.status == "PASS" else GateStatus.FAIL
+    return Gate(gate_id, status, verdict.reason)
+
+
 def assess(
     *,
     run_id: str,
@@ -244,88 +400,51 @@ def assess(
     hosts = tuple(_host(url) for url in SOURCE_URLS.values())
     allowlist_ok = set(hosts) <= ALLOWED_HOSTS and len(SOURCE_IDS) == 10
     verdict = assess_run_authority(run_id, resolver=run_authority)
-    authority_status = (
-        GateStatus.PASS if verdict.status == "PASS" else GateStatus.FAIL
-    )
-    rights_verdict = assess_rights(RIGHTS_UK_01, inventory=rights, now=now)
-    rights_status = (
-        GateStatus.PASS if rights_verdict.status == "PASS" else GateStatus.FAIL
-    )
-    rights_uk_02_verdict = assess_rights(
-        RIGHTS_UK_02, inventory=rights_uk_02, now=now
-    )
-    rights_uk_02_status = (
-        GateStatus.PASS if rights_uk_02_verdict.status == "PASS" else GateStatus.FAIL
-    )
-    rights_uk_03_verdict = assess_rights(
-        RIGHTS_UK_03, inventory=rights_uk_03, now=now
-    )
-    rights_uk_03_status = (
-        GateStatus.PASS if rights_uk_03_verdict.status == "PASS" else GateStatus.FAIL
-    )
-    rights_uk_05_verdict = assess_rights(
-        RIGHTS_UK_05, inventory=rights_uk_05, now=now
-    )
-    rights_uk_05_status = (
-        GateStatus.PASS if rights_uk_05_verdict.status == "PASS" else GateStatus.FAIL
-    )
-    rights_uk_10_verdict = assess_rights(
-        RIGHTS_UK_10, inventory=rights_uk_10, now=now
-    )
-    rights_uk_10_status = (
-        GateStatus.PASS if rights_uk_10_verdict.status == "PASS" else GateStatus.FAIL
-    )
-    rights_hk_01_verdict = assess_rights(
-        RIGHTS_HK_01, inventory=rights_hk_01, now=now
-    )
-    rights_hk_01_status = (
-        GateStatus.PASS if rights_hk_01_verdict.status == "PASS" else GateStatus.FAIL
-    )
-    rights_hk_02_verdict = assess_rights(
-        RIGHTS_HK_02, inventory=rights_hk_02, now=now
-    )
-    rights_hk_02_status = (
-        GateStatus.PASS if rights_hk_02_verdict.status == "PASS" else GateStatus.FAIL
-    )
-    rights_hk_04_verdict = assess_rights(
-        RIGHTS_HK_04, inventory=rights_hk_04, now=now
-    )
-    rights_hk_04_status = (
-        GateStatus.PASS if rights_hk_04_verdict.status == "PASS" else GateStatus.FAIL
-    )
-    rights_rad_01_verdict = assess_rights(
-        RIGHTS_RAD_01, inventory=rights_rad_01, now=now
-    )
-    rights_rad_01_status = (
-        GateStatus.PASS if rights_rad_01_verdict.status == "PASS" else GateStatus.FAIL
-    )
-    rights_rad_02_verdict = assess_rights(
-        RIGHTS_RAD_02, inventory=rights_rad_02, now=now
-    )
-    rights_rad_02_status = (
-        GateStatus.PASS if rights_rad_02_verdict.status == "PASS" else GateStatus.FAIL
+    packets = _rights_packets(
+        rights=rights,
+        rights_uk_02=rights_uk_02,
+        rights_uk_03=rights_uk_03,
+        rights_uk_05=rights_uk_05,
+        rights_uk_10=rights_uk_10,
+        rights_hk_01=rights_hk_01,
+        rights_hk_02=rights_hk_02,
+        rights_hk_04=rights_hk_04,
+        rights_rad_01=rights_rad_01,
+        rights_rad_02=rights_rad_02,
     )
     return (
-        Gate("PORTFOLIO_BOUND", GateStatus.PASS if SOURCE_IDS == tuple(item[0] for item in PORTFOLIO) else GateStatus.FAIL, "OD-001 ten"),
-        Gate("EGRESS_ALLOWLIST_ENFORCED", GateStatus.PASS if allowlist_ok else GateStatus.FAIL, ",".join(sorted(ALLOWED_HOSTS))),
+        Gate(
+            "PORTFOLIO_BOUND",
+            GateStatus.PASS
+            if SOURCE_IDS == tuple(item[0] for item in PORTFOLIO)
+            else GateStatus.FAIL,
+            "OD-001 ten",
+        ),
+        Gate(
+            "EGRESS_ALLOWLIST_ENFORCED",
+            GateStatus.PASS if allowlist_ok else GateStatus.FAIL,
+            ",".join(sorted(ALLOWED_HOSTS)),
+        ),
         Gate("NO_PUBLICATION", GateStatus.PASS, "publication remains false"),
-        Gate("KILL_SWITCH_READY", GateStatus.FAIL if kill_switch else GateStatus.PASS, "kill" if kill_switch else "clear"),
+        Gate(
+            "KILL_SWITCH_READY",
+            GateStatus.FAIL if kill_switch else GateStatus.PASS,
+            "kill" if kill_switch else "clear",
+        ),
         Gate(
             "NO_ACTIVE_HUMAN_EMERGENCY_STOP",
             GateStatus.PASS if no_emergency_stop else GateStatus.FAIL,
             "attested" if no_emergency_stop else "attestation required",
         ),
-        Gate(RUN_AUTHORITY_GATE, authority_status, verdict.reason),
-        Gate(RIGHTS_UK_01, rights_status, rights_verdict.reason),
-        Gate(RIGHTS_UK_02, rights_uk_02_status, rights_uk_02_verdict.reason),
-        Gate(RIGHTS_UK_03, rights_uk_03_status, rights_uk_03_verdict.reason),
-        Gate(RIGHTS_UK_05, rights_uk_05_status, rights_uk_05_verdict.reason),
-        Gate(RIGHTS_UK_10, rights_uk_10_status, rights_uk_10_verdict.reason),
-        Gate(RIGHTS_HK_01, rights_hk_01_status, rights_hk_01_verdict.reason),
-        Gate(RIGHTS_HK_02, rights_hk_02_status, rights_hk_02_verdict.reason),
-        Gate(RIGHTS_HK_04, rights_hk_04_status, rights_hk_04_verdict.reason),
-        Gate(RIGHTS_RAD_01, rights_rad_01_status, rights_rad_01_verdict.reason),
-        Gate(RIGHTS_RAD_02, rights_rad_02_status, rights_rad_02_verdict.reason),
+        Gate(
+            RUN_AUTHORITY_GATE,
+            GateStatus.PASS if verdict.status == "PASS" else GateStatus.FAIL,
+            verdict.reason,
+        ),
+        *(
+            _rights_gate(gate_id, packets[gate_id], now)
+            for gate_id in _PORTFOLIO_GATE_ORDER
+        ),
         Gate("OPENROUTER_UNUSED", GateStatus.PASS, "proving must not call OpenRouter"),
     )
 
@@ -389,6 +508,18 @@ def _connect(path: str) -> sqlite3.Connection:
             packet_json TEXT NOT NULL,
             assessed_at TEXT NOT NULL,
             PRIMARY KEY(run_id, gate_id),
+            FOREIGN KEY(run_id) REFERENCES proving_runs(run_id)
+        );
+        CREATE TABLE IF NOT EXISTS proving_source_health(
+            source_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('ACTIVE','DEGRADED','HELD','BLOCKED')),
+            endpoint TEXT NOT NULL,
+            attempts INTEGER NOT NULL CHECK(attempts >= 0),
+            reason TEXT,
+            next_retry_at TEXT,
+            recovered_at TEXT,
+            PRIMARY KEY(run_id, source_id),
             FOREIGN KEY(run_id) REFERENCES proving_runs(run_id)
         );
         """
@@ -476,6 +607,89 @@ def _put(connection: sqlite3.Connection, run_id: str, fetched_at: str, observati
     )
 
 
+def _retry_at(fetched_at: str) -> str:
+    instant = datetime.strptime(fetched_at, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+        tzinfo=UTC
+    )
+    return (instant + timedelta(seconds=SOURCE_RETRY_SECONDS)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+
+
+def _health(
+    *,
+    source_id: str,
+    run_id: str,
+    status: SourceHealthStatus,
+    endpoint: str,
+    attempts: int,
+    reason: str | None,
+    fetched_at: str,
+    recovered_at: str | None = None,
+) -> SourceHealth:
+    return SourceHealth(
+        source_id=source_id,
+        run_id=run_id,
+        status=status,
+        endpoint=endpoint,
+        attempts=attempts,
+        reason=reason,
+        next_retry_at=(
+            None if status is SourceHealthStatus.ACTIVE else _retry_at(fetched_at)
+        ),
+        recovered_at=recovered_at,
+    )
+
+
+def _recovered_at(
+    connection: sqlite3.Connection,
+    *,
+    source_id: str,
+    run_id: str,
+    current_status: SourceHealthStatus,
+    fetched_at: str,
+) -> str | None:
+    if current_status is not SourceHealthStatus.ACTIVE:
+        return None
+    previous = connection.execute(
+        """
+        SELECT health.status
+        FROM proving_source_health AS health
+        JOIN proving_runs AS run ON run.run_id=health.run_id
+        WHERE health.source_id=? AND health.run_id<>?
+        ORDER BY run.rowid DESC
+        LIMIT 1
+        """,
+        (source_id, run_id),
+    ).fetchone()
+    if previous is not None and str(previous[0]) != SourceHealthStatus.ACTIVE.value:
+        return fetched_at
+    return None
+
+
+def _put_source_health(
+    connection: sqlite3.Connection, health: SourceHealth
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO proving_source_health(
+            source_id, run_id, status, endpoint, attempts, reason,
+            next_retry_at, recovered_at
+        ) VALUES(?,?,?,?,?,?,?,?)
+        """,
+        (
+            health.source_id,
+            health.run_id,
+            health.status.value,
+            health.endpoint,
+            health.attempts,
+            health.reason,
+            health.next_retry_at,
+            health.recovered_at,
+        ),
+    )
+
+
 def run_proving(
     *,
     store_path: str,
@@ -496,7 +710,20 @@ def run_proving(
     rights_rad_01: object | None = None,
     rights_rad_02: object | None = None,
     now: str | None = None,
+    retry_sleep: Callable[[float], None] = time.sleep,
 ) -> ProvingReport:
+    packets = _rights_packets(
+        rights=rights,
+        rights_uk_02=rights_uk_02,
+        rights_uk_03=rights_uk_03,
+        rights_uk_05=rights_uk_05,
+        rights_uk_10=rights_uk_10,
+        rights_hk_01=rights_hk_01,
+        rights_hk_02=rights_hk_02,
+        rights_hk_04=rights_hk_04,
+        rights_rad_01=rights_rad_01,
+        rights_rad_02=rights_rad_02,
+    )
     gates = assess(
         run_id=run_id,
         kill_switch=kill_switch,
@@ -528,50 +755,107 @@ def run_proving(
             )
             _put_gates(connection, run_id, gates)
             _put_rights_packets(
-                connection,
-                run_id,
-                now or fetched_at,
-                {
-                    RIGHTS_UK_01: rights,
-                    RIGHTS_UK_02: rights_uk_02,
-                    RIGHTS_UK_03: rights_uk_03,
-                    RIGHTS_UK_05: rights_uk_05,
-                    RIGHTS_UK_10: rights_uk_10,
-                    RIGHTS_HK_01: rights_hk_01,
-                    RIGHTS_HK_02: rights_hk_02,
-                    RIGHTS_HK_04: rights_hk_04,
-                    RIGHTS_RAD_01: rights_rad_01,
-                    RIGHTS_RAD_02: rights_rad_02,
-                },
+                connection, run_id, now or fetched_at, packets
             )
         except sqlite3.IntegrityError as exc:
             connection.rollback()
             raise ProvingError("proving run_id already retained") from exc
-        if any(gate.status is GateStatus.FAIL for gate in gates):
+        gates_by_id = {gate.gate_id: gate.status for gate in gates}
+        gate_reasons = {gate.gate_id: gate.reason for gate in gates}
+        failed_global = tuple(
+            gate_id
+            for gate_id in sorted(GLOBAL_PROVING_GATES)
+            if gates_by_id.get(gate_id) is not GateStatus.PASS
+        )
+        if failed_global:
+            blocked = tuple(
+                _health(
+                    source_id=source_id,
+                    run_id=run_id,
+                    status=SourceHealthStatus.BLOCKED,
+                    endpoint=url,
+                    attempts=0,
+                    reason="global gates: " + ",".join(failed_global),
+                    fetched_at=fetched_at,
+                )
+                for source_id, url in PORTFOLIO
+            )
+            for item in blocked:
+                _put_source_health(connection, item)
             connection.commit()
-            return ProvingReport(run_id, False, False, False, 0, gates, ())
+            return ProvingReport(
+                run_id, False, False, False, 0, gates, (), blocked
+            )
         fetcher = default_fetch if fetch is None else fetch
         observations: list[Observation] = []
+        health_items: list[SourceHealth] = []
         for source_id, url in PORTFOLIO:
+            rights_gate_id = RIGHTS_GATE_BY_SOURCE[source_id]
+            if gates_by_id.get(rights_gate_id) is not GateStatus.PASS:
+                held = _health(
+                    source_id=source_id,
+                    run_id=run_id,
+                    status=SourceHealthStatus.HELD,
+                    endpoint=url,
+                    attempts=0,
+                    reason=gate_reasons.get(rights_gate_id, "rights gate failed"),
+                    fetched_at=fetched_at,
+                )
+                _put_source_health(connection, held)
+                health_items.append(held)
+                continue
             assert_allowed_url(url)
-            try:
-                status, body = fetcher(url)
-                error = None if status == 200 else f"http-{status}"
-            except ProvingError as exc:
-                status, body, error = 0, b"", str(exc)
+            status, body, error, attempts = _fetch_with_repair(
+                fetcher, url, sleep=retry_sleep
+            )
+            item_count = 0
+            if status == 200 and error is None:
+                item_count = assess_content(url, body).item_count
             observation = Observation(
                 source_id=source_id,
                 url=url,
                 fetched_at=fetched_at,
                 status_code=status,
                 body_digest=digest_bytes(body),
-                item_count=_item_count(url, body) if status == 200 else 0,
+                item_count=item_count,
                 error=error,
             )
             _put(connection, run_id, fetched_at, observation, body)
             observations.append(observation)
+            health_status = (
+                SourceHealthStatus.ACTIVE
+                if status == 200 and error is None
+                else SourceHealthStatus.DEGRADED
+            )
+            item = _health(
+                source_id=source_id,
+                run_id=run_id,
+                status=health_status,
+                endpoint=url,
+                attempts=attempts,
+                reason=error,
+                fetched_at=fetched_at,
+                recovered_at=_recovered_at(
+                    connection,
+                    source_id=source_id,
+                    run_id=run_id,
+                    current_status=health_status,
+                    fetched_at=fetched_at,
+                ),
+            )
+            _put_source_health(connection, item)
+            health_items.append(item)
         connection.commit()
-        return ProvingReport(run_id, False, False, False, 0, gates, tuple(observations))
+        return ProvingReport(
+            run_id,
+            False,
+            False,
+            False,
+            0,
+            gates,
+            tuple(observations),
+            tuple(health_items),
+        )
     except sqlite3.OperationalError as exc:
         connection.rollback()
         if "locked" in str(exc).lower():
@@ -591,6 +875,44 @@ def list_observations(store_path: str) -> tuple[Observation, ...]:
     finally:
         connection.close()
     return tuple(Observation(*row) for row in rows)
+
+
+def list_source_health(store_path: str, *, run_id: str | None = None) -> tuple[SourceHealth, ...]:
+    connection = _connect(store_path)
+    try:
+        selected_run = run_id
+        if selected_run is None:
+            latest = connection.execute(
+                "SELECT run_id FROM proving_runs ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+            if latest is None:
+                return ()
+            selected_run = str(latest[0])
+        rows = connection.execute(
+            """
+            SELECT source_id, run_id, status, endpoint, attempts, reason,
+                   next_retry_at, recovered_at
+            FROM proving_source_health
+            WHERE run_id=?
+            ORDER BY source_id
+            """,
+            (selected_run,),
+        ).fetchall()
+    finally:
+        connection.close()
+    return tuple(
+        SourceHealth(
+            source_id=str(row[0]),
+            run_id=str(row[1]),
+            status=SourceHealthStatus(str(row[2])),
+            endpoint=str(row[3]),
+            attempts=int(row[4]),
+            reason=None if row[5] is None else str(row[5]),
+            next_retry_at=None if row[6] is None else str(row[6]),
+            recovered_at=None if row[7] is None else str(row[7]),
+        )
+        for row in rows
+    )
 
 
 def report_json(report: ProvingReport) -> bytes:
@@ -614,6 +936,18 @@ def report_json(report: ProvingReport) -> bytes:
                 "error": item.error,
             }
             for item in report.observations
+        ],
+        "source_health": [
+            {
+                "source_id": item.source_id,
+                "status": item.status.value,
+                "endpoint": item.endpoint,
+                "attempts": item.attempts,
+                "reason": item.reason,
+                "next_retry_at": item.next_retry_at,
+                "recovered_at": item.recovered_at,
+            }
+            for item in report.source_health
         ],
     }
     return canonical_json_bytes(payload)
