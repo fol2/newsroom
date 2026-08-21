@@ -204,7 +204,7 @@ Undocumented flags and ambient `HOME` fallback are rejected.
 
 ## 9. Versioned proposed policy (`graphiti-cursor-efficiency-v1`)
 
-Normative for #731 to implement; not live-authorised by this ticket.
+**Advisory only.** This section records a candidate implementation policy for #731; it is non-normative research evidence. Implementation requires an Accepted specification or decision, or an explicit owner instruction. Nothing in this section independently authorises runtime or product changes.
 
 **Call classes (current GuardedGraphiti `add_episode`):**
 
