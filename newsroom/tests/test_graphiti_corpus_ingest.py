@@ -135,6 +135,7 @@ def _complete(
         predecessor_episode_uuid=unit.predecessor_ingest_id,
     )
     passage_id = str(attempt.manifest.passages[0].passage_id)
+    passage_bytes = " ".join(unit.episode_body.split()).encode("utf-8")
     if len(proposals) < proposal_count:
         proposals = (*proposals, *tuple(
             {
@@ -149,17 +150,26 @@ def _complete(
             }
             for index in range(len(proposals) + 1, proposal_count + 1)
         ))
-    bound_proposals: tuple[dict[str, object], ...] = tuple(
-        {
-            **proposal,
-            "evidence": [
-                {**item, "passage_id": passage_id}
-                for item in proposal.get("evidence", [])
-                if isinstance(item, dict)
-            ],
-        }
-        for proposal in proposals
-    )
+    bound_proposals: list[dict[str, object]] = []
+    for proposal in proposals:
+        bound_evidence: list[dict[str, object]] = []
+        for item in proposal.get("evidence", []):
+            if not isinstance(item, dict):
+                continue
+            bound_item = {**item, "passage_id": passage_id}
+            start_byte = bound_item.get("start_byte")
+            end_byte = bound_item.get("end_byte")
+            if (
+                "evidence_text_digest" not in bound_item
+                and isinstance(start_byte, int)
+                and isinstance(end_byte, int)
+            ):
+                bound_item["evidence_text_digest"] = digest_bytes(
+                    passage_bytes[start_byte:end_byte]
+                )
+            bound_evidence.append(bound_item)
+        bound_proposals.append({**proposal, "evidence": bound_evidence})
+    proposals_tuple = tuple(bound_proposals)
     embedding_receipt = embedding_usage or {
         "usage_basis": "NO_EMBEDDING_CALL",
         "request_count": 0,
@@ -179,7 +189,7 @@ def _complete(
         "passages": [
             passage.canonical_value() for passage in attempt.manifest.passages
         ],
-        "proposals": list(bound_proposals),
+        "proposals": list(proposals_tuple),
         "entities": list(entities),
         "relations": list(relations),
         "chat_invocations": list(chat_invocations),
@@ -209,7 +219,7 @@ def _complete(
         reference_time=unit.temporal().reference_time.to_text(),
         receipt_digest=str(raw["raw_output_digest"]),
         episode_uuid=unit.ingest_id,
-        proposals=bound_proposals,
+        proposals=proposals_tuple,
         passages=tuple(raw["passages"]),
         entities=entities,
         relations=relations,
@@ -1771,6 +1781,23 @@ def test_result_binding_rejects_generation_and_receipt_digest_drift() -> None:
     tampered = {**result.raw_receipt, "episode_uuid": "foreign"}
     with pytest.raises(ValueError, match="digest"):
         _bind_result(unit, replace(result, raw_receipt=tampered))
+
+    tampered = json.loads(json.dumps(result.raw_receipt))
+    tampered["proposals"][0]["evidence"][0]["evidence_text_digest"] = (
+        "sha256:" + ("0" * 64)
+    )
+    tampered.pop("raw_output_digest")
+    tampered["raw_output_digest"] = digest_bytes(canonical_json_bytes(tampered))
+    with pytest.raises(ValueError, match="evidence digest"):
+        _bind_result(
+            unit,
+            replace(
+                result,
+                raw_receipt=tampered,
+                receipt_digest=str(tampered["raw_output_digest"]),
+                proposals=tuple(tampered["proposals"]),
+            ),
+        )
 
 
 def test_result_binding_accepts_retained_original_access_after_renewal(

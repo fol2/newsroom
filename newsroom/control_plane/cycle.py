@@ -163,7 +163,8 @@ def _bind_result(
         raise ValueError("graphiti result needs exact single-passage provenance")
     passage = passages[0]
     expected_text = " ".join(unit.episode_body.split())
-    expected_digest = digest_bytes(expected_text.encode("utf-8"))
+    expected_bytes = expected_text.encode("utf-8")
+    expected_digest = digest_bytes(expected_bytes)
     if not isinstance(passage, dict) or (
         passage.get("byte_offset") != 0
         or passage.get("byte_length") != len(expected_text.encode("utf-8"))
@@ -252,6 +253,14 @@ def _bind_result(
                 or int(item["start_byte"]) >= int(item["end_byte"])
             ):
                 raise ValueError("graphiti proposal evidence is outside the bound passage")
+            start_byte = int(item["start_byte"])
+            end_byte = int(item["end_byte"])
+            if item.get("evidence_text_digest") != digest_bytes(
+                expected_bytes[start_byte:end_byte]
+            ):
+                raise ValueError(
+                    "graphiti proposal evidence digest differs from passage bytes"
+                )
     return result
 
 
