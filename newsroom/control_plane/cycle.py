@@ -11,7 +11,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Callable, ContextManager, Iterator, TypedDict
+from typing import Callable, ContextManager, Final, Iterator, TypedDict
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.corpus import (
@@ -44,6 +44,7 @@ from newsroom.control_plane.store import (
     insert_graphiti_ingest,
     insert_graphiti_attempt_receipt,
     insert_payload,
+    is_exact_no_embedding_call,
     next_graphiti_attempt_number,
     record_graphiti_coverage,
     record_graphiti_failure,
@@ -84,6 +85,15 @@ GLOBAL_PROVING_GATES = frozenset(
 _PROVING_RUN_LATEST_ORDER = "rowid DESC"
 _PROVING_RUN_EARLIEST_ORDER = "rowid ASC"
 _PROVING_FENCE_TIMEOUT_SECONDS = 5.0
+_GRAPHITI_RECOVERY_CLOSED_LEDGER_KIND: Final[str] = "GRAPHITI_EVALUATION_RECOVERY_CLOSED"
+_CLOSED_MARKER_RECOVERIES: Final[
+    frozenset[GraphitiRecoveryClassification]
+] = frozenset(
+    {
+        GraphitiRecoveryClassification.RECOVERED_AMBIGUOUS,
+        GraphitiRecoveryClassification.RECOVERED_PENDING_PROCESS_DEATH,
+    }
+)
 
 
 class _ProvingFenceUnavailable(RuntimeError):
@@ -370,6 +380,33 @@ def _receipt(
     return receipt
 
 
+def _retain_attempt_receipt(
+    unpublished: sqlite3.Connection,
+    *,
+    unit: CorpusIngestUnit,
+    result: GraphitiCycleResult,
+    accounting: dict[str, object],
+    dispatch_rights: dict[str, object],
+    recovery_classification: GraphitiRecoveryClassification | None = None,
+) -> tuple[dict[str, object], str]:
+    """Retain one bound attempt receipt and its canonical ledger event."""
+
+    receipt = _receipt(unit, result, accounting=accounting)
+    receipt["dispatch_rights"] = dispatch_rights
+    if recovery_classification is not None:
+        receipt["recovery_classification"] = recovery_classification
+    final_digest = insert_graphiti_attempt_receipt(
+        unpublished,
+        ingest_id=unit.ingest_id,
+        attempt_number=unit.attempt_number,
+        outcome=result.outcome,
+        receipt=receipt,
+    )
+    receipt["receipt_digest"] = final_digest
+    append_ledger(unpublished, "GRAPHITI_EVALUATION_ATTEMPT", receipt)
+    return receipt, final_digest
+
+
 def _queue(
     unpublished: sqlite3.Connection,
     units: tuple[CorpusIngestUnit, ...],
@@ -437,14 +474,17 @@ def _reconcile_no_embedding_spend(
 
 
 def _reports_no_embedding_call(result: GraphitiCycleResult) -> bool:
-    usage = result.embedding_usage if isinstance(result.embedding_usage, dict) else {}
-    return (
-        usage.get("usage_basis") == "NO_EMBEDDING_CALL"
-        and usage.get("requests") == []
-        and usage.get("request_count") == 0
-        and usage.get("embedding_tokens") == 0
-        and usage.get("cost_usd_microunits") == 0
-    )
+    return is_exact_no_embedding_call(result.embedding_usage)
+
+
+def _recovery_classification(
+    result: GraphitiCycleResult,
+) -> GraphitiRecoveryClassification | None:
+    raw = result.raw_receipt if isinstance(result.raw_receipt, dict) else {}
+    try:
+        return GraphitiRecoveryClassification(str(raw.get("recovery_classification")))
+    except ValueError:
+        return None
 
 
 def _proves_no_provider_dispatch(result: GraphitiCycleResult) -> bool:
@@ -575,12 +615,7 @@ def _reconcile_result_spend(
         (provider_spend_id,),
     ).fetchone()
     raw = result.raw_receipt if isinstance(result.raw_receipt, dict) else {}
-    try:
-        recovery_classification = GraphitiRecoveryClassification(
-            str(raw.get("recovery_classification"))
-        )
-    except ValueError:
-        recovery_classification = None
+    recovery_classification = _recovery_classification(result)
     recovered_digest = raw.get("recovered_validated_raw_digest")
     retained_raw_digest = (
         _retained_provider_raw_digest(
@@ -964,6 +999,12 @@ def _ingest(
             unpublished.commit()
             continue
         terminal_outcome = result.outcome in {"COMPLETE", "PARTIAL"}
+        recovery_classification = _recovery_classification(result)
+        marker_recovery = (
+            recovery_classification
+            if recovery_classification in _CLOSED_MARKER_RECOVERIES
+            else None
+        )
         if (
             not reserved
             and owner_id is not None
@@ -975,23 +1016,46 @@ def _ingest(
                 spend_id=spend_id,
                 owner_id=owner_id,
             )
-            append_ledger(
-                unpublished,
-                "GRAPHITI_EVALUATION_RETRY_HELD",
-                {
-                    "ingest_id": unit.ingest_id,
-                    "attempt_number": attempt_number,
-                    "failure_code": result.failure_code,
-                    "accounting": accounting,
-                    "chat_invocations": list(result.chat_invocations),
-                    "embedding_usage": result.embedding_usage,
-                    "provider_dispatch_state": (
-                        "NOT_DISPATCHED"
-                        if _proves_no_provider_dispatch(result)
-                        else "UNKNOWN"
-                    ),
-                },
-            )
+            transition_payload: dict[str, object] = {
+                "ingest_id": unit.ingest_id,
+                "attempt_number": attempt_number,
+                "failure_code": result.failure_code,
+                "accounting": accounting,
+                "chat_invocations": list(result.chat_invocations),
+                "embedding_usage": result.embedding_usage,
+                "provider_dispatch_state": (
+                    "NOT_DISPATCHED"
+                    if _proves_no_provider_dispatch(result)
+                    else "UNKNOWN"
+                ),
+            }
+            if marker_recovery is not None:
+                transition_payload["recovery_classification"] = marker_recovery
+                append_ledger(
+                    unpublished,
+                    _GRAPHITI_RECOVERY_CLOSED_LEDGER_KIND,
+                    transition_payload,
+                )
+                _fail(
+                    unpublished,
+                    unit,
+                    outcome=result.outcome,
+                    failure_code=result.failure_code,
+                )
+                _retain_attempt_receipt(
+                    unpublished,
+                    unit=unit,
+                    result=result,
+                    accounting=accounting,
+                    dispatch_rights=dispatch_rights,
+                    recovery_classification=marker_recovery,
+                )
+            else:
+                append_ledger(
+                    unpublished,
+                    "GRAPHITI_EVALUATION_RETRY_HELD",
+                    transition_payload,
+                )
             unpublished.commit()
             continue
         accounting = _reconcile_result_spend(
@@ -1001,17 +1065,13 @@ def _ingest(
             result=result,
             binding_validated=True,
         )
-        receipt = _receipt(unit, result, accounting=accounting)
-        receipt["dispatch_rights"] = dispatch_rights
-        final_digest = insert_graphiti_attempt_receipt(
+        receipt, final_digest = _retain_attempt_receipt(
             unpublished,
-            ingest_id=unit.ingest_id,
-            attempt_number=attempt_number,
-            outcome=result.outcome,
-            receipt=receipt,
+            unit=unit,
+            result=result,
+            accounting=accounting,
+            dispatch_rights=dispatch_rights,
         )
-        receipt["receipt_digest"] = final_digest
-        append_ledger(unpublished, "GRAPHITI_EVALUATION_ATTEMPT", receipt)
         if terminal_outcome:
             insert_graphiti_ingest(
                 unpublished,

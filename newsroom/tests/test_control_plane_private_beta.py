@@ -2,6 +2,8 @@ from pathlib import Path
 import json
 import os
 import stat
+import subprocess
+import sys
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -276,6 +278,12 @@ def test_control_plane_state_root_preserves_legacy_pair_or_bootstraps_fresh(
     assert _canonical_state_root(fresh_home) == (
         fresh_home / ".local" / "share" / "newsroom"
     )
+    for store_name in ("proving_store.sqlite3", "unpublished_store.sqlite3"):
+        intermediate_home = tmp_path / f"fresh-{store_name}"
+        intermediate = intermediate_home / ".local" / "share" / "newsroom"
+        intermediate.mkdir(parents=True)
+        (intermediate / store_name).touch()
+        assert _canonical_state_root(intermediate_home) == intermediate
 
     legacy = tmp_path / "legacy" / "Coding" / "newsroom" / "data" / "newsroom"
     legacy.mkdir(parents=True)
@@ -298,6 +306,17 @@ def test_control_plane_state_root_preserves_legacy_pair_or_bootstraps_fresh(
     with pytest.raises(RuntimeError, match="ambiguous authority"):
         _canonical_state_root(conflict_home)
 
+    mixed_home = tmp_path / "legacy-with-fresh-intermediate"
+    mixed_legacy = mixed_home / "Coding" / "newsroom" / "data" / "newsroom"
+    mixed_fresh = mixed_home / ".local" / "share" / "newsroom"
+    mixed_legacy.mkdir(parents=True)
+    mixed_fresh.mkdir(parents=True)
+    for name in ("proving_store.sqlite3", "unpublished_store.sqlite3"):
+        (mixed_legacy / name).touch()
+    (mixed_fresh / "proving_store.sqlite3").touch()
+    with pytest.raises(RuntimeError, match="refusing a split authority"):
+        _canonical_state_root(mixed_home)
+
     for name in ("proving_store.sqlite3", "unpublished_store.sqlite3"):
         (conflict_fresh / name).unlink()
         (conflict_fresh / name).symlink_to(conflict_legacy / name)
@@ -306,6 +325,39 @@ def test_control_plane_state_root_preserves_legacy_pair_or_bootstraps_fresh(
     private_root = tmp_path / "fresh-private"
     _ensure_private_directory(private_root)
     assert stat.S_IMODE(private_root.stat().st_mode) == 0o700
+
+
+def test_default_clis_bootstrap_fresh_stores_across_two_invocations(
+    tmp_path: Path,
+) -> None:
+    repository = Path(__file__).resolve().parents[2]
+    environment = {**os.environ, "HOME": str(tmp_path)}
+    fresh = tmp_path / ".local" / "share" / "newsroom"
+
+    status = subprocess.run(
+        [sys.executable, "scripts/hermes_control_plane.py", "status"],
+        cwd=repository,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert status.returncode == 0, status.stderr
+    assert (fresh / "unpublished_store.sqlite3").exists()
+    assert not (fresh / "proving_store.sqlite3").exists()
+
+    proving_list = subprocess.run(
+        [sys.executable, "scripts/increment9_proving_store.py", "list"],
+        cwd=repository,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proving_list.returncode == 0, proving_list.stderr
+    assert (fresh / "proving_store.sqlite3").exists()
 
 
 def test_real_graphiti_run_cycle_rejects_alternate_authority_or_ledger_store(

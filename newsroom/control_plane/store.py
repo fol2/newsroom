@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -17,6 +18,34 @@ SCHEMA_VERSION = "newsroom.control-plane.unpublished.v9"
 LEDGER_GENESIS = "sha256:" + ("0" * 64)
 GRAPHITI_MAX_FAILURES = 3
 _SQLITE_BIND_BATCH_SIZE = 500
+_NO_EMBEDDING_USAGE_KEYS = frozenset(
+    {
+        "requests",
+        "request_count",
+        "embedding_tokens",
+        "cost_usd_microunits",
+        "usage_basis",
+    }
+)
+
+
+def is_exact_no_embedding_call(
+    embedding_usage: Mapping[str, object] | None,
+) -> bool:
+    """Return whether provider telemetry is the complete canonical no-call shape."""
+
+    if embedding_usage is None or set(embedding_usage) != _NO_EMBEDDING_USAGE_KEYS:
+        return False
+    zero_fields = (
+        embedding_usage["request_count"],
+        embedding_usage["embedding_tokens"],
+        embedding_usage["cost_usd_microunits"],
+    )
+    return (
+        embedding_usage["usage_basis"] == "NO_EMBEDDING_CALL"
+        and embedding_usage["requests"] == []
+        and all(type(value) is int and value == 0 for value in zero_fields)
+    )
 
 
 def _bind_batches(values: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
@@ -24,6 +53,7 @@ def _bind_batches(values: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
         values[offset : offset + _SQLITE_BIND_BATCH_SIZE]
         for offset in range(0, len(values), _SQLITE_BIND_BATCH_SIZE)
     )
+
 
 _PAYLOAD_SQL = """
 CREATE TABLE IF NOT EXISTS unpublished_surface_payloads(
@@ -371,7 +401,7 @@ def reconcile_graphiti_spend(
     usage = embedding_usage or {}
     usage_basis = str(usage.get("usage_basis") or "UNREPORTED")
     raw_cost = usage.get("cost_usd_microunits")
-    no_call = usage_basis == "NO_EMBEDDING_CALL" and usage.get("request_count", 0) == 0
+    no_call = is_exact_no_embedding_call(embedding_usage)
     reported = usage_basis == "PROVIDER_REPORTED" and isinstance(raw_cost, int)
     # Conservative versioned parity conversion until a separately accepted FX
     # table supersedes this policy: USD 1.00 reserves/debits GBP 1.00.

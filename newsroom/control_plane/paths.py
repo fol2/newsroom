@@ -23,9 +23,12 @@ def _canonical_state_root(home: Path) -> Path:
             "legacy Control Plane store pair is incomplete; refusing a split authority"
         )
     if any(fresh_present) and not all(fresh_present):
-        raise RuntimeError(
-            "fresh Control Plane store pair is incomplete; refusing a split authority"
-        )
+        if any(legacy_present):
+            raise RuntimeError(
+                "fresh Control Plane store pair is incomplete beside legacy state; "
+                "refusing a split authority"
+            )
+        return fresh
     if all(legacy_present) and all(fresh_present):
         if all(
             legacy_path.samefile(fresh_path)

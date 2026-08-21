@@ -419,6 +419,26 @@ def _with_provider_attempt(
     )
 
 
+def _marker_recovery_result(
+    unit: CorpusIngestUnit,
+    recovery_classification: GraphitiRecoveryClassification,
+) -> GraphitiCycleResult:
+    result = replace(
+        _complete(unit),
+        outcome="AMBIGUOUS_EFFECT",
+        failure_code="AMBIGUOUS_EFFECT",
+    )
+    raw = dict(result.raw_receipt or {})
+    raw["recovery_classification"] = recovery_classification
+    raw.pop("raw_output_digest", None)
+    raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
+    return replace(
+        result,
+        receipt_digest=str(raw["raw_output_digest"]),
+        raw_receipt=raw,
+    )
+
+
 def test_parse_source_time_rfc822_and_iso() -> None:
     assert parse_source_time("Thu, 01 Jan 2026 09:00:00 +0000") == (
         "2026-01-01T09:00:00.000000Z"
@@ -1715,6 +1735,463 @@ def test_reused_unreceipted_reservation_accepts_bound_terminal_no_call(
     assert spend == ("RECONCILED", "NO_EMBEDDING_CALL", 0, None, None)
     assert attempt_receipts == 1
     assert ingests == 1
+
+
+@pytest.mark.parametrize(
+    "recovery_classification",
+    [
+        GraphitiRecoveryClassification.RECOVERED_AMBIGUOUS,
+        GraphitiRecoveryClassification.RECOVERED_PENDING_PROCESS_DEATH,
+    ],
+)
+def test_marker_recovery_closes_reused_attempt_but_preserves_spend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_classification: GraphitiRecoveryClassification,
+) -> None:
+    from newsroom.control_plane import cycle
+
+    class ProcessDeath(BaseException):
+        pass
+
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / f"marker-{recovery_classification}.sqlite3"
+    events: list[tuple[str, dict[str, object]]] = []
+    original_append = cycle.append_ledger
+
+    def capture_ledger(
+        connection: sqlite3.Connection, kind: str, payload: dict[str, object]
+    ) -> str:
+        events.append((kind, dict(payload)))
+        return original_append(connection, kind, payload)
+
+    monkeypatch.setattr(cycle, "append_ledger", capture_ledger)
+
+    class DiesAfterClaim:
+        def ingest(self, _unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            raise ProcessDeath
+
+    with pytest.raises(ProcessDeath):
+        run_cycle(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            writer=FixtureWriter(),
+            max_writes=0,
+            graphiti=DiesAfterClaim(),
+            max_graphiti=1,
+            clock=lambda: datetime(2026, 8, 21, tzinfo=UTC),
+        )
+
+    class MarkerRecovery:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            assert unit.attempt_number == 1
+            return _marker_recovery_result(unit, recovery_classification)
+
+    run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=MarkerRecovery(),
+        max_graphiti=1,
+        clock=lambda: datetime(2026, 8, 21, 0, 16, tzinfo=UTC),
+    )
+
+    connection = sqlite3.connect(unpublished)
+    spend = connection.execute(
+        """
+        SELECT status, usage_basis, actual_usd_microunits, dispatch_owner
+        FROM unpublished_graphiti_spend
+        """
+    ).fetchone()
+    receipt_row = connection.execute(
+        "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts"
+    ).fetchone()
+    failure = connection.execute(
+        """
+        SELECT retry_count, last_outcome, last_failure_code
+        FROM unpublished_graphiti_failures
+        """
+    ).fetchone()
+    ingest_id = connection.execute(
+        "SELECT ingest_id FROM unpublished_graphiti_spend"
+    ).fetchone()[0]
+    next_attempt = next_graphiti_attempt_number(connection, str(ingest_id))
+    connection.close()
+
+    assert spend == ("RESERVED", "PENDING_PROVIDER_REPORT", None, None)
+    assert receipt_row is not None
+    receipt = json.loads(receipt_row[0])
+    assert receipt["recovery_classification"] == recovery_classification
+    assert failure == (1, "AMBIGUOUS_EFFECT", "AMBIGUOUS_EFFECT")
+    assert next_attempt == 2
+    recovery_events = [
+        payload
+        for kind, payload in events
+        if kind == "GRAPHITI_EVALUATION_RECOVERY_CLOSED"
+    ]
+    assert len(recovery_events) == 1
+    assert recovery_events[0]["recovery_classification"] == recovery_classification
+    recovery_accounting = recovery_events[0]["accounting"]
+    assert isinstance(recovery_accounting, dict)
+    assert recovery_accounting["status"] == "RESERVED"
+    assert recovery_events[0]["chat_invocations"] == []
+    assert recovery_events[0]["embedding_usage"] == {
+        "usage_basis": "NO_EMBEDDING_CALL",
+        "request_count": 0,
+        "embedding_tokens": 0,
+        "cost_usd_microunits": 0,
+        "requests": [],
+    }
+    assert not any(
+        kind == "GRAPHITI_EVALUATION_RETRY_HELD" for kind, _ in events
+    )
+    assert any(kind == "GRAPHITI_EVALUATION_ATTEMPT" for kind, _ in events)
+
+
+def test_marker_recovery_advances_attempts_until_dead_letter(
+    tmp_path: Path,
+) -> None:
+    class ProcessDeath(BaseException):
+        pass
+
+    proving = _proving(tmp_path)
+    proving_connection = sqlite3.connect(proving)
+    proving_connection.execute(
+        "DELETE FROM proving_observations WHERE source_id!='HK-01'"
+    )
+    proving_connection.commit()
+    proving_connection.close()
+    unpublished = tmp_path / "marker-recovery-dead-letter.sqlite3"
+    port_transitions: list[tuple[str, int]] = []
+
+    for expected_attempt in range(1, 4):
+        class DiesAfterClaim:
+            def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+                port_transitions.append(("PROCESS_DEATH", unit.attempt_number))
+                assert unit.attempt_number == expected_attempt
+                raise ProcessDeath
+
+        with pytest.raises(ProcessDeath):
+            run_cycle(
+                proving_store=str(proving),
+                unpublished_store=str(unpublished),
+                writer=FixtureWriter(),
+                max_writes=0,
+                graphiti=DiesAfterClaim(),
+                max_graphiti=1,
+                clock=lambda: datetime(
+                    2026, 8, 21, expected_attempt - 1, tzinfo=UTC
+                ),
+            )
+
+        class MarkerRecovery:
+            def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+                port_transitions.append(("MARKER_RECOVERY", unit.attempt_number))
+                assert unit.attempt_number == expected_attempt
+                return _marker_recovery_result(
+                    unit,
+                    GraphitiRecoveryClassification.RECOVERED_PENDING_PROCESS_DEATH
+                )
+
+        report = run_cycle(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            writer=FixtureWriter(),
+            max_writes=0,
+            graphiti=MarkerRecovery(),
+            max_graphiti=1,
+            clock=lambda: datetime(
+                2026, 8, 21, expected_attempt - 1, 16, tzinfo=UTC
+            ),
+        )
+        assert report.graphiti == 1
+
+    class MustNotDispatch:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            raise AssertionError(
+                f"dead-lettered marker recovery reached provider: {unit.ingest_id}"
+            )
+
+    final_report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=MustNotDispatch(),
+        max_graphiti=1,
+        clock=lambda: datetime(2026, 8, 21, 3, tzinfo=UTC),
+    )
+
+    connection = sqlite3.connect(unpublished)
+    spend = connection.execute(
+        """
+        SELECT attempt_number, status, usage_basis, reserved_gbp_microunits,
+               dispatch_owner
+        FROM unpublished_graphiti_spend ORDER BY attempt_number
+        """
+    ).fetchall()
+    receipts = connection.execute(
+        """
+        SELECT attempt_number FROM unpublished_graphiti_attempt_receipts
+        ORDER BY attempt_number
+        """
+    ).fetchall()
+    failure = connection.execute(
+        """
+        SELECT retry_count, dead_lettered FROM unpublished_graphiti_failures
+        """
+    ).fetchone()
+    ceiling_commitment = connection.execute(
+        """
+        SELECT SUM(
+            CASE WHEN status='RECONCILED'
+                 THEN COALESCE(actual_gbp_microunits, 0)
+                 ELSE reserved_gbp_microunits END
+        ) FROM unpublished_graphiti_spend
+        """
+    ).fetchone()[0]
+    ledger_kinds = [
+        row[0]
+        for row in connection.execute("SELECT kind FROM ledger ORDER BY seq")
+    ]
+    connection.close()
+
+    assert port_transitions == [
+        ("PROCESS_DEATH", 1),
+        ("MARKER_RECOVERY", 1),
+        ("PROCESS_DEATH", 2),
+        ("MARKER_RECOVERY", 2),
+        ("PROCESS_DEATH", 3),
+        ("MARKER_RECOVERY", 3),
+    ]
+    assert spend == [
+        (1, "RESERVED", "PENDING_PROVIDER_REPORT", 500_000, None),
+        (2, "RESERVED", "PENDING_PROVIDER_REPORT", 500_000, None),
+        (3, "RESERVED", "PENDING_PROVIDER_REPORT", 500_000, None),
+    ]
+    assert receipts == [(1,), (2,), (3,)]
+    assert failure == (3, 1)
+    assert ceiling_commitment == 1_500_000
+    assert ledger_kinds.count("GRAPHITI_EVALUATION_RECOVERY_CLOSED") == 3
+    assert ledger_kinds.count("GRAPHITI_EVALUATION_ATTEMPT") == 3
+    assert "GRAPHITI_EVALUATION_RETRY_HELD" not in ledger_kinds
+    assert final_report.graphiti == 0
+
+
+@pytest.mark.parametrize(
+    "malformed_usage",
+    [
+        pytest.param(
+            {
+                "usage_basis": "NO_EMBEDDING_CALL",
+                "requests": [],
+                "embedding_tokens": 0,
+                "cost_usd_microunits": 0,
+            },
+            id="missing-request-count",
+        ),
+        pytest.param(
+            {
+                "usage_basis": "NO_EMBEDDING_CALL",
+                "requests": [{"provider": "unexpected"}],
+                "request_count": 0,
+                "embedding_tokens": 0,
+                "cost_usd_microunits": 0,
+            },
+            id="non-empty-requests",
+        ),
+        pytest.param(
+            {
+                "usage_basis": "NO_EMBEDDING_CALL",
+                "requests": [],
+                "request_count": 0,
+                "embedding_tokens": 1,
+                "cost_usd_microunits": 0,
+            },
+            id="positive-tokens",
+        ),
+        pytest.param(
+            {
+                "usage_basis": "NO_EMBEDDING_CALL",
+                "requests": [],
+                "request_count": 0,
+                "embedding_tokens": 0,
+                "cost_usd_microunits": 1,
+            },
+            id="positive-cost",
+        ),
+        pytest.param(
+            {
+                "usage_basis": "NO_EMBEDDING_CALL",
+                "requests": [],
+                "request_count": False,
+                "embedding_tokens": 0,
+                "cost_usd_microunits": 0,
+            },
+            id="boolean-count",
+        ),
+        pytest.param(
+            {
+                "usage_basis": "NO_EMBEDDING_CALL",
+                "requests": [],
+                "request_count": 0,
+                "embedding_tokens": 0,
+                "cost_usd_microunits": 0,
+                "unexpected": 0,
+            },
+            id="unexpected-key",
+        ),
+    ],
+)
+def test_no_call_reconciliation_requires_exact_zero_usage_shape(
+    tmp_path: Path,
+    malformed_usage: dict[str, object],
+) -> None:
+    connection = connect(str(tmp_path / "exact-zero-shape.sqlite3"))
+    assert reserve_graphiti_spend(
+        connection,
+        spend_id="ingest-1:1",
+        ingest_id="ingest-1",
+        attempt_number=1,
+        proving_run_id="run-1",
+        generation_id=GRAPHITI_GENERATION_ID,
+        reserved_gbp_microunits=500_000,
+        ceiling_gbp_microunits=5_000_000,
+    )
+    assert claim_graphiti_attempt(
+        connection,
+        spend_id="ingest-1:1",
+        generation_id=GRAPHITI_GENERATION_ID,
+        owner_id="malformed-no-call-owner",
+        claimed_at="2026-08-21T00:00:00.000000Z",
+        lease_expires_at="2026-08-21T00:15:00.000000Z",
+    )
+
+    accounting = reconcile_graphiti_spend(
+        connection,
+        spend_id="ingest-1:1",
+        embedding_usage=malformed_usage,
+    )
+    connection.commit()
+    connection.close()
+
+    reopened = sqlite3.connect(tmp_path / "exact-zero-shape.sqlite3")
+    durable_spend = reopened.execute(
+        """
+        SELECT status, actual_usd_microunits, actual_gbp_microunits,
+               dispatch_owner, dispatch_lease_expires_at, usage_basis
+        FROM unpublished_graphiti_spend WHERE spend_id='ingest-1:1'
+        """
+    ).fetchone()
+    reopened.close()
+
+    assert accounting["status"] == "UNRECONCILED"
+    assert accounting["actual_usd_microunits"] is None
+    assert accounting["actual_gbp_microunits"] is None
+    assert accounting["unused_reservation_released"] is False
+    assert durable_spend == (
+        "UNRECONCILED",
+        None,
+        None,
+        None,
+        None,
+        "NO_EMBEDDING_CALL",
+    )
+
+
+def test_reused_malformed_no_call_is_receipted_not_retry_held(
+    tmp_path: Path,
+) -> None:
+    class ProcessDeath(BaseException):
+        pass
+
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "reused-malformed-no-call.sqlite3"
+
+    class DiesAfterClaim:
+        def ingest(self, _unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            raise ProcessDeath
+
+    with pytest.raises(ProcessDeath):
+        run_cycle(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            writer=FixtureWriter(),
+            max_writes=0,
+            graphiti=DiesAfterClaim(),
+            max_graphiti=1,
+            clock=lambda: datetime(2026, 8, 21, tzinfo=UTC),
+        )
+
+    malformed_usage: dict[str, object] = {
+        "usage_basis": "NO_EMBEDDING_CALL",
+        "requests": [{"provider": "unexpected"}],
+        "request_count": 0,
+        "embedding_tokens": 0,
+        "cost_usd_microunits": 0,
+    }
+
+    class MalformedNoCall:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            assert unit.attempt_number == 1
+            return replace(
+                _complete(unit, embedding_usage=malformed_usage),
+                outcome="TIMEOUT",
+                failure_code="EXECUTION_TIMEOUT",
+            )
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=MalformedNoCall(),
+        max_graphiti=1,
+        clock=lambda: datetime(2026, 8, 21, 0, 16, tzinfo=UTC),
+    )
+
+    connection = sqlite3.connect(unpublished)
+    spend = connection.execute(
+        """
+        SELECT status, actual_usd_microunits, actual_gbp_microunits,
+               dispatch_owner, dispatch_lease_expires_at, usage_basis
+        FROM unpublished_graphiti_spend
+        """
+    ).fetchone()
+    receipt_row = connection.execute(
+        "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts"
+    ).fetchone()
+    failure = connection.execute(
+        """
+        SELECT retry_count, last_outcome, last_failure_code
+        FROM unpublished_graphiti_failures
+        """
+    ).fetchone()
+    ledger_kinds = [
+        row[0]
+        for row in connection.execute("SELECT kind FROM ledger ORDER BY seq")
+    ]
+    connection.close()
+
+    assert report.graphiti == 1
+    assert spend == (
+        "UNRECONCILED",
+        None,
+        None,
+        None,
+        None,
+        "NO_EMBEDDING_CALL",
+    )
+    assert receipt_row is not None
+    receipt = json.loads(receipt_row[0])
+    assert receipt["embedding_usage"] == malformed_usage
+    receipt_accounting = receipt["accounting"]
+    assert isinstance(receipt_accounting, dict)
+    assert receipt_accounting["status"] == "UNRECONCILED"
+    assert failure == (1, "TIMEOUT", "EXECUTION_TIMEOUT")
+    assert "GRAPHITI_EVALUATION_RETRY_HELD" not in ledger_kinds
+    assert ledger_kinds.count("GRAPHITI_EVALUATION_ATTEMPT") == 1
 
 
 def test_proving_writer_cannot_commit_during_provider_handoff(
