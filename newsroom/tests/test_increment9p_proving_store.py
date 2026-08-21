@@ -558,11 +558,61 @@ def test_production_and_news_pool_paths_are_rejected(tmp_path: Path):
             b'{"error":"rate limited"}',
             "content-malformed-json",
         ),
+        (
+            SOURCE_URLS["UK-02"],
+            b'{"error":{"code":"rate_limit"}}',
+            "content-malformed-json",
+        ),
+        (
+            SOURCE_URLS["UK-02"],
+            b'{"errors":[{"code":"rate_limit"}]}',
+            "content-malformed-json",
+        ),
+        (
+            SOURCE_URLS["UK-02"],
+            b'{"status":"error","code":"rate_limit"}',
+            "content-malformed-json",
+        ),
         (SOURCE_URLS["UK-02"], b"[1,2]", "content-malformed-json"),
+        (
+            SOURCE_URLS["UK-02"],
+            b'[{"title":"One"},{}]',
+            "content-malformed-json",
+        ),
+        (
+            SOURCE_URLS["HK-02"],
+            b'{"good":{"code":"TC1"},"bad":{}}',
+            "content-malformed-json",
+        ),
+        (SOURCE_URLS["UK-02"], b'{"title":"<br>"}', "content-malformed-json"),
         (SOURCE_URLS["UK-01"], b"<rss><channel>", "content-malformed-xml"),
         (
             SOURCE_URLS["UK-01"],
             b'<?xml version="1.0" encoding="x-unknown"?><rss/>',
+            "content-malformed-xml",
+        ),
+        (
+            SOURCE_URLS["UK-01"],
+            b"<rss><channel><item/></channel></rss>",
+            "content-malformed-xml",
+        ),
+        (
+            SOURCE_URLS["UK-01"],
+            b"<rss><channel><item><title>&lt;br&gt;</title></item></channel></rss>",
+            "content-malformed-xml",
+        ),
+        (
+            SOURCE_URLS["UK-01"],
+            (
+                "<rss><channel><item>"
+                + "&lt;br&gt;" * 60
+                + "Useful headline</item></channel></rss>"
+            ).encode(),
+            "content-malformed-xml",
+        ),
+        (
+            SOURCE_URLS["UK-01"],
+            b"<rss><channel><item><title>One</title></item><item/></channel></rss>",
             "content-malformed-xml",
         ),
         (
@@ -588,6 +638,11 @@ def test_assess_content_rejects_unusable_payloads(
         (SOURCE_URLS["UK-02"], b"[]", 0),
         (SOURCE_URLS["UK-02"], b'[{"title":"One"}]', 1),
         (SOURCE_URLS["HK-02"], b'{"warning":{"code":"TC1"}}', 1),
+        (
+            SOURCE_URLS["UK-01"],
+            b"<rss><channel><item><description>Fallback headline</description></item></channel></rss>",
+            1,
+        ),
         (
             SOURCE_URLS["UK-01"],
             b'<?xml version="1.0"?><rss version="2.0"><channel></channel></rss>',

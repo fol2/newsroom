@@ -1186,6 +1186,19 @@ def test_older_run_backlog_remains_queued_after_a_new_run_arrives(
     [
         ("content-malformed-xml", None),
         (None, b"<rss><channel>"),
+        (None, b"<rss><channel><item/></channel></rss>"),
+        (
+            None,
+            b"<rss><channel><item><title>&lt;br&gt;</title></item></channel></rss>",
+        ),
+        (
+            None,
+            (
+                "<rss><channel><item>"
+                + "&lt;br&gt;" * 60
+                + "Useful headline</item></channel></rss>"
+            ).encode(),
+        ),
     ],
 )
 def test_malformed_success_observation_is_not_admitted_to_cycle(

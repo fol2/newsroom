@@ -241,11 +241,14 @@ def _feed_item_count(root: ET.Element) -> int:
     return count
 
 
-def _usable_json_record(value: object) -> bool:
-    if not isinstance(value, dict):
-        return False
-    title = value.get("title") or value.get("name") or value.get("code")
-    return isinstance(title, str) and bool(title.strip())
+def _parsed_item_count(url: str, body: bytes) -> int:
+    from newsroom.control_plane.items import parse_observation
+
+    source_id = next(
+        (source_id for source_id, source_url in SOURCE_URLS.items() if source_url == url),
+        "CONTENT-ASSESSMENT",
+    )
+    return len(parse_observation(source_id=source_id, url=url, body=body))
 
 
 def assess_content(url: str, body: bytes) -> ContentAssessment:
@@ -261,19 +264,31 @@ def assess_content(url: str, body: bytes) -> ContentAssessment:
         except json.JSONDecodeError:
             return ContentAssessment(False, 0, "content-malformed-json")
         if isinstance(value, list):
-            if all(_usable_json_record(item) for item in value):
-                return ContentAssessment(True, len(value), None)
-            return ContentAssessment(False, 0, "content-malformed-json")
+            expected_count = len(value)
         if isinstance(value, dict):
             if not value:
                 return ContentAssessment(True, 0, None)
-            if "error" in value:
+            status = value.get("status")
+            if (
+                "error" in value
+                or "errors" in value
+                or (
+                    isinstance(status, str)
+                    and status.strip().lower() in {"error", "failed", "failure"}
+                )
+            ):
                 return ContentAssessment(False, 0, "content-malformed-json")
-            if _usable_json_record(value):
-                return ContentAssessment(True, 1, None)
-            if all(_usable_json_record(item) for item in value.values()):
-                return ContentAssessment(True, len(value), None)
-        return ContentAssessment(False, 0, "content-malformed-json")
+            expected_count = (
+                1
+                if any(key in value for key in ("title", "name", "code", "base_path"))
+                else len(value)
+            )
+        elif not isinstance(value, list):
+            return ContentAssessment(False, 0, "content-malformed-json")
+        item_count = _parsed_item_count(url, body)
+        if item_count != expected_count:
+            return ContentAssessment(False, 0, "content-malformed-json")
+        return ContentAssessment(True, item_count, None)
     try:
         root = ET.fromstring(body)
     except (ET.ParseError, LookupError):
@@ -281,7 +296,10 @@ def assess_content(url: str, body: bytes) -> ContentAssessment:
     root_tag = _xml_root_tag(root)
     if root_tag not in {"rss", "feed"}:
         return ContentAssessment(False, 0, f"content-unexpected-root:{root_tag}")
-    return ContentAssessment(True, _feed_item_count(root), None)
+    item_count = _feed_item_count(root)
+    if _parsed_item_count(url, body) != item_count:
+        return ContentAssessment(False, 0, "content-malformed-xml")
+    return ContentAssessment(True, item_count, None)
 
 
 def default_fetch(url: str) -> tuple[int, bytes]:
