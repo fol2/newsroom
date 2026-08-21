@@ -126,6 +126,15 @@ ResultValidator = Callable[[Any, _EpisodeTelemetry], dict[str, object]]
 SnapshotRestorer = Callable[[dict[str, object], _EpisodeTelemetry], None]
 
 
+def _runtime_metered_embedder_type(
+    embedder_base: type[Any],
+) -> type[MeteredOpenAIEmbedder]:
+    class RuntimeMeteredOpenAIEmbedder(MeteredOpenAIEmbedder, embedder_base):
+        """Metering wrapper satisfying Graphiti's nominal runtime contract."""
+
+    return RuntimeMeteredOpenAIEmbedder
+
+
 class AmbiguousEpisodeEffect(RuntimeError):
     """The deterministic episode exists without a completed ingest marker."""
 
@@ -134,6 +143,7 @@ def _load_graphiti() -> SimpleNamespace:
     try:
         from graphiti_core import Graphiti
         from graphiti_core.cross_encoder.client import CrossEncoderClient
+        from graphiti_core.embedder.client import EmbedderClient
         from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
         from graphiti_core.errors import NodeNotFoundError
         from graphiti_core.edges import EntityEdge, create_entity_edge_embeddings
@@ -156,6 +166,8 @@ def _load_graphiti() -> SimpleNamespace:
         ) -> list[tuple[str, float]]:
             del query
             return [(item, 0.0) for item in passages]
+
+    RuntimeMeteredOpenAIEmbedder = _runtime_metered_embedder_type(EmbedderClient)
 
     class GuardedGraphiti(Graphiti):
         """Pinned runtime with automatic edge invalidation disabled."""
@@ -195,6 +207,7 @@ def _load_graphiti() -> SimpleNamespace:
         Graphiti=GuardedGraphiti,
         OpenAIEmbedder=OpenAIEmbedder,
         OpenAIEmbedderConfig=OpenAIEmbedderConfig,
+        MeteredOpenAIEmbedder=RuntimeMeteredOpenAIEmbedder,
         IdentityCrossEncoder=IdentityCrossEncoder,
         EpisodeType=EpisodeType,
         EpisodicNode=EpisodicNode,
@@ -303,7 +316,7 @@ async def _add_episode(
             base_url=OPENROUTER_BASE_URL,
         )
     )
-    embedder = MeteredOpenAIEmbedder(delegate)
+    embedder = runtime.MeteredOpenAIEmbedder(delegate)
     graphiti = runtime.Graphiti(
         f"bolt://{NEO4J_BOLT_HOST}:{NEO4J_BOLT_PORT}",
         _NEO4J_USER,
@@ -881,7 +894,7 @@ class RealGraphitiAdapter:
                 embedding_usage=telemetry.embedding_usage,
                 attempt_receipt=raw,
             )
-        except Exception:
+        except Exception as exc:
             raw = _raw_receipt(
                 attempt,
                 started_at=started_at,
@@ -889,6 +902,9 @@ class RealGraphitiAdapter:
                 result=None,
                 proposals=(),
             )
+            raw.pop("raw_output_digest", None)
+            raw["producer_failure"] = type(exc).__name__
+            raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
             return produced_extraction(
                 attempt,
                 outcome=ExtractionOutcome.RETRYABLE_FAILURE,
