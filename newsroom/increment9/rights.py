@@ -82,6 +82,14 @@ RAD_02_TERMS_URL = "https://terms.bbc.fixture.invalid/rad-02"
 RAD_02_TERMS_BYTES = b"newsroom.increment9.rights.rad-02.fixture-terms\n"
 FIXTURE_DATA_CLASS = "PUBLIC_OFFICIAL_PUBLICATION_METADATA"
 FIXTURE_DESTINATIONS = ("TEN_APPROVED_SOURCE_ENDPOINTS",)
+# Evaluation-only Graphiti destinations; not live or production authority.
+GRAPHITI_EVALUATION_DESTINATIONS = frozenset(
+    {
+        "EVALUATION_CURSOR_AGENT_CLI",
+        "EVALUATION_GROK_BUILD_CLI",
+        "EVALUATION_OPENROUTER_EMBEDDINGS",
+    }
+)
 FIXTURE_RETENTION = "RAW_HTTP_MAX_7_DAYS"
 FIXTURE_FAMILIES = (
     "ANTHROPIC_AGENT_SDK",
@@ -379,6 +387,7 @@ class RightsVerdict:
     source_role: str | None = None
     families: tuple[str, ...] = ()
     reviewer_ids: tuple[str, ...] = ()
+    destinations: tuple[str, ...] = ()
     expires_at: str | None = None
     terms_url: str | None = None
     terms_digest: str | None = None
@@ -534,11 +543,29 @@ def fixture_review(
     return record
 
 
+def evaluation_rights_destinations() -> tuple[str, ...]:
+    """Return source-endpoint plus explicit EVALUATION Graphiti destinations."""
+
+    return tuple(sorted({*FIXTURE_DESTINATIONS, *GRAPHITI_EVALUATION_DESTINATIONS}))
+
+
 def fixture_inventory(*, gate: str = GATE_ID) -> dict[str, object]:
     return {
         "bound_terms": bound_terms_identity(gate=gate),
         "now": FIXTURE_NOW,
         "reviews": [fixture_review(family, gate=gate) for family in FIXTURE_FAMILIES],
+    }
+
+
+def evaluation_fixture_inventory(*, gate: str = GATE_ID) -> dict[str, object]:
+    destinations = list(evaluation_rights_destinations())
+    return {
+        "bound_terms": bound_terms_identity(gate=gate),
+        "now": FIXTURE_NOW,
+        "reviews": [
+            fixture_review(family, gate=gate, destinations=destinations)
+            for family in FIXTURE_FAMILIES
+        ],
     }
 
 
@@ -669,6 +696,9 @@ def assess_rights(
     if len(set(families)) != 3:
         return _fail("duplicate reviewer family")
     ordered = tuple(sorted(parsed, key=lambda item: str(item["reviewer_family"])))
+    destination_sets = {tuple(item["destinations"]) for item in ordered}
+    if len(destination_sets) != 1:
+        return _fail("record is malformed")
     return RightsVerdict(
         status="PASS",
         reason="authorised",
@@ -677,6 +707,7 @@ def assess_rights(
         source_role=str(ordered[0]["source_role"]),
         families=tuple(str(item["reviewer_family"]) for item in ordered),
         reviewer_ids=tuple(str(item["reviewer_id"]) for item in ordered),
+        destinations=next(iter(destination_sets)),
         expires_at=min(str(item["expires_at"]) for item in ordered),
         terms_url=str(ordered[0]["terms_url"]),
         terms_digest=str(ordered[0]["terms_digest"]),

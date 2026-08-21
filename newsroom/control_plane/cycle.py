@@ -59,9 +59,11 @@ from newsroom.graphiti_adapter.evaluation_packet import (
 from newsroom.increment9.proving import (
     FORBIDDEN_STORE_MARKERS,
     PROVING_GATES,
-    SOURCE_URLS,
 )
-from newsroom.increment9.rights import assess_rights
+from newsroom.increment9.rights import (
+    GRAPHITI_EVALUATION_DESTINATIONS,
+    assess_rights,
+)
 
 
 GLOBAL_PROVING_GATES = frozenset(
@@ -787,16 +789,14 @@ def _rights_decision_from_packet(
         packet = json.loads(packet_json)
     except json.JSONDecodeError:
         return None
-    if (
-        digest_bytes(canonical_json_bytes(packet)) != packet_digest
-        or source_url != SOURCE_URLS.get(source_id)
-    ):
+    if digest_bytes(canonical_json_bytes(packet)) != packet_digest:
         return None
     verdict = assess_rights(gate_id, inventory=packet, now=evaluated_at)
     if (
         verdict.status != "PASS"
         or verdict.gate_id != gate_id
         or not verdict.endpoint
+        or source_url != verdict.endpoint
         or not verdict.expires_at
         or not verdict.terms_url
         or not verdict.terms_digest
@@ -808,6 +808,7 @@ def _rights_decision_from_packet(
         "source_id": source_id,
         "source_definition_url": source_url,
         "rights_endpoint": verdict.endpoint,
+        "rights_destinations": verdict.destinations,
         "packet_digest": packet_digest,
         "expires_at": verdict.expires_at,
         "terms_url": verdict.terms_url,
@@ -863,7 +864,7 @@ def _dispatch_rights_decision(
         return None
     if retained is None or str(retained[1]) != "PASS":
         return None
-    return _rights_decision_from_packet(
+    decision = _rights_decision_from_packet(
         run_id=str(retained[0]),
         source_id=source_id,
         source_url=source_url,
@@ -871,6 +872,14 @@ def _dispatch_rights_decision(
         packet_digest=str(retained[2]),
         packet_json=str(retained[3]),
     )
+    if decision is None:
+        return None
+    destinations = decision.get("rights_destinations")
+    if not isinstance(destinations, tuple) or not GRAPHITI_EVALUATION_DESTINATIONS.issubset(
+        destinations
+    ):
+        return None
+    return decision
 
 
 def _latest_run_with_global_authority(

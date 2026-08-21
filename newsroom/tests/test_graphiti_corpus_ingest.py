@@ -61,6 +61,16 @@ from newsroom.graphiti_adapter.temporal import (
     map_reference_time,
 )
 from newsroom.increment9.proving import SOURCE_URLS
+from newsroom.increment9.rights import (
+    FIXTURE_DESTINATIONS,
+    FIXTURE_FAMILIES,
+    GRAPHITI_EVALUATION_DESTINATIONS,
+    RAD_01_ENDPOINT,
+    UK_10_ENDPOINT,
+    bound_terms_identity,
+    evaluation_rights_destinations,
+    fixture_review,
+)
 from newsroom.tests.test_control_plane_private_beta import _proving
 
 
@@ -1159,6 +1169,234 @@ def test_newer_failed_proving_run_blocks_dispatch_despite_older_pass(
     assert seen == []
     assert report.graphiti == 0
     assert report.eligible == 0
+
+
+def _retain_source(
+    proving: Path,
+    *,
+    source_id: str,
+    url: str,
+    body: bytes,
+    destinations: tuple[str, ...],
+) -> None:
+    gate_id = f"RIGHTS_{source_id}"
+    packet = {
+        "bound_terms": bound_terms_identity(gate=gate_id),
+        "now": "2026-08-20T00:00:00.000000Z",
+        "reviews": [
+            fixture_review(
+                family,
+                gate=gate_id,
+                issued_at="2026-01-01T00:00:00.000000Z",
+                expires_at="2099-01-01T00:00:00.000000Z",
+                destinations=list(destinations),
+            )
+            for family in FIXTURE_FAMILIES
+        ],
+    }
+    packet_bytes = canonical_json_bytes(packet)
+    connection = __import__("sqlite3").connect(proving)
+    connection.execute(
+        "INSERT INTO proving_gates VALUES(?,?,?,?)",
+        ("run-1", gate_id, "PASS", "fixture"),
+    )
+    connection.execute(
+        "INSERT INTO proving_rights_packets VALUES(?,?,?,?,?)",
+        (
+            "run-1",
+            gate_id,
+            digest_bytes(packet_bytes),
+            packet_bytes.decode("utf-8"),
+            "2026-08-20T00:00:00.000000Z",
+        ),
+    )
+    connection.execute(
+        "INSERT INTO proving_observations VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            source_id,
+            "run-1",
+            "2026-08-16T21:41:34.000000Z",
+            url,
+            200,
+            digest_bytes(body),
+            body,
+            1,
+            None,
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+
+def _rewrite_destinations(proving: Path, destinations: tuple[str, ...]) -> None:
+    connection = __import__("sqlite3").connect(proving)
+    rows = connection.execute(
+        "SELECT gate_id FROM proving_rights_packets WHERE run_id='run-1'"
+    ).fetchall()
+    for (gate_id,) in rows:
+        packet = {
+            "bound_terms": bound_terms_identity(gate=str(gate_id)),
+            "now": "2026-08-20T00:00:00.000000Z",
+            "reviews": [
+                fixture_review(
+                    family,
+                    gate=str(gate_id),
+                    issued_at="2026-01-01T00:00:00.000000Z",
+                    expires_at="2099-01-01T00:00:00.000000Z",
+                    destinations=list(destinations),
+                )
+                for family in FIXTURE_FAMILIES
+            ],
+        }
+        packet_bytes = canonical_json_bytes(packet)
+        connection.execute(
+            """
+            UPDATE proving_rights_packets
+            SET packet_digest=?, packet_json=?
+            WHERE run_id='run-1' AND gate_id=?
+            """,
+            (digest_bytes(packet_bytes), packet_bytes.decode("utf-8"), gate_id),
+        )
+    connection.commit()
+    connection.close()
+
+
+def test_source_endpoint_destinations_cannot_dispatch_graphiti_providers(
+    tmp_path: Path,
+) -> None:
+    proving = _proving(tmp_path)
+    _rewrite_destinations(proving, FIXTURE_DESTINATIONS)
+    connection = __import__("sqlite3").connect(proving)
+    decision = _dispatch_rights_decision(
+        connection,
+        source_id="UK-01",
+        source_url=SOURCE_URLS["UK-01"],
+        evaluated_at="2026-08-21T00:00:00.000000Z",
+    )
+    connection.close()
+    assert decision is None
+    seen: list[str] = []
+
+    class Stub:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            seen.append(unit.ingest_id)
+            return _complete(unit)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(tmp_path / "unpublished.sqlite3"),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=Stub(),
+        max_graphiti=10,
+        clock=lambda: datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    assert seen == []
+    assert report.graphiti == 0
+    assert report.eligible == 3
+
+
+def test_graphiti_dispatch_requires_every_evaluation_provider_destination(
+    tmp_path: Path,
+) -> None:
+    proving = _proving(tmp_path)
+    missing_openrouter = tuple(
+        destination
+        for destination in evaluation_rights_destinations()
+        if destination != "EVALUATION_OPENROUTER_EMBEDDINGS"
+    )
+    _rewrite_destinations(proving, missing_openrouter)
+    connection = __import__("sqlite3").connect(proving)
+    decision = _dispatch_rights_decision(
+        connection,
+        source_id="UK-01",
+        source_url=SOURCE_URLS["UK-01"],
+        evaluated_at="2026-08-21T00:00:00.000000Z",
+    )
+    connection.close()
+    assert GRAPHITI_EVALUATION_DESTINATIONS - set(missing_openrouter) == {
+        "EVALUATION_OPENROUTER_EMBEDDINGS"
+    }
+    assert decision is None
+
+
+def test_uk10_and_rad01_nine_p_hosts_cannot_use_reviewed_endpoint_rights(
+    tmp_path: Path,
+) -> None:
+    proving = _proving(tmp_path)
+    destinations = evaluation_rights_destinations()
+    _retain_source(
+        proving,
+        source_id="UK-10",
+        url=SOURCE_URLS["UK-10"],
+        body=DATED_RSS,
+        destinations=destinations,
+    )
+    _retain_source(
+        proving,
+        source_id="RAD-01",
+        url=SOURCE_URLS["RAD-01"],
+        body=DATED_RSS,
+        destinations=destinations,
+    )
+    connection = __import__("sqlite3").connect(proving)
+    uk10 = _dispatch_rights_decision(
+        connection,
+        source_id="UK-10",
+        source_url=SOURCE_URLS["UK-10"],
+        evaluated_at="2026-08-21T00:00:00.000000Z",
+    )
+    rad01 = _dispatch_rights_decision(
+        connection,
+        source_id="RAD-01",
+        source_url=SOURCE_URLS["RAD-01"],
+        evaluated_at="2026-08-21T00:00:00.000000Z",
+    )
+    connection.close()
+    assert SOURCE_URLS["UK-10"] != UK_10_ENDPOINT
+    assert SOURCE_URLS["RAD-01"] != RAD_01_ENDPOINT
+    assert uk10 is None
+    assert rad01 is None
+
+
+def test_reviewed_uk10_and_rad01_endpoints_dispatch_with_evaluation_destinations(
+    tmp_path: Path,
+) -> None:
+    proving = _proving(tmp_path)
+    destinations = evaluation_rights_destinations()
+    _retain_source(
+        proving,
+        source_id="UK-10",
+        url=UK_10_ENDPOINT,
+        body=DATED_RSS,
+        destinations=destinations,
+    )
+    _retain_source(
+        proving,
+        source_id="RAD-01",
+        url=RAD_01_ENDPOINT,
+        body=DATED_RSS,
+        destinations=destinations,
+    )
+    connection = __import__("sqlite3").connect(proving)
+    uk10 = _dispatch_rights_decision(
+        connection,
+        source_id="UK-10",
+        source_url=UK_10_ENDPOINT,
+        evaluated_at="2026-08-21T00:00:00.000000Z",
+    )
+    rad01 = _dispatch_rights_decision(
+        connection,
+        source_id="RAD-01",
+        source_url=RAD_01_ENDPOINT,
+        evaluated_at="2026-08-21T00:00:00.000000Z",
+    )
+    connection.close()
+    assert uk10 is not None
+    assert uk10["rights_endpoint"] == UK_10_ENDPOINT
+    assert GRAPHITI_EVALUATION_DESTINATIONS.issubset(uk10["rights_destinations"])
+    assert rad01 is not None
+    assert rad01["rights_endpoint"] == RAD_01_ENDPOINT
 
 
 def test_current_rights_decision_does_not_authorise_a_different_endpoint(

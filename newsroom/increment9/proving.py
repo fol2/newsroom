@@ -409,7 +409,7 @@ def _put_gates(
 ) -> None:
     for gate in gates:
         connection.execute(
-            "INSERT OR REPLACE INTO proving_gates VALUES(?,?,?,?)",
+            "INSERT INTO proving_gates VALUES(?,?,?,?)",
             (run_id, gate.gate_id, gate.status.value, gate.reason),
         )
 
@@ -428,7 +428,7 @@ def _put_rights_packets(
         packet_bytes = canonical_json_bytes(packet)
         connection.execute(
             """
-            INSERT OR REPLACE INTO proving_rights_packets(
+            INSERT INTO proving_rights_packets(
                 run_id, gate_id, packet_digest, packet_json, assessed_at
             ) VALUES(?,?,?,?,?)
             """,
@@ -499,28 +499,32 @@ def run_proving(
     )
     connection = _connect(store_path)
     try:
-        connection.execute(
-            "INSERT OR IGNORE INTO proving_runs VALUES(?,?,0,0,0,0)",
-            (run_id, fetched_at),
-        )
-        _put_gates(connection, run_id, gates)
-        _put_rights_packets(
-            connection,
-            run_id,
-            now or fetched_at,
-            {
-                RIGHTS_UK_01: rights,
-                RIGHTS_UK_02: rights_uk_02,
-                RIGHTS_UK_03: rights_uk_03,
-                RIGHTS_UK_05: rights_uk_05,
-                RIGHTS_UK_10: rights_uk_10,
-                RIGHTS_HK_01: rights_hk_01,
-                RIGHTS_HK_02: rights_hk_02,
-                RIGHTS_HK_04: rights_hk_04,
-                RIGHTS_RAD_01: rights_rad_01,
-                RIGHTS_RAD_02: rights_rad_02,
-            },
-        )
+        try:
+            connection.execute(
+                "INSERT INTO proving_runs VALUES(?,?,0,0,0,0)",
+                (run_id, fetched_at),
+            )
+            _put_gates(connection, run_id, gates)
+            _put_rights_packets(
+                connection,
+                run_id,
+                now or fetched_at,
+                {
+                    RIGHTS_UK_01: rights,
+                    RIGHTS_UK_02: rights_uk_02,
+                    RIGHTS_UK_03: rights_uk_03,
+                    RIGHTS_UK_05: rights_uk_05,
+                    RIGHTS_UK_10: rights_uk_10,
+                    RIGHTS_HK_01: rights_hk_01,
+                    RIGHTS_HK_02: rights_hk_02,
+                    RIGHTS_HK_04: rights_hk_04,
+                    RIGHTS_RAD_01: rights_rad_01,
+                    RIGHTS_RAD_02: rights_rad_02,
+                },
+            )
+        except sqlite3.IntegrityError as exc:
+            connection.rollback()
+            raise ProvingError("proving run_id already retained") from exc
         if any(gate.status is GateStatus.FAIL for gate in gates):
             connection.commit()
             return ProvingReport(run_id, False, False, False, 0, gates, ())

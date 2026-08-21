@@ -156,10 +156,10 @@ def test_fetch_stores_ten_observations_without_publication(tmp_path: Path):
     )
     assert not unauthorised.authorised and unauthorised.observations == ()
     assert list_observations(store) == ()
-    chain = persist_authorised_chain(run_id="r1")
+    chain = persist_authorised_chain(run_id="r2")
     report = run_proving(
         store_path=store,
-        run_id="r1",
+        run_id="r2",
         fetched_at="2026-08-16T20:00:00.000000Z",
         kill_switch=False,
         no_emergency_stop=True,
@@ -178,13 +178,45 @@ def test_fetch_stores_ten_observations_without_publication(tmp_path: Path):
     assert len(retained) == 10
     connection = __import__("sqlite3").connect(store)
     stored_gates = connection.execute(
-        "SELECT COUNT(*) FROM proving_gates WHERE run_id='r1'"
+        "SELECT COUNT(*) FROM proving_gates WHERE run_id='r2'"
     ).fetchone()[0]
     connection.close()
     assert stored_gates == len(report.gates)
     payload = report_json(report)
     assert b'"publication":false' in payload
     assert b"openrouter" in payload
+
+
+def test_duplicate_run_id_does_not_replace_failed_gates(tmp_path: Path) -> None:
+    store = str(tmp_path / "proving.sqlite3")
+    first = run_proving(
+        store_path=store,
+        run_id="r1",
+        fetched_at="2026-08-16T20:00:00.000000Z",
+        kill_switch=True,
+        no_emergency_stop=True,
+        fetch=_fetch_ok,
+    )
+    assert not first.authorised
+    chain = persist_authorised_chain(run_id="r1")
+    with pytest.raises(ProvingError, match="already retained"):
+        run_proving(
+            store_path=store,
+            run_id="r1",
+            fetched_at="2026-08-16T20:01:00.000000Z",
+            kill_switch=False,
+            no_emergency_stop=True,
+            fetch=_fetch_ok,
+            run_authority=chain.resolver,
+            **_rights_inventories(),
+        )
+    connection = __import__("sqlite3").connect(store)
+    kill = connection.execute(
+        "SELECT status FROM proving_gates "
+        "WHERE run_id='r1' AND gate_id='KILL_SWITCH_READY'"
+    ).fetchone()
+    connection.close()
+    assert kill == ("FAIL",)
 
 
 def test_production_and_news_pool_paths_are_rejected(tmp_path: Path):

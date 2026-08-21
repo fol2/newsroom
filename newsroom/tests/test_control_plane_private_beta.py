@@ -41,9 +41,11 @@ from newsroom.graphiti_adapter.types import (
 )
 from newsroom.increment9.proving import PROVING_GATES, SOURCE_URLS
 from newsroom.increment9.rights import (
+    BINDINGS,
     FIXTURE_FAMILIES,
     FIXTURE_NOW,
     bound_terms_identity,
+    evaluation_rights_destinations,
     fixture_review,
 )
 
@@ -144,7 +146,12 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
             JSON_DOC,
         ),
         *tuple(
-            (source_id, SOURCE_URLS[source_id], f"sha256:{source_id}", body)
+            (
+                source_id,
+                BINDINGS[f"RIGHTS_{source_id}"][2],
+                f"sha256:{source_id}",
+                body,
+            )
             for source_id, body in extra
         ),
     )
@@ -185,6 +192,7 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
                     gate=gate_id,
                     issued_at="2026-01-01T00:00:00.000000Z",
                     expires_at="2099-01-01T00:00:00.000000Z",
+                    destinations=list(evaluation_rights_destinations()),
                 )
                 for family in FIXTURE_FAMILIES
             ],
@@ -579,6 +587,13 @@ def test_intake_fetches_when_gates_pass(tmp_path: Path) -> None:
     assert report.authorised
     assert report.sources == 10
     assert report.ok == 10
+    assert report.proving_run_id.startswith("proving-9p-private-beta-")
+    second = run_intake(
+        proving_store=str(proving),
+        fetch=fetch,
+        clock=lambda: datetime.fromisoformat(FIXTURE_NOW.replace("Z", "+00:00")),
+    )
+    assert second.proving_run_id != report.proving_run_id
 
 
 def _sample_candidate_package() -> tuple[StoryCandidateRecord, EvidencePackage]:

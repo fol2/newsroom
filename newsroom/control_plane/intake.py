@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from os import environ
 from typing import Callable
+from uuid import uuid4
 
 from newsroom.increment9.prospective_run_authority import persist_authorised_chain
 from newsroom.increment9.proving import Fetcher, ProvingReport, run_proving
@@ -49,8 +50,8 @@ def _rights(*, now: str) -> dict[str, object]:
 
 
 def _run_id(now: datetime) -> str:
-    stamp = now.strftime("%Y%m%dT%H%M%SZ")
-    return f"proving-9p-private-beta-{stamp}"
+    stamp = now.strftime("%Y%m%dT%H%M%S%fZ")
+    return f"proving-9p-private-beta-{stamp}-{uuid4().hex}"
 
 
 def run_intake(
