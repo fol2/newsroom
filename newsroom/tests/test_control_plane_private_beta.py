@@ -106,8 +106,7 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
     connection.executescript(
         """
         CREATE TABLE proving_runs(
-            seq INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_id TEXT NOT NULL UNIQUE,
+            run_id TEXT PRIMARY KEY,
             started_at TEXT NOT NULL,
             publication INTEGER NOT NULL DEFAULT 0,
             public_dispatch INTEGER NOT NULL DEFAULT 0,
