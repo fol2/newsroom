@@ -26,6 +26,9 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_WORKSPACE_GROUP,
 )
 from newsroom.graphiti_adapter.models import GraphitiAttemptRequest
+from newsroom.graphiti_adapter.recovery_vocabulary import (
+    GraphitiRecoveryClassification,
+)
 from newsroom.graphiti_adapter.result_mapping import produced_extraction
 from newsroom.graphiti_adapter.types import GraphitiAdapterContractError
 
@@ -36,7 +39,7 @@ class SnapshotRestoration:
     chat_invocations: tuple[dict[str, object], ...]
     embedding_usage: dict[str, object]
     provider_attempt_number: int
-    recovery_classification: str
+    recovery_classification: GraphitiRecoveryClassification
 
 
 def _proposal_from_value(value: object) -> ProposalDraft:
@@ -163,7 +166,9 @@ def restore_validated_snapshot(
     if retained_attempt != attempt.attempt_number:
         recovered_raw["attempt_number"] = attempt.attempt_number
         recovered_raw["recovered_validated_raw_digest"] = retained_digest
-        recovered_raw["recovery_classification"] = "RECOVERED_IMMUTABLE_COMPLETE"
+        recovered_raw["recovery_classification"] = (
+            GraphitiRecoveryClassification.RECOVERED_IMMUTABLE_COMPLETE
+        )
         recovered_raw.pop("raw_output_digest", None)
         recovered_raw["raw_output_digest"] = digest_bytes(
             canonical_json_bytes(recovered_raw)
@@ -208,7 +213,9 @@ def restore_validated_snapshot(
         chat_invocations=tuple(dict(item) for item in invocations),
         embedding_usage=embedding_usage,
         provider_attempt_number=provider_attempt,
-        recovery_classification="RECOVERED_IMMUTABLE_COMPLETE",
+        recovery_classification=(
+            GraphitiRecoveryClassification.RECOVERED_IMMUTABLE_COMPLETE
+        ),
     )
 
 

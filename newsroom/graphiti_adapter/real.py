@@ -59,6 +59,9 @@ from newsroom.graphiti_adapter.result_mapping import (
     relation_receipts,
 )
 from newsroom.graphiti_adapter.result_snapshot import restore_validated_snapshot
+from newsroom.graphiti_adapter.recovery_vocabulary import (
+    GraphitiRecoveryClassification,
+)
 from newsroom.graphiti_adapter.neo4j_guard import (
     GuardError,
     GuardMarker,
@@ -113,7 +116,7 @@ class _EpisodeTelemetry:
     embedding_usage: dict[str, object] = field(default_factory=_no_embedding_usage)
     predecessor_episode_uuid: str | None = None
     provider_attempt_number: int | None = None
-    recovery_classification: str | None = None
+    recovery_classification: GraphitiRecoveryClassification | None = None
 
 
 ResultValidator = Callable[[Any, _EpisodeTelemetry], dict[str, object]]
@@ -332,13 +335,17 @@ async def _add_episode(
             return SimpleNamespace(episode=None, nodes=(), edges=())
         if marker.state is GuardState.RECOVERED_AMBIGUOUS:
             _restore_marker_telemetry(telemetry, marker)
-            telemetry.recovery_classification = "RECOVERED_AMBIGUOUS"
+            telemetry.recovery_classification = (
+                GraphitiRecoveryClassification.RECOVERED_AMBIGUOUS
+            )
             raise AmbiguousEpisodeEffect(
                 "prior Graphiti attempt was rolled back after an ambiguous effect"
             )
         if marker.state in {GuardState.PENDING, GuardState.ROLLING_BACK}:
             _restore_marker_telemetry(telemetry, marker)
-            telemetry.recovery_classification = "RECOVERED_PENDING_PROCESS_DEATH"
+            telemetry.recovery_classification = (
+                GraphitiRecoveryClassification.RECOVERED_PENDING_PROCESS_DEATH
+            )
             await guard.rollback_pending(
                 chat_invocations=telemetry.chat_invocations,
                 embedding_usage=telemetry.embedding_usage,
@@ -430,7 +437,9 @@ async def _add_episode(
                 embedding_usage=telemetry.embedding_usage,
                 reason=type(exc).__name__,
             )
-            telemetry.recovery_classification = "ROLLED_BACK_AMBIGUOUS_EFFECT"
+            telemetry.recovery_classification = (
+                GraphitiRecoveryClassification.ROLLED_BACK_AMBIGUOUS_EFFECT
+            )
             raise AmbiguousEpisodeEffect(
                 "Graphiti write failed after provider dispatch and was rolled back"
             ) from exc

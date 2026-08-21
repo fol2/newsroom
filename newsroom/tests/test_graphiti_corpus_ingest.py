@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import threading
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -58,6 +60,9 @@ from newsroom.graphiti_adapter.evaluation_packet import (
 from newsroom.graphiti_adapter.identity import MAX_EPISODE_BYTES
 from newsroom.graphiti_adapter.models import GraphitiAdapterContractError
 from newsroom.graphiti_adapter.real import _is_source_registry_name
+from newsroom.graphiti_adapter.recovery_vocabulary import (
+    GraphitiRecoveryClassification,
+)
 from newsroom.graphiti_adapter.temporal import (
     OBSERVED_FALLBACK,
     SOURCE_PUBLISHED,
@@ -88,6 +93,41 @@ DATED_RSS = """<?xml version="1.0" encoding="UTF-8"?>
   </item>
 </channel></rss>
 """.encode("utf-8")
+
+
+def _insert_failed_proving_run(
+    proving: Path, *, run_id: str, reason: str
+) -> None:
+    connection = sqlite3.connect(proving)
+    connection.execute(
+        """
+        INSERT INTO proving_runs(
+            run_id, started_at, publication, public_dispatch,
+            openrouter_invoked, spend_gbp_minor
+        ) VALUES(?,'2026-08-21T00:00:00.000000Z',0,0,0,0)
+        """,
+        (run_id,),
+    )
+    connection.execute(
+        """
+        INSERT INTO proving_gates
+        SELECT ?, gate_id,
+               CASE WHEN gate_id='KILL_SWITCH_READY' THEN 'FAIL' ELSE status END,
+               ?
+        FROM proving_gates WHERE run_id='run-1'
+        """,
+        (run_id, reason),
+    )
+    connection.execute(
+        """
+        INSERT INTO proving_rights_packets
+        SELECT ?, gate_id, packet_digest, packet_json, assessed_at
+        FROM proving_rights_packets WHERE run_id='run-1'
+        """,
+        (run_id,),
+    )
+    connection.commit()
+    connection.close()
 
 
 def test_content_api_keeps_description_for_drafting_and_details_for_corpus() -> None:
@@ -353,7 +393,9 @@ def _with_provider_attempt(
     original_digest = raw.get("raw_output_digest")
     raw["provider_attempt_number"] = provider_attempt
     if recovery:
-        raw["recovery_classification"] = "RECOVERED_IMMUTABLE_COMPLETE"
+        raw["recovery_classification"] = (
+            GraphitiRecoveryClassification.RECOVERED_IMMUTABLE_COMPLETE
+        )
         raw["recovered_validated_raw_digest"] = original_digest
     raw.pop("raw_output_digest", None)
     raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
@@ -1189,6 +1231,209 @@ def test_newer_failed_proving_run_blocks_dispatch_despite_older_pass(
     assert report.eligible == 0
 
 
+def test_newer_failed_run_before_fenced_claim_blocks_provider_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import newsroom.control_plane.cycle as cycle
+
+    proving = _proving(tmp_path)
+    original_reserve = cycle.reserve_graphiti_spend
+    original_append = cycle.append_ledger
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def capture_ledger(
+        connection: sqlite3.Connection, kind: str, payload: dict[str, object]
+    ) -> str:
+        events.append((kind, dict(payload)))
+        return original_append(connection, kind, payload)
+
+    def reserve_then_revoke(
+        connection: sqlite3.Connection,
+        *,
+        spend_id: str,
+        ingest_id: str,
+        attempt_number: int,
+        proving_run_id: str,
+        generation_id: str,
+        reserved_gbp_microunits: int,
+        ceiling_gbp_microunits: int,
+    ) -> bool:
+        reserved = original_reserve(
+            connection,
+            spend_id=spend_id,
+            ingest_id=ingest_id,
+            attempt_number=attempt_number,
+            proving_run_id=proving_run_id,
+            generation_id=generation_id,
+            reserved_gbp_microunits=reserved_gbp_microunits,
+            ceiling_gbp_microunits=ceiling_gbp_microunits,
+        )
+        assert reserved
+        _insert_failed_proving_run(
+            proving,
+            run_id="run-2",
+            reason="revoked before provider dispatch",
+        )
+        return reserved
+
+    monkeypatch.setattr(cycle, "reserve_graphiti_spend", reserve_then_revoke)
+    monkeypatch.setattr(cycle, "append_ledger", capture_ledger)
+
+    class MustNotDispatch:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            raise AssertionError(f"revoked unit reached provider: {unit.ingest_id}")
+
+    unpublished = tmp_path / "revoked-before-dispatch.sqlite3"
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=MustNotDispatch(),
+        max_graphiti=1,
+        clock=lambda: datetime(2026, 8, 21, tzinfo=UTC),
+    )
+
+    connection = sqlite3.connect(unpublished)
+    spend = connection.execute(
+        "SELECT status, usage_basis, dispatch_owner FROM unpublished_graphiti_spend"
+    ).fetchone()
+    connection.close()
+    holds = [payload for kind, payload in events if kind == "GRAPHITI_RIGHTS_HOLD"]
+    reconciliations = [
+        payload for kind, payload in events if kind == "GRAPHITI_SPEND_RECONCILE"
+    ]
+    reserved_spend_id = next(
+        str(payload["spend_id"])
+        for kind, payload in events
+        if kind == "GRAPHITI_SPEND_RESERVE"
+    )
+    assert report.graphiti == 0
+    assert spend == ("RECONCILED", "NO_EMBEDDING_CALL", None)
+    boundary_hold = next(
+        payload
+        for payload in holds
+        if payload["reason"] == "AUTHORITY_REVOKED_BEFORE_PROVIDER_DISPATCH"
+    )
+    assert boundary_hold["provider_dispatched"] is False
+    assert reconciliations == [
+        {
+            "spend_id": reserved_spend_id,
+            "usage_basis": "NO_EMBEDDING_CALL",
+            "status": "RECONCILED",
+            "actual_usd_microunits": 0,
+            "actual_gbp_microunits": 0,
+            "fx_policy": "USD_GBP_CONSERVATIVE_PARITY_V1",
+            "unused_reservation_released": True,
+        }
+    ]
+
+
+def test_proving_writer_cannot_commit_during_provider_handoff(
+    tmp_path: Path,
+) -> None:
+    proving = _proving(tmp_path)
+    writer_started = threading.Event()
+    writer_committed = threading.Event()
+    writer_errors: list[BaseException] = []
+    writer_thread: threading.Thread | None = None
+
+    def insert_veto() -> None:
+        writer_started.set()
+        try:
+            _insert_failed_proving_run(
+                proving,
+                run_id="run-during-dispatch",
+                reason="concurrent provider-boundary veto",
+            )
+            writer_committed.set()
+        except BaseException as exc:
+            writer_errors.append(exc)
+
+    class FencedDispatch:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            nonlocal writer_thread
+            writer_thread = threading.Thread(target=insert_veto, daemon=True)
+            writer_thread.start()
+            assert writer_started.wait(timeout=1)
+            assert not writer_committed.wait(timeout=0.2)
+            return _complete(unit)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(tmp_path / "fenced-dispatch.sqlite3"),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=FencedDispatch(),
+        max_graphiti=1,
+        clock=lambda: datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    assert writer_thread is not None
+    writer_thread.join(timeout=2)
+    assert writer_errors == []
+    assert writer_committed.is_set()
+    assert report.graphiti == 1
+
+
+def test_unavailable_proving_fence_releases_new_reservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import newsroom.control_plane.cycle as cycle
+
+    proving = _proving(tmp_path)
+    blocker = sqlite3.connect(proving)
+    blocker.execute("BEGIN IMMEDIATE")
+    monkeypatch.setattr(cycle, "_PROVING_FENCE_TIMEOUT_SECONDS", 0.01)
+    events: list[tuple[str, dict[str, object]]] = []
+    original_append = cycle.append_ledger
+
+    def capture_ledger(
+        connection: sqlite3.Connection, kind: str, payload: dict[str, object]
+    ) -> str:
+        events.append((kind, dict(payload)))
+        return original_append(connection, kind, payload)
+
+    monkeypatch.setattr(cycle, "append_ledger", capture_ledger)
+
+    class MustNotDispatch:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            raise AssertionError(f"unfenced unit reached provider: {unit.ingest_id}")
+
+    unpublished = tmp_path / "unavailable-fence.sqlite3"
+    try:
+        report = run_cycle(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            writer=FixtureWriter(),
+            max_writes=0,
+            graphiti=MustNotDispatch(),
+            max_graphiti=1,
+            clock=lambda: datetime(2026, 8, 21, tzinfo=UTC),
+        )
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    connection = sqlite3.connect(unpublished)
+    spend = connection.execute(
+        "SELECT status, usage_basis, dispatch_owner FROM unpublished_graphiti_spend"
+    ).fetchone()
+    connection.close()
+    assert report.graphiti == 0
+    assert spend == ("RECONCILED", "NO_EMBEDDING_CALL", None)
+    assert any(
+        kind == "GRAPHITI_SPEND_RECONCILE"
+        and payload["usage_basis"] == "NO_EMBEDDING_CALL"
+        for kind, payload in events
+    )
+    assert any(
+        kind == "GRAPHITI_RIGHTS_HOLD"
+        and payload["reason"] == "PROVING_FENCE_UNAVAILABLE"
+        and payload["provider_dispatched"] is False
+        for kind, payload in events
+    )
+
+
 def test_same_timestamp_later_fail_blocks_despite_smaller_run_id(
     tmp_path: Path,
 ) -> None:
@@ -1631,37 +1876,49 @@ def test_dispatch_lease_serialises_distinct_units_in_one_generation(
 
 
 def test_new_failed_global_gate_is_re_read_before_next_dispatch(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import newsroom.control_plane.cycle as cycle
+
     proving = _proving(tmp_path)
     seen: list[str] = []
+    veto_committed = threading.Event()
+    writer_errors: list[BaseException] = []
+    writer_thread: threading.Thread | None = None
+    original_bind = cycle._bind_result
+
+    def insert_veto() -> None:
+        try:
+            _insert_failed_proving_run(
+                proving,
+                run_id="run-2",
+                reason="new current veto",
+            )
+            veto_committed.set()
+        except BaseException as exc:
+            writer_errors.append(exc)
+
+    def bind_after_veto(
+        unit: CorpusIngestUnit,
+        result: GraphitiCycleResult,
+        *,
+        authority_connection: sqlite3.Connection | None = None,
+    ) -> GraphitiCycleResult:
+        assert veto_committed.wait(timeout=2)
+        return original_bind(
+            unit, result, authority_connection=authority_connection
+        )
 
     class Stub:
         def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            nonlocal writer_thread
             seen.append(unit.ingest_id)
             if len(seen) == 1:
-                connection = __import__("sqlite3").connect(proving)
-                connection.execute(
-                    """
-                    INSERT INTO proving_runs(
-                        run_id, started_at, publication, public_dispatch,
-                        openrouter_invoked, spend_gbp_minor
-                    ) VALUES('run-2','2026-08-21T00:00:00.000000Z',0,0,0,0)
-                    """
-                )
-                connection.execute(
-                    """
-                    INSERT INTO proving_gates
-                    SELECT 'run-2', gate_id,
-                           CASE WHEN gate_id='KILL_SWITCH_READY' THEN 'FAIL' ELSE status END,
-                           'new current veto'
-                    FROM proving_gates WHERE run_id='run-1'
-                    """
-                )
-                connection.commit()
-                connection.close()
+                writer_thread = threading.Thread(target=insert_veto, daemon=True)
+                writer_thread.start()
             return _complete(unit)
 
+    monkeypatch.setattr(cycle, "_bind_result", bind_after_veto)
     run_cycle(
         proving_store=str(proving),
         unpublished_store=str(tmp_path / "unpublished.sqlite3"),
@@ -1671,6 +1928,9 @@ def test_new_failed_global_gate_is_re_read_before_next_dispatch(
         max_graphiti=10,
         clock=lambda: datetime(2026, 8, 21, tzinfo=UTC),
     )
+    assert writer_thread is not None
+    writer_thread.join(timeout=2)
+    assert writer_errors == []
     assert len(seen) == 1
 
 
@@ -1997,7 +2257,7 @@ def test_validated_unreceipted_recovery_routes_telemetry_to_original_reserve(
     assert accounting["current_attempt"]["usage_basis"] == "NO_EMBEDDING_CALL"
 
 
-def test_recovery_shaped_telemetry_stays_on_current_without_unreceipted_reserve(
+def test_validated_recovery_repairs_receipted_but_unreconciled_provider_reserve(
     tmp_path: Path,
 ) -> None:
     unit = CorpusIngestUnit(
@@ -2066,11 +2326,102 @@ def test_recovery_shaped_telemetry_stays_on_current_without_unreceipted_reserve(
     ).fetchall()
     unpublished.close()
     assert spend == [
-        (1, "RESERVED", None, "PENDING_PROVIDER_REPORT"),
-        (2, "RECONCILED", 9, "PROVIDER_REPORTED"),
+        (1, "RECONCILED", 9, "PROVIDER_REPORTED"),
+        (2, "RECONCILED", 0, "NO_EMBEDDING_CALL"),
     ]
-    assert accounting["spend_id"].endswith(":2")
-    assert accounting["reconciled_to_current_attempt"] is True
+    assert accounting["provider_attempt"]["spend_id"].endswith(":1")
+    assert accounting["current_attempt"]["spend_id"].endswith(":2")
+
+
+def test_receipted_pending_recovery_does_not_double_debit_next_attempt(
+    tmp_path: Path,
+) -> None:
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "pending-recovery-no-double-debit.sqlite3"
+    calls = 0
+    usage = {
+        "usage_basis": "PROVIDER_REPORTED",
+        "request_count": 1,
+        "embedding_tokens": 25,
+        "cost_usd_microunits": 9,
+        "requests": [],
+    }
+
+    class PendingRecovery:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return replace(
+                    _complete(unit, embedding_usage=usage),
+                    outcome="FAILED",
+                    failure_code="PRODUCER_INTERNAL_ERROR",
+                )
+            recovered = _with_provider_attempt(
+                _complete(unit, embedding_usage=usage),
+                1,
+            )
+            raw = dict(recovered.raw_receipt or {})
+            raw["recovery_classification"] = (
+                GraphitiRecoveryClassification.RECOVERED_PENDING_PROCESS_DEATH
+            )
+            raw.pop("raw_output_digest", None)
+            raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
+            return replace(
+                recovered,
+                outcome="FAILED",
+                failure_code="AMBIGUOUS_EFFECT",
+                receipt_digest=str(raw["raw_output_digest"]),
+                raw_receipt=raw,
+            )
+
+    for _ in range(2):
+        run_cycle(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            writer=FixtureWriter(),
+            max_writes=0,
+            graphiti=PendingRecovery(),
+            max_graphiti=1,
+        )
+
+    connection = sqlite3.connect(unpublished)
+    spend = connection.execute(
+        """
+        SELECT attempt_number, status, actual_usd_microunits, usage_basis
+        FROM unpublished_graphiti_spend ORDER BY attempt_number
+        """
+    ).fetchall()
+    receipts = [
+        json.loads(row[0])
+        for row in connection.execute(
+            """
+            SELECT receipt_json FROM unpublished_graphiti_attempt_receipts
+            ORDER BY attempt_number
+            """
+        )
+    ]
+    total = connection.execute(
+        "SELECT SUM(actual_gbp_microunits) FROM unpublished_graphiti_spend"
+    ).fetchone()[0]
+    connection.close()
+    assert calls == 2
+    assert spend == [
+        (1, "RECONCILED", 9, "PROVIDER_REPORTED"),
+        (2, "RECONCILED", 0, "NO_EMBEDDING_CALL"),
+    ]
+    assert total == 9
+    assert receipts[1]["accounting"]["provider_attempt"] == {
+        "spend_id": receipts[0]["accounting"]["spend_id"],
+        "status": "RECONCILED",
+        "retained_attempt_receipt": True,
+        "reconciled_again": False,
+        "accounting": None,
+    }
+    assert (
+        receipts[1]["accounting"]["current_attempt"]["usage_basis"]
+        == "NO_EMBEDDING_CALL"
+    )
 
 
 def test_unvalidated_recovery_telemetry_does_not_consume_unreceipted_reserve(

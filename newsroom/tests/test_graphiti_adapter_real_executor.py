@@ -63,6 +63,9 @@ from newsroom.graphiti_adapter.evaluation_packet import (
 )
 from newsroom.graphiti_adapter.evaluation_attempt import evaluation_attempt_for
 from newsroom.graphiti_adapter.real import RealGraphitiAdapter
+from newsroom.graphiti_adapter.recovery_vocabulary import (
+    GraphitiRecoveryClassification,
+)
 from newsroom.graphiti_adapter.temporal_vocabulary import TemporalBasis
 
 from .extraction_4a_helpers import contract_request, run_request, seed_extraction_fixture
@@ -636,6 +639,190 @@ def test_process_recovery_uses_durable_guard_before_provider_dispatch(
     assert events == [expected_event, "close"]
 
 
+def test_pending_guard_recovery_uses_retained_attempt_snapshot() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import Neo4jMutationGuard
+
+    snapshot_ids: list[str] = []
+    marker = {
+        "state": "PENDING",
+        "group_id": GRAPHITI_WORKSPACE_GROUP,
+        "attempt_number": 1,
+        "input_digest": "sha256:" + "0" * 64,
+        "snapshot_id": "episode-id:1",
+        "chat_invocations_json": "[]",
+        "embedding_usage_json": "null",
+    }
+
+    class Driver:
+        async def execute_query(
+            self,
+            query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            assert routing_ == "w"
+            snapshot_id = params.get("snapshot_id")
+            if isinstance(snapshot_id, str):
+                snapshot_ids.append(snapshot_id)
+            if "RETURN properties(m) AS marker" in query:
+                return ([{"marker": marker}], None, None)
+            if "SET m.state = 'ROLLING_BACK'" in query:
+                marker["state"] = "ROLLING_BACK"
+                return ([{"state": "ROLLING_BACK"}], None, None)
+            if "SET m.state = 'RECOVERED_AMBIGUOUS'" in query:
+                marker["state"] = "RECOVERED_AMBIGUOUS"
+                return ([{"state": "RECOVERED_AMBIGUOUS"}], None, None)
+            return ([], None, None)
+
+    guard = Neo4jMutationGuard(
+        Driver(),
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        episode_uuid="episode-id",
+        attempt_number=2,
+        input_digest="sha256:" + "0" * 64,
+    )
+    retained = asyncio.run(guard.begin())
+    assert retained.attempt_number == 1
+    assert asyncio.run(
+        guard.rollback_pending(
+            chat_invocations=[],
+            embedding_usage={"usage_basis": "NO_EMBEDDING_CALL"},
+            reason="RECOVERED_PENDING_PROCESS_DEATH",
+        )
+    )
+    assert snapshot_ids
+    assert set(snapshot_ids) == {"episode-id:1"}
+
+
+@pytest.mark.parametrize("state", ["SNAPSHOTTING", "RECOVERED_AMBIGUOUS"])
+def test_guard_retry_resets_snapshot_after_retained_attempt_cleanup(
+    state: str,
+) -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import Neo4jMutationGuard
+
+    marker: dict[str, object] | None = {
+        "state": state,
+        "group_id": GRAPHITI_WORKSPACE_GROUP,
+        "attempt_number": 1,
+        "input_digest": "sha256:" + "0" * 64,
+        "snapshot_id": "episode-id:1",
+        "chat_invocations_json": "[]",
+        "embedding_usage_json": "null",
+    }
+    deleted_snapshots: list[str] = []
+    created_snapshots: list[str] = []
+
+    class Driver:
+        async def execute_query(
+            self,
+            query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            nonlocal marker
+            assert routing_ == "w"
+            if "RETURN properties(m) AS marker" in query:
+                return ([] if marker is None else [{"marker": marker}], None, None)
+            if "NewsroomSnapshot" in query and "DELETE s" in query:
+                deleted_snapshots.append(str(params["snapshot_id"]))
+            if "MATCH (m:NewsroomIngestMarker" in query and "DELETE m" in query:
+                marker = None
+            if "CREATE (m:NewsroomIngestMarker" in query:
+                created_snapshots.append(str(params["snapshot_id"]))
+            return ([], None, None)
+
+    guard = Neo4jMutationGuard(
+        Driver(),
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        episode_uuid="episode-id",
+        attempt_number=2,
+        input_digest="sha256:" + "0" * 64,
+    )
+    created = asyncio.run(guard.begin())
+    assert created.attempt_number == 2
+    assert created_snapshots == ["episode-id:2"]
+    assert deleted_snapshots == ["episode-id:1"]
+
+
+def test_guard_rejects_mismatched_retained_snapshot_identity() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import GuardError, Neo4jMutationGuard
+
+    marker = {
+        "state": "PENDING",
+        "group_id": GRAPHITI_WORKSPACE_GROUP,
+        "attempt_number": 1,
+        "input_digest": "sha256:" + "0" * 64,
+        "snapshot_id": "episode-id:2",
+        "chat_invocations_json": "[]",
+        "embedding_usage_json": "null",
+    }
+
+    class Driver:
+        async def execute_query(
+            self,
+            _query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            assert params == {"episode_uuid": "episode-id"}
+            assert routing_ == "w"
+            return ([{"marker": marker}], None, None)
+
+    guard = Neo4jMutationGuard(
+        Driver(),
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        episode_uuid="episode-id",
+        attempt_number=2,
+        input_digest="sha256:" + "0" * 64,
+    )
+    with pytest.raises(GuardError, match="snapshot identity"):
+        asyncio.run(guard.begin())
+
+
+def test_complete_guard_recovery_cleans_crash_window_snapshot() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import Neo4jMutationGuard
+
+    deleted_snapshots: list[str] = []
+    marker = {
+        "state": "COMPLETE",
+        "group_id": GRAPHITI_WORKSPACE_GROUP,
+        "attempt_number": 1,
+        "input_digest": "sha256:" + "0" * 64,
+        "snapshot_id": "episode-id:1",
+        "chat_invocations_json": "[]",
+        "embedding_usage_json": "null",
+    }
+
+    class Driver:
+        async def execute_query(
+            self,
+            query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            assert routing_ == "w"
+            if "RETURN properties(m) AS marker" in query:
+                return ([{"marker": marker}], None, None)
+            if "NewsroomSnapshot" in query and "DELETE s" in query:
+                deleted_snapshots.append(str(params["snapshot_id"]))
+            return ([], None, None)
+
+    guard = Neo4jMutationGuard(
+        Driver(),
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        episode_uuid="episode-id",
+        attempt_number=2,
+        input_digest="sha256:" + "0" * 64,
+    )
+    retained = asyncio.run(guard.begin())
+    assert retained.state.value == "COMPLETE"
+    assert deleted_snapshots == ["episode-id:1"]
+
+
 def test_complete_guard_recovery_requires_byte_exact_canonical_snapshot() -> None:
     from newsroom.graphiti_adapter.neo4j_guard import (
         GuardError,
@@ -766,7 +953,10 @@ def test_immutable_completion_snapshot_restores_without_graph_rehydration(
     restored = restore_validated_snapshot(raw=raw, attempt=attempt)
     assert restored.produced.raw_output_value == raw
     assert restored.provider_attempt_number == 1
-    assert restored.recovery_classification == "RECOVERED_IMMUTABLE_COMPLETE"
+    assert (
+        restored.recovery_classification
+        is GraphitiRecoveryClassification.RECOVERED_IMMUTABLE_COMPLETE
+    )
 
     corrupted = dict(raw)
     corrupted["framework"] = "graphiti-core==mutated"

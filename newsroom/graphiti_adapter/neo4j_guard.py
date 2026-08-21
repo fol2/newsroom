@@ -106,6 +106,15 @@ class Neo4jMutationGuard:
         marker = _record_value(records[0], "marker")
         return dict(marker) if isinstance(marker, dict) else None
 
+    def _adopt_retained_snapshot(
+        self, raw: dict[str, object], *, attempt_number: int
+    ) -> None:
+        snapshot_id = str(raw.get("snapshot_id") or "")
+        expected = f"{self._episode_uuid}:{attempt_number}"
+        if snapshot_id != expected:
+            raise GuardError("Graphiti guard snapshot identity is malformed")
+        self._snapshot_id = snapshot_id
+
     def _bind_marker(self, raw: dict[str, object]) -> GuardMarker:
         if (
             str(raw.get("group_id") or "") != self._group_id
@@ -117,6 +126,7 @@ class Neo4jMutationGuard:
             attempt_number = int(raw["attempt_number"])
         except (KeyError, TypeError, ValueError) as exc:
             raise GuardError("Graphiti guard marker is malformed") from exc
+        self._adopt_retained_snapshot(raw, attempt_number=attempt_number)
         invocations: tuple[dict[str, object], ...] = ()
         embedding_usage: dict[str, object] | None = None
         try:
@@ -149,19 +159,29 @@ class Neo4jMutationGuard:
                     raise GuardError(
                         "Graphiti guard marker identity differs from this input"
                     )
+                try:
+                    retained_attempt = int(retained["attempt_number"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise GuardError("Graphiti guard marker is malformed") from exc
+                self._adopt_retained_snapshot(
+                    retained, attempt_number=retained_attempt
+                )
                 await self._delete_snapshot()
                 await self._delete_marker()
                 return await self.begin()
             marker = self._bind_marker(retained)
             if marker.state is GuardState.COMPLETE:
+                await self._delete_snapshot()
                 return marker
             if marker.state is GuardState.RECOVERED_AMBIGUOUS:
+                await self._delete_snapshot()
                 if self._attempt_number <= marker.attempt_number:
                     return marker
                 await self._delete_marker()
             else:
                 return marker
 
+        self._snapshot_id = f"{self._episode_uuid}:{self._attempt_number}"
         await self._query(
             f"""
             CREATE (m:{_MARKER} {{
@@ -376,6 +396,9 @@ class Neo4jMutationGuard:
             f"""
             MATCH (s:{_SNAPSHOT_NODE} {{_newsroom_snapshot_id: $snapshot_id}})
             MATCH (n {{uuid: s._newsroom_source_uuid}})
+            WHERE NOT n:{_SNAPSHOT_NODE}
+              AND NOT n:{_SNAPSHOT_RELATIONSHIP}
+              AND NOT n:{_MARKER}
             SET n = properties(s)
             REMOVE n._newsroom_snapshot_id,
                    n._newsroom_source_uuid,
@@ -390,6 +413,10 @@ class Neo4jMutationGuard:
                   -[r {{uuid: s._newsroom_relationship_uuid}}]->
                   (b {{uuid: s._newsroom_target_uuid}})
             WHERE type(r) = s._newsroom_relationship_type
+              AND NOT a:{_SNAPSHOT_NODE} AND NOT b:{_SNAPSHOT_NODE}
+              AND NOT a:{_SNAPSHOT_RELATIONSHIP}
+              AND NOT b:{_SNAPSHOT_RELATIONSHIP}
+              AND NOT a:{_MARKER} AND NOT b:{_MARKER}
             SET r = properties(s)
             REMOVE r._newsroom_snapshot_id,
                    r._newsroom_relationship_uuid,
@@ -405,6 +432,9 @@ class Neo4jMutationGuard:
             f"""
             MATCH (s:{_SNAPSHOT_NODE} {{_newsroom_snapshot_id: $snapshot_id}})
             MATCH (n {{uuid: s._newsroom_source_uuid}})
+            WHERE NOT n:{_SNAPSHOT_NODE}
+              AND NOT n:{_SNAPSHOT_RELATIONSHIP}
+              AND NOT n:{_MARKER}
             RETURN n.uuid AS uuid,
                    s._newsroom_source_labels AS expected,
                    labels(n) AS actual
@@ -419,12 +449,24 @@ class Neo4jMutationGuard:
                 raise GuardError("Graphiti generation contains an unsafe dynamic label")
             for label in sorted(actual - expected):
                 await self._query(
-                    f"MATCH (n {{uuid: $uuid}}) REMOVE n:`{label}`",
+                    f"""
+                    MATCH (n {{uuid: $uuid}})
+                    WHERE NOT n:{_SNAPSHOT_NODE}
+                      AND NOT n:{_SNAPSHOT_RELATIONSHIP}
+                      AND NOT n:{_MARKER}
+                    REMOVE n:`{label}`
+                    """,
                     uuid=uuid,
                 )
             for label in sorted(expected - actual):
                 await self._query(
-                    f"MATCH (n {{uuid: $uuid}}) SET n:`{label}`",
+                    f"""
+                    MATCH (n {{uuid: $uuid}})
+                    WHERE NOT n:{_SNAPSHOT_NODE}
+                      AND NOT n:{_SNAPSHOT_RELATIONSHIP}
+                      AND NOT n:{_MARKER}
+                    SET n:`{label}`
+                    """,
                     uuid=uuid,
                 )
 
@@ -433,6 +475,9 @@ class Neo4jMutationGuard:
             f"""
             MATCH (s:{_SNAPSHOT_NODE} {{_newsroom_snapshot_id: $snapshot_id}})
             OPTIONAL MATCH (n {{uuid: s._newsroom_source_uuid}})
+            WHERE NOT n:{_SNAPSHOT_NODE}
+              AND NOT n:{_SNAPSHOT_RELATIONSHIP}
+              AND NOT n:{_MARKER}
             RETURN properties(s) AS snapshot,
                    properties(n) AS current,
                    labels(n) AS current_labels
@@ -465,6 +510,10 @@ class Neo4jMutationGuard:
                   -[r {{uuid: s._newsroom_relationship_uuid}}]->
                   (b {{uuid: s._newsroom_target_uuid}})
             WHERE type(r) = s._newsroom_relationship_type
+              AND NOT a:{_SNAPSHOT_NODE} AND NOT b:{_SNAPSHOT_NODE}
+              AND NOT a:{_SNAPSHOT_RELATIONSHIP}
+              AND NOT b:{_SNAPSHOT_RELATIONSHIP}
+              AND NOT a:{_MARKER} AND NOT b:{_MARKER}
             RETURN properties(s) AS snapshot,
                    properties(r) AS current,
                    a.uuid AS source_uuid,

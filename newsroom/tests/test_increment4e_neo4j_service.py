@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import atexit
+import asyncio
 from functools import lru_cache
 import os
 from pathlib import Path
 import sqlite3
+import uuid
 
 import pytest
+from neo4j import EagerResult
 
 from newsroom.increment4 import (
     Increment4Neo4jActiveReadRequest,
@@ -133,6 +136,116 @@ def _cleanup(
 def _event_count(path: Path) -> int:
     with sqlite3.connect(path) as conn:
         return int(conn.execute("SELECT COUNT(*) FROM ledger_events").fetchone()[0])
+
+
+def test_actual_service_guard_rollback_does_not_promote_snapshot_copies() -> None:
+    graphiti_driver = pytest.importorskip("graphiti_core.driver.neo4j_driver")
+    from newsroom.graphiti_adapter.neo4j_guard import Neo4jMutationGuard
+
+    async def exercise() -> None:
+        config = _service_config()
+        suffix = str(uuid.uuid4())
+        group_id = f"newsroom-guard-service-{suffix}"
+        episode_uuid = f"episode-{suffix}"
+        snapshot_id = f"{episode_uuid}:1"
+        driver = graphiti_driver.Neo4jDriver(
+            config.uri,
+            config.username,
+            config.password,
+            database=config.database,
+        )
+
+        async def query(cypher: str, **parameters: object) -> EagerResult:
+            return await driver.execute_query(
+                cypher, params=parameters, routing_="w"
+            )
+
+        try:
+            await query(
+                """
+                CREATE (a:Entity {uuid:$a, group_id:$group_id, name:'before'}),
+                       (b:Entity {uuid:$b, group_id:$group_id, name:'other'}),
+                       (a)-[:REL {uuid:$relationship, fact:'before'}]->(b)
+                """,
+                a=f"a-{suffix}",
+                b=f"b-{suffix}",
+                relationship=f"relationship-{suffix}",
+                group_id=group_id,
+            )
+            guard = Neo4jMutationGuard(
+                driver,
+                group_id=group_id,
+                episode_uuid=episode_uuid,
+                attempt_number=1,
+                input_digest="sha256:" + "1" * 64,
+            )
+            await guard.begin()
+            await query(
+                """
+                MATCH (a {uuid:$a})-[r]->()
+                SET a.name='after', r.fact='after'
+                CREATE (:Entity {uuid:$new, group_id:$group_id, name:'new'})
+                """,
+                a=f"a-{suffix}",
+                new=f"new-{suffix}",
+                group_id=group_id,
+            )
+            await guard.rollback_pending(
+                chat_invocations=[],
+                embedding_usage={
+                    "usage_basis": "NO_EMBEDDING_CALL",
+                    "request_count": 0,
+                },
+                reason="SERVICE_TEST",
+            )
+            result = await query(
+                """
+                MATCH (n {group_id:$group_id})
+                WHERE n.uuid IS NOT NULL
+                OPTIONAL MATCH (n)-[r]->()
+                RETURN collect(DISTINCT [n.uuid,n.name]) AS nodes,
+                       collect(DISTINCT [r.uuid,r.fact]) AS relationships
+                """,
+                group_id=group_id,
+            )
+            snapshots = await query(
+                """
+                MATCH (s)
+                WHERE s._newsroom_snapshot_id=$snapshot_id
+                   OR s:NewsroomSnapshotNode
+                      AND s.group_id=$group_id
+                   OR s:NewsroomSnapshotRelationship
+                      AND s.uuid=$relationship
+                RETURN count(s) AS count
+                """,
+                snapshot_id=snapshot_id,
+                group_id=group_id,
+                relationship=f"relationship-{suffix}",
+            )
+            record = result.records[0]
+            assert sorted(record["nodes"]) == sorted(
+                [[f"a-{suffix}", "before"], [f"b-{suffix}", "other"]]
+            )
+            assert [
+                item for item in record["relationships"] if item[0] is not None
+            ] == [[f"relationship-{suffix}", "before"]]
+            assert int(snapshots.records[0]["count"]) == 0
+        finally:
+            await query(
+                """
+                MATCH (n)
+                WHERE n.group_id=$group_id
+                   OR n.episode_uuid=$episode_uuid
+                   OR n._newsroom_snapshot_id=$snapshot_id
+                DETACH DELETE n
+                """,
+                group_id=group_id,
+                episode_uuid=episode_uuid,
+                snapshot_id=snapshot_id,
+            )
+            await driver.close()
+
+    asyncio.run(exercise())
 
 
 def test_actual_service_increment4_admitted_state_projects_exactly_and_replays(
