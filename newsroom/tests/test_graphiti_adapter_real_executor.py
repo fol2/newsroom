@@ -598,6 +598,7 @@ def test_episode_uses_default_database_and_validates_before_complete(
         Graphiti=Graphiti,
         OpenAIEmbedder=lambda **_values: delegate,
         OpenAIEmbedderConfig=lambda **values: SimpleNamespace(**values),
+        MeteredOpenAIEmbedder=real.MeteredOpenAIEmbedder,
         IdentityCrossEncoder=lambda: object(),
         EpisodeType=SimpleNamespace(text="text"),
         EpisodicNode=Episode,
@@ -690,6 +691,7 @@ def test_process_recovery_uses_durable_guard_before_provider_dispatch(
         Graphiti=Graphiti,
         OpenAIEmbedder=lambda **_values: delegate,
         OpenAIEmbedderConfig=lambda **values: SimpleNamespace(**values),
+        MeteredOpenAIEmbedder=real.MeteredOpenAIEmbedder,
         IdentityCrossEncoder=lambda: object(),
         MutationGuard=lambda *_args, **_values: Guard(),
     )
@@ -772,6 +774,7 @@ def test_cancelled_episode_cleanup_is_ordered_and_bounded(
         Graphiti=Graphiti,
         OpenAIEmbedder=lambda **_values: delegate,
         OpenAIEmbedderConfig=lambda **values: SimpleNamespace(**values),
+        MeteredOpenAIEmbedder=real.MeteredOpenAIEmbedder,
         IdentityCrossEncoder=lambda: object(),
         EpisodeType=SimpleNamespace(text="text"),
         MutationGuard=lambda *_args, **_values: Guard(),
@@ -1194,6 +1197,27 @@ def test_immutable_completion_preserves_original_access_after_rights_renewal(
     ] == old_access
 
 
+def test_runtime_metered_embedder_satisfies_a_nominal_client_contract() -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    class NominalEmbedderClient:
+        pass
+
+    meter_type = real._runtime_metered_embedder_type(NominalEmbedderClient)
+    meter = meter_type(
+        SimpleNamespace(
+            client=SimpleNamespace(),
+            config=SimpleNamespace(
+                embedding_model="openai/text-embedding-3-large",
+                embedding_dim=2,
+            ),
+        )
+    )
+
+    assert isinstance(meter, NominalEmbedderClient)
+    assert isinstance(meter, real.MeteredOpenAIEmbedder)
+
+
 def test_embedding_meter_retains_provider_tokens_and_native_usd_cost() -> None:
     from newsroom.graphiti_adapter.embedding_meter import MeteredOpenAIEmbedder
 
@@ -1374,6 +1398,7 @@ def test_retryable_failure_returns_diagnostic_receipt_without_structured_output(
     assert produced.raw_output_value is None
     assert produced.attempt_receipt_value is not None
     assert produced.attempt_receipt_value["chat_invocation_count"] == 1
+    assert produced.attempt_receipt_value["producer_failure"] == "RuntimeError"
     assert produced.attempt_receipt_value["usage_basis"] == "NO_EMBEDDING_CALL"
     assert produced.attempt_receipt_value["token_usage"]["usage_basis"] == (
         "UNREPORTED"
