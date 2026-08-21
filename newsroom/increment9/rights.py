@@ -105,10 +105,10 @@ UK_05_ENDPOINT = (
 )
 UK_05_SOURCE_ROLE = "DfE and Ofqual education anchor"
 UK_10_ENDPOINT = (
-    "https://weather.metoffice.gov.uk/public/data/PWSCache/WarningsRSS/Region/UK"
-)
-UK_10_NINE_P_ENDPOINT = (
     "https://www.metoffice.gov.uk/public/data/PWSCache/WarningsRSS/Region/UK"
+)
+UK_10_RETIRED_ENDPOINT = (
+    "https://weather.metoffice.gov.uk/public/data/PWSCache/WarningsRSS/Region/UK"
 )
 UK_10_SOURCE_ROLE = "Met Office warning anchor"
 HK_01_ENDPOINT = "https://www.news.gov.hk/tc/common/html/topstories.rss.xml"
@@ -119,10 +119,8 @@ HK_02_ENDPOINT = (
 HK_02_SOURCE_ROLE = "HKO warning anchor"
 HK_04_ENDPOINT = "https://www.edb.gov.hk/tc/whats_new_rss.xml"
 HK_04_SOURCE_ROLE = "EDB education anchor"
-RAD_01_ENDPOINT = "https://rthk.hk/rthk/news/rss/c_expressnews_clocal.xml"
-RAD_01_NINE_P_ENDPOINT = (
-    "https://rthk9.rthk.hk/rthk/news/rss/c_expressnews_clocal.xml"
-)
+RAD_01_ENDPOINT = "https://rthk9.rthk.hk/rthk/news/rss/c_expressnews_clocal.xml"
+RAD_01_RETIRED_ENDPOINT = "https://rthk.hk/rthk/news/rss/c_expressnews_clocal.xml"
 RAD_01_SOURCE_ROLE = "RTHK lead-only comparator"
 RAD_02_ENDPOINT = "https://feeds.bbci.co.uk/news/uk/rss.xml"
 RAD_02_SOURCE_ROLE = "BBC UK lead-only comparator"
@@ -132,10 +130,9 @@ _EMITTED_ONLY = (
     "RIGHTS_HK-04, RIGHTS_RAD-01 and RIGHTS_RAD-02 only"
 )
 
-# Exact OD-001 endpoints. Tests assert equality with proving.SOURCE_URLS
-# except RIGHTS_UK-10, which binds the weather host (#578), not the 9P www
-# host, and RIGHTS_RAD-01, which binds the rthk.hk host (#582), not the 9P
-# rthk9 host. These are two named host-alias exceptions, not one generic rule.
+# Current exact source endpoints. Proving derives its transport portfolio from
+# these bindings so a reviewed endpoint and the URL actually fetched cannot
+# drift independently.
 BINDINGS: dict[str, tuple[str, str, str]] = {
     HK_01_GATE_ID: (
         "HK-01",
@@ -966,7 +963,11 @@ def _should_engage_binding_mismatch(gate: str) -> bool:
     if gate == UK_10_GATE_ID:
         aliased = _with_reviews(
             [
-                fixture_review(family, gate=gate, endpoint=UK_10_NINE_P_ENDPOINT)
+                fixture_review(
+                    family,
+                    gate=gate,
+                    endpoint=UK_10_RETIRED_ENDPOINT,
+                )
                 for family in FIXTURE_FAMILIES
             ],
             gate=gate,
@@ -987,7 +988,11 @@ def _should_engage_binding_mismatch(gate: str) -> bool:
     if gate == RAD_01_GATE_ID:
         aliased = _with_reviews(
             [
-                fixture_review(family, gate=gate, endpoint=RAD_01_NINE_P_ENDPOINT)
+                fixture_review(
+                    family,
+                    gate=gate,
+                    endpoint=RAD_01_RETIRED_ENDPOINT,
+                )
                 for family in FIXTURE_FAMILIES
             ],
             gate=gate,

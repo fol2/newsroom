@@ -13,6 +13,8 @@ from newsroom.control_plane.paths import (
     CANONICAL_PROVING_STORE,
     ensure_control_plane_state_root,
 )
+from newsroom.control_plane.rights_renewal import automatic_rights_arguments
+from newsroom.increment9.prospective_run_authority import persist_authorised_chain
 from newsroom.increment9.proving import (
     ProvingReport,
     assess,
@@ -23,10 +25,6 @@ from newsroom.increment9.proving import (
 
 
 DEFAULT_PROVING_STORE = str(CANONICAL_PROVING_STORE)
-
-
-def _now() -> str:
-    return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -48,12 +46,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{item.source_id}\t{item.status_code}\t{item.item_count}\t{item.body_digest}")
         return 0
     Path(args.store).parent.mkdir(parents=True, exist_ok=True)
+    instant = datetime.now(tz=UTC)
+    fetched_at = instant.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    chain = persist_authorised_chain(run_id=args.run_id)
     report = run_proving(
         store_path=args.store,
         run_id=args.run_id,
-        fetched_at=_now(),
+        fetched_at=fetched_at,
         kill_switch=kill,
         no_emergency_stop=args.attest_no_emergency_stop,
+        run_authority=chain.resolver,
+        **automatic_rights_arguments(proving_store=args.store, now=instant),
     )
     sys.stdout.buffer.write(report_json(report))
     sys.stdout.write("\n")

@@ -85,7 +85,9 @@ from newsroom.increment9.proving import (
 from newsroom.increment9.rights import (
     FIXTURE_DESTINATIONS,
     RAD_01_ENDPOINT,
+    RAD_01_RETIRED_ENDPOINT,
     UK_10_ENDPOINT,
+    UK_10_RETIRED_ENDPOINT,
     fixture_inventory,
 )
 from newsroom.tests.test_control_plane_private_beta import (
@@ -1177,6 +1179,75 @@ def test_older_run_backlog_remains_queued_after_a_new_run_arrives(
     ]
     connection.close()
     assert spend_runs == ["run-1", "run-1"]
+
+
+@pytest.mark.parametrize(
+    ("stored_error", "body"),
+    [
+        ("content-malformed-xml", None),
+        (None, b"<rss><channel>"),
+    ],
+)
+def test_malformed_success_observation_is_not_admitted_to_cycle(
+    tmp_path: Path, stored_error: str | None, body: bytes | None
+) -> None:
+    proving = _proving(tmp_path)
+    connection = sqlite3.connect(proving)
+    connection.execute(
+        """
+        UPDATE proving_observations
+        SET error=?, body=COALESCE(?, body)
+        WHERE run_id='run-1' AND source_id='UK-01'
+        """,
+        (stored_error, body),
+    )
+    connection.commit()
+    connection.close()
+    seen: list[str] = []
+
+    class Stub:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            seen.append(unit.source_id)
+            return _complete(unit)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(tmp_path / "unpublished_store.sqlite3"),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=Stub(),
+        max_graphiti=10,
+    )
+
+    assert "UK-01" not in seen
+    assert report.sources == 2
+    assert report.eligible == 2
+
+
+def test_raw_http_older_than_seven_days_is_not_admitted_to_cycle(
+    tmp_path: Path,
+) -> None:
+    proving = _proving(tmp_path)
+    seen: list[str] = []
+
+    class Stub:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            seen.append(unit.source_id)
+            return _complete(unit)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(tmp_path / "unpublished_store.sqlite3"),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=Stub(),
+        max_graphiti=10,
+        clock=lambda: datetime(2026, 8, 24, tzinfo=UTC),
+    )
+
+    assert seen == []
+    assert report.sources == 0
+    assert report.eligible == 0
 
 
 def test_latest_rights_decision_blocks_historical_backlog(tmp_path: Path) -> None:
@@ -2874,7 +2945,7 @@ def test_graphiti_dispatch_requires_every_evaluation_provider_destination(
     assert decision is None
 
 
-def test_uk10_and_rad01_nine_p_hosts_cannot_use_reviewed_endpoint_rights(
+def test_uk10_and_rad01_canonical_endpoints_dispatch_with_evaluation_destinations(
     tmp_path: Path,
 ) -> None:
     proving = _proving(tmp_path)
@@ -2907,13 +2978,17 @@ def test_uk10_and_rad01_nine_p_hosts_cannot_use_reviewed_endpoint_rights(
         evaluated_at="2026-08-21T00:00:00.000000Z",
     )
     connection.close()
-    assert SOURCE_URLS["UK-10"] != UK_10_ENDPOINT
-    assert SOURCE_URLS["RAD-01"] != RAD_01_ENDPOINT
-    assert uk10 is None
-    assert rad01 is None
+    assert SOURCE_URLS["UK-10"] == UK_10_ENDPOINT
+    assert SOURCE_URLS["RAD-01"] == RAD_01_ENDPOINT
+    assert uk10 is not None
+    assert uk10["rights_endpoint"] == UK_10_ENDPOINT
+    assert GRAPHITI_EVALUATION_DESTINATION_TOKENS.issubset(uk10["rights_destinations"])
+    assert rad01 is not None
+    assert rad01["rights_endpoint"] == RAD_01_ENDPOINT
+    assert GRAPHITI_EVALUATION_DESTINATION_TOKENS.issubset(rad01["rights_destinations"])
 
 
-def test_reviewed_uk10_and_rad01_endpoints_dispatch_with_evaluation_destinations(
+def test_uk10_and_rad01_retired_aliases_remain_binding_mismatch_held(
     tmp_path: Path,
 ) -> None:
     proving = _proving(tmp_path)
@@ -2921,14 +2996,14 @@ def test_reviewed_uk10_and_rad01_endpoints_dispatch_with_evaluation_destinations
     _retain_source(
         proving,
         source_id="UK-10",
-        url=UK_10_ENDPOINT,
+        url=UK_10_RETIRED_ENDPOINT,
         body=DATED_RSS,
         destinations=destinations,
     )
     _retain_source(
         proving,
         source_id="RAD-01",
-        url=RAD_01_ENDPOINT,
+        url=RAD_01_RETIRED_ENDPOINT,
         body=DATED_RSS,
         destinations=destinations,
     )
@@ -2936,21 +3011,22 @@ def test_reviewed_uk10_and_rad01_endpoints_dispatch_with_evaluation_destinations
     uk10 = _dispatch_rights_decision(
         connection,
         source_id="UK-10",
-        source_url=UK_10_ENDPOINT,
+        source_url=UK_10_RETIRED_ENDPOINT,
         evaluated_at="2026-08-21T00:00:00.000000Z",
     )
     rad01 = _dispatch_rights_decision(
         connection,
         source_id="RAD-01",
-        source_url=RAD_01_ENDPOINT,
+        source_url=RAD_01_RETIRED_ENDPOINT,
         evaluated_at="2026-08-21T00:00:00.000000Z",
     )
     connection.close()
-    assert uk10 is not None
-    assert uk10["rights_endpoint"] == UK_10_ENDPOINT
-    assert GRAPHITI_EVALUATION_DESTINATION_TOKENS.issubset(uk10["rights_destinations"])
-    assert rad01 is not None
-    assert rad01["rights_endpoint"] == RAD_01_ENDPOINT
+    assert "weather.metoffice.gov.uk" in UK_10_RETIRED_ENDPOINT
+    assert "rthk.hk" in RAD_01_RETIRED_ENDPOINT
+    assert UK_10_RETIRED_ENDPOINT != UK_10_ENDPOINT
+    assert RAD_01_RETIRED_ENDPOINT != RAD_01_ENDPOINT
+    assert uk10 is None
+    assert rad01 is None
 
 
 def test_current_rights_decision_does_not_authorise_a_different_endpoint(

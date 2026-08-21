@@ -75,17 +75,17 @@ from newsroom.graphiti_adapter.recovery_vocabulary import (
 from newsroom.graphiti_adapter.usage_meter import summarise_graphiti_usage
 from newsroom.increment9.proving import (
     FORBIDDEN_STORE_MARKERS,
+    GLOBAL_PROVING_GATES,
     PROVING_GATES,
+    assess_content,
 )
 from newsroom.increment9.rights import assess_rights
 
 
-GLOBAL_PROVING_GATES = frozenset(
-    gate_id for gate_id in PROVING_GATES if not gate_id.startswith("RIGHTS_")
-)
 _PROVING_RUN_LATEST_ORDER = "rowid DESC"
 _PROVING_RUN_EARLIEST_ORDER = "rowid ASC"
 _PROVING_FENCE_TIMEOUT_SECONDS = 5.0
+_RAW_HTTP_RETENTION: Final = timedelta(days=7)
 _GRAPHITI_RECOVERY_CLOSED_LEDGER_KIND: Final[str] = "GRAPHITI_EVALUATION_RECOVERY_CLOSED"
 _CLOSED_MARKER_RECOVERIES: Final[
     frozenset[GraphitiRecoveryClassification]
@@ -1326,6 +1326,10 @@ def _permitted_rows(
     evaluated_at: str,
     required_valid_until: str | None = None,
 ) -> tuple[str, tuple[_ProvingObservation, ...], tuple[_ProvingObservation, ...]]:
+    raw_http_cutoff = _utc_text(
+        datetime.fromisoformat(evaluated_at.replace("Z", "+00:00"))
+        - _RAW_HTTP_RETENTION
+    )
     runs = proving.execute(
         f"SELECT run_id FROM proving_runs ORDER BY {_PROVING_RUN_EARLIEST_ORDER}"
     ).fetchall()
@@ -1340,14 +1344,14 @@ def _permitted_rows(
         run_id = str(raw_run_id)
         values = proving.execute(
             """
-            SELECT source_id, url, fetched_at, status_code, body_digest, body
+            SELECT source_id, url, fetched_at, status_code, body_digest, body, error
             FROM proving_observations
-            WHERE run_id=?
+            WHERE run_id=? AND fetched_at>=?
             ORDER BY source_id, fetched_at, body_digest
             """,
-            (run_id,),
+            (run_id, raw_http_cutoff),
         ).fetchall()
-        for source_id, url, fetched_at, status_code, body_digest, body in values:
+        for source_id, url, fetched_at, status_code, body_digest, body, error in values:
             source_id_text = str(source_id)
             source_url = str(url)
             current = _current_rights_decision(
@@ -1362,7 +1366,11 @@ def _permitted_rows(
                 current is None
                 or int(status_code) != 200
                 or not body
+                or error is not None
             ):
+                continue
+            body_bytes = bytes(body)
+            if not assess_content(source_url, body_bytes).usable:
                 continue
             stable_rights = dict(current)
             stable_rights.pop("evaluated_at", None)
@@ -1374,7 +1382,7 @@ def _permitted_rows(
                 fetched_at=str(fetched_at),
                 status_code=int(status_code),
                 body_digest=str(body_digest),
-                body=bytes(body),
+                body=body_bytes,
                 rights_authority_run_id=latest_run_id,
                 rights_gate_id=gate_id,
                 rights_gate_reason=canonical_json_bytes(stable_rights).decode("utf-8"),

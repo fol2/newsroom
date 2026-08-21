@@ -376,12 +376,6 @@ def test_bindings_match_portfolio_and_proving_assess_wires_uk_01_uk_02_and_uk_03
     for gate_id, (source_id, _role, endpoint) in BINDINGS.items():
         assert "&amp;" not in endpoint
         assert gate_id == f"RIGHTS_{source_id}"
-        if source_id == "UK-10":
-            assert endpoint != SOURCE_URLS[source_id]
-            continue
-        if source_id == "RAD-01":
-            assert endpoint != SOURCE_URLS[source_id]
-            continue
         assert endpoint == SOURCE_URLS[source_id]
     assert BINDINGS[GATE_ID][2] == UK_01_ENDPOINT
     from newsroom.increment9.proving import assess as proving_assess

@@ -8,19 +8,14 @@ from os import environ
 from typing import Callable
 from uuid import uuid4
 
+from newsroom.control_plane.rights_renewal import automatic_rights_arguments
 from newsroom.increment9.prospective_run_authority import persist_authorised_chain
-from newsroom.increment9.proving import Fetcher, ProvingReport, run_proving
-from newsroom.increment9.rights import (
-    HK_01_GATE_ID,
-    HK_02_GATE_ID,
-    HK_04_GATE_ID,
-    RAD_01_GATE_ID,
-    RAD_02_GATE_ID,
-    UK_02_GATE_ID,
-    UK_03_GATE_ID,
-    UK_05_GATE_ID,
-    UK_10_GATE_ID,
-    fixture_inventory,
+from newsroom.increment9.proving import (
+    Fetcher,
+    ProvingReport,
+    SOURCE_IDS,
+    SourceHealthStatus,
+    run_proving,
 )
 
 
@@ -31,22 +26,11 @@ class IntakeReport:
     authorised: bool
     ok: int
     sources: int
-
-
-def _rights(*, now: str) -> dict[str, object]:
-    return {
-        "rights": fixture_inventory(),
-        "rights_uk_02": fixture_inventory(gate=UK_02_GATE_ID),
-        "rights_uk_03": fixture_inventory(gate=UK_03_GATE_ID),
-        "rights_uk_05": fixture_inventory(gate=UK_05_GATE_ID),
-        "rights_uk_10": fixture_inventory(gate=UK_10_GATE_ID),
-        "rights_hk_01": fixture_inventory(gate=HK_01_GATE_ID),
-        "rights_hk_02": fixture_inventory(gate=HK_02_GATE_ID),
-        "rights_hk_04": fixture_inventory(gate=HK_04_GATE_ID),
-        "rights_rad_01": fixture_inventory(gate=RAD_01_GATE_ID),
-        "rights_rad_02": fixture_inventory(gate=RAD_02_GATE_ID),
-        "now": now,
-    }
+    health: str
+    active: int
+    degraded: int
+    held: int
+    blocked: int
 
 
 def _run_id(now: datetime) -> str:
@@ -73,13 +57,38 @@ def run_intake(
         no_emergency_stop=True,
         fetch=fetch,
         run_authority=chain.resolver,
-        **_rights(now=fetched_at),
+        **automatic_rights_arguments(proving_store=proving_store, now=instant),
     )
-    ok = sum(1 for item in report.observations if item.status_code == 200)
+    ok = sum(
+        1
+        for item in report.observations
+        if item.status_code == 200 and item.error is None
+    )
+    health_counts = {
+        status: sum(1 for item in report.source_health if item.status is status)
+        for status in SourceHealthStatus
+    }
+    active = health_counts[SourceHealthStatus.ACTIVE]
+    degraded = health_counts[SourceHealthStatus.DEGRADED]
+    held = health_counts[SourceHealthStatus.HELD]
+    blocked = health_counts[SourceHealthStatus.BLOCKED]
+    if blocked:
+        posture = SourceHealthStatus.BLOCKED.value
+    elif active == len(SOURCE_IDS):
+        posture = SourceHealthStatus.ACTIVE.value
+    elif held and not active and not degraded:
+        posture = SourceHealthStatus.HELD.value
+    else:
+        posture = SourceHealthStatus.DEGRADED.value
     return IntakeReport(
         proving_run_id=run_id,
         complete=report.complete,
         authorised=report.authorised,
         ok=ok,
         sources=len(report.observations),
+        health=posture,
+        active=active,
+        degraded=degraded,
+        held=held,
+        blocked=blocked,
     )

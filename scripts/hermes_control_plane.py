@@ -103,6 +103,11 @@ def main(argv: list[str] | None = None) -> int:
                     "complete": intake.complete,
                     "ok": intake.ok,
                     "sources": intake.sources,
+                    "health": intake.health,
+                    "active": intake.active,
+                    "degraded": intake.degraded,
+                    "held": intake.held,
+                    "blocked": intake.blocked,
                     "public_dispatch": False,
                     "auto_publish": False,
                 },
@@ -137,7 +142,10 @@ def main(argv: list[str] | None = None) -> int:
             intake = run_intake(proving_store=args.proving)
             print(
                 f"intake run={intake.proving_run_id} authorised={intake.authorised} "
-                f"ok={intake.ok}/{intake.sources} complete={intake.complete}",
+                f"ok={intake.ok}/{intake.sources} complete={intake.complete} "
+                f"health={intake.health} active={intake.active} "
+                f"degraded={intake.degraded} held={intake.held} "
+                f"blocked={intake.blocked}",
                 flush=True,
             )
             report = _cycle(args)
