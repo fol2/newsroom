@@ -7,8 +7,8 @@
 - Date: 2026-08-21
 - Related issue: [#739](https://github.com/fol2/newsroom/issues/739)
 - Related: [#726](https://github.com/fol2/newsroom/issues/726) (parent), [#731](https://github.com/fol2/newsroom/issues/731) (unblocked by this), [#728](https://github.com/fol2/newsroom/issues/728), [#730](https://github.com/fol2/newsroom/issues/730), [#736](https://github.com/fol2/newsroom/issues/736), [#737](https://github.com/fol2/newsroom/issues/737)
-- Code base: worktree HEAD `d24663236b99453088f07c018e498b1ff4643f61`
-- Cursor Agent CLI: `2026.08.11-e8db854` (`/Users/jamesto/.local/bin/cursor-agent`)
+- Measurement worktree HEAD: `d24663236b99453088f07c018e498b1ff4643f61` (source inspection and calibration preparation; PR exact state is recorded in #745)
+- Cursor Agent CLI: `2026.08.11-e8db854` (`~/.local/bin/cursor-agent`)
 - graphiti-core: `0.29.3` (optional extra; `pyproject.toml`)
 - Local host observation: `cursor-agent about --format json` reports `subscriptionTier` Ultra (email omitted)
 - Owner-approved calibration: 2026-08-21; 6 of 8 Cursor print-mode calls; no Grok; no OpenRouter. Redacted receipts: [`2026-08-21-graphiti-cursor-subscription-bootstrap-calibration.json`](2026-08-21-graphiti-cursor-subscription-bootstrap-calibration.json)
@@ -115,9 +115,9 @@ Provider-free reconstruction on graphiti-core 0.29.3 with a 368-byte `EpisodeTyp
 |---|---|---|---|
 | Graphiti messages + appended JSON schema + language instruction | **Measured** | 5.3–8.0 k characters on the sample shape | Not the 21,960 |
 | Irreducible Cursor system prompt | **Unresolved** | Not exposed in CLI help or print-mode JSON | unknown |
-| Agent tool definitions | **Measured** + **Documented** | `--print` still has all tools. No `--no-tools`. Hermetic tiny prompt still cost 20,103 input tokens. Isolated HOME still materialises 22 `skills-cursor` files | **~20,100**; dominant term |
-| Workspace / repository / project rules / `AGENTS.md` | **Documented** + **Measured** | CLI loads `.cursor/rules`, `AGENTS.md`, `CLAUDE.md` from the project. Graphiti cwd is an empty temp dir, so **project** rules should be absent | likely ~0 from cwd |
-| User rules, user MCP, user skills, plugins | **Measured** 2026-08-21 | Ambient HOME still has `mcp.json`, user rules, 642 Claude skills, 43 agents skills. Hermetic HOME (Keychains symlink only) has none of those. Cursor still *materialises* 22 built-in `skills-cursor` files plus a `plugins/` dir into the isolated `~/.cursor` during the call | **2,281–2,284 input tokens** vs ambient on the same prompt |
+| Cursor-agent residual context (system/tool/built-in-skill mix) | **Measured** + **Documented**, exact attribution **Unresolved** | `--print` exposes tools and the CLI has no `--no-tools`. The hermetic tiny run still reported 20,103 input tokens for a 49-character prompt, and the isolated HOME materialised 22 `skills-cursor` files | **20,103 total input observed**; exact component split unknown |
+| Workspace / repository / project rules / `AGENTS.md` | **Documented** + **Inferred** | CLI loads `.cursor/rules`, `AGENTS.md`, `CLAUDE.md` from the project. Graphiti cwd is an empty temp dir, so **project** rules are expected to be absent | likely ~0 from cwd; not provider-exposed |
+| User rules, user MCP, user skills, plugins | **Measured** 2026-08-21 | Ambient HOME has `mcp.json`, user rules, 642 Claude skills and 43 agents skills. Hermetic HOME (Keychains symlink only) has none of those. Cursor still materialises 22 built-in `skills-cursor` files plus a `plugins/` dir into isolated `~/.cursor` | **2,281–2,284 input tokens** saved by the tested ambient-vs-hermetic boundary as a whole; no per-component split |
 | Team rules | **Documented** | Team rules apply across repositories when enabled | unknown on this host |
 | Built-in skills | **Documented** | Cursor ships built-in skills (`/sdk`, `/shell`, `/create-rule`, …) and “may also use some automatically” | unknown |
 | Prior conversation | **Measured** | Each invocation is a new process; `--resume` / `--continue` are not passed | 0 by command shape |
@@ -125,16 +125,16 @@ Provider-free reconstruction on graphiti-core 0.29.3 with a 368-byte `EpisodeTyp
 | Prompt cache | **Measured** + **Documented** | 576 cache-read tokens/call. Composer 2.5 cache-read list price $0.20 / 1M vs $0.50 / 1M input. SDK `totalTokens` **includes** cache-read/write | cache is small here; see §7 |
 | What counts against the Cursor Models pool | **Documented** | Composer 2.5 draws from the Cursor Models pool (with Grok 4.6 / 4.5). CLI, IDE, SDK and Cloud Agent runs share pricing/request pools. Input, output and cached tokens are the metered dimensions | the 23 k input/call counts; cache-read counts at the cache-read rate |
 
-**Bound (measured 2026-08-21).** The ~21,960-token per-call delta is **Cursor-agent bootstrap**, not source size.
+**Bound (measured 2026-08-21).** The ~21,960-token per-call delta is dominated by Cursor-agent-side context outside the application prompt; source size and Graphiti schema bulk cannot explain it. The exact split among system prompt, tool schemas, built-in skills and any other provider-side heading remains unresolved.
 
 | Layer | Input tokens | Evidence |
 |---|---:|---|
 | Application prompt (nodes 5,452 chars / edges 7,867 chars) | ~1.4–2.0 k **inferred** from chars/4 | Provider-free reconstruction + live input |
-| HOME-inherited user MCP / Claude / agents skills / user rules | **2,281–2,284 measured** | Ambient minus hermetic, same prompt |
-| Irreducible CLI heading (system + tools + built-in `skills-cursor`) | **~20,100 measured** | Hermetic tiny prompt: 20,103 input for 49 characters; hermetic extract extras 20,035–20,066 |
-| Cache-read | 576 **measured** every call, both paths | Does not remove the heading |
+| HOME-inherited user MCP / Claude / agents skills / user rules | **2,281–2,284 measured** | Ambient minus hermetic, same prompt; boundary-level difference only |
+| Observed hermetic tiny-run total input | **20,103 measured** | 49-character application prompt; exact prompt-token numerator and residual component split unresolved |
+| Cache-read | 576 **measured** every call, both paths | Does not remove the residual input |
 
-Hermetic isolation is real and required. It does **not** remove the ~20 k built-in agent heading. That heading is the dominant term. It is not a source-truncation problem.
+Hermetic isolation is real and required. It does **not** remove the roughly 20 k observed residual input on the tested CLI path. That residual is dominant, but the calibration cannot partition it exactly. It is not a source-truncation problem.
 
 ## 5. graphiti-core 0.29.3 internal call-shape
 
@@ -163,20 +163,20 @@ Caveat: combined extraction always uses `prompt_library.extract_nodes_and_edges.
 
 ## 6. Track B per-path qualification
 
-Cursor CLI version **2026.08.11-e8db854**. Help recorded 2026-08-21 from `cursor-agent --help` and subcommand help. No `--print` against a model was run.
+Cursor CLI version **2026.08.11-e8db854**. Local interface discovery used `cursor-agent --help` and subcommand help only. Separately, the owner-approved calibration in §13 ran six bounded `--print` calls against `composer-2.5`; no other model call was made by this research.
 
 Columns: fixed context = bootstrap/tools/skills/MCP/rules; variable = Graphiti prompt + source; total / latency / quality = live values only where measured.
 
 | Path | Fixed context | Variable context | Total tokens | Latency | Result quality | Verdict |
 |---|---|---|---|---|---|---|
-| 1. Current `cursor-agent --print --mode ask` in empty temp dir | Extra ≈ 22.3 k **measured** (chars/4 reconstruction). Ambient HOME still has mcp + 642 Claude skills + 43 agents skills | Nodes 5,452 / edges 7,867 chars **measured** | This calibration pair **51,058** (nodes 23,713+917+576; edges 24,283+993+576). Historic sample 54,287 | Wall 25.3 s / 30.9 s; API 11.5 s / 13.1 s | `extract_json_ok` true | **Baseline.** Empty cwd is not enough |
-| 2. Hermetic zero-repo, zero-rule, zero-MCP, zero-plugin, no-tool / single-turn **if CLI exposes it** | CLI still has no `--no-tools`. Isolated HOME still materialises 22 built-in `skills-cursor` files and a `plugins/` dir | Same Graphiti prompts | Tiny prompt still **20,103 input**. Not a no-tool path | Wall 46 s (tiny) | JSON ok | **Rejected as a CLI-only configuration.** Isolation ≠ no-tool |
+| 1. Current `cursor-agent --print --mode ask` in empty temp dir | Extra ≈ 22.3 k **inferred** from measured provider input minus a coarse chars/4 prompt estimate. Ambient HOME still has mcp + 642 Claude skills + 43 agents skills | Nodes 5,452 / edges 7,867 chars **measured** | This calibration pair **51,058** (nodes 23,713+917+576; edges 24,283+993+576). Historic sample 54,287 | Wall 25.3 s / 30.9 s; API 11.5 s / 13.1 s | `extract_json_ok` true | **Baseline.** Empty cwd is not enough |
+| 2. Hermetic zero-repo, zero-rule, zero-MCP, zero-plugin, no-tool / single-turn **if CLI exposes it** | CLI still has no `--no-tools`. Isolated HOME still materialises 22 built-in `skills-cursor` files and a `plugins/` dir | Same Graphiti prompts | Tiny prompt still reports **20,103 total input**. Not a proved no-tool path | Wall 46 s (tiny) | JSON ok | **Rejected as a CLI-only configuration.** Isolation ≠ no-tool |
 | 3. Explicit workspace / config / env isolation | Isolated `HOME` + Keychains symlink only; no copied mcp/skills/rules. `--workspace` = empty cwd | Unchanged source | **Measured** −2,281 to −2,284 input vs ambient same prompt (~10% of the 22 k extra) | Wall *slower* (61 s / 53 s vs 25 s / 31 s); API ms similar or lower | JSON ok; no ambient canary in result | **Accepted as mandatory #730-style seam.** It is not the large saving. Fail closed if keychain/auth missing; never fall back to ambient `HOME` |
 | 4. Persistent session / prompt-cache reuse (`--resume`, `--continue`, `create-chat`) | Bootstrap may become cache-read | Prior turns become extra variable context | Fresh-process cache-read already **576/call** on both paths and still bills. `--resume` **unresolved**: `create-chat` timed out at 30 s; print-mode calls 7–8 unused | — | — | **Rejected as the default Graphiti path.** Violates one-episode isolation |
-| 5. Structured inference / API under the **same** subscription | SDK `tools: []` remains the only documented no-tool Composer 2.5 surface | Graphiti prompt only, if tools are empty | **Unresolved** (not in this bound; GING-010 unamended) | **Unresolved** | **Unresolved** | **Not a silent #731 switch.** Now the only credible way to attack the **20 k** floor |
-| 6. Combine entity + relation in one structured call | One ~20 k heading instead of two | Combined prompt 15,931 chars **measured** | Hermetic combined **25,000** (23,674+750+576). Hermetic two-call pair **46,105**. Saving ≈ **21 k** | Wall 54 s / API 9.2 s | JSON ok on the 368-byte fixture | **Accepted after quality fixtures.** Largest measured saving that stays on the CLI pin |
-| 7. Bounded multi-episode extraction with exact attribution | One bootstrap for N episodes | Concatenated `[Episode 0]…` bodies; `episode_indices` on facts | Lower bootstrap per revision **if** N>1 | Lower | Cross-item relations: `extract_edges` / combined facts may join entities that only co-occur because several revisions were concatenated. `GING-002` forbids mixing source revisions in one episode | **Rejected for distinct effective revisions.** Ordered chunks of **one** revision with predecessor UUIDs remain in contract |
-| 8. Alternative client, same Composer 2.5, no coding-agent bootstrap | SDK `tools: []` + empty `cwd` + no `settingSources`. ACP/CLI still tool-bearing | Graphiti prompt | Should fall toward prompt size **if** tools are empty; **unresolved** | **Unresolved** | **Unresolved** | **Rejected as a silent #731 switch.** Hermetic CLI left ~20 k on the floor; amending GING-010 is an owner pin |
+| 5. Structured inference / API under the **same** subscription | SDK `tools: []` is the only documented no-tool Composer 2.5 surface identified in this research | Graphiti prompt only, if tools are empty | **Unresolved** (not in this bound; GING-010 unamended) | **Unresolved** | **Unresolved** | **Not a silent #731 switch.** Now the only credible way to attack the **20 k** floor |
+| 6. Combine entity + relation in one structured call | One observed CLI residual instead of two | Combined prompt 15,931 chars **measured** | Hermetic combined **25,000** (23,674+750+576). Hermetic two-call pair **46,105**. Saving **21,105 measured** | Wall 54 s / API 9.2 s | JSON ok on the 368-byte fixture; semantic equivalence is unproved | **Preferred candidate, gated.** Do not adopt until text-episode quality and attribution fixtures pass |
+| 7. Bounded multi-episode extraction with exact attribution | One bootstrap for N episodes | Concatenated `[Episode 0]…` bodies; `episode_indices` on facts | Lower bootstrap per revision **inferred if** N>1 | Lower latency **inferred** | Cross-item relations: `extract_edges` / combined facts may join entities that only co-occur because several revisions were concatenated. `GING-002` forbids mixing source revisions in one episode | **Rejected for distinct effective revisions.** Ordered chunks of **one** revision with predecessor UUIDs remain in contract |
+| 8. Alternative client, same Composer 2.5, no coding-agent bootstrap | SDK `tools: []` + empty `cwd` + no `settingSources`. ACP/CLI still tool-bearing | Graphiti prompt | Should fall toward prompt size **if** tools are empty; **inferred and unresolved** | **Unresolved** | **Unresolved** | **Rejected as a silent #731 switch.** Hermetic CLI still reported ~20 k total input on the tiny prompt; amending GING-010 is an owner pin |
 
 Undocumented flags and ambient `HOME` fallback are rejected.
 
@@ -184,9 +184,9 @@ Undocumented flags and ambient `HOME` fallback are rejected.
 
 **Documented.** SDK `TokenUsage.totalTokens = input + output + cacheRead + cacheWrite` (reasoning excluded). Composer 2.5 list prices: input $0.50 / 1M, cache-read $0.20 / 1M, output $2.50 / 1M; no separate cache-write column. ([models and pricing](https://cursor.com/docs/models-and-pricing); [SDK token usage](https://cursor.com/docs/sdk/typescript).) Newsroom `cursor_cli_usage` uses the same four-field sum (`usage_meter.py:44-51`).
 
-**Measured.** Historic sample: 1,152 cache-read vs 47,235 uncached input. This calibration: **576 cache-read on every one of the six print-mode calls**, ambient and hermetic, tiny prompt included. Fresh process per call explains the weak reuse.
+**Measured.** Historic sample: 1,152 cache-read vs 47,235 uncached input. This calibration: **576 cache-read on every one of the six print-mode calls**, ambient and hermetic, tiny prompt included.
 
-**Inference.** Cache-read is **not** latency-only: it still consumes the Cursor Models pool, at a discount to uncached input. Hermetic isolation does not improve cache-read. Turning the 20 k heading into cache-read via `--resume` would still bill it. Removing the heading (no-tool) reduces quota; caching the heading mainly changes the rate.
+**Inference.** Fresh process per call is a plausible explanation for weak reuse, but causal attribution is unresolved. Cache-read is **not** latency-only: it still consumes the Cursor Models pool, at a discount to uncached input. Hermetic isolation does not improve cache-read. Turning the 20 k heading into cache-read via `--resume` would still bill it. Removing the heading (no-tool) reduces quota; caching the heading mainly changes the rate.
 
 **Unresolved.** `create-chat` under isolated HOME timed out at 30 s in this bound; `--resume` was not run. Not retried, so print-mode calls 7–8 remain unused.
 
@@ -221,7 +221,7 @@ Disabled on this runtime: `DEDUPE_EDGES` / automatic invalidation LLM; `EXTRACT_
 
 - One stable internal request identity per `(ingest, attempt, ordinal, prompt_digest, schema_digest, max_tokens)`.
 - Digest the Graphiti messages after `generate_response` mutation (schema + language instruction included), never the full source expression in the usage row (#728).
-- Refuse an identical digest inside the same attempt before dispatch, including graphiti-core’s four-attempt retry. Map that retry to `EmptyResponseError` **without** re-calling Cursor.
+- Refuse an identical digest inside the same attempt before dispatch, including graphiti-core’s four-attempt retry. Surface a stable non-retryable duplicate-request / call-shape error, or translate it outside graphiti-core’s retry decorator. Do **not** map the refusal back to `EmptyResponseError`, which would re-enter the four-attempt retry loop.
 
 **Output limits**
 
@@ -254,7 +254,7 @@ A later distinct class is `CALL_SHAPE_DRIFT`: stop before dispatch, roll back PE
 
 **Metrics**
 
-- Context-efficiency: `application_prompt_tokens / provider_input_tokens` (hermetic tiny: 49 chars / 20,103 input ≈ 0.6% **measured**; extract prompts remain prompt-light).
+- Context-efficiency: `application_prompt_tokens / provider_input_tokens`. Cursor CLI does not expose the provider tokenizer here, so the tiny-run numerator is unresolved. A coarse four-characters-per-token estimate gives `(49 / 4) / 20,103 ≈ 0.061%` (**inferred**, not measured); 49 characters must never be treated as 49 tokens. Retain exact prompt bytes and provider input tokens separately until a tokenizer-qualified numerator exists.
 - Terminal-result yield: tokens per terminal ingest, split by proposals / zero-proposals. Never tokens per proposal as a quota.
 
 **Batching**
@@ -275,14 +275,14 @@ A later distinct class is `CALL_SHAPE_DRIFT`: stop before dispatch, roll back PE
 
 **Rejected alternatives:** model/product switch; hard input truncation; `--resume` pooling; `add_episode_bulk` of unrelated revisions; CLI flags that do not exist; ambient `HOME` fallback; silent SDK swap; daily/300 s quotas as success; treating cache-read as “free”; declaring the 2-call sample an upper bound; treating hermetic CLI as having removed the 22 k heading.
 
-**Follow-on owner pin (not #731 silent work):** hermetic CLI still shows **~20,100 input tokens** on a 49-character prompt. The only documented no-tool Composer 2.5 surface is Cursor SDK `tools: []` under the same Ultra Cursor Models pool. That requires amending GING-010 from “cursor-agent CLI” to “Composer 2.5 on the Cursor subscription via a no-tool SDK run”.
+**Follow-on owner pin (not #731 silent work):** hermetic CLI still shows **20,103 total input tokens** on a 49-character prompt. The only documented no-tool Composer 2.5 surface identified by this research is Cursor SDK `tools: []` under the same Ultra Cursor Models pool. That requires amending GING-010 from “cursor-agent CLI” to “Composer 2.5 on the Cursor subscription via a no-tool SDK run”.
 
 ## 11. Integration with #728, #730, #731
 
 | Ticket | Seam this research consumes or supplies |
 |---|---|
 | #728 | Every Cursor, Grok and embedding leaf is a `ModelInvocationReceipt` under one ingest `ModelWorkEnvelope`. `chat_invocations` must reference those IDs. Missing/post-provider usage is `UNREPORTED` / `AMBIGUOUS` / `INVALID`, never zero. Cursor `usage` may be absent on failure (**documented** JSON failure path). |
-| #730 | Graphiti reuses the CONT hermetic isolation **concept** (fresh dir, isolated `HOME`, allow-listed env, context manifest). On this CLI, “zero skills” is **false**: Cursor materialises 22 `skills-cursor` files into isolated `~/.cursor`. User MCP/Claude/agents skills *are* absent. #730 owns the CONT writer path; Graphiti must not invent a second incompatible isolation protocol. |
+| #730 | Graphiti reuses the CONT hermetic isolation **concept** (fresh dir, isolated `HOME`, allow-listed env, context manifest). Cursor materialises 22 `skills-cursor` files into isolated `~/.cursor`; materialisation does **not** prove that all 22 were loaded into provider context. A manifest may truthfully claim zero copied user MCP/Claude/agents skills, but not zero materialised built-in skill files. #730 owns the CONT writer path; Graphiti must not invent a second incompatible isolation protocol. |
 | #731 | Implements call-shape policy, digest refusal, fallback eligibility, combined-extract optional seam, and joins receipts. Blocked on this evidence plus #728/#730/#737. |
 | #737 | Coverage grain is **effective pulls**, 24 h **7.08 / h**. Do not multiply 54,287 by poll-observation identity growth (~2,092 / h). |
 | #736 | Embedder must remain an `EmbedderClient`. Efficiency work must not regress that contract. |
@@ -300,7 +300,7 @@ Wrong grain (poll identities): 54,287 × ~2,092 / h ≈ **113.6 M tokens / h**. 
 | Hermetic CLI, still 2 extract calls | **46,105 measured** chat only | **326 k** | −4,953 vs this ambient pair (~10%) |
 | Current path, high | **~96 k inferred** | **~680 k** | 2 extract + `DEDUPE_NODES` + `SUMMARISE_NODES`, each carrying ~20–22 k extra |
 | Current path, retry failure mode | up to **4 ×** a full Cursor+Grok chain | — | graphiti-core `EmptyResponseError` retry; not useful work |
-| Recommended: hermetic CLI + combined extract | **25,000 measured** chat only | **177 k** | One combined call; still includes ~20 k heading |
+| Recommended: hermetic CLI + combined extract | **25,000 measured** chat only | **177 k** | One combined call; still includes the observed ~20 k CLI-side total-input floor |
 | Recommended + no-tool SDK (owner pin) | **unresolved**; extra should fall toward Graphiti prompt size | — | Only if GING-010 is amended |
 
 Uncertainty: six print-mode calls on one 368-byte fixture; no embeddings in this bound; combined-extract quality beyond JSON-parse not scored against a gold entity list; `create-chat`/`--resume` unused; conditional LLM classes not in the sample; CLI may omit `usage` on failure; cache-write unobserved (0).
@@ -330,7 +330,9 @@ SDK `tools: []` was out of scope (GING-010 unamended).
 
 ## 14. Fixture harness specification
 
-**Checked-in (this change):** `newsroom/tests/test_graphiti_core_0293_call_shape.py`. Injected `LLMClient`; counts `_generate_response` for `extract_nodes`, `extract_edges`, combined extract, zero-proposal, schema injection, and Newsroom `max_tokens` discard. graphiti-core 0.29.3 only. No provider I/O.
+**Checked-in (this change):** `newsroom/tests/test_graphiti_core_0293_call_shape.py`. Injected `LLMClient`; counts `_generate_response` for `extract_nodes`, `extract_edges`, combined extract, zero-proposal, schema injection, and Newsroom `max_tokens` discard. It also validates the bounded/redacted calibration receipt and the arithmetic behind the comparison table. graphiti-core 0.29.3 only. No provider I/O.
+
+**Permanent execution:** `CI / graphiti-research-fixtures` installs the optional `graphiti` extra, fails if `graphiti-core` is not exactly 0.29.3, and runs this fixture plus `test_graphiti_token_meter.py`. The ordinary `uv sync --dev --locked` path may omit the optional dependency; the dedicated job prevents that omission from silently converting the research fixture into a CI skip.
 
 **Required fixtures for #731 (fake transport; no live calls):**
 
@@ -363,7 +365,9 @@ Fake runner must record `max_tokens`, `response_model` name, prompt digest/lengt
 
 ## 15. Unresolved limitations
 
-- Exact split of the remaining ~20,100 tokens among system prompt, built-in tool schemas, and the 22 materialised `skills-cursor` files.
+- Exact split of the remaining ~20,100 observed input tokens among application-prompt tokens, system prompt, built-in tool schemas, materialised built-in skills and any other provider-side heading.
+- Provider-tokenizer count for the application prompt; chars/4 is only a coarse inference.
+- Whether the 22 materialised `skills-cursor` files were loaded into provider context, and if so how much each contributed.
 - Whether `--mode ask` actually withholds write/shell tools in print mode despite `--print` advertising all tools.
 - CLI enforcement of Graphiti `max_tokens`.
 - Presence of `usage` on failed/timeout CLI runs.
