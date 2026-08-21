@@ -16,7 +16,12 @@ from newsroom.control_plane.corpus import (
     revisions_from,
     units_from,
 )
-from newsroom.control_plane.cycle import _bind_result, run_cycle
+from newsroom.control_plane.cycle import (
+    _bind_result,
+    _dispatch_rights_decision,
+    _reconcile_result_spend,
+    run_cycle,
+)
 from newsroom.control_plane.editorial import (
     GroupedObservation,
     StoryCandidateRecord,
@@ -55,6 +60,7 @@ from newsroom.graphiti_adapter.temporal import (
     SOURCE_UPDATED,
     map_reference_time,
 )
+from newsroom.increment9.proving import SOURCE_URLS
 from newsroom.tests.test_control_plane_private_beta import _proving
 
 
@@ -92,6 +98,97 @@ def test_content_api_keeps_description_for_drafting_and_details_for_corpus() -> 
     assert item.retained_corpus_body == (
         "Complete retained policy body with material changes."
     )
+
+
+def test_feed_keeps_summary_for_drafting_and_full_content_for_corpus() -> None:
+    payload = """
+    <rss xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0">
+      <channel><item>
+        <guid>complete-1</guid><title>Complete feed item</title>
+        <description>Short feed summary.</description>
+        <content:encoded><![CDATA[<p>Full retained feed content.</p>]]></content:encoded>
+      </item></channel>
+    </rss>
+    """.encode("utf-8")
+    item = parse_observation(
+        source_id="UK-01",
+        url="https://www.gov.uk/feed/news.atom",
+        body=payload,
+    )[0]
+    assert item.body == "Short feed summary."
+    assert item.retained_corpus_body == "Full retained feed content."
+
+
+def test_feed_prefers_full_content_even_when_summary_comes_first() -> None:
+    payload = """
+    <rss xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0">
+      <channel><item>
+        <guid>order-1</guid><title>Ordered feed item</title>
+        <description>Summary listed first.</description>
+        <content:encoded><![CDATA[<p>Full body listed second.</p>]]></content:encoded>
+      </item></channel>
+    </rss>
+    """.encode("utf-8")
+    later_summary = """
+    <rss xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0">
+      <channel><item>
+        <guid>order-2</guid><title>Ordered feed item</title>
+        <content:encoded><![CDATA[<p>Full body listed first.</p>]]></content:encoded>
+        <description>Summary listed second.</description>
+      </item></channel>
+    </rss>
+    """.encode("utf-8")
+    first = parse_observation(
+        source_id="UK-01",
+        url="https://www.gov.uk/feed/news.rss",
+        body=payload,
+    )[0]
+    second = parse_observation(
+        source_id="UK-01",
+        url="https://www.gov.uk/feed/news.rss",
+        body=later_summary,
+    )[0]
+    assert first.body == "Summary listed first."
+    assert first.retained_corpus_body == "Full body listed second."
+    assert second.body == "Summary listed second."
+    assert second.retained_corpus_body == "Full body listed first."
+
+
+def test_atom_keeps_summary_for_drafting_and_content_for_corpus() -> None:
+    payload = """
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <id>atom-1</id>
+        <title>Complete atom item</title>
+        <summary>Short atom summary.</summary>
+        <content type="html"><![CDATA[<p>Full retained atom content.</p>]]></content>
+      </entry>
+    </feed>
+    """.encode("utf-8")
+    item = parse_observation(
+        source_id="UK-01",
+        url="https://www.gov.uk/search/all.atom",
+        body=payload,
+    )[0]
+    assert item.body == "Short atom summary."
+    assert item.retained_corpus_body == "Full retained atom content."
+
+
+def test_feed_without_summary_clips_full_content_for_drafting() -> None:
+    retained = "full-feed-content-" * 700
+    payload = (
+        '<rss xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0">'
+        "<channel><item><guid>full-only</guid><title>Full only</title>"
+        f"<content:encoded><![CDATA[{retained}]]></content:encoded>"
+        "</item></channel></rss>"
+    ).encode("utf-8")
+    item = parse_observation(
+        source_id="UK-01",
+        url="https://www.gov.uk/feed/news.rss",
+        body=payload,
+    )[0]
+    assert item.body == retained[:3_999] + "…"
+    assert item.retained_corpus_body == retained
 
 
 def _complete(
@@ -229,6 +326,28 @@ def _complete(
         attempt_number=unit.attempt_number,
         provider_attempt_number=unit.attempt_number,
         predecessor_episode_uuid=unit.predecessor_ingest_id,
+        raw_receipt=raw,
+    )
+
+
+def _with_provider_attempt(
+    result: GraphitiCycleResult,
+    provider_attempt: int,
+    *,
+    recovery: bool = False,
+) -> GraphitiCycleResult:
+    raw = dict(result.raw_receipt or {})
+    original_digest = raw.get("raw_output_digest")
+    raw["provider_attempt_number"] = provider_attempt
+    if recovery:
+        raw["recovery_classification"] = "RECOVERED_IMMUTABLE_COMPLETE"
+        raw["recovered_validated_raw_digest"] = original_digest
+    raw.pop("raw_output_digest", None)
+    raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
+    return replace(
+        result,
+        provider_attempt_number=provider_attempt,
+        receipt_digest=str(raw["raw_output_digest"]),
         raw_receipt=raw,
     )
 
@@ -952,6 +1071,96 @@ def test_latest_rights_decision_blocks_historical_backlog(tmp_path: Path) -> Non
     assert report.eligible == 2
 
 
+def test_dispatch_veto_and_source_rights_use_one_sqlite_snapshot(
+    tmp_path: Path,
+) -> None:
+    proving = _proving(tmp_path)
+    connection = __import__("sqlite3").connect(proving)
+    statements: list[str] = []
+    connection.set_trace_callback(statements.append)
+    decision = _dispatch_rights_decision(
+        connection,
+        source_id="UK-01",
+        source_url=SOURCE_URLS["UK-01"],
+        evaluated_at="2026-08-21T00:00:00.000000Z",
+    )
+    connection.close()
+    assert decision is not None
+    assert decision["rights_authority_run_id"] == "run-1"
+    reads = [
+        statement
+        for statement in statements
+        if statement.lstrip().upper().startswith(("SELECT", "WITH"))
+    ]
+    assert len(reads) == 1
+    combined = reads[0].upper()
+    assert "PROVING_RUNS" in combined
+    assert "PROVING_GATES" in combined
+    assert "PROVING_RIGHTS_PACKETS" in combined
+
+
+def test_newer_failed_proving_run_blocks_dispatch_despite_older_pass(
+    tmp_path: Path,
+) -> None:
+    proving = _proving(tmp_path)
+    connection = __import__("sqlite3").connect(proving)
+    passing = _dispatch_rights_decision(
+        connection,
+        source_id="UK-01",
+        source_url=SOURCE_URLS["UK-01"],
+        evaluated_at="2026-08-21T00:00:00.000000Z",
+    )
+    connection.execute(
+        "INSERT INTO proving_runs VALUES('run-2','2026-08-21T00:00:00.000000Z',0,0,0,0)"
+    )
+    connection.execute(
+        """
+        INSERT INTO proving_gates
+        SELECT 'run-2', gate_id,
+               CASE WHEN gate_id='KILL_SWITCH_READY' THEN 'FAIL' ELSE status END,
+               'later veto'
+        FROM proving_gates WHERE run_id='run-1'
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO proving_rights_packets
+        SELECT 'run-2', gate_id, packet_digest, packet_json, assessed_at
+        FROM proving_rights_packets WHERE run_id='run-1'
+        """
+    )
+    connection.commit()
+    blocked = _dispatch_rights_decision(
+        connection,
+        source_id="UK-01",
+        source_url=SOURCE_URLS["UK-01"],
+        evaluated_at="2026-08-21T00:00:00.000000Z",
+    )
+    connection.close()
+    assert passing is not None
+    assert passing["rights_authority_run_id"] == "run-1"
+    assert blocked is None
+    seen: list[str] = []
+
+    class Stub:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            seen.append(unit.ingest_id)
+            return _complete(unit)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(tmp_path / "unpublished.sqlite3"),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=Stub(),
+        max_graphiti=10,
+        clock=lambda: datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    assert seen == []
+    assert report.graphiti == 0
+    assert report.eligible == 0
+
+
 def test_current_rights_decision_does_not_authorise_a_different_endpoint(
     tmp_path: Path,
 ) -> None:
@@ -1295,7 +1504,7 @@ def test_provider_reported_embedding_cost_is_reconciled_and_debited(
     assert coverage["outstanding_reserved_spend_gbp_microunits"] == 0
 
 
-def test_completed_retry_reconciles_original_metering_and_releases_retry_reserve(
+def test_receipted_old_attempt_is_not_overwritten_by_recovered_telemetry(
     tmp_path: Path,
 ) -> None:
     proving = _proving(tmp_path)
@@ -1315,20 +1524,9 @@ def test_completed_retry_reconciles_original_metering_and_releases_retry_reserve
                 "cost_usd_microunits": 9,
                 "requests": [],
             }
-            result = _complete(unit, embedding_usage=usage)
-            assert result.raw_receipt is not None
-            raw = dict(result.raw_receipt)
-            raw["provider_attempt_number"] = 1
-            raw_without_digest = dict(raw)
-            raw_without_digest.pop("raw_output_digest")
-            raw["raw_output_digest"] = digest_bytes(
-                canonical_json_bytes(raw_without_digest)
-            )
-            return replace(
-                result,
-                provider_attempt_number=1,
-                receipt_digest=str(raw["raw_output_digest"]),
-                raw_receipt=raw,
+            return _with_provider_attempt(
+                _complete(unit, embedding_usage=usage),
+                1,
             )
 
     for _ in range(2):
@@ -1354,12 +1552,278 @@ def test_completed_retry_reconciles_original_metering_and_releases_retry_reserve
     )
     connection.close()
     assert spend == [
+        (1, "UNRECONCILED", None, "UNREPORTED"),
+        (2, "RECONCILED", 9, "PROVIDER_REPORTED"),
+    ]
+    assert receipt["provider_attempt_number"] == 1
+    assert receipt["accounting"]["spend_id"].endswith(":2")
+    assert receipt["accounting"]["reported_provider_attempt_number"] == 1
+    assert receipt["accounting"]["reconciled_to_current_attempt"] is True
+
+
+def test_rejected_stale_attempt_telemetry_stays_on_current_reserve(
+    tmp_path: Path,
+) -> None:
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "rejected-stale-spend.sqlite3"
+    calls = 0
+
+    class Liar:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("first attempt lost before result")
+            usage = {
+                "usage_basis": "PROVIDER_REPORTED",
+                "request_count": 1,
+                "embedding_tokens": 11,
+                "cost_usd_microunits": 17,
+                "requests": [],
+            }
+            return replace(
+                _with_provider_attempt(
+                    _complete(unit, embedding_usage=usage),
+                    1,
+                    recovery=True,
+                ),
+                ingest_id="00000000-0000-4000-8000-000000000099",
+            )
+
+    for _ in range(2):
+        run_cycle(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            writer=FixtureWriter(),
+            max_writes=0,
+            graphiti=Liar(),
+            max_graphiti=1,
+        )
+    connection = __import__("sqlite3").connect(unpublished)
+    spend = connection.execute(
+        """
+        SELECT attempt_number, status, actual_usd_microunits, usage_basis
+        FROM unpublished_graphiti_spend ORDER BY attempt_number
+        """
+    ).fetchall()
+    receipts = connection.execute(
+        """
+        SELECT attempt_number, outcome, receipt_json
+        FROM unpublished_graphiti_attempt_receipts
+        ORDER BY attempt_number
+        """
+    ).fetchall()
+    connection.close()
+    assert spend == [
+        (1, "UNRECONCILED", None, "UNREPORTED"),
+        (2, "RECONCILED", 17, "PROVIDER_REPORTED"),
+    ]
+    assert [row[0] for row in receipts] == [1, 2]
+    assert receipts[1][1] == "FAILED"
+    second = json.loads(receipts[1][2])
+    assert second["accounting"]["spend_id"].endswith(":2")
+    assert second["accounting"]["reported_provider_attempt_number"] == 1
+    assert second["accounting"]["reconciled_to_current_attempt"] is True
+    assert "provider_attempt" not in second["accounting"]
+
+
+def test_validated_unreceipted_recovery_routes_telemetry_to_original_reserve(
+    tmp_path: Path,
+) -> None:
+    unit = CorpusIngestUnit(
+        source_id="UK-01",
+        item_key="item",
+        headline="headline",
+        body="body",
+        canonical_url="https://www.gov.uk/item",
+        observation_digest="sha256:item",
+        observed_at="2026-08-21T00:00:00.000000Z",
+        proving_run_id="run-1",
+        attempt_number=2,
+    )
+    unpublished = connect(str(tmp_path / "recovery-spend.sqlite3"))
+    for attempt_number in (1, 2):
+        assert reserve_graphiti_spend(
+            unpublished,
+            spend_id=f"{unit.ingest_id}:{attempt_number}",
+            ingest_id=unit.ingest_id,
+            attempt_number=attempt_number,
+            proving_run_id="run-1",
+            generation_id=GRAPHITI_GENERATION_ID,
+            reserved_gbp_microunits=500_000,
+            ceiling_gbp_microunits=5_000_000,
+        )
+    unpublished.commit()
+    usage = {
+        "usage_basis": "PROVIDER_REPORTED",
+        "request_count": 1,
+        "embedding_tokens": 25,
+        "cost_usd_microunits": 9,
+        "requests": [],
+    }
+    recovered = _with_provider_attempt(
+        _complete(unit, embedding_usage=usage),
+        1,
+        recovery=True,
+    )
+    accounting = _reconcile_result_spend(
+        unpublished,
+        unit=unit,
+        attempt_number=2,
+        result=recovered,
+        binding_validated=True,
+    )
+    spend = unpublished.execute(
+        """
+        SELECT attempt_number, status, actual_usd_microunits, usage_basis
+        FROM unpublished_graphiti_spend ORDER BY attempt_number
+        """
+    ).fetchall()
+    unpublished.close()
+    assert spend == [
         (1, "RECONCILED", 9, "PROVIDER_REPORTED"),
         (2, "RECONCILED", 0, "NO_EMBEDDING_CALL"),
     ]
-    assert receipt["provider_attempt_number"] == 1
-    assert receipt["accounting"]["provider_attempt"]["spend_id"].endswith(":1")
-    assert receipt["accounting"]["current_attempt"]["spend_id"].endswith(":2")
+    assert accounting["provider_attempt"]["spend_id"].endswith(":1")
+    assert accounting["current_attempt"]["spend_id"].endswith(":2")
+    assert accounting["current_attempt"]["usage_basis"] == "NO_EMBEDDING_CALL"
+
+
+def test_recovery_shaped_telemetry_stays_on_current_without_unreceipted_reserve(
+    tmp_path: Path,
+) -> None:
+    unit = CorpusIngestUnit(
+        source_id="UK-01",
+        item_key="item",
+        headline="headline",
+        body="body",
+        canonical_url="https://www.gov.uk/item",
+        observation_digest="sha256:item",
+        observed_at="2026-08-21T00:00:00.000000Z",
+        proving_run_id="run-1",
+        attempt_number=2,
+    )
+    unpublished = connect(str(tmp_path / "spoofed-recovery.sqlite3"))
+    for attempt_number in (1, 2):
+        assert reserve_graphiti_spend(
+            unpublished,
+            spend_id=f"{unit.ingest_id}:{attempt_number}",
+            ingest_id=unit.ingest_id,
+            attempt_number=attempt_number,
+            proving_run_id="run-1",
+            generation_id=GRAPHITI_GENERATION_ID,
+            reserved_gbp_microunits=500_000,
+            ceiling_gbp_microunits=5_000_000,
+        )
+    unpublished.execute(
+        """
+        INSERT INTO unpublished_graphiti_attempt_receipts(
+            ingest_id, attempt_number, outcome, receipt_digest, receipt_json, at
+        ) VALUES(?,?,?,?,?,?)
+        """,
+        (
+            unit.ingest_id,
+            1,
+            "FAILED",
+            "sha256:receipt",
+            "{}",
+            "2026-08-21T00:00:00.000000Z",
+        ),
+    )
+    unpublished.commit()
+    usage = {
+        "usage_basis": "PROVIDER_REPORTED",
+        "request_count": 1,
+        "embedding_tokens": 25,
+        "cost_usd_microunits": 9,
+        "requests": [],
+    }
+    spoofed = _with_provider_attempt(
+        _complete(unit, embedding_usage=usage),
+        1,
+        recovery=True,
+    )
+    accounting = _reconcile_result_spend(
+        unpublished,
+        unit=unit,
+        attempt_number=2,
+        result=spoofed,
+        binding_validated=True,
+    )
+    spend = unpublished.execute(
+        """
+        SELECT attempt_number, status, actual_usd_microunits, usage_basis
+        FROM unpublished_graphiti_spend ORDER BY attempt_number
+        """
+    ).fetchall()
+    unpublished.close()
+    assert spend == [
+        (1, "RESERVED", None, "PENDING_PROVIDER_REPORT"),
+        (2, "RECONCILED", 9, "PROVIDER_REPORTED"),
+    ]
+    assert accounting["spend_id"].endswith(":2")
+    assert accounting["reconciled_to_current_attempt"] is True
+
+
+def test_unvalidated_recovery_telemetry_does_not_consume_unreceipted_reserve(
+    tmp_path: Path,
+) -> None:
+    unit = CorpusIngestUnit(
+        source_id="UK-01",
+        item_key="item",
+        headline="headline",
+        body="body",
+        canonical_url="https://www.gov.uk/item",
+        observation_digest="sha256:item",
+        observed_at="2026-08-21T00:00:00.000000Z",
+        proving_run_id="run-1",
+        attempt_number=2,
+    )
+    unpublished = connect(str(tmp_path / "unvalidated-recovery.sqlite3"))
+    for attempt_number in (1, 2):
+        assert reserve_graphiti_spend(
+            unpublished,
+            spend_id=f"{unit.ingest_id}:{attempt_number}",
+            ingest_id=unit.ingest_id,
+            attempt_number=attempt_number,
+            proving_run_id="run-1",
+            generation_id=GRAPHITI_GENERATION_ID,
+            reserved_gbp_microunits=500_000,
+            ceiling_gbp_microunits=5_000_000,
+        )
+    unpublished.commit()
+    usage = {
+        "usage_basis": "PROVIDER_REPORTED",
+        "request_count": 1,
+        "embedding_tokens": 25,
+        "cost_usd_microunits": 9,
+        "requests": [],
+    }
+    malformed = _with_provider_attempt(
+        _complete(unit, embedding_usage=usage),
+        1,
+        recovery=True,
+    )
+    accounting = _reconcile_result_spend(
+        unpublished,
+        unit=unit,
+        attempt_number=2,
+        result=malformed,
+        binding_validated=False,
+    )
+    spend = unpublished.execute(
+        """
+        SELECT attempt_number, status, actual_usd_microunits, usage_basis
+        FROM unpublished_graphiti_spend ORDER BY attempt_number
+        """
+    ).fetchall()
+    unpublished.close()
+    assert spend == [
+        (1, "RESERVED", None, "PENDING_PROVIDER_REPORT"),
+        (2, "RECONCILED", 9, "PROVIDER_REPORTED"),
+    ]
+    assert accounting["spend_id"].endswith(":2")
+    assert accounting["reconciled_to_current_attempt"] is True
 
 
 def test_max_graphiti_counts_failed_attempts(tmp_path: Path) -> None:

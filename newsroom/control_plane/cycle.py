@@ -383,23 +383,45 @@ def _reconcile_result_spend(
     unit: CorpusIngestUnit,
     attempt_number: int,
     result: GraphitiCycleResult,
+    binding_validated: bool,
 ) -> dict[str, object]:
     """Attribute returned provider telemetry without trusting invalid identity fields."""
 
     spend_id = f"{unit.ingest_id}:{attempt_number}"
     reported_attempt = result.provider_attempt_number
     provider_spend_id = f"{unit.ingest_id}:{reported_attempt}"
-    provider_exists = unpublished.execute(
-        "SELECT 1 FROM unpublished_graphiti_spend WHERE spend_id=?",
+    provider_state = unpublished.execute(
+        """
+        SELECT status,
+               EXISTS(
+                   SELECT 1 FROM unpublished_graphiti_attempt_receipts AS receipt
+                   WHERE receipt.ingest_id=spend.ingest_id
+                     AND receipt.attempt_number=spend.attempt_number
+               )
+        FROM unpublished_graphiti_spend AS spend
+        WHERE spend_id=?
+        """,
         (provider_spend_id,),
     ).fetchone()
-    if provider_spend_id == spend_id or provider_exists is None:
+    raw = result.raw_receipt if isinstance(result.raw_receipt, dict) else {}
+    recovered_digest = raw.get("recovered_validated_raw_digest")
+    validated_unreceipted_recovery = (
+        binding_validated
+        and provider_spend_id != spend_id
+        and provider_state is not None
+        and str(provider_state[0]) == "RESERVED"
+        and not bool(provider_state[1])
+        and raw.get("recovery_classification") == "RECOVERED_IMMUTABLE_COMPLETE"
+        and isinstance(recovered_digest, str)
+        and recovered_digest.startswith("sha256:")
+    )
+    if provider_spend_id == spend_id or not validated_unreceipted_recovery:
         accounting = reconcile_graphiti_spend(
             unpublished,
             spend_id=spend_id,
             embedding_usage=result.embedding_usage,
         )
-        if provider_exists is None and provider_spend_id != spend_id:
+        if provider_spend_id != spend_id:
             accounting["reported_provider_attempt_number"] = reported_attempt
             accounting["reconciled_to_current_attempt"] = True
         append_ledger(unpublished, "GRAPHITI_SPEND_RECONCILE", accounting)
@@ -594,6 +616,7 @@ def _ingest(
                     unit=unit,
                     attempt_number=attempt_number,
                     result=returned_result,
+                    binding_validated=False,
                 )
             _fail(
                 unpublished,
@@ -653,6 +676,7 @@ def _ingest(
             unit=unit,
             attempt_number=attempt_number,
             result=result,
+            binding_validated=True,
         )
         receipt = _receipt(unit, result, accounting=accounting)
         receipt["dispatch_rights"] = dispatch_rights
@@ -721,29 +745,44 @@ def _current_rights_decision(
     source_url: str,
     evaluated_at: str,
 ) -> dict[str, object] | None:
-    """Re-evaluate the retained packet at the actual provider-dispatch time."""
+    """Re-evaluate one run's retained source packet."""
 
     gate_id = f"RIGHTS_{source_id}"
-    gate = proving.execute(
-        "SELECT status FROM proving_gates WHERE run_id=? AND gate_id=?",
-        (run_id, gate_id),
-    ).fetchone()
-    if gate is None or str(gate[0]) != "PASS":
-        return None
     try:
         retained = proving.execute(
             """
-            SELECT packet_digest, packet_json
-            FROM proving_rights_packets
-            WHERE run_id=? AND gate_id=?
+            SELECT gate.status, packet.packet_digest, packet.packet_json
+            FROM proving_gates AS gate
+            JOIN proving_rights_packets AS packet
+              ON packet.run_id=gate.run_id AND packet.gate_id=gate.gate_id
+            WHERE gate.run_id=? AND gate.gate_id=?
             """,
             (run_id, gate_id),
         ).fetchone()
     except sqlite3.OperationalError:
         return None
-    if retained is None:
+    if retained is None or str(retained[0]) != "PASS":
         return None
-    packet_digest, packet_json = str(retained[0]), str(retained[1])
+    return _rights_decision_from_packet(
+        run_id=run_id,
+        source_id=source_id,
+        source_url=source_url,
+        evaluated_at=evaluated_at,
+        packet_digest=str(retained[1]),
+        packet_json=str(retained[2]),
+    )
+
+
+def _rights_decision_from_packet(
+    *,
+    run_id: str,
+    source_id: str,
+    source_url: str,
+    evaluated_at: str,
+    packet_digest: str,
+    packet_json: str,
+) -> dict[str, object] | None:
+    gate_id = f"RIGHTS_{source_id}"
     try:
         packet = json.loads(packet_json)
     except json.JSONDecodeError:
@@ -776,6 +815,62 @@ def _current_rights_decision(
         "evaluated_at": evaluated_at,
         "rights_authority_run_id": run_id,
     }
+
+
+def _dispatch_rights_decision(
+    proving: sqlite3.Connection,
+    *,
+    source_id: str,
+    source_url: str,
+    evaluated_at: str,
+) -> dict[str, object] | None:
+    """Read latest-run vetoes and source rights in one SQLite snapshot."""
+
+    required_gates = tuple(sorted(GLOBAL_PROVING_GATES))
+    placeholders = ",".join("?" for _ in required_gates)
+    gate_id = f"RIGHTS_{source_id}"
+    try:
+        retained = proving.execute(
+            f"""
+            WITH latest AS (
+                SELECT run_id
+                FROM proving_runs
+                ORDER BY started_at DESC, run_id DESC
+                LIMIT 1
+            ),
+            global_authority AS (
+                SELECT COUNT(DISTINCT gate.gate_id) AS passed_count
+                FROM proving_gates AS gate
+                JOIN latest ON latest.run_id=gate.run_id
+                WHERE gate.gate_id IN ({placeholders})
+                  AND gate.status='PASS'
+            )
+            SELECT latest.run_id, source_gate.status,
+                   packet.packet_digest, packet.packet_json
+            FROM latest
+            JOIN global_authority
+              ON global_authority.passed_count=?
+            JOIN proving_gates AS source_gate
+              ON source_gate.run_id=latest.run_id
+             AND source_gate.gate_id=?
+            JOIN proving_rights_packets AS packet
+              ON packet.run_id=source_gate.run_id
+             AND packet.gate_id=source_gate.gate_id
+            """,
+            (*required_gates, len(required_gates), gate_id),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if retained is None or str(retained[1]) != "PASS":
+        return None
+    return _rights_decision_from_packet(
+        run_id=str(retained[0]),
+        source_id=source_id,
+        source_url=source_url,
+        evaluated_at=evaluated_at,
+        packet_digest=str(retained[2]),
+        packet_json=str(retained[3]),
+    )
 
 
 def _latest_run_with_global_authority(
@@ -892,12 +987,8 @@ def run_cycle(
         current = sqlite3.connect(proving_store)
         current.execute("PRAGMA query_only=ON")
         try:
-            latest_authorised_run = _latest_run_with_global_authority(current)
-            if latest_authorised_run is None:
-                return None
-            return _current_rights_decision(
+            return _dispatch_rights_decision(
                 current,
-                run_id=latest_authorised_run,
                 source_id=unit.source_id,
                 source_url=unit.source_definition_url,
                 evaluated_at=_utc_text(clock()),

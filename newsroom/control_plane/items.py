@@ -104,10 +104,10 @@ def _from_entry(source_id: str, element: etree._Element) -> SourceItem | None:
                 link = child.get("href", "").strip()
                 break
     key = _child_text(element, ("guid", "id")) or link or headline
-    corpus_body = (
-        _child_text(element, ("description", "summary", "content", "encoded"))
-        or headline
-    ).strip()
+    summary = _child_text(element, ("description", "summary")).strip()
+    full_content = _child_text(element, ("content", "encoded")).strip()
+    corpus_body = full_content or summary or headline
+    drafting_body = summary or corpus_body
     published = parse_source_time(
         _child_text(element, ("published", "pubdate", "date"))
     )
@@ -116,7 +116,7 @@ def _from_entry(source_id: str, element: etree._Element) -> SourceItem | None:
         source_id,
         key,
         headline,
-        _clip(corpus_body, MAX_DRAFTING_BODY_CHARS),
+        _clip(drafting_body, MAX_DRAFTING_BODY_CHARS),
         link,
         published,
         updated,
