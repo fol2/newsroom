@@ -336,7 +336,7 @@ async def _add_episode(
             raise AmbiguousEpisodeEffect(
                 "prior Graphiti attempt was rolled back after an ambiguous effect"
             )
-        if marker.state is GuardState.PENDING:
+        if marker.state in {GuardState.PENDING, GuardState.ROLLING_BACK}:
             _restore_marker_telemetry(telemetry, marker)
             telemetry.recovery_classification = "RECOVERED_PENDING_PROCESS_DEATH"
             await guard.rollback_pending(
