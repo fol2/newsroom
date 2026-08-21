@@ -21,6 +21,10 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.effective_revision import (
+    create_effective_revision_schema,
+    retain_observation_revision_first_seen,
+)
 from newsroom.increment9.prospective_run_authority import (
     GATE_ID as RUN_AUTHORITY_GATE,
     RunAuthorityResolver,
@@ -542,6 +546,7 @@ def _connect(path: str) -> sqlite3.Connection:
         );
         """
     )
+    create_effective_revision_schema(connection)
     return connection
 
 
@@ -622,6 +627,15 @@ def _put(connection: sqlite3.Connection, run_id: str, fetched_at: str, observati
             observation.item_count,
             observation.error,
         ),
+    )
+    if observation.status_code != 200 or observation.error is not None:
+        return
+    retain_observation_revision_first_seen(
+        connection,
+        source_id=observation.source_id,
+        url=observation.url,
+        body=body,
+        observed_at=fetched_at,
     )
 
 

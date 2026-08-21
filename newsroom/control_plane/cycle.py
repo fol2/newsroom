@@ -20,6 +20,7 @@ from newsroom.control_plane.corpus import (
     units_from,
 )
 from newsroom.control_plane.editorial import GroupedObservation, form_candidates
+from newsroom.effective_revision import EffectiveRevisionIdentityResolver
 from newsroom.control_plane.evidence import package_for
 from newsroom.control_plane.graphiti import (
     GovernedRealGraphitiPort,
@@ -1393,6 +1394,20 @@ def _permitted_rows(
     return latest_run_id, tuple(latest_rows), tuple(all_rows)
 
 
+def _backfill_proving_first_seen(proving_store: str) -> None:
+    """Backfill missing first-seen rows for pre-existing revisions."""
+    timeout_ms = max(1, int(_PROVING_FENCE_TIMEOUT_SECONDS * 1_000))
+    connection = sqlite3.connect(
+        proving_store, timeout=_PROVING_FENCE_TIMEOUT_SECONDS
+    )
+    connection.execute(f"PRAGMA busy_timeout={timeout_ms}")
+    try:
+        from newsroom.effective_revision import backfill_missing_first_seen
+        backfill_missing_first_seen(connection)
+    finally:
+        connection.close()
+
+
 def run_cycle(
     *,
     proving_store: str,
@@ -1411,6 +1426,7 @@ def run_cycle(
     if any(marker in lowered for marker in FORBIDDEN_STORE_MARKERS):
         raise ValueError("proving store must not alias production or news_pool")
     admission_evaluated_at = clock().astimezone(UTC)
+    _backfill_proving_first_seen(proving_store)
     proving = sqlite3.connect(proving_store)
     proving.execute("PRAGMA query_only=ON")
     try:
@@ -1477,16 +1493,23 @@ def run_cycle(
 
     observations = _parsed_observations(latest_rows)
     unit_by_id: dict[str, CorpusIngestUnit] = {}
-    for row in corpus_rows:
-        for unit in units_from(
-            _parsed_observations((row,)),
-            proving_run_id=row.run_id,
-            rights_authority_run_id=row.rights_authority_run_id,
-            rights_gate_id=row.rights_gate_id,
-            rights_gate_reason=row.rights_gate_reason,
-            source_definition_url=row.url,
-        ):
-            unit_by_id.setdefault(unit.ingest_id, unit)
+    proving = sqlite3.connect(proving_store)
+    proving.execute("PRAGMA query_only=ON")
+    try:
+        effective_revision_resolver = EffectiveRevisionIdentityResolver(proving)
+        for row in corpus_rows:
+            for unit in units_from(
+                _parsed_observations((row,)),
+                proving_run_id=row.run_id,
+                rights_authority_run_id=row.rights_authority_run_id,
+                rights_gate_id=row.rights_gate_id,
+                rights_gate_reason=row.rights_gate_reason,
+                source_definition_url=row.url,
+                effective_revision_resolver=effective_revision_resolver,
+            ):
+                unit_by_id.setdefault(unit.ingest_id, unit)
+    finally:
+        proving.close()
     units = tuple(
         sorted(
             unit_by_id.values(), key=lambda item: (item.observed_at, item.ingest_id)

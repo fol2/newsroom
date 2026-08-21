@@ -219,8 +219,12 @@ def test_fetch_stores_ten_observations_without_publication(tmp_path: Path):
     stored_gates = connection.execute(
         "SELECT COUNT(*) FROM proving_gates WHERE run_id='r2'"
     ).fetchone()[0]
+    retained_revisions = connection.execute(
+        "SELECT COUNT(*) FROM proving_revision_first_seen"
+    ).fetchone()[0]
     connection.close()
     assert stored_gates == len(report.gates)
+    assert retained_revisions == 10
     payload = report_json(report)
     assert b'"publication":false' in payload
     assert b"openrouter" in payload

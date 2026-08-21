@@ -8,6 +8,7 @@ from uuid import UUID
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.objects import ObjectAccessDecisionId
 from newsroom.authority.types import ObjectAdmissionId, UUIDv4Id
+from newsroom.effective_revision import EffectiveRevisionIdentity
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_FALLBACK,
     GRAPHITI_CHAT_MODEL,
@@ -82,7 +83,7 @@ def ingest_key(
     representation_digest: str,
     published_at: str | None,
     updated_at: str | None,
-    observed_at: str,
+    effective_revision: EffectiveRevisionIdentity,
     chunk_ordinal: int = 1,
 ) -> str:
     digest = digest_bytes(
@@ -94,8 +95,9 @@ def ingest_key(
                 "representation_digest": representation_digest,
                 "published_at": published_at,
                 "updated_at": updated_at,
-                "observed_fallback_at": (
-                    observed_at if published_at is None and updated_at is None else None
+                "observed_fallback_at": effective_revision.observed_fallback_at(
+                    published_at=published_at,
+                    updated_at=updated_at,
                 ),
                 "content_digest": content_digest_value,
                 "chunk_ordinal": chunk_ordinal,
@@ -128,7 +130,7 @@ def observation_authority_ids(
     rights_gate_reason: str,
     published_at: str | None,
     updated_at: str | None,
-    observed_at: str,
+    effective_revision: EffectiveRevisionIdentity,
 ) -> tuple[
     ObjectAdmissionId,
     ObjectAccessDecisionId,
@@ -145,7 +147,11 @@ def observation_authority_ids(
         revision_digest,
         published_at or "",
         updated_at or "",
-        observed_at if published_at is None and updated_at is None else "",
+        effective_revision.observed_fallback_at(
+            published_at=published_at,
+            updated_at=updated_at,
+        )
+        or "",
     )
     return (
         _typed(

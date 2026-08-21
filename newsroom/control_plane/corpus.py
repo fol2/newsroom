@@ -6,6 +6,10 @@ from dataclasses import dataclass
 
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane.editorial import GroupedObservation
+from newsroom.effective_revision import (
+    EffectiveRevisionIdentity,
+    EffectiveRevisionIdentityResolver,
+)
 from newsroom.graphiti_adapter.identity import (
     MAX_EPISODE_BYTES,
     content_digest,
@@ -61,6 +65,7 @@ class CorpusIngestUnit:
     observation_digest: str
     observed_at: str
     proving_run_id: str
+    effective_revision: EffectiveRevisionIdentity
     published_at: str | None = None
     updated_at: str | None = None
     chunk_ordinal: int = 1
@@ -109,10 +114,9 @@ class CorpusIngestUnit:
                 "revision_digest": self.revision_digest,
                 "published_at": self.published_at,
                 "updated_at": self.updated_at,
-                "observed_fallback_at": (
-                    self.observed_at
-                    if self.published_at is None and self.updated_at is None
-                    else None
+                "observed_fallback_at": self.effective_revision.observed_fallback_at(
+                    published_at=self.published_at,
+                    updated_at=self.updated_at,
                 ),
             }
         )
@@ -127,7 +131,7 @@ class CorpusIngestUnit:
             representation_digest=self.representation_digest,
             published_at=self.published_at,
             updated_at=self.updated_at,
-            observed_at=self.observed_at,
+            effective_revision=self.effective_revision,
             chunk_ordinal=self.chunk_ordinal,
         )
 
@@ -148,7 +152,7 @@ class CorpusIngestUnit:
                 rights_gate_reason="evaluation fixture",
                 published_at=self.published_at,
                 updated_at=self.updated_at,
-                observed_at=self.observed_at,
+                effective_revision=self.effective_revision,
             )[4]
         )
 
@@ -168,9 +172,20 @@ def units_from(
     rights_gate_id: str | None = None,
     rights_gate_reason: str = "retained PASS",
     source_definition_url: str | None = None,
+    effective_revision_resolver: EffectiveRevisionIdentityResolver,
 ) -> tuple[CorpusIngestUnit, ...]:
     units: list[CorpusIngestUnit] = []
     for row in observations:
+        revision_digest = content_digest(
+            headline=row.item.headline,
+            body=row.item.retained_corpus_body,
+            canonical_url=row.item.canonical_url,
+        )
+        effective_revision = effective_revision_resolver.resolve(
+            source_id=row.source_id,
+            item_key=row.item.item_key,
+            revision_digest=revision_digest,
+        )
         base = CorpusIngestUnit(
             source_id=row.source_id,
             item_key=row.item.item_key,
@@ -180,12 +195,12 @@ def units_from(
             observation_digest=row.observation_digest,
             observed_at=row.observed_at,
             proving_run_id=proving_run_id,
+            effective_revision=effective_revision,
             published_at=row.item.published_at,
             updated_at=row.item.updated_at,
             source_definition_url=source_definition_url or row.item.canonical_url,
         )
         chunks = chunk_text(base.full_text)
-        revision_digest = base.revision_digest
         representation_digest = base.representation_digest
         authority_run_id = rights_authority_run_id or proving_run_id
         gate_id = rights_gate_id or f"RIGHTS_{base.source_id}"
@@ -206,7 +221,7 @@ def units_from(
             rights_gate_reason=rights_gate_reason,
             published_at=base.published_at,
             updated_at=base.updated_at,
-            observed_at=base.observed_at,
+            effective_revision=base.effective_revision,
         )
         definition_version_id = source_definition_version_id(
             source_id=base.source_id,
@@ -241,10 +256,9 @@ def units_from(
                 "revision_digest": revision_digest,
                 "published_at": base.published_at,
                 "updated_at": base.updated_at,
-                "observed_fallback_at": (
-                    base.observed_at
-                    if base.published_at is None and base.updated_at is None
-                    else None
+                "observed_fallback_at": base.effective_revision.observed_fallback_at(
+                    published_at=base.published_at,
+                    updated_at=base.updated_at,
                 ),
             },
             {
@@ -296,6 +310,7 @@ def units_from(
                 observation_digest=base.observation_digest,
                 observed_at=base.observed_at,
                 proving_run_id=base.proving_run_id,
+                effective_revision=base.effective_revision,
                 published_at=base.published_at,
                 updated_at=base.updated_at,
                 chunk_ordinal=ordinal,
@@ -347,7 +362,7 @@ def revisions_from(
                 item_key=first.item_key,
                 observed_at=first.observed_at,
                 source_time=first.temporal().reference_time.to_text(),
-                ingest_ids=tuple(item.ingest_id for item in ordered),
+                ingest_ids=tuple(dict.fromkeys(item.ingest_id for item in ordered)),
             )
         )
     return tuple(

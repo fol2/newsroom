@@ -5,6 +5,7 @@ from __future__ import annotations
 from newsroom.authority.canonical import digest_bytes, digest_canonical
 from newsroom.authority.objects import ObjectAccessDecisionId
 from newsroom.authority.types import ObjectAdmissionId
+from newsroom.effective_revision import EffectiveRevisionIdentity
 from newsroom.extraction.models import (
     ExtractionInputBinding,
     ExtractionPassageInput,
@@ -118,6 +119,7 @@ def evaluation_attempt_for_body(
     published_at: str | None,
     updated_at: str | None,
     observed_at: str,
+    effective_revision: EffectiveRevisionIdentity,
     canonical_url: str = "",
     revision_digest: str | None = None,
     representation_digest: str | None = None,
@@ -151,10 +153,9 @@ def evaluation_attempt_for_body(
                 "revision_digest": revision_digest,
                 "published_at": published_at,
                 "updated_at": updated_at,
-                "observed_fallback_at": (
-                    observed_at
-                    if published_at is None and updated_at is None
-                    else None
+                "observed_fallback_at": effective_revision.observed_fallback_at(
+                    published_at=published_at,
+                    updated_at=updated_at,
                 ),
             }
         )
@@ -168,7 +169,7 @@ def evaluation_attempt_for_body(
             rights_gate_reason="evaluation fixture",
             published_at=published_at,
             updated_at=updated_at,
-            observed_at=observed_at,
+            effective_revision=effective_revision,
         )
         definition_version_id = source_definition_version_id(
             source_id=source_id, source_url=canonical_url
@@ -289,6 +290,12 @@ def evaluation_attempt_for(passages: tuple[str, ...]) -> GraphitiAttemptRequest:
     body = "\n\n".join(" ".join(item.split()) for item in passages if item.split())
     digest = content_digest(headline="", body=body, canonical_url="")
     observed_at = "2026-08-20T00:00:00.000000Z"
+    effective_revision = EffectiveRevisionIdentity(
+        source_id="evaluation",
+        item_key="passages",
+        revision_digest=digest,
+        first_observed_at=observed_at,
+    )
     ingest_id = ingest_key(
         source_id="evaluation",
         item_key="passages",
@@ -297,7 +304,7 @@ def evaluation_attempt_for(passages: tuple[str, ...]) -> GraphitiAttemptRequest:
         representation_digest=digest,
         published_at=None,
         updated_at=None,
-        observed_at=observed_at,
+        effective_revision=effective_revision,
     )
     return evaluation_attempt_for_body(
         episode_body=body,
@@ -309,6 +316,7 @@ def evaluation_attempt_for(passages: tuple[str, ...]) -> GraphitiAttemptRequest:
         published_at=None,
         updated_at=None,
         observed_at=observed_at,
+        effective_revision=effective_revision,
     )
 
 

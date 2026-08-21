@@ -45,6 +45,13 @@ from newsroom.control_plane.store import (
 )
 from newsroom.control_plane.veto import VetoError
 from newsroom.control_plane.writer import FixtureWriter, WriterCopy
+from newsroom.effective_revision import (
+    create_effective_revision_schema,
+    EffectiveRevisionIdentity,
+    EffectiveRevisionIdentityResolver,
+    retain_effective_revision_first_seen,
+    retain_observation_revision_first_seen,
+)
 from newsroom.graphiti_adapter.evaluation_attempt import (
     evaluation_attempt_for,
     evaluation_attempt_for_body,
@@ -64,7 +71,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     OD_011_CASH_CEILING_GBP,
     OPENROUTER_EMBEDDING_SLUG,
 )
-from newsroom.graphiti_adapter.identity import MAX_EPISODE_BYTES
+from newsroom.graphiti_adapter.identity import content_digest, MAX_EPISODE_BYTES
 from newsroom.graphiti_adapter.models import GraphitiAdapterContractError
 from newsroom.graphiti_adapter.real import _is_source_registry_name
 from newsroom.graphiti_adapter.recovery_vocabulary import (
@@ -108,6 +115,61 @@ DATED_RSS = """<?xml version="1.0" encoding="UTF-8"?>
   </item>
 </channel></rss>
 """.encode("utf-8")
+
+
+def _effective_revision_resolver(
+    rows: tuple[GroupedObservation, ...],
+) -> EffectiveRevisionIdentityResolver:
+    connection = sqlite3.connect(":memory:")
+    create_effective_revision_schema(connection)
+    for row in rows:
+        retain_effective_revision_first_seen(
+            connection,
+            source_id=row.source_id,
+            item_key=row.item.item_key,
+            revision_digest=content_digest(
+                headline=row.item.headline,
+                body=row.item.retained_corpus_body,
+                canonical_url=row.item.canonical_url,
+            ),
+            observed_at=row.observed_at,
+        )
+    return EffectiveRevisionIdentityResolver(connection)
+
+
+def _effective_revision(
+    *,
+    source_id: str,
+    item_key: str,
+    headline: str,
+    body: str,
+    canonical_url: str,
+    first_observed_at: str,
+) -> EffectiveRevisionIdentity:
+    return EffectiveRevisionIdentity(
+        source_id=source_id,
+        item_key=item_key,
+        revision_digest=content_digest(
+            headline=headline,
+            body=body,
+            canonical_url=canonical_url,
+        ),
+        first_observed_at=first_observed_at,
+    )
+
+
+def _grouped_rows(
+    *, source_id: str, url: str, body: bytes, observed_at: str
+) -> tuple[GroupedObservation, ...]:
+    return tuple(
+        GroupedObservation(
+            source_id,
+            digest_bytes(body),
+            item,
+            observed_at,
+        )
+        for item in parse_observation(source_id=source_id, url=url, body=body)
+    )
 
 
 def _insert_failed_proving_run(
@@ -292,6 +354,7 @@ def _complete(
         published_at=unit.published_at,
         updated_at=unit.updated_at,
         observed_at=unit.observed_at,
+        effective_revision=unit.effective_revision,
         canonical_url=unit.canonical_url,
         revision_digest=unit.revision_digest,
         representation_digest=unit.representation_digest,
@@ -550,6 +613,14 @@ def test_temporal_policy_refuses_invalid_observed_at() -> None:
 
 
 def test_ingest_identity_is_deterministic_and_episode_omits_source_id() -> None:
+    effective_revision = _effective_revision(
+        source_id="HK-04",
+        item_key="q7",
+        headline="立法會質詢",
+        body="科技與生活科課程",
+        canonical_url="https://www.edb.gov.hk/example",
+        first_observed_at="2026-08-16T21:41:34.000000Z",
+    )
     unit = CorpusIngestUnit(
         source_id="HK-04",
         item_key="q7",
@@ -559,6 +630,7 @@ def test_ingest_identity_is_deterministic_and_episode_omits_source_id() -> None:
         observation_digest="sha256:obs",
         observed_at="2026-08-16T21:41:34.000000Z",
         proving_run_id="run-1",
+        effective_revision=effective_revision,
     )
     again = CorpusIngestUnit(
         source_id="HK-04",
@@ -569,6 +641,7 @@ def test_ingest_identity_is_deterministic_and_episode_omits_source_id() -> None:
         observation_digest="sha256:obs",
         observed_at="2026-08-16T21:41:34.000000Z",
         proving_run_id="run-1",
+        effective_revision=effective_revision,
     )
     assert unit.ingest_id == again.ingest_id
     assert "HK-04" not in unit.episode_body
@@ -723,7 +796,11 @@ def test_units_from_observations_cover_items_not_candidates() -> None:
     )
     # Same URL/item_key would collapse candidates; ingest still has two source rows
     # because source_id differs in ingest_key.
-    units = units_from(rows, proving_run_id="run-1")
+    units = units_from(
+        rows,
+        proving_run_id="run-1",
+        effective_revision_resolver=_effective_revision_resolver(rows),
+    )
     assert len(units) == 2
     assert {unit.source_id for unit in units} == {"HK-04", "RAD-02"}
 
@@ -743,17 +820,20 @@ def test_authority_records_bind_each_item_and_source_definition_version() -> Non
             "2026-08-20T00:00:00.000000Z",
         ),
     )
+    resolver = _effective_revision_resolver(rows)
     first = units_from(
         rows,
         proving_run_id="run-1",
         rights_authority_run_id="run-2",
         source_definition_url="https://source/feed-v1",
+        effective_revision_resolver=resolver,
     )
     changed = units_from(
         rows[:1],
         proving_run_id="run-1",
         rights_authority_run_id="run-2",
         source_definition_url="https://source/feed-v2",
+        effective_revision_resolver=resolver,
     )[0]
     assert first[0].authority is not None
     assert first[1].authority is not None
@@ -794,8 +874,17 @@ def test_revision_time_changes_rebind_admission_and_access_identities() -> None:
             published_at="2026-08-20T00:02:00.000000Z",
         ),
     )
-    first = units_from((first_row,), proving_run_id="run-1")[0]
-    changed = units_from((changed_row,), proving_run_id="run-1")[0]
+    resolver = _effective_revision_resolver((first_row, changed_row))
+    first = units_from(
+        (first_row,),
+        proving_run_id="run-1",
+        effective_revision_resolver=resolver,
+    )[0]
+    changed = units_from(
+        (changed_row,),
+        proving_run_id="run-1",
+        effective_revision_resolver=resolver,
+    )[0]
     assert first.authority is not None
     assert changed.authority is not None
     assert first.authority.revision_id != changed.authority.revision_id
@@ -817,8 +906,17 @@ def test_source_item_authority_excludes_mutable_canonical_url(tmp_path: Path) ->
         observation_digest="sha256:response-two",
         item=replace(first_row.item, canonical_url="https://item/renamed"),
     )
-    first = units_from((first_row,), proving_run_id="run-1")[0]
-    changed = units_from((changed_row,), proving_run_id="run-2")[0]
+    resolver = _effective_revision_resolver((first_row, changed_row))
+    first = units_from(
+        (first_row,),
+        proving_run_id="run-1",
+        effective_revision_resolver=resolver,
+    )[0]
+    changed = units_from(
+        (changed_row,),
+        proving_run_id="run-2",
+        effective_revision_resolver=resolver,
+    )[0]
     assert first.authority is not None
     assert changed.authority is not None
     first_item = next(
@@ -862,8 +960,17 @@ def test_source_revision_authority_is_stable_across_repeat_observations(
         observation_digest="sha256:response-two",
         observed_at="2026-08-20T01:00:00.000000Z",
     )
-    first = units_from((first_row,), proving_run_id="run-1")[0]
-    repeated = units_from((repeated_row,), proving_run_id="run-2")[0]
+    resolver = _effective_revision_resolver((first_row, repeated_row))
+    first = units_from(
+        (first_row,),
+        proving_run_id="run-1",
+        effective_revision_resolver=resolver,
+    )[0]
+    repeated = units_from(
+        (repeated_row,),
+        proving_run_id="run-2",
+        effective_revision_resolver=resolver,
+    )[0]
     assert first.authority is not None
     assert repeated.authority is not None
     first_revision = next(
@@ -884,6 +991,14 @@ def test_source_revision_authority_is_stable_across_repeat_observations(
 
 
 def test_same_immutable_revision_is_not_reingested_after_polling() -> None:
+    effective_revision = _effective_revision(
+        source_id="HK-04",
+        item_key="q7",
+        headline="立法會質詢",
+        body="科技與生活科課程",
+        canonical_url="https://www.edb.gov.hk/example",
+        first_observed_at="2026-08-16T21:41:34.000000Z",
+    )
     first = CorpusIngestUnit(
         source_id="HK-04",
         item_key="q7",
@@ -893,6 +1008,7 @@ def test_same_immutable_revision_is_not_reingested_after_polling() -> None:
         observation_digest="sha256:obs-a",
         observed_at="2026-08-16T21:41:34.000000Z",
         proving_run_id="run-1",
+        effective_revision=effective_revision,
         published_at="2026-01-01T00:00:00.000000Z",
     )
     second = CorpusIngestUnit(
@@ -904,6 +1020,7 @@ def test_same_immutable_revision_is_not_reingested_after_polling() -> None:
         observation_digest="sha256:obs-b",
         observed_at="2026-08-20T00:00:00.000000Z",
         proving_run_id="run-1",
+        effective_revision=effective_revision,
         published_at="2026-01-01T00:00:00.000000Z",
     )
     third = CorpusIngestUnit(
@@ -915,6 +1032,7 @@ def test_same_immutable_revision_is_not_reingested_after_polling() -> None:
         observation_digest="sha256:obs-a",
         observed_at="2026-08-16T21:41:34.000000Z",
         proving_run_id="run-1",
+        effective_revision=effective_revision,
         published_at="2026-03-01T00:00:00.000000Z",
     )
     assert first.ingest_id == second.ingest_id
@@ -928,11 +1046,11 @@ def test_same_immutable_revision_is_not_reingested_after_polling() -> None:
         fallback_later,
         observed_at="2026-08-19T00:00:00.000000Z",
     )
-    assert fallback_later.ingest_id != fallback_earlier.ingest_id
-    assert fallback_later.revision_id != fallback_earlier.revision_id
+    assert fallback_later.ingest_id == fallback_earlier.ingest_id
+    assert fallback_later.revision_id == fallback_earlier.revision_id
 
 
-def test_fallback_observations_are_separate_coverage_revisions() -> None:
+def test_fallback_observations_share_one_effective_revision() -> None:
     first_row = GroupedObservation(
         "UK-01",
         "sha256:response-one",
@@ -946,12 +1064,444 @@ def test_fallback_observations_are_separate_coverage_revisions() -> None:
     )
 
     revisions = revisions_from(
-        units_from((first_row, repeated_row), proving_run_id="run-1")
+        units_from(
+            (first_row, repeated_row),
+            proving_run_id="run-1",
+            effective_revision_resolver=_effective_revision_resolver(
+                (first_row, repeated_row)
+            ),
+        )
     )
 
-    assert len(revisions) == 2
-    assert revisions[0].revision_id != revisions[1].revision_id
-    assert all(len(revision.ingest_ids) == 1 for revision in revisions)
+    assert len(revisions) == 1
+    assert len(revisions[0].ingest_ids) == 1
+
+
+def test_174_unchanged_polls_retain_one_effective_revision() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.execute(
+        "CREATE TABLE proving_observations(run_id TEXT PRIMARY KEY, body BLOB NOT NULL)"
+    )
+    create_effective_revision_schema(connection)
+    body = b"<feed><entry><title>a</title></entry></feed>"
+    url = "https://www.gov.uk/search/all.atom"
+    rows: list[GroupedObservation] = []
+    for ordinal in range(174):
+        observed_at = f"2026-08-20T00:00:00.{ordinal:06d}Z"
+        connection.execute(
+            "INSERT INTO proving_observations VALUES(?,?)",
+            (f"run-{ordinal}", body),
+        )
+        retain_observation_revision_first_seen(
+            connection,
+            source_id="UK-01",
+            url=url,
+            body=body,
+            observed_at=observed_at,
+        )
+        rows.extend(
+            _grouped_rows(
+                source_id="UK-01", url=url, body=body, observed_at=observed_at
+            )
+        )
+    units = units_from(
+        tuple(rows),
+        proving_run_id="run-173",
+        effective_revision_resolver=EffectiveRevisionIdentityResolver(connection),
+    )
+    assert connection.execute(
+        "SELECT COUNT(*) FROM proving_observations"
+    ).fetchone()[0] == 174
+    assert connection.execute(
+        "SELECT COUNT(*) FROM proving_revision_first_seen"
+    ).fetchone()[0] == 1
+    assert connection.execute(
+        "SELECT first_seen_at FROM proving_revision_first_seen"
+    ).fetchone()[0] == "2026-08-20T00:00:00.000000Z"
+    assert len(revisions_from(units)) == 1
+    assert len({unit.ingest_id for unit in units}) == 1
+    connection.close()
+
+
+def test_200_item_repeat_has_zero_new_effective_pulls() -> None:
+    body = (
+        "<feed>"
+        + "".join(
+            f"<entry><id>{ordinal}</id><title>Item {ordinal}</title></entry>"
+            for ordinal in range(200)
+        )
+        + "</feed>"
+    ).encode()
+    url = "https://www.gov.uk/search/all.atom"
+    first_rows = _grouped_rows(
+        source_id="UK-01",
+        url=url,
+        body=body,
+        observed_at="2026-08-20T00:00:00.000000Z",
+    )
+    repeated_rows = _grouped_rows(
+        source_id="UK-01",
+        url=url,
+        body=body,
+        observed_at="2026-08-20T01:00:00.000000Z",
+    )
+    resolver = _effective_revision_resolver(first_rows + repeated_rows)
+    first = units_from(
+        first_rows,
+        proving_run_id="run-1",
+        effective_revision_resolver=resolver,
+    )
+    repeated = units_from(
+        repeated_rows,
+        proving_run_id="run-2",
+        effective_revision_resolver=resolver,
+    )
+    assert len(first) == 200
+    assert {unit.ingest_id for unit in repeated} - {
+        unit.ingest_id for unit in first
+    } == set()
+
+
+def test_two_added_entries_mint_exactly_two_effective_revisions() -> None:
+    def feed(count: int) -> bytes:
+        return (
+            "<feed>"
+            + "".join(
+                f"<entry><id>{ordinal}</id><title>Item {ordinal}</title></entry>"
+                for ordinal in range(count)
+            )
+            + "</feed>"
+        ).encode()
+
+    url = "https://www.gov.uk/search/all.atom"
+    first_rows = _grouped_rows(
+        source_id="UK-01",
+        url=url,
+        body=feed(200),
+        observed_at="2026-08-20T00:00:00.000000Z",
+    )
+    expanded_rows = _grouped_rows(
+        source_id="UK-01",
+        url=url,
+        body=feed(202),
+        observed_at="2026-08-20T01:00:00.000000Z",
+    )
+    resolver = _effective_revision_resolver(first_rows + expanded_rows)
+    first = units_from(
+        first_rows,
+        proving_run_id="run-1",
+        effective_revision_resolver=resolver,
+    )
+    expanded = units_from(
+        expanded_rows,
+        proving_run_id="run-2",
+        effective_revision_resolver=resolver,
+    )
+    assert len(
+        {unit.revision_id for unit in expanded}
+        - {unit.revision_id for unit in first}
+    ) == 2
+
+
+def test_changed_retained_content_uses_changed_revision_first_observation() -> None:
+    url = "https://www.gov.uk/search/all.atom"
+    first_body = (
+        b"<feed><entry><id>one</id><title>One</title>"
+        b"<summary>first</summary></entry></feed>"
+    )
+    changed_body = (
+        b"<feed><entry><id>one</id><title>One</title>"
+        b"<summary>changed</summary></entry></feed>"
+    )
+    first_rows = _grouped_rows(
+        source_id="UK-01",
+        url=url,
+        body=first_body,
+        observed_at="2026-08-20T00:00:00.000000Z",
+    )
+    changed_rows = _grouped_rows(
+        source_id="UK-01",
+        url=url,
+        body=changed_body,
+        observed_at="2026-08-20T01:00:00.000000Z",
+    )
+    resolver = _effective_revision_resolver(first_rows + changed_rows)
+    first = units_from(
+        first_rows,
+        proving_run_id="run-1",
+        effective_revision_resolver=resolver,
+    )[0]
+    changed = units_from(
+        changed_rows,
+        proving_run_id="run-2",
+        effective_revision_resolver=resolver,
+    )[0]
+    assert first.revision_id != changed.revision_id
+    assert changed.effective_revision.first_observed_at == (
+        "2026-08-20T01:00:00.000000Z"
+    )
+    assert changed.authority is not None
+    revision_record = next(
+        record
+        for record in changed.authority.records
+        if record["record_type"] == "SOURCE_REVISION"
+    )
+    assert revision_record["observed_fallback_at"] == (
+        "2026-08-20T01:00:00.000000Z"
+    )
+
+
+def test_changed_source_marker_is_deterministic_and_covered_once() -> None:
+    first_row = GroupedObservation(
+        "UK-01",
+        "sha256:first",
+        SourceItem(
+            "UK-01",
+            "one",
+            "One",
+            "Body",
+            "https://item/one",
+            updated_at="2026-08-20T00:00:00.000000Z",
+        ),
+        "2026-08-20T00:01:00.000000Z",
+    )
+    changed_row = replace(
+        first_row,
+        observation_digest="sha256:changed",
+        item=replace(
+            first_row.item,
+            updated_at="2026-08-20T02:00:00.000000Z",
+        ),
+        observed_at="2026-08-20T02:01:00.000000Z",
+    )
+    repeated_row = replace(
+        changed_row,
+        observation_digest="sha256:repeated",
+        observed_at="2026-08-20T03:01:00.000000Z",
+    )
+    resolver = _effective_revision_resolver(
+        (first_row, changed_row, repeated_row)
+    )
+    first = units_from(
+        (first_row,),
+        proving_run_id="run-1",
+        effective_revision_resolver=resolver,
+    )[0]
+    changed = units_from(
+        (changed_row, repeated_row),
+        proving_run_id="run-2",
+        effective_revision_resolver=resolver,
+    )
+    assert first.revision_id != changed[0].revision_id
+    assert changed[0].revision_id == changed[1].revision_id
+    assert len(revisions_from(changed)) == 1
+    assert len(revisions_from(changed)[0].ingest_ids) == 1
+
+
+def test_rights_renewal_restart_and_replay_create_zero_new_revisions(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "effective-revisions.sqlite3"
+    connection = sqlite3.connect(state)
+    create_effective_revision_schema(connection)
+    row = GroupedObservation(
+        "UK-01",
+        "sha256:first",
+        SourceItem("UK-01", "one", "One", "Body", "https://item/one"),
+        "2026-08-20T00:00:00.000000Z",
+    )
+    retain_effective_revision_first_seen(
+        connection,
+        source_id=row.source_id,
+        item_key=row.item.item_key,
+        revision_digest=content_digest(
+            headline=row.item.headline,
+            body=row.item.retained_corpus_body,
+            canonical_url=row.item.canonical_url,
+        ),
+        observed_at=row.observed_at,
+    )
+    connection.commit()
+    first = units_from(
+        (row,),
+        proving_run_id="run-1",
+        rights_authority_run_id="rights-1",
+        effective_revision_resolver=EffectiveRevisionIdentityResolver(connection),
+    )[0]
+    connection.close()
+    restarted = sqlite3.connect(state)
+    replayed = units_from(
+        (replace(row, observed_at="2026-08-21T00:00:00.000000Z"),),
+        proving_run_id="run-2",
+        rights_authority_run_id="rights-2",
+        effective_revision_resolver=EffectiveRevisionIdentityResolver(restarted),
+    )[0]
+    restarted.close()
+    assert first.revision_id == replayed.revision_id
+    assert first.ingest_id == replayed.ingest_id
+
+
+def test_backlog_with_recent_first_seen_row_still_backsills_older_revisions(
+    tmp_path: Path,
+) -> None:
+    """Verify backfill detects missing rows even when MAX(first_seen) >= MAX(obs).
+    
+    Reproduces: store with some missing rows, a recent first-seen row whose timestamp
+    equals the latest observation. Without watermark, guard incorrectly skips backfill.
+    """
+    proving = _proving(tmp_path)
+    connection = connect_proving(str(proving))
+    
+    body = b"<feed><entry><id>item</id><title>Item</title></entry></feed>"
+    url = "https://www.gov.uk/search/all.atom"
+    digest = digest_bytes(body)
+    
+    # Insert old observations (these will be missing first-seen rows)
+    for i in range(5):
+        connection.execute(
+            """
+            INSERT INTO proving_observations(
+                source_id, run_id, fetched_at, url, status_code, body_digest, body, item_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "UK-01",
+                f"run-old-{i}",
+                f"2026-08-20T{i:02d}:00:00.000000Z",
+                url,
+                200,
+                digest,
+                body,
+                1,
+            ),
+        )
+    
+    # Insert a recent observation that will be added to first-seen by _put()-like logic
+    latest_time = "2026-08-20T10:00:00.000000Z"
+    connection.execute(
+        """
+        INSERT INTO proving_observations(
+            source_id, run_id, fetched_at, url, status_code, body_digest, body, item_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "UK-01",
+            "run-recent",
+            latest_time,
+            url,
+            200,
+            digest,
+            body,
+            1,
+        ),
+    )
+    
+    # Simulate _put() having written ONE first-seen row with the latest timestamp
+    # This makes MAX(first_seen_at) == MAX(fetched_at) but many rows are still missing
+    connection.execute(
+        """
+        INSERT INTO proving_revision_first_seen(
+            source_id, item_key, revision_digest, first_seen_at
+        ) VALUES(?, ?, ?, ?)
+        """,
+        ("UK-01", "item", "sha256:dummy", latest_time),
+    )
+    connection.commit()
+    connection.close()
+    
+    # Now call backfill: the old bug's guard would return 0 because MAX(first_seen) == MAX(obs)
+    # But there are still missing rows from older observations
+    connection = connect_proving(str(proving))
+    from newsroom.effective_revision import backfill_missing_first_seen
+    rows_written = backfill_missing_first_seen(connection)
+    connection.close()
+    
+    # Verify backfill actually ran and found missing rows
+    assert rows_written > 0, "Backfill should have written rows for old observations"
+    
+    # Verify watermark was set
+    connection = connect_proving(str(proving))
+    watermark = connection.execute(
+        "SELECT processed_until FROM proving_backfill_watermark"
+    ).fetchone()
+    assert watermark is not None, "Watermark should have been written"
+    assert watermark[0] == latest_time, f"Watermark should equal latest observation: {watermark[0]} vs {latest_time}"
+    connection.close()
+
+
+def test_backlog_revisions_without_first_seen_self_heal_deterministically(
+    tmp_path: Path,
+) -> None:
+    """Verify run_cycle backfills pre-existing revisions without first-seen rows.
+    
+    Simulates transition: observations exist without first-seen rows.
+    run_cycle must backfill deterministically and produce stable identities.
+    """
+    proving = _proving(tmp_path)
+    
+    # Insert observations without first-seen rows (simulating backlog)
+    body = b"<feed><entry><id>item-one</id><title>Item One</title><summary>Content</summary></entry></feed>"
+    url = "https://www.gov.uk/search/all.atom"
+    connection = connect_proving(str(proving))
+    
+    for observed_at in (
+        "2026-08-20T00:00:00.000000Z",
+        "2026-08-20T01:00:00.000000Z",
+        "2026-08-20T02:00:00.000000Z",
+    ):
+        connection.execute(
+            """
+            INSERT INTO proving_observations(
+                source_id, run_id, fetched_at, url, status_code, body_digest, body, item_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "UK-01",
+                "backlog-run",
+                observed_at,
+                url,
+                200,
+                digest_bytes(body),
+                body,
+                1,
+            ),
+        )
+    connection.commit()
+    connection.close()
+    
+    # First run_cycle with backlog: backfill should run and complete successfully
+    unpublished_1 = tmp_path / "unpublished-1.sqlite3"
+    report_1 = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished_1),
+        writer=FixtureWriter(),
+        max_writes=0,
+        max_graphiti=0,
+        clock=lambda: datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    assert report_1.eligible >= 1, "First run_cycle should backfill and process observations"
+    
+    # Verify that first-seen rows were written
+    connection = connect_proving(str(proving))
+    first_seen_count = connection.execute(
+        "SELECT COUNT(*) FROM proving_revision_first_seen"
+    ).fetchone()[0]
+    connection.close()
+    assert first_seen_count > 0, "Backfill should have written first-seen rows"
+    
+    # Second run_cycle with same data: should skip backfill (no-op case)
+    unpublished_2 = tmp_path / "unpublished-2.sqlite3"
+    report_2 = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished_2),
+        writer=FixtureWriter(),
+        max_writes=0,
+        max_graphiti=0,
+        clock=lambda: datetime(2026, 8, 22, tzinfo=UTC),
+    )
+    # Second run should have same eligible count (same observations, no new data)
+    assert report_2.eligible == report_1.eligible, "Identical input should produce identical eligible count"
+
 
 
 def test_long_body_is_chunked_not_truncated() -> None:
@@ -962,7 +1512,11 @@ def test_long_body_is_chunked_not_truncated() -> None:
             "UK-01", "sha256:long", item, "2026-08-16T21:41:34.000000Z"
         ),
     )
-    units = units_from(rows, proving_run_id="run-1")
+    units = units_from(
+        rows,
+        proving_run_id="run-1",
+        effective_revision_resolver=_effective_revision_resolver(rows),
+    )
     assert len(units) >= 2
     assert {unit.chunk_ordinal for unit in units} == {1, 2}
     joined = "".join(
@@ -974,6 +1528,23 @@ def test_long_body_is_chunked_not_truncated() -> None:
     revisions = revisions_from(units)
     assert len(revisions) == 1
     assert len(revisions[0].ingest_ids) == 2
+    ordered = sorted(units, key=lambda unit: unit.chunk_ordinal)
+    assert ordered[0].predecessor_ingest_id is None
+    assert ordered[1].predecessor_ingest_id == ordered[0].ingest_id
+    repeated_rows = (
+        replace(
+            rows[0],
+            observation_digest="sha256:long-repeat",
+            observed_at="2026-08-20T00:00:00.000000Z",
+        ),
+    )
+    repeated = units_from(
+        repeated_rows,
+        proving_run_id="run-2",
+        effective_revision_resolver=_effective_revision_resolver(rows + repeated_rows),
+    )
+    assert {unit.revision_id for unit in repeated} == {revisions[0].revision_id}
+    assert {unit.ingest_id for unit in repeated} == set(revisions[0].ingest_ids)
 
 
 def test_parser_retains_long_corpus_text_before_ordered_chunking() -> None:
@@ -1012,6 +1583,16 @@ def test_parser_retains_long_corpus_text_before_ordered_chunking() -> None:
             ),
         ),
         proving_run_id="run-1",
+        effective_revision_resolver=_effective_revision_resolver(
+            (
+                GroupedObservation(
+                    "UK-01",
+                    "sha256:long-parser",
+                    item,
+                    "2026-08-16T21:41:34.000000Z",
+                ),
+            )
+        ),
     )
     assert retained in "".join(
         unit.episode_body for unit in sorted(units, key=lambda value: value.chunk_ordinal)
@@ -1168,7 +1749,7 @@ def test_older_run_backlog_remains_queued_after_a_new_run_arrives(
         max_graphiti=1,
     )
     assert report.proving_run_id == "run-2"
-    assert report.eligible == 6
+    assert report.eligible == 3
     assert calls[1][0] == "run-1"
     connection = __import__("sqlite3").connect(unpublished)
     spend_runs = [
@@ -3320,6 +3901,13 @@ def test_ordered_chunks_wait_for_predecessor_completion(tmp_path: Path) -> None:
         "UPDATE proving_observations SET body=?, body_digest=? WHERE source_id='UK-01'",
         (feed, digest_bytes(feed)),
     )
+    retain_observation_revision_first_seen(
+        connection,
+        source_id="UK-01",
+        url=SOURCE_URLS["UK-01"],
+        body=feed,
+        observed_at="2026-08-16T21:41:34.000000Z",
+    )
     connection.commit()
     connection.close()
     calls: list[tuple[int, str | None, str]] = []
@@ -3523,6 +4111,14 @@ def test_unreceipted_cross_attempt_recovery_charges_current_reserve(
         observation_digest="sha256:item",
         observed_at="2026-08-21T00:00:00.000000Z",
         proving_run_id="run-1",
+        effective_revision=_effective_revision(
+            source_id="UK-01",
+            item_key="item",
+            headline="headline",
+            body="body",
+            canonical_url="https://www.gov.uk/item",
+            first_observed_at="2026-08-21T00:00:00.000000Z",
+        ),
         attempt_number=2,
     )
     unpublished = connect(str(tmp_path / "recovery-spend.sqlite3"))
@@ -3579,6 +4175,14 @@ def test_noncanonical_retained_receipt_cannot_reallocate_recovery_spend(
         observation_digest="sha256:item",
         observed_at="2026-08-21T00:00:00.000000Z",
         proving_run_id="run-1",
+        effective_revision=_effective_revision(
+            source_id="UK-01",
+            item_key="item",
+            headline="headline",
+            body="body",
+            canonical_url="https://www.gov.uk/item",
+            first_observed_at="2026-08-21T00:00:00.000000Z",
+        ),
         attempt_number=2,
     )
     unpublished = connect(str(tmp_path / "spoofed-recovery.sqlite3"))
@@ -3808,6 +4412,14 @@ def test_unvalidated_recovery_telemetry_does_not_consume_unreceipted_reserve(
         observation_digest="sha256:item",
         observed_at="2026-08-21T00:00:00.000000Z",
         proving_run_id="run-1",
+        effective_revision=_effective_revision(
+            source_id="UK-01",
+            item_key="item",
+            headline="headline",
+            body="body",
+            canonical_url="https://www.gov.uk/item",
+            first_observed_at="2026-08-21T00:00:00.000000Z",
+        ),
         attempt_number=2,
     )
     unpublished = connect(str(tmp_path / "unvalidated-recovery.sqlite3"))
@@ -4141,7 +4753,9 @@ def test_retries_are_bounded_before_fresh_units_run(tmp_path: Path) -> None:
     assert calls[3] != calls[0]
 
 
-def test_dead_letter_stops_retrying_a_unit(tmp_path: Path) -> None:
+def test_three_failed_attempts_keep_one_revision_and_coverage_obligation(
+    tmp_path: Path,
+) -> None:
     proving = _proving(tmp_path)
     connection = __import__("sqlite3").connect(proving)
     connection.execute("DELETE FROM proving_observations WHERE source_id!='UK-01'")
@@ -4198,6 +4812,8 @@ def test_dead_letter_stops_retrying_a_unit(tmp_path: Path) -> None:
     connection.close()
     assert dead == 1
     assert receipts == [(1, "FAILED"), (2, "FAILED"), (3, "FAILED")]
+    assert coverage["eligible_source_revisions"] == 1
+    assert coverage["unresolved_gap"] == 1
     assert coverage["dead_letter_count"] == 1
 
 
@@ -4264,6 +4880,16 @@ def test_result_binding_rejects_generation_and_receipt_digest_drift() -> None:
         rights_authority_run_id="run-2",
         rights_gate_reason="current PASS",
         source_definition_url="https://source/feed",
+        effective_revision_resolver=_effective_revision_resolver(
+            (
+                GroupedObservation(
+                    "UK-01",
+                    "sha256:observation",
+                    SourceItem("UK-01", "item", "Headline", "Body", "https://item"),
+                    "2026-08-20T00:00:00.000000Z",
+                ),
+            )
+        ),
     )[0]
     result = _complete(unit)
     with pytest.raises(ValueError, match="generation"):
@@ -4307,6 +4933,16 @@ def test_result_binding_accepts_retained_original_access_after_renewal(
         rights_authority_run_id="run-current",
         rights_gate_reason="current PASS",
         source_definition_url="https://source/feed",
+        effective_revision_resolver=_effective_revision_resolver(
+            (
+                GroupedObservation(
+                    "UK-01",
+                    "sha256:observation",
+                    SourceItem("UK-01", "item", "Headline", "Body", "https://item"),
+                    "2026-08-20T00:00:00.000000Z",
+                ),
+            )
+        ),
     )[0]
     assert unit.authority is not None
     result = _complete(unit)
@@ -4431,6 +5067,14 @@ def test_evaluation_runner_reads_provider_attempt_after_adapter_execution(
         observation_digest="sha256:observation",
         observed_at="2026-08-20T00:00:00.000000Z",
         proving_run_id="run-1",
+        effective_revision=_effective_revision(
+            source_id="UK-01",
+            item_key="item",
+            headline="Headline",
+            body="Body",
+            canonical_url="https://item",
+            first_observed_at="2026-08-20T00:00:00.000000Z",
+        ),
         published_at="2026-08-19T00:00:00.000000Z",
         attempt_number=2,
     )
