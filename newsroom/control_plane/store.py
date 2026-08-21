@@ -13,7 +13,7 @@ from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.corpus import EligibleCorpusRevision
 from newsroom.control_plane.veto import VetoError, assert_private_store, refuse_public_effect
 
-SCHEMA_VERSION = "newsroom.control-plane.unpublished.v8"
+SCHEMA_VERSION = "newsroom.control-plane.unpublished.v9"
 LEDGER_GENESIS = "sha256:" + ("0" * 64)
 GRAPHITI_MAX_FAILURES = 3
 _SQLITE_BIND_BATCH_SIZE = 500
@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS unpublished_graphiti_spend(
     ingest_id TEXT NOT NULL,
     attempt_number INTEGER NOT NULL,
     proving_run_id TEXT NOT NULL,
+    generation_id TEXT,
     reserved_gbp_microunits INTEGER NOT NULL,
     actual_usd_microunits INTEGER,
     actual_gbp_microunits INTEGER,
@@ -165,6 +166,10 @@ def connect(path: str) -> sqlite3.Connection:
             "ALTER TABLE unpublished_graphiti_spend "
             "ADD COLUMN proving_run_id TEXT NOT NULL DEFAULT 'LEGACY_UNKNOWN'"
         )
+    if "generation_id" not in columns:
+        connection.execute(
+            "ALTER TABLE unpublished_graphiti_spend ADD COLUMN generation_id TEXT"
+        )
     for column, declaration in (
         ("dispatch_owner", "TEXT"),
         ("dispatch_lease_expires_at", "TEXT"),
@@ -215,6 +220,7 @@ def reserve_graphiti_spend(
     ingest_id: str,
     attempt_number: int,
     proving_run_id: str,
+    generation_id: str,
     reserved_gbp_microunits: int,
     ceiling_gbp_microunits: int,
 ) -> bool:
@@ -242,10 +248,10 @@ def reserve_graphiti_spend(
         """
         INSERT INTO unpublished_graphiti_spend(
             spend_id, ingest_id, attempt_number, reserved_gbp_microunits,
-            proving_run_id,
+            proving_run_id, generation_id,
             actual_usd_microunits, actual_gbp_microunits, usage_basis,
             status, provider_usage_json, at
-        ) VALUES(?,?,?,?,?,NULL,NULL,'PENDING_PROVIDER_REPORT','RESERVED',NULL,?)
+        ) VALUES(?,?,?,?,?,?,NULL,NULL,'PENDING_PROVIDER_REPORT','RESERVED',NULL,?)
         """,
         (
             spend_id,
@@ -253,6 +259,7 @@ def reserve_graphiti_spend(
             attempt_number,
             reserved_gbp_microunits,
             proving_run_id,
+            generation_id,
             _now(),
         ),
     )
@@ -292,25 +299,45 @@ def claim_graphiti_attempt(
     connection: sqlite3.Connection,
     *,
     spend_id: str,
+    generation_id: str,
     owner_id: str,
     claimed_at: str,
     lease_expires_at: str,
 ) -> bool:
-    """Atomically claim a new or proved-stale reservation before dispatch."""
+    """Atomically claim one attempt across its whole Graphiti generation."""
 
     row = connection.execute(
         """
         UPDATE unpublished_graphiti_spend
         SET dispatch_owner=?, dispatch_lease_expires_at=?
-        WHERE spend_id=? AND status='RESERVED'
+        WHERE spend_id=? AND generation_id=? AND status='RESERVED'
           AND (
               dispatch_owner IS NULL
               OR dispatch_lease_expires_at IS NULL
               OR dispatch_lease_expires_at <= ?
           )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM unpublished_graphiti_spend AS active
+              WHERE active.spend_id <> unpublished_graphiti_spend.spend_id
+                AND (
+                    active.generation_id = ?
+                    OR active.generation_id IS NULL
+                )
+                AND active.dispatch_owner IS NOT NULL
+                AND active.dispatch_lease_expires_at > ?
+          )
         RETURNING spend_id
         """,
-        (owner_id, lease_expires_at, spend_id, claimed_at),
+        (
+            owner_id,
+            lease_expires_at,
+            spend_id,
+            generation_id,
+            claimed_at,
+            generation_id,
+            claimed_at,
+        ),
     ).fetchone()
     return row is not None
 

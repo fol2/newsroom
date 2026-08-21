@@ -480,6 +480,7 @@ def _ingest(
                 ingest_id=unit.ingest_id,
                 attempt_number=attempt_number,
                 proving_run_id=unit.proving_run_id,
+                generation_id=GRAPHITI_GENERATION_ID,
                 reserved_gbp_microunits=500_000,
                 ceiling_gbp_microunits=OD_011_CASH_CEILING_GBP * 1_000_000,
             )
@@ -527,6 +528,7 @@ def _ingest(
         claimed = claim_graphiti_attempt(
             unpublished,
             spend_id=spend_id,
+            generation_id=GRAPHITI_GENERATION_ID,
             owner_id=owner_id,
             claimed_at=_utc_text(claim_instant),
             lease_expires_at=_utc_text(claim_instant + timedelta(minutes=15)),
@@ -544,7 +546,7 @@ def _ingest(
                 },
             )
             unpublished.commit()
-            continue
+            break
         append_ledger(
             unpublished,
             "GRAPHITI_ATTEMPT_CLAIM",

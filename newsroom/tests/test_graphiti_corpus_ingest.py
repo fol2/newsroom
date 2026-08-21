@@ -1002,6 +1002,7 @@ def test_process_death_reenters_unreceipted_reserved_attempt(tmp_path: Path) -> 
         ingest_id="ingest-1",
         attempt_number=1,
         proving_run_id="run-1",
+        generation_id=GRAPHITI_GENERATION_ID,
         reserved_gbp_microunits=500_000,
         ceiling_gbp_microunits=5_000_000,
     )
@@ -1029,12 +1030,14 @@ def test_unreceipted_attempt_requires_expired_dispatch_lease(
         ingest_id="ingest-1",
         attempt_number=1,
         proving_run_id="run-1",
+        generation_id=GRAPHITI_GENERATION_ID,
         reserved_gbp_microunits=500_000,
         ceiling_gbp_microunits=5_000_000,
     )
     assert claim_graphiti_attempt(
         connection,
         spend_id="ingest-1:1",
+        generation_id=GRAPHITI_GENERATION_ID,
         owner_id="owner-1",
         claimed_at="2026-08-21T00:00:00.000000Z",
         lease_expires_at="2026-08-21T00:15:00.000000Z",
@@ -1043,6 +1046,7 @@ def test_unreceipted_attempt_requires_expired_dispatch_lease(
     assert not claim_graphiti_attempt(
         connection,
         spend_id="ingest-1:1",
+        generation_id=GRAPHITI_GENERATION_ID,
         owner_id="owner-2",
         claimed_at="2026-08-21T00:05:00.000000Z",
         lease_expires_at="2026-08-21T00:20:00.000000Z",
@@ -1050,6 +1054,50 @@ def test_unreceipted_attempt_requires_expired_dispatch_lease(
     assert claim_graphiti_attempt(
         connection,
         spend_id="ingest-1:1",
+        generation_id=GRAPHITI_GENERATION_ID,
+        owner_id="owner-2",
+        claimed_at="2026-08-21T00:15:00.000000Z",
+        lease_expires_at="2026-08-21T00:30:00.000000Z",
+    )
+    connection.close()
+
+
+def test_dispatch_lease_serialises_distinct_units_in_one_generation(
+    tmp_path: Path,
+) -> None:
+    connection = connect(str(tmp_path / "unpublished.sqlite3"))
+    for ingest_id in ("ingest-1", "ingest-2"):
+        assert reserve_graphiti_spend(
+            connection,
+            spend_id=f"{ingest_id}:1",
+            ingest_id=ingest_id,
+            attempt_number=1,
+            proving_run_id="run-1",
+            generation_id=GRAPHITI_GENERATION_ID,
+            reserved_gbp_microunits=500_000,
+            ceiling_gbp_microunits=5_000_000,
+        )
+    assert claim_graphiti_attempt(
+        connection,
+        spend_id="ingest-1:1",
+        generation_id=GRAPHITI_GENERATION_ID,
+        owner_id="owner-1",
+        claimed_at="2026-08-21T00:00:00.000000Z",
+        lease_expires_at="2026-08-21T00:15:00.000000Z",
+    )
+    connection.commit()
+    assert not claim_graphiti_attempt(
+        connection,
+        spend_id="ingest-2:1",
+        generation_id=GRAPHITI_GENERATION_ID,
+        owner_id="owner-2",
+        claimed_at="2026-08-21T00:05:00.000000Z",
+        lease_expires_at="2026-08-21T00:20:00.000000Z",
+    )
+    assert claim_graphiti_attempt(
+        connection,
+        spend_id="ingest-2:1",
+        generation_id=GRAPHITI_GENERATION_ID,
         owner_id="owner-2",
         claimed_at="2026-08-21T00:15:00.000000Z",
         lease_expires_at="2026-08-21T00:30:00.000000Z",
@@ -1410,6 +1458,7 @@ def test_graphiti_cash_ceiling_holds_ingest_but_writer_continues(
         ingest_id="prior",
         attempt_number=1,
         proving_run_id="run-1",
+        generation_id=GRAPHITI_GENERATION_ID,
         reserved_gbp_microunits=500_000,
         ceiling_gbp_microunits=OD_011_CASH_CEILING_GBP * 1_000_000,
     )
