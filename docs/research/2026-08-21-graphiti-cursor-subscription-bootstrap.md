@@ -332,7 +332,7 @@ SDK `tools: []` was out of scope (GING-010 unamended).
 
 **Checked-in (this change):** `newsroom/tests/test_graphiti_core_0293_call_shape.py`. Injected `LLMClient`; counts `_generate_response` for `extract_nodes`, `extract_edges`, combined extract, zero-proposal, schema injection, and Newsroom `max_tokens` discard. It also validates the bounded/redacted calibration receipt and the arithmetic behind the comparison table. graphiti-core 0.29.3 only. No provider I/O.
 
-**Permanent execution:** `CI / graphiti-research-fixtures` installs the optional `graphiti` extra, fails if `graphiti-core` is not exactly 0.29.3, and runs this fixture plus `test_graphiti_token_meter.py`. The ordinary `uv sync --dev --locked` path may omit the optional dependency; the dedicated job prevents that omission from silently converting the research fixture into a CI skip.
+**Permanent execution:** the existing `CI / test` job first completes the ordinary `uv sync --dev --locked` compatibility gate, then runs `Sync Graphiti extra`, verifies `graphiti-core==0.29.3`, and executes this fixture plus `test_graphiti_token_meter.py`. Keeping the optional-extra steps inside the single retained CI job preserves the workflow contract while preventing `pytest.importorskip("graphiti_core")` from silently converting the research fixture into a skip.
 
 **Required fixtures for #731 (fake transport; no live calls):**
 
