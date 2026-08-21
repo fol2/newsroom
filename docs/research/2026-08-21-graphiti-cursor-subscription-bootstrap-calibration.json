@@ -1,0 +1,242 @@
+{
+  "issue": 739,
+  "approved_by": "owner",
+  "cursor_agent": "2026.08.11-e8db854",
+  "model": "composer-2.5",
+  "print_mode_calls_used": 6,
+  "print_mode_call_cap": 8,
+  "create_chat_resume": "timed_out_after_30s_not_retried",
+  "no_grok": true,
+  "no_openrouter": true,
+  "auth_route": "isolated HOME plus symlink of Library/Keychains only",
+  "calls": [
+    {
+      "n": 1,
+      "label": "ambient-nodes",
+      "prompt_chars": 5452,
+      "prompt_bytes": 5456,
+      "prompt_sha256": "4d7853e11bee09b25f635f2e8311426ac97ac123944161c3fb02532d81f76be6",
+      "returncode": 0,
+      "elapsed_ms": 25282,
+      "duration_ms": 11499,
+      "duration_api_ms": 11499,
+      "extract_json_ok": true,
+      "usage": {
+        "inputTokens": 23713,
+        "outputTokens": 917,
+        "cacheReadTokens": 576,
+        "cacheWriteTokens": 0
+      },
+      "isolation": {
+        "home_mcp": true,
+        "home_cli_config": true,
+        "skills_cursor": 22,
+        "skills_claude": 642,
+        "skills_agents": 43,
+        "cwd_empty": true,
+        "cwd_has_git": false,
+        "cursor_dir_names": [
+          ".gitignore",
+          "agent-cli-state.json",
+          "agents",
+          "ai-tracking",
+          "argv.json",
+          "browser-logs",
+          "chats",
+          "cli-config.json",
+          "extensions",
+          "ide_state.json",
+          "mcp.json",
+          "plans",
+          "plugins",
+          "projects",
+          "rules",
+          "skills",
+          "skills-cursor",
+          "statsig-cache.json",
+          "worktrees"
+        ]
+      }
+    },
+    {
+      "n": 2,
+      "label": "hermetic-nodes",
+      "prompt_chars": 5452,
+      "prompt_bytes": 5456,
+      "prompt_sha256": "4d7853e11bee09b25f635f2e8311426ac97ac123944161c3fb02532d81f76be6",
+      "returncode": 0,
+      "elapsed_ms": 61262,
+      "duration_ms": 9314,
+      "duration_api_ms": 9314,
+      "extract_json_ok": true,
+      "usage": {
+        "inputTokens": 21429,
+        "outputTokens": 860,
+        "cacheReadTokens": 576,
+        "cacheWriteTokens": 0
+      },
+      "isolation": {
+        "home_mcp": false,
+        "home_cli_config": false,
+        "skills_cursor": 22,
+        "skills_claude": 0,
+        "skills_agents": 0,
+        "cwd_empty": true,
+        "cwd_has_git": false,
+        "cursor_dir_names": [
+          "agent-cli-state.json",
+          "plugins",
+          "projects",
+          "skills-cursor"
+        ]
+      }
+    },
+    {
+      "n": 3,
+      "label": "ambient-edges",
+      "prompt_chars": 7867,
+      "prompt_bytes": 7881,
+      "prompt_sha256": "cbe735d4edb6a0e83cd4dbc0baea4f57110da182c6139a0061d7f18872dfa3f4",
+      "returncode": 0,
+      "elapsed_ms": 30882,
+      "duration_ms": 13114,
+      "duration_api_ms": 13114,
+      "extract_json_ok": true,
+      "usage": {
+        "inputTokens": 24283,
+        "outputTokens": 993,
+        "cacheReadTokens": 576,
+        "cacheWriteTokens": 0
+      },
+      "isolation": {
+        "home_mcp": true,
+        "home_cli_config": true,
+        "skills_cursor": 22,
+        "skills_claude": 642,
+        "skills_agents": 43,
+        "cwd_empty": true,
+        "cwd_has_git": false,
+        "cursor_dir_names": [
+          ".gitignore",
+          "agent-cli-state.json",
+          "agents",
+          "ai-tracking",
+          "argv.json",
+          "browser-logs",
+          "chats",
+          "cli-config.json",
+          "extensions",
+          "ide_state.json",
+          "mcp.json",
+          "plans",
+          "plugins",
+          "projects",
+          "rules",
+          "skills",
+          "skills-cursor",
+          "statsig-cache.json",
+          "worktrees"
+        ]
+      }
+    },
+    {
+      "n": 4,
+      "label": "hermetic-edges",
+      "prompt_chars": 7867,
+      "prompt_bytes": 7881,
+      "prompt_sha256": "cbe735d4edb6a0e83cd4dbc0baea4f57110da182c6139a0061d7f18872dfa3f4",
+      "returncode": 0,
+      "elapsed_ms": 52622,
+      "duration_ms": 6386,
+      "duration_api_ms": 6386,
+      "extract_json_ok": true,
+      "usage": {
+        "inputTokens": 22002,
+        "outputTokens": 662,
+        "cacheReadTokens": 576,
+        "cacheWriteTokens": 0
+      },
+      "isolation": {
+        "home_mcp": false,
+        "home_cli_config": false,
+        "skills_cursor": 22,
+        "skills_claude": 0,
+        "skills_agents": 0,
+        "cwd_empty": true,
+        "cwd_has_git": false,
+        "cursor_dir_names": [
+          "agent-cli-state.json",
+          "plugins",
+          "projects",
+          "skills-cursor"
+        ]
+      }
+    },
+    {
+      "n": 5,
+      "label": "hermetic-combined",
+      "prompt_chars": 15931,
+      "prompt_bytes": 15988,
+      "prompt_sha256": "aac0a07a75af3290409f79fd50e5b6f8838a9bd2fcb899e90d33961b30ac7b2d",
+      "returncode": 0,
+      "elapsed_ms": 53909,
+      "duration_ms": 9175,
+      "duration_api_ms": 9175,
+      "extract_json_ok": true,
+      "usage": {
+        "inputTokens": 23674,
+        "outputTokens": 750,
+        "cacheReadTokens": 576,
+        "cacheWriteTokens": 0
+      },
+      "isolation": {
+        "home_mcp": false,
+        "home_cli_config": false,
+        "skills_cursor": 22,
+        "skills_claude": 0,
+        "skills_agents": 0,
+        "cwd_empty": true,
+        "cwd_has_git": false,
+        "cursor_dir_names": [
+          "agent-cli-state.json",
+          "plugins",
+          "projects",
+          "skills-cursor"
+        ]
+      }
+    },
+    {
+      "n": 6,
+      "label": "hermetic-tiny",
+      "prompt_chars": 49,
+      "prompt_bytes": 49,
+      "prompt_sha256": "32e612e97c74afda5f116d596361e1a174eabaa758d8966b146c7ba98df92ca7",
+      "returncode": 0,
+      "elapsed_ms": 46059,
+      "duration_ms": 5138,
+      "duration_api_ms": 5138,
+      "extract_json_ok": true,
+      "usage": {
+        "inputTokens": 20103,
+        "outputTokens": 122,
+        "cacheReadTokens": 576,
+        "cacheWriteTokens": 0
+      },
+      "isolation": {
+        "home_mcp": false,
+        "home_cli_config": false,
+        "skills_cursor": 22,
+        "skills_claude": 0,
+        "skills_agents": 0,
+        "cwd_empty": true,
+        "cwd_has_git": false,
+        "cursor_dir_names": [
+          "agent-cli-state.json",
+          "plugins",
+          "projects",
+          "skills-cursor"
+        ]
+      }
+    }
+  ]
+}
