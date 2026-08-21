@@ -11,6 +11,7 @@ def test_permanent_neo4j_gate_executes_exact_increment4e_actual_service_proof() 
     text = _WORKFLOW.read_text(encoding="utf-8")
     required = (
         "newsroom/tests/test_increment4e_neo4j_service.py",
+        "test_actual_service_guard_rollback_does_not_promote_snapshot_copies",
         "test_actual_service_increment4_admitted_state_projects_exactly_and_replays",
         "test_actual_service_increment4_graph_loss_requires_isolated_replacement",
         "test_actual_service_increment4_replacement_generation_is_only_serving_state",

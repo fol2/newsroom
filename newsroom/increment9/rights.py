@@ -379,6 +379,10 @@ class RightsVerdict:
     source_role: str | None = None
     families: tuple[str, ...] = ()
     reviewer_ids: tuple[str, ...] = ()
+    destinations: tuple[str, ...] = ()
+    expires_at: str | None = None
+    terms_url: str | None = None
+    terms_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -531,11 +535,30 @@ def fixture_review(
     return record
 
 
-def fixture_inventory(*, gate: str = GATE_ID) -> dict[str, object]:
+def fixture_inventory(
+    *,
+    gate: str = GATE_ID,
+    destinations: tuple[str, ...] | None = None,
+    now: str = FIXTURE_NOW,
+    issued_at: str = FIXTURE_ISSUED_AT,
+    expires_at: str = FIXTURE_EXPIRES_AT,
+) -> dict[str, object]:
+    destination_list = sorted(
+        set(FIXTURE_DESTINATIONS if destinations is None else destinations)
+    )
     return {
         "bound_terms": bound_terms_identity(gate=gate),
-        "now": FIXTURE_NOW,
-        "reviews": [fixture_review(family, gate=gate) for family in FIXTURE_FAMILIES],
+        "now": now,
+        "reviews": [
+            fixture_review(
+                family,
+                gate=gate,
+                destinations=destination_list,
+                issued_at=issued_at,
+                expires_at=expires_at,
+            )
+            for family in FIXTURE_FAMILIES
+        ],
     }
 
 
@@ -666,6 +689,9 @@ def assess_rights(
     if len(set(families)) != 3:
         return _fail("duplicate reviewer family")
     ordered = tuple(sorted(parsed, key=lambda item: str(item["reviewer_family"])))
+    destination_sets = {tuple(item["destinations"]) for item in ordered}
+    if len(destination_sets) != 1:
+        return _fail("record is malformed")
     return RightsVerdict(
         status="PASS",
         reason="authorised",
@@ -674,6 +700,10 @@ def assess_rights(
         source_role=str(ordered[0]["source_role"]),
         families=tuple(str(item["reviewer_family"]) for item in ordered),
         reviewer_ids=tuple(str(item["reviewer_id"]) for item in ordered),
+        destinations=next(iter(destination_sets)),
+        expires_at=min(str(item["expires_at"]) for item in ordered),
+        terms_url=str(ordered[0]["terms_url"]),
+        terms_digest=str(ordered[0]["terms_digest"]),
     )
 
 

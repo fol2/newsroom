@@ -1,8 +1,12 @@
 from pathlib import Path
+import sqlite3
+
 import pytest
+import newsroom.increment9.proving as proving_module
 from newsroom.increment9.prospective_run_authority import persist_authorised_chain
 from newsroom.increment9.proving import (
     ALLOWED_HOSTS,
+    Observation,
     PORTFOLIO,
     SOURCE_IDS,
     ProvingError,
@@ -132,6 +136,16 @@ def test_fetch_is_blocked_until_gates_pass(tmp_path: Path):
     )
     assert not blocked.authorised and blocked.observations == ()
     assert list_observations(store) == ()
+    connection = __import__("sqlite3").connect(store)
+    failed = connection.execute(
+        "SELECT COUNT(*) FROM proving_gates WHERE run_id='r1' AND status='FAIL'"
+    ).fetchone()[0]
+    run = connection.execute(
+        "SELECT run_id FROM proving_runs WHERE run_id='r1'"
+    ).fetchone()
+    connection.close()
+    assert failed > 0
+    assert run == ("r1",)
 
 
 def test_fetch_stores_ten_observations_without_publication(tmp_path: Path):
@@ -146,10 +160,10 @@ def test_fetch_stores_ten_observations_without_publication(tmp_path: Path):
     )
     assert not unauthorised.authorised and unauthorised.observations == ()
     assert list_observations(store) == ()
-    chain = persist_authorised_chain(run_id="r1")
+    chain = persist_authorised_chain(run_id="r2")
     report = run_proving(
         store_path=store,
-        run_id="r1",
+        run_id="r2",
         fetched_at="2026-08-16T20:00:00.000000Z",
         kill_switch=False,
         no_emergency_stop=True,
@@ -166,9 +180,94 @@ def test_fetch_stores_ten_observations_without_publication(tmp_path: Path):
     assert all(item.status_code == 200 for item in report.observations)
     retained = list_observations(store)
     assert len(retained) == 10
+    connection = __import__("sqlite3").connect(store)
+    stored_gates = connection.execute(
+        "SELECT COUNT(*) FROM proving_gates WHERE run_id='r2'"
+    ).fetchone()[0]
+    connection.close()
+    assert stored_gates == len(report.gates)
     payload = report_json(report)
     assert b'"publication":false' in payload
     assert b"openrouter" in payload
+
+
+def test_duplicate_run_id_does_not_replace_failed_gates(tmp_path: Path) -> None:
+    store = str(tmp_path / "proving.sqlite3")
+    first = run_proving(
+        store_path=store,
+        run_id="r1",
+        fetched_at="2026-08-16T20:00:00.000000Z",
+        kill_switch=True,
+        no_emergency_stop=True,
+        fetch=_fetch_ok,
+    )
+    assert not first.authorised
+    chain = persist_authorised_chain(run_id="r1")
+    with pytest.raises(ProvingError, match="already retained"):
+        run_proving(
+            store_path=store,
+            run_id="r1",
+            fetched_at="2026-08-16T20:01:00.000000Z",
+            kill_switch=False,
+            no_emergency_stop=True,
+            fetch=_fetch_ok,
+            run_authority=chain.resolver,
+            **_rights_inventories(),
+        )
+    connection = __import__("sqlite3").connect(store)
+    kill = connection.execute(
+        "SELECT status FROM proving_gates "
+        "WHERE run_id='r1' AND gate_id='KILL_SWITCH_READY'"
+    ).fetchone()
+    connection.close()
+    assert kill == ("FAIL",)
+
+
+def test_writer_lock_after_connect_is_normalised_and_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = str(tmp_path / "post-connect-lock.sqlite3")
+    original_connect = proving_module._connect
+    blockers: list[sqlite3.Connection] = []
+    monkeypatch.setattr(proving_module, "PROVING_WRITE_TIMEOUT_SECONDS", 0.01)
+
+    def connect_then_lock(path: str) -> sqlite3.Connection:
+        connection = original_connect(path)
+        blocker = sqlite3.connect(path)
+        blocker.execute("BEGIN IMMEDIATE")
+        blockers.append(blocker)
+        return connection
+
+    monkeypatch.setattr(proving_module, "_connect", connect_then_lock)
+    try:
+        with pytest.raises(ProvingError, match="writer lock timed out"):
+            run_proving(
+                store_path=store,
+                run_id="locked-run",
+                fetched_at="2026-08-21T00:00:00.000000Z",
+                kill_switch=True,
+                no_emergency_stop=True,
+            )
+    finally:
+        for blocker in blockers:
+            blocker.rollback()
+            blocker.close()
+
+
+def test_proving_cli_default_writes_the_shared_canonical_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.increment9_proving_store as proving_cli
+
+    observed: list[str] = []
+
+    def capture_list(store_path: str) -> tuple[Observation, ...]:
+        observed.append(store_path)
+        return ()
+
+    monkeypatch.setattr(proving_cli, "list_observations", capture_list)
+    assert proving_cli.main(["list"]) == 0
+    assert observed == [proving_cli.DEFAULT_PROVING_STORE]
 
 
 def test_production_and_news_pool_paths_are_rejected(tmp_path: Path):

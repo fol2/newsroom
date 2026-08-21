@@ -30,6 +30,7 @@ from newsroom.graphiti_adapter.admission import (
 )
 from newsroom.graphiti_adapter.evaluation_packet import (
     EVALUATION_GRAPHITI_PACKET,
+    GRAPHITI_GENERATION_ID,
     GRAPHITI_WORKSPACE_GROUP,
     WRITER_FALLBACK,
     WRITER_MODEL,
@@ -125,7 +126,7 @@ def test_admit_is_required_before_increment4_projector_write() -> None:
     gated = require_admitted_projector_write(write)
     assert gated.may_write_admitted_projector is True
     assert gated.proposals == (entity, relation)
-    assert gated.workspace_group == "newsroom-eval-proposal"
+    assert gated.workspace_group == GRAPHITI_WORKSPACE_GROUP
     assert gated.projector_family_id == INCREMENT4_ADMITTED_FAMILY_ID
     assert gated.projector_family_id == GRAPHITI_ADMITTED_PROJECTOR_FAMILY_ID
     assert gated.admitted_vector_dimensions_excluded == 1024
@@ -260,7 +261,7 @@ def test_claim_proposals_are_outside_this_admission_slice() -> None:
 
 def test_real_adapter_cannot_mutate_ledger_or_admitted_labels() -> None:
     assert REAL_GRAPHITI_RUNTIME_ENABLED is True
-    assert GRAPHITI_WORKSPACE_GROUP == "newsroom-eval-proposal"
+    assert GRAPHITI_WORKSPACE_GROUP.startswith("newsroom-eval-proposal-")
     assert inspect.signature(RealGraphitiAdapter.execute).parameters.keys() == {
         "self",
         "attempt",
@@ -329,6 +330,7 @@ def test_graphiti_adapter_sources_stay_on_private_workspace_and_group_id() -> No
         "graphiti_writes_ledger": False,
         "graphiti_writes_admitted_graph": False,
         "workspace_group": GRAPHITI_WORKSPACE_GROUP,
+        "generation_id": GRAPHITI_GENERATION_ID,
     }
     from newsroom.authority.canonical import digest_canonical
 

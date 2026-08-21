@@ -47,6 +47,7 @@ from .types import (
     GraphitiWorkspaceId,
     GraphitiWorkspacePolicyId,
 )
+from .temporal_vocabulary import parse_temporal_basis
 
 GRAPHITI_CONFIGURATION_REGISTER_COMMAND = "graphiti.adapter.configuration.register"
 GRAPHITI_ATTEMPT_EXECUTE_COMMAND = "graphiti.adapter.attempt.execute"
@@ -392,6 +393,11 @@ def _attempt_payload(value: Any) -> bytes:
             "requested_version_number",
             "replay_source_id",
             "replay_source_digest",
+            "reference_time",
+            "temporal_basis",
+            "episode_uuid",
+            "generation_id",
+            "predecessor_episode_uuid",
         }
     )
     item = _object(value, field="graphiti_adapter_attempt", keys=keys)
@@ -444,6 +450,28 @@ def _attempt_payload(value: Any) -> bytes:
             )
     else:
         _digest(replay_digest, field="replay_source_digest")
+    basis = _string(item["temporal_basis"], field="temporal_basis")
+    try:
+        parse_temporal_basis(basis)
+    except ValueError as exc:
+        raise PayloadSchemaValidationError(
+            "temporal_basis must be a labelled mapping"
+        ) from exc
+
+    reference_time = item["reference_time"]
+    if reference_time is not None:
+        _string(reference_time, field="reference_time")
+    episode_uuid = item["episode_uuid"]
+    if episode_uuid is not None:
+        _string(episode_uuid, field="episode_uuid")
+    predecessor_episode_uuid = item["predecessor_episode_uuid"]
+    if predecessor_episode_uuid is not None:
+        _string(predecessor_episode_uuid, field="predecessor_episode_uuid")
+        if predecessor_episode_uuid == episode_uuid:
+            raise PayloadSchemaValidationError(
+                "episode predecessor cannot name the current episode"
+            )
+    _string(item["generation_id"], field="generation_id")
     return canonical_json_bytes(item)
 
 
@@ -555,6 +583,11 @@ def _golden_attempt_value() -> dict[str, object]:
         "requested_version_number": 1,
         "replay_source_id": None,
         "replay_source_digest": None,
+        "reference_time": None,
+        "temporal_basis": "UNSET",
+        "episode_uuid": None,
+        "generation_id": "",
+        "predecessor_episode_uuid": None,
     }
 
 

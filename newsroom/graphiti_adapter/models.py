@@ -63,6 +63,7 @@ from .types import (
     text,
     token,
 )
+from .temporal_vocabulary import TemporalBasis
 
 
 REAL_GRAPHITI_RUNTIME_ENABLED = True
@@ -1156,6 +1157,11 @@ class GraphitiAttemptRequest:
     extraction_request: ExtractionRunRequest
     replay_source: GraphitiReplaySource | None
     idempotency_key: str
+    reference_time: UtcTimestamp | None = None
+    temporal_basis: TemporalBasis = TemporalBasis.UNSET
+    episode_uuid: str | None = None
+    generation_id: str = ""
+    predecessor_episode_uuid: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.attempt_id, GraphitiAttemptId):
@@ -1225,6 +1231,32 @@ class GraphitiAttemptRequest:
             raise GraphitiAdapterContractError(
                 "only approved replay attempts can name replay source authority"
             )
+        if not isinstance(self.temporal_basis, TemporalBasis):
+            raise GraphitiAdapterContractError(
+                "temporal_basis must be a labelled mapping"
+            )
+        if self.reference_time is not None and not isinstance(
+            self.reference_time, UtcTimestamp
+        ):
+            raise GraphitiAdapterContractError("reference_time must be typed")
+        if self.episode_uuid is not None:
+            text(self.episode_uuid, field="episode_uuid", maximum_bytes=128)
+        if self.predecessor_episode_uuid is not None:
+            text(
+                self.predecessor_episode_uuid,
+                field="predecessor_episode_uuid",
+                maximum_bytes=128,
+            )
+            if self.predecessor_episode_uuid == self.episode_uuid:
+                raise GraphitiAdapterContractError(
+                    "episode predecessor cannot name the current episode"
+                )
+        text(
+            self.generation_id,
+            field="generation_id",
+            maximum_bytes=128,
+            allow_empty=True,
+        )
 
     def canonical_value(self) -> dict[str, object]:
         value = {
@@ -1256,6 +1288,15 @@ class GraphitiAttemptRequest:
                 if self.replay_source is None
                 else self.replay_source.canonical_digest
             ),
+            "reference_time": (
+                None
+                if self.reference_time is None
+                else self.reference_time.to_text()
+            ),
+            "temporal_basis": self.temporal_basis,
+            "episode_uuid": self.episode_uuid,
+            "generation_id": self.generation_id,
+            "predecessor_episode_uuid": self.predecessor_episode_uuid,
         }
         reject_private_graph_state(value)
         return value
@@ -1355,6 +1396,8 @@ def adapter_outcome_for(produced: ProducedExtraction) -> GraphitiAdapterOutcome:
     if produced.outcome is ExtractionOutcome.INVALID_OUTPUT:
         return GraphitiAdapterOutcome.MALFORMED_OUTPUT
     if produced.outcome is ExtractionOutcome.RETRYABLE_FAILURE:
+        if produced.failure_code is ExtractionFailureCode.AMBIGUOUS_EFFECT:
+            return GraphitiAdapterOutcome.AMBIGUOUS_EFFECT
         if produced.failure_code is ExtractionFailureCode.EXECUTION_TIMEOUT:
             return GraphitiAdapterOutcome.TIMEOUT
         return GraphitiAdapterOutcome.FAILED

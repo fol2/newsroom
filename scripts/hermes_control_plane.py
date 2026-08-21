@@ -7,20 +7,32 @@ import argparse
 import json
 import sys
 import time
+from typing import Protocol
 
-from newsroom.control_plane.cycle import run_cycle
+from newsroom.control_plane.cycle import CycleReport, run_cycle
 from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
 from newsroom.control_plane.intake import run_intake
+from newsroom.control_plane.paths import (
+    CANONICAL_PROVING_STORE,
+    CANONICAL_UNPUBLISHED_STORE,
+    ensure_control_plane_state_root,
+)
 from newsroom.control_plane.store import list_payloads
 from newsroom.control_plane.veto import VetoError
 from newsroom.control_plane.writer import default_writer
 from newsroom.graphiti_adapter.models import REAL_GRAPHITI_RUNTIME_ENABLED
 
-DEFAULT_PROVING = "data/newsroom/proving_store.sqlite3"
-DEFAULT_UNPUBLISHED = "data/newsroom/unpublished_store.sqlite3"
+DEFAULT_PROVING = str(CANONICAL_PROVING_STORE)
+DEFAULT_UNPUBLISHED = str(CANONICAL_UNPUBLISHED_STORE)
 
 
-def _cycle(args: argparse.Namespace):
+class _CycleArgs(Protocol):
+    proving: str
+    unpublished: str
+    max_writes: int
+
+
+def _cycle(args: _CycleArgs) -> CycleReport:
     return run_cycle(
         proving_store=args.proving,
         unpublished_store=args.unpublished,
@@ -41,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--interval", type=int, default=300)
     parser.add_argument("--max-writes", type=int, default=5)
     args = parser.parse_args(argv)
+    ensure_control_plane_state_root()
     if args.command == "status":
         payloads = list_payloads(args.unpublished)
         body = {

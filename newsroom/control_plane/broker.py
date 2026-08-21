@@ -8,7 +8,7 @@ import socket
 import subprocess
 import urllib.error
 import urllib.request
-from typing import Final
+from typing import Callable, Final, Protocol
 
 from newsroom.graphiti_adapter.evaluation_packet import OPENROUTER_BASE_URL
 
@@ -27,6 +27,36 @@ class BrokerError(RuntimeError):
     """Credential injection failed closed."""
 
 
+class _Neo4jRecord(Protocol):
+    def __getitem__(self, key: str) -> object: ...
+
+
+class _Neo4jResult(Protocol):
+    def single(self) -> _Neo4jRecord | None: ...
+
+
+class _Neo4jSession(Protocol):
+    def __enter__(self) -> _Neo4jSession: ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: object,
+    ) -> None: ...
+
+    def run(self, query: str) -> _Neo4jResult: ...
+
+
+class Neo4jProbeDriver(Protocol):
+    def session(self) -> _Neo4jSession: ...
+
+    def close(self) -> None: ...
+
+
+Neo4jDriverFactory = Callable[..., Neo4jProbeDriver]
+
+
 def keychain_present(*, account: str, service: str) -> bool:
     if shutil.which("security") is None:
         return False
@@ -41,21 +71,28 @@ def keychain_present(*, account: str, service: str) -> bool:
 
 
 def _keychain_password(*, account: str, service: str) -> str:
-    result = subprocess.run(
-        [
-            "security",
-            "find-generic-password",
-            "-a",
-            account,
-            "-s",
-            service,
-            "-w",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "security",
+                "find-generic-password",
+                "-a",
+                account,
+                "-s",
+                service,
+                "-w",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        raise BrokerError(f"Keychain class {account} lookup timed out") from None
+    except OSError:
+        raise BrokerError(f"Keychain class {account} lookup failed") from None
+    except UnicodeError:
+        raise BrokerError(f"Keychain class {account} lookup failed") from None
     if result.returncode != 0:
         raise BrokerError(f"Keychain class {account} is absent")
     secret = result.stdout.strip()
@@ -112,16 +149,14 @@ def prove_openrouter_keychain() -> None:
         raise BrokerError("OpenRouter Keychain probe returned a malformed body")
 
 
-def prove_neo4j_keychain() -> None:
+def prove_neo4j_keychain(*, driver_factory: Neo4jDriverFactory) -> None:
     """Inject NEO4J_COMMUNITY_LOCAL and confirm Bolt accepts it. Never logs the secret."""
     password = neo4j_community_password()
     try:
         socket.create_connection((NEO4J_BOLT_HOST, NEO4J_BOLT_PORT), timeout=3).close()
     except OSError as exc:
         raise BrokerError("Neo4j Bolt is not listening on 127.0.0.1:7687") from exc
-    from neo4j import GraphDatabase
-
-    driver = GraphDatabase.driver(
+    driver = driver_factory(
         f"bolt://{NEO4J_BOLT_HOST}:{NEO4J_BOLT_PORT}",
         auth=("neo4j", password),
     )

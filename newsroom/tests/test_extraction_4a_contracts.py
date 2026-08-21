@@ -351,7 +351,7 @@ def test_proposal_shape_codes_and_evidence_are_canonical() -> None:
         )
 
 
-def test_produced_extraction_outcome_matrix_prevents_false_success() -> None:
+def test_produced_extraction_outcome_matrix_accepts_valid_empty_success() -> None:
     proposal = _proposal()
     raw = {"schema_version": "fixture", "entities": []}
     usage = ExtractionUsage(
@@ -371,19 +371,19 @@ def test_produced_extraction_outcome_matrix_prevents_false_success() -> None:
     )
     assert complete.raw_output_digest == digest_bytes(canonical_json_bytes(raw))
 
-    with pytest.raises(ExtractionContractError, match="needs proposals"):
-        ProducedExtraction(
-            outcome=ExtractionOutcome.SUCCESS,
-            failure_code=ExtractionFailureCode.NONE,
-            validation=ExtractionOutputValidation.VALID,
-            raw_output_value=raw,
-            proposals=(),
-            usage=dataclasses.replace(
-                usage,
-                proposal_count=0,
-                evidence_range_count=0,
-            ),
-        )
+    empty_success = ProducedExtraction(
+        outcome=ExtractionOutcome.SUCCESS,
+        failure_code=ExtractionFailureCode.NONE,
+        validation=ExtractionOutputValidation.VALID,
+        raw_output_value=raw,
+        proposals=(),
+        usage=dataclasses.replace(
+            usage,
+            proposal_count=0,
+            evidence_range_count=0,
+        ),
+    )
+    assert empty_success.proposals == ()
     with pytest.raises(ExtractionContractError, match="cannot create proposal"):
         ProducedExtraction(
             outcome=ExtractionOutcome.INVALID_OUTPUT,

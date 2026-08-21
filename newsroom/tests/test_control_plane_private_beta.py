@@ -1,32 +1,55 @@
 from pathlib import Path
 import json
 import os
+import stat
+import subprocess
+import sys
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.cycle import run_cycle
+from newsroom.control_plane.corpus import CorpusIngestUnit
+from newsroom.control_plane.editorial import StoryCandidateRecord
+from newsroom.control_plane.evidence import EvidencePackage
 from newsroom.control_plane.intake import run_intake
 from newsroom.control_plane.items import parse_observation
 from newsroom.control_plane.reports import news_report
 from newsroom.control_plane.store import connect, list_payloads, mark_public_dispatch
 from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.veto import VetoError, refuse_public_effect
-from newsroom.control_plane.writer import CliChainWriter, FixtureWriter, run_grok_cli
+from newsroom.control_plane.writer import (
+    CliChainWriter,
+    FixtureWriter,
+    WriterCopy,
+    run_grok_cli,
+)
 from newsroom.graphiti_adapter.evaluation_packet import (
     EVALUATION_GRAPHITI_PACKET,
     EVALUATION_WORKSPACE_POLICY,
     GRAPHITI_CHAT_MODEL,
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_EMBEDDING_MODEL,
+    GRAPHITI_EVALUATION_DESTINATION_TOKENS,
     OPENROUTER_API,
     WRITER_FALLBACK,
     WRITER_MODEL,
 )
 from newsroom.graphiti_adapter.models import REAL_GRAPHITI_RUNTIME_ENABLED
+from newsroom.graphiti_adapter.temporal import OBSERVED_FALLBACK
 from newsroom.graphiti_adapter.types import (
     GraphitiCredentialClass,
     GraphitiEgressPolicy,
     GraphitiRuntimeNotAuthorized,
+)
+from newsroom.increment9.proving import PROVING_GATES, SOURCE_URLS
+from newsroom.increment9.rights import (
+    BINDINGS,
+    FIXTURE_DESTINATIONS,
+    FIXTURE_NOW,
+    fixture_inventory,
 )
 
 ATOM = b"""<?xml version="1.0" encoding="UTF-8"?>
@@ -62,6 +85,25 @@ SAME_URL_RSS = """<?xml version="1.0" encoding="UTF-8"?>
 """.encode("utf-8")
 
 
+def _evaluation_cycle_destinations() -> tuple[str, ...]:
+    return tuple(sorted({*FIXTURE_DESTINATIONS, *GRAPHITI_EVALUATION_DESTINATION_TOKENS}))
+
+
+def _cycle_rights_inventory(
+    gate: str,
+    destinations: tuple[str, ...] | None = None,
+) -> dict[str, object]:
+    return fixture_inventory(
+        gate=gate,
+        destinations=(
+            _evaluation_cycle_destinations() if destinations is None else destinations
+        ),
+        now="2026-08-20T00:00:00.000000Z",
+        issued_at="2026-01-01T00:00:00.000000Z",
+        expires_at="2099-01-01T00:00:00.000000Z",
+    )
+
+
 def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
     path = tmp_path / "proving_store.sqlite3"
     connection = __import__("sqlite3").connect(path)
@@ -86,15 +128,35 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
             item_count INTEGER NOT NULL,
             error TEXT
         );
+        CREATE TABLE proving_gates(
+            run_id TEXT NOT NULL,
+            gate_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            PRIMARY KEY(run_id, gate_id)
+        );
+        CREATE TABLE proving_rights_packets(
+            run_id TEXT NOT NULL,
+            gate_id TEXT NOT NULL,
+            packet_digest TEXT NOT NULL,
+            packet_json TEXT NOT NULL,
+            assessed_at TEXT NOT NULL,
+            PRIMARY KEY(run_id, gate_id)
+        );
         """
     )
     connection.execute(
-        "INSERT INTO proving_runs VALUES('run-1','2026-08-16T21:41:34.000000Z',0,0,0,0)"
+        """
+        INSERT INTO proving_runs(
+            run_id, started_at, publication, public_dispatch,
+            openrouter_invoked, spend_gbp_minor
+        ) VALUES('run-1','2026-08-16T21:41:34.000000Z',0,0,0,0)
+        """
     )
     rows = (
         (
             "UK-01",
-            "https://www.gov.uk/search/all.atom",
+            SOURCE_URLS["UK-01"],
             "sha256:feed",
             ATOM,
         ),
@@ -111,7 +173,12 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
             JSON_DOC,
         ),
         *tuple(
-            (source_id, "https://example.invalid/feed", f"sha256:{source_id}", body)
+            (
+                source_id,
+                BINDINGS[f"RIGHTS_{source_id}"][2],
+                f"sha256:{source_id}",
+                body,
+            )
             for source_id, body in extra
         ),
     )
@@ -130,9 +197,197 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
                 None,
             ),
         )
+    for gate_id in PROVING_GATES:
+        if gate_id.startswith("RIGHTS_"):
+            continue
+        connection.execute(
+            "INSERT INTO proving_gates VALUES(?,?,?,?)",
+            ("run-1", gate_id, "PASS", "fixture"),
+        )
+    for source_id, _url, _digest, _body in rows:
+        gate_id = f"RIGHTS_{source_id}"
+        connection.execute(
+            "INSERT INTO proving_gates VALUES(?,?,?,?)",
+            ("run-1", gate_id, "PASS", "fixture"),
+        )
+        packet = _cycle_rights_inventory(gate_id)
+        packet_bytes = canonical_json_bytes(packet)
+        connection.execute(
+            "INSERT INTO proving_rights_packets VALUES(?,?,?,?,?)",
+            (
+                "run-1",
+                gate_id,
+                digest_bytes(packet_bytes),
+                packet_bytes.decode("utf-8"),
+                "2026-08-20T00:00:00.000000Z",
+            ),
+        )
     connection.commit()
     connection.close()
     return path
+
+
+def test_real_graphiti_cycle_requires_canonical_shared_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.control_plane import paths as control_paths
+    import scripts.hermes_control_plane as hermes
+
+    anchored_default = Path(hermes.DEFAULT_UNPUBLISHED)
+    anchored_proving = Path(hermes.DEFAULT_PROVING)
+    assert anchored_default.is_absolute()
+    assert anchored_proving.is_absolute()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert Path(hermes.DEFAULT_UNPUBLISHED) == anchored_default
+    assert Path(hermes.DEFAULT_PROVING) == anchored_proving
+
+    canonical = tmp_path / "canonical" / "unpublished.sqlite3"
+    canonical.parent.mkdir()
+    canonical.touch()
+    alias = tmp_path / "canonical-alias.sqlite3"
+    alias.symlink_to(canonical)
+    canonical_proving = tmp_path / "canonical" / "proving.sqlite3"
+    canonical_proving.touch()
+    proving_alias = tmp_path / "proving-alias.sqlite3"
+    proving_alias.symlink_to(canonical_proving)
+    monkeypatch.setattr(control_paths, "CANONICAL_PROVING_STORE", canonical_proving)
+    monkeypatch.setattr(control_paths, "CANONICAL_UNPUBLISHED_STORE", canonical)
+    control_paths.require_canonical_proving_store(str(proving_alias))
+    control_paths.require_canonical_unpublished_store(str(alias))
+    with pytest.raises(ValueError, match="canonical proving store"):
+        control_paths.require_canonical_proving_store(
+            str(tmp_path / "other-proving.sqlite3")
+        )
+    with pytest.raises(ValueError, match="canonical unpublished store"):
+        control_paths.require_canonical_unpublished_store(
+            str(tmp_path / "other.sqlite3")
+        )
+
+
+def test_control_plane_state_root_preserves_legacy_pair_or_bootstraps_fresh(
+    tmp_path: Path,
+) -> None:
+    from newsroom.control_plane.paths import (
+        _canonical_state_root,
+        _ensure_private_directory,
+    )
+
+    fresh_home = tmp_path / "fresh"
+    assert _canonical_state_root(fresh_home) == (
+        fresh_home / ".local" / "share" / "newsroom"
+    )
+    for store_name in ("proving_store.sqlite3", "unpublished_store.sqlite3"):
+        intermediate_home = tmp_path / f"fresh-{store_name}"
+        intermediate = intermediate_home / ".local" / "share" / "newsroom"
+        intermediate.mkdir(parents=True)
+        (intermediate / store_name).touch()
+        assert _canonical_state_root(intermediate_home) == intermediate
+
+    legacy = tmp_path / "legacy" / "Coding" / "newsroom" / "data" / "newsroom"
+    legacy.mkdir(parents=True)
+    (legacy / "proving_store.sqlite3").write_bytes(b"proving")
+    with pytest.raises(RuntimeError, match="store pair is incomplete"):
+        _canonical_state_root(tmp_path / "legacy")
+    (legacy / "unpublished_store.sqlite3").write_bytes(b"unpublished")
+    assert _canonical_state_root(tmp_path / "legacy") == legacy
+
+    conflict_home = tmp_path / "conflict"
+    conflict_legacy = (
+        conflict_home / "Coding" / "newsroom" / "data" / "newsroom"
+    )
+    conflict_fresh = conflict_home / ".local" / "share" / "newsroom"
+    conflict_legacy.mkdir(parents=True)
+    conflict_fresh.mkdir(parents=True)
+    for name in ("proving_store.sqlite3", "unpublished_store.sqlite3"):
+        (conflict_legacy / name).write_bytes(b"legacy")
+        (conflict_fresh / name).write_bytes(b"fresh")
+    with pytest.raises(RuntimeError, match="ambiguous authority"):
+        _canonical_state_root(conflict_home)
+
+    mixed_home = tmp_path / "legacy-with-fresh-intermediate"
+    mixed_legacy = mixed_home / "Coding" / "newsroom" / "data" / "newsroom"
+    mixed_fresh = mixed_home / ".local" / "share" / "newsroom"
+    mixed_legacy.mkdir(parents=True)
+    mixed_fresh.mkdir(parents=True)
+    for name in ("proving_store.sqlite3", "unpublished_store.sqlite3"):
+        (mixed_legacy / name).touch()
+    (mixed_fresh / "proving_store.sqlite3").touch()
+    with pytest.raises(RuntimeError, match="refusing a split authority"):
+        _canonical_state_root(mixed_home)
+
+    for name in ("proving_store.sqlite3", "unpublished_store.sqlite3"):
+        (conflict_fresh / name).unlink()
+        (conflict_fresh / name).symlink_to(conflict_legacy / name)
+    assert _canonical_state_root(conflict_home) == conflict_legacy
+
+    private_root = tmp_path / "fresh-private"
+    _ensure_private_directory(private_root)
+    assert stat.S_IMODE(private_root.stat().st_mode) == 0o700
+
+
+def test_default_clis_bootstrap_fresh_stores_across_two_invocations(
+    tmp_path: Path,
+) -> None:
+    repository = Path(__file__).resolve().parents[2]
+    environment = {**os.environ, "HOME": str(tmp_path)}
+    fresh = tmp_path / ".local" / "share" / "newsroom"
+
+    status = subprocess.run(
+        [sys.executable, "scripts/hermes_control_plane.py", "status"],
+        cwd=repository,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert status.returncode == 0, status.stderr
+    assert (fresh / "unpublished_store.sqlite3").exists()
+    assert not (fresh / "proving_store.sqlite3").exists()
+
+    proving_list = subprocess.run(
+        [sys.executable, "scripts/increment9_proving_store.py", "list"],
+        cwd=repository,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proving_list.returncode == 0, proving_list.stderr
+    assert (fresh / "proving_store.sqlite3").exists()
+
+
+def test_real_graphiti_run_cycle_rejects_alternate_authority_or_ledger_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.control_plane import paths as control_paths
+    from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
+
+    canonical_proving = tmp_path / "canonical-proving.sqlite3"
+    canonical_unpublished = tmp_path / "canonical-unpublished.sqlite3"
+    monkeypatch.setattr(control_paths, "CANONICAL_PROVING_STORE", canonical_proving)
+    monkeypatch.setattr(
+        control_paths, "CANONICAL_UNPUBLISHED_STORE", canonical_unpublished
+    )
+    runner = EvaluationGraphitiRunner()
+
+    with pytest.raises(ValueError, match="canonical proving store"):
+        run_cycle(
+            proving_store=str(tmp_path / "stale-pass.sqlite3"),
+            unpublished_store=str(canonical_unpublished),
+            writer=FixtureWriter(),
+            graphiti=runner,
+        )
+    with pytest.raises(ValueError, match="canonical unpublished store"):
+        run_cycle(
+            proving_store=str(canonical_proving),
+            unpublished_store=str(tmp_path / "alternate-ledger.sqlite3"),
+            writer=FixtureWriter(),
+            graphiti=runner,
+        )
 
 
 def test_veto_refuses_public_intents() -> None:
@@ -208,7 +463,9 @@ def test_cycle_continues_after_one_writer_failure(tmp_path: Path) -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        def write(self, candidate, package):
+        def write(
+            self, candidate: StoryCandidateRecord, package: EvidencePackage
+        ) -> WriterCopy:
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("grok writer timed out")
@@ -254,13 +511,21 @@ def test_cycle_reserves_graphiti_spend_before_stub_extract(tmp_path: Path) -> No
     calls: list[str] = []
 
     class StubGraphiti:
-        def extract(self, package):
-            calls.append(package.candidate_id)
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            calls.append(unit.ingest_id)
             return GraphitiCycleResult(
-                candidate_id=package.candidate_id,
+                ingest_id=unit.ingest_id,
+                source_id=unit.source_id,
+                item_key=unit.item_key,
                 outcome="COMPLETE",
                 proposal_count=2,
+                entity_count=2,
+                relation_count=0,
                 failure_code="NONE",
+                temporal_basis=OBSERVED_FALLBACK,
+                reference_time=unit.observed_at,
+                attempt_number=unit.attempt_number,
+                provider_attempt_number=unit.attempt_number,
             )
 
     first = run_cycle(
@@ -278,6 +543,7 @@ def test_cycle_reserves_graphiti_spend_before_stub_extract(tmp_path: Path) -> No
     kinds = [row[0] for row in connection.execute("SELECT kind FROM ledger ORDER BY seq")]
     connection.close()
     assert kinds.count("GRAPHITI_SPEND_RESERVE") == 1
+    assert kinds.count("GRAPHITI_SPEND_RECONCILE") == 1
     assert kinds.count("GRAPHITI_EVALUATION_ATTEMPT") == 1
     assert kinds.index("GRAPHITI_SPEND_RESERVE") < kinds.index("GRAPHITI_EVALUATION_ATTEMPT")
     second = run_cycle(
@@ -293,33 +559,25 @@ def test_cycle_reserves_graphiti_spend_before_stub_extract(tmp_path: Path) -> No
     connection = __import__("sqlite3").connect(unpublished)
     kinds = [row[0] for row in connection.execute("SELECT kind FROM ledger ORDER BY seq")]
     connection.close()
-    assert kinds.count("GRAPHITI_SPEND_RESERVE") == 1
+    assert kinds.count("GRAPHITI_SPEND_RESERVE") == 2
+    assert kinds.count("GRAPHITI_SPEND_RECONCILE") == 2
     assert kinds.count("GRAPHITI_EVALUATION_ATTEMPT") == 2
 
 
 def test_cycle_retries_failed_graphiti_extract(tmp_path: Path) -> None:
     from newsroom.control_plane.graphiti import GraphitiCycleResult
+    from newsroom.tests.test_graphiti_corpus_ingest import _complete
 
     proving = _proving(tmp_path)
     unpublished = tmp_path / "unpublished_store.sqlite3"
     calls: list[str] = []
 
     class FlakyGraphiti:
-        def extract(self, package):
-            calls.append(package.candidate_id)
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            calls.append(unit.ingest_id)
             if len(calls) == 1:
-                return GraphitiCycleResult(
-                    candidate_id=package.candidate_id,
-                    outcome="FAILED",
-                    proposal_count=0,
-                    failure_code="PRODUCER_INTERNAL_ERROR",
-                )
-            return GraphitiCycleResult(
-                candidate_id=package.candidate_id,
-                outcome="COMPLETE",
-                proposal_count=1,
-                failure_code="NONE",
-            )
+                raise RuntimeError("provider failed before returning a result")
+            return _complete(unit)
 
     first = run_cycle(
         proving_store=str(proving),
@@ -332,7 +590,7 @@ def test_cycle_retries_failed_graphiti_extract(tmp_path: Path) -> None:
     assert first.graphiti == 1
     connection = __import__("sqlite3").connect(unpublished)
     stored = connection.execute(
-        "SELECT COUNT(*) FROM unpublished_graphiti_attempts"
+        "SELECT COUNT(*) FROM unpublished_graphiti_ingest"
     ).fetchone()[0]
     connection.close()
     assert stored == 0
@@ -348,7 +606,7 @@ def test_cycle_retries_failed_graphiti_extract(tmp_path: Path) -> None:
     assert calls[0] == calls[1]
     connection = __import__("sqlite3").connect(unpublished)
     stored = connection.execute(
-        "SELECT outcome, proposal_count FROM unpublished_graphiti_attempts"
+        "SELECT outcome, proposal_count FROM unpublished_graphiti_ingest"
     ).fetchone()
     connection.close()
     assert stored == ("COMPLETE", 1)
@@ -425,7 +683,7 @@ def test_evaluation_packet_authorises_evaluation_and_refuses_production() -> Non
     assert REAL_GRAPHITI_RUNTIME_ENABLED is True
     assert GRAPHITI_CORE_RELEASE == "graphiti-core-0.29.3"
     assert OPENROUTER_API == "OPENROUTER_API"
-    assert GRAPHITI_CHAT_MODEL == "openrouter:openai.gpt-5-mini"
+    assert GRAPHITI_CHAT_MODEL == "cursor-agent-cli:composer-2.5"
     assert GRAPHITI_EMBEDDING_MODEL == "openrouter:openai.text-embedding-3-large"
     assert WRITER_MODEL == "grok-build-cli:grok-4.6"
     assert WRITER_FALLBACK == "cursor-agent-cli"
@@ -498,13 +756,24 @@ def test_intake_fetches_when_gates_pass(tmp_path: Path) -> None:
             return 200, RSS
         return 200, JSON_DOC
 
-    report = run_intake(proving_store=str(proving), fetch=fetch)
+    report = run_intake(
+        proving_store=str(proving),
+        fetch=fetch,
+        clock=lambda: datetime.fromisoformat(FIXTURE_NOW.replace("Z", "+00:00")),
+    )
     assert report.authorised
     assert report.sources == 10
     assert report.ok == 10
+    assert report.proving_run_id.startswith("proving-9p-private-beta-")
+    second = run_intake(
+        proving_store=str(proving),
+        fetch=fetch,
+        clock=lambda: datetime.fromisoformat(FIXTURE_NOW.replace("Z", "+00:00")),
+    )
+    assert second.proving_run_id != report.proving_run_id
 
 
-def _sample_candidate_package():
+def _sample_candidate_package() -> tuple[StoryCandidateRecord, EvidencePackage]:
     from newsroom.control_plane.editorial import (
         DiscoverySignalRecord,
         NewsLeadRecord,
@@ -615,7 +884,9 @@ def test_cli_writer_accepts_finished_copy_that_mentions_verification() -> None:
     assert "核實資格" in copy.body
 
 
-def test_grok_cli_uses_empty_cwd_and_three_turns(monkeypatch) -> None:
+def test_grok_cli_uses_empty_cwd_and_three_turns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: dict[str, object] = {}
 
     class Result:
@@ -623,11 +894,12 @@ def test_grok_cli_uses_empty_cwd_and_three_turns(monkeypatch) -> None:
         stdout = json.dumps({"title": "t", "body": "b"})
         stderr = ""
 
-    def fake_run(command, **kwargs):
+    def fake_run(command: tuple[str, ...], **kwargs: object) -> Result:
         captured["command"] = command
         captured["timeout"] = kwargs.get("timeout")
         captured["cwd"] = kwargs.get("cwd")
-        captured["entries"] = os.listdir(kwargs["cwd"]) if kwargs.get("cwd") else []
+        cwd = kwargs.get("cwd")
+        captured["entries"] = os.listdir(cwd) if isinstance(cwd, str) else []
         return Result()
 
     monkeypatch.setattr("newsroom.control_plane.writer.subprocess.run", fake_run)
@@ -668,7 +940,9 @@ def test_cli_writer_reads_title_from_grok_text_envelope() -> None:
     assert copy.title == "【未出版】信封稿"
 
 
-def test_broker_error_does_not_include_secret(monkeypatch) -> None:
+def test_broker_error_does_not_include_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from newsroom.control_plane import broker
 
     class Result:
@@ -685,3 +959,13 @@ def test_broker_error_does_not_include_secret(monkeypatch) -> None:
         broker.openrouter_api_key()
     assert "super-secret-openrouter-key" not in str(caught.value)
 
+
+def test_keychain_timeout_is_a_broker_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from newsroom.control_plane import broker
+
+    def timeout(*_args: object, **_values: object) -> object:
+        raise broker.subprocess.TimeoutExpired("security", 10)
+
+    monkeypatch.setattr(broker.subprocess, "run", timeout)
+    with pytest.raises(broker.BrokerError, match="OPENROUTER_API lookup timed out"):
+        broker.openrouter_api_key()

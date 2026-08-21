@@ -5,11 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from os import environ
+from typing import Callable
+from uuid import uuid4
 
 from newsroom.increment9.prospective_run_authority import persist_authorised_chain
-from newsroom.increment9.proving import ProvingReport, run_proving
+from newsroom.increment9.proving import Fetcher, ProvingReport, run_proving
 from newsroom.increment9.rights import (
-    FIXTURE_NOW,
     HK_01_GATE_ID,
     HK_02_GATE_ID,
     HK_04_GATE_ID,
@@ -32,7 +33,7 @@ class IntakeReport:
     sources: int
 
 
-def _rights() -> dict[str, object]:
+def _rights(*, now: str) -> dict[str, object]:
     return {
         "rights": fixture_inventory(),
         "rights_uk_02": fixture_inventory(gate=UK_02_GATE_ID),
@@ -44,19 +45,25 @@ def _rights() -> dict[str, object]:
         "rights_hk_04": fixture_inventory(gate=HK_04_GATE_ID),
         "rights_rad_01": fixture_inventory(gate=RAD_01_GATE_ID),
         "rights_rad_02": fixture_inventory(gate=RAD_02_GATE_ID),
-        "now": FIXTURE_NOW,
+        "now": now,
     }
 
 
-def _run_id() -> str:
-    stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
-    return f"proving-9p-private-beta-{stamp}"
+def _run_id(now: datetime) -> str:
+    stamp = now.strftime("%Y%m%dT%H%M%S%fZ")
+    return f"proving-9p-private-beta-{stamp}-{uuid4().hex}"
 
 
-def run_intake(*, proving_store: str, fetch=None) -> IntakeReport:
+def run_intake(
+    *,
+    proving_store: str,
+    fetch: Fetcher | None = None,
+    clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
+) -> IntakeReport:
     kill = environ.get("NEWSROOM_PROVING_KILL") == "1"
-    run_id = _run_id()
-    fetched_at = datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    instant = clock().astimezone(UTC)
+    run_id = _run_id(instant)
+    fetched_at = instant.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     chain = persist_authorised_chain(run_id=run_id)
     report: ProvingReport = run_proving(
         store_path=proving_store,
@@ -66,7 +73,7 @@ def run_intake(*, proving_store: str, fetch=None) -> IntakeReport:
         no_emergency_stop=True,
         fetch=fetch,
         run_authority=chain.resolver,
-        **_rights(),
+        **_rights(now=fetched_at),
     )
     ok = sum(1 for item in report.observations if item.status_code == 200)
     return IntakeReport(

@@ -9,6 +9,10 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+from newsroom.control_plane.paths import (
+    CANONICAL_PROVING_STORE,
+    ensure_control_plane_state_root,
+)
 from newsroom.increment9.proving import (
     ProvingReport,
     assess,
@@ -18,6 +22,9 @@ from newsroom.increment9.proving import (
 )
 
 
+DEFAULT_PROVING_STORE = str(CANONICAL_PROVING_STORE)
+
+
 def _now() -> str:
     return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
@@ -25,10 +32,11 @@ def _now() -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Proving live source store (no publication).")
     parser.add_argument("command", choices=("assess", "fetch", "list"))
-    parser.add_argument("--store", default="data/newsroom/proving_store.sqlite3")
+    parser.add_argument("--store", default=DEFAULT_PROVING_STORE)
     parser.add_argument("--run-id", default="proving-9p")
     parser.add_argument("--attest-no-emergency-stop", action="store_true")
     args = parser.parse_args(argv)
+    ensure_control_plane_state_root()
     kill = os.environ.get("NEWSROOM_PROVING_KILL") == "1"
     if args.command == "assess":
         gates = assess(run_id=args.run_id, kill_switch=kill, no_emergency_stop=args.attest_no_emergency_stop)

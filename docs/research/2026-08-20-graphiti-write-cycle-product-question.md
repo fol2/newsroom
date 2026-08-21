@@ -4,7 +4,7 @@
 
 **Canonical language:** English
 
-**Issue:** [#722](https://github.com/fol2/newsroom/issues/722) (`wayfinder:grilling`, `ready-for-human`)
+**Issue:** [#722](https://github.com/fol2/newsroom/issues/722) (`wayfinder:grilling`; decision recorded)
 
 **Code base discussed:** `main` @ `46d7d67` (#721)
 
@@ -12,7 +12,7 @@
 
 **Host freeze:** [2026-08-20-unpublished-beta-store-snapshot](2026-08-20-unpublished-beta-store-snapshot/)
 
-**Implementation authority:** None. Do not change Control Plane logic until #722 records a PM answer.
+**Implementation authority:** Answered. [#722](https://github.com/fol2/newsroom/issues/722) records Option 3 in two slices. Slice A is authorised by [`../decisions/2026-08-20-graphiti.md`](../decisions/2026-08-20-graphiti.md).
 
 ## Why this exists
 

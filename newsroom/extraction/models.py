@@ -535,6 +535,7 @@ _ALLOWED_FAILURE_CODES_BY_OUTCOME: dict[
             ExtractionFailureCode.FIXTURE_RETRYABLE,
             ExtractionFailureCode.PRODUCER_INTERNAL_ERROR,
             ExtractionFailureCode.EXECUTION_TIMEOUT,
+            ExtractionFailureCode.AMBIGUOUS_EFFECT,
         }
     ),
     ExtractionOutcome.BLOCKING_FAILURE: frozenset(
@@ -567,6 +568,7 @@ class ProducedExtraction:
     raw_output_value: dict[str, Any] | None
     proposals: tuple[ProposalDraft, ...]
     usage: ExtractionUsage
+    attempt_receipt_value: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.outcome, ExtractionOutcome):
@@ -576,6 +578,11 @@ class ProducedExtraction:
         _require_outcome_failure_code(self.outcome, self.failure_code)
         if not isinstance(self.usage, ExtractionUsage):
             raise ExtractionContractError("extraction usage must be typed")
+        if self.attempt_receipt_value is not None:
+            if not isinstance(self.attempt_receipt_value, dict):
+                raise ExtractionContractError("attempt receipt must be a canonical object")
+            if not canonical_json_bytes(self.attempt_receipt_value):
+                raise ExtractionContractError("attempt receipt is empty")
         if self.raw_output_value is None:
             if self.validation is not None:
                 raise ExtractionContractError(
@@ -614,8 +621,6 @@ class ProducedExtraction:
             )
         if self.proposals and self.validation is not ExtractionOutputValidation.VALID:
             raise ExtractionContractError("proposals require valid structured output")
-        if self.outcome is ExtractionOutcome.SUCCESS and not self.proposals:
-            raise ExtractionContractError("successful fixture extraction needs proposals")
         if self.outcome is ExtractionOutcome.INVALID_OUTPUT:
             if self.validation is not ExtractionOutputValidation.INVALID:
                 raise ExtractionContractError("invalid outcome needs INVALID validation")
@@ -647,6 +652,12 @@ class ProducedExtraction:
     def raw_output_digest(self) -> str | None:
         value = self.raw_output_bytes
         return None if value is None else digest_bytes(value)
+
+    @property
+    def attempt_receipt_digest(self) -> str | None:
+        if self.attempt_receipt_value is None:
+            return None
+        return digest_bytes(canonical_json_bytes(self.attempt_receipt_value))
 
 
 class ProposalProducer(Protocol):
