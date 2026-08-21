@@ -25,6 +25,7 @@ class GuardError(RuntimeError):
 class GuardState(StrEnum):
     CREATED = "CREATED"
     PENDING = "PENDING"
+    ROLLING_BACK = "ROLLING_BACK"
     COMPLETE = "COMPLETE"
     RECOVERED_AMBIGUOUS = "RECOVERED_AMBIGUOUS"
 
@@ -293,8 +294,26 @@ class Neo4jMutationGuard:
         chat_invocations: list[dict[str, object]],
         embedding_usage: dict[str, object],
         reason: str,
-    ) -> None:
+    ) -> bool:
         """Restore the exact pre-attempt generation and retain a recovery marker."""
+
+        claimed = await self._query(
+            f"""
+            MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
+            WHERE m.state = 'PENDING'
+            SET m.state = 'ROLLING_BACK'
+            RETURN m.state AS state
+            """,
+            episode_uuid=self._episode_uuid,
+        )
+        if not claimed:
+            retained = await self._marker()
+            state = None if retained is None else str(retained.get("state"))
+            if state == GuardState.COMPLETE.value:
+                await self._delete_snapshot()
+                return False
+            if state != GuardState.ROLLING_BACK.value:
+                raise GuardError("Graphiti marker cannot enter rollback")
 
         await self._query(
             f"""
@@ -335,7 +354,7 @@ class Neo4jMutationGuard:
         recovered = await self._query(
             f"""
             MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
-            WHERE m.state = 'PENDING'
+            WHERE m.state = 'ROLLING_BACK'
             SET m.state = 'RECOVERED_AMBIGUOUS',
                 m.recovery_reason = $reason,
                 m.chat_invocations_json = $chat_invocations_json,
@@ -350,6 +369,7 @@ class Neo4jMutationGuard:
         if not recovered or _record_value(recovered[0], "state") != "RECOVERED_AMBIGUOUS":
             raise GuardError("Graphiti recovery marker transition did not commit")
         await self._delete_snapshot()
+        return True
 
     async def _restore_properties(self) -> None:
         await self._query(

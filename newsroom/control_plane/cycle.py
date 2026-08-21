@@ -176,20 +176,49 @@ def _bind_result(
             raise ValueError("graphiti passage admission differs from retained records")
         retained_access = passage.get("access_decision_id")
         if retained_access != unit.authority.access_decision_id:
-            retained = (
-                None
-                if authority_connection is None or not isinstance(retained_access, str)
-                else authority_connection.execute(
+            retained = None
+            if authority_connection is not None and isinstance(retained_access, str):
+                retained = authority_connection.execute(
                     """
-                    SELECT 1 FROM unpublished_graphiti_authority_records
+                    SELECT record_digest, record_json
+                    FROM unpublished_graphiti_authority_records
                     WHERE record_id=? AND record_type='OBJECT_ACCESS_DECISION'
                     """,
                     (retained_access,),
                 ).fetchone()
+            current_access = next(
+                (
+                    item
+                    for item in unit.authority.records
+                    if item.get("record_type") == "OBJECT_ACCESS_DECISION"
+                ),
+                None,
             )
-            if retained is None:
+            if retained is None or current_access is None:
                 raise ValueError(
                     "graphiti passage access decision is neither current nor retained"
+                )
+            try:
+                retained_record = json.loads(str(retained[1]))
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "retained Graphiti access decision is malformed"
+                ) from exc
+            if (
+                not isinstance(retained_record, dict)
+                or digest_bytes(canonical_json_bytes(retained_record)) != str(retained[0])
+                or retained_record.get("record_id") != retained_access
+                or retained_record.get("record_type") != "OBJECT_ACCESS_DECISION"
+                or retained_record.get("revision_id") != unit.authority.revision_id
+                or retained_record.get("decision") != "ALLOW"
+                or retained_record.get("principal_id") != "newsroom.control-plane"
+                or retained_record.get("purpose") != "graphiti.corpus-ingest"
+                or retained_record.get("rights_gate_status") != "PASS"
+                or retained_record.get("rights_gate_id")
+                != current_access.get("rights_gate_id")
+            ):
+                raise ValueError(
+                    "retained Graphiti access decision does not bind this revision"
                 )
     if tuple(raw.get("proposals", ())) != result.proposals:
         raise ValueError("graphiti proposal receipt differs from bound raw receipt")

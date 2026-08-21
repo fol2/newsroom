@@ -1758,6 +1758,17 @@ def test_result_binding_accepts_retained_original_access_after_renewal(
     with pytest.raises(ValueError, match="neither current nor retained"):
         _bind_result(unit, recovered)
     connection = connect(str(tmp_path / "unpublished.sqlite3"))
+    current_access = next(
+        item
+        for item in unit.authority.records
+        if item.get("record_type") == "OBJECT_ACCESS_DECISION"
+    )
+    retained_record = {
+        **current_access,
+        "record_id": old_access,
+        "rights_authority_run_id": "run-original",
+    }
+    retained_json = canonical_json_bytes(retained_record).decode("utf-8")
     connection.execute(
         """
         INSERT INTO unpublished_graphiti_authority_records(
@@ -1767,8 +1778,8 @@ def test_result_binding_accepts_retained_original_access_after_renewal(
         (
             old_access,
             "OBJECT_ACCESS_DECISION",
-            "sha256:retained",
-            "{}",
+            digest_bytes(retained_json.encode("utf-8")),
+            retained_json,
             "2026-08-20T00:00:00.000000Z",
         ),
     )
@@ -1777,6 +1788,21 @@ def test_result_binding_accepts_retained_original_access_after_renewal(
         recovered,
         authority_connection=connection,
     ) == recovered
+    wrong_revision = {**retained_record, "revision_id": "foreign-revision"}
+    wrong_json = canonical_json_bytes(wrong_revision).decode("utf-8")
+    connection.execute(
+        """
+        UPDATE unpublished_graphiti_authority_records
+        SET record_digest=?, record_json=? WHERE record_id=?
+        """,
+        (digest_bytes(wrong_json.encode("utf-8")), wrong_json, old_access),
+    )
+    with pytest.raises(ValueError, match="does not bind this revision"):
+        _bind_result(
+            unit,
+            recovered,
+            authority_connection=connection,
+        )
     connection.close()
 
 

@@ -705,6 +705,45 @@ def test_guard_completion_checks_the_committed_transition() -> None:
     assert any("NewsroomSnapshot" in query and "DELETE s" in query for query in queries)
 
 
+def test_complete_marker_blocks_cancellation_rollback_deletion() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import Neo4jMutationGuard
+
+    queries: list[str] = []
+
+    class Driver:
+        async def execute_query(
+            self,
+            query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            del params, routing_
+            queries.append(query)
+            if "SET m.state = 'ROLLING_BACK'" in query:
+                return [], None, None
+            if "RETURN properties(m) AS marker" in query:
+                return [{"marker": {"state": "COMPLETE"}}], None, None
+            return [], None, None
+
+    guard = Neo4jMutationGuard(
+        Driver(),
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        episode_uuid="episode-id",
+        attempt_number=1,
+        input_digest="sha256:" + "0" * 64,
+    )
+    rolled_back = asyncio.run(
+        guard.rollback_pending(
+            chat_invocations=[],
+            embedding_usage={"usage_basis": "NO_EMBEDDING_CALL"},
+            reason="CANCELLED",
+        )
+    )
+    assert rolled_back is False
+    assert not any("DELETE r" in query or "DETACH DELETE n" in query for query in queries)
+
+
 def test_immutable_completion_snapshot_restores_without_graph_rehydration(
     tmp_path: Path,
 ) -> None:
