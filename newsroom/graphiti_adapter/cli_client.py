@@ -9,12 +9,18 @@ import os
 import subprocess
 import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Awaitable, Protocol
 
 from newsroom.graphiti_adapter.evaluation_packet import (
     CURSOR_AGENT_MODEL_ID,
     GROK_CHAT_MODEL_ID,
     GROK_CHAT_REASONING,
+)
+from newsroom.graphiti_adapter.usage_meter import (
+    cursor_cli_usage,
+    grok_cli_usage,
+    unreported_cli_usage,
 )
 
 CURSOR_AGENT_BIN = os.environ.get(
@@ -23,10 +29,17 @@ CURSOR_AGENT_BIN = os.environ.get(
 GROK_BIN = os.environ.get("NEWSROOM_GROK_BIN", "/Users/jamesto/.grok/bin/grok")
 CLI_CALL_TIMEOUT_SECONDS = 80
 
-CliRunner = Callable[[str], str]
-GrokRunner = Callable[[str, str | None], str]
-AsyncCliRunner = Callable[[str], Awaitable[str]]
-AsyncGrokRunner = Callable[[str, str | None], Awaitable[str]]
+@dataclass(frozen=True, slots=True)
+class CliExecution:
+    text: str
+    usage: dict[str, object]
+
+
+CliOutput = str | CliExecution
+CliRunner = Callable[[str], CliOutput]
+GrokRunner = Callable[[str, str | None], CliOutput]
+AsyncCliRunner = Callable[[str], Awaitable[CliOutput]]
+AsyncGrokRunner = Callable[[str, str | None], Awaitable[CliOutput]]
 
 
 class CliResponseError(RuntimeError):
@@ -126,7 +139,7 @@ def _cursor_command(prompt: str) -> tuple[str, ...]:
         "--mode",
         "ask",
         "--output-format",
-        "text",
+        "json",
         "--sandbox",
         "enabled",
         "--trust",
@@ -156,42 +169,108 @@ def _grok_command(*, prompt: str, schema: str | None, cwd: str) -> tuple[str, ..
     ]
     if schema:
         command.extend(["--json-schema", schema])
+    command.extend(["--output-format", "streaming-json"])
     return tuple(command)
 
 
-def run_cursor_agent_llm(prompt: str) -> str:
+def parse_cursor_output(raw: str) -> CliExecution:
+    """Extract Cursor's model result and final provider-reported token usage."""
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return CliExecution(text=raw, usage=unreported_cli_usage())
+    if not isinstance(payload, dict) or not isinstance(payload.get("result"), str):
+        return CliExecution(text=raw, usage=unreported_cli_usage())
+    return CliExecution(
+        text=str(payload["result"]),
+        usage=cursor_cli_usage(payload.get("usage")),
+    )
+
+
+def _grok_update(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    params = value.get("params")
+    if isinstance(params, dict) and isinstance(params.get("update"), dict):
+        return params["update"]
+    update = value.get("update")
+    if isinstance(update, dict):
+        return update
+    return value
+
+
+def parse_grok_stream_output(raw: str) -> CliExecution:
+    """Extract message chunks and ``turn_completed`` usage from Grok NDJSON."""
+
+    chunks: list[str] = []
+    usage = unreported_cli_usage()
+    recognised = False
+    for line in raw.splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        update = _grok_update(value)
+        if update is None:
+            continue
+        kind = update.get("sessionUpdate") or update.get("type")
+        if kind in {"agent_message_chunk", "assistant_message_chunk"}:
+            content = update.get("content")
+            text = content.get("text") if isinstance(content, dict) else content
+            if isinstance(text, str):
+                chunks.append(text)
+                recognised = True
+        elif kind in {"turn_completed", "turnEnded"}:
+            usage = grok_cli_usage(update.get("usage"))
+            recognised = True
+    return CliExecution(
+        text="".join(chunks) if recognised and chunks else raw,
+        usage=usage,
+    )
+
+
+def run_cursor_agent_llm(prompt: str) -> CliExecution:
     with tempfile.TemporaryDirectory(prefix="newsroom-cursor-graphiti-") as cwd:
-        return run_cli(
-            _cursor_command(prompt),
-            timeout=CLI_CALL_TIMEOUT_SECONDS,
-            cwd=cwd,
+        return parse_cursor_output(
+            run_cli(
+                _cursor_command(prompt),
+                timeout=CLI_CALL_TIMEOUT_SECONDS,
+                cwd=cwd,
+            )
         )
 
 
-async def run_cursor_agent_llm_async(prompt: str) -> str:
+async def run_cursor_agent_llm_async(prompt: str) -> CliExecution:
     with tempfile.TemporaryDirectory(prefix="newsroom-cursor-graphiti-") as cwd:
-        return await run_cli_async(
-            _cursor_command(prompt),
-            timeout=CLI_CALL_TIMEOUT_SECONDS,
-            cwd=cwd,
+        return parse_cursor_output(
+            await run_cli_async(
+                _cursor_command(prompt),
+                timeout=CLI_CALL_TIMEOUT_SECONDS,
+                cwd=cwd,
+            )
         )
 
 
-def run_grok_llm(prompt: str, schema: str | None) -> str:
+def run_grok_llm(prompt: str, schema: str | None) -> CliExecution:
     with tempfile.TemporaryDirectory(prefix="newsroom-grok-graphiti-") as cwd:
-        return run_cli(
-            _grok_command(prompt=prompt, schema=schema, cwd=cwd),
-            timeout=CLI_CALL_TIMEOUT_SECONDS,
-            cwd=cwd,
+        return parse_grok_stream_output(
+            run_cli(
+                _grok_command(prompt=prompt, schema=schema, cwd=cwd),
+                timeout=CLI_CALL_TIMEOUT_SECONDS,
+                cwd=cwd,
+            )
         )
 
 
-async def run_grok_llm_async(prompt: str, schema: str | None) -> str:
+async def run_grok_llm_async(prompt: str, schema: str | None) -> CliExecution:
     with tempfile.TemporaryDirectory(prefix="newsroom-grok-graphiti-") as cwd:
-        return await run_cli_async(
-            _grok_command(prompt=prompt, schema=schema, cwd=cwd),
-            timeout=CLI_CALL_TIMEOUT_SECONDS,
-            cwd=cwd,
+        return parse_grok_stream_output(
+            await run_cli_async(
+                _grok_command(prompt=prompt, schema=schema, cwd=cwd),
+                timeout=CLI_CALL_TIMEOUT_SECONDS,
+                cwd=cwd,
+            )
         )
 
 
@@ -208,6 +287,35 @@ def _parsed_object(raw: str) -> dict[str, Any] | None:
     except (RuntimeError, json.JSONDecodeError, TypeError, ValueError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _execution(value: CliOutput) -> CliExecution:
+    if isinstance(value, CliExecution):
+        return value
+    return CliExecution(text=value, usage=unreported_cli_usage())
+
+
+def _invocation(
+    *,
+    provider: str,
+    model: str,
+    outcome: str,
+    execution: CliExecution | None = None,
+    failure: str | None = None,
+) -> dict[str, object]:
+    value: dict[str, object] = {
+        "provider": provider,
+        "model": model,
+        "outcome": outcome,
+        "usage": (
+            dict(execution.usage)
+            if execution is not None
+            else unreported_cli_usage()
+        ),
+    }
+    if failure is not None:
+        value["failure"] = failure
+    return value
 
 
 async def run_cli_chain(
@@ -227,32 +335,34 @@ async def run_cli_chain(
             raw = await asyncio.to_thread(cursor_runner, prompt)
     except asyncio.CancelledError as exc:
         invocations.append(
-            {
-                "provider": "cursor-agent-cli",
-                "model": CURSOR_AGENT_MODEL_ID,
-                "outcome": "CANCELLED",
-                "failure": type(exc).__name__,
-            }
+            _invocation(
+                provider="cursor-agent-cli",
+                model=CURSOR_AGENT_MODEL_ID,
+                outcome="CANCELLED",
+                failure=type(exc).__name__,
+            )
         )
         raise
     except (RuntimeError, OSError) as exc:
         invocations.append(
-            {
-                "provider": "cursor-agent-cli",
-                "model": CURSOR_AGENT_MODEL_ID,
-                "outcome": "FAILED",
-                "failure": type(exc).__name__,
-            }
+            _invocation(
+                provider="cursor-agent-cli",
+                model=CURSOR_AGENT_MODEL_ID,
+                outcome="FAILED",
+                failure=type(exc).__name__,
+            )
         )
         payload = None
     else:
-        payload = _parsed_object(raw)
+        cursor_execution = _execution(raw)
+        payload = _parsed_object(cursor_execution.text)
         invocations.append(
-            {
-                "provider": "cursor-agent-cli",
-                "model": CURSOR_AGENT_MODEL_ID,
-                "outcome": "COMPLETE" if payload is not None else "MALFORMED_OUTPUT",
-            }
+            _invocation(
+                provider="cursor-agent-cli",
+                model=CURSOR_AGENT_MODEL_ID,
+                outcome=("COMPLETE" if payload is not None else "MALFORMED_OUTPUT"),
+                execution=cursor_execution,
+            )
         )
     if payload is not None:
         return payload
@@ -264,31 +374,33 @@ async def run_cli_chain(
             raw = await asyncio.to_thread(grok_runner, prompt, schema)
     except asyncio.CancelledError as exc:
         invocations.append(
-            {
-                "provider": "grok-build-cli",
-                "model": GROK_CHAT_MODEL_ID,
-                "outcome": "CANCELLED",
-                "failure": type(exc).__name__,
-            }
+            _invocation(
+                provider="grok-build-cli",
+                model=GROK_CHAT_MODEL_ID,
+                outcome="CANCELLED",
+                failure=type(exc).__name__,
+            )
         )
         raise
     except (RuntimeError, OSError) as exc:
         invocations.append(
-            {
-                "provider": "grok-build-cli",
-                "model": GROK_CHAT_MODEL_ID,
-                "outcome": "FAILED",
-                "failure": type(exc).__name__,
-            }
+            _invocation(
+                provider="grok-build-cli",
+                model=GROK_CHAT_MODEL_ID,
+                outcome="FAILED",
+                failure=type(exc).__name__,
+            )
         )
         raise CliResponseError("Graphiti fallback CLI failed") from exc
-    payload = _parsed_object(raw)
+    grok_execution = _execution(raw)
+    payload = _parsed_object(grok_execution.text)
     invocations.append(
-        {
-            "provider": "grok-build-cli",
-            "model": GROK_CHAT_MODEL_ID,
-            "outcome": "COMPLETE" if payload is not None else "MALFORMED_OUTPUT",
-        }
+        _invocation(
+            provider="grok-build-cli",
+            model=GROK_CHAT_MODEL_ID,
+            outcome="COMPLETE" if payload is not None else "MALFORMED_OUTPUT",
+            execution=grok_execution,
+        )
     )
     if payload is None:
         raise CliResponseError("Graphiti CLI JSON was not an object")

@@ -36,6 +36,7 @@ from newsroom.extraction.types import (
 from newsroom.graphiti_adapter.cli_client import build_cli_llm_client
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
 from newsroom.graphiti_adapter.embedding_meter import MeteredOpenAIEmbedder
+from newsroom.graphiti_adapter.usage_meter import summarise_graphiti_usage
 from newsroom.graphiti_adapter.edge_guard import guard_extracted_edges
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_FALLBACK,
@@ -539,6 +540,10 @@ def _raw_receipt(
         "chat_invocation_count": len(telemetry.chat_invocations),
         "chat_subscription_not_debited": True,
         "embedding_usage": telemetry.embedding_usage,
+        "token_usage": summarise_graphiti_usage(
+            chat_invocations=telemetry.chat_invocations,
+            embedding_usage=telemetry.embedding_usage,
+        ),
         "usage_basis": str(
             telemetry.embedding_usage.get("usage_basis", "UNREPORTED")
         ),

@@ -283,17 +283,18 @@ def test_cursor_malformed_json_executes_grok_fallback_and_records_both_calls() -
     )
     assert result == {"value": "fallback"}
     assert calls == ["cursor", "grok"]
-    assert invocations == [
-        {
-            "provider": "cursor-agent-cli",
-            "model": "composer-2.5",
-            "outcome": "MALFORMED_OUTPUT",
-        },
-        {
-            "provider": "grok-build-cli",
-            "model": "grok-4.6",
-            "outcome": "COMPLETE",
-        },
+    assert [item["provider"] for item in invocations] == [
+        "cursor-agent-cli",
+        "grok-build-cli",
+    ]
+    assert [item["model"] for item in invocations] == ["composer-2.5", "grok-4.6"]
+    assert [item["outcome"] for item in invocations] == [
+        "MALFORMED_OUTPUT",
+        "COMPLETE",
+    ]
+    assert [item["usage"]["usage_basis"] for item in invocations] == [
+        "UNREPORTED",
+        "UNREPORTED",
     ]
 
 
@@ -1374,6 +1375,12 @@ def test_retryable_failure_returns_diagnostic_receipt_without_structured_output(
     assert produced.attempt_receipt_value is not None
     assert produced.attempt_receipt_value["chat_invocation_count"] == 1
     assert produced.attempt_receipt_value["usage_basis"] == "NO_EMBEDDING_CALL"
+    assert produced.attempt_receipt_value["token_usage"]["usage_basis"] == (
+        "UNREPORTED"
+    )
+    assert produced.attempt_receipt_value["token_usage"][
+        "unreported_chat_requests"
+    ] == 1
 
 
 def test_pre_dispatch_setup_failure_is_a_proved_no_call_receipt(
@@ -1399,6 +1406,7 @@ def test_pre_dispatch_setup_failure_is_a_proved_no_call_receipt(
     assert receipt["embedding_usage"]["request_count"] == 0
     assert receipt["embedding_usage"]["cost_usd_microunits"] == 0
     assert receipt["usage_basis"] == "NO_EMBEDDING_CALL"
+    assert receipt["token_usage"]["usage_basis"] == "NO_PROVIDER_CALL"
 
 
 def test_credential_time_is_deducted_from_absolute_extraction_deadline(
@@ -1615,7 +1623,9 @@ def test_cursor_cli_runs_outside_repository_cwd(
         return "{}"
 
     monkeypatch.setattr(cli_client, "run_cli", capture)
-    assert cli_client.run_cursor_agent_llm("untrusted source") == "{}"
+    cursor_execution = cli_client.run_cursor_agent_llm("untrusted source")
+    assert cursor_execution.text == "{}"
+    assert cursor_execution.usage["usage_basis"] == "UNREPORTED"
     cwd = observed["cwd"]
     assert isinstance(cwd, str)
     assert Path(cwd) != _REPOSITORY_ROOT
@@ -1623,7 +1633,9 @@ def test_cursor_cli_runs_outside_repository_cwd(
     assert observed["timeout"] == cli_client.CLI_CALL_TIMEOUT_SECONDS
 
     observed.clear()
-    assert cli_client.run_grok_llm("untrusted source", None) == "{}"
+    grok_execution = cli_client.run_grok_llm("untrusted source", None)
+    assert grok_execution.text == "{}"
+    assert grok_execution.usage["usage_basis"] == "UNREPORTED"
     grok_cwd = observed["cwd"]
     assert isinstance(grok_cwd, str)
     assert Path(grok_cwd) != _REPOSITORY_ROOT

@@ -43,6 +43,7 @@ class GraphitiCycleResult:
     passages: tuple[dict[str, object], ...] = ()
     chat_invocations: tuple[dict[str, object], ...] = ()
     embedding_usage: dict[str, object] | None = None
+    token_usage: dict[str, object] | None = None
     request_tokens: int = 0
     response_tokens: int = 0
     cost_microunits: int = 0
@@ -148,6 +149,7 @@ class EvaluationGraphitiRunner:
         proposal_receipts = payload.get("proposals")
         passage_receipts = payload.get("passages")
         embedding_usage = payload.get("embedding_usage")
+        token_usage = payload.get("token_usage")
         usage = execution.produced.usage
         usage_basis = payload.get("usage_basis")
         return GraphitiCycleResult(
@@ -180,6 +182,7 @@ class EvaluationGraphitiRunner:
             embedding_usage=(
                 embedding_usage if isinstance(embedding_usage, dict) else None
             ),
+            token_usage=token_usage if isinstance(token_usage, dict) else None,
             request_tokens=usage.request_tokens,
             response_tokens=usage.response_tokens,
             cost_microunits=usage.cost_microunits,
