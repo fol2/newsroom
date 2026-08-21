@@ -2,8 +2,89 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Any
+from typing import Any, TypeGuard
+
+from newsroom.graphiti_adapter.evaluation_packet import OPENROUTER_EMBEDDING_SLUG
+
+
+_PROVIDER_USAGE_KEYS = frozenset(
+    {
+        "requests",
+        "request_count",
+        "embedding_tokens",
+        "cost_usd_microunits",
+        "usage_basis",
+    }
+)
+_PROVIDER_REQUEST_KEYS = frozenset(
+    {
+        "provider",
+        "model",
+        "request_id",
+        "prompt_tokens",
+        "total_tokens",
+        "cost_usd_microunits",
+        "cost_reported",
+        "outcome",
+    }
+)
+
+
+def _is_non_negative_int(value: object) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def is_exact_provider_reported_usage(
+    embedding_usage: Mapping[str, object] | None,
+) -> bool:
+    """Validate required provider-native fields and internally consistent totals."""
+
+    if embedding_usage is None or not _PROVIDER_USAGE_KEYS <= set(embedding_usage):
+        return False
+    requests = embedding_usage["requests"]
+    request_count = embedding_usage["request_count"]
+    embedding_tokens = embedding_usage["embedding_tokens"]
+    cost = embedding_usage["cost_usd_microunits"]
+    if (
+        embedding_usage["usage_basis"] != "PROVIDER_REPORTED"
+        or not isinstance(requests, list)
+        or not requests
+        or not _is_non_negative_int(request_count)
+        or not _is_non_negative_int(embedding_tokens)
+        or not _is_non_negative_int(cost)
+        or request_count != len(requests)
+    ):
+        return False
+    request_tokens = 0
+    request_cost = 0
+    for request in requests:
+        if (
+            not isinstance(request, Mapping)
+            or not _PROVIDER_REQUEST_KEYS <= set(request)
+        ):
+            return False
+        prompt_tokens = request["prompt_tokens"]
+        total_tokens = request["total_tokens"]
+        item_cost = request["cost_usd_microunits"]
+        if (
+            request["provider"] != "openrouter"
+            or request["model"] != OPENROUTER_EMBEDDING_SLUG
+            or not isinstance(request["request_id"], str)
+            or (
+                prompt_tokens is not None
+                and not _is_non_negative_int(prompt_tokens)
+            )
+            or not _is_non_negative_int(total_tokens)
+            or not _is_non_negative_int(item_cost)
+            or request["cost_reported"] is not True
+            or request["outcome"] != "COMPLETE"
+        ):
+            return False
+        request_tokens += total_tokens
+        request_cost += item_cost
+    return request_tokens == embedding_tokens and request_cost == cost
 
 
 def _integer(value: object) -> int | None:
@@ -116,4 +197,4 @@ class MeteredOpenAIEmbedder:
         }
 
 
-__all__ = ["MeteredOpenAIEmbedder"]
+__all__ = ["MeteredOpenAIEmbedder", "is_exact_provider_reported_usage"]

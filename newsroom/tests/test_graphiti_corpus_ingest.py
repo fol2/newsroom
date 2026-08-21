@@ -62,6 +62,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_MAX_CLEANUP_TIMEOUT_MS,
     GRAPHITI_WORKSPACE_GROUP,
     OD_011_CASH_CEILING_GBP,
+    OPENROUTER_EMBEDDING_SLUG,
 )
 from newsroom.graphiti_adapter.identity import MAX_EPISODE_BYTES
 from newsroom.graphiti_adapter.models import GraphitiAdapterContractError
@@ -437,6 +438,63 @@ def _marker_recovery_result(
         receipt_digest=str(raw["raw_output_digest"]),
         raw_receipt=raw,
     )
+
+
+def _provider_usage(
+    *,
+    cost_usd_microunits: int,
+    embedding_tokens: int,
+    request_count: int = 1,
+) -> dict[str, object]:
+    token_base, token_remainder = divmod(embedding_tokens, request_count)
+    cost_base, cost_remainder = divmod(cost_usd_microunits, request_count)
+    requests = [
+        {
+            "provider": "openrouter",
+            "model": OPENROUTER_EMBEDDING_SLUG,
+            "request_id": f"request-{index}",
+            "prompt_tokens": token_base + int(index < token_remainder),
+            "total_tokens": token_base + int(index < token_remainder),
+            "cost_usd_microunits": cost_base + int(index < cost_remainder),
+            "cost_reported": True,
+            "outcome": "COMPLETE",
+        }
+        for index in range(request_count)
+    ]
+    return {
+        "usage_basis": "PROVIDER_REPORTED",
+        "requests": requests,
+        "request_count": request_count,
+        "embedding_tokens": embedding_tokens,
+        "cost_usd_microunits": cost_usd_microunits,
+    }
+
+
+def _provider_usage_variant(
+    *,
+    top_updates: dict[str, object] | None = None,
+    request_updates: dict[str, object] | None = None,
+    omit_top: str | None = None,
+    omit_request: str | None = None,
+) -> dict[str, object]:
+    usage = _provider_usage(cost_usd_microunits=9, embedding_tokens=25)
+    if top_updates is not None:
+        usage.update(top_updates)
+    if request_updates is not None:
+        requests = usage["requests"]
+        assert isinstance(requests, list) and len(requests) == 1
+        request = requests[0]
+        assert isinstance(request, dict)
+        request.update(request_updates)
+    if omit_request is not None:
+        requests = usage["requests"]
+        assert isinstance(requests, list) and len(requests) == 1
+        request = requests[0]
+        assert isinstance(request, dict)
+        request.pop(omit_request)
+    if omit_top is not None:
+        usage.pop(omit_top)
+    return usage
 
 
 def test_parse_source_time_rfc822_and_iso() -> None:
@@ -2100,6 +2158,180 @@ def test_no_call_reconciliation_requires_exact_zero_usage_shape(
     )
 
 
+@pytest.mark.parametrize(
+    "malformed_usage",
+    [
+        pytest.param(
+            _provider_usage_variant(
+                top_updates={"cost_usd_microunits": -1},
+            ),
+            id="negative-top-cost",
+        ),
+        pytest.param(
+            _provider_usage_variant(
+                request_updates={"cost_usd_microunits": -1},
+            ),
+            id="negative-request-cost",
+        ),
+        pytest.param(
+            _provider_usage_variant(
+                top_updates={"cost_usd_microunits": True},
+            ),
+            id="boolean-top-cost",
+        ),
+        pytest.param(
+            _provider_usage_variant(
+                request_updates={"cost_usd_microunits": True},
+            ),
+            id="boolean-request-cost",
+        ),
+        pytest.param(
+            _provider_usage_variant(omit_top="cost_usd_microunits"),
+            id="missing-cost",
+        ),
+        pytest.param(
+            _provider_usage_variant(omit_request="cost_usd_microunits"),
+            id="missing-request-cost",
+        ),
+        pytest.param(
+            _provider_usage_variant(top_updates={"requests": []}),
+            id="empty-requests",
+        ),
+        pytest.param(
+            _provider_usage_variant(top_updates={"request_count": 2}),
+            id="request-count-mismatch",
+        ),
+        pytest.param(
+            _provider_usage_variant(top_updates={"request_count": True}),
+            id="boolean-request-count",
+        ),
+        pytest.param(
+            _provider_usage_variant(top_updates={"embedding_tokens": 26}),
+            id="token-total-mismatch",
+        ),
+        pytest.param(
+            _provider_usage_variant(top_updates={"embedding_tokens": True}),
+            id="boolean-token-total",
+        ),
+        pytest.param(
+            _provider_usage_variant(
+                request_updates={"cost_usd_microunits": "9"}
+            ),
+            id="malformed-request-cost",
+        ),
+        pytest.param(
+            _provider_usage_variant(
+                request_updates={"cost_reported": False},
+            ),
+            id="cost-not-reported",
+        ),
+        pytest.param(
+            _provider_usage_variant(
+                request_updates={"outcome": "FAILED"},
+            ),
+            id="request-not-complete",
+        ),
+        pytest.param(
+            _provider_usage_variant(
+                top_updates={"cost_usd_microunits": 10},
+            ),
+            id="cost-total-mismatch",
+        ),
+    ],
+)
+def test_provider_reconciliation_requires_exact_typed_receipt(
+    tmp_path: Path,
+    malformed_usage: dict[str, object],
+) -> None:
+    store_path = tmp_path / "strict-provider-receipt.sqlite3"
+    connection = connect(str(store_path))
+    assert reserve_graphiti_spend(
+        connection,
+        spend_id="ingest-1:1",
+        ingest_id="ingest-1",
+        attempt_number=1,
+        proving_run_id="run-1",
+        generation_id=GRAPHITI_GENERATION_ID,
+        reserved_gbp_microunits=500_000,
+        ceiling_gbp_microunits=5_000_000,
+    )
+    accounting = reconcile_graphiti_spend(
+        connection,
+        spend_id="ingest-1:1",
+        embedding_usage=malformed_usage,
+    )
+    connection.commit()
+    connection.close()
+
+    reopened = sqlite3.connect(store_path)
+    durable_spend = reopened.execute(
+        """
+        SELECT status, actual_usd_microunits, actual_gbp_microunits, usage_basis
+        FROM unpublished_graphiti_spend
+        """
+    ).fetchone()
+    ceiling_commitment = reopened.execute(
+        """
+        SELECT SUM(
+            CASE WHEN status='RECONCILED'
+                 THEN COALESCE(actual_gbp_microunits, 0)
+                 ELSE reserved_gbp_microunits END
+        ) FROM unpublished_graphiti_spend
+        """
+    ).fetchone()[0]
+    reopened.close()
+
+    assert accounting["status"] == "UNRECONCILED"
+    assert accounting["actual_usd_microunits"] is None
+    assert accounting["actual_gbp_microunits"] is None
+    assert accounting["unused_reservation_released"] is False
+    assert durable_spend == ("UNRECONCILED", None, None, "PROVIDER_REPORTED")
+    assert ceiling_commitment == 500_000
+
+
+@pytest.mark.parametrize("cost", [0, 9])
+def test_valid_provider_receipt_reconciles_zero_and_positive_cost(
+    tmp_path: Path,
+    cost: int,
+) -> None:
+    connection = connect(str(tmp_path / f"valid-provider-{cost}.sqlite3"))
+    assert reserve_graphiti_spend(
+        connection,
+        spend_id="ingest-1:1",
+        ingest_id="ingest-1",
+        attempt_number=1,
+        proving_run_id="run-1",
+        generation_id=GRAPHITI_GENERATION_ID,
+        reserved_gbp_microunits=500_000,
+        ceiling_gbp_microunits=5_000_000,
+    )
+    usage = _provider_usage(
+        cost_usd_microunits=cost,
+        embedding_tokens=25,
+    )
+    if cost == 0:
+        usage["forward_compatible_top"] = "retained"
+        requests = usage["requests"]
+        assert isinstance(requests, list) and len(requests) == 1
+        request = requests[0]
+        assert isinstance(request, dict)
+        request["request_id"] = ""
+        request["prompt_tokens"] = None
+        request["forward_compatible_request"] = "retained"
+    accounting = reconcile_graphiti_spend(
+        connection,
+        spend_id="ingest-1:1",
+        embedding_usage=usage,
+    )
+    connection.commit()
+    connection.close()
+
+    assert accounting["status"] == "RECONCILED"
+    assert accounting["actual_usd_microunits"] == cost
+    assert accounting["actual_gbp_microunits"] == cost
+    assert accounting["unused_reservation_released"] is True
+
+
 def test_reused_malformed_no_call_is_receipted_not_retry_held(
     tmp_path: Path,
 ) -> None:
@@ -2192,6 +2424,80 @@ def test_reused_malformed_no_call_is_receipted_not_retry_held(
     assert failure == (1, "TIMEOUT", "EXECUTION_TIMEOUT")
     assert "GRAPHITI_EVALUATION_RETRY_HELD" not in ledger_kinds
     assert ledger_kinds.count("GRAPHITI_EVALUATION_ATTEMPT") == 1
+
+
+def test_reused_malformed_provider_receipt_preserves_ceiling_reservation(
+    tmp_path: Path,
+) -> None:
+    class ProcessDeath(BaseException):
+        pass
+
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "reused-malformed-provider.sqlite3"
+
+    class DiesAfterClaim:
+        def ingest(self, _unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            raise ProcessDeath
+
+    with pytest.raises(ProcessDeath):
+        run_cycle(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            writer=FixtureWriter(),
+            max_writes=0,
+            graphiti=DiesAfterClaim(),
+            max_graphiti=1,
+            clock=lambda: datetime(2026, 8, 21, tzinfo=UTC),
+        )
+
+    malformed_usage = _provider_usage_variant(
+        top_updates={"cost_usd_microunits": -1},
+        request_updates={"cost_usd_microunits": -1},
+    )
+
+    class MalformedProviderReceipt:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            assert unit.attempt_number == 1
+            return replace(
+                _complete(unit, embedding_usage=malformed_usage),
+                outcome="TIMEOUT",
+                failure_code="EXECUTION_TIMEOUT",
+            )
+
+    run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=MalformedProviderReceipt(),
+        max_graphiti=1,
+        clock=lambda: datetime(2026, 8, 21, 0, 16, tzinfo=UTC),
+    )
+
+    connection = sqlite3.connect(unpublished)
+    spend = connection.execute(
+        """
+        SELECT status, actual_usd_microunits, actual_gbp_microunits, usage_basis
+        FROM unpublished_graphiti_spend
+        """
+    ).fetchone()
+    ceiling_commitment = connection.execute(
+        """
+        SELECT SUM(
+            CASE WHEN status='RECONCILED'
+                 THEN COALESCE(actual_gbp_microunits, 0)
+                 ELSE reserved_gbp_microunits END
+        ) FROM unpublished_graphiti_spend
+        """
+    ).fetchone()[0]
+    receipts = connection.execute(
+        "SELECT COUNT(*) FROM unpublished_graphiti_attempt_receipts"
+    ).fetchone()[0]
+    connection.close()
+
+    assert spend == ("UNRECONCILED", None, None, "PROVIDER_REPORTED")
+    assert ceiling_commitment == 500_000
+    assert receipts == 1
 
 
 def test_proving_writer_cannot_commit_during_provider_handoff(
@@ -2953,13 +3259,11 @@ def test_provider_reported_embedding_cost_is_reconciled_and_debited(
 
     class MeteredStub:
         def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
-            usage = {
-                "usage_basis": "PROVIDER_REPORTED",
-                "request_count": 2,
-                "embedding_tokens": 125,
-                "cost_usd_microunits": 17,
-                "requests": [],
-            }
+            usage = _provider_usage(
+                cost_usd_microunits=17,
+                embedding_tokens=125,
+                request_count=2,
+            )
             result = _complete(unit, embedding_usage=usage)
             return replace(
                 result,
@@ -3014,13 +3318,7 @@ def test_receipted_old_attempt_is_not_overwritten_by_recovered_telemetry(
             calls += 1
             if calls == 1:
                 raise RuntimeError("response lost after provider write")
-            usage = {
-                "usage_basis": "PROVIDER_REPORTED",
-                "request_count": 1,
-                "embedding_tokens": 25,
-                "cost_usd_microunits": 9,
-                "requests": [],
-            }
+            usage = _provider_usage(cost_usd_microunits=9, embedding_tokens=25)
             return _with_provider_attempt(
                 _complete(unit, embedding_usage=usage),
                 1,
@@ -3071,13 +3369,7 @@ def test_rejected_stale_attempt_telemetry_stays_on_current_reserve(
             calls += 1
             if calls == 1:
                 raise RuntimeError("first attempt lost before result")
-            usage = {
-                "usage_basis": "PROVIDER_REPORTED",
-                "request_count": 1,
-                "embedding_tokens": 11,
-                "cost_usd_microunits": 17,
-                "requests": [],
-            }
+            usage = _provider_usage(cost_usd_microunits=17, embedding_tokens=11)
             return replace(
                 _with_provider_attempt(
                     _complete(unit, embedding_usage=usage),
@@ -3151,13 +3443,7 @@ def test_unreceipted_cross_attempt_recovery_charges_current_reserve(
             ceiling_gbp_microunits=5_000_000,
         )
     unpublished.commit()
-    usage = {
-        "usage_basis": "PROVIDER_REPORTED",
-        "request_count": 1,
-        "embedding_tokens": 25,
-        "cost_usd_microunits": 9,
-        "requests": [],
-    }
+    usage = _provider_usage(cost_usd_microunits=9, embedding_tokens=25)
     recovered = _with_provider_attempt(
         _complete(unit, embedding_usage=usage),
         1,
@@ -3215,13 +3501,10 @@ def test_noncanonical_retained_receipt_cannot_reallocate_recovery_spend(
     reconcile_graphiti_spend(
         unpublished,
         spend_id=f"{unit.ingest_id}:1",
-        embedding_usage={
-            "usage_basis": "PROVIDER_REPORTED",
-            "request_count": 1,
-            "embedding_tokens": 25,
-            "cost_usd_microunits": 9,
-            "requests": [],
-        },
+        embedding_usage=_provider_usage(
+            cost_usd_microunits=9,
+            embedding_tokens=25,
+        ),
     )
     unpublished.execute(
         """
@@ -3239,13 +3522,7 @@ def test_noncanonical_retained_receipt_cannot_reallocate_recovery_spend(
         ),
     )
     unpublished.commit()
-    usage = {
-        "usage_basis": "PROVIDER_REPORTED",
-        "request_count": 1,
-        "embedding_tokens": 25,
-        "cost_usd_microunits": 17,
-        "requests": [],
-    }
+    usage = _provider_usage(cost_usd_microunits=17, embedding_tokens=25)
     spoofed = _with_provider_attempt(
         _complete(unit, embedding_usage=usage),
         1,
@@ -3280,13 +3557,7 @@ def test_forged_receipted_pending_recovery_charges_current_attempt(
     proving = _proving(tmp_path)
     unpublished = tmp_path / "pending-recovery-no-double-debit.sqlite3"
     calls = 0
-    usage = {
-        "usage_basis": "PROVIDER_REPORTED",
-        "request_count": 1,
-        "embedding_tokens": 25,
-        "cost_usd_microunits": 9,
-        "requests": [],
-    }
+    usage = _provider_usage(cost_usd_microunits=9, embedding_tokens=25)
 
     class PendingRecovery:
         def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
@@ -3363,13 +3634,7 @@ def test_exact_immutable_complete_digest_reuses_prior_provider_accounting(
     unpublished = tmp_path / "immutable-recovery-accounting.sqlite3"
     calls = 0
     retained_raw_digest: str | None = None
-    usage = {
-        "usage_basis": "PROVIDER_REPORTED",
-        "request_count": 1,
-        "embedding_tokens": 25,
-        "cost_usd_microunits": 9,
-        "requests": [],
-    }
+    usage = _provider_usage(cost_usd_microunits=9, embedding_tokens=25)
 
     class ImmutableRecovery:
         def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
@@ -3463,13 +3728,7 @@ def test_unvalidated_recovery_telemetry_does_not_consume_unreceipted_reserve(
             ceiling_gbp_microunits=5_000_000,
         )
     unpublished.commit()
-    usage = {
-        "usage_basis": "PROVIDER_REPORTED",
-        "request_count": 1,
-        "embedding_tokens": 25,
-        "cost_usd_microunits": 9,
-        "requests": [],
-    }
+    usage = _provider_usage(cost_usd_microunits=9, embedding_tokens=25)
     malformed = _with_provider_attempt(
         _complete(unit, embedding_usage=usage),
         1,
@@ -3535,13 +3794,10 @@ def test_cycle_rejects_foreign_graphiti_identity(tmp_path: Path) -> None:
                         "outcome": "COMPLETE",
                     },
                 ),
-                embedding_usage={
-                    "usage_basis": "PROVIDER_REPORTED",
-                    "request_count": 1,
-                    "embedding_tokens": 11,
-                    "cost_usd_microunits": 17,
-                    "requests": [],
-                },
+                embedding_usage=_provider_usage(
+                    cost_usd_microunits=17,
+                    embedding_tokens=11,
+                ),
             )
             rejected = replace(
                 result,
@@ -3610,13 +3866,10 @@ def test_graphiti_cash_ceiling_holds_ingest_but_writer_continues(
     reconcile_graphiti_spend(
         connection,
         spend_id="prior:1",
-        embedding_usage={
-            "usage_basis": "PROVIDER_REPORTED",
-            "request_count": 1,
-            "embedding_tokens": 1,
-            "cost_usd_microunits": OD_011_CASH_CEILING_GBP * 1_000_000,
-            "requests": [],
-        },
+        embedding_usage=_provider_usage(
+            cost_usd_microunits=OD_011_CASH_CEILING_GBP * 1_000_000,
+            embedding_tokens=1,
+        ),
     )
     connection.commit()
     connection.close()

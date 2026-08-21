@@ -13,6 +13,7 @@ from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.corpus import EligibleCorpusRevision
 from newsroom.control_plane.veto import VetoError, assert_private_store, refuse_public_effect
+from newsroom.graphiti_adapter.embedding_meter import is_exact_provider_reported_usage
 
 SCHEMA_VERSION = "newsroom.control-plane.unpublished.v9"
 LEDGER_GENESIS = "sha256:" + ("0" * 64)
@@ -402,7 +403,7 @@ def reconcile_graphiti_spend(
     usage_basis = str(usage.get("usage_basis") or "UNREPORTED")
     raw_cost = usage.get("cost_usd_microunits")
     no_call = is_exact_no_embedding_call(embedding_usage)
-    reported = usage_basis == "PROVIDER_REPORTED" and isinstance(raw_cost, int)
+    reported = is_exact_provider_reported_usage(embedding_usage)
     # Conservative versioned parity conversion until a separately accepted FX
     # table supersedes this policy: USD 1.00 reserves/debits GBP 1.00.
     fx_policy = "USD_GBP_CONSERVATIVE_PARITY_V1"
