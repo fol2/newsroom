@@ -483,6 +483,10 @@ def test_segment_source_rejects_non_positive_max_bytes() -> None:
         segment_source("hello", max_bytes=True)
     parts = segment_source("ab", max_bytes=1)
     assert [item.text for item in parts] == ["a", "b"]
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        segment_source("漢", max_bytes=1)
+    han = segment_source("漢", max_bytes=3)
+    assert [item.text for item in han] == ["漢"]
 
 
 def test_raw_receipt_is_exact_and_survives_malformed_mapping() -> None:
@@ -554,3 +558,33 @@ def test_failing_embedder_rolls_back_without_graph_effect() -> None:
     assert leaf.graph_effect_attempted is False
     assert leaf.nodes == ()
     assert leaf.edges == ()
+
+
+@pytest.mark.parametrize(
+    "name",
+    ("explicit-valid-at", "explicit-invalid-at", "relative-date"),
+)
+def test_omitted_temporal_bounds_fail_when_evidence_has_a_cue(name: str) -> None:
+    case = fixture(name)
+    payload = json.loads(json.dumps(case.gold))
+    payload["facts"][0]["valid_at"] = None
+    payload["facts"][0]["invalid_at"] = None
+    leaf = extract_combined_temporal(
+        case.revision,
+        transport=_FakeTransport(payload),
+    )
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+    assert leaf.graph_effect_attempted is False
+
+
+def test_duplicate_json_facts_key_is_a_typed_failure() -> None:
+    leaf = extract_combined_temporal(
+        fixture("pair-current").revision,
+        transport=_FakeTransport(
+            '{"entities":[],"facts":[{"bad":true}],"facts":[]}'
+        ),
+    )
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.MALFORMED_OBJECT
+    assert leaf.payload is None

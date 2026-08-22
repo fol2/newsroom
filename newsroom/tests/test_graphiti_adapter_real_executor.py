@@ -258,6 +258,40 @@ def test_guarded_graphiti_never_invalidates_or_reuses_existing_edges(
     assert episode_edges == [proposed]
 
 
+def test_edge_guard_keeps_distinct_relation_types_on_the_same_fact() -> None:
+    from newsroom.graphiti_adapter.edge_guard import guard_extracted_edges
+
+    asked = SimpleNamespace(
+        source_node_uuid="source",
+        target_node_uuid="target",
+        name="ASKED_ABOUT",
+        fact="same fact",
+    )
+    about = SimpleNamespace(
+        source_node_uuid="source",
+        target_node_uuid="target",
+        name="ABOUT",
+        fact="same fact",
+    )
+
+    async def embed(_embedder: object, values: list[object]) -> None:
+        del _embedder
+        assert values == [asked, about]
+
+    new_edges, invalidated, episode_edges = asyncio.run(
+        guard_extracted_edges(
+            extracted_edges=[asked, about],
+            uuid_map={},
+            embedder=object(),
+            resolve_pointers=lambda items, _uuid_map: items,
+            create_embeddings=embed,
+        )
+    )
+    assert new_edges == [asked, about]
+    assert invalidated == []
+    assert episode_edges == [asked, about]
+
+
 def test_cursor_malformed_json_executes_grok_fallback_and_records_both_calls() -> None:
     from newsroom.graphiti_adapter.cli_client import run_cli_chain
 

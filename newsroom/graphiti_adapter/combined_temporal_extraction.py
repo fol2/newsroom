@@ -29,6 +29,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_EXTRACTION_INSTRUCTIONS,
 )
+from newsroom.graphiti_adapter.neo4j_guard import GuardState
 from newsroom.graphiti_adapter.identity import (
     configuration_digest,
     content_digest as revision_content_digest,
@@ -69,6 +70,8 @@ _SPLIT = re.compile(rb"(?:(?<=[.!?])[ \t]+)|(?:\n+)")
 _ISO_UTC = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)$"
 )
+_ISO_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+_CORRECTION = re.compile(r"(?i)\bcorrection\s*:")
 _RELATIVE_OFFSETS = {
     "yesterday": timedelta(days=-1),
     "today": timedelta(days=0),
@@ -87,6 +90,9 @@ _MONTH_NAMES = (
     "October",
     "November",
     "December",
+)
+_PROSE_DATE = re.compile(
+    r"\b\d{1,2} (" + "|".join(_MONTH_NAMES) + r") \d{4}\b"
 )
 
 SCHEMA: dict[str, Any] = {
@@ -316,15 +322,21 @@ def segment_source(
     for start, end in zip(cuts, cuts[1:]):
         if end > start:
             bounds.extend(_split_oversize(data, start, end, max_bytes))
-    return tuple(
-        EvidenceSegment(
-            segment_id=index,
-            start_byte=start,
-            end_byte=end,
-            text=data[start:end].decode("utf-8"),
+    segments: list[EvidenceSegment] = []
+    for index, (start, end) in enumerate(bounds):
+        try:
+            text = data[start:end].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("segment is not valid UTF-8") from exc
+        segments.append(
+            EvidenceSegment(
+                segment_id=index,
+                start_byte=start,
+                end_byte=end,
+                text=text,
+            )
         )
-        for index, (start, end) in enumerate(bounds)
-    )
+    return tuple(segments)
 
 
 def build_compact_prompt(revision: SourceRevisionInput) -> CompactPrompt:
@@ -426,12 +438,64 @@ def extract_combined_temporal(
             rollback_skipped=True,
             **receipt,
         )
-    resolutions = _resolve_nodes_locally(nodes)
+    except CanonicalizationError:
+        return _leaf(
+            CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE,
+            CombinedTemporalFailureCode.MALFORMED_OBJECT,
+            prompt,
+            None,
+            None,
+            (),
+            (),
+            (),
+            tuple(calls),
+            {},
+            (),
+            embedding_skipped=True,
+            journal_skipped=True,
+            rollback_skipped=True,
+            **receipt,
+        )
+    resolutions, uuid_map = _resolve_nodes_locally(nodes)
     journal = _MemoryJournal()
     journal.begin()
+    journal.pending.extend(edges)
     try:
-        guarded = _guard_edges(edges, embed_edges=embed_edges or _record_embeddings)
+        guarded = _guard_edges(
+            edges,
+            uuid_map=uuid_map,
+            embed_edges=embed_edges or _record_embeddings,
+        )
+        if len(guarded) != len(journal.pending):
+            raise CombinedTemporalError(
+                CombinedTemporalFailureCode.IDENTITY_INVALID,
+                "edge guard dropped a relation",
+            )
+        if journal.state is not GuardState.PENDING:
+            raise CombinedTemporalError(
+                CombinedTemporalFailureCode.PIPELINE_FAILED,
+                "journal is not pending",
+            )
         journal.complete()
+    except CombinedTemporalError as exc:
+        journal.rollback()
+        return _leaf(
+            CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE,
+            exc.code,
+            prompt,
+            None,
+            None,
+            (),
+            (),
+            (),
+            tuple(calls),
+            {},
+            resolutions,
+            embedding_skipped=False,
+            journal_skipped=False,
+            rollback_skipped=False,
+            **receipt,
+        )
     except Exception:
         journal.rollback()
         return _leaf(
@@ -572,20 +636,32 @@ def _split_oversize(
     while cursor < end:
         limit = min(cursor + max_bytes, end)
         if limit == end:
+            cut = _utf8_cut(data, cursor, end)
+            if cut != end:
+                raise ValueError("segment is not valid UTF-8")
             parts.append((cursor, end))
             break
         cut = data.rfind(b" ", cursor, limit)
         if cut <= cursor:
-            cut = limit
-            while cut > cursor and data[cut] & 0xC0 == 0x80:
-                cut -= 1
-            if cut == cursor:
-                cut = limit
+            cut = _utf8_cut(data, cursor, limit)
         else:
-            cut += 1
+            cut = _utf8_cut(data, cursor, cut + 1)
+        if cut <= cursor:
+            raise ValueError("segment is not valid UTF-8")
         parts.append((cursor, cut))
         cursor = cut
     return parts
+
+
+def _utf8_cut(data: bytes, start: int, limit: int) -> int:
+    piece = data[start:limit]
+    while piece:
+        try:
+            piece.decode("utf-8")
+            return start + len(piece)
+        except UnicodeDecodeError:
+            piece = piece[:-1]
+    return start
 
 
 def _parse_payload(raw: object) -> dict[str, Any]:
@@ -594,7 +670,9 @@ def _parse_payload(raw: object) -> dict[str, Any]:
     elif isinstance(raw, str):
         text = raw.strip()
         try:
-            decoded = json.loads(text)
+            decoded = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
+        except CombinedTemporalError:
+            raise
         except json.JSONDecodeError as exc:
             raise CombinedTemporalError(
                 CombinedTemporalFailureCode.MALFORMED_OBJECT,
@@ -624,6 +702,18 @@ def _parse_payload(raw: object) -> dict[str, Any]:
             CombinedTemporalFailureCode.MALFORMED_OBJECT,
             "entities and facts must be arrays",
         )
+    return payload
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise CombinedTemporalError(
+                CombinedTemporalFailureCode.MALFORMED_OBJECT,
+                "duplicate object keys are not allowed",
+            )
+        payload[key] = value
     return payload
 
 
@@ -745,6 +835,7 @@ def _assert_unique_facts(facts: list[dict[str, Any]]) -> None:
         locator = (
             fact["source_local_id"],
             fact["target_local_id"],
+            fact["relation_type"],
             tuple(fact["evidence_segment_ids"]),
         )
         prior = locators.get(fact["fact"])
@@ -757,10 +848,11 @@ def _assert_unique_facts(facts: list[dict[str, Any]]) -> None:
 
 
 def _assert_single_attribution(retained: str) -> None:
-    marker = "Correction:"
-    if marker not in retained:
+    match = _CORRECTION.search(retained)
+    if match is None:
         return
-    before, _sep, after = retained.partition(marker)
+    before = retained[: match.start()]
+    after = retained[match.end() :]
     if before.strip() and after.strip():
         raise CombinedTemporalError(
             CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
@@ -777,6 +869,11 @@ def _assert_temporal_policy(
         if re.search(rf"\b{name}\b", retained, flags=re.IGNORECASE)
     ]
     expected = {(reference_time + _RELATIVE_OFFSETS[name]).date() for name in hits}
+    if _has_temporal_cue(retained) and fact["valid_at"] is None and fact["invalid_at"] is None:
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.TEMPORAL_INVALID,
+            "cited evidence has a temporal cue but both bounds are null",
+        )
     for field_name in ("valid_at", "invalid_at"):
         raw = fact[field_name]
         if raw is None:
@@ -796,6 +893,15 @@ def _assert_temporal_policy(
                 CombinedTemporalFailureCode.TEMPORAL_INVALID,
                 f"{field_name} is not grounded in cited evidence",
             )
+
+
+def _has_temporal_cue(retained: str) -> bool:
+    if any(
+        re.search(rf"\b{name}\b", retained, flags=re.IGNORECASE)
+        for name in _RELATIVE_OFFSETS
+    ):
+        return True
+    return _ISO_DATE.search(retained) is not None or _PROSE_DATE.search(retained) is not None
 
 
 def _entity(raw: object) -> dict[str, Any]:
@@ -834,7 +940,7 @@ def _entity(raw: object) -> dict[str, Any]:
             CombinedTemporalFailureCode.IDENTITY_INVALID,
             "deterministic metadata is excluded from semantic extraction",
         )
-    if isinstance(type_id, bool) or type_id not in GOVERNED_ENTITY_TYPE_IDS:
+    if isinstance(type_id, bool) or not isinstance(type_id, int) or type_id not in GOVERNED_ENTITY_TYPE_IDS:
         raise CombinedTemporalError(
             CombinedTemporalFailureCode.IDENTITY_INVALID,
             "entity_type_id is not in the governed ontology",
@@ -866,6 +972,11 @@ def _fact(raw: object) -> dict[str, Any]:
         raise CombinedTemporalError(
             CombinedTemporalFailureCode.MALFORMED_OBJECT,
             "fact has unknown keys",
+        )
+    if "valid_at" not in raw or "invalid_at" not in raw:
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.MALFORMED_OBJECT,
+            "fact must include valid_at and invalid_at",
         )
     source = raw.get("source_local_id")
     target = raw.get("target_local_id")
@@ -1077,40 +1188,65 @@ class _NamespaceEdge(SimpleNamespace):
 
 class _MemoryJournal:
     def __init__(self) -> None:
-        self.begun = False
-        self.completed = False
-        self.rolled_back = False
+        self.state = GuardState.CREATED
+        self.pending: list[Any] = []
 
     def begin(self) -> None:
-        self.begun = True
+        if self.state is not GuardState.CREATED:
+            raise RuntimeError("journal already begun")
+        self.state = GuardState.PENDING
 
     def complete(self) -> None:
-        self.completed = True
+        if self.state is not GuardState.PENDING:
+            raise RuntimeError("journal complete requires pending")
+        self.pending.clear()
+        self.state = GuardState.COMPLETE
 
     def rollback(self) -> None:
-        self.rolled_back = True
+        self.pending.clear()
+        self.state = GuardState.RECOVERED_AMBIGUOUS
 
 
-def _resolve_nodes_locally(nodes: tuple[Any, ...]) -> tuple[str, ...]:
+def _resolve_nodes_locally(
+    nodes: tuple[Any, ...],
+) -> tuple[tuple[str, ...], dict[str, str]]:
+    uuid_map: dict[str, str] = {}
     resolutions: list[str] = []
     for node in nodes:
         attributes = dict(getattr(node, "attributes", {}) or {})
         attributes["resolution"] = LOCAL_NEW
         node.attributes = attributes
+        uuid_map[str(node.uuid)] = str(node.uuid)
         resolutions.append(LOCAL_NEW)
-    return tuple(resolutions)
+    return tuple(resolutions), uuid_map
+
+
+def _resolve_edge_pointers(
+    edges: list[Any], uuid_map: dict[str, str]
+) -> list[Any]:
+    for edge in edges:
+        edge.source_node_uuid = uuid_map.get(
+            str(edge.source_node_uuid), str(edge.source_node_uuid)
+        )
+        edge.target_node_uuid = uuid_map.get(
+            str(edge.target_node_uuid), str(edge.target_node_uuid)
+        )
+    return edges
 
 
 def _guard_edges(
-    edges: tuple[Any, ...], *, embed_edges: EmbedEdges
+    edges: tuple[Any, ...],
+    *,
+    uuid_map: dict[str, str],
+    embed_edges: EmbedEdges,
 ) -> tuple[Any, ...]:
     return tuple(
         _run_coroutine(
             guard_extracted_edges(
                 extracted_edges=list(edges),
-                uuid_map={},
+                uuid_map=uuid_map,
                 embedder=None,
-                resolve_pointers=lambda items, uuid_map: items,
+                resolve_pointers=_resolve_edge_pointers,
                 create_embeddings=embed_edges,
             )
         )[0]

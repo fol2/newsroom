@@ -732,6 +732,95 @@ MALFORMED_CASES: tuple[MalformedCase, ...] = (
         CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
     ),
     MalformedCase(
+        "duplicate-facts-key",
+        _PAIR_REVISION,
+        '{"entities":[],"facts":[{"bad":true}],"facts":[]}',
+        CombinedTemporalFailureCode.MALFORMED_OBJECT,
+    ),
+    MalformedCase(
+        "missing-temporal-keys",
+        _PAIR_REVISION,
+        {
+            "entities": _pair_entities(),
+            "facts": [
+                {
+                    "source_local_id": 0,
+                    "target_local_id": 1,
+                    "relation_type": "ASKED_ABOUT",
+                    "fact": PAIR_BODY,
+                    "evidence_segment_ids": [0],
+                }
+            ],
+        },
+        CombinedTemporalFailureCode.MALFORMED_OBJECT,
+    ),
+    MalformedCase(
+        "float-entity-type",
+        _PAIR_REVISION,
+        {
+            "entities": [
+                {
+                    "local_id": 0,
+                    "name": "Legislative Council",
+                    "entity_type_id": 0.0,
+                    "evidence_segment_ids": [0],
+                },
+                {
+                    "local_id": 1,
+                    "name": "Technology and Living curriculum",
+                    "entity_type_id": 0,
+                    "evidence_segment_ids": [0],
+                },
+            ],
+            "facts": [_pair_fact(valid_at=None, invalid_at=None)],
+        },
+        CombinedTemporalFailureCode.IDENTITY_INVALID,
+    ),
+    MalformedCase(
+        "lowercase-correction-span",
+        _revision(
+            "The Legislative Council asked about the Technology and Living "
+            "curriculum. correction: the Legislative Council asked about "
+            "Design and Applied Technology.",
+            revision_id="rev-span-correction-lower",
+        ),
+        {
+            "entities": _pair_entities(),
+            "facts": [
+                {
+                    "source_local_id": 0,
+                    "target_local_id": 1,
+                    "relation_type": "ASKED_ABOUT",
+                    "fact": PAIR_BODY,
+                    "valid_at": None,
+                    "invalid_at": None,
+                    "evidence_segment_ids": [0, 1],
+                }
+            ],
+        },
+        CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
+    ),
+    MalformedCase(
+        "same-fact-two-relations",
+        _PAIR_REVISION,
+        {
+            "entities": _pair_entities(),
+            "facts": [
+                _pair_fact(valid_at=None, invalid_at=None),
+                {
+                    "source_local_id": 0,
+                    "target_local_id": 1,
+                    "relation_type": "ABOUT",
+                    "fact": PAIR_BODY,
+                    "valid_at": None,
+                    "invalid_at": None,
+                    "evidence_segment_ids": [0],
+                },
+            ],
+        },
+        CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
+    ),
+    MalformedCase(
         "list-payload",
         _PAIR_REVISION,
         [],
