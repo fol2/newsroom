@@ -500,6 +500,17 @@ def test_proving_writer_enables_foreign_keys(tmp_path: Path) -> None:
         connection.close()
 
 
+def test_proving_module_does_not_import_control_plane_at_import_time() -> None:
+    source = Path("newsroom/increment9/proving.py").read_text(encoding="utf-8")
+    top_level = [
+        line
+        for line in source.splitlines()
+        if line.startswith("from ") or line.startswith("import ")
+    ]
+    assert not any("newsroom.control_plane" in line for line in top_level)
+    assert "apply_control_plane_sqlite_profile" in source
+
+
 def test_proving_cli_default_writes_the_shared_canonical_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -21,7 +21,6 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
-from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.effective_revision import (
     create_effective_revision_schema,
     retain_observation_revision_first_seen,
@@ -473,6 +472,9 @@ def assess(
 
 
 def _connect(path: str) -> sqlite3.Connection:
+    # Import here: control_plane.__init__ loads cycle → Graphiti → this module.
+    from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
+
     lowered = path.lower()
     if any(marker in lowered for marker in FORBIDDEN_STORE_MARKERS):
         raise ProvingError("proving store must not alias production or news_pool")
