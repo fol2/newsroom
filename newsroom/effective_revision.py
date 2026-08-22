@@ -56,24 +56,11 @@ class EffectiveRevisionIdentityResolver:
 
 
 def create_effective_revision_schema(connection: sqlite3.Connection) -> None:
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS proving_revision_first_seen(
-            source_id TEXT NOT NULL,
-            item_key TEXT NOT NULL,
-            revision_digest TEXT NOT NULL,
-            first_seen_at TEXT NOT NULL,
-            PRIMARY KEY(source_id, item_key, revision_digest)
-        ) WITHOUT ROWID
-        """
+    from newsroom.control_plane.proving_revision_schema import (
+        ensure_proving_revision_schema,
     )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS proving_backfill_watermark(
-            processed_until TEXT PRIMARY KEY
-        )
-        """
-    )
+
+    ensure_proving_revision_schema(connection)
 
 
 def backfill_missing_first_seen(connection: sqlite3.Connection) -> int:
@@ -85,7 +72,12 @@ def backfill_missing_first_seen(connection: sqlite3.Connection) -> int:
     Filters to usable observations (status_code=200, body present, no error).
     """
     from newsroom.control_plane.items import parse_observation
+    from newsroom.control_plane.proving_revision_schema import (
+        ensure_proving_revision_schema,
+    )
     from newsroom.graphiti_adapter.identity import content_digest
+
+    ensure_proving_revision_schema(connection)
 
     # Get the watermark: highest observation time fully processed
     watermark_row = connection.execute(
