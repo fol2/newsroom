@@ -17,6 +17,7 @@ from newsroom.control_plane.corpus import (
     CorpusIngestUnit,
     EligibleCorpusRevision,
     revisions_from,
+    unique_chunk_units,
     units_from,
 )
 from newsroom.control_plane.cycle import (
@@ -645,6 +646,34 @@ def test_ingest_identity_is_deterministic_and_episode_omits_source_id() -> None:
     )
     assert unit.ingest_id == again.ingest_id
     assert "HK-04" not in unit.episode_body
+    drifted = CorpusIngestUnit(
+        source_id="HK-04",
+        item_key="q7",
+        headline="立法會質詢",
+        body="科技與生活科課程",
+        canonical_url="https://www.edb.gov.hk/example",
+        observation_digest="sha256:obs-later",
+        observed_at="2026-08-20T00:00:00.000000Z",
+        proving_run_id="run-2",
+        effective_revision=_effective_revision(
+            source_id="HK-04",
+            item_key="q7",
+            headline="立法會質詢",
+            body="科技與生活科課程",
+            canonical_url="https://www.edb.gov.hk/example",
+            first_observed_at="2026-08-20T00:00:00.000000Z",
+        ),
+    )
+    assert drifted.ingest_id == unit.ingest_id
+    assert drifted.revision_id == unit.revision_id
+    assert drifted.representation_digest == unit.representation_digest
+    assert unit.temporal().basis == OBSERVED_FALLBACK
+    assert unit.temporal().reference_time.to_text() == (
+        "2026-08-16T21:41:34.000000Z"
+    )
+    assert drifted.temporal().reference_time.to_text() == (
+        "2026-08-20T00:00:00.000000Z"
+    )
     first = evaluation_attempt_for((unit.episode_body,))
     second = evaluation_attempt_for((unit.episode_body,))
     assert str(first.attempt_id) == str(second.attempt_id)
@@ -1296,6 +1325,13 @@ def test_changed_source_marker_is_deterministic_and_covered_once() -> None:
     assert changed[0].revision_id == changed[1].revision_id
     assert len(revisions_from(changed)) == 1
     assert len(revisions_from(changed)[0].ingest_ids) == 1
+    combined = (first, changed[0])
+    assert len(unique_chunk_units(combined)) == 2
+    assert len(revisions_from(combined)) == 2
+    assert {unit.ingest_id for unit in unique_chunk_units(combined)} == {
+        first.ingest_id,
+        changed[0].ingest_id,
+    }
 
 
 def test_rights_renewal_restart_and_replay_create_zero_new_revisions(
@@ -1501,6 +1537,22 @@ def test_backlog_revisions_without_first_seen_self_heal_deterministically(
     )
     # Second run should have same eligible count (same observations, no new data)
     assert report_2.eligible == report_1.eligible, "Identical input should produce identical eligible count"
+
+
+def test_legacy_store_without_watermark_table_self_heals(tmp_path: Path) -> None:
+    proving = _proving(tmp_path)
+    connection = sqlite3.connect(proving)
+    connection.execute("DROP TABLE IF EXISTS proving_backfill_watermark")
+    connection.commit()
+    from newsroom.effective_revision import backfill_missing_first_seen
+
+    written = backfill_missing_first_seen(connection)
+    watermark = connection.execute(
+        "SELECT processed_until FROM proving_backfill_watermark"
+    ).fetchone()
+    connection.close()
+    assert written >= 0
+    assert watermark is not None
 
 
 
@@ -1816,7 +1868,7 @@ def test_malformed_success_observation_is_not_admitted_to_cycle(
 
     assert "UK-01" not in seen
     assert report.sources == 2
-    assert report.eligible == 2
+    assert report.eligible == 3
 
 
 def test_raw_http_older_than_seven_days_is_not_admitted_to_cycle(
@@ -1842,7 +1894,8 @@ def test_raw_http_older_than_seven_days_is_not_admitted_to_cycle(
 
     assert seen == []
     assert report.sources == 0
-    assert report.eligible == 0
+    assert report.eligible == 3
+    assert report.effective_pull_count == 3
 
 
 def test_latest_rights_decision_blocks_historical_backlog(tmp_path: Path) -> None:

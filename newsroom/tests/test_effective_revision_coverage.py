@@ -65,6 +65,10 @@ def _set_body(proving: Path, *, source_id: str, body: bytes) -> None:
         """,
         (body, digest_bytes(body), source_id),
     )
+    connection.execute(
+        "DELETE FROM proving_revision_first_seen WHERE source_id=?",
+        (source_id,),
+    )
     retain_observation_revision_first_seen(
         connection,
         source_id=source_id,

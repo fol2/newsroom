@@ -2,8 +2,9 @@
 """Reconcile poll-amplified backlog identities onto effective revisions.
 
 Repair means remap, never delete. Dry-run mutates nothing. Live refuses to
-mutate unless G1–G5 pass, and refuses writable opens of the canonical stores
-unless --mutate-canonical is passed after the live daemon is stopped.
+mutate unless G1–G5 pass, the caller principal is allow-listed, and the
+version fence matches the dry-run receipt. Writable opens of the canonical
+stores also require --mutate-canonical after the live daemon is stopped.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ from pathlib import Path
 from newsroom.control_plane.backlog_reconciliation import (
     BacklogReconciliationError,
     CanonicalStoreGuardError,
+    ReconciliationCommand,
+    ReconciliationCommandError,
     load_receipt,
     parse_evaluated_at,
     reconcile_effective_revision_backlog,
@@ -67,16 +70,53 @@ def main(argv: list[str] | None = None) -> int:
             "only, after the Hermes daemon is stopped and backups are taken."
         ),
     )
+    parser.add_argument(
+        "--caller-principal",
+        default="",
+        help="Direct-writer principal (required for live)",
+    )
+    parser.add_argument(
+        "--command-type",
+        default="",
+        help="Allow-listed command type (required for live)",
+    )
+    parser.add_argument(
+        "--idempotency-key",
+        default="",
+        help="Idempotency identity for this live command (required for live)",
+    )
+    parser.add_argument(
+        "--expected-mapping-digest",
+        default="",
+        help="Version fence; must match the dry-run mapping digest (required for live)",
+    )
     args = parser.parse_args(argv)
     try:
         evaluated_at = parse_evaluated_at_or_now(args.evaluated_at)
         dry_run_receipt = None
+        command = None
         if args.mode == "live":
             if not args.dry_run_receipt:
                 parser.error("live mode requires --dry-run-receipt")
             if not args.backup_dir:
                 parser.error("live mode requires --backup-dir")
+            if not (
+                args.caller_principal
+                and args.command_type
+                and args.idempotency_key
+                and args.expected_mapping_digest
+            ):
+                parser.error(
+                    "live mode requires --caller-principal, --command-type, "
+                    "--idempotency-key and --expected-mapping-digest"
+                )
             dry_run_receipt = load_receipt(Path(args.dry_run_receipt))
+            command = ReconciliationCommand(
+                caller_principal=args.caller_principal,
+                command_type=args.command_type,
+                idempotency_key=args.idempotency_key,
+                expected_mapping_digest=args.expected_mapping_digest,
+            )
         receipt = reconcile_effective_revision_backlog(
             proving_store=args.proving,
             unpublished_store=args.unpublished,
@@ -86,8 +126,13 @@ def main(argv: list[str] | None = None) -> int:
             backup_dir=None if args.backup_dir is None else Path(args.backup_dir),
             allow_canonical_mutation=args.mutate_canonical,
             evaluated_at=evaluated_at,
+            command=command,
         )
-    except (BacklogReconciliationError, CanonicalStoreGuardError) as exc:
+    except (
+        BacklogReconciliationError,
+        CanonicalStoreGuardError,
+        ReconciliationCommandError,
+    ) as exc:
         sys.stderr.write(f"{exc}\n")
         return 2
     sys.stdout.write(

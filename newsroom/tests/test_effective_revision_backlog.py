@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,8 +11,16 @@ import pytest
 
 from newsroom.authority.canonical import digest_bytes, digest_canonical
 from newsroom.control_plane.backlog_reconciliation import (
+    ALLOWED_CALLER_PRINCIPALS,
+    ALLOWED_COMMAND_TYPES,
+    COORDINATOR_NAME,
     CanonicalStoreGuardError,
     RAW_HTTP_RETENTION,
+    ReconciliationCommand,
+    ReconciliationCommandError,
+    _backup_store,
+    _readonly_connect,
+    _write_coordinator,
     refuse_canonical_write,
     reconcile_effective_revision_backlog,
 )
@@ -252,6 +261,15 @@ def _amplified_stores(tmp_path: Path) -> tuple[Path, Path, dict[str, object]]:
     return proving, unpublished, meta
 
 
+def _command(mapping_digest: str, *, key: str | None = None) -> ReconciliationCommand:
+    return ReconciliationCommand(
+        caller_principal=next(iter(ALLOWED_CALLER_PRINCIPALS)),
+        command_type=next(iter(ALLOWED_COMMAND_TYPES)),
+        idempotency_key=key or f"test-{uuid.uuid4()}",
+        expected_mapping_digest=mapping_digest,
+    )
+
+
 def _run(
     proving: Path,
     unpublished: Path,
@@ -259,7 +277,16 @@ def _run(
     *,
     mode: str,
     dry_run_receipt: dict[str, object] | None = None,
+    command: ReconciliationCommand | None = None,
 ) -> object:
+    live_command = None
+    if mode == "live":
+        digest = (
+            ""
+            if dry_run_receipt is None
+            else str(dry_run_receipt["mapping_digest"])
+        )
+        live_command = command or _command(digest)
     return reconcile_effective_revision_backlog(
         proving_store=str(proving),
         unpublished_store=str(unpublished),
@@ -268,6 +295,7 @@ def _run(
         receipt_path=tmp_path / f"{mode}-receipt.json",
         backup_dir=tmp_path / "backups" if mode == "live" else None,
         evaluated_at=_EVALUATED_AT,
+        command=live_command,
     )
 
 
@@ -592,7 +620,7 @@ def test_source_version_rule_is_attributed(tmp_path: Path) -> None:
         receipt_path=tmp_path / "receipt.json",
         evaluated_at=_EVALUATED_AT,
     )
-    assert dry.new_effective_revision_count == 1
+    assert dry.new_effective_revision_count == 2
     rules = [
         row
         for row in dry.attributed_source_version_rules
@@ -630,6 +658,7 @@ def test_cli_dry_run_and_live(tmp_path: Path) -> None:
         == 0
     )
     assert dry_receipt.is_file()
+    digest = json.loads(dry_receipt.read_text(encoding="utf-8"))["mapping_digest"]
     assert (
         main(
             [
@@ -646,6 +675,14 @@ def test_cli_dry_run_and_live(tmp_path: Path) -> None:
                 str(tmp_path / "backups"),
                 "--evaluated-at",
                 "2026-08-21T12:00:00.000000Z",
+                "--caller-principal",
+                next(iter(ALLOWED_CALLER_PRINCIPALS)),
+                "--command-type",
+                next(iter(ALLOWED_COMMAND_TYPES)),
+                "--idempotency-key",
+                "cli-live-1",
+                "--expected-mapping-digest",
+                digest,
             ]
         )
         == 0
@@ -656,3 +693,204 @@ def test_cli_dry_run_and_live(tmp_path: Path) -> None:
     assert written["gates"]["G3"] == "pass"
     assert written["gates"]["G5"] == "pass"
     assert written["no_loss_proof"]["lost"] is False
+    assert written["command"]["idempotency_key"] == "cli-live-1"
+
+
+def test_live_requires_allow_listed_command(tmp_path: Path) -> None:
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    dry = _run(proving, unpublished, tmp_path, mode="dry-run")
+    with pytest.raises(ReconciliationCommandError, match="caller principal"):
+        _run(
+            proving,
+            unpublished,
+            tmp_path,
+            mode="live",
+            dry_run_receipt=dry.as_dict(),
+            command=ReconciliationCommand(
+                caller_principal="agent.worker",
+                command_type=next(iter(ALLOWED_COMMAND_TYPES)),
+                idempotency_key="bad-principal",
+                expected_mapping_digest=dry.mapping_digest,
+            ),
+        )
+    with pytest.raises(ReconciliationCommandError, match="command type"):
+        _run(
+            proving,
+            unpublished,
+            tmp_path,
+            mode="live",
+            dry_run_receipt=dry.as_dict(),
+            command=ReconciliationCommand(
+                caller_principal=next(iter(ALLOWED_CALLER_PRINCIPALS)),
+                command_type="control_plane.unknown",
+                idempotency_key="bad-type",
+                expected_mapping_digest=dry.mapping_digest,
+            ),
+        )
+    with pytest.raises(ReconciliationCommandError, match="mapping digest"):
+        _run(
+            proving,
+            unpublished,
+            tmp_path,
+            mode="live",
+            dry_run_receipt=dry.as_dict(),
+            command=_command("sha256:" + ("00" * 32)),
+        )
+
+
+def test_live_command_is_idempotent_for_the_same_key(tmp_path: Path) -> None:
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    dry = _run(proving, unpublished, tmp_path, mode="dry-run")
+    command = _command(dry.mapping_digest, key="same-live")
+    first = _run(
+        proving,
+        unpublished,
+        tmp_path,
+        mode="live",
+        dry_run_receipt=dry.as_dict(),
+        command=command,
+    )
+    second = _run(
+        proving,
+        unpublished,
+        tmp_path / "again",
+        mode="live",
+        dry_run_receipt=dry.as_dict(),
+        command=command,
+    )
+    assert first.mutated is True
+    assert second.mapping_digest == first.mapping_digest
+    assert second.remapped_count == first.remapped_count
+
+
+def test_retained_effects_are_remapped_with_old_ingest_id(tmp_path: Path) -> None:
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    dry = _run(proving, unpublished, tmp_path, mode="dry-run")
+    _run(
+        proving,
+        unpublished,
+        tmp_path,
+        mode="live",
+        dry_run_receipt=dry.as_dict(),
+    )
+    connection = sqlite3.connect(unpublished)
+    remapped = {
+        str(old_ingest_id)
+        for (old_ingest_id,) in connection.execute(
+            """
+            SELECT old_ingest_id
+            FROM unpublished_effective_revision_remap
+            WHERE kind='RETAINED_EFFECT_REMAP'
+              AND old_ingest_id IS NOT NULL
+            """
+        )
+    }
+    tables = {
+        str(name)
+        for (name,) in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    connection.close()
+    assert remapped == {"ingest-old-1", "ingest-old-2"}
+    proving_conn = sqlite3.connect(proving)
+    proving_tables = {
+        str(name)
+        for (name,) in proving_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    proving_conn.close()
+    assert "proving_revision_first_seen" in proving_tables
+    assert "proving_backfill_watermark" in proving_tables
+    assert "unpublished_effective_revision_remap" in tables
+
+
+def test_sqlite_profile_enables_foreign_keys(tmp_path: Path) -> None:
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    proving_conn = _readonly_connect(str(proving))
+    unpublished_conn = _readonly_connect(str(unpublished))
+    try:
+        assert proving_conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert unpublished_conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    finally:
+        proving_conn.close()
+        unpublished_conn.close()
+
+
+def test_live_backup_is_mode_restricted_and_digest_verified(tmp_path: Path) -> None:
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    dry = _run(proving, unpublished, tmp_path, mode="dry-run")
+    _run(
+        proving,
+        unpublished,
+        tmp_path,
+        mode="live",
+        dry_run_receipt=dry.as_dict(),
+    )
+    backup_dir = tmp_path / "backups"
+    proving_backup = backup_dir / "proving_store.sqlite3"
+    sidecar = Path(str(proving_backup) + ".sha256")
+    assert oct(backup_dir.stat().st_mode & 0o777) == "0o700"
+    assert oct(proving_backup.stat().st_mode & 0o777) == "0o600"
+    assert oct(sidecar.stat().st_mode & 0o777) == "0o600"
+    expected = "sha256:" + hashlib.sha256(proving_backup.read_bytes()).hexdigest()
+    assert sidecar.read_text(encoding="utf-8").strip() == expected
+    coordinator = json.loads(
+        (backup_dir / COORDINATOR_NAME).read_text(encoding="utf-8")
+    )
+    assert coordinator["status"] == "COMPLETE"
+
+
+def test_incomplete_coordinator_restores_split_brain_before_retry(
+    tmp_path: Path,
+) -> None:
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    dry = _run(proving, unpublished, tmp_path, mode="dry-run")
+    backup_dir = tmp_path / "backups"
+    _backup_store(proving, backup_dir / "proving_store.sqlite3")
+    _backup_store(unpublished, backup_dir / "unpublished_store.sqlite3")
+    _write_coordinator(
+        backup_dir / COORDINATOR_NAME,
+        {"status": "STARTED", "mapping_digest": dry.mapping_digest},
+    )
+    split = sqlite3.connect(proving)
+    split.execute(
+        """
+        INSERT INTO proving_runs(
+            run_id, started_at, publication, public_dispatch,
+            openrouter_invoked, spend_gbp_minor
+        ) VALUES('canary-split', ?, 0, 0, 0, 0)
+        """,
+        (_FIRST_POLL,),
+    )
+    split.commit()
+    split.close()
+    live = _run(
+        proving,
+        unpublished,
+        tmp_path,
+        mode="live",
+        dry_run_receipt=dry.as_dict(),
+    )
+    proving_conn = sqlite3.connect(proving)
+    canary = proving_conn.execute(
+        "SELECT 1 FROM proving_runs WHERE run_id='canary-split'"
+    ).fetchone()
+    first_seen = {
+        str(seen)
+        for (seen,) in proving_conn.execute(
+            "SELECT first_seen_at FROM proving_revision_first_seen"
+        )
+    }
+    proving_conn.close()
+    unpublished_conn = sqlite3.connect(unpublished)
+    remapped = unpublished_conn.execute(
+        "SELECT COUNT(*) FROM unpublished_effective_revision_remap"
+    ).fetchone()[0]
+    unpublished_conn.close()
+    assert canary is None
+    assert first_seen == {_FIRST_POLL}
+    assert remapped > 0
+    assert live.no_loss_proof["lost"] is False
+    assert live.mutated is True
