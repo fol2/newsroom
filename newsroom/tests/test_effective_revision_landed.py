@@ -338,3 +338,107 @@ def test_landed_record_key_is_effective_revision_identity_only(tmp_path: Path) -
     rows = _landed(unpublished_cycle)
     assert len(rows) == 1
     assert rows[0][3] == first_observed
+
+
+def test_landed_schema_crash_recovers_v10_rows(tmp_path: Path) -> None:
+    unpublished = tmp_path / "stranded.sqlite3"
+    raw = sqlite3.connect(unpublished)
+    raw.execute(
+        """
+        CREATE TABLE unpublished_effective_revision_landed (
+            source_id TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            revision_digest TEXT NOT NULL,
+            first_observed_at TEXT NOT NULL,
+            payload_digest TEXT NOT NULL,
+            ledger_digest TEXT NOT NULL,
+            at TEXT NOT NULL,
+            PRIMARY KEY(source_id, item_key, revision_digest)
+        ) WITHOUT ROWID
+        """
+    )
+    raw.execute(
+        """
+        INSERT INTO unpublished_effective_revision_landed
+        VALUES(?,?,?,?,?,?,?)
+        """,
+        (
+            "UK-01",
+            "item",
+            "sha256:" + ("ab" * 32),
+            "2026-08-20T00:00:00.000000Z",
+            "sha256:" + ("cd" * 32),
+            "sha256:" + ("ef" * 32),
+            "2026-08-20T00:00:00.000000Z",
+        ),
+    )
+    raw.execute(
+        "ALTER TABLE unpublished_effective_revision_landed "
+        "RENAME TO unpublished_effective_revision_landed_v10"
+    )
+    raw.commit()
+    raw.close()
+    connection = connect(str(unpublished))
+    new_rows = connection.execute(
+        "SELECT COUNT(*) FROM unpublished_effective_revision_landed"
+    ).fetchone()[0]
+    stranded = connection.execute(
+        """
+        SELECT 1 FROM sqlite_master
+        WHERE type='table' AND name='unpublished_effective_revision_landed_v10'
+        """
+    ).fetchone()
+    recovered = connection.execute(
+        """
+        SELECT source_id, item_key, revision_digest, first_observed_at
+        FROM unpublished_effective_revision_landed
+        """
+    ).fetchone()
+    connection.close()
+    assert new_rows == 1
+    assert stranded is None
+    assert recovered == (
+        "UK-01",
+        "item",
+        "sha256:" + ("ab" * 32),
+        "2026-08-20T00:00:00.000000Z",
+    )
+
+
+def test_emit_landed_uses_pull_landing_time_for_version_markers(
+    tmp_path: Path,
+) -> None:
+    identity = EffectiveRevisionIdentity(
+        source_id="UK-01",
+        item_key="item",
+        revision_digest="sha256:" + ("ab" * 32),
+        first_observed_at="2026-08-20T00:01:00.000000Z",
+    )
+    unpublished = tmp_path / "unpublished.sqlite3"
+    connection = connect(str(unpublished))
+    assert emit_effective_revision_landed(
+        connection,
+        identity,
+        updated_at="2026-08-20T00:00:00.000000Z",
+        landed_at="2026-08-20T00:01:00.000000Z",
+    )
+    assert emit_effective_revision_landed(
+        connection,
+        identity,
+        updated_at="2026-08-20T02:00:00.000000Z",
+        landed_at="2026-08-20T02:01:00.000000Z",
+    )
+    rows = list(
+        connection.execute(
+            """
+            SELECT updated_at, first_observed_at
+            FROM unpublished_effective_revision_landed
+            ORDER BY updated_at
+            """
+        )
+    )
+    connection.close()
+    assert rows == [
+        ("2026-08-20T00:00:00.000000Z", "2026-08-20T00:01:00.000000Z"),
+        ("2026-08-20T02:00:00.000000Z", "2026-08-20T02:01:00.000000Z"),
+    ]

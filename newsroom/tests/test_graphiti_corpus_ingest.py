@@ -1332,6 +1332,16 @@ def test_changed_source_marker_is_deterministic_and_covered_once() -> None:
         first.ingest_id,
         changed[0].ingest_id,
     }
+    coverage = revisions_from(combined)
+    by_updated = {item.updated_at: item for item in coverage}
+    assert by_updated[first_row.item.updated_at].observed_at == first_row.observed_at
+    assert by_updated[changed_row.item.updated_at].observed_at == changed_row.observed_at
+    assert changed[0].effective_revision.first_observed_at == (
+        first.effective_revision.first_observed_at
+    )
+    assert by_updated[changed_row.item.updated_at].observed_at != (
+        first.effective_revision.first_observed_at
+    )
 
 
 def test_rights_renewal_restart_and_replay_create_zero_new_revisions(
@@ -1703,6 +1713,87 @@ def test_coverage_uses_revision_denominator_and_contiguous_input_watermark(
     assert coverage["ingest_watermark_at"] is None
     assert coverage["oldest_unresolved_gap"]["revision_id"] == "revision-1"
     assert coverage["admission_backlog"] == 4
+
+
+def test_remapped_effect_does_not_cover_a_different_version_marker(
+    tmp_path: Path,
+) -> None:
+    from newsroom.control_plane.store import (
+        connect,
+        graphiti_coverage,
+        insert_graphiti_ingest,
+    )
+
+    connection = connect(str(tmp_path / "alias-coverage.sqlite3"))
+    digest = "sha256:" + ("ab" * 32)
+    first_marker = "2026-08-20T00:00:00.000000Z"
+    later_marker = "2026-08-20T02:00:00.000000Z"
+    insert_graphiti_ingest(
+        connection,
+        ingest_id="ingest-old",
+        source_id="UK-01",
+        item_key="one",
+        outcome="COMPLETE",
+        proposal_count=1,
+        entity_count=1,
+        relation_count=0,
+        failure_code="NONE",
+        temporal_basis="SOURCE_UPDATED",
+        reference_time=first_marker,
+        generation_id="generation",
+        receipt_digest="sha256:receipt",
+    )
+    connection.execute(
+        """
+        INSERT INTO unpublished_effective_revision_remap(
+            mapping_id, source_id, item_key, revision_digest, published_at,
+            updated_at, old_observed_fallback_at, new_first_observed_at, kind,
+            retention_window_bounded_inaccuracy, old_ingest_id, new_ingest_id, at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            "sha256:" + ("11" * 32),
+            "UK-01",
+            "one",
+            digest,
+            "",
+            first_marker,
+            None,
+            first_marker,
+            "RETAINED_EFFECT_REMAP",
+            0,
+            "ingest-old",
+            None,
+            first_marker,
+        ),
+    )
+    covered = EligibleCorpusRevision(
+        "revision-a",
+        "UK-01",
+        "one",
+        first_marker,
+        first_marker,
+        (),
+        digest,
+        None,
+        first_marker,
+    )
+    uncovered = EligibleCorpusRevision(
+        "revision-b",
+        "UK-01",
+        "one",
+        later_marker,
+        later_marker,
+        (),
+        digest,
+        None,
+        later_marker,
+    )
+    coverage = graphiti_coverage(connection, revisions=(covered, uncovered))
+    connection.close()
+    assert coverage["successfully_ingested_revisions"] == 1
+    assert coverage["unresolved_gap"] == 1
+    assert coverage["oldest_unresolved_gap"]["revision_id"] == "revision-b"
 
 
 def test_coverage_batches_large_ingest_id_sets(tmp_path: Path) -> None:

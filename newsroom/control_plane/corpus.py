@@ -396,7 +396,7 @@ def _revision_from_chunks(
 ) -> EligibleCorpusRevision:
     ordered = sorted(chunks, key=lambda item: item.chunk_ordinal)
     first = ordered[0]
-    landed_at = first.effective_revision.first_observed_at
+    landed_at = min(chunk.observed_at for chunk in ordered)
     return EligibleCorpusRevision(
         revision_id=first.revision_id,
         source_id=first.source_id,
@@ -405,7 +405,7 @@ def _revision_from_chunks(
         source_time=map_reference_time(
             published_at=first.published_at,
             updated_at=first.updated_at,
-            observed_at=landed_at,
+            observed_at=first.effective_revision.first_observed_at,
         ).reference_time.to_text(),
         ingest_ids=tuple(item.ingest_id for item in ordered),
         revision_digest=first.revision_digest,
@@ -492,7 +492,7 @@ def merge_durable_revisions(
     window_revisions: tuple[EligibleCorpusRevision, ...],
     first_seen: tuple[tuple[str, str, str, str], ...],
     landed: tuple[EligibleCorpusRevision, ...] = (),
-    remapped_effects: tuple[tuple[str, str, str, str], ...] = (),
+    remapped_effects: tuple[tuple[str, str, str, str, str, str], ...] = (),
     permitted_source_ids: frozenset[str] | None = None,
 ) -> tuple[EligibleCorpusRevision, ...]:
     """Keep coverage obligations after raw HTTP bodies leave the retention window.
@@ -512,11 +512,19 @@ def merge_durable_revisions(
     covered_triples = {
         (item.source_id, item.item_key, item.revision_digest) for item in selected.values()
     }
-    effects_by_triple: dict[tuple[str, str, str], list[str]] = {}
-    for source_id, item_key, revision_digest, ingest_id in remapped_effects:
+    effects_by_key: dict[tuple[str, str, str, str, str], list[str]] = {}
+    for (
+        source_id,
+        item_key,
+        revision_digest,
+        published_at,
+        updated_at,
+        ingest_id,
+    ) in remapped_effects:
         if ingest_id:
-            effects_by_triple.setdefault(
-                (source_id, item_key, revision_digest), []
+            effects_by_key.setdefault(
+                (source_id, item_key, revision_digest, published_at, updated_at),
+                [],
             ).append(ingest_id)
     for source_id, item_key, revision_digest, first_observed_at in first_seen:
         if (
@@ -527,7 +535,9 @@ def merge_durable_revisions(
         triple = (source_id, item_key, revision_digest)
         if triple in covered_triples:
             continue
-        extra = tuple(effects_by_triple.get(triple, ()))
+        extra = tuple(
+            effects_by_key.get((source_id, item_key, revision_digest, "", ""), ())
+        )
         selected[(source_id, item_key, revision_digest, "", "")] = (
             synthetic_coverage_revision(
                 source_id=source_id,

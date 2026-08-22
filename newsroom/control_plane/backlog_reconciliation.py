@@ -11,7 +11,7 @@ import json
 import os
 import sqlite3
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
@@ -21,6 +21,11 @@ from newsroom.control_plane.items import parse_observation
 from newsroom.control_plane.paths import (
     CANONICAL_PROVING_STORE,
     CANONICAL_UNPUBLISHED_STORE,
+)
+from newsroom.control_plane.command_auth import (
+    COMMAND_SERVICE_PRINCIPAL,
+    ISSUER_TOKEN,
+    RECONCILE_COMMAND_TYPE,
 )
 from newsroom.control_plane.proving_revision_schema import (
     ensure_proving_revision_schema,
@@ -37,10 +42,9 @@ SOURCE_SUPPLIED_VERSION_MARKER = "SOURCE_SUPPLIED_VERSION_MARKER"
 FIRST_SEEN_WITHOUT_RETAINED_OBSERVATION = "FIRST_SEEN_WITHOUT_RETAINED_OBSERVATION"
 RETENTION_WINDOW_BOUNDED_INACCURACY = "RETENTION_WINDOW_BOUNDED_INACCURACY"
 GRAPH_EFFECT_MULTIPLE_TERMINAL = "GRAPH_EFFECT_MULTIPLE_TERMINAL"
-ALLOWED_CALLER_PRINCIPALS = frozenset({"newsroom.control-plane.command-service"})
-ALLOWED_COMMAND_TYPES = frozenset(
-    {"control_plane.effective_revision_backlog.reconcile"}
-)
+GRAPH_EFFECT_AMBIGUOUS_COVERAGE = "GRAPH_EFFECT_AMBIGUOUS_COVERAGE"
+ALLOWED_CALLER_PRINCIPALS = frozenset({COMMAND_SERVICE_PRINCIPAL})
+ALLOWED_COMMAND_TYPES = frozenset({RECONCILE_COMMAND_TYPE})
 BACKUP_DIR_MODE = 0o700
 BACKUP_FILE_MODE = 0o600
 COORDINATOR_NAME = "dual_store_mutation.json"
@@ -65,6 +69,7 @@ class ReconciliationCommand:
     command_type: str
     idempotency_key: str
     expected_mapping_digest: str
+    _issuer: object = field(default=None, repr=False, compare=False)
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -73,6 +78,9 @@ class ReconciliationCommand:
             "idempotency_key": self.idempotency_key,
             "expected_mapping_digest": self.expected_mapping_digest,
         }
+
+    def is_authenticated(self) -> bool:
+        return self._issuer is ISSUER_TOKEN
 
 
 @dataclass(frozen=True, slots=True)
@@ -620,6 +628,12 @@ def _build_plan(
             }
         )
 
+    collisions = (
+        _graph_effect_collisions(unpublished, earliest, pulls) if unpublished else ()
+    )
+    retained_effect_maps = (
+        _retained_effect_maps(unpublished, earliest, pulls) if unpublished else ()
+    )
     mapping_digest = digest_canonical(
         {
             "effective_revisions": [
@@ -649,11 +663,9 @@ def _build_plan(
                 {**triple.as_dict(), "first_seen_at": first_seen[triple]}
                 for triple in orphan_keys
             ],
+            "retained_effect_maps": list(retained_effect_maps),
+            "unresolved_collisions": list(collisions),
         }
-    )
-    collisions = _graph_effect_collisions(unpublished, earliest) if unpublished else ()
-    retained_effect_maps = (
-        _retained_effect_maps(unpublished, earliest) if unpublished else ()
     )
     return _Plan(
         expected_keys=expected_keys,
@@ -674,11 +686,11 @@ def _build_plan(
     )
 
 
-def _graph_effect_collisions(
-    unpublished: sqlite3.Connection, earliest: dict[_Triple, str]
-) -> tuple[dict[str, object], ...]:
+def _terminal_ingests_by_item(
+    unpublished: sqlite3.Connection,
+) -> dict[tuple[str, str], list[str]]:
     if not _table_exists(unpublished, "unpublished_graphiti_ingest"):
-        return ()
+        return {}
     ingest_by_item: dict[tuple[str, str], list[str]] = {}
     for ingest_id, source_id, item_key, outcome in unpublished.execute(
         """
@@ -691,55 +703,86 @@ def _graph_effect_collisions(
         ingest_by_item.setdefault((str(source_id), str(item_key)), []).append(
             str(ingest_id)
         )
+    return ingest_by_item
+
+
+def _pulls_by_item(
+    pulls: set[tuple[_Triple, str, str]],
+) -> dict[tuple[str, str], list[tuple[_Triple, str, str]]]:
+    by_item: dict[tuple[str, str], list[tuple[_Triple, str, str]]] = {}
+    for pull in pulls:
+        triple, _published, _updated = pull
+        by_item.setdefault((triple.source_id, triple.item_key), []).append(pull)
+    return by_item
+
+
+def _graph_effect_collisions(
+    unpublished: sqlite3.Connection,
+    earliest: dict[_Triple, str],
+    pulls: set[tuple[_Triple, str, str]],
+) -> tuple[dict[str, object], ...]:
+    ingest_by_item = _terminal_ingests_by_item(unpublished)
+    if not ingest_by_item:
+        return ()
     digest_by_item: dict[tuple[str, str], set[str]] = {}
     for triple in earliest:
         digest_by_item.setdefault((triple.source_id, triple.item_key), set()).add(
             triple.revision_digest
         )
+    pulls_by_item = _pulls_by_item(pulls)
     collisions: list[dict[str, object]] = []
     for (source_id, item_key), ingest_ids in sorted(ingest_by_item.items()):
-        if len(ingest_ids) < 2:
-            continue
         digests = digest_by_item.get((source_id, item_key), set())
-        if len(digests) > 1:
+        item_pulls = pulls_by_item.get((source_id, item_key), [])
+        if len(ingest_ids) >= 2 and len(digests) <= 1:
+            collisions.append(
+                {
+                    "kind": GRAPH_EFFECT_MULTIPLE_TERMINAL,
+                    "source_id": source_id,
+                    "item_key": item_key,
+                    "revision_digest": next(iter(digests)) if digests else None,
+                    "ingest_ids": sorted(ingest_ids),
+                    "merged": False,
+                }
+            )
             continue
-        collisions.append(
-            {
-                "kind": GRAPH_EFFECT_MULTIPLE_TERMINAL,
-                "source_id": source_id,
-                "item_key": item_key,
-                "revision_digest": next(iter(digests)) if digests else None,
-                "ingest_ids": sorted(ingest_ids),
-                "merged": False,
-            }
-        )
+        if len(ingest_ids) >= 1 and len(item_pulls) > 1:
+            collisions.append(
+                {
+                    "kind": GRAPH_EFFECT_AMBIGUOUS_COVERAGE,
+                    "source_id": source_id,
+                    "item_key": item_key,
+                    "revision_digest": next(iter(digests)) if len(digests) == 1 else None,
+                    "ingest_ids": sorted(ingest_ids),
+                    "merged": False,
+                }
+            )
     return tuple(collisions)
 
 
 def _retained_effect_maps(
-    unpublished: sqlite3.Connection, earliest: dict[_Triple, str]
+    unpublished: sqlite3.Connection,
+    earliest: dict[_Triple, str],
+    pulls: set[tuple[_Triple, str, str]],
 ) -> tuple[dict[str, str], ...]:
-    if not _table_exists(unpublished, "unpublished_graphiti_ingest"):
+    ingest_by_item = _terminal_ingests_by_item(unpublished)
+    if not ingest_by_item:
         return ()
-    triples_by_item: dict[tuple[str, str], list[_Triple]] = {}
-    for triple in earliest:
-        triples_by_item.setdefault((triple.source_id, triple.item_key), []).append(
-            triple
-        )
+    pulls_by_item = _pulls_by_item(pulls)
     mapped: list[dict[str, str]] = []
-    for ingest_id, source_id, item_key in unpublished.execute(
-        "SELECT ingest_id, source_id, item_key FROM unpublished_graphiti_ingest"
-    ):
-        candidates = triples_by_item.get((str(source_id), str(item_key)), [])
-        if len(candidates) != 1:
+    for (source_id, item_key), ingest_ids in ingest_by_item.items():
+        item_pulls = pulls_by_item.get((source_id, item_key), [])
+        if len(ingest_ids) != 1 or len(item_pulls) != 1:
             continue
-        triple = candidates[0]
+        triple, published, updated = item_pulls[0]
         mapped.append(
             {
                 "source_id": triple.source_id,
                 "item_key": triple.item_key,
                 "revision_digest": triple.revision_digest,
-                "old_ingest_id": str(ingest_id),
+                "published_at": published,
+                "updated_at": updated,
+                "old_ingest_id": ingest_ids[0],
                 "new_first_observed_at": earliest[triple],
             }
         )
@@ -748,6 +791,8 @@ def _retained_effect_maps(
             item["source_id"],
             item["item_key"],
             item["revision_digest"],
+            item["published_at"],
+            item["updated_at"],
             item["old_ingest_id"],
         )
     )
@@ -932,6 +977,8 @@ def _ensure_remap_schema(
             source_id TEXT NOT NULL,
             item_key TEXT NOT NULL,
             revision_digest TEXT NOT NULL,
+            published_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT '',
             old_observed_fallback_at TEXT,
             new_first_observed_at TEXT NOT NULL,
             kind TEXT NOT NULL,
@@ -950,8 +997,14 @@ def _ensure_remap_schema(
             str(row[1])
             for row in connection.execute(f"PRAGMA {_pragma_table_info(schema)}")
         }
-        if columns and "new_ingest_id" not in columns:
-            connection.execute(f"ALTER TABLE {remap} ADD COLUMN new_ingest_id TEXT")
+        for name, declaration in (
+            ("new_ingest_id", "TEXT"),
+            ("published_at", "TEXT NOT NULL DEFAULT ''"),
+            ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if columns and name not in columns:
+                connection.execute(f"ALTER TABLE {remap} ADD COLUMN {name} {declaration}")
+                columns.add(name)
     connection.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {receipts}(
@@ -1034,6 +1087,8 @@ def _apply_remap_rows(
                 mapping["source_id"],
                 mapping["item_key"],
                 mapping["revision_digest"],
+                "",
+                "",
                 mapping["poll_observed_at"],
                 mapping["new_first_observed_at"],
                 "AMPLIFIED_POLL_REMAP",
@@ -1059,6 +1114,8 @@ def _apply_remap_rows(
                 correction["source_id"],
                 correction["item_key"],
                 correction["revision_digest"],
+                "",
+                "",
                 correction["old_first_seen_at"],
                 correction["new_first_seen_at"],
                 "FIRST_SEEN_CORRECTION",
@@ -1076,6 +1133,8 @@ def _apply_remap_rows(
                 mapping["source_id"],
                 mapping["item_key"],
                 mapping["revision_digest"],
+                mapping.get("published_at") or "",
+                mapping.get("updated_at") or "",
                 None,
                 mapping["new_first_observed_at"],
                 "RETAINED_EFFECT_REMAP",
@@ -1090,9 +1149,10 @@ def _apply_remap_rows(
             f"""
             INSERT OR IGNORE INTO {table}(
                 mapping_id, source_id, item_key, revision_digest,
+                published_at, updated_at,
                 old_observed_fallback_at, new_first_observed_at, kind,
                 retention_window_bounded_inaccuracy, old_ingest_id, new_ingest_id, at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             row,
         )
@@ -1235,10 +1295,9 @@ def _assert_command(
     plan: _Plan,
     dry_run_receipt: Mapping[str, object],
 ) -> ReconciliationCommand:
-    if command is None:
+    if command is None or not command.is_authenticated():
         raise ReconciliationCommandError(
-            "live mutation requires caller principal, command type, "
-            "idempotency key and expected mapping digest"
+            "live mutation requires an authenticated command-service command"
         )
     if command.caller_principal not in ALLOWED_CALLER_PRINCIPALS:
         raise ReconciliationCommandError(
@@ -1494,8 +1553,6 @@ def reconcile_effective_revision_backlog(
 
     proving_backup = backup_root / "proving_store.sqlite3"
     unpublished_backup = backup_root / "unpublished_store.sqlite3"
-    unpublished_prepared = connect_unpublished(unpublished_store)
-    unpublished_prepared.close()
     _backup_store(proving_path, proving_backup)
     _backup_store(unpublished_path, unpublished_backup)
     _write_coordinator(
@@ -1508,6 +1565,8 @@ def reconcile_effective_revision_backlog(
             "unpublished_backup": str(unpublished_backup),
         },
     )
+    unpublished_prepared = connect_unpublished(unpublished_store)
+    unpublished_prepared.close()
     _set_journal_mode(proving_path, "DELETE")
     _set_journal_mode(unpublished_path, "DELETE")
     try:

@@ -492,6 +492,14 @@ def test_writer_lock_after_connect_is_normalised_and_fail_closed(
             blocker.close()
 
 
+def test_proving_writer_enables_foreign_keys(tmp_path: Path) -> None:
+    connection = proving_module._connect(str(tmp_path / "fk.sqlite3"))
+    try:
+        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
 def test_proving_cli_default_writes_the_shared_canonical_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

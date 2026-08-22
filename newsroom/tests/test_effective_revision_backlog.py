@@ -11,7 +11,6 @@ import pytest
 
 from newsroom.authority.canonical import digest_bytes, digest_canonical
 from newsroom.control_plane.backlog_reconciliation import (
-    ALLOWED_CALLER_PRINCIPALS,
     ALLOWED_COMMAND_TYPES,
     COORDINATOR_NAME,
     CanonicalStoreGuardError,
@@ -24,6 +23,11 @@ from newsroom.control_plane.backlog_reconciliation import (
     refuse_canonical_write,
     reconcile_effective_revision_backlog,
 )
+from newsroom.control_plane.command_auth import (
+    COMMAND_SERVICE_PRINCIPAL,
+    RECONCILE_COMMAND_TYPE,
+)
+from newsroom.control_plane.command_service import issue_reconciliation_command
 from newsroom.control_plane.items import parse_observation
 from newsroom.control_plane.paths import CANONICAL_PROVING_STORE
 from newsroom.control_plane.store import connect
@@ -248,6 +252,30 @@ def _amplified_stores(tmp_path: Path) -> tuple[Path, Path, dict[str, object]]:
                 _FIRST_POLL,
             ),
         )
+    store.execute(
+        """
+        INSERT INTO unpublished_graphiti_ingest(
+            ingest_id, source_id, item_key, outcome, proposal_count,
+            entity_count, relation_count, failure_code, temporal_basis,
+            reference_time, generation_id, receipt_digest, at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            "ingest-uk10-unique",
+            "UK-10",
+            "UK-10-0",
+            "COMPLETE",
+            0,
+            0,
+            0,
+            "",
+            "OBSERVED_FALLBACK",
+            _FIRST_POLL,
+            "generation",
+            "sha256:" + ("dd" * 32),
+            _FIRST_POLL,
+        ),
+    )
     store.commit()
     store.close()
     old_n = _HK_ITEMS * _POLL_COUNT + _UK_ITEMS * _POLL_COUNT + 1
@@ -262,9 +290,7 @@ def _amplified_stores(tmp_path: Path) -> tuple[Path, Path, dict[str, object]]:
 
 
 def _command(mapping_digest: str, *, key: str | None = None) -> ReconciliationCommand:
-    return ReconciliationCommand(
-        caller_principal=next(iter(ALLOWED_CALLER_PRINCIPALS)),
-        command_type=next(iter(ALLOWED_COMMAND_TYPES)),
+    return issue_reconciliation_command(
         idempotency_key=key or f"test-{uuid.uuid4()}",
         expected_mapping_digest=mapping_digest,
     )
@@ -675,10 +701,6 @@ def test_cli_dry_run_and_live(tmp_path: Path) -> None:
                 str(tmp_path / "backups"),
                 "--evaluated-at",
                 "2026-08-21T12:00:00.000000Z",
-                "--caller-principal",
-                next(iter(ALLOWED_CALLER_PRINCIPALS)),
-                "--command-type",
-                next(iter(ALLOWED_COMMAND_TYPES)),
                 "--idempotency-key",
                 "cli-live-1",
                 "--expected-mapping-digest",
@@ -694,12 +716,14 @@ def test_cli_dry_run_and_live(tmp_path: Path) -> None:
     assert written["gates"]["G5"] == "pass"
     assert written["no_loss_proof"]["lost"] is False
     assert written["command"]["idempotency_key"] == "cli-live-1"
+    assert written["command"]["caller_principal"] == COMMAND_SERVICE_PRINCIPAL
+    assert written["command"]["command_type"] == RECONCILE_COMMAND_TYPE
 
 
-def test_live_requires_allow_listed_command(tmp_path: Path) -> None:
+def test_live_requires_authenticated_command(tmp_path: Path) -> None:
     proving, unpublished, _meta = _amplified_stores(tmp_path)
     dry = _run(proving, unpublished, tmp_path, mode="dry-run")
-    with pytest.raises(ReconciliationCommandError, match="caller principal"):
+    with pytest.raises(ReconciliationCommandError, match="authenticated command-service"):
         _run(
             proving,
             unpublished,
@@ -713,7 +737,7 @@ def test_live_requires_allow_listed_command(tmp_path: Path) -> None:
                 expected_mapping_digest=dry.mapping_digest,
             ),
         )
-    with pytest.raises(ReconciliationCommandError, match="command type"):
+    with pytest.raises(ReconciliationCommandError, match="authenticated command-service"):
         _run(
             proving,
             unpublished,
@@ -721,9 +745,9 @@ def test_live_requires_allow_listed_command(tmp_path: Path) -> None:
             mode="live",
             dry_run_receipt=dry.as_dict(),
             command=ReconciliationCommand(
-                caller_principal=next(iter(ALLOWED_CALLER_PRINCIPALS)),
-                command_type="control_plane.unknown",
-                idempotency_key="bad-type",
+                caller_principal=COMMAND_SERVICE_PRINCIPAL,
+                command_type=RECONCILE_COMMAND_TYPE,
+                idempotency_key="self-claim",
                 expected_mapping_digest=dry.mapping_digest,
             ),
         )
@@ -792,7 +816,7 @@ def test_retained_effects_are_remapped_with_old_ingest_id(tmp_path: Path) -> Non
         )
     }
     connection.close()
-    assert remapped == {"ingest-old-1", "ingest-old-2"}
+    assert remapped == {"ingest-uk10-unique"}
     proving_conn = sqlite3.connect(proving)
     proving_tables = {
         str(name)
@@ -894,3 +918,112 @@ def test_incomplete_coordinator_restores_split_brain_before_retry(
     assert remapped > 0
     assert live.no_loss_proof["lost"] is False
     assert live.mutated is True
+
+
+def test_g2_refuses_effect_map_drift_after_dry_run(tmp_path: Path) -> None:
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    dry = _run(proving, unpublished, tmp_path, mode="dry-run")
+    connection = sqlite3.connect(unpublished)
+    connection.execute(
+        """
+        INSERT INTO unpublished_graphiti_ingest(
+            ingest_id, source_id, item_key, outcome, proposal_count,
+            entity_count, relation_count, failure_code, temporal_basis,
+            reference_time, generation_id, receipt_digest, at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            "ingest-uk10-later",
+            "UK-10",
+            "UK-10-1",
+            "COMPLETE",
+            0,
+            0,
+            0,
+            "",
+            "OBSERVED_FALLBACK",
+            _FIRST_POLL,
+            "generation",
+            "sha256:" + ("ee" * 32),
+            _FIRST_POLL,
+        ),
+    )
+    connection.commit()
+    connection.close()
+    with pytest.raises(Exception, match="G2"):
+        _run(
+            proving,
+            unpublished,
+            tmp_path,
+            mode="live",
+            dry_run_receipt=dry.as_dict(),
+        )
+
+
+def test_g3_backup_is_taken_before_unpublished_schema_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import newsroom.control_plane.backlog_reconciliation as backlog
+
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    dry = _run(proving, unpublished, tmp_path, mode="dry-run")
+    order: list[str] = []
+    real_backup = backlog._backup_store
+    real_connect = backlog.connect_unpublished
+
+    def tracked_backup(source: Path, destination: Path) -> dict[str, str]:
+        order.append("backup")
+        return real_backup(source, destination)
+
+    def tracked_connect(path: str) -> sqlite3.Connection:
+        order.append("connect_unpublished")
+        return real_connect(path)
+
+    monkeypatch.setattr(backlog, "_backup_store", tracked_backup)
+    monkeypatch.setattr(backlog, "connect_unpublished", tracked_connect)
+    _run(
+        proving,
+        unpublished,
+        tmp_path,
+        mode="live",
+        dry_run_receipt=dry.as_dict(),
+    )
+    assert "backup" in order
+    assert "connect_unpublished" in order
+    assert order.index("backup") < order.index("connect_unpublished")
+
+
+def test_colliding_effects_are_not_remapped_to_the_same_revision(
+    tmp_path: Path,
+) -> None:
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    dry = _run(proving, unpublished, tmp_path, mode="dry-run")
+    colliding = next(
+        item
+        for item in dry.unresolved_collisions
+        if item["kind"] == "GRAPH_EFFECT_MULTIPLE_TERMINAL"
+    )
+    assert colliding["merged"] is False
+    assert set(colliding["ingest_ids"]) == {"ingest-old-1", "ingest-old-2"}
+    live = _run(
+        proving,
+        unpublished,
+        tmp_path,
+        mode="live",
+        dry_run_receipt=dry.as_dict(),
+    )
+    connection = sqlite3.connect(unpublished)
+    remapped = {
+        str(old_ingest_id)
+        for (old_ingest_id,) in connection.execute(
+            """
+            SELECT old_ingest_id
+            FROM unpublished_effective_revision_remap
+            WHERE kind='RETAINED_EFFECT_REMAP'
+              AND old_ingest_id IN ('ingest-old-1', 'ingest-old-2')
+            """
+        )
+    }
+    connection.close()
+    assert remapped == set()
+    assert live.unresolved_collisions == dry.unresolved_collisions

@@ -2,9 +2,10 @@
 """Reconcile poll-amplified backlog identities onto effective revisions.
 
 Repair means remap, never delete. Dry-run mutates nothing. Live refuses to
-mutate unless G1–G5 pass, the caller principal is allow-listed, and the
-version fence matches the dry-run receipt. Writable opens of the canonical
-stores also require --mutate-canonical after the live daemon is stopped.
+mutate unless G1–G5 pass and the command-service issues an authenticated
+command whose version fence matches the dry-run receipt. Writable opens of
+the canonical stores also require --mutate-canonical after the live daemon
+is stopped.
 """
 
 from __future__ import annotations
@@ -18,12 +19,12 @@ from pathlib import Path
 from newsroom.control_plane.backlog_reconciliation import (
     BacklogReconciliationError,
     CanonicalStoreGuardError,
-    ReconciliationCommand,
     ReconciliationCommandError,
     load_receipt,
     parse_evaluated_at,
     reconcile_effective_revision_backlog,
 )
+from newsroom.control_plane.command_service import ControlPlaneCommandService
 
 
 def parse_evaluated_at_or_now(text: str | None) -> datetime | None:
@@ -37,7 +38,8 @@ def main(argv: list[str] | None = None) -> int:
         description=(
             "No-loss remap of amplified SourceRevision identities onto "
             "effective revisions. Does not open canonical stores for writing "
-            "unless --mutate-canonical is set."
+            "unless --mutate-canonical is set. Live mutation is issued only "
+            "through the Control Plane command-service."
         )
     )
     parser.add_argument("mode", choices=("dry-run", "live"))
@@ -71,16 +73,6 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
-        "--caller-principal",
-        default="",
-        help="Direct-writer principal (required for live)",
-    )
-    parser.add_argument(
-        "--command-type",
-        default="",
-        help="Allow-listed command type (required for live)",
-    )
-    parser.add_argument(
         "--idempotency-key",
         default="",
         help="Idempotency identity for this live command (required for live)",
@@ -93,41 +85,37 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         evaluated_at = parse_evaluated_at_or_now(args.evaluated_at)
-        dry_run_receipt = None
-        command = None
         if args.mode == "live":
             if not args.dry_run_receipt:
                 parser.error("live mode requires --dry-run-receipt")
             if not args.backup_dir:
                 parser.error("live mode requires --backup-dir")
-            if not (
-                args.caller_principal
-                and args.command_type
-                and args.idempotency_key
-                and args.expected_mapping_digest
-            ):
+            if not (args.idempotency_key and args.expected_mapping_digest):
                 parser.error(
-                    "live mode requires --caller-principal, --command-type, "
-                    "--idempotency-key and --expected-mapping-digest"
+                    "live mode requires --idempotency-key and "
+                    "--expected-mapping-digest"
                 )
-            dry_run_receipt = load_receipt(Path(args.dry_run_receipt))
-            command = ReconciliationCommand(
-                caller_principal=args.caller_principal,
-                command_type=args.command_type,
+            receipt = ControlPlaneCommandService().reconcile_effective_revision_backlog(
+                proving_store=args.proving,
+                unpublished_store=args.unpublished,
+                dry_run_receipt=load_receipt(Path(args.dry_run_receipt)),
+                receipt_path=Path(args.receipt),
+                backup_dir=Path(args.backup_dir),
+                allow_canonical_mutation=args.mutate_canonical,
+                evaluated_at=evaluated_at,
                 idempotency_key=args.idempotency_key,
                 expected_mapping_digest=args.expected_mapping_digest,
             )
-        receipt = reconcile_effective_revision_backlog(
-            proving_store=args.proving,
-            unpublished_store=args.unpublished,
-            mode=args.mode,
-            dry_run_receipt=dry_run_receipt,
-            receipt_path=Path(args.receipt),
-            backup_dir=None if args.backup_dir is None else Path(args.backup_dir),
-            allow_canonical_mutation=args.mutate_canonical,
-            evaluated_at=evaluated_at,
-            command=command,
-        )
+        else:
+            receipt = reconcile_effective_revision_backlog(
+                proving_store=args.proving,
+                unpublished_store=args.unpublished,
+                mode="dry-run",
+                receipt_path=Path(args.receipt),
+                backup_dir=None if args.backup_dir is None else Path(args.backup_dir),
+                allow_canonical_mutation=args.mutate_canonical,
+                evaluated_at=evaluated_at,
+            )
     except (
         BacklogReconciliationError,
         CanonicalStoreGuardError,

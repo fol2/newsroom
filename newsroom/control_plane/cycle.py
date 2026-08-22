@@ -1429,6 +1429,7 @@ def _emit_effective_revision_landed(
             published_at=first.published_at or "",
             updated_at=first.updated_at or "",
             ingest_ids=tuple(item.ingest_id for item in ordered),
+            landed_at=min(item.observed_at for item in ordered),
         )
         emitted_triples.add(coverage_key[:3])
     for source_id, item_key, revision_digest, first_observed_at in first_seen:

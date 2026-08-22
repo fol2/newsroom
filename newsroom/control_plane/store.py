@@ -176,6 +176,8 @@ CREATE TABLE IF NOT EXISTS unpublished_effective_revision_remap(
     source_id TEXT NOT NULL,
     item_key TEXT NOT NULL,
     revision_digest TEXT NOT NULL,
+    published_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT '',
     old_observed_fallback_at TEXT,
     new_first_observed_at TEXT NOT NULL,
     kind TEXT NOT NULL,
@@ -231,54 +233,91 @@ def _now() -> str:
     return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+_LANDED_TABLE = "unpublished_effective_revision_landed"
+_LANDED_V10_TABLE = "unpublished_effective_revision_landed_v10"
+_LANDED_V11_DDL = f"""
+CREATE TABLE {_LANDED_TABLE}(
+    source_id TEXT NOT NULL,
+    item_key TEXT NOT NULL,
+    revision_digest TEXT NOT NULL,
+    published_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT '',
+    first_observed_at TEXT NOT NULL,
+    ingest_ids_json TEXT NOT NULL DEFAULT '[]',
+    payload_digest TEXT NOT NULL,
+    ledger_digest TEXT NOT NULL,
+    at TEXT NOT NULL,
+    PRIMARY KEY(source_id, item_key, revision_digest, published_at, updated_at)
+) WITHOUT ROWID
+"""
+
+
+def _sqlite_table_exists(connection: sqlite3.Connection, name: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
 def _landed_columns(connection: sqlite3.Connection) -> set[str]:
     return {
         str(row[1])
-        for row in connection.execute(
-            "PRAGMA table_info(unpublished_effective_revision_landed)"
-        )
+        for row in connection.execute(f"PRAGMA table_info({_LANDED_TABLE})")
     }
 
 
 def _ensure_landed_schema(connection: sqlite3.Connection) -> None:
-    columns = _landed_columns(connection)
-    if not columns:
+    has_landed = _sqlite_table_exists(connection, _LANDED_TABLE)
+    has_v10 = _sqlite_table_exists(connection, _LANDED_V10_TABLE)
+    columns = _landed_columns(connection) if has_landed else set()
+    needs_rebuild = has_landed and (
+        "published_at" not in columns or "ingest_ids_json" not in columns
+    )
+    if not needs_rebuild and not has_v10:
         return
-    if "published_at" in columns and "ingest_ids_json" in columns:
-        return
-    connection.execute(
-        "ALTER TABLE unpublished_effective_revision_landed "
-        "RENAME TO unpublished_effective_revision_landed_v10"
-    )
-    connection.execute(
-        """
-        CREATE TABLE unpublished_effective_revision_landed(
-            source_id TEXT NOT NULL,
-            item_key TEXT NOT NULL,
-            revision_digest TEXT NOT NULL,
-            published_at TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL DEFAULT '',
-            first_observed_at TEXT NOT NULL,
-            ingest_ids_json TEXT NOT NULL DEFAULT '[]',
-            payload_digest TEXT NOT NULL,
-            ledger_digest TEXT NOT NULL,
-            at TEXT NOT NULL,
-            PRIMARY KEY(source_id, item_key, revision_digest, published_at, updated_at)
-        ) WITHOUT ROWID
-        """
-    )
-    connection.execute(
-        """
-        INSERT INTO unpublished_effective_revision_landed(
-            source_id, item_key, revision_digest, published_at, updated_at,
-            first_observed_at, ingest_ids_json, payload_digest, ledger_digest, at
-        )
-        SELECT source_id, item_key, revision_digest, '', '',
-               first_observed_at, '[]', payload_digest, ledger_digest, at
-        FROM unpublished_effective_revision_landed_v10
-        """
-    )
-    connection.execute("DROP TABLE unpublished_effective_revision_landed_v10")
+    own_txn = not connection.in_transaction
+    if own_txn:
+        connection.execute("BEGIN IMMEDIATE")
+    try:
+        if needs_rebuild:
+            connection.execute(
+                f"ALTER TABLE {_LANDED_TABLE} RENAME TO {_LANDED_V10_TABLE}"
+            )
+            has_v10 = True
+            connection.execute(_LANDED_V11_DDL)
+        elif has_v10 and not _sqlite_table_exists(connection, _LANDED_TABLE):
+            connection.execute(_LANDED_V11_DDL)
+        if has_v10 and _sqlite_table_exists(connection, _LANDED_V10_TABLE):
+            connection.execute(
+                f"""
+                INSERT OR IGNORE INTO {_LANDED_TABLE}(
+                    source_id, item_key, revision_digest, published_at, updated_at,
+                    first_observed_at, ingest_ids_json, payload_digest,
+                    ledger_digest, at
+                )
+                SELECT source_id, item_key, revision_digest, '', '',
+                       first_observed_at, '[]', payload_digest, ledger_digest, at
+                FROM {_LANDED_V10_TABLE}
+                """
+            )
+            v10_count = int(
+                connection.execute(f"SELECT COUNT(*) FROM {_LANDED_V10_TABLE}").fetchone()[0]
+            )
+            v11_count = int(
+                connection.execute(f"SELECT COUNT(*) FROM {_LANDED_TABLE}").fetchone()[0]
+            )
+            if v11_count < v10_count:
+                raise EffectiveRevisionLandedError(
+                    "landed v10 rows were not recovered into the active schema"
+                )
+            connection.execute(f"DROP TABLE {_LANDED_V10_TABLE}")
+        if own_txn:
+            connection.commit()
+    except Exception:
+        if own_txn and connection.in_transaction:
+            connection.rollback()
+        raise
 
 
 def _ensure_remap_columns(connection: sqlite3.Connection) -> None:
@@ -290,11 +329,16 @@ def _ensure_remap_columns(connection: sqlite3.Connection) -> None:
     if not info:
         return
     columns = {str(row[1]) for row in info}
-    if "new_ingest_id" not in columns:
-        connection.execute(
-            "ALTER TABLE unpublished_effective_revision_remap "
-            "ADD COLUMN new_ingest_id TEXT"
-        )
+    for name, declaration in (
+        ("new_ingest_id", "TEXT"),
+        ("published_at", "TEXT NOT NULL DEFAULT ''"),
+        ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        if name not in columns:
+            connection.execute(
+                "ALTER TABLE unpublished_effective_revision_remap "
+                f"ADD COLUMN {name} {declaration}"
+            )
 
 
 def connect(path: str) -> sqlite3.Connection:
@@ -356,6 +400,7 @@ def effective_revision_landed_payload(
     published_at: str = "",
     updated_at: str = "",
     ingest_ids: tuple[str, ...] = (),
+    first_observed_at: str | None = None,
 ) -> dict[str, object]:
     return {
         "source_id": identity.source_id,
@@ -363,7 +408,7 @@ def effective_revision_landed_payload(
         "revision_digest": identity.revision_digest,
         "published_at": published_at,
         "updated_at": updated_at,
-        "first_observed_at": identity.first_observed_at,
+        "first_observed_at": first_observed_at or identity.first_observed_at,
         "ingest_ids": list(ingest_ids),
     }
 
@@ -399,16 +444,18 @@ def emit_effective_revision_landed(
     published_at: str | None = None,
     updated_at: str | None = None,
     ingest_ids: tuple[str, ...] = (),
+    landed_at: str | None = None,
 ) -> bool:
     """Append one identity-keyed landed record, or no-op if it already exists."""
 
     marker_published = published_at or ""
     marker_updated = updated_at or ""
+    first_observed_at = landed_at or identity.first_observed_at
     if not identity.source_id or not identity.item_key or not identity.revision_digest:
         raise EffectiveRevisionLandedError(
             "effective-revision landed identity is incomplete"
         )
-    if not identity.first_observed_at:
+    if not first_observed_at:
         raise EffectiveRevisionLandedError(
             "effective-revision landed record requires first_observed_at"
         )
@@ -424,6 +471,7 @@ def emit_effective_revision_landed(
         published_at=marker_published,
         updated_at=marker_updated,
         ingest_ids=ingest_ids,
+        first_observed_at=first_observed_at,
     )
     payload_digest = digest_canonical(payload)
     ledger_digest = append_ledger(connection, EFFECTIVE_REVISION_LANDED, payload)
@@ -441,7 +489,7 @@ def emit_effective_revision_landed(
                 identity.revision_digest,
                 marker_published,
                 marker_updated,
-                identity.first_observed_at,
+                first_observed_at,
                 json.dumps(list(ingest_ids), ensure_ascii=False),
                 payload_digest,
                 ledger_digest,
@@ -509,20 +557,44 @@ def list_landed_revisions(
 
 def list_remapped_ingest_effects(
     connection: sqlite3.Connection,
-) -> tuple[tuple[str, str, str, str], ...]:
+) -> tuple[tuple[str, str, str, str, str, str], ...]:
     if not connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' "
         "AND name='unpublished_effective_revision_remap'"
     ).fetchone():
         return ()
+    columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(unpublished_effective_revision_remap)"
+        )
+    }
+    has_markers = "published_at" in columns and "updated_at" in columns
+    select_sql = (
+        """
+        SELECT source_id, item_key, revision_digest, published_at, updated_at,
+               old_ingest_id
+        FROM unpublished_effective_revision_remap
+        WHERE old_ingest_id IS NOT NULL AND old_ingest_id != ''
+        """
+        if has_markers
+        else """
+        SELECT source_id, item_key, revision_digest, '', '', old_ingest_id
+        FROM unpublished_effective_revision_remap
+        WHERE old_ingest_id IS NOT NULL AND old_ingest_id != ''
+        """
+    )
     return tuple(
-        (str(source_id), str(item_key), str(revision_digest), str(old_ingest_id))
-        for source_id, item_key, revision_digest, old_ingest_id in connection.execute(
-            """
-            SELECT source_id, item_key, revision_digest, old_ingest_id
-            FROM unpublished_effective_revision_remap
-            WHERE old_ingest_id IS NOT NULL AND old_ingest_id != ''
-            """
+        (
+            str(source_id),
+            str(item_key),
+            str(revision_digest),
+            str(published_at or ""),
+            str(updated_at or ""),
+            str(old_ingest_id),
+        )
+        for source_id, item_key, revision_digest, published_at, updated_at, old_ingest_id in connection.execute(
+            select_sql
         )
     )
 
@@ -932,11 +1004,16 @@ def _coverage_query_ids(
     ids = {
         ingest_id for revision in revisions for ingest_id in revision.ingest_ids
     }
-    wanted = {(item.source_id, item.item_key, item.revision_digest) for item in revisions}
-    for source_id, item_key, revision_digest, old_ingest_id in list_remapped_ingest_effects(
-        connection
-    ):
-        if (source_id, item_key, revision_digest) in wanted:
+    wanted = {item.coverage_key() for item in revisions}
+    for (
+        source_id,
+        item_key,
+        revision_digest,
+        published_at,
+        updated_at,
+        old_ingest_id,
+    ) in list_remapped_ingest_effects(connection):
+        if (source_id, item_key, revision_digest, published_at, updated_at) in wanted:
             ids.add(old_ingest_id)
     return tuple(sorted(ids))
 
@@ -944,15 +1021,13 @@ def _coverage_query_ids(
 def _revision_is_ingested(
     revision: EligibleCorpusRevision,
     ingested_ids: set[str],
-    remapped_ids: dict[tuple[str, str, str], tuple[str, ...]],
+    remapped_ids: dict[tuple[str, str, str, str, str], tuple[str, ...]],
 ) -> bool:
     if revision.ingest_ids and all(
         ingest_id in ingested_ids for ingest_id in revision.ingest_ids
     ):
         return True
-    aliases = remapped_ids.get(
-        (revision.source_id, revision.item_key, revision.revision_digest), ()
-    )
+    aliases = remapped_ids.get(revision.coverage_key(), ())
     return bool(aliases) and any(ingest_id in ingested_ids for ingest_id in aliases)
 
 
@@ -965,13 +1040,19 @@ def graphiti_coverage(
     poll_observation_count: int | None = None,
     feed_snapshot_item_count: int | None = None,
 ) -> dict[str, object]:
-    remapped_ids: dict[tuple[str, str, str], list[str]] = {}
-    for source_id, item_key, revision_digest, old_ingest_id in list_remapped_ingest_effects(
-        connection
-    ):
-        remapped_ids.setdefault((source_id, item_key, revision_digest), []).append(
-            old_ingest_id
-        )
+    remapped_ids: dict[tuple[str, str, str, str, str], list[str]] = {}
+    for (
+        source_id,
+        item_key,
+        revision_digest,
+        published_at,
+        updated_at,
+        old_ingest_id,
+    ) in list_remapped_ingest_effects(connection):
+        remapped_ids.setdefault(
+            (source_id, item_key, revision_digest, published_at, updated_at),
+            [],
+        ).append(old_ingest_id)
     remapped_tuples = {
         key: tuple(values) for key, values in remapped_ids.items()
     }
