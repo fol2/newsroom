@@ -50,10 +50,6 @@ from newsroom.graphiti_adapter.combined_temporal_fixtures import (
 from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_CORE_RELEASE
 from newsroom.graphiti_adapter.identity import configuration_digest, content_digest
 from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_VERSION
-from scripts.graphiti_combined_temporal_upstream import (
-    PINNED_NONZERO_EDGE_CALLS,
-    PINNED_ZERO_EDGE_CALLS,
-)
 
 _REPO = Path(__file__).resolve().parents[2]
 _RESEARCH = _REPO / "docs" / "research"
@@ -471,8 +467,11 @@ def test_upstream_zero_and_nonzero_call_shapes_are_pinned() -> None:
         "newsroom.graphiti-combined-temporal-call-shapes.v1"
     )
     assert committed["graphiti_core_version"] == "0.29.3"
-    assert tuple(committed["zero_edge"]) == PINNED_ZERO_EDGE_CALLS
-    assert tuple(committed["nonzero_edge"]) == PINNED_NONZERO_EDGE_CALLS
+    assert tuple(committed["zero_edge"]) == ("CombinedExtraction",)
+    assert tuple(committed["nonzero_edge"]) == (
+        "CombinedExtraction",
+        "BatchEdgeTimestamps",
+    )
 
 
 def test_segment_source_rejects_non_positive_max_bytes() -> None:
@@ -511,7 +510,9 @@ def test_content_digest_follows_the_existing_chunk_pattern() -> None:
     )
 
 
-def test_prompt_or_schema_binding_mints_a_new_ingest_identity() -> None:
+def test_prompt_or_schema_binding_mints_a_new_ingest_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     leaf, case = _extract("pair-current")
     shifted = extract_combined_temporal(
         replace(case.revision, predecessor_revision_id="other-rev"),
@@ -520,6 +521,19 @@ def test_prompt_or_schema_binding_mints_a_new_ingest_identity() -> None:
     assert shifted.ingest_id != leaf.ingest_id
     assert {node.uuid for node in shifted.nodes} != {node.uuid for node in leaf.nodes}
     assert {edge.uuid for edge in shifted.edges} != {edge.uuid for edge in leaf.edges}
+    monkeypatch.setattr(
+        "newsroom.graphiti_adapter.combined_temporal_extraction.SCHEMA_DIGEST",
+        "sha256:" + "ab" * 32,
+    )
+    schema_shifted = extract_combined_temporal(
+        case.revision,
+        transport=_FakeTransport(case.gold),
+    )
+    assert schema_shifted.ingest_id != leaf.ingest_id
+    assert {node.uuid for node in schema_shifted.nodes} != {
+        node.uuid for node in leaf.nodes
+    }
+    assert configuration_digest() == leaf.configuration_digest
 
 
 def test_failing_embedder_rolls_back_without_graph_effect() -> None:
