@@ -9,13 +9,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, digest_canonical
 from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.corpus import EligibleCorpusRevision
 from newsroom.control_plane.veto import VetoError, assert_private_store, refuse_public_effect
+from newsroom.effective_revision import EffectiveRevisionIdentity
 from newsroom.graphiti_adapter.embedding_meter import is_exact_provider_reported_usage
 
-SCHEMA_VERSION = "newsroom.control-plane.unpublished.v9"
+SCHEMA_VERSION = "newsroom.control-plane.unpublished.v10"
+EFFECTIVE_REVISION_LANDED = "EFFECTIVE_REVISION_LANDED"
 LEDGER_GENESIS = "sha256:" + ("0" * 64)
 GRAPHITI_MAX_FAILURES = 3
 _SQLITE_BIND_BATCH_SIZE = 500
@@ -155,6 +157,16 @@ CREATE TABLE IF NOT EXISTS unpublished_graphiti_spend(
     at TEXT NOT NULL,
     UNIQUE(ingest_id, attempt_number)
 );
+CREATE TABLE IF NOT EXISTS unpublished_effective_revision_landed(
+    source_id TEXT NOT NULL,
+    item_key TEXT NOT NULL,
+    revision_digest TEXT NOT NULL,
+    first_observed_at TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    ledger_digest TEXT NOT NULL,
+    at TEXT NOT NULL,
+    PRIMARY KEY(source_id, item_key, revision_digest)
+) WITHOUT ROWID;
 """
 
 
@@ -177,6 +189,10 @@ class UnpublishedDraft:
 
 class GraphitiSpendCeilingExceeded(RuntimeError):
     """A new Graphiti reservation would exceed the fixed OD-011 ceiling."""
+
+
+class EffectiveRevisionLandedError(RuntimeError):
+    """A landed record cannot be emitted for this effective revision."""
 
 
 def _now() -> str:
@@ -232,6 +248,73 @@ def append_ledger(connection: sqlite3.Connection, kind: str, payload: dict[str, 
         (at, kind, payload_digest, prev, digest),
     )
     return digest
+
+
+def effective_revision_landed_payload(
+    identity: EffectiveRevisionIdentity,
+) -> dict[str, object]:
+    return {
+        "source_id": identity.source_id,
+        "item_key": identity.item_key,
+        "revision_digest": identity.revision_digest,
+        "first_observed_at": identity.first_observed_at,
+    }
+
+
+def has_effective_revision_landed(
+    connection: sqlite3.Connection, identity: EffectiveRevisionIdentity
+) -> bool:
+    row = connection.execute(
+        """
+        SELECT 1 FROM unpublished_effective_revision_landed
+        WHERE source_id=? AND item_key=? AND revision_digest=?
+        """,
+        (identity.source_id, identity.item_key, identity.revision_digest),
+    ).fetchone()
+    return row is not None
+
+
+def emit_effective_revision_landed(
+    connection: sqlite3.Connection, identity: EffectiveRevisionIdentity
+) -> bool:
+    """Append one identity-keyed landed record, or no-op if it already exists."""
+
+    if not identity.source_id or not identity.item_key or not identity.revision_digest:
+        raise EffectiveRevisionLandedError(
+            "effective-revision landed identity is incomplete"
+        )
+    if not identity.first_observed_at:
+        raise EffectiveRevisionLandedError(
+            "effective-revision landed record requires first_observed_at"
+        )
+    if has_effective_revision_landed(connection, identity):
+        return False
+    payload = effective_revision_landed_payload(identity)
+    payload_digest = digest_canonical(payload)
+    ledger_digest = append_ledger(connection, EFFECTIVE_REVISION_LANDED, payload)
+    try:
+        connection.execute(
+            """
+            INSERT INTO unpublished_effective_revision_landed(
+                source_id, item_key, revision_digest, first_observed_at,
+                payload_digest, ledger_digest, at
+            ) VALUES(?,?,?,?,?,?,?)
+            """,
+            (
+                identity.source_id,
+                identity.item_key,
+                identity.revision_digest,
+                identity.first_observed_at,
+                payload_digest,
+                ledger_digest,
+                _now(),
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise EffectiveRevisionLandedError(
+            "effective-revision landed identity collided during emission"
+        ) from exc
+    return True
 
 
 def spend_reserved(connection: sqlite3.Connection) -> bool:

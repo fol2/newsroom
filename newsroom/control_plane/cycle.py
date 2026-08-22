@@ -37,6 +37,7 @@ from newsroom.control_plane.store import (
     claim_graphiti_attempt,
     clear_graphiti_failure,
     connect,
+    emit_effective_revision_landed,
     graphiti_coverage,
     graphiti_failure_state,
     GraphitiSpendCeilingExceeded,
@@ -1394,6 +1395,20 @@ def _permitted_rows(
     return latest_run_id, tuple(latest_rows), tuple(all_rows)
 
 
+def _emit_effective_revision_landed(
+    unpublished: sqlite3.Connection,
+    units: tuple[CorpusIngestUnit, ...],
+) -> None:
+    seen: set[tuple[str, str, str]] = set()
+    for unit in units:
+        identity = unit.effective_revision
+        key = (identity.source_id, identity.item_key, identity.revision_digest)
+        if key in seen:
+            continue
+        seen.add(key)
+        emit_effective_revision_landed(unpublished, identity)
+
+
 def _backfill_proving_first_seen(proving_store: str) -> None:
     """Backfill missing first-seen rows for pre-existing revisions."""
     timeout_ms = max(1, int(_PROVING_FENCE_TIMEOUT_SECONDS * 1_000))
@@ -1535,6 +1550,7 @@ def run_cycle(
                 "writer_id": writer.writer_id,
             },
         )
+        _emit_effective_revision_landed(unpublished, units)
         if graphiti is not None:
             graphiti_ok = _ingest(
                 unpublished,
