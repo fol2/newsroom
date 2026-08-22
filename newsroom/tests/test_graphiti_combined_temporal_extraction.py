@@ -35,7 +35,6 @@ from newsroom.graphiti_adapter.combined_temporal_extraction import (
     CombinedTemporalOutcome,
     build_compact_prompt,
     extract_combined_temporal,
-    measure_token_effectiveness,
     segment_source,
 )
 from newsroom.graphiti_adapter.combined_temporal_fixtures import (
@@ -43,6 +42,7 @@ from newsroom.graphiti_adapter.combined_temporal_fixtures import (
     MALFORMED_CASES,
     fixture,
 )
+from scripts.graphiti_combined_temporal_extraction import measure_token_effectiveness
 
 _REPO = Path(__file__).resolve().parents[2]
 _RESEARCH = _REPO / "docs" / "research"
