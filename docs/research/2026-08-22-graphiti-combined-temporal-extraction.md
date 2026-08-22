@@ -9,6 +9,7 @@
 - Ticket: [#747](https://github.com/fol2/newsroom/issues/747)
 - Closed blocker: [#746](https://github.com/fol2/newsroom/issues/746)
 - Measurements: [`2026-08-22-graphiti-combined-temporal-extraction-measurements.json`](2026-08-22-graphiti-combined-temporal-extraction-measurements.json)
+- Call shapes: [`2026-08-22-graphiti-combined-temporal-call-shapes.json`](2026-08-22-graphiti-combined-temporal-call-shapes.json)
 - Live packet: [`2026-08-22-graphiti-combined-temporal-extraction-packet.json`](2026-08-22-graphiti-combined-temporal-extraction-packet.json)
 
 This note is non-normative research evidence. It **does not amend `GING-010`**, authorise Cursor SDK runtime, authorise a live call, mutate production Neo4j, or activate backlog ingest.
@@ -33,10 +34,10 @@ The authority-private module `newsroom.graphiti_adapter.combined_temporal_extrac
 4. expands local IDs into Graphiti-compatible node and edge proposals, retaining `entity_type_id` and evidence segment IDs on `attributes`;
 5. sets relation temporal fields on the primary object;
 6. bypasses `extract_timestamps_batch` after validation;
-7. labels every node `RESOLUTION_DEFERRED` without an LLM dedupe call or graph lookup, keeping same-name local IDs distinct; local resolution, embedding, mutation journal and rollback remain #748 / later ingest atoms because this qualification proves one provider leaf **before** any graph effect;
-8. routes edges through the existing invalidation guard, skipping embeddings;
+7. routes every node through a deterministic local resolver (`LOCAL_NEW`) without an LLM dedupe call or graph lookup, keeping same-name local IDs distinct;
+8. routes edges through the existing invalidation guard, a recording embedder (digest, no provider floats), and an in-memory mutation journal with rollback; `graph_effect_attempted` remains false (no Neo4j);
 9. retains a GING-005-shaped leaf receipt (raw-output digest, framework/model/prompt versions, invocation count, usage/cost slots) even when usage is `UNMEASURED`;
-10. binds episode identity with GING-002 `ingest_key` (representation digest, source timestamps, chunk ordinal, configuration and temporal-policy digests) and maps `reference_time` with GING-003, keeping `ingested_at` as `created_at` only.
+10. binds episode identity with GING-002 `ingest_key` (representation digest, source timestamps, chunk ordinal, configuration and temporal-policy digests, plus this seam's schema digest and candidate prompt digest) and maps `reference_time` with GING-003, keeping `ingested_at` as `created_at` only.
 
 Fallback policy remains [#731](https://github.com/fol2/newsroom/issues/731). This seam does not retry an unchanged request.
 

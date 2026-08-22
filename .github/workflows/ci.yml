@@ -150,3 +150,6 @@ jobs:
         run: |
           .venv/bin/python -m pytest -q \
             newsroom/tests/test_graphiti_combined_temporal_extraction.py
+
+      - name: Verify Graphiti combined-temporal live pin
+        run: .venv/bin/python scripts/graphiti_combined_temporal_extraction.py

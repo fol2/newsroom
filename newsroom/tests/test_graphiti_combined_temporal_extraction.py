@@ -14,23 +14,21 @@ Seams under test, taken from issue #747:
 
 from __future__ import annotations
 
-import asyncio
-import importlib.metadata
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from newsroom.authority.canonical import digest_canonical
+from newsroom.authority.canonical import canonical_json_bytes, digest_canonical
 from newsroom.graphiti_adapter.combined_temporal_extraction import (
+    CALL_SHAPES_PATH,
     CONTRACT_NAME,
     LIVE_PACKET_PATH,
+    LOCAL_NEW,
     MEASUREMENTS_PATH,
-    RESOLUTION_DEFERRED,
     SCHEMA,
     SCHEMA_DIGEST,
     UNMEASURED,
@@ -50,20 +48,16 @@ from newsroom.graphiti_adapter.combined_temporal_fixtures import (
     fixture,
 )
 from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_CORE_RELEASE
-from newsroom.graphiti_adapter.identity import configuration_digest
+from newsroom.graphiti_adapter.identity import configuration_digest, content_digest
 from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_VERSION
-from scripts.graphiti_combined_temporal_extraction import measure_token_effectiveness
+from scripts.graphiti_combined_temporal_upstream import (
+    PINNED_NONZERO_EDGE_CALLS,
+    PINNED_ZERO_EDGE_CALLS,
+)
 
 _REPO = Path(__file__).resolve().parents[2]
 _RESEARCH = _REPO / "docs" / "research"
 GRAPHITI_MEMORY_PHRASE = "AI agent memory system"
-
-
-def _graphiti_version() -> str | None:
-    try:
-        return importlib.metadata.version("graphiti-core")
-    except importlib.metadata.PackageNotFoundError:
-        return None
 
 
 class _FakeTransport:
@@ -156,6 +150,10 @@ def test_zero_result_makes_exactly_one_generate_response_request() -> None:
     assert leaf.nodes == ()
     assert leaf.edges == ()
     assert leaf.graph_effect_attempted is False
+    assert leaf.embedding_skipped is False
+    assert leaf.journal_skipped is False
+    assert leaf.rollback_skipped is True
+    assert leaf.node_resolutions == ()
 
 
 def test_nonzero_relation_makes_one_request_and_sets_temporal_fields() -> None:
@@ -177,10 +175,12 @@ def test_nonzero_relation_makes_one_request_and_sets_temporal_fields() -> None:
     assert leaf.edges[0].valid_at is None
     assert leaf.edges[0].invalid_at is None
     assert leaf.graph_effect_attempted is False
-    assert leaf.embedding_skipped is True
-    assert leaf.journal_skipped is True
+    assert leaf.embedding_skipped is False
+    assert leaf.journal_skipped is False
     assert leaf.rollback_skipped is True
-    assert leaf.node_resolutions == (RESOLUTION_DEFERRED, RESOLUTION_DEFERRED)
+    assert leaf.node_resolutions == (LOCAL_NEW, LOCAL_NEW)
+    assert all(node.attributes["resolution"] == LOCAL_NEW for node in leaf.nodes)
+    assert all("embedding_digest" in edge.attributes for edge in leaf.edges)
     assert all(node.attributes["entity_type_id"] == 0 for node in leaf.nodes)
     assert leaf.edges[0].attributes["evidence_segment_ids"] == [0]
     assert case.gold["facts"][0]["source_local_id"] != case.gold["facts"][0][
@@ -384,6 +384,8 @@ def test_episode_identity_binds_source_digests_and_source_timestamps() -> None:
     assert later.ingest_id == leaf.ingest_id
     assert {node.uuid for node in later.nodes} == {node.uuid for node in leaf.nodes}
     assert later.nodes[0].created_at != leaf.nodes[0].created_at
+    assert leaf.prompt_digest is not None
+    assert case.revision.ingest_id == leaf.ingest_id
 
 
 def test_leaf_receipt_retains_raw_digest_usage_and_versions() -> None:
@@ -424,20 +426,21 @@ def test_live_packet_is_owner_gated_and_redacted() -> None:
         assert forbidden not in raw
 
 
-@pytest.mark.skipif(
-    _graphiti_version() != "0.29.3",
-    reason="upstream prompt bytes are pinned to graphiti-core 0.29.3",
-)
 def test_measurements_record_one_leaf_and_beat_the_separate_pair_baseline() -> None:
-    measurements = measure_token_effectiveness()
     committed = json.loads(MEASUREMENTS_PATH.read_text(encoding="utf-8"))
-    assert measurements == committed
     assert committed["hermetic_separate_pair_chat_tokens"] == 46_105
     assert committed["do_not_compare_against_zero_edge_combined_as_complete"] is True
     assert committed["token_usage_basis"] == "UNMEASURED"
     assert committed["provider_free_proxy"] == "prompt_and_schema_bytes"
+    assert committed["schema_digest"] == SCHEMA_DIGEST
+    assert committed["graphiti_core_version"] == "0.29.3"
+    for case in FIXTURES:
+        prompt = build_compact_prompt(case.revision)
+        recorded = committed["fixtures"][case.name]
+        assert recorded["compact_chat_leaves"] == 1
+        assert recorded["compact_prompt_bytes"] == len(prompt.text.encode("utf-8"))
+        assert recorded["compact_schema_bytes"] == len(canonical_json_bytes(SCHEMA))
     pair = committed["fixtures"]["pair-current"]
-    assert pair["compact_chat_leaves"] == 1
     assert pair["upstream_nonzero_chat_leaves"] == 2
     assert pair["leaf_count_reduction"] == 1
     assert pair["compact_prompt_bytes"] < pair["upstream_combined_prompt_bytes"]
@@ -457,112 +460,83 @@ def test_research_note_recommends_without_amending_ging_010() -> None:
     assert "does not amend `GING-010`" in note
     assert "#731" in note
     assert "QUALIFIED_PROVIDER_FREE" in note
-    assert "does not amend `GING-010`" in note
     assert "owner-gated" in note
+    assert "LOCAL_NEW" in note
+    assert "RESOLUTION_DEFERRED" not in note
 
 
-@pytest.mark.skipif(
-    _graphiti_version() != "0.29.3",
-    reason="call-shape fixtures are pinned to graphiti-core 0.29.3",
-)
 def test_upstream_zero_and_nonzero_call_shapes_are_pinned() -> None:
-    pytest.importorskip("graphiti_core")
-    from graphiti_core.llm_client.client import LLMClient
-    from graphiti_core.llm_client.config import LLMConfig
-    from graphiti_core.nodes import EpisodeType, EpisodicNode
-    from graphiti_core.prompts.extract_edges import BatchEdgeTimestamps
-    from graphiti_core.prompts.extract_nodes_and_edges import CombinedExtraction
-    from graphiti_core.utils.maintenance.combined_extraction import (
-        extract_nodes_and_edges,
+    committed = json.loads(CALL_SHAPES_PATH.read_text(encoding="utf-8"))
+    assert committed["schema_version"] == (
+        "newsroom.graphiti-combined-temporal-call-shapes.v1"
+    )
+    assert committed["graphiti_core_version"] == "0.29.3"
+    assert tuple(committed["zero_edge"]) == PINNED_ZERO_EDGE_CALLS
+    assert tuple(committed["nonzero_edge"]) == PINNED_NONZERO_EDGE_CALLS
+
+
+def test_segment_source_rejects_non_positive_max_bytes() -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        segment_source("hello", max_bytes=0)
+    with pytest.raises(ValueError, match="positive integer"):
+        segment_source("hello", max_bytes=-1)
+    with pytest.raises(ValueError, match="positive integer"):
+        segment_source("hello", max_bytes=True)
+    parts = segment_source("ab", max_bytes=1)
+    assert [item.text for item in parts] == ["a", "b"]
+
+
+def test_raw_receipt_is_exact_and_survives_malformed_mapping() -> None:
+    revision = fixture("pair-current").revision
+    empty = extract_combined_temporal(revision, transport=_FakeTransport([]))
+    one = extract_combined_temporal(revision, transport=_FakeTransport([1]))
+    two = extract_combined_temporal(revision, transport=_FakeTransport([2]))
+    assert empty.raw_output_digest != one.raw_output_digest
+    assert one.raw_output_digest != two.raw_output_digest
+    assert empty.failure_code is CombinedTemporalFailureCode.MALFORMED_OBJECT
+    floated = extract_combined_temporal(
+        revision,
+        transport=_FakeTransport({"entities": [], "facts": [], "x": 1.5}),
+    )
+    assert floated.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert floated.failure_code is CombinedTemporalFailureCode.MALFORMED_OBJECT
+    assert floated.raw_output_digest is not None
+    assert floated.raw_output_digest.startswith("sha256:")
+
+
+def test_content_digest_follows_the_existing_chunk_pattern() -> None:
+    revision = fixture("pair-current").revision
+    assert revision.content_digest == content_digest(
+        headline="", body=revision.body, canonical_url=""
     )
 
-    from newsroom.graphiti_adapter.cli_client import messages_to_prompt
-    from newsroom.graphiti_adapter.evaluation_packet import (
-        GRAPHITI_EXTRACTION_INSTRUCTIONS,
+
+def test_prompt_or_schema_binding_mints_a_new_ingest_identity() -> None:
+    leaf, case = _extract("pair-current")
+    shifted = extract_combined_temporal(
+        replace(case.revision, predecessor_revision_id="other-rev"),
+        transport=_FakeTransport(case.gold),
     )
+    assert shifted.ingest_id != leaf.ingest_id
+    assert {node.uuid for node in shifted.nodes} != {node.uuid for node in leaf.nodes}
+    assert {edge.uuid for edge in shifted.edges} != {edge.uuid for edge in leaf.edges}
 
-    class _Recorder(LLMClient):
-        def __init__(self, nonempty: bool) -> None:
-            super().__init__(
-                LLMConfig(model="composer-2.5", small_model="composer-2.5"),
-                cache=False,
-            )
-            self.nonempty = nonempty
-            self.calls: list[str] = []
 
-        async def _generate_response(
-            self,
-            messages: list[Any],
-            response_model: type[Any] | None = None,
-            max_tokens: int = 0,
-            model_size: object = None,
-        ) -> dict[str, Any]:
-            del messages, max_tokens, model_size
-            name = None if response_model is None else response_model.__name__
-            self.calls.append(str(name))
-            if response_model is CombinedExtraction and not self.nonempty:
-                return {"extracted_entities": [], "edges": []}
-            if response_model is CombinedExtraction:
-                return {
-                    "extracted_entities": [
-                        {"name": "Legislative Council", "entity_type_id": 0},
-                        {
-                            "name": "Technology and Living curriculum",
-                            "entity_type_id": 0,
-                        },
-                    ],
-                    "edges": [
-                        {
-                            "source_entity_name": "Legislative Council",
-                            "target_entity_name": "Technology and Living curriculum",
-                            "relation_type": "ASKED_ABOUT",
-                            "fact": (
-                                "The Legislative Council asked about the "
-                                "Technology and Living curriculum."
-                            ),
-                            "episode_indices": [0],
-                        }
-                    ],
-                }
-            if response_model is BatchEdgeTimestamps:
-                return {
-                    "timestamps": [
-                        {"valid_at": "2026-08-20T00:00:00Z", "invalid_at": None}
-                    ]
-                }
-            raise AssertionError(name)
+def test_failing_embedder_rolls_back_without_graph_effect() -> None:
+    async def _boom(_embedder: Any, _edges: list[Any]) -> None:
+        raise RuntimeError("embed failed")
 
-    def _episode(body: str) -> EpisodicNode:
-        return EpisodicNode(
-            name="call-shape",
-            group_id="newsroom-call-shape",
-            labels=[],
-            source=EpisodeType.text,
-            source_description="newsroom-eval-proposal",
-            content=body,
-            created_at=datetime(2026, 8, 21, tzinfo=UTC),
-            valid_at=datetime(2026, 8, 20, tzinfo=UTC),
-        )
-
-    async def _run(nonempty: bool, body: str) -> list[str]:
-        llm = _Recorder(nonempty)
-        await extract_nodes_and_edges(
-            SimpleNamespace(llm_client=llm),
-            _episode(body),
-            [],
-            custom_extraction_instructions=GRAPHITI_EXTRACTION_INSTRUCTIONS,
-        )
-        return llm.calls
-
-    zero = asyncio.run(
-        _run(False, "A routine administrative reminder with no named entities.")
+    case = fixture("pair-current")
+    leaf = extract_combined_temporal(
+        case.revision,
+        transport=_FakeTransport(case.gold),
+        embed_edges=_boom,
     )
-    nonzero = asyncio.run(
-        _run(
-            True,
-            "The Legislative Council asked about the Technology and Living curriculum.",
-        )
-    )
-    assert zero == ["CombinedExtraction"]
-    assert nonzero == ["CombinedExtraction", "BatchEdgeTimestamps"]
-    del messages_to_prompt
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.PIPELINE_FAILED
+    assert leaf.embedding_skipped is False
+    assert leaf.journal_skipped is False
+    assert leaf.rollback_skipped is False
+    assert leaf.graph_effect_attempted is False
+    assert leaf.nodes == ()
+    assert leaf.edges == ()

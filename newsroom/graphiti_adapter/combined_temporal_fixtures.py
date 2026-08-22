@@ -606,6 +606,137 @@ MALFORMED_CASES: tuple[MalformedCase, ...] = (
         },
         CombinedTemporalFailureCode.IDENTITY_INVALID,
     ),
+    MalformedCase(
+        "duplicate-facts",
+        _PAIR_REVISION,
+        {
+            "entities": _pair_entities(),
+            "facts": [
+                _pair_fact(valid_at=None, invalid_at=None),
+                _pair_fact(valid_at=None, invalid_at=None),
+            ],
+        },
+        CombinedTemporalFailureCode.IDENTITY_INVALID,
+    ),
+    MalformedCase(
+        "ungrounded-2030",
+        _PAIR_REVISION,
+        {
+            "entities": _pair_entities(),
+            "facts": [_pair_fact(valid_at="2030-01-01T00:00:00Z", invalid_at=None)],
+        },
+        CombinedTemporalFailureCode.TEMPORAL_INVALID,
+    ),
+    MalformedCase(
+        "relative-date-misresolved",
+        _revision(
+            "Yesterday the Legislative Council asked about the Technology and "
+            "Living curriculum.",
+            revision_id="rev-relative-misresolved",
+        ),
+        {
+            "entities": _pair_entities(),
+            "facts": [
+                _pair_fact(
+                    valid_at="2030-01-01T00:00:00Z",
+                    invalid_at=None,
+                    fact=(
+                        "Yesterday the Legislative Council asked about the "
+                        "Technology and Living curriculum."
+                    ),
+                )
+            ],
+        },
+        CombinedTemporalFailureCode.TEMPORAL_INVALID,
+    ),
+    MalformedCase(
+        "assertion-and-correction",
+        _revision(
+            "The Legislative Council asked about the Technology and Living "
+            "curriculum. Correction: the Legislative Council asked about "
+            "Design and Applied Technology.",
+            revision_id="rev-span-correction",
+        ),
+        {
+            "entities": _pair_entities(),
+            "facts": [
+                {
+                    "source_local_id": 0,
+                    "target_local_id": 1,
+                    "relation_type": "ASKED_ABOUT",
+                    "fact": PAIR_BODY,
+                    "valid_at": None,
+                    "invalid_at": None,
+                    "evidence_segment_ids": [0, 1],
+                }
+            ],
+        },
+        CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
+    ),
+    MalformedCase(
+        "same-fact-text-different-endpoints",
+        _revision(
+            "The Legislative Council asked the Education Bureau about the "
+            "Technology and Living curriculum. The Education Bureau administers "
+            "the Technology and Living curriculum.",
+            revision_id="rev-same-fact-text",
+        ),
+        {
+            "entities": [
+                {
+                    "local_id": 0,
+                    "name": "Legislative Council",
+                    "entity_type_id": 0,
+                    "evidence_segment_ids": [0],
+                },
+                {
+                    "local_id": 1,
+                    "name": "Education Bureau",
+                    "entity_type_id": 0,
+                    "evidence_segment_ids": [0],
+                },
+                {
+                    "local_id": 2,
+                    "name": "Technology and Living curriculum",
+                    "entity_type_id": 0,
+                    "evidence_segment_ids": [0],
+                },
+            ],
+            "facts": [
+                {
+                    "source_local_id": 0,
+                    "target_local_id": 1,
+                    "relation_type": "ASKED",
+                    "fact": (
+                        "The Legislative Council asked the Education Bureau about "
+                        "the Technology and Living curriculum."
+                    ),
+                    "valid_at": None,
+                    "invalid_at": None,
+                    "evidence_segment_ids": [0],
+                },
+                {
+                    "source_local_id": 0,
+                    "target_local_id": 2,
+                    "relation_type": "ASKED",
+                    "fact": (
+                        "The Legislative Council asked the Education Bureau about "
+                        "the Technology and Living curriculum."
+                    ),
+                    "valid_at": None,
+                    "invalid_at": None,
+                    "evidence_segment_ids": [0],
+                },
+            ],
+        },
+        CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
+    ),
+    MalformedCase(
+        "list-payload",
+        _PAIR_REVISION,
+        [],
+        CombinedTemporalFailureCode.MALFORMED_OBJECT,
+    ),
 )
 
 

@@ -9,20 +9,32 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Mapping, Protocol
+from typing import Any, Protocol
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, digest_canonical
+from newsroom.authority.canonical import (
+    CanonicalizationError,
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+)
 from newsroom.authority.types import UtcTimestamp
+from newsroom.graphiti_adapter.edge_guard import guard_extracted_edges
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_EXTRACTION_INSTRUCTIONS,
 )
-from newsroom.graphiti_adapter.identity import configuration_digest, ingest_key, uuid4_from_digest
+from newsroom.graphiti_adapter.identity import (
+    configuration_digest,
+    content_digest as revision_content_digest,
+    ingest_key,
+    uuid4_from_digest,
+)
 from newsroom.graphiti_adapter.result_mapping import is_source_registry_name
 from newsroom.graphiti_adapter.temporal import map_reference_time
 from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_VERSION
@@ -31,7 +43,7 @@ CONTRACT_NAME = "NewsroomCombinedTemporalExtractionV1"
 GROUP_ID = "newsroom-combined-temporal-v1"
 MAX_SEGMENT_BYTES = 512
 GOVERNED_ENTITY_TYPE_IDS = frozenset({0})
-RESOLUTION_DEFERRED = "RESOLUTION_DEFERRED"
+LOCAL_NEW = "LOCAL_NEW"
 UNMEASURED = "UNMEASURED"
 _REPO = Path(__file__).resolve().parents[2]
 MEASUREMENTS_PATH = (
@@ -46,10 +58,35 @@ LIVE_PACKET_PATH = (
     / "research"
     / "2026-08-22-graphiti-combined-temporal-extraction-packet.json"
 )
+CALL_SHAPES_PATH = (
+    _REPO
+    / "docs"
+    / "research"
+    / "2026-08-22-graphiti-combined-temporal-call-shapes.json"
+)
 _RELATION_TYPE = re.compile(r"^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$")
 _SPLIT = re.compile(rb"(?:(?<=[.!?])[ \t]+)|(?:\n+)")
 _ISO_UTC = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)$"
+)
+_RELATIVE_OFFSETS = {
+    "yesterday": timedelta(days=-1),
+    "today": timedelta(days=0),
+    "tomorrow": timedelta(days=1),
+}
+_MONTH_NAMES = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
 )
 
 SCHEMA: dict[str, Any] = {
@@ -111,6 +148,8 @@ SCHEMA: dict[str, Any] = {
 }
 SCHEMA_DIGEST = digest_canonical(SCHEMA)
 
+EmbedEdges = Callable[[Any, list[Any]], Awaitable[None]]
+
 
 class CombinedTemporalOutcome(StrEnum):
     TERMINAL_SUCCESS_WITH_PROPOSALS = "TERMINAL_SUCCESS_WITH_PROPOSALS"
@@ -124,6 +163,7 @@ class CombinedTemporalFailureCode(StrEnum):
     TEMPORAL_INVALID = "TEMPORAL_INVALID"
     EVIDENCE_UNRESOLVED = "EVIDENCE_UNRESOLVED"
     IDENTITY_INVALID = "IDENTITY_INVALID"
+    PIPELINE_FAILED = "PIPELINE_FAILED"
 
 
 class CombinedTemporalError(ValueError):
@@ -175,10 +215,13 @@ class SourceRevisionInput:
 
     @property
     def content_digest(self) -> str:
-        return digest_bytes(canonical_json_bytes({"body": self.body}))
+        return revision_content_digest(
+            headline="", body=self.body, canonical_url=""
+        )
 
     @property
     def ingest_id(self) -> str:
+        prompt = build_compact_prompt(self)
         return ingest_key(
             source_id=self.source_id,
             item_key=self.item_key,
@@ -189,6 +232,8 @@ class SourceRevisionInput:
             updated_at=self.updated_at,
             observed_at=self.observed_at,
             chunk_ordinal=self.chunk_ordinal,
+            schema_digest=SCHEMA_DIGEST,
+            prompt_digest=_candidate_prompt_digest(prompt),
         )
 
 
@@ -255,6 +300,8 @@ class CombinedTemporalTransport(Protocol):
 def segment_source(
     body: str, *, max_bytes: int = MAX_SEGMENT_BYTES
 ) -> tuple[EvidenceSegment, ...]:
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 1:
+        raise ValueError("max_bytes must be a positive integer")
     data = body.encode("utf-8")
     if not data:
         return (EvidenceSegment(0, 0, 0, ""),)
@@ -314,12 +361,13 @@ def extract_combined_temporal(
     revision: SourceRevisionInput,
     *,
     transport: CombinedTemporalTransport,
+    embed_edges: EmbedEdges | None = None,
 ) -> CombinedTemporalLeaf:
     ingest_id = revision.ingest_id
     temporal_basis = revision.temporal_basis
     UtcTimestamp.parse(revision.ingested_at)
     prompt = build_compact_prompt(revision)
-    prompt_digest = digest_canonical({"prompt": prompt.text, "schema": SCHEMA})
+    prompt_digest = _candidate_prompt_digest(prompt)
     result = transport.generate_response(
         prompt=prompt.text,
         schema=SCHEMA,
@@ -354,9 +402,12 @@ def extract_combined_temporal(
     }
     try:
         payload = _parse_payload(raw)
-        normalised, ranges = _normalise(payload, prompt.segments)
+        normalised, ranges = _normalise(
+            payload,
+            prompt.segments,
+            UtcTimestamp.parse(revision.reference_time).value,
+        )
         nodes, edges = _expand(revision, normalised)
-        guarded = _guard_edges(edges)
     except CombinedTemporalError as exc:
         return _leaf(
             CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE,
@@ -370,6 +421,34 @@ def extract_combined_temporal(
             tuple(calls),
             {},
             (),
+            embedding_skipped=True,
+            journal_skipped=True,
+            rollback_skipped=True,
+            **receipt,
+        )
+    resolutions = _resolve_nodes_locally(nodes)
+    journal = _MemoryJournal()
+    journal.begin()
+    try:
+        guarded = _guard_edges(edges, embed_edges=embed_edges or _record_embeddings)
+        journal.complete()
+    except Exception:
+        journal.rollback()
+        return _leaf(
+            CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE,
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            prompt,
+            None,
+            None,
+            (),
+            (),
+            (),
+            tuple(calls),
+            {},
+            resolutions,
+            embedding_skipped=False,
+            journal_skipped=False,
+            rollback_skipped=False,
             **receipt,
         )
     outcome = (
@@ -388,9 +467,16 @@ def extract_combined_temporal(
         guarded,
         tuple(calls),
         ranges,
-        tuple(RESOLUTION_DEFERRED for _ in nodes),
+        resolutions,
+        embedding_skipped=False,
+        journal_skipped=False,
+        rollback_skipped=True,
         **receipt,
     )
+
+
+def _candidate_prompt_digest(prompt: CompactPrompt) -> str:
+    return digest_canonical({"prompt": prompt.text, "schema": SCHEMA})
 
 
 def _leaf(
@@ -406,6 +492,9 @@ def _leaf(
     ranges: dict[str, tuple[EvidenceSegment, ...]],
     resolutions: tuple[str, ...],
     *,
+    embedding_skipped: bool,
+    journal_skipped: bool,
+    rollback_skipped: bool,
     raw_output_digest: str | None,
     framework_version: str,
     model_version: str | None,
@@ -430,9 +519,9 @@ def _leaf(
         False,
         ranges,
         resolutions,
-        True,
-        True,
-        True,
+        embedding_skipped,
+        journal_skipped,
+        rollback_skipped,
         raw_output_digest,
         framework_version,
         model_version,
@@ -448,11 +537,31 @@ def _leaf(
 
 
 def _raw_digest(raw: object) -> str:
+    try:
+        return _raw_digest_body(raw)
+    except (CanonicalizationError, TypeError, ValueError, UnicodeError):
+        return digest_bytes(
+            f"{type(raw).__name__}\n{_raw_repr(raw)}".encode("utf-8", errors="replace")
+        )
+
+
+def _raw_digest_body(raw: object) -> str:
     if isinstance(raw, Mapping):
         return digest_canonical(dict(raw))
     if isinstance(raw, str):
         return digest_bytes(raw.encode("utf-8"))
-    return digest_canonical({"unsupported": type(raw).__name__})
+    if isinstance(raw, (bytes, bytearray, memoryview)):
+        return digest_bytes(bytes(raw))
+    if isinstance(raw, Sequence):
+        return digest_canonical(list(raw))
+    return digest_canonical({"unsupported": type(raw).__name__, "repr": _raw_repr(raw)})
+
+
+def _raw_repr(raw: object) -> str:
+    try:
+        return repr(raw)
+    except Exception:
+        return "<unreprable>"
 
 
 def _split_oversize(
@@ -521,6 +630,7 @@ def _parse_payload(raw: object) -> dict[str, Any]:
 def _normalise(
     payload: Mapping[str, Any],
     segments: tuple[EvidenceSegment, ...],
+    reference_time: datetime,
 ) -> tuple[dict[str, Any], dict[str, tuple[EvidenceSegment, ...]]]:
     entities = [_entity(item) for item in payload["entities"]]
     facts = [_fact(item) for item in payload["facts"]]
@@ -541,6 +651,7 @@ def _normalise(
             CombinedTemporalFailureCode.IDENTITY_INVALID,
             "zero facts requires zero entities",
         )
+    _assert_unique_facts(facts)
     connected: set[int] = set()
     ranges: dict[str, tuple[EvidenceSegment, ...]] = {}
     for fact in facts:
@@ -579,6 +690,8 @@ def _normalise(
                 CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
                 "relation type is not supported by cited segments",
             )
+        _assert_single_attribution(retained)
+        _assert_temporal_policy(fact, retained, reference_time)
         ranges[fact["fact"]] = cited
     if connected != id_set:
         raise CombinedTemporalError(
@@ -611,6 +724,78 @@ def _normalise(
         )
     )
     return {"entities": list(entities_out), "facts": list(facts_out)}, ranges
+
+
+def _assert_unique_facts(facts: list[dict[str, Any]]) -> None:
+    seen: set[tuple[object, ...]] = set()
+    locators: dict[str, tuple[object, ...]] = {}
+    for fact in facts:
+        duplicate = (
+            fact["source_local_id"],
+            fact["target_local_id"],
+            fact["relation_type"],
+            fact["fact"],
+        )
+        if duplicate in seen:
+            raise CombinedTemporalError(
+                CombinedTemporalFailureCode.IDENTITY_INVALID,
+                "duplicate facts are not allowed",
+            )
+        seen.add(duplicate)
+        locator = (
+            fact["source_local_id"],
+            fact["target_local_id"],
+            tuple(fact["evidence_segment_ids"]),
+        )
+        prior = locators.get(fact["fact"])
+        if prior is not None and prior != locator:
+            raise CombinedTemporalError(
+                CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
+                "fact text maps to contradictory attribution",
+            )
+        locators[fact["fact"]] = locator
+
+
+def _assert_single_attribution(retained: str) -> None:
+    marker = "Correction:"
+    if marker not in retained:
+        return
+    before, _sep, after = retained.partition(marker)
+    if before.strip() and after.strip():
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
+            "evidence cites assertion and correction",
+        )
+
+
+def _assert_temporal_policy(
+    fact: Mapping[str, Any], retained: str, reference_time: datetime
+) -> None:
+    hits = [
+        name
+        for name in _RELATIVE_OFFSETS
+        if re.search(rf"\b{name}\b", retained, flags=re.IGNORECASE)
+    ]
+    expected = {(reference_time + _RELATIVE_OFFSETS[name]).date() for name in hits}
+    for field_name in ("valid_at", "invalid_at"):
+        raw = fact[field_name]
+        if raw is None:
+            continue
+        value = UtcTimestamp.parse(raw).value
+        if expected:
+            if value.date() not in expected:
+                raise CombinedTemporalError(
+                    CombinedTemporalFailureCode.TEMPORAL_INVALID,
+                    f"{field_name} does not obey the reference-time policy",
+                )
+            continue
+        iso_date = value.date().isoformat()
+        prose = f"{value.day} {_MONTH_NAMES[value.month - 1]} {value.year}"
+        if iso_date not in retained and prose not in retained:
+            raise CombinedTemporalError(
+                CombinedTemporalFailureCode.TEMPORAL_INVALID,
+                f"{field_name} is not grounded in cited evidence",
+            )
 
 
 def _entity(raw: object) -> dict[str, Any]:
@@ -828,7 +1013,7 @@ def _expand(
             attributes={
                 "entity_type_id": entity["entity_type_id"],
                 "evidence_segment_ids": list(entity["evidence_segment_ids"]),
-                "resolution": RESOLUTION_DEFERRED,
+                "resolution": LOCAL_NEW,
                 "ingest_id": ingest_id,
             },
         )
@@ -890,11 +1075,35 @@ class _NamespaceEdge(SimpleNamespace):
         super().__init__(**kwargs)
 
 
-def _guard_edges(edges: tuple[Any, ...]) -> tuple[Any, ...]:
-    if not edges:
-        return ()
-    from newsroom.graphiti_adapter.edge_guard import guard_extracted_edges
+class _MemoryJournal:
+    def __init__(self) -> None:
+        self.begun = False
+        self.completed = False
+        self.rolled_back = False
 
+    def begin(self) -> None:
+        self.begun = True
+
+    def complete(self) -> None:
+        self.completed = True
+
+    def rollback(self) -> None:
+        self.rolled_back = True
+
+
+def _resolve_nodes_locally(nodes: tuple[Any, ...]) -> tuple[str, ...]:
+    resolutions: list[str] = []
+    for node in nodes:
+        attributes = dict(getattr(node, "attributes", {}) or {})
+        attributes["resolution"] = LOCAL_NEW
+        node.attributes = attributes
+        resolutions.append(LOCAL_NEW)
+    return tuple(resolutions)
+
+
+def _guard_edges(
+    edges: tuple[Any, ...], *, embed_edges: EmbedEdges
+) -> tuple[Any, ...]:
     return tuple(
         _run_coroutine(
             guard_extracted_edges(
@@ -902,7 +1111,7 @@ def _guard_edges(edges: tuple[Any, ...]) -> tuple[Any, ...]:
                 uuid_map={},
                 embedder=None,
                 resolve_pointers=lambda items, uuid_map: items,
-                create_embeddings=_skip_embeddings,
+                create_embeddings=embed_edges,
             )
         )[0]
     )
@@ -916,8 +1125,15 @@ def _run_coroutine(coro: Any) -> Any:
         loop.close()
 
 
-async def _skip_embeddings(embedder: Any, edges: list[Any]) -> None:
-    del embedder, edges
+async def _record_embeddings(embedder: Any, edges: list[Any]) -> None:
+    del embedder
+    for edge in edges:
+        payload = canonical_json_bytes(
+            {"uuid": str(edge.uuid), "fact": str(edge.fact)}
+        )
+        attributes = dict(getattr(edge, "attributes", {}) or {})
+        attributes["embedding_digest"] = digest_bytes(payload)
+        edge.attributes = attributes
 
 
 def _uuid(*parts: object) -> str:
@@ -926,6 +1142,7 @@ def _uuid(*parts: object) -> str:
 
 
 __all__ = [
+    "CALL_SHAPES_PATH",
     "CONTRACT_NAME",
     "CombinedTemporalError",
     "CombinedTemporalFailureCode",
@@ -938,8 +1155,8 @@ __all__ = [
     "GOVERNED_ENTITY_TYPE_IDS",
     "GROUP_ID",
     "LIVE_PACKET_PATH",
+    "LOCAL_NEW",
     "MEASUREMENTS_PATH",
-    "RESOLUTION_DEFERRED",
     "SCHEMA",
     "SCHEMA_DIGEST",
     "SourceRevisionInput",

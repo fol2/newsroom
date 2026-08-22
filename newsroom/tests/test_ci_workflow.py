@@ -124,6 +124,8 @@ def test_ci_is_an_exact_head_bounded_compatibility_gate() -> None:
         graphiti_research["run"]
     )
     assert "test_graphiti_token_meter.py" not in graphiti_research["run"]
+    live_pin = _step(job, "Verify Graphiti combined-temporal live pin")
+    assert "scripts/graphiti_combined_temporal_extraction.py" in live_pin["run"]
 
     rendered = CI_PATH.read_text(encoding="utf-8")
     assert "pytest -q\n" not in rendered

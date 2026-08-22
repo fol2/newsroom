@@ -3,19 +3,15 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import importlib.metadata
 import json
 import sys
-from types import SimpleNamespace
 from typing import Any, Mapping
 
 from newsroom.authority.canonical import canonical_json_bytes
-from newsroom.authority.types import UtcTimestamp
-from newsroom.graphiti_adapter.cli_client import messages_to_prompt
 from newsroom.graphiti_adapter.combined_temporal_extraction import (
+    CALL_SHAPES_PATH,
     CONTRACT_NAME,
-    GROUP_ID,
     LIVE_PACKET_PATH,
     MEASUREMENTS_PATH,
     SCHEMA,
@@ -24,8 +20,11 @@ from newsroom.graphiti_adapter.combined_temporal_extraction import (
     build_compact_prompt,
 )
 from newsroom.graphiti_adapter.combined_temporal_fixtures import FIXTURES
-from newsroom.graphiti_adapter.evaluation_packet import (
-    GRAPHITI_EXTRACTION_INSTRUCTIONS,
+from scripts.graphiti_combined_temporal_upstream import (
+    PINNED_NONZERO_EDGE_CALLS,
+    PINNED_ZERO_EDGE_CALLS,
+    pinned_upstream_call_shapes,
+    record_upstream_extraction,
 )
 
 
@@ -96,105 +95,48 @@ def _avoided_bytes(
     return name_avoided, evidence_avoided
 
 
-def _upstream_shapes(body: str, *, nonempty: bool) -> dict[str, int]:
-    from graphiti_core.llm_client.client import LLMClient
-    from graphiti_core.llm_client.config import LLMConfig
-    from graphiti_core.nodes import EpisodeType, EpisodicNode
-    from graphiti_core.prompts.extract_edges import BatchEdgeTimestamps
-    from graphiti_core.prompts.extract_nodes_and_edges import CombinedExtraction
-    from graphiti_core.utils.maintenance.combined_extraction import (
-        extract_nodes_and_edges,
-    )
-
+def _require_graphiti_core() -> None:
     if importlib.metadata.version("graphiti-core") != "0.29.3":
         raise RuntimeError("measurements require graphiti-core 0.29.3")
 
-    class _Recorder(LLMClient):
-        def __init__(self) -> None:
-            super().__init__(
-                LLMConfig(model="composer-2.5", small_model="composer-2.5"),
-                cache=False,
-            )
-            self.prompts: dict[str, str] = {}
 
-        async def _generate_response(
-            self,
-            messages: list[Any],
-            response_model: type[Any] | None = None,
-            max_tokens: int = 0,
-            model_size: object = None,
-        ) -> dict[str, Any]:
-            del max_tokens, model_size
-            name = None if response_model is None else response_model.__name__
-            self.prompts[str(name)] = messages_to_prompt(messages)
-            if response_model is CombinedExtraction and not nonempty:
-                return {"extracted_entities": [], "edges": []}
-            if response_model is CombinedExtraction:
-                return {
-                    "extracted_entities": [
-                        {"name": "Legislative Council", "entity_type_id": 0},
-                        {
-                            "name": "Technology and Living curriculum",
-                            "entity_type_id": 0,
-                        },
-                    ],
-                    "edges": [
-                        {
-                            "source_entity_name": "Legislative Council",
-                            "target_entity_name": "Technology and Living curriculum",
-                            "relation_type": "ASKED_ABOUT",
-                            "fact": (
-                                "The Legislative Council asked about the "
-                                "Technology and Living curriculum."
-                            ),
-                            "episode_indices": [0],
-                        }
-                    ],
-                }
-            if response_model is BatchEdgeTimestamps:
-                return {
-                    "timestamps": [
-                        {"valid_at": "2026-08-20T00:00:00Z", "invalid_at": None}
-                    ]
-                }
-            return {}
+def _upstream_shapes(body: str, *, nonempty: bool) -> dict[str, int]:
+    from graphiti_core.prompts.extract_edges import BatchEdgeTimestamps
+    from graphiti_core.prompts.extract_nodes_and_edges import CombinedExtraction
 
-    llm = _Recorder()
-    episode = EpisodicNode(
-        name="measure",
-        group_id=GROUP_ID,
-        labels=[],
-        source=EpisodeType.text,
-        source_description="newsroom-eval-proposal",
-        content=body,
-        created_at=UtcTimestamp.parse("2026-08-21T00:00:00Z").value,
-        valid_at=UtcTimestamp.parse("2026-08-20T00:00:00Z").value,
-    )
-
-    async def _run() -> None:
-        await extract_nodes_and_edges(
-            SimpleNamespace(llm_client=llm),
-            episode,
-            [],
-            custom_extraction_instructions=GRAPHITI_EXTRACTION_INSTRUCTIONS,
-        )
-
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(_run())
-    finally:
-        loop.close()
+    _require_graphiti_core()
+    recorder = record_upstream_extraction(body, nonempty=nonempty)
     combined_schema = json.dumps(CombinedExtraction.model_json_schema())
     timestamp_schema = json.dumps(BatchEdgeTimestamps.model_json_schema())
-    timestamp_prompt = llm.prompts.get("BatchEdgeTimestamps", "")
+    timestamp_prompt = recorder.prompts.get("BatchEdgeTimestamps", "")
     return {
-        "combined_prompt_bytes": len(llm.prompts["CombinedExtraction"].encode("utf-8")),
+        "combined_prompt_bytes": len(
+            recorder.prompts["CombinedExtraction"].encode("utf-8")
+        ),
         "combined_schema_bytes": len(combined_schema.encode("utf-8")),
         "timestamp_prompt_bytes": len(timestamp_prompt.encode("utf-8")),
         "timestamp_schema_bytes": 0
         if not timestamp_prompt
         else len(timestamp_schema.encode("utf-8")),
     }
+
+
+def committed_call_shapes() -> dict[str, Any]:
+    return json.loads(CALL_SHAPES_PATH.read_text(encoding="utf-8"))
+
+
+def live_call_shapes_match_pin() -> dict[str, tuple[str, ...]]:
+    _require_graphiti_core()
+    live = pinned_upstream_call_shapes()
+    committed = committed_call_shapes()
+    if (
+        tuple(committed["zero_edge"]) != PINNED_ZERO_EDGE_CALLS
+        or tuple(committed["nonzero_edge"]) != PINNED_NONZERO_EDGE_CALLS
+        or live["zero_edge"] != PINNED_ZERO_EDGE_CALLS
+        or live["nonzero_edge"] != PINNED_NONZERO_EDGE_CALLS
+    ):
+        raise RuntimeError("upstream call shapes drifted from the committed pin")
+    return live
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -221,7 +163,25 @@ def main(argv: list[str] | None = None) -> int:
     encoded = canonical_json_bytes(measurements).decode("utf-8") + "\n"
     if args.write_measurements:
         MEASUREMENTS_PATH.write_text(encoded, encoding="utf-8")
+        CALL_SHAPES_PATH.write_text(
+            canonical_json_bytes(
+                {
+                    "graphiti_core_version": "0.29.3",
+                    "nonzero_edge": list(PINNED_NONZERO_EDGE_CALLS),
+                    "schema_version": (
+                        "newsroom.graphiti-combined-temporal-call-shapes.v1"
+                    ),
+                    "zero_edge": list(PINNED_ZERO_EDGE_CALLS),
+                }
+            ).decode("utf-8")
+            + "\n",
+            encoding="utf-8",
+        )
     sys.stdout.write(encoded)
+    committed = json.loads(MEASUREMENTS_PATH.read_text(encoding="utf-8"))
+    if measurements != committed:
+        raise SystemExit("live measurements drifted from the committed pin")
+    live_call_shapes_match_pin()
     packet = json.loads(LIVE_PACKET_PATH.read_text(encoding="utf-8"))
     if packet["live_authority"]["authorised"] is not False:
         raise SystemExit("committed live packet must remain unauthorised")
