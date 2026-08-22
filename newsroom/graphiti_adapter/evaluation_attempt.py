@@ -5,6 +5,7 @@ from __future__ import annotations
 from newsroom.authority.canonical import digest_bytes, digest_canonical
 from newsroom.authority.objects import ObjectAccessDecisionId
 from newsroom.authority.types import ObjectAdmissionId
+from newsroom.effective_revision import EffectiveRevisionIdentity
 from newsroom.extraction.models import (
     ExtractionInputBinding,
     ExtractionPassageInput,
@@ -26,6 +27,7 @@ from newsroom.graphiti_adapter.identity import (
     content_digest,
     ingest_key,
     observation_authority_ids,
+    representation_digest_for,
     source_definition_version_id,
     typed_id,
 )
@@ -118,6 +120,7 @@ def evaluation_attempt_for_body(
     published_at: str | None,
     updated_at: str | None,
     observed_at: str,
+    effective_revision: EffectiveRevisionIdentity,
     canonical_url: str = "",
     revision_digest: str | None = None,
     representation_digest: str | None = None,
@@ -134,7 +137,7 @@ def evaluation_attempt_for_body(
     temporal = map_reference_time(
         published_at=published_at,
         updated_at=updated_at,
-        observed_at=observed_at,
+        observed_at=effective_revision.first_observed_at,
     )
     attempt_id, workspace_id, cleanup_id = attempt_ids(ingest_id, attempt_number)
     previous_attempt_id = (
@@ -144,19 +147,12 @@ def evaluation_attempt_for_body(
         revision_digest = revision_digest or content_digest(
             headline="", body=text, canonical_url=canonical_url
         )
-        representation_digest = representation_digest or digest_canonical(
-            {
-                "source_id": source_id,
-                "item_key": item_key,
-                "revision_digest": revision_digest,
-                "published_at": published_at,
-                "updated_at": updated_at,
-                "observed_fallback_at": (
-                    observed_at
-                    if published_at is None and updated_at is None
-                    else None
-                ),
-            }
+        representation_digest = representation_digest or representation_digest_for(
+            source_id=source_id,
+            item_key=item_key,
+            revision_digest=revision_digest,
+            published_at=published_at,
+            updated_at=updated_at,
         )
         generated = observation_authority_ids(
             source_id=source_id,
@@ -168,7 +164,6 @@ def evaluation_attempt_for_body(
             rights_gate_reason="evaluation fixture",
             published_at=published_at,
             updated_at=updated_at,
-            observed_at=observed_at,
         )
         definition_version_id = source_definition_version_id(
             source_id=source_id, source_url=canonical_url
@@ -289,6 +284,12 @@ def evaluation_attempt_for(passages: tuple[str, ...]) -> GraphitiAttemptRequest:
     body = "\n\n".join(" ".join(item.split()) for item in passages if item.split())
     digest = content_digest(headline="", body=body, canonical_url="")
     observed_at = "2026-08-20T00:00:00.000000Z"
+    effective_revision = EffectiveRevisionIdentity(
+        source_id="evaluation",
+        item_key="passages",
+        revision_digest=digest,
+        first_observed_at=observed_at,
+    )
     ingest_id = ingest_key(
         source_id="evaluation",
         item_key="passages",
@@ -297,7 +298,6 @@ def evaluation_attempt_for(passages: tuple[str, ...]) -> GraphitiAttemptRequest:
         representation_digest=digest,
         published_at=None,
         updated_at=None,
-        observed_at=observed_at,
     )
     return evaluation_attempt_for_body(
         episode_body=body,
@@ -309,6 +309,7 @@ def evaluation_attempt_for(passages: tuple[str, ...]) -> GraphitiAttemptRequest:
         published_at=None,
         updated_at=None,
         observed_at=observed_at,
+        effective_revision=effective_revision,
     )
 
 

@@ -9,13 +9,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, digest_canonical
 from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.corpus import EligibleCorpusRevision
+from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.veto import VetoError, assert_private_store, refuse_public_effect
+from newsroom.effective_revision import EffectiveRevisionIdentity
 from newsroom.graphiti_adapter.embedding_meter import is_exact_provider_reported_usage
 
-SCHEMA_VERSION = "newsroom.control-plane.unpublished.v9"
+SCHEMA_VERSION = "newsroom.control-plane.unpublished.v11"
+EFFECTIVE_REVISION_LANDED = "EFFECTIVE_REVISION_LANDED"
 LEDGER_GENESIS = "sha256:" + ("0" * 64)
 GRAPHITI_MAX_FAILURES = 3
 _SQLITE_BIND_BATCH_SIZE = 500
@@ -155,6 +158,47 @@ CREATE TABLE IF NOT EXISTS unpublished_graphiti_spend(
     at TEXT NOT NULL,
     UNIQUE(ingest_id, attempt_number)
 );
+CREATE TABLE IF NOT EXISTS unpublished_effective_revision_landed(
+    source_id TEXT NOT NULL,
+    item_key TEXT NOT NULL,
+    revision_digest TEXT NOT NULL,
+    published_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT '',
+    first_observed_at TEXT NOT NULL,
+    ingest_ids_json TEXT NOT NULL DEFAULT '[]',
+    payload_digest TEXT NOT NULL,
+    ledger_digest TEXT NOT NULL,
+    at TEXT NOT NULL,
+    PRIMARY KEY(source_id, item_key, revision_digest, published_at, updated_at)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS unpublished_effective_revision_remap(
+    mapping_id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    item_key TEXT NOT NULL,
+    revision_digest TEXT NOT NULL,
+    old_observed_fallback_at TEXT,
+    new_first_observed_at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    retention_window_bounded_inaccuracy INTEGER NOT NULL DEFAULT 0
+        CHECK(retention_window_bounded_inaccuracy IN (0,1)),
+    old_ingest_id TEXT,
+    new_ingest_id TEXT,
+    at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS unpublished_backlog_reconciliation_receipts(
+    receipt_digest TEXT PRIMARY KEY,
+    at TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    receipt_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS unpublished_reconciliation_commands(
+    idempotency_key TEXT PRIMARY KEY,
+    caller_principal TEXT NOT NULL,
+    command_type TEXT NOT NULL,
+    expected_mapping_digest TEXT NOT NULL,
+    receipt_json TEXT NOT NULL,
+    at TEXT NOT NULL
+);
 """
 
 
@@ -179,15 +223,87 @@ class GraphitiSpendCeilingExceeded(RuntimeError):
     """A new Graphiti reservation would exceed the fixed OD-011 ceiling."""
 
 
+class EffectiveRevisionLandedError(RuntimeError):
+    """A landed record cannot be emitted for this effective revision."""
+
+
 def _now() -> str:
     return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _landed_columns(connection: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(unpublished_effective_revision_landed)"
+        )
+    }
+
+
+def _ensure_landed_schema(connection: sqlite3.Connection) -> None:
+    columns = _landed_columns(connection)
+    if not columns:
+        return
+    if "published_at" in columns and "ingest_ids_json" in columns:
+        return
+    connection.execute(
+        "ALTER TABLE unpublished_effective_revision_landed "
+        "RENAME TO unpublished_effective_revision_landed_v10"
+    )
+    connection.execute(
+        """
+        CREATE TABLE unpublished_effective_revision_landed(
+            source_id TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            revision_digest TEXT NOT NULL,
+            published_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT '',
+            first_observed_at TEXT NOT NULL,
+            ingest_ids_json TEXT NOT NULL DEFAULT '[]',
+            payload_digest TEXT NOT NULL,
+            ledger_digest TEXT NOT NULL,
+            at TEXT NOT NULL,
+            PRIMARY KEY(source_id, item_key, revision_digest, published_at, updated_at)
+        ) WITHOUT ROWID
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO unpublished_effective_revision_landed(
+            source_id, item_key, revision_digest, published_at, updated_at,
+            first_observed_at, ingest_ids_json, payload_digest, ledger_digest, at
+        )
+        SELECT source_id, item_key, revision_digest, '', '',
+               first_observed_at, '[]', payload_digest, ledger_digest, at
+        FROM unpublished_effective_revision_landed_v10
+        """
+    )
+    connection.execute("DROP TABLE unpublished_effective_revision_landed_v10")
+
+
+def _ensure_remap_columns(connection: sqlite3.Connection) -> None:
+    info = list(
+        connection.execute(
+            "PRAGMA table_info(unpublished_effective_revision_remap)"
+        )
+    )
+    if not info:
+        return
+    columns = {str(row[1]) for row in info}
+    if "new_ingest_id" not in columns:
+        connection.execute(
+            "ALTER TABLE unpublished_effective_revision_remap "
+            "ADD COLUMN new_ingest_id TEXT"
+        )
 
 
 def connect(path: str) -> sqlite3.Connection:
     assert_private_store(path)
     connection = sqlite3.connect(path)
-    connection.execute("PRAGMA journal_mode=WAL")
+    apply_control_plane_sqlite_profile(connection)
     connection.executescript(_PAYLOAD_SQL)
+    _ensure_landed_schema(connection)
+    _ensure_remap_columns(connection)
     columns = {
         str(row[1])
         for row in connection.execute("PRAGMA table_info(unpublished_graphiti_spend)")
@@ -232,6 +348,183 @@ def append_ledger(connection: sqlite3.Connection, kind: str, payload: dict[str, 
         (at, kind, payload_digest, prev, digest),
     )
     return digest
+
+
+def effective_revision_landed_payload(
+    identity: EffectiveRevisionIdentity,
+    *,
+    published_at: str = "",
+    updated_at: str = "",
+    ingest_ids: tuple[str, ...] = (),
+) -> dict[str, object]:
+    return {
+        "source_id": identity.source_id,
+        "item_key": identity.item_key,
+        "revision_digest": identity.revision_digest,
+        "published_at": published_at,
+        "updated_at": updated_at,
+        "first_observed_at": identity.first_observed_at,
+        "ingest_ids": list(ingest_ids),
+    }
+
+
+def has_effective_revision_landed(
+    connection: sqlite3.Connection,
+    identity: EffectiveRevisionIdentity,
+    *,
+    published_at: str = "",
+    updated_at: str = "",
+) -> bool:
+    row = connection.execute(
+        """
+        SELECT 1 FROM unpublished_effective_revision_landed
+        WHERE source_id=? AND item_key=? AND revision_digest=?
+          AND published_at=? AND updated_at=?
+        """,
+        (
+            identity.source_id,
+            identity.item_key,
+            identity.revision_digest,
+            published_at,
+            updated_at,
+        ),
+    ).fetchone()
+    return row is not None
+
+
+def emit_effective_revision_landed(
+    connection: sqlite3.Connection,
+    identity: EffectiveRevisionIdentity,
+    *,
+    published_at: str | None = None,
+    updated_at: str | None = None,
+    ingest_ids: tuple[str, ...] = (),
+) -> bool:
+    """Append one identity-keyed landed record, or no-op if it already exists."""
+
+    marker_published = published_at or ""
+    marker_updated = updated_at or ""
+    if not identity.source_id or not identity.item_key or not identity.revision_digest:
+        raise EffectiveRevisionLandedError(
+            "effective-revision landed identity is incomplete"
+        )
+    if not identity.first_observed_at:
+        raise EffectiveRevisionLandedError(
+            "effective-revision landed record requires first_observed_at"
+        )
+    if has_effective_revision_landed(
+        connection,
+        identity,
+        published_at=marker_published,
+        updated_at=marker_updated,
+    ):
+        return False
+    payload = effective_revision_landed_payload(
+        identity,
+        published_at=marker_published,
+        updated_at=marker_updated,
+        ingest_ids=ingest_ids,
+    )
+    payload_digest = digest_canonical(payload)
+    ledger_digest = append_ledger(connection, EFFECTIVE_REVISION_LANDED, payload)
+    try:
+        connection.execute(
+            """
+            INSERT INTO unpublished_effective_revision_landed(
+                source_id, item_key, revision_digest, published_at, updated_at,
+                first_observed_at, ingest_ids_json, payload_digest, ledger_digest, at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                identity.source_id,
+                identity.item_key,
+                identity.revision_digest,
+                marker_published,
+                marker_updated,
+                identity.first_observed_at,
+                json.dumps(list(ingest_ids), ensure_ascii=False),
+                payload_digest,
+                ledger_digest,
+                _now(),
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise EffectiveRevisionLandedError(
+            "effective-revision landed identity collided during emission"
+        ) from exc
+    return True
+
+
+def list_landed_revisions(
+    connection: sqlite3.Connection,
+) -> tuple[EligibleCorpusRevision, ...]:
+    from newsroom.control_plane.corpus import synthetic_coverage_revision
+
+    if not connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='unpublished_effective_revision_landed'"
+    ).fetchone():
+        return ()
+    columns = _landed_columns(connection)
+    if "published_at" not in columns:
+        rows = connection.execute(
+            """
+            SELECT source_id, item_key, revision_digest, first_observed_at
+            FROM unpublished_effective_revision_landed
+            """
+        ).fetchall()
+        return tuple(
+            synthetic_coverage_revision(
+                source_id=str(source_id),
+                item_key=str(item_key),
+                revision_digest=str(revision_digest),
+                first_observed_at=str(first_observed_at),
+            )
+            for source_id, item_key, revision_digest, first_observed_at in rows
+        )
+    revisions: list[EligibleCorpusRevision] = []
+    for row in connection.execute(
+        """
+        SELECT source_id, item_key, revision_digest, published_at, updated_at,
+               first_observed_at, ingest_ids_json
+        FROM unpublished_effective_revision_landed
+        """
+    ):
+        ingest_ids = tuple(json.loads(str(row[6] or "[]")))
+        published = str(row[3] or "") or None
+        updated = str(row[4] or "") or None
+        revisions.append(
+            synthetic_coverage_revision(
+                source_id=str(row[0]),
+                item_key=str(row[1]),
+                revision_digest=str(row[2]),
+                first_observed_at=str(row[5]),
+                published_at=published,
+                updated_at=updated,
+                ingest_ids=ingest_ids,
+            )
+        )
+    return tuple(revisions)
+
+
+def list_remapped_ingest_effects(
+    connection: sqlite3.Connection,
+) -> tuple[tuple[str, str, str, str], ...]:
+    if not connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='unpublished_effective_revision_remap'"
+    ).fetchone():
+        return ()
+    return tuple(
+        (str(source_id), str(item_key), str(revision_digest), str(old_ingest_id))
+        for source_id, item_key, revision_digest, old_ingest_id in connection.execute(
+            """
+            SELECT source_id, item_key, revision_digest, old_ingest_id
+            FROM unpublished_effective_revision_remap
+            WHERE old_ingest_id IS NOT NULL AND old_ingest_id != ''
+            """
+        )
+    )
 
 
 def spend_reserved(connection: sqlite3.Connection) -> bool:
@@ -622,16 +915,67 @@ def clear_graphiti_failure(connection: sqlite3.Connection, ingest_id: str) -> No
     )
 
 
+class CoverageGrainError(ValueError):
+    """Coverage telemetry grains are negative or contradictory."""
+
+
+def _non_negative_count(value: int, *, field: str) -> int:
+    if type(value) is not int or value < 0:
+        raise CoverageGrainError(f"{field} must be a non-negative integer")
+    return value
+
+
+def _coverage_query_ids(
+    connection: sqlite3.Connection,
+    revisions: tuple[EligibleCorpusRevision, ...],
+) -> tuple[str, ...]:
+    ids = {
+        ingest_id for revision in revisions for ingest_id in revision.ingest_ids
+    }
+    wanted = {(item.source_id, item.item_key, item.revision_digest) for item in revisions}
+    for source_id, item_key, revision_digest, old_ingest_id in list_remapped_ingest_effects(
+        connection
+    ):
+        if (source_id, item_key, revision_digest) in wanted:
+            ids.add(old_ingest_id)
+    return tuple(sorted(ids))
+
+
+def _revision_is_ingested(
+    revision: EligibleCorpusRevision,
+    ingested_ids: set[str],
+    remapped_ids: dict[tuple[str, str, str], tuple[str, ...]],
+) -> bool:
+    if revision.ingest_ids and all(
+        ingest_id in ingested_ids for ingest_id in revision.ingest_ids
+    ):
+        return True
+    aliases = remapped_ids.get(
+        (revision.source_id, revision.item_key, revision.revision_digest), ()
+    )
+    return bool(aliases) and any(ingest_id in ingested_ids for ingest_id in aliases)
+
+
 def graphiti_coverage(
     connection: sqlite3.Connection,
     *,
     revisions: tuple[EligibleCorpusRevision, ...],
     retry_count: int | None = None,
     dead_letter_count: int | None = None,
+    poll_observation_count: int | None = None,
+    feed_snapshot_item_count: int | None = None,
 ) -> dict[str, object]:
-    eligible_ids = tuple(
-        ingest_id for revision in revisions for ingest_id in revision.ingest_ids
-    )
+    remapped_ids: dict[tuple[str, str, str], list[str]] = {}
+    for source_id, item_key, revision_digest, old_ingest_id in list_remapped_ingest_effects(
+        connection
+    ):
+        remapped_ids.setdefault((source_id, item_key, revision_digest), []).append(
+            old_ingest_id
+        )
+    remapped_tuples = {
+        key: tuple(values) for key, values in remapped_ids.items()
+    }
+    eligible_ids = _coverage_query_ids(connection, revisions)
     ingested_ids: set[str] = set()
     proposal_counts: dict[str, int] = {}
     if eligible_ids:
@@ -653,7 +997,7 @@ def graphiti_coverage(
     successful = tuple(
         revision
         for revision in revisions
-        if all(ingest_id in ingested_ids for ingest_id in revision.ingest_ids)
+        if _revision_is_ingested(revision, ingested_ids, remapped_tuples)
     )
     successful_ids = {item.revision_id for item in successful}
     unresolved = tuple(
@@ -721,9 +1065,13 @@ def graphiti_coverage(
         sorted(lags)[max(math.ceil(len(lags) * 0.95) - 1, 0)] if lags else 0
     )
     oldest_gap = unresolved[0] if unresolved else None
-    return {
-        "eligible_source_revisions": len(revisions),
-        "eligible_ingest_chunks": len(eligible_ids),
+    effective_pull_count = len(revisions)
+    coverage: dict[str, object] = {
+        "effective_pull_count": effective_pull_count,
+        "eligible_source_revisions": effective_pull_count,
+        "eligible_ingest_chunks": sum(
+            len(revision.ingest_ids) for revision in revisions
+        ),
         "successfully_ingested_revisions": len(successful),
         "held_or_failed_revisions": held_or_failed,
         "unresolved_gap": len(unresolved),
@@ -762,6 +1110,16 @@ def graphiti_coverage(
         "unpublished_payload_count": payloads,
         "payload_count_is_not_coverage": True,
     }
+    if poll_observation_count is not None:
+        poll_count = _non_negative_count(
+            poll_observation_count, field="poll_observation_count"
+        )
+        coverage["poll_observation_count"] = poll_count
+    if feed_snapshot_item_count is not None:
+        coverage["feed_snapshot_item_count"] = _non_negative_count(
+            feed_snapshot_item_count, field="feed_snapshot_item_count"
+        )
+    return coverage
 
 
 def record_graphiti_coverage(

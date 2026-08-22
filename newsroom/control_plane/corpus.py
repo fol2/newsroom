@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane.editorial import GroupedObservation
+from newsroom.effective_revision import (
+    EffectiveRevisionIdentity,
+    EffectiveRevisionIdentityResolver,
+)
 from newsroom.graphiti_adapter.identity import (
     MAX_EPISODE_BYTES,
     content_digest,
     ingest_key,
     observation_authority_ids,
+    representation_digest_for,
     source_definition_version_id,
 )
 from newsroom.graphiti_adapter.temporal import TemporalMapping, map_reference_time
@@ -61,6 +65,7 @@ class CorpusIngestUnit:
     observation_digest: str
     observed_at: str
     proving_run_id: str
+    effective_revision: EffectiveRevisionIdentity
     published_at: str | None = None
     updated_at: str | None = None
     chunk_ordinal: int = 1
@@ -102,19 +107,12 @@ class CorpusIngestUnit:
 
     @property
     def representation_digest(self) -> str:
-        return digest_canonical(
-            {
-                "source_id": self.source_id,
-                "item_key": self.item_key,
-                "revision_digest": self.revision_digest,
-                "published_at": self.published_at,
-                "updated_at": self.updated_at,
-                "observed_fallback_at": (
-                    self.observed_at
-                    if self.published_at is None and self.updated_at is None
-                    else None
-                ),
-            }
+        return representation_digest_for(
+            source_id=self.source_id,
+            item_key=self.item_key,
+            revision_digest=self.revision_digest,
+            published_at=self.published_at,
+            updated_at=self.updated_at,
         )
 
     @property
@@ -122,12 +120,11 @@ class CorpusIngestUnit:
         return ingest_key(
             source_id=self.source_id,
             item_key=self.item_key,
-            content_digest_value=self.digest,
+            content_digest_value=self.revision_digest,
             revision_id=self.revision_id,
             representation_digest=self.representation_digest,
             published_at=self.published_at,
             updated_at=self.updated_at,
-            observed_at=self.observed_at,
             chunk_ordinal=self.chunk_ordinal,
         )
 
@@ -148,7 +145,6 @@ class CorpusIngestUnit:
                 rights_gate_reason="evaluation fixture",
                 published_at=self.published_at,
                 updated_at=self.updated_at,
-                observed_at=self.observed_at,
             )[4]
         )
 
@@ -156,7 +152,16 @@ class CorpusIngestUnit:
         return map_reference_time(
             published_at=self.published_at,
             updated_at=self.updated_at,
-            observed_at=self.observed_at,
+            observed_at=self.effective_revision.first_observed_at,
+        )
+
+    def coverage_key(self) -> tuple[str, str, str, str, str]:
+        return (
+            self.source_id,
+            self.item_key,
+            self.revision_digest,
+            self.published_at or "",
+            self.updated_at or "",
         )
 
 
@@ -168,9 +173,20 @@ def units_from(
     rights_gate_id: str | None = None,
     rights_gate_reason: str = "retained PASS",
     source_definition_url: str | None = None,
+    effective_revision_resolver: EffectiveRevisionIdentityResolver,
 ) -> tuple[CorpusIngestUnit, ...]:
     units: list[CorpusIngestUnit] = []
     for row in observations:
+        revision_digest = content_digest(
+            headline=row.item.headline,
+            body=row.item.retained_corpus_body,
+            canonical_url=row.item.canonical_url,
+        )
+        effective_revision = effective_revision_resolver.resolve(
+            source_id=row.source_id,
+            item_key=row.item.item_key,
+            revision_digest=revision_digest,
+        )
         base = CorpusIngestUnit(
             source_id=row.source_id,
             item_key=row.item.item_key,
@@ -180,12 +196,12 @@ def units_from(
             observation_digest=row.observation_digest,
             observed_at=row.observed_at,
             proving_run_id=proving_run_id,
+            effective_revision=effective_revision,
             published_at=row.item.published_at,
             updated_at=row.item.updated_at,
             source_definition_url=source_definition_url or row.item.canonical_url,
         )
         chunks = chunk_text(base.full_text)
-        revision_digest = base.revision_digest
         representation_digest = base.representation_digest
         authority_run_id = rights_authority_run_id or proving_run_id
         gate_id = rights_gate_id or f"RIGHTS_{base.source_id}"
@@ -206,7 +222,6 @@ def units_from(
             rights_gate_reason=rights_gate_reason,
             published_at=base.published_at,
             updated_at=base.updated_at,
-            observed_at=base.observed_at,
         )
         definition_version_id = source_definition_version_id(
             source_id=base.source_id,
@@ -241,10 +256,9 @@ def units_from(
                 "revision_digest": revision_digest,
                 "published_at": base.published_at,
                 "updated_at": base.updated_at,
-                "observed_fallback_at": (
-                    base.observed_at
-                    if base.published_at is None and base.updated_at is None
-                    else None
+                "observed_fallback_at": base.effective_revision.observed_fallback_at(
+                    published_at=base.published_at,
+                    updated_at=base.updated_at,
                 ),
             },
             {
@@ -296,6 +310,7 @@ def units_from(
                 observation_digest=base.observation_digest,
                 observed_at=base.observed_at,
                 proving_run_id=base.proving_run_id,
+                effective_revision=base.effective_revision,
                 published_at=base.published_at,
                 updated_at=base.updated_at,
                 chunk_ordinal=ordinal,
@@ -320,7 +335,7 @@ def units_from(
 
 @dataclass(frozen=True, slots=True)
 class EligibleCorpusRevision:
-    """Coverage denominator entry; chunks remain implementation-level work."""
+    """One eligible effective revision; chunks remain implementation-level work."""
 
     revision_id: str
     source_id: str
@@ -328,28 +343,200 @@ class EligibleCorpusRevision:
     observed_at: str
     source_time: str
     ingest_ids: tuple[str, ...]
+    revision_digest: str = ""
+    published_at: str | None = None
+    updated_at: str | None = None
+
+    def coverage_key(self) -> tuple[str, str, str, str, str]:
+        return (
+            self.source_id,
+            self.item_key,
+            self.revision_digest,
+            self.published_at or "",
+            self.updated_at or "",
+        )
+
+
+def _effective_revision_chunk_key(
+    unit: CorpusIngestUnit,
+) -> tuple[str, str, str, str, str, int]:
+    return (*unit.coverage_key(), unit.chunk_ordinal)
+
+
+def unique_chunk_units(
+    units: tuple[CorpusIngestUnit, ...],
+) -> tuple[CorpusIngestUnit, ...]:
+    """Keep one ingest unit per effective-revision chunk.
+
+    Repeated poll observations of unchanged content collapse to the earliest
+    retained sighting. A source-supplied version-marker change is a new
+    revision. Chunk ordinals stay distinct under that revision.
+    """
+
+    selected: dict[tuple[str, str, str, str, str, int], CorpusIngestUnit] = {}
+    for unit in units:
+        key = _effective_revision_chunk_key(unit)
+        previous = selected.get(key)
+        if previous is None or unit.observed_at < previous.observed_at:
+            selected[key] = unit
+    return tuple(
+        sorted(
+            selected.values(),
+            key=lambda item: (
+                item.effective_revision.first_observed_at,
+                item.revision_id,
+                item.chunk_ordinal,
+            ),
+        )
+    )
+
+
+def _revision_from_chunks(
+    chunks: list[CorpusIngestUnit],
+) -> EligibleCorpusRevision:
+    ordered = sorted(chunks, key=lambda item: item.chunk_ordinal)
+    first = ordered[0]
+    landed_at = first.effective_revision.first_observed_at
+    return EligibleCorpusRevision(
+        revision_id=first.revision_id,
+        source_id=first.source_id,
+        item_key=first.item_key,
+        observed_at=landed_at,
+        source_time=map_reference_time(
+            published_at=first.published_at,
+            updated_at=first.updated_at,
+            observed_at=landed_at,
+        ).reference_time.to_text(),
+        ingest_ids=tuple(item.ingest_id for item in ordered),
+        revision_digest=first.revision_digest,
+        published_at=first.published_at,
+        updated_at=first.updated_at,
+    )
 
 
 def revisions_from(
     units: tuple[CorpusIngestUnit, ...],
 ) -> tuple[EligibleCorpusRevision, ...]:
-    grouped: dict[str, list[CorpusIngestUnit]] = {}
-    for unit in units:
-        grouped.setdefault(unit.revision_id, []).append(unit)
-    revisions = []
-    for revision_id, chunks in grouped.items():
-        ordered = sorted(chunks, key=lambda item: item.chunk_ordinal)
-        first = ordered[0]
-        revisions.append(
-            EligibleCorpusRevision(
-                revision_id=revision_id,
-                source_id=first.source_id,
-                item_key=first.item_key,
-                observed_at=first.observed_at,
-                source_time=first.temporal().reference_time.to_text(),
-                ingest_ids=tuple(item.ingest_id for item in ordered),
+    grouped: dict[tuple[str, str, str, str, str], list[CorpusIngestUnit]] = {}
+    for unit in unique_chunk_units(units):
+        grouped.setdefault(unit.coverage_key(), []).append(unit)
+    revisions = [_revision_from_chunks(chunks) for chunks in grouped.values()]
+    return tuple(
+        sorted(revisions, key=lambda item: (item.observed_at, item.revision_id))
+    )
+
+
+def synthetic_coverage_revision(
+    *,
+    source_id: str,
+    item_key: str,
+    revision_digest: str,
+    first_observed_at: str,
+    published_at: str | None = None,
+    updated_at: str | None = None,
+    ingest_ids: tuple[str, ...] = (),
+) -> EligibleCorpusRevision:
+    """Coverage obligation derivable without a currently retained HTTP body."""
+
+    representation_digest = representation_digest_for(
+        source_id=source_id,
+        item_key=item_key,
+        revision_digest=revision_digest,
+        published_at=published_at,
+        updated_at=updated_at,
+    )
+    revision_id = str(
+        observation_authority_ids(
+            source_id=source_id,
+            item_key=item_key,
+            revision_digest=revision_digest,
+            representation_digest=representation_digest,
+            rights_authority_run_id="durable-coverage",
+            rights_gate_id=f"RIGHTS_{source_id}",
+            rights_gate_reason="durable first-seen",
+            published_at=published_at,
+            updated_at=updated_at,
+        )[4]
+    )
+    obligation_ids = ingest_ids or (
+        ingest_key(
+            source_id=source_id,
+            item_key=item_key,
+            content_digest_value=revision_digest,
+            revision_id=revision_id,
+            representation_digest=representation_digest,
+            published_at=published_at,
+            updated_at=updated_at,
+            chunk_ordinal=1,
+        ),
+    )
+    return EligibleCorpusRevision(
+        revision_id=revision_id,
+        source_id=source_id,
+        item_key=item_key,
+        observed_at=first_observed_at,
+        source_time=map_reference_time(
+            published_at=published_at,
+            updated_at=updated_at,
+            observed_at=first_observed_at,
+        ).reference_time.to_text(),
+        ingest_ids=obligation_ids,
+        revision_digest=revision_digest,
+        published_at=published_at,
+        updated_at=updated_at,
+    )
+
+
+def merge_durable_revisions(
+    *,
+    window_revisions: tuple[EligibleCorpusRevision, ...],
+    first_seen: tuple[tuple[str, str, str, str], ...],
+    landed: tuple[EligibleCorpusRevision, ...] = (),
+    remapped_effects: tuple[tuple[str, str, str, str], ...] = (),
+    permitted_source_ids: frozenset[str] | None = None,
+) -> tuple[EligibleCorpusRevision, ...]:
+    """Keep coverage obligations after raw HTTP bodies leave the retention window.
+
+    Window reconstructions win. Landed records preserve version-marker pulls.
+    First-seen triples that have no window or landed match remain unresolved.
+    """
+
+    selected: dict[tuple[str, str, str, str, str], EligibleCorpusRevision] = {}
+    for revision in (*landed, *window_revisions):
+        if (
+            permitted_source_ids is not None
+            and revision.source_id not in permitted_source_ids
+        ):
+            continue
+        selected[revision.coverage_key()] = revision
+    covered_triples = {
+        (item.source_id, item.item_key, item.revision_digest) for item in selected.values()
+    }
+    effects_by_triple: dict[tuple[str, str, str], list[str]] = {}
+    for source_id, item_key, revision_digest, ingest_id in remapped_effects:
+        if ingest_id:
+            effects_by_triple.setdefault(
+                (source_id, item_key, revision_digest), []
+            ).append(ingest_id)
+    for source_id, item_key, revision_digest, first_observed_at in first_seen:
+        if (
+            permitted_source_ids is not None
+            and source_id not in permitted_source_ids
+        ):
+            continue
+        triple = (source_id, item_key, revision_digest)
+        if triple in covered_triples:
+            continue
+        extra = tuple(effects_by_triple.get(triple, ()))
+        selected[(source_id, item_key, revision_digest, "", "")] = (
+            synthetic_coverage_revision(
+                source_id=source_id,
+                item_key=item_key,
+                revision_digest=revision_digest,
+                first_observed_at=first_observed_at,
+                ingest_ids=extra,
             )
         )
     return tuple(
-        sorted(revisions, key=lambda item: (item.observed_at, item.revision_id))
+        sorted(selected.values(), key=lambda item: (item.observed_at, item.revision_id))
     )
