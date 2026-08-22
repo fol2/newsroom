@@ -117,6 +117,14 @@ def test_ci_is_an_exact_head_bounded_compatibility_gate() -> None:
     assert "ci-smoke-result.json" in enforce["run"]
     assert "PASS" in enforce["run"]
 
+    graphiti_sync = _step(job, "Sync Graphiti extra")
+    assert graphiti_sync["run"] == "uv sync --dev --extra graphiti --locked"
+    graphiti_research = _step(job, "Run provider-free Graphiti research fixtures")
+    assert "newsroom/tests/test_graphiti_combined_temporal_extraction.py" in (
+        graphiti_research["run"]
+    )
+    assert "test_graphiti_token_meter.py" not in graphiti_research["run"]
+
     rendered = CI_PATH.read_text(encoding="utf-8")
     assert "pytest -q\n" not in rendered
     assert "eval_clustering_metrics.py" not in rendered
