@@ -18,13 +18,21 @@ from typing import Any, Mapping, Protocol
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, digest_canonical
 from newsroom.authority.types import UtcTimestamp
-from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_EXTRACTION_INSTRUCTIONS
-from newsroom.graphiti_adapter.identity import uuid4_from_digest
+from newsroom.graphiti_adapter.evaluation_packet import (
+    GRAPHITI_CORE_RELEASE,
+    GRAPHITI_EXTRACTION_INSTRUCTIONS,
+)
+from newsroom.graphiti_adapter.identity import configuration_digest, ingest_key, uuid4_from_digest
 from newsroom.graphiti_adapter.result_mapping import is_source_registry_name
+from newsroom.graphiti_adapter.temporal import map_reference_time
+from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_VERSION
 
 CONTRACT_NAME = "NewsroomCombinedTemporalExtractionV1"
 GROUP_ID = "newsroom-combined-temporal-v1"
 MAX_SEGMENT_BYTES = 512
+GOVERNED_ENTITY_TYPE_IDS = frozenset({0})
+RESOLUTION_DEFERRED = "RESOLUTION_DEFERRED"
+UNMEASURED = "UNMEASURED"
 _REPO = Path(__file__).resolve().parents[2]
 MEASUREMENTS_PATH = (
     _REPO
@@ -135,12 +143,53 @@ class EvidenceSegment:
 @dataclass(frozen=True, slots=True)
 class SourceRevisionInput:
     body: str
-    reference_time: str
     revision_id: str
+    source_id: str
+    item_key: str
+    representation_digest: str
+    published_at: str | None
+    updated_at: str | None
+    observed_at: str
+    ingested_at: str
+    chunk_ordinal: int = 1
     predecessor_revision_id: str | None = None
     predecessor_body: str | None = None
     group_id: str = GROUP_ID
     episode_uuid: str | None = None
+
+    @property
+    def reference_time(self) -> str:
+        return map_reference_time(
+            published_at=self.published_at,
+            updated_at=self.updated_at,
+            observed_at=self.observed_at,
+        ).reference_time.to_text()
+
+    @property
+    def temporal_basis(self) -> str:
+        return map_reference_time(
+            published_at=self.published_at,
+            updated_at=self.updated_at,
+            observed_at=self.observed_at,
+        ).basis.value
+
+    @property
+    def content_digest(self) -> str:
+        return digest_bytes(canonical_json_bytes({"body": self.body}))
+
+    @property
+    def ingest_id(self) -> str:
+        return ingest_key(
+            source_id=self.source_id,
+            item_key=self.item_key,
+            content_digest_value=self.content_digest,
+            revision_id=self.revision_id,
+            representation_digest=self.representation_digest,
+            published_at=self.published_at,
+            updated_at=self.updated_at,
+            observed_at=self.observed_at,
+            chunk_ordinal=self.chunk_ordinal,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +197,15 @@ class CompactPrompt:
     text: str
     schema: dict[str, Any]
     segments: tuple[EvidenceSegment, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CombinedTemporalTransportResult:
+    raw: object
+    framework_version: str
+    model_version: str | None
+    token_usage: Mapping[str, object]
+    provider_cost: object | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +226,20 @@ class CombinedTemporalLeaf:
     node_resolutions: tuple[str, ...] = ()
     embedding_skipped: bool = True
     journal_skipped: bool = True
+    rollback_skipped: bool = True
+    raw_output_digest: str | None = None
+    framework_version: str = GRAPHITI_CORE_RELEASE
+    model_version: str | None = None
+    prompt_digest: str | None = None
+    invocation_count: int = 1
+    token_usage: Mapping[str, object] = field(
+        default_factory=lambda: {"basis": UNMEASURED}
+    )
+    provider_cost: object | None = None
+    ingest_id: str | None = None
+    temporal_basis: str | None = None
+    configuration_digest: str | None = None
+    temporal_policy_digest: str | None = None
 
 
 class CombinedTemporalTransport(Protocol):
@@ -177,7 +249,7 @@ class CombinedTemporalTransport(Protocol):
         prompt: str,
         schema: Mapping[str, Any],
         response_model: str,
-    ) -> object: ...
+    ) -> CombinedTemporalTransportResult: ...
 
 
 def segment_source(
@@ -226,6 +298,8 @@ def build_compact_prompt(revision: SourceRevisionInput) -> CompactPrompt:
         "Exclude source-registry identifiers and deterministic corpus metadata (SourceItem, SourceRevision, DERIVED_FROM, OBSERVED_IN).",
         GRAPHITI_EXTRACTION_INSTRUCTIONS,
         f"REFERENCE_TIME: {revision.reference_time}",
+        f"TEMPORAL_BASIS: {revision.temporal_basis}",
+        f"TEMPORAL_POLICY: {TEMPORAL_POLICY_VERSION}",
         f"REVISION_ID: {revision.revision_id}",
         f"PREDECESSOR_REVISION_ID: {predecessor}",
         "SCHEMA:",
@@ -241,26 +315,50 @@ def extract_combined_temporal(
     *,
     transport: CombinedTemporalTransport,
 ) -> CombinedTemporalLeaf:
+    ingest_id = revision.ingest_id
+    temporal_basis = revision.temporal_basis
+    UtcTimestamp.parse(revision.ingested_at)
     prompt = build_compact_prompt(revision)
+    prompt_digest = digest_canonical({"prompt": prompt.text, "schema": SCHEMA})
+    result = transport.generate_response(
+        prompt=prompt.text,
+        schema=SCHEMA,
+        response_model=CONTRACT_NAME,
+    )
+    raw = result.raw
+    raw_digest = _raw_digest(raw)
+    usage = dict(result.token_usage)
     calls = [
         {
             "response_model": CONTRACT_NAME,
             "prompt_bytes": len(prompt.text.encode("utf-8")),
             "schema_bytes": len(canonical_json_bytes(SCHEMA)),
+            "raw_output_digest": raw_digest,
+            "framework_version": result.framework_version,
+            "model_version": result.model_version,
+            "token_usage": usage,
+            "provider_cost": result.provider_cost,
         }
     ]
-    raw = transport.generate_response(
-        prompt=prompt.text,
-        schema=SCHEMA,
-        response_model=CONTRACT_NAME,
-    )
+    receipt = {
+        "raw_output_digest": raw_digest,
+        "framework_version": result.framework_version,
+        "model_version": result.model_version,
+        "prompt_digest": prompt_digest,
+        "token_usage": usage,
+        "provider_cost": result.provider_cost,
+        "ingest_id": ingest_id,
+        "temporal_basis": temporal_basis,
+        "configuration_digest": configuration_digest(),
+        "temporal_policy_digest": digest_canonical(TEMPORAL_POLICY_VERSION),
+    }
     try:
         payload = _parse_payload(raw)
         normalised, ranges = _normalise(payload, prompt.segments)
         nodes, edges = _expand(revision, normalised)
         guarded = _guard_edges(edges)
     except CombinedTemporalError as exc:
-        return CombinedTemporalLeaf(
+        return _leaf(
             CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE,
             exc.code,
             prompt,
@@ -270,18 +368,16 @@ def extract_combined_temporal(
             (),
             (),
             tuple(calls),
-            False,
             {},
             (),
-            True,
-            True,
+            **receipt,
         )
     outcome = (
         CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
         if not normalised["facts"]
         else CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
     )
-    return CombinedTemporalLeaf(
+    return _leaf(
         outcome,
         CombinedTemporalFailureCode.NONE,
         prompt,
@@ -291,12 +387,72 @@ def extract_combined_temporal(
         edges,
         guarded,
         tuple(calls),
+        ranges,
+        tuple(RESOLUTION_DEFERRED for _ in nodes),
+        **receipt,
+    )
+
+
+def _leaf(
+    outcome: CombinedTemporalOutcome,
+    failure_code: CombinedTemporalFailureCode,
+    prompt: CompactPrompt,
+    payload: dict[str, Any] | None,
+    payload_digest: str | None,
+    nodes: tuple[Any, ...],
+    edges: tuple[Any, ...],
+    guarded: tuple[Any, ...],
+    calls: tuple[dict[str, object], ...],
+    ranges: dict[str, tuple[EvidenceSegment, ...]],
+    resolutions: tuple[str, ...],
+    *,
+    raw_output_digest: str | None,
+    framework_version: str,
+    model_version: str | None,
+    prompt_digest: str | None,
+    token_usage: Mapping[str, object],
+    provider_cost: object | None,
+    ingest_id: str | None,
+    temporal_basis: str | None,
+    configuration_digest: str | None,
+    temporal_policy_digest: str | None,
+) -> CombinedTemporalLeaf:
+    return CombinedTemporalLeaf(
+        outcome,
+        failure_code,
+        prompt,
+        payload,
+        payload_digest,
+        nodes,
+        edges,
+        guarded,
+        calls,
         False,
         ranges,
-        tuple("DETERMINISTIC_NEW_NODE" for _ in nodes),
+        resolutions,
         True,
         True,
+        True,
+        raw_output_digest,
+        framework_version,
+        model_version,
+        prompt_digest,
+        1,
+        token_usage,
+        provider_cost,
+        ingest_id,
+        temporal_basis,
+        configuration_digest,
+        temporal_policy_digest,
     )
+
+
+def _raw_digest(raw: object) -> str:
+    if isinstance(raw, Mapping):
+        return digest_canonical(dict(raw))
+    if isinstance(raw, str):
+        return digest_bytes(raw.encode("utf-8"))
+    return digest_canonical({"unsupported": type(raw).__name__})
 
 
 def _split_oversize(
@@ -398,10 +554,30 @@ def _normalise(
         connected.update((source, target))
         cited = _resolve_segments(fact["evidence_segment_ids"], segments)
         retained = "".join(item.text for item in cited)
+        source_name = next(
+            item["name"] for item in entities if item["local_id"] == source
+        )
+        target_name = next(
+            item["name"] for item in entities if item["local_id"] == target
+        )
         if fact["fact"] not in retained:
             raise CombinedTemporalError(
                 CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
                 "fact is not present in cited segments",
+            )
+        if source_name not in retained or target_name not in retained:
+            raise CombinedTemporalError(
+                CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
+                "source and target names are not present in cited segments",
+            )
+        cue_ok = all(
+            re.search(rf"\b{re.escape(token)}\b", retained, flags=re.IGNORECASE)
+            for token in fact["relation_type"].split("_")
+        )
+        if not cue_ok:
+            raise CombinedTemporalError(
+                CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
+                "relation type is not supported by cited segments",
             )
         ranges[fact["fact"]] = cited
     if connected != id_set:
@@ -473,10 +649,10 @@ def _entity(raw: object) -> dict[str, Any]:
             CombinedTemporalFailureCode.IDENTITY_INVALID,
             "deterministic metadata is excluded from semantic extraction",
         )
-    if not isinstance(type_id, int) or isinstance(type_id, bool) or type_id < 0:
+    if isinstance(type_id, bool) or type_id not in GOVERNED_ENTITY_TYPE_IDS:
         raise CombinedTemporalError(
-            CombinedTemporalFailureCode.MALFORMED_OBJECT,
-            "entity_type_id must be a non-negative integer",
+            CombinedTemporalFailureCode.IDENTITY_INVALID,
+            "entity_type_id is not in the governed ontology",
         )
     return {
         "local_id": local_id,
@@ -629,12 +805,18 @@ def _expand(
     revision: SourceRevisionInput,
     payload: Mapping[str, Any],
 ) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
-    created = UtcTimestamp.parse(revision.reference_time).value
+    created = UtcTimestamp.parse(revision.ingested_at).value
+    reference = UtcTimestamp.parse(revision.reference_time).value
+    ingest_id = revision.ingest_id
     nodes_by_id: dict[int, Any] = {}
     nodes: list[Any] = []
     for entity in payload["entities"]:
         node_uuid = _uuid(
-            "node", revision.revision_id, entity["local_id"], entity["name"]
+            "node",
+            ingest_id,
+            entity["local_id"],
+            entity["name"],
+            entity["entity_type_id"],
         )
         node = _NamespaceNode(
             uuid=node_uuid,
@@ -646,14 +828,15 @@ def _expand(
             attributes={
                 "entity_type_id": entity["entity_type_id"],
                 "evidence_segment_ids": list(entity["evidence_segment_ids"]),
-                "resolution": "DETERMINISTIC_NEW_NODE",
+                "resolution": RESOLUTION_DEFERRED,
+                "ingest_id": ingest_id,
             },
         )
         nodes_by_id[entity["local_id"]] = node
         nodes.append(node)
-    episode_uuid = revision.episode_uuid or _uuid("episode", revision.revision_id)
+    episode_uuid = revision.episode_uuid or ingest_id
     edges: list[Any] = []
-    for index, fact in enumerate(payload["facts"]):
+    for fact in payload["facts"]:
         source = nodes_by_id[fact["source_local_id"]]
         target = nodes_by_id[fact["target_local_id"]]
         valid_at = (
@@ -668,7 +851,14 @@ def _expand(
         )
         edges.append(
             _NamespaceEdge(
-                uuid=_uuid("edge", revision.revision_id, index, fact["fact"]),
+                uuid=_uuid(
+                    "edge",
+                    ingest_id,
+                    fact["source_local_id"],
+                    fact["target_local_id"],
+                    fact["relation_type"],
+                    fact["fact"],
+                ),
                 group_id=revision.group_id,
                 source_node_uuid=source.uuid,
                 target_node_uuid=target.uuid,
@@ -678,9 +868,12 @@ def _expand(
                 episodes=[episode_uuid],
                 valid_at=valid_at,
                 invalid_at=invalid_at,
-                reference_time=created,
+                reference_time=reference,
                 attributes={
                     "evidence_segment_ids": list(fact["evidence_segment_ids"]),
+                    "temporal_basis": revision.temporal_basis,
+                    "temporal_policy": TEMPORAL_POLICY_VERSION,
+                    "ingest_id": ingest_id,
                 },
             )
         )
@@ -739,14 +932,18 @@ __all__ = [
     "CombinedTemporalLeaf",
     "CombinedTemporalOutcome",
     "CombinedTemporalTransport",
+    "CombinedTemporalTransportResult",
     "CompactPrompt",
     "EvidenceSegment",
+    "GOVERNED_ENTITY_TYPE_IDS",
     "GROUP_ID",
     "LIVE_PACKET_PATH",
     "MEASUREMENTS_PATH",
+    "RESOLUTION_DEFERRED",
     "SCHEMA",
     "SCHEMA_DIGEST",
     "SourceRevisionInput",
+    "UNMEASURED",
     "build_compact_prompt",
     "extract_combined_temporal",
     "segment_source",

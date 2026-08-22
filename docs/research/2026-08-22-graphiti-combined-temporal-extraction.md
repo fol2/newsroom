@@ -33,9 +33,10 @@ The authority-private module `newsroom.graphiti_adapter.combined_temporal_extrac
 4. expands local IDs into Graphiti-compatible node and edge proposals, retaining `entity_type_id` and evidence segment IDs on `attributes`;
 5. sets relation temporal fields on the primary object;
 6. bypasses `extract_timestamps_batch` after validation;
-7. labels every new node `DETERMINISTIC_NEW_NODE` without an LLM dedupe call, keeping same-name local IDs distinct;
+7. labels every node `RESOLUTION_DEFERRED` without an LLM dedupe call or graph lookup, keeping same-name local IDs distinct; local resolution, embedding, mutation journal and rollback remain #748 / later ingest atoms because this qualification proves one provider leaf **before** any graph effect;
 8. routes edges through the existing invalidation guard, skipping embeddings;
-9. proves one provider leaf before any graph effect (`graph_effect_attempted` is always false; embedding, mutation journal and rollback are not invoked).
+9. retains a GING-005-shaped leaf receipt (raw-output digest, framework/model/prompt versions, invocation count, usage/cost slots) even when usage is `UNMEASURED`;
+10. binds episode identity with GING-002 `ingest_key` (representation digest, source timestamps, chunk ordinal, configuration and temporal-policy digests) and maps `reference_time` with GING-003, keeping `ingested_at` as `created_at` only.
 
 Fallback policy remains [#731](https://github.com/fol2/newsroom/issues/731). This seam does not retry an unchanged request.
 

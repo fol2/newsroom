@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from newsroom.authority.canonical import digest_bytes
 from newsroom.graphiti_adapter.combined_temporal_extraction import (
     CombinedTemporalFailureCode,
     SourceRevisionInput,
@@ -15,7 +16,9 @@ PAIR_BODY = (
     "The Legislative Council asked about the Technology and Living curriculum."
 )
 REFERENCE_TIME = "2026-08-21T00:00:00Z"
+INGESTED_AT = "2026-08-22T12:00:00Z"
 GROUP_ID = "newsroom-combined-temporal-v1"
+SOURCE_ID = "newsroom-fixture"
 
 
 def _pair_entities() -> list[dict[str, Any]]:
@@ -57,13 +60,20 @@ def _revision(
     *,
     revision_id: str,
     reference_time: str = REFERENCE_TIME,
+    ingested_at: str = INGESTED_AT,
     predecessor_revision_id: str | None = None,
     predecessor_body: str | None = None,
 ) -> SourceRevisionInput:
     return SourceRevisionInput(
         body=body,
-        reference_time=reference_time,
         revision_id=revision_id,
+        source_id=SOURCE_ID,
+        item_key=revision_id,
+        representation_digest=digest_bytes(body.encode("utf-8")),
+        published_at=reference_time,
+        updated_at=None,
+        observed_at=reference_time,
+        ingested_at=ingested_at,
         predecessor_revision_id=predecessor_revision_id,
         predecessor_body=predecessor_body,
         group_id=GROUP_ID,
@@ -574,12 +584,35 @@ MALFORMED_CASES: tuple[MalformedCase, ...] = (
         },
         CombinedTemporalFailureCode.MALFORMED_OBJECT,
     ),
+    MalformedCase(
+        "unknown-entity-type",
+        _PAIR_REVISION,
+        {
+            "entities": [
+                {
+                    "local_id": 0,
+                    "name": "Legislative Council",
+                    "entity_type_id": 999,
+                    "evidence_segment_ids": [0],
+                },
+                {
+                    "local_id": 1,
+                    "name": "Technology and Living curriculum",
+                    "entity_type_id": 0,
+                    "evidence_segment_ids": [0],
+                },
+            ],
+            "facts": [_pair_fact(valid_at=None, invalid_at=None)],
+        },
+        CombinedTemporalFailureCode.IDENTITY_INVALID,
+    ),
 )
 
 
 __all__ = [
     "FIXTURES",
     "GROUP_ID",
+    "INGESTED_AT",
     "GoldFixture",
     "MALFORMED_CASES",
     "MalformedCase",

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import importlib.metadata
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,19 +30,28 @@ from newsroom.graphiti_adapter.combined_temporal_extraction import (
     CONTRACT_NAME,
     LIVE_PACKET_PATH,
     MEASUREMENTS_PATH,
+    RESOLUTION_DEFERRED,
     SCHEMA,
     SCHEMA_DIGEST,
+    UNMEASURED,
     CombinedTemporalFailureCode,
+    CombinedTemporalLeaf,
     CombinedTemporalOutcome,
+    CombinedTemporalTransportResult,
     build_compact_prompt,
     extract_combined_temporal,
     segment_source,
 )
 from newsroom.graphiti_adapter.combined_temporal_fixtures import (
     FIXTURES,
+    INGESTED_AT,
     MALFORMED_CASES,
+    GoldFixture,
     fixture,
 )
+from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_CORE_RELEASE
+from newsroom.graphiti_adapter.identity import configuration_digest
+from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_VERSION
 from scripts.graphiti_combined_temporal_extraction import measure_token_effectiveness
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -66,12 +76,20 @@ class _FakeTransport:
         prompt: str,
         schema: dict[str, Any],
         response_model: str,
-    ) -> object:
+    ) -> CombinedTemporalTransportResult:
         del prompt, schema, response_model
-        return self.payload
+        return CombinedTemporalTransportResult(
+            raw=self.payload,
+            framework_version=GRAPHITI_CORE_RELEASE,
+            model_version=None,
+            token_usage={"basis": UNMEASURED},
+            provider_cost=None,
+        )
 
 
-def _extract(name: str, payload: object | None = None):
+def _extract(
+    name: str, payload: object | None = None
+) -> tuple[CombinedTemporalLeaf, GoldFixture]:
     case = fixture(name)
     transport = _FakeTransport(case.gold if payload is None else payload)
     return extract_combined_temporal(case.revision, transport=transport), case
@@ -161,7 +179,8 @@ def test_nonzero_relation_makes_one_request_and_sets_temporal_fields() -> None:
     assert leaf.graph_effect_attempted is False
     assert leaf.embedding_skipped is True
     assert leaf.journal_skipped is True
-    assert leaf.node_resolutions == ("DETERMINISTIC_NEW_NODE", "DETERMINISTIC_NEW_NODE")
+    assert leaf.rollback_skipped is True
+    assert leaf.node_resolutions == (RESOLUTION_DEFERRED, RESOLUTION_DEFERRED)
     assert all(node.attributes["entity_type_id"] == 0 for node in leaf.nodes)
     assert leaf.edges[0].attributes["evidence_segment_ids"] == [0]
     assert case.gold["facts"][0]["source_local_id"] != case.gold["facts"][0][
@@ -268,6 +287,28 @@ def test_implied_relation_is_absent_from_gold_and_rejected_if_emitted() -> None:
     assert failed.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
     assert len(failed.transport_calls) == 1
     assert failed.graph_effect_attempted is False
+    assert failed.raw_output_digest is not None
+
+    lexical = {
+        "entities": case.gold["entities"],
+        "facts": [
+            {
+                "source_local_id": 0,
+                "target_local_id": 2,
+                "relation_type": "WORKS_FOR",
+                "fact": "Ms Chan attended the briefing.",
+                "valid_at": None,
+                "invalid_at": None,
+                "evidence_segment_ids": [0],
+            }
+        ],
+    }
+    rejected = extract_combined_temporal(
+        case.revision,
+        transport=_FakeTransport(lexical),
+    )
+    assert rejected.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert rejected.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
 
 
 @pytest.mark.parametrize("name", [case.name for case in MALFORMED_CASES])
@@ -310,6 +351,61 @@ def test_edge_guard_keeps_primary_temporal_fields() -> None:
     assert leaf.edges[0].valid_at == datetime(2026, 8, 20, tzinfo=UTC)
     assert leaf.guarded_edges[0].valid_at == datetime(2026, 8, 20, tzinfo=UTC)
     assert leaf.guarded_edges[0].invalid_at is None
+
+
+def test_ingest_time_does_not_replace_source_reference_time() -> None:
+    leaf, case = _extract("pair-current")
+    ingested = datetime(2026, 8, 22, 12, tzinfo=UTC)
+    source = datetime(2026, 8, 21, tzinfo=UTC)
+    assert case.revision.ingested_at == INGESTED_AT
+    assert leaf.nodes[0].created_at == ingested
+    assert leaf.edges[0].created_at == ingested
+    assert leaf.edges[0].reference_time == source
+    assert leaf.temporal_basis == "SOURCE_PUBLISHED"
+    assert leaf.edges[0].attributes["temporal_policy"] == TEMPORAL_POLICY_VERSION
+
+
+def test_episode_identity_binds_source_digests_and_source_timestamps() -> None:
+    leaf, case = _extract("pair-current")
+    assert leaf.ingest_id == case.revision.ingest_id
+    assert leaf.edges[0].episodes == [case.revision.ingest_id]
+    assert leaf.configuration_digest == configuration_digest()
+    shifted = replace(case.revision, published_at="2026-01-01T00:00:00Z")
+    other = extract_combined_temporal(
+        shifted, transport=_FakeTransport(case.gold)
+    )
+    assert other.ingest_id != leaf.ingest_id
+    assert {node.uuid for node in other.nodes} != {node.uuid for node in leaf.nodes}
+    assert {edge.uuid for edge in other.edges} != {edge.uuid for edge in leaf.edges}
+    later = extract_combined_temporal(
+        replace(case.revision, ingested_at="2026-08-23T00:00:00Z"),
+        transport=_FakeTransport(case.gold),
+    )
+    assert later.ingest_id == leaf.ingest_id
+    assert {node.uuid for node in later.nodes} == {node.uuid for node in leaf.nodes}
+    assert later.nodes[0].created_at != leaf.nodes[0].created_at
+
+
+def test_leaf_receipt_retains_raw_digest_usage_and_versions() -> None:
+    leaf, _case = _extract("pair-current")
+    call = leaf.transport_calls[0]
+    assert leaf.raw_output_digest is not None
+    assert leaf.raw_output_digest.startswith("sha256:")
+    assert call["raw_output_digest"] == leaf.raw_output_digest
+    assert leaf.framework_version == GRAPHITI_CORE_RELEASE
+    assert leaf.model_version is None
+    assert leaf.prompt_digest is not None
+    assert leaf.prompt_digest.startswith("sha256:")
+    assert leaf.invocation_count == 1
+    assert leaf.token_usage["basis"] == UNMEASURED
+    assert leaf.provider_cost is None
+    wrapped = extract_combined_temporal(
+        fixture("pair-current").revision,
+        transport=_FakeTransport("Here is the JSON:\n{}"),
+    )
+    assert wrapped.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert wrapped.raw_output_digest is not None
+    assert wrapped.transport_calls[0]["raw_output_digest"] == wrapped.raw_output_digest
 
 
 def test_live_packet_is_owner_gated_and_redacted() -> None:
