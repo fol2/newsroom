@@ -1403,54 +1403,6 @@ def _apply_crash_atomic_live_mutations(
     finally:
         if conn is not None:
             conn.close()
-    try:
-        apply_control_plane_sqlite_profile(conn, wal=False)
-        conn.execute("ATTACH DATABASE ? AS proving", (str(proving_path),))
-        apply_control_plane_sqlite_profile(conn, wal=False, schema=PROVING_ATTACH_SCHEMA)
-        conn.execute("BEGIN IMMEDIATE")
-        remapped = _apply_proving(conn, plan, schema=PROVING_ATTACH_SCHEMA)
-        remapped += _apply_remap_rows(conn, plan)
-        proving_after = _census_proving(conn, schema=PROVING_ATTACH_SCHEMA)
-        unpublished_after = _census_unpublished(conn)
-        no_loss = _no_loss_proof(
-            proving_before=proving_before,
-            unpublished_before=unpublished_before,
-            proving_after=proving_after,
-            unpublished_after=unpublished_after,
-        )
-        if no_loss["lost"]:
-            raise BacklogReconciliationError("G3: append-only census lost records")
-        receipt = _receipt_from_plan(
-            plan,
-            mode="live",
-            mutated=True,
-            remapped_count=remapped,
-            no_loss_proof=no_loss,
-            gates={
-                "G1": "pass",
-                "G2": "pass",
-                "G3": "pass",
-                "G4": "pending-rerun",
-                "G5": "pass",
-            },
-            command=command.as_dict(),
-        )
-        _retain_receipt(conn, receipt.as_dict())
-        _record_command(conn, command, receipt)
-        conn.commit()
-        return remapped, receipt, no_loss
-    except Exception:
-        if conn is not None and conn.in_transaction:
-            conn.rollback()
-        if conn is not None:
-            conn.close()
-            conn = None
-        _restore_store(proving_backup, proving_path)
-        _restore_store(unpublished_backup, unpublished_path)
-        raise
-    finally:
-        if conn is not None:
-            conn.close()
 
 
 def reconcile_effective_revision_backlog(
