@@ -1643,6 +1643,7 @@ def test_coverage_uses_revision_denominator_and_contiguous_input_watermark(
         )
     coverage = graphiti_coverage(connection, revisions=(first, second))
     connection.close()
+    assert coverage["effective_pull_count"] == 2
     assert coverage["eligible_source_revisions"] == 2
     assert coverage["eligible_ingest_chunks"] == 3
     assert coverage["successfully_ingested_revisions"] == 1

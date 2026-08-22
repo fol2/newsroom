@@ -705,12 +705,24 @@ def clear_graphiti_failure(connection: sqlite3.Connection, ingest_id: str) -> No
     )
 
 
+class CoverageGrainError(ValueError):
+    """Coverage telemetry grains are negative or contradictory."""
+
+
+def _non_negative_count(value: int, *, field: str) -> int:
+    if type(value) is not int or value < 0:
+        raise CoverageGrainError(f"{field} must be a non-negative integer")
+    return value
+
+
 def graphiti_coverage(
     connection: sqlite3.Connection,
     *,
     revisions: tuple[EligibleCorpusRevision, ...],
     retry_count: int | None = None,
     dead_letter_count: int | None = None,
+    poll_observation_count: int | None = None,
+    feed_snapshot_item_count: int | None = None,
 ) -> dict[str, object]:
     eligible_ids = tuple(
         ingest_id for revision in revisions for ingest_id in revision.ingest_ids
@@ -804,8 +816,10 @@ def graphiti_coverage(
         sorted(lags)[max(math.ceil(len(lags) * 0.95) - 1, 0)] if lags else 0
     )
     oldest_gap = unresolved[0] if unresolved else None
-    return {
-        "eligible_source_revisions": len(revisions),
+    effective_pull_count = len(revisions)
+    coverage: dict[str, object] = {
+        "effective_pull_count": effective_pull_count,
+        "eligible_source_revisions": effective_pull_count,
         "eligible_ingest_chunks": len(eligible_ids),
         "successfully_ingested_revisions": len(successful),
         "held_or_failed_revisions": held_or_failed,
@@ -845,6 +859,20 @@ def graphiti_coverage(
         "unpublished_payload_count": payloads,
         "payload_count_is_not_coverage": True,
     }
+    if poll_observation_count is not None:
+        poll_count = _non_negative_count(
+            poll_observation_count, field="poll_observation_count"
+        )
+        if poll_count == 0 and effective_pull_count:
+            raise CoverageGrainError(
+                "effective_pull_count requires at least one poll observation"
+            )
+        coverage["poll_observation_count"] = poll_count
+    if feed_snapshot_item_count is not None:
+        coverage["feed_snapshot_item_count"] = _non_negative_count(
+            feed_snapshot_item_count, field="feed_snapshot_item_count"
+        )
+    return coverage
 
 
 def record_graphiti_coverage(

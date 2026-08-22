@@ -17,6 +17,7 @@ from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.corpus import (
     CorpusIngestUnit,
     revisions_from,
+    unique_chunk_units,
     units_from,
 )
 from newsroom.control_plane.editorial import GroupedObservation, form_candidates
@@ -128,6 +129,9 @@ class CycleReport:
     writer_id: str
     graphiti: int = 0
     eligible: int = 0
+    poll_observation_count: int = 0
+    feed_snapshot_item_count: int = 0
+    effective_pull_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +146,7 @@ class _ProvingObservation:
     rights_authority_run_id: str
     rights_gate_id: str
     rights_gate_reason: str
+    item_count: int
 
 
 def _now() -> str:
@@ -1372,7 +1377,8 @@ def _permitted_rows(
             ):
                 continue
             body_bytes = bytes(body)
-            if not assess_content(source_url, body_bytes).usable:
+            assessment = assess_content(source_url, body_bytes)
+            if not assessment.usable:
                 continue
             stable_rights = dict(current)
             stable_rights.pop("evaluated_at", None)
@@ -1388,6 +1394,7 @@ def _permitted_rows(
                 rights_authority_run_id=latest_run_id,
                 rights_gate_id=gate_id,
                 rights_gate_reason=canonical_json_bytes(stable_rights).decode("utf-8"),
+                item_count=assessment.item_count,
             )
             all_rows.append(row)
             if run_id == latest_run_id:
@@ -1507,30 +1514,30 @@ def run_cycle(
             current.close()
 
     observations = _parsed_observations(latest_rows)
-    unit_by_id: dict[str, CorpusIngestUnit] = {}
+    collected_units: list[CorpusIngestUnit] = []
     proving = sqlite3.connect(proving_store)
     proving.execute("PRAGMA query_only=ON")
     try:
         effective_revision_resolver = EffectiveRevisionIdentityResolver(proving)
         for row in corpus_rows:
-            for unit in units_from(
-                _parsed_observations((row,)),
-                proving_run_id=row.run_id,
-                rights_authority_run_id=row.rights_authority_run_id,
-                rights_gate_id=row.rights_gate_id,
-                rights_gate_reason=row.rights_gate_reason,
-                source_definition_url=row.url,
-                effective_revision_resolver=effective_revision_resolver,
-            ):
-                unit_by_id.setdefault(unit.ingest_id, unit)
+            collected_units.extend(
+                units_from(
+                    _parsed_observations((row,)),
+                    proving_run_id=row.run_id,
+                    rights_authority_run_id=row.rights_authority_run_id,
+                    rights_gate_id=row.rights_gate_id,
+                    rights_gate_reason=row.rights_gate_reason,
+                    source_definition_url=row.url,
+                    effective_revision_resolver=effective_revision_resolver,
+                )
+            )
     finally:
         proving.close()
-    units = tuple(
-        sorted(
-            unit_by_id.values(), key=lambda item: (item.observed_at, item.ingest_id)
-        )
-    )
+    units = unique_chunk_units(tuple(collected_units))
     revisions = revisions_from(units)
+    poll_observation_count = len(corpus_rows)
+    feed_snapshot_item_count = sum(row.item_count for row in latest_rows)
+    effective_pull_count = len(revisions)
     candidates = form_candidates(observations)
     sources = len({row.source_id for row in latest_rows})
     unpublished = connect(unpublished_store)
@@ -1544,8 +1551,11 @@ def run_cycle(
             {
                 "proving_run_id": run_id,
                 "observations": len(latest_rows),
+                "poll_observation_count": poll_observation_count,
+                "feed_snapshot_item_count": feed_snapshot_item_count,
+                "effective_pull_count": effective_pull_count,
                 "candidates": len(candidates),
-                "eligible_source_revisions": len(revisions),
+                "eligible_source_revisions": effective_pull_count,
                 "eligible_ingest_chunks": len(units),
                 "writer_id": writer.writer_id,
             },
@@ -1599,6 +1609,8 @@ def run_cycle(
         coverage = graphiti_coverage(
             unpublished,
             revisions=revisions,
+            poll_observation_count=poll_observation_count,
+            feed_snapshot_item_count=feed_snapshot_item_count,
         )
         record_graphiti_coverage(unpublished, coverage)
         digest = append_ledger(
@@ -1627,5 +1639,8 @@ def run_cycle(
         digest,
         writer.writer_id,
         graphiti_ok,
-        len(revisions),
+        effective_pull_count,
+        poll_observation_count,
+        feed_snapshot_item_count,
+        effective_pull_count,
     )

@@ -335,7 +335,7 @@ def units_from(
 
 @dataclass(frozen=True, slots=True)
 class EligibleCorpusRevision:
-    """Coverage denominator entry; chunks remain implementation-level work."""
+    """One eligible effective revision; chunks remain implementation-level work."""
 
     revision_id: str
     source_id: str
@@ -345,24 +345,73 @@ class EligibleCorpusRevision:
     ingest_ids: tuple[str, ...]
 
 
+def _effective_revision_chunk_key(
+    unit: CorpusIngestUnit,
+) -> tuple[str, str, str, int]:
+    revision = unit.effective_revision
+    return (
+        revision.source_id,
+        revision.item_key,
+        revision.revision_digest,
+        unit.chunk_ordinal,
+    )
+
+
+def unique_chunk_units(
+    units: tuple[CorpusIngestUnit, ...],
+) -> tuple[CorpusIngestUnit, ...]:
+    """Keep one ingest unit per effective-revision chunk.
+
+    Repeated poll observations of unchanged content collapse to the earliest
+    retained sighting. Chunk ordinals stay distinct under that revision.
+    """
+
+    selected: dict[tuple[str, str, str, int], CorpusIngestUnit] = {}
+    for unit in units:
+        key = _effective_revision_chunk_key(unit)
+        previous = selected.get(key)
+        if previous is None or unit.observed_at < previous.observed_at:
+            selected[key] = unit
+    return tuple(
+        sorted(
+            selected.values(),
+            key=lambda item: (
+                item.effective_revision.first_observed_at,
+                item.revision_id,
+                item.chunk_ordinal,
+            ),
+        )
+    )
+
+
 def revisions_from(
     units: tuple[CorpusIngestUnit, ...],
 ) -> tuple[EligibleCorpusRevision, ...]:
-    grouped: dict[str, list[CorpusIngestUnit]] = {}
-    for unit in units:
-        grouped.setdefault(unit.revision_id, []).append(unit)
+    grouped: dict[tuple[str, str, str], list[CorpusIngestUnit]] = {}
+    for unit in unique_chunk_units(units):
+        key = (
+            unit.effective_revision.source_id,
+            unit.effective_revision.item_key,
+            unit.effective_revision.revision_digest,
+        )
+        grouped.setdefault(key, []).append(unit)
     revisions = []
-    for revision_id, chunks in grouped.items():
+    for chunks in grouped.values():
         ordered = sorted(chunks, key=lambda item: item.chunk_ordinal)
         first = ordered[0]
+        landed_at = first.effective_revision.first_observed_at
         revisions.append(
             EligibleCorpusRevision(
-                revision_id=revision_id,
+                revision_id=first.revision_id,
                 source_id=first.source_id,
                 item_key=first.item_key,
-                observed_at=first.observed_at,
-                source_time=first.temporal().reference_time.to_text(),
-                ingest_ids=tuple(dict.fromkeys(item.ingest_id for item in ordered)),
+                observed_at=landed_at,
+                source_time=map_reference_time(
+                    published_at=first.published_at,
+                    updated_at=first.updated_at,
+                    observed_at=landed_at,
+                ).reference_time.to_text(),
+                ingest_ids=tuple(item.ingest_id for item in ordered),
             )
         )
     return tuple(
