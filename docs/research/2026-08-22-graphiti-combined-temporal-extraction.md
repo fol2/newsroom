@@ -34,8 +34,8 @@ The authority-private module `newsroom.graphiti_adapter.combined_temporal_extrac
 4. expands local IDs into Graphiti-compatible node and edge proposals, retaining `entity_type_id` and evidence segment IDs on `attributes`;
 5. sets relation temporal fields on the primary object;
 6. bypasses `extract_timestamps_batch` after validation;
-7. routes every node through a deterministic local resolver (`LOCAL_NEW`) without an LLM dedupe call or graph lookup, keeping same-name local IDs distinct;
-8. routes edges through the existing invalidation guard, a recording embedder (digest, no provider floats), and an in-memory mutation journal with rollback; `graph_effect_attempted` remains false (no Neo4j);
+7. fails closed for non-zero proposals unless the caller supplies an explicit pipeline; the owner-authorised runtime factory wires graphiti-core's existing node resolver and edge-pointer resolver, so deduplication and graph lookup are not replaced by local substitutes;
+8. routes runtime nodes and edges through graphiti-core's bulk persistence and embedding paths inside the existing invalidation guard and `Neo4jMutationGuard` durable journal; provider-free tests use an explicit recording pipeline and make no Neo4j or provider call;
 9. retains a GING-005-shaped leaf receipt (raw-output digest, framework/model/prompt versions, invocation count, usage/cost slots) even when usage is `UNMEASURED`;
 10. binds episode identity with GING-002 `ingest_key` (representation digest, source timestamps, chunk ordinal, configuration and temporal-policy digests, plus this seam's schema digest and candidate prompt digest) and maps `reference_time` with GING-003, keeping `ingested_at` as `created_at` only.
 

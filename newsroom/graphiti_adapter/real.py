@@ -34,6 +34,9 @@ from newsroom.extraction.types import (
     ExtractionOutputValidation,
 )
 from newsroom.graphiti_adapter.cli_client import build_cli_llm_client
+from newsroom.graphiti_adapter.combined_temporal_pipeline import (
+    ExistingGraphitiPipeline,
+)
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
 from newsroom.graphiti_adapter.embedding_meter import MeteredOpenAIEmbedder
 from newsroom.graphiti_adapter.usage_meter import summarise_graphiti_usage
@@ -151,6 +154,9 @@ def _load_graphiti() -> SimpleNamespace:
         from graphiti_core.nodes import EntityNode
         from graphiti_core.utils.bulk_utils import resolve_edge_pointers
         from graphiti_core.utils.maintenance.edge_operations import extract_edges
+        from graphiti_core.utils.maintenance.node_operations import (
+            resolve_extracted_nodes,
+        )
     except ImportError as exc:
         raise GraphitiAdapterContractError(
             "graphiti extra (graphiti-core 0.29.3) is required for real Graphiti execution"
@@ -213,8 +219,100 @@ def _load_graphiti() -> SimpleNamespace:
         EpisodicNode=EpisodicNode,
         EntityEdge=EntityEdge,
         EntityNode=EntityNode,
+        create_entity_edge_embeddings=create_entity_edge_embeddings,
+        resolve_edge_pointers=resolve_edge_pointers,
+        resolve_extracted_nodes=resolve_extracted_nodes,
         NodeNotFoundError=NodeNotFoundError,
         MutationGuard=Neo4jMutationGuard,
+    )
+
+
+def combined_temporal_pipeline_for(
+    *,
+    graphiti: Any,
+    guard: Neo4jMutationGuard,
+    episode: Any,
+    previous_episodes: tuple[Any, ...] = (),
+    entity_types: dict[str, type[Any]] | None = None,
+) -> ExistingGraphitiPipeline:
+    """Wire combined-temporal proposals to the pinned existing Graphiti pipeline."""
+
+    runtime = _load_graphiti()
+
+    async def resolve_nodes(nodes: list[Any]) -> tuple[
+        list[Any], dict[str, str], list[tuple[Any, Any]]
+    ]:
+        typed_nodes = [
+            runtime.EntityNode(
+                uuid=str(node.uuid),
+                name=str(node.name),
+                group_id=str(node.group_id),
+                labels=list(node.labels),
+                created_at=node.created_at,
+                summary=str(node.summary),
+                attributes=dict(node.attributes),
+            )
+            for node in nodes
+        ]
+        return await runtime.resolve_extracted_nodes(
+            graphiti.clients,
+            typed_nodes,
+            episode,
+            list(previous_episodes),
+            entity_types,
+        )
+
+    def resolve_pointers(edges: list[Any], uuid_map: dict[str, str]) -> list[Any]:
+        typed_edges = [
+            runtime.EntityEdge(
+                uuid=str(edge.uuid),
+                group_id=str(edge.group_id),
+                source_node_uuid=str(edge.source_node_uuid),
+                target_node_uuid=str(edge.target_node_uuid),
+                created_at=edge.created_at,
+                name=str(edge.name),
+                fact=str(edge.fact),
+                fact_embedding=getattr(edge, "fact_embedding", None),
+                episodes=list(edge.episodes),
+                expired_at=getattr(edge, "expired_at", None),
+                valid_at=edge.valid_at,
+                invalid_at=edge.invalid_at,
+                reference_time=edge.reference_time,
+                attributes=dict(edge.attributes),
+            )
+            for edge in edges
+        ]
+        return runtime.resolve_edge_pointers(typed_edges, uuid_map)
+
+    async def persist_graph(nodes: list[Any], edges: list[Any]) -> None:
+        await graphiti._process_episode_data(
+            episode,
+            nodes,
+            edges,
+            datetime.now(tz=UTC),
+            str(episode.group_id),
+        )
+
+    def chat_receipt() -> list[dict[str, object]]:
+        return [
+            dict(item)
+            for item in getattr(graphiti.clients.llm_client, "invocations", ())
+        ]
+
+    def embedding_receipt() -> dict[str, object]:
+        receipt = getattr(graphiti.clients.embedder, "receipt", None)
+        return dict(receipt()) if callable(receipt) else _no_embedding_usage()
+
+    return ExistingGraphitiPipeline(
+        guard=guard,
+        resolve_nodes=resolve_nodes,
+        resolve_pointers=resolve_pointers,
+        create_embeddings=runtime.create_entity_edge_embeddings,
+        persist_graph=persist_graph,
+        embedder=graphiti.clients.embedder,
+        run_async=asyncio.run,
+        chat_receipt=chat_receipt,
+        embedding_receipt=embedding_receipt,
     )
 
 
@@ -924,4 +1022,4 @@ class RealGraphitiAdapter:
         return produced
 
 
-__all__ = ["RealGraphitiAdapter"]
+__all__ = ["RealGraphitiAdapter", "combined_temporal_pipeline_for"]

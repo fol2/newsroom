@@ -27,7 +27,6 @@ from newsroom.graphiti_adapter.combined_temporal_extraction import (
     CALL_SHAPES_PATH,
     CONTRACT_NAME,
     LIVE_PACKET_PATH,
-    LOCAL_NEW,
     MEASUREMENTS_PATH,
     SCHEMA,
     SCHEMA_DIGEST,
@@ -39,6 +38,10 @@ from newsroom.graphiti_adapter.combined_temporal_extraction import (
     build_compact_prompt,
     extract_combined_temporal,
     segment_source,
+)
+from newsroom.graphiti_adapter.combined_temporal_pipeline import (
+    CombinedTemporalPipelineError,
+    CombinedTemporalPipelineResult,
 )
 from newsroom.graphiti_adapter.combined_temporal_fixtures import (
     FIXTURES,
@@ -77,12 +80,44 @@ class _FakeTransport:
         )
 
 
+class _ProviderFreePipeline:
+    def execute(
+        self,
+        *,
+        nodes: tuple[Any, ...],
+        edges: tuple[Any, ...],
+        receipt: dict[str, object],
+    ) -> CombinedTemporalPipelineResult:
+        assert receipt["provider_attempt_number"] == 1
+        for node in nodes:
+            node.attributes = {**node.attributes, "resolution": "NEW"}
+        for edge in edges:
+            edge.fact_embedding = [0.0]
+        return CombinedTemporalPipelineResult(
+            nodes=nodes,
+            edges=edges,
+            guarded_edges=edges,
+            node_resolutions=tuple("NEW" for _node in nodes),
+            graph_effect_attempted=False,
+            embedding_skipped=False,
+            journal_skipped=False,
+            rollback_skipped=True,
+        )
+
+
+_PIPELINE = _ProviderFreePipeline()
+
+
 def _extract(
     name: str, payload: object | None = None
 ) -> tuple[CombinedTemporalLeaf, GoldFixture]:
     case = fixture(name)
     transport = _FakeTransport(case.gold if payload is None else payload)
-    return extract_combined_temporal(case.revision, transport=transport), case
+    return extract_combined_temporal(
+        case.revision,
+        transport=transport,
+        pipeline=_PIPELINE,
+    ), case
 
 
 def test_compact_schema_matches_the_ticket_contract() -> None:
@@ -146,8 +181,8 @@ def test_zero_result_makes_exactly_one_generate_response_request() -> None:
     assert leaf.nodes == ()
     assert leaf.edges == ()
     assert leaf.graph_effect_attempted is False
-    assert leaf.embedding_skipped is False
-    assert leaf.journal_skipped is False
+    assert leaf.embedding_skipped is True
+    assert leaf.journal_skipped is True
     assert leaf.rollback_skipped is True
     assert leaf.node_resolutions == ()
 
@@ -174,9 +209,9 @@ def test_nonzero_relation_makes_one_request_and_sets_temporal_fields() -> None:
     assert leaf.embedding_skipped is False
     assert leaf.journal_skipped is False
     assert leaf.rollback_skipped is True
-    assert leaf.node_resolutions == (LOCAL_NEW, LOCAL_NEW)
-    assert all(node.attributes["resolution"] == LOCAL_NEW for node in leaf.nodes)
-    assert all("embedding_digest" in edge.attributes for edge in leaf.edges)
+    assert leaf.node_resolutions == ("NEW", "NEW")
+    assert all(node.attributes["resolution"] == "NEW" for node in leaf.nodes)
+    assert all(edge.fact_embedding == [0.0] for edge in leaf.edges)
     assert all(node.attributes["entity_type_id"] == 0 for node in leaf.nodes)
     assert leaf.edges[0].attributes["evidence_segment_ids"] == [0]
     assert case.gold["facts"][0]["source_local_id"] != case.gold["facts"][0][
@@ -240,6 +275,7 @@ def test_normalisation_is_stable_under_key_and_order_variation() -> None:
     second = extract_combined_temporal(
         case.revision,
         transport=_FakeTransport(shuffled),
+        pipeline=_PIPELINE,
     )
     assert first.payload_digest == second.payload_digest
     assert first.payload == second.payload
@@ -368,7 +404,9 @@ def test_episode_identity_binds_source_digests_and_source_timestamps() -> None:
     assert leaf.configuration_digest == configuration_digest()
     shifted = replace(case.revision, published_at="2026-01-01T00:00:00Z")
     other = extract_combined_temporal(
-        shifted, transport=_FakeTransport(case.gold)
+        shifted,
+        transport=_FakeTransport(case.gold),
+        pipeline=_PIPELINE,
     )
     assert other.ingest_id != leaf.ingest_id
     assert {node.uuid for node in other.nodes} != {node.uuid for node in leaf.nodes}
@@ -376,6 +414,7 @@ def test_episode_identity_binds_source_digests_and_source_timestamps() -> None:
     later = extract_combined_temporal(
         replace(case.revision, ingested_at="2026-08-23T00:00:00Z"),
         transport=_FakeTransport(case.gold),
+        pipeline=_PIPELINE,
     )
     assert later.ingest_id == leaf.ingest_id
     assert {node.uuid for node in later.nodes} == {node.uuid for node in leaf.nodes}
@@ -457,7 +496,8 @@ def test_research_note_recommends_without_amending_ging_010() -> None:
     assert "#731" in note
     assert "QUALIFIED_PROVIDER_FREE" in note
     assert "owner-gated" in note
-    assert "LOCAL_NEW" in note
+    assert "Neo4jMutationGuard" in note
+    assert "LOCAL_NEW" not in note
     assert "RESOLUTION_DEFERRED" not in note
 
 
@@ -521,6 +561,7 @@ def test_prompt_or_schema_binding_mints_a_new_ingest_identity(
     shifted = extract_combined_temporal(
         replace(case.revision, predecessor_revision_id="other-rev"),
         transport=_FakeTransport(case.gold),
+        pipeline=_PIPELINE,
     )
     assert shifted.ingest_id != leaf.ingest_id
     assert {node.uuid for node in shifted.nodes} != {node.uuid for node in leaf.nodes}
@@ -532,6 +573,7 @@ def test_prompt_or_schema_binding_mints_a_new_ingest_identity(
     schema_shifted = extract_combined_temporal(
         case.revision,
         transport=_FakeTransport(case.gold),
+        pipeline=_PIPELINE,
     )
     assert schema_shifted.ingest_id != leaf.ingest_id
     assert {node.uuid for node in schema_shifted.nodes} != {
@@ -540,22 +582,27 @@ def test_prompt_or_schema_binding_mints_a_new_ingest_identity(
     assert configuration_digest() == leaf.configuration_digest
 
 
-def test_failing_embedder_rolls_back_without_graph_effect() -> None:
-    async def _boom(_embedder: Any, _edges: list[Any]) -> None:
-        raise RuntimeError("embed failed")
+def test_pipeline_failure_retains_rollback_outcome() -> None:
+    class _FailedPipeline:
+        def execute(self, **_kwargs: Any) -> CombinedTemporalPipelineResult:
+            raise CombinedTemporalPipelineError(
+                "embed failed",
+                graph_effect_attempted=True,
+                rollback_completed=True,
+            )
 
     case = fixture("pair-current")
     leaf = extract_combined_temporal(
         case.revision,
         transport=_FakeTransport(case.gold),
-        embed_edges=_boom,
+        pipeline=_FailedPipeline(),
     )
     assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
     assert leaf.failure_code is CombinedTemporalFailureCode.PIPELINE_FAILED
     assert leaf.embedding_skipped is False
     assert leaf.journal_skipped is False
     assert leaf.rollback_skipped is False
-    assert leaf.graph_effect_attempted is False
+    assert leaf.graph_effect_attempted is True
     assert leaf.nodes == ()
     assert leaf.edges == ()
 
@@ -588,3 +635,50 @@ def test_duplicate_json_facts_key_is_a_typed_failure() -> None:
     assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
     assert leaf.failure_code is CombinedTemporalFailureCode.MALFORMED_OBJECT
     assert leaf.payload is None
+
+
+def test_huge_json_integer_is_a_typed_failure() -> None:
+    leaf = extract_combined_temporal(
+        fixture("pair-current").revision,
+        transport=_FakeTransport(
+            '{"entities":[],"facts":[],"x":' + ("1" * 5_000) + "}"
+        ),
+    )
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.MALFORMED_OBJECT
+    assert leaf.payload is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    ("explicit-valid-at", "explicit-invalid-at", "relative-date"),
+)
+def test_temporal_bounds_cannot_be_swapped(name: str) -> None:
+    case = fixture(name)
+    payload = json.loads(json.dumps(case.gold))
+    fact = payload["facts"][0]
+    fact["valid_at"], fact["invalid_at"] = fact["invalid_at"], fact["valid_at"]
+    leaf = extract_combined_temporal(case.revision, transport=_FakeTransport(payload))
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+
+
+def test_entity_name_tokens_cannot_masquerade_as_a_relation_type() -> None:
+    case = fixture("pair-current")
+    payload = json.loads(json.dumps(case.gold))
+    payload["facts"][0]["relation_type"] = "LEGISLATIVE_COUNCIL"
+    leaf = extract_combined_temporal(case.revision, transport=_FakeTransport(payload))
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+
+
+def test_nonzero_extraction_requires_an_explicit_pipeline() -> None:
+    case = fixture("pair-current")
+    leaf = extract_combined_temporal(
+        case.revision,
+        transport=_FakeTransport(case.gold),
+    )
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.PIPELINE_FAILED
+    assert leaf.embedding_skipped is True
+    assert leaf.journal_skipped is True

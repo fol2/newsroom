@@ -6,12 +6,11 @@ amend GING-010.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,12 +23,14 @@ from newsroom.authority.canonical import (
     digest_canonical,
 )
 from newsroom.authority.types import UtcTimestamp
-from newsroom.graphiti_adapter.edge_guard import guard_extracted_edges
+from newsroom.graphiti_adapter.combined_temporal_pipeline import (
+    CombinedTemporalPipeline,
+    CombinedTemporalPipelineError,
+)
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_EXTRACTION_INSTRUCTIONS,
 )
-from newsroom.graphiti_adapter.neo4j_guard import GuardState
 from newsroom.graphiti_adapter.identity import (
     configuration_digest,
     content_digest as revision_content_digest,
@@ -44,7 +45,6 @@ CONTRACT_NAME = "NewsroomCombinedTemporalExtractionV1"
 GROUP_ID = "newsroom-combined-temporal-v1"
 MAX_SEGMENT_BYTES = 512
 GOVERNED_ENTITY_TYPE_IDS = frozenset({0})
-LOCAL_NEW = "LOCAL_NEW"
 UNMEASURED = "UNMEASURED"
 _REPO = Path(__file__).resolve().parents[2]
 MEASUREMENTS_PATH = (
@@ -72,6 +72,10 @@ _ISO_UTC = re.compile(
 )
 _ISO_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _CORRECTION = re.compile(r"(?i)\bcorrection\s*:")
+_INVALID_TEMPORAL_CUE = re.compile(
+    r"(?i)\b(?:until|ceased|ended|expired|invalidated|no longer)\b"
+)
+_WORD = re.compile(r"[A-Za-z0-9]+")
 _RELATIVE_OFFSETS = {
     "yesterday": timedelta(days=-1),
     "today": timedelta(days=0),
@@ -92,7 +96,8 @@ _MONTH_NAMES = (
     "December",
 )
 _PROSE_DATE = re.compile(
-    r"\b\d{1,2} (" + "|".join(_MONTH_NAMES) + r") \d{4}\b"
+    r"\b\d{1,2} (" + "|".join(_MONTH_NAMES) + r") \d{4}\b",
+    flags=re.IGNORECASE,
 )
 
 SCHEMA: dict[str, Any] = {
@@ -153,9 +158,6 @@ SCHEMA: dict[str, Any] = {
     "type": "object",
 }
 SCHEMA_DIGEST = digest_canonical(SCHEMA)
-
-EmbedEdges = Callable[[Any, list[Any]], Awaitable[None]]
-
 
 class CombinedTemporalOutcome(StrEnum):
     TERMINAL_SUCCESS_WITH_PROPOSALS = "TERMINAL_SUCCESS_WITH_PROPOSALS"
@@ -351,6 +353,7 @@ def build_compact_prompt(revision: SourceRevisionInput) -> CompactPrompt:
         "Extract only named or source-grounded entities that participate in a retained fact.",
         "Zero facts requires zero entities.",
         "Use the source's certainty. Do not add outside knowledge.",
+        "Build each relation_type only from relation words present in its fact; entity-name words are not relation evidence.",
         "Put valid_at and invalid_at on each fact. Resolve relative dates against REFERENCE_TIME to ISO-8601 UTC, or null.",
         "Cite evidence with the integer segment IDs below. Do not invent byte offsets.",
         "A valid empty object is terminal success.",
@@ -373,7 +376,7 @@ def extract_combined_temporal(
     revision: SourceRevisionInput,
     *,
     transport: CombinedTemporalTransport,
-    embed_edges: EmbedEdges | None = None,
+    pipeline: CombinedTemporalPipeline | None = None,
 ) -> CombinedTemporalLeaf:
     ingest_id = revision.ingest_id
     temporal_basis = revision.temporal_basis
@@ -436,6 +439,7 @@ def extract_combined_temporal(
             embedding_skipped=True,
             journal_skipped=True,
             rollback_skipped=True,
+            graph_effect_attempted=False,
             **receipt,
         )
     except CanonicalizationError:
@@ -454,50 +458,12 @@ def extract_combined_temporal(
             embedding_skipped=True,
             journal_skipped=True,
             rollback_skipped=True,
+            graph_effect_attempted=False,
             **receipt,
         )
-    resolutions, uuid_map = _resolve_nodes_locally(nodes)
-    journal = _MemoryJournal()
-    journal.begin()
-    journal.pending.extend(edges)
-    try:
-        guarded = _guard_edges(
-            edges,
-            uuid_map=uuid_map,
-            embed_edges=embed_edges or _record_embeddings,
-        )
-        if len(guarded) != len(journal.pending):
-            raise CombinedTemporalError(
-                CombinedTemporalFailureCode.IDENTITY_INVALID,
-                "edge guard dropped a relation",
-            )
-        if journal.state is not GuardState.PENDING:
-            raise CombinedTemporalError(
-                CombinedTemporalFailureCode.PIPELINE_FAILED,
-                "journal is not pending",
-            )
-        journal.complete()
-    except CombinedTemporalError as exc:
-        journal.rollback()
-        return _leaf(
-            CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE,
-            exc.code,
-            prompt,
-            None,
-            None,
-            (),
-            (),
-            (),
-            tuple(calls),
-            {},
-            resolutions,
-            embedding_skipped=False,
-            journal_skipped=False,
-            rollback_skipped=False,
-            **receipt,
-        )
-    except Exception:
-        journal.rollback()
+    if not edges:
+        pipeline_result = None
+    elif pipeline is None:
         return _leaf(
             CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE,
             CombinedTemporalFailureCode.PIPELINE_FAILED,
@@ -509,12 +475,76 @@ def extract_combined_temporal(
             (),
             tuple(calls),
             {},
-            resolutions,
-            embedding_skipped=False,
-            journal_skipped=False,
-            rollback_skipped=False,
+            (),
+            embedding_skipped=True,
+            journal_skipped=True,
+            rollback_skipped=True,
+            graph_effect_attempted=False,
             **receipt,
         )
+    else:
+        try:
+            pipeline_result = pipeline.execute(
+                nodes=nodes,
+                edges=edges,
+                receipt={**receipt, "provider_attempt_number": 1},
+            )
+        except CombinedTemporalPipelineError as exc:
+            return _leaf(
+                CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE,
+                CombinedTemporalFailureCode.PIPELINE_FAILED,
+                prompt,
+                None,
+                None,
+                (),
+                (),
+                (),
+                tuple(calls),
+                {},
+                (),
+                embedding_skipped=False,
+                journal_skipped=False,
+                rollback_skipped=not exc.rollback_completed,
+                graph_effect_attempted=exc.graph_effect_attempted,
+                **receipt,
+            )
+        except Exception:
+            return _leaf(
+                CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE,
+                CombinedTemporalFailureCode.PIPELINE_FAILED,
+                prompt,
+                None,
+                None,
+                (),
+                (),
+                (),
+                tuple(calls),
+                {},
+                (),
+                embedding_skipped=False,
+                journal_skipped=False,
+                rollback_skipped=False,
+                graph_effect_attempted=True,
+                **receipt,
+            )
+    if pipeline_result is None:
+        output_nodes = nodes
+        output_edges = edges
+        guarded: tuple[Any, ...] = ()
+        resolutions: tuple[str, ...] = ()
+        graph_effect_attempted = False
+        embedding_skipped = True
+        journal_skipped = True
+        rollback_skipped = True
+    else:
+        output_nodes = pipeline_result.nodes
+        output_edges = pipeline_result.edges
+        guarded = pipeline_result.guarded_edges
+        resolutions = pipeline_result.node_resolutions
+        graph_effect_attempted = pipeline_result.graph_effect_attempted
+        embedding_skipped = pipeline_result.embedding_skipped
+        journal_skipped = pipeline_result.journal_skipped
+        rollback_skipped = pipeline_result.rollback_skipped
     outcome = (
         CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
         if not normalised["facts"]
@@ -526,15 +556,16 @@ def extract_combined_temporal(
         prompt,
         normalised,
         digest_canonical(normalised),
-        nodes,
-        edges,
+        output_nodes,
+        output_edges,
         guarded,
         tuple(calls),
         ranges,
         resolutions,
-        embedding_skipped=False,
-        journal_skipped=False,
-        rollback_skipped=True,
+        embedding_skipped=embedding_skipped,
+        journal_skipped=journal_skipped,
+        rollback_skipped=rollback_skipped,
+        graph_effect_attempted=graph_effect_attempted,
         **receipt,
     )
 
@@ -559,6 +590,7 @@ def _leaf(
     embedding_skipped: bool,
     journal_skipped: bool,
     rollback_skipped: bool,
+    graph_effect_attempted: bool,
     raw_output_digest: str | None,
     framework_version: str,
     model_version: str | None,
@@ -580,7 +612,7 @@ def _leaf(
         edges,
         guarded,
         calls,
-        False,
+        graph_effect_attempted,
         ranges,
         resolutions,
         embedding_skipped,
@@ -673,7 +705,7 @@ def _parse_payload(raw: object) -> dict[str, Any]:
             decoded = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
         except CombinedTemporalError:
             raise
-        except json.JSONDecodeError as exc:
+        except (ValueError, RecursionError) as exc:
             raise CombinedTemporalError(
                 CombinedTemporalFailureCode.MALFORMED_OBJECT,
                 "response is not one JSON object",
@@ -771,15 +803,11 @@ def _normalise(
                 CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
                 "source and target names are not present in cited segments",
             )
-        cue_ok = all(
-            re.search(rf"\b{re.escape(token)}\b", retained, flags=re.IGNORECASE)
-            for token in fact["relation_type"].split("_")
+        _assert_relation_grounding(
+            fact=fact,
+            source_name=source_name,
+            target_name=target_name,
         )
-        if not cue_ok:
-            raise CombinedTemporalError(
-                CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
-                "relation type is not supported by cited segments",
-            )
         _assert_single_attribution(retained)
         _assert_temporal_policy(fact, retained, reference_time)
         ranges[fact["fact"]] = cited
@@ -860,22 +888,73 @@ def _assert_single_attribution(retained: str) -> None:
         )
 
 
+def _words(value: str) -> set[str]:
+    return {item.lower() for item in _WORD.findall(value)}
+
+
+def _assert_relation_grounding(
+    *,
+    fact: Mapping[str, Any],
+    source_name: str,
+    target_name: str,
+) -> None:
+    relation_words = {item.lower() for item in fact["relation_type"].split("_")}
+    fact_words = _words(str(fact["fact"]))
+    entity_words = _words(source_name) | _words(target_name)
+    if not relation_words <= fact_words or not (relation_words - entity_words):
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
+            "relation type is not supported by relation words in the fact",
+        )
+
+
+def _date_expectations(
+    retained: str, reference_time: datetime
+) -> tuple[set[date], set[date]]:
+    valid_dates: set[date] = set()
+    invalid_dates: set[date] = set()
+
+    def retain(value: date, start: int) -> None:
+        context = retained[max(0, start - 48) : start]
+        target = invalid_dates if _INVALID_TEMPORAL_CUE.search(context) else valid_dates
+        target.add(value)
+
+    for name, offset in _RELATIVE_OFFSETS.items():
+        for match in re.finditer(
+            rf"\b{re.escape(name)}\b", retained, flags=re.IGNORECASE
+        ):
+            retain((reference_time + offset).date(), match.start())
+    for match in _ISO_DATE.finditer(retained):
+        retain(datetime.strptime(match.group(0), "%Y-%m-%d").date(), match.start())
+    for match in _PROSE_DATE.finditer(retained):
+        retain(
+            datetime.strptime(match.group(0).title(), "%d %B %Y").date(),
+            match.start(),
+        )
+    return valid_dates, invalid_dates
+
+
 def _assert_temporal_policy(
     fact: Mapping[str, Any], retained: str, reference_time: datetime
 ) -> None:
-    hits = [
-        name
-        for name in _RELATIVE_OFFSETS
-        if re.search(rf"\b{name}\b", retained, flags=re.IGNORECASE)
-    ]
-    expected = {(reference_time + _RELATIVE_OFFSETS[name]).date() for name in hits}
-    if _has_temporal_cue(retained) and fact["valid_at"] is None and fact["invalid_at"] is None:
+    valid_dates, invalid_dates = _date_expectations(retained, reference_time)
+    if (
+        (valid_dates or invalid_dates)
+        and fact["valid_at"] is None
+        and fact["invalid_at"] is None
+    ):
         raise CombinedTemporalError(
             CombinedTemporalFailureCode.TEMPORAL_INVALID,
             "cited evidence has a temporal cue but both bounds are null",
         )
-    for field_name in ("valid_at", "invalid_at"):
+    expected_by_field = {"valid_at": valid_dates, "invalid_at": invalid_dates}
+    for field_name, expected in expected_by_field.items():
         raw = fact[field_name]
+        if expected and raw is None:
+            raise CombinedTemporalError(
+                CombinedTemporalFailureCode.TEMPORAL_INVALID,
+                f"{field_name} omits a source-grounded temporal bound",
+            )
         if raw is None:
             continue
         value = UtcTimestamp.parse(raw).value
@@ -886,22 +965,18 @@ def _assert_temporal_policy(
                     f"{field_name} does not obey the reference-time policy",
                 )
             continue
+        if valid_dates or invalid_dates:
+            raise CombinedTemporalError(
+                CombinedTemporalFailureCode.TEMPORAL_INVALID,
+                f"{field_name} uses the other temporal bound's semantics",
+            )
         iso_date = value.date().isoformat()
         prose = f"{value.day} {_MONTH_NAMES[value.month - 1]} {value.year}"
-        if iso_date not in retained and prose not in retained:
+        if iso_date not in retained and prose.lower() not in retained.lower():
             raise CombinedTemporalError(
                 CombinedTemporalFailureCode.TEMPORAL_INVALID,
                 f"{field_name} is not grounded in cited evidence",
             )
-
-
-def _has_temporal_cue(retained: str) -> bool:
-    if any(
-        re.search(rf"\b{name}\b", retained, flags=re.IGNORECASE)
-        for name in _RELATIVE_OFFSETS
-    ):
-        return True
-    return _ISO_DATE.search(retained) is not None or _PROSE_DATE.search(retained) is not None
 
 
 def _entity(raw: object) -> dict[str, Any]:
@@ -1114,7 +1189,7 @@ def _expand(
             entity["name"],
             entity["entity_type_id"],
         )
-        node = _NamespaceNode(
+        node = SimpleNamespace(
             uuid=node_uuid,
             name=entity["name"],
             group_id=revision.group_id,
@@ -1124,7 +1199,7 @@ def _expand(
             attributes={
                 "entity_type_id": entity["entity_type_id"],
                 "evidence_segment_ids": list(entity["evidence_segment_ids"]),
-                "resolution": LOCAL_NEW,
+                "resolution": "UNRESOLVED",
                 "ingest_id": ingest_id,
             },
         )
@@ -1146,7 +1221,7 @@ def _expand(
             else UtcTimestamp.parse(fact["invalid_at"]).value
         )
         edges.append(
-            _NamespaceEdge(
+            SimpleNamespace(
                 uuid=_uuid(
                     "edge",
                     ingest_id,
@@ -1161,7 +1236,9 @@ def _expand(
                 created_at=created,
                 name=fact["relation_type"],
                 fact=fact["fact"],
+                fact_embedding=None,
                 episodes=[episode_uuid],
+                expired_at=None,
                 valid_at=valid_at,
                 invalid_at=invalid_at,
                 reference_time=reference,
@@ -1174,102 +1251,6 @@ def _expand(
             )
         )
     return tuple(nodes), tuple(edges)
-
-
-class _NamespaceNode(SimpleNamespace):
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-
-
-class _NamespaceEdge(SimpleNamespace):
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-
-
-class _MemoryJournal:
-    def __init__(self) -> None:
-        self.state = GuardState.CREATED
-        self.pending: list[Any] = []
-
-    def begin(self) -> None:
-        if self.state is not GuardState.CREATED:
-            raise RuntimeError("journal already begun")
-        self.state = GuardState.PENDING
-
-    def complete(self) -> None:
-        if self.state is not GuardState.PENDING:
-            raise RuntimeError("journal complete requires pending")
-        self.pending.clear()
-        self.state = GuardState.COMPLETE
-
-    def rollback(self) -> None:
-        self.pending.clear()
-        self.state = GuardState.RECOVERED_AMBIGUOUS
-
-
-def _resolve_nodes_locally(
-    nodes: tuple[Any, ...],
-) -> tuple[tuple[str, ...], dict[str, str]]:
-    uuid_map: dict[str, str] = {}
-    resolutions: list[str] = []
-    for node in nodes:
-        attributes = dict(getattr(node, "attributes", {}) or {})
-        attributes["resolution"] = LOCAL_NEW
-        node.attributes = attributes
-        uuid_map[str(node.uuid)] = str(node.uuid)
-        resolutions.append(LOCAL_NEW)
-    return tuple(resolutions), uuid_map
-
-
-def _resolve_edge_pointers(
-    edges: list[Any], uuid_map: dict[str, str]
-) -> list[Any]:
-    for edge in edges:
-        edge.source_node_uuid = uuid_map.get(
-            str(edge.source_node_uuid), str(edge.source_node_uuid)
-        )
-        edge.target_node_uuid = uuid_map.get(
-            str(edge.target_node_uuid), str(edge.target_node_uuid)
-        )
-    return edges
-
-
-def _guard_edges(
-    edges: tuple[Any, ...],
-    *,
-    uuid_map: dict[str, str],
-    embed_edges: EmbedEdges,
-) -> tuple[Any, ...]:
-    return tuple(
-        _run_coroutine(
-            guard_extracted_edges(
-                extracted_edges=list(edges),
-                uuid_map=uuid_map,
-                embedder=None,
-                resolve_pointers=_resolve_edge_pointers,
-                create_embeddings=embed_edges,
-            )
-        )[0]
-    )
-
-
-def _run_coroutine(coro: Any) -> Any:
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
-
-
-async def _record_embeddings(embedder: Any, edges: list[Any]) -> None:
-    del embedder
-    for edge in edges:
-        payload = canonical_json_bytes(
-            {"uuid": str(edge.uuid), "fact": str(edge.fact)}
-        )
-        attributes = dict(getattr(edge, "attributes", {}) or {})
-        attributes["embedding_digest"] = digest_bytes(payload)
-        edge.attributes = attributes
 
 
 def _uuid(*parts: object) -> str:
@@ -1291,7 +1272,6 @@ __all__ = [
     "GOVERNED_ENTITY_TYPE_IDS",
     "GROUP_ID",
     "LIVE_PACKET_PATH",
-    "LOCAL_NEW",
     "MEASUREMENTS_PATH",
     "SCHEMA",
     "SCHEMA_DIGEST",
