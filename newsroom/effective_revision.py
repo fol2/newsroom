@@ -40,13 +40,13 @@ class EffectiveRevisionIdentityResolver:
             """,
             (source_id, item_key, revision_digest),
         ).fetchone()
-        
+
         if row is None:
             raise ValueError(
                 f"effective revision {source_id}:{item_key}:{revision_digest} "
                 "has no retained first observation"
             )
-        
+
         return EffectiveRevisionIdentity(
             source_id=source_id,
             item_key=item_key,
@@ -78,7 +78,7 @@ def create_effective_revision_schema(connection: sqlite3.Connection) -> None:
 
 def backfill_missing_first_seen(connection: sqlite3.Connection) -> int:
     """Populate missing first-seen entries from earliest observations.
-    
+
     Returns the count of rows written.
     Uses a watermark to track processed observations; cheap no-op if no new observations.
     Parses only observations newer than the watermark.
@@ -101,10 +101,10 @@ def backfill_missing_first_seen(connection: sqlite3.Connection) -> int:
         """
     ).fetchone()
     latest_observation_time = result[0] if result[0] else None
-    
+
     if latest_observation_time is None:
         return 0  # No usable observations to backfill
-    
+
     if watermark is not None and latest_observation_time <= watermark:
         return 0  # All usable observations already processed
 
@@ -126,12 +126,12 @@ def backfill_missing_first_seen(connection: sqlite3.Connection) -> int:
             ORDER BY fetched_at ASC
         """
         params = (watermark,)
-    
+
     observations = connection.execute(query, params).fetchall()
 
     # Parse observations and build a map of revisions to their earliest observation time
     revisions_seen: dict[tuple[str, str, str], str] = {}
-    
+
     for source_id, fetched_at, url, body in observations:
         for item in parse_observation(source_id=source_id, url=url, body=body):
             key = (
@@ -154,7 +154,7 @@ def backfill_missing_first_seen(connection: sqlite3.Connection) -> int:
 
     # Determine what needs to be written
     to_write = {k: v for k, v in revisions_seen.items() if k not in existing_keys}
-    
+
     if not to_write:
         # Even if nothing new to write, advance watermark to avoid re-parsing
         # Skip watermark update if lock is unavailable; it will be set on next real work

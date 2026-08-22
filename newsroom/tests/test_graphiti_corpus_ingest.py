@@ -1345,17 +1345,17 @@ def test_backlog_with_recent_first_seen_row_still_backsills_older_revisions(
     tmp_path: Path,
 ) -> None:
     """Verify backfill detects missing rows even when MAX(first_seen) >= MAX(obs).
-    
+
     Reproduces: store with some missing rows, a recent first-seen row whose timestamp
     equals the latest observation. Without watermark, guard incorrectly skips backfill.
     """
     proving = _proving(tmp_path)
     connection = connect_proving(str(proving))
-    
+
     body = b"<feed><entry><id>item</id><title>Item</title></entry></feed>"
     url = "https://www.gov.uk/search/all.atom"
     digest = digest_bytes(body)
-    
+
     # Insert old observations (these will be missing first-seen rows)
     for i in range(5):
         connection.execute(
@@ -1375,7 +1375,7 @@ def test_backlog_with_recent_first_seen_row_still_backsills_older_revisions(
                 1,
             ),
         )
-    
+
     # Insert a recent observation that will be added to first-seen by _put()-like logic
     latest_time = "2026-08-20T10:00:00.000000Z"
     connection.execute(
@@ -1395,7 +1395,7 @@ def test_backlog_with_recent_first_seen_row_still_backsills_older_revisions(
             1,
         ),
     )
-    
+
     # Simulate _put() having written ONE first-seen row with the latest timestamp
     # This makes MAX(first_seen_at) == MAX(fetched_at) but many rows are still missing
     connection.execute(
@@ -1408,17 +1408,17 @@ def test_backlog_with_recent_first_seen_row_still_backsills_older_revisions(
     )
     connection.commit()
     connection.close()
-    
+
     # Now call backfill: the old bug's guard would return 0 because MAX(first_seen) == MAX(obs)
     # But there are still missing rows from older observations
     connection = connect_proving(str(proving))
     from newsroom.effective_revision import backfill_missing_first_seen
     rows_written = backfill_missing_first_seen(connection)
     connection.close()
-    
+
     # Verify backfill actually ran and found missing rows
     assert rows_written > 0, "Backfill should have written rows for old observations"
-    
+
     # Verify watermark was set
     connection = connect_proving(str(proving))
     watermark = connection.execute(
@@ -1433,17 +1433,17 @@ def test_backlog_revisions_without_first_seen_self_heal_deterministically(
     tmp_path: Path,
 ) -> None:
     """Verify run_cycle backfills pre-existing revisions without first-seen rows.
-    
+
     Simulates transition: observations exist without first-seen rows.
     run_cycle must backfill deterministically and produce stable identities.
     """
     proving = _proving(tmp_path)
-    
+
     # Insert observations without first-seen rows (simulating backlog)
     body = b"<feed><entry><id>item-one</id><title>Item One</title><summary>Content</summary></entry></feed>"
     url = "https://www.gov.uk/search/all.atom"
     connection = connect_proving(str(proving))
-    
+
     for observed_at in (
         "2026-08-20T00:00:00.000000Z",
         "2026-08-20T01:00:00.000000Z",
@@ -1468,7 +1468,7 @@ def test_backlog_revisions_without_first_seen_self_heal_deterministically(
         )
     connection.commit()
     connection.close()
-    
+
     # First run_cycle with backlog: backfill should run and complete successfully
     unpublished_1 = tmp_path / "unpublished-1.sqlite3"
     report_1 = run_cycle(
@@ -1480,7 +1480,7 @@ def test_backlog_revisions_without_first_seen_self_heal_deterministically(
         clock=lambda: datetime(2026, 8, 21, tzinfo=UTC),
     )
     assert report_1.eligible >= 1, "First run_cycle should backfill and process observations"
-    
+
     # Verify that first-seen rows were written
     connection = connect_proving(str(proving))
     first_seen_count = connection.execute(
@@ -1488,7 +1488,7 @@ def test_backlog_revisions_without_first_seen_self_heal_deterministically(
     ).fetchone()[0]
     connection.close()
     assert first_seen_count > 0, "Backfill should have written first-seen rows"
-    
+
     # Second run_cycle with same data: should skip backfill (no-op case)
     unpublished_2 = tmp_path / "unpublished-2.sqlite3"
     report_2 = run_cycle(
