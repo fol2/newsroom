@@ -16,12 +16,17 @@ from typing import Callable, ContextManager, Final, Iterator, TypedDict
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.corpus import (
     CorpusIngestUnit,
+    merge_durable_revisions,
     revisions_from,
     unique_chunk_units,
     units_from,
 )
 from newsroom.control_plane.editorial import GroupedObservation, form_candidates
-from newsroom.effective_revision import EffectiveRevisionIdentityResolver
+from newsroom.effective_revision import (
+    EffectiveRevisionIdentityResolver,
+    create_effective_revision_schema,
+    backfill_missing_first_seen,
+)
 from newsroom.control_plane.evidence import package_for
 from newsroom.control_plane.graphiti import (
     GovernedRealGraphitiPort,
@@ -33,6 +38,7 @@ from newsroom.control_plane.paths import (
     require_canonical_proving_store,
     require_canonical_unpublished_store,
 )
+from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.store import (
     append_ledger,
     claim_graphiti_attempt,
@@ -48,6 +54,8 @@ from newsroom.control_plane.store import (
     insert_graphiti_attempt_receipt,
     insert_payload,
     is_exact_no_embedding_call,
+    list_landed_revisions,
+    list_remapped_ingest_effects,
     next_graphiti_attempt_number,
     record_graphiti_coverage,
     record_graphiti_failure,
@@ -1405,15 +1413,39 @@ def _permitted_rows(
 def _emit_effective_revision_landed(
     unpublished: sqlite3.Connection,
     units: tuple[CorpusIngestUnit, ...],
+    *,
+    first_seen: tuple[tuple[str, str, str, str], ...] = (),
 ) -> None:
-    seen: set[tuple[str, str, str]] = set()
+    grouped: dict[tuple[str, str, str, str, str], list[CorpusIngestUnit]] = {}
     for unit in units:
-        identity = unit.effective_revision
-        key = (identity.source_id, identity.item_key, identity.revision_digest)
-        if key in seen:
+        grouped.setdefault(unit.coverage_key(), []).append(unit)
+    emitted_triples: set[tuple[str, str, str]] = set()
+    for coverage_key, chunks in grouped.items():
+        ordered = sorted(chunks, key=lambda item: item.chunk_ordinal)
+        first = ordered[0]
+        emit_effective_revision_landed(
+            unpublished,
+            first.effective_revision,
+            published_at=first.published_at or "",
+            updated_at=first.updated_at or "",
+            ingest_ids=tuple(item.ingest_id for item in ordered),
+        )
+        emitted_triples.add(coverage_key[:3])
+    for source_id, item_key, revision_digest, first_observed_at in first_seen:
+        triple = (source_id, item_key, revision_digest)
+        if triple in emitted_triples:
             continue
-        seen.add(key)
-        emit_effective_revision_landed(unpublished, identity)
+        from newsroom.effective_revision import EffectiveRevisionIdentity
+
+        emit_effective_revision_landed(
+            unpublished,
+            EffectiveRevisionIdentity(
+                source_id=source_id,
+                item_key=item_key,
+                revision_digest=revision_digest,
+                first_observed_at=first_observed_at,
+            ),
+        )
 
 
 def _backfill_proving_first_seen(proving_store: str) -> None:
@@ -1422,12 +1454,80 @@ def _backfill_proving_first_seen(proving_store: str) -> None:
     connection = sqlite3.connect(
         proving_store, timeout=_PROVING_FENCE_TIMEOUT_SECONDS
     )
-    connection.execute(f"PRAGMA busy_timeout={timeout_ms}")
+    apply_control_plane_sqlite_profile(
+        connection, wal=None, busy_timeout_ms=timeout_ms
+    )
     try:
-        from newsroom.effective_revision import backfill_missing_first_seen
+        create_effective_revision_schema(connection)
         backfill_missing_first_seen(connection)
     finally:
         connection.close()
+
+
+def _rights_permitted_source_ids(
+    proving: sqlite3.Connection,
+    run_id: str,
+    *,
+    evaluated_at: str,
+    required_valid_until: str | None = None,
+) -> frozenset[str]:
+    if _latest_run_with_global_authority(proving) != run_id:
+        return frozenset()
+    permitted: set[str] = set()
+    for gate_id, status in proving.execute(
+        "SELECT gate_id, status FROM proving_gates WHERE run_id=?",
+        (run_id,),
+    ):
+        if not str(gate_id).startswith("RIGHTS_") or str(status) != "PASS":
+            continue
+        source_id = str(gate_id).removeprefix("RIGHTS_")
+        url_row = proving.execute(
+            """
+            SELECT url FROM proving_observations
+            WHERE source_id=?
+            ORDER BY fetched_at DESC
+            LIMIT 1
+            """,
+            (source_id,),
+        ).fetchone()
+        if url_row is None:
+            continue
+        if (
+            _current_rights_decision(
+                proving,
+                run_id=run_id,
+                source_id=source_id,
+                source_url=str(url_row[0]),
+                evaluated_at=evaluated_at,
+                required_valid_until=required_valid_until,
+            )
+            is None
+        ):
+            continue
+        permitted.add(source_id)
+    return frozenset(permitted)
+
+
+def _load_first_seen(
+    proving: sqlite3.Connection,
+) -> tuple[tuple[str, str, str, str], ...]:
+    exists = proving.execute(
+        """
+        SELECT 1 FROM sqlite_master
+        WHERE type='table' AND name='proving_revision_first_seen'
+        """
+    ).fetchone()
+    if exists is None:
+        return ()
+    return tuple(
+        (str(source_id), str(item_key), str(revision_digest), str(first_seen_at))
+        for source_id, item_key, revision_digest, first_seen_at in proving.execute(
+            """
+            SELECT source_id, item_key, revision_digest, first_seen_at
+            FROM proving_revision_first_seen
+            """
+        )
+    )
 
 
 def run_cycle(
@@ -1450,7 +1550,7 @@ def run_cycle(
     admission_evaluated_at = clock().astimezone(UTC)
     _backfill_proving_first_seen(proving_store)
     proving = sqlite3.connect(proving_store)
-    proving.execute("PRAGMA query_only=ON")
+    apply_control_plane_sqlite_profile(proving, query_only=True)
     try:
         run_id, latest_rows, corpus_rows = _permitted_rows(
             proving,
@@ -1462,7 +1562,7 @@ def run_cycle(
 
     def rights_check(unit: CorpusIngestUnit) -> dict[str, object] | None:
         current = sqlite3.connect(proving_store)
-        current.execute("PRAGMA query_only=ON")
+        apply_control_plane_sqlite_profile(current, query_only=True)
         try:
             evaluated_at = clock().astimezone(UTC)
             return _dispatch_rights_decision(
@@ -1483,7 +1583,9 @@ def run_cycle(
         current = sqlite3.connect(
             proving_store, timeout=_PROVING_FENCE_TIMEOUT_SECONDS
         )
-        current.execute(f"PRAGMA busy_timeout={timeout_ms}")
+        apply_control_plane_sqlite_profile(
+            current, wal=None, busy_timeout_ms=timeout_ms
+        )
         try:
             try:
                 current.execute("BEGIN IMMEDIATE")
@@ -1516,8 +1618,15 @@ def run_cycle(
     observations = _parsed_observations(latest_rows)
     collected_units: list[CorpusIngestUnit] = []
     proving = sqlite3.connect(proving_store)
-    proving.execute("PRAGMA query_only=ON")
+    apply_control_plane_sqlite_profile(proving, query_only=True)
     try:
+        permitted_source_ids = _rights_permitted_source_ids(
+            proving,
+            run_id,
+            evaluated_at=_utc_text(admission_evaluated_at),
+            required_valid_until=_dispatch_valid_until(admission_evaluated_at),
+        )
+        first_seen = _load_first_seen(proving)
         effective_revision_resolver = EffectiveRevisionIdentityResolver(proving)
         for row in corpus_rows:
             collected_units.extend(
@@ -1534,10 +1643,9 @@ def run_cycle(
     finally:
         proving.close()
     units = unique_chunk_units(tuple(collected_units))
-    revisions = revisions_from(units)
+    window_revisions = revisions_from(units)
     poll_observation_count = len(corpus_rows)
     feed_snapshot_item_count = sum(row.item_count for row in latest_rows)
-    effective_pull_count = len(revisions)
     candidates = form_candidates(observations)
     sources = len({row.source_id for row in latest_rows})
     unpublished = connect(unpublished_store)
@@ -1545,6 +1653,15 @@ def run_cycle(
     duplicate = 0
     graphiti_ok = 0
     try:
+        _emit_effective_revision_landed(unpublished, units, first_seen=first_seen)
+        revisions = merge_durable_revisions(
+            window_revisions=window_revisions,
+            first_seen=first_seen,
+            landed=list_landed_revisions(unpublished),
+            remapped_effects=list_remapped_ingest_effects(unpublished),
+            permitted_source_ids=permitted_source_ids,
+        )
+        effective_pull_count = len(revisions)
         append_ledger(
             unpublished,
             "PRIVATE_CYCLE_START",
@@ -1560,7 +1677,6 @@ def run_cycle(
                 "writer_id": writer.writer_id,
             },
         )
-        _emit_effective_revision_landed(unpublished, units)
         if graphiti is not None:
             graphiti_ok = _ingest(
                 unpublished,

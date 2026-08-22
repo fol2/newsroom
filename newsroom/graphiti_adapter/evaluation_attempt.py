@@ -27,6 +27,7 @@ from newsroom.graphiti_adapter.identity import (
     content_digest,
     ingest_key,
     observation_authority_ids,
+    representation_digest_for,
     source_definition_version_id,
     typed_id,
 )
@@ -136,7 +137,7 @@ def evaluation_attempt_for_body(
     temporal = map_reference_time(
         published_at=published_at,
         updated_at=updated_at,
-        observed_at=observed_at,
+        observed_at=effective_revision.first_observed_at,
     )
     attempt_id, workspace_id, cleanup_id = attempt_ids(ingest_id, attempt_number)
     previous_attempt_id = (
@@ -146,18 +147,12 @@ def evaluation_attempt_for_body(
         revision_digest = revision_digest or content_digest(
             headline="", body=text, canonical_url=canonical_url
         )
-        representation_digest = representation_digest or digest_canonical(
-            {
-                "source_id": source_id,
-                "item_key": item_key,
-                "revision_digest": revision_digest,
-                "published_at": published_at,
-                "updated_at": updated_at,
-                "observed_fallback_at": effective_revision.observed_fallback_at(
-                    published_at=published_at,
-                    updated_at=updated_at,
-                ),
-            }
+        representation_digest = representation_digest or representation_digest_for(
+            source_id=source_id,
+            item_key=item_key,
+            revision_digest=revision_digest,
+            published_at=published_at,
+            updated_at=updated_at,
         )
         generated = observation_authority_ids(
             source_id=source_id,
@@ -169,7 +164,6 @@ def evaluation_attempt_for_body(
             rights_gate_reason="evaluation fixture",
             published_at=published_at,
             updated_at=updated_at,
-            effective_revision=effective_revision,
         )
         definition_version_id = source_definition_version_id(
             source_id=source_id, source_url=canonical_url
@@ -304,7 +298,6 @@ def evaluation_attempt_for(passages: tuple[str, ...]) -> GraphitiAttemptRequest:
         representation_digest=digest,
         published_at=None,
         updated_at=None,
-        effective_revision=effective_revision,
     )
     return evaluation_attempt_for_body(
         episode_body=body,

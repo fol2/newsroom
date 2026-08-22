@@ -5,10 +5,9 @@ from __future__ import annotations
 from typing import TypeVar
 from uuid import UUID
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, digest_canonical
 from newsroom.authority.objects import ObjectAccessDecisionId
 from newsroom.authority.types import ObjectAdmissionId, UUIDv4Id
-from newsroom.effective_revision import EffectiveRevisionIdentity
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_FALLBACK,
     GRAPHITI_CHAT_MODEL,
@@ -74,6 +73,27 @@ def configuration_digest() -> str:
     )
 
 
+def representation_digest_for(
+    *,
+    source_id: str,
+    item_key: str,
+    revision_digest: str,
+    published_at: str | None,
+    updated_at: str | None,
+) -> str:
+    """Identity digest for a representation. Observation time must not enter it."""
+
+    return digest_canonical(
+        {
+            "source_id": source_id,
+            "item_key": item_key,
+            "revision_digest": revision_digest,
+            "published_at": published_at,
+            "updated_at": updated_at,
+        }
+    )
+
+
 def ingest_key(
     *,
     source_id: str,
@@ -83,7 +103,6 @@ def ingest_key(
     representation_digest: str,
     published_at: str | None,
     updated_at: str | None,
-    effective_revision: EffectiveRevisionIdentity,
     chunk_ordinal: int = 1,
 ) -> str:
     digest = digest_bytes(
@@ -95,10 +114,6 @@ def ingest_key(
                 "representation_digest": representation_digest,
                 "published_at": published_at,
                 "updated_at": updated_at,
-                "observed_fallback_at": effective_revision.observed_fallback_at(
-                    published_at=published_at,
-                    updated_at=updated_at,
-                ),
                 "content_digest": content_digest_value,
                 "chunk_ordinal": chunk_ordinal,
                 "configuration": configuration_digest(),
@@ -130,7 +145,6 @@ def observation_authority_ids(
     rights_gate_reason: str,
     published_at: str | None,
     updated_at: str | None,
-    effective_revision: EffectiveRevisionIdentity,
 ) -> tuple[
     ObjectAdmissionId,
     ObjectAccessDecisionId,
@@ -147,11 +161,6 @@ def observation_authority_ids(
         revision_digest,
         published_at or "",
         updated_at or "",
-        effective_revision.observed_fallback_at(
-            published_at=published_at,
-            updated_at=updated_at,
-        )
-        or "",
     )
     return (
         _typed(
