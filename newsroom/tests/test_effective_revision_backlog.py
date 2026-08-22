@@ -516,7 +516,8 @@ def test_unresolved_collisions_are_enumerated_not_merged(tmp_path: Path) -> None
         for row in connection.execute("SELECT ingest_id FROM unpublished_graphiti_ingest")
     }
     connection.close()
-    assert remaining == ingest_ids
+    assert ingest_ids <= remaining
+    assert remaining == ingest_ids | {"ingest-uk10-unique"}
     assert live.unresolved_collisions == dry.unresolved_collisions
 
 
