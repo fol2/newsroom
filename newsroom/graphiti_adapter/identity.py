@@ -5,7 +5,11 @@ from __future__ import annotations
 from typing import TypeVar
 from uuid import UUID
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+)
 from newsroom.authority.objects import ObjectAccessDecisionId
 from newsroom.authority.types import ObjectAdmissionId, UUIDv4Id
 from newsroom.graphiti_adapter.evaluation_packet import (
@@ -73,6 +77,27 @@ def configuration_digest() -> str:
     )
 
 
+def representation_digest_for(
+    *,
+    source_id: str,
+    item_key: str,
+    revision_digest: str,
+    published_at: str | None,
+    updated_at: str | None,
+) -> str:
+    """Identity digest for a representation. Observation time must not enter it."""
+
+    return digest_canonical(
+        {
+            "source_id": source_id,
+            "item_key": item_key,
+            "revision_digest": revision_digest,
+            "published_at": published_at,
+            "updated_at": updated_at,
+        }
+    )
+
+
 def ingest_key(
     *,
     source_id: str,
@@ -82,13 +107,15 @@ def ingest_key(
     representation_digest: str,
     published_at: str | None,
     updated_at: str | None,
-    observed_at: str,
+    observed_at: str | None = None,
     chunk_ordinal: int = 1,
     schema_digest: str | None = None,
     prompt_digest: str | None = None,
     workspace_group: str | None = None,
     episode_uuid: str | None = None,
 ) -> str:
+    """Return stable ingest identity; observation time is deliberately excluded."""
+
     payload = {
         "source_id": source_id,
         "item_key": item_key,
@@ -96,9 +123,6 @@ def ingest_key(
         "representation_digest": representation_digest,
         "published_at": published_at,
         "updated_at": updated_at,
-        "observed_fallback_at": (
-            observed_at if published_at is None and updated_at is None else None
-        ),
         "content_digest": content_digest_value,
         "chunk_ordinal": chunk_ordinal,
         "configuration": configuration_digest(),
@@ -116,9 +140,28 @@ def ingest_key(
     return str(uuid4_from_digest(bytes.fromhex(digest.removeprefix("sha256:")[:32])))
 
 
-def attempt_ids(ingest_id: str, attempt_number: int = 1) -> tuple[
-    GraphitiAttemptId, GraphitiWorkspaceId, GraphitiCleanupReceiptId
-]:
+def source_revision_id(
+    *,
+    source_id: str,
+    item_key: str,
+    revision_digest: str,
+    published_at: str | None,
+    updated_at: str | None,
+) -> SourceRevisionId:
+    return _typed(
+        SourceRevisionId,
+        "revision",
+        source_id,
+        item_key,
+        revision_digest,
+        published_at or "",
+        updated_at or "",
+    )
+
+
+def attempt_ids(
+    ingest_id: str, attempt_number: int = 1
+) -> tuple[GraphitiAttemptId, GraphitiWorkspaceId, GraphitiCleanupReceiptId]:
     return (
         _typed(GraphitiAttemptId, "attempt", ingest_id, attempt_number),
         _typed(GraphitiWorkspaceId, "workspace", ingest_id, attempt_number),
@@ -137,7 +180,6 @@ def observation_authority_ids(
     rights_gate_reason: str,
     published_at: str | None,
     updated_at: str | None,
-    observed_at: str,
 ) -> tuple[
     ObjectAdmissionId,
     ObjectAccessDecisionId,
@@ -146,15 +188,12 @@ def observation_authority_ids(
     SourceRevisionId,
     DiscoveryRepresentationId,
 ]:
-    revision_id = _typed(
-        SourceRevisionId,
-        "revision",
-        source_id,
-        item_key,
-        revision_digest,
-        published_at or "",
-        updated_at or "",
-        observed_at if published_at is None and updated_at is None else "",
+    revision_id = source_revision_id(
+        source_id=source_id,
+        item_key=item_key,
+        revision_digest=revision_digest,
+        published_at=published_at,
+        updated_at=updated_at,
     )
     return (
         _typed(
@@ -183,7 +222,11 @@ def observation_authority_ids(
     )
 
 
-def source_definition_version_id(*, source_id: str, source_url: str) -> SourceDefinitionVersionId:
+def source_definition_version_id(
+    *, source_id: str, source_url: str
+) -> SourceDefinitionVersionId:
     """Bind a version identity to the retained source endpoint definition."""
 
-    return _typed(SourceDefinitionVersionId, "definition-version", source_id, source_url)
+    return _typed(
+        SourceDefinitionVersionId, "definition-version", source_id, source_url
+    )

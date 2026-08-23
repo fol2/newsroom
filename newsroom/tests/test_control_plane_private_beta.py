@@ -6,11 +6,16 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
-from newsroom.control_plane.cycle import run_cycle
+from newsroom.effective_revision import (
+    create_effective_revision_schema,
+    retain_observation_revision_first_seen,
+)
+from newsroom.control_plane.cycle import CycleReport, run_cycle as _run_cycle
 from newsroom.control_plane.corpus import CorpusIngestUnit
 from newsroom.control_plane.editorial import StoryCandidateRecord
 from newsroom.control_plane.evidence import EvidencePackage
@@ -55,6 +60,12 @@ from newsroom.increment9.rights import (
     FIXTURE_NOW,
     fixture_inventory,
 )
+
+
+def run_cycle(*args: Any, **kwargs: Any) -> CycleReport:
+    kwargs.setdefault("clock", lambda: datetime(2026, 8, 20, tzinfo=UTC))
+    return _run_cycle(*args, **kwargs)
+
 
 ATOM = b"""<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
@@ -149,6 +160,7 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
         );
         """
     )
+    create_effective_revision_schema(connection)
     connection.execute(
         """
         INSERT INTO proving_runs(
@@ -200,6 +212,13 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
                 1,
                 None,
             ),
+        )
+        retain_observation_revision_first_seen(
+            connection,
+            source_id=source_id,
+            url=url,
+            body=body,
+            observed_at="2026-08-16T21:41:34.000000Z",
         )
     for gate_id in PROVING_GATES:
         if gate_id.startswith("RIGHTS_"):

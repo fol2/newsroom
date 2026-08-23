@@ -21,6 +21,10 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.effective_revision import (
+    create_effective_revision_schema,
+    retain_observation_revision_first_seen,
+)
 from newsroom.increment9.prospective_run_authority import (
     GATE_ID as RUN_AUTHORITY_GATE,
     RunAuthorityResolver,
@@ -468,12 +472,17 @@ def assess(
 
 
 def _connect(path: str) -> sqlite3.Connection:
+    # Import here: control_plane.__init__ loads cycle → Graphiti → this module.
+    from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
+
     lowered = path.lower()
     if any(marker in lowered for marker in FORBIDDEN_STORE_MARKERS):
         raise ProvingError("proving store must not alias production or news_pool")
     connection = sqlite3.connect(path, timeout=PROVING_WRITE_TIMEOUT_SECONDS)
-    connection.execute(
-        f"PRAGMA busy_timeout={int(PROVING_WRITE_TIMEOUT_SECONDS * 1_000)}"
+    apply_control_plane_sqlite_profile(
+        connection,
+        wal=None,
+        busy_timeout_ms=int(PROVING_WRITE_TIMEOUT_SECONDS * 1_000),
     )
     deadline = time.monotonic() + PROVING_WRITE_TIMEOUT_SECONDS
     while True:
@@ -542,6 +551,7 @@ def _connect(path: str) -> sqlite3.Connection:
         );
         """
     )
+    create_effective_revision_schema(connection)
     return connection
 
 
@@ -622,6 +632,15 @@ def _put(connection: sqlite3.Connection, run_id: str, fetched_at: str, observati
             observation.item_count,
             observation.error,
         ),
+    )
+    if observation.status_code != 200 or observation.error is not None:
+        return
+    retain_observation_revision_first_seen(
+        connection,
+        source_id=observation.source_id,
+        url=observation.url,
+        body=body,
+        observed_at=fetched_at,
     )
 
 
