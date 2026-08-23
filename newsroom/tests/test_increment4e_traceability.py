@@ -166,7 +166,7 @@ def test_operations_and_review_retain_proof_rollback_and_stop_boundaries() -> No
         "replay cannot resurrect",
         "test_increment4e_neo4j_service.py",
         "Increment 5 must not start",
-        "Real Graphiti, model and embedding execution remains disabled and unqualified",
+        "Real Graphiti, model and embedding execution remains unqualified in this unit",
     ):
         assert phrase in operations
     for phrase in (
