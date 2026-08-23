@@ -672,6 +672,12 @@ def test_retention_never_moves_durable_first_seen_later(tmp_path: Path) -> None:
            WHERE source_id=? AND item_key=? AND revision_digest=?""",
         (durable_at, source_id, item_key, revision_digest),
     )
+    connection.execute(
+        """INSERT INTO proving_effective_pull_first_seen(
+               source_id,item_key,revision_digest,published_at,updated_at,first_seen_at
+           ) VALUES(?,?,?,'','',?)""",
+        (source_id, item_key, revision_digest, "2026-08-20T00:00:00.000000Z"),
+    )
     connection.commit()
     connection.close()
 
@@ -1122,6 +1128,20 @@ def test_live_requires_authenticated_command(tmp_path: Path) -> None:
         )
 
 
+def test_live_rejects_a_live_receipt_as_dry_run_proof(tmp_path: Path) -> None:
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    receipt = _run(proving, unpublished, tmp_path, mode="dry-run").as_dict()
+    receipt.update(mode="live", mutated=True)
+    with pytest.raises(BacklogReconciliationError, match="not a dry-run"):
+        _run(
+            proving,
+            unpublished,
+            tmp_path,
+            mode="live",
+            dry_run_receipt=receipt,
+        )
+
+
 def test_command_service_rejects_invalid_authentication(tmp_path: Path) -> None:
     proving, unpublished, _meta = _amplified_stores(tmp_path)
     dry = _run(proving, unpublished, tmp_path, mode="dry-run")
@@ -1187,6 +1207,51 @@ def test_live_command_is_idempotent_for_the_same_key(tmp_path: Path) -> None:
     assert second.remapped_count == first.remapped_count
 
 
+def test_command_schema_preserves_unknown_legacy_writer(tmp_path: Path) -> None:
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    connection = sqlite3.connect(unpublished)
+    connection.execute("DROP TABLE unpublished_reconciliation_commands")
+    connection.executescript(
+        """
+        CREATE TABLE unpublished_reconciliation_commands(
+            idempotency_key TEXT PRIMARY KEY,
+            caller_principal TEXT NOT NULL,
+            command_type TEXT NOT NULL,
+            expected_mapping_digest TEXT NOT NULL,
+            receipt_json TEXT NOT NULL,
+            at TEXT NOT NULL
+        );
+        INSERT INTO unpublished_reconciliation_commands VALUES(
+            'legacy','legacy.caller','legacy.command','sha256:legacy','{}',
+            '2026-08-20T00:00:00.000000Z'
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+    dry = _run(proving, unpublished, tmp_path, mode="dry-run")
+
+    _run(
+        proving,
+        unpublished,
+        tmp_path,
+        mode="live",
+        dry_run_receipt=dry.as_dict(),
+        key="new-command",
+    )
+
+    connection = sqlite3.connect(unpublished)
+    writers = dict(
+        connection.execute(
+            "SELECT idempotency_key, writer_principal "
+            "FROM unpublished_reconciliation_commands"
+        )
+    )
+    connection.close()
+    assert writers["legacy"] is None
+    assert writers["new-command"] == "newsroom.control-plane.command-service"
+
+
 def test_retained_effects_are_remapped_with_old_ingest_id(tmp_path: Path) -> None:
     proving, unpublished, _meta = _amplified_stores(tmp_path)
     dry = _run(proving, unpublished, tmp_path, mode="dry-run")
@@ -1233,6 +1298,75 @@ def test_retained_effects_are_remapped_with_old_ingest_id(tmp_path: Path) -> Non
     assert "proving_revision_first_seen" in proving_tables
     assert "proving_backfill_watermark" in proving_tables
     assert "unpublished_effective_revision_remap" in tables
+
+
+def test_spend_only_lineage_is_an_explicit_collision(tmp_path: Path) -> None:
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    connection = sqlite3.connect(unpublished)
+    connection.execute(
+        """
+        INSERT INTO unpublished_graphiti_spend(
+            spend_id, ingest_id, attempt_number, proving_run_id,
+            reserved_gbp_microunits, usage_basis, status, at
+        ) VALUES('spend-only:1','spend-only',1,'run-1',1,'RESERVATION',
+                 'UNRECONCILED',?)
+        """,
+        (_FIRST_POLL,),
+    )
+    connection.commit()
+    connection.close()
+
+    dry = _run(proving, unpublished, tmp_path, mode="dry-run")
+
+    assert any(
+        collision["ingest_ids"] == ["spend-only"]
+        for collision in dry.unresolved_collisions
+    )
+
+
+def test_durable_orphan_is_in_the_exact_denominator(tmp_path: Path) -> None:
+    from newsroom.control_plane.corpus import merge_durable_revisions
+
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    connection = sqlite3.connect(proving)
+    connection.execute(
+        """
+        INSERT INTO proving_revision_first_seen(
+            source_id, item_key, revision_digest, first_seen_at
+        ) VALUES('UK-99','expired','sha256:orphan',?)
+        """,
+        (_FIRST_POLL,),
+    )
+    connection.commit()
+    first_seen = tuple(
+        map(str, row)
+        for row in connection.execute(
+            "SELECT source_id,item_key,revision_digest,first_seen_at "
+            "FROM proving_revision_first_seen"
+        )
+    )
+    connection.close()
+
+    dry = _run(proving, unpublished, tmp_path, mode="dry-run")
+    runtime = merge_durable_revisions(window_revisions=(), first_seen=first_seen)
+
+    assert dry.new_effective_revision_count == len(runtime)
+
+
+def test_coverage_rows_are_part_of_the_append_only_census(tmp_path: Path) -> None:
+    _proving, unpublished, _meta = _amplified_stores(tmp_path)
+    connection = sqlite3.connect(unpublished)
+    connection.execute(
+        "INSERT INTO unpublished_graphiti_coverage(at, coverage_json) VALUES(?,?)",
+        (_FIRST_POLL, "{}"),
+    )
+    before = _census_unpublished(connection)
+    connection.execute("DELETE FROM unpublished_graphiti_coverage")
+    after = _census_unpublished(connection)
+    connection.close()
+
+    assert before["unpublished_graphiti_coverage"] == frozenset({"1"})
+    assert after["unpublished_graphiti_coverage"] == frozenset()
 
 
 def test_sqlite_profile_enables_durable_writer_pragmas(tmp_path: Path) -> None:

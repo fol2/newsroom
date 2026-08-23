@@ -30,6 +30,16 @@ class EffectiveRevisionCoverageKey(NamedTuple):
     updated_at: str
 
 
+class RemappedIngestEffect(NamedTuple):
+    source_id: str
+    item_key: str
+    revision_digest: str
+    published_at: str
+    updated_at: str
+    old_ingest_id: str
+    new_ingest_id: str
+
+
 def chunk_text(text: str, *, limit: int = MAX_EPISODE_BYTES) -> tuple[str, ...]:
     data = text.encode("utf-8")
     if not data:
@@ -569,7 +579,7 @@ def merge_durable_revisions(
     window_revisions: tuple[EligibleCorpusRevision, ...],
     first_seen: tuple[tuple[str, str, str, str], ...],
     landed: tuple[EligibleCorpusRevision, ...] = (),
-    remapped_effects: tuple[tuple[str, ...], ...] = (),
+    remapped_effects: tuple[RemappedIngestEffect, ...] = (),
     permitted_source_ids: frozenset[str] | None = None,
 ) -> tuple[EligibleCorpusRevision, ...]:
     """Keep proven coverage obligations after raw HTTP bodies leave retention.
@@ -594,16 +604,17 @@ def merge_durable_revisions(
     }
     effects_by_key: dict[EffectiveRevisionCoverageKey, list[str]] = {}
     for effect in remapped_effects:
-        source_id, item_key, revision_digest, published_at, updated_at, ingest_id = (
-            effect[:6]
-        )
-        if ingest_id:
+        if effect.old_ingest_id:
             effects_by_key.setdefault(
                 EffectiveRevisionCoverageKey(
-                    source_id, item_key, revision_digest, published_at, updated_at
+                    effect.source_id,
+                    effect.item_key,
+                    effect.revision_digest,
+                    effect.published_at,
+                    effect.updated_at,
                 ),
                 [],
-            ).append(ingest_id)
+            ).append(effect.old_ingest_id)
     for coverage_key, ingest_ids in effects_by_key.items():
         if coverage_key in selected:
             continue

@@ -12,16 +12,13 @@ import os
 import shutil
 import sqlite3
 import tempfile
-import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from newsroom.authority.auth import AuthenticationProof
 from newsroom.authority.canonical import digest_canonical
-from newsroom.authority.types import UtcTimestamp
 from newsroom.control_plane.command_auth import (
     COMMAND_SERVICE_PRINCIPAL,
     HERMES_COMMAND_PRINCIPAL,
@@ -428,6 +425,11 @@ def _census_unpublished(
             f"{_schema_table('unpublished_graphiti_spend', schema=schema)}",
         ),
         (
+            "unpublished_graphiti_coverage",
+            "SELECT CAST(seq AS TEXT) FROM "
+            f"{_schema_table('unpublished_graphiti_coverage', schema=schema)}",
+        ),
+        (
             "unpublished_graphiti_failures",
             "SELECT ingest_id FROM "
             f"{_schema_table('unpublished_graphiti_failures', schema=schema)}",
@@ -677,9 +679,10 @@ def _build_plan(
             ] = str(seen)
     for pull in pulls:
         retained_at = pull_earliest[pull]
-        durable_at = pull_first_seen.get(pull)
-        if durable_at is None and len(version_markers[pull[0]]) == 1:
-            durable_at = first_seen.get(pull[0])
+        durable = [pull_first_seen[pull]] if pull in pull_first_seen else []
+        if len(version_markers[pull[0]]) == 1 and pull[0] in first_seen:
+            durable.append(first_seen[pull[0]])
+        durable_at = min(durable) if durable else None
         if durable_at is not None and durable_at < retained_at:
             pull_earliest[pull] = durable_at
 
@@ -730,6 +733,16 @@ def _build_plan(
             }
         )
     orphan_keys = tuple(kept_orphans)
+    for triple in orphan_keys:
+        old_key = (
+            "durable-first-seen",
+            triple.source_id,
+            triple.item_key,
+            triple.revision_digest,
+        )
+        old_keys.add(old_key)
+        old_by_source.setdefault(triple.source_id, set()).add(old_key)
+        new_by_source.setdefault(triple.source_id, set()).add((triple, "", ""))
 
     corrections: list[dict[str, object]] = []
     bounded: list[dict[str, object]] = []
@@ -833,7 +846,7 @@ def _build_plan(
                 "retention_window_bounded_inaccuracy": bool(row[5]),
             }
 
-    expected_n = len(pulls)
+    expected_n = len(pulls) + len(orphan_keys)
     per_source = []
     for source_id in sorted({*old_by_source, *new_by_source}):
         old_n = len(old_by_source.get(source_id, set()))
@@ -1059,9 +1072,11 @@ def _resolve_retained_lineage(
     pulls_by_item = _pulls_by_item(pulls)
     mapped: list[dict[str, object]] = []
     collisions: list[dict[str, object]] = []
+    bound_ingest_ids: set[str] = set()
     for (source_id, item_key), lineage in sorted(lineage_by_item.items()):
         unresolved: list[str] = []
         for ingest_id, markers in sorted(lineage.items()):
+            bound_ingest_ids.add(ingest_id)
             candidates = pulls_by_item.get((source_id, item_key), [])
             if markers is not None:
                 revision_digest, published_at, updated_at, chunk_ordinal = markers
@@ -1121,6 +1136,23 @@ def _resolve_retained_lineage(
                     "merged": False,
                 }
             )
+    if _table_exists(unpublished, "unpublished_graphiti_spend", schema=schema):
+        table = _schema_table("unpublished_graphiti_spend", schema=schema)
+        spend_only = sorted(
+            str(row[0])
+            for row in unpublished.execute(f"SELECT DISTINCT ingest_id FROM {table}")
+            if str(row[0]) not in bound_ingest_ids
+        )
+        if spend_only:
+            collisions.append(
+                {
+                    "kind": GRAPH_EFFECT_AMBIGUOUS_COVERAGE,
+                    "source_id": "",
+                    "item_key": "",
+                    "ingest_ids": spend_only,
+                    "merged": False,
+                }
+            )
     mapped.sort(
         key=lambda item: (
             item["source_id"],
@@ -1175,6 +1207,10 @@ def _assert_g1(plan: _Plan) -> None:
 
 
 def _assert_g2(plan: _Plan, dry_run_receipt: Mapping[str, object]) -> None:
+    if dry_run_receipt.get("mode") != "dry-run" or dry_run_receipt.get(
+        "mutated"
+    ) is not False:
+        raise BacklogReconciliationError("G2: receipt is not a dry-run receipt")
     before = dry_run_receipt.get(
         "before_denominator", dry_run_receipt.get("old_identity_count")
     )
@@ -1289,10 +1325,13 @@ def _apply_proving(
     for (triple, published_at, updated_at), first_seen_at in plan.pull_earliest.items():
         connection.execute(
             f"""
-            INSERT OR IGNORE INTO {pull_table}(
+            INSERT INTO {pull_table}(
                 source_id, item_key, revision_digest, published_at, updated_at,
                 first_seen_at
             ) VALUES(?,?,?,?,?,?)
+            ON CONFLICT(source_id, item_key, revision_digest, published_at, updated_at)
+            DO UPDATE SET first_seen_at=excluded.first_seen_at
+            WHERE excluded.first_seen_at < first_seen_at
             """,
             (
                 triple.source_id,
@@ -1420,6 +1459,12 @@ def _record_command(
     receipt: BacklogReconciliationReceipt,
 ) -> None:
     ensure_reconciliation_schema(connection)
+    columns = _table_columns(connection, "unpublished_reconciliation_commands")
+    if "writer_principal" not in columns:
+        connection.execute(
+            "ALTER TABLE unpublished_reconciliation_commands "
+            "ADD COLUMN writer_principal TEXT"
+        )
     connection.execute(
         """
         INSERT OR REPLACE INTO unpublished_reconciliation_commands(
@@ -1703,6 +1748,7 @@ def _restore_incomplete_dual_store(
     for path in (proving_path, unpublished_path):
         connection = sqlite3.connect(path)
         try:
+            apply_control_plane_sqlite_profile(connection, query_only=True, wal=False)
             if not _integrity_ok(connection):
                 raise BacklogReconciliationError(
                     f"G3: incomplete transaction left an invalid store: {path}"
@@ -1782,215 +1828,3 @@ def reconcile_effective_revision_backlog(
     )
     _write_receipt(receipt_path, receipt)
     return receipt
-
-
-class _ControlPlaneCommandService:
-    """Sole direct writer for Control Plane canonical mutation."""
-
-    principal = COMMAND_SERVICE_PRINCIPAL
-
-    def __init__(
-        self,
-        *,
-        authenticator: object,
-        clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
-    ) -> None:
-        if authenticator is None:
-            raise ValueError("command service requires an authenticator")
-        self._authenticator = authenticator
-        self._clock = clock
-
-    def reconcile_effective_revision_backlog(
-        self,
-        *,
-        proving_store: str,
-        unpublished_store: str,
-        dry_run_receipt: Mapping[str, object],
-        receipt_path: Path | None = None,
-        backup_dir: Path | None = None,
-        allow_canonical_mutation: bool = False,
-        evaluated_at: datetime | None = None,
-        idempotency_key: str,
-        expected_mapping_digest: str,
-        proof: AuthenticationProof,
-        mode: Literal["live"] = "live",
-    ) -> BacklogReconciliationReceipt:
-        if mode != "live":
-            raise ValueError("command-service mutation is live-only")
-        now = self._clock()
-        authentication = self._authenticator.authenticate(proof, now=now)
-        authentication.require_current(now)
-        command = _ReconciliationCommand(
-            caller_principal=authentication.principal_id,
-            writer_principal=COMMAND_SERVICE_PRINCIPAL,
-            command_type=RECONCILE_COMMAND_TYPE,
-            idempotency_key=idempotency_key,
-            expected_mapping_digest=expected_mapping_digest,
-        )
-        refuse_canonical_write(
-            proving_store, allow_canonical_mutation=allow_canonical_mutation
-        )
-        refuse_canonical_write(
-            unpublished_store, allow_canonical_mutation=allow_canonical_mutation
-        )
-        if backup_dir is None:
-            raise BacklogReconciliationError(
-                "G3: live migration requires a backup directory"
-            )
-        _assert_command_authority(command)
-        proving_path = Path(proving_store)
-        unpublished_path = Path(unpublished_store)
-        backup_root = Path(backup_dir)
-
-        # Recovery is itself a mutation, so it stays behind authentication.
-        _restore_incomplete_dual_store(
-            proving_path, unpublished_path, backup_root
-        )
-        evaluated = _as_utc(evaluated_at or datetime.now(tz=UTC))
-        plan, _proving_before, _unpublished_before = _plan_reconciliation(
-            proving_store, unpublished_store, evaluated_at=evaluated
-        )
-        _assert_g2(plan, dry_run_receipt)
-        _assert_command(command, plan, dry_run_receipt)
-        completed = _load_completed_command(unpublished_store, command)
-        if completed is not None:
-            _write_receipt(receipt_path, completed)
-            return completed
-
-        proving_backup = backup_root / "proving_store.sqlite3"
-        unpublished_backup = backup_root / "unpublished_store.sqlite3"
-        proving_backup_result = _backup_store(proving_path, proving_backup)
-        unpublished_backup_result = _backup_store(
-            unpublished_path, unpublished_backup
-        )
-        coordinator: dict[str, object] = {
-            "mapping_digest": plan.mapping_digest,
-            "idempotency_key": command.idempotency_key,
-            "proving_store": _store_identity(proving_path),
-            "unpublished_store": _store_identity(unpublished_path),
-            "proving_backup": str(proving_backup.resolve()),
-            "unpublished_backup": str(unpublished_backup.resolve()),
-            "proving_backup_digest": proving_backup_result["digest"],
-            "unpublished_backup_digest": unpublished_backup_result["digest"],
-        }
-        coordinator_path = backup_root / COORDINATOR_NAME
-        _write_coordinator(
-            coordinator_path, {**coordinator, "status": "STARTED"}
-        )
-
-        def apply_mutations() -> tuple[int, BacklogReconciliationReceipt]:
-            conn: sqlite3.Connection | None = sqlite3.connect(str(unpublished_path))
-            try:
-                apply_control_plane_sqlite_profile(conn, wal=False)
-                conn.execute("ATTACH DATABASE ? AS proving", (str(proving_path),))
-                apply_control_plane_sqlite_profile(
-                    conn, wal=False, schema=PROVING_ATTACH_SCHEMA
-                )
-
-                def versions() -> tuple[int, int]:
-                    return (
-                        int(conn.execute("PRAGMA main.data_version").fetchone()[0]),
-                        int(conn.execute("PRAGMA proving.data_version").fetchone()[0]),
-                    )
-
-                before_plan_versions = versions()
-                live_plan = _build_plan(
-                    conn,
-                    conn,
-                    evaluated_at=evaluated,
-                    proving_schema=PROVING_ATTACH_SCHEMA,
-                )
-                if versions() != before_plan_versions:
-                    raise BacklogReconciliationError(
-                        "G2: stores changed while planning"
-                    )
-                _assert_g1(live_plan)
-                _assert_g2(live_plan, dry_run_receipt)
-                _assert_g5(live_plan)
-                _assert_command(command, live_plan, dry_run_receipt)
-                proving_before = _census_proving(
-                    conn, schema=PROVING_ATTACH_SCHEMA
-                )
-                unpublished_before = _census_unpublished(conn)
-                conn.execute("BEGIN IMMEDIATE")
-                if versions() != before_plan_versions:
-                    raise BacklogReconciliationError(
-                        "G2: stores changed before mutation"
-                    )
-                deadline = time.monotonic() + LIVE_TRANSACTION_TIMEOUT_SECONDS
-                conn.set_progress_handler(lambda: time.monotonic() >= deadline, 1_000)
-                _ensure_landed_schema(conn)
-                remapped = _apply_proving(
-                    conn, live_plan, schema=PROVING_ATTACH_SCHEMA
-                )
-                remapped += _apply_remap_rows(conn, live_plan)
-                no_loss = _no_loss_proof(
-                    proving_before=proving_before,
-                    unpublished_before=unpublished_before,
-                    proving_after=_census_proving(
-                        conn, schema=PROVING_ATTACH_SCHEMA
-                    ),
-                    unpublished_after=_census_unpublished(conn),
-                )
-                if no_loss["lost"]:
-                    raise BacklogReconciliationError(
-                        "G3: append-only census lost records"
-                    )
-                rerun_changes = _apply_proving(
-                    conn, live_plan, schema=PROVING_ATTACH_SCHEMA
-                ) + _apply_remap_rows(conn, live_plan)
-                if rerun_changes:
-                    raise BacklogReconciliationError(
-                        "G4: rerun produced further remapping"
-                    )
-                receipt = _receipt_from_plan(
-                    live_plan,
-                    mode="live",
-                    mutated=True,
-                    remapped_count=remapped,
-                    no_loss_proof=no_loss,
-                    gates={key: "pass" for key in ("G1", "G2", "G3", "G4", "G5")},
-                    command=command.as_dict(),
-                )
-                _retain_receipt(conn, receipt.as_dict())
-                _record_command(conn, command, receipt)
-                conn.commit()
-                return remapped, receipt
-            except Exception as exc:
-                if conn is not None and conn.in_transaction:
-                    conn.rollback()
-                if conn is not None:
-                    conn.close()
-                    conn = None
-                if isinstance(exc, sqlite3.OperationalError) and "interrupted" in str(
-                    exc
-                ):
-                    raise BacklogReconciliationError(
-                        "live reconciliation exceeded the five-second transaction limit"
-                    ) from exc
-                raise
-            finally:
-                if conn is not None:
-                    conn.set_progress_handler(None, 0)
-                    conn.close()
-
-        try:
-            _set_journal_mode(proving_path, "DELETE")
-            _set_journal_mode(unpublished_path, "DELETE")
-            remapped, receipt = apply_mutations()
-        except Exception:
-            _restore_wal_profiles(proving_path, unpublished_path)
-            _write_coordinator(
-                coordinator_path, {**coordinator, "status": "ABORTED"}
-            )
-            raise
-        coordinator["remapped_count"] = remapped
-        _write_coordinator(
-            coordinator_path, {**coordinator, "status": "COMMITTED"}
-        )
-        _restore_wal_profiles(proving_path, unpublished_path)
-        _write_coordinator(
-            coordinator_path, {**coordinator, "status": "COMPLETE"}
-        )
-        _write_receipt(receipt_path, receipt)
-        return receipt
