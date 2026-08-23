@@ -258,6 +258,40 @@ def test_guarded_graphiti_never_invalidates_or_reuses_existing_edges(
     assert episode_edges == [proposed]
 
 
+def test_edge_guard_keeps_distinct_relation_types_on_the_same_fact() -> None:
+    from newsroom.graphiti_adapter.edge_guard import guard_extracted_edges
+
+    asked = SimpleNamespace(
+        source_node_uuid="source",
+        target_node_uuid="target",
+        name="ASKED_ABOUT",
+        fact="same fact",
+    )
+    about = SimpleNamespace(
+        source_node_uuid="source",
+        target_node_uuid="target",
+        name="ABOUT",
+        fact="same fact",
+    )
+
+    async def embed(_embedder: object, values: list[object]) -> None:
+        del _embedder
+        assert values == [asked, about]
+
+    new_edges, invalidated, episode_edges = asyncio.run(
+        guard_extracted_edges(
+            extracted_edges=[asked, about],
+            uuid_map={},
+            embedder=object(),
+            resolve_pointers=lambda items, _uuid_map: items,
+            create_embeddings=embed,
+        )
+    )
+    assert new_edges == [asked, about]
+    assert invalidated == []
+    assert episode_edges == [asked, about]
+
+
 def test_cursor_malformed_json_executes_grok_fallback_and_records_both_calls() -> None:
     from newsroom.graphiti_adapter.cli_client import run_cli_chain
 
@@ -836,8 +870,23 @@ def test_pending_guard_recovery_uses_retained_attempt_snapshot() -> None:
         ) -> tuple[list[dict[str, object]], None, None]:
             assert routing_ == "w"
             snapshot_id = params.get("snapshot_id")
-            if isinstance(snapshot_id, str):
+            if (
+                isinstance(snapshot_id, str)
+                and "MERGE (m:NewsroomIngestMarker" not in query
+            ):
                 snapshot_ids.append(snapshot_id)
+            if "CREATE CONSTRAINT" in query:
+                return ([], None, None)
+            if "MERGE (m:NewsroomIngestMarker" in query:
+                return (
+                    [{"marker": marker, "claimed": False, "active": False}],
+                    None,
+                    None,
+                )
+            if "SET m.state = $state" in query:
+                marker["state"] = params["state"]
+                marker["claim_token"] = params["claim_token"]
+                return ([{"marker": marker}], None, None)
             if "RETURN properties(m) AS marker" in query:
                 return ([{"marker": marker}], None, None)
             if "SET m.state = 'ROLLING_BACK'" in query:
@@ -896,14 +945,48 @@ def test_guard_retry_resets_snapshot_after_retained_attempt_cleanup(
         ) -> tuple[list[dict[str, object]], None, None]:
             nonlocal marker
             assert routing_ == "w"
+            if "CREATE CONSTRAINT" in query:
+                return ([], None, None)
+            if "MERGE (m:NewsroomIngestMarker" in query:
+                if marker is None:
+                    marker = {
+                        "state": "SNAPSHOTTING",
+                        "group_id": params["group_id"],
+                        "attempt_number": params["attempt_number"],
+                        "input_digest": params["input_digest"],
+                        "snapshot_id": params["snapshot_id"],
+                        "chat_invocations_json": "[]",
+                        "embedding_usage_json": "null",
+                    }
+                    created_snapshots.append(str(params["snapshot_id"]))
+                    return (
+                        [{"marker": marker, "claimed": True, "active": False}],
+                        None,
+                        None,
+                    )
+                return (
+                    [{"marker": marker, "claimed": False, "active": False}],
+                    None,
+                    None,
+                )
+            if "SET m.state = $state" in query:
+                assert marker is not None
+                marker["state"] = params["state"]
+                marker["claim_token"] = params["claim_token"]
+                return ([{"marker": marker}], None, None)
+            if "DELETE m" in query and "RETURN episode_uuid" in query:
+                marker = None
+                return ([{"episode_uuid": "episode-id"}], None, None)
+            if "SET m.state = 'PENDING'" in query:
+                assert marker is not None
+                marker["state"] = "PENDING"
+                return ([{"state": "PENDING"}], None, None)
             if "RETURN properties(m) AS marker" in query:
                 return ([] if marker is None else [{"marker": marker}], None, None)
             if "NewsroomSnapshot" in query and "DELETE s" in query:
                 deleted_snapshots.append(str(params["snapshot_id"]))
             if "MATCH (m:NewsroomIngestMarker" in query and "DELETE m" in query:
                 marker = None
-            if "CREATE (m:NewsroomIngestMarker" in query:
-                created_snapshots.append(str(params["snapshot_id"]))
             return ([], None, None)
 
     guard = Neo4jMutationGuard(
@@ -917,6 +1000,366 @@ def test_guard_retry_resets_snapshot_after_retained_attempt_cleanup(
     assert created.attempt_number == 2
     assert created_snapshots == ["episode-id:2"]
     assert deleted_snapshots == ["episode-id:1"]
+
+
+def test_concurrent_guard_begin_has_one_atomic_marker_claim() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import (
+        GuardError,
+        GuardState,
+        Neo4jMutationGuard,
+    )
+
+    marker: dict[str, object] | None = None
+    lock = asyncio.Lock()
+    claims = 0
+    constraints = 0
+
+    class Driver:
+        async def execute_query(
+            self,
+            query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            nonlocal claims, constraints, marker
+            assert routing_ == "w"
+            if "CREATE CONSTRAINT" in query:
+                constraints += 1
+                assert "REQUIRE m.episode_uuid IS UNIQUE" in query
+                return ([], None, None)
+            if "MERGE (m:NewsroomIngestMarker" in query:
+                async with lock:
+                    if marker is None:
+                        await asyncio.sleep(0.01)
+                        claims += 1
+                        marker = {
+                            "state": "SNAPSHOTTING",
+                            "group_id": params["group_id"],
+                            "attempt_number": params["attempt_number"],
+                            "input_digest": params["input_digest"],
+                            "snapshot_id": params["snapshot_id"],
+                            "chat_invocations_json": "[]",
+                            "embedding_usage_json": "null",
+                            "claim_token": params["claim_token"],
+                        }
+                        return (
+                            [{"marker": marker, "claimed": True, "active": False}],
+                            None,
+                            None,
+                        )
+                    return (
+                        [{"marker": marker, "claimed": False, "active": True}],
+                        None,
+                        None,
+                    )
+            if "SET m.state = 'PENDING'" in query:
+                assert marker is not None
+                marker["state"] = "PENDING"
+                return ([{"state": "PENDING"}], None, None)
+            return ([], None, None)
+
+    driver = Driver()
+    guards = [
+        Neo4jMutationGuard(
+            driver,
+            group_id=GRAPHITI_WORKSPACE_GROUP,
+            episode_uuid="episode-id",
+            attempt_number=1,
+            input_digest="sha256:" + "0" * 64,
+        )
+        for _ in range(2)
+    ]
+
+    async def begin_both() -> list[object]:
+        return list(
+            await asyncio.gather(
+                *(guard.begin() for guard in guards),
+                return_exceptions=True,
+            )
+        )
+
+    results = asyncio.run(begin_both())
+
+    assert claims == 1
+    assert constraints == 0
+    assert sum(
+        getattr(result, "state", None) is GuardState.CREATED for result in results
+    ) == 1
+    assert sum(isinstance(result, GuardError) for result in results) == 1
+
+
+def test_guard_schema_bootstrap_is_explicit_and_separate_from_begin() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import Neo4jMutationGuard
+
+    queries: list[tuple[str, dict[str, object]]] = []
+
+    class Driver:
+        async def execute_query(
+            self,
+            query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            assert routing_ == "w"
+            queries.append((query, params))
+            return [], None, None
+
+    asyncio.run(Neo4jMutationGuard.bootstrap_schema(Driver()))
+
+    assert len(queries) == 1
+    assert "CREATE CONSTRAINT newsroom_ingest_marker_episode" in queries[0][0]
+    assert queries[0][1] == {}
+
+
+def test_real_runtime_bootstraps_guard_schema_once_before_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    calls = 0
+
+    class Driver:
+        async def execute_query(
+            self,
+            query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            nonlocal calls
+            assert "CREATE CONSTRAINT" in query
+            assert params == {}
+            assert routing_ == "w"
+            calls += 1
+            return [], None, None
+
+    monkeypatch.setattr(real, "_GRAPHITI_SCHEMA_BOOTSTRAPPED", False)
+
+    async def bootstrap_twice() -> None:
+        driver = Driver()
+        await real._bootstrap_graphiti_schema(driver)
+        await real._bootstrap_graphiti_schema(driver)
+
+    asyncio.run(bootstrap_twice())
+
+    assert calls == 1
+
+
+def test_guard_rejects_telemetry_after_claim_takeover() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import GuardError, Neo4jMutationGuard
+
+    class Driver:
+        async def execute_query(
+            self,
+            _query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            del params
+            assert routing_ == "w"
+            return [], None, None
+
+    guard = Neo4jMutationGuard(
+        Driver(),
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        episode_uuid="episode-id",
+        attempt_number=1,
+        input_digest="sha256:" + "0" * 64,
+    )
+    guard._claim_token = "stale"  # type: ignore[attr-defined]
+
+    with pytest.raises(GuardError, match="lost its pending claim"):
+        asyncio.run(
+            guard.record_pending_telemetry(
+                chat_invocations=[],
+                embedding_usage={"usage_basis": "NO_EMBEDDING_CALL"},
+            )
+        )
+
+
+def test_guard_holds_marker_lock_across_external_graph_mutation() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import Neo4jMutationGuard
+
+    lock = asyncio.Lock()
+    events: list[str] = []
+
+    class Result:
+        async def single(self) -> dict[str, object]:
+            return {"claim_token": "owner"}
+
+    class Transaction:
+        async def run(self, _query: str, **_params: object) -> Result:
+            if not lock.locked():
+                await lock.acquire()
+                events.append("fenced")
+            return Result()
+
+        async def commit(self) -> None:
+            events.append("commit")
+            lock.release()
+
+        async def rollback(self) -> None:
+            if lock.locked():
+                lock.release()
+
+    class Session:
+        async def __aenter__(self) -> Session:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def begin_transaction(self) -> Transaction:
+            return Transaction()
+
+    class Driver:
+        def session(self) -> Session:
+            return Session()
+
+    guard = Neo4jMutationGuard(
+        Driver(),
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        episode_uuid="episode-id",
+        attempt_number=1,
+        input_digest="sha256:" + "0" * 64,
+    )
+    guard._claim_token = "owner"  # type: ignore[attr-defined]
+
+    async def prove_lock() -> None:
+        async with guard.fenced_graph_mutation():
+            contender = asyncio.create_task(lock.acquire())
+            await asyncio.sleep(0)
+            assert not contender.done()
+            events.append("persist")
+        await contender
+        events.append("takeover")
+        lock.release()
+
+    asyncio.run(prove_lock())
+
+    assert events == ["fenced", "persist", "commit", "takeover"]
+
+
+def test_concurrent_expired_marker_takeover_is_fenced() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import (
+        GuardError,
+        GuardState,
+        Neo4jMutationGuard,
+    )
+
+    marker: dict[str, object] | None = {
+        "state": "SNAPSHOTTING",
+        "group_id": GRAPHITI_WORKSPACE_GROUP,
+        "attempt_number": 1,
+        "input_digest": "sha256:" + "0" * 64,
+        "snapshot_id": "episode-id:1",
+        "chat_invocations_json": "[]",
+        "embedding_usage_json": "null",
+        "claim_token": "expired",
+        "active": False,
+    }
+    lock = asyncio.Lock()
+    claims = 0
+
+    class Driver:
+        async def execute_query(
+            self,
+            query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            nonlocal claims, marker
+            assert routing_ == "w"
+            if "CREATE CONSTRAINT" in query:
+                return ([], None, None)
+            if "MERGE (m:NewsroomIngestMarker" in query:
+                async with lock:
+                    if marker is None:
+                        claims += 1
+                        marker = {
+                            "state": "SNAPSHOTTING",
+                            "group_id": params["group_id"],
+                            "attempt_number": params["attempt_number"],
+                            "input_digest": params["input_digest"],
+                            "snapshot_id": params["snapshot_id"],
+                            "chat_invocations_json": "[]",
+                            "embedding_usage_json": "null",
+                            "claim_token": params["claim_token"],
+                            "active": True,
+                        }
+                        return (
+                            [{"marker": marker, "claimed": True, "active": False}],
+                            None,
+                            None,
+                        )
+                    return (
+                        [
+                            {
+                                "marker": marker,
+                                "claimed": False,
+                                "active": marker["active"],
+                            }
+                        ],
+                        None,
+                        None,
+                    )
+            if "SET m.state = $state" in query:
+                async with lock:
+                    if (
+                        marker is None
+                        or marker["state"] != params["retained_state"]
+                        or marker["claim_token"] != params["retained_claim_token"]
+                        or marker["active"]
+                    ):
+                        return ([], None, None)
+                    marker["state"] = params["state"]
+                    marker["claim_token"] = params["claim_token"]
+                    marker["active"] = True
+                    return ([{"marker": marker}], None, None)
+            if "DELETE m" in query and "RETURN episode_uuid" in query:
+                async with lock:
+                    if marker is None or marker["claim_token"] != params["claim_token"]:
+                        return ([], None, None)
+                    marker = None
+                    return ([{"episode_uuid": "episode-id"}], None, None)
+            if "SET m.state = 'PENDING'" in query:
+                assert marker is not None
+                if marker["claim_token"] != params["claim_token"]:
+                    return ([], None, None)
+                marker["state"] = "PENDING"
+                return ([{"state": "PENDING"}], None, None)
+            return ([], None, None)
+
+    driver = Driver()
+    guards = [
+        Neo4jMutationGuard(
+            driver,
+            group_id=GRAPHITI_WORKSPACE_GROUP,
+            episode_uuid="episode-id",
+            attempt_number=2,
+            input_digest="sha256:" + "0" * 64,
+        )
+        for _ in range(2)
+    ]
+
+    async def begin_both() -> list[object]:
+        return list(
+            await asyncio.gather(
+                *(guard.begin() for guard in guards), return_exceptions=True
+            )
+        )
+
+    results = asyncio.run(begin_both())
+
+    assert claims == 1
+    assert sum(
+        getattr(result, "state", None) is GuardState.CREATED for result in results
+    ) == 1
+    assert sum(isinstance(result, GuardError) for result in results) == 1
 
 
 def test_guard_rejects_mismatched_retained_snapshot_identity() -> None:
@@ -935,14 +1378,21 @@ def test_guard_rejects_mismatched_retained_snapshot_identity() -> None:
     class Driver:
         async def execute_query(
             self,
-            _query: str,
+            query: str,
             *,
             params: dict[str, object],
             routing_: str,
         ) -> tuple[list[dict[str, object]], None, None]:
-            assert params == {"episode_uuid": "episode-id"}
             assert routing_ == "w"
-            return ([{"marker": marker}], None, None)
+            if "CREATE CONSTRAINT" in query:
+                return ([], None, None)
+            assert "MERGE (m:NewsroomIngestMarker" in query
+            assert params["episode_uuid"] == "episode-id"
+            return (
+                [{"marker": marker, "claimed": False, "active": False}],
+                None,
+                None,
+            )
 
     guard = Neo4jMutationGuard(
         Driver(),
@@ -978,6 +1428,14 @@ def test_complete_guard_recovery_cleans_crash_window_snapshot() -> None:
             routing_: str,
         ) -> tuple[list[dict[str, object]], None, None]:
             assert routing_ == "w"
+            if "CREATE CONSTRAINT" in query:
+                return ([], None, None)
+            if "MERGE (m:NewsroomIngestMarker" in query:
+                return (
+                    [{"marker": marker, "claimed": False, "active": False}],
+                    None,
+                    None,
+                )
             if "RETURN properties(m) AS marker" in query:
                 return ([{"marker": marker}], None, None)
             if "NewsroomSnapshot" in query and "DELETE s" in query:
@@ -1006,6 +1464,12 @@ def test_complete_guard_recovery_requires_byte_exact_canonical_snapshot() -> Non
     raw_json = canonical_json_bytes(raw).decode("utf-8")
     marker = {
         "state": "COMPLETE",
+        "group_id": GRAPHITI_WORKSPACE_GROUP,
+        "input_digest": "sha256:" + "0" * 64,
+        "attempt_number": 1,
+        "snapshot_id": "episode-id:1",
+        "chat_invocations_json": "[]",
+        "embedding_usage_json": "null",
         "validated_raw_json": raw_json,
         "validated_raw_digest": digest_bytes(raw_json.encode("utf-8")),
     }
@@ -1033,6 +1497,32 @@ def test_complete_guard_recovery_requires_byte_exact_canonical_snapshot() -> Non
     marker["validated_raw_json"] = '{"provider_attempt_number": 1, "result": "fixed"}'
     with pytest.raises(GuardError, match="digest differs"):
         asyncio.run(guard.completed_raw())
+
+
+def test_completed_guard_probe_is_read_only_when_marker_is_absent() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import Neo4jMutationGuard
+
+    class Driver:
+        async def execute_query(
+            self,
+            query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            assert "RETURN properties(m) AS marker" in query
+            assert params == {"episode_uuid": "episode-id"}
+            assert routing_ == "w"
+            return ([], None, None)
+
+    guard = Neo4jMutationGuard(
+        Driver(),
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        episode_uuid="episode-id",
+        attempt_number=1,
+        input_digest="sha256:" + "0" * 64,
+    )
+    assert asyncio.run(guard.completed_raw_or_none()) is None
 
 
 def test_guard_completion_checks_the_committed_transition() -> None:

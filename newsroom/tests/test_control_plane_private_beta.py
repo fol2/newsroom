@@ -6,6 +6,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -14,7 +15,7 @@ from newsroom.effective_revision import (
     create_effective_revision_schema,
     retain_observation_revision_first_seen,
 )
-from newsroom.control_plane.cycle import run_cycle
+from newsroom.control_plane.cycle import CycleReport, run_cycle as _run_cycle
 from newsroom.control_plane.corpus import CorpusIngestUnit
 from newsroom.control_plane.editorial import StoryCandidateRecord
 from newsroom.control_plane.evidence import EvidencePackage
@@ -59,6 +60,12 @@ from newsroom.increment9.rights import (
     FIXTURE_NOW,
     fixture_inventory,
 )
+
+
+def run_cycle(*args: Any, **kwargs: Any) -> CycleReport:
+    kwargs.setdefault("clock", lambda: datetime(2026, 8, 20, tzinfo=UTC))
+    return _run_cycle(*args, **kwargs)
+
 
 ATOM = b"""<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">

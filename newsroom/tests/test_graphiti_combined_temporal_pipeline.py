@@ -1,0 +1,594 @@
+"""Provider-free contract tests for the existing Graphiti pipeline adapter."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from newsroom.graphiti_adapter import real
+from newsroom.graphiti_adapter.combined_temporal_extraction import (
+    CombinedTemporalOutcome,
+    CombinedTemporalTransportResult,
+    extract_combined_temporal,
+)
+from newsroom.graphiti_adapter.combined_temporal_fixtures import fixture
+from newsroom.graphiti_adapter.combined_temporal_pipeline import (
+    CombinedTemporalPipelineError,
+    ExistingGraphitiPipeline,
+)
+from newsroom.graphiti_adapter.evaluation_attempt import evaluation_attempt_for
+from newsroom.graphiti_adapter.evaluation_packet import (
+    GRAPHITI_CORE_RELEASE,
+    GRAPHITI_WORKSPACE_GROUP,
+)
+from newsroom.graphiti_adapter.neo4j_guard import GuardState
+
+
+class _Guard:
+    def __init__(self, state: object = GuardState.CREATED) -> None:
+        self.calls: list[str] = []
+        self.state = state
+        self.completed_receipt: dict[str, object] | None = None
+
+    async def completed_raw(self) -> dict[str, object]:
+        self.calls.append("completed")
+        assert self.completed_receipt is not None
+        return self.completed_receipt
+
+    async def begin(self) -> Any:
+        self.calls.append("begin")
+        return SimpleNamespace(
+            state=self.state,
+            chat_invocations=({"model": "retained"},),
+            embedding_usage={"usage_basis": "RETAINED"},
+        )
+
+    async def record_pending_telemetry(self, **_kwargs: Any) -> None:
+        self.calls.append("telemetry")
+
+    @asynccontextmanager
+    async def fenced_graph_mutation(self) -> AsyncIterator[None]:
+        self.calls.append("fence")
+        try:
+            yield
+        finally:
+            self.calls.append("unfence")
+
+    async def restore_preexisting(self) -> None:
+        self.calls.append("restore")
+
+    async def complete(self, receipt: dict[str, object]) -> None:
+        assert receipt["provider_attempt_number"] == 1
+        self.completed_receipt = dict(receipt)
+        self.calls.append("complete")
+
+    async def rollback_pending(self, **_kwargs: Any) -> bool:
+        self.calls.append("rollback")
+        return True
+
+
+def _node(uuid: str) -> Any:
+    return SimpleNamespace(uuid=uuid, attributes={})
+
+
+def _edge() -> Any:
+    return SimpleNamespace(
+        source_node_uuid="local-source",
+        target_node_uuid="local-target",
+        name="ASKED_ABOUT",
+        fact="asked about",
+    )
+
+
+def _pipeline(
+    guard: _Guard,
+    *,
+    fail_embedding: bool = False,
+) -> ExistingGraphitiPipeline:
+    async def resolve_nodes(
+        _nodes: list[Any],
+    ) -> tuple[list[Any], dict[str, str], list[tuple[Any, Any]]]:
+        guard.calls.append("resolve")
+        original_ids = [str(node.uuid) for node in _nodes]
+        resolved = [SimpleNamespace(**vars(node)) for node in _nodes]
+        resolved[0].uuid = "existing-source"
+        resolved[1].uuid = "existing-target"
+        return (
+            resolved,
+            {
+                original_ids[0]: "existing-source",
+                original_ids[1]: "existing-target",
+            },
+            [],
+        )
+
+    def resolve_pointers(edges: list[Any], uuid_map: dict[str, str]) -> list[Any]:
+        guard.calls.append("pointers")
+        for edge in edges:
+            edge.source_node_uuid = uuid_map[edge.source_node_uuid]
+            edge.target_node_uuid = uuid_map[edge.target_node_uuid]
+        return edges
+
+    async def create_embeddings(_embedder: Any, edges: list[Any]) -> None:
+        guard.calls.append("embed")
+        if fail_embedding:
+            raise RuntimeError("embedding failed")
+        for edge in edges:
+            edge.fact_embedding = [0.25]
+
+    async def persist_graph(_nodes: list[Any], _edges: list[Any]) -> None:
+        guard.calls.append("persist")
+
+    return ExistingGraphitiPipeline(
+        guard=guard,  # type: ignore[arg-type]
+        resolve_nodes=resolve_nodes,
+        resolve_pointers=resolve_pointers,
+        create_embeddings=create_embeddings,
+        persist_graph=persist_graph,
+        embedder=object(),
+        run_async=asyncio.run,
+        chat_receipt=lambda: [{"model": "composer-2.5"}],
+        embedding_receipt=lambda: {"usage_basis": "PROVIDER_REPORTED"},
+    )
+
+
+class _Transport:
+    def __init__(self, raw: object) -> None:
+        self.raw = raw
+        self.calls = 0
+
+    def generate_response(self, **_kwargs: object) -> CombinedTemporalTransportResult:
+        self.calls += 1
+        return CombinedTemporalTransportResult(
+            raw=self.raw,
+            framework_version=GRAPHITI_CORE_RELEASE,
+            model_version=None,
+            token_usage={"basis": "UNMEASURED"},
+            provider_cost=None,
+        )
+
+
+def test_existing_pipeline_resolves_embeds_and_completes_durable_journal() -> None:
+    guard = _Guard()
+    edge = _edge()
+    result = _pipeline(guard).execute(
+        nodes=(_node("local-source"), _node("local-target")),
+        edges=(edge,),
+        receipt={"provider_attempt_number": 1},
+    )
+
+    assert guard.calls == [
+        "begin",
+        "resolve",
+        "pointers",
+        "embed",
+        "fence",
+        "persist",
+        "restore",
+        "unfence",
+        "telemetry",
+        "complete",
+    ]
+    assert result.node_resolutions == (
+        "RESOLVED_EXISTING",
+        "RESOLVED_EXISTING",
+    )
+    assert edge.source_node_uuid == "existing-source"
+    assert edge.target_node_uuid == "existing-target"
+    assert edge.fact_embedding == [0.25]
+    assert result.graph_effect_attempted is True
+    assert result.rollback_skipped is True
+
+
+def test_stale_owner_is_fenced_before_graph_persistence() -> None:
+    guard = _Guard()
+
+    @asynccontextmanager
+    async def lost_claim() -> AsyncIterator[None]:
+        guard.calls.append("fence")
+        raise RuntimeError("claim was replaced")
+        yield
+
+    guard.fenced_graph_mutation = lost_claim  # type: ignore[method-assign]
+
+    with pytest.raises(CombinedTemporalPipelineError):
+        _pipeline(guard).execute(
+            nodes=(_node("local-source"), _node("local-target")),
+            edges=(_edge(),),
+            receipt={"provider_attempt_number": 1},
+        )
+
+    assert "persist" not in guard.calls
+    assert guard.calls[-1] == "rollback"
+
+
+def test_completed_ingest_replays_without_another_provider_leaf() -> None:
+    case = fixture("pair-current")
+    first_guard = _Guard()
+    first_transport = _Transport(case.gold)
+    first = extract_combined_temporal(
+        case.revision,
+        transport=first_transport,
+        pipeline=_pipeline(first_guard),
+    )
+
+    assert first.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert first_transport.calls == 1
+    assert first_guard.completed_receipt is not None
+
+    replay_guard = _Guard(GuardState.COMPLETE)
+    replay_guard.completed_receipt = first_guard.completed_receipt
+    replay_transport = _Transport(RuntimeError("provider must not run"))
+    replayed = extract_combined_temporal(
+        case.revision,
+        transport=replay_transport,
+        pipeline=_pipeline(replay_guard),
+    )
+
+    assert replay_transport.calls == 0
+    assert replayed.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert replayed.payload == first.payload
+    assert replayed.payload_digest == first.payload_digest
+    assert [node.uuid for node in replayed.nodes] == [node.uuid for node in first.nodes]
+    assert [edge.uuid for edge in replayed.edges] == [edge.uuid for edge in first.edges]
+    assert replay_guard.calls == ["begin", "completed"]
+
+
+def test_zero_result_is_completed_and_replayed_without_another_leaf() -> None:
+    case = fixture("zero-result")
+    first_guard = _Guard()
+    first_transport = _Transport(case.gold)
+    first = extract_combined_temporal(
+        case.revision,
+        transport=first_transport,
+        pipeline=_pipeline(first_guard),
+    )
+
+    assert first.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert first_transport.calls == 1
+    assert first_guard.completed_receipt is not None
+    assert "resolve" not in first_guard.calls
+    assert "persist" not in first_guard.calls
+
+    replay_guard = _Guard(GuardState.COMPLETE)
+    replay_guard.completed_receipt = first_guard.completed_receipt
+    replay_transport = _Transport(RuntimeError("provider must not run"))
+    replayed = extract_combined_temporal(
+        case.revision,
+        transport=replay_transport,
+        pipeline=_pipeline(replay_guard),
+    )
+
+    assert replayed.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert replay_transport.calls == 0
+    assert replay_guard.calls == ["begin", "completed"]
+
+
+def test_pending_marker_is_recovered_before_another_provider_leaf() -> None:
+    case = fixture("pair-current")
+    guard = _Guard(GuardState.PENDING)
+    transport = _Transport(case.gold)
+
+    with pytest.raises(CombinedTemporalPipelineError) as captured:
+        extract_combined_temporal(
+            case.revision,
+            transport=transport,
+            pipeline=_pipeline(guard),
+        )
+
+    assert transport.calls == 0
+    assert captured.value.rollback_completed is True
+    assert guard.calls == ["begin", "rollback"]
+
+
+def test_journal_starts_before_the_provider_leaf() -> None:
+    case = fixture("pair-current")
+    guard = _Guard()
+
+    class Transport(_Transport):
+        def generate_response(self, **kwargs: object) -> CombinedTemporalTransportResult:
+            assert guard.calls == ["begin"]
+            return super().generate_response(**kwargs)
+
+    extract_combined_temporal(
+        case.revision,
+        transport=Transport(case.gold),
+        pipeline=_pipeline(guard),
+    )
+
+
+def test_malformed_leaf_is_completed_and_replayed_without_provider_retry() -> None:
+    case = fixture("pair-current")
+    first_guard = _Guard()
+    first_transport = _Transport({"entities": [], "facts": [{"bad": True}]})
+    first = extract_combined_temporal(
+        case.revision,
+        transport=first_transport,
+        pipeline=_pipeline(first_guard),
+    )
+
+    assert first.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert first.journal_skipped is False
+    assert first_guard.completed_receipt is not None
+
+    replay_guard = _Guard(GuardState.COMPLETE)
+    replay_guard.completed_receipt = first_guard.completed_receipt
+    replay_transport = _Transport(RuntimeError("provider must not run"))
+    replayed = extract_combined_temporal(
+        case.revision,
+        transport=replay_transport,
+        pipeline=_pipeline(replay_guard),
+    )
+
+    assert replay_transport.calls == 0
+    assert replayed.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert replayed.failure_code is first.failure_code
+
+
+@pytest.mark.parametrize(
+    "retained",
+    ("SNAPSHOTTING", GuardState.RECOVERED_AMBIGUOUS),
+)
+def test_preflight_uses_guard_begin_recovery(retained: object) -> None:
+    case = fixture("pair-current")
+    guard = _Guard(retained)
+
+    async def recovered_begin() -> Any:
+        guard.calls.append("begin")
+        return SimpleNamespace(state=GuardState.CREATED)
+
+    guard.begin = recovered_begin  # type: ignore[method-assign]
+    transport = _Transport(case.gold)
+    leaf = extract_combined_temporal(
+        case.revision,
+        transport=transport,
+        pipeline=_pipeline(guard),
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert transport.calls == 1
+    assert guard.calls[0] == "begin"
+
+
+def test_completion_retains_canonical_proposals_and_passage_provenance() -> None:
+    case = fixture("pair-current")
+    guard = _Guard()
+    leaf = extract_combined_temporal(
+        case.revision,
+        transport=_Transport(case.gold),
+        pipeline=_pipeline(guard),
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert guard.completed_receipt is not None
+    assert guard.completed_receipt["invocation_count"] == 2
+    assert guard.completed_receipt["pipeline_chat_invocations"] == [
+        {"model": "composer-2.5"}
+    ]
+    assert guard.completed_receipt["embedding_usage"] == {
+        "usage_basis": "PROVIDER_REPORTED"
+    }
+    assert len(guard.completed_receipt["transport_calls"]) == 1
+    proposal = guard.completed_receipt["proposal_receipt"]
+    assert isinstance(proposal, dict)
+    assert proposal["contract"] == "NewsroomCombinedTemporalExtractionV1"
+    assert proposal["source_revision_id"] == case.revision.revision_id
+    assert proposal["reference_time"] == case.revision.reference_time
+    assert proposal["entity_mentions"]
+    assert proposal["relation_proposals"]
+    assert proposal["evidence_passages"]
+    assert proposal["evidence_passages"][0]["segments"][0]["text"] in case.revision.body
+    relation = proposal["relation_proposals"][0]
+    assert relation["source_identity"] == "existing-source"
+    assert relation["target_identity"] == "existing-target"
+    assert relation["fact"] == case.gold["facts"][0]["fact"]
+    assert "valid_at" in relation
+    assert "invalid_at" in relation
+    assert leaf.invocation_count == 2
+    assert leaf.pipeline_chat_invocations == ({"model": "composer-2.5"},)
+    assert leaf.embedding_usage == {"usage_basis": "PROVIDER_REPORTED"}
+
+
+def test_replay_revalidates_exact_evidence_passages() -> None:
+    case = fixture("pair-current")
+    first_guard = _Guard()
+    extract_combined_temporal(
+        case.revision,
+        transport=_Transport(case.gold),
+        pipeline=_pipeline(first_guard),
+    )
+    assert first_guard.completed_receipt is not None
+    proposal = first_guard.completed_receipt["proposal_receipt"]
+    assert isinstance(proposal, dict)
+    proposal["evidence_passages"] = []
+
+    replay_guard = _Guard(GuardState.COMPLETE)
+    replay_guard.completed_receipt = first_guard.completed_receipt
+    with pytest.raises(CombinedTemporalPipelineError, match="evidence"):
+        extract_combined_temporal(
+            case.revision,
+            transport=_Transport(RuntimeError("provider must not run")),
+            pipeline=_pipeline(replay_guard),
+        )
+
+
+def test_existing_pipeline_rolls_back_embedding_failure() -> None:
+    guard = _Guard()
+    with pytest.raises(CombinedTemporalPipelineError) as captured:
+        _pipeline(guard, fail_embedding=True).execute(
+            nodes=(_node("local-source"), _node("local-target")),
+            edges=(_edge(),),
+            receipt={"provider_attempt_number": 1},
+        )
+
+    assert captured.value.graph_effect_attempted is True
+    assert captured.value.rollback_completed is True
+    assert guard.calls == ["begin", "resolve", "pointers", "embed", "rollback"]
+
+
+def test_existing_pipeline_rejects_a_malformed_complete_marker_without_effect() -> None:
+    guard = _Guard(GuardState.COMPLETE)
+    with pytest.raises(CombinedTemporalPipelineError) as captured:
+        _pipeline(guard).execute(
+            nodes=(_node("local-source"), _node("local-target")),
+            edges=(_edge(),),
+            receipt={},
+        )
+
+    assert captured.value.graph_effect_attempted is False
+    assert captured.value.rollback_completed is False
+    assert guard.calls == ["begin", "completed"]
+
+
+def test_real_factory_uses_graphiti_types_and_bulk_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guard = _Guard()
+    calls: list[str] = []
+    driver = object()
+    guard.driver = driver
+    guard.group_id = GRAPHITI_WORKSPACE_GROUP
+    guard.episode_uuid = "episode"
+    guard.input_digest = "ingest"
+
+    class RuntimeObject:
+        def __init__(self, **values: Any) -> None:
+            vars(self).update(values)
+
+    async def resolve_nodes(
+        _clients: Any,
+        nodes: list[Any],
+        _episode: Any,
+        _previous: list[Any],
+        _entity_types: Any,
+    ) -> tuple[list[Any], dict[str, str], list[tuple[Any, Any]]]:
+        calls.append("resolve")
+        return nodes, {node.uuid: node.uuid for node in nodes}, []
+
+    def resolve_pointers(edges: list[Any], _uuid_map: dict[str, str]) -> list[Any]:
+        calls.append("pointers")
+        return edges
+
+    async def create_embeddings(_embedder: Any, edges: list[Any]) -> None:
+        calls.append("embed")
+        for edge in edges:
+            edge.fact_embedding = [0.5]
+
+    runtime = SimpleNamespace(
+        EntityNode=RuntimeObject,
+        EntityEdge=RuntimeObject,
+        resolve_extracted_nodes=resolve_nodes,
+        resolve_edge_pointers=resolve_pointers,
+        create_entity_edge_embeddings=create_embeddings,
+    )
+    monkeypatch.setattr(real, "_load_graphiti", lambda: runtime)
+
+    class Graphiti:
+        clients = SimpleNamespace(
+            llm_client=SimpleNamespace(invocations=[]),
+            embedder=SimpleNamespace(receipt=lambda: {"usage_basis": "TEST"}),
+        )
+
+        async def _process_episode_data(self, *args: Any) -> None:
+            assert isinstance(args[1][0], RuntimeObject)
+            assert isinstance(args[2][0], RuntimeObject)
+            calls.append("persist")
+
+    Graphiti.driver = driver
+
+    now = datetime.now(tz=UTC)
+    proposal_nodes = tuple(
+        SimpleNamespace(
+            uuid=value,
+            name=value,
+            group_id=GRAPHITI_WORKSPACE_GROUP,
+            labels=["Entity"],
+            created_at=now,
+            summary="",
+            attributes={},
+        )
+        for value in ("source", "target")
+    )
+    proposal_edge = SimpleNamespace(
+        uuid="edge",
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        source_node_uuid="source",
+        target_node_uuid="target",
+        created_at=now,
+        name="ASKED_ABOUT",
+        fact="asked about",
+        fact_embedding=None,
+        episodes=["episode"],
+        expired_at=None,
+        valid_at=None,
+        invalid_at=None,
+        reference_time=now,
+        attributes={},
+    )
+    pipeline = real.combined_temporal_pipeline_for(
+        configuration=evaluation_attempt_for(("Alice asked Bob.",)).configuration,
+        graphiti=Graphiti(),
+        guard=guard,  # type: ignore[arg-type]
+        episode=SimpleNamespace(group_id=GRAPHITI_WORKSPACE_GROUP, uuid="episode"),
+    )
+    receipt = {
+        "ingest_id": "ingest",
+        "proposal_receipt": {
+            "episode_id": "episode",
+            "entity_mentions": [{}, {}],
+            "relation_proposals": [{}],
+        },
+    }
+    result = pipeline.execute(
+        nodes=proposal_nodes,
+        edges=(proposal_edge,),
+        receipt=receipt,
+    )
+
+    assert calls == ["resolve", "pointers", "embed", "persist"]
+    assert isinstance(result.nodes[0], RuntimeObject)
+    assert isinstance(result.edges[0], RuntimeObject)
+    assert result.edges[0].fact_embedding == [0.5]
+
+    proposal_nodes[0].group_id = "other-generation"
+    with pytest.raises(CombinedTemporalPipelineError, match="identity differs"):
+        pipeline.execute(nodes=proposal_nodes, edges=(proposal_edge,), receipt=receipt)
+
+
+def test_real_factory_rejects_a_different_journal_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    guard = _Guard()
+    guard.driver = object()
+    guard.group_id = "test"
+    guard.episode_uuid = "episode"
+    guard.input_digest = "ingest"
+
+    with pytest.raises(real.GraphitiAdapterContractError, match="identity differ"):
+        real.combined_temporal_pipeline_for(
+            configuration=evaluation_attempt_for(("Alice asked Bob.",)).configuration,
+            graphiti=SimpleNamespace(driver=object()),
+            guard=guard,  # type: ignore[arg-type]
+            episode=SimpleNamespace(group_id="test", uuid="episode"),
+        )
+
+
+def test_real_factory_requires_the_existing_evaluation_authority_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(real, "_load_graphiti", lambda: pytest.fail("must not load"))
+
+    with pytest.raises(real.GraphitiAdapterContractError, match="typed configuration"):
+        real.combined_temporal_pipeline_for(
+            configuration=SimpleNamespace(),  # type: ignore[arg-type]
+            graphiti=SimpleNamespace(driver=object()),
+            guard=SimpleNamespace(),  # type: ignore[arg-type]
+            episode=SimpleNamespace(),
+        )

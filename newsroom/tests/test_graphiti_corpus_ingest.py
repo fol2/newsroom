@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal, Never
+from typing import Any, Literal, Never
 
 import pytest
 
@@ -29,7 +29,7 @@ from newsroom.control_plane.cycle import (
     _latest_run_with_global_authority,
     _reconcile_result_spend,
     CycleReport,
-    run_cycle,
+    run_cycle as _run_cycle,
 )
 from newsroom.control_plane.editorial import (
     GroupedObservation,
@@ -112,6 +112,11 @@ from newsroom.tests.test_control_plane_private_beta import (
     _evaluation_cycle_destinations,
     _proving,
 )
+
+
+def run_cycle(*args: Any, **kwargs: Any) -> CycleReport:
+    kwargs.setdefault("clock", lambda: datetime(2026, 8, 20, tzinfo=UTC))
+    return _run_cycle(*args, **kwargs)
 
 
 DATED_RSS = """<?xml version="1.0" encoding="UTF-8"?>

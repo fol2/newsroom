@@ -1,0 +1,43 @@
+{
+  "schema_version": "newsroom.graphiti-combined-temporal-live-packet.v1",
+  "issue": 747,
+  "parent_issue": 739,
+  "closed_blocker": 746,
+  "contract": "NewsroomCombinedTemporalExtractionV1",
+  "graphiti_core_version": "0.29.3",
+  "sdk_candidate": {
+    "runtime": "cursor-sdk",
+    "model": "composer-2.5",
+    "lifecycle": "Agent.prompt",
+    "tools": [],
+    "setting_sources": "OMITTED",
+    "finding_from_746": "no-tool SDK floor is a useful research transport; compact gold remains this packet"
+  },
+  "live_authority": {
+    "authorised": false,
+    "requires_explicit_owner_instruction": true,
+    "maximum_cursor_sdk_model_leaves": 8,
+    "maximum_grok_model_leaves": 0,
+    "maximum_openrouter_calls": 0,
+    "adaptive_extra_calls_permitted": false,
+    "unchanged_request_retry_permitted": false,
+    "neo4j_mutation_permitted": false,
+    "publication_permitted": false
+  },
+  "experiments": [
+    {"ordinal": 1, "label": "compact-zero-result", "fixture": "zero-result"},
+    {"ordinal": 2, "label": "compact-pair-current", "fixture": "pair-current"},
+    {"ordinal": 3, "label": "compact-several-relations", "fixture": "several-relations"},
+    {"ordinal": 4, "label": "compact-explicit-valid-at", "fixture": "explicit-valid-at"},
+    {"ordinal": 5, "label": "compact-relative-date", "fixture": "relative-date"},
+    {"ordinal": 6, "label": "compact-same-name", "fixture": "same-name"},
+    {"ordinal": 7, "label": "compact-long-8192", "fixture": "long-8192"},
+    {"ordinal": 8, "label": "compact-predeclared-repeat", "fixture": "pair-current"}
+  ],
+  "decision_rule": {
+    "every_leaf_must_be_one_primary_call": true,
+    "quality_must_not_regress": true,
+    "source_content_must_not_be_truncated": true,
+    "cheap_invalid_json_is_failure": true
+  }
+}
