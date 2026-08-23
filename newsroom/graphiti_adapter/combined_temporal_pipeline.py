@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from newsroom.graphiti_adapter.edge_guard import guard_extracted_edges
@@ -32,7 +32,11 @@ class CombinedTemporalPipelineResult:
 
 
 class CombinedTemporalPipeline(Protocol):
-    def completed_receipt(self) -> Mapping[str, object] | None: ...
+    def prepare_attempt(self) -> Mapping[str, object] | None: ...
+
+    def complete_failure(
+        self, receipt: Mapping[str, object]
+    ) -> Mapping[str, object]: ...
 
     def execute(
         self,
@@ -133,23 +137,32 @@ class ExistingGraphitiPipeline:
     expected_group_id: str | None = None
     expected_episode_uuid: str | None = None
     expected_ingest_id: str | None = None
+    _attempt_started: bool = field(default=False, init=False)
 
-    def completed_receipt(self) -> Mapping[str, object] | None:
-        return self.run_async(self._completed_receipt())
+    def prepare_attempt(self) -> Mapping[str, object] | None:
+        return self.run_async(self._prepare_attempt())
 
-    async def _completed_receipt(self) -> Mapping[str, object] | None:
+    async def _prepare_attempt(self) -> Mapping[str, object] | None:
         try:
-            marker = await self.guard.retained_marker_or_none()
+            marker = await self.guard.begin()
         except Exception as exc:
             raise CombinedTemporalPipelineError(
-                "combined-temporal journal could not be inspected",
+                "combined-temporal journal could not start",
                 graph_effect_attempted=False,
                 rollback_completed=False,
             ) from exc
-        if marker is None:
+        if marker.state is GuardState.CREATED:
+            self._attempt_started = True
             return None
         if marker.state is GuardState.COMPLETE:
-            return await self.guard.completed_raw()
+            try:
+                return await self.guard.completed_raw()
+            except Exception as exc:
+                raise CombinedTemporalPipelineError(
+                    "combined-temporal completed receipt is malformed",
+                    graph_effect_attempted=False,
+                    rollback_completed=False,
+                ) from exc
         rollback_completed = marker.state is GuardState.RECOVERED_AMBIGUOUS
         if marker.state in {GuardState.PENDING, GuardState.ROLLING_BACK}:
             try:
@@ -165,6 +178,38 @@ class ExistingGraphitiPipeline:
             graph_effect_attempted=True,
             rollback_completed=rollback_completed,
         )
+
+    def complete_failure(
+        self, receipt: Mapping[str, object]
+    ) -> Mapping[str, object]:
+        return self.run_async(self._complete_failure(receipt))
+
+    async def _complete_failure(
+        self, receipt: Mapping[str, object]
+    ) -> Mapping[str, object]:
+        if not self._attempt_started:
+            raise CombinedTemporalPipelineError(
+                "combined-temporal failed leaf has no pending journal",
+                graph_effect_attempted=False,
+                rollback_completed=False,
+            )
+        chat_invocations = self.chat_receipt()
+        embedding_usage = self.embedding_receipt()
+        durable = _durable_receipt(
+            receipt,
+            nodes=[],
+            edges=[],
+            resolutions=(),
+            chat_invocations=chat_invocations,
+            embedding_usage=embedding_usage,
+        )
+        await self.guard.record_pending_telemetry(
+            chat_invocations=chat_invocations,
+            embedding_usage=embedding_usage,
+        )
+        await self.guard.complete(durable)
+        self._attempt_started = False
+        return durable
 
     def execute(
         self,
@@ -183,37 +228,15 @@ class ExistingGraphitiPipeline:
         receipt: Mapping[str, object],
     ) -> CombinedTemporalPipelineResult:
         self._validate_context(nodes=nodes, edges=edges, receipt=receipt)
-        try:
-            marker = await self.guard.begin()
-        except Exception as exc:
-            raise CombinedTemporalPipelineError(
-                "combined-temporal journal could not start",
-                graph_effect_attempted=False,
-                rollback_completed=False,
-            ) from exc
-        if marker.state is not GuardState.CREATED:
-            if marker.state is GuardState.COMPLETE:
+        if not self._attempt_started:
+            completed = await self._prepare_attempt()
+            if completed is not None:
                 raise CombinedTemporalPipelineError(
                     "combined-temporal completed result must be replayed "
                     "before execution",
                     graph_effect_attempted=False,
                     rollback_completed=False,
                 )
-            rollback_completed = marker.state is GuardState.RECOVERED_AMBIGUOUS
-            if marker.state in {GuardState.PENDING, GuardState.ROLLING_BACK}:
-                try:
-                    rollback_completed = await self.guard.rollback_pending(
-                        chat_invocations=self.chat_receipt(),
-                        embedding_usage=self.embedding_receipt(),
-                        reason="RECOVERED_PENDING_PROCESS_DEATH",
-                    )
-                except Exception:
-                    rollback_completed = False
-            raise CombinedTemporalPipelineError(
-                "combined-temporal journal is not newly created",
-                graph_effect_attempted=True,
-                rollback_completed=rollback_completed,
-            )
         if not nodes and not edges:
             chat_invocations = self.chat_receipt()
             embedding_usage = self.embedding_receipt()
@@ -230,6 +253,7 @@ class ExistingGraphitiPipeline:
                 embedding_usage=embedding_usage,
             )
             await self.guard.complete(durable_receipt)
+            self._attempt_started = False
             return CombinedTemporalPipelineResult(
                 nodes=(),
                 edges=(),
@@ -290,11 +314,14 @@ class ExistingGraphitiPipeline:
                 )
             except Exception:
                 rollback_completed = False
+            self._attempt_started = False
             raise CombinedTemporalPipelineError(
                 "combined-temporal pipeline failed",
                 graph_effect_attempted=True,
                 rollback_completed=rollback_completed,
             ) from exc
+
+        self._attempt_started = False
 
         return CombinedTemporalPipelineResult(
             nodes=tuple(resolved_nodes),

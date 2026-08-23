@@ -123,6 +123,45 @@ def _extract(
     ), case
 
 
+def _named_pair_payload(
+    fact: str,
+    *,
+    evidence: tuple[int, ...] = (0,),
+    source_evidence: tuple[int, ...] | None = None,
+    target_evidence: tuple[int, ...] | None = None,
+    valid_at: str | None = None,
+) -> dict[str, object]:
+    source_ids = source_evidence or evidence
+    target_ids = target_evidence or evidence
+    return {
+        "entities": [
+            {
+                "local_id": 0,
+                "name": "Alice",
+                "entity_type_id": 0,
+                "evidence_segment_ids": list(source_ids),
+            },
+            {
+                "local_id": 1,
+                "name": "Bob",
+                "entity_type_id": 0,
+                "evidence_segment_ids": list(target_ids),
+            },
+        ],
+        "facts": [
+            {
+                "source_local_id": 0,
+                "target_local_id": 1,
+                "relation_type": "ASKED",
+                "fact": fact,
+                "valid_at": valid_at,
+                "invalid_at": None,
+                "evidence_segment_ids": list(evidence),
+            }
+        ],
+    }
+
+
 def test_compact_schema_matches_the_ticket_contract() -> None:
     assert CONTRACT_NAME == "NewsroomCombinedTemporalExtractionV1"
     assert SCHEMA["type"] == "object"
@@ -335,6 +374,29 @@ def test_fact_must_name_both_endpoints_to_be_self_contained() -> None:
     assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
 
 
+def test_fact_evidence_must_be_one_contiguous_source_range() -> None:
+    case = fixture("pair-current")
+    revision = replace(
+        case.revision,
+        body="Alice. [OMITTED CONTRADICTORY CONTEXT.] asked Bob.",
+    )
+    payload = _named_pair_payload(
+        "Alice. asked Bob.",
+        evidence=(0, 2),
+        source_evidence=(0,),
+        target_evidence=(2,),
+    )
+
+    leaf = extract_combined_temporal(
+        revision,
+        transport=_FakeTransport(payload),
+        pipeline=_PIPELINE,
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+
+
 def test_implied_relation_is_absent_from_gold_and_rejected_if_emitted() -> None:
     leaf, case = _extract("no-implied-relation")
     types = {edge.name for edge in leaf.edges}
@@ -413,6 +475,77 @@ def test_relative_date_text_is_not_accepted_as_a_timestamp() -> None:
     )
     assert leaf.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
     assert len(leaf.transport_calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("body", "valid_at"),
+    (
+        ("Last week Alice asked Bob.", None),
+        ("At 2026-08-20T18:30:00Z Alice asked Bob.", "2026-08-20T00:00:00Z"),
+    ),
+)
+def test_temporal_cues_require_the_exact_source_time(
+    body: str,
+    valid_at: str | None,
+) -> None:
+    case = fixture("pair-current")
+    revision = replace(case.revision, body=body)
+
+    leaf = extract_combined_temporal(
+        revision,
+        transport=_FakeTransport(_named_pair_payload(body, valid_at=valid_at)),
+        pipeline=_PIPELINE,
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+
+
+def test_exact_source_timestamp_is_retained() -> None:
+    case = fixture("pair-current")
+    body = "At 2026-08-20T18:30:00Z Alice asked Bob."
+    leaf = extract_combined_temporal(
+        replace(case.revision, body=body),
+        transport=_FakeTransport(
+            _named_pair_payload(body, valid_at="2026-08-20T18:30:00Z")
+        ),
+        pipeline=_PIPELINE,
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert leaf.edges[0].valid_at == datetime(2026, 8, 20, 18, 30, tzinfo=UTC)
+
+
+def test_invalid_source_date_is_a_typed_failed_leaf() -> None:
+    case = fixture("pair-current")
+    body = "On 2026-02-30 Alice asked Bob."
+    revision = replace(case.revision, body=body)
+
+    leaf = extract_combined_temporal(
+        revision,
+        transport=_FakeTransport(_named_pair_payload(body)),
+        pipeline=_PIPELINE,
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+
+
+def test_correction_dash_cannot_join_old_and_corrected_attribution() -> None:
+    case = fixture("pair-current")
+    body = "Alice asked Bob. Correction — Alice did not ask Bob."
+    revision = replace(case.revision, body=body)
+
+    leaf = extract_combined_temporal(
+        revision,
+        transport=_FakeTransport(
+            _named_pair_payload("Alice asked Bob.", evidence=(0, 1))
+        ),
+        pipeline=_PIPELINE,
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
 
 
 def test_correction_revision_does_not_contaminate_the_prompt() -> None:

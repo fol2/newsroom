@@ -231,16 +231,6 @@ class Neo4jMutationGuard:
             input_digest=self._input_digest,
         )
 
-    async def retained_marker_or_none(self) -> GuardMarker | None:
-        """Inspect an existing journal without creating one."""
-
-        retained = await self._marker()
-        if retained is None:
-            return None
-        if str(retained.get("state")) == "SNAPSHOTTING":
-            raise GuardError("Graphiti guard snapshot is incomplete")
-        return self._bind_marker(retained)
-
     async def _snapshot(self) -> None:
         unsafe = await self._query(
             f"""

@@ -35,14 +35,18 @@ from newsroom.graphiti_adapter.combined_temporal_contract import (
     build_compact_prompt,
     segment_source,
 )
-from newsroom.graphiti_adapter.combined_temporal_validation import (
+from newsroom.graphiti_adapter.combined_temporal_response import (
+    parse_payload,
+    raw_digest,
+)
+from newsroom.graphiti_adapter.combined_temporal_types import (
     CombinedTemporalError,
     CombinedTemporalFailureCode,
     EvidenceSegment,
+)
+from newsroom.graphiti_adapter.combined_temporal_validation import (
     GOVERNED_ENTITY_TYPE_IDS,
-    _normalise,
-    _parse_payload,
-    _raw_digest,
+    normalise,
 )
 from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_CORE_RELEASE
 from newsroom.graphiti_adapter.identity import (
@@ -145,7 +149,7 @@ def extract_combined_temporal(
     UtcTimestamp.parse(revision.ingested_at)
     prompt = build_compact_prompt(revision)
     prompt_digest = _candidate_prompt_digest(prompt)
-    completed = _completed_receipt(pipeline)
+    completed = _prepare_attempt(pipeline)
     if completed is not None:
         return _leaf_from_completed(
             revision=revision,
@@ -159,14 +163,14 @@ def extract_combined_temporal(
         response_model=CONTRACT_NAME,
     )
     raw = result.raw
-    raw_digest = _raw_digest(raw)
+    raw_digest_value = raw_digest(raw)
     usage = dict(result.token_usage)
     calls = [
         {
             "response_model": CONTRACT_NAME,
             "prompt_bytes": len(prompt.text.encode("utf-8")),
             "schema_bytes": len(canonical_json_bytes(SCHEMA)),
-            "raw_output_digest": raw_digest,
+            "raw_output_digest": raw_digest_value,
             "framework_version": result.framework_version,
             "model_version": result.model_version,
             "token_usage": usage,
@@ -174,7 +178,7 @@ def extract_combined_temporal(
         }
     ]
     receipt = {
-        "raw_output_digest": raw_digest,
+        "raw_output_digest": raw_digest_value,
         "framework_version": result.framework_version,
         "model_version": result.model_version,
         "prompt_digest": prompt_digest,
@@ -188,8 +192,8 @@ def extract_combined_temporal(
         "transport_calls": calls,
     }
     try:
-        payload = _parse_payload(raw)
-        normalised, ranges = _normalise(
+        payload = parse_payload(raw)
+        normalised, ranges = normalise(
             payload,
             prompt.segments,
             UtcTimestamp.parse(revision.reference_time).value,
@@ -201,17 +205,17 @@ def extract_combined_temporal(
             ranges=ranges,
         )
     except CombinedTemporalError as exc:
-        return _leaf(
+        return _failure_leaf(
+            pipeline,
             prompt,
             receipt,
-            outcome=CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE,
             failure_code=exc.code,
         )
     except CanonicalizationError:
-        return _leaf(
+        return _failure_leaf(
+            pipeline,
             prompt,
             receipt,
-            outcome=CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE,
             failure_code=CombinedTemporalFailureCode.MALFORMED_OBJECT,
         )
     if pipeline is None and edges:
@@ -284,12 +288,12 @@ def extract_combined_temporal(
     )
 
 
-def _completed_receipt(
+def _prepare_attempt(
     pipeline: CombinedTemporalPipeline | None,
 ) -> Mapping[str, object] | None:
     if pipeline is None:
         return None
-    reader = getattr(pipeline, "completed_receipt", None)
+    reader = getattr(pipeline, "prepare_attempt", None)
     if not callable(reader):
         return None
     completed = reader()
@@ -302,6 +306,39 @@ def _completed_receipt(
             rollback_completed=False,
         )
     return completed
+
+
+def _failure_leaf(
+    pipeline: CombinedTemporalPipeline | None,
+    prompt: CompactPrompt,
+    receipt: Mapping[str, object],
+    *,
+    failure_code: CombinedTemporalFailureCode,
+) -> CombinedTemporalLeaf:
+    terminal = {
+        **receipt,
+        "terminal_outcome": CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE,
+        "failure_code": failure_code,
+    }
+    journal_skipped = True
+    completer = getattr(pipeline, "complete_failure", None)
+    if callable(completer):
+        completed = completer(terminal)
+        if not isinstance(completed, Mapping):
+            raise CombinedTemporalPipelineError(
+                "combined-temporal failed receipt is malformed",
+                graph_effect_attempted=False,
+                rollback_completed=False,
+            )
+        terminal = dict(completed)
+        journal_skipped = False
+    return _leaf(
+        prompt,
+        terminal,
+        outcome=CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE,
+        failure_code=failure_code,
+        journal_skipped=journal_skipped,
+    )
 
 
 def _proposal_receipt(
@@ -354,6 +391,43 @@ def _leaf_from_completed(
     prompt_digest: str,
     completed: Mapping[str, object],
 ) -> CombinedTemporalLeaf:
+    if (
+        completed.get("ingest_id") != revision.ingest_id
+        or completed.get("prompt_digest") != prompt_digest
+    ):
+        raise CombinedTemporalPipelineError(
+            "combined-temporal completed receipt identity differs",
+            graph_effect_attempted=False,
+            rollback_completed=False,
+        )
+    terminal_outcome = completed.get("terminal_outcome")
+    if terminal_outcome is not None:
+        try:
+            outcome = CombinedTemporalOutcome(str(terminal_outcome))
+            failure_code = CombinedTemporalFailureCode(
+                str(completed.get("failure_code"))
+            )
+        except ValueError as exc:
+            raise CombinedTemporalPipelineError(
+                "combined-temporal completed failure is malformed",
+                graph_effect_attempted=False,
+                rollback_completed=False,
+            ) from exc
+        if (
+            outcome is not CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+            or failure_code is CombinedTemporalFailureCode.NONE
+        ):
+            raise CombinedTemporalPipelineError(
+                "combined-temporal completed failure is malformed",
+                graph_effect_attempted=False,
+                rollback_completed=False,
+            )
+        return _leaf(
+            prompt,
+            completed,
+            outcome=outcome,
+            failure_code=failure_code,
+        )
     proposal = completed.get("proposal_receipt")
     if not isinstance(proposal, Mapping):
         raise CombinedTemporalPipelineError(
@@ -365,7 +439,6 @@ def _leaf_from_completed(
         proposal.get("contract") != CONTRACT_NAME
         or proposal.get("ingest_id") != revision.ingest_id
         or proposal.get("source_revision_id") != revision.revision_id
-        or completed.get("prompt_digest") != prompt_digest
     ):
         raise CombinedTemporalPipelineError(
             "combined-temporal completed receipt identity differs",
@@ -379,10 +452,18 @@ def _leaf_from_completed(
             graph_effect_attempted=False,
             rollback_completed=False,
         )
-    payload = {
-        "entities": list(payload_raw.get("entities", [])),
-        "facts": list(payload_raw.get("facts", [])),
-    }
+    try:
+        payload, ranges = normalise(
+            parse_payload(payload_raw),
+            prompt.segments,
+            UtcTimestamp.parse(revision.reference_time).value,
+        )
+    except (CanonicalizationError, CombinedTemporalError, ValueError) as exc:
+        raise CombinedTemporalPipelineError(
+            "combined-temporal completed evidence or payload is malformed",
+            graph_effect_attempted=False,
+            rollback_completed=False,
+        ) from exc
     payload_digest = digest_canonical(payload)
     if proposal.get("payload_digest") != payload_digest:
         raise CombinedTemporalPipelineError(
@@ -390,32 +471,16 @@ def _leaf_from_completed(
             graph_effect_attempted=False,
             rollback_completed=False,
         )
-    ranges: dict[str, tuple[EvidenceSegment, ...]] = {}
-    passages = proposal.get("evidence_passages")
-    if not isinstance(passages, list):
+    expected_passages = _proposal_receipt(
+        revision=revision,
+        payload=payload,
+        ranges=ranges,
+    )["evidence_passages"]
+    if proposal.get("evidence_passages") != expected_passages:
         raise CombinedTemporalPipelineError(
-            "combined-temporal completed evidence is malformed",
+            "combined-temporal completed evidence differs",
             graph_effect_attempted=False,
             rollback_completed=False,
-        )
-    for passage in passages:
-        if not isinstance(passage, Mapping) or not isinstance(
-            passage.get("segments"), list
-        ):
-            raise CombinedTemporalPipelineError(
-                "combined-temporal completed evidence is malformed",
-                graph_effect_attempted=False,
-                rollback_completed=False,
-            )
-        ranges[str(passage["fact"])] = tuple(
-            EvidenceSegment(
-                segment_id=int(segment["segment_id"]),
-                start_byte=int(segment["start_byte"]),
-                end_byte=int(segment["end_byte"]),
-                text=str(segment["text"]),
-            )
-            for segment in passage["segments"]
-            if isinstance(segment, Mapping)
         )
     mentions = proposal.get("entity_mentions")
     relations = proposal.get("relation_proposals")

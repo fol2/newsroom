@@ -76,6 +76,7 @@ from newsroom.graphiti_adapter.neo4j_guard import (
 )
 
 from .models import (
+    GraphitiAdapterConfiguration,
     GraphitiAdapterExecution,
     GraphitiAttemptRequest,
     GraphitiWorkspaceDescriptor,
@@ -114,6 +115,37 @@ def _no_embedding_usage() -> dict[str, object]:
         "cost_usd_microunits": 0,
         "usage_basis": "NO_EMBEDDING_CALL",
     }
+
+
+def _require_evaluation_authority(
+    configuration: object,
+) -> GraphitiAdapterConfiguration:
+    if not isinstance(configuration, GraphitiAdapterConfiguration):
+        raise GraphitiAdapterContractError(
+            "real Graphiti adapter requires a typed configuration"
+        )
+    if configuration.runtime_mode is not GraphitiRuntimeMode.REAL_GRAPHITI:
+        raise GraphitiAdapterContractError(
+            "real adapter rejects a non-real configuration"
+        )
+    if configuration.execution_profile is not GraphitiExecutionProfile.EVALUATION:
+        raise GraphitiAdapterContractError(
+            "real Graphiti adapter is authorised only under EVALUATION"
+        )
+    configuration.require_execution_authorized()
+    authority = configuration.real_runtime_authority
+    if (
+        authority is None
+        or authority.framework_release != GRAPHITI_CORE_RELEASE
+        or authority.model_release != GRAPHITI_CHAT_MODEL
+        or authority.embedding_release != GRAPHITI_EMBEDDING_MODEL
+        or configuration.workspace_policy.namespace_prefix
+        != GRAPHITI_WORKSPACE_GROUP
+    ):
+        raise GraphitiAdapterContractError(
+            "real Graphiti adapter requires the EVALUATION CLI packet pins"
+        )
+    return configuration
 
 
 @dataclass(slots=True)
@@ -229,6 +261,7 @@ def _load_graphiti() -> SimpleNamespace:
 
 def combined_temporal_pipeline_for(
     *,
+    configuration: GraphitiAdapterConfiguration,
     graphiti: Any,
     guard: Neo4jMutationGuard,
     episode: Any,
@@ -237,11 +270,13 @@ def combined_temporal_pipeline_for(
 ) -> ExistingGraphitiPipeline:
     """Wire combined-temporal proposals to the pinned existing Graphiti pipeline."""
 
+    configuration = _require_evaluation_authority(configuration)
     runtime = _load_graphiti()
     expected_group_id = str(episode.group_id)
     expected_episode_uuid = str(episode.uuid)
     if (
         guard.driver is not graphiti.driver
+        or expected_group_id != configuration.workspace_policy.namespace_prefix
         or guard.group_id != expected_group_id
         or guard.episode_uuid != expected_episode_uuid
     ):
@@ -711,28 +746,7 @@ class RealGraphitiAdapter:
             raise GraphitiAdapterContractError(
                 "real adapter workspace root must be a pathlib Path"
             )
-        configuration = attempt.configuration
-        if configuration.runtime_mode is not GraphitiRuntimeMode.REAL_GRAPHITI:
-            raise GraphitiAdapterContractError(
-                "real adapter rejects a non-real configuration"
-            )
-        if configuration.execution_profile is not GraphitiExecutionProfile.EVALUATION:
-            raise GraphitiAdapterContractError(
-                "real Graphiti adapter is authorised only under EVALUATION"
-            )
-        configuration.require_execution_authorized()
-        authority = configuration.real_runtime_authority
-        if (
-            authority is None
-            or authority.framework_release != GRAPHITI_CORE_RELEASE
-            or authority.model_release != GRAPHITI_CHAT_MODEL
-            or authority.embedding_release != GRAPHITI_EMBEDDING_MODEL
-            or configuration.workspace_policy.namespace_prefix
-            != GRAPHITI_WORKSPACE_GROUP
-        ):
-            raise GraphitiAdapterContractError(
-                "real Graphiti adapter requires the EVALUATION CLI packet pins"
-            )
+        configuration = _require_evaluation_authority(attempt.configuration)
 
         started_at = self._clock()
         remaining_timeout_s = attempt.extraction_request.budget.timeout_ms / 1_000

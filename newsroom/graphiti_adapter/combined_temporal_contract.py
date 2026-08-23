@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_canonical
-from newsroom.graphiti_adapter.combined_temporal_validation import (
+from newsroom.graphiti_adapter.combined_temporal_evidence import (
     EvidenceSegment,
     segment_source,
 )

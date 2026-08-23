@@ -1,239 +1,31 @@
-"""Pure validation for NewsroomCombinedTemporalExtractionV1."""
+"""Semantic validation for NewsroomCombinedTemporalExtractionV1."""
 
 from __future__ import annotations
 
-import json
 import re
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-from enum import StrEnum
+from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
 
-from newsroom.authority.canonical import (
-    CanonicalizationError,
-    digest_bytes,
-    digest_canonical,
+from newsroom.graphiti_adapter.combined_temporal_temporal import (
+    assert_temporal_policy,
+    iso_timestamp,
+    parse_optional_timestamp,
 )
-from newsroom.authority.types import UtcTimestamp
+from newsroom.graphiti_adapter.combined_temporal_types import (
+    CombinedTemporalError,
+    CombinedTemporalFailureCode,
+    EvidenceSegment,
+)
 from newsroom.graphiti_adapter.result_mapping import is_source_registry_name
 
-
-class CombinedTemporalFailureCode(StrEnum):
-    NONE = "NONE"
-    MALFORMED_OBJECT = "MALFORMED_OBJECT"
-    TEMPORAL_INVALID = "TEMPORAL_INVALID"
-    EVIDENCE_UNRESOLVED = "EVIDENCE_UNRESOLVED"
-    IDENTITY_INVALID = "IDENTITY_INVALID"
-    PIPELINE_FAILED = "PIPELINE_FAILED"
-
-
-class CombinedTemporalError(ValueError):
-    def __init__(self, code: CombinedTemporalFailureCode, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-
-
-@dataclass(frozen=True, slots=True)
-class EvidenceSegment:
-    segment_id: int
-    start_byte: int
-    end_byte: int
-    text: str
-
-
-MAX_SEGMENT_BYTES = 512
 GOVERNED_ENTITY_TYPE_IDS = frozenset({0})
 _RELATION_TYPE = re.compile(r"^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$")
-_SPLIT = re.compile(rb"(?:(?<=[.!?])[ \t]+)|(?:\n+)")
-_ISO_UTC = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)$"
-)
-_ISO_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
-_CORRECTION = re.compile(r"(?i)\bcorrection\s*:")
-_INVALID_TEMPORAL_CUE = re.compile(
-    r"(?i)\b(?:until|ceased|ended|expired|invalidated|no longer)\b"
-)
+_CORRECTION = re.compile(r"(?i)\bcorrection\s*[:\-–—]")
 _WORD = re.compile(r"[A-Za-z0-9]+")
-_RELATIVE_OFFSETS = {
-    "yesterday": timedelta(days=-1),
-    "today": timedelta(days=0),
-    "tomorrow": timedelta(days=1),
-}
-_MONTH_NAMES = (
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-)
-_PROSE_DATE = re.compile(
-    r"\b\d{1,2} (" + "|".join(_MONTH_NAMES) + r") \d{4}\b",
-    flags=re.IGNORECASE,
-)
 
 
-def segment_source(
-    body: str, *, max_bytes: int = MAX_SEGMENT_BYTES
-) -> tuple[EvidenceSegment, ...]:
-    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 1:
-        raise ValueError("max_bytes must be a positive integer")
-    data = body.encode("utf-8")
-    if not data:
-        return (EvidenceSegment(0, 0, 0, ""),)
-    cuts = [0]
-    for match in _SPLIT.finditer(data):
-        end = match.end()
-        if end > cuts[-1]:
-            cuts.append(end)
-    if cuts[-1] < len(data):
-        cuts.append(len(data))
-    bounds: list[tuple[int, int]] = []
-    for start, end in zip(cuts, cuts[1:]):
-        if end > start:
-            bounds.extend(_split_oversize(data, start, end, max_bytes))
-    segments: list[EvidenceSegment] = []
-    for index, (start, end) in enumerate(bounds):
-        try:
-            text = data[start:end].decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError("segment is not valid UTF-8") from exc
-        segments.append(
-            EvidenceSegment(
-                segment_id=index,
-                start_byte=start,
-                end_byte=end,
-                text=text,
-            )
-        )
-    return tuple(segments)
-
-
-def _raw_digest(raw: object) -> str:
-    try:
-        return _raw_digest_body(raw)
-    except (CanonicalizationError, TypeError, ValueError, UnicodeError):
-        return digest_bytes(
-            f"{type(raw).__name__}\n{_raw_repr(raw)}".encode("utf-8", errors="replace")
-        )
-
-
-def _raw_digest_body(raw: object) -> str:
-    if isinstance(raw, Mapping):
-        return digest_canonical(dict(raw))
-    if isinstance(raw, str):
-        return digest_bytes(raw.encode("utf-8"))
-    if isinstance(raw, (bytes, bytearray, memoryview)):
-        return digest_bytes(bytes(raw))
-    if isinstance(raw, Sequence):
-        return digest_canonical(list(raw))
-    return digest_canonical({"unsupported": type(raw).__name__, "repr": _raw_repr(raw)})
-
-
-def _raw_repr(raw: object) -> str:
-    try:
-        return repr(raw)
-    except Exception:
-        return "<unreprable>"
-
-
-def _split_oversize(
-    data: bytes, start: int, end: int, max_bytes: int
-) -> list[tuple[int, int]]:
-    parts: list[tuple[int, int]] = []
-    cursor = start
-    while cursor < end:
-        limit = min(cursor + max_bytes, end)
-        if limit == end:
-            cut = _utf8_cut(data, cursor, end)
-            if cut != end:
-                raise ValueError("segment is not valid UTF-8")
-            parts.append((cursor, end))
-            break
-        cut = data.rfind(b" ", cursor, limit)
-        if cut <= cursor:
-            cut = _utf8_cut(data, cursor, limit)
-        else:
-            cut = _utf8_cut(data, cursor, cut + 1)
-        if cut <= cursor:
-            raise ValueError("segment is not valid UTF-8")
-        parts.append((cursor, cut))
-        cursor = cut
-    return parts
-
-
-def _utf8_cut(data: bytes, start: int, limit: int) -> int:
-    piece = data[start:limit]
-    while piece:
-        try:
-            piece.decode("utf-8")
-            return start + len(piece)
-        except UnicodeDecodeError:
-            piece = piece[:-1]
-    return start
-
-
-def _parse_payload(raw: object) -> dict[str, Any]:
-    if isinstance(raw, Mapping):
-        payload = dict(raw)
-    elif isinstance(raw, str):
-        text = raw.strip()
-        try:
-            decoded = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
-        except CombinedTemporalError:
-            raise
-        except (ValueError, RecursionError) as exc:
-            raise CombinedTemporalError(
-                CombinedTemporalFailureCode.MALFORMED_OBJECT,
-                "response is not one JSON object",
-            ) from exc
-        if not isinstance(decoded, dict):
-            raise CombinedTemporalError(
-                CombinedTemporalFailureCode.MALFORMED_OBJECT,
-                "response is not a JSON object",
-            )
-        payload = decoded
-    else:
-        raise CombinedTemporalError(
-            CombinedTemporalFailureCode.MALFORMED_OBJECT,
-            "response is not a JSON object",
-        )
-    extra = set(payload) - {"entities", "facts"}
-    if extra or "entities" not in payload or "facts" not in payload:
-        raise CombinedTemporalError(
-            CombinedTemporalFailureCode.MALFORMED_OBJECT,
-            "object keys are not exactly entities and facts",
-        )
-    if not isinstance(payload["entities"], list) or not isinstance(
-        payload["facts"], list
-    ):
-        raise CombinedTemporalError(
-            CombinedTemporalFailureCode.MALFORMED_OBJECT,
-            "entities and facts must be arrays",
-        )
-    return payload
-
-
-def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    payload: dict[str, object] = {}
-    for key, value in pairs:
-        if key in payload:
-            raise CombinedTemporalError(
-                CombinedTemporalFailureCode.MALFORMED_OBJECT,
-                "duplicate object keys are not allowed",
-            )
-        payload[key] = value
-    return payload
-
-
-def _normalise(
+def normalise(
     payload: Mapping[str, Any],
     segments: tuple[EvidenceSegment, ...],
     reference_time: datetime,
@@ -314,7 +106,7 @@ def _normalise(
             target_name=target_name,
         )
         _assert_single_attribution(retained)
-        _assert_temporal_policy(fact, retained, reference_time)
+        assert_temporal_policy(fact, retained, reference_time)
         ranges[fact["fact"]] = cited
     if connected != id_set:
         raise CombinedTemporalError(
@@ -411,77 +203,6 @@ def _assert_relation_grounding(
             CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
             "relation type is not supported by relation words in the fact",
         )
-
-
-def _date_expectations(
-    retained: str, reference_time: datetime
-) -> tuple[set[date], set[date]]:
-    valid_dates: set[date] = set()
-    invalid_dates: set[date] = set()
-
-    def retain(value: date, start: int) -> None:
-        context = retained[max(0, start - 48) : start]
-        target = invalid_dates if _INVALID_TEMPORAL_CUE.search(context) else valid_dates
-        target.add(value)
-
-    for name, offset in _RELATIVE_OFFSETS.items():
-        for match in re.finditer(
-            rf"\b{re.escape(name)}\b", retained, flags=re.IGNORECASE
-        ):
-            retain((reference_time + offset).date(), match.start())
-    for match in _ISO_DATE.finditer(retained):
-        retain(datetime.strptime(match.group(0), "%Y-%m-%d").date(), match.start())
-    for match in _PROSE_DATE.finditer(retained):
-        retain(
-            datetime.strptime(match.group(0).title(), "%d %B %Y").date(),
-            match.start(),
-        )
-    return valid_dates, invalid_dates
-
-
-def _assert_temporal_policy(
-    fact: Mapping[str, Any], retained: str, reference_time: datetime
-) -> None:
-    valid_dates, invalid_dates = _date_expectations(retained, reference_time)
-    if (
-        (valid_dates or invalid_dates)
-        and fact["valid_at"] is None
-        and fact["invalid_at"] is None
-    ):
-        raise CombinedTemporalError(
-            CombinedTemporalFailureCode.TEMPORAL_INVALID,
-            "cited evidence has a temporal cue but both bounds are null",
-        )
-    expected_by_field = {"valid_at": valid_dates, "invalid_at": invalid_dates}
-    for field_name, expected in expected_by_field.items():
-        raw = fact[field_name]
-        if expected and raw is None:
-            raise CombinedTemporalError(
-                CombinedTemporalFailureCode.TEMPORAL_INVALID,
-                f"{field_name} omits a source-grounded temporal bound",
-            )
-        if raw is None:
-            continue
-        value = UtcTimestamp.parse(raw).value
-        if expected:
-            if value.date() not in expected:
-                raise CombinedTemporalError(
-                    CombinedTemporalFailureCode.TEMPORAL_INVALID,
-                    f"{field_name} does not obey the reference-time policy",
-                )
-            continue
-        if valid_dates or invalid_dates:
-            raise CombinedTemporalError(
-                CombinedTemporalFailureCode.TEMPORAL_INVALID,
-                f"{field_name} uses the other temporal bound's semantics",
-            )
-        iso_date = value.date().isoformat()
-        prose = f"{value.day} {_MONTH_NAMES[value.month - 1]} {value.year}"
-        if iso_date not in retained and prose.lower() not in retained.lower():
-            raise CombinedTemporalError(
-                CombinedTemporalFailureCode.TEMPORAL_INVALID,
-                f"{field_name} is not grounded in cited evidence",
-            )
 
 
 def _entity(raw: object) -> dict[str, Any]:
@@ -586,8 +307,8 @@ def _fact(raw: object) -> dict[str, Any]:
             CombinedTemporalFailureCode.MALFORMED_OBJECT,
             "fact must be a non-empty string",
         )
-    valid_at = _timestamp(raw.get("valid_at"), "valid_at")
-    invalid_at = _timestamp(raw.get("invalid_at"), "invalid_at")
+    valid_at = parse_optional_timestamp(raw.get("valid_at"), "valid_at")
+    invalid_at = parse_optional_timestamp(raw.get("invalid_at"), "invalid_at")
     if valid_at is not None and invalid_at is not None and valid_at >= invalid_at:
         raise CombinedTemporalError(
             CombinedTemporalFailureCode.TEMPORAL_INVALID,
@@ -598,8 +319,8 @@ def _fact(raw: object) -> dict[str, Any]:
         "target_local_id": target,
         "relation_type": relation,
         "fact": fact,
-        "valid_at": None if valid_at is None else _iso(valid_at),
-        "invalid_at": None if invalid_at is None else _iso(invalid_at),
+        "valid_at": None if valid_at is None else iso_timestamp(valid_at),
+        "invalid_at": None if invalid_at is None else iso_timestamp(invalid_at),
         "evidence_segment_ids": _ids(raw.get("evidence_segment_ids")),
     }
 
@@ -650,6 +371,11 @@ def _resolve_segments(
     ids: list[int],
     segments: tuple[EvidenceSegment, ...],
 ) -> tuple[EvidenceSegment, ...]:
+    if any(right != left + 1 for left, right in zip(ids, ids[1:])):
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
+            "evidence segments must form one contiguous range",
+        )
     by_id = {item.segment_id: item for item in segments}
     try:
         return tuple(by_id[item] for item in ids)
@@ -660,30 +386,4 @@ def _resolve_segments(
         ) from exc
 
 
-def _timestamp(raw: object, field_name: str) -> datetime | None:
-    if raw is None:
-        return None
-    if not isinstance(raw, str) or not _ISO_UTC.fullmatch(raw):
-        raise CombinedTemporalError(
-            CombinedTemporalFailureCode.TEMPORAL_INVALID,
-            f"{field_name} must be ISO-8601 UTC or null",
-        )
-    try:
-        return UtcTimestamp.parse(raw).value
-    except ValueError as exc:
-        raise CombinedTemporalError(
-            CombinedTemporalFailureCode.TEMPORAL_INVALID,
-            f"{field_name} must be ISO-8601 UTC or null",
-        ) from exc
-
-
-def _iso(value: datetime) -> str:
-    return value.isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-__all__ = [
-    "CombinedTemporalError",
-    "CombinedTemporalFailureCode",
-    "EvidenceSegment",
-    "segment_source",
-]
+__all__ = ["GOVERNED_ENTITY_TYPE_IDS", "normalise"]
