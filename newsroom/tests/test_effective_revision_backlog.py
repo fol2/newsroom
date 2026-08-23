@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import sqlite3
 import uuid
 from datetime import UTC, datetime
@@ -17,10 +19,10 @@ from newsroom.authority.auth import (
 )
 from newsroom.authority.canonical import digest_bytes, digest_canonical
 from newsroom.control_plane.backlog_reconciliation import (
-    BacklogReconciliationError,
     COORDINATOR_NAME,
-    CanonicalStoreGuardError,
     RAW_HTTP_RETENTION,
+    BacklogReconciliationError,
+    CanonicalStoreGuardError,
     ReconciliationCommandError,
     _backup_store,
     _census_unpublished,
@@ -28,10 +30,10 @@ from newsroom.control_plane.backlog_reconciliation import (
     _restore_incomplete_dual_store,
     _store_identity,
     _write_coordinator,
-    refuse_canonical_write,
     reconcile_effective_revision_backlog,
+    refuse_canonical_write,
 )
-from newsroom.control_plane.command_auth import COMMAND_SERVICE_PRINCIPAL
+from newsroom.control_plane.command_auth import HERMES_COMMAND_PRINCIPAL
 from newsroom.control_plane.command_service import ControlPlaneCommandService
 from newsroom.control_plane.items import parse_observation
 from newsroom.control_plane.paths import CANONICAL_PROVING_STORE
@@ -49,7 +51,7 @@ _COMMAND_TOKEN = "test-command-service-token"
 _COMMAND_PROOF = AuthenticationProof(method="STATIC_TOKEN", credential=_COMMAND_TOKEN)
 _COMMAND_SERVICE = ControlPlaneCommandService(
     authenticator=StaticAuthenticator(
-        credentials={_COMMAND_TOKEN: StaticPrincipal(COMMAND_SERVICE_PRINCIPAL)},
+        credentials={_COMMAND_TOKEN: StaticPrincipal(HERMES_COMMAND_PRINCIPAL)},
         authority_domain="newsroom.control-plane",
     )
 )
@@ -461,6 +463,12 @@ def test_reconcile_retained_fixture_matches_independent_dedupe(tmp_path: Path) -
     )
     assert live.new_effective_revision_count == dry.new_effective_revision_count
     assert live.gates["G4"] == "pass"
+    assert live.command is not None
+    assert live.command["caller_principal"] == HERMES_COMMAND_PRINCIPAL
+    assert (
+        live.command["writer_principal"]
+        == "newsroom.control-plane.command-service"
+    )
     connection = sqlite3.connect(proving)
     rows = {
         (str(source_id), str(item_key), str(digest)): str(seen)
@@ -567,6 +575,40 @@ def test_append_only_records_remain_resolvable(tmp_path: Path) -> None:
     unpublished_conn.close()
 
 
+def test_post_reconciliation_corpus_consumes_bound_remap_effects(
+    tmp_path: Path,
+) -> None:
+    from newsroom.control_plane.corpus import merge_durable_revisions
+    from newsroom.control_plane.store import list_remapped_ingest_effects
+
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    dry = _run(proving, unpublished, tmp_path, mode="dry-run")
+    _run(
+        proving,
+        unpublished,
+        tmp_path,
+        mode="live",
+        dry_run_receipt=dry.as_dict(),
+    )
+    proving_connection = sqlite3.connect(proving)
+    first_seen = tuple(
+        (str(source), str(item), str(digest), str(seen))
+        for source, item, digest, seen in proving_connection.execute(
+            "SELECT source_id,item_key,revision_digest,first_seen_at "
+            "FROM proving_revision_first_seen"
+        )
+    )
+    proving_connection.close()
+    unpublished_connection = sqlite3.connect(unpublished)
+    effects = list_remapped_ingest_effects(unpublished_connection)
+    unpublished_connection.close()
+
+    assert effects and len(effects[0]) == 7
+    assert merge_durable_revisions(
+        window_revisions=(), first_seen=first_seen, remapped_effects=effects
+    )
+
+
 def test_rerun_is_idempotent(tmp_path: Path) -> None:
     proving, unpublished, _meta = _amplified_stores(tmp_path)
     dry = _run(proving, unpublished, tmp_path, mode="dry-run")
@@ -613,6 +655,54 @@ def test_mapping_digest_binds_first_seen_correction_inputs(tmp_path: Path) -> No
 
     assert second.first_seen_corrections != first.first_seen_corrections
     assert second.mapping_digest != first.mapping_digest
+
+
+def test_retention_never_moves_durable_first_seen_later(tmp_path: Path) -> None:
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    durable_at = "2026-08-19T00:00:00.000000Z"
+    connection = sqlite3.connect(proving)
+    source_id, item_key, revision_digest = connection.execute(
+        """SELECT source_id, item_key, revision_digest
+           FROM proving_revision_first_seen
+           WHERE source_id='HK-04'
+           LIMIT 1"""
+    ).fetchone()
+    connection.execute(
+        """UPDATE proving_revision_first_seen SET first_seen_at=?
+           WHERE source_id=? AND item_key=? AND revision_digest=?""",
+        (durable_at, source_id, item_key, revision_digest),
+    )
+    connection.commit()
+    connection.close()
+
+    dry = _run(proving, unpublished, tmp_path, mode="dry-run")
+    assert not any(
+        row["source_id"] == source_id
+        and row["item_key"] == item_key
+        and row["revision_digest"] == revision_digest
+        for row in dry.first_seen_corrections
+    )
+    _run(
+        proving,
+        unpublished,
+        tmp_path,
+        mode="live",
+        dry_run_receipt=dry.as_dict(),
+    )
+    connection = sqlite3.connect(proving)
+    revision_seen = connection.execute(
+        """SELECT first_seen_at FROM proving_revision_first_seen
+           WHERE source_id=? AND item_key=? AND revision_digest=?""",
+        (source_id, item_key, revision_digest),
+    ).fetchone()[0]
+    pull_seen = connection.execute(
+        """SELECT first_seen_at FROM proving_effective_pull_first_seen
+           WHERE source_id=? AND item_key=? AND revision_digest=?""",
+        (source_id, item_key, revision_digest),
+    ).fetchone()[0]
+    connection.close()
+    assert revision_seen == durable_at
+    assert pull_seen == durable_at
 
 
 def test_append_only_census_distinguishes_version_markers(tmp_path: Path) -> None:
@@ -663,7 +753,7 @@ def test_shared_reconciliation_schema_does_not_commit_callers_transaction() -> N
     connection.close()
 
 
-def test_v10_store_dry_run_does_not_require_marker_columns(tmp_path: Path) -> None:
+def test_v10_store_dry_run_and_live_preserve_landed_rows(tmp_path: Path) -> None:
     proving, unpublished, _meta = _amplified_stores(tmp_path)
     connection = sqlite3.connect(unpublished)
     connection.execute("DROP TABLE unpublished_effective_revision_landed")
@@ -681,6 +771,20 @@ def test_v10_store_dry_run_does_not_require_marker_columns(tmp_path: Path) -> No
         ) WITHOUT ROWID
         """
     )
+    connection.execute(
+        """
+        INSERT INTO unpublished_effective_revision_landed VALUES(?,?,?,?,?,?,?)
+        """,
+        (
+            "UK-01",
+            "legacy-item",
+            "sha256:" + ("ab" * 32),
+            _FIRST_POLL,
+            "sha256:" + ("cd" * 32),
+            "sha256:" + ("ef" * 32),
+            _FIRST_POLL,
+        ),
+    )
     connection.commit()
     connection.close()
     before = _file_digest(unpublished)
@@ -689,6 +793,20 @@ def test_v10_store_dry_run_does_not_require_marker_columns(tmp_path: Path) -> No
 
     assert receipt.gates["G1"] == "pass"
     assert _file_digest(unpublished) == before
+    live = _run(
+        proving,
+        unpublished,
+        tmp_path,
+        mode="live",
+        dry_run_receipt=receipt.as_dict(),
+    )
+    connection = sqlite3.connect(unpublished)
+    assert connection.execute(
+        "SELECT 1 FROM unpublished_effective_revision_landed "
+        "WHERE item_key='legacy-item' AND legacy_v10=1"
+    ).fetchone()
+    connection.close()
+    assert live.no_loss_proof["lost"] is False
 
 
 def test_terminal_chunks_share_one_effective_pull_without_collision(
@@ -1033,7 +1151,7 @@ def test_live_transaction_has_a_time_limit(
         return 0.0 if calls == 1 else 10.0
 
     monkeypatch.setattr(
-        "newsroom.control_plane.command_service.time.monotonic", elapsed
+        "newsroom.control_plane.backlog_reconciliation.time.monotonic", elapsed
     )
     with pytest.raises(BacklogReconciliationError, match="five-second"):
         _run(
@@ -1188,7 +1306,7 @@ def test_live_backup_is_mode_restricted_and_digest_verified(tmp_path: Path) -> N
     assert coordinator["status"] == "COMPLETE"
 
 
-def test_incomplete_coordinator_restores_split_brain_before_retry(
+def test_incomplete_coordinator_preserves_concurrent_append_before_retry(
     tmp_path: Path,
 ) -> None:
     proving, unpublished, _meta = _amplified_stores(tmp_path)
@@ -1236,7 +1354,7 @@ def test_incomplete_coordinator_restores_split_brain_before_retry(
         "SELECT COUNT(*) FROM unpublished_effective_revision_remap"
     ).fetchone()[0]
     unpublished_conn.close()
-    assert canary is None
+    assert canary is not None
     assert first_seen == {_FIRST_POLL}
     assert remapped > 0
     assert live.no_loss_proof["lost"] is False
@@ -1290,13 +1408,14 @@ def test_g2_rechecks_effect_drift_under_the_mutation_fence(
 
     proving, unpublished, _meta = _amplified_stores(tmp_path)
     dry = _run(proving, unpublished, tmp_path, mode="dry-run")
-    real_backup = backlog._backup_store
-    injected = False
+    real_build_plan = backlog._build_plan
+    calls = 0
 
-    def backup_after_drift(source: Path, destination: Path) -> dict[str, str]:
-        nonlocal injected
-        if not injected:
-            injected = True
+    def build_plan_then_drift(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        plan = real_build_plan(*args, **kwargs)
+        if calls == 2:
             connection = sqlite3.connect(unpublished)
             connection.execute(
                 """
@@ -1324,10 +1443,10 @@ def test_g2_rechecks_effect_drift_under_the_mutation_fence(
             )
             connection.commit()
             connection.close()
-        return real_backup(source, destination)
+        return plan
 
-    monkeypatch.setattr(backlog, "_backup_store", backup_after_drift)
-    with pytest.raises(Exception, match="G2"):
+    monkeypatch.setattr(backlog, "_build_plan", build_plan_then_drift)
+    with pytest.raises(BacklogReconciliationError, match="changed while planning"):
         _run(
             proving,
             unpublished,
@@ -1335,30 +1454,84 @@ def test_g2_rechecks_effect_drift_under_the_mutation_fence(
             mode="live",
             dry_run_receipt=dry.as_dict(),
         )
+    connection = sqlite3.connect(unpublished)
+    assert connection.execute(
+        "SELECT 1 FROM unpublished_graphiti_ingest WHERE ingest_id='ingest-after-g2'"
+    ).fetchone()
+    connection.close()
+
+
+def test_data_version_fence_rejects_append_between_plan_and_census(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import newsroom.control_plane.backlog_reconciliation as backlog
+
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    dry = _run(proving, unpublished, tmp_path, mode="dry-run")
+    real_census = backlog._census_unpublished
+    calls = 0
+
+    def census_after_append(connection: sqlite3.Connection) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            writer = sqlite3.connect(unpublished)
+            writer.execute(
+                """
+                INSERT INTO unpublished_graphiti_failures(
+                    ingest_id, source_id, item_key, retry_count, last_outcome,
+                    last_failure_code, dead_lettered, at
+                ) VALUES('concurrent-failure','UK-10','UK-10-1',1,
+                         'FAILED','CONCURRENT',0,?)
+                """,
+                (_FIRST_POLL,),
+            )
+            writer.commit()
+            writer.close()
+        return real_census(connection)
+
+    monkeypatch.setattr(backlog, "_census_unpublished", census_after_append)
+    with pytest.raises(BacklogReconciliationError, match="changed before mutation"):
+        _run(
+            proving,
+            unpublished,
+            tmp_path,
+            mode="live",
+            dry_run_receipt=dry.as_dict(),
+        )
+    connection = sqlite3.connect(unpublished)
+    assert connection.execute(
+        "SELECT 1 FROM unpublished_graphiti_failures "
+        "WHERE ingest_id='concurrent-failure'"
+    ).fetchone()
+    connection.close()
+    coordinator = json.loads(
+        (tmp_path / "backups" / COORDINATOR_NAME).read_text(encoding="utf-8")
+    )
+    assert coordinator["status"] == "ABORTED"
 
 
 def test_g3_backup_is_taken_before_unpublished_schema_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import newsroom.control_plane.backlog_reconciliation as backlog
-    import newsroom.control_plane.command_service as command_service
 
     proving, unpublished, _meta = _amplified_stores(tmp_path)
     dry = _run(proving, unpublished, tmp_path, mode="dry-run")
     order: list[str] = []
     real_backup = backlog._backup_store
-    real_connect = command_service.connect_unpublished
+    real_ensure = backlog._ensure_landed_schema
 
     def tracked_backup(source: Path, destination: Path) -> dict[str, str]:
         order.append("backup")
         return real_backup(source, destination)
 
-    def tracked_connect(path: str) -> sqlite3.Connection:
-        order.append("connect_unpublished")
-        return real_connect(path)
+    def tracked_ensure(connection: sqlite3.Connection) -> None:
+        order.append("ensure_landed_schema")
+        real_ensure(connection)
 
     monkeypatch.setattr(backlog, "_backup_store", tracked_backup)
-    monkeypatch.setattr(command_service, "connect_unpublished", tracked_connect)
+    monkeypatch.setattr(backlog, "_ensure_landed_schema", tracked_ensure)
     _run(
         proving,
         unpublished,
@@ -1367,8 +1540,8 @@ def test_g3_backup_is_taken_before_unpublished_schema_mutation(
         dry_run_receipt=dry.as_dict(),
     )
     assert "backup" in order
-    assert "connect_unpublished" in order
-    assert order.index("backup") < order.index("connect_unpublished")
+    assert "ensure_landed_schema" in order
+    assert order.index("backup") < order.index("ensure_landed_schema")
 
 
 def test_all_retained_chunks_are_bound_to_the_effective_pull(
@@ -1411,6 +1584,57 @@ def test_dry_run_does_not_create_sqlite_sidecars(tmp_path: Path) -> None:
     assert not any(path.exists() for path in sidecars)
     _run(proving, unpublished, tmp_path, mode="dry-run")
     assert not any(path.exists() for path in sidecars)
+
+
+def test_dry_run_does_not_touch_a_complete_wal_snapshot(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    proving, unpublished, _meta = _amplified_stores(source)
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+
+    def copy_with_wal(path: Path, *, proving_store: bool) -> Path:
+        writer = sqlite3.connect(path)
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        if proving_store:
+            writer.execute(
+                "INSERT INTO proving_runs VALUES('wal-only', ?, 0, 0, 0, 0)",
+                (_FIRST_POLL,),
+            )
+        else:
+            writer.execute(
+                "INSERT INTO unpublished_graphiti_coverage(at, coverage_json) "
+                "VALUES(?, '{\"wal_only\":true}')",
+                (_FIRST_POLL,),
+            )
+        writer.commit()
+        copied = snapshot / path.name
+        for suffix in ("", "-wal", "-shm"):
+            shutil.copy2(Path(str(path) + suffix), Path(str(copied) + suffix))
+        writer.close()
+        return copied
+
+    proving_copy = copy_with_wal(proving, proving_store=True)
+    unpublished_copy = copy_with_wal(unpublished, proving_store=False)
+    files = tuple(
+        Path(str(path) + suffix)
+        for path in (proving_copy, unpublished_copy)
+        for suffix in ("", "-wal", "-shm")
+    )
+    before = tuple(
+        (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns)
+        for path in files
+    )
+
+    dry = _run(proving_copy, unpublished_copy, tmp_path, mode="dry-run")
+
+    after = tuple(
+        (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns)
+        for path in files
+    )
+    assert dry.old_identity_count > 0
+    assert after == before
 
 
 def test_read_only_open_refuses_an_incomplete_sidecar_pair(tmp_path: Path) -> None:
@@ -1463,6 +1687,29 @@ def test_authentication_precedes_recovery(tmp_path: Path) -> None:
     connection.close()
 
 
+def test_only_authenticated_hermes_may_submit_a_live_command(tmp_path: Path) -> None:
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    dry = _run(proving, unpublished, tmp_path, mode="dry-run")
+    service = ControlPlaneCommandService(
+        authenticator=StaticAuthenticator(
+            credentials={"other": StaticPrincipal("principal.other")},
+            authority_domain="newsroom.control-plane",
+        )
+    )
+    with pytest.raises(ReconciliationCommandError, match="caller principal"):
+        service.reconcile_effective_revision_backlog(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            dry_run_receipt=dry.as_dict(),
+            backup_dir=tmp_path / "backups",
+            evaluated_at=_EVALUATED_AT,
+            idempotency_key="other-caller",
+            expected_mapping_digest=dry.mapping_digest,
+            proof=AuthenticationProof(method="STATIC_TOKEN", credential="other"),
+        )
+    assert not (tmp_path / "backups" / COORDINATOR_NAME).exists()
+
+
 def test_coordinator_refuses_a_different_store_pair(tmp_path: Path) -> None:
     (tmp_path / "a").mkdir()
     (tmp_path / "b").mkdir()
@@ -1487,6 +1734,35 @@ def test_coordinator_refuses_a_different_store_pair(tmp_path: Path) -> None:
     assert connection.execute(
         "SELECT 1 FROM unpublished_graphiti_coverage "
         "WHERE coverage_json='{\"b_only\":true}'"
+    ).fetchone()
+    connection.close()
+
+
+def test_coordinator_refuses_replacement_database_at_the_same_path(
+    tmp_path: Path,
+) -> None:
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    backup_dir = tmp_path / "backups"
+    _write_coordinator(
+        backup_dir / COORDINATOR_NAME,
+        _coordinator_payload(proving, unpublished, backup_dir, status="STARTED"),
+    )
+    replacement = tmp_path / "replacement.sqlite3"
+    shutil.copy2(proving, replacement)
+    connection = sqlite3.connect(replacement)
+    connection.execute(
+        "INSERT INTO proving_runs VALUES('replacement-only', ?, 0, 0, 0, 0)",
+        (_FIRST_POLL,),
+    )
+    connection.commit()
+    connection.close()
+    os.replace(replacement, proving)
+
+    with pytest.raises(BacklogReconciliationError, match="not bound"):
+        _restore_incomplete_dual_store(proving, unpublished, backup_dir)
+    connection = sqlite3.connect(proving)
+    assert connection.execute(
+        "SELECT 1 FROM proving_runs WHERE run_id='replacement-only'"
     ).fetchone()
     connection.close()
 

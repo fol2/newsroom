@@ -16,8 +16,8 @@ from newsroom.graphiti_adapter.identity import (
     ingest_key,
     observation_authority_ids,
     representation_digest_for,
-    source_revision_id,
     source_definition_version_id,
+    source_revision_id,
 )
 from newsroom.graphiti_adapter.temporal import TemporalMapping, map_reference_time
 
@@ -569,7 +569,7 @@ def merge_durable_revisions(
     window_revisions: tuple[EligibleCorpusRevision, ...],
     first_seen: tuple[tuple[str, str, str, str], ...],
     landed: tuple[EligibleCorpusRevision, ...] = (),
-    remapped_effects: tuple[tuple[str, str, str, str, str, str], ...] = (),
+    remapped_effects: tuple[tuple[str, ...], ...] = (),
     permitted_source_ids: frozenset[str] | None = None,
 ) -> tuple[EligibleCorpusRevision, ...]:
     """Keep proven coverage obligations after raw HTTP bodies leave retention.
@@ -593,14 +593,10 @@ def merge_durable_revisions(
         if permitted_source_ids is None or source_id in permitted_source_ids
     }
     effects_by_key: dict[EffectiveRevisionCoverageKey, list[str]] = {}
-    for (
-        source_id,
-        item_key,
-        revision_digest,
-        published_at,
-        updated_at,
-        ingest_id,
-    ) in remapped_effects:
+    for effect in remapped_effects:
+        source_id, item_key, revision_digest, published_at, updated_at, ingest_id = (
+            effect[:6]
+        )
         if ingest_id:
             effects_by_key.setdefault(
                 EffectiveRevisionCoverageKey(

@@ -9,24 +9,30 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
-from collections.abc import Mapping
+import tempfile
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
+from newsroom.authority.auth import AuthenticationProof
 from newsroom.authority.canonical import digest_canonical
+from newsroom.authority.types import UtcTimestamp
+from newsroom.control_plane.command_auth import (
+    COMMAND_SERVICE_PRINCIPAL,
+    HERMES_COMMAND_PRINCIPAL,
+    RECONCILE_COMMAND_TYPE,
+)
+from newsroom.control_plane.corpus import effective_pull_ingest_ids
 from newsroom.control_plane.items import parse_observation
 from newsroom.control_plane.paths import (
     CANONICAL_PROVING_STORE,
     CANONICAL_UNPUBLISHED_STORE,
 )
-from newsroom.control_plane.command_auth import (
-    COMMAND_SERVICE_PRINCIPAL,
-    RECONCILE_COMMAND_TYPE,
-)
-from newsroom.control_plane.corpus import effective_pull_ingest_ids
 from newsroom.control_plane.proving_revision_schema import (
     ensure_proving_revision_schema,
 )
@@ -35,11 +41,10 @@ from newsroom.control_plane.sqlite_profile import (
     apply_control_plane_sqlite_profile,
 )
 from newsroom.control_plane.store import (
+    _ensure_landed_schema,
     append_ledger,
     ensure_reconciliation_schema,
 )
-from newsroom.control_plane.veto import assert_private_store
-
 
 # Must match newsroom.control_plane.cycle._RAW_HTTP_RETENTION.
 RAW_HTTP_RETENTION = timedelta(days=7)
@@ -49,7 +54,7 @@ FIRST_SEEN_WITHOUT_RETAINED_OBSERVATION = "FIRST_SEEN_WITHOUT_RETAINED_OBSERVATI
 RETENTION_WINDOW_BOUNDED_INACCURACY = "RETENTION_WINDOW_BOUNDED_INACCURACY"
 GRAPH_EFFECT_AMBIGUOUS_COVERAGE = "GRAPH_EFFECT_AMBIGUOUS_COVERAGE"
 RETAINED_LINEAGE_REMAP = "RETAINED_LINEAGE_REMAP"
-ALLOWED_CALLER_PRINCIPALS = frozenset({COMMAND_SERVICE_PRINCIPAL})
+ALLOWED_CALLER_PRINCIPALS = frozenset({HERMES_COMMAND_PRINCIPAL})
 ALLOWED_COMMAND_TYPES = frozenset({RECONCILE_COMMAND_TYPE})
 BACKUP_DIR_MODE = 0o700
 BACKUP_FILE_MODE = 0o600
@@ -73,6 +78,7 @@ class ReconciliationCommandError(BacklogReconciliationError):
 @dataclass(frozen=True, slots=True)
 class _ReconciliationCommand:
     caller_principal: str
+    writer_principal: str
     command_type: str
     idempotency_key: str
     expected_mapping_digest: str
@@ -80,6 +86,7 @@ class _ReconciliationCommand:
     def as_dict(self) -> dict[str, str]:
         return {
             "caller_principal": self.caller_principal,
+            "writer_principal": self.writer_principal,
             "command_type": self.command_type,
             "idempotency_key": self.idempotency_key,
             "expected_mapping_digest": self.expected_mapping_digest,
@@ -235,14 +242,24 @@ def refuse_canonical_write(path: str, *, allow_canonical_mutation: bool) -> None
         )
 
 
+class _ScratchReadOnlyConnection(sqlite3.Connection):
+    """Read a copied WAL snapshot without touching source sidecars."""
+
+    scratch: tempfile.TemporaryDirectory[str] | None = None
+
+    def close(self) -> None:
+        super().close()
+        if self.scratch is not None:
+            self.scratch.cleanup()
+            self.scratch = None
+
+
 def _readonly_connect(path: str) -> sqlite3.Connection:
     resolved = _resolved(path)
     if not resolved.is_file():
         raise BacklogReconciliationError(f"store does not exist: {path}")
-    # SQLite creates WAL/SHM sidecars even for mode=ro.  A store with no WAL
-    # can instead be opened as immutable, which keeps dry-run byte-for-byte
-    # read-only.  Existing WAL stores still use the ordinary read-only path so
-    # committed WAL frames remain visible.
+    # SQLite mutates SHM even in mode=ro. Read a complete WAL snapshot from a
+    # scratch copy; WAL-free stores can be opened immutable in place.
     wal_exists, shm_exists = (
         Path(str(resolved) + suffix).exists() for suffix in ("-wal", "-shm")
     )
@@ -250,19 +267,55 @@ def _readonly_connect(path: str) -> sqlite3.Connection:
         raise BacklogReconciliationError(
             f"store has an incomplete WAL sidecar pair: {path}"
         )
-    immutable = "" if wal_exists else "&immutable=1"
-    connection = sqlite3.connect(f"{resolved.as_uri()}?mode=ro{immutable}", uri=True)
-    apply_control_plane_sqlite_profile(connection, query_only=True, wal=False)
-    return connection
-
-
-def _writable_connect(
-    path: str, *, allow_canonical_mutation: bool
-) -> sqlite3.Connection:
-    refuse_canonical_write(path, allow_canonical_mutation=allow_canonical_mutation)
-    assert_private_store(path)
-    connection = sqlite3.connect(path)
-    apply_control_plane_sqlite_profile(connection)
+    if wal_exists:
+        source_paths = tuple(
+            Path(str(resolved) + suffix) for suffix in ("", "-wal", "-shm")
+        )
+        before = tuple(
+            (
+                item.stat().st_dev,
+                item.stat().st_ino,
+                item.stat().st_size,
+                item.stat().st_mtime_ns,
+            )
+            for item in source_paths
+        )
+        scratch = tempfile.TemporaryDirectory(prefix="newsroom-readonly-")
+        copied = Path(scratch.name) / resolved.name
+        try:
+            shutil.copy2(resolved, copied)
+            shutil.copy2(Path(str(resolved) + "-wal"), Path(str(copied) + "-wal"))
+            after = tuple(
+                (
+                    item.stat().st_dev,
+                    item.stat().st_ino,
+                    item.stat().st_size,
+                    item.stat().st_mtime_ns,
+                )
+                for item in source_paths
+            )
+            if after != before:
+                raise BacklogReconciliationError(
+                    f"store changed while taking a read-only snapshot: {path}"
+                )
+            connection = sqlite3.connect(
+                f"{copied.as_uri()}?mode=ro",
+                uri=True,
+                factory=_ScratchReadOnlyConnection,
+            )
+            connection.scratch = scratch
+        except Exception:
+            scratch.cleanup()
+            raise
+    else:
+        connection = sqlite3.connect(
+            f"{resolved.as_uri()}?mode=ro&immutable=1", uri=True
+        )
+    try:
+        apply_control_plane_sqlite_profile(connection, query_only=True, wal=False)
+    except Exception:
+        connection.close()
+        raise
     return connection
 
 
@@ -343,7 +396,10 @@ def _census_unpublished(
     )
     landed_key = "source_id || '|' || item_key || '|' || revision_digest"
     if {"published_at", "updated_at"}.issubset(landed_columns):
-        landed_key += " || '|' || published_at || '|' || updated_at"
+        landed_key += (
+            " || CASE WHEN published_at='' AND updated_at='' THEN '' "
+            "ELSE '|' || published_at || '|' || updated_at END"
+        )
     queries = (
         ("ledger", f"SELECT digest FROM {_schema_table('ledger', schema=schema)}"),
         (
@@ -587,6 +643,46 @@ def _build_plan(
                 str(first_seen_at)
             )
 
+    retained_earliest = dict(earliest)
+    # Retention can reveal an earlier observation, but it can never move a
+    # durable first-seen instant later.
+    for triple, recorded_at in first_seen.items():
+        if triple in earliest and recorded_at < earliest[triple]:
+            earliest[triple] = recorded_at
+    for mapping in poll_mappings:
+        triple = _Triple(
+            mapping["source_id"], mapping["item_key"], mapping["revision_digest"]
+        )
+        mapping["new_first_observed_at"] = earliest[triple]
+
+    pull_first_seen: dict[tuple[_Triple, str, str], str] = {}
+    if _table_exists(
+        proving, "proving_effective_pull_first_seen", schema=proving_schema
+    ):
+        pull_table = _schema_table(
+            "proving_effective_pull_first_seen", schema=proving_schema
+        )
+        rows = proving.execute(
+            f"""SELECT source_id, item_key, revision_digest, published_at,
+                       updated_at, first_seen_at
+                FROM {pull_table}"""
+        )
+        for source_id, item_key, revision_digest, published, updated, seen in rows:
+            pull_first_seen[
+                (
+                    _Triple(str(source_id), str(item_key), str(revision_digest)),
+                    str(published or ""),
+                    str(updated or ""),
+                )
+            ] = str(seen)
+    for pull in pulls:
+        retained_at = pull_earliest[pull]
+        durable_at = pull_first_seen.get(pull)
+        if durable_at is None and len(version_markers[pull[0]]) == 1:
+            durable_at = first_seen.get(pull[0])
+        if durable_at is not None and durable_at < retained_at:
+            pull_earliest[pull] = durable_at
+
     attributed: list[dict[str, object]] = []
     for triple, markers in sorted(
         version_markers.items(),
@@ -640,7 +736,7 @@ def _build_plan(
     missing: list[tuple[_Triple, str]] = []
     for triple in expected_keys:
         new_at = earliest[triple]
-        window_bound = older_runs and new_at >= cutoff
+        window_bound = older_runs and retained_earliest[triple] >= cutoff
         if window_bound:
             bounded.append(
                 {
@@ -648,7 +744,7 @@ def _build_plan(
                     "source_id": triple.source_id,
                     "item_key": triple.item_key,
                     "revision_digest": triple.revision_digest,
-                    "earliest_retained_at": new_at,
+                    "earliest_retained_at": retained_earliest[triple],
                     "retention_cutoff": cutoff,
                     "not_true_first_landing": True,
                 }
@@ -671,7 +767,7 @@ def _build_plan(
                 }
             )
             continue
-        if recorded == new_at:
+        if recorded <= new_at:
             continue
         corrections.append(
             {
@@ -1151,46 +1247,6 @@ def _backup_store(source: Path, destination: Path) -> dict[str, str]:
     return {"path": str(destination), "digest": digest, "integrity": "ok"}
 
 
-def _restore_store(backup: Path, destination: Path) -> None:
-    sidecar = Path(str(backup) + ".sha256")
-    if sidecar.is_file():
-        expected = sidecar.read_text(encoding="utf-8").strip()
-        actual = _file_sha256(backup)
-        if expected != actual:
-            raise BacklogReconciliationError(f"backup file digest differs for {backup}")
-    check = sqlite3.connect(f"file:{backup.resolve()}?mode=ro", uri=True)
-    try:
-        if not _integrity_ok(check):
-            raise BacklogReconciliationError(f"backup integrity check failed: {backup}")
-    finally:
-        check.close()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(destination.parent, BACKUP_DIR_MODE)
-    if destination.exists():
-        destination.unlink()
-    for suffix in ("-wal", "-shm"):
-        sidecar_db = Path(str(destination) + suffix)
-        if sidecar_db.exists():
-            sidecar_db.unlink()
-    source_conn = sqlite3.connect(f"file:{backup.resolve()}?mode=ro", uri=True)
-    dest_conn = sqlite3.connect(destination)
-    try:
-        source_conn.backup(dest_conn)
-        dest_conn.commit()
-        if not _integrity_ok(dest_conn):
-            raise BacklogReconciliationError(
-                f"restored integrity check failed: {destination}"
-            )
-    finally:
-        dest_conn.close()
-        source_conn.close()
-    os.chmod(destination, BACKUP_FILE_MODE)
-
-
-def _row_changes(connection: sqlite3.Connection) -> int:
-    return int(connection.execute("SELECT changes()").fetchone()[0])
-
-
 def _ensure_first_seen_schema(
     connection: sqlite3.Connection, *, schema: str = "main"
 ) -> None:
@@ -1202,7 +1258,7 @@ def _apply_proving(
 ) -> int:
     _ensure_first_seen_schema(connection, schema=schema)
     table = _schema_table("proving_revision_first_seen", schema=schema)
-    changed = 0
+    before = connection.total_changes
     for correction in plan.first_seen_corrections:
         triple = (
             str(correction["source_id"]),
@@ -1229,7 +1285,6 @@ def _apply_proving(
                 """,
                 (new_at, *triple, str(correction["old_first_seen_at"])),
             )
-        changed += _row_changes(connection)
     pull_table = _schema_table("proving_effective_pull_first_seen", schema=schema)
     for (triple, published_at, updated_at), first_seen_at in plan.pull_earliest.items():
         connection.execute(
@@ -1248,8 +1303,7 @@ def _apply_proving(
                 first_seen_at,
             ),
         )
-        changed += _row_changes(connection)
-    return changed
+    return connection.total_changes - before
 
 
 def _apply_remap_rows(
@@ -1258,7 +1312,6 @@ def _apply_remap_rows(
     ensure_reconciliation_schema(connection, schema=schema)
     table = _schema_table("unpublished_effective_revision_remap", schema=schema)
     at = _now()
-    changed = 0
     rows: list[tuple[object, ...]] = []
     for mapping in plan.poll_mappings:
         payload = {"kind": "AMPLIFIED_POLL_REMAP", **mapping}
@@ -1325,20 +1378,19 @@ def _apply_remap_rows(
                 at,
             )
         )
-    for row in rows:
-        connection.execute(
-            f"""
-            INSERT OR IGNORE INTO {table}(
-                mapping_id, source_id, item_key, revision_digest,
-                published_at, updated_at,
-                old_observed_fallback_at, new_first_observed_at, kind,
-                retention_window_bounded_inaccuracy, old_ingest_id, new_ingest_id, at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            row,
-        )
-        changed += _row_changes(connection)
-    return changed
+    before = connection.total_changes
+    connection.executemany(
+        f"""
+        INSERT OR IGNORE INTO {table}(
+            mapping_id, source_id, item_key, revision_digest,
+            published_at, updated_at,
+            old_observed_fallback_at, new_first_observed_at, kind,
+            retention_window_bounded_inaccuracy, old_ingest_id, new_ingest_id, at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        rows,
+    )
+    return connection.total_changes - before
 
 
 def _retain_receipt(
@@ -1371,13 +1423,14 @@ def _record_command(
     connection.execute(
         """
         INSERT OR REPLACE INTO unpublished_reconciliation_commands(
-            idempotency_key, caller_principal, command_type,
-            expected_mapping_digest, receipt_json, at
-        ) VALUES(?,?,?,?,?,?)
+            idempotency_key, caller_principal, writer_principal,
+            command_type, expected_mapping_digest, receipt_json, at
+        ) VALUES(?,?,?,?,?,?,?)
         """,
         (
             command.idempotency_key,
             command.caller_principal,
+            command.writer_principal,
             command.command_type,
             command.expected_mapping_digest,
             json.dumps(receipt.as_dict(), ensure_ascii=False, sort_keys=True),
@@ -1470,14 +1523,7 @@ def _assert_command(
 ) -> _ReconciliationCommand:
     if command is None:
         raise ReconciliationCommandError("live mutation requires a service command")
-    if command.caller_principal not in ALLOWED_CALLER_PRINCIPALS:
-        raise ReconciliationCommandError(
-            f"caller principal is not allow-listed: {command.caller_principal}"
-        )
-    if command.command_type not in ALLOWED_COMMAND_TYPES:
-        raise ReconciliationCommandError(
-            f"command type is not allow-listed: {command.command_type}"
-        )
+    _assert_command_authority(command)
     if not command.idempotency_key.strip():
         raise ReconciliationCommandError("idempotency key is required")
     if command.expected_mapping_digest != plan.mapping_digest:
@@ -1489,6 +1535,21 @@ def _assert_command(
             "expected mapping digest does not match the dry-run receipt"
         )
     return command
+
+
+def _assert_command_authority(command: _ReconciliationCommand) -> None:
+    if command.caller_principal not in ALLOWED_CALLER_PRINCIPALS:
+        raise ReconciliationCommandError(
+            f"caller principal is not allow-listed: {command.caller_principal}"
+        )
+    if command.writer_principal != COMMAND_SERVICE_PRINCIPAL:
+        raise ReconciliationCommandError(
+            f"writer principal is not the command service: {command.writer_principal}"
+        )
+    if command.command_type not in ALLOWED_COMMAND_TYPES:
+        raise ReconciliationCommandError(
+            f"command type is not allow-listed: {command.command_type}"
+        )
 
 
 def _load_completed_command(
@@ -1525,14 +1586,31 @@ def _load_completed_command(
 def _write_coordinator(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, BACKUP_DIR_MODE)
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    os.chmod(path, BACKUP_FILE_MODE)
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            os.fchmod(handle.fileno(), BACKUP_FILE_MODE)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _store_identity(path: Path) -> dict[str, object]:
-    return {"path": str(path.expanduser().resolve())}
+    resolved = path.expanduser().resolve()
+    stat = resolved.stat()
+    return {
+        "path": str(resolved),
+        "device": stat.st_dev,
+        "inode": stat.st_ino,
+    }
 
 
 def _assert_coordinator_binding(
@@ -1601,7 +1679,7 @@ def _restore_incomplete_dual_store(
     backup_dir: Path,
 ) -> bool:
     coordinator = _read_coordinator(backup_dir / COORDINATOR_NAME)
-    if coordinator is None or coordinator.get("status") == "COMPLETE":
+    if coordinator is None or coordinator.get("status") in {"ABORTED", "COMPLETE"}:
         return False
     proving_backup = backup_dir / "proving_store.sqlite3"
     unpublished_backup = backup_dir / "unpublished_store.sqlite3"
@@ -1619,9 +1697,24 @@ def _restore_incomplete_dual_store(
             {**coordinator, "status": "COMPLETE"},
         )
         return False
-    _restore_store(proving_backup, proving_path)
-    _restore_store(unpublished_backup, unpublished_path)
-    return True
+    # One attached SQLite transaction is crash-atomic. STARTED means the
+    # transaction did not commit; restoring an older backup here could delete
+    # append-only evidence committed by another connection.
+    for path in (proving_path, unpublished_path):
+        connection = sqlite3.connect(path)
+        try:
+            if not _integrity_ok(connection):
+                raise BacklogReconciliationError(
+                    f"G3: incomplete transaction left an invalid store: {path}"
+                )
+        finally:
+            connection.close()
+    _restore_wal_profiles(proving_path, unpublished_path)
+    _write_coordinator(
+        backup_dir / COORDINATOR_NAME,
+        {**coordinator, "status": "ABORTED"},
+    )
+    return False
 
 
 def _plan_reconciliation(
@@ -1689,3 +1782,215 @@ def reconcile_effective_revision_backlog(
     )
     _write_receipt(receipt_path, receipt)
     return receipt
+
+
+class _ControlPlaneCommandService:
+    """Sole direct writer for Control Plane canonical mutation."""
+
+    principal = COMMAND_SERVICE_PRINCIPAL
+
+    def __init__(
+        self,
+        *,
+        authenticator: object,
+        clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
+    ) -> None:
+        if authenticator is None:
+            raise ValueError("command service requires an authenticator")
+        self._authenticator = authenticator
+        self._clock = clock
+
+    def reconcile_effective_revision_backlog(
+        self,
+        *,
+        proving_store: str,
+        unpublished_store: str,
+        dry_run_receipt: Mapping[str, object],
+        receipt_path: Path | None = None,
+        backup_dir: Path | None = None,
+        allow_canonical_mutation: bool = False,
+        evaluated_at: datetime | None = None,
+        idempotency_key: str,
+        expected_mapping_digest: str,
+        proof: AuthenticationProof,
+        mode: Literal["live"] = "live",
+    ) -> BacklogReconciliationReceipt:
+        if mode != "live":
+            raise ValueError("command-service mutation is live-only")
+        now = self._clock()
+        authentication = self._authenticator.authenticate(proof, now=now)
+        authentication.require_current(now)
+        command = _ReconciliationCommand(
+            caller_principal=authentication.principal_id,
+            writer_principal=COMMAND_SERVICE_PRINCIPAL,
+            command_type=RECONCILE_COMMAND_TYPE,
+            idempotency_key=idempotency_key,
+            expected_mapping_digest=expected_mapping_digest,
+        )
+        refuse_canonical_write(
+            proving_store, allow_canonical_mutation=allow_canonical_mutation
+        )
+        refuse_canonical_write(
+            unpublished_store, allow_canonical_mutation=allow_canonical_mutation
+        )
+        if backup_dir is None:
+            raise BacklogReconciliationError(
+                "G3: live migration requires a backup directory"
+            )
+        _assert_command_authority(command)
+        proving_path = Path(proving_store)
+        unpublished_path = Path(unpublished_store)
+        backup_root = Path(backup_dir)
+
+        # Recovery is itself a mutation, so it stays behind authentication.
+        _restore_incomplete_dual_store(
+            proving_path, unpublished_path, backup_root
+        )
+        evaluated = _as_utc(evaluated_at or datetime.now(tz=UTC))
+        plan, _proving_before, _unpublished_before = _plan_reconciliation(
+            proving_store, unpublished_store, evaluated_at=evaluated
+        )
+        _assert_g2(plan, dry_run_receipt)
+        _assert_command(command, plan, dry_run_receipt)
+        completed = _load_completed_command(unpublished_store, command)
+        if completed is not None:
+            _write_receipt(receipt_path, completed)
+            return completed
+
+        proving_backup = backup_root / "proving_store.sqlite3"
+        unpublished_backup = backup_root / "unpublished_store.sqlite3"
+        proving_backup_result = _backup_store(proving_path, proving_backup)
+        unpublished_backup_result = _backup_store(
+            unpublished_path, unpublished_backup
+        )
+        coordinator: dict[str, object] = {
+            "mapping_digest": plan.mapping_digest,
+            "idempotency_key": command.idempotency_key,
+            "proving_store": _store_identity(proving_path),
+            "unpublished_store": _store_identity(unpublished_path),
+            "proving_backup": str(proving_backup.resolve()),
+            "unpublished_backup": str(unpublished_backup.resolve()),
+            "proving_backup_digest": proving_backup_result["digest"],
+            "unpublished_backup_digest": unpublished_backup_result["digest"],
+        }
+        coordinator_path = backup_root / COORDINATOR_NAME
+        _write_coordinator(
+            coordinator_path, {**coordinator, "status": "STARTED"}
+        )
+
+        def apply_mutations() -> tuple[int, BacklogReconciliationReceipt]:
+            conn: sqlite3.Connection | None = sqlite3.connect(str(unpublished_path))
+            try:
+                apply_control_plane_sqlite_profile(conn, wal=False)
+                conn.execute("ATTACH DATABASE ? AS proving", (str(proving_path),))
+                apply_control_plane_sqlite_profile(
+                    conn, wal=False, schema=PROVING_ATTACH_SCHEMA
+                )
+
+                def versions() -> tuple[int, int]:
+                    return (
+                        int(conn.execute("PRAGMA main.data_version").fetchone()[0]),
+                        int(conn.execute("PRAGMA proving.data_version").fetchone()[0]),
+                    )
+
+                before_plan_versions = versions()
+                live_plan = _build_plan(
+                    conn,
+                    conn,
+                    evaluated_at=evaluated,
+                    proving_schema=PROVING_ATTACH_SCHEMA,
+                )
+                if versions() != before_plan_versions:
+                    raise BacklogReconciliationError(
+                        "G2: stores changed while planning"
+                    )
+                _assert_g1(live_plan)
+                _assert_g2(live_plan, dry_run_receipt)
+                _assert_g5(live_plan)
+                _assert_command(command, live_plan, dry_run_receipt)
+                proving_before = _census_proving(
+                    conn, schema=PROVING_ATTACH_SCHEMA
+                )
+                unpublished_before = _census_unpublished(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                if versions() != before_plan_versions:
+                    raise BacklogReconciliationError(
+                        "G2: stores changed before mutation"
+                    )
+                deadline = time.monotonic() + LIVE_TRANSACTION_TIMEOUT_SECONDS
+                conn.set_progress_handler(lambda: time.monotonic() >= deadline, 1_000)
+                _ensure_landed_schema(conn)
+                remapped = _apply_proving(
+                    conn, live_plan, schema=PROVING_ATTACH_SCHEMA
+                )
+                remapped += _apply_remap_rows(conn, live_plan)
+                no_loss = _no_loss_proof(
+                    proving_before=proving_before,
+                    unpublished_before=unpublished_before,
+                    proving_after=_census_proving(
+                        conn, schema=PROVING_ATTACH_SCHEMA
+                    ),
+                    unpublished_after=_census_unpublished(conn),
+                )
+                if no_loss["lost"]:
+                    raise BacklogReconciliationError(
+                        "G3: append-only census lost records"
+                    )
+                rerun_changes = _apply_proving(
+                    conn, live_plan, schema=PROVING_ATTACH_SCHEMA
+                ) + _apply_remap_rows(conn, live_plan)
+                if rerun_changes:
+                    raise BacklogReconciliationError(
+                        "G4: rerun produced further remapping"
+                    )
+                receipt = _receipt_from_plan(
+                    live_plan,
+                    mode="live",
+                    mutated=True,
+                    remapped_count=remapped,
+                    no_loss_proof=no_loss,
+                    gates={key: "pass" for key in ("G1", "G2", "G3", "G4", "G5")},
+                    command=command.as_dict(),
+                )
+                _retain_receipt(conn, receipt.as_dict())
+                _record_command(conn, command, receipt)
+                conn.commit()
+                return remapped, receipt
+            except Exception as exc:
+                if conn is not None and conn.in_transaction:
+                    conn.rollback()
+                if conn is not None:
+                    conn.close()
+                    conn = None
+                if isinstance(exc, sqlite3.OperationalError) and "interrupted" in str(
+                    exc
+                ):
+                    raise BacklogReconciliationError(
+                        "live reconciliation exceeded the five-second transaction limit"
+                    ) from exc
+                raise
+            finally:
+                if conn is not None:
+                    conn.set_progress_handler(None, 0)
+                    conn.close()
+
+        try:
+            _set_journal_mode(proving_path, "DELETE")
+            _set_journal_mode(unpublished_path, "DELETE")
+            remapped, receipt = apply_mutations()
+        except Exception:
+            _restore_wal_profiles(proving_path, unpublished_path)
+            _write_coordinator(
+                coordinator_path, {**coordinator, "status": "ABORTED"}
+            )
+            raise
+        coordinator["remapped_count"] = remapped
+        _write_coordinator(
+            coordinator_path, {**coordinator, "status": "COMMITTED"}
+        )
+        _restore_wal_profiles(proving_path, unpublished_path)
+        _write_coordinator(
+            coordinator_path, {**coordinator, "status": "COMPLETE"}
+        )
+        _write_receipt(receipt_path, receipt)
+        return receipt

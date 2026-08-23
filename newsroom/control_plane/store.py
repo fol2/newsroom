@@ -14,9 +14,9 @@ from newsroom.authority.canonical import (
     digest_bytes,
     digest_canonical,
 )
-from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.corpus import EligibleCorpusRevision
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
+from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.veto import (
     VetoError,
     assert_private_store,
@@ -333,6 +333,7 @@ def ensure_reconciliation_schema(
         CREATE TABLE IF NOT EXISTS {prefix}unpublished_reconciliation_commands(
             idempotency_key TEXT PRIMARY KEY,
             caller_principal TEXT NOT NULL,
+            writer_principal TEXT NOT NULL,
             command_type TEXT NOT NULL,
             expected_mapping_digest TEXT NOT NULL,
             receipt_json TEXT NOT NULL,
@@ -340,6 +341,20 @@ def ensure_reconciliation_schema(
         )
         """
     )
+    command_pragma = (
+        "table_info(unpublished_reconciliation_commands)"
+        if schema == "main"
+        else f"{schema}.table_info(unpublished_reconciliation_commands)"
+    )
+    command_columns = {
+        str(row[1]) for row in connection.execute(f"PRAGMA {command_pragma}")
+    }
+    if "writer_principal" not in command_columns:
+        connection.execute(
+            f"ALTER TABLE {prefix}unpublished_reconciliation_commands "
+            "ADD COLUMN writer_principal TEXT NOT NULL "
+            "DEFAULT 'newsroom.control-plane.command-service'"
+        )
     pragma = (
         "table_info(unpublished_effective_revision_remap)"
         if schema == "main"
@@ -564,9 +579,11 @@ def list_landed_revisions(
             ORDER BY at, mapping_id
             """
         ):
-            corrected_first_seen[
-                (str(source_id), str(item_key), str(revision_digest))
-            ] = str(corrected_at)
+            key = (str(source_id), str(item_key), str(revision_digest))
+            corrected = str(corrected_at)
+            corrected_first_seen[key] = min(
+                corrected_first_seen.get(key, corrected), corrected
+            )
     rows = list(
         connection.execute(
             """
@@ -591,9 +608,11 @@ def list_landed_revisions(
         updated = str(row[4] or "") or None
         first_observed_at = str(row[5])
         if published is None and updated is None:
-            first_observed_at = corrected_first_seen.get(
-                (str(row[0]), str(row[1]), str(row[2])), first_observed_at
+            corrected = corrected_first_seen.get(
+                (str(row[0]), str(row[1]), str(row[2]))
             )
+            if corrected is not None:
+                first_observed_at = min(first_observed_at, corrected)
         revisions.append(
             synthetic_coverage_revision(
                 source_id=str(row[0]),
