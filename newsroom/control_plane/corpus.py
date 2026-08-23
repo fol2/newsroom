@@ -16,8 +16,8 @@ from newsroom.graphiti_adapter.identity import (
     ingest_key,
     observation_authority_ids,
     representation_digest_for,
-    source_revision_id,
     source_definition_version_id,
+    source_revision_id,
 )
 from newsroom.graphiti_adapter.temporal import TemporalMapping, map_reference_time
 
@@ -28,6 +28,25 @@ class EffectiveRevisionCoverageKey(NamedTuple):
     revision_digest: str
     published_at: str
     updated_at: str
+
+
+class RemappedIngestEffect(NamedTuple):
+    source_id: str
+    item_key: str
+    revision_digest: str
+    published_at: str
+    updated_at: str
+    old_ingest_id: str
+    new_ingest_id: str
+
+
+class EffectivePullFirstSeen(NamedTuple):
+    source_id: str
+    item_key: str
+    revision_digest: str
+    published_at: str
+    updated_at: str
+    first_observed_at: str
 
 
 def chunk_text(text: str, *, limit: int = MAX_EPISODE_BYTES) -> tuple[str, ...]:
@@ -568,8 +587,9 @@ def merge_durable_revisions(
     *,
     window_revisions: tuple[EligibleCorpusRevision, ...],
     first_seen: tuple[tuple[str, str, str, str], ...],
+    pull_first_seen: tuple[EffectivePullFirstSeen, ...] = (),
     landed: tuple[EligibleCorpusRevision, ...] = (),
-    remapped_effects: tuple[tuple[str, str, str, str, str, str], ...] = (),
+    remapped_effects: tuple[RemappedIngestEffect, ...] = (),
     permitted_source_ids: frozenset[str] | None = None,
 ) -> tuple[EligibleCorpusRevision, ...]:
     """Keep proven coverage obligations after raw HTTP bodies leave retention.
@@ -593,21 +613,48 @@ def merge_durable_revisions(
         if permitted_source_ids is None or source_id in permitted_source_ids
     }
     effects_by_key: dict[EffectiveRevisionCoverageKey, list[str]] = {}
-    for (
-        source_id,
-        item_key,
-        revision_digest,
-        published_at,
-        updated_at,
-        ingest_id,
-    ) in remapped_effects:
-        if ingest_id:
+    for effect in remapped_effects:
+        if effect.old_ingest_id:
             effects_by_key.setdefault(
                 EffectiveRevisionCoverageKey(
-                    source_id, item_key, revision_digest, published_at, updated_at
+                    effect.source_id,
+                    effect.item_key,
+                    effect.revision_digest,
+                    effect.published_at,
+                    effect.updated_at,
                 ),
                 [],
-            ).append(ingest_id)
+            ).append(effect.old_ingest_id)
+    for pull in pull_first_seen:
+        coverage_key = EffectiveRevisionCoverageKey(
+            pull.source_id,
+            pull.item_key,
+            pull.revision_digest,
+            pull.published_at,
+            pull.updated_at,
+        )
+        if coverage_key in selected:
+            continue
+        if (
+            pull.source_id,
+            pull.item_key,
+            pull.revision_digest,
+        ) not in first_seen_by_triple:
+            continue
+        if (
+            permitted_source_ids is not None
+            and pull.source_id not in permitted_source_ids
+        ):
+            continue
+        selected[coverage_key] = synthetic_coverage_revision(
+            source_id=pull.source_id,
+            item_key=pull.item_key,
+            revision_digest=pull.revision_digest,
+            first_observed_at=pull.first_observed_at,
+            published_at=pull.published_at or None,
+            updated_at=pull.updated_at or None,
+            ingest_ids=tuple(sorted(set(effects_by_key.get(coverage_key, ())))),
+        )
     for coverage_key, ingest_ids in effects_by_key.items():
         if coverage_key in selected:
             continue

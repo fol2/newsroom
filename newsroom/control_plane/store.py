@@ -14,9 +14,9 @@ from newsroom.authority.canonical import (
     digest_bytes,
     digest_canonical,
 )
-from newsroom.control_plane.surface import UnpublishedSurfacePayload
-from newsroom.control_plane.corpus import EligibleCorpusRevision
+from newsroom.control_plane.corpus import EligibleCorpusRevision, RemappedIngestEffect
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
+from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.veto import (
     VetoError,
     assert_private_store,
@@ -333,6 +333,7 @@ def ensure_reconciliation_schema(
         CREATE TABLE IF NOT EXISTS {prefix}unpublished_reconciliation_commands(
             idempotency_key TEXT PRIMARY KEY,
             caller_principal TEXT NOT NULL,
+            writer_principal TEXT,
             command_type TEXT NOT NULL,
             expected_mapping_digest TEXT NOT NULL,
             receipt_json TEXT NOT NULL,
@@ -564,9 +565,11 @@ def list_landed_revisions(
             ORDER BY at, mapping_id
             """
         ):
-            corrected_first_seen[
-                (str(source_id), str(item_key), str(revision_digest))
-            ] = str(corrected_at)
+            key = (str(source_id), str(item_key), str(revision_digest))
+            corrected = str(corrected_at)
+            corrected_first_seen[key] = min(
+                corrected_first_seen.get(key, corrected), corrected
+            )
     rows = list(
         connection.execute(
             """
@@ -591,9 +594,11 @@ def list_landed_revisions(
         updated = str(row[4] or "") or None
         first_observed_at = str(row[5])
         if published is None and updated is None:
-            first_observed_at = corrected_first_seen.get(
-                (str(row[0]), str(row[1]), str(row[2])), first_observed_at
+            corrected = corrected_first_seen.get(
+                (str(row[0]), str(row[1]), str(row[2]))
             )
+            if corrected is not None:
+                first_observed_at = min(first_observed_at, corrected)
         revisions.append(
             synthetic_coverage_revision(
                 source_id=str(row[0]),
@@ -610,7 +615,7 @@ def list_landed_revisions(
 
 def list_remapped_ingest_effects(
     connection: sqlite3.Connection,
-) -> tuple[tuple[str, str, str, str, str, str, str], ...]:
+) -> tuple[RemappedIngestEffect, ...]:
     if not connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' "
         "AND name='unpublished_effective_revision_remap'"
@@ -641,14 +646,14 @@ def list_remapped_ingest_effects(
         """
     )
     return tuple(
-        (
-            str(source_id),
-            str(item_key),
-            str(revision_digest),
-            str(published_at or ""),
-            str(updated_at or ""),
-            str(old_ingest_id),
-            str(new_ingest_id),
+        RemappedIngestEffect(
+            source_id=str(source_id),
+            item_key=str(item_key),
+            revision_digest=str(revision_digest),
+            published_at=str(published_at or ""),
+            updated_at=str(updated_at or ""),
+            old_ingest_id=str(old_ingest_id),
+            new_ingest_id=str(new_ingest_id),
         )
         for source_id, item_key, revision_digest, published_at, updated_at, old_ingest_id, new_ingest_id in connection.execute(
             select_sql

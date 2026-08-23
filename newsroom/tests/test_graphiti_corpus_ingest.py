@@ -16,6 +16,7 @@ from newsroom.authority.types import UtcTimestamp
 from newsroom.control_plane.corpus import (
     CorpusIngestUnit,
     EligibleCorpusRevision,
+    RemappedIngestEffect,
     merge_durable_revisions,
     revisions_from,
     unique_chunk_units,
@@ -1926,7 +1927,11 @@ def test_marker_specific_effect_survives_after_raw_body_retention() -> None:
     revisions = merge_durable_revisions(
         window_revisions=(),
         first_seen=(("UK-01", "one", digest, first_seen),),
-        remapped_effects=(("UK-01", "one", digest, "", marker, "ingest-old"),),
+        remapped_effects=(
+            RemappedIngestEffect(
+                "UK-01", "one", digest, "", marker, "ingest-old", "ingest-new"
+            ),
+        ),
         permitted_source_ids=frozenset({"UK-01"}),
     )
 

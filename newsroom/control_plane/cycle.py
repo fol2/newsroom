@@ -16,6 +16,7 @@ from typing import Callable, ContextManager, Final, Iterator, TypedDict
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.corpus import (
     CorpusIngestUnit,
+    EffectivePullFirstSeen,
     merge_durable_revisions,
     revisions_from,
     unique_chunk_units,
@@ -1512,6 +1513,29 @@ def _load_first_seen(
     )
 
 
+def _load_pull_first_seen(
+    proving: sqlite3.Connection,
+) -> tuple[EffectivePullFirstSeen, ...]:
+    exists = proving.execute(
+        """
+        SELECT 1 FROM sqlite_master
+        WHERE type='table' AND name='proving_effective_pull_first_seen'
+        """
+    ).fetchone()
+    if exists is None:
+        return ()
+    return tuple(
+        EffectivePullFirstSeen(*(str(value or "") for value in row))
+        for row in proving.execute(
+            """
+            SELECT source_id, item_key, revision_digest, published_at,
+                   updated_at, first_seen_at
+            FROM proving_effective_pull_first_seen
+            """
+        )
+    )
+
+
 def run_cycle(
     *,
     proving_store: str,
@@ -1609,6 +1633,7 @@ def run_cycle(
             required_valid_until=_dispatch_valid_until(admission_evaluated_at),
         )
         first_seen = _load_first_seen(proving)
+        pull_first_seen = _load_pull_first_seen(proving)
         effective_revision_resolver = EffectiveRevisionIdentityResolver(proving)
         for row in corpus_rows:
             collected_units.extend(
@@ -1639,6 +1664,7 @@ def run_cycle(
         revisions = merge_durable_revisions(
             window_revisions=window_revisions,
             first_seen=first_seen,
+            pull_first_seen=pull_first_seen,
             landed=list_landed_revisions(unpublished),
             remapped_effects=list_remapped_ingest_effects(unpublished),
             permitted_source_ids=permitted_source_ids,
