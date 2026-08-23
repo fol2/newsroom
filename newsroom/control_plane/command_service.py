@@ -71,6 +71,9 @@ class ControlPlaneCommandService:
         proving_path = Path(proving_store)
         unpublished_path = Path(unpublished_store)
         backup_root = Path(backup_dir)
+        store_binding = backlog._store_pair_identity(
+            proving_store, unpublished_store
+        )
 
         # Recovery is itself a mutation, so it stays behind authentication.
         backlog._restore_incomplete_dual_store(
@@ -80,7 +83,7 @@ class ControlPlaneCommandService:
         plan, _proving_before, _unpublished_before = backlog._plan_reconciliation(
             proving_store, unpublished_store, evaluated_at=evaluated
         )
-        backlog._assert_g2(plan, dry_run_receipt)
+        backlog._assert_g2(plan, dry_run_receipt, store_binding=store_binding)
         backlog._assert_command(command, plan, dry_run_receipt)
         completed = backlog._load_completed_command(unpublished_store, command)
         if completed is not None:
@@ -135,7 +138,9 @@ class ControlPlaneCommandService:
                         "G2: stores changed while planning"
                     )
                 backlog._assert_g1(live_plan)
-                backlog._assert_g2(live_plan, dry_run_receipt)
+                backlog._assert_g2(
+                    live_plan, dry_run_receipt, store_binding=store_binding
+                )
                 backlog._assert_g5(live_plan)
                 backlog._assert_command(command, live_plan, dry_run_receipt)
                 proving_before = backlog._census_proving(
@@ -180,6 +185,7 @@ class ControlPlaneCommandService:
                     remapped_count=remapped,
                     no_loss_proof=no_loss,
                     gates={key: "pass" for key in ("G1", "G2", "G3", "G4", "G5")},
+                    store_binding=store_binding,
                     command=command.as_dict(),
                 )
                 backlog._retain_receipt(conn, receipt.as_dict())

@@ -119,6 +119,7 @@ class BacklogReconciliationReceipt:
     retention_window_bounded_inaccuracies: tuple[dict[str, object], ...]
     mutated: bool
     gates: dict[str, str]
+    store_binding: dict[str, dict[str, object]]
     command: dict[str, str] | None = None
 
     def as_dict(self) -> dict[str, object]:
@@ -142,6 +143,7 @@ class BacklogReconciliationReceipt:
             ),
             "mutated": self.mutated,
             "gates": dict(self.gates),
+            "store_binding": self.store_binding,
         }
         if self.command is not None:
             payload["command"] = dict(self.command)
@@ -168,6 +170,11 @@ class BacklogReconciliationReceipt:
             ),
             mutated=bool(payload.get("mutated")),
             gates=dict(payload.get("gates") or {}),
+            store_binding={
+                str(key): dict(value)
+                for key, value in dict(payload.get("store_binding") or {}).items()
+                if isinstance(value, Mapping)
+            },
             command=dict(command) if isinstance(command, Mapping) else None,
         )
 
@@ -733,16 +740,27 @@ def _build_plan(
             }
         )
     orphan_keys = tuple(kept_orphans)
+    orphan_pulls = {
+        pull: seen
+        for pull, seen in pull_first_seen.items()
+        if pull[0] in orphan_keys
+    }
     for triple in orphan_keys:
-        old_key = (
-            "durable-first-seen",
-            triple.source_id,
-            triple.item_key,
-            triple.revision_digest,
-        )
-        old_keys.add(old_key)
-        old_by_source.setdefault(triple.source_id, set()).add(old_key)
-        new_by_source.setdefault(triple.source_id, set()).add((triple, "", ""))
+        durable_pulls = [pull for pull in orphan_pulls if pull[0] == triple]
+        if not durable_pulls:
+            durable_pulls = [(triple, "", "")]
+        for pull in durable_pulls:
+            old_key = (
+                "durable-first-seen",
+                triple.source_id,
+                triple.item_key,
+                triple.revision_digest,
+                pull[1],
+                pull[2],
+            )
+            old_keys.add(old_key)
+            old_by_source.setdefault(triple.source_id, set()).add(old_key)
+            new_by_source.setdefault(triple.source_id, set()).add(pull)
 
     corrections: list[dict[str, object]] = []
     bounded: list[dict[str, object]] = []
@@ -846,7 +864,11 @@ def _build_plan(
                 "retention_window_bounded_inaccuracy": bool(row[5]),
             }
 
-    expected_n = len(pulls) + len(orphan_keys)
+    orphan_pull_count = sum(
+        max(1, sum(pull[0] == triple for pull in orphan_pulls))
+        for triple in orphan_keys
+    )
+    expected_n = len(pulls) + orphan_pull_count
     per_source = []
     for source_id in sorted({*old_by_source, *new_by_source}):
         old_n = len(old_by_source.get(source_id, set()))
@@ -905,6 +927,24 @@ def _build_plan(
             "orphan_first_seen": [
                 {**triple.as_dict(), "first_seen_at": first_seen[triple]}
                 for triple in orphan_keys
+            ],
+            "orphan_effective_pulls": [
+                {
+                    **triple.as_dict(),
+                    "published_at": published,
+                    "updated_at": updated,
+                    "first_observed_at": seen,
+                }
+                for (triple, published, updated), seen in sorted(
+                    orphan_pulls.items(),
+                    key=lambda item: (
+                        item[0][0].source_id,
+                        item[0][0].item_key,
+                        item[0][0].revision_digest,
+                        item[0][1],
+                        item[0][2],
+                    ),
+                )
             ],
             "retained_effect_maps": list(retained_effect_maps),
             "unresolved_collisions": list(collisions),
@@ -1206,11 +1246,18 @@ def _assert_g1(plan: _Plan) -> None:
             )
 
 
-def _assert_g2(plan: _Plan, dry_run_receipt: Mapping[str, object]) -> None:
+def _assert_g2(
+    plan: _Plan,
+    dry_run_receipt: Mapping[str, object],
+    *,
+    store_binding: dict[str, dict[str, object]],
+) -> None:
     if dry_run_receipt.get("mode") != "dry-run" or dry_run_receipt.get(
         "mutated"
     ) is not False:
         raise BacklogReconciliationError("G2: receipt is not a dry-run receipt")
+    if dry_run_receipt.get("store_binding") != store_binding:
+        raise BacklogReconciliationError("G2: dry-run receipt belongs to other stores")
     before = dry_run_receipt.get(
         "before_denominator", dry_run_receipt.get("old_identity_count")
     )
@@ -1541,6 +1588,7 @@ def _receipt_from_plan(
     remapped_count: int,
     no_loss_proof: dict[str, object],
     gates: dict[str, str],
+    store_binding: dict[str, dict[str, object]],
     command: dict[str, str] | None = None,
 ) -> BacklogReconciliationReceipt:
     return BacklogReconciliationReceipt(
@@ -1557,6 +1605,7 @@ def _receipt_from_plan(
         retention_window_bounded_inaccuracies=plan.retention_window_bounded_inaccuracies,
         mutated=mutated,
         gates=gates,
+        store_binding=store_binding,
         command=command,
     )
 
@@ -1655,6 +1704,15 @@ def _store_identity(path: Path) -> dict[str, object]:
         "path": str(resolved),
         "device": stat.st_dev,
         "inode": stat.st_ino,
+    }
+
+
+def _store_pair_identity(
+    proving_store: str, unpublished_store: str
+) -> dict[str, dict[str, object]]:
+    return {
+        "proving_store": _store_identity(Path(proving_store)),
+        "unpublished_store": _store_identity(Path(unpublished_store)),
     }
 
 
@@ -1825,6 +1883,7 @@ def reconcile_effective_revision_backlog(
             "G4": "pending-rerun",
             "G5": "pass",
         },
+        store_binding=_store_pair_identity(proving_store, unpublished_store),
     )
     _write_receipt(receipt_path, receipt)
     return receipt

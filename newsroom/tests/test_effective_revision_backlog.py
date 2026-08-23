@@ -1142,6 +1142,23 @@ def test_live_rejects_a_live_receipt_as_dry_run_proof(tmp_path: Path) -> None:
         )
 
 
+def test_dry_receipt_is_bound_to_its_store_pair(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    proving_a, unpublished_a, _meta = _amplified_stores(tmp_path / "a")
+    proving_b, unpublished_b, _meta = _amplified_stores(tmp_path / "b")
+    dry_a = _run(proving_a, unpublished_a, tmp_path / "a", mode="dry-run")
+
+    with pytest.raises(BacklogReconciliationError, match="other stores"):
+        _run(
+            proving_b,
+            unpublished_b,
+            tmp_path / "b",
+            mode="live",
+            dry_run_receipt=dry_a.as_dict(),
+        )
+
+
 def test_command_service_rejects_invalid_authentication(tmp_path: Path) -> None:
     proving, unpublished, _meta = _amplified_stores(tmp_path)
     dry = _run(proving, unpublished, tmp_path, mode="dry-run")
@@ -1351,6 +1368,46 @@ def test_durable_orphan_is_in_the_exact_denominator(tmp_path: Path) -> None:
     runtime = merge_durable_revisions(window_revisions=(), first_seen=first_seen)
 
     assert dry.new_effective_revision_count == len(runtime)
+
+
+def test_marker_specific_durable_orphans_are_counted_and_digested(
+    tmp_path: Path,
+) -> None:
+    proving, unpublished, _meta = _amplified_stores(tmp_path)
+    baseline = _run(proving, unpublished, tmp_path, mode="dry-run")
+    connection = sqlite3.connect(proving)
+    connection.execute(
+        "INSERT INTO proving_revision_first_seen VALUES('UK-99','expired',?,?)",
+        ("sha256:marker-orphan", _FIRST_POLL),
+    )
+    connection.executemany(
+        """
+        INSERT INTO proving_effective_pull_first_seen(
+            source_id,item_key,revision_digest,published_at,updated_at,first_seen_at
+        ) VALUES('UK-99','expired',?,?,?,?)
+        """,
+        (
+            ("sha256:marker-orphan", "2026-08-19T00:00:00Z", "", _FIRST_POLL),
+            ("sha256:marker-orphan", "2026-08-20T00:00:00Z", "", _FIRST_POLL),
+        ),
+    )
+    connection.commit()
+    with_markers = _run(proving, unpublished, tmp_path, mode="dry-run")
+    connection.execute(
+        "DELETE FROM proving_effective_pull_first_seen "
+        "WHERE published_at='2026-08-20T00:00:00Z'"
+    )
+    connection.commit()
+    connection.close()
+    one_marker = _run(proving, unpublished, tmp_path, mode="dry-run")
+
+    assert with_markers.new_effective_revision_count == (
+        baseline.new_effective_revision_count + 2
+    )
+    assert one_marker.new_effective_revision_count == (
+        baseline.new_effective_revision_count + 1
+    )
+    assert one_marker.mapping_digest != with_markers.mapping_digest
 
 
 def test_coverage_rows_are_part_of_the_append_only_census(tmp_path: Path) -> None:
