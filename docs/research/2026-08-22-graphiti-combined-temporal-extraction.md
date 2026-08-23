@@ -36,8 +36,16 @@ The authority-private module `newsroom.graphiti_adapter.combined_temporal_extrac
 6. bypasses `extract_timestamps_batch` after validation;
 7. fails closed for non-zero proposals unless the caller supplies an explicit pipeline; the owner-authorised runtime factory wires graphiti-core's existing node resolver and edge-pointer resolver, so deduplication and graph lookup are not replaced by local substitutes;
 8. routes runtime nodes and edges through graphiti-core's bulk persistence and embedding paths inside the existing invalidation guard and `Neo4jMutationGuard` durable journal; provider-free tests use an explicit recording pipeline and make no Neo4j or provider call;
-9. retains a GING-005-shaped leaf receipt (raw-output digest, framework/model/prompt versions, invocation count, usage/cost slots) even when usage is `UNMEASURED`;
+9. durably retains a GING-005-shaped completion receipt (Entity Mentions, Relation Proposals, canonical endpoints, exact evidence passages, temporal bounds, raw-output digest, framework/model/prompt versions, invocation count and usage/cost slots), even when usage is `UNMEASURED`;
 10. binds episode identity with GING-002 `ingest_key` (representation digest, source timestamps, chunk ordinal, configuration and temporal-policy digests, plus this seam's schema digest and candidate prompt digest) and maps `reference_time` with GING-003, keeping `ingested_at` as `created_at` only.
+11. reads and validates a matching completed marker before transport dispatch, replaying its durable result without another provider leaf or graph effect.
+
+The compact wire keys `entities` and `facts` are the names fixed by issue #747's
+response schema. At the Newsroom boundary they remain untrusted **Entity Mentions**
+and **Relation Proposals** respectively; they are never Canonical Entities,
+Governed Relations or governed facts. The durable completion receipt uses those
+canonical Newsroom terms, while `EntityNode` / `EntityEdge.fact` remain confined
+to the graphiti-core compatibility boundary.
 
 Fallback policy remains [#731](https://github.com/fol2/newsroom/issues/731). This seam does not retry an unchanged request.
 

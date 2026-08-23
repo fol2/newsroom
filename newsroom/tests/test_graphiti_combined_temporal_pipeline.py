@@ -10,10 +10,17 @@ from typing import Any
 import pytest
 
 from newsroom.graphiti_adapter import real
+from newsroom.graphiti_adapter.combined_temporal_extraction import (
+    CombinedTemporalOutcome,
+    CombinedTemporalTransportResult,
+    extract_combined_temporal,
+)
+from newsroom.graphiti_adapter.combined_temporal_fixtures import fixture
 from newsroom.graphiti_adapter.combined_temporal_pipeline import (
     CombinedTemporalPipelineError,
     ExistingGraphitiPipeline,
 )
+from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_CORE_RELEASE
 from newsroom.graphiti_adapter.neo4j_guard import GuardState
 
 
@@ -21,6 +28,11 @@ class _Guard:
     def __init__(self, state: GuardState = GuardState.CREATED) -> None:
         self.calls: list[str] = []
         self.state = state
+        self.completed_receipt: dict[str, object] | None = None
+
+    async def completed_raw_or_none(self) -> dict[str, object] | None:
+        self.calls.append("completed")
+        return self.completed_receipt if self.state is GuardState.COMPLETE else None
 
     async def begin(self) -> Any:
         self.calls.append("begin")
@@ -34,6 +46,7 @@ class _Guard:
 
     async def complete(self, receipt: dict[str, object]) -> None:
         assert receipt["provider_attempt_number"] == 1
+        self.completed_receipt = dict(receipt)
         self.calls.append("complete")
 
     async def rollback_pending(self, **_kwargs: Any) -> bool:
@@ -63,11 +76,15 @@ def _pipeline(
         _nodes: list[Any],
     ) -> tuple[list[Any], dict[str, str], list[tuple[Any, Any]]]:
         guard.calls.append("resolve")
+        original_ids = [str(node.uuid) for node in _nodes]
+        resolved = [SimpleNamespace(**vars(node)) for node in _nodes]
+        resolved[0].uuid = "existing-source"
+        resolved[1].uuid = "existing-target"
         return (
-            [_node("existing-source"), _node("existing-target")],
+            resolved,
             {
-                "local-source": "existing-source",
-                "local-target": "existing-target",
+                original_ids[0]: "existing-source",
+                original_ids[1]: "existing-target",
             },
             [],
         )
@@ -102,6 +119,22 @@ def _pipeline(
     )
 
 
+class _Transport:
+    def __init__(self, raw: object) -> None:
+        self.raw = raw
+        self.calls = 0
+
+    def generate_response(self, **_kwargs: object) -> CombinedTemporalTransportResult:
+        self.calls += 1
+        return CombinedTemporalTransportResult(
+            raw=self.raw,
+            framework_version=GRAPHITI_CORE_RELEASE,
+            model_version=None,
+            token_usage={"basis": "UNMEASURED"},
+            provider_cost=None,
+        )
+
+
 def test_existing_pipeline_resolves_embeds_and_completes_durable_journal() -> None:
     guard = _Guard()
     edge = _edge()
@@ -132,6 +165,68 @@ def test_existing_pipeline_resolves_embeds_and_completes_durable_journal() -> No
     assert result.rollback_skipped is True
 
 
+def test_completed_ingest_replays_without_another_provider_leaf() -> None:
+    case = fixture("pair-current")
+    first_guard = _Guard()
+    first_transport = _Transport(case.gold)
+    first = extract_combined_temporal(
+        case.revision,
+        transport=first_transport,
+        pipeline=_pipeline(first_guard),
+    )
+
+    assert first.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert first_transport.calls == 1
+    assert first_guard.completed_receipt is not None
+
+    replay_guard = _Guard(GuardState.COMPLETE)
+    replay_guard.completed_receipt = first_guard.completed_receipt
+    replay_transport = _Transport(RuntimeError("provider must not run"))
+    replayed = extract_combined_temporal(
+        case.revision,
+        transport=replay_transport,
+        pipeline=_pipeline(replay_guard),
+    )
+
+    assert replay_transport.calls == 0
+    assert replayed.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert replayed.payload == first.payload
+    assert replayed.payload_digest == first.payload_digest
+    assert [node.uuid for node in replayed.nodes] == [node.uuid for node in first.nodes]
+    assert [edge.uuid for edge in replayed.edges] == [edge.uuid for edge in first.edges]
+    assert replay_guard.calls == ["completed"]
+
+
+def test_completion_retains_canonical_proposals_and_passage_provenance() -> None:
+    case = fixture("pair-current")
+    guard = _Guard()
+    leaf = extract_combined_temporal(
+        case.revision,
+        transport=_Transport(case.gold),
+        pipeline=_pipeline(guard),
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert guard.completed_receipt is not None
+    assert guard.completed_receipt["invocation_count"] == 1
+    assert len(guard.completed_receipt["transport_calls"]) == 1
+    proposal = guard.completed_receipt["proposal_receipt"]
+    assert isinstance(proposal, dict)
+    assert proposal["contract"] == "NewsroomCombinedTemporalExtractionV1"
+    assert proposal["source_revision_id"] == case.revision.revision_id
+    assert proposal["reference_time"] == case.revision.reference_time
+    assert proposal["entity_mentions"]
+    assert proposal["relation_proposals"]
+    assert proposal["evidence_passages"]
+    assert proposal["evidence_passages"][0]["segments"][0]["text"] in case.revision.body
+    relation = proposal["relation_proposals"][0]
+    assert relation["source_identity"] == "existing-source"
+    assert relation["target_identity"] == "existing-target"
+    assert relation["fact"] == case.gold["facts"][0]["fact"]
+    assert "valid_at" in relation
+    assert "invalid_at" in relation
+
+
 def test_existing_pipeline_rolls_back_embedding_failure() -> None:
     guard = _Guard()
     with pytest.raises(CombinedTemporalPipelineError) as captured:
@@ -146,7 +241,7 @@ def test_existing_pipeline_rolls_back_embedding_failure() -> None:
     assert guard.calls == ["begin", "resolve", "pointers", "embed", "rollback"]
 
 
-def test_existing_pipeline_does_not_roll_back_a_complete_marker() -> None:
+def test_existing_pipeline_rejects_a_malformed_complete_marker_without_effect() -> None:
     guard = _Guard(GuardState.COMPLETE)
     with pytest.raises(CombinedTemporalPipelineError) as captured:
         _pipeline(guard).execute(
@@ -155,7 +250,7 @@ def test_existing_pipeline_does_not_roll_back_a_complete_marker() -> None:
             receipt={},
         )
 
-    assert captured.value.graph_effect_attempted is True
+    assert captured.value.graph_effect_attempted is False
     assert captured.value.rollback_completed is False
     assert guard.calls == ["begin"]
 

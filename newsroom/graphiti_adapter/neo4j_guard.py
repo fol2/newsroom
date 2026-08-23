@@ -567,9 +567,18 @@ class Neo4jMutationGuard:
         await self._delete_snapshot()
 
     async def completed_raw(self) -> dict[str, object]:
+        raw = await self.completed_raw_or_none()
+        if raw is None:
+            raise GuardError("Graphiti completion marker is absent")
+        return raw
+
+    async def completed_raw_or_none(self) -> dict[str, object] | None:
+        """Read a matching completed result without creating a mutation marker."""
+
         marker = await self._marker()
         if marker is None or str(marker.get("state")) != GuardState.COMPLETE.value:
-            raise GuardError("Graphiti completion marker is absent")
+            return None
+        self._bind_marker(marker)
         raw_json = marker.get("validated_raw_json")
         retained_digest = marker.get("validated_raw_digest")
         if not isinstance(raw_json, str) or not isinstance(retained_digest, str):

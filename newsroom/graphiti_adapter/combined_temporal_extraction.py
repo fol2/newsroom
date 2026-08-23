@@ -351,8 +351,10 @@ def build_compact_prompt(revision: SourceRevisionInput) -> CompactPrompt:
         "One effective source revision. Do not use any other revision's wording.",
         "Retain every supplied segment; do not summarise or truncate.",
         "Extract only named or source-grounded entities that participate in a retained fact.",
+        "The wire entities are untrusted Entity Mentions; they are not Canonical Entities.",
         "Zero facts requires zero entities.",
         "Use the source's certainty. Do not add outside knowledge.",
+        "The wire facts are untrusted Relation Proposals; they are not governed facts.",
         "Build each relation_type only from relation words present in its fact; entity-name words are not relation evidence.",
         "Put valid_at and invalid_at on each fact. Resolve relative dates against REFERENCE_TIME to ISO-8601 UTC, or null.",
         "Cite evidence with the integer segment IDs below. Do not invent byte offsets.",
@@ -383,6 +385,14 @@ def extract_combined_temporal(
     UtcTimestamp.parse(revision.ingested_at)
     prompt = build_compact_prompt(revision)
     prompt_digest = _candidate_prompt_digest(prompt)
+    completed = _completed_receipt(pipeline)
+    if completed is not None:
+        return _leaf_from_completed(
+            revision=revision,
+            prompt=prompt,
+            prompt_digest=prompt_digest,
+            completed=completed,
+        )
     result = transport.generate_response(
         prompt=prompt.text,
         schema=SCHEMA,
@@ -414,6 +424,8 @@ def extract_combined_temporal(
         "temporal_basis": temporal_basis,
         "configuration_digest": configuration_digest(),
         "temporal_policy_digest": digest_canonical(TEMPORAL_POLICY_VERSION),
+        "invocation_count": 1,
+        "transport_calls": calls,
     }
     try:
         payload = _parse_payload(raw)
@@ -423,6 +435,11 @@ def extract_combined_temporal(
             UtcTimestamp.parse(revision.reference_time).value,
         )
         nodes, edges = _expand(revision, normalised)
+        receipt["proposal_receipt"] = _proposal_receipt(
+            revision=revision,
+            payload=normalised,
+            ranges=ranges,
+        )
     except CombinedTemporalError as exc:
         return _leaf(
             CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE,
@@ -440,7 +457,7 @@ def extract_combined_temporal(
             journal_skipped=True,
             rollback_skipped=True,
             graph_effect_attempted=False,
-            **receipt,
+            **_leaf_receipt(receipt),
         )
     except CanonicalizationError:
         return _leaf(
@@ -459,7 +476,7 @@ def extract_combined_temporal(
             journal_skipped=True,
             rollback_skipped=True,
             graph_effect_attempted=False,
-            **receipt,
+            **_leaf_receipt(receipt),
         )
     if not edges:
         pipeline_result = None
@@ -480,7 +497,7 @@ def extract_combined_temporal(
             journal_skipped=True,
             rollback_skipped=True,
             graph_effect_attempted=False,
-            **receipt,
+            **_leaf_receipt(receipt),
         )
     else:
         try:
@@ -506,7 +523,7 @@ def extract_combined_temporal(
                 journal_skipped=False,
                 rollback_skipped=not exc.rollback_completed,
                 graph_effect_attempted=exc.graph_effect_attempted,
-                **receipt,
+                **_leaf_receipt(receipt),
             )
         except Exception:
             return _leaf(
@@ -525,7 +542,7 @@ def extract_combined_temporal(
                 journal_skipped=False,
                 rollback_skipped=False,
                 graph_effect_attempted=True,
-                **receipt,
+                **_leaf_receipt(receipt),
             )
     if pipeline_result is None:
         output_nodes = nodes
@@ -566,7 +583,238 @@ def extract_combined_temporal(
         journal_skipped=journal_skipped,
         rollback_skipped=rollback_skipped,
         graph_effect_attempted=graph_effect_attempted,
-        **receipt,
+        **_leaf_receipt(receipt),
+    )
+
+
+def _completed_receipt(
+    pipeline: CombinedTemporalPipeline | None,
+) -> Mapping[str, object] | None:
+    if pipeline is None:
+        return None
+    reader = getattr(pipeline, "completed_receipt", None)
+    if not callable(reader):
+        return None
+    completed = reader()
+    if completed is None:
+        return None
+    if not isinstance(completed, Mapping):
+        raise CombinedTemporalPipelineError(
+            "combined-temporal completed receipt is malformed",
+            graph_effect_attempted=False,
+            rollback_completed=False,
+        )
+    return completed
+
+
+def _leaf_receipt(receipt: Mapping[str, object]) -> dict[str, object]:
+    return {
+        key: receipt.get(key)
+        for key in (
+            "raw_output_digest",
+            "framework_version",
+            "model_version",
+            "prompt_digest",
+            "token_usage",
+            "provider_cost",
+            "ingest_id",
+            "temporal_basis",
+            "configuration_digest",
+            "temporal_policy_digest",
+        )
+    }
+
+
+def _proposal_receipt(
+    *,
+    revision: SourceRevisionInput,
+    payload: Mapping[str, Any],
+    ranges: Mapping[str, tuple[EvidenceSegment, ...]],
+) -> dict[str, object]:
+    evidence_passages = [
+        {
+            "fact": fact,
+            "segments": [
+                {
+                    "segment_id": segment.segment_id,
+                    "start_byte": segment.start_byte,
+                    "end_byte": segment.end_byte,
+                    "text": segment.text,
+                }
+                for segment in segments
+            ],
+        }
+        for fact, segments in sorted(ranges.items())
+    ]
+    canonical_payload = {
+        "entities": [dict(item) for item in payload["entities"]],
+        "facts": [dict(item) for item in payload["facts"]],
+    }
+    return {
+        "contract": CONTRACT_NAME,
+        "ingest_id": revision.ingest_id,
+        "source_id": revision.source_id,
+        "source_revision_id": revision.revision_id,
+        "representation_digest": revision.representation_digest,
+        "episode_id": revision.episode_uuid or revision.ingest_id,
+        "reference_time": revision.reference_time,
+        "temporal_basis": revision.temporal_basis,
+        "ingested_at": revision.ingested_at,
+        "payload_digest": digest_canonical(canonical_payload),
+        "wire_payload": canonical_payload,
+        "entity_mentions": [dict(item) for item in payload["entities"]],
+        "relation_proposals": [dict(item) for item in payload["facts"]],
+        "evidence_passages": evidence_passages,
+    }
+
+
+def _leaf_from_completed(
+    *,
+    revision: SourceRevisionInput,
+    prompt: CompactPrompt,
+    prompt_digest: str,
+    completed: Mapping[str, object],
+) -> CombinedTemporalLeaf:
+    proposal = completed.get("proposal_receipt")
+    if not isinstance(proposal, Mapping):
+        raise CombinedTemporalPipelineError(
+            "combined-temporal completed receipt has no proposals",
+            graph_effect_attempted=False,
+            rollback_completed=False,
+        )
+    if (
+        proposal.get("contract") != CONTRACT_NAME
+        or proposal.get("ingest_id") != revision.ingest_id
+        or proposal.get("source_revision_id") != revision.revision_id
+        or completed.get("prompt_digest") != prompt_digest
+    ):
+        raise CombinedTemporalPipelineError(
+            "combined-temporal completed receipt identity differs",
+            graph_effect_attempted=False,
+            rollback_completed=False,
+        )
+    payload_raw = proposal.get("wire_payload")
+    if not isinstance(payload_raw, Mapping):
+        raise CombinedTemporalPipelineError(
+            "combined-temporal completed payload is malformed",
+            graph_effect_attempted=False,
+            rollback_completed=False,
+        )
+    payload = {
+        "entities": list(payload_raw.get("entities", [])),
+        "facts": list(payload_raw.get("facts", [])),
+    }
+    payload_digest = digest_canonical(payload)
+    if proposal.get("payload_digest") != payload_digest:
+        raise CombinedTemporalPipelineError(
+            "combined-temporal completed payload digest differs",
+            graph_effect_attempted=False,
+            rollback_completed=False,
+        )
+    ranges: dict[str, tuple[EvidenceSegment, ...]] = {}
+    passages = proposal.get("evidence_passages")
+    if not isinstance(passages, list):
+        raise CombinedTemporalPipelineError(
+            "combined-temporal completed evidence is malformed",
+            graph_effect_attempted=False,
+            rollback_completed=False,
+        )
+    for passage in passages:
+        if not isinstance(passage, Mapping) or not isinstance(
+            passage.get("segments"), list
+        ):
+            raise CombinedTemporalPipelineError(
+                "combined-temporal completed evidence is malformed",
+                graph_effect_attempted=False,
+                rollback_completed=False,
+            )
+        ranges[str(passage["fact"])] = tuple(
+            EvidenceSegment(
+                segment_id=int(segment["segment_id"]),
+                start_byte=int(segment["start_byte"]),
+                end_byte=int(segment["end_byte"]),
+                text=str(segment["text"]),
+            )
+            for segment in passage["segments"]
+            if isinstance(segment, Mapping)
+        )
+    mentions = proposal.get("entity_mentions")
+    relations = proposal.get("relation_proposals")
+    if not isinstance(mentions, list) or not isinstance(relations, list):
+        raise CombinedTemporalPipelineError(
+            "combined-temporal completed proposals are malformed",
+            graph_effect_attempted=False,
+            rollback_completed=False,
+        )
+    nodes, edges = _expand(revision, payload)
+    if len(mentions) != len(nodes) or len(relations) != len(edges):
+        raise CombinedTemporalPipelineError(
+            "combined-temporal completed proposal counts differ",
+            graph_effect_attempted=False,
+            rollback_completed=False,
+        )
+    resolutions: list[str] = []
+    for mention, node in zip(mentions, nodes, strict=True):
+        if not isinstance(mention, Mapping):
+            raise CombinedTemporalPipelineError(
+                "combined-temporal completed entity mention is malformed",
+                graph_effect_attempted=False,
+                rollback_completed=False,
+            )
+        node.uuid = str(mention["canonical_identity"])
+        resolution = str(mention["resolution"])
+        node.attributes = {**node.attributes, "resolution": resolution}
+        resolutions.append(resolution)
+    for relation, edge in zip(relations, edges, strict=True):
+        if not isinstance(relation, Mapping):
+            raise CombinedTemporalPipelineError(
+                "combined-temporal completed relation proposal is malformed",
+                graph_effect_attempted=False,
+                rollback_completed=False,
+            )
+        edge.uuid = str(relation["proposal_identity"])
+        edge.source_node_uuid = str(relation["source_identity"])
+        edge.target_node_uuid = str(relation["target_identity"])
+        edge.fact_embedding = relation.get("fact_embedding")
+    calls_raw = completed.get("transport_calls", [])
+    calls = tuple(dict(item) for item in calls_raw if isinstance(item, Mapping))
+    token_usage = completed.get("token_usage", {"basis": UNMEASURED})
+    if not isinstance(token_usage, Mapping):
+        token_usage = {"basis": UNMEASURED}
+    return _leaf(
+        (
+            CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+            if not payload["facts"]
+            else CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+        ),
+        CombinedTemporalFailureCode.NONE,
+        prompt,
+        payload,
+        payload_digest,
+        nodes,
+        edges,
+        edges,
+        calls,
+        ranges,
+        tuple(resolutions),
+        embedding_skipped=True,
+        journal_skipped=True,
+        rollback_skipped=True,
+        graph_effect_attempted=False,
+        raw_output_digest=str(completed.get("raw_output_digest") or "") or None,
+        framework_version=str(completed.get("framework_version") or GRAPHITI_CORE_RELEASE),
+        model_version=(
+            str(completed["model_version"])
+            if completed.get("model_version") is not None
+            else None
+        ),
+        prompt_digest=prompt_digest,
+        token_usage=dict(token_usage),
+        provider_cost=completed.get("provider_cost"),
+        ingest_id=revision.ingest_id,
+        temporal_basis=revision.temporal_basis,
+        configuration_digest=str(completed.get("configuration_digest") or "") or None,
+        temporal_policy_digest=str(completed.get("temporal_policy_digest") or "") or None,
     )
 
 

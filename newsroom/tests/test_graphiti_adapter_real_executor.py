@@ -1040,6 +1040,12 @@ def test_complete_guard_recovery_requires_byte_exact_canonical_snapshot() -> Non
     raw_json = canonical_json_bytes(raw).decode("utf-8")
     marker = {
         "state": "COMPLETE",
+        "group_id": GRAPHITI_WORKSPACE_GROUP,
+        "input_digest": "sha256:" + "0" * 64,
+        "attempt_number": 1,
+        "snapshot_id": "episode-id:1",
+        "chat_invocations_json": "[]",
+        "embedding_usage_json": "null",
         "validated_raw_json": raw_json,
         "validated_raw_digest": digest_bytes(raw_json.encode("utf-8")),
     }
@@ -1067,6 +1073,32 @@ def test_complete_guard_recovery_requires_byte_exact_canonical_snapshot() -> Non
     marker["validated_raw_json"] = '{"provider_attempt_number": 1, "result": "fixed"}'
     with pytest.raises(GuardError, match="digest differs"):
         asyncio.run(guard.completed_raw())
+
+
+def test_completed_guard_probe_is_read_only_when_marker_is_absent() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import Neo4jMutationGuard
+
+    class Driver:
+        async def execute_query(
+            self,
+            query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            assert "RETURN properties(m) AS marker" in query
+            assert params == {"episode_uuid": "episode-id"}
+            assert routing_ == "w"
+            return ([], None, None)
+
+    guard = Neo4jMutationGuard(
+        Driver(),
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        episode_uuid="episode-id",
+        attempt_number=1,
+        input_digest="sha256:" + "0" * 64,
+    )
+    assert asyncio.run(guard.completed_raw_or_none()) is None
 
 
 def test_guard_completion_checks_the_committed_transition() -> None:

@@ -135,6 +135,17 @@ def test_compact_schema_matches_the_ticket_contract() -> None:
     assert SCHEMA_DIGEST.startswith("sha256:")
 
 
+def test_wire_vocabulary_is_confined_to_untrusted_proposal_terms() -> None:
+    prompt = build_compact_prompt(fixture("pair-current").revision).text
+    assert "untrusted Entity Mentions" in prompt
+    assert "untrusted Relation Proposals" in prompt
+    note = (
+        _RESEARCH / "2026-08-22-graphiti-combined-temporal-extraction.md"
+    ).read_text(encoding="utf-8")
+    assert "never Canonical Entities" in note
+    assert "EntityNode` / `EntityEdge.fact` remain confined" in note
+
+
 def test_segmentation_round_trips_retained_bytes_and_uses_integer_ids() -> None:
     body = fixture("pair-current").revision.body
     segments = segment_source(body)
