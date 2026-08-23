@@ -132,7 +132,7 @@ def test_operations_and_review_retain_real_runtime_and_stop_boundaries() -> None
     for phrase in (
         "schema v16",
         "graphiti.adapter.attempt.execute",
-        "REAL_GRAPHITI_RUNTIME_ENABLED = False",
+        "REAL_GRAPHITI_RUNTIME_ENABLED = True",
         "persist-before-admission",
         "DENY_ALL",
         "replay survives complete workspace loss",
