@@ -221,28 +221,13 @@ def relation_is_grounded(
     relation_words = words(relation_type.replace("_", " "))
     if relation_words <= words(value):
         return all(contains_name(value, name) for name in (source_name, target_name))
-    if grounded_endpoint_spans(
-        value,
-        relation_type,
-        source_name=source_name,
-        target_name=target_name,
-    ):
-        return True
-    known_types = {
-        candidate
-        for candidate, terms in _CJK_RELATION_TERMS.items()
-        if any(term in value for term in terms)
-    }
-    if known_types:
-        return False
-    pattern = re.compile(
-        rf"{re.escape(source_name)}(?P<predicate>.+?){re.escape(target_name)}"
-    )
-    return any(
-        _span_is_bounded(value, *match.span())
-        and _CJK.search(match.group("predicate")) is not None
-        and match.group("predicate").strip(" 　與和跟向對於在")
-        for match in pattern.finditer(value)
+    return bool(
+        grounded_endpoint_spans(
+            value,
+            relation_type,
+            source_name=source_name,
+            target_name=target_name,
+        )
     )
 
 
