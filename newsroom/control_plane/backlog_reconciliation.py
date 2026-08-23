@@ -517,7 +517,6 @@ class _Plan:
     retention_window_bounded_inaccuracies: tuple[dict[str, object], ...]
     unresolved_collisions: tuple[dict[str, object], ...]
     orphan_first_seen: tuple[_Triple, ...]
-    digest_mismatches: tuple[_Triple, ...]
     retained_effect_maps: tuple[dict[str, object], ...]
 
 
@@ -692,6 +691,28 @@ def _build_plan(
         durable_at = min(durable) if durable else None
         if durable_at is not None and durable_at < retained_at:
             pull_earliest[pull] = durable_at
+    durable_extra_pulls = {
+        pull: seen
+        for pull, seen in pull_first_seen.items()
+        if pull not in pulls and pull[0] in first_seen
+    }
+    for triple, published, updated in durable_extra_pulls:
+        version_markers.setdefault(triple, set()).add(
+            (published or None, updated or None)
+        )
+        old_key = (
+            "durable-effective-pull",
+            triple.source_id,
+            triple.item_key,
+            triple.revision_digest,
+            published,
+            updated,
+        )
+        old_keys.add(old_key)
+        old_by_source.setdefault(triple.source_id, set()).add(old_key)
+        new_by_source.setdefault(triple.source_id, set()).add(
+            (triple, published, updated)
+        )
 
     attributed: list[dict[str, object]] = []
     for triple, markers in sorted(
@@ -722,13 +743,8 @@ def _build_plan(
             key=lambda item: (item.source_id, item.item_key, item.revision_digest),
         )
     )
-    expected_items = {(item.source_id, item.item_key) for item in expected_keys}
-    digest_mismatches: list[_Triple] = []
     kept_orphans: list[_Triple] = []
     for triple in orphan_keys:
-        if (triple.source_id, triple.item_key) in expected_items:
-            digest_mismatches.append(triple)
-            continue
         kept_orphans.append(triple)
         attributed.append(
             {
@@ -740,50 +756,18 @@ def _build_plan(
             }
         )
     orphan_keys = tuple(kept_orphans)
-    orphan_pulls = {
-        pull: seen
-        for pull, seen in pull_first_seen.items()
-        if pull[0] in orphan_keys
-    }
-    orphan_markers: dict[_Triple, set[tuple[str, str]]] = {}
-    for triple, published, updated in orphan_pulls:
-        orphan_markers.setdefault(triple, set()).add((published, updated))
-    for triple, markers in sorted(
-        orphan_markers.items(),
-        key=lambda item: (
-            item[0].source_id,
-            item[0].item_key,
-            item[0].revision_digest,
-        ),
-    ):
-        if len(markers) > 1:
-            attributed.append(
-                {
-                    "rule": SOURCE_SUPPLIED_VERSION_MARKER,
-                    **triple.as_dict(),
-                    "marker_count": len(markers),
-                    "markers": [
-                        {"published_at": published, "updated_at": updated}
-                        for published, updated in sorted(markers)
-                    ],
-                }
-            )
     for triple in orphan_keys:
-        durable_pulls = [pull for pull in orphan_pulls if pull[0] == triple]
-        if not durable_pulls:
-            durable_pulls = [(triple, "", "")]
-        for pull in durable_pulls:
-            old_key = (
-                "durable-first-seen",
-                triple.source_id,
-                triple.item_key,
-                triple.revision_digest,
-                pull[1],
-                pull[2],
-            )
-            old_keys.add(old_key)
-            old_by_source.setdefault(triple.source_id, set()).add(old_key)
-            new_by_source.setdefault(triple.source_id, set()).add(pull)
+        if any(pull[0] == triple for pull in durable_extra_pulls):
+            continue
+        old_key = (
+            "durable-first-seen",
+            triple.source_id,
+            triple.item_key,
+            triple.revision_digest,
+        )
+        old_keys.add(old_key)
+        old_by_source.setdefault(triple.source_id, set()).add(old_key)
+        new_by_source.setdefault(triple.source_id, set()).add((triple, "", ""))
 
     corrections: list[dict[str, object]] = []
     bounded: list[dict[str, object]] = []
@@ -887,11 +871,11 @@ def _build_plan(
                 "retention_window_bounded_inaccuracy": bool(row[5]),
             }
 
-    orphan_pull_count = sum(
-        max(1, sum(pull[0] == triple for pull in orphan_pulls))
+    markerless_orphan_count = sum(
+        not any(pull[0] == triple for pull in durable_extra_pulls)
         for triple in orphan_keys
     )
-    expected_n = len(pulls) + orphan_pull_count
+    expected_n = len(pulls) + len(durable_extra_pulls) + markerless_orphan_count
     per_source = []
     for source_id in sorted({*old_by_source, *new_by_source}):
         old_n = len(old_by_source.get(source_id, set()))
@@ -911,8 +895,8 @@ def _build_plan(
     retained_effect_maps, collisions = (
         _resolve_retained_lineage(
             unpublished,
-            pulls,
-            pull_earliest,
+            pulls | set(durable_extra_pulls),
+            {**pull_earliest, **durable_extra_pulls},
             pull_ingest_ids,
             schema=unpublished_schema,
         )
@@ -951,7 +935,7 @@ def _build_plan(
                 {**triple.as_dict(), "first_seen_at": first_seen[triple]}
                 for triple in orphan_keys
             ],
-            "orphan_effective_pulls": [
+            "durable_effective_pulls": [
                 {
                     **triple.as_dict(),
                     "published_at": published,
@@ -959,7 +943,7 @@ def _build_plan(
                     "first_observed_at": seen,
                 }
                 for (triple, published, updated), seen in sorted(
-                    orphan_pulls.items(),
+                    durable_extra_pulls.items(),
                     key=lambda item: (
                         item[0][0].source_id,
                         item[0][0].item_key,
@@ -988,7 +972,6 @@ def _build_plan(
         retention_window_bounded_inaccuracies=tuple(bounded),
         unresolved_collisions=collisions,
         orphan_first_seen=orphan_keys,
-        digest_mismatches=tuple(digest_mismatches),
         retained_effect_maps=retained_effect_maps,
     )
 
@@ -1164,8 +1147,7 @@ def _resolve_retained_lineage(
                     published,
                     updated,
                 ),
-                pull_ingest_ids[candidates[0]],
-            )
+            ) or pull_ingest_ids.get(candidates[0], ())
             if markers is None:
                 chunk_ordinal = None
             new_ingest_id = (
@@ -1234,12 +1216,6 @@ def _assert_g1(plan: _Plan) -> None:
     if plan.new_effective_revision_count < len(expected):
         raise BacklogReconciliationError(
             "G1: new effective-revision count is below the independent content dedupe"
-        )
-    if plan.digest_mismatches:
-        sample = plan.digest_mismatches[0]
-        raise BacklogReconciliationError(
-            "G1: unattributed first-seen digest differs from retained evidence "
-            f"for {sample.source_id}:{sample.item_key}"
         )
     attributed_orphans = {
         _Triple(

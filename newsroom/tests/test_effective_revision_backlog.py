@@ -858,23 +858,6 @@ def test_g2_drift_refuses_live_mutation(tmp_path: Path) -> None:
     assert _file_digest(proving) == before
 
 
-def test_g1_refuses_unattributed_digest_mismatch(tmp_path: Path) -> None:
-    proving, unpublished, _meta = _amplified_stores(tmp_path)
-    connection = sqlite3.connect(proving)
-    connection.execute(
-        """
-        INSERT INTO proving_revision_first_seen(
-            source_id, item_key, revision_digest, first_seen_at
-        ) VALUES(?,?,?,?)
-        """,
-        ("HK-04", "HK-04-0", "sha256:" + ("ff" * 32), _FIRST_POLL),
-    )
-    connection.commit()
-    connection.close()
-    with pytest.raises(Exception, match="G1"):
-        _run(proving, unpublished, tmp_path, mode="dry-run")
-
-
 def test_retention_window_bounded_inaccuracy_is_typed(tmp_path: Path) -> None:
     proving = tmp_path / "proving_store.sqlite3"
     unpublished = tmp_path / "unpublished_store.sqlite3"
@@ -1481,6 +1464,71 @@ def test_marker_specific_durable_orphans_are_counted_and_digested(
         "2026-08-19T00:00:00Z",
         "2026-08-20T00:00:00Z",
     }
+
+
+def test_pruned_marker_is_counted_when_same_revision_remains_retained(
+    tmp_path: Path,
+) -> None:
+    proving, unpublished, meta = _amplified_stores(tmp_path)
+    baseline = _run(proving, unpublished, tmp_path, mode="dry-run")
+    source_id, item_key, revision_digest = next(
+        triple for triple in meta["expected"] if triple[0] == "UK-01"
+    )
+    connection = sqlite3.connect(proving)
+    connection.execute(
+        """
+        INSERT INTO proving_effective_pull_first_seen(
+            source_id,item_key,revision_digest,published_at,updated_at,first_seen_at
+        ) VALUES(?,?,?,?,?,?)
+        """,
+        (
+            source_id,
+            item_key,
+            revision_digest,
+            "2025-12-31T09:00:00.000000Z",
+            "",
+            _FIRST_POLL,
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    dry = _run(proving, unpublished, tmp_path, mode="dry-run")
+
+    assert dry.new_effective_revision_count == baseline.new_effective_revision_count + 1
+    rule = next(
+        rule
+        for rule in dry.attributed_source_version_rules
+        if rule["rule"] == "SOURCE_SUPPLIED_VERSION_MARKER"
+        and rule["source_id"] == "UK-01"
+    )
+    assert rule["marker_count"] == 2
+
+
+def test_pruned_content_revision_is_not_rejected_as_a_digest_mismatch(
+    tmp_path: Path,
+) -> None:
+    proving, unpublished, meta = _amplified_stores(tmp_path)
+    baseline = _run(proving, unpublished, tmp_path, mode="dry-run")
+    source_id, item_key, _digest = next(
+        triple for triple in meta["expected"] if triple[0] == "UK-01"
+    )
+    connection = sqlite3.connect(proving)
+    connection.execute(
+        "INSERT INTO proving_revision_first_seen VALUES(?,?,?,?)",
+        (source_id, item_key, "sha256:pruned-content", _FIRST_POLL),
+    )
+    connection.commit()
+    connection.close()
+
+    dry = _run(proving, unpublished, tmp_path, mode="dry-run")
+
+    assert dry.new_effective_revision_count == baseline.new_effective_revision_count + 1
+    assert any(
+        rule["rule"] == "FIRST_SEEN_WITHOUT_RETAINED_OBSERVATION"
+        and rule["revision_digest"] == "sha256:pruned-content"
+        for rule in dry.attributed_source_version_rules
+    )
 
 
 def test_coverage_rows_are_part_of_the_append_only_census(tmp_path: Path) -> None:
