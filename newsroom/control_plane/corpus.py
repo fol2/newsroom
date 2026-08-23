@@ -236,7 +236,7 @@ class CorpusIngestUnit:
         return map_reference_time(
             published_at=self.published_at,
             updated_at=self.updated_at,
-            observed_at=self.effective_revision.first_observed_at,
+            observed_at=self.coverage_first_observed_at,
         )
 
     def coverage_key(self) -> EffectiveRevisionCoverageKey:
@@ -349,9 +349,10 @@ def units_from(
                 "revision_digest": revision_digest,
                 "published_at": base.published_at,
                 "updated_at": base.updated_at,
-                "observed_fallback_at": base.effective_revision.observed_fallback_at(
-                    published_at=base.published_at,
-                    updated_at=base.updated_at,
+                "observed_fallback_at": (
+                    base.coverage_first_observed_at
+                    if base.published_at is None and base.updated_at is None
+                    else None
                 ),
             },
             {
@@ -501,7 +502,7 @@ def _revision_from_chunks(
         source_time=map_reference_time(
             published_at=first.published_at,
             updated_at=first.updated_at,
-            observed_at=first.effective_revision.first_observed_at,
+            observed_at=landed_at,
         ).reference_time.to_text(),
         ingest_ids=tuple(item.ingest_id for item in ordered),
         revision_digest=first.revision_digest,

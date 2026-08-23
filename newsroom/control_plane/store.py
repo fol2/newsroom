@@ -233,23 +233,25 @@ def _landed_columns(connection: sqlite3.Connection) -> set[str]:
 
 
 def _ensure_landed_schema(connection: sqlite3.Connection) -> None:
-    has_landed = _sqlite_table_exists(connection, _LANDED_TABLE)
-    has_v10 = _sqlite_table_exists(connection, _LANDED_V10_TABLE)
-    columns = _landed_columns(connection) if has_landed else set()
-    needs_rebuild = has_landed and (
-        "published_at" not in columns or "ingest_ids_json" not in columns
-    )
-    if has_landed and not needs_rebuild and "legacy_v10" not in columns:
-        connection.execute(
-            f"ALTER TABLE {_LANDED_TABLE} "
-            "ADD COLUMN legacy_v10 INTEGER NOT NULL DEFAULT 0"
-        )
-    if has_landed and not needs_rebuild and not has_v10:
-        return
     own_txn = not connection.in_transaction
     if own_txn:
         connection.execute("BEGIN IMMEDIATE")
     try:
+        has_landed = _sqlite_table_exists(connection, _LANDED_TABLE)
+        has_v10 = _sqlite_table_exists(connection, _LANDED_V10_TABLE)
+        columns = _landed_columns(connection) if has_landed else set()
+        needs_rebuild = has_landed and (
+            "published_at" not in columns or "ingest_ids_json" not in columns
+        )
+        if has_landed and not needs_rebuild and "legacy_v10" not in columns:
+            connection.execute(
+                f"ALTER TABLE {_LANDED_TABLE} "
+                "ADD COLUMN legacy_v10 INTEGER NOT NULL DEFAULT 0"
+            )
+        if has_landed and not needs_rebuild and not has_v10:
+            if own_txn:
+                connection.commit()
+            return
         if needs_rebuild:
             connection.execute(
                 f"ALTER TABLE {_LANDED_TABLE} RENAME TO {_LANDED_V10_TABLE}"
@@ -298,68 +300,75 @@ def ensure_reconciliation_schema(
     connection: sqlite3.Connection, *, schema: str = "main"
 ) -> None:
     prefix = "" if schema == "main" else f"{schema}."
-    connection.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {prefix}unpublished_effective_revision_remap(
-            mapping_id TEXT PRIMARY KEY,
-            source_id TEXT NOT NULL,
-            item_key TEXT NOT NULL,
-            revision_digest TEXT NOT NULL,
-            published_at TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL DEFAULT '',
-            old_observed_fallback_at TEXT,
-            new_first_observed_at TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            retention_window_bounded_inaccuracy INTEGER NOT NULL DEFAULT 0
-                CHECK(retention_window_bounded_inaccuracy IN (0,1)),
-            old_ingest_id TEXT,
-            new_ingest_id TEXT,
-            at TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {prefix}unpublished_backlog_reconciliation_receipts(
-            receipt_digest TEXT PRIMARY KEY,
-            at TEXT NOT NULL,
-            mode TEXT NOT NULL,
-            receipt_json TEXT NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {prefix}unpublished_reconciliation_commands(
-            idempotency_key TEXT PRIMARY KEY,
-            caller_principal TEXT NOT NULL,
-            writer_principal TEXT,
-            command_type TEXT NOT NULL,
-            expected_mapping_digest TEXT NOT NULL,
-            receipt_json TEXT NOT NULL,
-            at TEXT NOT NULL
-        )
-        """
-    )
-    pragma = (
-        "table_info(unpublished_effective_revision_remap)"
-        if schema == "main"
-        else f"{schema}.table_info(unpublished_effective_revision_remap)"
-    )
-    info = list(connection.execute(f"PRAGMA {pragma}"))
-    if not info:
-        return
-    columns = {str(row[1]) for row in info}
-    for name, declaration in (
-        ("new_ingest_id", "TEXT"),
-        ("published_at", "TEXT NOT NULL DEFAULT ''"),
-        ("updated_at", "TEXT NOT NULL DEFAULT ''"),
-    ):
-        if name not in columns:
-            connection.execute(
-                f"ALTER TABLE {prefix}unpublished_effective_revision_remap "
-                f"ADD COLUMN {name} {declaration}"
+    own_txn = not connection.in_transaction
+    if own_txn:
+        connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {prefix}unpublished_effective_revision_remap(
+                mapping_id TEXT PRIMARY KEY,
+                source_id TEXT NOT NULL,
+                item_key TEXT NOT NULL,
+                revision_digest TEXT NOT NULL,
+                published_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                old_observed_fallback_at TEXT,
+                new_first_observed_at TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                retention_window_bounded_inaccuracy INTEGER NOT NULL DEFAULT 0
+                    CHECK(retention_window_bounded_inaccuracy IN (0,1)),
+                old_ingest_id TEXT,
+                new_ingest_id TEXT,
+                at TEXT NOT NULL
             )
+            """
+        )
+        connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {prefix}unpublished_backlog_reconciliation_receipts(
+                receipt_digest TEXT PRIMARY KEY,
+                at TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                receipt_json TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {prefix}unpublished_reconciliation_commands(
+                idempotency_key TEXT PRIMARY KEY,
+                caller_principal TEXT NOT NULL,
+                writer_principal TEXT,
+                command_type TEXT NOT NULL,
+                expected_mapping_digest TEXT NOT NULL,
+                receipt_json TEXT NOT NULL,
+                at TEXT NOT NULL
+            )
+            """
+        )
+        pragma = (
+            "table_info(unpublished_effective_revision_remap)"
+            if schema == "main"
+            else f"{schema}.table_info(unpublished_effective_revision_remap)"
+        )
+        columns = {str(row[1]) for row in connection.execute(f"PRAGMA {pragma}")}
+        for name, declaration in (
+            ("new_ingest_id", "TEXT"),
+            ("published_at", "TEXT NOT NULL DEFAULT ''"),
+            ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if name not in columns:
+                connection.execute(
+                    f"ALTER TABLE {prefix}unpublished_effective_revision_remap "
+                    f"ADD COLUMN {name} {declaration}"
+                )
+        if own_txn:
+            connection.commit()
+    except Exception:
+        if own_txn and connection.in_transaction:
+            connection.rollback()
+        raise
 
 
 def connect(path: str) -> sqlite3.Connection:

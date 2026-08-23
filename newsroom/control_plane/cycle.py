@@ -24,9 +24,10 @@ from newsroom.control_plane.corpus import (
 )
 from newsroom.control_plane.editorial import GroupedObservation, form_candidates
 from newsroom.effective_revision import (
+    EffectiveRevisionIdentity,
     EffectiveRevisionIdentityResolver,
-    create_effective_revision_schema,
     backfill_missing_first_seen,
+    create_effective_revision_schema,
 )
 from newsroom.control_plane.evidence import package_for
 from newsroom.control_plane.graphiti import (
@@ -1414,6 +1415,9 @@ def _permitted_rows(
 def _emit_effective_revision_landed(
     unpublished: sqlite3.Connection,
     units: tuple[CorpusIngestUnit, ...],
+    first_seen: tuple[tuple[str, str, str, str], ...],
+    pull_first_seen: tuple[EffectivePullFirstSeen, ...],
+    permitted_source_ids: frozenset[str],
 ) -> None:
     grouped: dict[tuple[str, str, str, str, str], list[CorpusIngestUnit]] = {}
     for unit in units:
@@ -1428,6 +1432,46 @@ def _emit_effective_revision_landed(
             updated_at=first.updated_at or "",
             ingest_ids=tuple(item.ingest_id for item in ordered),
             landed_at=min(item.coverage_first_observed_at for item in ordered),
+        )
+    first_seen_by_revision = {
+        (source_id, item_key, revision_digest): observed_at
+        for source_id, item_key, revision_digest, observed_at in first_seen
+    }
+    pull_revisions: set[tuple[str, str, str]] = set()
+    for pull in pull_first_seen:
+        pull_revisions.add((pull.source_id, pull.item_key, pull.revision_digest))
+        if pull.source_id not in permitted_source_ids:
+            continue
+        revision_first_seen = first_seen_by_revision.get(
+            (pull.source_id, pull.item_key, pull.revision_digest)
+        )
+        if revision_first_seen is None:
+            continue
+        identity = EffectiveRevisionIdentity(
+            source_id=pull.source_id,
+            item_key=pull.item_key,
+            revision_digest=pull.revision_digest,
+            first_observed_at=revision_first_seen,
+        )
+        emit_effective_revision_landed(
+            unpublished,
+            identity,
+            published_at=pull.published_at,
+            updated_at=pull.updated_at,
+            landed_at=pull.first_observed_at,
+        )
+    for revision, observed_at in first_seen_by_revision.items():
+        source_id, item_key, revision_digest = revision
+        if source_id not in permitted_source_ids or revision in pull_revisions:
+            continue
+        emit_effective_revision_landed(
+            unpublished,
+            EffectiveRevisionIdentity(
+                source_id=source_id,
+                item_key=item_key,
+                revision_digest=revision_digest,
+                first_observed_at=observed_at,
+            ),
         )
 
 
@@ -1660,7 +1704,13 @@ def run_cycle(
     duplicate = 0
     graphiti_ok = 0
     try:
-        _emit_effective_revision_landed(unpublished, units)
+        _emit_effective_revision_landed(
+            unpublished,
+            units,
+            first_seen,
+            pull_first_seen,
+            permitted_source_ids,
+        )
         revisions = merge_durable_revisions(
             window_revisions=window_revisions,
             first_seen=first_seen,

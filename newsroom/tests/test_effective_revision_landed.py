@@ -312,6 +312,45 @@ def test_crash_between_revision_commit_and_emission_replays_to_one_record(
     assert len(_landed(unpublished)) == 1
 
 
+def test_crash_replay_emits_landed_record_after_raw_body_retention(
+    tmp_path: Path,
+) -> None:
+    proving = tmp_path / "proving.sqlite3"
+    unpublished = tmp_path / "unpublished.sqlite3"
+    _add_proving_run(
+        proving,
+        run_id="run-1",
+        body=b"<feed><entry><title>a</title></entry></feed>",
+        fetched_at="2026-08-01T00:00:00.000000Z",
+    )
+
+    _cycle(proving, unpublished)
+
+    assert len(_landed(unpublished)) == 1
+
+
+def test_legacy_revision_without_pull_ledger_emits_landed_record(
+    tmp_path: Path,
+) -> None:
+    proving = tmp_path / "proving.sqlite3"
+    unpublished = tmp_path / "unpublished.sqlite3"
+    _add_proving_run(
+        proving,
+        run_id="run-1",
+        body=b"<feed><entry><title>a</title></entry></feed>",
+        fetched_at="2026-08-01T00:00:00.000000Z",
+    )
+    connection = sqlite3.connect(proving)
+    connection.execute("DELETE FROM proving_effective_pull_first_seen")
+    connection.execute("UPDATE proving_observations SET status_code=500")
+    connection.commit()
+    connection.close()
+
+    _cycle(proving, unpublished)
+
+    assert len(_landed(unpublished)) == 1
+
+
 def test_landed_record_key_is_effective_revision_identity_only(tmp_path: Path) -> None:
     first_observed = "2026-08-20T00:00:00.000000Z"
     later_fetch = "2026-08-20T01:00:00.000000Z"

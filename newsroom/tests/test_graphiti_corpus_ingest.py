@@ -1375,6 +1375,42 @@ def test_changed_source_marker_is_deterministic_and_covered_once() -> None:
     )
 
 
+def test_undated_marker_transition_uses_effective_pull_first_observation() -> None:
+    dated = GroupedObservation(
+        "UK-01",
+        "sha256:dated",
+        SourceItem(
+            "UK-01",
+            "one",
+            "One",
+            "Body",
+            "https://item/one",
+            updated_at="2026-08-20T00:00:00.000000Z",
+        ),
+        "2026-08-20T00:01:00.000000Z",
+    )
+    undated = replace(
+        dated,
+        observation_digest="sha256:undated",
+        item=replace(dated.item, updated_at=None),
+        observed_at="2026-08-20T02:01:00.000000Z",
+    )
+    unit = units_from(
+        (undated,),
+        proving_run_id="run-2",
+        effective_revision_resolver=_effective_revision_resolver((dated, undated)),
+    )[0]
+    assert unit.temporal().reference_time.to_text() == undated.observed_at
+    assert revisions_from((unit,))[0].source_time == undated.observed_at
+    assert unit.authority is not None
+    revision_record = next(
+        record
+        for record in unit.authority.records
+        if record["record_type"] == "SOURCE_REVISION"
+    )
+    assert revision_record["observed_fallback_at"] == undated.observed_at
+
+
 def test_rights_renewal_restart_and_replay_create_zero_new_revisions(
     tmp_path: Path,
 ) -> None:
