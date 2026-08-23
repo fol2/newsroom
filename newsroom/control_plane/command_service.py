@@ -85,7 +85,9 @@ class ControlPlaneCommandService:
         )
         backlog._assert_g2(plan, dry_run_receipt, store_binding=store_binding)
         backlog._assert_command(command, plan, dry_run_receipt)
-        completed = backlog._load_completed_command(unpublished_store, command)
+        completed = backlog._load_completed_command(
+            unpublished_store, command, store_binding=store_binding
+        )
         if completed is not None:
             backlog._write_receipt(receipt_path, completed)
             return completed

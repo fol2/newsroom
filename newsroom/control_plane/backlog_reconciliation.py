@@ -745,6 +745,29 @@ def _build_plan(
         for pull, seen in pull_first_seen.items()
         if pull[0] in orphan_keys
     }
+    orphan_markers: dict[_Triple, set[tuple[str, str]]] = {}
+    for triple, published, updated in orphan_pulls:
+        orphan_markers.setdefault(triple, set()).add((published, updated))
+    for triple, markers in sorted(
+        orphan_markers.items(),
+        key=lambda item: (
+            item[0].source_id,
+            item[0].item_key,
+            item[0].revision_digest,
+        ),
+    ):
+        if len(markers) > 1:
+            attributed.append(
+                {
+                    "rule": SOURCE_SUPPLIED_VERSION_MARKER,
+                    **triple.as_dict(),
+                    "marker_count": len(markers),
+                    "markers": [
+                        {"published_at": published, "updated_at": updated}
+                        for published, updated in sorted(markers)
+                    ],
+                }
+            )
     for triple in orphan_keys:
         durable_pulls = [pull for pull in orphan_pulls if pull[0] == triple]
         if not durable_pulls:
@@ -1647,7 +1670,10 @@ def _assert_command_authority(command: _ReconciliationCommand) -> None:
 
 
 def _load_completed_command(
-    unpublished_store: str, command: _ReconciliationCommand
+    unpublished_store: str,
+    command: _ReconciliationCommand,
+    *,
+    store_binding: dict[str, dict[str, object]],
 ) -> BacklogReconciliationReceipt | None:
     if not Path(unpublished_store).is_file():
         return None
@@ -1674,7 +1700,12 @@ def _load_completed_command(
     payload = json.loads(str(row[1]))
     if not isinstance(payload, dict):
         raise BacklogReconciliationError("stored command receipt is not an object")
-    return BacklogReconciliationReceipt.from_dict(payload)
+    receipt = BacklogReconciliationReceipt.from_dict(payload)
+    if receipt.store_binding != store_binding:
+        raise ReconciliationCommandError(
+            "stored command receipt belongs to other stores"
+        )
+    return receipt
 
 
 def _write_coordinator(path: Path, payload: dict[str, object]) -> None:

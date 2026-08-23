@@ -1224,6 +1224,40 @@ def test_live_command_is_idempotent_for_the_same_key(tmp_path: Path) -> None:
     assert second.remapped_count == first.remapped_count
 
 
+def test_completed_command_cannot_be_replayed_for_copied_stores(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    copied = tmp_path / "copied"
+    source.mkdir()
+    copied.mkdir()
+    proving, unpublished, _meta = _amplified_stores(source)
+    dry = _run(proving, unpublished, source, mode="dry-run")
+    _run(
+        proving,
+        unpublished,
+        source,
+        mode="live",
+        dry_run_receipt=dry.as_dict(),
+        key="store-bound-command",
+    )
+    proving_copy = copied / "proving.sqlite3"
+    unpublished_copy = copied / "unpublished.sqlite3"
+    _backup_store(proving, proving_copy)
+    _backup_store(unpublished, unpublished_copy)
+    copied_dry = _run(
+        proving_copy, unpublished_copy, copied, mode="dry-run"
+    )
+
+    with pytest.raises(ReconciliationCommandError, match="other stores"):
+        _run(
+            proving_copy,
+            unpublished_copy,
+            copied,
+            mode="live",
+            dry_run_receipt=copied_dry.as_dict(),
+            key="store-bound-command",
+        )
+
+
 def test_command_schema_preserves_unknown_legacy_writer(tmp_path: Path) -> None:
     proving, unpublished, _meta = _amplified_stores(tmp_path)
     connection = sqlite3.connect(unpublished)
@@ -1373,6 +1407,11 @@ def test_durable_orphan_is_in_the_exact_denominator(tmp_path: Path) -> None:
 def test_marker_specific_durable_orphans_are_counted_and_digested(
     tmp_path: Path,
 ) -> None:
+    from newsroom.control_plane.corpus import (
+        EffectivePullFirstSeen,
+        merge_durable_revisions,
+    )
+
     proving, unpublished, _meta = _amplified_stores(tmp_path)
     baseline = _run(proving, unpublished, tmp_path, mode="dry-run")
     connection = sqlite3.connect(proving)
@@ -1408,6 +1447,40 @@ def test_marker_specific_durable_orphans_are_counted_and_digested(
         baseline.new_effective_revision_count + 1
     )
     assert one_marker.mapping_digest != with_markers.mapping_digest
+    marker_rule = next(
+        rule
+        for rule in with_markers.attributed_source_version_rules
+        if rule["rule"] == "SOURCE_SUPPLIED_VERSION_MARKER"
+        and rule["source_id"] == "UK-99"
+    )
+    assert marker_rule["marker_count"] == 2
+    runtime = merge_durable_revisions(
+        window_revisions=(),
+        first_seen=(("UK-99", "expired", "sha256:marker-orphan", _FIRST_POLL),),
+        pull_first_seen=(
+            EffectivePullFirstSeen(
+                "UK-99",
+                "expired",
+                "sha256:marker-orphan",
+                "2026-08-19T00:00:00Z",
+                "",
+                _FIRST_POLL,
+            ),
+            EffectivePullFirstSeen(
+                "UK-99",
+                "expired",
+                "sha256:marker-orphan",
+                "2026-08-20T00:00:00Z",
+                "",
+                _FIRST_POLL,
+            ),
+        ),
+    )
+    assert len(runtime) == 2
+    assert {revision.published_at for revision in runtime} == {
+        "2026-08-19T00:00:00Z",
+        "2026-08-20T00:00:00Z",
+    }
 
 
 def test_coverage_rows_are_part_of_the_append_only_census(tmp_path: Path) -> None:
