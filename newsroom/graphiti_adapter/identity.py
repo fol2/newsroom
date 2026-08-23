@@ -86,6 +86,8 @@ def ingest_key(
     chunk_ordinal: int = 1,
     schema_digest: str | None = None,
     prompt_digest: str | None = None,
+    workspace_group: str | None = None,
+    episode_uuid: str | None = None,
 ) -> str:
     payload = {
         "source_id": source_id,
@@ -106,6 +108,10 @@ def ingest_key(
         payload["schema_digest"] = schema_digest
     if prompt_digest is not None:
         payload["prompt_digest"] = prompt_digest
+    if workspace_group is not None:
+        payload["workspace_group"] = workspace_group
+    if episode_uuid is not None:
+        payload["episode_uuid"] = episode_uuid
     digest = digest_bytes(canonical_json_bytes(payload))
     return str(uuid4_from_digest(bytes.fromhex(digest.removeprefix("sha256:")[:32])))
 

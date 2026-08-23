@@ -34,6 +34,21 @@ class _Guard:
         self.calls.append("completed")
         return self.completed_receipt if self.state is GuardState.COMPLETE else None
 
+    async def completed_raw(self) -> dict[str, object]:
+        self.calls.append("completed")
+        assert self.completed_receipt is not None
+        return self.completed_receipt
+
+    async def retained_marker_or_none(self) -> Any:
+        self.calls.append("retained")
+        if self.state is GuardState.CREATED:
+            return None
+        return SimpleNamespace(
+            state=self.state,
+            chat_invocations=({"model": "retained"},),
+            embedding_usage={"usage_basis": "RETAINED"},
+        )
+
     async def begin(self) -> Any:
         self.calls.append("begin")
         return SimpleNamespace(state=self.state)
@@ -194,7 +209,54 @@ def test_completed_ingest_replays_without_another_provider_leaf() -> None:
     assert replayed.payload_digest == first.payload_digest
     assert [node.uuid for node in replayed.nodes] == [node.uuid for node in first.nodes]
     assert [edge.uuid for edge in replayed.edges] == [edge.uuid for edge in first.edges]
-    assert replay_guard.calls == ["completed"]
+    assert replay_guard.calls == ["retained", "completed"]
+
+
+def test_zero_result_is_completed_and_replayed_without_another_leaf() -> None:
+    case = fixture("zero-result")
+    first_guard = _Guard()
+    first_transport = _Transport(case.gold)
+    first = extract_combined_temporal(
+        case.revision,
+        transport=first_transport,
+        pipeline=_pipeline(first_guard),
+    )
+
+    assert first.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert first_transport.calls == 1
+    assert first_guard.completed_receipt is not None
+    assert "resolve" not in first_guard.calls
+    assert "persist" not in first_guard.calls
+
+    replay_guard = _Guard(GuardState.COMPLETE)
+    replay_guard.completed_receipt = first_guard.completed_receipt
+    replay_transport = _Transport(RuntimeError("provider must not run"))
+    replayed = extract_combined_temporal(
+        case.revision,
+        transport=replay_transport,
+        pipeline=_pipeline(replay_guard),
+    )
+
+    assert replayed.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert replay_transport.calls == 0
+    assert replay_guard.calls == ["retained", "completed"]
+
+
+def test_pending_marker_is_recovered_before_another_provider_leaf() -> None:
+    case = fixture("pair-current")
+    guard = _Guard(GuardState.PENDING)
+    transport = _Transport(case.gold)
+
+    with pytest.raises(CombinedTemporalPipelineError) as captured:
+        extract_combined_temporal(
+            case.revision,
+            transport=transport,
+            pipeline=_pipeline(guard),
+        )
+
+    assert transport.calls == 0
+    assert captured.value.rollback_completed is True
+    assert guard.calls == ["retained", "rollback"]
 
 
 def test_completion_retains_canonical_proposals_and_passage_provenance() -> None:
@@ -208,7 +270,13 @@ def test_completion_retains_canonical_proposals_and_passage_provenance() -> None
 
     assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
     assert guard.completed_receipt is not None
-    assert guard.completed_receipt["invocation_count"] == 1
+    assert guard.completed_receipt["invocation_count"] == 2
+    assert guard.completed_receipt["pipeline_chat_invocations"] == [
+        {"model": "composer-2.5"}
+    ]
+    assert guard.completed_receipt["embedding_usage"] == {
+        "usage_basis": "PROVIDER_REPORTED"
+    }
     assert len(guard.completed_receipt["transport_calls"]) == 1
     proposal = guard.completed_receipt["proposal_receipt"]
     assert isinstance(proposal, dict)
@@ -225,6 +293,9 @@ def test_completion_retains_canonical_proposals_and_passage_provenance() -> None
     assert relation["fact"] == case.gold["facts"][0]["fact"]
     assert "valid_at" in relation
     assert "invalid_at" in relation
+    assert leaf.invocation_count == 2
+    assert leaf.pipeline_chat_invocations == ({"model": "composer-2.5"},)
+    assert leaf.embedding_usage == {"usage_basis": "PROVIDER_REPORTED"}
 
 
 def test_existing_pipeline_rolls_back_embedding_failure() -> None:
@@ -260,6 +331,11 @@ def test_real_factory_uses_graphiti_types_and_bulk_persistence(
 ) -> None:
     guard = _Guard()
     calls: list[str] = []
+    driver = object()
+    guard.driver = driver
+    guard.group_id = "test"
+    guard.episode_uuid = "episode"
+    guard.input_digest = "ingest"
 
     class RuntimeObject:
         def __init__(self, **values: Any) -> None:
@@ -304,6 +380,8 @@ def test_real_factory_uses_graphiti_types_and_bulk_persistence(
             assert isinstance(args[2][0], RuntimeObject)
             calls.append("persist")
 
+    Graphiti.driver = driver
+
     now = datetime.now(tz=UTC)
     proposal_nodes = tuple(
         SimpleNamespace(
@@ -336,15 +414,45 @@ def test_real_factory_uses_graphiti_types_and_bulk_persistence(
     pipeline = real.combined_temporal_pipeline_for(
         graphiti=Graphiti(),
         guard=guard,  # type: ignore[arg-type]
-        episode=SimpleNamespace(group_id="test"),
+        episode=SimpleNamespace(group_id="test", uuid="episode"),
     )
+    receipt = {
+        "ingest_id": "ingest",
+        "proposal_receipt": {
+            "episode_id": "episode",
+            "entity_mentions": [{}, {}],
+            "relation_proposals": [{}],
+        },
+    }
     result = pipeline.execute(
         nodes=proposal_nodes,
         edges=(proposal_edge,),
-        receipt={},
+        receipt=receipt,
     )
 
     assert calls == ["resolve", "pointers", "embed", "persist"]
     assert isinstance(result.nodes[0], RuntimeObject)
     assert isinstance(result.edges[0], RuntimeObject)
     assert result.edges[0].fact_embedding == [0.5]
+
+    proposal_nodes[0].group_id = "other-generation"
+    with pytest.raises(CombinedTemporalPipelineError, match="identity differs"):
+        pipeline.execute(nodes=proposal_nodes, edges=(proposal_edge,), receipt=receipt)
+
+
+def test_real_factory_rejects_a_different_journal_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    guard = _Guard()
+    guard.driver = object()
+    guard.group_id = "test"
+    guard.episode_uuid = "episode"
+    guard.input_digest = "ingest"
+
+    with pytest.raises(real.GraphitiAdapterContractError, match="identity differ"):
+        real.combined_temporal_pipeline_for(
+            graphiti=SimpleNamespace(driver=object()),
+            guard=guard,  # type: ignore[arg-type]
+            episode=SimpleNamespace(group_id="test", uuid="episode"),
+        )

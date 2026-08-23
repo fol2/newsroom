@@ -238,6 +238,16 @@ def combined_temporal_pipeline_for(
     """Wire combined-temporal proposals to the pinned existing Graphiti pipeline."""
 
     runtime = _load_graphiti()
+    expected_group_id = str(episode.group_id)
+    expected_episode_uuid = str(episode.uuid)
+    if (
+        guard.driver is not graphiti.driver
+        or guard.group_id != expected_group_id
+        or guard.episode_uuid != expected_episode_uuid
+    ):
+        raise GraphitiAdapterContractError(
+            "combined-temporal graph, journal and episode identity differ"
+        )
 
     async def resolve_nodes(nodes: list[Any]) -> tuple[
         list[Any], dict[str, str], list[tuple[Any, Any]]
@@ -313,6 +323,9 @@ def combined_temporal_pipeline_for(
         run_async=asyncio.run,
         chat_receipt=chat_receipt,
         embedding_receipt=embedding_receipt,
+        expected_group_id=expected_group_id,
+        expected_episode_uuid=expected_episode_uuid,
+        expected_ingest_id=guard.input_digest,
     )
 
 

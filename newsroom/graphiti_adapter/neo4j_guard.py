@@ -87,6 +87,22 @@ class Neo4jMutationGuard:
         self._input_digest = input_digest
         self._snapshot_id = f"{episode_uuid}:{attempt_number}"
 
+    @property
+    def driver(self) -> Any:
+        return self._driver
+
+    @property
+    def group_id(self) -> str:
+        return self._group_id
+
+    @property
+    def episode_uuid(self) -> str:
+        return self._episode_uuid
+
+    @property
+    def input_digest(self) -> str:
+        return self._input_digest
+
     async def _query(self, query: str, **parameters: object) -> list[object]:
         records, _, _ = await self._driver.execute_query(
             query, params=parameters, routing_="w"
@@ -214,6 +230,16 @@ class Neo4jMutationGuard:
             attempt_number=self._attempt_number,
             input_digest=self._input_digest,
         )
+
+    async def retained_marker_or_none(self) -> GuardMarker | None:
+        """Inspect an existing journal without creating one."""
+
+        retained = await self._marker()
+        if retained is None:
+            return None
+        if str(retained.get("state")) == "SNAPSHOTTING":
+            raise GuardError("Graphiti guard snapshot is incomplete")
+        return self._bind_marker(retained)
 
     async def _snapshot(self) -> None:
         unsafe = await self._query(

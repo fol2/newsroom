@@ -50,7 +50,10 @@ from newsroom.graphiti_adapter.combined_temporal_fixtures import (
     GoldFixture,
     fixture,
 )
-from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_CORE_RELEASE
+from newsroom.graphiti_adapter.evaluation_packet import (
+    GRAPHITI_CORE_RELEASE,
+    GRAPHITI_WORKSPACE_GROUP,
+)
 from newsroom.graphiti_adapter.identity import configuration_digest, content_digest
 from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_VERSION
 
@@ -99,7 +102,7 @@ class _ProviderFreePipeline:
             guarded_edges=edges,
             node_resolutions=tuple("NEW" for _node in nodes),
             graph_effect_attempted=False,
-            embedding_skipped=False,
+            embedding_skipped=not edges,
             journal_skipped=False,
             rollback_skipped=True,
         )
@@ -193,7 +196,7 @@ def test_zero_result_makes_exactly_one_generate_response_request() -> None:
     assert leaf.edges == ()
     assert leaf.graph_effect_attempted is False
     assert leaf.embedding_skipped is True
-    assert leaf.journal_skipped is True
+    assert leaf.journal_skipped is False
     assert leaf.rollback_skipped is True
     assert leaf.node_resolutions == ()
 
@@ -299,6 +302,37 @@ def test_same_name_entities_keep_distinct_local_identities() -> None:
     assert len({node.uuid for node in leaf.nodes}) == 3
     sources = {edge.source_node_uuid for edge in leaf.edges}
     assert len(sources) == 2
+
+
+def test_same_name_fact_endpoints_must_share_their_entity_evidence() -> None:
+    case = fixture("same-name")
+    payload = json.loads(json.dumps(case.gold))
+    payload["facts"][0]["source_local_id"] = 2
+    payload["facts"][1]["source_local_id"] = 0
+
+    leaf = extract_combined_temporal(
+        case.revision,
+        transport=_FakeTransport(payload),
+        pipeline=_PIPELINE,
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+
+
+def test_fact_must_name_both_endpoints_to_be_self_contained() -> None:
+    case = fixture("pair-current")
+    payload = json.loads(json.dumps(case.gold))
+    payload["facts"][0]["fact"] = "asked about"
+
+    leaf = extract_combined_temporal(
+        case.revision,
+        transport=_FakeTransport(payload),
+        pipeline=_PIPELINE,
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
 
 
 def test_implied_relation_is_absent_from_gold_and_rejected_if_emitted() -> None:
@@ -578,7 +612,7 @@ def test_prompt_or_schema_binding_mints_a_new_ingest_identity(
     assert {node.uuid for node in shifted.nodes} != {node.uuid for node in leaf.nodes}
     assert {edge.uuid for edge in shifted.edges} != {edge.uuid for edge in leaf.edges}
     monkeypatch.setattr(
-        "newsroom.graphiti_adapter.combined_temporal_extraction.SCHEMA_DIGEST",
+        "newsroom.graphiti_adapter.combined_temporal_contract.SCHEMA_DIGEST",
         "sha256:" + "ab" * 32,
     )
     schema_shifted = extract_combined_temporal(
@@ -591,6 +625,13 @@ def test_prompt_or_schema_binding_mints_a_new_ingest_identity(
         node.uuid for node in leaf.nodes
     }
     assert configuration_digest() == leaf.configuration_digest
+
+
+def test_generation_and_episode_identity_are_bound_to_the_ingest_key() -> None:
+    revision = fixture("pair-current").revision
+    assert revision.group_id == GRAPHITI_WORKSPACE_GROUP
+    assert replace(revision, group_id="other-generation").ingest_id != revision.ingest_id
+    assert replace(revision, episode_uuid="other-episode").ingest_id != revision.ingest_id
 
 
 def test_pipeline_failure_retains_rollback_outcome() -> None:
@@ -616,6 +657,20 @@ def test_pipeline_failure_retains_rollback_outcome() -> None:
     assert leaf.graph_effect_attempted is True
     assert leaf.nodes == ()
     assert leaf.edges == ()
+
+
+def test_unknown_pipeline_failure_does_not_fabricate_effect_evidence() -> None:
+    class _UnknownPipeline:
+        def execute(self, **_kwargs: Any) -> CombinedTemporalPipelineResult:
+            raise RuntimeError("unknown pre-effect failure")
+
+    case = fixture("pair-current")
+    with pytest.raises(RuntimeError, match="unknown pre-effect failure"):
+        extract_combined_temporal(
+            case.revision,
+            transport=_FakeTransport(case.gold),
+            pipeline=_UnknownPipeline(),
+        )
 
 
 @pytest.mark.parametrize(

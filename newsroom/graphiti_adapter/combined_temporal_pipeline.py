@@ -28,6 +28,7 @@ class CombinedTemporalPipelineResult:
     embedding_skipped: bool
     journal_skipped: bool
     rollback_skipped: bool
+    completed_receipt: Mapping[str, object] | None = None
 
 
 class CombinedTemporalPipeline(Protocol):
@@ -61,9 +62,16 @@ def _durable_receipt(
     nodes: list[Any],
     edges: list[Any],
     resolutions: tuple[str, ...],
+    chat_invocations: list[dict[str, object]],
+    embedding_usage: dict[str, object],
 ) -> dict[str, object]:
     durable = dict(receipt)
     durable.setdefault("provider_attempt_number", 1)
+    durable["pipeline_chat_invocations"] = [dict(item) for item in chat_invocations]
+    durable["embedding_usage"] = dict(embedding_usage)
+    durable["invocation_count"] = int(durable.get("invocation_count", 0)) + len(
+        chat_invocations
+    )
     proposal_raw = durable.get("proposal_receipt")
     if not isinstance(proposal_raw, Mapping):
         return durable
@@ -122,9 +130,41 @@ class ExistingGraphitiPipeline:
     run_async: Callable[[Awaitable[Any]], Any]
     chat_receipt: Callable[[], list[dict[str, object]]]
     embedding_receipt: Callable[[], dict[str, object]]
+    expected_group_id: str | None = None
+    expected_episode_uuid: str | None = None
+    expected_ingest_id: str | None = None
 
     def completed_receipt(self) -> Mapping[str, object] | None:
-        return self.run_async(self.guard.completed_raw_or_none())
+        return self.run_async(self._completed_receipt())
+
+    async def _completed_receipt(self) -> Mapping[str, object] | None:
+        try:
+            marker = await self.guard.retained_marker_or_none()
+        except Exception as exc:
+            raise CombinedTemporalPipelineError(
+                "combined-temporal journal could not be inspected",
+                graph_effect_attempted=False,
+                rollback_completed=False,
+            ) from exc
+        if marker is None:
+            return None
+        if marker.state is GuardState.COMPLETE:
+            return await self.guard.completed_raw()
+        rollback_completed = marker.state is GuardState.RECOVERED_AMBIGUOUS
+        if marker.state in {GuardState.PENDING, GuardState.ROLLING_BACK}:
+            try:
+                rollback_completed = await self.guard.rollback_pending(
+                    chat_invocations=[dict(item) for item in marker.chat_invocations],
+                    embedding_usage=dict(marker.embedding_usage or {}),
+                    reason="RECOVERED_BEFORE_PROVIDER_RETRY",
+                )
+            except Exception:
+                rollback_completed = False
+        raise CombinedTemporalPipelineError(
+            "combined-temporal journal blocks another provider leaf",
+            graph_effect_attempted=True,
+            rollback_completed=rollback_completed,
+        )
 
     def execute(
         self,
@@ -142,6 +182,7 @@ class ExistingGraphitiPipeline:
         edges: tuple[Any, ...],
         receipt: Mapping[str, object],
     ) -> CombinedTemporalPipelineResult:
+        self._validate_context(nodes=nodes, edges=edges, receipt=receipt)
         try:
             marker = await self.guard.begin()
         except Exception as exc:
@@ -153,7 +194,8 @@ class ExistingGraphitiPipeline:
         if marker.state is not GuardState.CREATED:
             if marker.state is GuardState.COMPLETE:
                 raise CombinedTemporalPipelineError(
-                    "combined-temporal completed result must be replayed before execution",
+                    "combined-temporal completed result must be replayed "
+                    "before execution",
                     graph_effect_attempted=False,
                     rollback_completed=False,
                 )
@@ -171,6 +213,33 @@ class ExistingGraphitiPipeline:
                 "combined-temporal journal is not newly created",
                 graph_effect_attempted=True,
                 rollback_completed=rollback_completed,
+            )
+        if not nodes and not edges:
+            chat_invocations = self.chat_receipt()
+            embedding_usage = self.embedding_receipt()
+            await self.guard.record_pending_telemetry(
+                chat_invocations=chat_invocations,
+                embedding_usage=embedding_usage,
+            )
+            durable_receipt = _durable_receipt(
+                receipt,
+                nodes=[],
+                edges=[],
+                resolutions=(),
+                chat_invocations=chat_invocations,
+                embedding_usage=embedding_usage,
+            )
+            await self.guard.complete(durable_receipt)
+            return CombinedTemporalPipelineResult(
+                nodes=(),
+                edges=(),
+                guarded_edges=(),
+                node_resolutions=(),
+                graph_effect_attempted=False,
+                embedding_skipped=True,
+                journal_skipped=False,
+                rollback_skipped=True,
+                completed_receipt=durable_receipt,
             )
         try:
             resolved_nodes, uuid_map, _duplicates = await self.resolve_nodes(
@@ -195,9 +264,11 @@ class ExistingGraphitiPipeline:
                 attributes["resolution"] = resolution
                 node.attributes = attributes
             await self.persist_graph(resolved_nodes, guarded)
+            chat_invocations = self.chat_receipt()
+            embedding_usage = self.embedding_receipt()
             await self.guard.record_pending_telemetry(
-                chat_invocations=self.chat_receipt(),
-                embedding_usage=self.embedding_receipt(),
+                chat_invocations=chat_invocations,
+                embedding_usage=embedding_usage,
             )
             await self.guard.restore_preexisting()
             durable_receipt = _durable_receipt(
@@ -205,6 +276,8 @@ class ExistingGraphitiPipeline:
                 nodes=resolved_nodes,
                 edges=guarded,
                 resolutions=resolutions,
+                chat_invocations=chat_invocations,
+                embedding_usage=embedding_usage,
             )
             await self.guard.complete(durable_receipt)
         except Exception as exc:
@@ -232,7 +305,35 @@ class ExistingGraphitiPipeline:
             embedding_skipped=False,
             journal_skipped=False,
             rollback_skipped=True,
+            completed_receipt=durable_receipt,
         )
+
+    def _validate_context(
+        self,
+        *,
+        nodes: tuple[Any, ...],
+        edges: tuple[Any, ...],
+        receipt: Mapping[str, object],
+    ) -> None:
+        if self.expected_group_id is None:
+            return
+        proposal = receipt.get("proposal_receipt")
+        if (
+            receipt.get("ingest_id") != self.expected_ingest_id
+            or not isinstance(proposal, Mapping)
+            or proposal.get("episode_id") != self.expected_episode_uuid
+            or any(str(node.group_id) != self.expected_group_id for node in nodes)
+            or any(str(edge.group_id) != self.expected_group_id for edge in edges)
+            or any(
+                list(edge.episodes) != [self.expected_episode_uuid]
+                for edge in edges
+            )
+        ):
+            raise CombinedTemporalPipelineError(
+                "combined-temporal pipeline identity differs",
+                graph_effect_attempted=False,
+                rollback_completed=False,
+            )
 
 
 __all__ = [

@@ -8,6 +8,7 @@ from typing import Any
 from newsroom.authority.canonical import digest_bytes
 from newsroom.graphiti_adapter.combined_temporal_extraction import (
     CombinedTemporalFailureCode,
+    GROUP_ID,
     SourceRevisionInput,
 )
 from newsroom.graphiti_adapter.identity import MAX_EPISODE_BYTES
@@ -17,7 +18,6 @@ PAIR_BODY = (
 )
 REFERENCE_TIME = "2026-08-21T00:00:00Z"
 INGESTED_AT = "2026-08-22T12:00:00Z"
-GROUP_ID = "newsroom-combined-temporal-v1"
 SOURCE_ID = "newsroom-fixture"
 
 
