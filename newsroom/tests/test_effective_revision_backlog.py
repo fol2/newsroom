@@ -1171,7 +1171,7 @@ def test_live_transaction_has_a_time_limit(
         return 0.0 if calls == 1 else 10.0
 
     monkeypatch.setattr(
-        "newsroom.control_plane.backlog_reconciliation.time.monotonic", elapsed
+        "newsroom.control_plane.command_service.time.monotonic", elapsed
     )
     with pytest.raises(BacklogReconciliationError, match="five-second"):
         _run(
