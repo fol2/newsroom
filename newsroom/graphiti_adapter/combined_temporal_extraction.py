@@ -144,6 +144,7 @@ def extract_combined_temporal(
     transport: CombinedTemporalTransport,
     pipeline: CombinedTemporalPipeline | None = None,
 ) -> CombinedTemporalLeaf:
+    _require_pipeline(pipeline)
     ingest_id = revision.ingest_id
     temporal_basis = revision.temporal_basis
     UtcTimestamp.parse(revision.ingested_at)
@@ -157,40 +158,53 @@ def extract_combined_temporal(
             prompt_digest=prompt_digest,
             completed=completed,
         )
-    result = transport.generate_response(
-        prompt=prompt.text,
-        schema=SCHEMA,
-        response_model=CONTRACT_NAME,
-    )
-    raw = result.raw
-    raw_digest_value = raw_digest(raw)
-    usage = dict(result.token_usage)
-    calls = [
-        {
-            "response_model": CONTRACT_NAME,
-            "prompt_bytes": len(prompt.text.encode("utf-8")),
-            "schema_bytes": len(canonical_json_bytes(SCHEMA)),
-            "raw_output_digest": raw_digest_value,
-            "framework_version": result.framework_version,
-            "model_version": result.model_version,
-            "token_usage": usage,
-            "provider_cost": result.provider_cost,
-        }
-    ]
-    receipt = {
-        "raw_output_digest": raw_digest_value,
-        "framework_version": result.framework_version,
-        "model_version": result.model_version,
+    receipt: dict[str, object] = {
         "prompt_digest": prompt_digest,
-        "token_usage": usage,
-        "provider_cost": result.provider_cost,
         "ingest_id": ingest_id,
         "temporal_basis": temporal_basis,
         "configuration_digest": configuration_digest(),
         "temporal_policy_digest": digest_canonical(TEMPORAL_POLICY_VERSION),
         "invocation_count": 1,
-        "transport_calls": calls,
+        "transport_calls": [],
     }
+    try:
+        result = transport.generate_response(
+            prompt=prompt.text,
+            schema=SCHEMA,
+            response_model=CONTRACT_NAME,
+        )
+        raw = result.raw
+        raw_digest_value = raw_digest(raw)
+        usage = dict(result.token_usage)
+        calls = [
+            {
+                "response_model": CONTRACT_NAME,
+                "prompt_bytes": len(prompt.text.encode("utf-8")),
+                "schema_bytes": len(canonical_json_bytes(SCHEMA)),
+                "raw_output_digest": raw_digest_value,
+                "framework_version": result.framework_version,
+                "model_version": result.model_version,
+                "token_usage": usage,
+                "provider_cost": result.provider_cost,
+            }
+        ]
+        receipt.update(
+            {
+                "raw_output_digest": raw_digest_value,
+                "framework_version": result.framework_version,
+                "model_version": result.model_version,
+                "token_usage": usage,
+                "provider_cost": result.provider_cost,
+                "transport_calls": calls,
+            }
+        )
+    except Exception:
+        return _failure_leaf(
+            pipeline,
+            prompt,
+            receipt,
+            failure_code=CombinedTemporalFailureCode.PIPELINE_FAILED,
+        )
     try:
         payload = parse_payload(raw)
         normalised, ranges = normalise(
@@ -293,10 +307,7 @@ def _prepare_attempt(
 ) -> Mapping[str, object] | None:
     if pipeline is None:
         return None
-    reader = getattr(pipeline, "prepare_attempt", None)
-    if not callable(reader):
-        return None
-    completed = reader()
+    completed = pipeline.prepare_attempt()
     if completed is None:
         return None
     if not isinstance(completed, Mapping):
@@ -321,9 +332,8 @@ def _failure_leaf(
         "failure_code": failure_code,
     }
     journal_skipped = True
-    completer = getattr(pipeline, "complete_failure", None)
-    if callable(completer):
-        completed = completer(terminal)
+    if pipeline is not None:
+        completed = pipeline.complete_failure(terminal)
         if not isinstance(completed, Mapping):
             raise CombinedTemporalPipelineError(
                 "combined-temporal failed receipt is malformed",
@@ -339,6 +349,22 @@ def _failure_leaf(
         failure_code=failure_code,
         journal_skipped=journal_skipped,
     )
+
+
+def _require_pipeline(pipeline: CombinedTemporalPipeline | None) -> None:
+    if pipeline is None:
+        return
+    missing = [
+        name
+        for name in ("prepare_attempt", "complete_failure", "execute")
+        if not callable(getattr(pipeline, name, None))
+    ]
+    if missing:
+        raise CombinedTemporalPipelineError(
+            "combined-temporal pipeline is incomplete: " + ", ".join(missing),
+            graph_effect_attempted=False,
+            rollback_completed=False,
+        )
 
 
 def _proposal_receipt(

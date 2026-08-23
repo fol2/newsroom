@@ -22,6 +22,13 @@ from newsroom.graphiti_adapter.result_mapping import is_source_registry_name
 GOVERNED_ENTITY_TYPE_IDS = frozenset({0})
 _RELATION_TYPE = re.compile(r"^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$")
 _CORRECTION = re.compile(r"(?i)\bcorrection\s*[:\-–—]")
+_NEGATION = re.compile(
+    r"(?i)(?:\b(?:not|never|no longer|cannot|neither|nor)\b|"
+    r"\b[A-Za-z]+n['’]t\b)"
+)
+_STATEMENT_BOUNDARY = re.compile(
+    r"(?i)(?:(?<=[.!?])\s+|[;\n]+|\b(?:and|but|while|whereas|although)\b)"
+)
 _WORD = re.compile(r"[A-Za-z0-9]+")
 
 
@@ -62,7 +69,9 @@ def normalise(
                 "facts must reference two present distinct local IDs",
             )
         connected.update((source, target))
-        cited = _resolve_segments(fact["evidence_segment_ids"], segments)
+        cited = _resolve_segments(
+            fact["evidence_segment_ids"], segments, contiguous=True
+        )
         retained = "".join(item.text for item in cited)
         source_entity = entity_by_id[source]
         target_entity = entity_by_id[target]
@@ -105,8 +114,19 @@ def normalise(
             source_name=source_name,
             target_name=target_name,
         )
-        _assert_single_attribution(retained)
-        assert_temporal_policy(fact, retained, reference_time)
+        _assert_single_attribution(
+            retained,
+            source_name=source_name,
+            target_name=target_name,
+            relation_type=fact["relation_type"],
+        )
+        assert_temporal_policy(
+            fact,
+            retained,
+            reference_time,
+            source_name=source_name,
+            target_name=target_name,
+        )
         ranges[fact["fact"]] = cited
     if connected != id_set:
         raise CombinedTemporalError(
@@ -115,11 +135,10 @@ def normalise(
         )
     for entity in entities:
         cited = _resolve_segments(entity["evidence_segment_ids"], segments)
-        retained = "".join(item.text for item in cited)
-        if entity["name"] not in retained:
+        if any(entity["name"] not in item.text for item in cited):
             raise CombinedTemporalError(
                 CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
-                "entity name is not present in cited segments",
+                "entity name is not present in every cited segment",
             )
     entities_out = tuple(
         sorted(
@@ -172,17 +191,46 @@ def _assert_unique_facts(facts: list[dict[str, Any]]) -> None:
         locators[fact["fact"]] = locator
 
 
-def _assert_single_attribution(retained: str) -> None:
+def _assert_single_attribution(
+    retained: str,
+    *,
+    source_name: str,
+    target_name: str,
+    relation_type: str,
+) -> None:
     match = _CORRECTION.search(retained)
-    if match is None:
-        return
-    before = retained[: match.start()]
-    after = retained[match.end() :]
-    if before.strip() and after.strip():
+    if match is not None:
+        before = retained[: match.start()]
+        after = retained[match.end() :]
+        if before.strip() and after.strip():
+            raise CombinedTemporalError(
+                CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
+                "evidence cites assertion and correction",
+            )
+    relation_words = {_stem(item) for item in relation_type.split("_")}
+    statements = [
+        item
+        for item in _STATEMENT_BOUNDARY.split(retained)
+        if source_name in item
+        and target_name in item
+        and relation_words <= {_stem(word) for word in _WORD.findall(item)}
+    ]
+    if statements and any(_NEGATION.search(item) for item in statements) and any(
+        not _NEGATION.search(item) for item in statements
+    ):
         raise CombinedTemporalError(
             CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
-            "evidence cites assertion and correction",
+            "evidence cites contradictory attribution",
         )
+
+
+def _stem(value: str) -> str:
+    value = value.lower()
+    if value.endswith("ied") and len(value) > 3:
+        return value[:-3] + "y"
+    if value.endswith("ed") and len(value) > 3:
+        return value[:-2]
+    return value
 
 
 def _words(value: str) -> set[str]:
@@ -370,8 +418,10 @@ def _ids(raw: object) -> list[int]:
 def _resolve_segments(
     ids: list[int],
     segments: tuple[EvidenceSegment, ...],
+    *,
+    contiguous: bool = False,
 ) -> tuple[EvidenceSegment, ...]:
-    if any(right != left + 1 for left, right in zip(ids, ids[1:])):
+    if contiguous and any(right != left + 1 for left, right in zip(ids, ids[1:])):
         raise CombinedTemporalError(
             CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
             "evidence segments must form one contiguous range",

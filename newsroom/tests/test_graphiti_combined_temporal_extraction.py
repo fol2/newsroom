@@ -84,6 +84,14 @@ class _FakeTransport:
 
 
 class _ProviderFreePipeline:
+    def prepare_attempt(self) -> None:
+        return None
+
+    def complete_failure(
+        self, receipt: dict[str, object]
+    ) -> dict[str, object]:
+        return receipt
+
     def execute(
         self,
         *,
@@ -397,6 +405,82 @@ def test_fact_evidence_must_be_one_contiguous_source_range() -> None:
     assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
 
 
+def test_entity_evidence_may_span_non_contiguous_facts() -> None:
+    case = fixture("pair-current")
+    revision = replace(
+        case.revision,
+        body="Alice asked Bob. Unrelated note. Alice asked Carol.",
+    )
+    payload = {
+        "entities": [
+            {
+                "local_id": 0,
+                "name": "Alice",
+                "entity_type_id": 0,
+                "evidence_segment_ids": [0, 2],
+            },
+            {
+                "local_id": 1,
+                "name": "Bob",
+                "entity_type_id": 0,
+                "evidence_segment_ids": [0],
+            },
+            {
+                "local_id": 2,
+                "name": "Carol",
+                "entity_type_id": 0,
+                "evidence_segment_ids": [2],
+            },
+        ],
+        "facts": [
+            {
+                "source_local_id": 0,
+                "target_local_id": target,
+                "relation_type": "ASKED",
+                "fact": fact,
+                "valid_at": None,
+                "invalid_at": None,
+                "evidence_segment_ids": [segment],
+            }
+            for target, fact, segment in (
+                (1, "Alice asked Bob.", 0),
+                (2, "Alice asked Carol.", 2),
+            )
+        ],
+    }
+
+    leaf = extract_combined_temporal(
+        revision,
+        transport=_FakeTransport(payload),
+        pipeline=_PIPELINE,
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert leaf.payload["entities"][0]["evidence_segment_ids"] == [0, 2]
+
+
+def test_entity_evidence_rejects_an_unrelated_extra_segment() -> None:
+    case = fixture("pair-current")
+    revision = replace(
+        case.revision,
+        body="Alice asked Bob. Unrelated note. Carol danced.",
+    )
+    leaf = extract_combined_temporal(
+        revision,
+        transport=_FakeTransport(
+            _named_pair_payload(
+                "Alice asked Bob.",
+                source_evidence=(0, 2),
+                target_evidence=(0,),
+            )
+        ),
+        pipeline=_PIPELINE,
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+
+
 def test_implied_relation_is_absent_from_gold_and_rejected_if_emitted() -> None:
     leaf, case = _extract("no-implied-relation")
     types = {edge.name for edge in leaf.edges}
@@ -516,6 +600,81 @@ def test_exact_source_timestamp_is_retained() -> None:
     assert leaf.edges[0].valid_at == datetime(2026, 8, 20, 18, 30, tzinfo=UTC)
 
 
+def test_offset_source_timestamp_keeps_the_exact_instant() -> None:
+    case = fixture("pair-current")
+    body = "At 2026-08-20T19:30:00.123+01:00 Alice asked Bob."
+    revision = replace(case.revision, body=body)
+
+    wrong = extract_combined_temporal(
+        revision,
+        transport=_FakeTransport(
+            _named_pair_payload(body, valid_at="2026-08-20T00:00:00.123Z")
+        ),
+        pipeline=_PIPELINE,
+    )
+    exact = extract_combined_temporal(
+        revision,
+        transport=_FakeTransport(
+            _named_pair_payload(body, valid_at="2026-08-20T18:30:00.123Z")
+        ),
+        pipeline=_PIPELINE,
+    )
+
+    assert wrong.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+    assert exact.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert exact.edges[0].valid_at == datetime(
+        2026, 8, 20, 18, 30, 0, 123_000, tzinfo=UTC
+    )
+
+
+@pytest.mark.parametrize("separator", ("and", ", after"))
+def test_temporal_cue_must_belong_to_the_fact_clause(separator: str) -> None:
+    case = fixture("pair-current")
+    body = (
+        f"On 2026-01-01 Alice JOINED Acme {separator} "
+        "Bob visited Paris on 2026-02-01."
+    )
+    revision = replace(case.revision, body=body)
+    payload = {
+        "entities": [
+            {
+                "local_id": local_id,
+                "name": name,
+                "entity_type_id": 0,
+                "evidence_segment_ids": [0],
+            }
+            for local_id, name in enumerate(("Alice", "Acme"))
+        ],
+        "facts": [
+            {
+                "source_local_id": 0,
+                "target_local_id": 1,
+                "relation_type": "JOINED",
+                "fact": body,
+                "valid_at": "2026-02-01T00:00:00Z",
+                "invalid_at": None,
+                "evidence_segment_ids": [0],
+            }
+        ],
+    }
+
+    leaf = extract_combined_temporal(
+        revision,
+        transport=_FakeTransport(payload),
+        pipeline=_PIPELINE,
+    )
+    payload["facts"][0]["valid_at"] = "2026-01-01T00:00:00Z"
+    exact = extract_combined_temporal(
+        revision,
+        transport=_FakeTransport(payload),
+        pipeline=_PIPELINE,
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+    assert exact.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+
+
 def test_invalid_source_date_is_a_typed_failed_leaf() -> None:
     case = fixture("pair-current")
     body = "On 2026-02-30 Alice asked Bob."
@@ -546,6 +705,68 @@ def test_correction_dash_cannot_join_old_and_corrected_attribution() -> None:
 
     assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
     assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+
+
+@pytest.mark.parametrize(
+    ("body", "evidence"),
+    (
+        ("Alice JOINED Acme. Alice didn’t JOIN Acme.", [0, 1]),
+        ("Alice JOINED Acme and Alice didn’t JOIN Acme.", [0]),
+        ("Alice JOINED Acme. Alice hasn't JOINED Acme.", [0, 1]),
+        ("Alice JOINED Acme. Alice won’t JOIN Acme.", [0, 1]),
+        ("Alice JOINED Acme. Alice cannot JOIN Acme.", [0, 1]),
+    ),
+)
+def test_plain_negation_cannot_join_contradictory_attribution(
+    body: str, evidence: list[int]
+) -> None:
+    case = fixture("pair-current")
+    revision = replace(case.revision, body=body)
+    payload = {
+        "entities": [
+            {
+                "local_id": local_id,
+                "name": name,
+                "entity_type_id": 0,
+                "evidence_segment_ids": evidence,
+            }
+            for local_id, name in enumerate(("Alice", "Acme"))
+        ],
+        "facts": [
+            {
+                "source_local_id": 0,
+                "target_local_id": 1,
+                "relation_type": "JOINED",
+                "fact": "Alice JOINED Acme.",
+                "valid_at": None,
+                "invalid_at": None,
+                "evidence_segment_ids": evidence,
+            }
+        ],
+    }
+
+    leaf = extract_combined_temporal(
+        revision,
+        transport=_FakeTransport(payload),
+        pipeline=_PIPELINE,
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+
+    positive_body = "Alice JOINED Acme without delay."
+    for entity in payload["entities"]:
+        entity["evidence_segment_ids"] = [0]
+    payload["facts"][0].update(
+        fact=positive_body,
+        evidence_segment_ids=[0],
+    )
+    positive = extract_combined_temporal(
+        replace(case.revision, body=positive_body),
+        transport=_FakeTransport(payload),
+        pipeline=_PIPELINE,
+    )
+    assert positive.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
 
 
 def test_correction_revision_does_not_contaminate_the_prompt() -> None:
@@ -768,7 +989,7 @@ def test_generation_and_episode_identity_are_bound_to_the_ingest_key() -> None:
 
 
 def test_pipeline_failure_retains_rollback_outcome() -> None:
-    class _FailedPipeline:
+    class _FailedPipeline(_ProviderFreePipeline):
         def execute(self, **_kwargs: Any) -> CombinedTemporalPipelineResult:
             raise CombinedTemporalPipelineError(
                 "embed failed",
@@ -793,7 +1014,7 @@ def test_pipeline_failure_retains_rollback_outcome() -> None:
 
 
 def test_unknown_pipeline_failure_does_not_fabricate_effect_evidence() -> None:
-    class _UnknownPipeline:
+    class _UnknownPipeline(_ProviderFreePipeline):
         def execute(self, **_kwargs: Any) -> CombinedTemporalPipelineResult:
             raise RuntimeError("unknown pre-effect failure")
 
@@ -804,6 +1025,50 @@ def test_unknown_pipeline_failure_does_not_fabricate_effect_evidence() -> None:
             transport=_FakeTransport(case.gold),
             pipeline=_UnknownPipeline(),
         )
+
+
+def test_partial_pipeline_is_rejected_before_provider_work() -> None:
+    class _PartialPipeline:
+        def execute(self, **_kwargs: Any) -> CombinedTemporalPipelineResult:
+            raise AssertionError("pipeline must not execute")
+
+    class _NoCallTransport:
+        def generate_response(self, **_kwargs: Any) -> CombinedTemporalTransportResult:
+            raise AssertionError("provider must not execute")
+
+    with pytest.raises(CombinedTemporalPipelineError, match="pipeline is incomplete"):
+        extract_combined_temporal(
+            fixture("pair-current").revision,
+            transport=_NoCallTransport(),
+            pipeline=_PartialPipeline(),
+        )
+
+
+def test_transport_failure_durably_completes_the_prepared_attempt() -> None:
+    class _Journal(_ProviderFreePipeline):
+        completed = False
+
+        def complete_failure(
+            self, receipt: dict[str, object]
+        ) -> dict[str, object]:
+            self.completed = True
+            return receipt
+
+    class _FailedTransport:
+        def generate_response(self, **_kwargs: Any) -> CombinedTemporalTransportResult:
+            raise RuntimeError("transport failed")
+
+    pipeline = _Journal()
+    leaf = extract_combined_temporal(
+        fixture("pair-current").revision,
+        transport=_FailedTransport(),
+        pipeline=pipeline,
+    )
+
+    assert pipeline.completed is True
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.PIPELINE_FAILED
+    assert leaf.journal_skipped is False
 
 
 @pytest.mark.parametrize(

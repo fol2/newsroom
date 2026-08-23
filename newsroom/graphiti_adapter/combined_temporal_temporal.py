@@ -17,7 +17,7 @@ _ISO_UTC = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)$"
 )
 _ISO_TIMESTAMP = re.compile(
-    r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)"
+    r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})"
 )
 _ISO_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _INVALID_TEMPORAL_CUE = re.compile(
@@ -48,6 +48,60 @@ _PROSE_DATE = re.compile(
     r"\b\d{1,2} (" + "|".join(_MONTH_NAMES) + r") \d{4}\b",
     flags=re.IGNORECASE,
 )
+_CLAUSE_BOUNDARY = re.compile(
+    r"(?i)(?:[.!?](?:\s+|$)|;\s*|,\s*(?=(?:after|before|when)\b)|"
+    r"\b(?:and|but|while|whereas)\b)"
+)
+_WORD = re.compile(r"[A-Za-z0-9]+")
+
+
+def _fact_scope(
+    retained: str,
+    fact_text: str,
+    *,
+    source_name: str,
+    target_name: str,
+    relation_type: str,
+) -> str:
+    protected = [
+        (match.start(), match.end())
+        for name in (source_name, target_name)
+        for match in re.finditer(re.escape(name), retained)
+    ]
+    boundaries = [
+        match
+        for match in _CLAUSE_BOUNDARY.finditer(retained)
+        if not any(start <= match.start() < end for start, end in protected)
+    ]
+    clauses: list[str] = []
+    cursor = 0
+    for match in boundaries:
+        clauses.append(retained[cursor : match.start()])
+        cursor = match.end()
+    clauses.append(retained[cursor:])
+    relation_words = {item.lower() for item in relation_type.split("_")}
+    attributed = [
+        clause
+        for clause in clauses
+        if source_name in clause
+        and target_name in clause
+        and relation_words <= {item.lower() for item in _WORD.findall(clause)}
+    ]
+    if len(attributed) == 1:
+        return attributed[0]
+    start = retained.find(fact_text)
+    if start < 0:
+        return retained
+    end = start + len(fact_text)
+    left = max(
+        (match.end() for match in boundaries if match.end() <= start),
+        default=0,
+    )
+    right = min(
+        (match.start() for match in boundaries if match.start() >= end),
+        default=len(retained),
+    )
+    return retained[left:right]
 
 
 def _date_expectations(
@@ -102,9 +156,26 @@ def _date_expectations(
 
 
 def assert_temporal_policy(
-    fact: Mapping[str, Any], retained: str, reference_time: datetime
+    fact: Mapping[str, Any],
+    retained: str,
+    reference_time: datetime,
+    *,
+    source_name: str,
+    target_name: str,
 ) -> None:
+    retained = _fact_scope(
+        retained,
+        str(fact["fact"]),
+        source_name=source_name,
+        target_name=target_name,
+        relation_type=str(fact["relation_type"]),
+    )
     valid_dates, invalid_dates = _date_expectations(retained, reference_time)
+    if len(valid_dates) > 1 or len(invalid_dates) > 1:
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.TEMPORAL_INVALID,
+            "fact evidence has ambiguous temporal attribution",
+        )
     if (
         (valid_dates or invalid_dates)
         and fact["valid_at"] is None
@@ -164,7 +235,7 @@ def parse_optional_timestamp(raw: object, field_name: str) -> datetime | None:
 
 
 def iso_timestamp(value: datetime) -> str:
-    return value.isoformat(timespec="seconds").replace("+00:00", "Z")
+    return value.isoformat().replace("+00:00", "Z")
 
 
 __all__ = ["assert_temporal_policy", "iso_timestamp", "parse_optional_timestamp"]
