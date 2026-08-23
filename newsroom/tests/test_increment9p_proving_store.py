@@ -219,8 +219,12 @@ def test_fetch_stores_ten_observations_without_publication(tmp_path: Path):
     stored_gates = connection.execute(
         "SELECT COUNT(*) FROM proving_gates WHERE run_id='r2'"
     ).fetchone()[0]
+    retained_revisions = connection.execute(
+        "SELECT COUNT(*) FROM proving_revision_first_seen"
+    ).fetchone()[0]
     connection.close()
     assert stored_gates == len(report.gates)
+    assert retained_revisions == 10
     payload = report_json(report)
     assert b'"publication":false' in payload
     assert b"openrouter" in payload
@@ -486,6 +490,25 @@ def test_writer_lock_after_connect_is_normalised_and_fail_closed(
         for blocker in blockers:
             blocker.rollback()
             blocker.close()
+
+
+def test_proving_writer_enables_foreign_keys(tmp_path: Path) -> None:
+    connection = proving_module._connect(str(tmp_path / "fk.sqlite3"))
+    try:
+        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
+def test_proving_module_does_not_import_control_plane_at_import_time() -> None:
+    source = Path("newsroom/increment9/proving.py").read_text(encoding="utf-8")
+    top_level = [
+        line
+        for line in source.splitlines()
+        if line.startswith("from ") or line.startswith("import ")
+    ]
+    assert not any("newsroom.control_plane" in line for line in top_level)
+    assert "apply_control_plane_sqlite_profile" in source
 
 
 def test_proving_cli_default_writes_the_shared_canonical_store(

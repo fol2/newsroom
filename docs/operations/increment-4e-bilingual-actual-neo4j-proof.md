@@ -7,7 +7,7 @@
 
 Increment 4E proves the complete governed path from retained source material through proposal production, entity resolution, relation admission and admitted-only Neo4j generation. SQLite and governed objects remain authority. Neo4j remains a disposable, rebuildable projection. The private Graphiti proposal workspace remains disposable and non-authoritative.
 
-Real Graphiti, model and embedding execution remains unqualified in this unit. This unit starts no live source, search, schedule, provider credential, spending, publication, shadow, canary or production activation.
+Real Graphiti, model and embedding execution remains disabled and unqualified. This unit starts no live source, search, schedule, provider credential, spending, publication, shadow, canary or production activation.
 
 ## Public proof boundary
 

@@ -7,7 +7,7 @@
 
 Increment 4D provides a private adapter that can produce retained Extraction Run output and Proposal Envelopes, but cannot resolve entities, admit relations, write governed Neo4j state, create Candidates, start Evidence Intake, publish, or activate production.
 
-The repository ships `graphiti-core==0.29.3` as an optional extra and a repository-owned `RealGraphitiAdapter`. `REAL_GRAPHITI_RUNTIME_ENABLED = True`. A structurally valid real-runtime configuration is still gated on a complete `RealGraphitiRuntimeAuthority` packet and on EVALUATION profile; PRODUCTION remains closed.
+The repository contains no Graphiti package or model-provider runtime in this boundary. `REAL_GRAPHITI_RUNTIME_ENABLED = False`. A structurally valid real-runtime configuration is still rejected until a separate owner decision binds every required framework, model, prompt, rights, destination, credential, security, budget, evaluation and rollback value.
 
 Map #690 reviewed flip: Control Plane Graphiti may execute under EVALUATION with `REAL_GRAPHITI_RUNTIME_ENABLED = True`. Increment 4D qualification remains deterministic fake and approved replay. PRODUCTION stays closed. `graphiti-core==0.29.3` is an optional extra.
 
@@ -54,7 +54,7 @@ EVALUATION
 PRODUCTION
 ```
 
-Qualification accepts only the deterministic fake. Replay accepts only an exact approved retained replay source. Evaluation and production require a separately authorised `RealGraphitiRuntimeAuthority` and reject missing, disabled, fake, replay or incompatible runtime configuration. Even a structurally complete real authority packet cannot execute outside EVALUATION; PRODUCTION remains closed.
+Qualification accepts only the deterministic fake. Replay accepts only an exact approved retained replay source. Evaluation and production require a separately authorised `RealGraphitiRuntimeAuthority` and reject missing, disabled, fake, replay or incompatible runtime configuration. Even a structurally complete real authority packet cannot execute while `REAL_GRAPHITI_RUNTIME_ENABLED = False`.
 
 The initial production target remains Neo4j Community plus Graphiti under ADR 0005, but this unit does not qualify any exact Graphiti or model release and does not make a network or provider call.
 
@@ -290,7 +290,7 @@ Before enabling even deterministic qualification in a controlled environment:
 
 - confirm schema v16, migration checksum and schema fingerprint;
 - confirm all three command definitions and three distinct read scopes;
-- confirm `REAL_GRAPHITI_RUNTIME_ENABLED = True` per Map #690 reviewed flip unless a later reviewed release changes it;
+- confirm `REAL_GRAPHITI_RUNTIME_ENABLED = False` unless a later reviewed release changes it;
 - confirm the selected policy is `DENY_ALL`, credential class `NONE` and the workspace root is not a symlink;
 - run contract, workspace, fake/replay, authority, lifecycle, ordering, rights, concurrency, security, injection, integrity, migration and traceability tests;
 - verify no Graphiti/model/provider/network/Cypher/governed-graph runtime import entered the authority boundary;

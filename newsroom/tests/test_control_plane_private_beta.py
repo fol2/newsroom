@@ -10,6 +10,10 @@ from types import SimpleNamespace
 import pytest
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.effective_revision import (
+    create_effective_revision_schema,
+    retain_observation_revision_first_seen,
+)
 from newsroom.control_plane.cycle import run_cycle
 from newsroom.control_plane.corpus import CorpusIngestUnit
 from newsroom.control_plane.editorial import StoryCandidateRecord
@@ -149,6 +153,7 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
         );
         """
     )
+    create_effective_revision_schema(connection)
     connection.execute(
         """
         INSERT INTO proving_runs(
@@ -200,6 +205,13 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
                 1,
                 None,
             ),
+        )
+        retain_observation_revision_first_seen(
+            connection,
+            source_id=source_id,
+            url=url,
+            body=body,
+            observed_at="2026-08-16T21:41:34.000000Z",
         )
     for gate_id in PROVING_GATES:
         if gate_id.startswith("RIGHTS_"):
