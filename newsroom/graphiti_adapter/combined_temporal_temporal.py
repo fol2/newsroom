@@ -8,6 +8,16 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from newsroom.authority.types import UtcTimestamp
+from newsroom.graphiti_adapter.combined_temporal_attribution import (
+    CJK_DATE,
+    ISO_DATE,
+    ISO_TIMESTAMP,
+    MONTH_NAMES,
+    PROSE_DATE,
+    RELATIVE_DAY_OFFSETS,
+    RELATIVE_PATTERNS,
+    attributed_scope,
+)
 from newsroom.graphiti_adapter.combined_temporal_types import (
     CombinedTemporalError,
     CombinedTemporalFailureCode,
@@ -16,92 +26,13 @@ from newsroom.graphiti_adapter.combined_temporal_types import (
 _ISO_UTC = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)$"
 )
-_ISO_TIMESTAMP = re.compile(
-    r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})"
-)
-_ISO_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _INVALID_TEMPORAL_CUE = re.compile(
-    r"(?i)\b(?:until|ceased|ended|expired|invalidated|no longer)\b"
+    r"(?i)(?:\b(?:until|ceased|ended|expired|invalidated|no longer)\b|"
+    r"截至|直至|終止於|結束於|到期於|失效於|不再)"
 )
 _RELATIVE_OFFSETS = {
-    "last week": timedelta(days=-7),
-    "yesterday": timedelta(days=-1),
-    "today": timedelta(days=0),
-    "tomorrow": timedelta(days=1),
-    "next week": timedelta(days=7),
+    name: timedelta(days=days) for name, days in RELATIVE_DAY_OFFSETS.items()
 }
-_MONTH_NAMES = (
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-)
-_PROSE_DATE = re.compile(
-    r"\b\d{1,2} (" + "|".join(_MONTH_NAMES) + r") \d{4}\b",
-    flags=re.IGNORECASE,
-)
-_CLAUSE_BOUNDARY = re.compile(
-    r"(?i)(?:[.!?](?:\s+|$)|;\s*|,\s*(?=(?:after|before|when)\b)|"
-    r"\b(?:and|but|while|whereas)\b)"
-)
-_WORD = re.compile(r"[A-Za-z0-9]+")
-
-
-def _fact_scope(
-    retained: str,
-    fact_text: str,
-    *,
-    source_name: str,
-    target_name: str,
-    relation_type: str,
-) -> str:
-    protected = [
-        (match.start(), match.end())
-        for name in (source_name, target_name)
-        for match in re.finditer(re.escape(name), retained)
-    ]
-    boundaries = [
-        match
-        for match in _CLAUSE_BOUNDARY.finditer(retained)
-        if not any(start <= match.start() < end for start, end in protected)
-    ]
-    clauses: list[str] = []
-    cursor = 0
-    for match in boundaries:
-        clauses.append(retained[cursor : match.start()])
-        cursor = match.end()
-    clauses.append(retained[cursor:])
-    relation_words = {item.lower() for item in relation_type.split("_")}
-    attributed = [
-        clause
-        for clause in clauses
-        if source_name in clause
-        and target_name in clause
-        and relation_words <= {item.lower() for item in _WORD.findall(clause)}
-    ]
-    if len(attributed) == 1:
-        return attributed[0]
-    start = retained.find(fact_text)
-    if start < 0:
-        return retained
-    end = start + len(fact_text)
-    left = max(
-        (match.end() for match in boundaries if match.end() <= start),
-        default=0,
-    )
-    right = min(
-        (match.start() for match in boundaries if match.start() >= end),
-        default=len(retained),
-    )
-    return retained[left:right]
 
 
 def _date_expectations(
@@ -116,12 +47,10 @@ def _date_expectations(
         target.add(value)
 
     for name, offset in _RELATIVE_OFFSETS.items():
-        for match in re.finditer(
-            rf"\b{re.escape(name)}\b", retained, flags=re.IGNORECASE
-        ):
+        for match in RELATIVE_PATTERNS[name].finditer(retained):
             retain(reference_time + offset, match.start())
     timestamp_spans: list[tuple[int, int]] = []
-    for match in _ISO_TIMESTAMP.finditer(retained):
+    for match in ISO_TIMESTAMP.finditer(retained):
         timestamp_spans.append(match.span())
         try:
             retain(UtcTimestamp.parse(match.group(0)).value, match.start())
@@ -130,7 +59,7 @@ def _date_expectations(
                 CombinedTemporalFailureCode.TEMPORAL_INVALID,
                 "source timestamp is invalid",
             ) from exc
-    for match in _ISO_DATE.finditer(retained):
+    for match in ISO_DATE.finditer(retained):
         if any(start <= match.start() < end for start, end in timestamp_spans):
             continue
         try:
@@ -141,11 +70,25 @@ def _date_expectations(
                 "source date is invalid",
             ) from exc
         retain(parsed, match.start())
-    for match in _PROSE_DATE.finditer(retained):
+    for match in PROSE_DATE.finditer(retained):
         try:
             parsed = datetime.strptime(
                 match.group(0).title(), "%d %B %Y"
             ).replace(tzinfo=UTC)
+        except ValueError as exc:
+            raise CombinedTemporalError(
+                CombinedTemporalFailureCode.TEMPORAL_INVALID,
+                "source date is invalid",
+            ) from exc
+        retain(parsed, match.start())
+    for match in CJK_DATE.finditer(retained):
+        try:
+            parsed = datetime(
+                int(match.group(1)),
+                int(match.group(2)),
+                int(match.group(3)),
+                tzinfo=UTC,
+            )
         except ValueError as exc:
             raise CombinedTemporalError(
                 CombinedTemporalFailureCode.TEMPORAL_INVALID,
@@ -163,7 +106,7 @@ def assert_temporal_policy(
     source_name: str,
     target_name: str,
 ) -> None:
-    retained = _fact_scope(
+    retained = attributed_scope(
         retained,
         str(fact["fact"]),
         source_name=source_name,
@@ -209,8 +152,13 @@ def assert_temporal_policy(
                 f"{field_name} uses the other temporal bound's semantics",
             )
         iso_date = value.date().isoformat()
-        prose = f"{value.day} {_MONTH_NAMES[value.month - 1]} {value.year}"
-        if iso_date not in retained and prose.lower() not in retained.lower():
+        prose = f"{value.day} {MONTH_NAMES[value.month - 1]} {value.year}"
+        cjk = f"{value.year}年{value.month}月{value.day}日"
+        if (
+            iso_date not in retained
+            and prose.lower() not in retained.lower()
+            and cjk not in retained
+        ):
             raise CombinedTemporalError(
                 CombinedTemporalFailureCode.TEMPORAL_INVALID,
                 f"{field_name} is not grounded in cited evidence",

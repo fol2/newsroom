@@ -92,6 +92,7 @@ from .workspace import DisposableProposalWorkspace
 
 _GRAPHITI_CORE_VERSION = "0.29.3"
 _NEO4J_USER = "neo4j"
+_GRAPHITI_SCHEMA_BOOTSTRAPPED = False
 _REASON_BY_OUTCOME = {
     "COMPLETE": GraphitiCleanupReason.NORMAL,
     "PARTIAL": GraphitiCleanupReason.PARTIAL,
@@ -105,6 +106,16 @@ _REASON_BY_OUTCOME = {
 
 # Compatibility names retained for callers while implementation lives in focused modules.
 _is_source_registry_name = is_source_registry_name
+
+
+async def _bootstrap_graphiti_schema(driver: Any) -> None:
+    """Create journal schema once before this process starts attempts."""
+
+    global _GRAPHITI_SCHEMA_BOOTSTRAPPED
+    if _GRAPHITI_SCHEMA_BOOTSTRAPPED:
+        return
+    await Neo4jMutationGuard.bootstrap_schema(driver)
+    _GRAPHITI_SCHEMA_BOOTSTRAPPED = True
 
 
 def _no_embedding_usage() -> dict[str, object]:
@@ -283,6 +294,8 @@ def combined_temporal_pipeline_for(
         raise GraphitiAdapterContractError(
             "combined-temporal graph, journal and episode identity differ"
         )
+    if isinstance(guard, Neo4jMutationGuard):
+        asyncio.run(_bootstrap_graphiti_schema(graphiti.driver))
 
     async def resolve_nodes(nodes: list[Any]) -> tuple[
         list[Any], dict[str, str], list[tuple[Any, Any]]
@@ -491,6 +504,8 @@ async def _add_episode(
     )
     cancellation_cleanup_active = False
     try:
+        if runtime.MutationGuard is Neo4jMutationGuard:
+            await _bootstrap_graphiti_schema(graphiti.driver)
         marker = await guard.begin()
         if marker.state is GuardState.COMPLETE:
             raw = await guard.completed_raw()

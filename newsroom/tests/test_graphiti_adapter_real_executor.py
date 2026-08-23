@@ -1082,11 +1082,165 @@ def test_concurrent_guard_begin_has_one_atomic_marker_claim() -> None:
     results = asyncio.run(begin_both())
 
     assert claims == 1
-    assert constraints == 2
+    assert constraints == 0
     assert sum(
         getattr(result, "state", None) is GuardState.CREATED for result in results
     ) == 1
     assert sum(isinstance(result, GuardError) for result in results) == 1
+
+
+def test_guard_schema_bootstrap_is_explicit_and_separate_from_begin() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import Neo4jMutationGuard
+
+    queries: list[tuple[str, dict[str, object]]] = []
+
+    class Driver:
+        async def execute_query(
+            self,
+            query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            assert routing_ == "w"
+            queries.append((query, params))
+            return [], None, None
+
+    asyncio.run(Neo4jMutationGuard.bootstrap_schema(Driver()))
+
+    assert len(queries) == 1
+    assert "CREATE CONSTRAINT newsroom_ingest_marker_episode" in queries[0][0]
+    assert queries[0][1] == {}
+
+
+def test_real_runtime_bootstraps_guard_schema_once_before_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    calls = 0
+
+    class Driver:
+        async def execute_query(
+            self,
+            query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            nonlocal calls
+            assert "CREATE CONSTRAINT" in query
+            assert params == {}
+            assert routing_ == "w"
+            calls += 1
+            return [], None, None
+
+    monkeypatch.setattr(real, "_GRAPHITI_SCHEMA_BOOTSTRAPPED", False)
+
+    async def bootstrap_twice() -> None:
+        driver = Driver()
+        await real._bootstrap_graphiti_schema(driver)
+        await real._bootstrap_graphiti_schema(driver)
+
+    asyncio.run(bootstrap_twice())
+
+    assert calls == 1
+
+
+def test_guard_rejects_telemetry_after_claim_takeover() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import GuardError, Neo4jMutationGuard
+
+    class Driver:
+        async def execute_query(
+            self,
+            _query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            del params
+            assert routing_ == "w"
+            return [], None, None
+
+    guard = Neo4jMutationGuard(
+        Driver(),
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        episode_uuid="episode-id",
+        attempt_number=1,
+        input_digest="sha256:" + "0" * 64,
+    )
+    guard._claim_token = "stale"  # type: ignore[attr-defined]
+
+    with pytest.raises(GuardError, match="lost its pending claim"):
+        asyncio.run(
+            guard.record_pending_telemetry(
+                chat_invocations=[],
+                embedding_usage={"usage_basis": "NO_EMBEDDING_CALL"},
+            )
+        )
+
+
+def test_guard_holds_marker_lock_across_external_graph_mutation() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import Neo4jMutationGuard
+
+    lock = asyncio.Lock()
+    events: list[str] = []
+
+    class Result:
+        async def single(self) -> dict[str, object]:
+            return {"claim_token": "owner"}
+
+    class Transaction:
+        async def run(self, _query: str, **_params: object) -> Result:
+            if not lock.locked():
+                await lock.acquire()
+                events.append("fenced")
+            return Result()
+
+        async def commit(self) -> None:
+            events.append("commit")
+            lock.release()
+
+        async def rollback(self) -> None:
+            if lock.locked():
+                lock.release()
+
+    class Session:
+        async def __aenter__(self) -> Session:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def begin_transaction(self) -> Transaction:
+            return Transaction()
+
+    class Driver:
+        def session(self) -> Session:
+            return Session()
+
+    guard = Neo4jMutationGuard(
+        Driver(),
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        episode_uuid="episode-id",
+        attempt_number=1,
+        input_digest="sha256:" + "0" * 64,
+    )
+    guard._claim_token = "owner"  # type: ignore[attr-defined]
+
+    async def prove_lock() -> None:
+        async with guard.fenced_graph_mutation():
+            contender = asyncio.create_task(lock.acquire())
+            await asyncio.sleep(0)
+            assert not contender.done()
+            events.append("persist")
+        await contender
+        events.append("takeover")
+        lock.release()
+
+    asyncio.run(prove_lock())
+
+    assert events == ["fenced", "persist", "commit", "takeover"]
 
 
 def test_concurrent_expired_marker_takeover_is_fenced() -> None:

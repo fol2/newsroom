@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -49,6 +51,11 @@ class _Guard:
 
     async def record_pending_telemetry(self, **_kwargs: Any) -> None:
         self.calls.append("telemetry")
+
+    @asynccontextmanager
+    async def fenced_graph_mutation(self) -> AsyncIterator[None]:
+        self.calls.append("fence")
+        yield
 
     async def restore_preexisting(self) -> None:
         self.calls.append("restore")
@@ -158,6 +165,7 @@ def test_existing_pipeline_resolves_embeds_and_completes_durable_journal() -> No
         "resolve",
         "pointers",
         "embed",
+        "fence",
         "persist",
         "telemetry",
         "restore",
@@ -172,6 +180,28 @@ def test_existing_pipeline_resolves_embeds_and_completes_durable_journal() -> No
     assert edge.fact_embedding == [0.25]
     assert result.graph_effect_attempted is True
     assert result.rollback_skipped is True
+
+
+def test_stale_owner_is_fenced_before_graph_persistence() -> None:
+    guard = _Guard()
+
+    @asynccontextmanager
+    async def lost_claim() -> AsyncIterator[None]:
+        guard.calls.append("fence")
+        raise RuntimeError("claim was replaced")
+        yield
+
+    guard.fenced_graph_mutation = lost_claim  # type: ignore[method-assign]
+
+    with pytest.raises(CombinedTemporalPipelineError):
+        _pipeline(guard).execute(
+            nodes=(_node("local-source"), _node("local-target")),
+            edges=(_edge(),),
+            receipt={"provider_attempt_number": 1},
+        )
+
+    assert "persist" not in guard.calls
+    assert guard.calls[-1] == "rollback"
 
 
 def test_completed_ingest_replays_without_another_provider_leaf() -> None:

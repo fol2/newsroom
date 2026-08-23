@@ -7,6 +7,15 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
+from newsroom.graphiti_adapter.combined_temporal_attribution import (
+    attributed_statements,
+    contains_name,
+    grounded_endpoint_spans,
+    grounded_relation_polarities,
+    relation_is_grounded,
+    relation_polarity,
+    words,
+)
 from newsroom.graphiti_adapter.combined_temporal_temporal import (
     assert_temporal_policy,
     iso_timestamp,
@@ -21,15 +30,18 @@ from newsroom.graphiti_adapter.result_mapping import is_source_registry_name
 
 GOVERNED_ENTITY_TYPE_IDS = frozenset({0})
 _RELATION_TYPE = re.compile(r"^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$")
-_CORRECTION = re.compile(r"(?i)\bcorrection\s*[:\-–—]")
+_CORRECTION = re.compile(r"(?i)(?:\bcorrection\s*[:\-–—]|(?:更正|修正)\s*[:：\-–—])")
+_ENGLISH_NEGATION_PATTERN = (
+    r"\b(?:not|never|no longer|no(?!\.?\s*\d)|cannot|neither|nor)\b|"
+    r"\b[A-Za-z]+n['’]t\b|\banything but\b"
+)
+_CJK_NEGATION_PATTERN = r"不(?!但|只|僅)|未|沒有|無|從未"
+_ENGLISH_NEGATION = re.compile(_ENGLISH_NEGATION_PATTERN, flags=re.IGNORECASE)
 _NEGATION = re.compile(
-    r"(?i)(?:\b(?:not|never|no longer|cannot|neither|nor)\b|"
-    r"\b[A-Za-z]+n['’]t\b)"
+    rf"(?:{_ENGLISH_NEGATION_PATTERN}|{_CJK_NEGATION_PATTERN})",
+    flags=re.IGNORECASE,
 )
-_STATEMENT_BOUNDARY = re.compile(
-    r"(?i)(?:(?<=[.!?])\s+|[;\n]+|\b(?:and|but|while|whereas|although)\b)"
-)
-_WORD = re.compile(r"[A-Za-z0-9]+")
+_AFFIRMATIVE_NO = re.compile(r"(?i)\bno doubt\b")
 
 
 def normalise(
@@ -82,17 +94,12 @@ def normalise(
                 CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
                 "fact is not present in cited segments",
             )
-        if source_name not in retained or target_name not in retained:
-            raise CombinedTemporalError(
-                CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
-                "source and target names are not present in cited segments",
-            )
         fact_text = fact["fact"]
-        if source_name not in fact_text or target_name not in fact_text:
-            raise CombinedTemporalError(
-                CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
-                "fact must name both endpoints",
-            )
+        _assert_relation_grounding(
+            fact=fact,
+            source_name=source_name,
+            target_name=target_name,
+        )
         if source_name == target_name and fact_text.count(source_name) < 2:
             raise CombinedTemporalError(
                 CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
@@ -109,11 +116,6 @@ def normalise(
                 CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
                 "fact endpoints do not share their entity evidence",
             )
-        _assert_relation_grounding(
-            fact=fact,
-            source_name=source_name,
-            target_name=target_name,
-        )
         _assert_single_attribution(
             retained,
             source_name=source_name,
@@ -135,7 +137,26 @@ def normalise(
         )
     for entity in entities:
         cited = _resolve_segments(entity["evidence_segment_ids"], segments)
-        if any(entity["name"] not in item.text for item in cited):
+        related = [
+            fact
+            for fact in facts
+            if entity["local_id"]
+            in (fact["source_local_id"], fact["target_local_id"])
+        ]
+        if any(
+            not contains_name(item.text, entity["name"])
+            and not any(
+                item.segment_id in fact["evidence_segment_ids"]
+                and relation_is_grounded(
+                    item.text,
+                    fact["relation_type"],
+                    source_name=entity_by_id[fact["source_local_id"]]["name"],
+                    target_name=entity_by_id[fact["target_local_id"]]["name"],
+                )
+                for fact in related
+            )
+            for item in cited
+        ):
             raise CombinedTemporalError(
                 CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
                 "entity name is not present in every cited segment",
@@ -207,34 +228,69 @@ def _assert_single_attribution(
                 CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
                 "evidence cites assertion and correction",
             )
-    relation_words = {_stem(item) for item in relation_type.split("_")}
-    statements = [
-        item
-        for item in _STATEMENT_BOUNDARY.split(retained)
-        if source_name in item
-        and target_name in item
-        and relation_words <= {_stem(word) for word in _WORD.findall(item)}
-    ]
-    if statements and any(_NEGATION.search(item) for item in statements) and any(
-        not _NEGATION.search(item) for item in statements
-    ):
+    attribution_type, negative_relation = relation_polarity(relation_type)
+    statements = attributed_statements(
+        retained,
+        source_name=source_name,
+        target_name=target_name,
+        relation_type=attribution_type or relation_type,
+    )
+    polarities = tuple(
+        polarity
+        for item in statements
+        for polarity in _statement_polarities(
+            item,
+            source_name=source_name,
+            target_name=target_name,
+            relation_type=attribution_type,
+        )
+    )
+    if any(polarities) and (not negative_relation or not all(polarities)):
         raise CombinedTemporalError(
             CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
-            "evidence cites contradictory attribution",
+            "evidence cites negative or contradictory attribution",
         )
 
 
-def _stem(value: str) -> str:
-    value = value.lower()
-    if value.endswith("ied") and len(value) > 3:
-        return value[:-3] + "y"
-    if value.endswith("ed") and len(value) > 3:
-        return value[:-2]
-    return value
+def _statement_polarities(
+    value: str, *, source_name: str, target_name: str, relation_type: str
+) -> tuple[bool, ...]:
+    grounded = grounded_relation_polarities(
+        value,
+        relation_type,
+        source_name=source_name,
+        target_name=target_name,
+    )
+    retained = _without_endpoints(value, source_name, target_name, relation_type)
+    english_negative = (
+        _ENGLISH_NEGATION.search(_AFFIRMATIVE_NO.sub("", retained)) is not None
+    )
+    if grounded:
+        return grounded + ((True,) if english_negative else ())
+    return (english_negative,)
 
 
-def _words(value: str) -> set[str]:
-    return {item.lower() for item in _WORD.findall(value)}
+def _without_endpoints(
+    value: str, source_name: str, target_name: str, relation_type: str
+) -> str:
+    proven = grounded_endpoint_spans(
+        value,
+        relation_type,
+        source_name=source_name,
+        target_name=target_name,
+    )
+    spans = list(proven or ()) or [
+        (value.find(source_name), value.find(source_name) + len(source_name)),
+        (value.rfind(target_name), value.rfind(target_name) + len(target_name)),
+    ]
+    for name in (source_name, target_name):
+        if _NEGATION.fullmatch(name) is None:
+            spans.extend(match.span() for match in re.finditer(re.escape(name), value))
+    masked = value
+    for start, end in sorted(set(spans), reverse=True):
+        if start >= 0:
+            masked = masked[:start] + " " * (end - start) + masked[end:]
+    return masked
 
 
 def _assert_relation_grounding(
@@ -243,10 +299,14 @@ def _assert_relation_grounding(
     source_name: str,
     target_name: str,
 ) -> None:
-    relation_words = {item.lower() for item in fact["relation_type"].split("_")}
-    fact_words = _words(str(fact["fact"]))
-    entity_words = _words(source_name) | _words(target_name)
-    if not relation_words <= fact_words or not (relation_words - entity_words):
+    relation_words = words(str(fact["relation_type"]).replace("_", " "))
+    entity_words = words(source_name) | words(target_name)
+    if not (relation_words - entity_words) or not relation_is_grounded(
+        str(fact["fact"]),
+        str(fact["relation_type"]),
+        source_name=source_name,
+        target_name=target_name,
+    ):
         raise CombinedTemporalError(
             CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
             "relation type is not supported by relation words in the fact",

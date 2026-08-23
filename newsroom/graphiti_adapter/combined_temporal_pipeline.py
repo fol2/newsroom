@@ -287,7 +287,8 @@ class ExistingGraphitiPipeline:
                 attributes = dict(getattr(node, "attributes", {}) or {})
                 attributes["resolution"] = resolution
                 node.attributes = attributes
-            await self.persist_graph(resolved_nodes, guarded)
+            async with self.guard.fenced_graph_mutation():
+                await self.persist_graph(resolved_nodes, guarded)
             chat_invocations = self.chat_receipt()
             embedding_usage = self.embedding_receipt()
             await self.guard.record_pending_telemetry(

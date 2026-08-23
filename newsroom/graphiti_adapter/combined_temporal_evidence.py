@@ -7,7 +7,10 @@ import re
 from newsroom.graphiti_adapter.combined_temporal_types import EvidenceSegment
 
 MAX_SEGMENT_BYTES = 512
-_SPLIT = re.compile(rb"(?:(?<=[.!?])[ \t]+)|(?:\n+)")
+_SPLIT = re.compile(
+    rb"(?:(?<=[.!?])[ \t]+)|(?:\n+)|"
+    rb"(?:(?:\xe3\x80\x82|\xef\xbc\x81|\xef\xbc\x9f|\xef\xbc\x9b)[ \t]*)"
+)
 
 
 def segment_source(

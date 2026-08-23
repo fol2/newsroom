@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -18,6 +20,12 @@ _SNAPSHOT_NODE = "NewsroomSnapshotNode"
 _SNAPSHOT_RELATIONSHIP = "NewsroomSnapshotRelationship"
 _MARKER = "NewsroomIngestMarker"
 _MARKER_CLAIM_LEASE = "PT15M"
+_SCHEMA_QUERIES = (
+    f"""
+    CREATE CONSTRAINT newsroom_ingest_marker_episode IF NOT EXISTS
+    FOR (m:{_MARKER}) REQUIRE m.episode_uuid IS UNIQUE
+    """,
+)
 
 
 class GuardError(RuntimeError):
@@ -113,6 +121,20 @@ class Neo4jMutationGuard:
         )
         return list(records)
 
+    def _require_pending_claim(self, records: list[object], *, operation: str) -> None:
+        if (
+            not records
+            or _record_value(records[0], "claim_token") != self._claim_token
+        ):
+            raise GuardError(f"Graphiti {operation} lost its pending claim")
+
+    @staticmethod
+    async def bootstrap_schema(driver: Any) -> None:
+        """Create journal schema once during explicit Neo4j bootstrap."""
+
+        for query in _SCHEMA_QUERIES:
+            await driver.execute_query(query, params={}, routing_="w")
+
     async def _marker(self) -> dict[str, object] | None:
         records = await self._query(
             f"""
@@ -129,12 +151,6 @@ class Neo4jMutationGuard:
     async def _claim_marker(
         self,
     ) -> tuple[dict[str, object], bool, bool]:
-        await self._query(
-            f"""
-            CREATE CONSTRAINT newsroom_ingest_marker_episode IF NOT EXISTS
-            FOR (m:{_MARKER}) REQUIRE m.episode_uuid IS UNIQUE
-            """
-        )
         claim_token = str(uuid4())
         records = await self._query(
             f"""
@@ -440,18 +456,58 @@ class Neo4jMutationGuard:
         chat_invocations: list[dict[str, object]],
         embedding_usage: dict[str, object],
     ) -> None:
-        await self._query(
+        recorded = await self._query(
             f"""
             MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
             WHERE m.state = 'PENDING' AND m.claim_token = $claim_token
             SET m.chat_invocations_json = $chat_invocations_json,
                 m.embedding_usage_json = $embedding_usage_json
+            RETURN m.claim_token AS claim_token
             """,
             episode_uuid=self._episode_uuid,
             claim_token=self._claim_token,
             chat_invocations_json=canonical_json_bytes(chat_invocations).decode("utf-8"),
             embedding_usage_json=canonical_json_bytes(embedding_usage).decode("utf-8"),
         )
+        self._require_pending_claim(recorded, operation="telemetry")
+
+    @asynccontextmanager
+    async def fenced_graph_mutation(self) -> AsyncIterator[None]:
+        """Hold the marker write lock across the external graph mutation."""
+
+        async with self._driver.session() as session:
+            transaction = await session.begin_transaction()
+            try:
+                result = await transaction.run(
+                    f"""
+                    MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
+                    WHERE m.state = 'PENDING' AND m.claim_token = $claim_token
+                    SET m.claim_expires_at = datetime() + duration($claim_lease)
+                    RETURN m.claim_token AS claim_token
+                    """,
+                    episode_uuid=self._episode_uuid,
+                    claim_token=self._claim_token,
+                    claim_lease=_MARKER_CLAIM_LEASE,
+                )
+                record = await result.single()
+                self._require_pending_claim(
+                    [] if record is None else [record], operation="mutation"
+                )
+                yield
+                await transaction.run(
+                    f"""
+                    MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
+                    WHERE m.state = 'PENDING' AND m.claim_token = $claim_token
+                    SET m.claim_expires_at = datetime() + duration($claim_lease)
+                    """,
+                    episode_uuid=self._episode_uuid,
+                    claim_token=self._claim_token,
+                    claim_lease=_MARKER_CLAIM_LEASE,
+                )
+                await transaction.commit()
+            except BaseException:
+                await transaction.rollback()
+                raise
 
     async def restore_preexisting(self) -> None:
         """Restore every pre-attempt node/edge property while retaining new objects."""
