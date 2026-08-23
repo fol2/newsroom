@@ -17,11 +17,12 @@ async def guard_extracted_edges(
     """Keep fresh episode edges and bypass all existing-edge resolution."""
 
     resolved = resolve_pointers(extracted_edges, uuid_map)
-    unique: dict[tuple[str, str, str], Any] = {}
+    unique: dict[tuple[str, str, str, str], Any] = {}
     for edge in resolved:
         key = (
             str(edge.source_node_uuid),
             str(edge.target_node_uuid),
+            str(getattr(edge, "name", "") or ""),
             " ".join(str(edge.fact).split()),
         )
         unique.setdefault(key, edge)

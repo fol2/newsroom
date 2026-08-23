@@ -34,6 +34,9 @@ from newsroom.extraction.types import (
     ExtractionOutputValidation,
 )
 from newsroom.graphiti_adapter.cli_client import build_cli_llm_client
+from newsroom.graphiti_adapter.combined_temporal_pipeline import (
+    ExistingGraphitiPipeline,
+)
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
 from newsroom.graphiti_adapter.embedding_meter import MeteredOpenAIEmbedder
 from newsroom.graphiti_adapter.usage_meter import summarise_graphiti_usage
@@ -73,6 +76,7 @@ from newsroom.graphiti_adapter.neo4j_guard import (
 )
 
 from .models import (
+    GraphitiAdapterConfiguration,
     GraphitiAdapterExecution,
     GraphitiAttemptRequest,
     GraphitiWorkspaceDescriptor,
@@ -88,6 +92,7 @@ from .workspace import DisposableProposalWorkspace
 
 _GRAPHITI_CORE_VERSION = "0.29.3"
 _NEO4J_USER = "neo4j"
+_GRAPHITI_SCHEMA_BOOTSTRAPPED = False
 _REASON_BY_OUTCOME = {
     "COMPLETE": GraphitiCleanupReason.NORMAL,
     "PARTIAL": GraphitiCleanupReason.PARTIAL,
@@ -103,6 +108,16 @@ _REASON_BY_OUTCOME = {
 _is_source_registry_name = is_source_registry_name
 
 
+async def _bootstrap_graphiti_schema(driver: Any) -> None:
+    """Create journal schema once before this process starts attempts."""
+
+    global _GRAPHITI_SCHEMA_BOOTSTRAPPED
+    if _GRAPHITI_SCHEMA_BOOTSTRAPPED:
+        return
+    await Neo4jMutationGuard.bootstrap_schema(driver)
+    _GRAPHITI_SCHEMA_BOOTSTRAPPED = True
+
+
 def _no_embedding_usage() -> dict[str, object]:
     return {
         "requests": [],
@@ -111,6 +126,37 @@ def _no_embedding_usage() -> dict[str, object]:
         "cost_usd_microunits": 0,
         "usage_basis": "NO_EMBEDDING_CALL",
     }
+
+
+def _require_evaluation_authority(
+    configuration: object,
+) -> GraphitiAdapterConfiguration:
+    if not isinstance(configuration, GraphitiAdapterConfiguration):
+        raise GraphitiAdapterContractError(
+            "real Graphiti adapter requires a typed configuration"
+        )
+    if configuration.runtime_mode is not GraphitiRuntimeMode.REAL_GRAPHITI:
+        raise GraphitiAdapterContractError(
+            "real adapter rejects a non-real configuration"
+        )
+    if configuration.execution_profile is not GraphitiExecutionProfile.EVALUATION:
+        raise GraphitiAdapterContractError(
+            "real Graphiti adapter is authorised only under EVALUATION"
+        )
+    configuration.require_execution_authorized()
+    authority = configuration.real_runtime_authority
+    if (
+        authority is None
+        or authority.framework_release != GRAPHITI_CORE_RELEASE
+        or authority.model_release != GRAPHITI_CHAT_MODEL
+        or authority.embedding_release != GRAPHITI_EMBEDDING_MODEL
+        or configuration.workspace_policy.namespace_prefix
+        != GRAPHITI_WORKSPACE_GROUP
+    ):
+        raise GraphitiAdapterContractError(
+            "real Graphiti adapter requires the EVALUATION CLI packet pins"
+        )
+    return configuration
 
 
 @dataclass(slots=True)
@@ -151,6 +197,9 @@ def _load_graphiti() -> SimpleNamespace:
         from graphiti_core.nodes import EntityNode
         from graphiti_core.utils.bulk_utils import resolve_edge_pointers
         from graphiti_core.utils.maintenance.edge_operations import extract_edges
+        from graphiti_core.utils.maintenance.node_operations import (
+            resolve_extracted_nodes,
+        )
     except ImportError as exc:
         raise GraphitiAdapterContractError(
             "graphiti extra (graphiti-core 0.29.3) is required for real Graphiti execution"
@@ -213,8 +262,118 @@ def _load_graphiti() -> SimpleNamespace:
         EpisodicNode=EpisodicNode,
         EntityEdge=EntityEdge,
         EntityNode=EntityNode,
+        create_entity_edge_embeddings=create_entity_edge_embeddings,
+        resolve_edge_pointers=resolve_edge_pointers,
+        resolve_extracted_nodes=resolve_extracted_nodes,
         NodeNotFoundError=NodeNotFoundError,
         MutationGuard=Neo4jMutationGuard,
+    )
+
+
+def combined_temporal_pipeline_for(
+    *,
+    configuration: GraphitiAdapterConfiguration,
+    graphiti: Any,
+    guard: Neo4jMutationGuard,
+    episode: Any,
+    previous_episodes: tuple[Any, ...] = (),
+    entity_types: dict[str, type[Any]] | None = None,
+) -> ExistingGraphitiPipeline:
+    """Wire combined-temporal proposals to the pinned existing Graphiti pipeline."""
+
+    configuration = _require_evaluation_authority(configuration)
+    runtime = _load_graphiti()
+    expected_group_id = str(episode.group_id)
+    expected_episode_uuid = str(episode.uuid)
+    if (
+        guard.driver is not graphiti.driver
+        or expected_group_id != configuration.workspace_policy.namespace_prefix
+        or guard.group_id != expected_group_id
+        or guard.episode_uuid != expected_episode_uuid
+    ):
+        raise GraphitiAdapterContractError(
+            "combined-temporal graph, journal and episode identity differ"
+        )
+    if isinstance(guard, Neo4jMutationGuard):
+        asyncio.run(_bootstrap_graphiti_schema(graphiti.driver))
+
+    async def resolve_nodes(nodes: list[Any]) -> tuple[
+        list[Any], dict[str, str], list[tuple[Any, Any]]
+    ]:
+        typed_nodes = [
+            runtime.EntityNode(
+                uuid=str(node.uuid),
+                name=str(node.name),
+                group_id=str(node.group_id),
+                labels=list(node.labels),
+                created_at=node.created_at,
+                summary=str(node.summary),
+                attributes=dict(node.attributes),
+            )
+            for node in nodes
+        ]
+        return await runtime.resolve_extracted_nodes(
+            graphiti.clients,
+            typed_nodes,
+            episode,
+            list(previous_episodes),
+            entity_types,
+        )
+
+    def resolve_pointers(edges: list[Any], uuid_map: dict[str, str]) -> list[Any]:
+        typed_edges = [
+            runtime.EntityEdge(
+                uuid=str(edge.uuid),
+                group_id=str(edge.group_id),
+                source_node_uuid=str(edge.source_node_uuid),
+                target_node_uuid=str(edge.target_node_uuid),
+                created_at=edge.created_at,
+                name=str(edge.name),
+                fact=str(edge.fact),
+                fact_embedding=getattr(edge, "fact_embedding", None),
+                episodes=list(edge.episodes),
+                expired_at=getattr(edge, "expired_at", None),
+                valid_at=edge.valid_at,
+                invalid_at=edge.invalid_at,
+                reference_time=edge.reference_time,
+                attributes=dict(edge.attributes),
+            )
+            for edge in edges
+        ]
+        return runtime.resolve_edge_pointers(typed_edges, uuid_map)
+
+    async def persist_graph(nodes: list[Any], edges: list[Any]) -> None:
+        await graphiti._process_episode_data(
+            episode,
+            nodes,
+            edges,
+            datetime.now(tz=UTC),
+            str(episode.group_id),
+        )
+
+    def chat_receipt() -> list[dict[str, object]]:
+        return [
+            dict(item)
+            for item in getattr(graphiti.clients.llm_client, "invocations", ())
+        ]
+
+    def embedding_receipt() -> dict[str, object]:
+        receipt = getattr(graphiti.clients.embedder, "receipt", None)
+        return dict(receipt()) if callable(receipt) else _no_embedding_usage()
+
+    return ExistingGraphitiPipeline(
+        guard=guard,
+        resolve_nodes=resolve_nodes,
+        resolve_pointers=resolve_pointers,
+        create_embeddings=runtime.create_entity_edge_embeddings,
+        persist_graph=persist_graph,
+        embedder=graphiti.clients.embedder,
+        run_async=asyncio.run,
+        chat_receipt=chat_receipt,
+        embedding_receipt=embedding_receipt,
+        expected_group_id=expected_group_id,
+        expected_episode_uuid=expected_episode_uuid,
+        expected_ingest_id=guard.input_digest,
     )
 
 
@@ -345,6 +504,8 @@ async def _add_episode(
     )
     cancellation_cleanup_active = False
     try:
+        if runtime.MutationGuard is Neo4jMutationGuard:
+            await _bootstrap_graphiti_schema(graphiti.driver)
         marker = await guard.begin()
         if marker.state is GuardState.COMPLETE:
             raw = await guard.completed_raw()
@@ -600,28 +761,7 @@ class RealGraphitiAdapter:
             raise GraphitiAdapterContractError(
                 "real adapter workspace root must be a pathlib Path"
             )
-        configuration = attempt.configuration
-        if configuration.runtime_mode is not GraphitiRuntimeMode.REAL_GRAPHITI:
-            raise GraphitiAdapterContractError(
-                "real adapter rejects a non-real configuration"
-            )
-        if configuration.execution_profile is not GraphitiExecutionProfile.EVALUATION:
-            raise GraphitiAdapterContractError(
-                "real Graphiti adapter is authorised only under EVALUATION"
-            )
-        configuration.require_execution_authorized()
-        authority = configuration.real_runtime_authority
-        if (
-            authority is None
-            or authority.framework_release != GRAPHITI_CORE_RELEASE
-            or authority.model_release != GRAPHITI_CHAT_MODEL
-            or authority.embedding_release != GRAPHITI_EMBEDDING_MODEL
-            or configuration.workspace_policy.namespace_prefix
-            != GRAPHITI_WORKSPACE_GROUP
-        ):
-            raise GraphitiAdapterContractError(
-                "real Graphiti adapter requires the EVALUATION CLI packet pins"
-            )
+        configuration = _require_evaluation_authority(attempt.configuration)
 
         started_at = self._clock()
         remaining_timeout_s = attempt.extraction_request.budget.timeout_ms / 1_000
@@ -924,4 +1064,4 @@ class RealGraphitiAdapter:
         return produced
 
 
-__all__ = ["RealGraphitiAdapter"]
+__all__ = ["RealGraphitiAdapter", "combined_temporal_pipeline_for"]

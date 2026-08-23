@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
+from uuid import uuid4
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 
@@ -16,6 +19,13 @@ _LABEL = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SNAPSHOT_NODE = "NewsroomSnapshotNode"
 _SNAPSHOT_RELATIONSHIP = "NewsroomSnapshotRelationship"
 _MARKER = "NewsroomIngestMarker"
+_MARKER_CLAIM_LEASE = "PT15M"
+_SCHEMA_QUERIES = (
+    f"""
+    CREATE CONSTRAINT newsroom_ingest_marker_episode IF NOT EXISTS
+    FOR (m:{_MARKER}) REQUIRE m.episode_uuid IS UNIQUE
+    """,
+)
 
 
 class GuardError(RuntimeError):
@@ -64,6 +74,7 @@ class Neo4jMutationGuard:
 
     __slots__ = (
         "_attempt_number",
+        "_claim_token",
         "_driver",
         "_episode_uuid",
         "_group_id",
@@ -81,17 +92,48 @@ class Neo4jMutationGuard:
         input_digest: str,
     ) -> None:
         self._driver = driver
+        self._claim_token: str | None = None
         self._group_id = group_id
         self._episode_uuid = episode_uuid
         self._attempt_number = attempt_number
         self._input_digest = input_digest
         self._snapshot_id = f"{episode_uuid}:{attempt_number}"
 
+    @property
+    def driver(self) -> Any:
+        return self._driver
+
+    @property
+    def group_id(self) -> str:
+        return self._group_id
+
+    @property
+    def episode_uuid(self) -> str:
+        return self._episode_uuid
+
+    @property
+    def input_digest(self) -> str:
+        return self._input_digest
+
     async def _query(self, query: str, **parameters: object) -> list[object]:
         records, _, _ = await self._driver.execute_query(
             query, params=parameters, routing_="w"
         )
         return list(records)
+
+    def _require_pending_claim(self, records: list[object], *, operation: str) -> None:
+        if (
+            not records
+            or _record_value(records[0], "claim_token") != self._claim_token
+        ):
+            raise GuardError(f"Graphiti {operation} lost its pending claim")
+
+    @staticmethod
+    async def bootstrap_schema(driver: Any) -> None:
+        """Create journal schema once during explicit Neo4j bootstrap."""
+
+        for query in _SCHEMA_QUERIES:
+            await driver.execute_query(query, params={}, routing_="w")
 
     async def _marker(self) -> dict[str, object] | None:
         records = await self._query(
@@ -105,6 +147,110 @@ class Neo4jMutationGuard:
             return None
         marker = _record_value(records[0], "marker")
         return dict(marker) if isinstance(marker, dict) else None
+
+    async def _claim_marker(
+        self,
+    ) -> tuple[dict[str, object], bool, bool]:
+        claim_token = str(uuid4())
+        records = await self._query(
+            f"""
+            MERGE (m:{_MARKER} {{episode_uuid: $episode_uuid}})
+            ON CREATE SET
+                m.group_id = $group_id,
+                m.attempt_number = $attempt_number,
+                m.input_digest = $input_digest,
+                m.snapshot_id = $snapshot_id,
+                m.state = 'SNAPSHOTTING',
+                m.chat_invocations_json = '[]',
+                m.embedding_usage_json = 'null',
+                m.claim_token = $claim_token,
+                m.claim_expires_at = datetime() + duration($claim_lease)
+            RETURN properties(m) AS marker,
+                   m.claim_token = $claim_token AS claimed,
+                   m.state IN [
+                       'SNAPSHOTTING', 'PENDING', 'ROLLING_BACK', 'RECOVERING'
+                   ]
+                       AND m.claim_token <> $claim_token
+                       AND m.claim_expires_at > datetime() AS active
+            """,
+            episode_uuid=self._episode_uuid,
+            group_id=self._group_id,
+            attempt_number=self._attempt_number,
+            input_digest=self._input_digest,
+            snapshot_id=self._snapshot_id,
+            claim_token=claim_token,
+            claim_lease=_MARKER_CLAIM_LEASE,
+        )
+        if not records:
+            raise GuardError("Graphiti guard marker claim did not commit")
+        marker = _record_value(records[0], "marker")
+        if not isinstance(marker, dict):
+            raise GuardError("Graphiti guard marker is malformed")
+        claimed = _record_value(records[0], "claimed") is True
+        if claimed:
+            self._claim_token = claim_token
+        return (
+            dict(marker),
+            claimed,
+            _record_value(records[0], "active") is True,
+        )
+
+    async def _take_over(
+        self,
+        raw: dict[str, object],
+        *,
+        state: str,
+        require_expired: bool = True,
+    ) -> dict[str, object] | None:
+        claim_token = str(uuid4())
+        records = await self._query(
+            f"""
+            MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
+            WHERE m.state = $retained_state
+              AND m.snapshot_id = $snapshot_id
+              AND coalesce(m.claim_token, '') = $retained_claim_token
+              AND (
+                  NOT $require_expired
+                  OR m.claim_expires_at IS NULL
+                  OR m.claim_expires_at <= datetime()
+              )
+            SET m.state = $state,
+                m.claim_token = $claim_token,
+                m.claim_expires_at = datetime() + duration($claim_lease)
+            RETURN properties(m) AS marker
+            """,
+            episode_uuid=self._episode_uuid,
+            retained_state=str(raw.get("state") or ""),
+            snapshot_id=str(raw.get("snapshot_id") or ""),
+            retained_claim_token=str(raw.get("claim_token") or ""),
+            state=state,
+            require_expired=require_expired,
+            claim_token=claim_token,
+            claim_lease=_MARKER_CLAIM_LEASE,
+        )
+        if not records:
+            return None
+        marker = _record_value(records[0], "marker")
+        if not isinstance(marker, dict):
+            raise GuardError("Graphiti guard marker is malformed")
+        self._claim_token = claim_token
+        return dict(marker)
+
+    async def _discard_taken_over_marker(self) -> None:
+        records = await self._query(
+            f"""
+            MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
+            WHERE m.state = 'RECOVERING' AND m.claim_token = $claim_token
+            WITH m, m.episode_uuid AS episode_uuid
+            DELETE m
+            RETURN episode_uuid
+            """,
+            episode_uuid=self._episode_uuid,
+            claim_token=self._claim_token,
+        )
+        if not records:
+            raise GuardError("Graphiti recovery marker deletion did not commit")
+        self._claim_token = None
 
     def _adopt_retained_snapshot(
         self, raw: dict[str, object], *, attempt_number: int
@@ -149,9 +295,13 @@ class Neo4jMutationGuard:
         )
 
     async def begin(self) -> GuardMarker:
-        retained = await self._marker()
-        if retained is not None:
-            if str(retained.get("state")) == "SNAPSHOTTING":
+        self._snapshot_id = f"{self._episode_uuid}:{self._attempt_number}"
+        retained, claimed, active = await self._claim_marker()
+        if not claimed:
+            if active:
+                raise GuardError("Graphiti guard marker is owned by an active attempt")
+            retained_state = str(retained.get("state"))
+            if retained_state in {"SNAPSHOTTING", "RECOVERING"}:
                 if (
                     str(retained.get("group_id") or "") != self._group_id
                     or str(retained.get("input_digest") or "") != self._input_digest
@@ -166,49 +316,52 @@ class Neo4jMutationGuard:
                 self._adopt_retained_snapshot(
                     retained, attempt_number=retained_attempt
                 )
+                taken_over = await self._take_over(retained, state="RECOVERING")
+                if taken_over is None:
+                    return await self.begin()
                 await self._delete_snapshot()
-                await self._delete_marker()
+                await self._discard_taken_over_marker()
                 return await self.begin()
+            if retained_state in {"PENDING", "ROLLING_BACK"}:
+                self._bind_marker(retained)
+                taken_over = await self._take_over(retained, state=retained_state)
+                if taken_over is None:
+                    return await self.begin()
+                retained = taken_over
             marker = self._bind_marker(retained)
             if marker.state is GuardState.COMPLETE:
                 await self._delete_snapshot()
                 return marker
             if marker.state is GuardState.RECOVERED_AMBIGUOUS:
-                await self._delete_snapshot()
                 if self._attempt_number <= marker.attempt_number:
+                    await self._delete_snapshot()
                     return marker
-                await self._delete_marker()
+                taken_over = await self._take_over(
+                    retained,
+                    state="RECOVERING",
+                    require_expired=False,
+                )
+                if taken_over is None:
+                    return await self.begin()
+                await self._delete_snapshot()
+                await self._discard_taken_over_marker()
+                return await self.begin()
             else:
                 return marker
 
-        self._snapshot_id = f"{self._episode_uuid}:{self._attempt_number}"
-        await self._query(
-            f"""
-            CREATE (m:{_MARKER} {{
-                episode_uuid: $episode_uuid,
-                group_id: $group_id,
-                attempt_number: $attempt_number,
-                input_digest: $input_digest,
-                snapshot_id: $snapshot_id,
-                state: 'SNAPSHOTTING',
-                chat_invocations_json: '[]',
-                embedding_usage_json: 'null'
-            }})
-            """,
-            episode_uuid=self._episode_uuid,
-            group_id=self._group_id,
-            attempt_number=self._attempt_number,
-            input_digest=self._input_digest,
-            snapshot_id=self._snapshot_id,
-        )
         await self._snapshot()
-        await self._query(
+        pending = await self._query(
             f"""
             MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
+            WHERE m.state = 'SNAPSHOTTING' AND m.claim_token = $claim_token
             SET m.state = 'PENDING'
+            RETURN m.state AS state
             """,
             episode_uuid=self._episode_uuid,
+            claim_token=self._claim_token,
         )
+        if not pending or _record_value(pending[0], "state") != "PENDING":
+            raise GuardError("Graphiti guard marker lost its claim before dispatch")
         return GuardMarker(
             state=GuardState.CREATED,
             attempt_number=self._attempt_number,
@@ -251,6 +404,10 @@ class Neo4jMutationGuard:
             raise GuardError("Graphiti generation relationship has no stable UUID")
         await self._query(
             f"""
+            MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
+            WHERE m.claim_token = $claim_token
+            SET m.claim_expires_at = datetime() + duration($claim_lease)
+            WITH m
             MATCH (n)
             WHERE n.group_id = $group_id
               AND NOT n:{_SNAPSHOT_NODE}
@@ -264,9 +421,16 @@ class Neo4jMutationGuard:
             """,
             group_id=self._group_id,
             snapshot_id=self._snapshot_id,
+            episode_uuid=self._episode_uuid,
+            claim_token=self._claim_token,
+            claim_lease=_MARKER_CLAIM_LEASE,
         )
         await self._query(
             f"""
+            MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
+            WHERE m.claim_token = $claim_token
+            SET m.claim_expires_at = datetime() + duration($claim_lease)
+            WITH m
             MATCH (a)-[r]->(b)
             WHERE (a.group_id = $group_id OR b.group_id = $group_id)
               AND NOT a:{_SNAPSHOT_NODE} AND NOT b:{_SNAPSHOT_NODE}
@@ -281,6 +445,9 @@ class Neo4jMutationGuard:
             """,
             group_id=self._group_id,
             snapshot_id=self._snapshot_id,
+            episode_uuid=self._episode_uuid,
+            claim_token=self._claim_token,
+            claim_lease=_MARKER_CLAIM_LEASE,
         )
 
     async def record_pending_telemetry(
@@ -289,17 +456,58 @@ class Neo4jMutationGuard:
         chat_invocations: list[dict[str, object]],
         embedding_usage: dict[str, object],
     ) -> None:
-        await self._query(
+        recorded = await self._query(
             f"""
             MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
-            WHERE m.state = 'PENDING'
+            WHERE m.state = 'PENDING' AND m.claim_token = $claim_token
             SET m.chat_invocations_json = $chat_invocations_json,
                 m.embedding_usage_json = $embedding_usage_json
+            RETURN m.claim_token AS claim_token
             """,
             episode_uuid=self._episode_uuid,
+            claim_token=self._claim_token,
             chat_invocations_json=canonical_json_bytes(chat_invocations).decode("utf-8"),
             embedding_usage_json=canonical_json_bytes(embedding_usage).decode("utf-8"),
         )
+        self._require_pending_claim(recorded, operation="telemetry")
+
+    @asynccontextmanager
+    async def fenced_graph_mutation(self) -> AsyncIterator[None]:
+        """Hold the marker write lock across the external graph mutation."""
+
+        async with self._driver.session() as session:
+            transaction = await session.begin_transaction()
+            try:
+                result = await transaction.run(
+                    f"""
+                    MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
+                    WHERE m.state = 'PENDING' AND m.claim_token = $claim_token
+                    SET m.claim_expires_at = datetime() + duration($claim_lease)
+                    RETURN m.claim_token AS claim_token
+                    """,
+                    episode_uuid=self._episode_uuid,
+                    claim_token=self._claim_token,
+                    claim_lease=_MARKER_CLAIM_LEASE,
+                )
+                record = await result.single()
+                self._require_pending_claim(
+                    [] if record is None else [record], operation="mutation"
+                )
+                yield
+                await transaction.run(
+                    f"""
+                    MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
+                    WHERE m.state = 'PENDING' AND m.claim_token = $claim_token
+                    SET m.claim_expires_at = datetime() + duration($claim_lease)
+                    """,
+                    episode_uuid=self._episode_uuid,
+                    claim_token=self._claim_token,
+                    claim_lease=_MARKER_CLAIM_LEASE,
+                )
+                await transaction.commit()
+            except BaseException:
+                await transaction.rollback()
+                raise
 
     async def restore_preexisting(self) -> None:
         """Restore every pre-attempt node/edge property while retaining new objects."""
@@ -320,11 +528,12 @@ class Neo4jMutationGuard:
         claimed = await self._query(
             f"""
             MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
-            WHERE m.state = 'PENDING'
+            WHERE m.state = 'PENDING' AND m.claim_token = $claim_token
             SET m.state = 'ROLLING_BACK'
             RETURN m.state AS state
             """,
             episode_uuid=self._episode_uuid,
+            claim_token=self._claim_token,
         )
         if not claimed:
             retained = await self._marker()
@@ -334,6 +543,8 @@ class Neo4jMutationGuard:
                 return False
             if state != GuardState.ROLLING_BACK.value:
                 raise GuardError("Graphiti marker cannot enter rollback")
+            if str(retained.get("claim_token") or "") != self._claim_token:
+                raise GuardError("Graphiti rollback is owned by another claim")
 
         await self._query(
             f"""
@@ -374,7 +585,7 @@ class Neo4jMutationGuard:
         recovered = await self._query(
             f"""
             MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
-            WHERE m.state = 'ROLLING_BACK'
+            WHERE m.state = 'ROLLING_BACK' AND m.claim_token = $claim_token
             SET m.state = 'RECOVERED_AMBIGUOUS',
                 m.recovery_reason = $reason,
                 m.chat_invocations_json = $chat_invocations_json,
@@ -382,6 +593,7 @@ class Neo4jMutationGuard:
             RETURN m.state AS state
             """,
             episode_uuid=self._episode_uuid,
+            claim_token=self._claim_token,
             reason=reason,
             chat_invocations_json=canonical_json_bytes(chat_invocations).decode("utf-8"),
             embedding_usage_json=canonical_json_bytes(embedding_usage).decode("utf-8"),
@@ -550,7 +762,7 @@ class Neo4jMutationGuard:
         completed = await self._query(
             f"""
             MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
-            WHERE m.state = 'PENDING'
+            WHERE m.state = 'PENDING' AND m.claim_token = $claim_token
             SET m.state = 'COMPLETE',
                 m.validated_raw_json = $validated_raw_json,
                 m.validated_raw_digest = $validated_raw_digest,
@@ -558,6 +770,7 @@ class Neo4jMutationGuard:
             RETURN m.state AS state
             """,
             episode_uuid=self._episode_uuid,
+            claim_token=self._claim_token,
             validated_raw_json=raw_bytes.decode("utf-8"),
             validated_raw_digest=digest_bytes(raw_bytes),
             provider_attempt_number=int(raw["provider_attempt_number"]),
@@ -567,9 +780,18 @@ class Neo4jMutationGuard:
         await self._delete_snapshot()
 
     async def completed_raw(self) -> dict[str, object]:
+        raw = await self.completed_raw_or_none()
+        if raw is None:
+            raise GuardError("Graphiti completion marker is absent")
+        return raw
+
+    async def completed_raw_or_none(self) -> dict[str, object] | None:
+        """Read a matching completed result without creating a mutation marker."""
+
         marker = await self._marker()
         if marker is None or str(marker.get("state")) != GuardState.COMPLETE.value:
-            raise GuardError("Graphiti completion marker is absent")
+            return None
+        self._bind_marker(marker)
         raw_json = marker.get("validated_raw_json")
         retained_digest = marker.get("validated_raw_digest")
         if not isinstance(raw_json, str) or not isinstance(retained_digest, str):

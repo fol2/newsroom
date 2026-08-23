@@ -84,26 +84,35 @@ def ingest_key(
     updated_at: str | None,
     observed_at: str,
     chunk_ordinal: int = 1,
+    schema_digest: str | None = None,
+    prompt_digest: str | None = None,
+    workspace_group: str | None = None,
+    episode_uuid: str | None = None,
 ) -> str:
-    digest = digest_bytes(
-        canonical_json_bytes(
-            {
-                "source_id": source_id,
-                "item_key": item_key,
-                "revision_id": revision_id,
-                "representation_digest": representation_digest,
-                "published_at": published_at,
-                "updated_at": updated_at,
-                "observed_fallback_at": (
-                    observed_at if published_at is None and updated_at is None else None
-                ),
-                "content_digest": content_digest_value,
-                "chunk_ordinal": chunk_ordinal,
-                "configuration": configuration_digest(),
-                "temporal": TEMPORAL_POLICY_VERSION,
-            }
-        )
-    )
+    payload = {
+        "source_id": source_id,
+        "item_key": item_key,
+        "revision_id": revision_id,
+        "representation_digest": representation_digest,
+        "published_at": published_at,
+        "updated_at": updated_at,
+        "observed_fallback_at": (
+            observed_at if published_at is None and updated_at is None else None
+        ),
+        "content_digest": content_digest_value,
+        "chunk_ordinal": chunk_ordinal,
+        "configuration": configuration_digest(),
+        "temporal": TEMPORAL_POLICY_VERSION,
+    }
+    if schema_digest is not None:
+        payload["schema_digest"] = schema_digest
+    if prompt_digest is not None:
+        payload["prompt_digest"] = prompt_digest
+    if workspace_group is not None:
+        payload["workspace_group"] = workspace_group
+    if episode_uuid is not None:
+        payload["episode_uuid"] = episode_uuid
+    digest = digest_bytes(canonical_json_bytes(payload))
     return str(uuid4_from_digest(bytes.fromhex(digest.removeprefix("sha256:")[:32])))
 
 
