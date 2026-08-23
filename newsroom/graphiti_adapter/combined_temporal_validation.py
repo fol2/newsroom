@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from newsroom.graphiti_adapter.combined_temporal_attribution import (
+    CJK_NEGATION_PATTERN,
     attributed_statements,
     contains_name,
     grounded_endpoint_spans,
@@ -35,10 +36,9 @@ _ENGLISH_NEGATION_PATTERN = (
     r"\b(?:not|never|no longer|no(?!\.?\s*\d)|cannot|neither|nor)\b|"
     r"\b[A-Za-z]+n['’]t\b|\banything but\b"
 )
-_CJK_NEGATION_PATTERN = r"不(?!但|只|僅)|未|沒有|無|從未"
 _ENGLISH_NEGATION = re.compile(_ENGLISH_NEGATION_PATTERN, flags=re.IGNORECASE)
 _NEGATION = re.compile(
-    rf"(?:{_ENGLISH_NEGATION_PATTERN}|{_CJK_NEGATION_PATTERN})",
+    rf"(?:{_ENGLISH_NEGATION_PATTERN}|{CJK_NEGATION_PATTERN})",
     flags=re.IGNORECASE,
 )
 _AFFIRMATIVE_NO = re.compile(r"(?i)\bno doubt\b")

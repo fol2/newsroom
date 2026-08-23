@@ -55,7 +55,10 @@ class _Guard:
     @asynccontextmanager
     async def fenced_graph_mutation(self) -> AsyncIterator[None]:
         self.calls.append("fence")
-        yield
+        try:
+            yield
+        finally:
+            self.calls.append("unfence")
 
     async def restore_preexisting(self) -> None:
         self.calls.append("restore")
@@ -167,8 +170,9 @@ def test_existing_pipeline_resolves_embeds_and_completes_durable_journal() -> No
         "embed",
         "fence",
         "persist",
-        "telemetry",
         "restore",
+        "unfence",
+        "telemetry",
         "complete",
     ]
     assert result.node_resolutions == (

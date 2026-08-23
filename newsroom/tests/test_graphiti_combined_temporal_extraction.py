@@ -1078,6 +1078,7 @@ def test_contract_number_is_not_a_negation() -> None:
         ("陳志明是教育局成員。", ("陳志明", "教育局"), "IS_MEMBER_OF"),
         ("立法會向教育局提問。", ("立法會", "教育局"), "ASKED"),
         ("陳志明與教育局簽約。", ("陳志明", "教育局"), "HAS_CONTRACT_WITH"),
+        ("陳志明拜訪教育局。", ("陳志明", "教育局"), "VISITED"),
     ),
 )
 def test_traditional_chinese_fact_is_source_grounded(

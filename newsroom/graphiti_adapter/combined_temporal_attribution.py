@@ -55,6 +55,7 @@ _NEGATIVE_AUXILIARIES = {
     "WERE",
     "WILL",
 }
+CJK_NEGATION_PATTERN = r"不(?!但|只|僅)|未|沒有|無|從未"
 _CONTRACTION = re.compile(r"(?i)\b([A-Za-z]+)n['’]t\b")
 _IRREGULAR_CONTRACTIONS = re.compile(r"(?i)\b(won|shan|can)['’]t\b")
 _IRREGULAR_BASE = {"won": "will", "shan": "shall", "can": "can"}
@@ -220,13 +221,28 @@ def relation_is_grounded(
     relation_words = words(relation_type.replace("_", " "))
     if relation_words <= words(value):
         return all(contains_name(value, name) for name in (source_name, target_name))
-    return bool(
-        grounded_endpoint_spans(
-            value,
-            relation_type,
-            source_name=source_name,
-            target_name=target_name,
-        )
+    if grounded_endpoint_spans(
+        value,
+        relation_type,
+        source_name=source_name,
+        target_name=target_name,
+    ):
+        return True
+    known_types = {
+        candidate
+        for candidate, terms in _CJK_RELATION_TERMS.items()
+        if any(term in value for term in terms)
+    }
+    if known_types:
+        return False
+    pattern = re.compile(
+        rf"{re.escape(source_name)}(?P<predicate>.+?){re.escape(target_name)}"
+    )
+    return any(
+        _span_is_bounded(value, *match.span())
+        and _CJK.search(match.group("predicate")) is not None
+        and match.group("predicate").strip(" 　與和跟向對於在")
+        for match in pattern.finditer(value)
     )
 
 
@@ -284,7 +300,7 @@ def _grounded_cjk_matches(
         return ()
     base_relation_type, negative_relation = relation_polarity(relation_type)
     connector = r"\s*(?:向|對)?\s*"
-    negative = r"(?P<negative>不(?!但|只|僅)|未|沒有|無|從未)"
+    negative = rf"(?P<negative>{CJK_NEGATION_PATTERN})"
     polarity = negative if negative_relation else rf"(?:{negative})?"
     patterns = [
         (
@@ -427,6 +443,7 @@ def attributed_scope(
 
 
 __all__ = [
+    "CJK_NEGATION_PATTERN",
     "ISO_DATE",
     "ISO_TIMESTAMP",
     "CJK_DATE",
