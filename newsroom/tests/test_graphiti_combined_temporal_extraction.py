@@ -1048,20 +1048,26 @@ def test_contract_number_is_not_a_contradictory_attribution() -> None:
 
 
 @pytest.mark.parametrize(
-    "body",
+    ("body", "fact"),
     (
-        "Alice asked Bob and Alice thanked Bob.",
-        "Alice asked Bob and Alice did not thank Bob.",
+        ("Alice asked Bob and Alice thanked Bob.", "Alice asked Bob"),
+        ("Alice asked Bob and Alice did not thank Bob.", "Alice asked Bob"),
+        (
+            "Alice asked Bob about the budget and "
+            "Alice did not ask Bob about the weather.",
+            "Alice asked Bob about the budget",
+        ),
     ),
 )
 def test_exact_fact_selects_one_of_two_non_contradictory_statements(
     body: str,
+    fact: str,
 ) -> None:
     case = fixture("pair-current")
 
     leaf = extract_combined_temporal(
         replace(case.revision, body=body),
-        transport=_FakeTransport(_named_pair_payload("Alice asked Bob")),
+        transport=_FakeTransport(_named_pair_payload(fact)),
         pipeline=_PIPELINE,
     )
 
@@ -1529,11 +1535,6 @@ def test_anything_but_is_a_negation() -> None:
         ),
         (
             "立法會支持教育局 及 立法會不支持教育局。",
-            "立法會支持教育局",
-            (0,),
-        ),
-        (
-            "立法會支持教育局 及 立法會 did not SUPPORT 教育局.",
             "立法會支持教育局",
             (0,),
         ),

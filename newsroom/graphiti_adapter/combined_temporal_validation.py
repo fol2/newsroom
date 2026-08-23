@@ -99,7 +99,6 @@ def normalise(
         _assert_single_attribution(
             retained,
             fact_text=fact_text,
-            relation_type=fact["relation_type"],
             source_name=source_name,
             target_name=target_name,
         )
@@ -175,7 +174,6 @@ def _assert_single_attribution(
     retained: str,
     *,
     fact_text: str,
-    relation_type: str,
     source_name: str,
     target_name: str,
 ) -> None:
@@ -191,7 +189,6 @@ def _assert_single_attribution(
     if not attribution_is_unambiguous(
         retained,
         fact_text,
-        relation_type=relation_type,
         source_name=source_name,
         target_name=target_name,
     ):

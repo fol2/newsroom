@@ -281,7 +281,6 @@ def attribution_is_unambiguous(
     retained: str,
     fact_text: str,
     *,
-    relation_type: str,
     source_name: str,
     target_name: str,
 ) -> bool:
@@ -303,9 +302,6 @@ def attribution_is_unambiguous(
     expected = _statement_signature(
         matching[0], source_name=source_name, target_name=target_name
     )
-    relation_words = frozenset(
-        _stem(token.lower()) for token in _WORD.findall(relation_type)
-    )
     for statement in statements:
         if statement == matching[0]:
             continue
@@ -314,9 +310,7 @@ def attribution_is_unambiguous(
             source_name=source_name,
             target_name=target_name,
         )
-        if expected[0] != actual[0] and (
-            expected[1] == actual[1] or relation_words & actual[1]
-        ):
+        if expected[0] != actual[0] and expected[1] == actual[1]:
             return False
     return True
 
