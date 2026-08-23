@@ -87,6 +87,16 @@ _SOURCE_MODIFIER = re.compile(
     r"(?i)^\s*(?:according to .+|per .+|as (?:reported|confirmed) by .+|"
     r".+\s+(?:said|stated|say|says|reported|confirmed)|reportedly|allegedly)\s*$"
 )
+_ENGLISH_NEGATION = re.compile(
+    r"(?i)\b(?:not|never|no longer|no(?!\.?\s*\d)|cannot)\b|"
+    r"\b([A-Za-z]+)n['’]t\b|\banything but\b"
+)
+_CJK_NEGATION = re.compile(r"不(?!但|只|僅)|未(?!來)|沒有|無(?!國)|從未")
+_AFFIRMATIVE_POLARITY = re.compile(r"(?i)\bno doubt\b|毫無疑問|無疑")
+_CONTRACTION_BASE = {"ca": "can", "sha": "shall", "wo": "will"}
+_AUXILIARIES = frozenset(
+    "a an are can did do does has have is of the was were will".split()
+)
 
 
 def _relative_pattern(name: str) -> str:
@@ -143,6 +153,8 @@ def _span_is_bounded(
 
 def name_spans(value: str, name: str) -> tuple[tuple[int, int], ...]:
     spans = tuple(match.span() for match in re.finditer(re.escape(name), value))
+    # Unicode defines no lexical boundary between Han characters. Retain literal
+    # spans as Entity Mentions; canonical identity remains downstream authority.
     cjk_is_boundary = name.isascii() or _CJK.search(name) is not None
     return tuple(
         span
@@ -227,6 +239,88 @@ def attributed_statements(
     )
 
 
+def _stem(value: str) -> str:
+    if value.endswith("ied") and len(value) > 3:
+        return value[:-3] + "y"
+    if value.endswith("ed") and len(value) > 3:
+        return value[:-2]
+    return value
+
+
+def _expand_negation(match: re.Match[str]) -> str:
+    base = match.group(1) or ""
+    return f"{_CONTRACTION_BASE.get(base, base)} not"
+
+
+def _statement_signature(
+    value: str, *, source_name: str, target_name: str
+) -> tuple[bool, frozenset[str]]:
+    retained = _without_names(value, source_name, target_name)
+    retained = _AFFIRMATIVE_POLARITY.sub("", retained)
+    negative = (
+        _ENGLISH_NEGATION.search(retained) is not None
+        or _CJK_NEGATION.search(retained) is not None
+    )
+    retained = _ENGLISH_NEGATION.sub(_expand_negation, retained)
+    retained = _CJK_NEGATION.sub("", retained)
+    for pattern in (ISO_TIMESTAMP, ISO_DATE, PROSE_DATE, CJK_DATE):
+        retained = pattern.sub(" ", retained)
+    for pattern in RELATIVE_PATTERNS.values():
+        retained = pattern.sub(" ", retained)
+    words = frozenset(
+        stemmed
+        for token in _WORD.findall(retained.lower())
+        if (stemmed := _stem(token)) not in _AUXILIARIES
+        and stemmed != "not"
+        and not stemmed.isdigit()
+    )
+    return negative, words
+
+
+def attribution_is_unambiguous(
+    retained: str,
+    fact_text: str,
+    *,
+    relation_type: str,
+    source_name: str,
+    target_name: str,
+) -> bool:
+    statements = attributed_statements(
+        retained,
+        source_name=source_name,
+        target_name=target_name,
+    )
+    needle = fact_text.strip().rstrip(".!?。！？")
+    matching = tuple(
+        statement
+        for statement in statements
+        if statement.strip().rstrip(".!?。！？") == needle
+    )
+    if not matching and len(statements) == 1 and retained.count(fact_text) == 1:
+        matching = statements
+    if len(matching) != 1:
+        return False
+    expected = _statement_signature(
+        matching[0], source_name=source_name, target_name=target_name
+    )
+    relation_words = frozenset(
+        _stem(token.lower()) for token in _WORD.findall(relation_type)
+    )
+    for statement in statements:
+        if statement == matching[0]:
+            continue
+        actual = _statement_signature(
+            statement,
+            source_name=source_name,
+            target_name=target_name,
+        )
+        if expected[0] != actual[0] and (
+            expected[1] == actual[1] or relation_words & actual[1]
+        ):
+            return False
+    return True
+
+
 def _is_temporal_modifier(statement: str) -> bool:
     retained = list(statement)
     matched = False
@@ -274,6 +368,7 @@ __all__ = [
     "PROSE_DATE",
     "RELATIVE_DAY_OFFSETS",
     "RELATIVE_PATTERNS",
+    "attribution_is_unambiguous",
     "attributed_scope",
     "attributed_statements",
     "contains_name",

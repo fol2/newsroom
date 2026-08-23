@@ -1026,7 +1026,7 @@ def test_entity_name_cannot_be_part_of_another_unicode_name(
     assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
 
 
-def test_multiple_endpoint_assertions_are_not_one_attribution() -> None:
+def test_contract_number_is_not_a_contradictory_attribution() -> None:
     case = fixture("pair-current")
     body = (
         "Alice has contract with Acme. "
@@ -1044,8 +1044,28 @@ def test_multiple_endpoint_assertions_are_not_one_attribution() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        "Alice asked Bob and Alice thanked Bob.",
+        "Alice asked Bob and Alice did not thank Bob.",
+    ),
+)
+def test_exact_fact_selects_one_of_two_non_contradictory_statements(
+    body: str,
+) -> None:
+    case = fixture("pair-current")
+
+    leaf = extract_combined_temporal(
+        replace(case.revision, body=body),
+        transport=_FakeTransport(_named_pair_payload("Alice asked Bob")),
+        pipeline=_PIPELINE,
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
 
 
 @pytest.mark.parametrize(
@@ -1456,7 +1476,7 @@ def test_relative_date_word_inside_entity_name_is_not_a_temporal_cue() -> None:
     assert fabricated.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
 
 
-def test_repeated_endpoint_assertions_are_ambiguous() -> None:
+def test_no_doubt_is_not_a_contradictory_attribution() -> None:
     case = fixture("pair-current")
     body = (
         "Alice is a member of Acme. "
@@ -1474,8 +1494,7 @@ def test_repeated_endpoint_assertions_are_ambiguous() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
 
 
 def test_anything_but_is_a_negation() -> None:

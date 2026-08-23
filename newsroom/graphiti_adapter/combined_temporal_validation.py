@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from newsroom.graphiti_adapter.combined_temporal_attribution import (
-    attributed_statements,
+    attribution_is_unambiguous,
     contains_name,
     has_predicate_surface,
 )
@@ -85,11 +85,6 @@ def normalise(
             source_name=source_name,
             target_name=target_name,
         )
-        if source_name == target_name and fact_text.count(source_name) < 2:
-            raise CombinedTemporalError(
-                CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
-                "same-name endpoints require two grounded mentions",
-            )
         fact_segment_ids = set(fact["evidence_segment_ids"])
         source_evidence = set(source_entity["evidence_segment_ids"])
         target_evidence = set(target_entity["evidence_segment_ids"])
@@ -103,6 +98,8 @@ def normalise(
             )
         _assert_single_attribution(
             retained,
+            fact_text=fact_text,
+            relation_type=fact["relation_type"],
             source_name=source_name,
             target_name=target_name,
         )
@@ -177,6 +174,8 @@ def _assert_unique_facts(facts: list[dict[str, Any]]) -> None:
 def _assert_single_attribution(
     retained: str,
     *,
+    fact_text: str,
+    relation_type: str,
     source_name: str,
     target_name: str,
 ) -> None:
@@ -189,12 +188,13 @@ def _assert_single_attribution(
                 CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
                 "evidence cites assertion and correction",
             )
-    statements = attributed_statements(
+    if not attribution_is_unambiguous(
         retained,
+        fact_text,
+        relation_type=relation_type,
         source_name=source_name,
         target_name=target_name,
-    )
-    if len(statements) != 1:
+    ):
         raise CombinedTemporalError(
             CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
             "evidence must cite one unambiguous endpoint statement",
