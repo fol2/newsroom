@@ -102,17 +102,8 @@ def assert_temporal_policy(
     fact: Mapping[str, Any],
     retained: str,
     reference_time: datetime,
-    *,
-    source_name: str,
-    target_name: str,
 ) -> None:
-    retained = attributed_scope(
-        retained,
-        str(fact["fact"]),
-        source_name=source_name,
-        target_name=target_name,
-        relation_type=str(fact["relation_type"]),
-    )
+    retained = attributed_scope(retained, str(fact["fact"]))
     valid_dates, invalid_dates = _date_expectations(retained, reference_time)
     if len(valid_dates) > 1 or len(invalid_dates) > 1:
         raise CombinedTemporalError(

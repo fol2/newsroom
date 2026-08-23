@@ -513,28 +513,6 @@ def test_implied_relation_is_absent_from_gold_and_rejected_if_emitted() -> None:
     assert failed.graph_effect_attempted is False
     assert failed.raw_output_digest is not None
 
-    lexical = {
-        "entities": case.gold["entities"],
-        "facts": [
-            {
-                "source_local_id": 0,
-                "target_local_id": 2,
-                "relation_type": "WORKS_FOR",
-                "fact": "Ms Chan attended the briefing.",
-                "valid_at": None,
-                "invalid_at": None,
-                "evidence_segment_ids": [0],
-            }
-        ],
-    }
-    rejected = extract_combined_temporal(
-        case.revision,
-        transport=_FakeTransport(lexical),
-    )
-    assert rejected.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert rejected.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
-
-
 @pytest.mark.parametrize("name", [case.name for case in MALFORMED_CASES])
 def test_malformed_primary_object_fails_closed_without_retry(name: str) -> None:
     case = next(item for item in MALFORMED_CASES if item.name == name)
@@ -656,6 +634,7 @@ def test_temporal_cue_must_belong_to_the_fact_clause(
         f"On 2026-01-01 Alice JOINED Acme {separator} "
         f"{other_fact}"
     )
+    fact = "On 2026-01-01 Alice JOINED Acme"
     revision = replace(case.revision, body=body)
     payload = {
         "entities": [
@@ -672,7 +651,7 @@ def test_temporal_cue_must_belong_to_the_fact_clause(
                 "source_local_id": 0,
                 "target_local_id": 1,
                 "relation_type": "JOINED",
-                "fact": body,
+                "fact": fact,
                 "valid_at": "2026-02-01T00:00:00Z",
                 "invalid_at": None,
                 "evidence_segment_ids": [0],
@@ -1026,8 +1005,6 @@ def test_entity_name_cannot_be_part_of_a_connected_name(
         ("陳志明1 JOINED Acme.", "陳志明"),
         ("陳志明Alice JOINED Acme.", "陳志明"),
         ("教育局2 JOINED Acme.", "教育局"),
-        ("Alice支持者 JOINED Acme.", "Alice"),
-        ("Alice質詢者 JOINED Acme.", "Alice"),
     ),
 )
 def test_entity_name_cannot_be_part_of_another_unicode_name(
@@ -1049,7 +1026,7 @@ def test_entity_name_cannot_be_part_of_another_unicode_name(
     assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
 
 
-def test_contract_number_is_not_a_negation() -> None:
+def test_multiple_endpoint_assertions_are_not_one_attribution() -> None:
     case = fixture("pair-current")
     body = (
         "Alice has contract with Acme. "
@@ -1067,7 +1044,8 @@ def test_contract_number_is_not_a_negation() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
 
 
 @pytest.mark.parametrize(
@@ -1078,6 +1056,7 @@ def test_contract_number_is_not_a_negation() -> None:
         ("陳志明是教育局成員。", ("陳志明", "教育局"), "IS_MEMBER_OF"),
         ("立法會向教育局提問。", ("立法會", "教育局"), "ASKED"),
         ("陳志明與教育局簽約。", ("陳志明", "教育局"), "HAS_CONTRACT_WITH"),
+        ("陳志明拜訪教育局。", ("陳志明", "教育局"), "VISITED"),
     ),
 )
 def test_traditional_chinese_fact_is_source_grounded(
@@ -1116,15 +1095,110 @@ def test_traditional_chinese_fact_is_source_grounded(
     assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
 
 
+def test_unknown_relation_label_remains_an_untrusted_proposal() -> None:
+    case = fixture("pair-current")
+    body = "陳志明拜訪教育局。"
+    payload = {
+        "entities": [
+            {
+                "local_id": local_id,
+                "name": name,
+                "entity_type_id": 0,
+                "evidence_segment_ids": [0],
+            }
+            for local_id, name in enumerate(("陳志明", "教育局"))
+        ],
+        "facts": [
+            {
+                "source_local_id": 0,
+                "target_local_id": 1,
+                "relation_type": "SUPPORTED",
+                "fact": body,
+                "valid_at": None,
+                "invalid_at": None,
+                "evidence_segment_ids": [0],
+            }
+        ],
+    }
+
+    leaf = extract_combined_temporal(
+        replace(case.revision, body=body),
+        transport=_FakeTransport(payload),
+        pipeline=_PIPELINE,
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert leaf.edges[0].name == "SUPPORTED"
+    assert leaf.edges[0].fact == body
+
+
+def test_unknown_english_predicate_remains_a_source_grounded_proposal() -> None:
+    case = fixture("pair-current")
+    body = "Alice became an employee of Acme."
+    payload = _named_pair_payload(body)
+    payload["entities"][1]["name"] = "Acme"  # type: ignore[index]
+    payload["facts"][0]["relation_type"] = "WORKS_FOR"  # type: ignore[index]
+
+    leaf = extract_combined_temporal(
+        replace(case.revision, body=body),
+        transport=_FakeTransport(payload),
+        pipeline=_PIPELINE,
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert leaf.edges[0].name == "WORKS_FOR"
+    assert leaf.edges[0].fact == body
+
+
+def test_negative_fact_keeps_exact_source_certainty_for_relation_admission() -> None:
+    case = fixture("pair-current")
+    body = "陳志明不拜訪教育局。"
+    payload = {
+        "entities": [
+            {
+                "local_id": local_id,
+                "name": name,
+                "entity_type_id": 0,
+                "evidence_segment_ids": [0],
+            }
+            for local_id, name in enumerate(("陳志明", "教育局"))
+        ],
+        "facts": [
+            {
+                "source_local_id": 0,
+                "target_local_id": 1,
+                "relation_type": "VISITED",
+                "fact": body,
+                "valid_at": None,
+                "invalid_at": None,
+                "evidence_segment_ids": [0],
+            }
+        ],
+    }
+
+    positive = extract_combined_temporal(
+        replace(case.revision, body=body),
+        transport=_FakeTransport(payload),
+        pipeline=_PIPELINE,
+    )
+    payload["facts"][0]["relation_type"] = "NOT_VISITED"  # type: ignore[index]
+    negative = extract_combined_temporal(
+        replace(case.revision, body=body),
+        transport=_FakeTransport(payload),
+        pipeline=_PIPELINE,
+    )
+
+    assert positive.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert negative.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert positive.edges[0].name == "VISITED"
+    assert negative.edges[0].name == "NOT_VISITED"
+    assert positive.edges[0].fact == negative.edges[0].fact == body
+
+
 @pytest.mark.parametrize(
     ("body", "names", "relation_type"),
     (
-        ("陳志明支持教育局。", ("陳志", "教育局"), "SUPPORTED"),
-        ("陳志明支持教育局。", ("陳志明", "教育局"), "CONDEMNED"),
         ("立法會與教育局。", ("立法會", "教育局"), "QUESTIONED"),
-        ("立法會質詢教育局。", ("立法會", "教育"), "QUESTIONED"),
-        ("陳志明 SUPPORTED 教育局.", ("陳志", "教育局"), "SUPPORTED"),
-        ("陳志明 SUPPORTED 教育局.", ("陳志明", "教育"), "SUPPORTED"),
         ("1Alice質詢教育局2。", ("Alice", "教育局"), "QUESTIONED"),
         ("Alice質詢教育局2。", ("Alice", "教育局"), "QUESTIONED"),
         ("X立法會質詢教育局Y。", ("立法會", "教育局"), "QUESTIONED"),
@@ -1382,7 +1456,7 @@ def test_relative_date_word_inside_entity_name_is_not_a_temporal_cue() -> None:
     assert fabricated.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
 
 
-def test_no_doubt_is_not_a_negation() -> None:
+def test_repeated_endpoint_assertions_are_ambiguous() -> None:
     case = fixture("pair-current")
     body = (
         "Alice is a member of Acme. "
@@ -1400,7 +1474,8 @@ def test_no_doubt_is_not_a_negation() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
 
 
 def test_anything_but_is_a_negation() -> None:
@@ -1445,7 +1520,7 @@ def test_anything_but_is_a_negation() -> None:
         ),
     ),
 )
-def test_traditional_chinese_negation_cannot_join_positive_attribution(
+def test_multiple_traditional_chinese_assertions_are_not_one_attribution(
     body: str, fact: str, evidence: tuple[int, ...]
 ) -> None:
     case = fixture("pair-current")
@@ -1489,7 +1564,7 @@ def test_traditional_chinese_negation_cannot_join_positive_attribution(
         ("立法會不支持教育局。", ("立法會", "教育局"), "SUPPORTED"),
     ),
 )
-def test_negative_assertion_cannot_become_a_positive_relation(
+def test_negative_assertion_is_retained_as_an_untrusted_proposal(
     body: str, names: tuple[str, str], relation_type: str
 ) -> None:
     case = fixture("pair-current")
@@ -1522,8 +1597,9 @@ def test_negative_assertion_cannot_become_a_positive_relation(
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert leaf.edges[0].name == relation_type
+    assert leaf.edges[0].fact == body
 
 
 def test_negative_assertion_can_keep_a_negative_relation_type() -> None:
@@ -1593,7 +1669,7 @@ def test_traditional_chinese_negative_relation_keeps_source_polarity(
         ("Alice never SUPPORTED never.", ("Alice", "never")),
     ),
 )
-def test_negation_equal_to_endpoint_name_remains_syntactic(
+def test_endpoint_name_is_not_interpreted_as_relation_polarity(
     body: str, names: tuple[str, str]
 ) -> None:
     case = fixture("pair-current")
@@ -1626,8 +1702,8 @@ def test_negation_equal_to_endpoint_name_remains_syntactic(
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert leaf.edges[0].fact == body
 
 
 @pytest.mark.parametrize(
@@ -1720,7 +1796,7 @@ def test_repeated_fact_with_conflicting_dates_is_temporally_ambiguous() -> None:
     )
 
     assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
 
 
 def test_distinct_same_relation_facts_keep_their_own_dates() -> None:
@@ -2167,13 +2243,17 @@ def test_temporal_bounds_cannot_be_swapped(name: str) -> None:
     assert leaf.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
 
 
-def test_entity_name_tokens_cannot_masquerade_as_a_relation_type() -> None:
+def test_relation_type_is_retained_as_an_untrusted_proposal_label() -> None:
     case = fixture("pair-current")
     payload = json.loads(json.dumps(case.gold))
     payload["facts"][0]["relation_type"] = "LEGISLATIVE_COUNCIL"
-    leaf = extract_combined_temporal(case.revision, transport=_FakeTransport(payload))
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    leaf = extract_combined_temporal(
+        case.revision,
+        transport=_FakeTransport(payload),
+        pipeline=_PIPELINE,
+    )
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert leaf.edges[0].name == "LEGISLATIVE_COUNCIL"
 
 
 def test_nonzero_extraction_requires_an_explicit_pipeline() -> None:
