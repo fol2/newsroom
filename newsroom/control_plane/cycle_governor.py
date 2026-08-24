@@ -233,6 +233,29 @@ OperatorResetVerifier = Callable[[OperatorResetRequest], bool]
 WriterRouteHealthProbe = Callable[[], WriterRouteHealthProof]
 
 
+_HEALTH_PROBE_TABLE_SQL = """
+CREATE TABLE unpublished_route_health_probes(
+    probe_id TEXT PRIMARY KEY,
+    route TEXT NOT NULL,
+    bound_failure_reason TEXT NOT NULL,
+    attempted_at TEXT NOT NULL,
+    probe_state TEXT NOT NULL
+        CHECK(probe_state IN ('LEGACY_UNKNOWN','RESERVED','TERMINAL')),
+    terminal_at TEXT,
+    outcome TEXT CHECK(outcome IS NULL OR outcome IN ('PASSED','FAILED')),
+    provider_dispatched INTEGER NOT NULL CHECK(provider_dispatched IN (0,1)),
+    provider_receipt_reference TEXT,
+    evidence_json TEXT NOT NULL,
+    evidence_digest TEXT NOT NULL,
+    CHECK(
+        (probe_state='LEGACY_UNKNOWN' AND terminal_at IS NULL AND outcome IS NULL)
+        OR (probe_state='RESERVED' AND terminal_at IS NULL AND outcome IS NULL)
+        OR (probe_state='TERMINAL' AND terminal_at IS NOT NULL AND outcome IS NOT NULL)
+    )
+)
+"""
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS unpublished_cycle_governor_state(
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -288,22 +311,38 @@ CREATE TABLE IF NOT EXISTS unpublished_governed_cycles(
     refused_early_start_count INTEGER,
     refused_early_start_reason TEXT
 );
-CREATE TABLE IF NOT EXISTS unpublished_route_health_probes(
-    probe_id TEXT PRIMARY KEY,
-    route TEXT NOT NULL,
-    bound_failure_reason TEXT NOT NULL,
-    attempted_at TEXT NOT NULL,
-    probe_state TEXT NOT NULL CHECK(probe_state IN ('RESERVED','TERMINAL')),
-    terminal_at TEXT,
-    outcome TEXT NOT NULL CHECK(outcome IN ('PASSED','FAILED')),
-    provider_dispatched INTEGER NOT NULL CHECK(provider_dispatched IN (0,1)),
-    provider_receipt_reference TEXT,
-    evidence_json TEXT NOT NULL,
-    evidence_digest TEXT NOT NULL
-);
 CREATE UNIQUE INDEX IF NOT EXISTS unpublished_one_active_governed_cycle
 ON unpublished_governed_cycles(lease_state) WHERE lease_state='ACTIVE';
 """
+
+
+def _ensure_health_probe_schema(connection: sqlite3.Connection) -> None:
+    retained = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND "
+        "name='unpublished_route_health_probes'"
+    ).fetchone()
+    if retained is None:
+        connection.execute(_HEALTH_PROBE_TABLE_SQL)
+        return
+    if "LEGACY_UNKNOWN" in str(retained[0]):
+        return
+
+    connection.execute(
+        "ALTER TABLE unpublished_route_health_probes "
+        "RENAME TO unpublished_route_health_probes_legacy_migration"
+    )
+    connection.execute(_HEALTH_PROBE_TABLE_SQL)
+    connection.execute(
+        "INSERT INTO unpublished_route_health_probes("
+        "probe_id, route, bound_failure_reason, attempted_at, probe_state, "
+        "terminal_at, outcome, provider_dispatched, provider_receipt_reference, "
+        "evidence_json, evidence_digest) "
+        "SELECT probe_id, route, bound_failure_reason, attempted_at, "
+        "'LEGACY_UNKNOWN', NULL, NULL, provider_dispatched, "
+        "provider_receipt_reference, evidence_json, evidence_digest "
+        "FROM unpublished_route_health_probes_legacy_migration"
+    )
+    connection.execute("DROP TABLE unpublished_route_health_probes_legacy_migration")
 
 
 def ensure_cycle_governor_schema(
@@ -312,6 +351,7 @@ def ensure_cycle_governor_schema(
     policy_version: str | None = None,
 ) -> None:
     connection.executescript(_SCHEMA)
+    _ensure_health_probe_schema(connection)
     configured_policy_version = policy_version or EvaluationCyclePolicy().version
     connection.execute(
         "INSERT OR IGNORE INTO unpublished_cycle_governor_state("
@@ -335,27 +375,6 @@ def ensure_cycle_governor_schema(
         if column not in cycle_columns:
             connection.execute(
                 f"ALTER TABLE unpublished_governed_cycles ADD COLUMN {column} {declaration}"
-            )
-    health_probe_columns = {
-        str(row[1])
-        for row in connection.execute(
-            "PRAGMA table_info(unpublished_route_health_probes)"
-        )
-    }
-    for column, declaration in (
-        (
-            "probe_state",
-            (
-                "TEXT NOT NULL DEFAULT 'TERMINAL' "
-                "CHECK(probe_state IN ('RESERVED','TERMINAL'))"
-            ),
-        ),
-        ("terminal_at", "TEXT"),
-    ):
-        if column not in health_probe_columns:
-            connection.execute(
-                "ALTER TABLE unpublished_route_health_probes "
-                f"ADD COLUMN {column} {declaration}"
             )
     connection.commit()
 
@@ -1074,7 +1093,7 @@ class DurableCycleGovernor:
             "bound_failure_reason": bound_failure_reason,
             "attempted_at": now_text,
             "probe_state": "RESERVED",
-            "outcome": "FAILED",
+            "outcome": None,
             "no_content_probe": True,
             "provider_dispatched": False,
         }
@@ -1134,7 +1153,7 @@ class DurableCycleGovernor:
                     now_text,
                     "RESERVED",
                     None,
-                    "FAILED",
+                    None,
                     0,
                     None,
                     canonical_json_bytes(reservation).decode(),

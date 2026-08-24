@@ -113,6 +113,48 @@ def test_fresh_store_binds_configured_conservative_policy(tmp_path: Path) -> Non
     assert governor.status().policy_version == policy.version
 
 
+def test_legacy_health_probe_rows_migrate_without_inventing_terminal_truth(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE unpublished_route_health_probes("
+        "probe_id TEXT PRIMARY KEY, route TEXT NOT NULL, "
+        "bound_failure_reason TEXT NOT NULL, attempted_at TEXT NOT NULL, "
+        "outcome TEXT NOT NULL CHECK(outcome IN ('PASSED','FAILED')), "
+        "provider_dispatched INTEGER NOT NULL CHECK(provider_dispatched IN (0,1)), "
+        "provider_receipt_reference TEXT, evidence_json TEXT NOT NULL, "
+        "evidence_digest TEXT NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO unpublished_route_health_probes VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            "probe-legacy",
+            "CONT",
+            "PROVIDER_CONFIGURATION_FAILURE",
+            "2026-08-24T00:00:00.000000Z",
+            "PASSED",
+            1,
+            "receipt://legacy",
+            "{}",
+            "sha256:legacy",
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    DurableCycleGovernor(str(path))
+
+    connection = sqlite3.connect(path)
+    migrated = connection.execute(
+        "SELECT probe_state, terminal_at, outcome FROM "
+        "unpublished_route_health_probes WHERE probe_id='probe-legacy'"
+    ).fetchone()
+    connection.close()
+    assert migrated == ("LEGACY_UNKNOWN", None, None)
+
+
 def test_long_cycle_has_no_fixed_rate_catch_up(tmp_path: Path) -> None:
     clocks = InjectedClocks(datetime(2026, 8, 24, tzinfo=UTC))
     governor = _governor(tmp_path / "unpublished.sqlite3", clocks)
@@ -520,14 +562,14 @@ def test_provider_health_probe_reservation_is_durable_before_dispatch(
     def interrupted_route() -> WriterRouteHealthProof:
         connection = sqlite3.connect(path)
         probe = connection.execute(
-            "SELECT probe_state, provider_dispatched FROM "
+            "SELECT probe_state, terminal_at, outcome, provider_dispatched FROM "
             "unpublished_route_health_probes"
         ).fetchone()
         last_probe_at = connection.execute(
             "SELECT last_probe_at FROM unpublished_route_circuits WHERE route='CONT'"
         ).fetchone()
         connection.close()
-        assert probe == ("RESERVED", 0)
+        assert probe == ("RESERVED", None, None, 0)
         assert last_probe_at == ("2026-08-24T01:00:00.000000Z",)
         raise KeyboardInterrupt
 
