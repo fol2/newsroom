@@ -16,6 +16,7 @@ from typing import Literal
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.editorial import StoryCandidateRecord
+from newsroom.control_plane.governed_context import GovernedContext
 
 EVID_012_POLICY_VERSION = "newsroom.evid-012.v7"
 GOVERNED_CLAIM_POLICY_VERSION = "newsroom.governed-claim.v7"
@@ -1131,6 +1132,7 @@ class EvidencePackage:
     integrity_result: str = "MISSING"
     explicit_exclusions: tuple[str, ...] = ()
     resolved_evidence_records: tuple[tuple[str, str], ...] = ()
+    admitted_context: GovernedContext | None = None
 
     def __post_init__(self) -> None:
         if not self.signal_ids or not self.lead_ids or not self.observation_digests:
@@ -1173,7 +1175,7 @@ class EvidencePackage:
 
     @property
     def digest(self) -> str:
-        return digest_bytes(
+        base_digest = digest_bytes(
             canonical_json_bytes(
                 {
                     "candidate_id": self.candidate_id,
@@ -1271,6 +1273,16 @@ class EvidencePackage:
                 }
             )
         )
+        if self.admitted_context is None:
+            return base_digest
+        return digest_bytes(
+            canonical_json_bytes(
+                {
+                    "base_evidence_package_digest": base_digest,
+                    "admitted_context": self.admitted_context.canonical_value(),
+                }
+            )
+        )
 
 
 def package_for(candidate: StoryCandidateRecord) -> EvidencePackage:
@@ -1288,6 +1300,7 @@ def package_for(candidate: StoryCandidateRecord) -> EvidencePackage:
             signal.observation_digest for signal in candidate.signals
         ),
         passages=passages,
+        admitted_context=candidate.governed_context,
     )
 
 
@@ -1529,6 +1542,7 @@ def _decode_governed_package(
             freshness_result=value["freshness_result"],
             integrity_result=value["integrity_result"],
             explicit_exclusions=tuple(value["explicit_exclusions"]),
+            admitted_context=base.admitted_context,
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return base

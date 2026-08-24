@@ -36,6 +36,7 @@ from newsroom.control_plane.editorial import (
     form_candidates,
 )
 from newsroom.control_plane.evidence import EvidencePackage, retained_package_for
+from newsroom.control_plane.governed_context import GovernedContext
 from newsroom.control_plane.graphiti import (
     GovernedRealGraphitiPort,
     GraphitiCycleResult,
@@ -95,6 +96,7 @@ from newsroom.control_plane.writer import (
     WriterPort,
     WriterRoute,
     WriterValidatorResult,
+    require_permitted_context,
     validate_writer_copy,
 )
 from newsroom.effective_revision import (
@@ -1733,6 +1735,7 @@ def _dispatch_writer(
     *,
     route: WriterRoute,
 ) -> WriterCopy:
+    require_permitted_context(candidate, package)
     dispatch = getattr(writer, "dispatch", None)
     if callable(dispatch):
         return cast(WriterCopy, dispatch(candidate, package, route=route))
@@ -1771,6 +1774,16 @@ def _run_write_loop(
     cycle_execution_id: str,
     writer_dispatch_fence: Callable[[], None] | None,
 ) -> _WriteLoopResult:
+    permitted: list[
+        tuple[StoryCandidateRecord, EvidencePackage, WriteAdmissionDecision]
+    ] = []
+    for candidate, package, decision in admitted:
+        try:
+            require_permitted_context(candidate, package)
+        except WriterDispatchError:
+            continue
+        permitted.append((candidate, package, decision))
+    admitted = tuple(permitted)
     duplicate = 0
     for candidate, package, decision in admitted:
         if decision.decision == "WRITE_READY" and has_candidate(
@@ -2274,6 +2287,10 @@ def run_cycle(
     max_graphiti_admissions: int = 100,
     evidence_package_builder: Callable[[StoryCandidateRecord], EvidencePackage]
     | None = None,
+    governed_context_builder: Callable[
+        [tuple[GroupedObservation, ...]], GovernedContext
+    ]
+    | None = None,
     max_write_ready_candidates: int = 5,
     max_writer_provider_dispatches: int = 5,
     max_writer_fallback_dispatches: int = 1,
@@ -2364,7 +2381,10 @@ def run_cycle(
     window_revisions = revisions_from(units)
     poll_observation_count = len(corpus_rows)
     feed_snapshot_item_count = sum(row.item_count for row in latest_rows)
-    candidates = form_candidates(observations)
+    candidates = form_candidates(
+        observations,
+        governed_context_builder=governed_context_builder,
+    )
     sources = len({row.source_id for row in latest_rows})
     unpublished = connect(unpublished_store)
     ensure_graphiti_event_schema(unpublished)

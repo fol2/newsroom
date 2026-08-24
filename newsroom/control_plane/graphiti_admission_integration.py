@@ -12,9 +12,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from newsroom.authority.auth import AuthenticationProof
-from newsroom.authority.canonical import digest_canonical
+from newsroom.authority.canonical import canonical_json_bytes, digest_canonical
 from newsroom.authority.editorial_relation_system import GovernedEditorialRelations
 from newsroom.authority.entity_system import GovernedEntityRecords
+from newsroom.control_plane.governed_context import (
+    AuthorityContextBinding,
+    GovernedAuthorityContext,
+)
 from newsroom.control_plane.graphiti_admission import (
     GraphitiAdmissionConsumerError,
     GraphitiAdmissionRequest,
@@ -22,21 +26,27 @@ from newsroom.control_plane.graphiti_admission import (
 )
 from newsroom.entities.models import (
     EntityMentionAdmissionRequest,
+    EntityResolutionDecision,
     EntityResolutionDecisionRequest,
     EntityResolutionProposalRequest,
 )
-from newsroom.entities.models import EntityResolutionDecision
 from newsroom.entities.types import (
+    CanonicalEntityLifecycle,
     EntityResolutionDecisionAction,
     EntityResolutionProposalId,
 )
 from newsroom.extraction.types import ExtractionProposalKind
 from newsroom.graphiti_adapter.admission import GraphitiProposalAdmissionAction
 from newsroom.relations.editorial_models import (
+    CanonicalEntityRelationEndpoint,
     EditorialRelationDecisionRequest,
     EditorialRelationProposalRequest,
+    endpoint_canonical_value,
 )
-from newsroom.relations.editorial_types import EditorialRelationDecisionAction
+from newsroom.relations.editorial_types import (
+    EditorialRelationAssertionLifecycle,
+    EditorialRelationDecisionAction,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,6 +358,227 @@ class ExistingGovernedGraphitiAdmissionAuthority:
             and tuple(current_names) == decision.resolved_endpoint_names
             and tuple(current_names) == request.proposed_endpoints
         )
+
+
+    def current_context(
+        self,
+        request: GraphitiAdmissionRequest,
+        decision: GraphitiGovernedDecision,
+    ) -> GovernedAuthorityContext | None:
+        """Hydrate the exact current authority behind one admitted receipt."""
+
+        if decision.action is not GraphitiProposalAdmissionAction.ADMIT:
+            return None
+        try:
+            if request.proposal.kind is ExtractionProposalKind.RELATION:
+                plan = self._relation_plan(
+                    request,
+                    GraphitiProposalAdmissionAction.ADMIT,
+                    f"graphiti-admit:{request.proposal_key}",
+                )
+                self._require_binding(
+                    request,
+                    digest=plan.graphiti_proposal_digest,
+                    local_id=plan.graphiti_proposal_local_id,
+                )
+                retained = self._relations.decision(
+                    plan.proposal_request.proposal_id,
+                    proof=self._proof,
+                )
+                if (
+                    retained is None
+                    or retained.action is not EditorialRelationDecisionAction.ACCEPT
+                    or str(retained.decision_id) != decision.decision_id
+                    or retained.authority_ledger_seq != decision.authority_ledger_seq
+                    or retained.assertion_id is None
+                ):
+                    return None
+                current = self._relations.current(
+                    retained.assertion_id,
+                    proof=self._proof,
+                )
+                assertion = current.assertion
+                version = self._relations.proposal_version(
+                    assertion.proposal_version_id,
+                    proof=self._proof,
+                )
+                endpoints_current = self.relation_endpoint_resolutions_current(
+                    request,
+                    decision,
+                )
+                endpoint_bindings: list[AuthorityContextBinding] = []
+                for endpoint in (assertion.subject, assertion.object):
+                    if not isinstance(endpoint, CanonicalEntityRelationEndpoint):
+                        endpoints_current = False
+                        continue
+                    preferred = self._entities.preferred(
+                        endpoint.entity_id,
+                        proof=self._proof,
+                    )
+                    endpoint_version = self._entities.entity_version(
+                        preferred.current_entity_version_id,
+                        proof=self._proof,
+                    )
+                    if not (
+                        preferred.entity_id == endpoint.entity_id
+                        and preferred.preferred_entity_id == endpoint.entity_id
+                        and preferred.current_entity_version_id
+                        == endpoint.entity_version_id
+                        and preferred.lifecycle is CanonicalEntityLifecycle.ACTIVE
+                        and endpoint_version.entity_id == endpoint.entity_id
+                        and endpoint_version.entity_version_id
+                        == endpoint.entity_version_id
+                        and endpoint_version.lifecycle
+                        is CanonicalEntityLifecycle.ACTIVE
+                    ):
+                        endpoints_current = False
+                    endpoint_bindings.append(
+                        AuthorityContextBinding(
+                            authority_kind="CANONICAL_ENTITY",
+                            authority_id=str(endpoint.entity_id),
+                            authority_version=str(endpoint_version.version_number),
+                        )
+                    )
+                currentness = (
+                    "CURRENT"
+                    if current.lifecycle is EditorialRelationAssertionLifecycle.ACTIVE
+                    and str(current.current_decision_id) == decision.decision_id
+                    and current.current_decision_version == retained.decision_version
+                    and endpoints_current
+                    else "STALE"
+                )
+                bindings = tuple(
+                    sorted(
+                        {
+                            *endpoint_bindings,
+                            AuthorityContextBinding(
+                                authority_kind="EDITORIAL_RELATION_ASSERTION",
+                                authority_id=str(assertion.assertion_id),
+                                authority_version=str(version.version_number),
+                            ),
+                            AuthorityContextBinding(
+                                authority_kind="EDITORIAL_RELATION_DECISION",
+                                authority_id=str(retained.decision_id),
+                                authority_version=str(retained.decision_version),
+                            ),
+                        },
+                        key=lambda item: (
+                            item.authority_kind,
+                            item.authority_id,
+                            item.authority_version,
+                        ),
+                    )
+                )
+                temporal = tuple(
+                    sorted(
+                        {
+                            "admitted_at": (
+                                None
+                                if assertion.admitted_at is None
+                                else assertion.admitted_at.to_text()
+                            ),
+                            **assertion.temporal_scope.canonical_value(),
+                        }.items()
+                    )
+                )
+                return GovernedAuthorityContext(
+                    bindings=bindings,
+                    admitted_temporal_fields=temporal,
+                    currentness_state=currentness,
+                    admitted_structured_value_json=canonical_json_bytes(
+                        {
+                            "authority_kind": "EDITORIAL_RELATION_ASSERTION",
+                            "assertion": {
+                                "assertion_id": str(assertion.assertion_id),
+                                "predicate": assertion.predicate.value,
+                                "subject": endpoint_canonical_value(
+                                    assertion.subject
+                                ),
+                                "object": endpoint_canonical_value(assertion.object),
+                                "statement": assertion.statement,
+                                "temporal_scope": (
+                                    assertion.temporal_scope.canonical_value()
+                                ),
+                                "uncertainty_codes": list(
+                                    assertion.uncertainty_codes
+                                ),
+                            },
+                        }
+                    ).decode(),
+                )
+
+            plan = self._entity_plan(
+                request,
+                GraphitiProposalAdmissionAction.ADMIT,
+                f"graphiti-admit:{request.proposal_key}",
+            )
+            self._require_binding(
+                request,
+                digest=plan.graphiti_proposal_digest,
+                local_id=plan.graphiti_proposal_local_id,
+            )
+            retained = self._entities.decision(
+                plan.proposal_request.proposal_id,
+                proof=self._proof,
+            )
+            if (
+                retained is None
+                or retained.action is not EntityResolutionDecisionAction.ACCEPT
+                or str(retained.decision_id) != decision.decision_id
+                or retained.authority_ledger_seq != decision.authority_ledger_seq
+                or retained.accepted_entity_id is None
+                or retained.accepted_entity_version_id is None
+            ):
+                return None
+            preferred = self._entities.preferred(
+                retained.accepted_entity_id,
+                proof=self._proof,
+            )
+            version = self._entities.entity_version(
+                preferred.current_entity_version_id,
+                proof=self._proof,
+            )
+            aliases = self._entities.aliases(
+                retained.accepted_entity_id,
+                limit=16,
+                proof=self._proof,
+            )
+            currentness = (
+                "CURRENT"
+                if version.entity_id == retained.accepted_entity_id
+                and preferred.entity_id == retained.accepted_entity_id
+                and preferred.preferred_entity_id == retained.accepted_entity_id
+                and preferred.lifecycle is CanonicalEntityLifecycle.ACTIVE
+                and version.lifecycle is CanonicalEntityLifecycle.ACTIVE
+                else "STALE"
+            )
+            return GovernedAuthorityContext(
+                bindings=(
+                    AuthorityContextBinding(
+                        authority_kind="CANONICAL_ENTITY",
+                        authority_id=str(retained.accepted_entity_id),
+                        authority_version=str(version.version_number),
+                    ),
+                    AuthorityContextBinding(
+                        authority_kind="ENTITY_RESOLUTION_DECISION",
+                        authority_id=str(retained.decision_id),
+                        authority_version=str(retained.decision_version),
+                    ),
+                ),
+                admitted_temporal_fields=(
+                    ("admitted_at", retained.recorded_at.to_text()),
+                ),
+                currentness_state=currentness,
+                admitted_structured_value_json=canonical_json_bytes(
+                    {
+                        "authority_kind": "CANONICAL_ENTITY",
+                        "aliases": [alias.canonical_value() for alias in aliases],
+                        "entity_version": version.canonical_value(),
+                    }
+                ).decode(),
+            )
+        except Exception:  # noqa: BLE001 - any authority read fault fails closed
+            return None
 
 
 __all__ = [

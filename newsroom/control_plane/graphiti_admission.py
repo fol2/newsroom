@@ -21,6 +21,7 @@ from newsroom.authority.canonical import (
     digest_canonical,
     validate_sha256_digest,
 )
+from newsroom.entities.types import EntityResolutionDecisionId
 from newsroom.extraction.models import ProposalDraft
 from newsroom.extraction.types import (
     EvidenceRange,
@@ -28,11 +29,9 @@ from newsroom.extraction.types import (
     ExtractionProposalKind,
     ProposalPredicateHint,
 )
-from newsroom.entities.types import EntityResolutionDecisionId
 from newsroom.graphiti_adapter.admission import GraphitiProposalAdmissionAction
 from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_WORKSPACE_GROUP
 from newsroom.projection.models import ProjectionGenerationId
-
 
 _TERMINAL_INGEST_OUTCOMES = frozenset({"COMPLETE", "PARTIAL"})
 _PROJECTABLE_KINDS = frozenset(
@@ -498,6 +497,12 @@ def _mapping_tuple(value: object, *, field: str) -> tuple[dict[str, object], ...
     return tuple(_mapping(item, field=f"{field} item") for item in value)
 
 
+def _exact_integer(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise GraphitiAdmissionConsumerError(f"{field} must be an exact integer")
+    return value
+
+
 def _parse_proposal(value: Mapping[str, object]) -> ProposalDraft:
     raw = dict(value)
     expected_keys = {
@@ -573,13 +578,15 @@ def _parse_proposal(value: Mapping[str, object]) -> ProposalDraft:
     return draft
 
 
-def _request_from_value(value: Mapping[str, object]) -> GraphitiAdmissionRequest:
+def graphiti_admission_request_from_value(
+    value: Mapping[str, object],
+) -> GraphitiAdmissionRequest:
     raw = dict(value)
     proposal_payload = _mapping(raw["proposal"], field="proposal")
     endpoints_raw = raw.get("proposed_endpoints")
     temporal_raw = raw.get("relation_temporal_bounds")
     return GraphitiAdmissionRequest(
-        queue_seq=int(raw["queue_seq"]),
+        queue_seq=_exact_integer(raw["queue_seq"], field="queue sequence"),
         proposal_key=str(raw["proposal_key"]),
         source_receipt_digest=str(raw["source_receipt_digest"]),
         proposal=_parse_proposal(proposal_payload),
@@ -607,7 +614,7 @@ def _request_from_value(value: Mapping[str, object]) -> GraphitiAdmissionRequest
     )
 
 
-def _decision_from_json(value: str) -> GraphitiGovernedDecision:
+def graphiti_governed_decision_from_json(value: str) -> GraphitiGovernedDecision:
     raw = _mapping(json.loads(value), field="retained admission decision")
     return GraphitiGovernedDecision(
         proposal_key=str(raw["proposal_key"]),
@@ -616,7 +623,9 @@ def _decision_from_json(value: str) -> GraphitiGovernedDecision:
         proposal_local_id=str(raw["proposal_local_id"]),
         action=GraphitiProposalAdmissionAction(str(raw["action"])),
         decision_id=str(raw["decision_id"]),
-        authority_ledger_seq=int(raw["authority_ledger_seq"]),
+        authority_ledger_seq=_exact_integer(
+            raw["authority_ledger_seq"], field="authority ledger sequence"
+        ),
         reason_code=str(raw["reason_code"]),
         authority_receipt_digest=str(raw["authority_receipt_digest"]),
         endpoint_resolution_decision_ids=tuple(
@@ -625,23 +634,29 @@ def _decision_from_json(value: str) -> GraphitiGovernedDecision:
         resolved_endpoint_names=tuple(
             str(item) for item in raw["resolved_endpoint_names"]  # type: ignore[union-attr]
         ),
-        provider_model_calls=int(raw["provider_model_calls"]),
+        provider_model_calls=_exact_integer(
+            raw["provider_model_calls"], field="provider model calls"
+        ),
     )
 
 
-def _projection_from_json(value: str) -> GraphitiProjectionReceipt:
+def graphiti_projection_receipt_from_json(value: str) -> GraphitiProjectionReceipt:
     raw = _mapping(json.loads(value), field="retained projection receipt")
     return GraphitiProjectionReceipt(
         proposal_key=str(raw["proposal_key"]),
         decision_id=str(raw["decision_id"]),
         effect_id=str(raw["effect_id"]),
-        authority_watermark=int(raw["authority_watermark"]),
+        authority_watermark=_exact_integer(
+            raw["authority_watermark"], field="projection authority watermark"
+        ),
         receipt_digest=str(raw["receipt_digest"]),
         projector_family_id=str(raw["projector_family_id"]),
         generation_id=str(raw["generation_id"]),
         schema_version=str(raw["schema_version"]),
         trust_scope=str(raw["trust_scope"]),
-        provider_model_calls=int(raw["provider_model_calls"]),
+        provider_model_calls=_exact_integer(
+            raw["provider_model_calls"], field="provider model calls"
+        ),
     )
 
 
@@ -1046,7 +1061,11 @@ class GraphitiAdmissionConsumer:
                 now,
             ),
         )
-        queue_seq = int(cursor.lastrowid)
+        if cursor.lastrowid is None:
+            raise GraphitiAdmissionConsumerError(
+                "Graphiti admission queue did not return an identity"
+            )
+        queue_seq = cursor.lastrowid
         request = GraphitiAdmissionRequest(
             queue_seq=queue_seq,
             proposal_key=mapped.proposal_key,
@@ -1139,7 +1158,7 @@ class GraphitiAdmissionConsumer:
                         json.loads(request_json),
                         field="queued admission request",
                     )
-                    request = _request_from_value(retained_request)
+                    request = graphiti_admission_request_from_value(retained_request)
                     if (
                         digest_bytes(canonical_json_bytes(retained_request))
                         != request_digest
@@ -1347,7 +1366,7 @@ class GraphitiAdmissionConsumer:
             "WHERE proposal_key=?",
             (proposal_key,),
         ).fetchone()
-        return None if row is None else _decision_from_json(str(row[0]))
+        return None if row is None else graphiti_governed_decision_from_json(str(row[0]))
 
     def _retain_decision(
         self,
@@ -1540,7 +1559,7 @@ class GraphitiAdmissionConsumer:
             if revoked >= limit:
                 break
             try:
-                request = _request_from_value(
+                request = graphiti_admission_request_from_value(
                     _mapping(
                         json.loads(str(request_json)),
                         field="queued admission request",
@@ -1548,7 +1567,7 @@ class GraphitiAdmissionConsumer:
                 )
                 if self._rights.is_current(request):
                     continue
-                decision = _decision_from_json(str(decision_json))
+                decision = graphiti_governed_decision_from_json(str(decision_json))
                 self._tombstone_projection(
                     proposal_key=str(proposal_key),
                     request=request,
@@ -1698,7 +1717,7 @@ class GraphitiAdmissionConsumer:
         expected_items: list[GraphitiProjectionReceipt] = []
         missing: list[str] = []
         for proposal_key, request_json, projection_json in rows:
-            _request_from_value(
+            graphiti_admission_request_from_value(
                 _mapping(
                     json.loads(str(request_json)),
                     field="queued admission request",
@@ -1707,7 +1726,7 @@ class GraphitiAdmissionConsumer:
             if projection_json is None:
                 missing.append(str(proposal_key))
                 continue
-            projection = _projection_from_json(str(projection_json))
+            projection = graphiti_projection_receipt_from_json(str(projection_json))
             if projection.generation_id != generation_id:
                 raise GraphitiAdmissionConsumerError(
                     "admitted projection receipt belongs to another generation"
@@ -1882,11 +1901,13 @@ def graphiti_admission_telemetry(
                 (str(reconciliation.get("generation_id") or ""),),
             )
         )
-        reconciled = rights_tombstone_failures == 0 and tuple(
-            reconciliation.get("actual_effect_ids", ())
-        ) == (
-            generation_effect_ids
-        ) and active_admitted == len(active_effect_ids)
+        actual_effect_ids = reconciliation.get("actual_effect_ids")
+        reconciled = (
+            rights_tombstone_failures == 0
+            and isinstance(actual_effect_ids, list)
+            and tuple(actual_effect_ids) == generation_effect_ids
+            and active_admitted == len(active_effect_ids)
+        )
     integrity_holds = int(
         connection.execute(
             "SELECT COUNT(*) FROM unpublished_graphiti_admission_receipt_failures"
@@ -1996,10 +2017,13 @@ __all__ = [
     "GraphitiAdmissionRequest",
     "GraphitiAdmissionTelemetry",
     "GraphitiGovernedDecision",
-    "GraphitiProjectionReconciliationReceipt",
     "GraphitiProjectionReceipt",
+    "GraphitiProjectionReconciliationReceipt",
     "GraphitiProjectionRequest",
     "GraphitiProposalAdmissionAction",
     "GraphitiRightsAuthority",
+    "graphiti_admission_request_from_value",
     "graphiti_admission_telemetry",
+    "graphiti_governed_decision_from_json",
+    "graphiti_projection_receipt_from_json",
 ]

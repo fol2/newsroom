@@ -18,6 +18,7 @@ from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.child_environment import unprivileged_child_environment
 from newsroom.control_plane.editorial import StoryCandidateRecord
 from newsroom.control_plane.evidence import EvidencePackage
+from newsroom.control_plane.governed_context import GovernedContextStatus
 from newsroom.control_plane.zh_hant import (
     contains_discourse_filler,
     contains_non_han_letter,
@@ -304,6 +305,44 @@ class CliProcessError(RuntimeError):
         self.provider_status = provider_status
 
 
+def require_permitted_context(
+    candidate: StoryCandidateRecord,
+    package: EvidencePackage,
+) -> None:
+    context = package.admitted_context
+    candidate_context = candidate.governed_context
+    if (context is None) != (candidate_context is None) or (
+        context is not None
+        and candidate_context is not None
+        and context.digest != candidate_context.digest
+    ):
+        raise WriterDispatchError(
+            "candidate and evidence governed context differ",
+            failure_class="CANDIDATE_LOCAL",
+            reason_code="GOVERNED_CONTEXT_DRIFT",
+        )
+    if context is not None and context.status is GovernedContextStatus.HOLD:
+        raise WriterDispatchError(
+            "admitted structured context is held",
+            failure_class="CANDIDATE_LOCAL",
+            reason_code="GOVERNED_CONTEXT_HELD",
+        )
+    if context is not None and (
+        context.stale or context.degraded or context.projection_gap_count != 0
+    ):
+        raise WriterDispatchError(
+            "admitted structured context is not current and gap-free",
+            failure_class="CANDIDATE_LOCAL",
+            reason_code="GOVERNED_CONTEXT_NOT_CURRENT",
+        )
+    if context is not None and not context.currency_consistent:
+        raise WriterDispatchError(
+            "admitted structured context currency differs from its items",
+            failure_class="CANDIDATE_LOCAL",
+            reason_code="GOVERNED_CONTEXT_CURRENCY_DRIFT",
+        )
+
+
 class WriterPort(Protocol):
     writer_id: str
 
@@ -330,6 +369,7 @@ class FixtureWriter:
     def write(
         self, candidate: StoryCandidateRecord, package: EvidencePackage
     ) -> WriterCopy:
+        require_permitted_context(candidate, package)
         headline_claim = next(
             claim for claim in package.governed_claims if claim.claim_role == "HEADLINE"
         )
@@ -375,9 +415,16 @@ def _prompt(candidate: StoryCandidateRecord, package: EvidencePackage) -> str:
         }
         for claim in package.governed_claims
     ]
+    admitted_context = (
+        None
+        if package.admitted_context is None
+        else package.admitted_context.canonical_value()
+    )
     return (
         f"{_PROMPT}\n題旨：{candidate.headline}\n"
         f"approved_governed_claims：{json.dumps(approved_claims, ensure_ascii=False)}"
+        "\npermitted_admitted_structured_context："
+        f"{json.dumps(admitted_context, ensure_ascii=False)}"
         "\n證據：\n" + "\n---\n".join(package.passages)
     )
 
@@ -999,6 +1046,7 @@ class CliChainWriter:
         *,
         route: WriterRoute,
     ) -> WriterCopy:
+        require_permitted_context(candidate, package)
         prompt = _prompt(candidate, package)
         invoke = self._primary if route == "PRIMARY" else self._fallback
         writer_id = (
