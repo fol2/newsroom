@@ -283,10 +283,24 @@ def _parse_utc(value: str) -> datetime:
 def assert_no_owner_emergency_stop(proving_store: str) -> None:
     """Fail closed unless the latest proving authority retains the stop gate PASS."""
 
-    connection = sqlite3.connect(proving_store)
-    apply_control_plane_sqlite_profile(connection, query_only=True)
+    with owner_emergency_stop_fence(proving_store):
+        pass
+
+
+@contextmanager
+def owner_emergency_stop_fence(proving_store: str) -> Iterator[None]:
+    """Hold the owner-stop authority stable across one provider dispatch."""
+
+    timeout_ms = max(1, int(_PROVING_FENCE_TIMEOUT_SECONDS * 1_000))
+    connection = sqlite3.connect(
+        proving_store, timeout=_PROVING_FENCE_TIMEOUT_SECONDS
+    )
+    apply_control_plane_sqlite_profile(
+        connection, wal=None, busy_timeout_ms=timeout_ms
+    )
     try:
         try:
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "WITH latest AS (SELECT run_id FROM proving_runs "
                 f"ORDER BY {_PROVING_RUN_LATEST_ORDER} LIMIT 1) "
@@ -296,10 +310,13 @@ def assert_no_owner_emergency_stop(proving_store: str) -> None:
             ).fetchone()
         except sqlite3.OperationalError as exc:
             raise VetoError("owner emergency stop authority is unavailable") from exc
+        if row != ("PASS",):
+            raise VetoError("owner emergency stop is active or unproved")
+        yield
     finally:
+        if connection.in_transaction:
+            connection.rollback()
         connection.close()
-    if row != ("PASS",):
-        raise VetoError("owner emergency stop is active or unproved")
 
 
 def _dispatch_valid_until(evaluated_at: datetime) -> str:
@@ -1969,6 +1986,7 @@ def _run_write_loop(
     selected_at: str,
     cycle_execution_id: str,
     writer_dispatch_fence: Callable[[], None] | None,
+    writer_owner_stop_fence: Callable[[], ContextManager[None]] | None,
     model_usage: ModelUsageService | None,
     clock: Callable[[], datetime],
 ) -> _WriteLoopResult:
@@ -2243,12 +2261,21 @@ def _run_write_loop(
             if model_usage is not None and usage_allocation is not None:
                 usage_dispatch_at = clock().astimezone(UTC)
             try:
-                copy = _dispatch_writer(
-                    writer,
-                    candidate,
-                    package,
-                    route=route,
-                )
+                if writer_owner_stop_fence is None:
+                    copy = _dispatch_writer(
+                        writer,
+                        candidate,
+                        package,
+                        route=route,
+                    )
+                else:
+                    with writer_owner_stop_fence():
+                        copy = _dispatch_writer(
+                            writer,
+                            candidate,
+                            package,
+                            route=route,
+                        )
                 if model_usage is not None and usage_allocation is not None:
                     model_usage.observe_transport(
                         invocation_id=usage_allocation.invocation_id,
@@ -2265,6 +2292,25 @@ def _run_write_loop(
                         ),
                     )
             except VetoError:
+                if model_usage is not None and usage_allocation is not None:
+                    _complete_writer_usage(
+                        model_usage,
+                        usage_allocation,
+                        outcome="VETOED_BEFORE_PROVIDER_DISPATCH",
+                        failure_class="OWNER_EMERGENCY_STOP",
+                        usage=None,
+                        dispatch_at=None,
+                        completed_at=clock().astimezone(UTC),
+                        provider_dispatched=False,
+                        policy=cast(InvocationEfficiencyPolicy, usage_policy),
+                    )
+                complete_writer_provider_attempt(
+                    unpublished,
+                    provider_attempt_id=provider_attempt_id,
+                    status="FAILED",
+                    reason_code="OWNER_EMERGENCY_STOP",
+                )
+                unpublished.commit()
                 raise
             except WriterDispatchError as exc:
                 if model_usage is not None and usage_allocation is not None:
@@ -2924,6 +2970,9 @@ def run_cycle(
             selected_at=_utc_text(admission_evaluated_at),
             cycle_execution_id=cycle_id,
             writer_dispatch_fence=exact_writer_dispatch_fence,
+            writer_owner_stop_fence=lambda: owner_emergency_stop_fence(
+                proving_store
+            ),
             model_usage=model_usage,
             clock=clock,
         )

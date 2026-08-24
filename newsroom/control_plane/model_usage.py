@@ -1499,7 +1499,8 @@ class ModelUsageService:
                 "SELECT a.invocation_id,a.allocated_at,a.workload_class,"
                 "(SELECT MIN(o.observed_at) FROM model_transport_observations o "
                 "WHERE o.invocation_id=a.invocation_id "
-                "AND o.state='DISPATCH_STARTED') "
+                "AND o.state='DISPATCH_STARTED'),"
+                "json_extract(a.record_json,'$.recovery_deadline_at') "
                 "FROM model_invocation_allocations a "
                 "LEFT JOIN model_invocation_terminals t ON t.invocation_id=a.invocation_id "
                 "WHERE t.invocation_id IS NULL "
@@ -1514,6 +1515,7 @@ class ModelUsageService:
             workload = WorkloadClass(str(row[2]))
             embedding = workload is WorkloadClass.GRAPHITI_EMBEDDING
             dispatch_at = _instant(str(row[3] or row[1]))
+            recovery_terminal_at = _instant(str(row[4]))
             terminal = InvocationTerminal.create(
                 invocation_id=str(row[0]),
                 outcome="RECOVERED_UNRESOLVED",
@@ -1521,19 +1523,30 @@ class ModelUsageService:
                 usage_status=UsageStatus.AMBIGUOUS,
                 components=UsageComponents(provenance="UNAVAILABLE"),
                 dispatch_at=dispatch_at,
-                completed_at=observed_at,
-                observed_at=observed_at,
+                completed_at=recovery_terminal_at,
+                observed_at=recovery_terminal_at,
                 od_011_reference=(
                     "OD-011:EVALUATION_GRAPHITI_EMBEDDING" if embedding else None
                 ),
                 subscription_cli_chat_not_cash_debited=not embedding,
             )
-            self.complete(terminal)
+            try:
+                self.complete(terminal)
+            except ModelUsageIntegrityError as exc:
+                if not self._terminal_exists(str(row[0])):
+                    raise
+                if "conflicting invocation terminal replay" not in str(exc):
+                    raise
+                continue
             recovered += 1
         connection = self._connection()
         try:
             envelope_rows = connection.execute(
-                "SELECT e.envelope_id FROM model_work_envelopes e "
+                "SELECT e.envelope_id,MAX(json_extract("
+                "a_deadline.record_json,'$.recovery_deadline_at')) "
+                "FROM model_work_envelopes e "
+                "JOIN model_invocation_allocations a_deadline "
+                "ON a_deadline.envelope_id=e.envelope_id "
                 "WHERE NOT EXISTS (SELECT 1 FROM model_work_outcomes w "
                 "WHERE w.envelope_id=e.envelope_id) "
                 "AND EXISTS (SELECT 1 FROM model_invocation_allocations a "
@@ -1546,27 +1559,61 @@ class ModelUsageService:
                 "WHERE a.envelope_id=e.envelope_id AND ("
                 "json_extract(a.record_json,'$.recovery_deadline_at') IS NULL OR "
                 "json_extract(a.record_json,'$.recovery_deadline_at')>?)) "
-                "ORDER BY e.envelope_id",
+                "GROUP BY e.envelope_id ORDER BY e.envelope_id",
                 (_utc_text(observed_at),),
             ).fetchall()
         finally:
             connection.close()
-        for (envelope_id,) in envelope_rows:
-            self.record_work_outcome(
-                envelope_id=str(envelope_id),
-                outcome="AMBIGUOUS_PROCESS_LOST_BEFORE_WORK_OUTCOME",
-                outcome_record_id=digest_canonical(
-                    {
-                        "envelope_id": str(envelope_id),
-                        "recovered_at": _utc_text(observed_at),
-                    }
-                ),
-                payload_digest=None,
-                terminal_at=observed_at,
-                stable_reason_codes=("PROCESS_LOST_BEFORE_WORK_OUTCOME",),
-            )
+        for envelope_id, raw_terminal_at in envelope_rows:
+            recovery_terminal_at = _instant(str(raw_terminal_at))
+            try:
+                self.record_work_outcome(
+                    envelope_id=str(envelope_id),
+                    outcome="AMBIGUOUS_PROCESS_LOST_BEFORE_WORK_OUTCOME",
+                    outcome_record_id=digest_canonical(
+                        {
+                            "envelope_id": str(envelope_id),
+                            "recovered_at": _utc_text(recovery_terminal_at),
+                        }
+                    ),
+                    payload_digest=None,
+                    terminal_at=recovery_terminal_at,
+                    stable_reason_codes=("PROCESS_LOST_BEFORE_WORK_OUTCOME",),
+                )
+            except ModelUsageIntegrityError as exc:
+                if not self._work_outcome_exists(str(envelope_id)):
+                    raise
+                if "conflicting model_work_outcomes replay" not in str(exc):
+                    raise
+                continue
             recovered += 1
         return recovered
+
+    def _terminal_exists(self, invocation_id: str) -> bool:
+        connection = self._connection()
+        try:
+            return (
+                connection.execute(
+                    "SELECT 1 FROM model_invocation_terminals WHERE invocation_id=?",
+                    (invocation_id,),
+                ).fetchone()
+                is not None
+            )
+        finally:
+            connection.close()
+
+    def _work_outcome_exists(self, envelope_id: str) -> bool:
+        connection = self._connection()
+        try:
+            return (
+                connection.execute(
+                    "SELECT 1 FROM model_work_outcomes WHERE envelope_id=?",
+                    (envelope_id,),
+                ).fetchone()
+                is not None
+            )
+        finally:
+            connection.close()
 
     def reconcile(
         self,
@@ -1682,7 +1729,6 @@ class ModelUsageService:
             elif (
                 not blocking_cause_on_canonical_route
                 and prior_route_state["state"] == "OPEN"
-                and prior_route_state.get("invocation_id") == invocation_id
             ):
                 self._append_route_state(
                     connection,
@@ -2668,6 +2714,25 @@ class ModelUsageService:
                     and row.get("usage_status") in {"REPORTED", "ESTIMATED"}
                 )
 
+            def productive_as_of_bucket(
+                row: dict[str, object], *, bucket_boundary: datetime = boundary
+            ) -> bool:
+                outcome_at = row.get("work_outcome_terminal_at")
+                if (
+                    not isinstance(outcome_at, str)
+                    or _instant(outcome_at) >= bucket_boundary
+                ):
+                    return False
+                return bool(
+                    bool(row.get("accepted_provider_attempt_id"))
+                    and row.get("provider_attempt_id")
+                    == row.get("accepted_provider_attempt_id")
+                    or str(row.get("work_outcome") or "").startswith(
+                        "GRAPHITI_SUCCESS"
+                    )
+                    or row.get("work_outcome") == "GRAPHITI_PARTIAL"
+                )
+
             writer.writerow(
                 {
                     "bucket_start_utc": cursor.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -2724,29 +2789,13 @@ class ModelUsageService:
                         int(row["total_tokens"])
                         for row in accounted
                         if _is_int(row.get("total_tokens"))
-                        and (
-                            bool(row.get("accepted_provider_attempt_id"))
-                            and row.get("provider_attempt_id")
-                            == row.get("accepted_provider_attempt_id")
-                            or str(row.get("work_outcome") or "").startswith(
-                                "GRAPHITI_SUCCESS"
-                            )
-                            or row.get("work_outcome") == "GRAPHITI_PARTIAL"
-                        )
+                        and productive_as_of_bucket(row)
                     ),
                     "no_result_tokens": sum(
                         int(row["total_tokens"])
                         for row in accounted
                         if _is_int(row.get("total_tokens"))
-                        and not (
-                            bool(row.get("accepted_provider_attempt_id"))
-                            and row.get("provider_attempt_id")
-                            == row.get("accepted_provider_attempt_id")
-                            or str(row.get("work_outcome") or "").startswith(
-                                "GRAPHITI_SUCCESS"
-                            )
-                            or row.get("work_outcome") == "GRAPHITI_PARTIAL"
-                        )
+                        and not productive_as_of_bucket(row)
                     ),
                 }
             )

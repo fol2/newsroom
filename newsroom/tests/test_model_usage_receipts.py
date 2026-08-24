@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -812,6 +813,37 @@ def test_restart_recovery_does_not_claim_a_live_invocation(tmp_path: Path) -> No
     ] == "REPORTED"
 
 
+def test_concurrent_recovery_is_idempotent_at_the_retained_deadline(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    service = ModelUsageService(str(path))
+    _envelope_value, _policy_value, allocation = _open_and_allocate(service)
+    service.observe_transport(
+        invocation_id=allocation.invocation_id,
+        observed_at=T0 + timedelta(seconds=2),
+        state="DISPATCH_STARTED",
+        evidence_digest=_digest({"concurrent": True}),
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = tuple(
+            pool.map(
+                lambda seconds: ModelUsageService(str(path)).recover_unresolved(
+                    observed_at=T0 + timedelta(seconds=seconds)
+                ),
+                (40, 45),
+            )
+        )
+
+    assert sum(results) >= 2
+    assert service_row_count(path, "model_invocation_terminals") == 1
+    assert service_row_count(path, "model_work_outcomes") == 1
+    leaf = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"][0]
+    assert leaf["completed_at"] == "2026-08-24T10:00:31.000000Z"
+    assert leaf["work_outcome_terminal_at"] == "2026-08-24T10:00:31.000000Z"
+
+
 def test_later_provider_telemetry_appends_reconciliation_without_editing_history(
     tmp_path: Path,
 ) -> None:
@@ -932,7 +964,7 @@ def test_reconciliation_closes_only_after_every_route_uncertainty_is_resolved(
         request="request-2",
     )
     service.allocate(second, owner_emergency_stop=False)
-    for ordinal, allocation in enumerate((first, second), start=1):
+    for ordinal, allocation in enumerate((second, first), start=1):
         service.complete(
             InvocationTerminal.create(
                 invocation_id=allocation.invocation_id,
@@ -1141,6 +1173,30 @@ def test_work_outcome_is_visible_in_its_own_cross_bucket_window(
     )
     assert second["accepted_payload_count"] == 1
     assert buckets[0]["minted_reported"] == "1"
+    short_rows = list(
+        csv.DictReader(
+            io.StringIO(
+                service.export_bucket_csv(
+                    start=T0,
+                    end=T0 + timedelta(minutes=5),
+                )
+            )
+        )
+    )
+    long_rows = list(
+        csv.DictReader(
+            io.StringIO(
+                service.export_bucket_csv(
+                    start=T0,
+                    end=T0 + timedelta(minutes=10),
+                )
+            )
+        )
+    )
+    assert short_rows[0]["productive_tokens"] == long_rows[0]["productive_tokens"]
+    assert short_rows[0]["no_result_tokens"] == long_rows[0]["no_result_tokens"]
+    assert short_rows[0]["productive_tokens"] == "0"
+    assert short_rows[0]["no_result_tokens"] == "125"
 
 
 def test_deterministic_csv_export_reconciles_leaf_count_and_uncertainty(
