@@ -85,7 +85,7 @@ CONT_FALLBACK_PROVIDER = "cursor-agent-cli"
 CONT_FALLBACK_ROUTE = "CONT_FALLBACK"
 CONT_FALLBACK_MODEL = "cursor-pinned"
 CONT_FALLBACK_REASONING = "provider-default"
-CONT_CONTEXT_MANIFEST_SCHEMA_VERSION = "newsroom.cont-writer.context-manifest.v1"
+CONT_CONTEXT_MANIFEST_SCHEMA_VERSION = "newsroom.cont-writer.context-manifest.v2"
 _TRUSTED_GIT_EXECUTABLE = "/usr/bin/git"
 _HERMETIC_ENVIRONMENT_KEYS = frozenset(
     {
@@ -417,6 +417,7 @@ class WriterInvocationManifest:
     working_directory_inventory_digest: str
     disabled_capabilities: tuple[str, ...]
     evidence_package_digest: str
+    evidence_package_bytes: int
     one_turn: bool
     exact_input: bool
     skills_enabled: bool
@@ -472,6 +473,7 @@ class WriterInvocationManifest:
             ),
             "disabled_capabilities": list(self.disabled_capabilities),
             "evidence_package_digest": self.evidence_package_digest,
+            "evidence_package_bytes": self.evidence_package_bytes,
             "one_turn": self.one_turn,
             "exact_input": self.exact_input,
             "skills_enabled": self.skills_enabled,
@@ -824,7 +826,7 @@ class FixtureWriter:
         )
 
 
-def _prompt(candidate: StoryCandidateRecord, package: EvidencePackage) -> str:
+def _writer_evidence_value(package: EvidencePackage) -> dict[str, object]:
     approved_claims = [
         {
             "governed_claim_id": claim.claim_id,
@@ -848,11 +850,21 @@ def _prompt(candidate: StoryCandidateRecord, package: EvidencePackage) -> str:
         if package.admitted_context is None
         else package.admitted_context.canonical_value()
     )
+    return {
+        "approved_governed_claims": approved_claims,
+        "permitted_admitted_structured_context": admitted_context,
+        "passages": list(package.passages),
+    }
+
+
+def _prompt(candidate: StoryCandidateRecord, package: EvidencePackage) -> str:
+    evidence = _writer_evidence_value(package)
     return (
         f"{_PROMPT}\n題旨：{candidate.headline}\n"
-        f"approved_governed_claims：{json.dumps(approved_claims, ensure_ascii=False)}"
+        "approved_governed_claims："
+        f"{json.dumps(evidence['approved_governed_claims'], ensure_ascii=False)}"
         "\npermitted_admitted_structured_context："
-        f"{json.dumps(admitted_context, ensure_ascii=False)}"
+        f"{json.dumps(evidence['permitted_admitted_structured_context'], ensure_ascii=False)}"
         "\n證據：\n" + "\n---\n".join(package.passages)
     )
 
@@ -1650,6 +1662,9 @@ class CliChainWriter:
         prompt_bytes = prompt.encode("utf-8")
         system_bytes = CONT_WRITER_SYSTEM_INSTRUCTION.encode("utf-8")
         schema_bytes = canonical_json_bytes(WRITER_SCHEMA)
+        evidence_package_bytes = canonical_json_bytes(
+            _writer_evidence_value(package)
+        )
         implementation_revision, implementation_worktree_clean = (
             cont_writer_implementation_identity()
         )
@@ -1720,6 +1735,7 @@ class CliChainWriter:
             ),
             disabled_capabilities=disabled_capabilities,
             evidence_package_digest=package.digest,
+            evidence_package_bytes=len(evidence_package_bytes),
             one_turn=True,
             exact_input=True,
             skills_enabled=False,

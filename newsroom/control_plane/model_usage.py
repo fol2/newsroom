@@ -1153,6 +1153,11 @@ class ModelUsageService:
         )
         if any(not isinstance(retained.get(field), str) for field in required_text):
             raise ModelUsageAdmissionError("context manifest identity is incomplete")
+        evidence_package_bytes = retained.get("evidence_package_bytes")
+        if not _is_int(evidence_package_bytes) or evidence_package_bytes <= 0:
+            raise ModelUsageAdmissionError(
+                "context manifest Evidence Package size is invalid"
+            )
         zero_counts = (
             "prior_message_count",
             "skill_count",
