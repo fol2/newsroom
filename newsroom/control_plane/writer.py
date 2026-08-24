@@ -335,6 +335,12 @@ def require_permitted_context(
             failure_class="CANDIDATE_LOCAL",
             reason_code="GOVERNED_CONTEXT_NOT_CURRENT",
         )
+    if context is not None and not context.currency_consistent:
+        raise WriterDispatchError(
+            "admitted structured context currency differs from its items",
+            failure_class="CANDIDATE_LOCAL",
+            reason_code="GOVERNED_CONTEXT_CURRENCY_DRIFT",
+        )
 
 
 class WriterPort(Protocol):

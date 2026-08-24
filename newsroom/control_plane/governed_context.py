@@ -329,6 +329,10 @@ class GovernedContext:
             raise ValueError(
                 "ready or empty governed context must be current and gap-free"
             )
+        if not self.currency_consistent:
+            raise ValueError(
+                "ready governed context currency differs from its admitted items"
+            )
         measured_bytes, measured_tokens = _measure_context(
             self._canonical_value_without_measurement()
         )
@@ -347,6 +351,26 @@ class GovernedContext:
     @property
     def digest(self) -> str:
         return digest_bytes(canonical_json_bytes(self.canonical_value()))
+
+    @property
+    def currency_consistent(self) -> bool:
+        if self.status is not GovernedContextStatus.READY:
+            return True
+        return bool(
+            self.projection_generation_id
+            and self.contiguous_projection_watermark is not None
+            and self.contiguous_projection_watermark > 0
+            and all(
+                item.projection_generation_id == self.projection_generation_id
+                and item.contiguous_projection_watermark
+                == self.contiguous_projection_watermark
+                and item.projection_gap_count == self.projection_gap_count
+                and item.oldest_lag_seconds == self.oldest_lag_seconds
+                and item.stale == self.stale
+                and item.degraded == self.degraded
+                for item in self.items
+            )
+        )
 
     def _canonical_value_without_measurement(self) -> dict[str, object]:
         return {

@@ -332,6 +332,22 @@ def test_admitted_context_survives_hypothesis_candidate_evidence_and_cont(
     assert "Alice Example" in prompts[0]
     assert "graphiti_workspace" not in prompts[0]
 
+    assert candidate.governed_context is not None
+    object.__setattr__(
+        candidate.governed_context,
+        "projection_generation_id",
+        "wrong-generation",
+    )
+    with pytest.raises(WriterDispatchError, match="currency differs") as drift:
+        CliChainWriter(primary=write).dispatch(
+            candidate,
+            package,
+            route="PRIMARY",
+        )
+
+    assert drift.value.reason_code == "GOVERNED_CONTEXT_CURRENCY_DRIFT"
+    assert len(prompts) == 1
+
 
 def test_held_and_rejected_proposals_produce_zero_context(tmp_path) -> None:
     for action in (
@@ -486,6 +502,8 @@ def test_context_size_is_bounded_and_replay_stable(tmp_path) -> None:
     assert first.canonical_value() == second.canonical_value()
     with pytest.raises(ValueError, match="current and gap-free"):
         replace(first, stale=True)
+    with pytest.raises(ValueError, match="currency differs"):
+        replace(first, projection_generation_id="wrong-generation")
     assert bounded.status is GovernedContextStatus.HOLD
     assert bounded.reason_code == "ADMITTED_CONTEXT_SIZE_BOUND_EXCEEDED"
     assert bounded.items == ()
