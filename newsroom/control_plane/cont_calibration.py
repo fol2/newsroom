@@ -17,6 +17,12 @@ from newsroom.control_plane.model_usage import (
 from newsroom.control_plane.writer import (
     CONT_CONTEXT_MANIFEST_SCHEMA_VERSION,
     CONT_DISABLED_CAPABILITIES,
+    CONT_FALLBACK_COMMAND_FLAGS,
+    CONT_FALLBACK_CONFIG_IDENTITY,
+    CONT_FALLBACK_MODEL,
+    CONT_FALLBACK_PROVIDER,
+    CONT_FALLBACK_REASONING,
+    CONT_FALLBACK_ROUTE,
     CONT_PRIMARY_COMMAND_FLAGS,
     CONT_PRIMARY_CONFIG_IDENTITY,
     CONT_PRIMARY_MODEL,
@@ -26,6 +32,7 @@ from newsroom.control_plane.writer import (
     CONT_WRITER_CONTEXT_IDENTITY,
     CONT_WRITER_OUTPUT_SCHEMA_DIGEST,
     CONT_WRITER_PROMPT_CONTRACT_VERSION,
+    CURSOR_COMMAND_SEMANTIC_VERSION,
     GROK_COMMAND_SEMANTIC_VERSION,
 )
 
@@ -261,9 +268,13 @@ def assess_cont_calibration(
     )
     policy_clean = all(row.get("policy_breach") is None for row in dispatched_rows)
     no_result_tokens = (
-        sum(total_tokens) - sum(accepted_token_totals)
+        sum(
+            _integer(row, "total_tokens") or 0
+            for row in dispatched_rows
+            if row.get("invocation_outcome") != "ACCEPTED_OUTPUT"
+            or row.get("work_outcome") != "ACCEPTED"
+        )
         if complete_total_telemetry
-        and len(accepted_token_totals) == len(accepted)
         else None
     )
     p50_context = _median_int(contexts)
@@ -276,43 +287,76 @@ def assess_cont_calibration(
         }
     )
 
-    manifest_controls_pass = all(
-        isinstance(row.get("context_manifest"), dict)
-        and all(
-            row["context_manifest"].get(field) == 0  # type: ignore[union-attr]
-            for field in (
-                "prior_message_count",
-                "skill_count",
-                "tool_count",
-                "mcp_server_count",
-                "mcp_tool_count",
+    def manifest_controls_match(row: Mapping[str, object]) -> bool:
+        workload = row.get("workload_class")
+        if workload == WorkloadClass.CONT_WRITER_PRIMARY.value:
+            command_version = GROK_COMMAND_SEMANTIC_VERSION
+            command_flags = CONT_PRIMARY_COMMAND_FLAGS
+            config_identity = CONT_PRIMARY_CONFIG_IDENTITY
+        elif workload == WorkloadClass.CONT_WRITER_FALLBACK.value:
+            command_version = CURSOR_COMMAND_SEMANTIC_VERSION
+            command_flags = CONT_FALLBACK_COMMAND_FLAGS
+            config_identity = CONT_FALLBACK_CONFIG_IDENTITY
+        else:
+            return False
+        manifest = row.get("context_manifest")
+        return (
+            isinstance(manifest, dict)
+            and all(
+                manifest.get(field) == 0
+                for field in (
+                    "prior_message_count",
+                    "skill_count",
+                    "tool_count",
+                    "mcp_server_count",
+                    "mcp_tool_count",
+                )
             )
+            and manifest.get("one_turn") is True
+            and manifest.get("exact_input") is True
+            and manifest.get("skills_enabled") is False
+            and manifest.get("tools_enabled") is False
+            and manifest.get("mcp_enabled") is False
+            and manifest.get("implementation_revision") == implementation_revision
+            and manifest.get("implementation_worktree_clean") is True
+            and manifest.get("schema_version")
+            == CONT_CONTEXT_MANIFEST_SCHEMA_VERSION
+            and manifest.get("command_semantic_version") == command_version
+            and tuple(manifest.get("command_flags", ())) == command_flags
+            and manifest.get("config_identity") == config_identity
+            and tuple(manifest.get("disabled_capabilities", ()))
+            == CONT_DISABLED_CAPABILITIES
         )
-        and row["context_manifest"].get("one_turn") is True  # type: ignore[union-attr]
-        and row["context_manifest"].get("exact_input") is True  # type: ignore[union-attr]
-        and row["context_manifest"].get("skills_enabled") is False  # type: ignore[union-attr]
-        and row["context_manifest"].get("tools_enabled") is False  # type: ignore[union-attr]
-        and row["context_manifest"].get("mcp_enabled") is False  # type: ignore[union-attr]
-        and row["context_manifest"].get("implementation_revision")  # type: ignore[union-attr]
-        == implementation_revision
-        and row["context_manifest"].get("implementation_worktree_clean") is True  # type: ignore[union-attr]
-        and row["context_manifest"].get("schema_version")  # type: ignore[union-attr]
-        == CONT_CONTEXT_MANIFEST_SCHEMA_VERSION
-        and row["context_manifest"].get("command_semantic_version")  # type: ignore[union-attr]
-        == GROK_COMMAND_SEMANTIC_VERSION
-        and tuple(row["context_manifest"].get("command_flags", ()))  # type: ignore[union-attr]
-        == CONT_PRIMARY_COMMAND_FLAGS
-        and tuple(row["context_manifest"].get("disabled_capabilities", ()))  # type: ignore[union-attr]
-        == CONT_DISABLED_CAPABILITIES
-        for row in dispatched_rows
+
+    manifest_controls_pass = all(
+        manifest_controls_match(row) for row in dispatched_rows
     )
-    exact_route_pins = all(
-        row.get("provider") == CONT_PRIMARY_PROVIDER
-        and row.get("route") == CONT_PRIMARY_ROUTE
-        and row.get("model") == CONT_PRIMARY_MODEL
-        and row.get("reasoning") == CONT_PRIMARY_REASONING
-        for row in primary_rows
-    )
+
+    def route_pins_match(row: Mapping[str, object]) -> bool:
+        if row.get("workload_class") == WorkloadClass.CONT_WRITER_PRIMARY.value:
+            expected = (
+                CONT_PRIMARY_PROVIDER,
+                CONT_PRIMARY_ROUTE,
+                CONT_PRIMARY_MODEL,
+                CONT_PRIMARY_REASONING,
+            )
+        elif row.get("workload_class") == WorkloadClass.CONT_WRITER_FALLBACK.value:
+            expected = (
+                CONT_FALLBACK_PROVIDER,
+                CONT_FALLBACK_ROUTE,
+                CONT_FALLBACK_MODEL,
+                CONT_FALLBACK_REASONING,
+            )
+        else:
+            return False
+        return (
+            row.get("provider"),
+            row.get("route"),
+            row.get("model"),
+            row.get("reasoning"),
+        ) == expected
+
+    exact_route_pins = all(route_pins_match(row) for row in dispatched_rows)
     primary_once = all(
         len(
             [
