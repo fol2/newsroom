@@ -174,6 +174,7 @@ class MeteredOpenAIEmbedder:
                 input_data=input_data,
             )
         )
+        transport_started = False
         try:
             if self._invocation_observer is not None:
                 dispatch_started = getattr(
@@ -183,16 +184,15 @@ class MeteredOpenAIEmbedder:
                 )
                 if callable(dispatch_started):
                     dispatch_started(observer_token)
+            transport_started = True
             response = await self._delegate.client.embeddings.create(
                 input=input_data,
                 model=self._delegate.config.embedding_model,
             )
         except asyncio.CancelledError:
             if self._invocation_observer is not None:
-                binding = self._invocation_observer.after_embedding_invocation(
-                    observer_token,
-                    outcome="CANCELLED",
-                    usage={
+                usage = (
+                    {
                         "usage_basis": "UNREPORTED",
                         "input_tokens": None,
                         "output_tokens": None,
@@ -200,17 +200,36 @@ class MeteredOpenAIEmbedder:
                         "cached_write_tokens": None,
                         "reasoning_tokens": None,
                         "total_tokens": None,
-                    },
+                    }
+                    if transport_started
+                    else {
+                        "usage_basis": "NO_PROVIDER_CALL",
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cached_read_tokens": 0,
+                        "cached_write_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "total_tokens": 0,
+                    }
+                )
+                binding = self._invocation_observer.after_embedding_invocation(
+                    observer_token,
+                    outcome="CANCELLED",
+                    usage=usage,
+                )
+                request.update(
+                    {
+                        "outcome": "CANCELLED",
+                        "usage_basis": usage["usage_basis"],
+                    }
                 )
                 if binding is not None:
                     request.update(binding)
             raise
         except Exception:
             if self._invocation_observer is not None:
-                binding = self._invocation_observer.after_embedding_invocation(
-                    observer_token,
-                    outcome="FAILED",
-                    usage={
+                usage = (
+                    {
                         "usage_basis": "UNREPORTED",
                         "input_tokens": None,
                         "output_tokens": None,
@@ -218,7 +237,25 @@ class MeteredOpenAIEmbedder:
                         "cached_write_tokens": None,
                         "reasoning_tokens": None,
                         "total_tokens": None,
-                    },
+                    }
+                    if transport_started
+                    else {
+                        "usage_basis": "NO_PROVIDER_CALL",
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cached_read_tokens": 0,
+                        "cached_write_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "total_tokens": 0,
+                    }
+                )
+                binding = self._invocation_observer.after_embedding_invocation(
+                    observer_token,
+                    outcome="FAILED",
+                    usage=usage,
+                )
+                request.update(
+                    {"outcome": "FAILED", "usage_basis": usage["usage_basis"]}
                 )
                 if binding is not None:
                     request.update(binding)
