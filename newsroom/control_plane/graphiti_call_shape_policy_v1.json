@@ -118,7 +118,6 @@
       "distinct_internal_request_count": 3
     }
   ],
-  "evidence_digest": "sha256:c3eecc519f2475471fabbe81df1c5f319b9d795f8918d832c7d28fcdea72a76e",
   "qualified_routes": [
     {
       "leaf_class": "PRIMARY",
@@ -137,6 +136,9 @@
         "--mode=ask",
         "--output-format=json",
         "--sandbox=enabled",
+        "--disable-tools",
+        "--disable-mcp",
+        "--max-output-tokens=REQUEST_MAX_TOKENS",
         "--trust",
         "--model=composer-2.5"
       ],
@@ -150,7 +152,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "newsroom-graphiti-adapter-issue-769-v1"
+      "implementation_revision": "sha256:492b1498beaf0f7d5e24479cec3c366e5dea5675f4a668abacc00bf8dafcd3fa"
     },
     {
       "leaf_class": "FALLBACK",
@@ -174,6 +176,7 @@
         "--deny=*",
         "--no-plan",
         "--max-turns=1",
+        "--max-output-tokens=REQUEST_MAX_TOKENS",
         "--no-subagents",
         "--reasoning-effort=medium",
         "--output-format=streaming-json"
@@ -188,7 +191,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "newsroom-graphiti-adapter-issue-769-v1"
+      "implementation_revision": "sha256:492b1498beaf0f7d5e24479cec3c366e5dea5675f4a668abacc00bf8dafcd3fa"
     },
     {
       "leaf_class": "EMBEDDING",
@@ -216,7 +219,125 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "newsroom-graphiti-adapter-issue-769-v1"
+      "implementation_revision": "sha256:6f186682715adce996b0ebcbee6458d6e65a7d61297df1800529c0d6dabfe034"
     }
-  ]
+  ],
+  "qualified_request_shapes": [
+    {
+      "leaf_class": "PRIMARY",
+      "semantic_request_class": "ExtractedEntities",
+      "response_schema_identity": "ExtractedEntities",
+      "response_schema_digest": "sha256:56db744fac017edf7409fa6a479c6eed651daa643b9ee1db0e47fdfa37f44428"
+    },
+    {
+      "leaf_class": "PRIMARY",
+      "semantic_request_class": "NodeResolutions",
+      "response_schema_identity": "NodeResolutions",
+      "response_schema_digest": "sha256:a3b12c1524421ad9265a089e7745b144d3e18db14101788dec47d236b2c1c026"
+    },
+    {
+      "leaf_class": "PRIMARY",
+      "semantic_request_class": "ExtractedEdges",
+      "response_schema_identity": "ExtractedEdges",
+      "response_schema_digest": "sha256:79024a7c300a14757f48390ac073c97d4ba19a931cad1bb349aff889be29f59a"
+    },
+    {
+      "leaf_class": "PRIMARY",
+      "semantic_request_class": "EdgeTimestamps",
+      "response_schema_identity": "EdgeTimestamps",
+      "response_schema_digest": "sha256:9c69ff91808d5c41b6690fe761be284f593e1c3dbb13f1289e2344cffb0244bc"
+    },
+    {
+      "leaf_class": "PRIMARY",
+      "semantic_request_class": "EdgeDuplicate",
+      "response_schema_identity": "EdgeDuplicate",
+      "response_schema_digest": "sha256:f5fb4d979abb8851ba013e9b12f52c627a4cb1a71ec47c50c5f40a38289329ef"
+    },
+    {
+      "leaf_class": "PRIMARY",
+      "semantic_request_class": "SummarizedEntities",
+      "response_schema_identity": "SummarizedEntities",
+      "response_schema_digest": "sha256:ba64b6b66be61061612a1ed85d55b5bee7ba47b33d3b30a685bb7ca0e9899d8a"
+    },
+    {
+      "leaf_class": "PRIMARY",
+      "semantic_request_class": "CombinedExtraction",
+      "response_schema_identity": "CombinedExtraction",
+      "response_schema_digest": "sha256:f82d136b470ba9247cf3c5c766a4f8711d56ba0277d6109f2ce3b08b0ed61ea9"
+    },
+    {
+      "leaf_class": "PRIMARY",
+      "semantic_request_class": "BatchEdgeTimestamps",
+      "response_schema_identity": "BatchEdgeTimestamps",
+      "response_schema_digest": "sha256:e0381500464c5f27913952734855f99022ec7e860243fe8ccae5ff1344c522ef"
+    },
+    {
+      "leaf_class": "FALLBACK",
+      "semantic_request_class": "ExtractedEntities",
+      "response_schema_identity": "ExtractedEntities",
+      "response_schema_digest": "sha256:56db744fac017edf7409fa6a479c6eed651daa643b9ee1db0e47fdfa37f44428"
+    },
+    {
+      "leaf_class": "FALLBACK",
+      "semantic_request_class": "NodeResolutions",
+      "response_schema_identity": "NodeResolutions",
+      "response_schema_digest": "sha256:a3b12c1524421ad9265a089e7745b144d3e18db14101788dec47d236b2c1c026"
+    },
+    {
+      "leaf_class": "FALLBACK",
+      "semantic_request_class": "ExtractedEdges",
+      "response_schema_identity": "ExtractedEdges",
+      "response_schema_digest": "sha256:79024a7c300a14757f48390ac073c97d4ba19a931cad1bb349aff889be29f59a"
+    },
+    {
+      "leaf_class": "FALLBACK",
+      "semantic_request_class": "EdgeTimestamps",
+      "response_schema_identity": "EdgeTimestamps",
+      "response_schema_digest": "sha256:9c69ff91808d5c41b6690fe761be284f593e1c3dbb13f1289e2344cffb0244bc"
+    },
+    {
+      "leaf_class": "FALLBACK",
+      "semantic_request_class": "EdgeDuplicate",
+      "response_schema_identity": "EdgeDuplicate",
+      "response_schema_digest": "sha256:f5fb4d979abb8851ba013e9b12f52c627a4cb1a71ec47c50c5f40a38289329ef"
+    },
+    {
+      "leaf_class": "FALLBACK",
+      "semantic_request_class": "SummarizedEntities",
+      "response_schema_identity": "SummarizedEntities",
+      "response_schema_digest": "sha256:ba64b6b66be61061612a1ed85d55b5bee7ba47b33d3b30a685bb7ca0e9899d8a"
+    },
+    {
+      "leaf_class": "FALLBACK",
+      "semantic_request_class": "CombinedExtraction",
+      "response_schema_identity": "CombinedExtraction",
+      "response_schema_digest": "sha256:f82d136b470ba9247cf3c5c766a4f8711d56ba0277d6109f2ce3b08b0ed61ea9"
+    },
+    {
+      "leaf_class": "FALLBACK",
+      "semantic_request_class": "BatchEdgeTimestamps",
+      "response_schema_identity": "BatchEdgeTimestamps",
+      "response_schema_digest": "sha256:e0381500464c5f27913952734855f99022ec7e860243fe8ccae5ff1344c522ef"
+    },
+    {
+      "leaf_class": "EMBEDDING",
+      "semantic_request_class": "EMBEDDING_VECTOR",
+      "response_schema_identity": "embedding-vector",
+      "response_schema_digest": "sha256:61f33d3eb95aa8344239bebead9b8f7ef06ecb84e4db5950c418ec6ea53c5c6f"
+    },
+    {
+      "leaf_class": "PRIMARY",
+      "semantic_request_class": "UNSTRUCTURED",
+      "response_schema_identity": "UNSTRUCTURED",
+      "response_schema_digest": "sha256:9a654d3f546e144a1d829e0939c44f24fded717777651e6ebe82538161c8dc22"
+    },
+    {
+      "leaf_class": "FALLBACK",
+      "semantic_request_class": "UNSTRUCTURED",
+      "response_schema_identity": "UNSTRUCTURED",
+      "response_schema_digest": "sha256:9a654d3f546e144a1d829e0939c44f24fded717777651e6ebe82538161c8dc22"
+    }
+  ],
+  "evidence_digest": "sha256:09bea34ebdf0aae92f8079fe69caaf7a73d825a55d0914f5ff56b0ece4109b0d",
+  "canonical_digest": "sha256:aef7ca30bd6850d6a882dff7eef191b66a3e1b55a0485cbea27500fb801fa27e"
 }

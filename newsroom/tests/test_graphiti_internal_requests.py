@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from graphiti_core.prompts.extract_edges import ExtractedEdges
+from graphiti_core.prompts.extract_nodes import ExtractedEntities
 
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane.graphiti import GraphitiModelUsageObserver
@@ -36,6 +39,8 @@ from newsroom.graphiti_adapter.embedding_meter import MeteredOpenAIEmbedder
 from newsroom.graphiti_adapter.usage_meter import cursor_cli_usage
 
 T0 = datetime(2026, 8, 24, 20, 0, tzinfo=UTC)
+EXTRACTED_ENTITIES_SCHEMA = json.dumps(ExtractedEntities.model_json_schema())
+EXTRACTED_EDGES_SCHEMA = json.dumps(ExtractedEdges.model_json_schema())
 QUALIFIED_ROUTES = (
     {
         "leaf_class": "PRIMARY",
@@ -86,6 +91,31 @@ QUALIFIED_ROUTES = (
         "max_total_tokens": 4_096,
     },
 )
+QUALIFIED_REQUEST_SHAPES = (
+    {
+        "leaf_class": "PRIMARY",
+        "semantic_request_class": "ExtractedEntities",
+        "response_schema_identity": "ExtractedEntities",
+        "response_schema_digest": digest_canonical({"schema": "entity"}),
+    },
+    {
+        "leaf_class": "FALLBACK",
+        "semantic_request_class": "ExtractedEntities",
+        "response_schema_identity": "ExtractedEntities",
+        "response_schema_digest": digest_canonical({"schema": "entity"}),
+    },
+    {
+        "leaf_class": "EMBEDDING",
+        "semantic_request_class": "EMBEDDING_VECTOR",
+        "response_schema_identity": "embedding-vector",
+        "response_schema_digest": digest_canonical(
+            {
+                "schema": "embedding-vector",
+                "model": "openai/text-embedding-3-large",
+            }
+        ),
+    },
+)
 
 
 def test_checked_call_shape_policy_derives_headroom_from_qualified_fixtures() -> None:
@@ -120,6 +150,60 @@ def test_checked_call_shape_policy_derives_headroom_from_qualified_fixtures() ->
         and route.disabled_capabilities
         for route in policy.qualified_routes
     )
+    assert {
+        "ExtractedEntities",
+        "NodeResolutions",
+        "ExtractedEdges",
+        "EdgeTimestamps",
+        "EdgeDuplicate",
+        "SummarizedEntities",
+        "CombinedExtraction",
+        "BatchEdgeTimestamps",
+        "EMBEDDING_VECTOR",
+        "UNSTRUCTURED",
+    } == {
+        shape.semantic_request_class for shape in policy.qualified_request_shapes
+    }
+
+
+def test_checked_call_shape_refuses_an_arbitrary_runtime_schema(
+    tmp_path: Path,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-schema-drift",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-schema-drift",
+        graphiti_attempt_id="ingest-schema-drift:1",
+    )
+    service.open_envelope(envelope)
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=1),
+        owner_stop_check=lambda: None,
+    )
+
+    with pytest.raises(
+        ValueError, match="semantic class/schema is outside the checked call shape"
+    ):
+        observer.before_cli_invocation(
+            provider="cursor-agent-cli",
+            model="composer-2.5",
+            prompt="schema drift",
+            schema='{"totally":"unqualified"}',
+            semantic_request_class="ExtractedEntities",
+            max_tokens=100,
+        )
+
+    assert service.graphiti_request_records(envelope_id=envelope.envelope_id)[
+        "requests"
+    ] == []
 
 
 def test_internal_request_identity_binds_semantics_without_source_expression() -> None:
@@ -133,6 +217,7 @@ def test_internal_request_identity_binds_semantics_without_source_expression() -
         temporal_identity="temporal-v1",
         generation_policy_identity="generation-v1",
         qualified_routes=QUALIFIED_ROUTES,
+        qualified_request_shapes=QUALIFIED_REQUEST_SHAPES,
         fixtures=(
             {
                 "fixture_id": "zero",
@@ -255,6 +340,7 @@ def _service_fixture(
         temporal_identity="temporal-v1",
         generation_policy_identity="generation-v1",
         qualified_routes=QUALIFIED_ROUTES,
+        qualified_request_shapes=QUALIFIED_REQUEST_SHAPES,
         fixtures=(
             {
                 "fixture_id": "single",
@@ -318,6 +404,19 @@ def _bound_request(
         "implementation_revision": policy.implementation_revision,
         "implementation_worktree_clean": True,
         "disabled_capabilities": list(policy.disabled_capabilities),
+        "working_directory_inventory": [],
+        "working_directory_inventory_digest": digest_canonical([]),
+        "environment_keys": [
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "PATH",
+            "TMPDIR",
+            "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+        ],
         "config_identity": "graphiti-cli-command-v1",
         "context_identity": "graphiti-context-v1",
         "system_digest": system_digest,
@@ -540,6 +639,84 @@ def test_atomic_graphiti_allocation_refuses_duplicate_and_call_shape_drift(
     assert service.route_state(policy.route)["state"] == "OPEN"
 
 
+def test_operational_restart_reuses_the_retained_graphiti_envelope(
+    tmp_path: Path,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    first = WorkEnvelope.create(
+        cycle_id="event-769",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-restart-envelope",
+        graphiti_attempt_id="ingest-restart-envelope:1",
+    )
+    assert service.resume_or_open_graphiti_envelope(first) == first
+
+    recreated = WorkEnvelope.create(
+        cycle_id=first.cycle_id,
+        workload_class=first.workload_class,
+        admitted_at=T0 + timedelta(minutes=5),
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id=first.ingest_id,
+        graphiti_attempt_id=first.graphiti_attempt_id,
+    )
+    resumed = ModelUsageService(service.path).resume_or_open_graphiti_envelope(
+        recreated
+    )
+
+    assert resumed.envelope_id == first.envelope_id
+    assert resumed.canonical_digest == first.canonical_digest
+    assert resumed.admitted_at == first.admitted_at
+
+
+def test_attempt_cannot_complete_while_an_earlier_envelope_leaf_is_unresolved(
+    tmp_path: Path,
+) -> None:
+    service, first, policy, shape = _service_fixture(tmp_path)
+    allocation, identity = _bound_request(
+        service=service,
+        envelope=first,
+        policy=policy,
+        shape=shape,
+        ordinal=1,
+        semantic="unresolved-prior-envelope",
+    )
+    service.allocate_graphiti_request(
+        allocation,
+        identity=identity,
+        max_distinct_internal_requests=shape.max_distinct_internal_requests,
+    )
+    later = WorkEnvelope.create(
+        cycle_id="cycle-769-later-envelope",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0 + timedelta(minutes=1),
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id=first.ingest_id,
+        graphiti_attempt_id=first.graphiti_attempt_id,
+    )
+    service.open_envelope(later)
+
+    with pytest.raises(ModelUsageIntegrityError, match="terminal receipt"):
+        service.record_work_outcome(
+            envelope_id=later.envelope_id,
+            outcome="ZERO_PROPOSAL",
+            outcome_record_id="attempt-outcome",
+            payload_digest=None,
+            terminal_at=T0 + timedelta(minutes=2),
+            retained_proposal_count=0,
+        )
+
+
 def test_chat_transport_observes_committed_identity_and_receipts_requested_max_tokens(
     tmp_path: Path,
 ) -> None:
@@ -610,7 +787,7 @@ def test_chat_transport_observes_committed_identity_and_receipts_requested_max_t
     result = asyncio.run(
         run_cli_chain(
             prompt="source-safe prompt",
-            schema='{"type":"object"}',
+            schema=EXTRACTED_ENTITIES_SCHEMA,
             semantic_request_class="ExtractedEntities",
             max_tokens=77,
             cursor_runner=cursor_runner,
@@ -630,7 +807,7 @@ def test_chat_transport_observes_committed_identity_and_receipts_requested_max_t
         asyncio.run(
             run_cli_chain(
                 prompt="source-safe prompt",
-                schema='{"type":"object"}',
+                schema=EXTRACTED_ENTITIES_SCHEMA,
                 semantic_request_class="ExtractedEntities",
                 max_tokens=77,
                 cursor_runner=cursor_runner,
@@ -747,7 +924,7 @@ def test_requested_max_tokens_is_forwarded_and_enforced_on_reported_usage(
         asyncio.run(
             run_cli_chain(
                 prompt="bounded prompt",
-                schema=None,
+                schema=EXTRACTED_ENTITIES_SCHEMA,
                 semantic_request_class="ExtractedEntities",
                 max_tokens=3,
                 cursor_runner=cursor_runner,
@@ -761,6 +938,28 @@ def test_requested_max_tokens_is_forwarded_and_enforced_on_reported_usage(
     leaf = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"][0]
     assert leaf["policy_breach"] == "REQUESTED_MAX_OUTPUT_TOKENS_EXCEEDED"
     assert service.route_state("GRAPHITI_CHAT_PRIMARY")["state"] == "OPEN"
+
+
+def test_requested_max_tokens_rejects_unreported_output_at_transport_boundary() -> None:
+    invocations: list[dict[str, object]] = []
+
+    with pytest.raises(CliResponseError, match="exceeded requested max_tokens"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="bounded prompt",
+                schema=None,
+                max_tokens=1,
+                cursor_runner=lambda _prompt, *, max_tokens: CliExecution(
+                    text='{"value":"' + ("x" * 10_000) + '"}',
+                    usage={"usage_basis": "UNREPORTED"},
+                ),
+                grok_runner=lambda _prompt, _schema, *, max_tokens: "not called",
+                invocations=invocations,
+            )
+        )
+
+    assert invocations[0]["outcome"] == "OUTPUT_LIMIT_EXCEEDED"
+    assert invocations[0]["requested_max_tokens"] == 1
 
 
 def test_cancellation_retains_uncertain_leaf_before_control_returns(
@@ -799,7 +998,7 @@ def test_cancellation_retains_uncertain_leaf_before_control_returns(
         task = asyncio.create_task(
             run_cli_chain(
                 prompt="cancel prompt",
-                schema=None,
+                schema=EXTRACTED_ENTITIES_SCHEMA,
                 semantic_request_class="ExtractedEntities",
                 max_tokens=100,
                 cursor_runner=cursor_runner,
@@ -851,7 +1050,7 @@ def test_typed_fallback_has_a_distinct_identity_and_exact_parent(
     result = asyncio.run(
         run_cli_chain(
             prompt="fallback prompt",
-            schema='{"type":"object"}',
+            schema=EXTRACTED_EDGES_SCHEMA,
             semantic_request_class="ExtractedEdges",
             max_tokens=512,
             cursor_runner=lambda _prompt, *, max_tokens: CliExecution(
@@ -915,7 +1114,7 @@ def test_deadline_owner_stop_and_max_tokens_refuse_before_transport(
             provider="cursor-agent-cli",
             model="composer-2.5",
             prompt="expired",
-            schema=None,
+            schema=EXTRACTED_ENTITIES_SCHEMA,
             semantic_request_class="ExtractedEntities",
             max_tokens=100,
         )
@@ -939,7 +1138,7 @@ def test_deadline_owner_stop_and_max_tokens_refuse_before_transport(
             provider="cursor-agent-cli",
             model="composer-2.5",
             prompt="stopped",
-            schema=None,
+            schema=EXTRACTED_ENTITIES_SCHEMA,
             semantic_request_class="ExtractedEntities",
             max_tokens=100,
         )
@@ -957,7 +1156,7 @@ def test_deadline_owner_stop_and_max_tokens_refuse_before_transport(
             provider="cursor-agent-cli",
             model="composer-2.5",
             prompt="oversized",
-            schema=None,
+            schema=EXTRACTED_ENTITIES_SCHEMA,
             semantic_request_class="ExtractedEntities",
             max_tokens=16_385,
         )
@@ -967,7 +1166,7 @@ def test_deadline_owner_stop_and_max_tokens_refuse_before_transport(
             provider="unqualified-provider",
             model="unqualified-model",
             prompt="route drift",
-            schema=None,
+            schema=EXTRACTED_ENTITIES_SCHEMA,
             semantic_request_class="ExtractedEntities",
             max_tokens=100,
         )

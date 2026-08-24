@@ -153,6 +153,45 @@ class GraphitiQualifiedRoute:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class GraphitiQualifiedRequestShape:
+    """One checked semantic class/schema pair admitted for a leaf class."""
+
+    leaf_class: GraphitiLeafClass
+    semantic_request_class: str
+    response_schema_identity: str
+    response_schema_digest: str
+
+    @classmethod
+    def from_mapping(
+        cls, value: Mapping[str, object]
+    ) -> GraphitiQualifiedRequestShape:
+        try:
+            leaf_class = GraphitiLeafClass(str(value.get("leaf_class", "")))
+        except ValueError as exc:
+            raise GraphitiRequestContractError(
+                "qualified Graphiti request has an invalid leaf class"
+            ) from exc
+        shape = cls(
+            leaf_class=leaf_class,
+            semantic_request_class=str(value.get("semantic_request_class", "")),
+            response_schema_identity=str(value.get("response_schema_identity", "")),
+            response_schema_digest=str(value.get("response_schema_digest", "")),
+        )
+        _token(shape.semantic_request_class, field="semantic request class")
+        _token(shape.response_schema_identity, field="response schema identity")
+        _digest(shape.response_schema_digest, field="response schema digest")
+        return shape
+
+    def as_record(self) -> dict[str, object]:
+        return {
+            "leaf_class": self.leaf_class.value,
+            "semantic_request_class": self.semantic_request_class,
+            "response_schema_identity": self.response_schema_identity,
+            "response_schema_digest": self.response_schema_digest,
+        }
+
+
 def _string_tuple(value: object) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)) or not all(
         isinstance(item, str) for item in value
@@ -238,6 +277,7 @@ class GraphitiCallShapePolicy:
     temporal_identity: str
     generation_policy_identity: str
     qualified_routes: tuple[GraphitiQualifiedRoute, ...]
+    qualified_request_shapes: tuple[GraphitiQualifiedRequestShape, ...]
     fixtures: tuple[GraphitiCallShapeFixture, ...]
     evidence_digest: str
     maximum_qualified_fixture_count: int
@@ -273,12 +313,28 @@ class GraphitiCallShapePolicy:
             else _raise_route_type()
             for item in raw_routes
         )
+        raw_request_shapes = values.get("qualified_request_shapes")
+        if not isinstance(raw_request_shapes, tuple) or not raw_request_shapes:
+            raise GraphitiRequestContractError(
+                "qualified Graphiti request shapes must be a tuple"
+            )
+        request_shapes = tuple(
+            item
+            if isinstance(item, GraphitiQualifiedRequestShape)
+            else GraphitiQualifiedRequestShape.from_mapping(item)
+            if isinstance(item, Mapping)
+            else _raise_request_shape_type()
+            for item in raw_request_shapes
+        )
         supplied_evidence_digest = values.pop("evidence_digest", None)
         evidence_digest = digest_canonical(
             {
                 "graphiti_core_release": values.get("graphiti_core_release"),
                 "fixtures": [item.as_record() for item in fixtures],
                 "qualified_routes": [item.as_record() for item in routes],
+                "qualified_request_shapes": [
+                    item.as_record() for item in request_shapes
+                ],
             }
         )
         if (
@@ -297,10 +353,14 @@ class GraphitiCallShapePolicy:
             **{
                 key: value
                 for key, value in values.items()
-                if key not in {"fixtures", "qualified_routes"}
+                if key
+                not in {"fixtures", "qualified_routes", "qualified_request_shapes"}
             },
             "fixtures": [item.as_record() for item in fixtures],
             "qualified_routes": [item.as_record() for item in routes],
+            "qualified_request_shapes": [
+                item.as_record() for item in request_shapes
+            ],
             "maximum_qualified_fixture_count": maximum,
             "headroom": headroom,
             "max_distinct_internal_requests": maximum_with_headroom,
@@ -309,9 +369,11 @@ class GraphitiCallShapePolicy:
             **{
                 key: value
                 for key, value in values.items()
-                if key not in {"fixtures", "qualified_routes"}
+                if key
+                not in {"fixtures", "qualified_routes", "qualified_request_shapes"}
             },  # type: ignore[arg-type]
             qualified_routes=routes,
+            qualified_request_shapes=request_shapes,
             fixtures=fixtures,
             maximum_qualified_fixture_count=maximum,
             headroom=headroom,
@@ -339,6 +401,9 @@ class GraphitiCallShapePolicy:
                 "graphiti_core_release": self.graphiti_core_release,
                 "fixtures": [item.as_record() for item in self.fixtures],
                 "qualified_routes": [item.as_record() for item in self.qualified_routes],
+                "qualified_request_shapes": [
+                    item.as_record() for item in self.qualified_request_shapes
+                ],
             }
         )
         if self.evidence_digest != expected_evidence_digest:
@@ -351,6 +416,25 @@ class GraphitiCallShapePolicy:
             raise GraphitiRequestContractError(
                 "qualified Graphiti routes must bind every leaf class exactly once"
             )
+        request_shape_keys = {
+            (
+                item.leaf_class,
+                item.semantic_request_class,
+                item.response_schema_identity,
+                item.response_schema_digest,
+            )
+            for item in self.qualified_request_shapes
+        }
+        if len(request_shape_keys) != len(self.qualified_request_shapes):
+            raise GraphitiRequestContractError(
+                "qualified Graphiti request shapes repeat"
+            )
+        if {item.leaf_class for item in self.qualified_request_shapes} != set(
+            GraphitiLeafClass
+        ):
+            raise GraphitiRequestContractError(
+                "qualified Graphiti request shapes must cover every leaf class"
+            )
 
     def route_for(self, leaf_class: GraphitiLeafClass) -> GraphitiQualifiedRoute:
         matches = tuple(
@@ -359,6 +443,36 @@ class GraphitiCallShapePolicy:
         if len(matches) != 1:
             raise GraphitiRequestContractError(
                 "qualified Graphiti route identity is ambiguous"
+            )
+        return matches[0]
+
+    def qualify_request(
+        self,
+        *,
+        leaf_class: GraphitiLeafClass,
+        semantic_request_class: str,
+        response_schema_identity: str,
+        response_schema_digest: str,
+    ) -> GraphitiQualifiedRequestShape:
+        matches = tuple(
+            shape
+            for shape in self.qualified_request_shapes
+            if (
+                shape.leaf_class,
+                shape.semantic_request_class,
+                shape.response_schema_identity,
+                shape.response_schema_digest,
+            )
+            == (
+                leaf_class,
+                semantic_request_class,
+                response_schema_identity,
+                response_schema_digest,
+            )
+        )
+        if len(matches) != 1:
+            raise GraphitiRequestContractError(
+                "Graphiti semantic class/schema is outside the checked call shape"
             )
         return matches[0]
 
@@ -375,6 +489,9 @@ class GraphitiCallShapePolicy:
             "temporal_identity": self.temporal_identity,
             "generation_policy_identity": self.generation_policy_identity,
             "qualified_routes": [item.as_record() for item in self.qualified_routes],
+            "qualified_request_shapes": [
+                item.as_record() for item in self.qualified_request_shapes
+            ],
             "fixtures": [item.as_record() for item in self.fixtures],
             "evidence_digest": self.evidence_digest,
             "maximum_qualified_fixture_count": self.maximum_qualified_fixture_count,
@@ -389,6 +506,12 @@ def _raise_fixture_type() -> GraphitiCallShapeFixture:
 
 def _raise_route_type() -> GraphitiQualifiedRoute:
     raise GraphitiRequestContractError("qualified Graphiti route must be a mapping")
+
+
+def _raise_request_shape_type() -> GraphitiQualifiedRequestShape:
+    raise GraphitiRequestContractError(
+        "qualified Graphiti request shape must be a mapping"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -614,6 +737,12 @@ def load_checked_graphiti_call_shape_policy() -> GraphitiCallShapePolicy:
     if not isinstance(raw_routes, list):
         raise GraphitiRequestContractError("checked qualified routes are absent")
     payload["qualified_routes"] = tuple(raw_routes)
+    raw_request_shapes = payload.get("qualified_request_shapes")
+    if not isinstance(raw_request_shapes, list):
+        raise GraphitiRequestContractError(
+            "checked qualified request shapes are absent"
+        )
+    payload["qualified_request_shapes"] = tuple(raw_request_shapes)
     policy = GraphitiCallShapePolicy.create(**payload)
     if expected_digest is not None and expected_digest != policy.canonical_digest:
         raise GraphitiRequestContractError("checked call-shape policy digest changed")
@@ -628,6 +757,7 @@ __all__ = [
     "GraphitiCallShapePolicy",
     "GraphitiInternalRequestIdentity",
     "GraphitiLeafClass",
+    "GraphitiQualifiedRequestShape",
     "GraphitiQualifiedRoute",
     "GraphitiRequestContractError",
     "graphiti_semantic_state_digest",

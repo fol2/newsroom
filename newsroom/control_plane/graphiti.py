@@ -120,6 +120,29 @@ GRAPHITI_CONTEXT_MANIFEST_SCHEMA_VERSION = (
 GRAPHITI_CHAT_PRIMARY_ROUTE = "GRAPHITI_CHAT_PRIMARY"
 GRAPHITI_CHAT_FALLBACK_ROUTE = "GRAPHITI_CHAT_FALLBACK"
 GRAPHITI_EMBEDDING_ROUTE = "GRAPHITI_EMBEDDING"
+_GRAPHITI_ADAPTER_DIRECTORY = Path(__file__).parent.parent / "graphiti_adapter"
+_GRAPHITI_HERMETIC_ENVIRONMENT_KEYS = (
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "PATH",
+    "TMPDIR",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+)
+
+
+def _graphiti_transport_implementation_revision(
+    leaf_class: GraphitiLeafClass,
+) -> str:
+    source = (
+        _GRAPHITI_ADAPTER_DIRECTORY / "embedding_meter.py"
+        if leaf_class is GraphitiLeafClass.EMBEDDING
+        else _GRAPHITI_ADAPTER_DIRECTORY / "cli_client.py"
+    )
+    return digest_bytes(source.read_bytes())
 
 
 class GraphitiModelUsageObserver:
@@ -184,6 +207,7 @@ class GraphitiModelUsageObserver:
         reasoning: str,
         output_schema_digest: str,
         semantic_request_class: str,
+        response_schema_identity: str,
     ) -> InvocationEfficiencyPolicy:
         leaf_class = (
             GraphitiLeafClass.EMBEDDING
@@ -193,6 +217,19 @@ class GraphitiModelUsageObserver:
             else GraphitiLeafClass.PRIMARY
         )
         route_contract = self._shape.route_for(leaf_class)
+        implementation_revision = _graphiti_transport_implementation_revision(
+            leaf_class
+        )
+        if implementation_revision != route_contract.implementation_revision:
+            raise ModelUsageAdmissionError(
+                "Graphiti transport implementation differs from the checked policy"
+            )
+        self._shape.qualify_request(
+            leaf_class=leaf_class,
+            semantic_request_class=semantic_request_class,
+            response_schema_identity=response_schema_identity,
+            response_schema_digest=output_schema_digest,
+        )
         if (
             provider,
             route,
@@ -228,7 +265,7 @@ class GraphitiModelUsageObserver:
             command_flags=route_contract.command_flags,
             context_manifest_schema_version=GRAPHITI_CONTEXT_MANIFEST_SCHEMA_VERSION,
             disabled_capabilities=route_contract.disabled_capabilities,
-            implementation_revision=route_contract.implementation_revision,
+            implementation_revision=implementation_revision,
             max_prompt_bytes=route_contract.max_prompt_bytes,
             max_context_tokens=route_contract.max_context_tokens,
             max_output_tokens=route_contract.max_output_tokens,
@@ -285,6 +322,7 @@ class GraphitiModelUsageObserver:
             reasoning=reasoning,
             output_schema_digest=output_schema_digest,
             semantic_request_class=semantic_request_class,
+            response_schema_identity=response_schema_identity,
         )
         if requested_max_tokens <= 0:
             requested_max_tokens = policy.max_output_tokens
@@ -340,7 +378,7 @@ class GraphitiModelUsageObserver:
                 "reasoning": reasoning,
                 "command_semantic_version": route_contract.command_semantic_version,
                 "command_flags": list(route_contract.command_flags),
-                "implementation_revision": route_contract.implementation_revision,
+                "implementation_revision": policy.implementation_revision,
                 "system_digest": system_digest,
                 "prompt_digest": prompt_digest,
                 "output_schema_digest": output_schema_digest,
@@ -354,11 +392,18 @@ class GraphitiModelUsageObserver:
             "reasoning": reasoning,
             "command_semantic_version": route_contract.command_semantic_version,
             "command_flags": list(route_contract.command_flags),
-            "implementation_revision": route_contract.implementation_revision,
-            "implementation_worktree_clean": True,
+            "implementation_revision": policy.implementation_revision,
+            "implementation_worktree_clean": (
+                policy.implementation_revision
+                == _graphiti_transport_implementation_revision(leaf_class)
+            ),
             "disabled_capabilities": list(route_contract.disabled_capabilities),
-            "clean_working_directory_inventory_digest": digest_canonical(
-                {"inventory": "EMPTY_NON_REPOSITORY_WORKSPACE"}
+            "working_directory_inventory": [],
+            "working_directory_inventory_digest": digest_canonical([]),
+            "environment_keys": (
+                []
+                if leaf_class is GraphitiLeafClass.EMBEDDING
+                else list(_GRAPHITI_HERMETIC_ENVIRONMENT_KEYS)
             ),
             "config_identity": route_contract.config_identity,
             "context_identity": GRAPHITI_CONTEXT_IDENTITY,
@@ -659,7 +704,7 @@ class GraphitiModelUsageObserver:
                     None
                     if reported
                     else (
-                        "EXECUTABLE_NOT_FOUND"
+                        outcome
                         if no_provider_call
                         else "MISSING_PROVIDER_TELEMETRY"
                     )
@@ -759,7 +804,7 @@ class EvaluationGraphitiRunner:
             ingest_id=unit.ingest_id,
             graphiti_attempt_id=f"{unit.ingest_id}:{unit.attempt_number}",
         )
-        model_usage.open_envelope(envelope)
+        envelope = model_usage.resume_or_open_graphiti_envelope(envelope)
         observer = GraphitiModelUsageObserver(
             service=model_usage,
             envelope=envelope,

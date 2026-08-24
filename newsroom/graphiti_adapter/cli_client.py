@@ -65,6 +65,10 @@ class CliResponseError(RuntimeError):
     """Both subscription CLI responses failed the Graphiti JSON contract."""
 
 
+class CliPredispatchRefusal(RuntimeError):
+    """The installed CLI cannot prove the checked transport contract."""
+
+
 class CliOutputDecodeError(RuntimeError):
     """A dispatched subscription CLI returned non-UTF-8 output."""
 
@@ -110,7 +114,13 @@ def extract_json(raw: str) -> str:
     return raw[start : end + 1]
 
 
-def run_cli(command: tuple[str, ...], *, timeout: int, cwd: str | None = None) -> str:
+def run_cli(
+    command: tuple[str, ...],
+    *,
+    timeout: int,
+    cwd: str | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> str:
     name = os.path.basename(command[0])
     try:
         result = subprocess.run(
@@ -120,7 +130,7 @@ def run_cli(command: tuple[str, ...], *, timeout: int, cwd: str | None = None) -
             text=False,
             timeout=timeout,
             cwd=cwd,
-            env=unprivileged_child_environment(),
+            env=dict(environment or unprivileged_child_environment()),
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"{name} Graphiti LLM timed out") from None
@@ -142,7 +152,11 @@ def _decode_stdout(stdout: bytes, *, name: str) -> str:
 
 
 async def run_cli_async(
-    command: tuple[str, ...], *, timeout: int, cwd: str | None = None
+    command: tuple[str, ...],
+    *,
+    timeout: int,
+    cwd: str | None = None,
+    environment: Mapping[str, str] | None = None,
 ) -> str:
     """Run a cancellable CLI child so the extraction deadline remains authoritative."""
 
@@ -152,7 +166,7 @@ async def run_cli_async(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
-        env=unprivileged_child_environment(),
+        env=dict(environment or unprivileged_child_environment()),
     )
     try:
         stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
@@ -172,7 +186,7 @@ async def run_cli_async(
     return text
 
 
-def _cursor_command(prompt: str) -> tuple[str, ...]:
+def _cursor_command(prompt: str, *, max_tokens: int) -> tuple[str, ...]:
     return (
         CURSOR_AGENT_BIN,
         "--print",
@@ -182,6 +196,10 @@ def _cursor_command(prompt: str) -> tuple[str, ...]:
         "json",
         "--sandbox",
         "enabled",
+        "--disable-tools",
+        "--disable-mcp",
+        "--max-output-tokens",
+        str(max_tokens),
         "--trust",
         "--model",
         CURSOR_AGENT_MODEL_ID,
@@ -189,8 +207,10 @@ def _cursor_command(prompt: str) -> tuple[str, ...]:
     )
 
 
-def _grok_command(*, prompt: str, schema: str | None, cwd: str) -> tuple[str, ...]:
-    path = os.path.join(cwd, "prompt.txt")
+def _grok_command(
+    *, prompt: str, schema: str | None, request_dir: str, max_tokens: int
+) -> tuple[str, ...]:
+    path = os.path.join(request_dir, "prompt.txt")
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(prompt)
     command = [
@@ -211,6 +231,8 @@ def _grok_command(*, prompt: str, schema: str | None, cwd: str) -> tuple[str, ..
         "--no-plan",
         "--max-turns",
         "1",
+        "--max-output-tokens",
+        str(max_tokens),
         "--no-subagents",
         "--reasoning-effort",
         GROK_CHAT_REASONING,
@@ -219,6 +241,75 @@ def _grok_command(*, prompt: str, schema: str | None, cwd: str) -> tuple[str, ..
         command.extend(["--json-schema", schema])
     command.extend(["--output-format", "streaming-json"])
     return tuple(command)
+
+
+@dataclass(frozen=True, slots=True)
+class _GraphitiCliWorkspace:
+    cwd: str
+    request_dir: str
+    environment: dict[str, str]
+
+
+def _hermetic_cli_workspace(root: str, *, binary: str) -> _GraphitiCliWorkspace:
+    paths = {
+        "cwd": os.path.join(root, "workspace"),
+        "home": os.path.join(root, "home"),
+        "request": os.path.join(root, "request"),
+        "tmp": os.path.join(root, "tmp"),
+        "config": os.path.join(root, "xdg-config"),
+        "data": os.path.join(root, "xdg-data"),
+        "cache": os.path.join(root, "xdg-cache"),
+        "state": os.path.join(root, "xdg-state"),
+    }
+    for path in paths.values():
+        os.mkdir(path, mode=0o700)
+    binary_dirs = tuple(
+        dict.fromkeys(
+            (os.path.dirname(binary), "/usr/bin", "/bin", "/usr/sbin", "/sbin")
+        )
+    )
+    environment = {
+        "HOME": paths["home"],
+        "LANG": "en_GB.UTF-8",
+        "LC_ALL": "en_GB.UTF-8",
+        "PATH": os.pathsep.join(binary_dirs),
+        "TMPDIR": paths["tmp"],
+        "XDG_CACHE_HOME": paths["cache"],
+        "XDG_CONFIG_HOME": paths["config"],
+        "XDG_DATA_HOME": paths["data"],
+        "XDG_STATE_HOME": paths["state"],
+    }
+    return _GraphitiCliWorkspace(
+        cwd=paths["cwd"],
+        request_dir=paths["request"],
+        environment=environment,
+    )
+
+
+def _prove_cli_controls(
+    *,
+    binary: str,
+    required_controls: tuple[str, ...],
+    workspace: _GraphitiCliWorkspace,
+) -> None:
+    try:
+        result = subprocess.run(
+            (binary, "--help"),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            cwd=workspace.cwd,
+            env=workspace.environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CliPredispatchRefusal("Graphiti CLI preflight failed") from exc
+    if result.returncode != 0 or not all(
+        control in result.stdout for control in required_controls
+    ):
+        raise CliPredispatchRefusal(
+            "Graphiti CLI cannot prove tool isolation and max_tokens enforcement"
+        )
 
 
 def parse_cursor_output(raw: str) -> CliExecution:
@@ -280,12 +371,23 @@ def parse_grok_stream_output(raw: str) -> CliExecution:
 
 def run_cursor_agent_llm(prompt: str, *, max_tokens: int) -> CliExecution:
     _require_positive_max_tokens(max_tokens)
-    with tempfile.TemporaryDirectory(prefix="newsroom-cursor-graphiti-") as cwd:
+    with tempfile.TemporaryDirectory(prefix="newsroom-cursor-graphiti-") as root:
+        workspace = _hermetic_cli_workspace(root, binary=CURSOR_AGENT_BIN)
+        _prove_cli_controls(
+            binary=CURSOR_AGENT_BIN,
+            required_controls=(
+                "--disable-tools",
+                "--disable-mcp",
+                "--max-output-tokens",
+            ),
+            workspace=workspace,
+        )
         return parse_cursor_output(
             run_cli(
-                _cursor_command(prompt),
+                _cursor_command(prompt, max_tokens=max_tokens),
                 timeout=CLI_CALL_TIMEOUT_SECONDS,
-                cwd=cwd,
+                cwd=workspace.cwd,
+                environment=workspace.environment,
             )
         )
 
@@ -294,12 +396,24 @@ async def run_cursor_agent_llm_async(
     prompt: str, *, max_tokens: int
 ) -> CliExecution:
     _require_positive_max_tokens(max_tokens)
-    with tempfile.TemporaryDirectory(prefix="newsroom-cursor-graphiti-") as cwd:
+    with tempfile.TemporaryDirectory(prefix="newsroom-cursor-graphiti-") as root:
+        workspace = _hermetic_cli_workspace(root, binary=CURSOR_AGENT_BIN)
+        await asyncio.to_thread(
+            _prove_cli_controls,
+            binary=CURSOR_AGENT_BIN,
+            required_controls=(
+                "--disable-tools",
+                "--disable-mcp",
+                "--max-output-tokens",
+            ),
+            workspace=workspace,
+        )
         return parse_cursor_output(
             await run_cli_async(
-                _cursor_command(prompt),
+                _cursor_command(prompt, max_tokens=max_tokens),
                 timeout=CLI_CALL_TIMEOUT_SECONDS,
-                cwd=cwd,
+                cwd=workspace.cwd,
+                environment=workspace.environment,
             )
         )
 
@@ -308,12 +422,24 @@ def run_grok_llm(
     prompt: str, schema: str | None, *, max_tokens: int
 ) -> CliExecution:
     _require_positive_max_tokens(max_tokens)
-    with tempfile.TemporaryDirectory(prefix="newsroom-grok-graphiti-") as cwd:
+    with tempfile.TemporaryDirectory(prefix="newsroom-grok-graphiti-") as root:
+        workspace = _hermetic_cli_workspace(root, binary=GROK_BIN)
+        _prove_cli_controls(
+            binary=GROK_BIN,
+            required_controls=("--max-output-tokens",),
+            workspace=workspace,
+        )
         return parse_grok_stream_output(
             run_cli(
-                _grok_command(prompt=prompt, schema=schema, cwd=cwd),
+                _grok_command(
+                    prompt=prompt,
+                    schema=schema,
+                    request_dir=workspace.request_dir,
+                    max_tokens=max_tokens,
+                ),
                 timeout=CLI_CALL_TIMEOUT_SECONDS,
-                cwd=cwd,
+                cwd=workspace.cwd,
+                environment=workspace.environment,
             )
         )
 
@@ -322,12 +448,25 @@ async def run_grok_llm_async(
     prompt: str, schema: str | None, *, max_tokens: int
 ) -> CliExecution:
     _require_positive_max_tokens(max_tokens)
-    with tempfile.TemporaryDirectory(prefix="newsroom-grok-graphiti-") as cwd:
+    with tempfile.TemporaryDirectory(prefix="newsroom-grok-graphiti-") as root:
+        workspace = _hermetic_cli_workspace(root, binary=GROK_BIN)
+        await asyncio.to_thread(
+            _prove_cli_controls,
+            binary=GROK_BIN,
+            required_controls=("--max-output-tokens",),
+            workspace=workspace,
+        )
         return parse_grok_stream_output(
             await run_cli_async(
-                _grok_command(prompt=prompt, schema=schema, cwd=cwd),
+                _grok_command(
+                    prompt=prompt,
+                    schema=schema,
+                    request_dir=workspace.request_dir,
+                    max_tokens=max_tokens,
+                ),
                 timeout=CLI_CALL_TIMEOUT_SECONDS,
-                cwd=cwd,
+                cwd=workspace.cwd,
+                environment=workspace.environment,
             )
         )
 
@@ -403,6 +542,14 @@ def _reported_output_exceeds(
         and not isinstance(output_tokens, bool)
         and output_tokens > max_tokens
     )
+
+
+def _output_exceeds_conservative_transport_ceiling(
+    execution: CliExecution, *, max_tokens: int
+) -> bool:
+    """Bound unreported output using one UTF-8 byte as the safe token floor."""
+
+    return len(execution.text.encode("utf-8")) > max_tokens
 
 
 def _before_observed_cli_invocation(
@@ -502,16 +649,21 @@ async def run_cli_chain(
             )
         )
         raise
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, CliPredispatchRefusal) as exc:
         cursor_usage = no_provider_call_cli_usage()
+        refusal_outcome = (
+            "EXECUTABLE_NOT_FOUND"
+            if isinstance(exc, FileNotFoundError)
+            else "PREDISPATCH_REFUSED"
+        )
         binding = observe(
-            cursor_token, outcome="EXECUTABLE_NOT_FOUND", usage=cursor_usage
+            cursor_token, outcome=refusal_outcome, usage=cursor_usage
         )
         invocations.append(
             _invocation(
                 provider="cursor-agent-cli",
                 model=CURSOR_AGENT_MODEL_ID,
-                outcome="EXECUTABLE_NOT_FOUND",
+                outcome=refusal_outcome,
                 execution=CliExecution(text="", usage=cursor_usage),
                 failure=type(exc).__name__,
                 requested_max_tokens=max_tokens,
@@ -537,6 +689,8 @@ async def run_cli_chain(
         cursor_execution = _execution(cast(CliOutput, raw))
         payload = _parsed_object(cursor_execution.text)
         output_limit_exceeded = _reported_output_exceeds(
+            cursor_execution, max_tokens=max_tokens
+        ) or _output_exceeds_conservative_transport_ceiling(
             cursor_execution, max_tokens=max_tokens
         )
         cursor_outcome = (
@@ -602,16 +756,21 @@ async def run_cli_chain(
             )
         )
         raise
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, CliPredispatchRefusal) as exc:
         grok_usage = no_provider_call_cli_usage()
+        refusal_outcome = (
+            "EXECUTABLE_NOT_FOUND"
+            if isinstance(exc, FileNotFoundError)
+            else "PREDISPATCH_REFUSED"
+        )
         binding = observe(
-            grok_token, outcome="EXECUTABLE_NOT_FOUND", usage=grok_usage
+            grok_token, outcome=refusal_outcome, usage=grok_usage
         )
         invocations.append(
             _invocation(
                 provider="grok-build-cli",
                 model=GROK_CHAT_MODEL_ID,
-                outcome="EXECUTABLE_NOT_FOUND",
+                outcome=refusal_outcome,
                 execution=CliExecution(text="", usage=grok_usage),
                 failure=type(exc).__name__,
                 requested_max_tokens=max_tokens,
@@ -636,6 +795,8 @@ async def run_cli_chain(
     grok_execution = _execution(cast(CliOutput, raw))
     payload = _parsed_object(grok_execution.text)
     output_limit_exceeded = _reported_output_exceeds(
+        grok_execution, max_tokens=max_tokens
+    ) or _output_exceeds_conservative_transport_ceiling(
         grok_execution, max_tokens=max_tokens
     )
     grok_outcome = (
