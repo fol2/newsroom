@@ -4284,6 +4284,7 @@ def _register_cont_usage_policy(
     route: str,
     model: str,
     reasoning: str,
+    max_prompt_bytes: int = 100_000,
 ) -> None:
     usage.register_policy(
         InvocationEfficiencyPolicy.create(
@@ -4300,7 +4301,7 @@ def _register_cont_usage_policy(
             tools_enabled=False,
             mcp_enabled=False,
             prior_message_count=0,
-            max_prompt_bytes=100_000,
+            max_prompt_bytes=max_prompt_bytes,
             max_context_tokens=10_000,
             max_output_tokens=2_000,
             max_total_tokens=12_000,
@@ -4346,7 +4347,7 @@ def test_controller_holds_writer_before_dispatch_without_exact_usage_policy(
     )
     assert calls == 0
     assert report.provider_dispatches == 0
-    assert report.draft_reject == 1
+    assert report.draft_hold == 1
     assert retained["envelope_count"] == 1
     assert retained["leaf_dispatch_count"] == 0
 
@@ -4435,6 +4436,54 @@ def test_controller_allocates_every_primary_and_fallback_leaf_before_dispatch(
         leaf["context_manifest_observation"]["provider_context_tokens"] == 80
         for leaf in leaves
     )
+
+
+def test_oversized_exact_evidence_is_held_before_dispatch_without_truncation(
+    tmp_path: Path,
+) -> None:
+    unpublished = tmp_path / "usage-oversized-exact-input.sqlite3"
+    usage = ModelUsageService(str(unpublished))
+    _register_cont_usage_policy(
+        usage,
+        workload_class=WorkloadClass.CONT_WRITER_PRIMARY,
+        provider=CONT_PRIMARY_PROVIDER,
+        route=CONT_PRIMARY_ROUTE,
+        model=CONT_PRIMARY_MODEL,
+        reasoning=CONT_PRIMARY_REASONING,
+        max_prompt_bytes=1,
+    )
+    calls = 0
+
+    def primary(_prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        return "must-not-dispatch"
+
+    report = run_cycle(
+        proving_store=str(_proving(tmp_path)),
+        unpublished_store=str(unpublished),
+        writer=CliChainWriter(primary=primary),
+        evidence_package_builder=_qualified_builder(frozenset({"HK-01"})),
+        clock=_CLOCK,
+        model_usage=usage,
+    )
+
+    assert calls == 0
+    assert report.provider_dispatches == 0
+    assert report.draft_hold == 1
+    assert (
+        "EXACT_INPUT_EXCEEDS_QUALIFIED_BOUND",
+        1,
+    ) in report.draft_reason_counts
+    connection = sqlite3.connect(unpublished)
+    manifest = json.loads(
+        connection.execute(
+            "SELECT record_json FROM model_invocation_context_manifests"
+        ).fetchone()[0]
+    )
+    connection.close()
+    assert manifest["prompt_bytes"] > 1
+    assert manifest["evidence_package_digest"]
 
 
 def test_controller_retains_explicit_zero_when_writer_executable_is_missing(

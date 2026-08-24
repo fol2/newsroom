@@ -32,6 +32,7 @@ Before allocation and dispatch, the shared model-usage store retains the
 canonical non-secret context manifest. It binds:
 
 - provider, route, model, reasoning, command version and semantic flags;
+- the exact Git revision and proof that its tracked worktree was clean;
 - empty working-directory inventory and digest;
 - permitted login/configuration digests without credential bytes;
 - disabled capabilities and exact zero skill/tool/MCP/prior-message counts;
@@ -45,8 +46,22 @@ receipt.
 
 ## Productive calibration
 
-The operator assessment command reads the shared receipts only; it does not
-rerun the historical ambient baseline:
+First register a bounded bootstrap policy for the selected candidates. This
+policy is EVALUATION-only in effect: it is bound to at most five candidate
+identities, the clean Git revision, command semantics, manifest contract and
+the 15,000-context-token ceiling. It cannot admit any other candidate:
+
+```bash
+.venv/bin/python scripts/hermes_control_plane.py writer-calibration \
+  --unpublished data/newsroom/unpublished_store.sqlite3 \
+  --calibration-candidates CANDIDATE_1,CANDIDATE_2,CANDIDATE_3 \
+  --calibration-version issue-730-v1 \
+  --stage-calibration-policy
+```
+
+After the governed cycles have produced shared receipts, the operator
+assessment reads those receipts only; it does not rerun the historical ambient
+baseline:
 
 ```bash
 .venv/bin/python scripts/hermes_control_plane.py writer-calibration \
@@ -59,7 +74,9 @@ rerun the historical ambient baseline:
 
 Add `--register-policy` only after the packet passes. The command then mints
 and registers the exact primary invocation-efficiency policy. A failed packet
-cannot mint or register a policy.
+cannot mint or register a policy. Both the bootstrap and final policy versions
+include the current Git revision; a dirty or unversioned worktree fails before
+registration or assessment.
 
 The assessment requires three accepted unpublished payloads from at most five
 candidates, three distinct prompt sizes, complete context telemetry, p50
@@ -67,7 +84,10 @@ context no greater than 10,000, maximum context no greater than 15,000, at
 least 70% reduction from 37,479, one primary call per candidate, zero ambient
 capabilities and zero public effects. It also reports accepted-payload token
 totals and median, no-result tokens, primary acceptance, fallback recovery and
-the context-to-Newsroom-input ratio.
+the context-to-Newsroom-input ratio. Missing output or total usage on any
+dispatched leaf fails the packet; unknown usage is never reported as zero.
+Public-effect counts are derived from the retained unpublished payload rows and
+their schema-enforced `publication_bundle`, `auto_publish` and `status` fields.
 
 ## Current exact-head observation
 

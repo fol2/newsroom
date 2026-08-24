@@ -1,14 +1,31 @@
 from __future__ import annotations
 
-from newsroom.control_plane.cont_calibration import assess_cont_calibration
-from newsroom.control_plane.model_usage import ModelUsageAdmissionError
+from pathlib import Path
+
+import pytest
+
+from newsroom.control_plane.cont_calibration import (
+    assess_cont_calibration,
+    stage_cont_calibration_policy,
+)
+from newsroom.control_plane.model_usage import (
+    ModelUsageAdmissionError,
+    ModelUsageService,
+    WorkloadClass,
+)
 from newsroom.control_plane.writer import (
+    CONT_CONTEXT_MANIFEST_SCHEMA_VERSION,
+    CONT_DISABLED_CAPABILITIES,
+    CONT_PRIMARY_COMMAND_FLAGS,
     CONT_PRIMARY_CONFIG_IDENTITY,
     CONT_PRIMARY_MODEL,
     CONT_PRIMARY_PROVIDER,
     CONT_PRIMARY_REASONING,
     CONT_PRIMARY_ROUTE,
+    GROK_COMMAND_SEMANTIC_VERSION,
 )
+
+REVISION = "a" * 40
 
 
 def _leaf(
@@ -34,6 +51,17 @@ def _leaf(
         "work_outcome": "ACCEPTED" if accepted else "REJECT",
         "invocation_outcome": "ACCEPTED_OUTPUT" if accepted else "REJECTED_OUTPUT",
         "context_manifest": {
+            "schema_version": CONT_CONTEXT_MANIFEST_SCHEMA_VERSION,
+            "command_semantic_version": GROK_COMMAND_SEMANTIC_VERSION,
+            "command_flags": list(CONT_PRIMARY_COMMAND_FLAGS),
+            "disabled_capabilities": list(CONT_DISABLED_CAPABILITIES),
+            "implementation_revision": REVISION,
+            "implementation_worktree_clean": True,
+            "one_turn": True,
+            "exact_input": True,
+            "skills_enabled": False,
+            "tools_enabled": False,
+            "mcp_enabled": False,
             "prior_message_count": 0,
             "skill_count": 0,
             "tool_count": tool_count,
@@ -56,6 +84,8 @@ def test_productive_low_context_packet_mints_exact_primary_policy() -> None:
         _passing_leaves(),
         candidate_ids=("short", "medium", "long"),
         version="issue-730-v1",
+        implementation_revision=REVISION,
+        unpublished_payload_candidate_ids=("short", "medium", "long"),
     )
 
     assert packet.passed is True
@@ -71,7 +101,10 @@ def test_productive_low_context_packet_mints_exact_primary_policy() -> None:
     assert policy.reasoning == CONT_PRIMARY_REASONING
     assert policy.max_prompt_bytes == 3_000
     assert policy.max_context_tokens == 15_000
+    assert policy.max_total_tokens >= policy.max_context_tokens + policy.max_output_tokens
     assert policy.allowed_config_identities == (CONT_PRIMARY_CONFIG_IDENTITY,)
+    assert policy.implementation_revision == REVISION
+    assert policy.command_flags == CONT_PRIMARY_COMMAND_FLAGS
     assert policy.evidence_digest == packet.calibration_evidence_digest
 
 
@@ -85,16 +118,14 @@ def test_low_context_without_three_accepted_payloads_does_not_pass() -> None:
         leaves,
         candidate_ids=("short", "medium", "long"),
         version="issue-730-v1",
+        implementation_revision=REVISION,
+        unpublished_payload_candidate_ids=("short", "medium", "long"),
     )
 
     assert packet.passed is False
     assert "PRODUCTIVITY_BELOW_GATE" in packet.failure_reasons
-    try:
+    with pytest.raises(ModelUsageAdmissionError):
         packet.mint_primary_policy()
-    except ModelUsageAdmissionError:
-        pass
-    else:
-        raise AssertionError("failed calibration minted a policy")
 
 
 def test_accepted_prose_cannot_waive_context_or_manifest_gates() -> None:
@@ -113,6 +144,8 @@ def test_accepted_prose_cannot_waive_context_or_manifest_gates() -> None:
         leaves,
         candidate_ids=("short", "medium", "long"),
         version="issue-730-v1",
+        implementation_revision=REVISION,
+        unpublished_payload_candidate_ids=("short", "medium", "long"),
     )
 
     assert packet.metrics["accepted_unpublished_payload_count"] == 3
@@ -120,3 +153,74 @@ def test_accepted_prose_cannot_waive_context_or_manifest_gates() -> None:
     assert "P50_CONTEXT_EXCEEDED" in packet.failure_reasons
     assert "MAXIMUM_CONTEXT_EXCEEDED" in packet.failure_reasons
     assert "AMBIENT_CAPABILITY_IN_MANIFEST" in packet.failure_reasons
+
+
+def test_missing_usage_is_not_inferred_as_zero() -> None:
+    leaves = _passing_leaves()
+    leaves[1].pop("total_tokens")
+    leaves[2].pop("output_tokens")
+
+    packet = assess_cont_calibration(
+        leaves,
+        candidate_ids=("short", "medium", "long"),
+        version="issue-730-v1",
+        implementation_revision=REVISION,
+        unpublished_payload_candidate_ids=("short", "medium", "long"),
+    )
+
+    assert packet.passed is False
+    assert "TOTAL_TELEMETRY_MISSING" in packet.failure_reasons
+    assert "OUTPUT_TELEMETRY_MISSING" in packet.failure_reasons
+    assert packet.metrics["tokens_on_hold_reject_or_no_result"] is None
+
+
+def test_bootstrap_policy_is_exact_head_and_candidate_scoped() -> None:
+    policy = stage_cont_calibration_policy(
+        candidate_ids=("short", "medium", "long"),
+        version="issue-730-v1+aaaaaaaaaaaa",
+        implementation_revision=REVISION,
+        max_prompt_bytes=8_000,
+    )
+
+    assert policy.qualified is True
+    assert policy.calibration_only is True
+    assert policy.allowed_candidate_ids == ("short", "medium", "long")
+    assert policy.implementation_revision == REVISION
+    assert policy.max_context_tokens == 15_000
+
+
+def test_bootstrap_policy_resolves_only_for_bound_candidate_and_revision(
+    tmp_path: Path,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "usage.sqlite3"))
+    policy = stage_cont_calibration_policy(
+        candidate_ids=("short", "medium", "long"),
+        version="issue-730-v1+aaaaaaaaaaaa",
+        implementation_revision=REVISION,
+        max_prompt_bytes=8_000,
+    )
+    service.register_policy(policy)
+
+    selected = service.qualified_policy(
+        workload_class=WorkloadClass.CONT_WRITER_PRIMARY,
+        provider=CONT_PRIMARY_PROVIDER,
+        route=CONT_PRIMARY_ROUTE,
+        model=CONT_PRIMARY_MODEL,
+        reasoning=CONT_PRIMARY_REASONING,
+        candidate_id="short",
+        implementation_revision=REVISION,
+        config_identity=CONT_PRIMARY_CONFIG_IDENTITY,
+    )
+    assert selected.canonical_digest == policy.canonical_digest
+
+    with pytest.raises(ModelUsageAdmissionError):
+        service.qualified_policy(
+            workload_class=WorkloadClass.CONT_WRITER_PRIMARY,
+            provider=CONT_PRIMARY_PROVIDER,
+            route=CONT_PRIMARY_ROUTE,
+            model=CONT_PRIMARY_MODEL,
+            reasoning=CONT_PRIMARY_REASONING,
+            candidate_id="outside",
+            implementation_revision=REVISION,
+            config_identity=CONT_PRIMARY_CONFIG_IDENTITY,
+        )

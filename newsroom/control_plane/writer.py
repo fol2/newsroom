@@ -85,6 +85,8 @@ CONT_FALLBACK_PROVIDER = "cursor-agent-cli"
 CONT_FALLBACK_ROUTE = "CONT_FALLBACK"
 CONT_FALLBACK_MODEL = "cursor-pinned"
 CONT_FALLBACK_REASONING = "provider-default"
+CONT_CONTEXT_MANIFEST_SCHEMA_VERSION = "newsroom.cont-writer.context-manifest.v1"
+_TRUSTED_GIT_EXECUTABLE = "/usr/bin/git"
 _HERMETIC_ENVIRONMENT_KEYS = frozenset(
     {
         "HOME",
@@ -98,6 +100,34 @@ _HERMETIC_ENVIRONMENT_KEYS = frozenset(
         "XDG_STATE_HOME",
     }
 )
+
+
+def cont_writer_implementation_identity() -> tuple[str, bool]:
+    """Return the Git revision and exact clean-tree state for calibration binding."""
+
+    repository = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    try:
+        revision = subprocess.run(
+            (_TRUSTED_GIT_EXECUTABLE, "rev-parse", "HEAD"),
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+        status = subprocess.run(
+            (_TRUSTED_GIT_EXECUTABLE, "status", "--porcelain"),
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return "UNVERSIONED", False
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        return "UNVERSIONED", False
+    return revision, status == ""
 _PROMPT = (
     "你係 Newsroom 嘅 CONT 原創記者，唔係 Graphiti。"
     "用香港繁體中文寫一篇已經完成嘅未出版新聞稿。"
@@ -331,6 +361,8 @@ class WriterInvocationManifest:
     reasoning: str
     command_semantic_version: str
     command_flags: tuple[str, ...]
+    implementation_revision: str
+    implementation_worktree_clean: bool
     prompt_contract_version: str
     system_bytes: int
     system_digest: str
@@ -359,6 +391,19 @@ class WriterInvocationManifest:
     mcp_server_count: int
     mcp_tool_count: int
 
+    @classmethod
+    def create(cls, **values: object) -> WriterInvocationManifest:
+        """Build one canonical manifest from the typed serialisation contract."""
+
+        values.pop("context_manifest_digest", None)
+        draft = cls(**values, context_manifest_digest="")  # type: ignore[arg-type]
+        canonical = draft.as_record()
+        canonical.pop("context_manifest_digest")
+        return cls(  # type: ignore[arg-type]
+            **values,
+            context_manifest_digest=digest_canonical(canonical),
+        )
+
     def as_record(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
@@ -369,6 +414,8 @@ class WriterInvocationManifest:
             "reasoning": self.reasoning,
             "command_semantic_version": self.command_semantic_version,
             "command_flags": list(self.command_flags),
+            "implementation_revision": self.implementation_revision,
+            "implementation_worktree_clean": self.implementation_worktree_clean,
             "prompt_contract_version": self.prompt_contract_version,
             "system_bytes": self.system_bytes,
             "system_digest": self.system_digest,
@@ -1386,8 +1433,6 @@ _GROK_WRITER_SEMANTIC_FLAGS = (
     "dontAsk",
     "--tools",
     "",
-    "--disallowed-tools",
-    "*",
     "--deny",
     "*",
     "--no-plan",
@@ -1412,6 +1457,19 @@ _CURSOR_WRITER_REQUIRED_FLAGS = (
     "enabled",
     "--disable-tools",
     "--disable-mcp",
+)
+CONT_PRIMARY_COMMAND_FLAGS = _GROK_WRITER_SEMANTIC_FLAGS
+CONT_FALLBACK_COMMAND_FLAGS = _CURSOR_WRITER_REQUIRED_FLAGS
+CONT_DISABLED_CAPABILITIES = (
+    "REPOSITORY_DISCOVERY",
+    "INSTALLED_SKILLS",
+    "MCP_SERVERS",
+    "PLANNING",
+    "PRIOR_MESSAGES",
+    "SHELL_EXECUTION",
+    "SUBAGENTS",
+    "TOOLS",
+    "WEB_SEARCH",
 )
 
 
@@ -1554,6 +1612,9 @@ class CliChainWriter:
         prompt_bytes = prompt.encode("utf-8")
         system_bytes = CONT_WRITER_SYSTEM_INSTRUCTION.encode("utf-8")
         schema_bytes = canonical_json_bytes(WRITER_SCHEMA)
+        implementation_revision, implementation_worktree_clean = (
+            cont_writer_implementation_identity()
+        )
         if route == "PRIMARY":
             provider = CONT_PRIMARY_PROVIDER
             provider_route = CONT_PRIMARY_ROUTE
@@ -1585,69 +1646,24 @@ class CliChainWriter:
                 "reasoning": reasoning,
                 "command_semantic_version": command_semantic_version,
                 "command_flags": list(command_flags),
+                "implementation_revision": implementation_revision,
                 "system_digest": digest_bytes(system_bytes),
                 "prompt_digest": digest_bytes(prompt_bytes),
                 "output_schema_digest": CONT_WRITER_OUTPUT_SCHEMA_DIGEST,
             }
         )
         working_directory_inventory: tuple[str, ...] = ()
-        disabled_capabilities = (
-            "REPOSITORY_DISCOVERY",
-            "INSTALLED_SKILLS",
-            "MCP_SERVERS",
-            "PLANNING",
-            "PRIOR_MESSAGES",
-            "SHELL_EXECUTION",
-            "SUBAGENTS",
-            "TOOLS",
-            "WEB_SEARCH",
-        )
-        context_manifest = {
-            "schema_version": "newsroom.cont-writer.context-manifest.v1",
-            "provider": provider,
-            "route": provider_route,
-            "model": model,
-            "reasoning": reasoning,
-            "command_semantic_version": command_semantic_version,
-            "command_flags": list(command_flags),
-            "prompt_contract_version": CONT_WRITER_PROMPT_CONTRACT_VERSION,
-            "system_bytes": len(system_bytes),
-            "system_digest": digest_bytes(system_bytes),
-            "prompt_bytes": len(prompt_bytes),
-            "prompt_digest": digest_bytes(prompt_bytes),
-            "schema_bytes": len(schema_bytes),
-            "schema_digest": digest_bytes(schema_bytes),
-            "request_digest": request_digest,
-            "output_schema_digest": CONT_WRITER_OUTPUT_SCHEMA_DIGEST,
-            "context_identity": CONT_WRITER_CONTEXT_IDENTITY,
-            "config_identity": config_identity,
-            "allowed_config_digests": list(allowed_config_digests),
-            "working_directory_inventory": list(working_directory_inventory),
-            "working_directory_inventory_digest": digest_canonical(
-                list(working_directory_inventory)
-            ),
-            "disabled_capabilities": list(disabled_capabilities),
-            "evidence_package_digest": package.digest,
-            "one_turn": True,
-            "exact_input": True,
-            "skills_enabled": False,
-            "tools_enabled": False,
-            "mcp_enabled": False,
-            "prior_message_count": 0,
-            "skill_count": 0,
-            "tool_count": 0,
-            "mcp_server_count": 0,
-            "mcp_tool_count": 0,
-            "provider_context_tokens": None,
-        }
-        return WriterInvocationManifest(
-            schema_version="newsroom.cont-writer.context-manifest.v1",
+        disabled_capabilities = CONT_DISABLED_CAPABILITIES
+        return WriterInvocationManifest.create(
+            schema_version=CONT_CONTEXT_MANIFEST_SCHEMA_VERSION,
             provider=provider,
             route=provider_route,
             model=model,
             reasoning=reasoning,
             command_semantic_version=command_semantic_version,
             command_flags=command_flags,
+            implementation_revision=implementation_revision,
+            implementation_worktree_clean=implementation_worktree_clean,
             prompt_contract_version=CONT_WRITER_PROMPT_CONTRACT_VERSION,
             system_bytes=len(system_bytes),
             system_digest=digest_bytes(system_bytes),
@@ -1657,7 +1673,6 @@ class CliChainWriter:
             schema_digest=digest_bytes(schema_bytes),
             request_digest=request_digest,
             output_schema_digest=CONT_WRITER_OUTPUT_SCHEMA_DIGEST,
-            context_manifest_digest=digest_canonical(context_manifest),
             context_identity=CONT_WRITER_CONTEXT_IDENTITY,
             config_identity=config_identity,
             allowed_config_digests=allowed_config_digests,
