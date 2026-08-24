@@ -805,10 +805,16 @@ class GraphitiEventQueue:
             unresolved = [row for row in rows if str(row[2]) != "TERMINAL"]
             oldest_lag = None
             if unresolved:
-                landed = datetime.fromisoformat(str(unresolved[0][1]))
-                if landed.tzinfo is None:
-                    landed = landed.replace(tzinfo=UTC)
-                oldest_lag = max(int((now - landed).total_seconds()), 0)
+                landed_times = [
+                    datetime.fromisoformat(str(row[1])) for row in unresolved
+                ]
+                oldest_landed = min(
+                    landed.replace(tzinfo=UTC)
+                    if landed.tzinfo is None
+                    else landed.astimezone(UTC)
+                    for landed in landed_times
+                )
+                oldest_lag = max(int((now - oldest_landed).total_seconds()), 0)
             latencies = sorted(
                 max(
                     (

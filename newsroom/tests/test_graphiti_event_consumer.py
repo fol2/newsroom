@@ -177,6 +177,18 @@ def test_zero_proposal_result_is_terminal_revision_coverage(tmp_path: Path) -> N
     assert health.contiguous_coverage_watermark == result.ledger_seq
 
 
+def test_oldest_unresolved_lag_uses_effective_landing_not_ledger_order(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 24, 0, 10, tzinfo=UTC))
+    path = tmp_path / "unpublished.sqlite3"
+    _enqueue_fixture(path, (_unit(2), _unit(1)), available_at=clock.value)
+
+    health = GraphitiEventQueue(str(path), clock=clock).health()
+
+    assert health.oldest_unresolved_lag_seconds == 599
+
+
 def test_rights_hold_does_not_block_another_qualified_source(tmp_path: Path) -> None:
     clock = MutableClock(datetime(2026, 8, 24, 0, 1, tzinfo=UTC))
     queue = GraphitiEventQueue(str(tmp_path / "unpublished.sqlite3"), clock=clock)
