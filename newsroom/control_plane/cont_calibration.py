@@ -232,6 +232,18 @@ def assess_cont_calibration(
         for row in primary_rows
         if (value := _integer(row, "prompt_bytes")) is not None
     ]
+    evidence_package_sizes = [
+        value
+        for row in primary_rows
+        if isinstance(row.get("context_manifest"), dict)
+        and (
+            value := _integer(
+                row["context_manifest"],  # type: ignore[arg-type]
+                "evidence_package_bytes",
+            )
+        )
+        is not None
+    ]
     output_tokens = [
         value
         for row in dispatched_rows
@@ -316,7 +328,11 @@ def assess_cont_calibration(
         (0 < len(candidates) <= CONT_CALIBRATION_MAX_CANDIDATES, "CANDIDATE_BOUND"),
         (len(set(candidates)) == len(candidates), "CANDIDATE_ID_DUPLICATE"),
         (set(by_candidate) == set(candidates), "CALIBRATION_CANDIDATE_MISSING"),
-        (len(set(prompt_sizes)) >= 3, "EVIDENCE_SIZE_RANGE_MISSING"),
+        (
+            len(evidence_package_sizes) == len(primary_rows)
+            and len(set(evidence_package_sizes)) >= 3,
+            "EVIDENCE_SIZE_RANGE_MISSING",
+        ),
         (len(accepted) >= CONT_CALIBRATION_MIN_ACCEPTED, "PRODUCTIVITY_BELOW_GATE"),
         (
             set(accepted).issubset(set(unpublished_payload_candidate_ids)),
@@ -361,6 +377,16 @@ def assess_cont_calibration(
                 "short_bytes": min(prompt_sizes),
                 "medium_bytes": _median_int(prompt_sizes),
                 "long_bytes": max(prompt_sizes),
+            }
+        ),
+        "evidence_package_size_bands": (
+            None
+            if not evidence_package_sizes
+            or len(evidence_package_sizes) != len(primary_rows)
+            else {
+                "short_bytes": min(evidence_package_sizes),
+                "medium_bytes": _median_int(evidence_package_sizes),
+                "long_bytes": max(evidence_package_sizes),
             }
         ),
         "maximum_output_tokens": (

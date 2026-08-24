@@ -59,6 +59,7 @@ def _leaf(
             "disabled_capabilities": list(CONT_DISABLED_CAPABILITIES),
             "implementation_revision": REVISION,
             "implementation_worktree_clean": True,
+            "evidence_package_bytes": prompt_bytes,
             "one_turn": True,
             "exact_input": True,
             "skills_enabled": False,
@@ -177,6 +178,24 @@ def test_missing_usage_is_not_inferred_as_zero() -> None:
     assert packet.metrics["maximum_total_tokens"] is None
     assert packet.metrics["total_tokens_for_accepted_payloads"] is None
     assert packet.metrics["median_tokens_per_accepted_payload"] is None
+
+
+def test_prompt_size_differences_cannot_substitute_for_evidence_package_range() -> None:
+    leaves = _passing_leaves()
+    for row in leaves:
+        row["context_manifest"]["evidence_package_bytes"] = 1_000  # type: ignore[index]
+
+    packet = assess_cont_calibration(
+        leaves,
+        candidate_ids=("short", "medium", "long"),
+        version="issue-730-v1",
+        implementation_revision=REVISION,
+        unpublished_payload_candidate_ids=("short", "medium", "long"),
+    )
+
+    assert len({row["prompt_bytes"] for row in leaves}) == 3
+    assert packet.passed is False
+    assert "EVIDENCE_SIZE_RANGE_MISSING" in packet.failure_reasons
 
 
 def test_bootstrap_policy_is_exact_head_and_candidate_scoped() -> None:

@@ -38,7 +38,8 @@ adding manifest and context-observation provenance. The manifest binds:
 - empty working-directory inventory and digest;
 - permitted login/configuration digests without credential bytes;
 - disabled capabilities and exact zero skill/tool/MCP/prior-message counts;
-- system, prompt and schema byte counts and digests; and
+- system, prompt, exact writer-facing Evidence Package and schema byte counts
+  and digests; and
 - the exact Evidence Package digest.
 
 The allocation links the context-manifest digest. Terminal completion retains
@@ -93,6 +94,8 @@ the context-to-Newsroom-input ratio. Missing output or total usage on any
 dispatched leaf fails the packet; unknown usage is never reported as zero.
 Public-effect counts are derived from the retained unpublished payload rows and
 their schema-enforced `publication_bundle`, `auto_publish` and `status` fields.
+The short, medium and long range is checked against the canonical bytes derived
+from each exact writer-facing Evidence Package, not against whole-prompt length.
 
 ## Current exact-head observation
 
