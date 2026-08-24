@@ -149,6 +149,68 @@ def test_landed_record_and_queue_event_roll_back_together(tmp_path: Path) -> Non
     assert GraphitiEventQueue(str(path)).health().eligible_revision_count == 0
 
 
+def test_projection_rejects_landed_payload_not_authorised_by_ledger(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    unit = _unit(1)
+    connection = connect(str(path))
+    connection.execute("BEGIN IMMEDIATE")
+    emit_effective_revision_landed(
+        connection,
+        unit.effective_revision,
+        ingest_ids=(unit.ingest_id,),
+        landed_at=unit.coverage_first_observed_at,
+    )
+    connection.commit()
+    forged_payload = {
+        "source_id": unit.source_id,
+        "item_key": "forged",
+        "revision_digest": unit.effective_revision.revision_digest,
+        "published_at": unit.published_at,
+        "updated_at": unit.updated_at,
+        "first_observed_at": unit.coverage_first_observed_at,
+        "ingest_ids": [unit.ingest_id],
+    }
+    connection.execute(
+        "UPDATE unpublished_effective_revision_landed "
+        "SET item_key=?,payload_digest=?",
+        ("forged", digest_bytes(canonical_json_bytes(forged_payload))),
+    )
+    connection.commit()
+    connection.close()
+    queue = GraphitiEventQueue(str(path))
+    dispatched = False
+
+    def dispatch(_event):
+        nonlocal dispatched
+        dispatched = True
+        return GraphitiDispatchResult.terminal(
+            proposal_count=0, provider_dispatched=False
+        )
+
+    try:
+        queue.process_one(
+            owner_id="worker",
+            gate=lambda _event: GraphitiDispatchGate.allow(),
+            dispatch=dispatch,
+        )
+    except ValueError as exc:
+        assert str(exc) == "landed Graphiti payload digest differs from ledger"
+    else:
+        raise AssertionError("forged landed payload was projected")
+
+    assert dispatched is False
+    retained = sqlite3.connect(path)
+    assert (
+        retained.execute(
+            "SELECT COUNT(*) FROM unpublished_graphiti_revision_events"
+        ).fetchone()[0]
+        == 0
+    )
+    retained.close()
+
+
 def test_zero_proposal_result_is_terminal_revision_coverage(tmp_path: Path) -> None:
     clock = MutableClock(datetime(2026, 8, 24, 0, 1, tzinfo=UTC))
     queue = GraphitiEventQueue(str(tmp_path / "unpublished.sqlite3"), clock=clock)

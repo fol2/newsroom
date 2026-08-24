@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane.corpus import CorpusIngestUnit
+from newsroom.control_plane.store import EFFECTIVE_REVISION_LANDED
 from newsroom.control_plane.veto import assert_private_store
 
 GRAPHITI_EVENT_STATES = (
@@ -182,13 +183,14 @@ class SystemicGraphitiEventFailure(RuntimeError):
 
 def _landed_rows(
     connection: sqlite3.Connection,
-) -> list[tuple[int, str, str, str, str, str, str, str, str, str]]:
+) -> list[tuple[int, str, str, str, str, str, str, str, str, str, str, str]]:
     raw_rows = connection.execute(
         """
         SELECT ledger.seq,ledger.digest,landed.source_id,landed.item_key,
                landed.revision_digest,landed.published_at,landed.updated_at,
                landed.first_observed_at,landed.ingest_ids_json,
-               landed.payload_digest,landed.legacy_v10
+               landed.payload_digest,ledger.kind,ledger.payload_digest,
+               landed.legacy_v10
         FROM unpublished_effective_revision_landed AS landed
         JOIN ledger ON ledger.digest=landed.ledger_digest
         WHERE NOT (
@@ -217,6 +219,8 @@ def _landed_rows(
             str(row[7]),
             str(row[8]),
             str(row[9]),
+            str(row[10]),
+            str(row[11]),
         )
         for row in raw_rows
     ]
@@ -294,8 +298,14 @@ def reconcile_graphiti_events(
             "first_observed_at": row[7],
             "ingest_ids": list(landed_ingest_ids),
         }
-        if digest_canonical(landed_payload) != row[9]:
-            raise ValueError("landed Graphiti payload digest differs")
+        reconstructed_payload_digest = digest_canonical(landed_payload)
+        if row[10] != EFFECTIVE_REVISION_LANDED:
+            raise ValueError("landed Graphiti ledger kind differs")
+        if not (
+            reconstructed_payload_digest == row[9]
+            and reconstructed_payload_digest == row[11]
+        ):
+            raise ValueError("landed Graphiti payload digest differs from ledger")
         ordered = tuple(
             sorted(grouped.get(key, ()), key=lambda item: item.chunk_ordinal)
         )
