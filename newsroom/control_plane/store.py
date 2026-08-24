@@ -237,7 +237,8 @@ CREATE TABLE IF NOT EXISTS unpublished_graphiti_admission_queue(
     proposal_digest TEXT NOT NULL,
     proposal_kind TEXT NOT NULL
         CHECK(proposal_kind IN ('ENTITY_MENTION','ENTITY_EQUIVALENCE','RELATION')),
-    request_json TEXT NOT NULL,
+    request_json TEXT NOT NULL
+        CHECK(length(CAST(request_json AS BLOB))<=262144),
     request_digest TEXT NOT NULL,
     state TEXT NOT NULL
         CHECK(state IN (
@@ -271,6 +272,10 @@ CREATE TABLE IF NOT EXISTS unpublished_graphiti_projection_receipts(
         REFERENCES unpublished_graphiti_admission_queue(proposal_key),
     effect_id TEXT NOT NULL UNIQUE,
     authority_watermark INTEGER NOT NULL CHECK(authority_watermark>0),
+    projector_family_id TEXT NOT NULL,
+    generation_id TEXT NOT NULL,
+    schema_version TEXT NOT NULL,
+    trust_scope TEXT NOT NULL CHECK(trust_scope='ADMITTED'),
     receipt_json TEXT NOT NULL,
     receipt_digest TEXT NOT NULL,
     projected_at TEXT NOT NULL
@@ -283,6 +288,14 @@ CREATE TABLE IF NOT EXISTS unpublished_graphiti_projection_tombstones(
     receipt_json TEXT NOT NULL,
     receipt_digest TEXT NOT NULL,
     tombstoned_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS unpublished_graphiti_projection_reconciliations(
+    receipt_digest TEXT PRIMARY KEY,
+    projector_family_id TEXT NOT NULL,
+    generation_id TEXT NOT NULL,
+    authority_watermark INTEGER NOT NULL CHECK(authority_watermark>0),
+    receipt_json TEXT NOT NULL,
+    reconciled_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS unpublished_graphiti_admission_receipt_failures(
     ingest_id TEXT PRIMARY KEY,
@@ -311,6 +324,12 @@ CREATE TRIGGER IF NOT EXISTS immutable_graphiti_projection_tombstones_update
 CREATE TRIGGER IF NOT EXISTS immutable_graphiti_projection_tombstones_delete
     BEFORE DELETE ON unpublished_graphiti_projection_tombstones
     BEGIN SELECT RAISE(ABORT,'Graphiti projection tombstone is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_graphiti_projection_reconciliations_update
+    BEFORE UPDATE ON unpublished_graphiti_projection_reconciliations
+    BEGIN SELECT RAISE(ABORT,'Graphiti projection reconciliation is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_graphiti_projection_reconciliations_delete
+    BEFORE DELETE ON unpublished_graphiti_projection_reconciliations
+    BEGIN SELECT RAISE(ABORT,'Graphiti projection reconciliation is immutable'); END;
 CREATE TABLE IF NOT EXISTS unpublished_graphiti_spend(
     spend_id TEXT PRIMARY KEY,
     ingest_id TEXT NOT NULL,
