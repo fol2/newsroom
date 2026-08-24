@@ -774,6 +774,10 @@ def test_adopt_requires_relations_quality_not_tiny_floor_alone() -> None:
     assert recommend([tiny]) == "RESEARCH_ONLY"
     assert recommend([tiny, relations]) == "ADOPT_FOR_QUALIFICATION"
 
+    pending = {**relations, "semantic_fixture_result": "PENDING", "json_valid": None}
+    assert recommend([tiny, pending]) == "REJECT"
+    assert recommend([relations]) == "REJECT"
+
 
 def test_owner_gated_packet_remains_unauthorised_in_git() -> None:
     payload = json.loads(_PACKET_PATH.read_text(encoding="utf-8"))

@@ -587,13 +587,16 @@ def recommend(leaves: Sequence[Mapping[str, object]]) -> str:
         for leaf in leaves
     ):
         return "UNMEASURED"
-    tiny = next(leaf for leaf in leaves if leaf.get("label") == LEAF_LABELS[0])
+    tiny = next((leaf for leaf in leaves if leaf.get("label") == LEAF_LABELS[0]), None)
+    if tiny is None or not isinstance(tiny.get("usage"), Mapping):
+        return "REJECT"
     comparison = compare_to_cli_baseline(tiny["usage"])  # type: ignore[arg-type]
     if comparison["fails_minimum_useful_reduction"]:
         return "REJECT"
     quality_ok = all(
-        leaf.get("semantic_fixture_result") in {"PASS", "PENDING"} for leaf in leaves
-    ) and all(leaf.get("json_valid") is not False for leaf in leaves)
+        leaf.get("semantic_fixture_result") == "PASS" and leaf.get("json_valid") is True
+        for leaf in leaves
+    )
     if not quality_ok:
         return "REJECT"
     relations = [
