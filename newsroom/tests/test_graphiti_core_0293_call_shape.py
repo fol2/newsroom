@@ -105,8 +105,7 @@ def test_calibration_receipt_is_bounded_and_redacted() -> None:
         usage = call["usage"]
         assert set(usage) == set(_USAGE_KEYS)
         assert all(
-            isinstance(usage[key], int) and usage[key] >= 0
-            for key in _USAGE_KEYS
+            isinstance(usage[key], int) and usage[key] >= 0 for key in _USAGE_KEYS
         )
 
 
@@ -190,8 +189,7 @@ def _episode(*, body: str) -> EpisodicNode:
 
 def _body(size: int = 368) -> str:
     seed = (
-        "The Legislative Council asked about the Technology and Living curriculum. "
-        * 8
+        "The Legislative Council asked about the Technology and Living curriculum. " * 8
     )
     encoded = seed.encode("utf-8")[:size]
     return encoded.decode("utf-8", errors="ignore")

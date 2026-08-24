@@ -84,6 +84,14 @@
       "usage_status": "PROVIDER_REPORTED"
     }
   ],
+  "evidence_limitations": {
+    "agent_prompt_stream_events_observed": false,
+    "bridge_workspace_isolation_proved": false,
+    "invalid_zero_expectation_leaf_count": 2,
+    "model_catalogue_identity_verified": true,
+    "run_result_model_identity_retained": false,
+    "tool_call_count_basis": "ROUTE_CONFIGURATION_ONLY"
+  },
   "exact_repeat": {
     "available": true,
     "input_token_delta": 6463,
@@ -100,6 +108,7 @@
       "environment_allow_list_digest": "sha256:df48e445407ea450138c07d526a73151c7f38562b49679cf7a25e361dc9d82b9",
       "fact_count": null,
       "fixture_id": "tiny-json",
+      "fixture_validity": "VALID",
       "isolation": {
         "custom_tool_count": 0,
         "cwd_cursor_entry_count": 0,
@@ -141,6 +150,8 @@
       "label": "sdk-no-tool-tiny",
       "latency_ms": 4901,
       "model": "composer-2.5",
+      "model_identity_basis": "REQUEST_AND_CATALOGUE",
+      "observed_model": null,
       "ordinal": 1,
       "prompt_bytes": 49,
       "prompt_chars": 49,
@@ -156,6 +167,7 @@
       "status": "finished",
       "stream_message_classes": [],
       "tool_call_count": 0,
+      "tool_call_observation_basis": "ROUTE_CONFIGURATION_ONLY",
       "usage": {
         "cached_read_tokens": 416,
         "cached_write_tokens": 0,
@@ -175,6 +187,7 @@
       "environment_allow_list_digest": "sha256:df48e445407ea450138c07d526a73151c7f38562b49679cf7a25e361dc9d82b9",
       "fact_count": null,
       "fixture_id": "zero-result-368",
+      "fixture_validity": "INVALID_ZERO_EXPECTATION",
       "isolation": {
         "custom_tool_count": 0,
         "cwd_cursor_entry_count": 0,
@@ -216,6 +229,8 @@
       "label": "sdk-upstream-combined-zero",
       "latency_ms": 4631,
       "model": "composer-2.5",
+      "model_identity_basis": "REQUEST_AND_CATALOGUE",
+      "observed_model": null,
       "ordinal": 2,
       "prompt_bytes": 15988,
       "prompt_chars": 15931,
@@ -233,6 +248,7 @@
       "status": "finished",
       "stream_message_classes": [],
       "tool_call_count": 0,
+      "tool_call_observation_basis": "ROUTE_CONFIGURATION_ONLY",
       "usage": {
         "cached_read_tokens": 416,
         "cached_write_tokens": 0,
@@ -252,6 +268,7 @@
       "environment_allow_list_digest": "sha256:df48e445407ea450138c07d526a73151c7f38562b49679cf7a25e361dc9d82b9",
       "fact_count": null,
       "fixture_id": "relations",
+      "fixture_validity": "VALID",
       "isolation": {
         "custom_tool_count": 0,
         "cwd_cursor_entry_count": 0,
@@ -293,6 +310,8 @@
       "label": "sdk-upstream-combined-relations",
       "latency_ms": 4018,
       "model": "composer-2.5",
+      "model_identity_basis": "REQUEST_AND_CATALOGUE",
+      "observed_model": null,
       "ordinal": 3,
       "prompt_bytes": 15693,
       "prompt_chars": 15636,
@@ -308,6 +327,7 @@
       "status": "finished",
       "stream_message_classes": [],
       "tool_call_count": 0,
+      "tool_call_observation_basis": "ROUTE_CONFIGURATION_ONLY",
       "usage": {
         "cached_read_tokens": 416,
         "cached_write_tokens": 0,
@@ -327,6 +347,7 @@
       "environment_allow_list_digest": "sha256:df48e445407ea450138c07d526a73151c7f38562b49679cf7a25e361dc9d82b9",
       "fact_count": null,
       "fixture_id": "relations-timestamps",
+      "fixture_validity": "VALID",
       "isolation": {
         "custom_tool_count": 0,
         "cwd_cursor_entry_count": 0,
@@ -368,6 +389,8 @@
       "label": "sdk-upstream-batch-timestamps",
       "latency_ms": 3264,
       "model": "composer-2.5",
+      "model_identity_basis": "REQUEST_AND_CATALOGUE",
+      "observed_model": null,
       "ordinal": 4,
       "prompt_bytes": 2134,
       "prompt_chars": 2134,
@@ -383,6 +406,7 @@
       "status": "finished",
       "stream_message_classes": [],
       "tool_call_count": 0,
+      "tool_call_observation_basis": "ROUTE_CONFIGURATION_ONLY",
       "usage": {
         "cached_read_tokens": 416,
         "cached_write_tokens": 0,
@@ -402,6 +426,7 @@
       "environment_allow_list_digest": "sha256:df48e445407ea450138c07d526a73151c7f38562b49679cf7a25e361dc9d82b9",
       "fact_count": null,
       "fixture_id": "zero-result-368",
+      "fixture_validity": "INVALID_ZERO_EXPECTATION",
       "isolation": {
         "custom_tool_count": 0,
         "cwd_cursor_entry_count": 0,
@@ -443,6 +468,8 @@
       "label": "sdk-compact-temporal-zero",
       "latency_ms": 17978,
       "model": "composer-2.5",
+      "model_identity_basis": "REQUEST_AND_CATALOGUE",
+      "observed_model": null,
       "ordinal": 5,
       "prompt_bytes": 1871,
       "prompt_chars": 1871,
@@ -460,6 +487,7 @@
       "status": "finished",
       "stream_message_classes": [],
       "tool_call_count": 0,
+      "tool_call_observation_basis": "ROUTE_CONFIGURATION_ONLY",
       "usage": {
         "cached_read_tokens": 9408,
         "cached_write_tokens": 0,
@@ -479,6 +507,7 @@
       "environment_allow_list_digest": "sha256:df48e445407ea450138c07d526a73151c7f38562b49679cf7a25e361dc9d82b9",
       "fact_count": null,
       "fixture_id": "relations",
+      "fixture_validity": "VALID",
       "isolation": {
         "custom_tool_count": 0,
         "cwd_cursor_entry_count": 0,
@@ -520,6 +549,8 @@
       "label": "sdk-compact-temporal-relations",
       "latency_ms": 30587,
       "model": "composer-2.5",
+      "model_identity_basis": "REQUEST_AND_CATALOGUE",
+      "observed_model": null,
       "ordinal": 6,
       "prompt_bytes": 1576,
       "prompt_chars": 1576,
@@ -537,6 +568,7 @@
       "status": "finished",
       "stream_message_classes": [],
       "tool_call_count": 0,
+      "tool_call_observation_basis": "ROUTE_CONFIGURATION_ONLY",
       "usage": {
         "cached_read_tokens": 6112,
         "cached_write_tokens": 0,
@@ -556,6 +588,7 @@
       "environment_allow_list_digest": "sha256:df48e445407ea450138c07d526a73151c7f38562b49679cf7a25e361dc9d82b9",
       "fact_count": null,
       "fixture_id": "long-8192",
+      "fixture_validity": "VALID",
       "isolation": {
         "custom_tool_count": 0,
         "cwd_cursor_entry_count": 0,
@@ -597,6 +630,8 @@
       "label": "sdk-compact-temporal-long",
       "latency_ms": 17474,
       "model": "composer-2.5",
+      "model_identity_basis": "REQUEST_AND_CATALOGUE",
+      "observed_model": null,
       "ordinal": 7,
       "prompt_bytes": 9695,
       "prompt_chars": 9695,
@@ -614,6 +649,7 @@
       "status": "finished",
       "stream_message_classes": [],
       "tool_call_count": 0,
+      "tool_call_observation_basis": "ROUTE_CONFIGURATION_ONLY",
       "usage": {
         "cached_read_tokens": 416,
         "cached_write_tokens": 0,
@@ -633,6 +669,7 @@
       "environment_allow_list_digest": "sha256:df48e445407ea450138c07d526a73151c7f38562b49679cf7a25e361dc9d82b9",
       "fact_count": null,
       "fixture_id": "relations-repeat",
+      "fixture_validity": "VALID",
       "isolation": {
         "custom_tool_count": 0,
         "cwd_cursor_entry_count": 0,
@@ -674,6 +711,8 @@
       "label": "sdk-predeclared-repeat",
       "latency_ms": 28694,
       "model": "composer-2.5",
+      "model_identity_basis": "REQUEST_AND_CATALOGUE",
+      "observed_model": null,
       "ordinal": 8,
       "prompt_bytes": 1576,
       "prompt_chars": 1576,
@@ -689,6 +728,7 @@
       "status": "finished",
       "stream_message_classes": [],
       "tool_call_count": 0,
+      "tool_call_observation_basis": "ROUTE_CONFIGURATION_ONLY",
       "usage": {
         "cached_read_tokens": 2496,
         "cached_write_tokens": 0,
@@ -718,9 +758,11 @@
   "sdk_version": "1.0.28",
   "semantic_summary": {
     "fail_count": 4,
+    "invalid_fixture_count": 2,
     "invalid_json_count": 1,
     "pass_count": 4,
     "pending_count": 0,
+    "retained_label_basis": "HISTORICAL_PRE_V3",
     "unresolved_count": 0
   }
 }

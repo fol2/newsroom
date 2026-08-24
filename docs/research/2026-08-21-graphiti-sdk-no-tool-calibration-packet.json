@@ -1,92 +1,102 @@
 {
-  "schema_version": "newsroom.graphiti-sdk-no-tool-calibration-packet.v1",
-  "issue": 746,
-  "parent_issue": 739,
-  "created_at": "2026-08-21",
-  "status": "OWNER_GATED_LIVE_CALIBRATION",
-  "sdk_version": "1.0.28",
-  "bridge_protocol": "sdk.v1",
-  "model": "composer-2.5",
-  "lifecycle": "Agent.prompt",
-  "runtime": "local",
-  "tools": [],
-  "mcp_servers": {},
   "agents": {},
+  "bridge_protocol": "sdk.v1",
+  "created_at": "2026-08-21",
   "custom_tools": {},
-  "setting_sources": "OMITTED",
-  "live_authority": {
-    "authorised": false,
-    "requires_explicit_owner_instruction": true,
-    "maximum_cursor_sdk_model_leaves": 8,
-    "maximum_grok_model_leaves": 0,
-    "maximum_openrouter_calls": 0,
-    "adaptive_extra_calls_permitted": false,
-    "unchanged_request_retry_permitted": false,
-    "neo4j_mutation_permitted": false,
-    "publication_permitted": false
-  },
-  "experiments": [
-    {
-      "ordinal": 1,
-      "label": "sdk-no-tool-tiny",
-      "fixture": "49-character JSON prompt",
-      "purpose": "Measure the fixed no-tool SDK input floor."
-    },
-    {
-      "ordinal": 2,
-      "label": "sdk-upstream-combined-zero",
-      "fixture": "368-byte valid zero-result revision",
-      "purpose": "Compare the upstream combined prompt on the no-tool route."
-    },
-    {
-      "ordinal": 3,
-      "label": "sdk-upstream-combined-relations",
-      "fixture": "Several source-safe entities and relations",
-      "purpose": "Measure the initial upstream combined leaf on a non-zero result."
-    },
-    {
-      "ordinal": 4,
-      "label": "sdk-upstream-batch-timestamps",
-      "fixture": "Predeclared facts from experiment 3",
-      "purpose": "Measure the conditional graphiti-core timestamp leaf separately."
-    },
-    {
-      "ordinal": 5,
-      "label": "sdk-compact-temporal-zero",
-      "fixture": "368-byte valid zero-result revision",
-      "purpose": "Qualify the compact one-leaf zero-result contract."
-    },
-    {
-      "ordinal": 6,
-      "label": "sdk-compact-temporal-relations",
-      "fixture": "Several source-safe entities, relations and temporal bounds",
-      "purpose": "Qualify one-leaf non-zero entity/relation/temporal output."
-    },
-    {
-      "ordinal": 7,
-      "label": "sdk-compact-temporal-long",
-      "fixture": "Source-safe retained chunk at the 8192-byte boundary",
-      "purpose": "Prove no silent content truncation at the existing chunk limit."
-    },
-    {
-      "ordinal": 8,
-      "label": "sdk-predeclared-repeat",
-      "fixture": "Exact repeat of experiment 6",
-      "purpose": "Measure repeatability and cache behaviour without session reuse."
-    }
-  ],
   "decision_rule": {
-    "minimum_tiny_input_reduction_fraction": 0.5,
-    "preferred_tiny_input_reduction_fraction": 0.75,
-    "maximum_tiny_input_tokens_for_minimum_effect": 10051,
-    "missing_usage_is_zero": false,
     "allowed_recommendations": [
       "ADOPT_FOR_QUALIFICATION",
       "RESEARCH_ONLY",
       "REJECT"
-    ]
+    ],
+    "maximum_tiny_input_tokens_for_minimum_effect": 10051,
+    "minimum_tiny_input_reduction_fraction": 0.5,
+    "missing_usage_is_zero": false,
+    "preferred_tiny_input_reduction_fraction": 0.75,
+    "tool_call_execution_must_be_observed_for_qualification": true
   },
+  "experiments": [
+    {
+      "fixture": "49-character JSON prompt",
+      "label": "sdk-no-tool-tiny",
+      "ordinal": 1,
+      "purpose": "Measure the fixed no-tool SDK input floor."
+    },
+    {
+      "fixture": "368-byte relation-bearing source historically mislabelled as a zero-result fixture",
+      "label": "sdk-upstream-combined-zero",
+      "ordinal": 2,
+      "purpose": "Compare the upstream combined prompt on the no-tool route."
+    },
+    {
+      "fixture": "Several source-safe entities and relations",
+      "label": "sdk-upstream-combined-relations",
+      "ordinal": 3,
+      "purpose": "Measure the initial upstream combined leaf on a non-zero result."
+    },
+    {
+      "fixture": "Predeclared facts from experiment 3",
+      "label": "sdk-upstream-batch-timestamps",
+      "ordinal": 4,
+      "purpose": "Measure the conditional graphiti-core timestamp leaf separately."
+    },
+    {
+      "fixture": "368-byte relation-bearing source historically mislabelled as a zero-result fixture",
+      "label": "sdk-compact-temporal-zero",
+      "ordinal": 5,
+      "purpose": "Qualify the compact one-leaf zero-result contract."
+    },
+    {
+      "fixture": "Several source-safe entities, relations and temporal bounds",
+      "label": "sdk-compact-temporal-relations",
+      "ordinal": 6,
+      "purpose": "Qualify one-leaf non-zero entity/relation/temporal output."
+    },
+    {
+      "fixture": "Source-safe retained chunk at the 8192-byte boundary",
+      "label": "sdk-compact-temporal-long",
+      "ordinal": 7,
+      "purpose": "Prove no silent content truncation at the existing chunk limit."
+    },
+    {
+      "fixture": "Exact repeat of experiment 6",
+      "label": "sdk-predeclared-repeat",
+      "ordinal": 8,
+      "purpose": "Measure repeatability and cache behaviour without session reuse."
+    }
+  ],
+  "historical_evidence_limitations": {
+    "agent_prompt_stream_events_observed": false,
+    "bridge_workspace_isolation_proved": false,
+    "invalid_zero_expectation_leaf_count": 2,
+    "run_result_model_identity_retained": false,
+    "tool_call_count_basis": "ROUTE_CONFIGURATION_ONLY"
+  },
+  "issue": 746,
+  "lifecycle": "Agent.prompt",
+  "live_authority": {
+    "adaptive_extra_calls_permitted": false,
+    "authorised": false,
+    "maximum_cursor_sdk_model_leaves": 8,
+    "maximum_grok_model_leaves": 0,
+    "maximum_openrouter_calls": 0,
+    "neo4j_mutation_permitted": false,
+    "publication_permitted": false,
+    "requires_explicit_owner_instruction": true,
+    "unchanged_request_retry_permitted": false
+  },
+  "mcp_servers": {},
+  "model": "composer-2.5",
+  "parent_issue": 739,
   "receipt_redaction": {
+    "forbid": [
+      "api_key",
+      "account_email",
+      "full_prompt",
+      "full_model_result",
+      "session_transcript",
+      "local_home_path"
+    ],
     "retain": [
       "sdk_and_bridge_versions",
       "model_catalog_identity",
@@ -97,15 +107,13 @@
       "usage_status_and_provenance",
       "latency",
       "json_and_semantic_fixture_result",
-      "stream_message_classes_and_tool_call_count"
-    ],
-    "forbid": [
-      "api_key",
-      "account_email",
-      "full_prompt",
-      "full_model_result",
-      "session_transcript",
-      "local_home_path"
+      "tool_surface_configuration_and_observation_basis"
     ]
-  }
+  },
+  "runtime": "local",
+  "schema_version": "newsroom.graphiti-sdk-no-tool-calibration-packet.v1",
+  "sdk_version": "1.0.28",
+  "setting_sources": "OMITTED",
+  "status": "OWNER_GATED_LIVE_CALIBRATION",
+  "tools": []
 }

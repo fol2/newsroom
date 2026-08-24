@@ -5,6 +5,7 @@
   "environment_allow_list_digest": "sha256:df48e445407ea450138c07d526a73151c7f38562b49679cf7a25e361dc9d82b9",
   "fact_count": null,
   "fixture_id": "relations-timestamps",
+  "fixture_validity": "VALID",
   "isolation": {
     "custom_tool_count": 0,
     "cwd_cursor_entry_count": 0,
@@ -46,6 +47,8 @@
   "label": "sdk-upstream-batch-timestamps",
   "latency_ms": 3264,
   "model": "composer-2.5",
+  "model_identity_basis": "REQUEST_AND_CATALOGUE",
+  "observed_model": null,
   "ordinal": 4,
   "prompt_bytes": 2134,
   "prompt_chars": 2134,
@@ -61,6 +64,7 @@
   "status": "finished",
   "stream_message_classes": [],
   "tool_call_count": 0,
+  "tool_call_observation_basis": "ROUTE_CONFIGURATION_ONLY",
   "usage": {
     "cached_read_tokens": 416,
     "cached_write_tokens": 0,

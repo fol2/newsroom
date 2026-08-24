@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Cursor SDK no-tool calibration CLI. Provider I/O only happens on `--execute`."""
 
 from __future__ import annotations

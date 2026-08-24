@@ -47,6 +47,7 @@
     "quality_must_not_regress": true,
     "source_content_must_not_be_truncated": true,
     "tool_call_count_must_equal": 0,
+    "tool_call_execution_must_be_observed_for_qualification": true,
     "zero_result_is_terminal_success": true
   },
   "experiments": [
@@ -57,7 +58,7 @@
       "purpose": "Measure the fixed no-tool SDK input floor."
     },
     {
-      "fixture": "368-byte valid zero-result revision",
+      "fixture": "368-byte relation-bearing source historically mislabelled as a zero-result fixture",
       "label": "sdk-upstream-combined-zero",
       "ordinal": 2,
       "purpose": "Compare the upstream combined prompt on the no-tool route."
@@ -75,7 +76,7 @@
       "purpose": "Measure the conditional graphiti-core timestamp leaf separately."
     },
     {
-      "fixture": "368-byte valid zero-result revision",
+      "fixture": "368-byte relation-bearing source historically mislabelled as a zero-result fixture",
       "label": "sdk-compact-temporal-zero",
       "ordinal": 5,
       "purpose": "Qualify the compact one-leaf zero-result contract."
@@ -99,6 +100,9 @@
       "purpose": "Measure repeatability and cache behaviour without session reuse."
     }
   ],
+  "historical_evidence_limitations": {
+    "invalid_zero_expectation_leaf_count": 2
+  },
   "live_authority": {
     "adaptive_extra_calls_permitted": false,
     "authorised": false,
@@ -138,36 +142,42 @@
       "usage_status_and_provenance",
       "latency",
       "json_and_semantic_fixture_result",
-      "stream_message_classes_and_tool_call_count"
+      "tool_surface_configuration_and_observation_basis"
     ]
   },
   "retained_live_outcome": {
+    "bridge_workspace_isolation_proved": false,
     "exact_repeat_input_token_delta": 6463,
     "exact_repeat_input_token_delta_fraction": 0.29704016913319237,
     "exact_repeat_semantic_outcome_matches": false,
     "executed_at": "2026-08-22",
     "first_compact_leaf_count": 3,
     "first_compact_leaf_fail_count": 3,
+    "invalid_zero_expectation_leaf_count": 2,
     "provider_calls": 8,
     "recommendation": "REJECT",
+    "run_result_model_identity_retained": false,
     "semantic_fail_count": 4,
     "semantic_pass_count": 4,
     "tiny_input_reduction_fraction": 0.8293786996965627,
-    "tiny_input_tokens": 3430
+    "tiny_input_tokens": 3430,
+    "tool_call_count_basis": "ROUTE_CONFIGURATION_ONLY"
   },
   "schema_version": "newsroom.graphiti-token-effectiveness-experiment-plan.v1",
   "sdk_candidate": {
+    "agent_prompt_stream_exposure": "UNAVAILABLE_IN_CURSOR_SDK_1_0_28_RUN_RESULT",
     "agents": {},
     "authentication": "PURPOSE_CREATED_CURSOR_API_KEY",
     "custom_tools": {},
     "cwd": "FRESH_EMPTY_NON_GIT_DIRECTORY_PER_LEAF",
+    "future_qualification_requires_observable_event_lifecycle": true,
     "lifecycle": "Agent.prompt",
     "mcp_servers": {},
     "model": "composer-2.5",
     "official_bridge_manifest_version_observed": "1.0.28",
     "prior_messages": 0,
     "protocol": "sdk.v1",
-    "required_stream_tool_call_count": 0,
+    "required_stream_tool_call_count": null,
     "runtime": "local",
     "setting_sources": "OMITTED",
     "tools": []
