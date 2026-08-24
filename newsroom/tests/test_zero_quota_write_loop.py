@@ -176,6 +176,15 @@ def test_official_programme_terms_have_a_structured_entity_type() -> None:
         "香港政府公布學生安排",
         "香港政府公布弱勢安排",
         "香港政府公布申請安排",
+        "香港政府公布房屋安排",
+        "香港政府公布就業安排",
+        "香港政府公布長者安排",
+        "香港政府公布基層安排",
+        "香港政府公布醫療安排",
+        "香港政府公布福利安排",
+        "香港政府公布政策安排",
+        "香港政府公布措施安排",
+        "香港政府公布計劃安排",
         "方針明確公布安排",
         "方表示支持新安排",
         "政府任命任務安排",
@@ -187,6 +196,21 @@ def test_common_chinese_words_are_not_invented_as_people_or_places(text: str) ->
         for entity in bounded_named_entities(text)
         if entity[1] in {"PERSON", "PLACE"}
     }
+
+
+@pytest.mark.parametrize(
+    ("text", "person"),
+    (
+        ("警方拘捕李小明", "李小明"),
+        ("法院起訴王小明", "王小明"),
+        ("機構邀請李小明", "李小明"),
+        ("政府會見劉志偉", "劉志偉"),
+    ),
+)
+def test_action_context_retains_arbitrary_chinese_person(
+    text: str, person: str
+) -> None:
+    assert (person, "PERSON") in bounded_named_entities(text)
 
 
 def test_owner_approved_hong_kong_charter_has_no_simplified_shapes() -> None:
@@ -343,6 +367,18 @@ def test_approved_proper_name_is_exempt_from_contextual_shape_gate(
             ("北角", "PLACE"),
             ("太子", "PLACE"),
         ),
+        (
+            "香港政府公布劉志偉獲委任為局長",
+            "香港政府最新公告指郭志強獲委任做局長",
+            ("劉志偉", "PERSON"),
+            ("郭志強", "PERSON"),
+        ),
+        (
+            "香港政府公布：銅鑼灣將設立新中心",
+            "香港政府最新公告指：佐敦將設立新中心",
+            ("銅鑼灣", "PLACE"),
+            ("佐敦", "PLACE"),
+        ),
     ),
 )
 def test_changed_chinese_identity_fails_closed_before_writer(
@@ -445,6 +481,7 @@ def test_short_service_delay_cannot_masquerade_as_law_change() -> None:
         "服務公布新增十分鐘延誤",
         "服務公布新增半小時延誤",
         "服務公布零分鐘延誤",
+        "青松學校公布校巴新增半小時延誤",
     ),
 )
 def test_service_delay_cannot_masquerade_as_official_instruction(
@@ -452,11 +489,18 @@ def test_service_delay_cannot_masquerade_as_official_instruction(
 ) -> None:
     candidate, package = _candidate_package()
     headline, substantive = package.governed_claims
+    entities = tuple(sorted(bounded_named_entities(service_noise)))
     changed_headline = replace(
         headline,
         claim=service_noise,
         supporting_excerpt=service_noise,
-        rendered_assertion_zh_hant_hk="服務新增十分鐘延誤安排",
+        rendered_assertion_zh_hant_hk=f"{service_noise.replace('公布', '公布咗')}安排",
+        named_entity_evidence=tuple(
+            (text, entity_type, f"entity:service:{index}")
+            for index, (text, entity_type) in enumerate(entities)
+        ),
+        named_entities=tuple(text for text, _entity_type in entities),
+        rendered_named_entities=tuple(text for text, _entity_type in entities),
     )
     guarded = replace(
         package,
@@ -478,12 +522,56 @@ def test_service_delay_cannot_masquerade_as_official_instruction(
             ),
             package.qualification_evidence[1],
         ),
+        resolved_evidence_records=(
+            *package.resolved_evidence_records,
+            *(
+                (f"entity:service:{index}", f"digest:service:{index}")
+                for index, _entity in enumerate(entities)
+            ),
+        ),
     )
     decision = DeterministicWriteAdmission().decide(
         candidate, guarded, decided_at="2026-08-20T00:00:00Z"
     )
     assert decision.decision == "HOLD"
     assert decision.stable_reason_codes == ("QUALIFICATION_EVIDENCE_NOT_EXACT",)
+
+
+def test_explicit_reader_instruction_survives_disruption_noise_gate() -> None:
+    candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    instruction = "政府公布鐵路停駛期間乘客必須改乘巴士"
+    changed_headline = replace(
+        headline,
+        claim=instruction,
+        supporting_excerpt=instruction,
+        rendered_assertion_zh_hant_hk="政府宣布鐵路停駛期間乘客必須改搭巴士",
+    )
+    guarded = replace(
+        package,
+        passages=(f"{instruction}\n{substantive.claim}",),
+        substantive_new_information=(instruction, substantive.claim),
+        governed_claims=(changed_headline, substantive),
+        qualification_evidence=(
+            QualificationEvidence(
+                Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE,
+                changed_headline.claim_id,
+                package.qualification_evidence[0].qualification_record_id,
+                (
+                    ("action_class", "INSTRUCTION"),
+                    ("event_polarity", "AFFIRMED"),
+                    ("action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"),
+                    ("material_relation_span", instruction),
+                    ("reader_action", instruction),
+                ),
+            ),
+            package.qualification_evidence[1],
+        ),
+    )
+    decision = DeterministicWriteAdmission().decide(
+        candidate, guarded, decided_at="2026-08-20T00:00:00Z"
+    )
+    assert decision.decision == "WRITE_READY"
 
 
 def test_governed_records_reject_cross_source_claim_link() -> None:
@@ -3571,6 +3659,12 @@ def test_connect_upgrades_legacy_ledger_for_retained_counter_payloads(
     fresh_schema = fresh.execute("PRAGMA table_info(ledger)").fetchall()
     fresh.close()
     assert migrated_schema == fresh_schema
+    reopened = connect(str(path))
+    assert reopened.execute("SELECT COUNT(*) FROM ledger").fetchone() == (1,)
+    assert not reopened.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ledger_pre_v12'"
+    ).fetchone()
+    reopened.close()
 
 
 def test_concurrent_ledger_appends_form_one_contiguous_chain(tmp_path: Path) -> None:
@@ -3667,6 +3761,10 @@ def test_write_selection_replay_requires_exact_canonical_record(tmp_path: Path) 
         selected_at="2026-08-20T00:00:00Z",
     )[0][3]
     retain_write_selection(connection, selection)
+    retain_write_selection(
+        connection,
+        replace(selection, selected_at="2026-08-20T00:00:01Z"),
+    )
 
     with pytest.raises(ValueError, match="selection identity"):
         WriteSelectionRecord(
@@ -3678,6 +3776,29 @@ def test_write_selection_replay_requires_exact_canonical_record(tmp_path: Path) 
             quality_score=(0, *selection.quality_score[1:]),
             ordering_evidence=selection.ordering_evidence,
             policy_version=selection.policy_version,
+            selected_at=selection.selected_at,
+        )
+    with pytest.raises(ValueError, match="unsupported write selection policy"):
+        WriteSelectionRecord(
+            selection_id=digest_bytes(
+                canonical_json_bytes(
+                    {
+                        "decision_id": selection.decision_id,
+                        "candidate_id": selection.candidate_id,
+                        "evidence_package_digest": selection.evidence_package_digest,
+                        "rank": selection.rank,
+                        "quality_score": selection.quality_score,
+                        "policy_version": "evil.policy",
+                    }
+                )
+            ),
+            decision_id=selection.decision_id,
+            candidate_id=selection.candidate_id,
+            evidence_package_digest=selection.evidence_package_digest,
+            rank=selection.rank,
+            quality_score=selection.quality_score,
+            ordering_evidence=selection.ordering_evidence,
+            policy_version="evil.policy",
             selected_at=selection.selected_at,
         )
 

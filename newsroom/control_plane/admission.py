@@ -232,22 +232,40 @@ def _qualification_relation_is_proven(
         if clause.strip()
     }
     span = spans[0] if len(spans) == 1 else ""
-    service_noise = bool(
-        _MATERIAL_SUBJECT_SPAN_PATTERNS[
-            Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION
-        ].search(span)
-        and _MATERIAL_RELATION_SPAN_PATTERNS[
+    disruption_relation = bool(
+        _MATERIAL_RELATION_SPAN_PATTERNS[
             Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION
         ].search(span)
     )
+    qualification_fields = dict(qualification.test_evidence)
+    explicit_reader_instruction = bool(
+        qualification.test is Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE
+        and qualification_fields.get("action_class") == "INSTRUCTION"
+        and re.search(
+            r"must|need(?:s)? to|required? to|should|instruct(?:ed|ion)?|"
+            r"必須|必须|需要|應該|应该|指示|要求|改乘|改搭",
+            span,
+            flags=re.IGNORECASE,
+        )
+    )
+    explicit_official_deadline = bool(
+        qualification.test is Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE
+        and qualification_fields.get("action_class") == "OFFICIAL_DEADLINE"
+        and re.search(
+            r"deadline|closing date|限期|截止|屆滿|届满",
+            span,
+            flags=re.IGNORECASE,
+        )
+    )
     if (
-        service_noise
+        disruption_relation
         and qualification.test
         is not Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION
+        and not explicit_reader_instruction
+        and not explicit_official_deadline
     ):
         return False
     if qualification.test is Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE:
-        evidence = dict(qualification.test_evidence)
         action_pattern = {
             "INSTRUCTION": re.compile(
                 r"must|need(?:s)? to|required? to|should|instruct(?:ed|ion)?|"
@@ -264,8 +282,10 @@ def _qualification_relation_is_proven(
                 r"官方行動|官方行动|限期|截止|屆滿|届满|公布|宣佈|宣布",
                 re.IGNORECASE,
             ),
-        }[evidence["action_class"]]
-        if evidence["reader_action"] != span or not action_pattern.search(span):
+        }[qualification_fields["action_class"]]
+        if qualification_fields["reader_action"] != span or not action_pattern.search(
+            span
+        ):
             return False
     return (
         len(spans) == 1
@@ -451,6 +471,8 @@ class WriteSelectionRecord:
             "quality_score": self.quality_score,
             "policy_version": self.policy_version,
         }
+        if self.policy_version != WRITE_SELECTION_POLICY_VERSION:
+            raise ValueError("unsupported write selection policy version")
         if self.selection_id != digest_bytes(canonical_json_bytes(identity)):
             raise ValueError("write selection identity does not match retained fields")
         expected_ordering = (
