@@ -165,6 +165,12 @@ class ExistingGovernedGraphitiAdmissionAuthority:
             digest=plan.graphiti_proposal_digest,
             local_id=plan.graphiti_proposal_local_id,
         )
+        planned_action = _ENTITY_ACTIONS.get(plan.decision_request.action)
+        if planned_action is None:
+            raise GraphitiAdmissionConsumerError(
+                "entity plan contains a non-admission decision"
+            )
+        self._require_action(planned_action, required_action)
         for mention in plan.mention_requests:
             self._entities.admit_mention(mention, proof=self._proof)
         proposed = self._entities.propose_resolution(
@@ -230,6 +236,12 @@ class ExistingGovernedGraphitiAdmissionAuthority:
             raise GraphitiAdmissionConsumerError(
                 "relation plan lacks two exact governed endpoint bindings"
             )
+        planned_action = _RELATION_ACTIONS.get(plan.decision_request.action)
+        if planned_action is None:
+            raise GraphitiAdmissionConsumerError(
+                "relation plan contains a lifecycle decision"
+            )
+        self._require_action(planned_action, required_action)
         endpoint_decisions = []
         for proposal_id in plan.endpoint_resolution_proposal_ids:
             decision = self._entities.decision(proposal_id, proof=self._proof)
