@@ -125,9 +125,12 @@ class EffectiveRevisionTokenOutcome(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class EffectiveRevisionTokenCase:
+    """One #737-grain case with aggregate tokens for its primary leaf misses."""
+
     case_id: str
     outcome: EffectiveRevisionTokenOutcome
     primary_tokens: TokenEstimateRange | None
+    primary_leaf_count: int | None
     current: ConditionalLeafProfile
     target: ConditionalLeafProfile
     embedding_tokens: int | None
@@ -146,6 +149,27 @@ class EffectiveRevisionTokenCase:
         ):
             raise DeterministicWorkContractError(
                 "primary token estimate must be typed or unresolved"
+            )
+        if self.primary_leaf_count is not None and (
+            isinstance(self.primary_leaf_count, bool)
+            or not isinstance(self.primary_leaf_count, int)
+            or self.primary_leaf_count < 0
+        ):
+            raise DeterministicWorkContractError(
+                "primary leaf count must be non-negative or unresolved"
+            )
+        zero_primary_tokens = TokenEstimateRange(0, 0, 0)
+        if self.primary_leaf_count == 0 and self.primary_tokens != zero_primary_tokens:
+            raise DeterministicWorkContractError(
+                "zero primary leaves require an exact zero primary token range"
+            )
+        if (
+            self.primary_leaf_count is not None
+            and self.primary_leaf_count > 0
+            and self.primary_tokens == zero_primary_tokens
+        ):
+            raise DeterministicWorkContractError(
+                "positive primary leaves require non-zero or unresolved primary tokens"
             )
         if not isinstance(self.current, ConditionalLeafProfile) or not isinstance(
             self.target, ConditionalLeafProfile
@@ -172,7 +196,23 @@ class EffectiveRevisionTokenCase:
             )
 
 
-def _profile_probabilities(
+def _profile_expected_counts_ppm(
+    cases: tuple[EffectiveRevisionTokenCase, ...],
+    *,
+    profile_name: str,
+) -> dict[str, int]:
+    denominator = len(cases)
+    return {
+        field: (
+            sum(getattr(getattr(case, profile_name), field) for case in cases)
+            * 1_000_000
+            // denominator
+        )
+        for field in ("timestamp", "dedupe", "summary", "fallback")
+    }
+
+
+def _profile_prevalence_ppm(
     cases: tuple[EffectiveRevisionTokenCase, ...],
     *,
     profile_name: str,
@@ -236,7 +276,13 @@ def build_token_effectiveness_report(
         )
     current_total = TokenEstimateRange(0, 0, 0)
     target_total = TokenEstimateRange(0, 0, 0)
-    terminal_unresolved = False
+    usage_unresolved = any(
+        case.primary_tokens is None
+        or case.embedding_tokens is None
+        or case.unresolved_chat_leaves > 0
+        or case.reported_chat_tokens > 0
+        for case in cases
+    )
     for case in terminal:
         if (
             case.primary_tokens is None
@@ -244,7 +290,6 @@ def build_token_effectiveness_report(
             or case.unresolved_chat_leaves > 0
             or case.reported_chat_tokens > 0
         ):
-            terminal_unresolved = True
             continue
         embedding = TokenEstimateRange(
             case.embedding_tokens,
@@ -257,18 +302,60 @@ def build_token_effectiveness_report(
         target_total = target_total.plus(case.primary_tokens).plus(
             sensitivity.for_profile(case.target)
         ).plus(embedding)
-    unresolved_chat_leaves = sum(case.unresolved_chat_leaves for case in cases)
+    explicit_unresolved_chat_leaves = sum(
+        case.unresolved_chat_leaves for case in cases
+    )
+    unresolved_primary_leaf_count_unknown = any(
+        case.primary_tokens is None and case.primary_leaf_count is None
+        for case in cases
+    )
+    unresolved_primary_leaves = sum(
+        case.primary_leaf_count or 0
+        for case in cases
+        if case.primary_tokens is None
+    )
+    if unresolved_primary_leaf_count_unknown:
+        unresolved_leaf_count: object = "UNRESOLVED"
+        chat_usage_unresolved = True
+    else:
+        unresolved_leaf_count = (
+            explicit_unresolved_chat_leaves + unresolved_primary_leaves
+        )
+        chat_usage_unresolved = unresolved_leaf_count > 0
     embedding_unresolved = any(case.embedding_tokens is None for case in cases)
-    current_probability: object = "UNRESOLVED"
-    target_probability: object = "UNRESOLVED"
+    current_expected_counts: object = "UNRESOLVED"
+    target_expected_counts: object = "UNRESOLVED"
+    current_prevalence: object = "UNRESOLVED"
+    target_prevalence: object = "UNRESOLVED"
+    primary_leaves_per_revision: object = "UNRESOLVED"
+    primary_leaf_counts_resolved = False
     if distribution_measured:
-        current_probability = _profile_probabilities(cases, profile_name="current")
-        target_probability = _profile_probabilities(cases, profile_name="target")
+        current_expected_counts = _profile_expected_counts_ppm(
+            cases, profile_name="current"
+        )
+        target_expected_counts = _profile_expected_counts_ppm(
+            cases, profile_name="target"
+        )
+        current_prevalence = _profile_prevalence_ppm(cases, profile_name="current")
+        target_prevalence = _profile_prevalence_ppm(cases, profile_name="target")
+        if all(case.primary_leaf_count is not None for case in cases):
+            total_primary_leaves = sum(
+                case.primary_leaf_count or 0 for case in cases
+            )
+            primary_leaves_per_revision = {
+                "basis": "MEASURED_EFFECTIVE_REVISION_CASES",
+                "expected_count_ppm": (
+                    total_primary_leaves * 1_000_000 // len(cases)
+                ),
+                "revision_count": len(cases),
+                "total_leaf_count": total_primary_leaves,
+            }
+            primary_leaf_counts_resolved = True
     quality_matches = all(case.quality_matches_gold is True for case in cases)
     if not distribution_measured:
         averages: object = "UNRESOLVED"
         recommendation = "HOLD_UNMEASURED_EFFECTIVE_REVISION_DISTRIBUTION"
-    elif terminal_unresolved:
+    elif usage_unresolved or not primary_leaf_counts_resolved:
         averages: object = "UNRESOLVED"
         recommendation = "HOLD_UNRESOLVED_USAGE"
     else:
@@ -279,23 +366,23 @@ def build_token_effectiveness_report(
             target_average[scenario] < current_average[scenario]
             for scenario in ("low", "base", "high")
         )
-        assert isinstance(current_probability, dict)
-        assert isinstance(target_probability, dict)
-        probability_non_increasing = all(
-            target_probability[field] <= current_probability[field]
+        assert isinstance(current_expected_counts, dict)
+        assert isinstance(target_expected_counts, dict)
+        expected_counts_non_increasing = all(
+            target_expected_counts[field] <= current_expected_counts[field]
             for field in ("timestamp", "dedupe", "summary", "fallback")
         )
-        avoidable_probability_falls = any(
-            target_probability[field] < current_probability[field]
+        avoidable_expected_count_falls = any(
+            target_expected_counts[field] < current_expected_counts[field]
             for field in ("dedupe", "summary", "fallback")
         )
         if not quality_matches:
             recommendation = "HOLD_QUALITY_REGRESSION"
         elif (
             strict_improvement
-            and probability_non_increasing
-            and avoidable_probability_falls
-            and target_probability["timestamp"] == 0
+            and expected_counts_non_increasing
+            and avoidable_expected_count_falls
+            and target_expected_counts["timestamp"] == 0
         ):
             recommendation = "ADOPT_IN_731_IMPLEMENTATION_ATOM"
         else:
@@ -305,20 +392,26 @@ def build_token_effectiveness_report(
         if case.primary_tokens is not None:
             estimated_primary = estimated_primary.plus(case.primary_tokens)
     return {
-        "schema_version": "newsroom.graphiti-token-effectiveness-report.v1",
+        "schema_version": "newsroom.graphiti-token-effectiveness-report.v2",
         "effective_revision_count": len(cases),
-        "mandatory_primary_leaves_per_revision": 1,
-        "conditional_leaf_probabilities_ppm": {
-            "current": current_probability,
-            "target": target_probability,
+        "mandatory_primary_leaves_per_revision": primary_leaves_per_revision,
+        "conditional_leaf_expected_counts_ppm": {
+            "current": current_expected_counts,
+            "target": target_expected_counts,
+        },
+        "conditional_leaf_prevalence_ppm": {
+            "current": current_prevalence,
+            "target": target_prevalence,
         },
         "chat_tokens": {
             "reported": sum(case.reported_chat_tokens for case in cases),
-            "estimated_primary": estimated_primary.canonical_value(),
-            "unresolved": (
-                "UNRESOLVED" if unresolved_chat_leaves else 0
+            "estimated_primary": (
+                "UNRESOLVED"
+                if any(case.primary_tokens is None for case in cases)
+                else estimated_primary.canonical_value()
             ),
-            "unresolved_leaf_count": unresolved_chat_leaves,
+            "unresolved": "UNRESOLVED" if chat_usage_unresolved else 0,
+            "unresolved_leaf_count": unresolved_leaf_count,
         },
         "embedding_tokens": (
             "UNRESOLVED"

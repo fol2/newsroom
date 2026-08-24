@@ -4,9 +4,14 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
+)
+from newsroom.graphiti_adapter.deterministic_contract import (
+    DeterministicWorkContractError,
 )
 from newsroom.graphiti_adapter.deterministic_sidecar import (
     AuthorityRecordRef,
@@ -429,8 +434,9 @@ def test_average_token_model_separates_conditional_zero_token_work() -> None:
         EffectiveRevisionTokenCase(
             case_id="revision:proposals",
             outcome=EffectiveRevisionTokenOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS,
+            primary_leaf_count=1,
             primary_tokens=TokenEstimateRange(100, 120, 150),
-            current=ConditionalLeafProfile(dedupe=1, summary=1),
+            current=ConditionalLeafProfile(dedupe=2, summary=1),
             target=ConditionalLeafProfile(),
             embedding_tokens=10,
             quality_matches_gold=True,
@@ -438,6 +444,7 @@ def test_average_token_model_separates_conditional_zero_token_work() -> None:
         EffectiveRevisionTokenCase(
             case_id="revision:zero",
             outcome=EffectiveRevisionTokenOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS,
+            primary_leaf_count=1,
             primary_tokens=TokenEstimateRange(100, 120, 150),
             current=ConditionalLeafProfile(),
             target=ConditionalLeafProfile(),
@@ -447,6 +454,7 @@ def test_average_token_model_separates_conditional_zero_token_work() -> None:
         EffectiveRevisionTokenCase(
             case_id="revision:held",
             outcome=EffectiveRevisionTokenOutcome.HELD_AMBIGUITY,
+            primary_leaf_count=1,
             primary_tokens=TokenEstimateRange(100, 120, 150),
             current=ConditionalLeafProfile(dedupe=1),
             target=ConditionalLeafProfile(),
@@ -458,14 +466,31 @@ def test_average_token_model_separates_conditional_zero_token_work() -> None:
     report = build_token_effectiveness_report(cases, sensitivity=sensitivity)
 
     assert report["effective_revision_count"] == 3
-    assert report["mandatory_primary_leaves_per_revision"] == 1
-    assert report["conditional_leaf_probabilities_ppm"]["current"] == {
+    assert report["mandatory_primary_leaves_per_revision"] == {
+        "basis": "MEASURED_EFFECTIVE_REVISION_CASES",
+        "expected_count_ppm": 1_000_000,
+        "revision_count": 3,
+        "total_leaf_count": 3,
+    }
+    assert report["conditional_leaf_expected_counts_ppm"]["current"] == {
+        "timestamp": 0,
+        "dedupe": 1_000_000,
+        "summary": 333_333,
+        "fallback": 0,
+    }
+    assert report["conditional_leaf_expected_counts_ppm"]["target"] == {
+        "timestamp": 0,
+        "dedupe": 0,
+        "summary": 0,
+        "fallback": 0,
+    }
+    assert report["conditional_leaf_prevalence_ppm"]["current"] == {
         "timestamp": 0,
         "dedupe": 666_666,
         "summary": 333_333,
         "fallback": 0,
     }
-    assert report["conditional_leaf_probabilities_ppm"]["target"] == {
+    assert report["conditional_leaf_prevalence_ppm"]["target"] == {
         "timestamp": 0,
         "dedupe": 0,
         "summary": 0,
@@ -478,17 +503,106 @@ def test_average_token_model_separates_conditional_zero_token_work() -> None:
     }
     assert report["average_total_tokens_per_terminal_effective_revision"][
         "current"
-    ] == {"low": 125, "base": 155, "high": 195}
+    ] == {"low": 135, "base": 170, "high": 215}
     assert report["average_total_tokens_per_terminal_effective_revision"][
         "target"
     ] == {"low": 110, "base": 130, "high": 160}
     assert report["recommendation"] == "ADOPT_IN_731_IMPLEMENTATION_ATOM"
 
 
+def test_primary_leaf_average_supports_zero_hits_and_multi_chunk_misses() -> None:
+    cases = (
+        EffectiveRevisionTokenCase(
+            case_id="revision:exact-reuse-hit",
+            outcome=EffectiveRevisionTokenOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS,
+            primary_leaf_count=0,
+            primary_tokens=TokenEstimateRange(0, 0, 0),
+            current=ConditionalLeafProfile(),
+            target=ConditionalLeafProfile(),
+            embedding_tokens=0,
+            quality_matches_gold=True,
+        ),
+        EffectiveRevisionTokenCase(
+            case_id="revision:three-chunk-miss",
+            outcome=EffectiveRevisionTokenOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS,
+            primary_leaf_count=3,
+            primary_tokens=TokenEstimateRange(300, 300, 300),
+            current=ConditionalLeafProfile(),
+            target=ConditionalLeafProfile(),
+            embedding_tokens=0,
+            quality_matches_gold=True,
+        ),
+    )
+
+    report = build_token_effectiveness_report(
+        cases,
+        sensitivity=ConditionalLeafTokenRanges.zero(),
+    )
+
+    assert report["mandatory_primary_leaves_per_revision"] == {
+        "basis": "MEASURED_EFFECTIVE_REVISION_CASES",
+        "expected_count_ppm": 1_500_000,
+        "revision_count": 2,
+        "total_leaf_count": 3,
+    }
+
+
+def test_zero_primary_misses_reject_nonzero_primary_tokens() -> None:
+    with pytest.raises(
+        DeterministicWorkContractError,
+        match="zero primary leaves require an exact zero primary token range",
+    ):
+        EffectiveRevisionTokenCase(
+            case_id="revision:invalid-zero-hit",
+            outcome=EffectiveRevisionTokenOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS,
+            primary_leaf_count=0,
+            primary_tokens=TokenEstimateRange(1, 1, 1),
+            current=ConditionalLeafProfile(),
+            target=ConditionalLeafProfile(),
+            embedding_tokens=0,
+            quality_matches_gold=True,
+        )
+
+
+def test_zero_primary_misses_require_an_exact_zero_token_range() -> None:
+    with pytest.raises(
+        DeterministicWorkContractError,
+        match="zero primary leaves require an exact zero primary token range",
+    ):
+        EffectiveRevisionTokenCase(
+            case_id="revision:unresolved-zero-hit",
+            outcome=EffectiveRevisionTokenOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS,
+            primary_leaf_count=0,
+            primary_tokens=None,
+            current=ConditionalLeafProfile(),
+            target=ConditionalLeafProfile(),
+            embedding_tokens=0,
+            quality_matches_gold=True,
+        )
+
+
+def test_positive_primary_misses_reject_an_exact_zero_token_range() -> None:
+    with pytest.raises(
+        DeterministicWorkContractError,
+        match="positive primary leaves require non-zero or unresolved primary tokens",
+    ):
+        EffectiveRevisionTokenCase(
+            case_id="revision:invalid-positive-miss",
+            outcome=EffectiveRevisionTokenOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS,
+            primary_leaf_count=2,
+            primary_tokens=TokenEstimateRange(0, 0, 0),
+            current=ConditionalLeafProfile(),
+            target=ConditionalLeafProfile(),
+            embedding_tokens=0,
+            quality_matches_gold=True,
+        )
+
+
 def test_unresolved_usage_is_never_rendered_as_zero() -> None:
     case = EffectiveRevisionTokenCase(
         case_id="revision:unresolved",
         outcome=EffectiveRevisionTokenOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS,
+        primary_leaf_count=None,
         primary_tokens=None,
         current=ConditionalLeafProfile(),
         target=ConditionalLeafProfile(),
@@ -503,10 +617,75 @@ def test_unresolved_usage_is_never_rendered_as_zero() -> None:
     )
 
     assert report["chat_tokens"]["unresolved"] == "UNRESOLVED"
+    assert report["chat_tokens"]["estimated_primary"] == "UNRESOLVED"
+    assert report["chat_tokens"]["unresolved_leaf_count"] == "UNRESOLVED"
     assert report["embedding_tokens"] == "UNRESOLVED"
     assert report["average_total_tokens_per_terminal_effective_revision"] == (
         "UNRESOLVED"
     )
+    assert report["mandatory_primary_leaves_per_revision"] == "UNRESOLVED"
+    assert report["recommendation"] == "HOLD_UNRESOLVED_USAGE"
+
+
+def test_unknown_primary_tokens_derive_unresolved_leaf_count() -> None:
+    case = EffectiveRevisionTokenCase(
+        case_id="revision:two-unreported-primary-misses",
+        outcome=EffectiveRevisionTokenOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS,
+        primary_leaf_count=2,
+        primary_tokens=None,
+        current=ConditionalLeafProfile(),
+        target=ConditionalLeafProfile(),
+        embedding_tokens=0,
+        quality_matches_gold=True,
+    )
+
+    report = build_token_effectiveness_report(
+        (case,),
+        sensitivity=ConditionalLeafTokenRanges.zero(),
+    )
+
+    assert report["chat_tokens"]["estimated_primary"] == "UNRESOLVED"
+    assert report["chat_tokens"]["unresolved"] == "UNRESOLVED"
+    assert report["chat_tokens"]["unresolved_leaf_count"] == 2
+    assert report["recommendation"] == "HOLD_UNRESOLVED_USAGE"
+
+
+def test_held_case_unresolved_usage_blocks_terminal_case_adoption() -> None:
+    cases = (
+        EffectiveRevisionTokenCase(
+            case_id="revision:improving-terminal",
+            outcome=EffectiveRevisionTokenOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS,
+            primary_leaf_count=1,
+            primary_tokens=TokenEstimateRange(100, 100, 100),
+            current=ConditionalLeafProfile(dedupe=1),
+            target=ConditionalLeafProfile(),
+            embedding_tokens=0,
+            quality_matches_gold=True,
+        ),
+        EffectiveRevisionTokenCase(
+            case_id="revision:held-unreported-primary",
+            outcome=EffectiveRevisionTokenOutcome.HELD_AMBIGUITY,
+            primary_leaf_count=1,
+            primary_tokens=None,
+            current=ConditionalLeafProfile(),
+            target=ConditionalLeafProfile(),
+            embedding_tokens=0,
+            quality_matches_gold=True,
+        ),
+    )
+
+    report = build_token_effectiveness_report(
+        cases,
+        sensitivity=ConditionalLeafTokenRanges(
+            timestamp=TokenEstimateRange(0, 0, 0),
+            dedupe=TokenEstimateRange(10, 10, 10),
+            summary=TokenEstimateRange(0, 0, 0),
+            fallback=TokenEstimateRange(0, 0, 0),
+        ),
+    )
+
+    assert report["chat_tokens"]["unresolved"] == "UNRESOLVED"
+    assert report["chat_tokens"]["unresolved_leaf_count"] == 1
     assert report["recommendation"] == "HOLD_UNRESOLVED_USAGE"
 
 
@@ -514,6 +693,7 @@ def test_adoption_requires_strict_improvement_in_every_sensitivity_scenario() ->
     case = EffectiveRevisionTokenCase(
         case_id="revision:adversarial",
         outcome=EffectiveRevisionTokenOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS,
+        primary_leaf_count=1,
         primary_tokens=TokenEstimateRange(100, 100, 100),
         current=ConditionalLeafProfile(dedupe=1),
         target=ConditionalLeafProfile(summary=1),
@@ -537,10 +717,11 @@ def test_adoption_requires_strict_improvement_in_every_sensitivity_scenario() ->
     assert report["recommendation"] == "HOLD_NO_MEASURED_IMPROVEMENT"
 
 
-def test_adoption_rejects_any_conditional_probability_regression() -> None:
+def test_adoption_rejects_any_conditional_expected_count_regression() -> None:
     case = EffectiveRevisionTokenCase(
-        case_id="revision:probability-regression",
+        case_id="revision:expected-count-regression",
         outcome=EffectiveRevisionTokenOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS,
+        primary_leaf_count=1,
         primary_tokens=TokenEstimateRange(100, 100, 100),
         current=ConditionalLeafProfile(fallback=1),
         target=ConditionalLeafProfile(dedupe=1),
@@ -579,13 +760,17 @@ def test_provider_free_packet_covers_issue_748_acceptance() -> None:
     assert packet["acceptance"]["combined_temporal_gold_quality"] == (
         "EXTERNAL_RUN_REQUIRED"
     )
-    assert packet["acceptance"]["conditional_leaf_probabilities"] == "UNRESOLVED"
+    assert packet["acceptance"]["conditional_leaf_expected_counts"] == "UNRESOLVED"
+    assert packet["acceptance"]["conditional_leaf_prevalence"] == "UNRESOLVED"
     assert packet["token_effectiveness"]["recommendation"] == (
         "HOLD_UNMEASURED_EFFECTIVE_REVISION_DISTRIBUTION"
     )
-    assert packet["token_effectiveness"]["conditional_leaf_probabilities_ppm"][
+    assert packet["token_effectiveness"]["conditional_leaf_expected_counts_ppm"][
         "target"
     ] == "UNRESOLVED"
+    assert packet["token_effectiveness"]["mandatory_primary_leaves_per_revision"] == (
+        "UNRESOLVED"
+    )
     assert packet["recommendation"]["decision"] == (
         "HOLD_FOR_731_RUNTIME_MEASUREMENT"
     )

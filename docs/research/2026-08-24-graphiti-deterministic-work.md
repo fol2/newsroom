@@ -26,8 +26,8 @@ assertions. They make no provider call and no live graph mutation.
 
 The eleven #747 gold fixtures are useful for deterministic replay and quality
 comparison, but they are not an executed #737 effective-revision distribution.
-They therefore do not establish live dedupe, summary, fallback or retry
-probabilities. The packet reports those probabilities and average total tokens
+They therefore do not establish live dedupe, summary, fallback or retry leaf
+counts. The packet reports expected counts, prevalence and average total tokens
 as `UNRESOLVED` rather than turning fixture eligibility into observed usage.
 
 ## 2. Deterministic sidecar
@@ -93,7 +93,7 @@ temporal links stay outside the convenience string. Empty input yields
 `OMITTED_EMPTY`; bounded input yields `DETERMINISTIC_SUMMARY`; excess length or
 count yields `OVERLONG_HOLD`. No truncation or provider fallback occurs.
 
-## 6. Token and probability evidence
+## 6. Token and leaf-count evidence
 
 The token model keeps three evidence classes separate:
 
@@ -102,18 +102,29 @@ The token model keeps three evidence classes separate:
 - unresolved usage or conditional-leaf distributions.
 
 An adoption recommendation requires all gold quality comparisons to pass, zero
-timestamp leaves, and a strictly lower target average in each low, base and
-high sensitivity scenario. Every conditional class probability must also be
-non-increasing and at least one avoidable class must fall. Missing usage,
-reported usage without a decomposed target, an unmeasured class distribution,
-or any non-improving scenario produces a hold.
+expected timestamp leaves, and a strictly lower target average in each low,
+base and high sensitivity scenario. Every conditional class expected count per
+effective revision must also be non-increasing and at least one avoidable class
+must fall. Bernoulli prevalence remains a separate diagnostic and never
+substitutes for integer leaf counts. Missing usage, reported usage without a
+decomposed target, an unmeasured class distribution, or any non-improving
+scenario produces a hold.
+
+Each measured case carries its own primary leaf or miss count. The report sums
+those counts and renders the exact expected count in integer parts per million,
+so a two-chunk revision contributes two rather than one and a future exact
+reuse hit may contribute zero. `primary_tokens` is the aggregate range for all
+primary misses in that case, and a zero-miss case must carry an exact zero
+range. Any missing case count, including this provider-free fixture
+distribution, renders the primary expectation
+`UNRESOLVED`; the report never hard-codes one leaf per revision.
 
 The retained exact-main context contains two terminal effective revisions: one
 used three chat leaves and three embedding requests; the other used two chat
 leaves and three embedding requests. It contains no provider token counts and
 does not classify the chat leaves as primary, dedupe, summary or fallback.
-Those classes and their probabilities remain `UNRESOLVED`; all five chat
-leaves are explicitly marked as having unresolved provider token usage.
+Those classes, expected counts and prevalence remain `UNRESOLVED`; all five
+chat leaves are explicitly marked as having unresolved provider token usage.
 
 The sensitivity output nevertheless uses the two retained terminal outcomes
 at #737 grain: three additional chat leaves across two revisions and three
