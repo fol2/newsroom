@@ -517,6 +517,7 @@ def test_short_service_delay_cannot_masquerade_as_law_change() -> None:
         ("服務公布半小時延誤後乘客認為必須賠償", "INSTRUCTION"),
         ("服務公布半小時延誤後工會表示乘客應該獲賠償", "INSTRUCTION"),
         ("服務公布新增半小時延誤後乘客表示必須獲賠償", "INSTRUCTION"),
+        ("政府公布服務新增半小時延誤後乘客表示必須獲賠償", "INSTRUCTION"),
         ("服務重申申請截止日期並公布新增半小時延誤", "OFFICIAL_DEADLINE"),
         ("服務重申申請限期延長安排並公布新增半小時延誤", "OFFICIAL_DEADLINE"),
     ),

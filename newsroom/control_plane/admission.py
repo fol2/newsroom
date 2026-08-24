@@ -239,17 +239,28 @@ def _qualification_relation_is_proven(
         ].search(span)
     )
     qualification_fields = dict(qualification.test_evidence)
+    authority_instruction = re.search(
+        r"(?:official|authority|government|department|agency|"
+        r"政府|當局|当局|部門|部门|機構|机构|署|局).{0,48}"
+        r"(?:must|need(?:s)? to|required? to|should|instruct(?:ed|ion)?|"
+        r"必須|必须|需要|應該|应该|改乘|改搭)",
+        span,
+        flags=re.IGNORECASE,
+    )
+    competing_attribution = re.search(
+        r"(?:passengers?|users?|residents?|unions?|patients?|parents?|students?|"
+        r"乘客|工會|工会|居民|市民|旅客|用戶|用户|患者|家長|家长|學生|学生)"
+        r".{0,8}(?:said|says|stated|argued|believed|demanded|表示|認為|认为|"
+        r"要求|聲稱|声称|稱|说|說).{0,24}"
+        r"(?:must|required?|should|必須|必须|需要|應該|应该)",
+        span,
+        flags=re.IGNORECASE,
+    )
     explicit_reader_instruction = bool(
         qualification.test is Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE
         and qualification_fields.get("action_class") == "INSTRUCTION"
-        and re.search(
-            r"(?:official|authority|government|department|agency|"
-            r"政府|當局|当局|部門|部门|機構|机构|署|局).{0,48}"
-            r"(?:must|need(?:s)? to|required? to|should|instruct(?:ed|ion)?|"
-            r"必須|必须|需要|應該|应该|改乘|改搭)",
-            span,
-            flags=re.IGNORECASE,
-        )
+        and authority_instruction
+        and not competing_attribution
     )
     explicit_official_deadline = bool(
         qualification.test is Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE
