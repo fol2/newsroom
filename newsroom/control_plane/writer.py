@@ -74,8 +74,6 @@ _SYSTEMIC_MARKERS = (
     "invalid api key",
     "api key invalid",
     "permission denied",
-    "401",
-    "403",
     "invalid model",
     "invalid command",
     "configuration",
@@ -397,24 +395,32 @@ def validate_writer_copy(
         for value in re.split(r"(?<=[.!?。！？；;])|\n+", item)
         if value.strip()
     )
-    normalised_draft = "".join(
-        character.casefold() for character in text if character.isalnum()
+    approved_overlap = tuple(
+        value
+        for claim in package.governed_claims
+        for value in (*claim.named_entities, *claim.quotations)
+        if value
     )
+
+    def normalise_originality(value: str) -> str:
+        for approved in sorted(approved_overlap, key=len, reverse=True):
+            value = value.replace(approved, "")
+        return "".join(
+            character.casefold() for character in value if character.isalnum()
+        )
+
+    normalised_draft = normalise_originality(text)
     copied_source_expression = any(
         sequence in normalised_draft
         for expression in source_expressions
-        for normalised_expression in (
-            "".join(
-                character.casefold() for character in expression if character.isalnum()
-            ),
-        )
+        for normalised_expression in (normalise_originality(expression),)
         for sequence in (
             normalised_expression[index : index + 12]
             for index in range(max(0, len(normalised_expression) - 11))
         )
     )
     aligned_source_expression = any(
-        len(normalised_expression) >= 12
+        len(normalised_expression) >= 4
         and sum(
             block.size
             for block in SequenceMatcher(
@@ -423,22 +429,13 @@ def validate_writer_copy(
                 normalised_segment,
                 autojunk=False,
             ).get_matching_blocks()
-            if block.size >= 4
         )
         / len(normalised_expression)
         >= ORIGINALITY_ALIGNMENT_MIN_SOURCE_COVERAGE
         for expression in source_expressions
-        for normalised_expression in (
-            "".join(
-                character.casefold() for character in expression if character.isalnum()
-            ),
-        )
+        for normalised_expression in (normalise_originality(expression),)
         for segment in narrative_segments
-        for normalised_segment in (
-            "".join(
-                character.casefold() for character in segment if character.isalnum()
-            ),
-        )
+        for normalised_segment in (normalise_originality(segment),)
     )
     check(
         "ORIGINALITY_BOUNDARY",
@@ -469,10 +466,31 @@ def validate_writer_copy(
     check(
         "QUOTE_FIDELITY",
         all(
-            any(value in claim.quotations for claim in package.governed_claims)
+            any(
+                value in claim.quotations
+                and any(
+                    value in segment and claim.attribution in segment
+                    for segment in narrative_segments
+                )
+                for claim in package.governed_claims
+            )
             for value in quoted
         ),
-        "UNSUPPORTED_QUOTATION",
+        "UNSUPPORTED_OR_UNATTRIBUTED_QUOTATION",
+    )
+    attribution_bound = all(
+        any(
+            claim.rendered_assertion_zh_hant_hk in segment
+            and claim.attribution in segment
+            for segment in narrative_segments
+        )
+        for claim in package.governed_claims
+        if claim.quotations or claim.status.value == "ATTRIBUTED_CLAIM_OR_OPINION"
+    )
+    check(
+        "ATTRIBUTION_FIDELITY",
+        attribution_bound,
+        "REQUIRED_ATTRIBUTION_MISSING",
     )
     certainty_terms = ("證實", "已確認", "必定", "肯定會", "proved", "confirmed")
     used_certainty = tuple(term for term in certainty_terms if term in text)
@@ -494,18 +512,19 @@ def _provider_control_status(message: str) -> int | None:
     status = re.search(
         r"\b(?:http(?:\s*(?:status|error))?|status(?:\s+code)?|api\s*error|"
         r"provider\s+error|request\s+failed|writer\s+failed|error)"
-        r"\s*[:=\[(]?\s*(402|429)\b",
+        r"\s*[:=\[(]?\s*(401|402|403|429)\b",
         lowered,
     )
     if status:
         return int(status.group(1))
     machine_status = re.search(
-        r"""["']?(?:status\s*_?\s*code|code)["']?\s*:\s*(402|429)\b""",
+        r'["\']?(?:status(?:\s*_?\s*code)?|code)["\']?\s*:\s*'
+        r"(401|402|403|429)\b",
         lowered,
     )
     if machine_status:
         return int(machine_status.group(1))
-    if re.fullmatch(r"\s*(?:402|429)\s*", lowered):
+    if re.fullmatch(r"\s*(?:401|402|403|429)\s*", lowered):
         return int(lowered.strip())
     return None
 
@@ -515,8 +534,8 @@ def _failure(
 ) -> WriterDispatchError:
     lowered = message.lower()
     if (
-        provider_status in {402, 429}
-        or _provider_control_status(message) in {402, 429}
+        provider_status in {401, 402, 403, 429}
+        or _provider_control_status(message) in {401, 402, 403, 429}
         or any(marker in lowered for marker in _SYSTEMIC_MARKERS)
     ):
         return WriterDispatchError(

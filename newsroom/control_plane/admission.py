@@ -9,15 +9,22 @@ from typing import Literal, Protocol
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.editorial import StoryCandidateRecord
 from newsroom.control_plane.evidence import (
+    EVID_012_POLICY_VERSION,
     EVIDENCE_GATE_POLICY_VERSION,
     ClaimAuthorityClass,
     EvidencePackage,
     GovernedClaimEvidence,
     GovernedClaimStatus,
 )
-from newsroom.control_plane.zh_hant import contains_simplified_variant
+from newsroom.control_plane.zh_hant import (
+    ZH_HANT_HK_SHAPE_POLICY_VERSION,
+    contains_simplified_variant,
+)
 
-WRITE_ADMISSION_POLICY_VERSION = "newsroom.write-admission.v1"
+WRITE_ADMISSION_POLICY_VERSION = (
+    "newsroom.write-admission.v2+"
+    f"{EVID_012_POLICY_VERSION}+{ZH_HANT_HK_SHAPE_POLICY_VERSION}"
+)
 WRITE_SELECTION_POLICY_VERSION = "newsroom.write-selection.v1"
 
 WriteAdmissionResult = Literal["WRITE_READY", "HOLD", "REJECT"]
@@ -84,24 +91,37 @@ def _duration_is_exactly_supported(
         )
     duration = rf"(?:{'|'.join(duration_patterns)})"
     english_disruption = (
-        r"(?:delay(?:ed)?|disruption|suspend(?:ed|sion)?|clos(?:ed|ure)|"
+        r"(?:delays?|delayed|disruption|suspend(?:ed|sion)?|clos(?:ed|ure)|"
         r"outage|interrupt(?:ed|ion)?|unavailable)"
     )
     chinese_disruption = (
         r"(?:延誤|延误|停駛|停驶|中斷|中断|暫停|暂停|關閉|关闭|停電|停电)"
     )
+    chinese_duration_modifier = r"(?:長達|长达|達|达|約|约|最多)?"
     relation = re.compile(
-        rf"(?:{english_disruption}\s*(?:(?:for|by|of|lasting|lasted)\s+)?"
+        rf"(?:{english_disruption}\s*(?:(?:for|by|lasting|lasted|"
+        rf"of(?:\s+up\s+to)?)\s+)?"
         rf"{duration}|{duration}\s*(?:-|–|—)?\s*(?:service\s+)?"
-        rf"{english_disruption}|{chinese_disruption}.{{0,12}}{duration}|"
-        rf"{duration}.{{0,12}}{chinese_disruption})",
+        rf"{english_disruption}|{chinese_disruption}\s*"
+        rf"{chinese_duration_modifier}\s*{duration}|"
+        rf"{chinese_duration_modifier}\s*{duration}\s*(?:的|嘅)?\s*"
+        rf"{chinese_disruption})",
         re.IGNORECASE,
     )
-    return any(
-        relation.search(clause)
-        for clause in re.split(r"[\n.;；。!?！？]+", evidence_text)
-        if clause.strip()
-    )
+    for clause in re.split(r"[\n,，.;；。!?！？]+", evidence_text):
+        if not clause.strip() or not relation.search(clause):
+            continue
+        polarity_text = re.sub(
+            r"\b(?:no|not)\s+less\s+than\b|不少於|不少于", "", clause, flags=re.I
+        )
+        if re.search(
+            r"\b(?:no|not|without|never)\b|未有|沒有|没有|並無|并无|否認|否认",
+            polarity_text,
+            flags=re.I,
+        ):
+            continue
+        return True
+    return False
 
 
 def _valid_zh_hant_hk_rendering(claim: GovernedClaimEvidence) -> bool:

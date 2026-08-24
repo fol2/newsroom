@@ -70,6 +70,7 @@ def test_hong_kong_traditional_variants_are_not_simplified(text: str) -> None:
 def test_unambiguous_simplified_shape_is_rejected() -> None:
     assert contains_simplified_variant("官方说新安排")
     assert contains_simplified_variant("里面安排不变")
+    assert contains_simplified_variant("后台程序更新")
 
 
 def test_governed_records_reject_cross_source_claim_link() -> None:
@@ -407,6 +408,15 @@ def test_evid_012_is_a_closed_versioned_domain() -> None:
         )
 
 
+def test_stale_originality_policy_version_fails_closed() -> None:
+    _candidate, package = _candidate_package()
+    with pytest.raises(ValueError, match="originality policy version"):
+        replace(
+            package.governed_claims[0],
+            originality_policy_version="newsroom.cont-originality.v1",
+        )
+
+
 def test_ordinary_short_delay_cannot_satisfy_material_disruption_evidence() -> None:
     with pytest.raises(ValueError, match="does not satisfy EVID-012"):
         QualificationEvidence(
@@ -562,6 +572,54 @@ def test_material_disruption_duration_relation_is_admitted() -> None:
     )
 
     assert decision.decision == "WRITE_READY"
+
+
+@pytest.mark.parametrize(
+    ("fact", "expected"),
+    (
+        (
+            "No 60-minute service disruption occurred; "
+            "Route 60 train was delayed by two minutes.",
+            "HOLD",
+        ),
+        ("Train services face delays of up to 60 minutes.", "WRITE_READY"),
+        ("列車只延誤兩分鐘，原定車程為60分鐘。", "HOLD"),
+    ),
+)
+def test_material_disruption_duration_requires_positive_exact_relation(
+    fact: str, expected: str
+) -> None:
+    candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    changed_substantive = replace(
+        substantive,
+        claim=fact,
+        supporting_excerpt=fact,
+        rendered_assertion_zh_hant_hk="列車服務最新延誤安排已經確認",
+    )
+    checked = replace(
+        package,
+        passages=(f"HK-01: {headline.claim}\n{fact}",),
+        substantive_new_information=(fact,),
+        governed_claims=(headline, changed_substantive),
+        qualification_evidence=(
+            QualificationEvidence(
+                Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION,
+                changed_substantive.claim_id,
+                (
+                    ("service_kind", "TRANSPORT"),
+                    ("duration_minutes", "60"),
+                    ("affected_group", fact),
+                ),
+            ),
+        ),
+    )
+
+    decision = DeterministicWriteAdmission().decide(
+        candidate, checked, decided_at="2026-08-20T00:00:00.000000Z"
+    )
+
+    assert decision.decision == expected
 
 
 def test_self_reported_pass_gates_without_governed_claims_fail_closed() -> None:
@@ -858,6 +916,7 @@ def test_systemic_authentication_failure_opens_route_circuit_immediately(
         "APIError: 429",
         "HTTPError: 429",
         '{"statusCode":429}',
+        '{"status":429}',
         '{"code":402}',
         "grok writer failed: 429",
     ),
@@ -882,11 +941,12 @@ def test_actual_cli_classifier_marks_provider_control_failures_systemic(
     assert caught.value.reason_code == "SYSTEMIC_PROVIDER_FAILURE"
 
 
-def test_json_character_offset_429_remains_fallback_eligible() -> None:
+@pytest.mark.parametrize("offset", (401, 403, 429))
+def test_json_character_offset_remains_fallback_eligible(offset: int) -> None:
     candidate, package = _candidate_package()
 
     def primary(_prompt: str) -> str:
-        raise RuntimeError("JSON parse error at column 430 (char 429)")
+        raise RuntimeError(f"JSON parse error at column {offset + 1} (char {offset})")
 
     writer = CliChainWriter(primary=primary, fallback=lambda _prompt: "unused")
     with pytest.raises(WriterDispatchError) as caught:
@@ -1128,6 +1188,137 @@ def test_inserted_characters_cannot_break_source_sequence_alignment() -> None:
     assert "VERBATIM_SOURCE_EXPRESSION" in failed
 
 
+def test_short_block_insertions_cannot_break_source_sequence_alignment() -> None:
+    _candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    source = package.passages[0]
+    interrupted_copy = "的".join(
+        source[index : index + 3] for index in range(0, len(source), 3)
+    )
+    copy = WriterCopy(
+        title=f"【未出版】{headline.rendered_assertion_zh_hant_hk}",
+        body=(
+            "本報根據已核實證據報道："
+            f"{substantive.rendered_assertion_zh_hant_hk}\n{interrupted_copy}"
+        ),
+        writer_id="short-block-copying-writer",
+        evidence_package_digest=package.digest,
+        evidence_links=tuple(
+            WriterEvidenceLink(item.claim_id, item.rendered_assertion_zh_hant_hk)
+            for item in package.governed_claims
+        ),
+    )
+    failed = {
+        item.reason_code
+        for item in validate_writer_copy(copy, package)
+        if item.result == "FAIL"
+    }
+    assert "VERBATIM_SOURCE_EXPRESSION" in failed
+
+
+def test_short_source_sentence_cannot_be_copied_with_punctuation_only() -> None:
+    _candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    source_sentence = "區議會今日復會"
+    changed_substantive = replace(
+        substantive,
+        claim=source_sentence,
+        supporting_excerpt=source_sentence,
+        rendered_assertion_zh_hant_hk=f"{source_sentence}。",
+    )
+    guarded_package = replace(
+        package,
+        passages=(source_sentence,),
+        substantive_new_information=(source_sentence,),
+        governed_claims=(headline, changed_substantive),
+    )
+    copy = WriterCopy(
+        title=f"【未出版】{headline.rendered_assertion_zh_hant_hk}",
+        body=f"本報根據已核實證據報道：{changed_substantive.rendered_assertion_zh_hant_hk}",
+        writer_id="short-sentence-copying-writer",
+        evidence_package_digest=guarded_package.digest,
+        evidence_links=tuple(
+            WriterEvidenceLink(item.claim_id, item.rendered_assertion_zh_hant_hk)
+            for item in guarded_package.governed_claims
+        ),
+    )
+    failed = {
+        item.reason_code
+        for item in validate_writer_copy(copy, guarded_package)
+        if item.result == "FAIL"
+    }
+    assert "VERBATIM_SOURCE_EXPRESSION" in failed
+
+
+def test_approved_named_entity_is_removed_before_originality_overlap() -> None:
+    _candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    entity = "Hong Kong Monetary Authority"
+    changed_headline = replace(
+        headline,
+        named_entities=(entity,),
+        rendered_assertion_zh_hant_hk=f"{entity}公布咗最新安排",
+    )
+    guarded_package = replace(
+        package,
+        passages=(f"{package.passages[0]}\n{entity}",),
+        governed_claims=(changed_headline, substantive),
+    )
+    copy = WriterCopy(
+        title=f"【未出版】{changed_headline.rendered_assertion_zh_hant_hk}",
+        body=(f"本報根據已核實證據報道：{substantive.rendered_assertion_zh_hant_hk}"),
+        writer_id="approved-entity-writer",
+        evidence_package_digest=guarded_package.digest,
+        evidence_links=tuple(
+            WriterEvidenceLink(item.claim_id, item.rendered_assertion_zh_hant_hk)
+            for item in guarded_package.governed_claims
+        ),
+    )
+    failed = {
+        item.reason_code
+        for item in validate_writer_copy(copy, guarded_package)
+        if item.result == "FAIL"
+    }
+    assert "VERBATIM_SOURCE_EXPRESSION" not in failed
+
+
+def test_approved_quotation_must_retain_exact_attribution() -> None:
+    _candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    attributed_claim = "署方說會繼續跟進"
+    changed_substantive = replace(
+        substantive,
+        claim=attributed_claim,
+        supporting_excerpt=attributed_claim,
+        attribution="署方",
+        quotations=("會繼續跟進",),
+        rendered_assertion_zh_hant_hk="「會繼續跟進」",
+    )
+    guarded_package = replace(
+        package,
+        passages=(f"{headline.claim}\n{attributed_claim}",),
+        substantive_new_information=(attributed_claim,),
+        governed_claims=(headline, changed_substantive),
+    )
+    copy = WriterCopy(
+        title=f"【未出版】{headline.rendered_assertion_zh_hant_hk}",
+        body=f"本報根據已核實證據報道：{changed_substantive.rendered_assertion_zh_hant_hk}",
+        writer_id="unattributed-quote-writer",
+        evidence_package_digest=guarded_package.digest,
+        evidence_links=tuple(
+            WriterEvidenceLink(item.claim_id, item.rendered_assertion_zh_hant_hk)
+            for item in guarded_package.governed_claims
+        ),
+    )
+    failed = {
+        item.reason_code
+        for item in validate_writer_copy(copy, guarded_package)
+        if item.result == "FAIL"
+    }
+    assert "UNSUPPORTED_OR_UNATTRIBUTED_QUOTATION" in failed
+    assert "REQUIRED_ATTRIBUTION_MISSING" in failed
+
+
 def test_long_passage_cannot_hide_interrupted_sentence_copy() -> None:
     _candidate, package = _candidate_package()
     headline, substantive = package.governed_claims
@@ -1195,7 +1386,7 @@ def test_default_package_builder_can_admit_explicit_governed_input(
     base_package = package_for(governed_candidate)
     claim_ids = ("governed-headline", "governed-development")
     evidence = {
-        "schema_version": "newsroom.governed-input.v1",
+        "schema_version": "newsroom.governed-input.v2",
         "candidate_id": governed_candidate.candidate_id,
         "hypothesis_id": governed_candidate.hypothesis_id,
         "base_package_digest": base_package.digest,
@@ -1217,6 +1408,7 @@ def test_default_package_builder_can_admit_explicit_governed_input(
                 "attribution": "UK-02",
                 "rendered_assertion_zh_hant_hk": "英國官方公布咗最新限期安排",
                 "claim_role": "HEADLINE",
+                "originality_policy_version": "newsroom.cont-originality.v2",
             },
             {
                 "claim_id": "governed-development",
@@ -1235,6 +1427,7 @@ def test_default_package_builder_can_admit_explicit_governed_input(
                 "attribution": "UK-02",
                 "rendered_assertion_zh_hant_hk": "新限期定喺九月三十日",
                 "claim_role": "SUBSTANTIVE",
+                "originality_policy_version": "newsroom.cont-originality.v2",
             },
         ],
         "substantive_new_information": ["The deadline is now 30 September."],

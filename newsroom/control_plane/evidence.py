@@ -17,7 +17,7 @@ from newsroom.control_plane.editorial import StoryCandidateRecord
 EVID_012_POLICY_VERSION = "newsroom.evid-012.v1"
 GOVERNED_CLAIM_POLICY_VERSION = "newsroom.governed-claim.v1"
 EVIDENCE_GATE_POLICY_VERSION = "newsroom.evidence-gates.v1"
-GOVERNED_INPUT_SCHEMA_VERSION = "newsroom.governed-input.v1"
+GOVERNED_INPUT_SCHEMA_VERSION = "newsroom.governed-input.v2"
 EVIDENCE_APPROVAL_POLICY_VERSION = "newsroom.evidence-approval.v1"
 EVIDENCE_APPROVAL_PRINCIPAL = "HERMES_EVIDENCE_CONTROLLER"
 ORIGINALITY_POLICY_VERSION = "newsroom.cont-originality.v2"
@@ -423,9 +423,7 @@ def _decode_governed_package(
                 claim_role=item["claim_role"],
                 named_entities=tuple(item.get("named_entities", ())),
                 quotations=tuple(item.get("quotations", ())),
-                originality_policy_version=item.get(
-                    "originality_policy_version", ORIGINALITY_POLICY_VERSION
-                ),
+                originality_policy_version=item["originality_policy_version"],
             )
             for item in value["governed_claims"]
         )
