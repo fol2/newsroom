@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -419,11 +420,37 @@ def test_rights_loss_and_stale_projection_fail_closed_without_items(tmp_path) ->
     assert dispatched == []
 
     class CustomWriter:
-        def dispatch(self, candidate, package, *, route):
+        def dispatch(
+            self,
+            candidate: object,
+            package: object,
+            *,
+            route: str,
+        ) -> None:
+            del candidate, package
             dispatched.append(route)
             raise AssertionError("held context reached custom writer")
 
     with pytest.raises(WriterDispatchError, match="context is held"):
+        _dispatch_writer(
+            CustomWriter(),  # type: ignore[arg-type]
+            candidate,
+            package_for(candidate),
+            route="PRIMARY",
+        )
+
+    assert dispatched == []
+
+    assert candidate.governed_context is not None
+    object.__setattr__(
+        candidate.governed_context,
+        "status",
+        GovernedContextStatus.EMPTY,
+    )
+    object.__setattr__(candidate.governed_context, "projection_gap_count", 7)
+    object.__setattr__(candidate.governed_context, "stale", True)
+    object.__setattr__(candidate.governed_context, "degraded", True)
+    with pytest.raises(WriterDispatchError, match="not current and gap-free"):
         _dispatch_writer(
             CustomWriter(),  # type: ignore[arg-type]
             candidate,
@@ -457,6 +484,8 @@ def test_context_size_is_bounded_and_replay_stable(tmp_path) -> None:
 
     assert first.digest == second.digest
     assert first.canonical_value() == second.canonical_value()
+    with pytest.raises(ValueError, match="current and gap-free"):
+        replace(first, stale=True)
     assert bounded.status is GovernedContextStatus.HOLD
     assert bounded.reason_code == "ADMITTED_CONTEXT_SIZE_BOUND_EXCEEDED"
     assert bounded.items == ()

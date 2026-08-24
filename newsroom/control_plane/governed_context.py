@@ -317,6 +317,18 @@ class GovernedContext:
     authority_effect: str = "NONE"
 
     def __post_init__(self) -> None:
+        if self.status is GovernedContextStatus.READY and not self.items:
+            raise ValueError("ready governed context must contain admitted items")
+        if self.status is not GovernedContextStatus.READY and self.items:
+            raise ValueError("non-ready governed context cannot expose items")
+        if self.status is GovernedContextStatus.HOLD and not self.degraded:
+            raise ValueError("held governed context must be explicitly degraded")
+        if self.status is not GovernedContextStatus.HOLD and (
+            self.stale or self.degraded or self.projection_gap_count != 0
+        ):
+            raise ValueError(
+                "ready or empty governed context must be current and gap-free"
+            )
         measured_bytes, measured_tokens = _measure_context(
             self._canonical_value_without_measurement()
         )
@@ -325,12 +337,6 @@ class GovernedContext:
             measured_tokens,
         ):
             raise ValueError("governed context size measurement differs")
-        if self.status is GovernedContextStatus.READY and not self.items:
-            raise ValueError("ready governed context must contain admitted items")
-        if self.status is not GovernedContextStatus.READY and self.items:
-            raise ValueError("non-ready governed context cannot expose items")
-        if self.status is GovernedContextStatus.HOLD and not self.degraded:
-            raise ValueError("held governed context must be explicitly degraded")
         if self.trust_label != ADMITTED_CONTEXT_TRUST_LABEL:
             raise ValueError("governed context trust label differs")
         if self.provider_model_calls != 0 or self.authority_effect != "NONE":

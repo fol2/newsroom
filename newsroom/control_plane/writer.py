@@ -327,6 +327,14 @@ def require_permitted_context(
             failure_class="CANDIDATE_LOCAL",
             reason_code="GOVERNED_CONTEXT_HELD",
         )
+    if context is not None and (
+        context.stale or context.degraded or context.projection_gap_count != 0
+    ):
+        raise WriterDispatchError(
+            "admitted structured context is not current and gap-free",
+            failure_class="CANDIDATE_LOCAL",
+            reason_code="GOVERNED_CONTEXT_NOT_CURRENT",
+        )
 
 
 class WriterPort(Protocol):
