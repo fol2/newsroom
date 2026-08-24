@@ -36,6 +36,8 @@ from newsroom.control_plane.writer import (
     CliChainWriter,
     FixtureWriter,
     WriterCopy,
+    WriterDispatchError,
+    run_cursor_agent_cli,
     run_grok_cli,
 )
 from newsroom.effective_revision import (
@@ -1208,42 +1210,171 @@ def test_cli_writer_accepts_finished_copy_that_mentions_verification() -> None:
     assert "核實資格" in copy.body
 
 
-def test_grok_cli_uses_empty_cwd_and_three_turns(
+def test_grok_cli_uses_hermetic_single_turn_context(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, object] = {}
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "https://auth.x.ai::fixture": {
+                    "auth_mode": "oauth",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "key": "fixture-access-token",
+                    "refresh_token": "fixture-refresh-token",
+                }
+            }
+        )
+    )
+    auth_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    monkeypatch.setattr("newsroom.control_plane.writer.GROK_AUTH_FILE", str(auth_file))
+    monkeypatch.setenv("AMBIENT_WRITER_CANARY", "must-not-enter")
+    calls: list[dict[str, object]] = []
 
     class Result:
         returncode = 0
-        stdout = json.dumps({"title": "t", "body": "b"})
+        stdout = ""
         stderr = ""
 
     def fake_run(command: tuple[str, ...], **kwargs: object) -> Result:
-        captured["command"] = command
-        captured["timeout"] = kwargs.get("timeout")
-        captured["cwd"] = kwargs.get("cwd")
+        result = Result()
         cwd = kwargs.get("cwd")
-        captured["entries"] = os.listdir(cwd) if isinstance(cwd, str) else []
-        return Result()
+        environment = kwargs.get("env")
+        home = (
+            Path(environment["HOME"])
+            if isinstance(environment, dict)
+            and isinstance(environment.get("HOME"), str)
+            else None
+        )
+        calls.append(
+            {
+                "command": command,
+                "timeout": kwargs.get("timeout"),
+                "cwd": cwd,
+                "entries": os.listdir(cwd) if isinstance(cwd, str) else [],
+                "environment": dict(environment) if isinstance(environment, dict) else {},
+                "grok_home_entries": (
+                    sorted(path.name for path in (home / ".grok").iterdir())
+                    if home is not None and (home / ".grok").is_dir()
+                    else []
+                ),
+            }
+        )
+        if "inspect" in command:
+            result.stdout = json.dumps(
+                {
+                    "grokVersion": "1.0.8",
+                    "projectRoot": None,
+                    "projectInstructions": [],
+                    "permissions": {"loaded": 0},
+                    "skills": [],
+                    "plugins": [],
+                    "marketplaces": [],
+                    "mcpServers": [],
+                    "hooks": [],
+                    "lspServers": [],
+                    "configSources": {"layers": []},
+                }
+            )
+        elif "version" in command:
+            result.stdout = "grok 1.0.8 (fixture) [alpha]\n"
+        else:
+            result.stdout = json.dumps({"title": "t", "body": "b"})
+        return result
 
     monkeypatch.setattr("newsroom.control_plane.writer.subprocess.run", fake_run)
     run_grok_cli("prompt")
-    command = captured["command"]
+    provider_call = calls[-1]
+    command = provider_call["command"]
     assert isinstance(command, tuple)
-    assert captured["timeout"] == 300
+    assert provider_call["timeout"] == 300
     assert command[command.index("--max-turns") + 1] == "1"
     assert command[command.index("--reasoning-effort") + 1] == "low"
     assert "--json-schema" in command
+    assert "--system-prompt-override" in command
+    assert "--verbatim" in command
     assert "--no-plan" in command
     assert "--disable-web-search" in command
     assert "--no-subagents" in command
     assert "--always-approve" not in command
     assert "--force" not in command
     assert "--yolo" not in command
-    assert captured["entries"] == ["prompt.txt"]
-    cwd = captured["cwd"]
+    assert provider_call["entries"] == []
+    environment = provider_call["environment"]
+    assert isinstance(environment, dict)
+    assert "AMBIENT_WRITER_CANARY" not in environment
+    assert set(environment) == {
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "PATH",
+        "TMPDIR",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+    }
+    isolated_home = Path(environment["HOME"])
+    assert isolated_home != Path.home()
+    assert provider_call["grok_home_entries"] == ["auth.json"]
+    cwd = provider_call["cwd"]
     assert isinstance(cwd, str)
     assert cwd != os.getcwd()
+
+
+def test_grok_cli_missing_minimal_auth_fails_before_provider_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing = tmp_path / "missing-auth.json"
+    monkeypatch.setattr("newsroom.control_plane.writer.GROK_AUTH_FILE", str(missing))
+    calls = 0
+
+    def fake_run(*_args: object, **_kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("pre-dispatch authentication failure must not run CLI")
+
+    monkeypatch.setattr("newsroom.control_plane.writer.subprocess.run", fake_run)
+    with pytest.raises(WriterDispatchError) as caught:
+        run_grok_cli("prompt")
+    assert caught.value.reason_code == "MINIMAL_AUTHENTICATION_UNAVAILABLE"
+    assert caught.value.provider_dispatched is False
+    assert calls == 0
+
+
+def test_cursor_cli_fails_before_dispatch_when_zero_tools_cannot_be_proved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    workspaces: list[tuple[list[str], dict[str, str], bool]] = []
+
+    class Result:
+        returncode = 0
+        stdout = "Usage: agent [options]\n--mode <mode>\n--sandbox <mode>\n"
+        stderr = ""
+
+    def fake_run(command: tuple[str, ...], **kwargs: object) -> Result:
+        calls.append(command)
+        cwd = kwargs.get("cwd")
+        environment = kwargs.get("env")
+        assert isinstance(cwd, str)
+        assert isinstance(environment, dict)
+        home = Path(environment["HOME"])
+        workspaces.append((os.listdir(cwd), dict(environment), (home / ".grok").exists()))
+        return Result()
+
+    monkeypatch.setattr("newsroom.control_plane.writer.subprocess.run", fake_run)
+    with pytest.raises(WriterDispatchError) as caught:
+        run_cursor_agent_cli("prompt")
+    assert caught.value.reason_code == "HERMETIC_CAPABILITY_UNPROVABLE"
+    assert caught.value.provider_dispatched is False
+    assert calls == [("/Users/jamesto/.local/bin/cursor-agent", "--help")]
+    entries, environment, grok_home_exists = workspaces[0]
+    assert entries == []
+    assert Path(environment["HOME"]) != Path.home()
+    assert grok_home_exists is False
 
 
 def test_cli_writer_reads_title_from_grok_text_envelope() -> None:

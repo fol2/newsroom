@@ -87,6 +87,25 @@ CREATE TABLE IF NOT EXISTS model_zero_call_admissions(
     cycle_id TEXT NOT NULL,
     recorded_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS model_invocation_context_manifests(
+    context_manifest_digest TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    route TEXT NOT NULL,
+    evidence_package_digest TEXT NOT NULL,
+    record_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS model_invocation_context_observations(
+    observation_digest TEXT PRIMARY KEY,
+    invocation_id TEXT NOT NULL UNIQUE,
+    context_manifest_digest TEXT NOT NULL,
+    provider_context_tokens INTEGER,
+    record_json TEXT NOT NULL,
+    FOREIGN KEY(invocation_id) REFERENCES model_invocation_allocations(invocation_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY(context_manifest_digest)
+        REFERENCES model_invocation_context_manifests(context_manifest_digest)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+);
 CREATE TABLE IF NOT EXISTS model_invocation_allocations(
     invocation_id TEXT PRIMARY KEY,
     envelope_id TEXT NOT NULL,
@@ -997,6 +1016,68 @@ class ModelUsageService:
             ),
         )
 
+    def retain_context_manifest(self, record: Mapping[str, object]) -> None:
+        """Retain the non-secret context proof before any provider dispatch."""
+
+        retained = dict(record)
+        digest = str(retained.pop("context_manifest_digest", ""))
+        if not digest or digest_canonical(retained) != digest:
+            raise ModelUsageAdmissionError("context manifest digest is invalid")
+        required_text = (
+            "provider",
+            "route",
+            "model",
+            "reasoning",
+            "command_semantic_version",
+            "prompt_digest",
+            "schema_digest",
+            "system_digest",
+            "evidence_package_digest",
+        )
+        if any(not isinstance(retained.get(field), str) for field in required_text):
+            raise ModelUsageAdmissionError("context manifest identity is incomplete")
+        zero_counts = (
+            "prior_message_count",
+            "skill_count",
+            "tool_count",
+            "mcp_server_count",
+            "mcp_tool_count",
+        )
+        if any(retained.get(field) != 0 for field in zero_counts) or any(
+            retained.get(field) is not False
+            for field in ("skills_enabled", "tools_enabled", "mcp_enabled")
+        ):
+            raise ModelUsageAdmissionError(
+                "context manifest contains an ambient capability"
+            )
+        forbidden = {
+            "prompt",
+            "system_prompt",
+            "schema",
+            "passages",
+            "source_expression",
+            "secret",
+        }
+        if forbidden.intersection(retained):
+            raise ModelUsageAdmissionError("context manifest contains secret input")
+        canonical_record = {"context_manifest_digest": digest, **retained}
+        self._insert_exact(
+            table="model_invocation_context_manifests",
+            identity_column="context_manifest_digest",
+            identity=digest,
+            record=canonical_record,
+            sql="INSERT INTO model_invocation_context_manifests("
+            "context_manifest_digest,provider,route,evidence_package_digest,record_json) "
+            "VALUES(?,?,?,?,?)",
+            values=(
+                digest,
+                retained["provider"],
+                retained["route"],
+                retained["evidence_package_digest"],
+                _json(canonical_record),
+            ),
+        )
+
     def retain_zero_call_admission(
         self, *, decision_id: str, decision: str, cycle_id: str, recorded_at: datetime
     ) -> None:
@@ -1235,7 +1316,8 @@ class ModelUsageService:
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT a.route,a.workload_class,p.record_json "
+                "SELECT a.route,a.workload_class,p.record_json,"
+                "json_extract(a.record_json,'$.context_manifest_digest') "
                 "FROM model_invocation_allocations a "
                 "JOIN model_invocation_policies p ON p.canonical_digest=a.policy_digest "
                 "WHERE a.invocation_id=?",
@@ -1244,6 +1326,7 @@ class ModelUsageService:
             if row is None:
                 raise ModelUsageIntegrityError("invocation allocation is absent")
             route, workload = str(row[0]), WorkloadClass(str(row[1]))
+            context_manifest_digest = str(row[3])
             policy = _policy_from_record(_object(row[2]))
             retained = terminal
             if provider_telemetry is not None:
@@ -1305,6 +1388,37 @@ class ModelUsageService:
                     raise ModelUsageIntegrityError(
                         "conflicting invocation terminal replay"
                     ) from exc
+            context_manifest = connection.execute(
+                "SELECT 1 FROM model_invocation_context_manifests "
+                "WHERE context_manifest_digest=?",
+                (context_manifest_digest,),
+            ).fetchone()
+            if context_manifest is not None:
+                context_observation = {
+                    "schema_version": MODEL_USAGE_SCHEMA_VERSION,
+                    "invocation_id": retained.invocation_id,
+                    "context_manifest_digest": context_manifest_digest,
+                    "usage_status": retained.usage_status.value,
+                    "provider_context_tokens": retained.components.context_tokens,
+                    "observed_at": _utc_text(retained.observed_at),
+                }
+                observation_digest = digest_canonical(context_observation)
+                observation_record = {
+                    **context_observation,
+                    "observation_digest": observation_digest,
+                }
+                connection.execute(
+                    "INSERT OR IGNORE INTO model_invocation_context_observations("
+                    "observation_digest,invocation_id,context_manifest_digest,"
+                    "provider_context_tokens,record_json) VALUES(?,?,?,?,?)",
+                    (
+                        observation_digest,
+                        retained.invocation_id,
+                        context_manifest_digest,
+                        retained.components.context_tokens,
+                        _json(observation_record),
+                    ),
+                )
             if retained.usage_status in {
                 UsageStatus.UNREPORTED,
                 UsageStatus.AMBIGUOUS,
@@ -1939,6 +2053,20 @@ class ModelUsageService:
                     "FROM model_invocation_provider_attempt_links"
                 )
             }
+            context_manifests = {
+                str(row[0]): _object(row[1])
+                for row in connection.execute(
+                    "SELECT context_manifest_digest,record_json "
+                    "FROM model_invocation_context_manifests"
+                )
+            }
+            context_observations = {
+                str(row[0]): _object(row[1])
+                for row in connection.execute(
+                    "SELECT invocation_id,record_json "
+                    "FROM model_invocation_context_observations"
+                )
+            }
             dispatch_observations = {
                 str(row[0]): str(row[1])
                 for row in connection.execute(
@@ -2049,6 +2177,12 @@ class ModelUsageService:
                     None
                     if provider_attempt is None
                     else provider_attempt.get("provider_attempt_id")
+                ),
+                "context_manifest": context_manifests.get(
+                    str(allocation["context_manifest_digest"])
+                ),
+                "context_manifest_observation": context_observations.get(
+                    str(allocation["invocation_id"])
                 ),
                 "usage_status": effective.get("usage_status"),
                 "terminal_usage_status": (
