@@ -525,22 +525,30 @@ class GraphitiModelUsageObserver:
         )
         self._allocations.append(allocation)
         self._policies[allocation.invocation_id] = policy
+        return allocation
+
+    def transport_dispatch_started(self, token: object) -> None:
+        """Retain the provider-I/O boundary after local preflight succeeds."""
+
+        if not isinstance(token, InvocationAllocation):
+            raise TypeError("Graphiti transport token is not an allocation")
+        if token.invocation_id in self._dispatch_at:
+            raise ModelUsageAdmissionError("Graphiti transport dispatch repeated")
         dispatch_at = self._clock().astimezone(UTC)
         self._service.observe_transport(
-            invocation_id=allocation.invocation_id,
+            invocation_id=token.invocation_id,
             observed_at=dispatch_at,
             state="DISPATCH_STARTED",
             evidence_digest=digest_canonical(
                 {
-                    "invocation_id": allocation.invocation_id,
-                    "provider": provider,
-                    "route": route,
-                    "request_digest": allocation.request_digest,
+                    "invocation_id": token.invocation_id,
+                    "provider": token.provider,
+                    "route": token.route,
+                    "request_digest": token.request_digest,
                 }
             ),
         )
-        self._dispatch_at[allocation.invocation_id] = dispatch_at
-        return allocation
+        self._dispatch_at[token.invocation_id] = dispatch_at
 
     def link_provider_attempts(
         self, *, provider_attempt_number: int, linked_at: datetime

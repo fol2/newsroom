@@ -1389,6 +1389,7 @@ def test_graphiti_provider_observer_persists_chat_and_embedding_leaves(
         prompt="chat prompt",
         schema=None,
     )
+    observer.transport_dispatch_started(chat)
     observer.after_cli_invocation(
         chat,
         outcome="COMPLETE",
@@ -1407,6 +1408,7 @@ def test_graphiti_provider_observer_persists_chat_and_embedding_leaves(
         model=OPENROUTER_EMBEDDING_SLUG,
         input_data=["embedding input"],
     )
+    observer.transport_dispatch_started(embedding)
     observer.after_embedding_invocation(
         embedding,
         outcome="COMPLETE",
@@ -1481,6 +1483,7 @@ def test_graphiti_missing_telemetry_without_a_hard_bound_is_unreported(
         prompt="chat prompt",
         schema=None,
     )
+    observer.transport_dispatch_started(token)
     observer.after_cli_invocation(
         token,
         outcome="TRANSPORT_LOST",

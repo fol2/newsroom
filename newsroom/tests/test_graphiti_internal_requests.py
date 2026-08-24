@@ -32,6 +32,7 @@ from newsroom.control_plane.model_usage import (
 )
 from newsroom.graphiti_adapter.cli_client import (
     CliExecution,
+    CliPredispatchRefusal,
     CliResponseError,
     run_cli_chain,
 )
@@ -960,6 +961,155 @@ def test_requested_max_tokens_rejects_unreported_output_at_transport_boundary() 
 
     assert invocations[0]["outcome"] == "OUTPUT_LIMIT_EXCEEDED"
     assert invocations[0]["requested_max_tokens"] == 1
+
+
+def test_reported_output_uses_exact_provider_tokens_not_byte_ceiling() -> None:
+    invocations: list[dict[str, object]] = []
+    result = asyncio.run(
+        run_cli_chain(
+            prompt="bounded prompt",
+            schema=None,
+            max_tokens=10,
+            cursor_runner=lambda _prompt, *, max_tokens: CliExecution(
+                text='{"value":"ok"}',
+                usage={
+                    "usage_basis": "PROVIDER_REPORTED",
+                    "input_tokens": 3,
+                    "output_tokens": 4,
+                    "cached_read_tokens": 0,
+                    "cached_write_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "total_tokens": 7,
+                },
+            ),
+            grok_runner=lambda _prompt, _schema, *, max_tokens: "not called",
+            invocations=invocations,
+        )
+    )
+
+    assert result == {"value": "ok"}
+    assert invocations[0]["outcome"] == "COMPLETE"
+
+
+def test_cli_capability_refusal_remains_proved_pre_dispatch_zero(
+    tmp_path: Path,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-preflight-refusal",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-preflight-refusal",
+        graphiti_attempt_id="ingest-preflight-refusal:1",
+    )
+    service.open_envelope(envelope)
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=10),
+        owner_stop_check=lambda: None,
+    )
+
+    def refused_cursor(
+        _prompt: str,
+        *,
+        max_tokens: int,
+        dispatch_started: object = None,
+    ) -> CliExecution:
+        del max_tokens, dispatch_started
+        raise CliPredispatchRefusal("unsupported max token control")
+
+    result = asyncio.run(
+        run_cli_chain(
+            prompt="source-safe prompt",
+            schema=EXTRACTED_ENTITIES_SCHEMA,
+            semantic_request_class="ExtractedEntities",
+            max_tokens=100,
+            cursor_runner=refused_cursor,
+            grok_runner=lambda _prompt, _schema, *, max_tokens: CliExecution(
+                text='{"extracted_entities":[]}',
+                usage=cursor_cli_usage(
+                    {
+                        "inputTokens": 2,
+                        "outputTokens": 2,
+                        "cacheReadTokens": 0,
+                        "cacheWriteTokens": 0,
+                    }
+                ),
+            ),
+            invocations=[],
+            invocation_observer=observer,
+        )
+    )
+
+    assert result == {"extracted_entities": []}
+    leaves = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"]
+    primary = next(
+        leaf
+        for leaf in leaves
+        if leaf["workload_class"] == "GRAPHITI_CHAT_PRIMARY"
+    )
+    assert primary["invocation_outcome"] == "PREDISPATCH_REFUSED"
+    assert primary["transport_dispatch_observed"] is False
+    assert primary["pre_dispatch_zero_proved"] is True
+    assert primary["total_tokens"] == 0
+
+
+def test_async_cli_capability_preflight_kills_child_on_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.graphiti_adapter import cli_client
+
+    started = asyncio.Event()
+    killed = False
+    waited = False
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            started.set()
+            await asyncio.Future()
+            raise AssertionError("cancelled preflight resumed")
+
+        def kill(self) -> None:
+            nonlocal killed
+            killed = True
+
+        async def wait(self) -> None:
+            nonlocal waited
+            waited = True
+
+    async def create_process(*_command: str, **_values: object) -> Process:
+        return Process()
+
+    monkeypatch.setattr(
+        cli_client.asyncio, "create_subprocess_exec", create_process
+    )
+    workspace = cli_client._hermetic_cli_workspace(
+        str(tmp_path), binary="/bin/fixture-cli"
+    )
+
+    async def cancel_preflight() -> None:
+        task = asyncio.create_task(
+            cli_client._prove_cli_controls_async(
+                binary="/bin/fixture-cli",
+                required_controls=("--max-output-tokens",),
+                workspace=workspace,
+            )
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancel_preflight())
+    assert killed is True
+    assert waited is True
 
 
 def test_cancellation_retains_uncertain_leaf_before_control_returns(

@@ -8,7 +8,7 @@ import json
 import os
 import subprocess
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
@@ -42,22 +42,44 @@ CliOutput = str | CliExecution
 
 
 class CliRunner(Protocol):
-    def __call__(self, prompt: str, *, max_tokens: int) -> CliOutput: ...
+    def __call__(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int,
+        dispatch_started: Callable[[], None] | None = None,
+    ) -> CliOutput: ...
 
 
 class GrokRunner(Protocol):
     def __call__(
-        self, prompt: str, schema: str | None, *, max_tokens: int
+        self,
+        prompt: str,
+        schema: str | None,
+        *,
+        max_tokens: int,
+        dispatch_started: Callable[[], None] | None = None,
     ) -> CliOutput: ...
 
 
 class AsyncCliRunner(Protocol):
-    async def __call__(self, prompt: str, *, max_tokens: int) -> CliOutput: ...
+    async def __call__(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int,
+        dispatch_started: Callable[[], None] | None = None,
+    ) -> CliOutput: ...
 
 
 class AsyncGrokRunner(Protocol):
     async def __call__(
-        self, prompt: str, schema: str | None, *, max_tokens: int
+        self,
+        prompt: str,
+        schema: str | None,
+        *,
+        max_tokens: int,
+        dispatch_started: Callable[[], None] | None = None,
     ) -> CliOutput: ...
 
 
@@ -67,6 +89,10 @@ class CliResponseError(RuntimeError):
 
 class CliPredispatchRefusal(RuntimeError):
     """The installed CLI cannot prove the checked transport contract."""
+
+
+class CliDispatchMarkerError(RuntimeError):
+    """Durable dispatch observation failed before provider I/O."""
 
 
 class CliOutputDecodeError(RuntimeError):
@@ -96,6 +122,8 @@ class CliInvocationObserver(Protocol):
         semantic_request_class: str,
         max_tokens: int,
     ) -> object: ...
+
+    def transport_dispatch_started(self, token: object) -> None: ...
 
     def after_cli_invocation(
         self,
@@ -312,6 +340,47 @@ def _prove_cli_controls(
         )
 
 
+async def _prove_cli_controls_async(
+    *,
+    binary: str,
+    required_controls: tuple[str, ...],
+    workspace: _GraphitiCliWorkspace,
+) -> None:
+    try:
+        process = await asyncio.create_subprocess_exec(
+            binary,
+            "--help",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=workspace.cwd,
+            env=workspace.environment,
+        )
+    except OSError as exc:
+        raise CliPredispatchRefusal("Graphiti CLI preflight failed") from exc
+    try:
+        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=20)
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+        raise CliPredispatchRefusal("Graphiti CLI preflight timed out") from None
+    except asyncio.CancelledError:
+        process.kill()
+        await process.wait()
+        raise
+    try:
+        help_text = stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CliPredispatchRefusal(
+            "Graphiti CLI preflight returned malformed UTF-8"
+        ) from exc
+    if process.returncode != 0 or not all(
+        control in help_text for control in required_controls
+    ):
+        raise CliPredispatchRefusal(
+            "Graphiti CLI cannot prove tool isolation and max_tokens enforcement"
+        )
+
+
 def parse_cursor_output(raw: str) -> CliExecution:
     """Extract Cursor's model result and final provider-reported token usage."""
 
@@ -369,7 +438,12 @@ def parse_grok_stream_output(raw: str) -> CliExecution:
     )
 
 
-def run_cursor_agent_llm(prompt: str, *, max_tokens: int) -> CliExecution:
+def run_cursor_agent_llm(
+    prompt: str,
+    *,
+    max_tokens: int,
+    dispatch_started: Callable[[], None] | None = None,
+) -> CliExecution:
     _require_positive_max_tokens(max_tokens)
     with tempfile.TemporaryDirectory(prefix="newsroom-cursor-graphiti-") as root:
         workspace = _hermetic_cli_workspace(root, binary=CURSOR_AGENT_BIN)
@@ -382,6 +456,8 @@ def run_cursor_agent_llm(prompt: str, *, max_tokens: int) -> CliExecution:
             ),
             workspace=workspace,
         )
+        if dispatch_started is not None:
+            dispatch_started()
         return parse_cursor_output(
             run_cli(
                 _cursor_command(prompt, max_tokens=max_tokens),
@@ -393,13 +469,15 @@ def run_cursor_agent_llm(prompt: str, *, max_tokens: int) -> CliExecution:
 
 
 async def run_cursor_agent_llm_async(
-    prompt: str, *, max_tokens: int
+    prompt: str,
+    *,
+    max_tokens: int,
+    dispatch_started: Callable[[], None] | None = None,
 ) -> CliExecution:
     _require_positive_max_tokens(max_tokens)
     with tempfile.TemporaryDirectory(prefix="newsroom-cursor-graphiti-") as root:
         workspace = _hermetic_cli_workspace(root, binary=CURSOR_AGENT_BIN)
-        await asyncio.to_thread(
-            _prove_cli_controls,
+        await _prove_cli_controls_async(
             binary=CURSOR_AGENT_BIN,
             required_controls=(
                 "--disable-tools",
@@ -408,6 +486,8 @@ async def run_cursor_agent_llm_async(
             ),
             workspace=workspace,
         )
+        if dispatch_started is not None:
+            dispatch_started()
         return parse_cursor_output(
             await run_cli_async(
                 _cursor_command(prompt, max_tokens=max_tokens),
@@ -419,7 +499,11 @@ async def run_cursor_agent_llm_async(
 
 
 def run_grok_llm(
-    prompt: str, schema: str | None, *, max_tokens: int
+    prompt: str,
+    schema: str | None,
+    *,
+    max_tokens: int,
+    dispatch_started: Callable[[], None] | None = None,
 ) -> CliExecution:
     _require_positive_max_tokens(max_tokens)
     with tempfile.TemporaryDirectory(prefix="newsroom-grok-graphiti-") as root:
@@ -429,6 +513,8 @@ def run_grok_llm(
             required_controls=("--max-output-tokens",),
             workspace=workspace,
         )
+        if dispatch_started is not None:
+            dispatch_started()
         return parse_grok_stream_output(
             run_cli(
                 _grok_command(
@@ -445,17 +531,22 @@ def run_grok_llm(
 
 
 async def run_grok_llm_async(
-    prompt: str, schema: str | None, *, max_tokens: int
+    prompt: str,
+    schema: str | None,
+    *,
+    max_tokens: int,
+    dispatch_started: Callable[[], None] | None = None,
 ) -> CliExecution:
     _require_positive_max_tokens(max_tokens)
     with tempfile.TemporaryDirectory(prefix="newsroom-grok-graphiti-") as root:
         workspace = _hermetic_cli_workspace(root, binary=GROK_BIN)
-        await asyncio.to_thread(
-            _prove_cli_controls,
+        await _prove_cli_controls_async(
             binary=GROK_BIN,
             required_controls=("--max-output-tokens",),
             workspace=workspace,
         )
+        if dispatch_started is not None:
+            dispatch_started()
         return parse_grok_stream_output(
             await run_cli_async(
                 _grok_command(
@@ -552,6 +643,16 @@ def _output_exceeds_conservative_transport_ceiling(
     return len(execution.text.encode("utf-8")) > max_tokens
 
 
+def _output_limit_exceeded(
+    execution: CliExecution, *, max_tokens: int
+) -> bool:
+    if execution.usage.get("usage_basis") == "PROVIDER_REPORTED":
+        return _reported_output_exceeds(execution, max_tokens=max_tokens)
+    return _output_exceeds_conservative_transport_ceiling(
+        execution, max_tokens=max_tokens
+    )
+
+
 def _before_observed_cli_invocation(
     observer: CliInvocationObserver,
     *,
@@ -586,6 +687,24 @@ def _before_observed_cli_invocation(
     return method(**values)  # type: ignore[arg-type]
 
 
+def _runner_accepts_dispatch_marker(runner: Callable[..., object]) -> bool:
+    try:
+        parameters = inspect.signature(runner).parameters
+    except (TypeError, ValueError):
+        return False
+    return "dispatch_started" in parameters
+
+
+def _mark_observed_transport_dispatch(
+    observer: CliInvocationObserver | None, token: object
+) -> None:
+    if observer is None:
+        return
+    method = getattr(observer, "transport_dispatch_started", None)
+    if callable(method):
+        method(token)
+
+
 async def run_cli_chain(
     *,
     prompt: str,
@@ -613,6 +732,19 @@ async def run_cli_chain(
             max_tokens=max_tokens,
         )
     )
+    cursor_transport_started = False
+
+    def mark_cursor_transport_started() -> None:
+        nonlocal cursor_transport_started
+        if cursor_transport_started:
+            raise RuntimeError("Cursor Graphiti transport dispatch repeated")
+        try:
+            _mark_observed_transport_dispatch(invocation_observer, cursor_token)
+        except Exception as exc:
+            raise CliDispatchMarkerError(
+                "Cursor durable dispatch observation failed"
+            ) from exc
+        cursor_transport_started = True
 
     def observe(
         token: object,
@@ -630,13 +762,36 @@ async def run_cli_chain(
 
     try:
         if inspect.iscoroutinefunction(cursor_runner):
-            raw = await cursor_runner(prompt, max_tokens=max_tokens)
+            if _runner_accepts_dispatch_marker(cursor_runner):
+                raw = await cursor_runner(
+                    prompt,
+                    max_tokens=max_tokens,
+                    dispatch_started=mark_cursor_transport_started,
+                )
+            else:
+                mark_cursor_transport_started()
+                raw = await cursor_runner(prompt, max_tokens=max_tokens)
         else:
-            raw = await asyncio.to_thread(
-                cursor_runner, prompt, max_tokens=max_tokens
-            )
+            if _runner_accepts_dispatch_marker(cursor_runner):
+                raw = await asyncio.to_thread(
+                    cursor_runner,
+                    prompt,
+                    max_tokens=max_tokens,
+                    dispatch_started=mark_cursor_transport_started,
+                )
+            else:
+                mark_cursor_transport_started()
+                raw = await asyncio.to_thread(
+                    cursor_runner, prompt, max_tokens=max_tokens
+                )
+    except CliDispatchMarkerError:
+        raise
     except asyncio.CancelledError as exc:
-        cursor_usage = unreported_cli_usage()
+        cursor_usage = (
+            unreported_cli_usage()
+            if cursor_transport_started
+            else no_provider_call_cli_usage()
+        )
         binding = observe(cursor_token, outcome="CANCELLED", usage=cursor_usage)
         invocations.append(
             _invocation(
@@ -688,9 +843,7 @@ async def run_cli_chain(
     else:
         cursor_execution = _execution(cast(CliOutput, raw))
         payload = _parsed_object(cursor_execution.text)
-        output_limit_exceeded = _reported_output_exceeds(
-            cursor_execution, max_tokens=max_tokens
-        ) or _output_exceeds_conservative_transport_ceiling(
+        output_limit_exceeded = _output_limit_exceeded(
             cursor_execution, max_tokens=max_tokens
         )
         cursor_outcome = (
@@ -735,15 +888,53 @@ async def run_cli_chain(
             max_tokens=max_tokens,
         )
     )
+    grok_transport_started = False
+
+    def mark_grok_transport_started() -> None:
+        nonlocal grok_transport_started
+        if grok_transport_started:
+            raise RuntimeError("Grok Graphiti transport dispatch repeated")
+        try:
+            _mark_observed_transport_dispatch(invocation_observer, grok_token)
+        except Exception as exc:
+            raise CliDispatchMarkerError(
+                "Grok durable dispatch observation failed"
+            ) from exc
+        grok_transport_started = True
     try:
         if inspect.iscoroutinefunction(grok_runner):
-            raw = await grok_runner(prompt, schema, max_tokens=max_tokens)
+            if _runner_accepts_dispatch_marker(grok_runner):
+                raw = await grok_runner(
+                    prompt,
+                    schema,
+                    max_tokens=max_tokens,
+                    dispatch_started=mark_grok_transport_started,
+                )
+            else:
+                mark_grok_transport_started()
+                raw = await grok_runner(prompt, schema, max_tokens=max_tokens)
         else:
-            raw = await asyncio.to_thread(
-                grok_runner, prompt, schema, max_tokens=max_tokens
-            )
+            if _runner_accepts_dispatch_marker(grok_runner):
+                raw = await asyncio.to_thread(
+                    grok_runner,
+                    prompt,
+                    schema,
+                    max_tokens=max_tokens,
+                    dispatch_started=mark_grok_transport_started,
+                )
+            else:
+                mark_grok_transport_started()
+                raw = await asyncio.to_thread(
+                    grok_runner, prompt, schema, max_tokens=max_tokens
+                )
+    except CliDispatchMarkerError:
+        raise
     except asyncio.CancelledError as exc:
-        grok_usage = unreported_cli_usage()
+        grok_usage = (
+            unreported_cli_usage()
+            if grok_transport_started
+            else no_provider_call_cli_usage()
+        )
         binding = observe(grok_token, outcome="CANCELLED", usage=grok_usage)
         invocations.append(
             _invocation(
@@ -794,9 +985,7 @@ async def run_cli_chain(
         raise CliResponseError("Graphiti fallback CLI failed") from exc
     grok_execution = _execution(cast(CliOutput, raw))
     payload = _parsed_object(grok_execution.text)
-    output_limit_exceeded = _reported_output_exceeds(
-        grok_execution, max_tokens=max_tokens
-    ) or _output_exceeds_conservative_transport_ceiling(
+    output_limit_exceeded = _output_limit_exceeded(
         grok_execution, max_tokens=max_tokens
     )
     grok_outcome = (
