@@ -11,10 +11,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from newsroom.authority._editorial_relation_facade import GovernedEditorialRelations
-from newsroom.authority._entity_facade import GovernedEntityRecords
 from newsroom.authority.auth import AuthenticationProof
 from newsroom.authority.canonical import digest_canonical
+from newsroom.authority.editorial_relation_system import GovernedEditorialRelations
+from newsroom.authority.entity_system import GovernedEntityRecords
 from newsroom.control_plane.graphiti_admission import (
     GraphitiAdmissionConsumerError,
     GraphitiAdmissionRequest,
