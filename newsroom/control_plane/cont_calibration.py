@@ -256,6 +256,10 @@ def assess_cont_calibration(
     ]
     complete_total_telemetry = len(total_tokens) == len(dispatched_rows)
     complete_output_telemetry = len(output_tokens) == len(dispatched_rows)
+    reported_usage = all(
+        row.get("usage_status") == "REPORTED" for row in dispatched_rows
+    )
+    policy_clean = all(row.get("policy_breach") is None for row in dispatched_rows)
     no_result_tokens = (
         sum(total_tokens) - sum(accepted_token_totals)
         if complete_total_telemetry
@@ -359,6 +363,8 @@ def assess_cont_calibration(
         (manifest_controls_pass, "AMBIENT_CAPABILITY_IN_MANIFEST"),
         (exact_route_pins, "ROUTE_PIN_DRIFT"),
         (public_effect_count == 0, "PUBLIC_EFFECT_DETECTED"),
+        (reported_usage, "USAGE_STATUS_NOT_REPORTED"),
+        (policy_clean, "POLICY_BREACH_DETECTED"),
         (complete_output_telemetry, "OUTPUT_TELEMETRY_MISSING"),
         (complete_total_telemetry, "TOTAL_TELEMETRY_MISSING"),
     )

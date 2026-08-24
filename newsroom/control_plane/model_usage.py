@@ -1352,6 +1352,37 @@ class ModelUsageService:
             raise ModelUsageAdmissionError(
                 "context manifest command contract differs from invocation policy"
             )
+        if policy.command_semantic_version != "UNSPECIFIED" and (
+            manifest.get("evidence_package_digest")
+            != envelope.get("evidence_package_digest")
+        ):
+            raise ModelUsageAdmissionError(
+                "context manifest Evidence Package differs from work envelope"
+            )
+        if policy.command_semantic_version != "UNSPECIFIED" and (
+            manifest.get("provider") != allocation.provider
+            or manifest.get("route") != allocation.route
+            or manifest.get("model") != allocation.model
+            or manifest.get("reasoning") != allocation.reasoning
+            or manifest.get("prompt_contract_version")
+            != allocation.prompt_contract_version
+            or manifest.get("prompt_bytes") != allocation.prompt_bytes
+            or manifest.get("prompt_digest") != allocation.prompt_digest
+            or manifest.get("output_schema_digest")
+            != allocation.output_schema_digest
+            or manifest.get("context_identity") != allocation.context_identity
+            or manifest.get("config_identity") != allocation.config_identity
+            or manifest.get("one_turn") != allocation.one_turn
+            or manifest.get("exact_input") != allocation.exact_input
+            or manifest.get("skills_enabled") != allocation.skills_enabled
+            or manifest.get("tools_enabled") != allocation.tools_enabled
+            or manifest.get("mcp_enabled") != allocation.mcp_enabled
+            or manifest.get("prior_message_count")
+            != allocation.prior_message_count
+        ):
+            raise ModelUsageAdmissionError(
+                "context manifest invocation identity differs from allocation"
+            )
         if policy.calibration_only and envelope.get("candidate_id") not in (
             policy.allowed_candidate_ids
         ):

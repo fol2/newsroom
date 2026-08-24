@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane.cont_calibration import (
     assess_cont_calibration,
     stage_cont_calibration_policy,
 )
 from newsroom.control_plane.model_usage import (
+    InvocationAllocation,
     InvocationEfficiencyPolicy,
     ModelUsageAdmissionError,
     ModelUsageIntegrityError,
     ModelUsageService,
+    WorkEnvelope,
     WorkloadClass,
 )
 from newsroom.control_plane.writer import (
@@ -49,6 +53,8 @@ def _leaf(
         "context_tokens": context_tokens,
         "output_tokens": 400,
         "total_tokens": context_tokens + 400,
+        "usage_status": "REPORTED",
+        "policy_breach": None,
         "actual_provider_dispatch": True,
         "work_outcome": "ACCEPTED" if accepted else "REJECT",
         "invocation_outcome": "ACCEPTED_OUTPUT" if accepted else "REJECTED_OUTPUT",
@@ -180,6 +186,35 @@ def test_missing_usage_is_not_inferred_as_zero() -> None:
     assert packet.metrics["median_tokens_per_accepted_payload"] is None
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    (
+        ("usage_status", "INVALID", "USAGE_STATUS_NOT_REPORTED"),
+        ("policy_breach", "MAX_OUTPUT_TOKENS_EXCEEDED", "POLICY_BREACH_DETECTED"),
+    ),
+)
+def test_invalid_or_policy_breaching_usage_cannot_mint_policy(
+    field: str,
+    value: str,
+    reason: str,
+) -> None:
+    leaves = _passing_leaves()
+    leaves[1][field] = value
+
+    packet = assess_cont_calibration(
+        leaves,
+        candidate_ids=("short", "medium", "long"),
+        version="issue-730-v1",
+        implementation_revision=REVISION,
+        unpublished_payload_candidate_ids=("short", "medium", "long"),
+    )
+
+    assert packet.passed is False
+    assert reason in packet.failure_reasons
+    with pytest.raises(ModelUsageAdmissionError):
+        packet.mint_primary_policy()
+
+
 def test_prompt_size_differences_cannot_substitute_for_evidence_package_range() -> None:
     leaves = _passing_leaves()
     for row in leaves:
@@ -248,6 +283,103 @@ def test_bootstrap_policy_resolves_only_for_bound_candidate_and_revision(
             implementation_revision=REVISION,
             config_identity=CONT_PRIMARY_CONFIG_IDENTITY,
         )
+
+
+def test_hermetic_allocation_rejects_manifest_evidence_package_drift(
+    tmp_path: Path,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "usage.sqlite3"))
+    policy = stage_cont_calibration_policy(
+        candidate_ids=("short",),
+        version="issue-730-v1+aaaaaaaaaaaa",
+        implementation_revision=REVISION,
+        max_prompt_bytes=8_000,
+    )
+    envelope = WorkEnvelope.create(
+        cycle_id="00000000-0000-4000-8000-000000000001",
+        workload_class=WorkloadClass.CONT_WRITER_PRIMARY,
+        admitted_at=datetime(2026, 8, 24, 10, 0, tzinfo=UTC),
+        admission_decision_id="decision-1",
+        candidate_id="short",
+        hypothesis_digest=digest_canonical({"hypothesis": 1}),
+        evidence_package_digest=digest_canonical({"evidence": "envelope"}),
+        ingest_id=None,
+        graphiti_attempt_id=None,
+    )
+    service.register_policy(policy)
+    service.open_envelope(envelope)
+    manifest = {
+        "schema_version": CONT_CONTEXT_MANIFEST_SCHEMA_VERSION,
+        "provider": CONT_PRIMARY_PROVIDER,
+        "route": CONT_PRIMARY_ROUTE,
+        "model": CONT_PRIMARY_MODEL,
+        "reasoning": CONT_PRIMARY_REASONING,
+        "command_semantic_version": GROK_COMMAND_SEMANTIC_VERSION,
+        "command_flags": list(CONT_PRIMARY_COMMAND_FLAGS),
+        "implementation_revision": REVISION,
+        "implementation_worktree_clean": True,
+        "prompt_contract_version": policy.prompt_contract_version,
+        "prompt_bytes": 200,
+        "prompt_digest": digest_canonical({"prompt": 1}),
+        "schema_digest": digest_canonical({"schema": 1}),
+        "system_digest": digest_canonical({"system": 1}),
+        "output_schema_digest": policy.output_schema_digest,
+        "context_identity": policy.allowed_context_identities[0],
+        "config_identity": policy.allowed_config_identities[0],
+        "evidence_package_digest": digest_canonical({"evidence": "manifest"}),
+        "evidence_package_bytes": 100,
+        "disabled_capabilities": list(CONT_DISABLED_CAPABILITIES),
+        "one_turn": True,
+        "exact_input": True,
+        "skills_enabled": False,
+        "tools_enabled": False,
+        "mcp_enabled": False,
+        "prior_message_count": 0,
+        "skill_count": 0,
+        "tool_count": 0,
+        "mcp_server_count": 0,
+        "mcp_tool_count": 0,
+    }
+    manifest_digest = digest_canonical(manifest)
+    service.retain_context_manifest(
+        {"context_manifest_digest": manifest_digest, **manifest}
+    )
+    allocated_at = datetime(2026, 8, 24, 10, 0, 1, tzinfo=UTC)
+    allocation = InvocationAllocation.create(
+        envelope_id=envelope.envelope_id,
+        cycle_id=envelope.cycle_id,
+        leaf_ordinal=1,
+        workload_class=WorkloadClass.CONT_WRITER_PRIMARY,
+        invocation_policy_digest=policy.canonical_digest,
+        provider=policy.provider,
+        route=policy.route,
+        model=policy.model,
+        reasoning=policy.reasoning,
+        prompt_contract_version=policy.prompt_contract_version,
+        prompt_bytes=200,
+        prompt_digest=manifest["prompt_digest"],
+        request_digest=digest_canonical({"request": 1}),
+        output_schema_digest=policy.output_schema_digest,
+        max_output_tokens=policy.max_output_tokens,
+        context_manifest_digest=manifest_digest,
+        context_identity=policy.allowed_context_identities[0],
+        config_identity=policy.allowed_config_identities[0],
+        one_turn=policy.one_turn,
+        exact_input=policy.exact_input,
+        skills_enabled=policy.skills_enabled,
+        tools_enabled=policy.tools_enabled,
+        mcp_enabled=policy.mcp_enabled,
+        prior_message_count=policy.prior_message_count,
+        allocated_at=allocated_at,
+        recovery_deadline_at=allocated_at + timedelta(minutes=6),
+        parent_invocation_id=None,
+    )
+
+    with pytest.raises(
+        ModelUsageAdmissionError,
+        match="Evidence Package differs",
+    ):
+        service.allocate(allocation, owner_emergency_stop=False)
 
 
 def test_new_head_bootstrap_supersedes_old_final_and_later_final_tightening(
