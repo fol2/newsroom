@@ -194,6 +194,13 @@ def test_official_programme_terms_have_a_structured_entity_type() -> None:
         "政府公布政策將實施",
         "政府公布措施將推行",
         "政府公布計劃將啟用",
+        "政府公布工作小組出任項目角色",
+        "政府公布專責小組出任項目角色",
+        "政府公布方代表出任項目角色",
+        "政府公布新中心將設於初步階段",
+        "政府公布新中心將設於測試階段",
+        "政府公布新中心將設於學校附近",
+        "政府公布新中心將設於社會層面",
     ),
 )
 def test_common_chinese_words_are_not_invented_as_people_or_places(text: str) -> None:
@@ -392,6 +399,12 @@ def test_approved_proper_name_is_exempt_from_contextual_shape_gate(
             ("郭志強", "PERSON"),
         ),
         (
+            "香港政府公布新人事安排由劉志偉接任局長",
+            "香港政府最新公告指新人事由郭志強升任局長",
+            ("劉志偉", "PERSON"),
+            ("郭志強", "PERSON"),
+        ),
+        (
             "香港政府公布新中心將設於銅鑼灣",
             "香港政府最新公告顯示新中心設於佐敦",
             ("銅鑼灣", "PLACE"),
@@ -501,7 +514,11 @@ def test_short_service_delay_cannot_masquerade_as_law_change() -> None:
         ("服務公布零分鐘延誤", "INSTRUCTION"),
         ("青松學校公布校巴新增半小時延誤", "INSTRUCTION"),
         ("服務公布半小時延誤後乘客要求賠償", "INSTRUCTION"),
+        ("服務公布半小時延誤後乘客認為必須賠償", "INSTRUCTION"),
+        ("服務公布半小時延誤後工會表示乘客應該獲賠償", "INSTRUCTION"),
+        ("服務公布新增半小時延誤後乘客表示必須獲賠償", "INSTRUCTION"),
         ("服務重申申請截止日期並公布新增半小時延誤", "OFFICIAL_DEADLINE"),
+        ("服務重申申請限期延長安排並公布新增半小時延誤", "OFFICIAL_DEADLINE"),
     ),
 )
 def test_service_delay_cannot_masquerade_as_official_instruction(
@@ -3754,7 +3771,7 @@ def test_conflicting_admission_for_same_package_is_not_silently_ignored(
     with pytest.raises(sqlite3.IntegrityError):
         connection.execute(
             "INSERT INTO unpublished_write_admission_decisions "
-            "VALUES(?,?,?,?,?,?,?,?,?)",
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
             (
                 "sha256:" + ("f" * 64),
                 decision.candidate_id,
@@ -3765,6 +3782,7 @@ def test_conflicting_admission_for_same_package_is_not_silently_ignored(
                 "{}",
                 "2026-08-20T00:00:01Z",
                 "2026-08-20T00:00:01Z",
+                "sha256:" + ("0" * 64),
             ),
         )
     connection.close()
@@ -3844,6 +3862,18 @@ def test_write_selection_replay_requires_exact_canonical_record(tmp_path: Path) 
             "WHERE selection_id=?",
             (canonical_json_bytes(original_record).decode(), selection.selection_id),
         )
+    time_poison = {**original_record, "selected_at": "attacker-time"}
+    connection.execute(
+        "UPDATE unpublished_write_selections SET record_json=?, selected_at=? "
+        "WHERE selection_id=?",
+        (
+            canonical_json_bytes(time_poison).decode(),
+            "attacker-time",
+            selection.selection_id,
+        ),
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="conflicting write-selection"):
+        retain_write_selection(connection, selection)
     connection.close()
 
 
@@ -3859,6 +3889,19 @@ def test_admission_replay_rejects_tampered_canonical_record(tmp_path: Path) -> N
         "SET reason_codes_json='[\"TAMPERED\"]', record_json='{}' "
         "WHERE decision_id=?",
         (decision.decision_id,),
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="conflicting write-admission"):
+        retain_write_admission_decision(connection, decision)
+    poisoned = {**decision.as_record(), "decided_at": "attacker-time"}
+    connection.execute(
+        "UPDATE unpublished_write_admission_decisions "
+        "SET reason_codes_json=?, record_json=?, decided_at=? WHERE decision_id=?",
+        (
+            canonical_json_bytes(list(decision.stable_reason_codes)).decode(),
+            canonical_json_bytes(poisoned).decode(),
+            "attacker-time",
+            decision.decision_id,
+        ),
     )
     with pytest.raises(sqlite3.IntegrityError, match="conflicting write-admission"):
         retain_write_admission_decision(connection, decision)

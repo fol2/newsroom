@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS unpublished_write_admission_decisions(
     record_json TEXT NOT NULL,
     at TEXT NOT NULL,
     decided_at TEXT,
+    record_digest TEXT,
     UNIQUE(candidate_id, evidence_package_digest, policy_version),
     UNIQUE(decision_id, candidate_id, evidence_package_digest)
 );
@@ -118,6 +119,7 @@ CREATE TABLE IF NOT EXISTS unpublished_write_selections(
     record_json TEXT NOT NULL,
     at TEXT NOT NULL,
     selected_at TEXT,
+    record_digest TEXT,
     FOREIGN KEY(decision_id, candidate_id, evidence_package_digest)
         REFERENCES unpublished_write_admission_decisions(
             decision_id, candidate_id, evidence_package_digest
@@ -515,6 +517,11 @@ def connect(path: str) -> sqlite3.Connection:
                 "ALTER TABLE unpublished_write_admission_decisions "
                 "ADD COLUMN decided_at TEXT"
             )
+        if "record_digest" not in decision_columns:
+            connection.execute(
+                "ALTER TABLE unpublished_write_admission_decisions "
+                "ADD COLUMN record_digest TEXT"
+            )
         selection_columns = {
             str(row[1])
             for row in connection.execute(
@@ -524,6 +531,10 @@ def connect(path: str) -> sqlite3.Connection:
         if "selected_at" not in selection_columns:
             connection.execute(
                 "ALTER TABLE unpublished_write_selections ADD COLUMN selected_at TEXT"
+            )
+        if "record_digest" not in selection_columns:
+            connection.execute(
+                "ALTER TABLE unpublished_write_selections ADD COLUMN record_digest TEXT"
             )
         connection.commit()
     except Exception:
@@ -601,6 +612,7 @@ def retain_write_admission_decision(
         raise TypeError("write admission decision record required")
     record = decision.as_record()
     record_json = canonical_json_bytes(record).decode("utf-8")
+    record_digest = digest_bytes(record_json.encode("utf-8"))
     reason_codes_json = canonical_json_bytes(list(decision.stable_reason_codes)).decode(
         "utf-8"
     )
@@ -609,8 +621,8 @@ def retain_write_admission_decision(
             """
             INSERT INTO unpublished_write_admission_decisions(
                 decision_id, candidate_id, evidence_package_digest, policy_version,
-                decision, reason_codes_json, record_json, at, decided_at
-            ) VALUES(?,?,?,?,?,?,?,?,?)
+                decision, reason_codes_json, record_json, at, decided_at, record_digest
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 decision.decision_id,
@@ -622,13 +634,14 @@ def retain_write_admission_decision(
                 record_json,
                 _now(),
                 decision.decided_at,
+                record_digest,
             ),
         )
     except sqlite3.IntegrityError as exc:
         rows = connection.execute(
             """
             SELECT decision_id, candidate_id, evidence_package_digest, policy_version,
-                   decision, reason_codes_json, record_json, decided_at
+                   decision, reason_codes_json, record_json, decided_at, record_digest
             FROM unpublished_write_admission_decisions
             WHERE decision_id=? OR (
                 candidate_id=? AND evidence_package_digest=? AND policy_version=?
@@ -655,6 +668,7 @@ def retain_write_admission_decision(
                     and canonical_json_bytes(stored_reasons).decode("utf-8") == row[5]
                     and stored_reasons == list(stored.stable_reason_codes)
                     and stored.decided_at == row[7]
+                    and digest_bytes(row[6].encode("utf-8")) == row[8]
                     and row[:5]
                     == (
                         decision.decision_id,
@@ -679,13 +693,14 @@ def retain_write_selection(connection: sqlite3.Connection, selection: object) ->
     if not isinstance(selection, WriteSelectionRecord):
         raise TypeError("write selection record required")
     record_json = canonical_json_bytes(selection.as_record()).decode("utf-8")
+    record_digest = digest_bytes(record_json.encode("utf-8"))
     try:
         connection.execute(
             """
             INSERT INTO unpublished_write_selections(
                 selection_id, decision_id, candidate_id, evidence_package_digest,
-                rank, record_json, at, selected_at
-            ) VALUES(?,?,?,?,?,?,?,?)
+                rank, record_json, at, selected_at, record_digest
+            ) VALUES(?,?,?,?,?,?,?,?,?)
             """,
             (
                 selection.selection_id,
@@ -696,12 +711,13 @@ def retain_write_selection(connection: sqlite3.Connection, selection: object) ->
                 record_json,
                 _now(),
                 selection.selected_at,
+                record_digest,
             ),
         )
     except sqlite3.IntegrityError as exc:
         row = connection.execute(
             "SELECT decision_id, candidate_id, evidence_package_digest, rank, "
-            "record_json, selected_at "
+            "record_json, selected_at, record_digest "
             "FROM unpublished_write_selections WHERE selection_id=?",
             (selection.selection_id,),
         ).fetchone()
@@ -727,6 +743,7 @@ def retain_write_selection(connection: sqlite3.Connection, selection: object) ->
             or stored_selection.selection_id != selection.selection_id
             or stored_selection.selected_at != row[5]
             or canonical_stored != row[4]
+            or digest_bytes(row[4].encode("utf-8")) != row[6]
         ):
             raise sqlite3.IntegrityError("conflicting write-selection replay") from exc
 

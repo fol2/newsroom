@@ -243,8 +243,10 @@ def _qualification_relation_is_proven(
         qualification.test is Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE
         and qualification_fields.get("action_class") == "INSTRUCTION"
         and re.search(
-            r"must|need(?:s)? to|required? to|should|instruct(?:ed|ion)?|"
-            r"必須|必须|需要|應該|应该|改乘|改搭",
+            r"(?:official|authority|government|department|agency|"
+            r"政府|當局|当局|部門|部门|機構|机构|署|局).{0,48}"
+            r"(?:must|need(?:s)? to|required? to|should|instruct(?:ed|ion)?|"
+            r"必須|必须|需要|應該|应该|改乘|改搭)",
             span,
             flags=re.IGNORECASE,
         )
@@ -252,6 +254,12 @@ def _qualification_relation_is_proven(
     explicit_official_deadline = bool(
         qualification.test is Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE
         and qualification_fields.get("action_class") == "OFFICIAL_DEADLINE"
+        and not re.search(
+            r"reiterat(?:e|ed|es)|restate(?:d|s)?|unchanged|重申|再次確認|再次确认|"
+            r"維持不變|维持不变",
+            span,
+            flags=re.IGNORECASE,
+        )
         and re.search(
             r"(?:deadline|closing date)\s+(?:changed|extended|shortened|moved)|"
             r"(?:changed|extended|shortened|moved)\s+(?:the\s+)?"

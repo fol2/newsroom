@@ -393,19 +393,20 @@ def bounded_named_entities(text: str) -> frozenset[tuple[str, str]]:
         r"辭職|辞职|請辭|请辞))"
     )
     for match in chinese_person.finditer(text):
-        if match.group(1) not in {"方資料"} and not any(
+        if match.group(1) not in {"方資料", "方代表", "方表示"} and not any(
             marker in match.group(1)
             for marker in ("任命", "委任", "出任", "局長", "署長", "司長")
         ):
             candidates.append((match.start(1), match.end(1), match.group(1), "PERSON"))
     appointed_chinese_person = re.compile(
         r"(?:任命|委任|提名|公布[：:]?|指[：:]?|由)"
-        r"([\u3400-\u9fff]{2,4}?)"
-        r"(?=(?:出任|擔任|担任|任職|任职|獲委任|获委任))"
+        r"([趙錢孫李周吳鄭王馮陳褚衛蔣沈韓楊朱秦尤許何呂施張孔曹嚴華金魏陶姜戚謝鄒喻柏水竇章雲蘇潘葛奚范彭郎魯韋昌馬苗鳳花方俞任袁柳唐羅薛伍余米貝姚孟顧尹江鍾蔡葉杜夏汪田劉郭梁黃林]"
+        r"[\u3400-\u9fff]{2})"
+        r"(?=(?:出任|擔任|担任|任職|任职|獲委任|获委任|接任|升任))"
     )
     for match in appointed_chinese_person.finditer(text):
         person = match.group(1)
-        if person not in {"任務安排", "政策措施", "相關安排", "方案甲"}:
+        if person[1:] not in {"表示", "安排", "措施", "政策", "案甲", "代表"}:
             candidates.append((match.start(1), match.end(1), person, "PERSON"))
     interaction_chinese_person = re.compile(
         r"(?:會見|会见|接見|接见|拘捕|起訴|起诉|邀請|邀请)"
@@ -431,12 +432,6 @@ def bounded_named_entities(text: str) -> frozenset[tuple[str, str]]:
         r"(?:實施|实施|推行|設立|设立|開設|开设|啟用|启用))"
     )
     for match in action_context_structural_place.finditer(text):
-        candidates.append((match.start(1), match.end(1), match.group(1), "PLACE"))
-    located_chinese_place = re.compile(
-        r"(?:設於|设于|位於|位于)([\u3400-\u9fff]{2,5})"
-        r"(?=$|[，,。；;：:]|(?:嘅|的)?(?:中心|地區|地区|附近|一帶|一带))"
-    )
-    for match in located_chinese_place.finditer(text):
         candidates.append((match.start(1), match.end(1), match.group(1), "PLACE"))
     chinese_organisation = re.compile(
         r"(?<![\u3400-\u9fff])"
