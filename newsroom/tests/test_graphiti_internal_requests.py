@@ -880,6 +880,72 @@ def test_embedding_transport_observes_separate_preallocated_leaf_and_od011_recei
     assert leaf["od_011_reference"] == "OD-011:EVALUATION_GRAPHITI_EMBEDDING"
 
 
+def test_embedding_dispatch_fence_refusal_terminalises_exact_zero(
+    tmp_path: Path,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-embedding-fence",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-embedding-fence",
+        graphiti_attempt_id="ingest-embedding-fence:1",
+    )
+    service.open_envelope(envelope)
+    clock_calls = 0
+
+    def clock() -> datetime:
+        nonlocal clock_calls
+        clock_calls += 1
+        return (
+            T0 + timedelta(seconds=1)
+            if clock_calls == 1
+            else T0 + timedelta(minutes=2)
+        )
+
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=clock,
+        owner_stop_check=lambda: None,
+        deadline=T0 + timedelta(minutes=1),
+    )
+    provider_calls = 0
+
+    class Embeddings:
+        async def create(self, **_values: object) -> object:
+            nonlocal provider_calls
+            provider_calls += 1
+            raise AssertionError("embedding provider must remain fenced")
+
+    delegate = SimpleNamespace(
+        client=SimpleNamespace(embeddings=Embeddings()),
+        config=SimpleNamespace(
+            embedding_model="openai/text-embedding-3-large",
+            embedding_dim=2,
+        ),
+    )
+    embedder = MeteredOpenAIEmbedder(delegate, invocation_observer=observer)
+
+    with pytest.raises(ModelUsageAdmissionError, match="expired during local preflight"):
+        asyncio.run(embedder.create("embedding input"))
+
+    assert provider_calls == 0
+    request = embedder.receipt()["requests"][0]
+    assert request["outcome"] == "FAILED"
+    assert request["usage_basis"] == "NO_PROVIDER_CALL"
+    assert request["model_invocation_terminal_digest"]
+    leaf = service.query(start=T0, end=T0 + timedelta(minutes=3))["leaves"][0]
+    assert leaf["invocation_outcome"] == "FAILED"
+    assert leaf["transport_dispatch_observed"] is False
+    assert leaf["pre_dispatch_zero_proved"] is True
+    assert leaf["total_tokens"] == 0
+
+
 def test_requested_max_tokens_is_forwarded_and_enforced_on_reported_usage(
     tmp_path: Path,
 ) -> None:
@@ -1018,6 +1084,105 @@ def test_missing_reported_output_tokens_uses_conservative_byte_ceiling() -> None
         )
 
     assert invocations[0]["outcome"] == "OUTPUT_LIMIT_EXCEEDED"
+
+
+def test_negative_reported_output_tokens_uses_conservative_byte_ceiling() -> None:
+    invocations: list[dict[str, object]] = []
+
+    with pytest.raises(CliResponseError, match="exceeded requested max_tokens"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="bounded prompt",
+                schema=None,
+                max_tokens=1,
+                cursor_runner=lambda _prompt, *, max_tokens: CliExecution(
+                    text='{"value":"' + ("x" * 10_000) + '"}',
+                    usage={
+                        "usage_basis": "PROVIDER_REPORTED",
+                        "input_tokens": 3,
+                        "output_tokens": -1,
+                        "cached_read_tokens": 0,
+                        "cached_write_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "total_tokens": 2,
+                    },
+                ),
+                grok_runner=lambda _prompt, _schema, *, max_tokens: "not called",
+                invocations=invocations,
+            )
+        )
+
+    assert invocations[0]["outcome"] == "OUTPUT_LIMIT_EXCEEDED"
+
+
+def test_post_marker_executable_loss_is_usage_uncertain(
+    tmp_path: Path,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-post-marker-executable-loss",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-post-marker-executable-loss",
+        graphiti_attempt_id="ingest-post-marker-executable-loss:1",
+    )
+    service.open_envelope(envelope)
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=10),
+        owner_stop_check=lambda: None,
+    )
+    invocations: list[dict[str, object]] = []
+
+    def missing_after_marker(
+        _prompt: str,
+        *,
+        max_tokens: int,
+        dispatch_started: object,
+    ) -> CliExecution:
+        del max_tokens
+        assert callable(dispatch_started)
+        dispatch_started()
+        raise FileNotFoundError("fixture executable disappeared")
+
+    result = asyncio.run(
+        run_cli_chain(
+            prompt="source-safe prompt",
+            schema=EXTRACTED_ENTITIES_SCHEMA,
+            semantic_request_class="ExtractedEntities",
+            max_tokens=100,
+            cursor_runner=missing_after_marker,
+            grok_runner=lambda _prompt, _schema, *, max_tokens: CliExecution(
+                text='{"extracted_entities":[]}',
+                usage=cursor_cli_usage(
+                    {
+                        "inputTokens": 2,
+                        "outputTokens": 2,
+                        "cacheReadTokens": 0,
+                        "cacheWriteTokens": 0,
+                    }
+                ),
+            ),
+            invocations=invocations,
+            invocation_observer=observer,
+        )
+    )
+
+    assert result == {"extracted_entities": []}
+    assert invocations[0]["usage"]["usage_basis"] == "UNREPORTED"
+    primary = next(
+        leaf
+        for leaf in service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"]
+        if leaf["workload_class"] == "GRAPHITI_CHAT_PRIMARY"
+    )
+    assert primary["transport_dispatch_observed"] is True
+    assert primary["pre_dispatch_zero_proved"] is False
+    assert primary["dispatch_at"] is not None
 
 
 @pytest.mark.parametrize(

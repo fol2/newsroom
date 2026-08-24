@@ -288,7 +288,13 @@ def test_cli_chain_retains_exact_zero_for_missing_executable_before_dispatch() -
         ) -> None:
             completions.append((str(token), outcome, usage))
 
-    def cursor(_prompt: str, *, max_tokens: int) -> CliExecution:
+    def cursor(
+        _prompt: str,
+        *,
+        max_tokens: int,
+        dispatch_started: object = None,
+    ) -> CliExecution:
+        del max_tokens, dispatch_started
         raise FileNotFoundError("cursor-agent")
 
     result = asyncio.run(

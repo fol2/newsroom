@@ -640,6 +640,7 @@ def _output_limit_exceeded(
         execution.usage.get("usage_basis") == "PROVIDER_REPORTED"
         and isinstance(output_tokens, int)
         and not isinstance(output_tokens, bool)
+        and output_tokens >= 0
     ):
         return output_tokens > max_tokens
     return _output_exceeds_conservative_transport_ceiling(
@@ -819,7 +820,11 @@ async def run_cli_chain(
         )
         raise
     except (FileNotFoundError, CliPredispatchRefusal) as exc:
-        cursor_usage = no_provider_call_cli_usage()
+        cursor_usage = (
+            unreported_cli_usage()
+            if cursor_transport_started
+            else no_provider_call_cli_usage()
+        )
         refusal_outcome = (
             "EXECUTABLE_NOT_FOUND"
             if isinstance(exc, FileNotFoundError)
@@ -987,7 +992,11 @@ async def run_cli_chain(
         )
         raise
     except (FileNotFoundError, CliPredispatchRefusal) as exc:
-        grok_usage = no_provider_call_cli_usage()
+        grok_usage = (
+            unreported_cli_usage()
+            if grok_transport_started
+            else no_provider_call_cli_usage()
+        )
         refusal_outcome = (
             "EXECUTABLE_NOT_FOUND"
             if isinstance(exc, FileNotFoundError)
