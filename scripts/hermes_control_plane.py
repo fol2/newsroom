@@ -33,6 +33,7 @@ from newsroom.control_plane.cycle_governor import (
     EvaluationCyclePolicy,
     WriterRouteHealthProof,
 )
+from newsroom.control_plane.cont_calibration import assess_cont_calibration
 from newsroom.control_plane.graphiti_events import GraphitiEventQueue
 from newsroom.control_plane.intake import IntakeReport, run_intake
 from newsroom.control_plane.model_usage import (
@@ -485,6 +486,7 @@ def main(argv: list[str] | None = None) -> int:
             "intake",
             "usage",
             "writer-health-probe",
+            "writer-calibration",
         ),
     )
     parser.add_argument("--proving", default=DEFAULT_PROVING)
@@ -525,6 +527,20 @@ def main(argv: list[str] | None = None) -> int:
         default="json",
         help="deterministic shared model-usage export format",
     )
+    parser.add_argument(
+        "--calibration-candidates",
+        help="comma-separated retained WRITE_READY candidate identities (maximum five)",
+    )
+    parser.add_argument(
+        "--calibration-version",
+        default="issue-730-v1",
+        help="version bound into the calibration packet and minted route policy",
+    )
+    parser.add_argument(
+        "--register-policy",
+        action="store_true",
+        help="register the policy only when every productive calibration gate passes",
+    )
     args = parser.parse_args(argv)
     try:
         cooldown_seconds = _resolve_cooldown(
@@ -538,6 +554,45 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
     ensure_control_plane_state_root()
+    if args.command == "writer-calibration":
+        if not args.calibration_candidates:
+            parser.error("writer-calibration requires --calibration-candidates")
+        candidate_ids = tuple(
+            value.strip()
+            for value in args.calibration_candidates.split(",")
+            if value.strip()
+        )
+        now = datetime.now(tz=UTC)
+        try:
+            start = _usage_instant(
+                args.usage_start,
+                default=now - timedelta(days=1),
+            )
+            end = _usage_instant(
+                args.usage_end,
+                default=now + timedelta(microseconds=1),
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        usage = ModelUsageService(args.unpublished)
+        query = usage.query(start=start, end=end)
+        packet = assess_cont_calibration(
+            query["leaves"],  # type: ignore[arg-type]
+            candidate_ids=candidate_ids,
+            version=args.calibration_version,
+            public_effect_count=0,
+        )
+        body = packet.as_record()
+        if packet.passed:
+            policy = packet.mint_primary_policy()
+            body["invocation_efficiency_policy"] = policy.as_record()
+            if args.register_policy:
+                usage.register_policy(policy)
+                body["policy_registered"] = True
+        elif args.register_policy:
+            body["policy_registered"] = False
+        sys.stdout.write(json.dumps(body, ensure_ascii=False, indent=2) + "\n")
+        return 0 if packet.passed else 2
     if args.command == "usage":
         now = datetime.now(tz=UTC)
         try:

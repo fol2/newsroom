@@ -2173,6 +2173,7 @@ def _run_write_loop(
                     # End any read transaction before the shared usage
                     # authority takes its pre-dispatch write claim.
                     unpublished.commit()
+                    model_usage.retain_context_manifest(manifest.as_record())
                     usage_policy = model_usage.qualified_policy(
                         workload_class=workload_class,
                         provider=manifest.provider,

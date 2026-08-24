@@ -58,6 +58,7 @@ from newsroom.control_plane.evidence import (
 from newsroom.control_plane.items import SourceItem, parse_observation
 from newsroom.control_plane.model_usage import (
     InvocationEfficiencyPolicy,
+    ModelUsageAdmissionError,
     ModelUsageService,
     WorkloadClass,
 )
@@ -75,10 +76,12 @@ from newsroom.control_plane.store import (
 from newsroom.control_plane.veto import VetoError
 from newsroom.control_plane.writer import (
     CONT_FALLBACK_MODEL,
+    CONT_FALLBACK_CONFIG_IDENTITY,
     CONT_FALLBACK_PROVIDER,
     CONT_FALLBACK_REASONING,
     CONT_FALLBACK_ROUTE,
     CONT_PRIMARY_MODEL,
+    CONT_PRIMARY_CONFIG_IDENTITY,
     CONT_PRIMARY_PROVIDER,
     CONT_PRIMARY_REASONING,
     CONT_PRIMARY_ROUTE,
@@ -102,6 +105,48 @@ from newsroom.effective_revision import retain_observation_revision_first_seen
 from newsroom.tests.test_control_plane_private_beta import _proving
 
 _CLOCK = lambda: datetime(2026, 8, 20, tzinfo=UTC)
+
+
+def test_cont_context_manifest_is_canonical_zero_capability_evidence() -> None:
+    candidate, package = _candidate_package()
+    manifest = CliChainWriter(
+        primary=lambda _prompt: "unused", fallback=lambda _prompt: "unused"
+    ).invocation_manifest(candidate, package, route="PRIMARY")
+    record = manifest.as_record()
+    unsigned = dict(record)
+    unsigned.pop("context_manifest_digest")
+
+    assert digest_canonical(unsigned) == manifest.context_manifest_digest
+    assert manifest.evidence_package_digest == package.digest
+    assert manifest.working_directory_inventory == ()
+    assert manifest.prior_message_count == 0
+    assert manifest.skill_count == 0
+    assert manifest.tool_count == 0
+    assert manifest.mcp_server_count == 0
+    assert manifest.mcp_tool_count == 0
+    assert manifest.tools_enabled is False
+    assert manifest.skills_enabled is False
+    assert manifest.mcp_enabled is False
+    retained = json.dumps(record, ensure_ascii=False)
+    assert candidate.headline not in retained
+    assert all(passage not in retained for passage in package.passages)
+
+
+def test_context_manifest_with_one_tool_fails_route_gate(tmp_path: Path) -> None:
+    candidate, package = _candidate_package()
+    manifest = CliChainWriter(
+        primary=lambda _prompt: "unused", fallback=lambda _prompt: "unused"
+    ).invocation_manifest(candidate, package, route="PRIMARY")
+    record = manifest.as_record()
+    record["tool_count"] = 1
+    unsigned = dict(record)
+    unsigned.pop("context_manifest_digest")
+    record["context_manifest_digest"] = digest_canonical(unsigned)
+
+    with pytest.raises(ModelUsageAdmissionError, match="ambient capability"):
+        ModelUsageService(str(tmp_path / "usage.sqlite3")).retain_context_manifest(
+            record
+        )
 
 
 def test_non_controller_children_do_not_receive_evidence_approval_key(
@@ -4262,7 +4307,11 @@ def _register_cont_usage_policy(
             prompt_contract_version=CONT_WRITER_PROMPT_CONTRACT_VERSION,
             output_schema_digest=CONT_WRITER_OUTPUT_SCHEMA_DIGEST,
             allowed_context_identities=(CONT_WRITER_CONTEXT_IDENTITY,),
-            allowed_config_identities=("cont-writer-hermetic-command-v1",),
+            allowed_config_identities=(
+                CONT_PRIMARY_CONFIG_IDENTITY
+                if route == CONT_PRIMARY_ROUTE
+                else CONT_FALLBACK_CONFIG_IDENTITY,
+            ),
             hard_estimate_ceiling_tokens=12_000,
             evidence_digest=digest_canonical({"issue": 728, "route": route}),
             qualified=True,
@@ -4337,6 +4386,7 @@ def test_controller_allocates_every_primary_and_fallback_leaf_before_dispatch(
                     "cached_read_tokens": 5,
                     "cached_write_tokens": 0,
                     "reasoning_tokens": 0,
+                    "context_tokens": 80,
                     "total_tokens": 125,
                 },
             ),
@@ -4349,6 +4399,7 @@ def test_controller_allocates_every_primary_and_fallback_leaf_before_dispatch(
                     "cached_read_tokens": 5,
                     "cached_write_tokens": 0,
                     "reasoning_tokens": 0,
+                    "context_tokens": 80,
                     "total_tokens": 125,
                 },
             ),
@@ -4376,6 +4427,14 @@ def test_controller_allocates_every_primary_and_fallback_leaf_before_dispatch(
     assert {leaf["usage_status"] for leaf in leaves} == {"REPORTED"}
     assert sum(leaf["total_tokens"] for leaf in leaves) == 250
     assert {leaf["work_outcome"] for leaf in leaves} == {"ACCEPTED"}
+    assert all(leaf["context_manifest"] is not None for leaf in leaves)
+    assert all(leaf["context_manifest"]["tool_count"] == 0 for leaf in leaves)
+    assert all(leaf["context_manifest"]["mcp_server_count"] == 0 for leaf in leaves)
+    assert all(leaf["context_manifest"]["prior_message_count"] == 0 for leaf in leaves)
+    assert all(
+        leaf["context_manifest_observation"]["provider_context_tokens"] == 80
+        for leaf in leaves
+    )
 
 
 def test_controller_retains_explicit_zero_when_writer_executable_is_missing(
@@ -4420,3 +4479,54 @@ def test_controller_retains_explicit_zero_when_writer_executable_is_missing(
     assert retained["leaves"][0]["total_tokens"] == 0
     assert retained["leaves"][0]["dispatch_at"] is None
     assert retained["leaves"][0]["pre_dispatch_zero_proved"] is True
+
+
+def test_timeout_and_cancellation_retain_context_manifest_before_cleanup(
+    tmp_path: Path,
+) -> None:
+    for suffix, failure in (
+        ("timeout", RuntimeError("grok writer timed out")),
+        ("cancelled", KeyboardInterrupt()),
+    ):
+        fixture_root = tmp_path / suffix
+        fixture_root.mkdir()
+        unpublished = tmp_path / f"usage-{suffix}.sqlite3"
+        usage = ModelUsageService(str(unpublished))
+        _register_cont_usage_policy(
+            usage,
+            workload_class=WorkloadClass.CONT_WRITER_PRIMARY,
+            provider=CONT_PRIMARY_PROVIDER,
+            route=CONT_PRIMARY_ROUTE,
+            model=CONT_PRIMARY_MODEL,
+            reasoning=CONT_PRIMARY_REASONING,
+        )
+
+        def fail(_prompt: str, *, error: BaseException = failure) -> str:
+            raise error
+
+        if isinstance(failure, KeyboardInterrupt):
+            with pytest.raises(KeyboardInterrupt):
+                run_cycle(
+                    proving_store=str(_proving(fixture_root)),
+                    unpublished_store=str(unpublished),
+                    writer=CliChainWriter(primary=fail),
+                    evidence_package_builder=_qualified_builder(frozenset({"HK-01"})),
+                    clock=_CLOCK,
+                    model_usage=usage,
+                )
+        else:
+            run_cycle(
+                proving_store=str(_proving(fixture_root)),
+                unpublished_store=str(unpublished),
+                writer=CliChainWriter(primary=fail),
+                evidence_package_builder=_qualified_builder(frozenset({"HK-01"})),
+                clock=_CLOCK,
+                model_usage=usage,
+            )
+        leaves = usage.query(
+            start=datetime(2026, 8, 19, tzinfo=UTC),
+            end=datetime(2026, 8, 21, tzinfo=UTC),
+        )["leaves"]
+        assert len(leaves) == 1
+        assert leaves[0]["context_manifest"] is not None
+        assert leaves[0]["context_manifest"]["working_directory_inventory"] == []

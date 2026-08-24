@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import unicodedata
@@ -35,8 +36,19 @@ from newsroom.graphiti_adapter.usage_meter import (
 )
 
 GROK_BIN = os.environ.get("NEWSROOM_GROK_BIN", "/Users/jamesto/.grok/bin/grok")
+GROK_AUTH_FILE = os.environ.get(
+    "NEWSROOM_GROK_AUTH_FILE", os.path.expanduser("~/.grok/auth.json")
+)
 CURSOR_AGENT_BIN = os.environ.get(
     "NEWSROOM_CURSOR_AGENT_BIN", "/Users/jamesto/.local/bin/cursor-agent"
+)
+GROK_COMMAND_SEMANTIC_VERSION = "1.0.8"
+CURSOR_COMMAND_SEMANTIC_VERSION = "2026.08.11-e8db854"
+CONT_PRIMARY_CONFIG_IDENTITY = "cont-writer-grok-hermetic-command-v2"
+CONT_FALLBACK_CONFIG_IDENTITY = "cont-writer-cursor-hermetic-command-v2"
+CONT_WRITER_SYSTEM_INSTRUCTION = (
+    "你係一個單次、無工具、無工作區嘅 Newsroom 寫作轉換器。"
+    "只按用戶提供嘅 CONT 合約、Story Candidate 同 Evidence Package 回覆。"
 )
 WRITER_SCHEMA = {
     "type": "object",
@@ -73,6 +85,19 @@ CONT_FALLBACK_PROVIDER = "cursor-agent-cli"
 CONT_FALLBACK_ROUTE = "CONT_FALLBACK"
 CONT_FALLBACK_MODEL = "cursor-pinned"
 CONT_FALLBACK_REASONING = "provider-default"
+_HERMETIC_ENVIRONMENT_KEYS = frozenset(
+    {
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "PATH",
+        "TMPDIR",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+    }
+)
 _PROMPT = (
     "你係 Newsroom 嘅 CONT 原創記者，唔係 Graphiti。"
     "用香港繁體中文寫一篇已經完成嘅未出版新聞稿。"
@@ -299,24 +324,81 @@ class WriterCopy:
 
 @dataclass(frozen=True, slots=True)
 class WriterInvocationManifest:
+    schema_version: str
     provider: str
     route: str
     model: str
     reasoning: str
+    command_semantic_version: str
+    command_flags: tuple[str, ...]
     prompt_contract_version: str
+    system_bytes: int
+    system_digest: str
     prompt_bytes: int
     prompt_digest: str
+    schema_bytes: int
+    schema_digest: str
     request_digest: str
     output_schema_digest: str
     context_manifest_digest: str
     context_identity: str
     config_identity: str
+    allowed_config_digests: tuple[str, ...]
+    working_directory_inventory: tuple[str, ...]
+    working_directory_inventory_digest: str
+    disabled_capabilities: tuple[str, ...]
+    evidence_package_digest: str
     one_turn: bool
     exact_input: bool
     skills_enabled: bool
     tools_enabled: bool
     mcp_enabled: bool
     prior_message_count: int
+    skill_count: int
+    tool_count: int
+    mcp_server_count: int
+    mcp_tool_count: int
+
+    def as_record(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "context_manifest_digest": self.context_manifest_digest,
+            "provider": self.provider,
+            "route": self.route,
+            "model": self.model,
+            "reasoning": self.reasoning,
+            "command_semantic_version": self.command_semantic_version,
+            "command_flags": list(self.command_flags),
+            "prompt_contract_version": self.prompt_contract_version,
+            "system_bytes": self.system_bytes,
+            "system_digest": self.system_digest,
+            "prompt_bytes": self.prompt_bytes,
+            "prompt_digest": self.prompt_digest,
+            "schema_bytes": self.schema_bytes,
+            "schema_digest": self.schema_digest,
+            "request_digest": self.request_digest,
+            "output_schema_digest": self.output_schema_digest,
+            "context_identity": self.context_identity,
+            "config_identity": self.config_identity,
+            "allowed_config_digests": list(self.allowed_config_digests),
+            "working_directory_inventory": list(self.working_directory_inventory),
+            "working_directory_inventory_digest": (
+                self.working_directory_inventory_digest
+            ),
+            "disabled_capabilities": list(self.disabled_capabilities),
+            "evidence_package_digest": self.evidence_package_digest,
+            "one_turn": self.one_turn,
+            "exact_input": self.exact_input,
+            "skills_enabled": self.skills_enabled,
+            "tools_enabled": self.tools_enabled,
+            "mcp_enabled": self.mcp_enabled,
+            "prior_message_count": self.prior_message_count,
+            "skill_count": self.skill_count,
+            "tool_count": self.tool_count,
+            "mcp_server_count": self.mcp_server_count,
+            "mcp_tool_count": self.mcp_tool_count,
+            "provider_context_tokens": None,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,6 +438,214 @@ class CliProcessError(RuntimeError):
     def __init__(self, message: str, *, provider_status: int | None) -> None:
         super().__init__(message)
         self.provider_status = provider_status
+
+
+@dataclass(frozen=True, slots=True)
+class _HermeticWorkspace:
+    root: str
+    cwd: str
+    home: str
+    request: str
+    environment: dict[str, str]
+
+
+def _hermetic_workspace(root: str, *, binary: str) -> _HermeticWorkspace:
+    paths = {
+        "cwd": os.path.join(root, "workspace"),
+        "home": os.path.join(root, "home"),
+        "request": os.path.join(root, "request"),
+        "tmp": os.path.join(root, "tmp"),
+        "config": os.path.join(root, "xdg-config"),
+        "data": os.path.join(root, "xdg-data"),
+        "cache": os.path.join(root, "xdg-cache"),
+        "state": os.path.join(root, "xdg-state"),
+    }
+    for path in paths.values():
+        os.mkdir(path, mode=0o700)
+    binary_dirs = tuple(
+        dict.fromkeys(
+            (
+                os.path.dirname(binary),
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
+            )
+        )
+    )
+    environment = {
+        "HOME": paths["home"],
+        "LANG": "en_GB.UTF-8",
+        "LC_ALL": "en_GB.UTF-8",
+        "PATH": os.pathsep.join(binary_dirs),
+        "TMPDIR": paths["tmp"],
+        "XDG_CACHE_HOME": paths["cache"],
+        "XDG_CONFIG_HOME": paths["config"],
+        "XDG_DATA_HOME": paths["data"],
+        "XDG_STATE_HOME": paths["state"],
+    }
+    if set(environment) != _HERMETIC_ENVIRONMENT_KEYS:
+        raise RuntimeError("hermetic writer environment contract drifted")
+    return _HermeticWorkspace(
+        root=root,
+        cwd=paths["cwd"],
+        home=paths["home"],
+        request=paths["request"],
+        environment=environment,
+    )
+
+
+def _minimal_grok_auth_bytes() -> bytes:
+    try:
+        descriptor = os.open(
+            GROK_AUTH_FILE,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise WriterDispatchError(
+            "minimal Grok authentication is unavailable",
+            failure_class="SYSTEMIC",
+            reason_code="MINIMAL_AUTHENTICATION_UNAVAILABLE",
+            provider_dispatched=False,
+        ) from exc
+    with os.fdopen(descriptor, "rb") as handle:
+        metadata = os.fstat(handle.fileno())
+        raw = handle.read(65_537)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_mode & 0o077
+        or metadata.st_size > 65_536
+        or len(raw) > 65_536
+    ):
+        raise WriterDispatchError(
+            "minimal Grok authentication has unsafe file permissions",
+            failure_class="SYSTEMIC",
+            reason_code="MINIMAL_AUTHENTICATION_UNAVAILABLE",
+            provider_dispatched=False,
+        )
+    try:
+        values = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise WriterDispatchError(
+            "minimal Grok authentication is malformed",
+            failure_class="SYSTEMIC",
+            reason_code="MINIMAL_AUTHENTICATION_UNAVAILABLE",
+            provider_dispatched=False,
+        ) from exc
+    identities = values.values() if isinstance(values, dict) else ()
+    if not any(
+        isinstance(identity, dict)
+        and any(
+            isinstance(identity.get(field), str) and bool(identity[field].strip())
+            for field in ("key", "refresh_token")
+        )
+        for identity in identities
+    ):
+        raise WriterDispatchError(
+            "minimal Grok authentication lacks a permitted login credential",
+            failure_class="SYSTEMIC",
+            reason_code="MINIMAL_AUTHENTICATION_UNAVAILABLE",
+            provider_dispatched=False,
+        )
+    return raw
+
+
+def _install_minimal_grok_auth(workspace: _HermeticWorkspace, raw: bytes) -> None:
+    grok_home = os.path.join(workspace.home, ".grok")
+    os.mkdir(grok_home, mode=0o700)
+    auth_path = os.path.join(grok_home, "auth.json")
+    descriptor = os.open(auth_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(raw)
+
+
+def _run_predispatch(
+    command: tuple[str, ...], *, workspace: _HermeticWorkspace
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            cwd=workspace.cwd,
+            env=workspace.environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise WriterDispatchError(
+            "hermetic writer preflight failed",
+            failure_class="SYSTEMIC",
+            reason_code="HERMETIC_PREFLIGHT_FAILED",
+            provider_dispatched=False,
+        ) from exc
+
+
+def _prove_grok_hermetic_capabilities(auth: bytes) -> None:
+    with tempfile.TemporaryDirectory(prefix="newsroom-grok-preflight-") as root:
+        workspace = _hermetic_workspace(root, binary=GROK_BIN)
+        _install_minimal_grok_auth(workspace, auth)
+        version = _run_predispatch((GROK_BIN, "version"), workspace=workspace)
+        match = re.search(r"\bgrok\s+(\d+\.\d+\.\d+)\b", version.stdout)
+        if (
+            version.returncode != 0
+            or match is None
+            or match.group(1) != GROK_COMMAND_SEMANTIC_VERSION
+        ):
+            raise WriterDispatchError(
+                "Grok command semantic version is not qualified",
+                failure_class="SYSTEMIC",
+                reason_code="HERMETIC_COMMAND_VERSION_UNQUALIFIED",
+                provider_dispatched=False,
+            )
+        inspection = _run_predispatch(
+            (GROK_BIN, "--cwd", workspace.cwd, "inspect", "--json"),
+            workspace=workspace,
+        )
+        try:
+            manifest = json.loads(inspection.stdout)
+        except json.JSONDecodeError as exc:
+            raise WriterDispatchError(
+                "Grok capability inspection is not machine-readable",
+                failure_class="SYSTEMIC",
+                reason_code="HERMETIC_CAPABILITY_UNPROVABLE",
+                provider_dispatched=False,
+            ) from exc
+        if not isinstance(manifest, dict):
+            raise WriterDispatchError(
+                "Grok capability inspection has the wrong shape",
+                failure_class="SYSTEMIC",
+                reason_code="HERMETIC_CAPABILITY_UNPROVABLE",
+                provider_dispatched=False,
+            )
+        permissions = manifest.get("permissions", {})
+        config_sources = manifest.get("configSources", {})
+        empty_fields = (
+            "projectInstructions",
+            "skills",
+            "plugins",
+            "marketplaces",
+            "mcpServers",
+            "hooks",
+            "lspServers",
+        )
+        proved = (
+            inspection.returncode == 0
+            and manifest.get("grokVersion") == GROK_COMMAND_SEMANTIC_VERSION
+            and manifest.get("projectRoot") is None
+            and all(manifest.get(field) == [] for field in empty_fields)
+            and isinstance(permissions, dict)
+            and permissions.get("loaded") == 0
+            and isinstance(config_sources, dict)
+            and config_sources.get("layers") == []
+        )
+        if not proved:
+            raise WriterDispatchError(
+                "Grok zero-skill, zero-MCP context cannot be proved",
+                failure_class="SYSTEMIC",
+                reason_code="HERMETIC_CAPABILITY_UNPROVABLE",
+                provider_dispatched=False,
+            )
 
 
 def require_permitted_context(
@@ -994,7 +1284,13 @@ def _failure(
     )
 
 
-def _run(command: tuple[str, ...], *, timeout: int, cwd: str | None = None) -> str:
+def _run(
+    command: tuple[str, ...],
+    *,
+    timeout: int,
+    cwd: str | None = None,
+    environment: dict[str, str] | None = None,
+) -> str:
     name = os.path.basename(command[0])
     try:
         result = subprocess.run(
@@ -1004,7 +1300,7 @@ def _run(command: tuple[str, ...], *, timeout: int, cwd: str | None = None) -> s
             text=True,
             timeout=timeout,
             cwd=cwd,
-            env=unprivileged_child_environment(),
+            env=environment or unprivileged_child_environment(),
         )
     except FileNotFoundError as exc:
         raise WriterDispatchError(
@@ -1076,62 +1372,99 @@ def _parse_grok_writer_output(raw: str) -> WriterCliExecution:
     )
 
 
+_GROK_WRITER_SEMANTIC_FLAGS = (
+    "--prompt-file",
+    "REQUEST",
+    "-m",
+    CONT_PRIMARY_MODEL,
+    "--json-schema",
+    "SCHEMA",
+    "--disable-web-search",
+    "--sandbox",
+    "read-only",
+    "--permission-mode",
+    "dontAsk",
+    "--tools",
+    "",
+    "--disallowed-tools",
+    "*",
+    "--deny",
+    "*",
+    "--no-plan",
+    "--max-turns",
+    "1",
+    "--no-subagents",
+    "--reasoning-effort",
+    CONT_PRIMARY_REASONING,
+    "--system-prompt-override",
+    "SYSTEM",
+    "--verbatim",
+    "--output-format",
+    "streaming-json",
+)
+_CURSOR_WRITER_REQUIRED_FLAGS = (
+    "--print",
+    "--mode",
+    "ask",
+    "--output-format",
+    "json",
+    "--sandbox",
+    "enabled",
+    "--disable-tools",
+    "--disable-mcp",
+)
+
+
+def _grok_writer_command(path: str, schema: str) -> tuple[str, ...]:
+    replacements = {"REQUEST": path, "SCHEMA": schema, "SYSTEM": CONT_WRITER_SYSTEM_INSTRUCTION}
+    return (
+        GROK_BIN,
+        *(replacements.get(value, value) for value in _GROK_WRITER_SEMANTIC_FLAGS),
+    )
+
+
 def run_grok_cli(prompt: str) -> WriterCliExecution:
-    schema = json.dumps(WRITER_SCHEMA, ensure_ascii=False)
-    with tempfile.TemporaryDirectory(prefix="newsroom-grok-writer-") as cwd:
-        path = os.path.join(cwd, "prompt.txt")
+    auth = _minimal_grok_auth_bytes()
+    _prove_grok_hermetic_capabilities(auth)
+    schema = canonical_json_bytes(WRITER_SCHEMA).decode("utf-8")
+    with tempfile.TemporaryDirectory(prefix="newsroom-grok-writer-") as root:
+        workspace = _hermetic_workspace(root, binary=GROK_BIN)
+        _install_minimal_grok_auth(workspace, auth)
+        path = os.path.join(workspace.request, "prompt.txt")
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(prompt)
         raw = _run(
-            (
-                GROK_BIN,
-                "--prompt-file",
-                path,
-                "-m",
-                "grok-4.6",
-                "--json-schema",
-                schema,
-                "--disable-web-search",
-                "--sandbox",
-                "read-only",
-                "--permission-mode",
-                "plan",
-                "--tools",
-                "",
-                "--deny",
-                "*",
-                "--no-plan",
-                "--max-turns",
-                "1",
-                "--no-subagents",
-                "--reasoning-effort",
-                "low",
-                "--output-format",
-                "streaming-json",
-            ),
+            _grok_writer_command(path, schema),
             timeout=300,
-            cwd=cwd,
+            cwd=workspace.cwd,
+            environment=workspace.environment,
         )
         return _parse_grok_writer_output(raw)
 
 
 def run_cursor_agent_cli(prompt: str) -> WriterCliExecution:
-    raw = _run(
-        (
-            CURSOR_AGENT_BIN,
-            "--print",
-            "--mode",
-            "ask",
-            "--output-format",
-            "json",
-            "--sandbox",
-            "enabled",
-            "--trust",
-            prompt,
-        ),
-        timeout=180,
+    del prompt
+    with tempfile.TemporaryDirectory(prefix="newsroom-cursor-preflight-") as root:
+        workspace = _hermetic_workspace(root, binary=CURSOR_AGENT_BIN)
+        help_result = _run_predispatch(
+            (CURSOR_AGENT_BIN, "--help"), workspace=workspace
+        )
+        required_controls = ("--disable-tools", "--disable-mcp")
+        if help_result.returncode != 0 or not all(
+            control in help_result.stdout for control in required_controls
+        ):
+            raise WriterDispatchError(
+                "Cursor CLI cannot prove a zero-tool, zero-MCP ask",
+                failure_class="SYSTEMIC",
+                reason_code="HERMETIC_CAPABILITY_UNPROVABLE",
+                provider_dispatched=False,
+            )
+    raise WriterDispatchError(
+        "Cursor CLI hermetic command semantics are not qualified",
+        failure_class="SYSTEMIC",
+        reason_code="HERMETIC_COMMAND_VERSION_UNQUALIFIED",
+        provider_dispatched=False,
     )
-    return _parse_cursor_writer_output(raw)
 
 
 class CliChainWriter:
@@ -1219,52 +1552,131 @@ class CliChainWriter:
 
         prompt = _prompt(candidate, package)
         prompt_bytes = prompt.encode("utf-8")
+        system_bytes = CONT_WRITER_SYSTEM_INSTRUCTION.encode("utf-8")
+        schema_bytes = canonical_json_bytes(WRITER_SCHEMA)
         if route == "PRIMARY":
             provider = CONT_PRIMARY_PROVIDER
             provider_route = CONT_PRIMARY_ROUTE
             model = CONT_PRIMARY_MODEL
             reasoning = CONT_PRIMARY_REASONING
+            command_semantic_version = GROK_COMMAND_SEMANTIC_VERSION
+            command_flags = _GROK_WRITER_SEMANTIC_FLAGS
+            config_identity = CONT_PRIMARY_CONFIG_IDENTITY
+            try:
+                auth_bytes = _minimal_grok_auth_bytes()
+            except WriterDispatchError:
+                allowed_config_digests: tuple[str, ...] = ()
+            else:
+                allowed_config_digests = (digest_bytes(auth_bytes),)
         else:
             provider = CONT_FALLBACK_PROVIDER
             provider_route = CONT_FALLBACK_ROUTE
             model = CONT_FALLBACK_MODEL
             reasoning = CONT_FALLBACK_REASONING
+            command_semantic_version = CURSOR_COMMAND_SEMANTIC_VERSION
+            command_flags = _CURSOR_WRITER_REQUIRED_FLAGS
+            config_identity = CONT_FALLBACK_CONFIG_IDENTITY
+            allowed_config_digests = ()
+        request_digest = digest_canonical(
+            {
+                "provider": provider,
+                "route": provider_route,
+                "model": model,
+                "reasoning": reasoning,
+                "command_semantic_version": command_semantic_version,
+                "command_flags": list(command_flags),
+                "system_digest": digest_bytes(system_bytes),
+                "prompt_digest": digest_bytes(prompt_bytes),
+                "output_schema_digest": CONT_WRITER_OUTPUT_SCHEMA_DIGEST,
+            }
+        )
+        working_directory_inventory: tuple[str, ...] = ()
+        disabled_capabilities = (
+            "REPOSITORY_DISCOVERY",
+            "INSTALLED_SKILLS",
+            "MCP_SERVERS",
+            "PLANNING",
+            "PRIOR_MESSAGES",
+            "SHELL_EXECUTION",
+            "SUBAGENTS",
+            "TOOLS",
+            "WEB_SEARCH",
+        )
         context_manifest = {
+            "schema_version": "newsroom.cont-writer.context-manifest.v1",
+            "provider": provider,
+            "route": provider_route,
+            "model": model,
+            "reasoning": reasoning,
+            "command_semantic_version": command_semantic_version,
+            "command_flags": list(command_flags),
+            "prompt_contract_version": CONT_WRITER_PROMPT_CONTRACT_VERSION,
+            "system_bytes": len(system_bytes),
+            "system_digest": digest_bytes(system_bytes),
+            "prompt_bytes": len(prompt_bytes),
+            "prompt_digest": digest_bytes(prompt_bytes),
+            "schema_bytes": len(schema_bytes),
+            "schema_digest": digest_bytes(schema_bytes),
+            "request_digest": request_digest,
+            "output_schema_digest": CONT_WRITER_OUTPUT_SCHEMA_DIGEST,
             "context_identity": CONT_WRITER_CONTEXT_IDENTITY,
-            "candidate_id": candidate.candidate_id,
-            "hypothesis_id": candidate.hypothesis_id,
+            "config_identity": config_identity,
+            "allowed_config_digests": list(allowed_config_digests),
+            "working_directory_inventory": list(working_directory_inventory),
+            "working_directory_inventory_digest": digest_canonical(
+                list(working_directory_inventory)
+            ),
+            "disabled_capabilities": list(disabled_capabilities),
             "evidence_package_digest": package.digest,
-            "source_ids": sorted(package.source_ids),
-            "observation_digests": sorted(package.observation_digests),
+            "one_turn": True,
+            "exact_input": True,
+            "skills_enabled": False,
+            "tools_enabled": False,
+            "mcp_enabled": False,
+            "prior_message_count": 0,
+            "skill_count": 0,
+            "tool_count": 0,
+            "mcp_server_count": 0,
+            "mcp_tool_count": 0,
+            "provider_context_tokens": None,
         }
         return WriterInvocationManifest(
+            schema_version="newsroom.cont-writer.context-manifest.v1",
             provider=provider,
             route=provider_route,
             model=model,
             reasoning=reasoning,
+            command_semantic_version=command_semantic_version,
+            command_flags=command_flags,
             prompt_contract_version=CONT_WRITER_PROMPT_CONTRACT_VERSION,
+            system_bytes=len(system_bytes),
+            system_digest=digest_bytes(system_bytes),
             prompt_bytes=len(prompt_bytes),
             prompt_digest=digest_bytes(prompt_bytes),
-            request_digest=digest_canonical(
-                {
-                    "provider": provider,
-                    "route": provider_route,
-                    "model": model,
-                    "reasoning": reasoning,
-                    "prompt_digest": digest_bytes(prompt_bytes),
-                    "output_schema_digest": CONT_WRITER_OUTPUT_SCHEMA_DIGEST,
-                }
-            ),
+            schema_bytes=len(schema_bytes),
+            schema_digest=digest_bytes(schema_bytes),
+            request_digest=request_digest,
             output_schema_digest=CONT_WRITER_OUTPUT_SCHEMA_DIGEST,
             context_manifest_digest=digest_canonical(context_manifest),
             context_identity=CONT_WRITER_CONTEXT_IDENTITY,
-            config_identity="cont-writer-hermetic-command-v1",
+            config_identity=config_identity,
+            allowed_config_digests=allowed_config_digests,
+            working_directory_inventory=working_directory_inventory,
+            working_directory_inventory_digest=digest_canonical(
+                list(working_directory_inventory)
+            ),
+            disabled_capabilities=disabled_capabilities,
+            evidence_package_digest=package.digest,
             one_turn=True,
             exact_input=True,
             skills_enabled=False,
             tools_enabled=False,
             mcp_enabled=False,
             prior_message_count=0,
+            skill_count=0,
+            tool_count=0,
+            mcp_server_count=0,
+            mcp_tool_count=0,
         )
 
 
