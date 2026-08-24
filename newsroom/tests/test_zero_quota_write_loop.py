@@ -4118,6 +4118,11 @@ def _register_cont_usage_policy(
             model=model,
             reasoning=reasoning,
             one_turn=True,
+            exact_input=True,
+            skills_enabled=False,
+            tools_enabled=False,
+            mcp_enabled=False,
+            prior_message_count=0,
             max_prompt_bytes=100_000,
             max_context_tokens=10_000,
             max_output_tokens=2_000,
@@ -4231,6 +4236,9 @@ def test_controller_allocates_every_primary_and_fallback_leaf_before_dispatch(
         "CONT_WRITER_FALLBACK",
     ]
     assert leaves[1]["parent_invocation_id"] == leaves[0]["invocation_id"]
+    assert all(leaf["admission_decision_id"] for leaf in leaves)
+    assert all(leaf["work_outcome_record_id"] for leaf in leaves)
+    assert len({leaf["provider_attempt_id"] for leaf in leaves}) == 2
     assert {leaf["usage_status"] for leaf in leaves} == {"REPORTED"}
     assert sum(leaf["total_tokens"] for leaf in leaves) == 250
     assert {leaf["work_outcome"] for leaf in leaves} == {"ACCEPTED"}

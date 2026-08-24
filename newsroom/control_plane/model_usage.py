@@ -120,6 +120,15 @@ CREATE TABLE IF NOT EXISTS model_transport_observations(
     FOREIGN KEY(invocation_id) REFERENCES model_invocation_allocations(invocation_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT
 );
+CREATE TABLE IF NOT EXISTS model_invocation_provider_attempt_links(
+    link_digest TEXT PRIMARY KEY,
+    invocation_id TEXT NOT NULL UNIQUE,
+    provider_attempt_id TEXT NOT NULL,
+    linked_at TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    FOREIGN KEY(invocation_id) REFERENCES model_invocation_allocations(invocation_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+);
 CREATE TABLE IF NOT EXISTS model_invocation_terminals(
     terminal_digest TEXT PRIMARY KEY,
     invocation_id TEXT NOT NULL UNIQUE,
@@ -267,6 +276,11 @@ class InvocationEfficiencyPolicy:
     model: str
     reasoning: str
     one_turn: bool
+    exact_input: bool
+    skills_enabled: bool
+    tools_enabled: bool
+    mcp_enabled: bool
+    prior_message_count: int
     max_prompt_bytes: int
     max_context_tokens: int
     max_output_tokens: int
@@ -323,6 +337,21 @@ class InvocationEfficiencyPolicy:
             value = getattr(self, name)
             if not _is_int(value) or value <= 0:
                 raise ModelUsageIntegrityError(f"{name} must be positive")
+        if not isinstance(self.one_turn, bool) or not isinstance(
+            self.exact_input, bool
+        ):
+            raise ModelUsageIntegrityError("policy turn/input controls must be boolean")
+        for name in ("skills_enabled", "tools_enabled", "mcp_enabled"):
+            if not isinstance(getattr(self, name), bool):
+                raise ModelUsageIntegrityError(f"policy {name} must be boolean")
+        if not _is_int(self.prior_message_count) or self.prior_message_count < 0:
+            raise ModelUsageIntegrityError(
+                "policy prior message count must be non-negative"
+            )
+        if self.qualified and (not self.one_turn or not self.exact_input):
+            raise ModelUsageIntegrityError(
+                "qualified invocation policy must be one-turn exact-input"
+            )
         if self.max_total_tokens < self.max_output_tokens:
             raise ModelUsageIntegrityError("policy total is below output maximum")
         if not self.allowed_context_identities or len(
@@ -346,6 +375,11 @@ class InvocationEfficiencyPolicy:
             "model": self.model,
             "reasoning": self.reasoning,
             "one_turn": self.one_turn,
+            "exact_input": self.exact_input,
+            "skills_enabled": self.skills_enabled,
+            "tools_enabled": self.tools_enabled,
+            "mcp_enabled": self.mcp_enabled,
+            "prior_message_count": self.prior_message_count,
             "max_prompt_bytes": self.max_prompt_bytes,
             "max_context_tokens": self.max_context_tokens,
             "max_output_tokens": self.max_output_tokens,
@@ -474,6 +508,12 @@ class InvocationAllocation:
     max_output_tokens: int
     context_manifest_digest: str
     context_identity: str
+    one_turn: bool
+    exact_input: bool
+    skills_enabled: bool
+    tools_enabled: bool
+    mcp_enabled: bool
+    prior_message_count: int
     allocated_at: datetime
     parent_invocation_id: str | None
     canonical_digest: str
@@ -517,6 +557,12 @@ class InvocationAllocation:
                     "max_output_tokens": values["max_output_tokens"],
                     "context_manifest_digest": values["context_manifest_digest"],
                     "context_identity": values["context_identity"],
+                    "one_turn": values["one_turn"],
+                    "exact_input": values["exact_input"],
+                    "skills_enabled": values["skills_enabled"],
+                    "tools_enabled": values["tools_enabled"],
+                    "mcp_enabled": values["mcp_enabled"],
+                    "prior_message_count": values["prior_message_count"],
                     "allocated_at": _utc_text(allocated_at),
                 }
             ),
@@ -547,6 +593,21 @@ class InvocationAllocation:
             raise ModelUsageIntegrityError("prompt bytes must be non-negative")
         if not _is_int(self.max_output_tokens) or self.max_output_tokens <= 0:
             raise ModelUsageIntegrityError("max output tokens must be positive")
+        for name in (
+            "one_turn",
+            "exact_input",
+            "skills_enabled",
+            "tools_enabled",
+            "mcp_enabled",
+        ):
+            if not isinstance(getattr(self, name), bool):
+                raise ModelUsageIntegrityError(
+                    f"allocation {name} must be boolean"
+                )
+        if not _is_int(self.prior_message_count) or self.prior_message_count < 0:
+            raise ModelUsageIntegrityError(
+                "allocation prior message count must be non-negative"
+            )
         _utc_text(self.allocated_at)
 
     def as_record(self) -> dict[str, object]:
@@ -571,6 +632,12 @@ class InvocationAllocation:
             "max_output_tokens": self.max_output_tokens,
             "context_manifest_digest": self.context_manifest_digest,
             "context_identity": self.context_identity,
+            "one_turn": self.one_turn,
+            "exact_input": self.exact_input,
+            "skills_enabled": self.skills_enabled,
+            "tools_enabled": self.tools_enabled,
+            "mcp_enabled": self.mcp_enabled,
+            "prior_message_count": self.prior_message_count,
             "allocated_at": _utc_text(self.allocated_at),
             "parent_invocation_id": self.parent_invocation_id,
         }
@@ -978,6 +1045,12 @@ class ModelUsageService:
             or allocation.prompt_contract_version != policy.prompt_contract_version
             or allocation.output_schema_digest != policy.output_schema_digest
             or allocation.max_output_tokens != policy.max_output_tokens
+            or allocation.one_turn != policy.one_turn
+            or allocation.exact_input != policy.exact_input
+            or allocation.skills_enabled != policy.skills_enabled
+            or allocation.tools_enabled != policy.tools_enabled
+            or allocation.mcp_enabled != policy.mcp_enabled
+            or allocation.prior_message_count != policy.prior_message_count
         ):
             raise ModelUsageAdmissionError("allocation differs from invocation policy")
         if allocation.prompt_bytes > policy.max_prompt_bytes:
@@ -1041,6 +1114,41 @@ class ModelUsageService:
             connection.commit()
         finally:
             connection.close()
+
+    def link_provider_attempt(
+        self,
+        *,
+        invocation_id: str,
+        provider_attempt_id: str,
+        linked_at: datetime,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        record = {
+            "schema_version": MODEL_USAGE_SCHEMA_VERSION,
+            "invocation_id": _token(invocation_id, field="invocation id"),
+            "provider_attempt_id": _token(
+                provider_attempt_id, field="provider attempt id"
+            ),
+            "linked_at": _utc_text(linked_at),
+        }
+        digest = digest_canonical(record)
+        self._insert_exact(
+            table="model_invocation_provider_attempt_links",
+            identity_column="invocation_id",
+            identity=invocation_id,
+            record={**record, "link_digest": digest},
+            sql="INSERT INTO model_invocation_provider_attempt_links("
+            "link_digest,invocation_id,provider_attempt_id,linked_at,record_json) "
+            "VALUES(?,?,?,?,?)",
+            values=(
+                digest,
+                invocation_id,
+                provider_attempt_id,
+                record["linked_at"],
+                _json({**record, "link_digest": digest}),
+            ),
+            connection=connection,
+        )
 
     def complete(
         self,
@@ -1219,6 +1327,9 @@ class ModelUsageService:
         route_circuit_state: str | None = None,
         route_circuit_reason: str | None = None,
         retained_proposal_count: int | None = None,
+        accepted_provider_attempt_id: str | None = None,
+        stable_reason_codes: tuple[str, ...] = (),
+        connection: sqlite3.Connection | None = None,
     ) -> None:
         record = {
             "schema_version": MODEL_USAGE_SCHEMA_VERSION,
@@ -1231,40 +1342,29 @@ class ModelUsageService:
             "route_circuit_state": route_circuit_state,
             "route_circuit_reason": route_circuit_reason,
             "retained_proposal_count": retained_proposal_count,
+            "accepted_provider_attempt_id": accepted_provider_attempt_id,
+            "stable_reason_codes": list(stable_reason_codes),
         }
         if retained_proposal_count is not None:
             _non_negative(retained_proposal_count, field="retained proposal count")
         digest = digest_canonical(record)
-        connection = self._connection()
-        try:
-            try:
-                connection.execute(
-                    "INSERT INTO model_work_outcomes("
-                    "outcome_digest,envelope_id,outcome,terminal_at,record_json) "
-                    "VALUES(?,?,?,?,?)",
-                    (
-                        digest,
-                        envelope_id,
-                        outcome,
-                        record["terminal_at"],
-                        _json({**record, "outcome_digest": digest}),
-                    ),
-                )
-            except sqlite3.IntegrityError as exc:
-                prior = connection.execute(
-                    "SELECT record_json FROM model_work_outcomes WHERE envelope_id=?",
-                    (envelope_id,),
-                ).fetchone()
-                if prior is None or _object(prior[0]) != {
-                    **record,
-                    "outcome_digest": digest,
-                }:
-                    raise ModelUsageIntegrityError(
-                        "conflicting work outcome replay"
-                    ) from exc
-            connection.commit()
-        finally:
-            connection.close()
+        self._insert_exact(
+            table="model_work_outcomes",
+            identity_column="envelope_id",
+            identity=envelope_id,
+            record={**record, "outcome_digest": digest},
+            sql="INSERT INTO model_work_outcomes("
+            "outcome_digest,envelope_id,outcome,terminal_at,record_json) "
+            "VALUES(?,?,?,?,?)",
+            values=(
+                digest,
+                envelope_id,
+                outcome,
+                record["terminal_at"],
+                _json({**record, "outcome_digest": digest}),
+            ),
+            connection=connection,
+        )
 
     def record_cycle_outcome(
         self,
@@ -1318,27 +1418,67 @@ class ModelUsageService:
         recovered = 0
         try:
             rows = connection.execute(
-                "SELECT a.invocation_id,a.allocated_at FROM model_invocation_allocations a "
-                "JOIN model_transport_observations o ON o.invocation_id=a.invocation_id "
+                "SELECT a.invocation_id,a.allocated_at,a.workload_class,"
+                "(SELECT MIN(o.observed_at) FROM model_transport_observations o "
+                "WHERE o.invocation_id=a.invocation_id "
+                "AND o.state='DISPATCH_STARTED') "
+                "FROM model_invocation_allocations a "
                 "LEFT JOIN model_invocation_terminals t ON t.invocation_id=a.invocation_id "
                 "WHERE t.invocation_id IS NULL "
-                "GROUP BY a.invocation_id,a.allocated_at ORDER BY a.invocation_id"
+                "ORDER BY a.invocation_id"
             ).fetchall()
         finally:
             connection.close()
         for row in rows:
+            workload = WorkloadClass(str(row[2]))
+            embedding = workload is WorkloadClass.GRAPHITI_EMBEDDING
+            dispatch_at = _instant(str(row[3] or row[1]))
             terminal = InvocationTerminal.create(
                 invocation_id=str(row[0]),
                 outcome="RECOVERED_UNRESOLVED",
-                failure_class="PROCESS_LOST_AFTER_POSSIBLE_DISPATCH",
+                failure_class="PROCESS_LOST_AFTER_ALLOCATION",
                 usage_status=UsageStatus.AMBIGUOUS,
                 components=UsageComponents(provenance="UNAVAILABLE"),
-                dispatch_at=_instant(str(row[1])),
+                dispatch_at=dispatch_at,
                 completed_at=observed_at,
                 observed_at=observed_at,
-                subscription_cli_chat_not_cash_debited=True,
+                od_011_reference=(
+                    "OD-011:EVALUATION_GRAPHITI_EMBEDDING" if embedding else None
+                ),
+                subscription_cli_chat_not_cash_debited=not embedding,
             )
             self.complete(terminal)
+            recovered += 1
+        connection = self._connection()
+        try:
+            envelope_rows = connection.execute(
+                "SELECT e.envelope_id FROM model_work_envelopes e "
+                "WHERE NOT EXISTS (SELECT 1 FROM model_work_outcomes w "
+                "WHERE w.envelope_id=e.envelope_id) "
+                "AND EXISTS (SELECT 1 FROM model_invocation_allocations a "
+                "WHERE a.envelope_id=e.envelope_id) "
+                "AND NOT EXISTS (SELECT 1 FROM model_invocation_allocations a "
+                "LEFT JOIN model_invocation_terminals t "
+                "ON t.invocation_id=a.invocation_id "
+                "WHERE a.envelope_id=e.envelope_id AND t.invocation_id IS NULL) "
+                "ORDER BY e.envelope_id"
+            ).fetchall()
+        finally:
+            connection.close()
+        for (envelope_id,) in envelope_rows:
+            self.record_work_outcome(
+                envelope_id=str(envelope_id),
+                outcome="AMBIGUOUS_PROCESS_LOST_BEFORE_WORK_OUTCOME",
+                outcome_record_id=digest_canonical(
+                    {
+                        "envelope_id": str(envelope_id),
+                        "recovered_at": _utc_text(observed_at),
+                    }
+                ),
+                payload_digest=None,
+                terminal_at=observed_at,
+                stable_reason_codes=("PROCESS_LOST_BEFORE_WORK_OUTCOME",),
+            )
             recovered += 1
         return recovered
 
@@ -1434,11 +1574,35 @@ class ModelUsageService:
     def _route_state(
         self, connection: sqlite3.Connection, route: str
     ) -> dict[str, object]:
+        canonical_route = (
+            "CONT_WRITER_ROUTE"
+            if route.startswith("CONT_") and route != "CONT_HEALTH_PROBE"
+            else route
+        )
+        has_canonical = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='unpublished_route_circuits'"
+        ).fetchone()
+        if canonical_route == "CONT_WRITER_ROUTE" and has_canonical is not None:
+            canonical = connection.execute(
+                "SELECT state,open_reason,opened_at FROM unpublished_route_circuits "
+                "WHERE route=?",
+                (canonical_route,),
+            ).fetchone()
+            if canonical is not None:
+                return {
+                    "route": canonical_route,
+                    "state": str(canonical[0]),
+                    "reason": str(canonical[1]),
+                    "invocation_id": None,
+                    "recorded_at": canonical[2],
+                    "authority": "UNPUBLISHED_ROUTE_CIRCUIT",
+                }
         row = connection.execute(
             "SELECT state,reason,invocation_id,recorded_at "
             "FROM model_usage_route_circuit_events WHERE route=? "
             "ORDER BY recorded_at DESC,rowid DESC LIMIT 1",
-            (route,),
+            (canonical_route,),
         ).fetchone()
         if row is None:
             return {
@@ -1465,9 +1629,37 @@ class ModelUsageService:
         invocation_id: str | None,
         recorded_at: datetime,
     ) -> None:
+        canonical_route = (
+            "CONT_WRITER_ROUTE"
+            if route.startswith("CONT_") and route != "CONT_HEALTH_PROBE"
+            else route
+        )
+        has_canonical = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='unpublished_route_circuits'"
+        ).fetchone()
+        if (
+            state == "OPEN"
+            and canonical_route == "CONT_WRITER_ROUTE"
+            and has_canonical is not None
+        ):
+            connection.execute(
+                "INSERT INTO unpublished_route_circuits("
+                "route,state,open_reason,opened_at,release_evidence_json,"
+                "release_evidence_digest,last_probe_at) VALUES(?,?,?,?,NULL,NULL,NULL) "
+                "ON CONFLICT(route) DO UPDATE SET state='OPEN',open_reason=excluded.open_reason,"
+                "opened_at=COALESCE(unpublished_route_circuits.opened_at,excluded.opened_at),"
+                "release_evidence_json=NULL,release_evidence_digest=NULL",
+                (
+                    canonical_route,
+                    "OPEN",
+                    reason,
+                    _utc_text(recorded_at),
+                ),
+            )
         record = {
             "schema_version": MODEL_USAGE_SCHEMA_VERSION,
-            "route": route,
+            "route": canonical_route,
             "state": state,
             "reason": reason,
             "invocation_id": invocation_id,
@@ -1480,7 +1672,7 @@ class ModelUsageService:
             "VALUES(?,?,?,?,?,?,?)",
             (
                 digest,
-                route,
+                canonical_route,
                 state,
                 reason,
                 invocation_id,
@@ -1505,19 +1697,54 @@ class ModelUsageService:
                 "JOIN model_work_envelopes e ON e.envelope_id=a.envelope_id "
                 "LEFT JOIN model_invocation_terminals t ON t.invocation_id=a.invocation_id "
                 "LEFT JOIN model_work_outcomes o ON o.envelope_id=a.envelope_id "
-                "WHERE a.allocated_at>=? AND a.allocated_at<? "
+                "WHERE (a.allocated_at>=? AND a.allocated_at<?) "
+                "OR (t.completed_at>=? AND t.completed_at<?) "
+                "OR EXISTS (SELECT 1 FROM model_usage_reconciliations r "
+                "WHERE r.invocation_id=a.invocation_id "
+                "AND r.observed_at>=? AND r.observed_at<?) "
+                "OR EXISTS (SELECT 1 FROM model_transport_observations x "
+                "WHERE x.invocation_id=a.invocation_id "
+                "AND x.state='DISPATCH_STARTED' "
+                "AND x.observed_at>=? AND x.observed_at<?) "
                 "ORDER BY a.allocated_at,a.cycle_id,a.envelope_id,a.leaf_ordinal",
-                (_utc_text(start), _utc_text(end)),
+                (
+                    _utc_text(start),
+                    _utc_text(end),
+                    _utc_text(start),
+                    _utc_text(end),
+                    _utc_text(start),
+                    _utc_text(end),
+                    _utc_text(start),
+                    _utc_text(end),
+                ),
             ).fetchall()
             reconciliations = {
                 str(row[0]): _object(row[1])
                 for row in connection.execute(
                     "SELECT invocation_id,record_json FROM model_usage_reconciliations "
                     "WHERE rowid IN (SELECT MAX(rowid) FROM model_usage_reconciliations "
-                    "GROUP BY invocation_id)"
+                    "WHERE observed_at<? GROUP BY invocation_id)",
+                    (_utc_text(end),),
                 )
             }
-            cycle_outcomes = {
+            provider_attempts = {
+                str(row[0]): _object(row[1])
+                for row in connection.execute(
+                    "SELECT invocation_id,record_json "
+                    "FROM model_invocation_provider_attempt_links"
+                )
+            }
+            dispatch_observations = {
+                str(row[0]): str(row[1])
+                for row in connection.execute(
+                    "SELECT invocation_id,MIN(observed_at) "
+                    "FROM model_transport_observations "
+                    "WHERE state='DISPATCH_STARTED' AND observed_at<? "
+                    "GROUP BY invocation_id",
+                    (_utc_text(end),),
+                )
+            }
+            projected_cycle_outcomes = {
                 str(row[0]): _object(row[1])
                 for row in connection.execute(
                     "SELECT cycle_id,record_json FROM model_usage_cycle_outcomes "
@@ -1525,21 +1752,59 @@ class ModelUsageService:
                     (_utc_text(start), _utc_text(end)),
                 )
             }
+            has_governor = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='unpublished_governed_cycles'"
+            ).fetchone()
+            canonical_cycle_outcomes: dict[str, dict[str, object]] = {}
+            if has_governor is not None:
+                for row in connection.execute(
+                    "SELECT cycle_id,outcome_class,terminal_at,"
+                    "writer_unproductive_streak_before,"
+                    "writer_unproductive_streak_after,writer_circuit_state,"
+                    "writer_circuit_open_reason FROM unpublished_governed_cycles "
+                    "WHERE lease_state IN ('TERMINAL','RECOVERED') "
+                    "AND terminal_at>=? AND terminal_at<? "
+                    "ORDER BY terminal_at,cycle_id",
+                    (_utc_text(start), _utc_text(end)),
+                ):
+                    canonical_cycle_outcomes[str(row[0])] = {
+                        "schema_version": MODEL_USAGE_SCHEMA_VERSION,
+                        "cycle_id": str(row[0]),
+                        "outcome_class": str(row[1]),
+                        "terminal_at": str(row[2]),
+                        "writer_unproductive_streak_before": int(row[3]),
+                        "writer_unproductive_streak_after": int(row[4]),
+                        "writer_circuit_state": str(row[5]),
+                        "writer_circuit_open_reason": str(row[6]),
+                        "authority": "UNPUBLISHED_GOVERNED_CYCLE_TERMINAL",
+                    }
+            cycle_outcomes = {
+                **projected_cycle_outcomes,
+                **canonical_cycle_outcomes,
+            }
         finally:
             connection.close()
         outcomes = {}
         envelopes = []
+        envelope_ids: set[str] = set()
         for row in envelope_rows:
             record = _object(row[0])
             envelopes.append(record)
+            envelope_ids.add(str(record["envelope_id"]))
         leaves: list[dict[str, object]] = []
         for allocation_json, terminal_json, outcome_json, envelope_json in leaf_rows:
             allocation = _object(allocation_json)
             envelope = _object(envelope_json)
             terminal = None if terminal_json is None else _object(terminal_json)
+            if terminal is not None and _instant(str(terminal["completed_at"])) >= end:
+                terminal = None
             outcome = None if outcome_json is None else _object(outcome_json)
+            if outcome is not None and _instant(str(outcome["terminal_at"])) >= end:
+                outcome = None
             effective = dict(terminal or {})
             reconciliation = reconciliations.get(str(allocation["invocation_id"]))
+            provider_attempt = provider_attempts.get(str(allocation["invocation_id"]))
             if reconciliation is not None:
                 effective.update(
                     {
@@ -1552,6 +1817,7 @@ class ModelUsageService:
                             "raw_telemetry_pointer"
                         ],
                         "reconciled_at": reconciliation["observed_at"],
+                        "completed_at": reconciliation["observed_at"],
                     }
                 )
             components = effective.get("components")
@@ -1565,11 +1831,56 @@ class ModelUsageService:
                 "evidence_package_digest": envelope.get("evidence_package_digest"),
                 "ingest_id": envelope.get("ingest_id"),
                 "graphiti_attempt_id": envelope.get("graphiti_attempt_id"),
+                "provider_attempt_id": (
+                    None
+                    if provider_attempt is None
+                    else provider_attempt.get("provider_attempt_id")
+                ),
                 "usage_status": effective.get("usage_status"),
+                "terminal_usage_status": (
+                    None if terminal is None else terminal.get("usage_status")
+                ),
+                "terminal_components": (
+                    None if terminal is None else terminal.get("components")
+                ),
+                "terminal_completed_at": (
+                    None if terminal is None else terminal.get("completed_at")
+                ),
+                "reconciliation_usage_status": (
+                    None
+                    if reconciliation is None
+                    else reconciliation.get("usage_status")
+                ),
+                "reconciliation_components": (
+                    None
+                    if reconciliation is None
+                    else reconciliation.get("components")
+                ),
+                "reconciled_at": effective.get("reconciled_at"),
                 "invocation_outcome": effective.get("outcome"),
                 "failure_class": effective.get("failure_class"),
                 **components,
-                "dispatch_at": effective.get("dispatch_at"),
+                "dispatch_at": (
+                    None
+                    if effective.get("pre_dispatch_zero_proved")
+                    else dispatch_observations.get(
+                        str(allocation["invocation_id"]),
+                        effective.get("dispatch_at"),
+                    )
+                ),
+                "transport_dispatch_observed": str(allocation["invocation_id"])
+                in dispatch_observations,
+                "actual_provider_dispatch": bool(
+                    not effective.get("pre_dispatch_zero_proved")
+                    and (
+                        str(allocation["invocation_id"]) in dispatch_observations
+                        or (
+                            terminal is not None
+                            and terminal.get("dispatch_at") is not None
+                            and terminal.get("outcome") != "RECOVERED_UNRESOLVED"
+                        )
+                    )
+                ),
                 "completed_at": effective.get("completed_at"),
                 "observed_at": effective.get("observed_at"),
                 "provider_telemetry_digest": effective.get("provider_telemetry_digest"),
@@ -1591,6 +1902,12 @@ class ModelUsageService:
                     else ""
                 ),
                 "work_outcome": None if outcome is None else outcome.get("outcome"),
+                "work_outcome_record_id": (
+                    None if outcome is None else outcome.get("outcome_record_id")
+                ),
+                "work_outcome_terminal_at": (
+                    None if outcome is None else outcome.get("terminal_at")
+                ),
                 "payload_digest": None
                 if outcome is None
                 else outcome.get("payload_digest"),
@@ -1606,8 +1923,17 @@ class ModelUsageService:
                 "retained_proposal_count": None
                 if outcome is None
                 else outcome.get("retained_proposal_count"),
+                "accepted_provider_attempt_id": None
+                if outcome is None
+                else outcome.get("accepted_provider_attempt_id"),
+                "stable_reason_codes": []
+                if outcome is None
+                else outcome.get("stable_reason_codes", []),
             }
             leaves.append(row)
+            if str(envelope["envelope_id"]) not in envelope_ids:
+                envelopes.append(envelope)
+                envelope_ids.add(str(envelope["envelope_id"]))
             if outcome is not None:
                 outcomes[str(outcome["envelope_id"])] = outcome
         for envelope in envelopes:
@@ -1633,7 +1959,21 @@ class ModelUsageService:
         data = self.query(start=start, end=end)
         leaves = data["leaves"]
         assert isinstance(leaves, list)
-        terminal_leaves = [row for row in leaves if row["usage_status"] is not None]
+        allocated_leaves = [
+            row
+            for row in leaves
+            if start <= _instant(str(row["allocated_at"])) < end
+        ]
+        terminal_leaves = [
+            row
+            for row in leaves
+            if row["usage_status"] is not None
+            and isinstance(row.get("completed_at"), str)
+            and start <= _instant(str(row["completed_at"])) < end
+        ]
+        allocation_terminals = [
+            row for row in allocated_leaves if row["usage_status"] is not None
+        ]
         accounted_leaves = [
             row
             for row in terminal_leaves
@@ -1661,23 +2001,55 @@ class ModelUsageService:
         )
         accepted_envelopes = {
             str(row["envelope_id"])
-            for row in terminal_leaves
+            for row in leaves
             if row["work_outcome"] == "ACCEPTED" and row["payload_digest"]
         }
+        graphiti_envelopes = {
+            str(row["envelope_id"])
+            for row in leaves
+            if str(row["work_outcome"] or "").startswith("GRAPHITI_SUCCESS")
+        }
+
+        def productive_leaf(row: Mapping[str, object]) -> bool:
+            workload = str(row["workload_class"])
+            if workload.startswith("CONT_WRITER_"):
+                accepted_attempt = row.get("accepted_provider_attempt_id")
+                return bool(
+                    accepted_attempt
+                    and row.get("provider_attempt_id") == accepted_attempt
+                    and row.get("invocation_outcome") == "ACCEPTED_OUTPUT"
+                )
+            if workload.startswith("GRAPHITI_"):
+                return (
+                    str(row["envelope_id"]) in graphiti_envelopes
+                    and row.get("invocation_outcome") == "COMPLETE"
+                )
+            return str(row["envelope_id"]) in accepted_envelopes
+
         productive = sum(
             int(row["total_tokens"])
             for row in accounted_leaves
-            if str(row["envelope_id"]) in accepted_envelopes
-            and _is_int(row.get("total_tokens"))
+            if productive_leaf(row) and _is_int(row.get("total_tokens"))
         )
         no_result = observed_total - productive
         no_result_reasons: Counter[str] = Counter()
         for row in accounted_leaves:
-            if str(row["envelope_id"]) in accepted_envelopes:
+            if productive_leaf(row):
                 continue
             if _is_int(row.get("total_tokens")):
+                stable_reasons = row.get("stable_reason_codes")
+                stable_reason = (
+                    str(stable_reasons[0])
+                    if isinstance(stable_reasons, list) and stable_reasons
+                    else None
+                )
                 no_result_reasons[
-                    str(row["invocation_outcome"] or row["failure_class"] or "UNKNOWN")
+                    str(
+                        row["failure_class"]
+                        or stable_reason
+                        or row["invocation_outcome"]
+                        or "UNKNOWN"
+                    )
                 ] += int(row["total_tokens"])
         workload_totals: Counter[str] = Counter()
         provider_totals: Counter[str] = Counter()
@@ -1685,7 +2057,7 @@ class ModelUsageService:
         status_totals: Counter[str] = Counter()
         outcome_totals: Counter[str] = Counter()
         context_tokens = 0
-        cont_input_tokens = 0
+        provider_input_tokens = 0
         for row in accounted_leaves:
             total = row.get("total_tokens")
             if _is_int(total):
@@ -1703,12 +2075,7 @@ class ModelUsageService:
                 context_tokens += context
             input_tokens = row.get("input_tokens")
             if _is_int(input_tokens) and str(row["workload_class"]).startswith("CONT_"):
-                cont_input_tokens += input_tokens
-        graphiti_envelopes = {
-            str(row["envelope_id"])
-            for row in accounted_leaves
-            if str(row["work_outcome"] or "").startswith("GRAPHITI_SUCCESS")
-        }
+                provider_input_tokens += input_tokens
         graphiti_tokens = sum(
             int(row["total_tokens"])
             for row in accounted_leaves
@@ -1734,7 +2101,18 @@ class ModelUsageService:
             if _is_int(total) and isinstance(completed, str):
                 daily[_instant(completed).date().isoformat()] += total
         zero_calls = self._zero_call_counts(start=start, end=end)
-        rolling = self._rolling_dispatch_usage(accounted_leaves)
+        rolling_data = self.query(
+            start=start - timedelta(seconds=300), end=end
+        )["leaves"]
+        assert isinstance(rolling_data, list)
+        rolling_accounted = [
+            row
+            for row in rolling_data
+            if row["usage_status"] in {"REPORTED", "ESTIMATED"}
+        ]
+        rolling = self._rolling_dispatch_usage(
+            rolling_accounted, start=start, end=end
+        )
         cycle_rows = data["cycle_outcomes"]
         assert isinstance(cycle_rows, list)
         cycle_counts = Counter(str(row["outcome_class"]) for row in cycle_rows)
@@ -1772,16 +2150,38 @@ class ModelUsageService:
             for row in data["envelopes"]  # type: ignore[union-attr]
             if row.get("outcome") == "ACCEPTED" and row.get("payload_digest")
         )
+        for row in leaves:
+            if str(row["workload_class"]).startswith("CONT_WRITER_"):
+                accepted_by_cycle.setdefault(str(row["cycle_id"]), 0)
+        dispatches = [
+            row
+            for row in leaves
+            if isinstance(row.get("dispatch_at"), str)
+            and row.get("actual_provider_dispatch") is True
+            and start <= _instant(str(row["dispatch_at"])) < end
+        ]
+        outstanding = len(allocated_leaves) - len(allocation_terminals)
         return {
             "schema_version": MODEL_USAGE_SCHEMA_VERSION,
             "start": _utc_text(start),
             "end": _utc_text(end),
             "bucket_seconds": bucket_seconds,
             "envelope_count": len(data["envelopes"]),  # type: ignore[arg-type]
-            "leaf_dispatch_count": len(leaves),
+            "allocation_count": len(allocated_leaves),
+            "actual_provider_dispatch_count": len(dispatches),
+            "terminal_count": len(allocation_terminals),
+            "outstanding_count": outstanding,
+            "allocation_reconciliation": {
+                "allocation_count": len(allocated_leaves),
+                "terminal_count": len(allocation_terminals),
+                "outstanding_count": outstanding,
+                "reconciles": len(allocated_leaves)
+                == len(allocation_terminals) + outstanding,
+            },
+            "leaf_dispatch_count": len(dispatches),
             "terminal_leaf_count": len(terminal_leaves),
-            "leaf_dispatch_count_reconciles": len(leaves)
-            == len({row["invocation_id"] for row in leaves}),
+            "leaf_dispatch_count_reconciles": len(allocated_leaves)
+            == len(allocation_terminals) + outstanding,
             "reported_tokens": reported_total,
             "estimated_tokens": estimated_total,
             "observed_total_tokens": observed_total,
@@ -1792,10 +2192,12 @@ class ModelUsageService:
             "productive_tokens": productive,
             "no_result_tokens": no_result,
             "tokens_per_accepted_payload": (
-                productive // len(accepted_envelopes) if accepted_envelopes else None
+                {"numerator": productive, "denominator": len(accepted_envelopes)}
+                if accepted_envelopes
+                else None
             ),
             "writer_leaf_calls_per_accepted_payload": (
-                len(writer_leaves) // len(accepted_envelopes)
+                {"numerator": len(writer_leaves), "denominator": len(accepted_envelopes)}
                 if accepted_envelopes
                 else None
             ),
@@ -1808,10 +2210,14 @@ class ModelUsageService:
             "model_totals": dict(sorted(model_totals.items())),
             "usage_status_totals": dict(sorted(status_totals.items())),
             "outcome_totals": dict(sorted(outcome_totals.items())),
-            "context_to_newsroom_input_ratio": {
+            "provider_context_to_input_ratio": {
                 "numerator": context_tokens,
-                "denominator": cont_input_tokens,
+                "denominator": provider_input_tokens,
             },
+            "context_to_newsroom_input_ratio": None,
+            "context_to_newsroom_input_ratio_reason": (
+                "AWAITING_730_EXACT_NEWSROOM_INPUT_TOKEN_MEASURE"
+            ),
             "fallback_leaf_count": len(fallback_leaves),
             "fallback_tokens": fallback_tokens,
             "fallback_no_result_tokens": fallback_no_result_tokens,
@@ -1828,12 +2234,14 @@ class ModelUsageService:
             },
             "graphiti_valid_ingest_count": len(graphiti_envelopes),
             "graphiti_tokens_per_valid_ingest": (
-                graphiti_tokens // len(graphiti_envelopes)
+                {"numerator": graphiti_tokens, "denominator": len(graphiti_envelopes)}
                 if graphiti_envelopes
                 else None
             ),
             "graphiti_tokens_per_retained_proposal": (
-                graphiti_tokens // proposals if proposals else None
+                {"numerator": graphiti_tokens, "denominator": proposals}
+                if proposals
+                else None
             ),
             "zero_call_admission_counts": zero_calls,
             "cycle_outcome_counts": dict(sorted(cycle_counts.items())),
@@ -1892,14 +2300,23 @@ class ModelUsageService:
         return result
 
     def _rolling_dispatch_usage(
-        self, leaves: list[dict[str, object]]
+        self,
+        leaves: list[dict[str, object]],
+        *,
+        start: datetime,
+        end: datetime,
     ) -> list[dict[str, object]]:
         result: list[dict[str, object]] = []
         for row in leaves:
             dispatched = row.get("dispatch_at")
-            if not isinstance(dispatched, str):
+            if (
+                not isinstance(dispatched, str)
+                or row.get("actual_provider_dispatch") is not True
+            ):
                 continue
             at = _instant(dispatched)
+            if not start <= at < end:
+                continue
             total = 0
             for other in leaves:
                 completed = other.get("completed_at")
@@ -1948,6 +2365,8 @@ class ModelUsageService:
             "evidence_package_digest",
             "ingest_id",
             "graphiti_attempt_id",
+            "provider_attempt_id",
+            "work_outcome_record_id",
             "provider",
             "route",
             "model",
@@ -1968,6 +2387,9 @@ class ModelUsageService:
             "invocation_outcome",
             "failure_class",
             "usage_status",
+            "terminal_usage_status",
+            "reconciliation_usage_status",
+            "reconciled_at",
             "input_tokens",
             "output_tokens",
             "cached_read_tokens",
@@ -1992,6 +2414,197 @@ class ModelUsageService:
             writer.writerow({field: row.get(field) for field in fields})
         return output.getvalue()
 
+    def export_bucket_csv(
+        self, *, start: datetime, end: datetime, bucket_seconds: int = 300
+    ) -> str:
+        """Export the canonical fixed-bucket shape used by the 300s incident CSV."""
+
+        data = self.query(start=start, end=end)
+        leaves = data["leaves"]
+        cycles = data["cycle_outcomes"]
+        assert isinstance(leaves, list)
+        assert isinstance(cycles, list)
+        fields = (
+            "bucket_start_utc",
+            "bucket_end_utc",
+            "cycle_results",
+            "minted_reported",
+            "graphiti_successes_reported",
+            "grok_writer_sessions",
+            "grok_completed_sessions",
+            "grok_model_calls",
+            "grok_input_tokens",
+            "grok_output_tokens",
+            "grok_total_tokens",
+            "grok_cached_read_tokens",
+            "grok_reasoning_tokens",
+            "cursor_fallback_sessions",
+            "stored_outputs",
+            "stored_grok_outputs",
+            "stored_cursor_outputs",
+            "stored_other_outputs",
+            "reported_tokens",
+            "estimated_tokens",
+            "unresolved_invocations",
+            "productive_tokens",
+            "no_result_tokens",
+        )
+        output = io.StringIO(newline="")
+        writer = csv.DictWriter(output, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        start_utc = start.astimezone(UTC)
+        end_utc = end.astimezone(UTC)
+        epoch_seconds = int(start_utc.timestamp())
+        cursor = datetime.fromtimestamp(
+            epoch_seconds - (epoch_seconds % bucket_seconds), tz=UTC
+        )
+        while cursor < end_utc:
+            boundary = cursor + timedelta(seconds=bucket_seconds)
+
+            def in_bucket(
+                value: object,
+                bucket_start: datetime = cursor,
+                bucket_end: datetime = boundary,
+            ) -> bool:
+                return (
+                    isinstance(value, str)
+                    and bucket_start <= _instant(value) < bucket_end
+                )
+
+            terminal = [row for row in leaves if in_bucket(row.get("completed_at"))]
+            grok = [row for row in terminal if row.get("provider") == "grok-build-cli"]
+            cursor_rows = [
+                row for row in terminal if row.get("provider") == "cursor-agent-cli"
+            ]
+            dispatched_grok = [
+                row
+                for row in leaves
+                if row.get("provider") == "grok-build-cli"
+                and row.get("actual_provider_dispatch") is True
+                and in_bucket(row.get("dispatch_at"))
+            ]
+            outcomes: dict[str, dict[str, object]] = {}
+            for row in leaves:
+                if in_bucket(row.get("work_outcome_terminal_at")):
+                    outcomes[str(row["envelope_id"])] = row
+            accepted = [
+                row
+                for row in outcomes.values()
+                if row.get("work_outcome") == "ACCEPTED"
+                and row.get("payload_digest")
+            ]
+            graphiti_successes = [
+                row
+                for row in outcomes.values()
+                if str(row.get("work_outcome") or "").startswith(
+                    "GRAPHITI_SUCCESS"
+                )
+            ]
+            accounted = [
+                row
+                for row in terminal
+                if row.get("usage_status") in {"REPORTED", "ESTIMATED"}
+            ]
+            accepted_providers = Counter(
+                str(row.get("provider") or "other")
+                for accepted_row in accepted
+                for row in leaves
+                if row.get("envelope_id") == accepted_row.get("envelope_id")
+                and row.get("provider_attempt_id")
+                == accepted_row.get("accepted_provider_attempt_id")
+            )
+
+            def token_sum(rows: list[dict[str, object]], field: str) -> int:
+                return sum(
+                    int(value)
+                    for row in rows
+                    if _is_int(value := row.get(field))
+                    and row.get("usage_status") in {"REPORTED", "ESTIMATED"}
+                )
+
+            writer.writerow(
+                {
+                    "bucket_start_utc": cursor.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "bucket_end_utc": boundary.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "cycle_results": sum(
+                        in_bucket(row.get("terminal_at")) for row in cycles
+                    ),
+                    "minted_reported": len(accepted),
+                    "graphiti_successes_reported": len(graphiti_successes),
+                    "grok_writer_sessions": sum(
+                        str(row.get("workload_class", "")).startswith(
+                            "CONT_WRITER_"
+                        )
+                        for row in grok
+                    ),
+                    "grok_completed_sessions": len(grok),
+                    "grok_model_calls": len(dispatched_grok),
+                    "grok_input_tokens": token_sum(grok, "input_tokens"),
+                    "grok_output_tokens": token_sum(grok, "output_tokens"),
+                    "grok_total_tokens": token_sum(grok, "total_tokens"),
+                    "grok_cached_read_tokens": token_sum(
+                        grok, "cached_read_tokens"
+                    ),
+                    "grok_reasoning_tokens": token_sum(grok, "reasoning_tokens"),
+                    "cursor_fallback_sessions": len(cursor_rows),
+                    "stored_outputs": len(accepted),
+                    "stored_grok_outputs": accepted_providers["grok-build-cli"],
+                    "stored_cursor_outputs": accepted_providers["cursor-agent-cli"],
+                    "stored_other_outputs": len(accepted)
+                    - accepted_providers["grok-build-cli"]
+                    - accepted_providers["cursor-agent-cli"],
+                    "reported_tokens": token_sum(
+                        [
+                            row
+                            for row in terminal
+                            if row.get("usage_status") == "REPORTED"
+                        ],
+                        "total_tokens",
+                    ),
+                    "estimated_tokens": token_sum(
+                        [
+                            row
+                            for row in terminal
+                            if row.get("usage_status") == "ESTIMATED"
+                        ],
+                        "total_tokens",
+                    ),
+                    "unresolved_invocations": sum(
+                        row.get("usage_status")
+                        in {"UNREPORTED", "AMBIGUOUS", "INVALID"}
+                        for row in terminal
+                    ),
+                    "productive_tokens": sum(
+                        int(row["total_tokens"])
+                        for row in accounted
+                        if _is_int(row.get("total_tokens"))
+                        and (
+                            bool(row.get("accepted_provider_attempt_id"))
+                            and row.get("provider_attempt_id")
+                            == row.get("accepted_provider_attempt_id")
+                            or str(row.get("work_outcome") or "").startswith(
+                                "GRAPHITI_SUCCESS"
+                            )
+                        )
+                    ),
+                    "no_result_tokens": sum(
+                        int(row["total_tokens"])
+                        for row in accounted
+                        if _is_int(row.get("total_tokens"))
+                        and not (
+                            bool(row.get("accepted_provider_attempt_id"))
+                            and row.get("provider_attempt_id")
+                            == row.get("accepted_provider_attempt_id")
+                            or str(row.get("work_outcome") or "").startswith(
+                                "GRAPHITI_SUCCESS"
+                            )
+                        )
+                    ),
+                }
+            )
+            cursor = boundary
+        return output.getvalue()
+
     def _insert_exact(
         self,
         *,
@@ -2001,13 +2614,15 @@ class ModelUsageService:
         record: Mapping[str, object],
         sql: str,
         values: tuple[object, ...],
+        connection: sqlite3.Connection | None = None,
     ) -> None:
-        connection = self._connection()
+        owns_connection = connection is None
+        current = self._connection() if connection is None else connection
         try:
             try:
-                connection.execute(sql, values)
+                current.execute(sql, values)
             except sqlite3.IntegrityError as exc:
-                row = connection.execute(
+                row = current.execute(
                     f"SELECT record_json FROM {table} WHERE {identity_column}=?",
                     (identity,),
                 ).fetchone()
@@ -2015,9 +2630,11 @@ class ModelUsageService:
                     raise ModelUsageIntegrityError(
                         f"conflicting {table} replay"
                     ) from exc
-            connection.commit()
+            if owns_connection:
+                current.commit()
         finally:
-            connection.close()
+            if owns_connection:
+                current.close()
 
 
 def _json(value: Mapping[str, object]) -> str:
@@ -2046,6 +2663,11 @@ def _policy_from_record(record: Mapping[str, object]) -> InvocationEfficiencyPol
         model=str(record["model"]),
         reasoning=str(record["reasoning"]),
         one_turn=bool(record["one_turn"]),
+        exact_input=bool(record["exact_input"]),
+        skills_enabled=bool(record["skills_enabled"]),
+        tools_enabled=bool(record["tools_enabled"]),
+        mcp_enabled=bool(record["mcp_enabled"]),
+        prior_message_count=_record_int(record, "prior_message_count"),
         max_prompt_bytes=_record_int(record, "max_prompt_bytes"),
         max_context_tokens=_record_int(record, "max_context_tokens"),
         max_output_tokens=_record_int(record, "max_output_tokens"),

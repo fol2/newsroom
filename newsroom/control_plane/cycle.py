@@ -54,6 +54,7 @@ from newsroom.control_plane.graphiti_events import (
 from newsroom.control_plane.items import parse_observation
 from newsroom.control_plane.model_usage import (
     InvocationAllocation,
+    InvocationEfficiencyPolicy,
     InvocationTerminal,
     ModelUsageAdmissionError,
     ModelUsageService,
@@ -103,10 +104,10 @@ from newsroom.control_plane.veto import VetoError, assert_private_store
 from newsroom.control_plane.writer import (
     WriterCopy,
     WriterDispatchError,
+    WriterInvocationManifest,
     WriterPort,
     WriterRoute,
     WriterValidatorResult,
-    WriterInvocationManifest,
     require_permitted_context,
     validate_writer_copy,
 )
@@ -840,6 +841,30 @@ def _ingest(
     model_usage: ModelUsageService | None = None,
     cycle_id: str | None = None,
 ) -> int:
+    if isinstance(graphiti, GovernedRealGraphitiPort) and (
+        model_usage is None
+        or not callable(getattr(graphiti, "ingest_with_usage", None))
+    ):
+        return 0
+
+    def finalise_usage(
+        unit: CorpusIngestUnit,
+        *,
+        outcome: str,
+        outcome_record_id: str,
+        retained_proposal_count: int,
+    ) -> None:
+        finalise = getattr(graphiti, "finalise_usage", None)
+        if callable(finalise):
+            finalise(
+                unit,
+                outcome=outcome,
+                outcome_record_id=outcome_record_id,
+                retained_proposal_count=retained_proposal_count,
+                terminal_at=clock().astimezone(UTC),
+                connection=unpublished,
+            )
+
     def systemic_result_failure(result: GraphitiCycleResult) -> str | None:
         if result.failure_code != "PRODUCER_INTERNAL_ERROR":
             return None
@@ -1179,6 +1204,12 @@ def _ingest(
             )
             failure_receipt["receipt_digest"] = final_digest
             append_ledger(unpublished, "GRAPHITI_EVALUATION_ATTEMPT", failure_receipt)
+            finalise_usage(
+                unit,
+                outcome="GRAPHITI_REJECTED_BINDING",
+                outcome_record_id=final_digest,
+                retained_proposal_count=0,
+            )
             unpublished.commit()
             if systemic_exception and on_systemic_failure is not None:
                 on_systemic_failure(type(exc).__name__, attempted > 0)
@@ -1230,7 +1261,7 @@ def _ingest(
                         outcome=result.outcome,
                         failure_code=result.failure_code,
                     )
-                _retain_attempt_receipt(
+                _marker_receipt, marker_digest = _retain_attempt_receipt(
                     unpublished,
                     unit=unit,
                     result=result,
@@ -1238,11 +1269,23 @@ def _ingest(
                     dispatch_rights=dispatch_rights,
                     recovery_classification=marker_recovery,
                 )
+                finalise_usage(
+                    unit,
+                    outcome=f"GRAPHITI_{result.outcome}",
+                    outcome_record_id=marker_digest,
+                    retained_proposal_count=0,
+                )
             else:
                 append_ledger(
                     unpublished,
                     "GRAPHITI_EVALUATION_RETRY_HELD",
                     transition_payload,
+                )
+                finalise_usage(
+                    unit,
+                    outcome="GRAPHITI_RETRY_HELD",
+                    outcome_record_id=spend_id,
+                    retained_proposal_count=0,
                 )
             unpublished.commit()
             if systemic_failure is not None and on_systemic_failure is not None:
@@ -1291,6 +1334,20 @@ def _ingest(
                     outcome=result.outcome,
                     failure_code=result.failure_code,
                 )
+        finalise_usage(
+            unit,
+            outcome=(
+                "GRAPHITI_SUCCESS_ZERO_PROPOSALS"
+                if result.outcome == "COMPLETE" and result.proposal_count == 0
+                else "GRAPHITI_SUCCESS"
+                if result.outcome == "COMPLETE"
+                else f"GRAPHITI_{result.outcome}"
+            ),
+            outcome_record_id=final_digest,
+            retained_proposal_count=(
+                result.proposal_count if terminal_outcome else 0
+            ),
+        )
         unpublished.commit()
         if systemic_failure is not None and on_systemic_failure is not None:
             on_systemic_failure(
@@ -1801,8 +1858,10 @@ def _complete_writer_usage(
     outcome: str,
     failure_class: str | None,
     usage: dict[str, object] | None,
+    dispatch_at: datetime | None,
     completed_at: datetime,
     provider_dispatched: bool = True,
+    policy: InvocationEfficiencyPolicy,
 ) -> None:
     usage_value = usage if isinstance(usage, dict) else {}
     reported = usage_value.get("usage_basis") == "PROVIDER_REPORTED"
@@ -1817,14 +1876,18 @@ def _complete_writer_usage(
             cached_read_tokens=cast(int | None, usage_value.get("cached_read_tokens")),
             cached_write_tokens=cast(int | None, usage_value.get("cached_write_tokens")),
             reasoning_tokens=cast(int | None, usage_value.get("reasoning_tokens")),
+            context_tokens=cast(int | None, usage_value.get("context_tokens")),
             total_tokens=cast(int | None, usage_value.get("total_tokens")),
             provenance="PROVIDER_REPORTED",
         )
         usage_status = UsageStatus.REPORTED
         telemetry_digest = digest_bytes(canonical_json_bytes(usage_value))
     else:
-        components = UsageComponents(provenance="UNAVAILABLE")
-        usage_status = UsageStatus.UNREPORTED
+        components = UsageComponents(
+            total_tokens=policy.max_total_tokens,
+            provenance="BOUNDED_ESTIMATE",
+        )
+        usage_status = UsageStatus.ESTIMATED
         telemetry_digest = None
     model_usage.complete(
         InvocationTerminal.create(
@@ -1833,7 +1896,7 @@ def _complete_writer_usage(
             failure_class=failure_class,
             usage_status=usage_status,
             components=components,
-            dispatch_at=allocation.allocated_at if provider_dispatched else None,
+            dispatch_at=dispatch_at if provider_dispatched else None,
             completed_at=completed_at,
             observed_at=completed_at,
             provider_telemetry_digest=telemetry_digest,
@@ -1845,6 +1908,16 @@ def _complete_writer_usage(
             ),
             subscription_cli_chat_not_cash_debited=True,
             pre_dispatch_zero_proved=not provider_dispatched,
+            estimate_policy_digest=(
+                policy.canonical_digest
+                if usage_status is UsageStatus.ESTIMATED
+                else None
+            ),
+            estimate_calculation=(
+                f"qualified_policy.max_total_tokens={policy.max_total_tokens}"
+                if usage_status is UsageStatus.ESTIMATED
+                else None
+            ),
         ),
         provider_telemetry=usage_value if reported else None,
     )
@@ -1942,13 +2015,19 @@ def _run_write_loop(
         draft_counts[result] += 1
         draft_reasons.update(reasons)
         if model_usage is not None and usage_envelope_id is not None:
-            unpublished.commit()
             model_usage.record_work_outcome(
                 envelope_id=usage_envelope_id,
                 outcome=result,
                 outcome_record_id=record.outcome_id,
                 payload_digest=payload_digest,
                 terminal_at=terminal_at,
+                accepted_provider_attempt_id=(
+                    provider_attempt_ids[-1]
+                    if result == "ACCEPTED" and provider_attempt_ids
+                    else None
+                ),
+                stable_reason_codes=reasons,
+                connection=unpublished,
             )
 
     for candidate, package, decision, _selection in selected:
@@ -2011,6 +2090,8 @@ def _run_write_loop(
             if writer_dispatch_fence is not None:
                 writer_dispatch_fence()
             usage_allocation: InvocationAllocation | None = None
+            usage_policy: InvocationEfficiencyPolicy | None = None
+            usage_dispatch_at: datetime | None = None
             if model_usage is not None:
                 manifest_method = getattr(writer, "invocation_manifest", None)
                 if not callable(manifest_method):
@@ -2036,6 +2117,26 @@ def _run_write_loop(
                         model=manifest.model,
                         reasoning=manifest.reasoning,
                     )
+                    manifest_controls = (
+                        manifest.one_turn,
+                        manifest.exact_input,
+                        manifest.skills_enabled,
+                        manifest.tools_enabled,
+                        manifest.mcp_enabled,
+                        manifest.prior_message_count,
+                    )
+                    policy_controls = (
+                        usage_policy.one_turn,
+                        usage_policy.exact_input,
+                        usage_policy.skills_enabled,
+                        usage_policy.tools_enabled,
+                        usage_policy.mcp_enabled,
+                        usage_policy.prior_message_count,
+                    )
+                    if manifest_controls != policy_controls:
+                        raise ModelUsageAdmissionError(
+                            "writer invocation controls do not match qualified policy"
+                        )
                     allocated_at = clock().astimezone(UTC)
                     usage_allocation = InvocationAllocation.create(
                         envelope_id=usage_envelope_id,
@@ -2055,6 +2156,12 @@ def _run_write_loop(
                         max_output_tokens=usage_policy.max_output_tokens,
                         context_manifest_digest=manifest.context_manifest_digest,
                         context_identity=manifest.context_identity,
+                        one_turn=manifest.one_turn,
+                        exact_input=manifest.exact_input,
+                        skills_enabled=manifest.skills_enabled,
+                        tools_enabled=manifest.tools_enabled,
+                        mcp_enabled=manifest.mcp_enabled,
+                        prior_message_count=manifest.prior_message_count,
                         allocated_at=allocated_at,
                         parent_invocation_id=(
                             None
@@ -2078,6 +2185,13 @@ def _run_write_loop(
                 route=route,
                 ordinal=provider_dispatches,
             )
+            if model_usage is not None and usage_allocation is not None:
+                model_usage.link_provider_attempt(
+                    invocation_id=usage_allocation.invocation_id,
+                    provider_attempt_id=provider_attempt_id,
+                    linked_at=clock().astimezone(UTC),
+                    connection=unpublished,
+                )
             provider_attempt_ids.append(provider_attempt_id)
             append_ledger(
                 unpublished,
@@ -2090,6 +2204,8 @@ def _run_write_loop(
                 },
             )
             unpublished.commit()
+            if model_usage is not None and usage_allocation is not None:
+                usage_dispatch_at = clock().astimezone(UTC)
             try:
                 copy = _dispatch_writer(
                     writer,
@@ -2097,10 +2213,40 @@ def _run_write_loop(
                     package,
                     route=route,
                 )
+                if model_usage is not None and usage_allocation is not None:
+                    model_usage.observe_transport(
+                        invocation_id=usage_allocation.invocation_id,
+                        observed_at=cast(datetime, usage_dispatch_at),
+                        state="DISPATCH_STARTED",
+                        evidence_digest=digest_bytes(
+                            canonical_json_bytes(
+                                {
+                                    "provider_attempt_id": provider_attempt_id,
+                                    "route": route,
+                                    "request_digest": usage_allocation.request_digest,
+                                }
+                            )
+                        ),
+                    )
             except VetoError:
                 raise
             except WriterDispatchError as exc:
                 if model_usage is not None and usage_allocation is not None:
+                    if exc.provider_dispatched:
+                        model_usage.observe_transport(
+                            invocation_id=usage_allocation.invocation_id,
+                            observed_at=cast(datetime, usage_dispatch_at),
+                            state="DISPATCH_STARTED",
+                            evidence_digest=digest_bytes(
+                                canonical_json_bytes(
+                                    {
+                                        "provider_attempt_id": provider_attempt_id,
+                                        "route": route,
+                                        "request_digest": usage_allocation.request_digest,
+                                    }
+                                )
+                            ),
+                        )
                     completed_at = clock().astimezone(UTC)
                     _complete_writer_usage(
                         model_usage,
@@ -2108,8 +2254,10 @@ def _run_write_loop(
                         outcome="FAILED",
                         failure_class=exc.reason_code,
                         usage=exc.usage,
+                        dispatch_at=usage_dispatch_at,
                         completed_at=completed_at,
                         provider_dispatched=exc.provider_dispatched,
+                        policy=cast(InvocationEfficiencyPolicy, usage_policy),
                     )
                     if not exc.provider_dispatched:
                         provider_dispatches -= 1
@@ -2130,23 +2278,30 @@ def _run_write_loop(
                 if route == "PRIMARY" and exc.failure_class == "FALLBACK_ELIGIBLE":
                     continue
                 break
+            validators = validate_writer_copy(copy, package)
+            failed = tuple(item.reason_code for item in validators if item.result == "FAIL")
             if model_usage is not None and usage_allocation is not None:
                 completed_at = clock().astimezone(UTC)
+                telemetry_missing = (
+                    copy.usage is None
+                    or copy.usage.get("usage_basis") != "PROVIDER_REPORTED"
+                )
                 _complete_writer_usage(
                     model_usage,
                     usage_allocation,
-                    outcome="OUTPUT_RECEIVED",
+                    outcome=("REJECTED_OUTPUT" if failed else "ACCEPTED_OUTPUT"),
                     failure_class=(
-                        None
-                        if copy.usage is not None
-                        and copy.usage.get("usage_basis") == "PROVIDER_REPORTED"
+                        failed[0]
+                        if failed
                         else "MISSING_PROVIDER_TELEMETRY"
+                        if telemetry_missing
+                        else None
                     ),
                     usage=copy.usage,
+                    dispatch_at=usage_dispatch_at,
                     completed_at=completed_at,
+                    policy=cast(InvocationEfficiencyPolicy, usage_policy),
                 )
-            validators = validate_writer_copy(copy, package)
-            failed = tuple(item.reason_code for item in validators if item.result == "FAIL")
             if failed:
                 complete_writer_provider_attempt(
                     unpublished,
@@ -2335,6 +2490,7 @@ def consume_next_graphiti_event(
         require_canonical_unpublished_store(unpublished_store)
         if model_usage is None:
             model_usage = ModelUsageService(unpublished_store)
+        model_usage.recover_unresolved(observed_at=clock().astimezone(UTC))
     rights_check, rights_fence = _graphiti_dispatch_controls(proving_store, clock=clock)
     queue = GraphitiEventQueue(unpublished_store, clock=clock)
     resolved_units: dict[str, tuple[CorpusIngestUnit, ...]] = {}

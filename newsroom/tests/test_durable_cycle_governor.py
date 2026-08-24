@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane.cycle_governor import (
     CycleLeaseConflict,
     CycleNotEligible,
@@ -17,6 +18,11 @@ from newsroom.control_plane.cycle_governor import (
     DurableCycleGovernor,
     EvaluationCyclePolicy,
     WriterRouteHealthProof,
+)
+from newsroom.control_plane.model_usage import (
+    InvocationEfficiencyPolicy,
+    ModelUsageService,
+    WorkloadClass,
 )
 
 
@@ -879,6 +885,37 @@ def test_cli_health_probe_releases_open_route_with_configured_probe(
     connection.close()
     monkeypatch.setattr(hermes, "ensure_control_plane_state_root", lambda: None)
     monkeypatch.setattr(hermes, "_probe_cont_writer_route", _healthy_route)
+    usage = ModelUsageService(str(path))
+    usage.register_policy(
+        InvocationEfficiencyPolicy.create(
+            policy_id="fixture-health-probe",
+            version="v1",
+            workload_class=WorkloadClass.CONT_ROUTE_HEALTH_PROBE,
+            provider=hermes.CONT_HEALTH_PROBE_PROVIDER,
+            route=hermes.CONT_HEALTH_PROBE_ROUTE,
+            model=hermes.CONT_HEALTH_PROBE_MODEL,
+            reasoning=hermes.CONT_HEALTH_PROBE_REASONING,
+            one_turn=True,
+            exact_input=True,
+            skills_enabled=False,
+            tools_enabled=False,
+            mcp_enabled=False,
+            prior_message_count=0,
+            max_prompt_bytes=1_000,
+            max_context_tokens=1,
+            max_output_tokens=1,
+            max_total_tokens=1,
+            prompt_contract_version=hermes.CONT_HEALTH_PROBE_PROMPT_CONTRACT,
+            output_schema_digest=digest_canonical(
+                {"schema": "writer-route-health"}
+            ),
+            allowed_context_identities=(
+                hermes.CONT_HEALTH_PROBE_CONTEXT_IDENTITY,
+            ),
+            evidence_digest=digest_canonical({"fixture": "health-probe"}),
+            qualified=True,
+        )
+    )
 
     return_code = hermes.main(
         [
@@ -895,3 +932,10 @@ def test_cli_health_probe_releases_open_route_with_configured_probe(
     assert return_code == 0
     assert body["event"] == "CONT_WRITER_HEALTH_PROBE_PASSED"
     assert governor.status().writer_circuit_state == "CLOSED"
+    leaves = usage.query(
+        start=datetime.now(tz=UTC) - timedelta(minutes=1),
+        end=datetime.now(tz=UTC) + timedelta(minutes=1),
+    )["leaves"]
+    assert len(leaves) == 1
+    assert leaves[0]["workload_class"] == "CONT_ROUTE_HEALTH_PROBE"
+    assert leaves[0]["total_tokens"] == 0

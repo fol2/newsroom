@@ -187,7 +187,7 @@ def _grok_command(*, prompt: str, schema: str | None, cwd: str) -> tuple[str, ..
         "*",
         "--no-plan",
         "--max-turns",
-        "3",
+        "1",
         "--no-subagents",
         "--reasoning-effort",
         GROK_CHAT_REASONING,

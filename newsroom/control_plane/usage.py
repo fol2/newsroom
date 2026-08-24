@@ -26,6 +26,7 @@ _TOTAL_FIELDS = (
     "chat_cached_read_tokens",
     "chat_cached_write_tokens",
     "chat_reasoning_tokens",
+    "chat_context_tokens",
     "chat_total_tokens",
     "embedding_request_count",
     "embedding_tokens",
@@ -72,10 +73,11 @@ def _text(value: datetime) -> str:
 
 
 def _add_usage(target: dict[str, int], usage: object) -> bool | None:
-    if not isinstance(usage, dict) or set(usage) != {
-        "usage_basis",
-        *_TOTAL_FIELDS,
-    }:
+    if not isinstance(usage, dict):
+        return None
+    expected = {"usage_basis", *_TOTAL_FIELDS}
+    compatibility = expected - {"chat_context_tokens"}
+    if frozenset(usage) not in {frozenset(expected), frozenset(compatibility)}:
         return None
     basis = usage["usage_basis"]
     if basis not in {
@@ -86,11 +88,11 @@ def _add_usage(target: dict[str, int], usage: object) -> bool | None:
     }:
         return None
     for field in _TOTAL_FIELDS:
-        value = usage[field]
+        value = usage.get(field, 0)
         if not _is_non_negative_int(value):
             return None
     for field in _TOTAL_FIELDS:
-        target[field] += usage[field]
+        target[field] += int(usage.get(field, 0))
     return basis in {"PROVIDER_REPORTED", "NO_PROVIDER_CALL"}
 
 
@@ -195,7 +197,10 @@ def _validated_receipt_token_usage(
         chat_invocations=leaves,
         embedding_usage=embedding_usage,
     )
-    if canonical_json_bytes(retained) != canonical_json_bytes(expected):
+    retained_for_comparison = dict(retained)
+    if "chat_context_tokens" not in retained_for_comparison:
+        retained_for_comparison["chat_context_tokens"] = 0
+    if canonical_json_bytes(retained_for_comparison) != canonical_json_bytes(expected):
         return None
     return retained
 

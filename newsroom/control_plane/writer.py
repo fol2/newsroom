@@ -310,6 +310,12 @@ class WriterInvocationManifest:
     output_schema_digest: str
     context_manifest_digest: str
     context_identity: str
+    one_turn: bool
+    exact_input: bool
+    skills_enabled: bool
+    tools_enabled: bool
+    mcp_enabled: bool
+    prior_message_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1095,7 +1101,7 @@ def run_grok_cli(prompt: str) -> WriterCliExecution:
                 "*",
                 "--no-plan",
                 "--max-turns",
-                "3",
+                "1",
                 "--no-subagents",
                 "--reasoning-effort",
                 "low",
@@ -1251,6 +1257,12 @@ class CliChainWriter:
             output_schema_digest=CONT_WRITER_OUTPUT_SCHEMA_DIGEST,
             context_manifest_digest=digest_canonical(context_manifest),
             context_identity=CONT_WRITER_CONTEXT_IDENTITY,
+            one_turn=True,
+            exact_input=True,
+            skills_enabled=False,
+            tools_enabled=False,
+            mcp_enabled=False,
+            prior_message_count=0,
         )
 
 

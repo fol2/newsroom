@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -17,6 +18,7 @@ from newsroom.authority.canonical import (
 from newsroom.control_plane.corpus import CorpusIngestUnit
 from newsroom.control_plane.model_usage import (
     InvocationAllocation,
+    InvocationEfficiencyPolicy,
     InvocationTerminal,
     ModelUsageService,
     UsageComponents,
@@ -110,6 +112,9 @@ class GraphitiModelUsageObserver:
         self._envelope = envelope
         self._clock = clock
         self._ordinal = 0
+        self._allocations: list[InvocationAllocation] = []
+        self._dispatch_at: dict[str, datetime] = {}
+        self._policies: dict[str, InvocationEfficiencyPolicy] = {}
         self._primary_by_prompt: dict[str, str] = {}
 
     def _allocate(
@@ -131,6 +136,17 @@ class GraphitiModelUsageObserver:
             model=model,
             reasoning=reasoning,
         )
+        if (
+            not policy.one_turn
+            or not policy.exact_input
+            or policy.skills_enabled
+            or policy.tools_enabled
+            or policy.mcp_enabled
+            or policy.prior_message_count != 0
+        ):
+            raise ValueError(
+                "Graphiti invocation controls do not match the exact one-turn contract"
+            )
         self._ordinal += 1
         prompt_digest = digest_bytes(prompt_bytes)
         allocation = InvocationAllocation.create(
@@ -166,11 +182,52 @@ class GraphitiModelUsageObserver:
                 }
             ),
             context_identity=GRAPHITI_CONTEXT_IDENTITY,
+            one_turn=True,
+            exact_input=True,
+            skills_enabled=False,
+            tools_enabled=False,
+            mcp_enabled=False,
+            prior_message_count=0,
             allocated_at=self._clock().astimezone(UTC),
             parent_invocation_id=parent_invocation_id,
         )
         self._service.allocate(allocation)
+        self._allocations.append(allocation)
+        self._policies[allocation.invocation_id] = policy
+        dispatch_at = self._clock().astimezone(UTC)
+        self._service.observe_transport(
+            invocation_id=allocation.invocation_id,
+            observed_at=dispatch_at,
+            state="DISPATCH_STARTED",
+            evidence_digest=digest_canonical(
+                {
+                    "invocation_id": allocation.invocation_id,
+                    "provider": provider,
+                    "route": route,
+                    "request_digest": allocation.request_digest,
+                }
+            ),
+        )
+        self._dispatch_at[allocation.invocation_id] = dispatch_at
         return allocation
+
+    def link_provider_attempts(
+        self, *, provider_attempt_number: int, linked_at: datetime
+    ) -> None:
+        if provider_attempt_number <= 0:
+            raise ValueError("Graphiti provider attempt number must be positive")
+        attempt_id = self._envelope.graphiti_attempt_id
+        if attempt_id is None:
+            raise ValueError("Graphiti work envelope lacks an attempt identity")
+        for allocation in self._allocations:
+            self._service.link_provider_attempt(
+                invocation_id=allocation.invocation_id,
+                provider_attempt_id=(
+                    f"{attempt_id}:provider-attempt:{provider_attempt_number}:"
+                    f"leaf:{allocation.leaf_ordinal}"
+                ),
+                linked_at=linked_at,
+            )
 
     def before_cli_invocation(
         self, *, provider: str, model: str, prompt: str, schema: str | None
@@ -264,6 +321,7 @@ class GraphitiModelUsageObserver:
     ) -> None:
         reported = usage.get("usage_basis") == "PROVIDER_REPORTED"
         no_provider_call = usage.get("usage_basis") == "NO_PROVIDER_CALL"
+        policy = self._policies[allocation.invocation_id]
         components = (
             UsageComponents(
                 input_tokens=usage.get("input_tokens"),  # type: ignore[arg-type]
@@ -271,6 +329,7 @@ class GraphitiModelUsageObserver:
                 cached_read_tokens=usage.get("cached_read_tokens"),  # type: ignore[arg-type]
                 cached_write_tokens=usage.get("cached_write_tokens"),  # type: ignore[arg-type]
                 reasoning_tokens=usage.get("reasoning_tokens"),  # type: ignore[arg-type]
+                context_tokens=usage.get("context_tokens"),  # type: ignore[arg-type]
                 total_tokens=usage.get("total_tokens"),  # type: ignore[arg-type]
                 provenance="PROVIDER_REPORTED",
             )
@@ -278,7 +337,10 @@ class GraphitiModelUsageObserver:
             else (
                 UsageComponents(total_tokens=0, provenance="CLI_DERIVED")
                 if no_provider_call
-                else UsageComponents(provenance="UNAVAILABLE")
+                else UsageComponents(
+                    total_tokens=policy.max_total_tokens,
+                    provenance="BOUNDED_ESTIMATE",
+                )
             )
         )
         telemetry = usage.get("provider_telemetry", usage)
@@ -300,10 +362,14 @@ class GraphitiModelUsageObserver:
                 usage_status=(
                     UsageStatus.REPORTED
                     if reported or no_provider_call
-                    else UsageStatus.UNREPORTED
+                    else UsageStatus.ESTIMATED
                 ),
                 components=components,
-                dispatch_at=(None if no_provider_call else allocation.allocated_at),
+                dispatch_at=(
+                    None
+                    if no_provider_call
+                    else self._dispatch_at[allocation.invocation_id]
+                ),
                 completed_at=completed_at,
                 observed_at=completed_at,
                 provider_telemetry_digest=(
@@ -318,6 +384,16 @@ class GraphitiModelUsageObserver:
                 od_011_reference=od_011_reference,
                 subscription_cli_chat_not_cash_debited=subscription_not_debited,
                 pre_dispatch_zero_proved=no_provider_call,
+                estimate_policy_digest=(
+                    policy.canonical_digest
+                    if not reported and not no_provider_call
+                    else None
+                ),
+                estimate_calculation=(
+                    f"qualified_policy.max_total_tokens={policy.max_total_tokens}"
+                    if not reported and not no_provider_call
+                    else None
+                ),
             ),
             provider_telemetry=telemetry_mapping if reported else None,
         )
@@ -332,6 +408,9 @@ class EvaluationGraphitiRunner:
         self, *, clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC)
     ) -> None:
         self._clock = clock
+        self._pending_usage: dict[
+            tuple[str, int], tuple[ModelUsageService, WorkEnvelope]
+        ] = {}
 
     def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
         return self._ingest(unit, deadline=None)
@@ -366,22 +445,43 @@ class EvaluationGraphitiRunner:
             envelope=envelope,
             clock=self._clock,
         )
+        self._pending_usage[(unit.ingest_id, unit.attempt_number)] = (
+            model_usage,
+            envelope,
+        )
         result = self._ingest(unit, deadline=deadline, invocation_observer=observer)
-        model_usage.record_work_outcome(
-            envelope_id=envelope.envelope_id,
-            outcome=(
-                "GRAPHITI_SUCCESS_ZERO_PROPOSALS"
-                if result.outcome == "COMPLETE" and result.proposal_count == 0
-                else "GRAPHITI_SUCCESS"
-                if result.outcome == "COMPLETE"
-                else f"GRAPHITI_{result.outcome}"
-            ),
-            outcome_record_id=result.receipt_digest,
-            payload_digest=None,
-            terminal_at=self._clock().astimezone(UTC),
-            retained_proposal_count=result.proposal_count,
+        terminal_at = self._clock().astimezone(UTC)
+        observer.link_provider_attempts(
+            provider_attempt_number=result.provider_attempt_number,
+            linked_at=terminal_at,
         )
         return result
+
+    def finalise_usage(
+        self,
+        unit: CorpusIngestUnit,
+        *,
+        outcome: str,
+        outcome_record_id: str,
+        retained_proposal_count: int,
+        terminal_at: datetime,
+        connection: sqlite3.Connection,
+    ) -> None:
+        pending = self._pending_usage.pop(
+            (unit.ingest_id, unit.attempt_number), None
+        )
+        if pending is None:
+            return
+        model_usage, envelope = pending
+        model_usage.record_work_outcome(
+            envelope_id=envelope.envelope_id,
+            outcome=outcome,
+            outcome_record_id=outcome_record_id,
+            payload_digest=None,
+            terminal_at=terminal_at,
+            retained_proposal_count=retained_proposal_count,
+            connection=connection,
+        )
 
     def _ingest(
         self,

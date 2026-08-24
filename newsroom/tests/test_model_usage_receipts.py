@@ -60,6 +60,11 @@ def _policy(
         model=model,
         reasoning="low",
         one_turn=True,
+        exact_input=True,
+        skills_enabled=False,
+        tools_enabled=False,
+        mcp_enabled=False,
+        prior_message_count=0,
         max_prompt_bytes=4_096,
         max_context_tokens=2_000,
         max_output_tokens=500,
@@ -120,6 +125,12 @@ def _allocation(
         max_output_tokens=policy.max_output_tokens,
         context_manifest_digest=_digest({"context": "v1"}),
         context_identity="context-v1",
+        one_turn=policy.one_turn,
+        exact_input=policy.exact_input,
+        skills_enabled=policy.skills_enabled,
+        tools_enabled=policy.tools_enabled,
+        mcp_enabled=policy.mcp_enabled,
+        prior_message_count=policy.prior_message_count,
         allocated_at=T0 + timedelta(seconds=leaf_ordinal),
         parent_invocation_id=parent_invocation_id,
     )
@@ -213,14 +224,25 @@ def test_primary_and_fallback_are_distinct_leaves_joined_to_one_outcome(
         parent_invocation_id=primary.invocation_id,
     )
     service.allocate(fallback)
-    service.complete(_reported(primary, total=125, outcome="MALFORMED"))
-    service.complete(_reported(fallback, total=125, outcome="ACCEPTED"))
+    service.link_provider_attempt(
+        invocation_id=primary.invocation_id,
+        provider_attempt_id="provider-primary",
+        linked_at=T0 + timedelta(seconds=2),
+    )
+    service.link_provider_attempt(
+        invocation_id=fallback.invocation_id,
+        provider_attempt_id="provider-fallback",
+        linked_at=T0 + timedelta(seconds=2),
+    )
+    service.complete(_reported(primary, total=125, outcome="REJECTED_OUTPUT"))
+    service.complete(_reported(fallback, total=125, outcome="ACCEPTED_OUTPUT"))
     service.record_work_outcome(
         envelope_id=envelope.envelope_id,
         outcome="ACCEPTED",
         outcome_record_id="draft-outcome-1",
         payload_digest=_digest({"payload": 1}),
         terminal_at=T0 + timedelta(seconds=4),
+        accepted_provider_attempt_id="provider-fallback",
     )
 
     rows = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"]
@@ -232,6 +254,10 @@ def test_primary_and_fallback_are_distinct_leaves_joined_to_one_outcome(
     assert rows[1]["parent_invocation_id"] == primary.invocation_id
     assert {row["work_outcome"] for row in rows} == {"ACCEPTED"}
     assert {row["payload_digest"] for row in rows} == {_digest({"payload": 1})}
+    report = service.report(start=T0, end=T0 + timedelta(minutes=1))
+    assert report["productive_tokens"] == 125
+    assert report["no_result_tokens"] == 125
+    assert report["no_result_reasons"] == {"REJECTED_OUTPUT": 125}
 
 
 def test_rejected_provider_output_is_no_result_usage_not_productivity(
@@ -458,7 +484,7 @@ def test_duplicate_request_digest_is_stopped_before_dispatch(tmp_path: Path) -> 
         )
 
     assert (
-        service.report(start=T0, end=T0 + timedelta(minutes=1))["leaf_dispatch_count"]
+        service.report(start=T0, end=T0 + timedelta(minutes=1))["allocation_count"]
         == 1
     )
     assert first.invocation_id
@@ -552,7 +578,10 @@ def test_graphiti_chat_and_embedding_are_distinct_and_zero_proposals_are_valid(
     report = service.report(start=T0, end=T0 + timedelta(minutes=1))
 
     assert report["graphiti_valid_ingest_count"] == 1
-    assert report["graphiti_tokens_per_valid_ingest"] == 165
+    assert report["graphiti_tokens_per_valid_ingest"] == {
+        "numerator": 165,
+        "denominator": 1,
+    }
     assert report["graphiti_tokens_per_retained_proposal"] is None
     assert report["workload_totals"]["GRAPHITI_CHAT_PRIMARY"] == 125
     assert report["workload_totals"]["GRAPHITI_EMBEDDING"] == 40
@@ -718,20 +747,16 @@ def test_restart_recovery_retains_unresolved_leaf_without_duplication(
 ) -> None:
     path = tmp_path / "unpublished.sqlite3"
     first_service = ModelUsageService(str(path))
-    _envelope_value, _policy_value, allocation = _open_and_allocate(first_service)
-    first_service.observe_transport(
-        invocation_id=allocation.invocation_id,
-        observed_at=T0 + timedelta(seconds=2),
-        state="DISPATCH_POSSIBLE_PROCESS_LOST",
-        evidence_digest=_digest({"process": "lost"}),
+    _envelope_value, _policy_value, _allocation_value = _open_and_allocate(
+        first_service
     )
-
     restarted = ModelUsageService(str(path))
     restarted.recover_unresolved(observed_at=T0 + timedelta(minutes=1))
     restarted.recover_unresolved(observed_at=T0 + timedelta(minutes=2))
     report = restarted.report(start=T0, end=T0 + timedelta(minutes=3))
 
-    assert report["leaf_dispatch_count"] == 1
+    assert report["allocation_count"] == 1
+    assert report["actual_provider_dispatch_count"] == 0
     assert report["unresolved_invocation_count"] == 1
     row = restarted.query(start=T0, end=T0 + timedelta(minutes=3))["leaves"][0]
     assert row["usage_status"] == "AMBIGUOUS"
@@ -771,10 +796,16 @@ def test_later_provider_telemetry_appends_reconciliation_without_editing_history
         raw_telemetry_pointer="private://late/1",
     )
 
+    historical = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"][0]
     row = service.query(start=T0, end=T0 + timedelta(minutes=6))["leaves"][0]
 
+    assert historical["usage_status"] == "UNREPORTED"
+    assert historical["reconciliation_usage_status"] is None
     assert row["usage_status"] == "REPORTED"
     assert row["total_tokens"] == 125
+    assert row["terminal_usage_status"] == "UNREPORTED"
+    assert row["reconciliation_usage_status"] == "REPORTED"
+    assert row["reconciled_at"] == "2026-08-24T10:05:00.000000Z"
     assert (
         service_row_count(
             tmp_path / "unpublished.sqlite3", "model_invocation_terminals"
@@ -791,6 +822,30 @@ def test_later_provider_telemetry_appends_reconciliation_without_editing_history
         service_row_count(tmp_path / "unpublished.sqlite3", "model_provider_telemetry")
         == 1
     )
+
+
+def test_usage_windows_are_sliced_by_terminal_event_time(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    _envelope_value, _policy_value, allocation = _open_and_allocate(service)
+    service.complete(
+        _reported(
+            allocation,
+            total=125,
+            completed_at=T0 + timedelta(minutes=1, seconds=10),
+        )
+    )
+
+    first = service.report(start=T0, end=T0 + timedelta(minutes=1))
+    second = service.report(
+        start=T0 + timedelta(minutes=1),
+        end=T0 + timedelta(minutes=2),
+    )
+
+    assert first["observed_total_tokens"] == 0
+    assert first["fixed_buckets"][0]["observed_total_tokens"] == 0
+    assert second["observed_total_tokens"] == 125
+    assert second["fixed_buckets"][0]["observed_total_tokens"] == 125
+    assert second["utc_day_totals"] == {"2026-08-24": 125}
 
 
 def test_deterministic_csv_export_reconciles_leaf_count_and_uncertainty(
@@ -816,6 +871,21 @@ def test_deterministic_csv_export_reconciles_leaf_count_and_uncertainty(
         is True
     )
 
+    bucket_rows = list(
+        csv.DictReader(
+            io.StringIO(
+                service.export_bucket_csv(
+                    start=T0,
+                    end=T0 + timedelta(minutes=10),
+                )
+            )
+        )
+    )
+    assert len(bucket_rows) == 2
+    assert bucket_rows[0]["grok_model_calls"] == "1"
+    assert bucket_rows[0]["grok_total_tokens"] == "125"
+    assert bucket_rows[1]["grok_total_tokens"] == "0"
+
 
 def test_graphiti_provider_observer_persists_chat_and_embedding_leaves(
     tmp_path: Path,
@@ -837,6 +907,11 @@ def test_graphiti_provider_observer_persists_chat_and_embedding_leaves(
             model=CURSOR_AGENT_MODEL_ID,
             reasoning="provider-default",
             one_turn=True,
+            exact_input=True,
+            skills_enabled=False,
+            tools_enabled=False,
+            mcp_enabled=False,
+            prior_message_count=0,
             max_prompt_bytes=4_096,
             max_context_tokens=2_000,
             max_output_tokens=500,
@@ -856,6 +931,11 @@ def test_graphiti_provider_observer_persists_chat_and_embedding_leaves(
             model=OPENROUTER_EMBEDDING_SLUG,
             reasoning="none",
             one_turn=True,
+            exact_input=True,
+            skills_enabled=False,
+            tools_enabled=False,
+            mcp_enabled=False,
+            prior_message_count=0,
             max_prompt_bytes=4_096,
             max_context_tokens=2_000,
             max_output_tokens=500,
@@ -958,6 +1038,6 @@ def test_hermes_usage_command_exports_shared_receipts_as_json_and_csv(
     assert json_report["leaf_dispatch_count"] == 1
     assert json_report["observed_total_tokens"] == 125
 
-    assert hermes.main([*common, "--usage-format", "csv"]) == 0
+    assert hermes.main([*common, "--usage-format", "leaf-csv"]) == 0
     rows = list(csv.DictReader(io.StringIO(capsys.readouterr().out)))
     assert [row["invocation_id"] for row in rows] == [allocation.invocation_id]
