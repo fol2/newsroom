@@ -348,6 +348,44 @@ def test_admitted_context_survives_hypothesis_candidate_evidence_and_cont(
     assert drift.value.reason_code == "GOVERNED_CONTEXT_CURRENCY_DRIFT"
     assert len(prompts) == 1
 
+    object.__setattr__(
+        candidate.governed_context,
+        "projection_generation_id",
+        candidate.governed_context.items[0].projection_generation_id,
+    )
+    object.__setattr__(
+        candidate.governed_context.items[0],
+        "currency_read_at",
+        "2026-08-24T12:00:01Z",
+    )
+    with pytest.raises(WriterDispatchError, match="currency differs"):
+        CliChainWriter(primary=write).dispatch(
+            candidate,
+            package,
+            route="PRIMARY",
+        )
+
+    assert len(prompts) == 1
+
+    object.__setattr__(
+        candidate.governed_context.items[0],
+        "currency_read_at",
+        candidate.governed_context.read_at,
+    )
+    object.__setattr__(
+        candidate.governed_context.items[0],
+        "projection_authority_watermark",
+        999,
+    )
+    with pytest.raises(WriterDispatchError, match="currency differs"):
+        CliChainWriter(primary=write).dispatch(
+            candidate,
+            package,
+            route="PRIMARY",
+        )
+
+    assert len(prompts) == 1
+
 
 def test_held_and_rejected_proposals_produce_zero_context(tmp_path) -> None:
     for action in (
@@ -504,6 +542,18 @@ def test_context_size_is_bounded_and_replay_stable(tmp_path) -> None:
         replace(first, stale=True)
     with pytest.raises(ValueError, match="currency differs"):
         replace(first, projection_generation_id="wrong-generation")
+    item_with_other_read_time = replace(
+        first.items[0],
+        currency_read_at="2026-08-24T12:00:01Z",
+    )
+    with pytest.raises(ValueError, match="currency differs"):
+        replace(first, items=(item_with_other_read_time,))
+    item_with_other_projection_watermark = replace(
+        first.items[0],
+        projection_authority_watermark=999,
+    )
+    with pytest.raises(ValueError, match="currency differs"):
+        replace(first, items=(item_with_other_projection_watermark,))
     assert bounded.status is GovernedContextStatus.HOLD
     assert bounded.reason_code == "ADMITTED_CONTEXT_SIZE_BOUND_EXCEEDED"
     assert bounded.items == ()

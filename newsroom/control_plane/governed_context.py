@@ -368,6 +368,12 @@ class GovernedContext:
                 and item.oldest_lag_seconds == self.oldest_lag_seconds
                 and item.stale == self.stale
                 and item.degraded == self.degraded
+                and item.currency_read_at == self.read_at
+                and item.admission_authority_version
+                == item.projection_authority_watermark
+                and 0
+                < item.projection_authority_watermark
+                <= self.contiguous_projection_watermark
                 for item in self.items
             )
         )
