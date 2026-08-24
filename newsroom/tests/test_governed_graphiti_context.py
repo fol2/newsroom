@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import pytest
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.control_plane.cycle import _dispatch_writer
 from newsroom.control_plane.editorial import GroupedObservation, form_candidates
 from newsroom.control_plane.evidence import package_for
 from newsroom.control_plane.governed_context import (
@@ -417,6 +418,21 @@ def test_rights_loss_and_stale_projection_fail_closed_without_items(tmp_path) ->
     assert held.value.reason_code == "GOVERNED_CONTEXT_HELD"
     assert dispatched == []
 
+    class CustomWriter:
+        def dispatch(self, candidate, package, *, route):
+            dispatched.append(route)
+            raise AssertionError("held context reached custom writer")
+
+    with pytest.raises(WriterDispatchError, match="context is held"):
+        _dispatch_writer(
+            CustomWriter(),  # type: ignore[arg-type]
+            candidate,
+            package_for(candidate),
+            route="PRIMARY",
+        )
+
+    assert dispatched == []
+
 
 def test_context_size_is_bounded_and_replay_stable(tmp_path) -> None:
     connection = connect(str(tmp_path / "bounded.sqlite3"))
@@ -488,6 +504,70 @@ def test_empty_context_still_enforces_envelope_bounds(tmp_path) -> None:
 
     assert context.status is GovernedContextStatus.HOLD
     assert context.reason_code == "ADMITTED_CONTEXT_SIZE_BOUND_EXCEEDED"
+    assert context.items == ()
+
+
+def test_fully_tombstoned_reconciled_generation_returns_empty_context(
+    tmp_path,
+) -> None:
+    connection = connect(str(tmp_path / "revoked-empty.sqlite3"))
+    _seed_entity(connection, reconcile=False)
+    tombstone = GraphitiProjectionReceipt(
+        proposal_key=DIGEST_B,
+        decision_id="decision:entity.0001",
+        effect_id="tombstone:entity.0001",
+        authority_watermark=101,
+        receipt_digest=DIGEST_C,
+        generation_id=GENERATION_ID,
+    )
+    tombstone_json = canonical_json_bytes(tombstone.canonical_value()).decode()
+    connection.execute(
+        "INSERT INTO unpublished_graphiti_projection_tombstones VALUES(?,?,?,?,?,?)",
+        (
+            tombstone.proposal_key,
+            tombstone.effect_id,
+            tombstone.authority_watermark,
+            tombstone_json,
+            tombstone.receipt_digest,
+            "2026-08-24T11:59:30Z",
+        ),
+    )
+    connection.execute(
+        "UPDATE unpublished_graphiti_admission_queue SET state='REVOKED'"
+    )
+    reconciliation = {
+        "generation_id": GENERATION_ID,
+        "expected_effect_ids": [],
+        "actual_effect_ids": [],
+        "authority_watermark": 101,
+        "receipt_digest": DIGEST_C,
+        "projector_family_id": "graph.increment4.admitted",
+        "provider_model_calls": 0,
+    }
+    connection.execute(
+        "INSERT INTO unpublished_graphiti_projection_reconciliations "
+        "VALUES(?,?,?,?,?,?)",
+        (
+            DIGEST_C,
+            "graph.increment4.admitted",
+            GENERATION_ID,
+            101,
+            canonical_json_bytes(reconciliation).decode(),
+            "2026-08-24T11:59:30Z",
+        ),
+    )
+    connection.commit()
+
+    context = GovernedContextHydrator(
+        connection,
+        authority=_CurrentAuthority(),
+        rights=_Rights(),
+        clock=lambda: NOW,
+    ).hydrate()
+
+    assert context.status is GovernedContextStatus.EMPTY
+    assert context.reason_code == "ZERO_ADMITTED_CONTEXT"
+    assert context.contiguous_projection_watermark == 101
     assert context.items == ()
 
 

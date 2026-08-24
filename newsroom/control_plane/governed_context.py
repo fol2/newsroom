@@ -574,6 +574,24 @@ class GovernedContextHydrator:
             snapshot.append((str(effect_id), watermark, str(generation_id)))
         return tuple(snapshot)
 
+    def _tombstone_projection_watermark(self, generation_id: str) -> int | None:
+        row = self._connection.execute(
+            """
+            SELECT MAX(tombstone.authority_watermark)
+            FROM unpublished_graphiti_projection_tombstones AS tombstone
+            JOIN unpublished_graphiti_projection_receipts AS projection
+              USING(proposal_key)
+            WHERE projection.generation_id=?
+            """,
+            (generation_id,),
+        ).fetchone()
+        watermark = None if row is None else row[0]
+        if watermark is None:
+            return None
+        if isinstance(watermark, bool) or not isinstance(watermark, int):
+            raise TypeError("projection tombstone watermark must be an integer")
+        return watermark
+
     def _empty_or_size_hold(
         self,
         *,
@@ -643,8 +661,10 @@ class GovernedContextHydrator:
                 active_effect_ids = tuple(
                     str(row[0]) for row in active_projection_snapshot
                 )
-                active_projection_watermark = max(
-                    row[1] for row in active_projection_snapshot
+                governed_projection_watermark = (
+                    max(row[1] for row in active_projection_snapshot)
+                    if active_projection_snapshot
+                    else self._tombstone_projection_watermark(generation_id)
                 )
                 if (
                     canonical_json_bytes(reconciliation).decode() != reconciliation_text
@@ -656,7 +676,7 @@ class GovernedContextHydrator:
                     or reconciliation.get("authority_watermark")
                     != int(reconciliation_row[4])
                     or reconciliation.get("authority_watermark")
-                    != active_projection_watermark
+                    != governed_projection_watermark
                     or any(
                         str(row[2]) != generation_id
                         for row in active_projection_snapshot

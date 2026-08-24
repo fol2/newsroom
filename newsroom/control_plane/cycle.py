@@ -96,6 +96,7 @@ from newsroom.control_plane.writer import (
     WriterPort,
     WriterRoute,
     WriterValidatorResult,
+    require_permitted_context,
     validate_writer_copy,
 )
 from newsroom.effective_revision import (
@@ -1734,6 +1735,7 @@ def _dispatch_writer(
     *,
     route: WriterRoute,
 ) -> WriterCopy:
+    require_permitted_context(candidate, package)
     dispatch = getattr(writer, "dispatch", None)
     if callable(dispatch):
         return cast(WriterCopy, dispatch(candidate, package, route=route))
@@ -1772,6 +1774,16 @@ def _run_write_loop(
     cycle_execution_id: str,
     writer_dispatch_fence: Callable[[], None] | None,
 ) -> _WriteLoopResult:
+    permitted: list[
+        tuple[StoryCandidateRecord, EvidencePackage, WriteAdmissionDecision]
+    ] = []
+    for candidate, package, decision in admitted:
+        try:
+            require_permitted_context(candidate, package)
+        except WriterDispatchError:
+            continue
+        permitted.append((candidate, package, decision))
+    admitted = tuple(permitted)
     duplicate = 0
     for candidate, package, decision in admitted:
         if decision.decision == "WRITE_READY" and has_candidate(

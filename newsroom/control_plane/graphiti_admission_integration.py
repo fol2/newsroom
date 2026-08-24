@@ -38,6 +38,7 @@ from newsroom.entities.types import (
 from newsroom.extraction.types import ExtractionProposalKind
 from newsroom.graphiti_adapter.admission import GraphitiProposalAdmissionAction
 from newsroom.relations.editorial_models import (
+    CanonicalEntityRelationEndpoint,
     EditorialRelationDecisionRequest,
     EditorialRelationProposalRequest,
     endpoint_canonical_value,
@@ -401,24 +402,72 @@ class ExistingGovernedGraphitiAdmissionAuthority:
                     assertion.proposal_version_id,
                     proof=self._proof,
                 )
+                endpoints_current = self.relation_endpoint_resolutions_current(
+                    request,
+                    decision,
+                )
+                endpoint_bindings: list[AuthorityContextBinding] = []
+                for endpoint in (assertion.subject, assertion.object):
+                    if not isinstance(endpoint, CanonicalEntityRelationEndpoint):
+                        endpoints_current = False
+                        continue
+                    preferred = self._entities.preferred(
+                        endpoint.entity_id,
+                        proof=self._proof,
+                    )
+                    endpoint_version = self._entities.entity_version(
+                        preferred.current_entity_version_id,
+                        proof=self._proof,
+                    )
+                    if not (
+                        preferred.entity_id == endpoint.entity_id
+                        and preferred.preferred_entity_id == endpoint.entity_id
+                        and preferred.current_entity_version_id
+                        == endpoint.entity_version_id
+                        and preferred.lifecycle is CanonicalEntityLifecycle.ACTIVE
+                        and endpoint_version.entity_id == endpoint.entity_id
+                        and endpoint_version.entity_version_id
+                        == endpoint.entity_version_id
+                        and endpoint_version.lifecycle
+                        is CanonicalEntityLifecycle.ACTIVE
+                    ):
+                        endpoints_current = False
+                    endpoint_bindings.append(
+                        AuthorityContextBinding(
+                            authority_kind="CANONICAL_ENTITY",
+                            authority_id=str(endpoint.entity_id),
+                            authority_version=str(endpoint_version.version_number),
+                        )
+                    )
                 currentness = (
                     "CURRENT"
                     if current.lifecycle is EditorialRelationAssertionLifecycle.ACTIVE
                     and str(current.current_decision_id) == decision.decision_id
                     and current.current_decision_version == retained.decision_version
+                    and endpoints_current
                     else "STALE"
                 )
-                bindings = (
-                    AuthorityContextBinding(
-                        authority_kind="EDITORIAL_RELATION_ASSERTION",
-                        authority_id=str(assertion.assertion_id),
-                        authority_version=str(version.version_number),
-                    ),
-                    AuthorityContextBinding(
-                        authority_kind="EDITORIAL_RELATION_DECISION",
-                        authority_id=str(retained.decision_id),
-                        authority_version=str(retained.decision_version),
-                    ),
+                bindings = tuple(
+                    sorted(
+                        {
+                            *endpoint_bindings,
+                            AuthorityContextBinding(
+                                authority_kind="EDITORIAL_RELATION_ASSERTION",
+                                authority_id=str(assertion.assertion_id),
+                                authority_version=str(version.version_number),
+                            ),
+                            AuthorityContextBinding(
+                                authority_kind="EDITORIAL_RELATION_DECISION",
+                                authority_id=str(retained.decision_id),
+                                authority_version=str(retained.decision_version),
+                            ),
+                        },
+                        key=lambda item: (
+                            item.authority_kind,
+                            item.authority_id,
+                            item.authority_version,
+                        ),
+                    )
                 )
                 temporal = tuple(
                     sorted(

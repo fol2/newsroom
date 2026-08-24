@@ -391,16 +391,86 @@ def test_existing_authority_hydrates_current_relation_facts() -> None:
         ),
         proposal_version=lambda *_args, **_kwargs: SimpleNamespace(version_number=1),
     )
+    endpoint_proposal_ids = (
+        EntityResolutionProposalId.parse("00000000-0000-4000-8000-0000000076c1"),
+        EntityResolutionProposalId.parse("00000000-0000-4000-8000-0000000076c2"),
+    )
+    endpoint_by_entity = {
+        subject.entity_id: subject,
+        object_.entity_id: object_,
+    }
+    endpoint_decision_by_proposal = dict(
+        zip(
+            endpoint_proposal_ids,
+            decision.endpoint_resolution_decision_ids,
+            strict=True,
+        )
+    )
+    endpoint_state = {"stale": False}
+
+    def endpoint_decision(
+        proposal_id: EntityResolutionProposalId,
+        *,
+        proof: object,
+    ) -> SimpleNamespace:
+        del proof
+        return SimpleNamespace(
+            action=EntityResolutionDecisionAction.ACCEPT,
+            decision_id=endpoint_decision_by_proposal[proposal_id],
+        )
+
+    def preferred_endpoint(
+        entity_id: CanonicalEntityId,
+        *,
+        proof: object,
+    ) -> SimpleNamespace:
+        del proof
+        endpoint = endpoint_by_entity[entity_id]
+        preferred_entity_id = (
+            object_.entity_id
+            if endpoint_state["stale"] and entity_id == subject.entity_id
+            else entity_id
+        )
+        return SimpleNamespace(
+            entity_id=entity_id,
+            current_entity_version_id=endpoint.entity_version_id,
+            preferred_entity_id=preferred_entity_id,
+            lifecycle=CanonicalEntityLifecycle.ACTIVE,
+        )
+
+    def endpoint_version(
+        version_id: CanonicalEntityVersionId,
+        *,
+        proof: object,
+    ) -> SimpleNamespace:
+        del proof
+        endpoint = next(
+            item
+            for item in endpoint_by_entity.values()
+            if item.entity_version_id == version_id
+        )
+        return SimpleNamespace(
+            entity_id=endpoint.entity_id,
+            entity_version_id=endpoint.entity_version_id,
+            version_number=1,
+            lifecycle=CanonicalEntityLifecycle.ACTIVE,
+        )
+
+    entities = SimpleNamespace(
+        decision=endpoint_decision,
+        preferred=preferred_endpoint,
+        entity_version=endpoint_version,
+    )
     plan = GraphitiRelationAdmissionPlan(
         graphiti_proposal_digest=proposal.digest,
         graphiti_proposal_local_id=proposal.local_id,
         proposal_request=SimpleNamespace(proposal_id="relation-proposal"),  # type: ignore[arg-type]
         decision_request=SimpleNamespace(),  # type: ignore[arg-type]
-        endpoint_resolution_proposal_ids=(),
+        endpoint_resolution_proposal_ids=endpoint_proposal_ids,
         resolved_endpoint_names=("Alice", "Bob"),
     )
     authority = ExistingGovernedGraphitiAdmissionAuthority(
-        entities=SimpleNamespace(),  # type: ignore[arg-type]
+        entities=entities,  # type: ignore[arg-type]
         relations=relations,  # type: ignore[arg-type]
         proof=AuthenticationProof(method="STATIC_TOKEN", credential="fixture"),
         entity_plan=lambda *_: pytest.fail("entity planner called"),
@@ -415,6 +485,17 @@ def test_existing_authority_hydrates_current_relation_facts() -> None:
     assert structured["authority_kind"] == "EDITORIAL_RELATION_ASSERTION"
     assert structured["assertion"]["predicate"] == "SUPPORTS"  # type: ignore[index]
     assert structured["assertion"]["statement"] == "Alice supports Bob"  # type: ignore[index]
+    assert {
+        item.authority_id
+        for item in context.bindings
+        if item.authority_kind == "CANONICAL_ENTITY"
+    } == {str(subject.entity_id), str(object_.entity_id)}
+
+    endpoint_state["stale"] = True
+    stale_context = authority.current_context(request, decision)
+
+    assert stale_context is not None
+    assert stale_context.currentness_state == "STALE"
 
 
 def test_existing_authority_rejects_unbound_graphiti_plan() -> None:

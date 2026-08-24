@@ -305,7 +305,7 @@ class CliProcessError(RuntimeError):
         self.provider_status = provider_status
 
 
-def _require_permitted_context(
+def require_permitted_context(
     candidate: StoryCandidateRecord,
     package: EvidencePackage,
 ) -> None:
@@ -355,7 +355,7 @@ class FixtureWriter:
     def write(
         self, candidate: StoryCandidateRecord, package: EvidencePackage
     ) -> WriterCopy:
-        _require_permitted_context(candidate, package)
+        require_permitted_context(candidate, package)
         headline_claim = next(
             claim for claim in package.governed_claims if claim.claim_role == "HEADLINE"
         )
@@ -1032,7 +1032,7 @@ class CliChainWriter:
         *,
         route: WriterRoute,
     ) -> WriterCopy:
-        _require_permitted_context(candidate, package)
+        require_permitted_context(candidate, package)
         prompt = _prompt(candidate, package)
         invoke = self._primary if route == "PRIMARY" else self._fallback
         writer_id = (
