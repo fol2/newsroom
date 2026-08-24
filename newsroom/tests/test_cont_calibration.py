@@ -22,12 +22,19 @@ from newsroom.control_plane.model_usage import (
 from newsroom.control_plane.writer import (
     CONT_CONTEXT_MANIFEST_SCHEMA_VERSION,
     CONT_DISABLED_CAPABILITIES,
+    CONT_FALLBACK_COMMAND_FLAGS,
+    CONT_FALLBACK_CONFIG_IDENTITY,
+    CONT_FALLBACK_MODEL,
+    CONT_FALLBACK_PROVIDER,
+    CONT_FALLBACK_REASONING,
+    CONT_FALLBACK_ROUTE,
     CONT_PRIMARY_COMMAND_FLAGS,
     CONT_PRIMARY_CONFIG_IDENTITY,
     CONT_PRIMARY_MODEL,
     CONT_PRIMARY_PROVIDER,
     CONT_PRIMARY_REASONING,
     CONT_PRIMARY_ROUTE,
+    CURSOR_COMMAND_SEMANTIC_VERSION,
     GROK_COMMAND_SEMANTIC_VERSION,
 )
 
@@ -66,6 +73,7 @@ def _leaf(
             "implementation_revision": REVISION,
             "implementation_worktree_clean": True,
             "evidence_package_bytes": prompt_bytes,
+            "config_identity": CONT_PRIMARY_CONFIG_IDENTITY,
             "one_turn": True,
             "exact_input": True,
             "skills_enabled": False,
@@ -86,6 +94,34 @@ def _passing_leaves() -> list[dict[str, object]]:
         _leaf("medium", prompt_bytes=2_000, context_tokens=4_000),
         _leaf("long", prompt_bytes=3_000, context_tokens=5_000),
     ]
+
+
+def _fallback_leaf(
+    candidate_id: str,
+    *,
+    prompt_bytes: int,
+    context_tokens: int,
+) -> dict[str, object]:
+    row = _leaf(
+        candidate_id,
+        prompt_bytes=prompt_bytes,
+        context_tokens=context_tokens,
+    )
+    row.update(
+        workload_class="CONT_WRITER_FALLBACK",
+        provider=CONT_FALLBACK_PROVIDER,
+        route=CONT_FALLBACK_ROUTE,
+        model=CONT_FALLBACK_MODEL,
+        reasoning=CONT_FALLBACK_REASONING,
+    )
+    manifest = row["context_manifest"]
+    assert isinstance(manifest, dict)
+    manifest.update(
+        command_semantic_version=CURSOR_COMMAND_SEMANTIC_VERSION,
+        command_flags=list(CONT_FALLBACK_COMMAND_FLAGS),
+        config_identity=CONT_FALLBACK_CONFIG_IDENTITY,
+    )
+    return row
 
 
 def test_productive_low_context_packet_mints_exact_primary_policy() -> None:
@@ -184,6 +220,35 @@ def test_missing_usage_is_not_inferred_as_zero() -> None:
     assert packet.metrics["maximum_total_tokens"] is None
     assert packet.metrics["total_tokens_for_accepted_payloads"] is None
     assert packet.metrics["median_tokens_per_accepted_payload"] is None
+
+
+def test_rejected_primary_tokens_remain_no_result_after_fallback_recovery() -> None:
+    rejected_primary = _leaf(
+        "short",
+        prompt_bytes=1_000,
+        context_tokens=3_000,
+        accepted=False,
+    )
+    rejected_primary["work_outcome"] = "ACCEPTED"
+    fallback = _fallback_leaf(
+        "short",
+        prompt_bytes=1_000,
+        context_tokens=3_500,
+    )
+    packet = assess_cont_calibration(
+        [rejected_primary, fallback, *_passing_leaves()[1:]],
+        candidate_ids=("short", "medium", "long"),
+        version="issue-730-v1",
+        implementation_revision=REVISION,
+        unpublished_payload_candidate_ids=("short", "medium", "long"),
+    )
+
+    assert packet.passed is True
+    assert packet.metrics["tokens_on_hold_reject_or_no_result"] == 3_400
+    assert packet.metrics["fallback_recovery_rate"] == {
+        "numerator": 1,
+        "denominator": 1,
+    }
 
 
 @pytest.mark.parametrize(
