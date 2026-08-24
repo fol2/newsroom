@@ -535,6 +535,15 @@ class GraphitiModelUsageObserver:
         if token.invocation_id in self._dispatch_at:
             raise ModelUsageAdmissionError("Graphiti transport dispatch repeated")
         dispatch_at = self._clock().astimezone(UTC)
+        if self._deadline is not None and dispatch_at >= self._deadline.astimezone(UTC):
+            raise ModelUsageAdmissionError(
+                "Graphiti dispatch deadline expired during local preflight"
+            )
+        self._owner_stop_check()
+        if self._service.route_state(token.route)["state"] != "CLOSED":
+            raise ModelUsageAdmissionError(
+                "Graphiti route circuit opened during local preflight"
+            )
         self._service.observe_transport(
             invocation_id=token.invocation_id,
             observed_at=dispatch_at,

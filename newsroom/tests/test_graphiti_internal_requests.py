@@ -991,6 +991,35 @@ def test_reported_output_uses_exact_provider_tokens_not_byte_ceiling() -> None:
     assert invocations[0]["outcome"] == "COMPLETE"
 
 
+def test_missing_reported_output_tokens_uses_conservative_byte_ceiling() -> None:
+    invocations: list[dict[str, object]] = []
+
+    with pytest.raises(CliResponseError, match="exceeded requested max_tokens"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="bounded prompt",
+                schema=None,
+                max_tokens=1,
+                cursor_runner=lambda _prompt, *, max_tokens: CliExecution(
+                    text='{"value":"' + ("x" * 10_000) + '"}',
+                    usage={
+                        "usage_basis": "PROVIDER_REPORTED",
+                        "input_tokens": 3,
+                        "output_tokens": None,
+                        "cached_read_tokens": None,
+                        "cached_write_tokens": None,
+                        "reasoning_tokens": None,
+                        "total_tokens": None,
+                    },
+                ),
+                grok_runner=lambda _prompt, _schema, *, max_tokens: "not called",
+                invocations=invocations,
+            )
+        )
+
+    assert invocations[0]["outcome"] == "OUTPUT_LIMIT_EXCEEDED"
+
+
 @pytest.mark.parametrize(
     ("failure", "expected_outcome"),
     [
@@ -1120,6 +1149,137 @@ def test_async_cli_capability_preflight_kills_child_on_cancellation(
     asyncio.run(cancel_preflight())
     assert killed is True
     assert waited is True
+
+
+def test_dispatch_fence_rechecks_deadline_after_local_preflight(
+    tmp_path: Path,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-preflight-deadline",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-preflight-deadline",
+        graphiti_attempt_id="ingest-preflight-deadline:1",
+    )
+    service.open_envelope(envelope)
+    now = T0 + timedelta(seconds=1)
+    owner_stop_checks = 0
+
+    def owner_stop_check() -> None:
+        nonlocal owner_stop_checks
+        owner_stop_checks += 1
+
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: now,
+        owner_stop_check=owner_stop_check,
+        deadline=T0 + timedelta(minutes=1),
+    )
+    provider_calls = 0
+
+    def cursor_runner(
+        _prompt: str,
+        *,
+        max_tokens: int,
+        dispatch_started: object,
+    ) -> CliExecution:
+        nonlocal now, provider_calls
+        del max_tokens
+        now = T0 + timedelta(minutes=2)
+        assert callable(dispatch_started)
+        dispatch_started()
+        provider_calls += 1
+        return CliExecution(text="{}", usage={"usage_basis": "UNREPORTED"})
+
+    with pytest.raises(ModelUsageAdmissionError, match="expired during local preflight"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="source-safe prompt",
+                schema=EXTRACTED_ENTITIES_SCHEMA,
+                semantic_request_class="ExtractedEntities",
+                max_tokens=100,
+                cursor_runner=cursor_runner,
+                grok_runner=lambda _prompt, _schema, *, max_tokens: "not called",
+                invocations=[],
+                invocation_observer=observer,
+            )
+        )
+
+    assert provider_calls == 0
+    assert owner_stop_checks == 1
+    leaf = service.query(start=T0, end=T0 + timedelta(minutes=3))["leaves"][0]
+    assert leaf["invocation_outcome"] == "DISPATCH_FENCE_REFUSED"
+    assert leaf["transport_dispatch_observed"] is False
+    assert leaf["pre_dispatch_zero_proved"] is True
+
+
+def test_cancellation_before_dispatch_marker_has_matching_zero_receipts(
+    tmp_path: Path,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-cancel-preflight",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-cancel-preflight",
+        graphiti_attempt_id="ingest-cancel-preflight:1",
+    )
+    service.open_envelope(envelope)
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=10),
+        owner_stop_check=lambda: None,
+    )
+    invocations: list[dict[str, object]] = []
+
+    async def cancel_before_marker() -> None:
+        started = asyncio.Event()
+
+        async def cursor_runner(
+            _prompt: str,
+            *,
+            max_tokens: int,
+            dispatch_started: object,
+        ) -> CliExecution:
+            del max_tokens, dispatch_started
+            started.set()
+            await asyncio.Future()
+            raise AssertionError("cancelled preflight resumed")
+
+        task = asyncio.create_task(
+            run_cli_chain(
+                prompt="source-safe prompt",
+                schema=EXTRACTED_ENTITIES_SCHEMA,
+                semantic_request_class="ExtractedEntities",
+                max_tokens=100,
+                cursor_runner=cursor_runner,
+                grok_runner=lambda _prompt, _schema, *, max_tokens: "not called",
+                invocations=invocations,
+                invocation_observer=observer,
+            )
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancel_before_marker())
+    leaf = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"][0]
+    assert leaf["invocation_outcome"] == "CANCELLED"
+    assert leaf["transport_dispatch_observed"] is False
+    assert leaf["pre_dispatch_zero_proved"] is True
+    assert invocations[0]["usage"]["usage_basis"] == "NO_PROVIDER_CALL"
 
 
 def test_cancellation_retains_uncertain_leaf_before_control_returns(
