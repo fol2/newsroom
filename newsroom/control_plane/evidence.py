@@ -2,10 +2,1112 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import hmac
+import json
+import os
+import re
+import sqlite3
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
+from datetime import date, datetime
+from enum import StrEnum
+from typing import Literal
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.editorial import StoryCandidateRecord
+
+EVID_012_POLICY_VERSION = "newsroom.evid-012.v7"
+GOVERNED_CLAIM_POLICY_VERSION = "newsroom.governed-claim.v7"
+EVIDENCE_GATE_POLICY_VERSION = "newsroom.evidence-gates.v2"
+GOVERNED_INPUT_SCHEMA_VERSION = "newsroom.governed-input.v10"
+EVIDENCE_APPROVAL_POLICY_VERSION = "newsroom.evidence-approval.v8"
+EVIDENCE_APPROVAL_PRINCIPAL = "HERMES_EVIDENCE_CONTROLLER"
+ORIGINALITY_POLICY_VERSION = "newsroom.cont-originality.v3"
+NAMED_ENTITY_POLICY_VERSION = "newsroom.named-entity.v8"
+
+_SOURCE_RECORD_FIELDS = frozenset(
+    {
+        "record_id",
+        "record_type",
+        "candidate_id",
+        "base_package_digest",
+        "status",
+        "source_id",
+        "canonical_url",
+        "publisher",
+        "responsible_body",
+        "source_type",
+        "authority_class",
+        "publication_time",
+        "retrieval_time",
+        "geography",
+        "language",
+        "extraction_status",
+        "rights_decision_id",
+        "originating_report_id",
+        "originating_artefact_digest",
+        "dependency_evidence_ids",
+    }
+)
+_SOURCE_AUTHORITY_RECORD_FIELDS = frozenset(
+    {
+        "record_id",
+        "record_type",
+        "candidate_id",
+        "base_package_digest",
+        "status",
+        "source_id",
+        "decision",
+        "authority_class",
+        "authority_scope",
+        "governed_claim_id",
+        "claim_digest",
+    }
+)
+_RIGHTS_RECORD_FIELDS = frozenset(
+    {
+        "record_id",
+        "record_type",
+        "candidate_id",
+        "base_package_digest",
+        "status",
+        "source_id",
+        "decision",
+        "permitted_use",
+    }
+)
+_DEPENDENCY_RECORD_FIELDS = frozenset(
+    {
+        "record_id",
+        "record_type",
+        "candidate_id",
+        "base_package_digest",
+        "status",
+        "source_id",
+        "dependency_status",
+        "evidential_origin_id",
+        "originating_report_id",
+    }
+)
+_QUALIFICATION_RECORD_FIELDS = frozenset(
+    {
+        "record_id",
+        "record_type",
+        "candidate_id",
+        "base_package_digest",
+        "status",
+        "governed_claim_id",
+        "test",
+        "test_evidence",
+        "policy_version",
+        "evidence_span_digest",
+        "source_record_ids",
+    }
+)
+_NAMED_ENTITY_RECORD_FIELDS = frozenset(
+    {
+        "record_id",
+        "record_type",
+        "candidate_id",
+        "base_package_digest",
+        "status",
+        "governed_claim_id",
+        "text",
+        "rendered_text",
+        "entity_type",
+        "canonical_entity_id",
+        "policy_version",
+        "evidence_span_digest",
+        "rendered_span_digest",
+        "source_record_ids",
+    }
+)
+_SEMANTIC_RELATION_RECORD_FIELDS = frozenset(
+    {
+        "record_id",
+        "record_type",
+        "candidate_id",
+        "base_package_digest",
+        "status",
+        "governed_claim_id",
+        "source_modality",
+        "rendered_modality",
+        "source_polarity",
+        "rendered_polarity",
+        "relation",
+        "claim_digest",
+        "rendered_assertion_digest",
+    }
+)
+_RECORD_FIELDS_BY_TYPE = {
+    "SOURCE_RECORD": _SOURCE_RECORD_FIELDS,
+    "SOURCE_AUTHORITY_DECISION": _SOURCE_AUTHORITY_RECORD_FIELDS,
+    "RIGHTS_DECISION": _RIGHTS_RECORD_FIELDS,
+    "DEPENDENCY_EVIDENCE": _DEPENDENCY_RECORD_FIELDS,
+    "QUALIFICATION_EVIDENCE": _QUALIFICATION_RECORD_FIELDS,
+    "NAMED_ENTITY_EVIDENCE": _NAMED_ENTITY_RECORD_FIELDS,
+    "SEMANTIC_RELATION_EVIDENCE": _SEMANTIC_RELATION_RECORD_FIELDS,
+}
+_PUBLICATION_EVIDENCE_SOURCE_TYPES = frozenset(
+    {
+        "PRIMARY_OFFICIAL",
+        "ESTABLISHED_NEWS_ORGANISATION",
+        "LOCAL_SPECIALIST_PUBLICATION",
+    }
+)
+_ENGLISH_MONTHS = {
+    month.casefold(): index
+    for index, month in enumerate(
+        (
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
+        ),
+        start=1,
+    )
+}
+_CHINESE_DIGITS = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "兩": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+_OWNER_APPROVED_ENTITY_REGISTRY = {
+    "里斯本": "PLACE",
+    "里約熱內盧": "PLACE",
+    "后海灣": "PLACE",
+    "干邑": "PLACE",
+    "干德道": "PLACE",
+    "干諾道中": "PLACE",
+    "香港": "PLACE",
+    "中西區": "PLACE",
+    "灣仔": "PLACE",
+    "東區": "PLACE",
+    "南區": "PLACE",
+    "油尖旺": "PLACE",
+    "深水埗": "PLACE",
+    "九龍城": "PLACE",
+    "黃大仙": "PLACE",
+    "觀塘": "PLACE",
+    "葵青": "PLACE",
+    "荃灣": "PLACE",
+    "屯門": "PLACE",
+    "元朗": "PLACE",
+    "北區": "PLACE",
+    "大埔": "PLACE",
+    "沙田": "PLACE",
+    "北角": "PLACE",
+    "太子": "PLACE",
+    "旺角": "PLACE",
+    "尖沙咀": "PLACE",
+    "銅鑼灣": "PLACE",
+    "佐敦": "PLACE",
+    "西貢": "PLACE",
+    "離島": "PLACE",
+    "九龍": "PLACE",
+    "倫敦": "PLACE",
+    "深圳": "PLACE",
+    "北京": "PLACE",
+    "上海": "PLACE",
+    "澳門": "PLACE",
+    "廣州": "PLACE",
+    "巴黎": "PLACE",
+    "英國": "PLACE",
+    "香港政府": "ORGANISATION",
+    "運輸署": "ORGANISATION",
+    "教育局": "ORGANISATION",
+    "醫院管理局": "ORGANISATION",
+    "Home Office": "ORGANISATION",
+    "Hong Kong Authority": "ORGANISATION",
+    "Hong Kong Monetary Authority": "ORGANISATION",
+    "Housing Authority": "ORGANISATION",
+    "EUSS": "OFFICIAL_TERM",
+    "Universal Credit": "OFFICIAL_TERM",
+}
+_ENGLISH_ORGANISATION_ACTION_WORDS = frozenset(
+    {
+        "announces",
+        "backs",
+        "confirms",
+        "creates",
+        "expands",
+        "funds",
+        "introduces",
+        "launches",
+        "new",
+        "opens",
+        "plans",
+        "proposes",
+        "says",
+        "scraps",
+        "supports",
+        "unveils",
+    }
+)
+_ENGLISH_ORGANISATION = re.compile(
+    r"\b(?:Department|Ministry|Office)\s+(?:for|of)\s+(?:the\s+)?"
+    r"[A-Z][A-Za-z&.-]+(?:\s+(?:and|of|for)\s+(?:the\s+)?"
+    r"[A-Z][A-Za-z&.-]+)*\b|"
+    r"\bNHS(?:\s+(?:England|Scotland|Wales))?\b|"
+    r"\bTransport\s+for\s+[A-Z][A-Za-z&.-]+\b|"
+    r"\b(?:[A-Z][A-Za-z&.-]+\s+){1,3}"
+    r"(?:Authority|Directorate|Department|Ministry|Agency|Council|Commission|"
+    r"Service|Police|University|Hospital|Bank)\b"
+)
+_ENGLISH_OFFICIAL_TERM = re.compile(
+    r"\b(?:[A-Z][A-Za-z-]+(?:\s+(?:and|of|the|for|[A-Z][A-Za-z-]+)){1,7}"
+    r"\s+Act|(?:[A-Z][A-Za-z-]+\s+){1,5}"
+    r"(?:Authorisation|Credit|Scheme|Programme|Benefit|Visa|Permit|Status))\b"
+)
+
+
+def _is_bounded_english_organisation(text: str) -> bool:
+    return bool(_ENGLISH_ORGANISATION.fullmatch(text)) and not any(
+        token.casefold() in _ENGLISH_ORGANISATION_ACTION_WORDS
+        for token in re.findall(r"[A-Za-z]+", text)
+    )
+
+
+def _has_bounded_named_entity_shape(text: str, entity_type: str) -> bool:
+    if text in _OWNER_APPROVED_ENTITY_REGISTRY:
+        return entity_type == _OWNER_APPROVED_ENTITY_REGISTRY[text]
+    if re.search(r"[A-Za-z]", text):
+        if entity_type == "OFFICIAL_TERM":
+            return bool(_ENGLISH_OFFICIAL_TERM.fullmatch(text))
+        if entity_type == "ORGANISATION":
+            return _is_bounded_english_organisation(text)
+        tokens = re.findall(r"[A-Za-z]+", text)
+        if not tokens or any(
+            not (
+                token.isupper()
+                or token[:1].isupper()
+                or token.casefold() in {"of", "the", "and", "for"}
+            )
+            for token in tokens
+        ):
+            return False
+        return entity_type == "PERSON" and 2 <= len(tokens) <= 3
+    if not re.fullmatch(r"[\u3400-\u9fff《》〈〉]+", text):
+        return False
+    suffixes = {
+        "ORGANISATION": (
+            "政府",
+            "署",
+            "局",
+            "部",
+            "委員會",
+            "協會",
+            "公司",
+            "大學",
+            "學校",
+            "法院",
+            "警方",
+            "醫院",
+            "銀行",
+            "管理局",
+        ),
+        "PLACE": (
+            "市",
+            "區",
+            "國",
+            "灣",
+            "道",
+            "路",
+            "山",
+            "河",
+            "島",
+            "州",
+            "縣",
+            "鎮",
+            "角",
+        ),
+        "OFFICIAL_TITLE": ("長", "司", "官", "大臣", "主席", "總統"),
+    }
+    if entity_type == "PERSON":
+        return 2 <= len(text) <= 4
+    if entity_type == "PLACE":
+        return 2 <= len(text) <= 5
+    if entity_type == "PRODUCT":
+        return text.startswith(("《", "〈")) and text.endswith(("》", "〉"))
+    return text.endswith(suffixes.get(entity_type, ()))
+
+
+def bounded_named_entities(text: str) -> frozenset[tuple[str, str]]:
+    """Extract only closed, structurally recognisable entity spans."""
+
+    candidates: list[tuple[int, int, str, str]] = []
+    for entity, entity_type in _OWNER_APPROVED_ENTITY_REGISTRY.items():
+        for match in re.finditer(re.escape(entity), text):
+            candidates.append((match.start(), match.end(), entity, entity_type))
+    english_person = re.compile(
+        r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})"
+        r"(?=\s+(?:said|says|announced|confirmed|stated|warned|told)\b)"
+    )
+    for match in english_person.finditer(text):
+        candidates.append((match.start(1), match.end(1), match.group(1), "PERSON"))
+    for match in _ENGLISH_ORGANISATION.finditer(text):
+        organisation = match.group(0)
+        if _is_bounded_english_organisation(organisation):
+            candidates.append(
+                (match.start(), match.end(), organisation, "ORGANISATION")
+            )
+    for match in _ENGLISH_OFFICIAL_TERM.finditer(text):
+        candidates.append((match.start(), match.end(), match.group(0), "OFFICIAL_TERM"))
+    titled_chinese_person = re.compile(
+        r"(行政長官|財政司司長|政務司司長|律政司司長|特首|司長|局長|署長)"
+        r"([趙錢孫李周吳鄭王馮陳褚衛蔣沈韓楊朱秦尤許何呂施張孔曹嚴華金魏陶姜戚謝鄒喻柏水竇章雲蘇潘葛奚范彭郎魯韋昌馬苗鳳花方俞任袁柳唐羅薛伍余米貝姚孟顧尹江鍾蔡葉杜夏汪田]"
+        r"[\u3400-\u9fff]{1,2})"
+        r"(?=[\u3400-\u9fff]{0,8}(?:公布|宣佈|宣布|表示|指出|證實|確認|警告|"
+        r"稱|說|指|主持|出席|會見))"
+    )
+    for match in titled_chinese_person.finditer(text):
+        candidates.append(
+            (match.start(1), match.end(1), match.group(1), "OFFICIAL_TITLE")
+        )
+        candidates.append((match.start(2), match.end(2), match.group(2), "PERSON"))
+    chinese_person = re.compile(
+        r"(?<![\u3400-\u9fff])"
+        r"([趙錢孫李周吳鄭王馮陳褚衛蔣沈韓楊朱秦尤許何呂施張孔曹嚴華金魏陶姜戚謝鄒喻柏水竇章雲蘇潘葛奚范彭郎魯韋昌馬苗鳳花方俞任袁柳唐羅薛伍余米貝姚孟顧尹江鍾蔡葉杜夏汪田]"
+        r"[\u3400-\u9fff]{1,2})"
+        r"(?=(?:公布|宣佈|宣布|表示|指出|證實|確認|警告|"
+        r"稱|說|指|主持|出席|會見|簽署|签署|視察|视察|任命|接見|接见|"
+        r"辭職|辞职|請辭|请辞))"
+    )
+    for match in chinese_person.finditer(text):
+        if match.group(1) not in {"方資料", "方代表", "方表示"} and not any(
+            marker in match.group(1)
+            for marker in ("任命", "委任", "出任", "局長", "署長", "司長")
+        ):
+            candidates.append((match.start(1), match.end(1), match.group(1), "PERSON"))
+    appointed_chinese_person = re.compile(
+        r"(?:任命|委任|提名|公布[：:]?|指[：:]?|由)"
+        r"([趙錢孫李周吳鄭王馮陳褚衛蔣沈韓楊朱秦尤許何呂施張孔曹嚴華金魏陶姜戚謝鄒喻柏水竇章雲蘇潘葛奚范彭郎魯韋昌馬苗鳳花方俞任袁柳唐羅薛伍余米貝姚孟顧尹江鍾蔡葉杜夏汪田劉郭梁黃林]"
+        r"[\u3400-\u9fff]{2})"
+        r"(?=(?:出任|擔任|担任|任職|任职|獲委任|获委任|接任|升任))"
+    )
+    for match in appointed_chinese_person.finditer(text):
+        person = match.group(1)
+        if person[1:] not in {"表示", "安排", "措施", "政策", "案甲", "代表"}:
+            candidates.append((match.start(1), match.end(1), person, "PERSON"))
+    interaction_chinese_person = re.compile(
+        r"(?:會見|会见|接見|接见|拘捕|起訴|起诉|邀請|邀请)"
+        r"([趙錢孫李周吳鄭王馮陳褚衛蔣沈韓楊朱秦尤許何呂施張孔曹嚴華金魏陶姜戚謝鄒喻柏水竇章雲蘇潘葛奚范彭郎魯韋昌馬苗鳳花方俞任袁柳唐羅薛伍余米貝姚孟顧尹江鍾蔡葉杜夏汪田劉郭梁黃林]"
+        r"[\u3400-\u9fff]{2})"
+        r"(?=$|[，,。；;：:]|(?:後|后|時|时|並|并|出席|表示|獲准|获准))"
+    )
+    for match in interaction_chinese_person.finditer(text):
+        person = match.group(1)
+        if person[1:] not in {"表示", "安排", "措施", "政策", "案甲"}:
+            candidates.append((match.start(1), match.end(1), person, "PERSON"))
+    structural_chinese_place = re.compile(
+        r"(?:公布|涉及|位於|位于|前往|覆蓋|覆盖|影響|影响)"
+        r"([\u3400-\u9fff]{1,4}?(?:市|區|区|國|国|灣|湾|道|路|山|河|島|岛|"
+        r"州|縣|县|鎮|镇|角|咀))"
+        r"(?=(?:嘅|的)?(?:新安排|安排|措施|計劃|计划|服務|服务|居民|地區|地区))"
+    )
+    for match in structural_chinese_place.finditer(text):
+        candidates.append((match.start(1), match.end(1), match.group(1), "PLACE"))
+    action_context_structural_place = re.compile(
+        r"(?:公布|指)[：:]?([\u3400-\u9fff]{1,4}?(?:市|區|区|國|国|灣|湾|"
+        r"道|路|山|河|島|岛|州|縣|县|鎮|镇|角|咀))(?=(?:將|将)"
+        r"(?:實施|实施|推行|設立|设立|開設|开设|啟用|启用))"
+    )
+    for match in action_context_structural_place.finditer(text):
+        candidates.append((match.start(1), match.end(1), match.group(1), "PLACE"))
+    chinese_organisation = re.compile(
+        r"(?<![\u3400-\u9fff])"
+        r"([\u3400-\u9fff]{2,16}(?:政府|醫院管理局|管理局|委員會|協會|"
+        r"公司|大學|學校|法院|警方|醫院|銀行|署|局|部))"
+        r"(?=(?:公布|宣佈|宣布|表示|指出|證實|確認|警告|稱|說|指|推出))"
+    )
+    for match in chinese_organisation.finditer(text):
+        candidates.append(
+            (match.start(1), match.end(1), match.group(1), "ORGANISATION")
+        )
+    for match in re.finditer(r"[《〈][^《》〈〉\n]{1,80}[》〉]", text):
+        candidates.append((match.start(), match.end(), match.group(0), "PRODUCT"))
+    selected: list[tuple[int, int, str, str]] = []
+    for candidate in sorted(candidates, key=lambda item: (-(item[1] - item[0]), item)):
+        if not any(
+            candidate[0] < existing[1] and existing[0] < candidate[1]
+            for existing in selected
+        ):
+            selected.append(candidate)
+    return frozenset(
+        (text, entity_type) for _start, _end, text, entity_type in selected
+    )
+
+
+def _chinese_integer(value: str) -> int | None:
+    def section(raw: str) -> int | None:
+        if not raw:
+            return 0
+        if raw.isdigit():
+            return int(raw)
+        if all(character in _CHINESE_DIGITS for character in raw):
+            return int("".join(str(_CHINESE_DIGITS[character]) for character in raw))
+        small_units = {"十": 10, "百": 100, "千": 1_000}
+        result = 0
+        number = 0
+        last_unit_value = 0
+        last_unit_index = -1
+        for character in raw:
+            if character in _CHINESE_DIGITS:
+                number = _CHINESE_DIGITS[character]
+            elif character in small_units:
+                result += (number or 1) * small_units[character]
+                number = 0
+                last_unit_value = small_units[character]
+                last_unit_index = raw.index(character, last_unit_index + 1)
+            else:
+                return None
+        if (
+            number
+            and last_unit_value >= 100
+            and "零" not in raw[last_unit_index + 1 :]
+            and "〇" not in raw[last_unit_index + 1 :]
+        ):
+            return None
+        return result + number
+
+    def below_yi(raw: str) -> int | None:
+        separators = tuple(character for character in ("萬", "万") if character in raw)
+        if len(separators) > 1 or (separators and raw.count(separators[0]) != 1):
+            return None
+        if not separators:
+            return section(raw)
+        left, right = raw.split(separators[0])
+        if not left or (
+            right
+            and not right.startswith(("零", "〇"))
+            and not any(unit in right for unit in ("十", "百", "千"))
+        ):
+            return None
+        high = section(left)
+        low = section(right)
+        if high is None or low is None:
+            return None
+        return high * 10_000 + low
+
+    yi_separators = tuple(character for character in ("億", "亿") if character in value)
+    if len(yi_separators) > 1 or (yi_separators and value.count(yi_separators[0]) != 1):
+        return None
+    if not yi_separators:
+        return below_yi(value)
+    left, right = value.split(yi_separators[0])
+    if not left or (
+        right
+        and not right.startswith(("零", "〇"))
+        and not any(unit in right for unit in ("十", "百", "千", "萬", "万"))
+    ):
+        return None
+    high = below_yi(left)
+    low = below_yi(right)
+    if high is None or low is None:
+        return None
+    return high * 100_000_000 + low
+
+
+def _valid_canonical_date(value: tuple[object, ...]) -> bool:
+    _kind, year, month, day, hour, minute = value
+    if not isinstance(month, int) or not isinstance(day, int):
+        return False
+    if (hour is None) != (minute is None):
+        return False
+    if hour is not None and (
+        not isinstance(hour, int)
+        or not isinstance(minute, int)
+        or not 0 <= hour <= 23
+        or not 0 <= minute <= 59
+    ):
+        return False
+    try:
+        date(int(year) if isinstance(year, int) else 2000, int(month), int(day))
+    except ValueError:
+        return False
+    return True
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _has_valid_origin_independence(
+    authority_class: ClaimAuthorityClass,
+    source_records: Sequence[Mapping[str, object]],
+    dependency_records: Sequence[Mapping[str, object]],
+    expected_origins: tuple[str, ...],
+) -> bool:
+    report_to_origins: dict[str, set[str]] = {}
+    origin_to_reports: dict[str, set[str]] = {}
+    for record in dependency_records:
+        report = record.get("originating_report_id")
+        origin = record.get("evidential_origin_id")
+        if (
+            not isinstance(report, str)
+            or not report
+            or not isinstance(origin, str)
+            or not origin
+        ):
+            return False
+        report_to_origins.setdefault(report, set()).add(origin)
+        origin_to_reports.setdefault(origin, set()).add(report)
+    if (
+        not report_to_origins
+        or any(len(values) != 1 for values in report_to_origins.values())
+        or any(len(values) != 1 for values in origin_to_reports.values())
+        or set(origin_to_reports) != set(expected_origins)
+    ):
+        return False
+    if authority_class is not ClaimAuthorityClass.INDEPENDENT_RELIABLE:
+        return True
+    source_ids = {record.get("source_id") for record in source_records}
+    canonical_urls = {record.get("canonical_url") for record in source_records}
+    source_reports = {record.get("originating_report_id") for record in source_records}
+    artefact_digests = {
+        record.get("originating_artefact_digest") for record in source_records
+    }
+    return (
+        len(source_records) >= 2
+        and len(source_ids) == len(source_records)
+        and len(canonical_urls) == len(source_records)
+        and len(source_reports) == len(source_records)
+        and len(artefact_digests) == len(source_records)
+        and len(report_to_origins) >= 2
+    )
+
+
+def _canonical_localised_fact(value: str) -> tuple[object, ...] | None:
+    value = value.strip()
+    english_date = re.fullmatch(
+        r"(\d{1,2})\s+([A-Za-z]+)(?:\s+(\d{4}))?"
+        r"(?:\s+at\s+(\d{1,2}):(\d{2}))?",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if english_date:
+        month = _ENGLISH_MONTHS.get(english_date.group(2).casefold())
+        if month is not None:
+            result = (
+                "DATE_TIME",
+                int(english_date.group(3)) if english_date.group(3) else None,
+                month,
+                int(english_date.group(1)),
+                int(english_date.group(4)) if english_date.group(4) else None,
+                int(english_date.group(5)) if english_date.group(5) else None,
+            )
+            if not _valid_canonical_date(result):
+                return None
+            return result
+    chinese_date = re.fullmatch(
+        r"(?:(\d{4}|[零〇一二三四五六七八九十]+)年)?"
+        r"(\d{1,2}|[零〇一二三四五六七八九十]+)月"
+        r"(\d{1,2}|[零〇一二三四五六七八九十]+)(?:日|號|号)"
+        r"(?:(上午|下午)?(\d{1,2}|[零〇一二三四五六七八九十]+)"
+        r"(?:時|时|點|点)(\d{1,2}|[零〇一二三四五六七八九十]+)分?)?",
+        value,
+    )
+    if chinese_date:
+        year = (
+            _chinese_integer(chinese_date.group(1)) if chinese_date.group(1) else None
+        )
+        month = _chinese_integer(chinese_date.group(2))
+        day = _chinese_integer(chinese_date.group(3))
+        hour = (
+            _chinese_integer(chinese_date.group(5)) if chinese_date.group(5) else None
+        )
+        minute = (
+            _chinese_integer(chinese_date.group(6)) if chinese_date.group(6) else None
+        )
+        if (chinese_date.group(1) is not None and year is None) or (
+            chinese_date.group(5) is not None and (hour is None or minute is None)
+        ):
+            return None
+        if hour is not None:
+            if chinese_date.group(4) == "上午" and hour == 12:
+                hour = 0
+            elif chinese_date.group(4) == "下午" and hour < 12:
+                hour += 12
+        result = ("DATE_TIME", year, month, day, hour, minute)
+        if not _valid_canonical_date(result):
+            return None
+        return result
+    english_money = re.fullmatch(r"HK\$\s*([\d,]+)", value, re.IGNORECASE)
+    if english_money:
+        return ("MONEY", "HKD", int(english_money.group(1).replace(",", "")))
+    chinese_money = re.fullmatch(
+        r"([零〇一二三四五六七八九十百千萬万億亿兩两]+)(?:港元|元)", value
+    )
+    if chinese_money:
+        amount = _chinese_integer(chinese_money.group(1))
+        if amount is None:
+            return None
+        return ("MONEY", "HKD", amount)
+    number_words = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+    }
+    english_duration = re.fullmatch(
+        r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+"
+        r"(hours?|minutes?)",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if english_duration:
+        raw_number = english_duration.group(1).casefold()
+        number = int(raw_number) if raw_number.isdigit() else number_words[raw_number]
+        minutes = (
+            number * 60
+            if english_duration.group(2).casefold().startswith("hour")
+            else number
+        )
+        return ("DURATION_MINUTES", minutes)
+    chinese_duration = re.fullmatch(
+        r"([零〇一二三四五六七八九十百千兩两\d]+)(小時|小时|分鐘|分钟)",
+        value,
+    )
+    if chinese_duration:
+        number = _chinese_integer(chinese_duration.group(1))
+        if number is None:
+            return None
+        minutes = (
+            number * 60 if chinese_duration.group(2) in {"小時", "小时"} else number
+        )
+        return ("DURATION_MINUTES", minutes)
+    english_count = re.fullmatch(
+        r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+"
+        r"(schools?|hospitals?|clinics?|buses?|roads?)",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if english_count:
+        raw_number = english_count.group(1).casefold()
+        number = int(raw_number) if raw_number.isdigit() else number_words[raw_number]
+        objects = {
+            "school": "SCHOOL",
+            "hospital": "HOSPITAL",
+            "clinic": "CLINIC",
+            "bus": "BUS",
+            "road": "ROAD",
+        }
+        return (
+            "COUNT",
+            objects[english_count.group(2).casefold().removesuffix("s")],
+            number,
+        )
+    chinese_count = re.fullmatch(
+        r"([零〇一二三四五六七八九十百千兩两\d]+)"
+        r"(?:間|间|所|間|部|輛|辆|條|条)"
+        r"(學校|学校|醫院|医院|診所|诊所|巴士|道路)",
+        value,
+    )
+    if chinese_count:
+        number = _chinese_integer(chinese_count.group(1))
+        if number is None:
+            return None
+        objects = {
+            "學校": "SCHOOL",
+            "学校": "SCHOOL",
+            "醫院": "HOSPITAL",
+            "医院": "HOSPITAL",
+            "診所": "CLINIC",
+            "诊所": "CLINIC",
+            "巴士": "BUS",
+            "道路": "ROAD",
+        }
+        return ("COUNT", objects[chinese_count.group(2)], number)
+    return None
+
+
+class Evid012QualificationTest(StrEnum):
+    LAW_RIGHT_STATUS_POLICY = "LAW_RIGHT_STATUS_POLICY"
+    SAFETY_OR_PUBLIC_HEALTH = "SAFETY_OR_PUBLIC_HEALTH"
+    ESSENTIAL_SERVICE_DISRUPTION = "ESSENTIAL_SERVICE_DISRUPTION"
+    HOUSEHOLD_PRACTICAL_EFFECT = "HOUSEHOLD_PRACTICAL_EFFECT"
+    OFFICIAL_ACTION_OR_DEADLINE = "OFFICIAL_ACTION_OR_DEADLINE"
+    EXCEPTIONAL_PUBLIC_IMPORTANCE = "EXCEPTIONAL_PUBLIC_IMPORTANCE"
+
+
+class GovernedClaimStatus(StrEnum):
+    CONFIRMED_FACT = "CONFIRMED_FACT"
+    EXPRESSLY_PROVISIONAL_FACT = "EXPRESSLY_PROVISIONAL_FACT"
+    ATTRIBUTED_CLAIM_OR_OPINION = "ATTRIBUTED_CLAIM_OR_OPINION"
+    PUBLISHED_ANALYSIS_OR_FORECAST = "PUBLISHED_ANALYSIS_OR_FORECAST"
+    CONTEXTUAL_BACKGROUND = "CONTEXTUAL_BACKGROUND"
+
+
+class ClaimAuthorityClass(StrEnum):
+    RESPONSIBLE_PRIMARY = "RESPONSIBLE_PRIMARY"
+    INDEPENDENT_RELIABLE = "INDEPENDENT_RELIABLE"
+
+
+@dataclass(frozen=True, slots=True)
+class GovernedClaimEvidence:
+    claim_id: str
+    claim: str
+    passage_index: int
+    supporting_excerpt: str
+    source_ids: tuple[str, ...]
+    source_record_ids: tuple[str, ...]
+    source_authority_decision_ids: tuple[str, ...]
+    rights_decision_ids: tuple[str, ...]
+    dependency_evidence_ids: tuple[str, ...]
+    evidential_origin_ids: tuple[str, ...]
+    authority_class: ClaimAuthorityClass
+    authority_scope: str
+    status: GovernedClaimStatus
+    attribution: str
+    rendered_assertion_zh_hant_hk: str
+    claim_role: Literal["HEADLINE", "SUBSTANTIVE", "CONTEXT"]
+    semantic_relation_evidence_id: str
+    localised_factual_expressions: tuple[tuple[str, str], ...] = ()
+    named_entity_evidence: tuple[tuple[str, str, str], ...] = ()
+    named_entities: tuple[str, ...] = ()
+    rendered_named_entities: tuple[str, ...] = ()
+    quotations: tuple[str, ...] = ()
+    certainty: Literal["CONFIRMED"] = "CONFIRMED"
+    originality_basis: Literal["FACTUAL_REWRITE_REQUIRED"] = "FACTUAL_REWRITE_REQUIRED"
+    originality_policy_version: str = ORIGINALITY_POLICY_VERSION
+    admitted_use: Literal["PUBLICATION_EVIDENCE"] = "PUBLICATION_EVIDENCE"
+    policy_version: str = GOVERNED_CLAIM_POLICY_VERSION
+
+    def __post_init__(self) -> None:
+        required = (
+            self.claim_id,
+            self.claim,
+            self.supporting_excerpt,
+            self.authority_scope,
+            self.attribution,
+            self.rendered_assertion_zh_hant_hk,
+            self.semantic_relation_evidence_id,
+        )
+        if any(not isinstance(value, str) or not value.strip() for value in required):
+            raise ValueError("governed claim evidence fields are required")
+        if (
+            not isinstance(self.passage_index, int)
+            or isinstance(self.passage_index, bool)
+            or self.passage_index < 0
+        ):
+            raise ValueError("governed claim passage index must be non-negative")
+        if any(
+            not values
+            for values in (
+                self.source_ids,
+                self.source_record_ids,
+                self.source_authority_decision_ids,
+                self.rights_decision_ids,
+                self.dependency_evidence_ids,
+                self.evidential_origin_ids,
+            )
+        ):
+            raise ValueError(
+                "governed claim requires source, authority, rights and dependency provenance"
+            )
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for values in (
+                self.source_ids,
+                self.source_record_ids,
+                self.source_authority_decision_ids,
+                self.rights_decision_ids,
+                self.dependency_evidence_ids,
+                self.evidential_origin_ids,
+                self.named_entities,
+                self.quotations,
+            )
+            for value in values
+        ):
+            raise ValueError("governed claim provenance values must be strings")
+        if len(set(self.source_ids)) != len(self.source_ids):
+            raise ValueError("governed claim source IDs must be unique")
+        if any(
+            len(set(values)) != len(values)
+            for values in (
+                self.source_record_ids,
+                self.source_authority_decision_ids,
+                self.rights_decision_ids,
+                self.dependency_evidence_ids,
+            )
+        ):
+            raise ValueError("governed claim provenance IDs must be unique")
+        if len(set(self.evidential_origin_ids)) != len(self.evidential_origin_ids):
+            raise ValueError("governed claim evidential origins must be unique")
+        entity_texts = tuple(item[0] for item in self.named_entity_evidence)
+        entity_types = frozenset(
+            {
+                "PERSON",
+                "ORGANISATION",
+                "PLACE",
+                "OFFICIAL_TITLE",
+                "OFFICIAL_TERM",
+                "PRODUCT",
+            }
+        )
+        if (
+            entity_texts != self.named_entities
+            or self.rendered_named_entities != self.named_entities
+            or len(set(entity_texts)) != len(entity_texts)
+            or any(
+                len(item) != 3
+                or any(
+                    not isinstance(value, str) or not value.strip() for value in item
+                )
+                or item[1] not in entity_types
+                for item in self.named_entity_evidence
+            )
+            or len({item[2] for item in self.named_entity_evidence})
+            != len(self.named_entity_evidence)
+            or any(
+                text in {self.claim, self.supporting_excerpt}
+                or len(text) > 80
+                or re.search(r"[\n。！？!?；;：:]", text)
+                or not _has_bounded_named_entity_shape(text, entity_type)
+                for text, entity_type, _record_id in self.named_entity_evidence
+            )
+            or any(
+                not isinstance(text, str)
+                or not text.strip()
+                or len(text) > 80
+                or re.search(r"[\n。！？!?；;：:]", text)
+                for text in self.rendered_named_entities
+            )
+        ):
+            raise ValueError("named entities require exact typed retained evidence")
+        if any(
+            not isinstance(item, (tuple, list))
+            or len(item) != 2
+            or any(not isinstance(value, str) or not value.strip() for value in item)
+            for item in self.localised_factual_expressions
+        ):
+            raise ValueError(
+                "localised factual expressions must be source-target pairs"
+            )
+        localised_sources = tuple(
+            source for source, _target in self.localised_factual_expressions
+        )
+        localised_targets = tuple(
+            target for _source, target in self.localised_factual_expressions
+        )
+        if (
+            len(set(localised_sources)) != len(localised_sources)
+            or len(set(localised_targets)) != len(localised_targets)
+            or any(
+                source not in self.claim and source not in self.supporting_excerpt
+                for source in localised_sources
+            )
+            or any(
+                target not in self.rendered_assertion_zh_hant_hk
+                for target in localised_targets
+            )
+            or any(
+                _canonical_localised_fact(source) is None
+                or _canonical_localised_fact(source)
+                != _canonical_localised_fact(target)
+                for source, target in self.localised_factual_expressions
+            )
+        ):
+            raise ValueError(
+                "localised factual expressions must bind equivalent exact claim facts"
+            )
+        if self.admitted_use != "PUBLICATION_EVIDENCE":
+            raise ValueError("governed claim is not admitted for publication evidence")
+        if self.claim_role not in {"HEADLINE", "SUBSTANTIVE", "CONTEXT"}:
+            raise ValueError("governed claim role is not supported")
+        if self.certainty != "CONFIRMED":
+            raise ValueError("governed claim certainty is not supported")
+        if self.originality_basis != "FACTUAL_REWRITE_REQUIRED":
+            raise ValueError("governed claim originality basis is not supported")
+        if self.policy_version != GOVERNED_CLAIM_POLICY_VERSION:
+            raise ValueError("governed claim policy version is not supported")
+        if self.originality_policy_version != ORIGINALITY_POLICY_VERSION:
+            raise ValueError(
+                "governed claim originality policy version is not supported"
+            )
+        if self.rendered_assertion_zh_hant_hk in {
+            self.claim,
+            self.supporting_excerpt,
+        }:
+            raise ValueError("governed claim rendering must be an original assertion")
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceGateEvidence:
+    gate: Literal["CLAIM_TRACEABILITY", "EVIDENCE_SUFFICIENCY", "SOURCE_AUTHORITY"]
+    result: Literal["PASS"]
+    governed_claim_ids: tuple[str, ...]
+    policy_version: str = EVIDENCE_GATE_POLICY_VERSION
+
+    def __post_init__(self) -> None:
+        if (
+            self.gate
+            not in {
+                "CLAIM_TRACEABILITY",
+                "EVIDENCE_SUFFICIENCY",
+                "SOURCE_AUTHORITY",
+            }
+            or self.result != "PASS"
+        ):
+            raise ValueError("evidence gate or result is not supported")
+        if not self.governed_claim_ids or any(
+            not isinstance(value, str) or not value.strip()
+            for value in self.governed_claim_ids
+        ):
+            raise ValueError("evidence gate requires governed claim provenance")
+        if len(set(self.governed_claim_ids)) != len(self.governed_claim_ids):
+            raise ValueError("evidence gate claim provenance must be unique")
+        if self.policy_version != EVIDENCE_GATE_POLICY_VERSION:
+            raise ValueError("evidence gate policy version is not supported")
+
+
+@dataclass(frozen=True, slots=True)
+class QualificationEvidence:
+    test: Evid012QualificationTest
+    governed_claim_id: str
+    qualification_record_id: str
+    test_evidence: tuple[tuple[str, str], ...]
+    policy_version: str = EVID_012_POLICY_VERSION
+
+    def __post_init__(self) -> None:
+        try:
+            canonical_test = Evid012QualificationTest(self.test)
+        except ValueError:
+            raise ValueError("qualification test is not in EVID-012") from None
+        object.__setattr__(self, "test", canonical_test)
+        if (
+            not isinstance(self.governed_claim_id, str)
+            or not self.governed_claim_id.strip()
+            or not isinstance(self.qualification_record_id, str)
+            or not self.qualification_record_id.strip()
+        ):
+            raise ValueError("qualification governed claim is required")
+        if self.policy_version != EVID_012_POLICY_VERSION:
+            raise ValueError("qualification policy version is not supported")
+        evidence = dict(self.test_evidence)
+        if len(evidence) != len(self.test_evidence) or any(
+            not key.strip() or not value.strip() for key, value in self.test_evidence
+        ):
+            raise ValueError("qualification test evidence must be unique and complete")
+        allowed: dict[Evid012QualificationTest, dict[str, frozenset[str] | None]] = {
+            Evid012QualificationTest.LAW_RIGHT_STATUS_POLICY: {
+                "change_kind": frozenset(
+                    {"LAW", "RIGHT", "STATUS", "OFFICIAL_DEADLINE", "PUBLIC_POLICY"}
+                ),
+                "event_polarity": frozenset({"AFFIRMED"}),
+                "change_relation": frozenset({"NEW_OR_CHANGED_STATE"}),
+                "material_relation_span": None,
+                "new_state": None,
+            },
+            Evid012QualificationTest.SAFETY_OR_PUBLIC_HEALTH: {
+                "effect_class": frozenset(
+                    {
+                        "INJURY_RISK",
+                        "PUBLIC_HEALTH_WARNING",
+                        "EVACUATION",
+                        "MATERIAL_EXPOSURE",
+                    }
+                ),
+                "event_polarity": frozenset({"AFFIRMED"}),
+                "effect_relation": frozenset({"MATERIAL_EFFECT"}),
+                "material_relation_span": None,
+                "affected_group": None,
+            },
+            Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION: {
+                "service_kind": frozenset(
+                    {"TRANSPORT", "UTILITY", "SCHOOL", "WORKPLACE", "LOCALITY"}
+                ),
+                "event_polarity": frozenset({"AFFIRMED"}),
+                "duration_relation": frozenset({"DISRUPTION_DURATION"}),
+                "duration_minutes": None,
+                "affected_group": None,
+            },
+            Evid012QualificationTest.HOUSEHOLD_PRACTICAL_EFFECT: {
+                "domain": frozenset(
+                    {
+                        "MONEY",
+                        "WORK",
+                        "HOUSING",
+                        "EDUCATION",
+                        "HEALTHCARE",
+                        "UK_HONG_KONG_TRAVEL",
+                    }
+                ),
+                "event_polarity": frozenset({"AFFIRMED"}),
+                "effect_relation": frozenset({"MATERIAL_PRACTICAL_EFFECT"}),
+                "material_relation_span": None,
+                "practical_effect": None,
+            },
+            Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE: {
+                "action_class": frozenset(
+                    {"INSTRUCTION", "PROCESS", "OFFICIAL_DEADLINE"}
+                ),
+                "event_polarity": frozenset({"AFFIRMED"}),
+                "action_relation": frozenset({"NEW_OR_CHANGED_OFFICIAL_ACTION"}),
+                "material_relation_span": None,
+                "reader_action": None,
+            },
+            Evid012QualificationTest.EXCEPTIONAL_PUBLIC_IMPORTANCE: {
+                "importance_class": frozenset(
+                    {
+                        "HONG_KONG_WIDE",
+                        "INTERNATIONAL_EMERGENCY",
+                        "CONSTITUTIONAL_CHANGE",
+                    }
+                ),
+                "event_polarity": frozenset({"AFFIRMED"}),
+                "importance_relation": frozenset({"CURRENT_EXCEPTIONAL_IMPORTANCE"}),
+                "material_relation_span": None,
+                "affected_group": None,
+            },
+        }
+        required = allowed[canonical_test]
+        if set(evidence) != set(required) or any(
+            permitted is not None and evidence[field] not in permitted
+            for field, permitted in required.items()
+        ):
+            raise ValueError("qualification test evidence does not satisfy EVID-012")
+        if canonical_test is Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION:
+            try:
+                duration_minutes = int(evidence["duration_minutes"])
+            except ValueError:
+                raise ValueError(
+                    "qualification disruption duration must be an integer"
+                ) from None
+            if duration_minutes < 60:
+                raise ValueError(
+                    "qualification disruption is below the material duration floor"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,12 +1119,57 @@ class EvidencePackage:
     source_ids: tuple[str, ...]
     observation_digests: tuple[str, ...]
     passages: tuple[str, ...]
+    substantive_new_information: tuple[str, ...] = ()
+    governed_claims: tuple[GovernedClaimEvidence, ...] = ()
+    qualification_evidence: tuple[QualificationEvidence, ...] = ()
+    selection_rationale: str = ""
+    geography: tuple[str, ...] = ()
+    categories: tuple[str, ...] = ()
+    evidence_gate_results: tuple[tuple[str, str], ...] = ()
+    evidence_gate_evidence: tuple[EvidenceGateEvidence, ...] = ()
+    freshness_result: str = "MISSING"
+    integrity_result: str = "MISSING"
+    explicit_exclusions: tuple[str, ...] = ()
+    resolved_evidence_records: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.signal_ids or not self.lead_ids or not self.observation_digests:
-            raise ValueError("Evidence Package requires Signal, Lead and retained observations")
+            raise ValueError(
+                "Evidence Package requires Signal, Lead and retained observations"
+            )
         if not self.passages:
             raise ValueError("Evidence Package requires at least one retained passage")
+        gate_names = tuple(name for name, _result in self.evidence_gate_results)
+        if len(set(gate_names)) != len(gate_names):
+            raise ValueError("Evidence Package gate names must be unique")
+        if any(
+            result not in {"PASS", "HOLD", "FAIL", "MISSING"}
+            for _name, result in self.evidence_gate_results
+        ):
+            raise ValueError("Evidence Package gate result is not canonical")
+        claim_ids = tuple(item.claim_id for item in self.governed_claims)
+        if len(set(claim_ids)) != len(claim_ids):
+            raise ValueError("Evidence Package governed claim IDs must be unique")
+        qualification_record_ids = tuple(
+            item.qualification_record_id for item in self.qualification_evidence
+        )
+        qualification_logical_ids = tuple(
+            (item.test, item.governed_claim_id) for item in self.qualification_evidence
+        )
+        if len(set(qualification_record_ids)) != len(qualification_record_ids) or len(
+            set(qualification_logical_ids)
+        ) != len(qualification_logical_ids):
+            raise ValueError("Evidence Package qualification evidence must be unique")
+        if any(
+            len(set(values)) != len(values)
+            for values in (
+                self.substantive_new_information,
+                self.geography,
+                self.categories,
+                self.explicit_exclusions,
+            )
+        ):
+            raise ValueError("Evidence Package governed inventories must be unique")
 
     @property
     def digest(self) -> str:
@@ -36,6 +1183,91 @@ class EvidencePackage:
                     "source_ids": list(self.source_ids),
                     "observation_digests": list(self.observation_digests),
                     "passages": list(self.passages),
+                    "substantive_new_information": list(
+                        self.substantive_new_information
+                    ),
+                    "governed_claims": [
+                        {
+                            "claim_id": item.claim_id,
+                            "claim": item.claim,
+                            "passage_index": item.passage_index,
+                            "supporting_excerpt": item.supporting_excerpt,
+                            "source_ids": list(item.source_ids),
+                            "source_record_ids": list(item.source_record_ids),
+                            "source_authority_decision_ids": list(
+                                item.source_authority_decision_ids
+                            ),
+                            "rights_decision_ids": list(item.rights_decision_ids),
+                            "dependency_evidence_ids": list(
+                                item.dependency_evidence_ids
+                            ),
+                            "evidential_origin_ids": list(item.evidential_origin_ids),
+                            "authority_class": item.authority_class.value,
+                            "authority_scope": item.authority_scope,
+                            "status": item.status.value,
+                            "attribution": item.attribution,
+                            "rendered_assertion_zh_hant_hk": (
+                                item.rendered_assertion_zh_hant_hk
+                            ),
+                            "claim_role": item.claim_role,
+                            "semantic_relation_evidence_id": (
+                                item.semantic_relation_evidence_id
+                            ),
+                            "localised_factual_expressions": [
+                                list(value)
+                                for value in item.localised_factual_expressions
+                            ],
+                            "named_entity_evidence": [
+                                list(value) for value in item.named_entity_evidence
+                            ],
+                            "named_entities": list(item.named_entities),
+                            "rendered_named_entities": list(
+                                item.rendered_named_entities
+                            ),
+                            "quotations": list(item.quotations),
+                            "certainty": item.certainty,
+                            "originality_basis": item.originality_basis,
+                            "originality_policy_version": (
+                                item.originality_policy_version
+                            ),
+                            "admitted_use": item.admitted_use,
+                            "policy_version": item.policy_version,
+                        }
+                        for item in self.governed_claims
+                    ],
+                    "qualification_evidence": [
+                        {
+                            "test": item.test.value,
+                            "governed_claim_id": item.governed_claim_id,
+                            "qualification_record_id": item.qualification_record_id,
+                            "test_evidence": [
+                                list(value) for value in item.test_evidence
+                            ],
+                            "policy_version": item.policy_version,
+                        }
+                        for item in self.qualification_evidence
+                    ],
+                    "selection_rationale": self.selection_rationale,
+                    "geography": list(self.geography),
+                    "categories": list(self.categories),
+                    "evidence_gate_results": [
+                        list(item) for item in self.evidence_gate_results
+                    ],
+                    "evidence_gate_evidence": [
+                        {
+                            "gate": item.gate,
+                            "result": item.result,
+                            "governed_claim_ids": list(item.governed_claim_ids),
+                            "policy_version": item.policy_version,
+                        }
+                        for item in self.evidence_gate_evidence
+                    ],
+                    "freshness_result": self.freshness_result,
+                    "integrity_result": self.integrity_result,
+                    "explicit_exclusions": list(self.explicit_exclusions),
+                    "resolved_evidence_records": [
+                        list(item) for item in self.resolved_evidence_records
+                    ],
                 }
             )
         )
@@ -57,3 +1289,623 @@ def package_for(candidate: StoryCandidateRecord) -> EvidencePackage:
         ),
         passages=passages,
     )
+
+
+def _decode_governed_package(
+    candidate: StoryCandidateRecord,
+    base: EvidencePackage,
+    raw: str,
+) -> EvidencePackage:
+    package_fields = {
+        "schema_version",
+        "candidate_id",
+        "hypothesis_id",
+        "base_package_digest",
+        "governed_claims",
+        "substantive_new_information",
+        "qualification_evidence",
+        "selection_rationale",
+        "geography",
+        "categories",
+        "evidence_gate_results",
+        "evidence_gate_evidence",
+        "freshness_result",
+        "integrity_result",
+        "explicit_exclusions",
+    }
+    claim_fields = {
+        "claim_id",
+        "claim",
+        "passage_index",
+        "supporting_excerpt",
+        "source_ids",
+        "source_record_ids",
+        "source_authority_decision_ids",
+        "rights_decision_ids",
+        "dependency_evidence_ids",
+        "evidential_origin_ids",
+        "authority_class",
+        "authority_scope",
+        "status",
+        "attribution",
+        "rendered_assertion_zh_hant_hk",
+        "claim_role",
+        "semantic_relation_evidence_id",
+        "localised_factual_expressions",
+        "named_entity_evidence",
+        "named_entities",
+        "rendered_named_entities",
+        "quotations",
+        "certainty",
+        "originality_basis",
+        "originality_policy_version",
+        "admitted_use",
+        "policy_version",
+    }
+    qualification_fields = {
+        "test",
+        "governed_claim_id",
+        "qualification_record_id",
+        "test_evidence",
+        "policy_version",
+    }
+    gate_fields = {"gate", "result", "governed_claim_ids", "policy_version"}
+
+    def string_list(item: object) -> bool:
+        return isinstance(item, list) and all(isinstance(value, str) for value in item)
+
+    try:
+        value = json.loads(raw)
+        if (
+            not isinstance(value, dict)
+            or set(value) != package_fields
+            or value["schema_version"] != GOVERNED_INPUT_SCHEMA_VERSION
+            or value["candidate_id"] != candidate.candidate_id
+            or value["hypothesis_id"] != candidate.hypothesis_id
+            or value["base_package_digest"] != base.digest
+            or canonical_json_bytes(value).decode("utf-8") != raw
+        ):
+            return base
+        if (
+            not isinstance(value["governed_claims"], list)
+            or not isinstance(value["qualification_evidence"], list)
+            or not isinstance(value["evidence_gate_evidence"], list)
+            or not string_list(value["substantive_new_information"])
+            or not string_list(value["geography"])
+            or not string_list(value["categories"])
+            or not string_list(value["explicit_exclusions"])
+            or not isinstance(value["selection_rationale"], str)
+            or not isinstance(value["freshness_result"], str)
+            or not isinstance(value["integrity_result"], str)
+            or not isinstance(value["evidence_gate_results"], list)
+            or any(
+                not isinstance(item, list)
+                or len(item) != 2
+                or not all(isinstance(part, str) for part in item)
+                for item in value["evidence_gate_results"]
+            )
+        ):
+            return base
+        if (
+            any(
+                not isinstance(item, dict) or set(item) != claim_fields
+                for item in value["governed_claims"]
+            )
+            or any(
+                not isinstance(item, dict) or set(item) != qualification_fields
+                for item in value["qualification_evidence"]
+            )
+            or any(
+                not isinstance(item, dict) or set(item) != gate_fields
+                for item in value["evidence_gate_evidence"]
+            )
+        ):
+            return base
+        if (
+            any(
+                not string_list(item[field])
+                for item in value["governed_claims"]
+                for field in (
+                    "source_ids",
+                    "source_record_ids",
+                    "source_authority_decision_ids",
+                    "rights_decision_ids",
+                    "dependency_evidence_ids",
+                    "evidential_origin_ids",
+                    "named_entities",
+                    "rendered_named_entities",
+                    "quotations",
+                )
+            )
+            or any(
+                not isinstance(item["localised_factual_expressions"], list)
+                or any(
+                    not isinstance(part, list)
+                    or len(part) != 2
+                    or not all(isinstance(value, str) for value in part)
+                    for part in item["localised_factual_expressions"]
+                )
+                for item in value["governed_claims"]
+            )
+            or any(
+                not isinstance(item["named_entity_evidence"], list)
+                or any(
+                    not isinstance(part, list)
+                    or len(part) != 3
+                    or not all(isinstance(value, str) for value in part)
+                    for part in item["named_entity_evidence"]
+                )
+                for item in value["governed_claims"]
+            )
+            or any(
+                not isinstance(item["test_evidence"], list)
+                or any(
+                    not isinstance(part, list)
+                    or len(part) != 2
+                    or not all(isinstance(value, str) for value in part)
+                    for part in item["test_evidence"]
+                )
+                for item in value["qualification_evidence"]
+            )
+            or any(
+                not string_list(item["governed_claim_ids"])
+                for item in value["evidence_gate_evidence"]
+            )
+        ):
+            return base
+        claims = tuple(
+            GovernedClaimEvidence(
+                claim_id=item["claim_id"],
+                claim=item["claim"],
+                passage_index=item["passage_index"],
+                supporting_excerpt=item["supporting_excerpt"],
+                source_ids=tuple(item["source_ids"]),
+                source_record_ids=tuple(item["source_record_ids"]),
+                source_authority_decision_ids=tuple(
+                    item["source_authority_decision_ids"]
+                ),
+                rights_decision_ids=tuple(item["rights_decision_ids"]),
+                dependency_evidence_ids=tuple(item["dependency_evidence_ids"]),
+                evidential_origin_ids=tuple(item["evidential_origin_ids"]),
+                authority_class=ClaimAuthorityClass(item["authority_class"]),
+                authority_scope=item["authority_scope"],
+                status=GovernedClaimStatus(item["status"]),
+                attribution=item["attribution"],
+                rendered_assertion_zh_hant_hk=item["rendered_assertion_zh_hant_hk"],
+                claim_role=item["claim_role"],
+                semantic_relation_evidence_id=item["semantic_relation_evidence_id"],
+                localised_factual_expressions=tuple(
+                    tuple(value) for value in item["localised_factual_expressions"]
+                ),
+                named_entity_evidence=tuple(
+                    tuple(value) for value in item["named_entity_evidence"]
+                ),
+                named_entities=tuple(item["named_entities"]),
+                rendered_named_entities=tuple(item["rendered_named_entities"]),
+                quotations=tuple(item["quotations"]),
+                certainty=item["certainty"],
+                originality_basis=item["originality_basis"],
+                originality_policy_version=item["originality_policy_version"],
+                admitted_use=item["admitted_use"],
+                policy_version=item["policy_version"],
+            )
+            for item in value["governed_claims"]
+        )
+        return EvidencePackage(
+            candidate_id=base.candidate_id,
+            hypothesis_id=base.hypothesis_id,
+            signal_ids=base.signal_ids,
+            lead_ids=base.lead_ids,
+            source_ids=base.source_ids,
+            observation_digests=base.observation_digests,
+            passages=base.passages,
+            substantive_new_information=tuple(value["substantive_new_information"]),
+            governed_claims=claims,
+            qualification_evidence=tuple(
+                QualificationEvidence(
+                    Evid012QualificationTest(item["test"]),
+                    item["governed_claim_id"],
+                    item["qualification_record_id"],
+                    tuple(tuple(value) for value in item["test_evidence"]),
+                    item["policy_version"],
+                )
+                for item in value["qualification_evidence"]
+            ),
+            selection_rationale=value["selection_rationale"],
+            geography=tuple(value["geography"]),
+            categories=tuple(value["categories"]),
+            evidence_gate_results=tuple(
+                tuple(item) for item in value["evidence_gate_results"]
+            ),
+            evidence_gate_evidence=tuple(
+                EvidenceGateEvidence(
+                    item["gate"],
+                    item["result"],
+                    tuple(item["governed_claim_ids"]),
+                    item["policy_version"],
+                )
+                for item in value["evidence_gate_evidence"]
+            ),
+            freshness_result=value["freshness_result"],
+            integrity_result=value["integrity_result"],
+            explicit_exclusions=tuple(value["explicit_exclusions"]),
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return base
+
+
+def retained_package_for(
+    candidate: StoryCandidateRecord,
+    *,
+    proving_store: str,
+) -> EvidencePackage:
+    """Load one controller-approved sidecar package; source content cannot mint it."""
+
+    base = package_for(candidate)
+    approval_key = os.environ.get("NEWSROOM_EVIDENCE_APPROVAL_KEY", "").encode("utf-8")
+    if len(approval_key) < 32:
+        return base
+    connection = sqlite3.connect(proving_store)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        existing_tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+                "('proving_write_evidence_packages','proving_write_evidence_records')"
+            )
+        }
+        if existing_tables != {
+            "proving_write_evidence_packages",
+            "proving_write_evidence_records",
+        }:
+            return base
+        row = connection.execute(
+            "SELECT package_json, package_json_digest, approval_status, "
+            "approval_record_json, approval_signature "
+            "FROM proving_write_evidence_packages WHERE candidate_id=?",
+            (candidate.candidate_id,),
+        ).fetchone()
+        if row is None or row[2] != "APPROVED" or not isinstance(row[0], str):
+            return base
+        raw = row[0]
+        approval_raw = row[3]
+        if (
+            not isinstance(approval_raw, str)
+            or row[1] != digest_bytes(raw.encode("utf-8"))
+            or not hmac.compare_digest(
+                str(row[4]),
+                hmac.new(
+                    approval_key,
+                    approval_raw.encode("utf-8"),
+                    hashlib.sha256,
+                ).hexdigest(),
+            )
+        ):
+            return base
+        try:
+            approval = json.loads(approval_raw)
+        except json.JSONDecodeError:
+            return base
+        package = _decode_governed_package(candidate, base, raw)
+        if package is base:
+            return base
+        records = _resolve_governed_records(connection, candidate, base, package)
+        if records is None:
+            return base
+        record_set_digest = digest_bytes(
+            canonical_json_bytes({"records": [list(item) for item in records]})
+        )
+        if canonical_json_bytes(approval).decode(
+            "utf-8"
+        ) != approval_raw or approval != {
+            "base_package_digest": base.digest,
+            "candidate_id": candidate.candidate_id,
+            "controller_principal": EVIDENCE_APPROVAL_PRINCIPAL,
+            "decision": "APPROVED",
+            "evidence_record_set_digest": record_set_digest,
+            "hypothesis_id": candidate.hypothesis_id,
+            "package_json_digest": row[1],
+            "policy_version": EVIDENCE_APPROVAL_POLICY_VERSION,
+        }:
+            return base
+        return replace(package, resolved_evidence_records=records)
+    finally:
+        connection.close()
+
+
+def _resolve_governed_records(
+    connection: sqlite3.Connection,
+    candidate: StoryCandidateRecord,
+    base: EvidencePackage,
+    package: EvidencePackage,
+) -> tuple[tuple[str, str], ...] | None:
+    def record_id_set(value: object) -> set[str] | None:
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            return None
+        return set(value)
+
+    def has_exact_source_ids(
+        record_ids: tuple[str, ...], expected_source_ids: tuple[str, ...]
+    ) -> bool:
+        source_ids = tuple(
+            records[record_id].get("source_id") for record_id in record_ids
+        )
+        return all(isinstance(source_id, str) for source_id in source_ids) and set(
+            source_ids
+        ) == set(expected_source_ids)
+
+    expected_types: dict[str, str] = {}
+    for claim in package.governed_claims:
+        for record_type, record_ids in (
+            ("SOURCE_RECORD", claim.source_record_ids),
+            ("SOURCE_AUTHORITY_DECISION", claim.source_authority_decision_ids),
+            ("RIGHTS_DECISION", claim.rights_decision_ids),
+            ("DEPENDENCY_EVIDENCE", claim.dependency_evidence_ids),
+        ):
+            for record_id in record_ids:
+                existing_type = expected_types.setdefault(record_id, record_type)
+                if existing_type != record_type:
+                    return None
+        existing_type = expected_types.setdefault(
+            claim.semantic_relation_evidence_id, "SEMANTIC_RELATION_EVIDENCE"
+        )
+        if existing_type != "SEMANTIC_RELATION_EVIDENCE":
+            return None
+    for qualification in package.qualification_evidence:
+        existing_type = expected_types.setdefault(
+            qualification.qualification_record_id, "QUALIFICATION_EVIDENCE"
+        )
+        if existing_type != "QUALIFICATION_EVIDENCE":
+            return None
+    for claim in package.governed_claims:
+        for _text, _entity_type, record_id in claim.named_entity_evidence:
+            existing_type = expected_types.setdefault(
+                record_id, "NAMED_ENTITY_EVIDENCE"
+            )
+            if existing_type != "NAMED_ENTITY_EVIDENCE":
+                return None
+    if not expected_types:
+        return None
+    placeholders = ",".join("?" for _item in expected_types)
+    rows = connection.execute(
+        "SELECT record_id, record_type, record_json, record_digest "
+        f"FROM proving_write_evidence_records WHERE record_id IN ({placeholders})",
+        tuple(sorted(expected_types)),
+    ).fetchall()
+    if len(rows) != len(expected_types):
+        return None
+    records: dict[str, dict[str, object]] = {}
+    digests: list[tuple[str, str]] = []
+    for record_id, record_type, record_raw, record_digest in rows:
+        if (
+            expected_types.get(record_id) != record_type
+            or not isinstance(record_raw, str)
+            or record_digest != digest_bytes(record_raw.encode("utf-8"))
+        ):
+            return None
+        try:
+            record = json.loads(record_raw)
+        except json.JSONDecodeError:
+            return None
+        if (
+            canonical_json_bytes(record).decode("utf-8") != record_raw
+            or record.get("record_id") != record_id
+            or record.get("record_type") != record_type
+            or record.get("candidate_id") != candidate.candidate_id
+            or record.get("base_package_digest") != base.digest
+            or record.get("status") != "CURRENT"
+            or set(record) != _RECORD_FIELDS_BY_TYPE.get(record_type)
+        ):
+            return None
+        records[record_id] = record
+        digests.append((record_id, record_digest))
+    source_urls = {(item.source_id, item.canonical_url) for item in candidate.items}
+    required_source_record_string_fields = (
+        "source_id",
+        "canonical_url",
+        "publisher",
+        "responsible_body",
+        "source_type",
+        "authority_class",
+        "publication_time",
+        "retrieval_time",
+        "geography",
+        "language",
+        "rights_decision_id",
+        "originating_report_id",
+        "originating_artefact_digest",
+    )
+    for claim in package.governed_claims:
+        if claim.passage_index >= len(candidate.items):
+            return None
+        source_records = [records[record_id] for record_id in claim.source_record_ids]
+        if not has_exact_source_ids(claim.source_record_ids, claim.source_ids):
+            return None
+        passage_item = candidate.items[claim.passage_index]
+        if not any(
+            record.get("source_id") == passage_item.source_id
+            and record.get("canonical_url") == passage_item.canonical_url
+            for record in source_records
+        ):
+            return None
+        if any(
+            (
+                records[record_id].get("source_id"),
+                records[record_id].get("canonical_url"),
+            )
+            not in source_urls
+            or records[record_id].get("extraction_status") != "COMPLETE"
+            or any(
+                not isinstance(records[record_id].get(field), str)
+                or not str(records[record_id][field]).strip()
+                for field in required_source_record_string_fields
+            )
+            or set(records[record_id]) != _SOURCE_RECORD_FIELDS
+            or records[record_id].get("source_type")
+            not in _PUBLICATION_EVIDENCE_SOURCE_TYPES
+            or records[record_id].get("authority_class") != claim.authority_class.value
+            for record_id in claim.source_record_ids
+        ):
+            return None
+        for source_record in source_records:
+            publication_time = _parse_iso_datetime(source_record["publication_time"])
+            retrieval_time = _parse_iso_datetime(source_record["retrieval_time"])
+            if (
+                publication_time is None
+                or retrieval_time is None
+                or (publication_time.tzinfo is None) != (retrieval_time.tzinfo is None)
+                or retrieval_time < publication_time
+                or source_record["geography"] not in {"UK", "Hong Kong", "Global"}
+                or source_record["language"] not in {"en", "en-GB", "zh-Hant-HK"}
+                or (
+                    package.geography
+                    and source_record["geography"] not in {*package.geography, "Global"}
+                )
+            ):
+                return None
+        source_rights_id_values = tuple(
+            record.get("rights_decision_id") for record in source_records
+        )
+        if not all(isinstance(rights_id, str) for rights_id in source_rights_id_values):
+            return None
+        source_rights_ids = set(source_rights_id_values)
+        source_dependency_ids: set[str] = set()
+        for record in source_records:
+            raw_dependency_ids = record.get("dependency_evidence_ids")
+            dependency_ids = record_id_set(raw_dependency_ids)
+            if (
+                dependency_ids is None
+                or not isinstance(raw_dependency_ids, list)
+                or not dependency_ids
+                or len(dependency_ids) != len(raw_dependency_ids)
+                or any(not item.strip() for item in dependency_ids)
+            ):
+                return None
+            source_dependency_ids.update(dependency_ids)
+        if source_rights_ids != set(
+            claim.rights_decision_ids
+        ) or source_dependency_ids != set(claim.dependency_evidence_ids):
+            return None
+        if any(
+            records[record_id].get("source_id") not in claim.source_ids
+            or records[record_id].get("decision") != "ADMITTED"
+            or records[record_id].get("authority_class") != claim.authority_class.value
+            or records[record_id].get("authority_scope") != claim.authority_scope
+            or records[record_id].get("governed_claim_id") != claim.claim_id
+            or records[record_id].get("claim_digest")
+            != digest_bytes(claim.claim.encode("utf-8"))
+            for record_id in claim.source_authority_decision_ids
+        ):
+            return None
+        if not has_exact_source_ids(
+            claim.source_authority_decision_ids, claim.source_ids
+        ):
+            return None
+        if any(
+            records[record_id].get("source_id") not in claim.source_ids
+            or records[record_id].get("decision") != "PERMITTED"
+            or records[record_id].get("permitted_use") != "PUBLICATION_EVIDENCE"
+            for record_id in claim.rights_decision_ids
+        ):
+            return None
+        if not has_exact_source_ids(claim.rights_decision_ids, claim.source_ids):
+            return None
+        if any(
+            records[record_id].get("source_id") not in claim.source_ids
+            or records[record_id].get("dependency_status") != "RESOLVED"
+            or records[record_id].get("evidential_origin_id")
+            not in claim.evidential_origin_ids
+            or not records[record_id].get("originating_report_id")
+            for record_id in claim.dependency_evidence_ids
+        ):
+            return None
+        for index, (text, entity_type, record_id) in enumerate(
+            claim.named_entity_evidence
+        ):
+            rendered_text = claim.rendered_named_entities[index]
+            record = records[record_id]
+            if record != {
+                "base_package_digest": base.digest,
+                "candidate_id": candidate.candidate_id,
+                "canonical_entity_id": digest_bytes(f"{entity_type}:{text}".encode()),
+                "entity_type": entity_type,
+                "evidence_span_digest": digest_bytes(text.encode("utf-8")),
+                "governed_claim_id": claim.claim_id,
+                "policy_version": NAMED_ENTITY_POLICY_VERSION,
+                "record_id": record_id,
+                "record_type": "NAMED_ENTITY_EVIDENCE",
+                "rendered_span_digest": digest_bytes(rendered_text.encode("utf-8")),
+                "rendered_text": rendered_text,
+                "source_record_ids": list(claim.source_record_ids),
+                "status": "CURRENT",
+                "text": text,
+            }:
+                return None
+        semantic_record = records[claim.semantic_relation_evidence_id]
+        if semantic_record != {
+            "base_package_digest": base.digest,
+            "candidate_id": candidate.candidate_id,
+            "claim_digest": digest_bytes(claim.claim.encode("utf-8")),
+            "governed_claim_id": claim.claim_id,
+            "record_id": claim.semantic_relation_evidence_id,
+            "record_type": "SEMANTIC_RELATION_EVIDENCE",
+            "relation": "SEMANTICALLY_EQUIVALENT",
+            "rendered_assertion_digest": digest_bytes(
+                claim.rendered_assertion_zh_hant_hk.encode("utf-8")
+            ),
+            "rendered_modality": "ASSERTED",
+            "rendered_polarity": "AFFIRMED",
+            "source_modality": "ASSERTED",
+            "source_polarity": "AFFIRMED",
+            "status": "CURRENT",
+        }:
+            return None
+        if not has_exact_source_ids(claim.dependency_evidence_ids, claim.source_ids):
+            return None
+        for source_record in source_records:
+            source_id = source_record.get("source_id")
+            rights_id = source_record.get("rights_decision_id")
+            if (
+                not isinstance(rights_id, str)
+                or records[rights_id].get("source_id") != source_id
+            ):
+                return None
+            dependency_ids = record_id_set(source_record.get("dependency_evidence_ids"))
+            if dependency_ids is None:
+                return None
+            for dependency_id in dependency_ids:
+                dependency_record = records[dependency_id]
+                if dependency_record.get(
+                    "source_id"
+                ) != source_id or dependency_record.get(
+                    "originating_report_id"
+                ) != source_record.get("originating_report_id"):
+                    return None
+        if not _has_valid_origin_independence(
+            claim.authority_class,
+            source_records,
+            [records[record_id] for record_id in claim.dependency_evidence_ids],
+            claim.evidential_origin_ids,
+        ):
+            return None
+    governed_claims = {claim.claim_id: claim for claim in package.governed_claims}
+    for qualification in package.qualification_evidence:
+        claim = governed_claims.get(qualification.governed_claim_id)
+        record = records[qualification.qualification_record_id]
+        if (
+            claim is None
+            or record.get("governed_claim_id") != qualification.governed_claim_id
+            or record.get("test") != qualification.test.value
+            or record.get("test_evidence")
+            != [list(item) for item in qualification.test_evidence]
+            or record.get("policy_version") != qualification.policy_version
+            or record.get("evidence_span_digest")
+            != digest_bytes(claim.supporting_excerpt.encode("utf-8"))
+            or record_id_set(record.get("source_record_ids"))
+            != set(claim.source_record_ids)
+        ):
+            return None
+    return tuple(sorted(digests))

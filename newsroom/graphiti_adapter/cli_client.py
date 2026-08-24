@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Awaitable, Protocol
 
+from newsroom.control_plane.child_environment import unprivileged_child_environment
 from newsroom.graphiti_adapter.evaluation_packet import (
     CURSOR_AGENT_MODEL_ID,
     GROK_CHAT_MODEL_ID,
@@ -28,6 +29,7 @@ CURSOR_AGENT_BIN = os.environ.get(
 )
 GROK_BIN = os.environ.get("NEWSROOM_GROK_BIN", "/Users/jamesto/.grok/bin/grok")
 CLI_CALL_TIMEOUT_SECONDS = 80
+
 
 @dataclass(frozen=True, slots=True)
 class CliExecution:
@@ -80,6 +82,7 @@ def run_cli(command: tuple[str, ...], *, timeout: int, cwd: str | None = None) -
             text=False,
             timeout=timeout,
             cwd=cwd,
+            env=unprivileged_child_environment(),
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"{name} Graphiti LLM timed out") from None
@@ -111,11 +114,10 @@ async def run_cli_async(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
+        env=unprivileged_child_environment(),
     )
     try:
-        stdout, _stderr = await asyncio.wait_for(
-            process.communicate(), timeout=timeout
-        )
+        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
     except TimeoutError:
         process.kill()
         await process.wait()
@@ -160,6 +162,14 @@ def _grok_command(*, prompt: str, schema: str | None, cwd: str) -> tuple[str, ..
         "-m",
         GROK_CHAT_MODEL_ID,
         "--disable-web-search",
+        "--sandbox",
+        "read-only",
+        "--permission-mode",
+        "plan",
+        "--tools",
+        "",
+        "--deny",
+        "*",
         "--no-plan",
         "--max-turns",
         "3",
@@ -308,9 +318,7 @@ def _invocation(
         "model": model,
         "outcome": outcome,
         "usage": (
-            dict(execution.usage)
-            if execution is not None
-            else unreported_cli_usage()
+            dict(execution.usage) if execution is not None else unreported_cli_usage()
         ),
     }
     if failure is not None:
@@ -425,7 +433,9 @@ def build_cli_llm_client(
     class CliChainGraphitiLlmClient(LLMClient):
         def __init__(self) -> None:
             super().__init__(
-                LLMConfig(model=CURSOR_AGENT_MODEL_ID, small_model=CURSOR_AGENT_MODEL_ID),
+                LLMConfig(
+                    model=CURSOR_AGENT_MODEL_ID, small_model=CURSOR_AGENT_MODEL_ID
+                ),
                 cache=False,
             )
             self.invocations: list[dict[str, object]] = []

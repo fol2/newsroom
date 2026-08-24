@@ -10,6 +10,7 @@ import urllib.error
 import urllib.request
 from typing import Callable, Final, Protocol
 
+from newsroom.control_plane.child_environment import unprivileged_child_environment
 from newsroom.graphiti_adapter.evaluation_packet import OPENROUTER_BASE_URL
 
 OPENROUTER_ACCOUNT = "OPENROUTER_API"
@@ -20,7 +21,9 @@ NEO4J_BOLT_HOST = "127.0.0.1"
 NEO4J_BOLT_PORT = 7687
 _MIN_SECRET_CHARS = 20
 OPENROUTER_KEYCHAIN_SKIP: Final[str] = "OPENROUTER_API Keychain class not on this host"
-NEO4J_KEYCHAIN_SKIP: Final[str] = "NEO4J_COMMUNITY_LOCAL Keychain class not on this host"
+NEO4J_KEYCHAIN_SKIP: Final[str] = (
+    "NEO4J_COMMUNITY_LOCAL Keychain class not on this host"
+)
 
 
 class BrokerError(RuntimeError):
@@ -66,6 +69,7 @@ def keychain_present(*, account: str, service: str) -> bool:
         capture_output=True,
         text=True,
         timeout=10,
+        env=unprivileged_child_environment(),
     )
     return result.returncode == 0
 
@@ -86,6 +90,7 @@ def _keychain_password(*, account: str, service: str) -> str:
             capture_output=True,
             text=True,
             timeout=10,
+            env=unprivileged_child_environment(),
         )
     except subprocess.TimeoutExpired:
         raise BrokerError(f"Keychain class {account} lookup timed out") from None
@@ -144,7 +149,9 @@ def prove_openrouter_keychain() -> None:
             f"OpenRouter rejected Keychain OPENROUTER_API HTTP {exc.code}"
         ) from None
     except urllib.error.URLError as exc:
-        raise BrokerError("OpenRouter Keychain probe could not reach openrouter.ai") from exc
+        raise BrokerError(
+            "OpenRouter Keychain probe could not reach openrouter.ai"
+        ) from exc
     if status != 200 or not isinstance(payload, dict):
         raise BrokerError("OpenRouter Keychain probe returned a malformed body")
 

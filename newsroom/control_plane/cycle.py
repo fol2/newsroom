@@ -8,12 +8,19 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Callable, ContextManager, Final, Iterator, TypedDict
+from typing import Callable, ContextManager, Final, Iterator, TypedDict, cast
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.control_plane.admission import (
+    DeterministicWriteAdmission,
+    WriteAdmissionDecision,
+    select_write_ready,
+    validate_admission_binding,
+)
 from newsroom.control_plane.corpus import (
     CorpusIngestUnit,
     EffectivePullFirstSeen,
@@ -22,14 +29,13 @@ from newsroom.control_plane.corpus import (
     unique_chunk_units,
     units_from,
 )
-from newsroom.control_plane.editorial import GroupedObservation, form_candidates
-from newsroom.effective_revision import (
-    EffectiveRevisionIdentity,
-    EffectiveRevisionIdentityResolver,
-    backfill_missing_first_seen,
-    create_effective_revision_schema,
+from newsroom.control_plane.drafting import DraftOutcomeRecord
+from newsroom.control_plane.editorial import (
+    GroupedObservation,
+    StoryCandidateRecord,
+    form_candidates,
 )
-from newsroom.control_plane.evidence import package_for
+from newsroom.control_plane.evidence import EvidencePackage, retained_package_for
 from newsroom.control_plane.graphiti import (
     GovernedRealGraphitiPort,
     GraphitiCycleResult,
@@ -42,33 +48,52 @@ from newsroom.control_plane.paths import (
 )
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.store import (
+    GraphitiSpendCeilingExceeded,
     append_ledger,
     claim_graphiti_attempt,
     clear_graphiti_failure,
+    complete_writer_provider_attempt,
     connect,
     emit_effective_revision_landed,
     graphiti_coverage,
     graphiti_failure_state,
-    GraphitiSpendCeilingExceeded,
     has_candidate,
     has_graphiti_ingest,
-    insert_graphiti_ingest,
     insert_graphiti_attempt_receipt,
+    insert_graphiti_ingest,
     insert_payload,
     is_exact_no_embedding_call,
     list_landed_revisions,
     list_remapped_ingest_effects,
     next_graphiti_attempt_number,
+    reconcile_graphiti_spend,
     record_graphiti_coverage,
     record_graphiti_failure,
-    reconcile_graphiti_spend,
     release_graphiti_attempt_claim,
     reserve_graphiti_spend,
+    reserve_write_candidate_attempt,
+    reserve_writer_provider_attempt,
+    retain_draft_outcome,
     retain_graphiti_authority_records,
+    retain_write_admission_decision,
+    retain_write_selection,
 )
 from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.veto import VetoError, assert_private_store
-from newsroom.control_plane.writer import WriterPort
+from newsroom.control_plane.writer import (
+    WriterCopy,
+    WriterDispatchError,
+    WriterPort,
+    WriterRoute,
+    WriterValidatorResult,
+    validate_writer_copy,
+)
+from newsroom.effective_revision import (
+    EffectiveRevisionIdentity,
+    EffectiveRevisionIdentityResolver,
+    backfill_missing_first_seen,
+    create_effective_revision_schema,
+)
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_FALLBACK,
@@ -89,11 +114,9 @@ from newsroom.graphiti_adapter.usage_meter import summarise_graphiti_usage
 from newsroom.increment9.proving import (
     FORBIDDEN_STORE_MARKERS,
     GLOBAL_PROVING_GATES,
-    PROVING_GATES,
     assess_content,
 )
 from newsroom.increment9.rights import assess_rights
-
 
 _PROVING_RUN_LATEST_ORDER = "rowid DESC"
 _PROVING_RUN_EARLIEST_ORDER = "rowid ASC"
@@ -142,6 +165,50 @@ class CycleReport:
     poll_observation_count: int = 0
     feed_snapshot_item_count: int = 0
     effective_pull_count: int = 0
+    candidates_considered: int = 0
+    write_ready: int = 0
+    admission_hold: int = 0
+    admission_reject: int = 0
+    selected_write_ready: int = 0
+    candidate_attempts: int = 0
+    provider_dispatches: int = 0
+    primary_dispatches: int = 0
+    fallback_dispatches: int = 0
+    draft_accepted: int = 0
+    draft_hold: int = 0
+    draft_reject: int = 0
+    accepted_payload_count: int = 0
+    writer_circuit_open: bool = False
+    writer_circuit_open_reason: str = ""
+    no_useful_output_circuit_open: bool = False
+    no_useful_output_circuit_open_reason: str = ""
+    candidate_budget_exhausted: bool = False
+    provider_budget_exhausted: bool = False
+    fallback_budget_exhausted: bool = False
+    write_budget_exhausted: bool = False
+    admission_reason_counts: tuple[tuple[str, int], ...] = ()
+    draft_reason_counts: tuple[tuple[str, int], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _WriteLoopResult:
+    minted: int
+    duplicate: int
+    selected: int
+    candidate_attempts: int
+    provider_dispatches: int
+    primary_dispatches: int
+    fallback_dispatches: int
+    draft_counts: tuple[tuple[str, int], ...]
+    draft_reasons: tuple[tuple[str, int], ...]
+    writer_circuit_open: bool
+    writer_circuit_open_reason: str
+    no_useful_output_circuit_open: bool
+    no_useful_output_circuit_open_reason: str
+    candidate_budget_exhausted: bool
+    provider_budget_exhausted: bool
+    fallback_budget_exhausted: bool
+    write_budget_exhausted: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,15 +357,16 @@ def _bind_result(
                 raise ValueError(
                     "retained Graphiti access decision does not bind this revision"
                 )
-    if tuple(raw.get("proposals", ())) != result.proposals:
+    if tuple(cast(tuple[object, ...], raw.get("proposals", ()))) != result.proposals:
         raise ValueError("graphiti proposal receipt differs from bound raw receipt")
     if result.proposal_count != len(result.proposals):
         raise ValueError("graphiti proposal count differs from retained proposals")
     if (
-        tuple(raw.get("entities", ())) != result.entities
-        or tuple(raw.get("relations", ())) != result.relations
-        or tuple(raw.get("passages", ())) != result.passages
-        or tuple(raw.get("chat_invocations", ())) != result.chat_invocations
+        tuple(cast(tuple[object, ...], raw.get("entities", ()))) != result.entities
+        or tuple(cast(tuple[object, ...], raw.get("relations", ()))) != result.relations
+        or tuple(cast(tuple[object, ...], raw.get("passages", ()))) != result.passages
+        or tuple(cast(tuple[object, ...], raw.get("chat_invocations", ())))
+        != result.chat_invocations
         or raw.get("embedding_usage") != result.embedding_usage
         or raw.get("token_usage") != result.token_usage
         or raw.get("entity_count") != result.entity_count
@@ -677,6 +745,7 @@ def _reconcile_result_spend(
         append_ledger(unpublished, "GRAPHITI_SPEND_RECONCILE", accounting)
         return accounting
 
+    assert provider_state is not None
     if str(provider_state[0]) == "RECONCILED":
         provider_attempt: _ProviderAttemptRecoveryAccounting = {
             "spend_id": provider_spend_id,
@@ -925,6 +994,7 @@ def _ingest(
                 )
             )
             if preserve_unresolved:
+                assert owner_id is not None
                 dispatch_state = (
                     "NOT_DISPATCHED"
                     if returned_result is not None
@@ -1580,6 +1650,327 @@ def _load_pull_first_seen(
     )
 
 
+def _payload_digest(payload: UnpublishedSurfacePayload) -> str:
+    return digest_bytes(
+        canonical_json_bytes(
+            {
+                "payload_kind": payload.payload_kind,
+                "publication_bundle": payload.publication_bundle,
+                "auto_publish": payload.auto_publish,
+                "language": payload.language,
+                "title": payload.title,
+                "body": payload.body,
+                "evidence_package_digest": payload.evidence_package_digest,
+                "story_candidate_id": payload.story_candidate_id,
+                "event_hypothesis_id": payload.event_hypothesis_id,
+                "source_lineage": payload.source_lineage,
+                "generated_at": payload.generated_at,
+                "status": payload.status,
+                "writer_id": payload.writer_id,
+            }
+        )
+    )
+
+
+def _dispatch_writer(
+    writer: WriterPort,
+    candidate: StoryCandidateRecord,
+    package: EvidencePackage,
+    *,
+    route: WriterRoute,
+) -> WriterCopy:
+    dispatch = getattr(writer, "dispatch", None)
+    if callable(dispatch):
+        return cast(WriterCopy, dispatch(candidate, package, route=route))
+    if route == "FALLBACK":
+        raise WriterDispatchError(
+            "writer exposes no fallback route",
+            failure_class="CANDIDATE_LOCAL",
+            reason_code="FALLBACK_ROUTE_UNAVAILABLE",
+        )
+    try:
+        return writer.write(candidate, package)
+    except VetoError:
+        raise
+    except WriterDispatchError:
+        raise
+    except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as exc:
+        raise WriterDispatchError(
+            str(exc),
+            failure_class="UNKNOWN",
+            reason_code="UNKNOWN_WRITER_FAILURE",
+        ) from exc
+
+
+def _run_write_loop(
+    unpublished: sqlite3.Connection,
+    *,
+    writer: WriterPort,
+    admitted: tuple[
+        tuple[StoryCandidateRecord, EvidencePackage, WriteAdmissionDecision], ...
+    ],
+    max_writes: int,
+    max_write_ready_candidates: int,
+    max_writer_provider_dispatches: int,
+    max_writer_fallback_dispatches: int,
+    selected_at: str,
+) -> _WriteLoopResult:
+    duplicate = 0
+    for candidate, package, decision in admitted:
+        if decision.decision == "WRITE_READY" and has_candidate(
+            unpublished, candidate.candidate_id
+        ):
+            duplicate += 1
+            continue
+    selection_limit = min(max_write_ready_candidates, 5)
+    if max_writes <= 0 or max_writer_provider_dispatches <= 0:
+        selection_limit = 0
+    selected = select_write_ready(
+        tuple(
+            item
+            for item in admitted
+            if not (
+                item[2].decision == "WRITE_READY"
+                and has_candidate(unpublished, item[0].candidate_id)
+            )
+        ),
+        limit=selection_limit,
+        selected_at=selected_at,
+    )
+    for _candidate, _package, _decision, selection in selected:
+        retain_write_selection(unpublished, selection)
+        append_ledger(unpublished, "WRITE_READY_SELECTION", selection.as_record())
+
+    cycle_execution_id = str(uuid.uuid4())
+    minted = 0
+    candidate_attempts = 0
+    provider_dispatches = 0
+    primary_dispatches = 0
+    fallback_dispatches = 0
+    draft_counts: Counter[str] = Counter()
+    draft_reasons: Counter[str] = Counter()
+    writer_circuit_reason = ""
+    no_useful_reason = ""
+
+    def outcome(
+        *,
+        decision: WriteAdmissionDecision,
+        candidate_attempt_id: str,
+        provider_attempt_ids: tuple[str, ...],
+        result: str,
+        validators: tuple[WriterValidatorResult, ...],
+        reasons: tuple[str, ...],
+        payload_digest: str | None = None,
+    ) -> None:
+        record = DraftOutcomeRecord.create(
+            write_admission_decision_id=decision.decision_id,
+            candidate_id=decision.candidate_id,
+            evidence_package_digest=decision.evidence_package_digest,
+            provider_attempt_ids=provider_attempt_ids,
+            outcome=result,  # type: ignore[arg-type]
+            validator_results=validators,
+            stable_reason_codes=reasons,
+            payload_digest=payload_digest,
+            recorded_at=_now(),
+            candidate_attempt_id=candidate_attempt_id,
+        )
+        retain_draft_outcome(unpublished, record)
+        append_ledger(unpublished, "DRAFT_OUTCOME", record.as_record())
+        draft_counts[result] += 1
+        draft_reasons.update(reasons)
+
+    for candidate, package, decision, _selection in selected:
+        if minted >= min(max_writes, 5) or writer_circuit_reason or no_useful_reason:
+            break
+        if provider_dispatches >= max_writer_provider_dispatches:
+            break
+        candidate_attempts += 1
+        candidate_attempt_id = reserve_write_candidate_attempt(
+            unpublished,
+            cycle_execution_id=cycle_execution_id,
+            decision_id=decision.decision_id,
+            candidate_id=candidate.candidate_id,
+            evidence_package_digest=package.digest,
+            ordinal=candidate_attempts,
+        )
+        append_ledger(
+            unpublished,
+            "WRITE_CANDIDATE_ATTEMPT_RESERVED",
+            {
+                "candidate_attempt_id": candidate_attempt_id,
+                "decision_id": decision.decision_id,
+                "candidate_id": candidate.candidate_id,
+                "evidence_package_digest": package.digest,
+                "ordinal": candidate_attempts,
+            },
+        )
+        unpublished.commit()
+        provider_attempt_ids: list[str] = []
+        validators: tuple[WriterValidatorResult, ...] = ()
+        accepted_copy: WriterCopy | None = None
+        last_reason = "NO_USEFUL_OUTPUT"
+
+        for route in ("PRIMARY", "FALLBACK"):
+            if route == "FALLBACK":
+                if fallback_dispatches >= max_writer_fallback_dispatches:
+                    last_reason = "FALLBACK_BUDGET_EXHAUSTED"
+                    break
+                if provider_dispatches >= max_writer_provider_dispatches:
+                    last_reason = "PROVIDER_BUDGET_EXHAUSTED"
+                    break
+            provider_dispatches += 1
+            if route == "PRIMARY":
+                primary_dispatches += 1
+            else:
+                fallback_dispatches += 1
+            provider_attempt_id = reserve_writer_provider_attempt(
+                unpublished,
+                candidate_attempt_id=candidate_attempt_id,
+                route=route,
+                ordinal=provider_dispatches,
+            )
+            provider_attempt_ids.append(provider_attempt_id)
+            append_ledger(
+                unpublished,
+                "WRITER_PROVIDER_DISPATCH_RESERVED",
+                {
+                    "provider_attempt_id": provider_attempt_id,
+                    "candidate_attempt_id": candidate_attempt_id,
+                    "route": route,
+                    "ordinal": provider_dispatches,
+                },
+            )
+            unpublished.commit()
+            try:
+                copy = _dispatch_writer(
+                    writer,
+                    candidate,
+                    package,
+                    route=route,
+                )
+            except VetoError:
+                raise
+            except WriterDispatchError as exc:
+                complete_writer_provider_attempt(
+                    unpublished,
+                    provider_attempt_id=provider_attempt_id,
+                    status="FAILED",
+                    reason_code=exc.reason_code,
+                )
+                last_reason = exc.reason_code
+                if exc.failure_class == "SYSTEMIC":
+                    writer_circuit_reason = exc.reason_code
+                    break
+                if route == "PRIMARY" and exc.failure_class == "FALLBACK_ELIGIBLE":
+                    continue
+                break
+            validators = validate_writer_copy(copy, package)
+            failed = tuple(item.reason_code for item in validators if item.result == "FAIL")
+            if failed:
+                complete_writer_provider_attempt(
+                    unpublished,
+                    provider_attempt_id=provider_attempt_id,
+                    status="REJECTED_OUTPUT",
+                    reason_code=failed[0],
+                )
+                last_reason = failed[0]
+                if route == "PRIMARY":
+                    continue
+                break
+            complete_writer_provider_attempt(
+                unpublished,
+                provider_attempt_id=provider_attempt_id,
+                status="COMPLETE",
+                reason_code="VALIDATED_DRAFT",
+            )
+            accepted_copy = copy
+            break
+
+        if accepted_copy is None:
+            result = "HOLD" if writer_circuit_reason else "REJECT"
+            outcome(
+                decision=decision,
+                candidate_attempt_id=candidate_attempt_id,
+                provider_attempt_ids=tuple(provider_attempt_ids),
+                result=result,
+                validators=validators,
+                reasons=(last_reason,),
+            )
+            if not writer_circuit_reason:
+                no_useful_reason = last_reason
+            unpublished.commit()
+            continue
+
+        payload = UnpublishedSurfacePayload(
+            payload_kind="unpublished_surface_payload",
+            publication_bundle=False,
+            auto_publish=False,
+            language="ZH_HANT_HK",
+            title=accepted_copy.title,
+            body=accepted_copy.body,
+            evidence_package_digest=package.digest,
+            story_candidate_id=candidate.candidate_id,
+            event_hypothesis_id=candidate.hypothesis_id,
+            source_lineage=tuple(sorted({item.source_id for item in candidate.items})),
+            generated_at=_now(),
+            status="UNPUBLISHED",
+            writer_id=accepted_copy.writer_id,
+        )
+        if insert_payload(unpublished, payload):
+            minted += 1
+            outcome(
+                decision=decision,
+                candidate_attempt_id=candidate_attempt_id,
+                provider_attempt_ids=tuple(provider_attempt_ids),
+                result="ACCEPTED",
+                validators=validators,
+                reasons=("VALIDATED_AND_INSERTED",),
+                payload_digest=_payload_digest(payload),
+            )
+        else:
+            duplicate += 1
+            outcome(
+                decision=decision,
+                candidate_attempt_id=candidate_attempt_id,
+                provider_attempt_ids=tuple(provider_attempt_ids),
+                result="HOLD",
+                validators=validators,
+                reasons=("DUPLICATE_INSERT_RACE",),
+            )
+        unpublished.commit()
+
+    return _WriteLoopResult(
+        minted=minted,
+        duplicate=duplicate,
+        selected=len(selected),
+        candidate_attempts=candidate_attempts,
+        provider_dispatches=provider_dispatches,
+        primary_dispatches=primary_dispatches,
+        fallback_dispatches=fallback_dispatches,
+        draft_counts=tuple(sorted(draft_counts.items())),
+        draft_reasons=tuple(sorted(draft_reasons.items())),
+        writer_circuit_open=bool(writer_circuit_reason),
+        writer_circuit_open_reason=writer_circuit_reason,
+        no_useful_output_circuit_open=bool(no_useful_reason),
+        no_useful_output_circuit_open_reason=no_useful_reason,
+        candidate_budget_exhausted=(
+            min(max_write_ready_candidates, 5) > 0
+            and candidate_attempts >= min(max_write_ready_candidates, 5)
+        ),
+        provider_budget_exhausted=(
+            max_writer_provider_dispatches > 0
+            and provider_dispatches >= max_writer_provider_dispatches
+        ),
+        fallback_budget_exhausted=(
+            max_writer_fallback_dispatches > 0
+            and fallback_dispatches >= max_writer_fallback_dispatches
+        ),
+        write_budget_exhausted=(
+            min(max_writes, 5) > 0 and minted >= min(max_writes, 5)
+        ),
+    )
+
+
 def run_cycle(
     *,
     proving_store: str,
@@ -1588,8 +1979,26 @@ def run_cycle(
     max_writes: int = 5,
     graphiti: GraphitiPort | None = None,
     max_graphiti: int = 1,
+    evidence_package_builder: Callable[[StoryCandidateRecord], EvidencePackage]
+    | None = None,
+    max_write_ready_candidates: int = 5,
+    max_writer_provider_dispatches: int = 5,
+    max_writer_fallback_dispatches: int = 1,
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
 ) -> CycleReport:
+    for name, value in (
+        ("max_writes", max_writes),
+        ("max_write_ready_candidates", max_write_ready_candidates),
+        ("max_writer_provider_dispatches", max_writer_provider_dispatches),
+        ("max_writer_fallback_dispatches", max_writer_fallback_dispatches),
+    ):
+        if value < 0:
+            raise ValueError(f"{name} must be non-negative")
+    if evidence_package_builder is None:
+        evidence_package_builder = lambda candidate: retained_package_for(
+            candidate,
+            proving_store=proving_store,
+        )
     if isinstance(graphiti, GovernedRealGraphitiPort):
         require_canonical_proving_store(proving_store)
         require_canonical_unpublished_store(unpublished_store)
@@ -1700,9 +2109,32 @@ def run_cycle(
     candidates = form_candidates(observations)
     sources = len({row.source_id for row in latest_rows})
     unpublished = connect(unpublished_store)
-    minted = 0
-    duplicate = 0
     graphiti_ok = 0
+    admission_policy = DeterministicWriteAdmission()
+    admission_counts: Counter[str] = Counter()
+    admission_reasons: Counter[str] = Counter()
+    decisions: list[
+        tuple[StoryCandidateRecord, EvidencePackage, WriteAdmissionDecision]
+    ] = []
+    write_result = _WriteLoopResult(
+        minted=0,
+        duplicate=0,
+        selected=0,
+        candidate_attempts=0,
+        provider_dispatches=0,
+        primary_dispatches=0,
+        fallback_dispatches=0,
+        draft_counts=(),
+        draft_reasons=(),
+        writer_circuit_open=False,
+        writer_circuit_open_reason="",
+        no_useful_output_circuit_open=False,
+        no_useful_output_circuit_open_reason="",
+        candidate_budget_exhausted=False,
+        provider_budget_exhausted=False,
+        fallback_budget_exhausted=False,
+        write_budget_exhausted=False,
+    )
     try:
         _emit_effective_revision_landed(
             unpublished,
@@ -1747,39 +2179,33 @@ def run_cycle(
             )
             unpublished.commit()
         for candidate in candidates:
-            if minted >= max_writes:
-                break
-            if has_candidate(unpublished, candidate.candidate_id):
-                duplicate += 1
-                continue
-            package = package_for(candidate)
-            try:
-                copy = writer.write(candidate, package)
-                payload = UnpublishedSurfacePayload(
-                    payload_kind="unpublished_surface_payload",
-                    publication_bundle=False,
-                    auto_publish=False,
-                    language="ZH_HANT_HK",
-                    title=copy.title,
-                    body=copy.body,
-                    evidence_package_digest=package.digest,
-                    story_candidate_id=candidate.candidate_id,
-                    event_hypothesis_id=candidate.hypothesis_id,
-                    source_lineage=tuple(
-                        sorted({item.source_id for item in candidate.items})
-                    ),
-                    generated_at=_now(),
-                    status="UNPUBLISHED",
-                    writer_id=copy.writer_id,
-                )
-            except VetoError:
-                raise
-            except (RuntimeError, ValueError, OSError, json.JSONDecodeError):
-                continue
-            if insert_payload(unpublished, payload):
-                minted += 1
-            else:
-                duplicate += 1
+            package = evidence_package_builder(candidate)
+            decision = admission_policy.decide(
+                candidate,
+                package,
+                decided_at=_utc_text(admission_evaluated_at),
+            )
+            validate_admission_binding(decision, candidate, package)
+            retain_write_admission_decision(unpublished, decision)
+            append_ledger(
+                unpublished,
+                "WRITE_ADMISSION_DECISION",
+                decision.as_record(),
+            )
+            unpublished.commit()
+            decisions.append((candidate, package, decision))
+            admission_counts[decision.decision] += 1
+            admission_reasons.update(decision.stable_reason_codes)
+        write_result = _run_write_loop(
+            unpublished,
+            writer=writer,
+            admitted=tuple(decisions),
+            max_writes=max_writes,
+            max_write_ready_candidates=min(max_write_ready_candidates, 5),
+            max_writer_provider_dispatches=min(max_writer_provider_dispatches, 5),
+            max_writer_fallback_dispatches=min(max_writer_fallback_dispatches, 1),
+            selected_at=_utc_text(admission_evaluated_at),
+        )
         coverage = graphiti_coverage(
             unpublished,
             revisions=revisions,
@@ -1792,10 +2218,33 @@ def run_cycle(
             "PRIVATE_CYCLE_CLOSE",
             {
                 "proving_run_id": run_id,
-                "minted": minted,
-                "duplicate": duplicate,
+                "minted": write_result.minted,
+                "duplicate": write_result.duplicate,
                 "sources": sources,
                 "candidates": len(candidates),
+                "candidates_considered": len(candidates),
+                "admission_counts": dict(sorted(admission_counts.items())),
+                "admission_reason_counts": dict(sorted(admission_reasons.items())),
+                "selected_write_ready": write_result.selected,
+                "candidate_attempts": write_result.candidate_attempts,
+                "provider_dispatches": write_result.provider_dispatches,
+                "primary_dispatches": write_result.primary_dispatches,
+                "fallback_dispatches": write_result.fallback_dispatches,
+                "draft_outcomes": dict(write_result.draft_counts),
+                "draft_reason_counts": dict(write_result.draft_reasons),
+                "accepted_payload_count": write_result.minted,
+                "writer_circuit_open": write_result.writer_circuit_open,
+                "writer_circuit_open_reason": write_result.writer_circuit_open_reason,
+                "no_useful_output_circuit_open": (
+                    write_result.no_useful_output_circuit_open
+                ),
+                "no_useful_output_circuit_open_reason": (
+                    write_result.no_useful_output_circuit_open_reason
+                ),
+                "candidate_budget_exhausted": write_result.candidate_budget_exhausted,
+                "provider_budget_exhausted": write_result.provider_budget_exhausted,
+                "fallback_budget_exhausted": write_result.fallback_budget_exhausted,
+                "write_budget_exhausted": write_result.write_budget_exhausted,
                 "writer_id": writer.writer_id,
                 "graphiti": graphiti_ok,
                 **coverage,
@@ -1804,17 +2253,43 @@ def run_cycle(
         unpublished.commit()
     finally:
         unpublished.close()
+    draft_counts = dict(write_result.draft_counts)
     return CycleReport(
-        run_id,
-        minted,
-        duplicate,
-        sources,
-        len(candidates),
-        digest,
-        writer.writer_id,
-        graphiti_ok,
-        effective_pull_count,
-        poll_observation_count,
-        feed_snapshot_item_count,
-        effective_pull_count,
+        proving_run_id=run_id,
+        minted=write_result.minted,
+        duplicate=write_result.duplicate,
+        sources=sources,
+        candidates=len(candidates),
+        ledger_digest=digest,
+        writer_id=writer.writer_id,
+        graphiti=graphiti_ok,
+        eligible=effective_pull_count,
+        poll_observation_count=poll_observation_count,
+        feed_snapshot_item_count=feed_snapshot_item_count,
+        effective_pull_count=effective_pull_count,
+        candidates_considered=len(candidates),
+        write_ready=admission_counts["WRITE_READY"],
+        admission_hold=admission_counts["HOLD"],
+        admission_reject=admission_counts["REJECT"],
+        selected_write_ready=write_result.selected,
+        candidate_attempts=write_result.candidate_attempts,
+        provider_dispatches=write_result.provider_dispatches,
+        primary_dispatches=write_result.primary_dispatches,
+        fallback_dispatches=write_result.fallback_dispatches,
+        draft_accepted=draft_counts.get("ACCEPTED", 0),
+        draft_hold=draft_counts.get("HOLD", 0),
+        draft_reject=draft_counts.get("REJECT", 0),
+        accepted_payload_count=write_result.minted,
+        writer_circuit_open=write_result.writer_circuit_open,
+        writer_circuit_open_reason=write_result.writer_circuit_open_reason,
+        no_useful_output_circuit_open=write_result.no_useful_output_circuit_open,
+        no_useful_output_circuit_open_reason=(
+            write_result.no_useful_output_circuit_open_reason
+        ),
+        candidate_budget_exhausted=write_result.candidate_budget_exhausted,
+        provider_budget_exhausted=write_result.provider_budget_exhausted,
+        fallback_budget_exhausted=write_result.fallback_budget_exhausted,
+        write_budget_exhausted=write_result.write_budget_exhausted,
+        admission_reason_counts=tuple(sorted(admission_reasons.items())),
+        draft_reason_counts=write_result.draft_reasons,
     )

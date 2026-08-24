@@ -7,7 +7,7 @@ import argparse
 import json
 import sys
 import time
-from typing import Protocol
+from typing import Protocol, cast
 
 from newsroom.control_plane.cycle import CycleReport, run_cycle
 from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
@@ -117,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0 if intake.authorised else 2
     if args.command == "cycle":
-        report = _cycle(args)
+        report = _cycle(cast(_CycleArgs, args))
         sys.stdout.write(
             json.dumps(
                 {
@@ -126,6 +126,37 @@ def main(argv: list[str] | None = None) -> int:
                     "duplicate": report.duplicate,
                     "sources": report.sources,
                     "candidates": report.candidates,
+                    "candidates_considered": report.candidates_considered,
+                    "admission_counts": {
+                        "WRITE_READY": report.write_ready,
+                        "HOLD": report.admission_hold,
+                        "REJECT": report.admission_reject,
+                    },
+                    "admission_reason_counts": dict(report.admission_reason_counts),
+                    "selected_write_ready": report.selected_write_ready,
+                    "candidate_attempts": report.candidate_attempts,
+                    "provider_dispatches": report.provider_dispatches,
+                    "primary_dispatches": report.primary_dispatches,
+                    "fallback_dispatches": report.fallback_dispatches,
+                    "draft_outcomes": {
+                        "ACCEPTED": report.draft_accepted,
+                        "HOLD": report.draft_hold,
+                        "REJECT": report.draft_reject,
+                    },
+                    "draft_reason_counts": dict(report.draft_reason_counts),
+                    "accepted_payload_count": report.accepted_payload_count,
+                    "writer_circuit_open": report.writer_circuit_open,
+                    "writer_circuit_open_reason": report.writer_circuit_open_reason,
+                    "no_useful_output_circuit_open": (
+                        report.no_useful_output_circuit_open
+                    ),
+                    "no_useful_output_circuit_open_reason": (
+                        report.no_useful_output_circuit_open_reason
+                    ),
+                    "candidate_budget_exhausted": report.candidate_budget_exhausted,
+                    "provider_budget_exhausted": report.provider_budget_exhausted,
+                    "fallback_budget_exhausted": report.fallback_budget_exhausted,
+                    "write_budget_exhausted": report.write_budget_exhausted,
                     "writer_id": report.writer_id,
                     "graphiti": report.graphiti,
                     "ledger_digest": report.ledger_digest,
@@ -148,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"blocked={intake.blocked}",
                 flush=True,
             )
-            report = _cycle(args)
+            report = _cycle(cast(_CycleArgs, args))
             print(
                 f"cycle run={report.proving_run_id} minted={report.minted} "
                 f"duplicate={report.duplicate} candidates={report.candidates} "
