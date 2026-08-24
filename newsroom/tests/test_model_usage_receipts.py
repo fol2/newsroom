@@ -411,7 +411,7 @@ def test_estimate_is_explicit_and_unbounded_missing_usage_opens_only_route(
     assert report["unresolved_invocation_count"] == 1
     assert service.route_state("CONT_PRIMARY")["state"] == "OPEN"
     assert service.route_state("GRAPHITI_EMBEDDING")["state"] == "CLOSED"
-    with pytest.raises(ModelUsageAdmissionError, match="route circuit"):
+    with pytest.raises(ModelUsageAdmissionError, match="unresolved usage"):
         service.allocate(
             _allocation(
                 second_envelope,
@@ -1026,7 +1026,7 @@ def test_cont_usage_circuit_uses_the_canonical_governor_route(tmp_path: Path) ->
     path = tmp_path / "unpublished.sqlite3"
     DurableCycleGovernor(str(path))
     service = ModelUsageService(str(path))
-    _envelope_value, _policy_value, allocation = _open_and_allocate(service)
+    _envelope_value, policy, allocation = _open_and_allocate(service)
     service.complete(
         InvocationTerminal.create(
             invocation_id=allocation.invocation_id,
@@ -1045,8 +1045,40 @@ def test_cont_usage_circuit_uses_the_canonical_governor_route(tmp_path: Path) ->
     routes = connection.execute(
         "SELECT route,state FROM unpublished_route_circuits ORDER BY route"
     ).fetchall()
+    connection.execute(
+        "UPDATE unpublished_route_circuits SET state='CLOSED' WHERE route='CONT'"
+    )
+    connection.commit()
     connection.close()
     assert routes == [("CONT", "OPEN")]
+    assert service.route_state("CONT_PRIMARY")["state"] == "OPEN"
+
+    later_envelope = _envelope(
+        cycle_id="00000000-0000-4000-8000-000000000099",
+        candidate_id="candidate-after-health",
+    )
+    service.open_envelope(later_envelope)
+    with pytest.raises(ModelUsageAdmissionError, match="unresolved usage"):
+        service.allocate(
+            _allocation(later_envelope, policy, request="after-health"),
+            owner_emergency_stop=False,
+        )
+    service.reconcile(
+        invocation_id=allocation.invocation_id,
+        components=UsageComponents(
+            input_tokens=100,
+            output_tokens=25,
+            total_tokens=125,
+            provenance="PROVIDER_REPORTED",
+        ),
+        provider_telemetry={"late": "canonical-route"},
+        observed_at=T0 + timedelta(minutes=1),
+        raw_telemetry_pointer="private://late/canonical-route",
+    )
+    service.allocate(
+        _allocation(later_envelope, policy, request="after-health"),
+        owner_emergency_stop=False,
+    )
 
 
 def test_usage_windows_are_sliced_by_terminal_event_time(tmp_path: Path) -> None:

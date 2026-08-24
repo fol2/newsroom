@@ -217,6 +217,31 @@ def _token(value: str, *, field: str) -> str:
     return value
 
 
+def _canonical_circuit_route(route: str) -> str:
+    return (
+        CONT_WRITER_ROUTE
+        if route.startswith("CONT_") and route != "CONT_HEALTH_PROBE"
+        else route
+    )
+
+
+def _usage_blocking_routes(connection: sqlite3.Connection) -> set[str]:
+    rows = connection.execute(
+        "SELECT a.route FROM model_invocation_terminals t "
+        "JOIN model_invocation_allocations a "
+        "ON a.invocation_id=t.invocation_id "
+        "WHERE (t.usage_status IN "
+        "('UNREPORTED','AMBIGUOUS','INVALID') "
+        "AND NOT EXISTS (SELECT 1 FROM model_usage_reconciliations r "
+        "WHERE r.invocation_id=t.invocation_id)) "
+        "OR json_extract(t.record_json,'$.policy_breach') IS NOT NULL "
+        "OR EXISTS (SELECT 1 FROM model_usage_reconciliations r "
+        "WHERE r.invocation_id=t.invocation_id "
+        "AND json_extract(r.record_json,'$.policy_breach') IS NOT NULL)"
+    ).fetchall()
+    return {_canonical_circuit_route(str(row[0])) for row in rows}
+
+
 def _non_negative(value: int | None, *, field: str) -> int | None:
     if value is not None and (
         isinstance(value, bool) or not isinstance(value, int) or value < 0
@@ -1102,6 +1127,12 @@ class ModelUsageService:
             raise ModelUsageAdmissionError(
                 "config identity is outside qualified policy"
             )
+        if _canonical_circuit_route(allocation.route) in _usage_blocking_routes(
+            connection
+        ):
+            raise ModelUsageAdmissionError(
+                "affected route has unresolved usage or a policy breach"
+            )
         if self._route_state(connection, allocation.route)["state"] == "OPEN":
             raise ModelUsageAdmissionError("affected route circuit is open")
         duplicate = connection.execute(
@@ -1634,33 +1665,9 @@ class ModelUsageService:
                     _json({**record, "reconciliation_digest": digest}),
                 ),
             )
-            blocking_routes = connection.execute(
-                "SELECT a.route FROM model_invocation_terminals t "
-                "JOIN model_invocation_allocations a "
-                "ON a.invocation_id=t.invocation_id "
-                "WHERE (t.usage_status IN "
-                "('UNREPORTED','AMBIGUOUS','INVALID') "
-                "AND NOT EXISTS (SELECT 1 FROM model_usage_reconciliations r "
-                "WHERE r.invocation_id=t.invocation_id)) "
-                "OR json_extract(t.record_json,'$.policy_breach') IS NOT NULL "
-                "OR EXISTS (SELECT 1 FROM model_usage_reconciliations r "
-                "WHERE r.invocation_id=t.invocation_id "
-                "AND json_extract(r.record_json,'$.policy_breach') IS NOT NULL)"
-            ).fetchall()
-            canonical_route = (
-                CONT_WRITER_ROUTE
-                if route.startswith("CONT_") and route != "CONT_HEALTH_PROBE"
-                else route
-            )
-            blocking_cause_on_canonical_route = any(
-                (
-                    CONT_WRITER_ROUTE
-                    if str(row[0]).startswith("CONT_")
-                    and str(row[0]) != "CONT_HEALTH_PROBE"
-                    else str(row[0])
-                )
-                == canonical_route
-                for row in blocking_routes
+            canonical_route = _canonical_circuit_route(route)
+            blocking_cause_on_canonical_route = (
+                canonical_route in _usage_blocking_routes(connection)
             )
             prior_route_state = self._route_state(connection, route)
             if record["policy_breach"] is not None:
@@ -1699,11 +1706,8 @@ class ModelUsageService:
     def _route_state(
         self, connection: sqlite3.Connection, route: str
     ) -> dict[str, object]:
-        canonical_route = (
-            CONT_WRITER_ROUTE
-            if route.startswith("CONT_") and route != "CONT_HEALTH_PROBE"
-            else route
-        )
+        canonical_route = _canonical_circuit_route(route)
+        usage_blocking = canonical_route in _usage_blocking_routes(connection)
         has_canonical = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='unpublished_route_circuits'"
@@ -1714,7 +1718,9 @@ class ModelUsageService:
                 "WHERE route=?",
                 (canonical_route,),
             ).fetchone()
-            if canonical is not None:
+            if canonical is not None and (
+                str(canonical[0]) == "OPEN" or not usage_blocking
+            ):
                 return {
                     "route": canonical_route,
                     "state": str(canonical[0]),
@@ -1730,16 +1736,29 @@ class ModelUsageService:
             (canonical_route,),
         ).fetchone()
         if row is None:
+            if usage_blocking:
+                return {
+                    "route": canonical_route,
+                    "state": "OPEN",
+                    "reason": "UNRESOLVED_USAGE_OR_POLICY_BREACH",
+                    "invocation_id": None,
+                    "authority": "MODEL_USAGE_RECEIPT",
+                }
             return {
                 "route": route,
                 "state": "CLOSED",
                 "reason": "",
                 "invocation_id": None,
             }
+        state = "OPEN" if usage_blocking else str(row[0])
         return {
             "route": route,
-            "state": str(row[0]),
-            "reason": str(row[1]),
+            "state": state,
+            "reason": (
+                "UNRESOLVED_USAGE_OR_POLICY_BREACH"
+                if usage_blocking and str(row[0]) != "OPEN"
+                else str(row[1])
+            ),
             "invocation_id": row[2],
             "recorded_at": str(row[3]),
         }
@@ -1754,11 +1773,7 @@ class ModelUsageService:
         invocation_id: str | None,
         recorded_at: datetime,
     ) -> None:
-        canonical_route = (
-            CONT_WRITER_ROUTE
-            if route.startswith("CONT_") and route != "CONT_HEALTH_PROBE"
-            else route
-        )
+        canonical_route = _canonical_circuit_route(route)
         has_canonical = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='unpublished_route_circuits'"
