@@ -152,7 +152,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:492b1498beaf0f7d5e24479cec3c366e5dea5675f4a668abacc00bf8dafcd3fa"
+      "implementation_revision": "sha256:6d2873f4aeb33808f49bd4e38e6fc6d12414fcecad6f10b4147a31e80fdd49a3"
     },
     {
       "leaf_class": "FALLBACK",
@@ -191,7 +191,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:492b1498beaf0f7d5e24479cec3c366e5dea5675f4a668abacc00bf8dafcd3fa"
+      "implementation_revision": "sha256:6d2873f4aeb33808f49bd4e38e6fc6d12414fcecad6f10b4147a31e80fdd49a3"
     },
     {
       "leaf_class": "EMBEDDING",
@@ -219,7 +219,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:6f186682715adce996b0ebcbee6458d6e65a7d61297df1800529c0d6dabfe034"
+      "implementation_revision": "sha256:9ab6efdf0d5c0427db5be4d4586e74e93a7e461ad68740041136129388bb2d78"
     }
   ],
   "qualified_request_shapes": [
@@ -338,6 +338,6 @@
       "response_schema_digest": "sha256:9a654d3f546e144a1d829e0939c44f24fded717777651e6ebe82538161c8dc22"
     }
   ],
-  "evidence_digest": "sha256:09bea34ebdf0aae92f8079fe69caaf7a73d825a55d0914f5ff56b0ece4109b0d",
-  "canonical_digest": "sha256:aef7ca30bd6850d6a882dff7eef191b66a3e1b55a0485cbea27500fb801fa27e"
+  "evidence_digest": "sha256:6585037d8c0e6e572a6fa168e576ae219cfc30ebe848725fca7f084c716868ca",
+  "canonical_digest": "sha256:9c128f7f514c645107b41e3c4894304dae4616d2a5d1df46de3b466c91ea55b2"
 }

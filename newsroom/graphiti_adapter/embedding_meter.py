@@ -37,6 +37,8 @@ class EmbeddingInvocationObserver(Protocol):
         self, *, provider: str, model: str, input_data: object
     ) -> object: ...
 
+    def transport_dispatch_started(self, token: object) -> None: ...
+
     def after_embedding_invocation(
         self,
         token: object,
@@ -173,6 +175,14 @@ class MeteredOpenAIEmbedder:
             )
         )
         try:
+            if self._invocation_observer is not None:
+                dispatch_started = getattr(
+                    self._invocation_observer,
+                    "transport_dispatch_started",
+                    None,
+                )
+                if callable(dispatch_started):
+                    dispatch_started(observer_token)
             response = await self._delegate.client.embeddings.create(
                 input=input_data,
                 model=self._delegate.config.embedding_model,
