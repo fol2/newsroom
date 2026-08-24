@@ -464,10 +464,15 @@ async def _add_episode(
     attempt_number: int,
     validate_result: ResultValidator,
     restore_result: SnapshotRestorer,
+    invocation_observer: Any | None = None,
 ) -> Any:
     os.environ.setdefault("GRAPHITI_TELEMETRY_ENABLED", "false")
     runtime = _load_graphiti()
-    llm_client = build_cli_llm_client()
+    llm_client = (
+        build_cli_llm_client()
+        if invocation_observer is None
+        else build_cli_llm_client(invocation_observer=invocation_observer)
+    )
     delegate = runtime.OpenAIEmbedder(
         config=runtime.OpenAIEmbedderConfig(
             api_key=api_key,
@@ -475,7 +480,13 @@ async def _add_episode(
             base_url=OPENROUTER_BASE_URL,
         )
     )
-    embedder = runtime.MeteredOpenAIEmbedder(delegate)
+    embedder = (
+        runtime.MeteredOpenAIEmbedder(delegate)
+        if invocation_observer is None
+        else runtime.MeteredOpenAIEmbedder(
+            delegate, invocation_observer=invocation_observer
+        )
+    )
     graphiti = runtime.Graphiti(
         f"bolt://{NEO4J_BOLT_HOST}:{NEO4J_BOLT_PORT}",
         _NEO4J_USER,
@@ -736,7 +747,12 @@ def _raw_receipt(
 class RealGraphitiAdapter:
     """Repository-owned real Graphiti adapter for EVALUATION only."""
 
-    __slots__ = ("_clock", "_execution_deadline", "_monotonic")
+    __slots__ = (
+        "_clock",
+        "_execution_deadline",
+        "_invocation_observer",
+        "_monotonic",
+    )
 
     def __init__(
         self,
@@ -744,10 +760,12 @@ class RealGraphitiAdapter:
         clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
         monotonic: Callable[[], float] = time.monotonic,
         execution_deadline: datetime | None = None,
+        invocation_observer: Any | None = None,
     ) -> None:
         self._clock = clock
         self._monotonic = monotonic
         self._execution_deadline = execution_deadline
+        self._invocation_observer = invocation_observer
 
     def execute(
         self,
@@ -1003,6 +1021,7 @@ class RealGraphitiAdapter:
                         attempt_number=attempt.attempt_number,
                         validate_result=validate_result,
                         restore_result=restore_result,
+                        invocation_observer=self._invocation_observer,
                     ),
                     timeout=remaining_timeout_s,
                 )

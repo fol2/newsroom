@@ -52,6 +52,16 @@ from newsroom.control_plane.graphiti_events import (
     ensure_graphiti_event_schema,
 )
 from newsroom.control_plane.items import parse_observation
+from newsroom.control_plane.model_usage import (
+    InvocationAllocation,
+    InvocationTerminal,
+    ModelUsageAdmissionError,
+    ModelUsageService,
+    UsageComponents,
+    UsageStatus,
+    WorkEnvelope,
+    WorkloadClass,
+)
 from newsroom.control_plane.paths import (
     require_canonical_proving_store,
     require_canonical_unpublished_store,
@@ -96,6 +106,7 @@ from newsroom.control_plane.writer import (
     WriterPort,
     WriterRoute,
     WriterValidatorResult,
+    WriterInvocationManifest,
     require_permitted_context,
     validate_writer_copy,
 )
@@ -259,6 +270,13 @@ def _now() -> str:
 
 def _utc_text(value: datetime) -> str:
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _parse_utc(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("retained UTC timestamp lacks timezone")
+    return parsed.astimezone(UTC)
 
 
 def _dispatch_valid_until(evaluated_at: datetime) -> str:
@@ -819,6 +837,8 @@ def _ingest(
     ],
     clock: Callable[[], datetime],
     on_systemic_failure: Callable[[str, bool], None] | None = None,
+    model_usage: ModelUsageService | None = None,
+    cycle_id: str | None = None,
 ) -> int:
     def systemic_result_failure(result: GraphitiCycleResult) -> str | None:
         if result.failure_code != "PRODUCER_INTERNAL_ERROR":
@@ -990,7 +1010,22 @@ def _ingest(
                 unpublished.commit()
                 dispatch_rights = final_dispatch_rights
                 attempted += 1
-                if isinstance(graphiti, GovernedRealGraphitiPort):
+                ingest_with_usage = getattr(graphiti, "ingest_with_usage", None)
+                if model_usage is not None and callable(ingest_with_usage):
+                    returned_result = cast(
+                        GraphitiCycleResult,
+                        ingest_with_usage(
+                            unit,
+                            model_usage=model_usage,
+                            cycle_id=cycle_id or unit.proving_run_id,
+                            deadline=(
+                                dispatch_authority.deadline
+                                if isinstance(graphiti, GovernedRealGraphitiPort)
+                                else None
+                            ),
+                        ),
+                    )
+                elif isinstance(graphiti, GovernedRealGraphitiPort):
                     returned_result = graphiti.ingest_until(
                         unit,
                         deadline=dispatch_authority.deadline,
@@ -1759,6 +1794,62 @@ def _dispatch_writer(
         ) from exc
 
 
+def _complete_writer_usage(
+    model_usage: ModelUsageService,
+    allocation: InvocationAllocation,
+    *,
+    outcome: str,
+    failure_class: str | None,
+    usage: dict[str, object] | None,
+    completed_at: datetime,
+    provider_dispatched: bool = True,
+) -> None:
+    usage_value = usage if isinstance(usage, dict) else {}
+    reported = usage_value.get("usage_basis") == "PROVIDER_REPORTED"
+    if not provider_dispatched:
+        components = UsageComponents(total_tokens=0, provenance="CLI_DERIVED")
+        usage_status = UsageStatus.REPORTED
+        telemetry_digest = None
+    elif reported:
+        components = UsageComponents(
+            input_tokens=cast(int | None, usage_value.get("input_tokens")),
+            output_tokens=cast(int | None, usage_value.get("output_tokens")),
+            cached_read_tokens=cast(int | None, usage_value.get("cached_read_tokens")),
+            cached_write_tokens=cast(int | None, usage_value.get("cached_write_tokens")),
+            reasoning_tokens=cast(int | None, usage_value.get("reasoning_tokens")),
+            total_tokens=cast(int | None, usage_value.get("total_tokens")),
+            provenance="PROVIDER_REPORTED",
+        )
+        usage_status = UsageStatus.REPORTED
+        telemetry_digest = digest_bytes(canonical_json_bytes(usage_value))
+    else:
+        components = UsageComponents(provenance="UNAVAILABLE")
+        usage_status = UsageStatus.UNREPORTED
+        telemetry_digest = None
+    model_usage.complete(
+        InvocationTerminal.create(
+            invocation_id=allocation.invocation_id,
+            outcome=outcome,
+            failure_class=failure_class,
+            usage_status=usage_status,
+            components=components,
+            dispatch_at=allocation.allocated_at if provider_dispatched else None,
+            completed_at=completed_at,
+            observed_at=completed_at,
+            provider_telemetry_digest=telemetry_digest,
+            raw_telemetry_pointer=(
+                "sqlite-private://model_provider_telemetry/"
+                f"{allocation.invocation_id}"
+                if reported
+                else None
+            ),
+            subscription_cli_chat_not_cash_debited=True,
+            pre_dispatch_zero_proved=not provider_dispatched,
+        ),
+        provider_telemetry=usage_value if reported else None,
+    )
+
+
 def _run_write_loop(
     unpublished: sqlite3.Connection,
     *,
@@ -1773,6 +1864,8 @@ def _run_write_loop(
     selected_at: str,
     cycle_execution_id: str,
     writer_dispatch_fence: Callable[[], None] | None,
+    model_usage: ModelUsageService | None,
+    clock: Callable[[], datetime],
 ) -> _WriteLoopResult:
     permitted: list[
         tuple[StoryCandidateRecord, EvidencePackage, WriteAdmissionDecision]
@@ -1829,7 +1922,9 @@ def _run_write_loop(
         validators: tuple[WriterValidatorResult, ...],
         reasons: tuple[str, ...],
         payload_digest: str | None = None,
+        usage_envelope_id: str | None = None,
     ) -> None:
+        terminal_at = clock().astimezone(UTC)
         record = DraftOutcomeRecord.create(
             write_admission_decision_id=decision.decision_id,
             candidate_id=decision.candidate_id,
@@ -1839,13 +1934,22 @@ def _run_write_loop(
             validator_results=validators,
             stable_reason_codes=reasons,
             payload_digest=payload_digest,
-            recorded_at=_now(),
+            recorded_at=_utc_text(terminal_at),
             candidate_attempt_id=candidate_attempt_id,
         )
         retain_draft_outcome(unpublished, record)
         append_ledger(unpublished, "DRAFT_OUTCOME", record.as_record())
         draft_counts[result] += 1
         draft_reasons.update(reasons)
+        if model_usage is not None and usage_envelope_id is not None:
+            unpublished.commit()
+            model_usage.record_work_outcome(
+                envelope_id=usage_envelope_id,
+                outcome=result,
+                outcome_record_id=record.outcome_id,
+                payload_digest=payload_digest,
+                terminal_at=terminal_at,
+            )
 
     for candidate, package, decision, _selection in selected:
         if minted >= min(max_writes, 5) or writer_circuit_reason or no_useful_reason:
@@ -1874,9 +1978,27 @@ def _run_write_loop(
         )
         unpublished.commit()
         provider_attempt_ids: list[str] = []
+        usage_invocation_ids: list[str] = []
         validators: tuple[WriterValidatorResult, ...] = ()
         accepted_copy: WriterCopy | None = None
         last_reason = "NO_USEFUL_OUTPUT"
+        usage_envelope_id: str | None = None
+        if model_usage is not None:
+            usage_envelope = WorkEnvelope.create(
+                cycle_id=cycle_execution_id,
+                workload_class=WorkloadClass.CONT_WRITER_PRIMARY,
+                admitted_at=_parse_utc(selected_at),
+                admission_decision_id=decision.decision_id,
+                candidate_id=candidate.candidate_id,
+                hypothesis_digest=digest_bytes(
+                    canonical_json_bytes({"hypothesis_id": candidate.hypothesis_id})
+                ),
+                evidence_package_digest=package.digest,
+                ingest_id=None,
+                graphiti_attempt_id=None,
+            )
+            model_usage.open_envelope(usage_envelope)
+            usage_envelope_id = usage_envelope.envelope_id
 
         for route in ("PRIMARY", "FALLBACK"):
             if route == "FALLBACK":
@@ -1888,6 +2010,63 @@ def _run_write_loop(
                     break
             if writer_dispatch_fence is not None:
                 writer_dispatch_fence()
+            usage_allocation: InvocationAllocation | None = None
+            if model_usage is not None:
+                manifest_method = getattr(writer, "invocation_manifest", None)
+                if not callable(manifest_method):
+                    last_reason = "MODEL_USAGE_CONTRACT_UNAVAILABLE"
+                    break
+                manifest = cast(
+                    WriterInvocationManifest,
+                    manifest_method(candidate, package, route=route),
+                )
+                workload_class = (
+                    WorkloadClass.CONT_WRITER_PRIMARY
+                    if route == "PRIMARY"
+                    else WorkloadClass.CONT_WRITER_FALLBACK
+                )
+                try:
+                    # End any read transaction before the shared usage
+                    # authority takes its pre-dispatch write claim.
+                    unpublished.commit()
+                    usage_policy = model_usage.qualified_policy(
+                        workload_class=workload_class,
+                        provider=manifest.provider,
+                        route=manifest.route,
+                        model=manifest.model,
+                        reasoning=manifest.reasoning,
+                    )
+                    allocated_at = clock().astimezone(UTC)
+                    usage_allocation = InvocationAllocation.create(
+                        envelope_id=usage_envelope_id,
+                        cycle_id=cycle_execution_id,
+                        leaf_ordinal=len(provider_attempt_ids) + 1,
+                        workload_class=workload_class,
+                        invocation_policy_digest=usage_policy.canonical_digest,
+                        provider=manifest.provider,
+                        route=manifest.route,
+                        model=manifest.model,
+                        reasoning=manifest.reasoning,
+                        prompt_contract_version=manifest.prompt_contract_version,
+                        prompt_bytes=manifest.prompt_bytes,
+                        prompt_digest=manifest.prompt_digest,
+                        request_digest=manifest.request_digest,
+                        output_schema_digest=manifest.output_schema_digest,
+                        max_output_tokens=usage_policy.max_output_tokens,
+                        context_manifest_digest=manifest.context_manifest_digest,
+                        context_identity=manifest.context_identity,
+                        allocated_at=allocated_at,
+                        parent_invocation_id=(
+                            None
+                            if not usage_invocation_ids
+                            else usage_invocation_ids[0]
+                        ),
+                    )
+                    model_usage.allocate(usage_allocation)
+                    usage_invocation_ids.append(usage_allocation.invocation_id)
+                except ModelUsageAdmissionError:
+                    last_reason = "MODEL_USAGE_ADMISSION_HELD"
+                    break
             provider_dispatches += 1
             if route == "PRIMARY":
                 primary_dispatches += 1
@@ -1921,6 +2100,23 @@ def _run_write_loop(
             except VetoError:
                 raise
             except WriterDispatchError as exc:
+                if model_usage is not None and usage_allocation is not None:
+                    completed_at = clock().astimezone(UTC)
+                    _complete_writer_usage(
+                        model_usage,
+                        usage_allocation,
+                        outcome="FAILED",
+                        failure_class=exc.reason_code,
+                        usage=exc.usage,
+                        completed_at=completed_at,
+                        provider_dispatched=exc.provider_dispatched,
+                    )
+                    if not exc.provider_dispatched:
+                        provider_dispatches -= 1
+                        if route == "PRIMARY":
+                            primary_dispatches -= 1
+                        else:
+                            fallback_dispatches -= 1
                 complete_writer_provider_attempt(
                     unpublished,
                     provider_attempt_id=provider_attempt_id,
@@ -1934,6 +2130,21 @@ def _run_write_loop(
                 if route == "PRIMARY" and exc.failure_class == "FALLBACK_ELIGIBLE":
                     continue
                 break
+            if model_usage is not None and usage_allocation is not None:
+                completed_at = clock().astimezone(UTC)
+                _complete_writer_usage(
+                    model_usage,
+                    usage_allocation,
+                    outcome="OUTPUT_RECEIVED",
+                    failure_class=(
+                        None
+                        if copy.usage is not None
+                        and copy.usage.get("usage_basis") == "PROVIDER_REPORTED"
+                        else "MISSING_PROVIDER_TELEMETRY"
+                    ),
+                    usage=copy.usage,
+                    completed_at=completed_at,
+                )
             validators = validate_writer_copy(copy, package)
             failed = tuple(item.reason_code for item in validators if item.result == "FAIL")
             if failed:
@@ -1965,6 +2176,7 @@ def _run_write_loop(
                 result=result,
                 validators=validators,
                 reasons=(last_reason,),
+                usage_envelope_id=usage_envelope_id,
             )
             if not writer_circuit_reason:
                 no_useful_reason = last_reason
@@ -1996,6 +2208,7 @@ def _run_write_loop(
                 validators=validators,
                 reasons=("VALIDATED_AND_INSERTED",),
                 payload_digest=_payload_digest(payload),
+                usage_envelope_id=usage_envelope_id,
             )
         else:
             duplicate += 1
@@ -2006,6 +2219,7 @@ def _run_write_loop(
                 result="HOLD",
                 validators=validators,
                 reasons=("DUPLICATE_INSERT_RACE",),
+                usage_envelope_id=usage_envelope_id,
             )
         unpublished.commit()
 
@@ -2112,12 +2326,15 @@ def consume_next_graphiti_event(
     graphiti: GraphitiPort,
     owner_id: str,
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
+    model_usage: ModelUsageService | None = None,
 ) -> GraphitiProcessResult | None:
     """Claim and process one durable revision, independently from source polling."""
 
     if isinstance(graphiti, GovernedRealGraphitiPort):
         require_canonical_proving_store(proving_store)
         require_canonical_unpublished_store(unpublished_store)
+        if model_usage is None:
+            model_usage = ModelUsageService(unpublished_store)
     rights_check, rights_fence = _graphiti_dispatch_controls(proving_store, clock=clock)
     queue = GraphitiEventQueue(unpublished_store, clock=clock)
     resolved_units: dict[str, tuple[CorpusIngestUnit, ...]] = {}
@@ -2225,6 +2442,8 @@ def consume_next_graphiti_event(
                     rights_fence=rights_fence,
                     clock=clock,
                     on_systemic_failure=systemic_failure,
+                    model_usage=model_usage,
+                    cycle_id=event.event_id,
                 )
                 provider_dispatched = provider_dispatched or attempted > 0
                 if all(has_graphiti_ingest(unpublished, item) for item in ingest_ids):
@@ -2297,6 +2516,7 @@ def run_cycle(
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
     cycle_id: str | None = None,
     writer_dispatch_fence: Callable[[], None] | None = None,
+    model_usage: ModelUsageService | None = None,
 ) -> CycleReport:
     if cycle_id is None:
         cycle_id = str(uuid.uuid4())
@@ -2457,6 +2677,8 @@ def run_cycle(
                 rights_check=rights_check,
                 rights_fence=rights_fence,
                 clock=clock,
+                model_usage=model_usage,
+                cycle_id=cycle_id,
             )
             unpublished.commit()
         if graphiti_admission_factory is not None:
@@ -2483,6 +2705,13 @@ def run_cycle(
                 decision.as_record(),
             )
             unpublished.commit()
+            if model_usage is not None and decision.decision in {"HOLD", "REJECT"}:
+                model_usage.retain_zero_call_admission(
+                    decision_id=decision.decision_id,
+                    decision=decision.decision,
+                    cycle_id=cycle_id,
+                    recorded_at=admission_evaluated_at,
+                )
             decisions.append((candidate, package, decision))
             admission_counts[decision.decision] += 1
             admission_reasons.update(decision.stable_reason_codes)
@@ -2497,6 +2726,8 @@ def run_cycle(
             selected_at=_utc_text(admission_evaluated_at),
             cycle_execution_id=cycle_id,
             writer_dispatch_fence=writer_dispatch_fence,
+            model_usage=model_usage,
+            clock=clock,
         )
         coverage = graphiti_coverage(
             unpublished,

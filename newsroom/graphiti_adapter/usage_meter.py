@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import TypeGuard
 
-
 CLI_USAGE_BASIS_REPORTED = "PROVIDER_REPORTED"
 CLI_USAGE_BASIS_UNREPORTED = "UNREPORTED"
+CLI_USAGE_BASIS_NO_PROVIDER_CALL = "NO_PROVIDER_CALL"
 
 
 def _is_non_negative_int(value: object) -> TypeGuard[int]:
@@ -28,6 +28,20 @@ def unreported_cli_usage() -> dict[str, object]:
     }
 
 
+def no_provider_call_cli_usage() -> dict[str, object]:
+    """Return an exact zero only when provider dispatch was structurally ruled out."""
+
+    return {
+        "usage_basis": CLI_USAGE_BASIS_NO_PROVIDER_CALL,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_read_tokens": 0,
+        "cached_write_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 0,
+    }
+
+
 def cursor_cli_usage(value: object) -> dict[str, object]:
     """Normalise Cursor's final JSON usage into the retained receipt contract."""
 
@@ -43,7 +57,7 @@ def cursor_cli_usage(value: object) -> dict[str, object]:
         return unreported_cli_usage()
     # Cursor's print-mode JSON reports uncached input separately from cache reads
     # and writes, so all four fields are disjoint parts of observed consumption.
-    total = sum(int(item) for item in fields.values())
+    total = sum(item for item in fields.values() if _is_non_negative_int(item))
     return {
         "usage_basis": CLI_USAGE_BASIS_REPORTED,
         **fields,
@@ -119,9 +133,17 @@ def summarise_graphiti_usage(
             reported.append(usage)
 
     def total(key: str) -> int:
-        return sum(int(item[key]) for item in reported)
+        return sum(
+            value
+            for item in reported
+            if _is_non_negative_int(value := item.get(key))
+        )
 
-    chat_reasoning = sum(int(item.get("reasoning_tokens") or 0) for item in reported)
+    chat_reasoning = sum(
+        value
+        for item in reported
+        if _is_non_negative_int(value := item.get("reasoning_tokens"))
+    )
     unreported_chat = len(invocations) - len(reported)
     embedding_basis = (
         str(embedding_usage.get("usage_basis"))
@@ -186,6 +208,7 @@ def summarise_graphiti_usage(
 __all__ = [
     "cursor_cli_usage",
     "grok_cli_usage",
+    "no_provider_call_cli_usage",
     "summarise_graphiti_usage",
     "unreported_cli_usage",
 ]

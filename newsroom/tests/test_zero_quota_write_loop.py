@@ -14,7 +14,11 @@ from uuid import UUID
 
 import pytest
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+)
 from newsroom.control_plane.admission import (
     WRITE_ADMISSION_POLICY_VERSION,
     DeterministicWriteAdmission,
@@ -52,6 +56,11 @@ from newsroom.control_plane.evidence import (
     package_for,
 )
 from newsroom.control_plane.items import SourceItem, parse_observation
+from newsroom.control_plane.model_usage import (
+    InvocationEfficiencyPolicy,
+    ModelUsageService,
+    WorkloadClass,
+)
 from newsroom.control_plane.store import (
     LEDGER_GENESIS,
     append_ledger,
@@ -64,8 +73,20 @@ from newsroom.control_plane.store import (
     retain_write_selection,
 )
 from newsroom.control_plane.writer import (
+    CONT_FALLBACK_MODEL,
+    CONT_FALLBACK_PROVIDER,
+    CONT_FALLBACK_REASONING,
+    CONT_FALLBACK_ROUTE,
+    CONT_PRIMARY_MODEL,
+    CONT_PRIMARY_PROVIDER,
+    CONT_PRIMARY_REASONING,
+    CONT_PRIMARY_ROUTE,
+    CONT_WRITER_CONTEXT_IDENTITY,
+    CONT_WRITER_OUTPUT_SCHEMA_DIGEST,
+    CONT_WRITER_PROMPT_CONTRACT_VERSION,
     CliChainWriter,
     FixtureWriter,
+    WriterCliExecution,
     WriterCopy,
     WriterDispatchError,
     WriterEvidenceLink,
@@ -4076,3 +4097,184 @@ def test_validated_payload_and_outcome_survive_later_coverage_failure(
         "SELECT outcome FROM unpublished_draft_outcomes"
     ).fetchall() == [("ACCEPTED",)]
     connection.close()
+
+
+def _register_cont_usage_policy(
+    usage: ModelUsageService,
+    *,
+    workload_class: WorkloadClass,
+    provider: str,
+    route: str,
+    model: str,
+    reasoning: str,
+) -> None:
+    usage.register_policy(
+        InvocationEfficiencyPolicy.create(
+            policy_id=f"issue-728-{route.lower()}",
+            version="fixture-v1",
+            workload_class=workload_class,
+            provider=provider,
+            route=route,
+            model=model,
+            reasoning=reasoning,
+            one_turn=True,
+            max_prompt_bytes=100_000,
+            max_context_tokens=10_000,
+            max_output_tokens=2_000,
+            max_total_tokens=12_000,
+            prompt_contract_version=CONT_WRITER_PROMPT_CONTRACT_VERSION,
+            output_schema_digest=CONT_WRITER_OUTPUT_SCHEMA_DIGEST,
+            allowed_context_identities=(CONT_WRITER_CONTEXT_IDENTITY,),
+            evidence_digest=digest_canonical({"issue": 728, "route": route}),
+            qualified=True,
+        )
+    )
+
+
+def test_controller_holds_writer_before_dispatch_without_exact_usage_policy(
+    tmp_path: Path,
+) -> None:
+    unpublished = tmp_path / "usage-policy-held.sqlite3"
+    usage = ModelUsageService(str(unpublished))
+    calls = 0
+
+    def primary(_prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        return "must-not-dispatch"
+
+    report = run_cycle(
+        proving_store=str(_proving(tmp_path)),
+        unpublished_store=str(unpublished),
+        writer=CliChainWriter(primary=primary, fallback=primary),
+        evidence_package_builder=_qualified_builder(frozenset({"HK-01"})),
+        clock=_CLOCK,
+        model_usage=usage,
+    )
+
+    retained = usage.report(
+        start=datetime(2026, 8, 19, tzinfo=UTC),
+        end=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    assert calls == 0
+    assert report.provider_dispatches == 0
+    assert report.draft_reject == 1
+    assert retained["envelope_count"] == 1
+    assert retained["leaf_dispatch_count"] == 0
+
+
+def test_controller_allocates_every_primary_and_fallback_leaf_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    unpublished = tmp_path / "usage-primary-fallback.sqlite3"
+    usage = ModelUsageService(str(unpublished))
+    _register_cont_usage_policy(
+        usage,
+        workload_class=WorkloadClass.CONT_WRITER_PRIMARY,
+        provider=CONT_PRIMARY_PROVIDER,
+        route=CONT_PRIMARY_ROUTE,
+        model=CONT_PRIMARY_MODEL,
+        reasoning=CONT_PRIMARY_REASONING,
+    )
+    _register_cont_usage_policy(
+        usage,
+        workload_class=WorkloadClass.CONT_WRITER_FALLBACK,
+        provider=CONT_FALLBACK_PROVIDER,
+        route=CONT_FALLBACK_ROUTE,
+        model=CONT_FALLBACK_MODEL,
+        reasoning=CONT_FALLBACK_REASONING,
+    )
+
+    report = run_cycle(
+        proving_store=str(_proving(tmp_path)),
+        unpublished_store=str(unpublished),
+        writer=CliChainWriter(
+            primary=lambda _prompt: WriterCliExecution(
+                text="malformed",
+                usage={
+                    "usage_basis": "PROVIDER_REPORTED",
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cached_read_tokens": 5,
+                    "cached_write_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "total_tokens": 125,
+                },
+            ),
+            fallback=lambda prompt: WriterCliExecution(
+                text=_valid_cli_json(prompt),
+                usage={
+                    "usage_basis": "PROVIDER_REPORTED",
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cached_read_tokens": 5,
+                    "cached_write_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "total_tokens": 125,
+                },
+            ),
+        ),
+        evidence_package_builder=_qualified_builder(frozenset({"HK-01"})),
+        clock=_CLOCK,
+        model_usage=usage,
+    )
+
+    retained = usage.query(
+        start=datetime(2026, 8, 19, tzinfo=UTC),
+        end=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    leaves = retained["leaves"]
+    assert report.provider_dispatches == 2
+    assert report.minted == 1
+    assert [leaf["workload_class"] for leaf in leaves] == [
+        "CONT_WRITER_PRIMARY",
+        "CONT_WRITER_FALLBACK",
+    ]
+    assert leaves[1]["parent_invocation_id"] == leaves[0]["invocation_id"]
+    assert {leaf["usage_status"] for leaf in leaves} == {"REPORTED"}
+    assert sum(leaf["total_tokens"] for leaf in leaves) == 250
+    assert {leaf["work_outcome"] for leaf in leaves} == {"ACCEPTED"}
+
+
+def test_controller_retains_explicit_zero_when_writer_executable_is_missing(
+    tmp_path: Path,
+) -> None:
+    unpublished = tmp_path / "usage-pre-dispatch-zero.sqlite3"
+    usage = ModelUsageService(str(unpublished))
+    _register_cont_usage_policy(
+        usage,
+        workload_class=WorkloadClass.CONT_WRITER_PRIMARY,
+        provider=CONT_PRIMARY_PROVIDER,
+        route=CONT_PRIMARY_ROUTE,
+        model=CONT_PRIMARY_MODEL,
+        reasoning=CONT_PRIMARY_REASONING,
+    )
+
+    def missing_executable(_prompt: str) -> str:
+        raise WriterDispatchError(
+            "writer executable not found",
+            failure_class="SYSTEMIC",
+            reason_code="EXECUTABLE_NOT_FOUND",
+            provider_dispatched=False,
+        )
+
+    report = run_cycle(
+        proving_store=str(_proving(tmp_path)),
+        unpublished_store=str(unpublished),
+        writer=CliChainWriter(primary=missing_executable),
+        evidence_package_builder=_qualified_builder(frozenset({"HK-01"})),
+        clock=_CLOCK,
+        model_usage=usage,
+    )
+
+    retained = usage.query(
+        start=datetime(2026, 8, 19, tzinfo=UTC),
+        end=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    assert report.provider_dispatches == 0
+    assert ("EXECUTABLE_NOT_FOUND", 1) in report.draft_reason_counts
+    assert len(retained["leaves"]) == 1
+    assert retained["leaves"][0]["usage_status"] == "REPORTED"
+    assert retained["leaves"][0]["total_tokens"] == 0
+    assert retained["leaves"][0]["dispatch_at"] is None
+    assert retained["leaves"][0]["pre_dispatch_zero_proved"] is True

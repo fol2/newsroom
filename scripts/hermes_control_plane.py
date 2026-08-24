@@ -11,6 +11,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, cast
 
 from newsroom.control_plane.cycle import CycleReport, run_cycle
@@ -24,13 +25,13 @@ from newsroom.control_plane.cycle_governor import (
 )
 from newsroom.control_plane.graphiti_events import GraphitiEventQueue
 from newsroom.control_plane.intake import IntakeReport, run_intake
+from newsroom.control_plane.model_usage import ModelUsageService
 from newsroom.control_plane.paths import (
     CANONICAL_PROVING_STORE,
     CANONICAL_UNPUBLISHED_STORE,
     ensure_control_plane_state_root,
 )
 from newsroom.control_plane.store import list_payloads
-from newsroom.control_plane.usage import graphiti_usage_report
 from newsroom.control_plane.veto import VetoError
 from newsroom.control_plane.writer import default_writer, probe_grok_writer_route
 
@@ -51,6 +52,7 @@ def _cycle(
     writer_dispatch_permitted: bool,
     writer_dispatch_fence: Callable[[], None],
 ) -> CycleReport:
+    model_usage = ModelUsageService(args.unpublished)
     return run_cycle(
         proving_store=args.proving,
         unpublished_store=args.unpublished,
@@ -62,6 +64,7 @@ def _cycle(
         max_writer_fallback_dispatches=1 if writer_dispatch_permitted else 0,
         cycle_id=cycle_id,
         writer_dispatch_fence=writer_dispatch_fence,
+        model_usage=model_usage,
     )
 
 
@@ -152,6 +155,23 @@ class GovernedUnitFailure(RuntimeError):
         self.terminal = terminal
 
 
+def _retain_usage_cycle_outcome(path: str, terminal: CycleTerminalResult) -> None:
+    ModelUsageService(path).record_cycle_outcome(
+        cycle_id=terminal.cycle_id,
+        outcome_class=terminal.outcome_class,
+        terminal_at=_usage_instant(
+            terminal.terminal_at,
+            default=datetime.now(tz=UTC),
+        ),
+        writer_unproductive_streak_before=(
+            terminal.writer_unproductive_streak_before
+        ),
+        writer_unproductive_streak_after=terminal.writer_unproductive_streak_after,
+        writer_circuit_state=terminal.writer_circuit_state,
+        writer_circuit_open_reason=terminal.writer_circuit_open_reason,
+    )
+
+
 def _governed_unit(
     args: _CycleArgs,
     *,
@@ -189,12 +209,14 @@ def _governed_unit(
                 ),
             ),
         )
+        _retain_usage_cycle_outcome(args.unpublished, terminal)
     except Exception as exc:
         try:
             terminal = governor.fail_ambiguous(
                 lease,
                 failure_reason=f"GOVERNED_UNIT_EXCEPTION:{type(exc).__name__}",
             )
+            _retain_usage_cycle_outcome(args.unpublished, terminal)
         except Exception as terminal_error:
             exc.add_note(
                 "durable ambiguous-cycle terminalisation also failed: "
@@ -230,6 +252,15 @@ def _reporting_boundaries(
         "human_emergency_stop_is_separate": True,
         "daily_article_quota": None,
     }
+
+
+def _usage_instant(value: str | None, *, default: datetime) -> datetime:
+    if value is None:
+        return default
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("usage range timestamps must include a UTC offset")
+    return parsed.astimezone(UTC)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -276,6 +307,20 @@ def main(argv: list[str] | None = None) -> int:
         default=300,
         help="fixed UTC reporting bucket for token usage; not a cooldown",
     )
+    parser.add_argument(
+        "--usage-start",
+        help="inclusive ISO-8601 start for deterministic usage export",
+    )
+    parser.add_argument(
+        "--usage-end",
+        help="exclusive ISO-8601 end for deterministic usage export",
+    )
+    parser.add_argument(
+        "--usage-format",
+        choices=("json", "csv"),
+        default="json",
+        help="deterministic shared model-usage export format",
+    )
     args = parser.parse_args(argv)
     try:
         cooldown_seconds = _resolve_cooldown(
@@ -290,17 +335,34 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
     ensure_control_plane_state_root()
     if args.command == "usage":
-        sys.stdout.write(
-            json.dumps(
-                graphiti_usage_report(
-                    args.unpublished,
-                    window_seconds=args.usage_window,
-                ),
-                ensure_ascii=False,
-                indent=2,
+        now = datetime.now(tz=UTC)
+        try:
+            start = _usage_instant(
+                args.usage_start,
+                default=now - timedelta(days=1),
             )
-            + "\n"
-        )
+            end = _usage_instant(
+                args.usage_end,
+                default=now + timedelta(microseconds=1),
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        usage = ModelUsageService(args.unpublished)
+        if args.usage_format == "csv":
+            sys.stdout.write(usage.export_csv(start=start, end=end))
+        else:
+            sys.stdout.write(
+                json.dumps(
+                    usage.report(
+                        start=start,
+                        end=end,
+                        bucket_seconds=args.usage_window,
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n"
+            )
         return 0
     if args.command == "writer-health-probe":
         governor = DurableCycleGovernor(
