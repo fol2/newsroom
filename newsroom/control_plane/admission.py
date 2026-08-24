@@ -14,14 +14,20 @@ from newsroom.control_plane.evidence import (
     EVIDENCE_GATE_POLICY_VERSION,
     GOVERNED_CLAIM_POLICY_VERSION,
     GOVERNED_INPUT_SCHEMA_VERSION,
+    NAMED_ENTITY_POLICY_VERSION,
     ORIGINALITY_POLICY_VERSION,
     ClaimAuthorityClass,
+    Evid012QualificationTest,
     EvidencePackage,
     GovernedClaimEvidence,
     GovernedClaimStatus,
+    QualificationEvidence,
+    bounded_named_entities,
 )
 from newsroom.control_plane.zh_hant import (
     ZH_HANT_HK_SHAPE_POLICY_VERSION,
+    contains_discourse_filler,
+    contains_non_han_letter,
     contains_simplified_variant,
 )
 
@@ -30,7 +36,8 @@ WRITE_ADMISSION_POLICY_VERSION = (
     f"{EVID_012_POLICY_VERSION}+{EVIDENCE_APPROVAL_POLICY_VERSION}+"
     f"{EVIDENCE_GATE_POLICY_VERSION}+"
     f"{GOVERNED_CLAIM_POLICY_VERSION}+{GOVERNED_INPUT_SCHEMA_VERSION}+"
-    f"{ORIGINALITY_POLICY_VERSION}+{ZH_HANT_HK_SHAPE_POLICY_VERSION}"
+    f"{NAMED_ENTITY_POLICY_VERSION}+{ORIGINALITY_POLICY_VERSION}+"
+    f"{ZH_HANT_HK_SHAPE_POLICY_VERSION}"
 )
 WRITE_SELECTION_POLICY_VERSION = "newsroom.write-selection.v1"
 
@@ -72,8 +79,126 @@ _QUALIFICATION_CLASSIFIER_FIELDS = frozenset(
         "importance_class",
         "event_polarity",
         "duration_relation",
+        "change_relation",
+        "effect_relation",
+        "action_relation",
+        "importance_relation",
     }
 )
+
+
+def _qualification_text_is_affirmative(text: str) -> bool:
+    if re.search(
+        r"\b(?:no|not|without|never|zero|unchanged|absent|unlikely|"
+        r"may|might|could|propos\w*|consider\w*|plan\w*|intend\w*|"
+        r"expect\w*|forecast\w*|"
+        r"fail\w*|declin\w*|refus\w*|abandon\w*|postpon\w*|shelv\w*|"
+        r"defer\w*|withhold\w*|remain\w*|disput\w*|den\w*|refut\w*|"
+        r"rebut\w*|investigat\w*|review\w*|assess\w*|examin\w*|study\w*|"
+        r"question\w*|whether|asked?|inquir\w*|discuss\w*|alleged(?:ly)?|"
+        r"reported(?:ly)?|rumou?r\w*|reports?|suggest\w*|speculat\w*|"
+        r"doubt\w*|unclear|uncertain|unverified|unconfirmed|scant\s+evidence|"
+        r"little\s+evidence|insufficient\s+evidence|false|incorrect|untrue|"
+        r"purported(?:ly)?|supposed(?:ly)?|ostensibly|hoax|according\s+to\s+"
+        r"(?:unnamed|anonymous)\s+sources?|was\s+said\s+to|"
+        r"rule(?:d)?\s+out|dismiss\w*|reject\w*)\b|"
+        r"\bsame\s+(?:policy|status|rules?|arrangements?|deadline|action)\b|"
+        r"[未不無无沒没否非莫勿]|排除|澄清|維持|维持|拒絕|拒绝|放棄|"
+        r"放弃|擱置|搁置|延後|延后|暫緩|暂缓|駁斥|驳斥|反駁|反驳|"
+        r"可能|或會|或会|擬|拟|建議|建议|考慮|考虑|計劃|计划|預計|预计|"
+        r"調查|调查|檢視|检视|審視|审视|研究中|查詢|查询|網傳|网传|"
+        r"傳聞|传闻|傳言|传言|據報|据报|據稱|据称|聲稱|声称|疑似|似乎",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    return bool(
+        re.match(
+            r"^(?:Official (?:action|deadline|policy|status) changed\b|"
+            r"(?:(?:The\s+)?(?:authority|government|officials?|department|agency|"
+            r"service|route|train services?|deadline|policy|law|risk|grant)\s+"
+            r"(?:has\s+|have\s+|had\s+|is\s+|are\s+|was\s+|were\s+)?"
+            r"(?:announc\w*|confirm\w*|chang\w*|introduc\w*|launch\w*|"
+            r"extend\w*|shorten\w*|move\w*|grant\w*|revoke\w*|declar\w*|"
+            r"detect\w*|issu\w*|clos\w*|disrupt\w*|delay\w*|suspend\w*|"
+            r"now\b|effective\b|present\b|increas\w*|decreas\w*|"
+            r"face\s+delays?))|"
+            r"(?:[A-Z][A-Za-z.-]+(?:\s+[A-Z][A-Za-z.-]+){0,5})\s+"
+            r"(?:announc\w*|confirm\w*|extend\w*|launch\w*|introduc\w*|"
+            r"shorten\w*|revoke\w*|grant\w*)|"
+            r"(?:[\u3400-\u9fff]{1,24})(?:公布|宣佈|宣布|確認|證實|证实|"
+            r"推出|延長|延长|縮短|缩短|生效|批出|撤銷|撤销|發出|发出|"
+            r"發現|发现|關閉|关闭|停運|停駛|停驶|中斷|中断|延誤|延误))",
+            text.strip(),
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+_MATERIAL_RELATION_SPAN_PATTERNS = {
+    Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION: re.compile(
+        r"closed?|closure|disrupt(?:ed|ion)?|delay(?:ed)?|suspend(?:ed|sion)?|"
+        r"停運|停驶|停駛|關閉|关闭|中斷|中断|延誤|延误|暫停|暂停",
+        re.IGNORECASE,
+    ),
+    Evid012QualificationTest.LAW_RIGHT_STATUS_POLICY: re.compile(
+        r"changed|changes|new|now|introduced?|effective|granted?|revoked?|"
+        r"已(?:經|经)?更?改|更?改(?:為|为|至)|新增|新|現時|现时|生效|"
+        r"批出|撤銷|撤销",
+        re.IGNORECASE,
+    ),
+    Evid012QualificationTest.SAFETY_OR_PUBLIC_HEALTH: re.compile(
+        r"present|increased?|issued?|confirmed?|detected?|declared?|"
+        r"存在|上升|發出|发出|證實|证实|發現|发现|宣布",
+        re.IGNORECASE,
+    ),
+    Evid012QualificationTest.HOUSEHOLD_PRACTICAL_EFFECT: re.compile(
+        r"changed|changes|new|now|increased?|decreased?|rose|fell|cut|"
+        r"已(?:經|经)?更?改|更?改(?:為|为|至)|新增|新|現時|现时|上升|"
+        r"下降|增加|減少|减少",
+        re.IGNORECASE,
+    ),
+    Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE: re.compile(
+        r"changed|changes|new|now|introduced?|announced?|launched?|extended?|"
+        r"shortened?|moved?|effective|已(?:經|经)?更?改|更?改(?:為|为|至)|"
+        r"新增|新|現時|现时|推出|公布|延長|延长|縮短|缩短|生效",
+        re.IGNORECASE,
+    ),
+    Evid012QualificationTest.EXCEPTIONAL_PUBLIC_IMPORTANCE: re.compile(
+        r"declared?|confirmed?|unprecedented|record|emergency|"
+        r"宣布|證實|证实|史無前例|史无前例|紀錄|纪录|緊急|紧急",
+        re.IGNORECASE,
+    ),
+}
+
+
+def _qualification_relation_is_proven(
+    qualification: QualificationEvidence, claim: GovernedClaimEvidence
+) -> bool:
+    spans = tuple(
+        value
+        for field, value in qualification.test_evidence
+        if field == "material_relation_span"
+        or (
+            qualification.test is Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION
+            and field == "affected_group"
+        )
+    )
+    pattern = _MATERIAL_RELATION_SPAN_PATTERNS.get(qualification.test)
+    clauses = {
+        clause.strip().strip(".,，。;；!?！？")
+        for clause in re.split(
+            r"[\n,，.;；。!?！？]+", f"{claim.claim}\n{claim.supporting_excerpt}"
+        )
+        if clause.strip()
+    }
+    return (
+        len(spans) == 1
+        and pattern is not None
+        and spans[0].strip().strip(".,，。;；!?！？") in clauses
+        and _qualification_text_is_affirmative(spans[0])
+        and bool(pattern.search(spans[0]))
+    )
 
 
 def _duration_is_exactly_supported(
@@ -147,8 +272,9 @@ def _valid_zh_hant_hk_rendering(claim: GovernedClaimEvidence) -> bool:
         without_entities = without_entities.replace(entity, "")
     return (
         any("\u3400" <= character <= "\u9fff" for character in rendered)
-        and not re.search(r"[A-Za-z]", without_entities)
+        and not contains_non_han_letter(without_entities)
         and not contains_simplified_variant(without_entities)
+        and not contains_discourse_filler(rendered)
         and all(
             len(value) < 8 or value not in rendered
             for value in (claim.claim, claim.supporting_excerpt)
@@ -329,13 +455,24 @@ class DeterministicWriteAdmission:
         if not package.resolved_evidence_records:
             missing.append("UNRESOLVED_GOVERNED_EVIDENCE_RECORDS")
         elif any(
-            item.qualification_record_id
-            not in {
-                record_id for record_id, _digest in package.resolved_evidence_records
-            }
-            for item in package.qualification_evidence
+            record_id not in {item[0] for item in package.resolved_evidence_records}
+            for record_id in (
+                *(
+                    item.qualification_record_id
+                    for item in package.qualification_evidence
+                ),
+                *(
+                    record_id
+                    for claim in package.governed_claims
+                    for _text, _entity_type, record_id in claim.named_entity_evidence
+                ),
+                *(
+                    claim.semantic_relation_evidence_id
+                    for claim in package.governed_claims
+                ),
+            )
         ):
-            missing.append("UNRESOLVED_QUALIFICATION_EVIDENCE")
+            missing.append("UNRESOLVED_SEMANTIC_EVIDENCE")
         governed_claims = {item.claim_id: item for item in package.governed_claims}
         invalid_claims = tuple(
             item
@@ -349,6 +486,20 @@ class DeterministicWriteAdmission:
             or any(
                 entity not in item.claim and entity not in item.supporting_excerpt
                 for entity in item.named_entities
+            )
+            or bounded_named_entities(f"{item.claim}\n{item.supporting_excerpt}")
+            != frozenset(
+                (text, entity_type)
+                for text, entity_type, _record_id in item.named_entity_evidence
+            )
+            or bounded_named_entities(item.rendered_assertion_zh_hant_hk)
+            != frozenset(
+                (text, entity_type)
+                for text, (_source, entity_type, _record_id) in zip(
+                    item.rendered_named_entities,
+                    item.named_entity_evidence,
+                    strict=True,
+                )
             )
             or any(
                 quotation not in item.supporting_excerpt
@@ -365,12 +516,33 @@ class DeterministicWriteAdmission:
             missing.append("INVALID_GOVERNED_CLAIM_EVIDENCE")
         if sum(item.claim_role == "HEADLINE" for item in package.governed_claims) != 1:
             missing.append("INVALID_HEADLINE_CLAIM_INVENTORY")
+        else:
+            headline_claim = next(
+                item
+                for item in package.governed_claims
+                if item.claim_role == "HEADLINE"
+            )
+            qualified_claim_ids = {
+                item.governed_claim_id for item in package.qualification_evidence
+            }
+            if package.substantive_new_information and (
+                headline_claim.claim not in package.substantive_new_information
+                or headline_claim.claim_id not in qualified_claim_ids
+            ):
+                missing.append("UNQUALIFIED_HEADLINE_CLAIM")
         if any(
             not any(
-                claim.claim == fact and claim.claim_role == "SUBSTANTIVE"
+                claim.claim == fact and claim.claim_role in {"HEADLINE", "SUBSTANTIVE"}
                 for claim in package.governed_claims
             )
             for fact in package.substantive_new_information
+        ) or (
+            package.substantive_new_information
+            and not any(
+                claim.claim_role == "SUBSTANTIVE"
+                and claim.claim in package.substantive_new_information
+                for claim in package.governed_claims
+            )
         ):
             missing.append("INVALID_SUBSTANTIVE_CLAIM_INVENTORY")
         expected_claim_ids = frozenset(governed_claims)
@@ -430,6 +602,9 @@ class DeterministicWriteAdmission:
             item
             for item in package.qualification_evidence
             if item.governed_claim_id not in governed_claims
+            or not _qualification_relation_is_proven(
+                item, governed_claims[item.governed_claim_id]
+            )
             or any(
                 field not in _QUALIFICATION_CLASSIFIER_FIELDS
                 and value not in governed_claims[item.governed_claim_id].claim

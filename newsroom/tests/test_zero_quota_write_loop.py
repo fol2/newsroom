@@ -32,6 +32,7 @@ from newsroom.control_plane.evidence import (
     EVIDENCE_GATE_POLICY_VERSION,
     GOVERNED_CLAIM_POLICY_VERSION,
     GOVERNED_INPUT_SCHEMA_VERSION,
+    NAMED_ENTITY_POLICY_VERSION,
     ORIGINALITY_POLICY_VERSION,
     ClaimAuthorityClass,
     Evid012QualificationTest,
@@ -40,7 +41,9 @@ from newsroom.control_plane.evidence import (
     GovernedClaimEvidence,
     GovernedClaimStatus,
     QualificationEvidence,
+    _has_valid_origin_independence,
     _resolve_governed_records,
+    bounded_named_entities,
     package_for,
 )
 from newsroom.control_plane.items import SourceItem, parse_observation
@@ -55,6 +58,7 @@ from newsroom.control_plane.writer import (
 )
 from newsroom.control_plane.zh_hant import (
     ZH_HANT_HK_SHAPE_POLICY_VERSION,
+    contains_discourse_filler,
     contains_simplified_variant,
 )
 from newsroom.effective_revision import retain_observation_revision_first_seen
@@ -88,10 +92,49 @@ def test_non_controller_children_do_not_receive_evidence_approval_key(
         "內容獲准先至可以公布",
         "平台准許已批准嘅社群進行核查",
         "人才群體公布安排",
+        "人工智能高峰會將於周四舉行",
+        "三十周年搜集證據安排",
+        "人口回流香港",
+        "高峰期每周更新查核資料",
+        "港人回流英國",
+        "山峰地區有暴雨",
+        "峰值",
+        "巔峰",
+        "金融峰會",
+        "官方宣布新安排",
+        "家具供應增加",
+        "數據分布情況",
+        "舞台表演最新安排",
+        "月台最新安排",
+        "港台最新安排",
     ),
 )
 def test_hong_kong_traditional_variants_are_not_simplified(text: str) -> None:
     assert not contains_simplified_variant(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "整體而言，官方公布最新安排",
+        "簡而言之，官方公布最新安排",
+        "總的來說，官方公布最新安排",
+        "由此可見，官方公布最新安排",
+        "值得留意，官方公布最新安排",
+        "說到底，官方公布最新安排",
+        "歸根究底，官方公布最新安排",
+        "眾所周知，官方公布最新安排",
+    ),
+)
+def test_discourse_filler_is_rejected(text: str) -> None:
+    assert contains_discourse_filler(text)
+
+
+def test_official_programme_terms_have_a_structured_entity_type() -> None:
+    for text in ("EUSS", "Universal Credit", "Nationality and Borders Act"):
+        assert bounded_named_entities(f"{text} changed") == frozenset(
+            {(text, "OFFICIAL_TERM")}
+        )
 
 
 def test_owner_approved_hong_kong_charter_has_no_simplified_shapes() -> None:
@@ -143,6 +186,19 @@ def test_unambiguous_simplified_shape_is_rejected() -> None:
         "手表展示",
         "云端系統",
         "系上安全帶",
+        "官方划定範圍",
+        "企業托管資產",
+        "部門占据場地",
+        "公開征集意見",
+        "這是范例",
+        "面包供應增加",
+        "柜台服務恢復",
+        "方案适用全港",
+        "种植面積增加",
+        "党派發表聲明",
+        "几乎全部完成",
+        "夸大影響",
+        "願景成為愿望",
     ):
         assert contains_simplified_variant(text)
 
@@ -160,13 +216,33 @@ def test_approved_proper_name_is_exempt_from_contextual_shape_gate(
         headline,
         claim=source_claim,
         supporting_excerpt=source_claim,
+        named_entity_evidence=((entity, "PLACE", f"entity:{entity}"),),
         named_entities=(entity,),
+        rendered_named_entities=(entity,),
         rendered_assertion_zh_hant_hk=f"{entity}最新安排",
     )
     guarded_package = replace(
         package,
         passages=(f"{source_claim}\n{substantive.claim}",),
+        substantive_new_information=(source_claim, substantive.claim),
         governed_claims=(changed_headline, substantive),
+        qualification_evidence=(
+            replace(
+                package.qualification_evidence[0],
+                test_evidence=(
+                    ("action_class", "OFFICIAL_DEADLINE"),
+                    ("event_polarity", "AFFIRMED"),
+                    ("action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"),
+                    ("material_relation_span", source_claim),
+                    ("reader_action", source_claim),
+                ),
+            ),
+            package.qualification_evidence[1],
+        ),
+        resolved_evidence_records=(
+            *package.resolved_evidence_records,
+            (f"entity:{entity}", "fixture-digest"),
+        ),
     )
 
     decision = DeterministicWriteAdmission().decide(
@@ -215,6 +291,7 @@ def test_governed_records_reject_cross_source_claim_link() -> None:
         "A",
         "官方公布最新限期安排",
         "HEADLINE",
+        "semantic-A",
     )
     package = replace(base, governed_claims=(claim,))
     records = (
@@ -237,6 +314,7 @@ def test_governed_records_reject_cross_source_claim_link() -> None:
             "extraction_status": "COMPLETE",
             "rights_decision_id": "rights-A",
             "originating_report_id": "origin-A",
+            "originating_artefact_digest": "sha256:source-a",
             "dependency_evidence_ids": ["dependency-A"],
         },
         {
@@ -273,6 +351,23 @@ def test_governed_records_reject_cross_source_claim_link() -> None:
             "evidential_origin_id": "origin-A",
             "originating_report_id": "origin-A",
         },
+        {
+            "record_id": "semantic-A",
+            "record_type": "SEMANTIC_RELATION_EVIDENCE",
+            "candidate_id": candidate.candidate_id,
+            "base_package_digest": base.digest,
+            "status": "CURRENT",
+            "governed_claim_id": claim.claim_id,
+            "source_modality": "ASSERTED",
+            "rendered_modality": "ASSERTED",
+            "source_polarity": "AFFIRMED",
+            "rendered_polarity": "AFFIRMED",
+            "relation": "SEMANTICALLY_EQUIVALENT",
+            "claim_digest": digest_bytes(claim.claim.encode()),
+            "rendered_assertion_digest": digest_bytes(
+                claim.rendered_assertion_zh_hant_hk.encode()
+            ),
+        },
     )
     connection = sqlite3.connect(":memory:")
     connection.execute(
@@ -296,6 +391,213 @@ def test_governed_records_reject_cross_source_claim_link() -> None:
     connection.close()
 
 
+@pytest.mark.parametrize(
+    "source_overrides",
+    (
+        {"source_type": "LEAD_ONLY"},
+        {
+            "publisher": 123,
+            "responsible_body": ["fixture"],
+            "publication_time": True,
+            "retrieval_time": {"at": "2026-01-01"},
+            "geography": 42,
+            "language": 99,
+        },
+        {"publication_time": "not-a-time", "retrieval_time": "tomorrow-ish"},
+        {"geography": "Mars", "language": "definitely-not-bcp47"},
+    ),
+)
+def test_governed_records_reject_lead_only_or_untyped_source_records(
+    source_overrides: dict[str, object],
+) -> None:
+    item = SourceItem(
+        "A", "a", "Official deadline", "Deadline changed", "https://example.test/a"
+    )
+    candidate = StoryCandidateRecord(
+        "candidate-source-schema",
+        "hypothesis-source-schema",
+        item.headline,
+        (item,),
+        (DiscoverySignalRecord("signal-a", "A", "a", "digest-a"),),
+        (NewsLeadRecord("lead-a", "signal-a", item.headline),),
+    )
+    base = package_for(candidate)
+    claim = GovernedClaimEvidence(
+        "claim-source-schema",
+        item.headline,
+        0,
+        item.headline,
+        ("A",),
+        ("source-record-A",),
+        ("authority-A",),
+        ("rights-A",),
+        ("dependency-A",),
+        ("origin-A",),
+        ClaimAuthorityClass.RESPONSIBLE_PRIMARY,
+        "Own deadline",
+        GovernedClaimStatus.CONFIRMED_FACT,
+        "A",
+        "官方公布最新限期安排",
+        "HEADLINE",
+        "semantic-A",
+    )
+    package = replace(base, governed_claims=(claim,))
+    source_record: dict[str, object] = {
+        "record_id": "source-record-A",
+        "record_type": "SOURCE_RECORD",
+        "candidate_id": candidate.candidate_id,
+        "base_package_digest": base.digest,
+        "status": "CURRENT",
+        "source_id": "A",
+        "canonical_url": item.canonical_url,
+        "publisher": "Fixture authority",
+        "responsible_body": "Fixture authority",
+        "source_type": "PRIMARY_OFFICIAL",
+        "authority_class": "RESPONSIBLE_PRIMARY",
+        "publication_time": "2026-01-01",
+        "retrieval_time": "2026-01-01",
+        "geography": "UK",
+        "language": "en",
+        "extraction_status": "COMPLETE",
+        "rights_decision_id": "rights-A",
+        "originating_report_id": "origin-A",
+        "originating_artefact_digest": "sha256:source-a",
+        "dependency_evidence_ids": ["dependency-A"],
+    }
+    records: tuple[dict[str, object], ...] = (
+        source_record,
+        {
+            "record_id": "authority-A",
+            "record_type": "SOURCE_AUTHORITY_DECISION",
+            "candidate_id": candidate.candidate_id,
+            "base_package_digest": base.digest,
+            "status": "CURRENT",
+            "source_id": "A",
+            "decision": "ADMITTED",
+            "authority_class": "RESPONSIBLE_PRIMARY",
+            "authority_scope": "Own deadline",
+            "governed_claim_id": claim.claim_id,
+            "claim_digest": digest_bytes(claim.claim.encode()),
+        },
+        {
+            "record_id": "rights-A",
+            "record_type": "RIGHTS_DECISION",
+            "candidate_id": candidate.candidate_id,
+            "base_package_digest": base.digest,
+            "status": "CURRENT",
+            "source_id": "A",
+            "decision": "PERMITTED",
+            "permitted_use": "PUBLICATION_EVIDENCE",
+        },
+        {
+            "record_id": "dependency-A",
+            "record_type": "DEPENDENCY_EVIDENCE",
+            "candidate_id": candidate.candidate_id,
+            "base_package_digest": base.digest,
+            "status": "CURRENT",
+            "source_id": "A",
+            "dependency_status": "RESOLVED",
+            "evidential_origin_id": "origin-A",
+            "originating_report_id": "origin-A",
+        },
+        {
+            "record_id": "semantic-A",
+            "record_type": "SEMANTIC_RELATION_EVIDENCE",
+            "candidate_id": candidate.candidate_id,
+            "base_package_digest": base.digest,
+            "status": "CURRENT",
+            "governed_claim_id": claim.claim_id,
+            "source_modality": "ASSERTED",
+            "rendered_modality": "ASSERTED",
+            "source_polarity": "AFFIRMED",
+            "rendered_polarity": "AFFIRMED",
+            "relation": "SEMANTICALLY_EQUIVALENT",
+            "claim_digest": digest_bytes(claim.claim.encode()),
+            "rendered_assertion_digest": digest_bytes(
+                claim.rendered_assertion_zh_hant_hk.encode()
+            ),
+        },
+    )
+
+    def resolve(overrides: dict[str, object]) -> object:
+        connection = sqlite3.connect(":memory:")
+        connection.execute(
+            "CREATE TABLE proving_write_evidence_records("
+            "record_id TEXT PRIMARY KEY, record_type TEXT, "
+            "record_json TEXT, record_digest TEXT)"
+        )
+        for original in records:
+            record = dict(original)
+            if record["record_type"] == "SOURCE_RECORD":
+                record.update(overrides)
+            raw = canonical_json_bytes(record).decode()
+            connection.execute(
+                "INSERT INTO proving_write_evidence_records VALUES(?,?,?,?)",
+                (
+                    record["record_id"],
+                    record["record_type"],
+                    raw,
+                    digest_bytes(raw.encode()),
+                ),
+            )
+        resolved = _resolve_governed_records(connection, candidate, base, package)
+        connection.close()
+        return resolved
+
+    assert resolve({}) is not None
+    assert resolve(source_overrides) is None
+
+
+def test_independent_authority_collapses_shared_report_and_url_origins() -> None:
+    sources = [
+        {
+            "source_id": "A",
+            "canonical_url": "https://example.test/shared",
+            "originating_report_id": "same-report",
+            "originating_artefact_digest": "sha256:shared",
+        },
+        {
+            "source_id": "B",
+            "canonical_url": "https://example.test/shared",
+            "originating_report_id": "same-report",
+            "originating_artefact_digest": "sha256:shared",
+        },
+    ]
+    dependencies = [
+        {"originating_report_id": "same-report", "evidential_origin_id": "origin-1"},
+        {"originating_report_id": "same-report", "evidential_origin_id": "origin-2"},
+    ]
+
+    assert not _has_valid_origin_independence(
+        ClaimAuthorityClass.INDEPENDENT_RELIABLE,
+        sources,
+        dependencies,
+        ("origin-1", "origin-2"),
+    )
+    sources[1]["originating_report_id"] = "report-2"
+    dependencies[1]["originating_report_id"] = "report-2"
+    assert not _has_valid_origin_independence(
+        ClaimAuthorityClass.INDEPENDENT_RELIABLE,
+        sources,
+        dependencies,
+        ("origin-1", "origin-2"),
+    )
+    sources[1]["canonical_url"] = "https://example.test/independent"
+    assert not _has_valid_origin_independence(
+        ClaimAuthorityClass.INDEPENDENT_RELIABLE,
+        sources,
+        dependencies,
+        ("origin-1", "origin-2"),
+    )
+    sources[1]["originating_artefact_digest"] = "sha256:independent"
+    assert _has_valid_origin_independence(
+        ClaimAuthorityClass.INDEPENDENT_RELIABLE,
+        sources,
+        dependencies,
+        ("origin-1", "origin-2"),
+    )
+
+
 def _admit_package(
     candidate: StoryCandidateRecord,
     package: EvidencePackage,
@@ -303,8 +605,8 @@ def _admit_package(
     authority_class: ClaimAuthorityClass = ClaimAuthorityClass.RESPONSIBLE_PRIMARY,
     origin_ids: tuple[str, ...] | None = None,
 ) -> EvidencePackage:
-    headline = candidate.headline
-    substantive = candidate.items[0].body
+    headline = "Official action changed: a new official arrangement."
+    substantive = "Official action changed: an official deadline."
     origins = origin_ids or (f"origin:{candidate.items[0].source_id}",)
     claims = (
         GovernedClaimEvidence(
@@ -326,6 +628,7 @@ def _admit_package(
             attribution=candidate.items[0].source_id,
             rendered_assertion_zh_hant_hk="官方公布咗最新安排",
             claim_role="HEADLINE",
+            semantic_relation_evidence_id=f"semantic:{candidate.candidate_id}:headline",
         ),
         GovernedClaimEvidence(
             claim_id=f"claim:{candidate.candidate_id}:substantive",
@@ -346,23 +649,30 @@ def _admit_package(
             attribution=candidate.items[0].source_id,
             rendered_assertion_zh_hant_hk="相關官方資料確認安排已經更新",
             claim_role="SUBSTANTIVE",
+            semantic_relation_evidence_id=f"semantic:{candidate.candidate_id}:substantive",
         ),
     )
+    claims = tuple(_bind_fixture_entities(claim) for claim in claims)
     claim_ids = tuple(claim.claim_id for claim in claims)
     return replace(
         package,
-        substantive_new_information=(substantive,),
+        passages=(f"{package.passages[0]}\n{headline}\n{substantive}",),
+        substantive_new_information=(headline, substantive),
         governed_claims=claims,
-        qualification_evidence=(
+        qualification_evidence=tuple(
             QualificationEvidence(
                 Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE,
-                claims[1].claim_id,
-                f"qualification:{claims[1].claim_id}",
+                claim.claim_id,
+                f"qualification:{claim.claim_id}",
                 (
                     ("action_class", "OFFICIAL_DEADLINE"),
-                    ("reader_action", substantive),
+                    ("event_polarity", "AFFIRMED"),
+                    ("action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"),
+                    ("material_relation_span", claim.claim),
+                    ("reader_action", claim.claim),
                 ),
-            ),
+            )
+            for claim in claims
         ),
         selection_rationale="Retained governed evidence proves a material official development.",
         geography=("Hong Kong" if "HK" in candidate.items[0].source_id else "UK",),
@@ -384,11 +694,47 @@ def _admit_package(
         integrity_result="PASS",
         resolved_evidence_records=(
             ("fixture-evidence-record", f"digest:{candidate.candidate_id}"),
-            (
-                f"qualification:{claims[1].claim_id}",
-                f"qualification-digest:{candidate.candidate_id}",
+            *(
+                (
+                    claim.semantic_relation_evidence_id,
+                    f"semantic-digest:{claim.claim_id}",
+                )
+                for claim in claims
+            ),
+            *(
+                (record_id, f"entity-digest:{record_id}")
+                for claim in claims
+                for _text, _entity_type, record_id in claim.named_entity_evidence
+            ),
+            *(
+                (
+                    f"qualification:{claim.claim_id}",
+                    f"qualification-digest:{claim.claim_id}",
+                )
+                for claim in claims
             ),
         ),
+    )
+
+
+def _bind_fixture_entities(claim: GovernedClaimEvidence) -> GovernedClaimEvidence:
+    entities = tuple(
+        sorted(bounded_named_entities(f"{claim.claim}\n{claim.supporting_excerpt}"))
+    )
+    if not entities:
+        return claim
+    texts = tuple(text for text, _entity_type in entities)
+    return replace(
+        claim,
+        rendered_assertion_zh_hant_hk=(
+            "、".join(texts) + "：" + claim.rendered_assertion_zh_hant_hk
+        ),
+        named_entity_evidence=tuple(
+            (text, entity_type, f"entity:{claim.claim_id}:{index}")
+            for index, (text, entity_type) in enumerate(entities)
+        ),
+        named_entities=texts,
+        rendered_named_entities=texts,
     )
 
 
@@ -592,9 +938,10 @@ def test_material_duration_classifier_must_be_exact_in_retained_fact() -> None:
     unsupported = replace(
         package,
         passages=(f"HK-01: {headline.claim}\n{short_delay}",),
-        substantive_new_information=(short_delay,),
+        substantive_new_information=(headline.claim, short_delay),
         governed_claims=(headline, changed_substantive),
         qualification_evidence=(
+            package.qualification_evidence[0],
             QualificationEvidence(
                 Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION,
                 changed_substantive.claim_id,
@@ -623,7 +970,8 @@ def test_admission_policy_identity_binds_all_admission_subpolicies() -> None:
         f"{EVID_012_POLICY_VERSION}+{EVIDENCE_APPROVAL_POLICY_VERSION}+"
         f"{EVIDENCE_GATE_POLICY_VERSION}+"
         f"{GOVERNED_CLAIM_POLICY_VERSION}+{GOVERNED_INPUT_SCHEMA_VERSION}+"
-        f"{ORIGINALITY_POLICY_VERSION}+{ZH_HANT_HK_SHAPE_POLICY_VERSION}"
+        f"{NAMED_ENTITY_POLICY_VERSION}+{ORIGINALITY_POLICY_VERSION}+"
+        f"{ZH_HANT_HK_SHAPE_POLICY_VERSION}"
     )
 
 
@@ -640,9 +988,10 @@ def test_route_number_cannot_masquerade_as_material_disruption_duration() -> Non
     unsupported = replace(
         package,
         passages=(f"HK-01: {headline.claim}\n{short_delay}",),
-        substantive_new_information=(short_delay,),
+        substantive_new_information=(headline.claim, short_delay),
         governed_claims=(headline, changed_substantive),
         qualification_evidence=(
+            package.qualification_evidence[0],
             QualificationEvidence(
                 Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION,
                 changed_substantive.claim_id,
@@ -681,9 +1030,10 @@ def test_scheduled_journey_duration_cannot_masquerade_as_disruption_duration() -
     unsupported = replace(
         package,
         passages=(f"HK-01: {headline.claim}\n{short_delay}",),
-        substantive_new_information=(short_delay,),
+        substantive_new_information=(headline.claim, short_delay),
         governed_claims=(headline, changed_substantive),
         qualification_evidence=(
+            package.qualification_evidence[0],
             QualificationEvidence(
                 Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION,
                 changed_substantive.claim_id,
@@ -720,9 +1070,10 @@ def test_material_disruption_duration_relation_is_admitted() -> None:
     supported = replace(
         package,
         passages=(f"HK-01: {headline.claim}\n{material_delay}",),
-        substantive_new_information=(material_delay,),
+        substantive_new_information=(headline.claim, material_delay),
         governed_claims=(headline, changed_substantive),
         qualification_evidence=(
+            package.qualification_evidence[0],
             QualificationEvidence(
                 Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION,
                 changed_substantive.claim_id,
@@ -761,6 +1112,9 @@ def test_material_disruption_duration_relation_is_admitted() -> None:
         ("There were zero 60-minute service disruptions.", "HOLD"),
         ("Officials ruled out delays of up to 60 minutes.", "HOLD"),
         ("Officials dismissed reports of delays of up to 60 minutes.", "HOLD"),
+        ("The route may be closed for 120 minutes.", "HOLD"),
+        ("The route could be closed for 120 minutes.", "HOLD"),
+        ("The route is expected to be closed for 120 minutes.", "HOLD"),
         ("當局澄清並不存在60分鐘延誤。", "HOLD"),
         ("當局排除會延誤60分鐘。", "HOLD"),
         ("The claim of a 60-minute delay is false.", "HOLD"),
@@ -782,9 +1136,10 @@ def test_material_disruption_duration_requires_positive_exact_relation(
     checked = replace(
         package,
         passages=(f"HK-01: {headline.claim}\n{fact}",),
-        substantive_new_information=(fact,),
+        substantive_new_information=(headline.claim, fact),
         governed_claims=(headline, changed_substantive),
         qualification_evidence=(
+            package.qualification_evidence[0],
             QualificationEvidence(
                 Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION,
                 changed_substantive.claim_id,
@@ -845,12 +1200,19 @@ def test_qualification_detail_must_be_exact_in_bound_governed_claim() -> None:
     unsupported = replace(
         package,
         qualification_evidence=(
+            package.qualification_evidence[0],
             QualificationEvidence(
                 Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE,
                 package.governed_claims[1].claim_id,
                 f"qualification:{package.governed_claims[1].claim_id}",
                 (
                     ("action_class", "OFFICIAL_DEADLINE"),
+                    ("event_polarity", "AFFIRMED"),
+                    ("action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"),
+                    (
+                        "material_relation_span",
+                        package.governed_claims[1].claim,
+                    ),
                     ("reader_action", "An unsupported reader action."),
                 ),
             ),
@@ -862,6 +1224,233 @@ def test_qualification_detail_must_be_exact_in_bound_governed_claim() -> None:
     )
     assert decision.decision == "HOLD"
     assert decision.stable_reason_codes == ("QUALIFICATION_EVIDENCE_NOT_EXACT",)
+
+
+@pytest.mark.parametrize(
+    ("test", "claim_text", "test_evidence"),
+    (
+        (
+            Evid012QualificationTest.LAW_RIGHT_STATUS_POLICY,
+            "Officials confirmed the policy has not changed.",
+            (
+                ("change_kind", "PUBLIC_POLICY"),
+                ("event_polarity", "AFFIRMED"),
+                ("change_relation", "NEW_OR_CHANGED_STATE"),
+                ("new_state", "Officials confirmed the policy has not changed."),
+            ),
+        ),
+        (
+            Evid012QualificationTest.SAFETY_OR_PUBLIC_HEALTH,
+            "Officials confirmed there is no public-health risk.",
+            (
+                ("effect_class", "PUBLIC_HEALTH_WARNING"),
+                ("event_polarity", "AFFIRMED"),
+                ("effect_relation", "MATERIAL_EFFECT"),
+                (
+                    "affected_group",
+                    "Officials confirmed there is no public-health risk.",
+                ),
+            ),
+        ),
+        (
+            Evid012QualificationTest.HOUSEHOLD_PRACTICAL_EFFECT,
+            "Officials confirmed there is no effect on household money.",
+            (
+                ("domain", "MONEY"),
+                ("event_polarity", "AFFIRMED"),
+                ("effect_relation", "MATERIAL_PRACTICAL_EFFECT"),
+                (
+                    "practical_effect",
+                    "Officials confirmed there is no effect on household money.",
+                ),
+            ),
+        ),
+        (
+            Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE,
+            "The deadline did not change from 30 September.",
+            (
+                ("action_class", "OFFICIAL_DEADLINE"),
+                ("event_polarity", "AFFIRMED"),
+                ("action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"),
+                ("reader_action", "The deadline did not change from 30 September."),
+            ),
+        ),
+        (
+            Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE,
+            "The deadline remains the same.",
+            (
+                ("action_class", "OFFICIAL_DEADLINE"),
+                ("event_polarity", "AFFIRMED"),
+                ("action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"),
+                ("reader_action", "The deadline remains the same."),
+            ),
+        ),
+        (
+            Evid012QualificationTest.LAW_RIGHT_STATUS_POLICY,
+            "Officials said the policy remains the same.",
+            (
+                ("change_kind", "PUBLIC_POLICY"),
+                ("event_polarity", "AFFIRMED"),
+                ("change_relation", "NEW_OR_CHANGED_STATE"),
+                ("new_state", "Officials said the policy remains the same."),
+            ),
+        ),
+        (
+            Evid012QualificationTest.SAFETY_OR_PUBLIC_HEALTH,
+            "Officials said public-health risk is absent.",
+            (
+                ("effect_class", "PUBLIC_HEALTH_WARNING"),
+                ("event_polarity", "AFFIRMED"),
+                ("effect_relation", "MATERIAL_EFFECT"),
+                ("affected_group", "Officials said public-health risk is absent."),
+            ),
+        ),
+        (
+            Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE,
+            "政府並未更改申請限期",
+            (
+                ("action_class", "OFFICIAL_DEADLINE"),
+                ("event_polarity", "AFFIRMED"),
+                ("action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"),
+                ("reader_action", "政府並未更改申請限期"),
+            ),
+        ),
+        (
+            Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE,
+            "政府未曾更改申請限期",
+            (
+                ("action_class", "OFFICIAL_DEADLINE"),
+                ("event_polarity", "AFFIRMED"),
+                ("action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"),
+                ("reader_action", "政府未曾更改申請限期"),
+            ),
+        ),
+        (
+            Evid012QualificationTest.SAFETY_OR_PUBLIC_HEALTH,
+            "Officials disputed reports of a public-health risk.",
+            (
+                ("effect_class", "PUBLIC_HEALTH_WARNING"),
+                ("event_polarity", "AFFIRMED"),
+                ("effect_relation", "MATERIAL_EFFECT"),
+                (
+                    "affected_group",
+                    "Officials disputed reports of a public-health risk.",
+                ),
+            ),
+        ),
+        *(
+            (
+                Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE,
+                claim,
+                (
+                    ("action_class", "OFFICIAL_DEADLINE"),
+                    ("event_polarity", "AFFIRMED"),
+                    ("action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"),
+                    ("reader_action", claim),
+                ),
+            )
+            for claim in (
+                "Officials failed to change the deadline.",
+                "Officials declined to change the deadline.",
+                "Officials are unlikely to change the deadline.",
+                "Officials refuted claims that the deadline changed.",
+                "Officials rebutted reports that the deadline changed.",
+                "Officials are investigating whether the deadline changed.",
+                "Officials asked whether the deadline changed.",
+                "The authority is reviewing a new deadline.",
+                "Officials discussed reports that the deadline changed.",
+                "The deadline allegedly changed.",
+                "網傳申請限期已改",
+                "Sources suggested that the deadline changed.",
+                "It is unclear if the deadline changed.",
+                "It is doubtful that the deadline changed.",
+                "There is scant evidence the deadline changed.",
+                "The unverified claim says the deadline changed.",
+                "Sources speculated that the deadline changed.",
+                "政府拒絕更改申請限期",
+                "政府放棄更改申請限期",
+                "政府擱置更改申請限期",
+                "政府駁斥申請限期已改",
+            )
+        ),
+    ),
+)
+def test_negated_or_unchanged_fact_cannot_satisfy_qualification(
+    test: Evid012QualificationTest,
+    claim_text: str,
+    test_evidence: tuple[tuple[str, str], ...],
+) -> None:
+    candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    changed = replace(
+        substantive,
+        claim=claim_text,
+        supporting_excerpt=claim_text,
+        rendered_assertion_zh_hant_hk="官方確認相關情況維持不變",
+    )
+    test_evidence = (*test_evidence, ("material_relation_span", claim_text))
+    checked = replace(
+        package,
+        passages=(f"{headline.claim}\n{claim_text}",),
+        substantive_new_information=(headline.claim, claim_text),
+        governed_claims=(headline, changed),
+        qualification_evidence=(
+            package.qualification_evidence[0],
+            QualificationEvidence(
+                test,
+                changed.claim_id,
+                f"qualification:{changed.claim_id}",
+                test_evidence,
+            ),
+        ),
+    )
+
+    decision = DeterministicWriteAdmission().decide(
+        candidate, checked, decided_at="2026-08-20T00:00:00Z"
+    )
+
+    assert decision.decision == "HOLD"
+    assert decision.stable_reason_codes == ("QUALIFICATION_EVIDENCE_NOT_EXACT",)
+
+
+def test_positive_material_clause_is_not_tainted_by_unrelated_negative_clause() -> None:
+    candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    full_claim = "政府公布新限期，但現有申請不受影響"
+    material_clause = "政府公布新限期"
+    changed = replace(
+        substantive,
+        claim=full_claim,
+        supporting_excerpt=full_claim,
+        rendered_assertion_zh_hant_hk="政府公布咗新限期",
+    )
+    checked = replace(
+        package,
+        passages=(f"{headline.claim}\n{full_claim}",),
+        substantive_new_information=(headline.claim, full_claim),
+        governed_claims=(headline, changed),
+        qualification_evidence=(
+            package.qualification_evidence[0],
+            QualificationEvidence(
+                Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE,
+                changed.claim_id,
+                f"qualification:{changed.claim_id}",
+                (
+                    ("action_class", "OFFICIAL_DEADLINE"),
+                    ("event_polarity", "AFFIRMED"),
+                    ("action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"),
+                    ("material_relation_span", material_clause),
+                    ("reader_action", material_clause),
+                ),
+            ),
+        ),
+    )
+
+    decision = DeterministicWriteAdmission().decide(
+        candidate, checked, decided_at="2026-08-20T00:00:00Z"
+    )
+
+    assert decision.decision == "WRITE_READY"
 
 
 def test_admission_identity_binds_exact_evidence_package_digest() -> None:
@@ -1213,7 +1802,10 @@ def test_syntactically_valid_unmapped_claim_is_rejected(tmp_path: Path) -> None:
     )
 
     assert report.draft_reject == 1
-    assert ("REQUIRED_GOVERNED_CLAIM_MISSING", 1) in report.draft_reason_counts
+    assert (
+        "DUPLICATE_OR_MISPLACED_GOVERNED_CLAIM",
+        1,
+    ) in report.draft_reason_counts
     assert list_payloads(str(unpublished)) == ()
 
 
@@ -1240,6 +1832,41 @@ def test_unrelated_claim_in_same_sentence_fails_governed_entailment() -> None:
         if item.result == "FAIL"
     }
     assert "UNSUPPORTED_CLAIM_RESIDUE" in failed
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ("duplicate-body", "duplicate-title", "duplicate-title-scaffold"),
+)
+def test_repeated_governed_content_fails_exact_once_structure(variant: str) -> None:
+    _candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    title = f"【未出版】{headline.rendered_assertion_zh_hant_hk}"
+    body = f"本報根據已核實證據報道：{substantive.rendered_assertion_zh_hant_hk}"
+    if variant == "duplicate-body":
+        body += f"；{substantive.rendered_assertion_zh_hant_hk}"
+    elif variant == "duplicate-title":
+        title += headline.rendered_assertion_zh_hant_hk
+    else:
+        title = f"【未出版】【未出版】{headline.rendered_assertion_zh_hant_hk}"
+    copy = WriterCopy(
+        title=title,
+        body=body,
+        writer_id="repetitive-writer",
+        evidence_package_digest=package.digest,
+        evidence_links=tuple(
+            WriterEvidenceLink(item.claim_id, item.rendered_assertion_zh_hant_hk)
+            for item in package.governed_claims
+        ),
+    )
+
+    failed = {
+        item.reason_code
+        for item in validate_writer_copy(copy, package)
+        if item.result == "FAIL"
+    }
+
+    assert "DUPLICATE_OR_MISPLACED_GOVERNED_CLAIM" in failed
 
 
 def test_claim_link_cannot_rebind_another_governed_claim_identity() -> None:
@@ -1444,7 +2071,11 @@ def test_approved_named_entity_is_removed_before_originality_overlap() -> None:
     entity = "Hong Kong Monetary Authority"
     changed_headline = replace(
         headline,
+        named_entity_evidence=(
+            (entity, "ORGANISATION", "entity:hong-kong-monetary-authority"),
+        ),
         named_entities=(entity,),
+        rendered_named_entities=(entity,),
         rendered_assertion_zh_hant_hk=f"{entity}公布咗最新安排",
     )
     guarded_package = replace(
@@ -1468,6 +2099,141 @@ def test_approved_named_entity_is_removed_before_originality_overlap() -> None:
         if item.result == "FAIL"
     }
     assert "VERBATIM_SOURCE_EXPRESSION" not in failed
+
+
+@pytest.mark.parametrize(
+    ("claim_text", "entity"),
+    (
+        ("The deadline is now 30 September", "The deadline is now 30 September"),
+        ("香港政府公布新限期安排", "香港政府公布新限期安排"),
+        ("香港機場客運量創新高引起關注", "香港機場客運量創新高"),
+        (
+            "Update: Hong Kong Authority Launches New Payment System",
+            "Hong Kong Authority Launches New Payment System",
+        ),
+        (
+            "Government Opens New Housing Authority",
+            "Government Opens New Housing Authority",
+        ),
+        (
+            "Government Plans New Housing Authority",
+            "Government Plans New Housing Authority",
+        ),
+        (
+            "Government Creates New Housing Authority",
+            "Government Creates New Housing Authority",
+        ),
+        (
+            "Government Backs New Housing Authority",
+            "Government Backs New Housing Authority",
+        ),
+    ),
+)
+def test_named_entity_cannot_exempt_an_entire_source_sentence(
+    claim_text: str, entity: str
+) -> None:
+    _candidate, package = _candidate_package()
+    substantive = package.governed_claims[1]
+
+    with pytest.raises(ValueError, match="exact typed retained evidence"):
+        replace(
+            substantive,
+            claim=claim_text,
+            supporting_excerpt=claim_text,
+            rendered_assertion_zh_hant_hk=entity,
+            named_entity_evidence=((entity, "ORGANISATION", "entity:sentence"),),
+            named_entities=(entity,),
+            rendered_named_entities=(entity,),
+        )
+
+
+@pytest.mark.parametrize(
+    ("source_claim", "rendered_assertion"),
+    (
+        ("香港政府推出新措施", "英國當局實施全新政策"),
+        ("李家超公布新措施", "陳茂波宣布另一政策"),
+        ("John Smith announced a new measure", "Jane Jones announced another policy"),
+        ("行政長官李家超公布新措施", "財政司司長陳茂波公布新政策"),
+        ("運輸署公布新安排", "教育局公布另一安排"),
+        ("李家超出席會議", "陳茂波會見代表"),
+        ("李家超簽署文件", "陳茂波視察工地"),
+        ("深圳公布新安排", "北京公布另一安排"),
+        ("上海公布新安排", "澳門公布另一安排"),
+        ("廣州推出新安排", "巴黎推出新安排"),
+        (
+            "Department for Work and Pensions announced a change",
+            "NHS England confirmed another change",
+        ),
+        (
+            "Transport for London announced a change",
+            "Northern Transport Directorate confirmed another change",
+        ),
+    ),
+)
+def test_named_entity_inventory_cannot_be_omitted_or_replaced(
+    source_claim: str, rendered_assertion: str
+) -> None:
+    candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    changed = replace(
+        headline,
+        claim=source_claim,
+        supporting_excerpt=source_claim,
+        rendered_assertion_zh_hant_hk=rendered_assertion,
+    )
+    guarded = replace(
+        package,
+        passages=(f"{source_claim}\n{substantive.claim}",),
+        governed_claims=(changed, substantive),
+    )
+
+    decision = DeterministicWriteAdmission().decide(
+        candidate, guarded, decided_at="2026-08-20T00:00:00.000000Z"
+    )
+
+    assert decision.decision == "HOLD"
+    assert "INVALID_GOVERNED_CLAIM_EVIDENCE" in decision.stable_reason_codes
+
+
+def test_named_entity_evidence_binds_one_canonical_identity() -> None:
+    _candidate, package = _candidate_package()
+    substantive = package.governed_claims[1]
+
+    with pytest.raises(ValueError, match="exact typed retained evidence"):
+        replace(
+            substantive,
+            claim="李家超公布新措施",
+            supporting_excerpt="李家超公布新措施",
+            rendered_assertion_zh_hant_hk="陳茂波宣布另一政策",
+            named_entity_evidence=(("李家超", "PERSON", "entity:chief-executive"),),
+            named_entities=("李家超",),
+            rendered_named_entities=("陳茂波",),
+        )
+
+
+def test_may_to_will_requires_retained_semantic_relation_evidence() -> None:
+    candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    changed = replace(
+        substantive,
+        claim="The route may close.",
+        supporting_excerpt="The route may close.",
+        rendered_assertion_zh_hant_hk="相關路線將會關閉",
+        semantic_relation_evidence_id="semantic:unretained-may-to-will",
+    )
+    guarded = replace(
+        package,
+        passages=(f"{headline.claim}\nThe route may close.",),
+        governed_claims=(headline, changed),
+    )
+    copy = FixtureWriter().write(candidate, guarded)
+
+    failed = {
+        item.reason_code
+        for item in validate_writer_copy(copy, guarded)
+        if item.result == "FAIL"
+    }
+    assert "CERTAINTY_EXCEEDS_EVIDENCE" in failed
 
 
 @pytest.mark.parametrize(
@@ -1555,6 +2321,12 @@ def test_approved_date_is_removed_before_originality_overlap(
             "one hour",
             "一小時",
         ),
+        (
+            "The delay lasted 60 minutes.",
+            "延誤持續六十分鐘",
+            "60 minutes",
+            "六十分鐘",
+        ),
     ),
 )
 def test_controller_bound_localised_fact_passes_numeric_fidelity(
@@ -1633,6 +2405,86 @@ def test_unbound_localised_word_unit_fails_numeric_fidelity() -> None:
     assert "UNSUPPORTED_NUMBER_OR_DATE" in failed
 
 
+def test_localised_date_mapping_must_preserve_canonical_value() -> None:
+    _candidate, package = _candidate_package()
+    substantive = package.governed_claims[1]
+
+    with pytest.raises(ValueError, match="equivalent exact claim facts"):
+        replace(
+            substantive,
+            claim="The deadline is now 30 September.",
+            supporting_excerpt="The deadline is now 30 September.",
+            rendered_assertion_zh_hant_hk="新限期定喺十月三十日",
+            localised_factual_expressions=(("30 September", "十月三十日"),),
+        )
+
+
+def test_localised_large_chinese_units_do_not_collide() -> None:
+    _candidate, package = _candidate_package()
+    substantive = package.governed_claims[1]
+
+    with pytest.raises(ValueError, match="equivalent exact claim facts"):
+        replace(
+            substantive,
+            claim="資助額增至一萬億元",
+            supporting_excerpt="資助額增至一萬億元",
+            rendered_assertion_zh_hant_hk="新資助額係一億零一萬元",
+            localised_factual_expressions=(("一萬億元", "一億零一萬元"),),
+        )
+
+
+@pytest.mark.parametrize(
+    ("source_fact", "rendered_fact"),
+    (
+        ("一百二元", "一百零二元"),
+        ("一千二元", "一千零二元"),
+        ("一萬二元", "一萬零二元"),
+        ("萬億元", "零元"),
+        ("一百二元", "一百三元"),
+        ("一千二元", "一千三元"),
+        ("一萬二元", "一萬三元"),
+        ("萬億元", "億元"),
+    ),
+)
+def test_ambiguous_chinese_number_shorthand_fails_closed(
+    source_fact: str, rendered_fact: str
+) -> None:
+    _candidate, package = _candidate_package()
+    substantive = package.governed_claims[1]
+
+    with pytest.raises(ValueError, match="equivalent exact claim facts"):
+        replace(
+            substantive,
+            claim=f"資助額增至{source_fact}",
+            supporting_excerpt=f"資助額增至{source_fact}",
+            rendered_assertion_zh_hant_hk=f"新資助額係{rendered_fact}",
+            localised_factual_expressions=((source_fact, rendered_fact),),
+        )
+
+
+@pytest.mark.parametrize(
+    ("source_fact", "rendered_fact"),
+    (
+        ("九月三十日上午十二時零分", "九月三十日下午十二時零分"),
+        ("二月三十一日", "二月三十一日"),
+    ),
+)
+def test_invalid_or_polarity_changed_date_fails_closed(
+    source_fact: str, rendered_fact: str
+) -> None:
+    _candidate, package = _candidate_package()
+    substantive = package.governed_claims[1]
+
+    with pytest.raises(ValueError, match="equivalent exact claim facts"):
+        replace(
+            substantive,
+            claim=f"會議定於{source_fact}",
+            supporting_excerpt=f"會議定於{source_fact}",
+            rendered_assertion_zh_hant_hk=f"會議改喺{rendered_fact}",
+            localised_factual_expressions=((source_fact, rendered_fact),),
+        )
+
+
 @pytest.mark.parametrize(
     ("source_claim", "rendered_assertion"),
     (
@@ -1641,6 +2493,33 @@ def test_unbound_localised_word_unit_fails_numeric_fidelity() -> None:
             "會議定於二零二六年十二月三十一日舉行",
             "活動改喺二零二七年十二月三十一日開始",
         ),
+        ("計劃進入第三階段", "相關工作展開第四階段"),
+        ("項目涉及三間學校", "工作涵蓋四間學校"),
+        ("申請分三批處理", "安排改為四批處理"),
+        ("活動改於星期三舉行", "會議定喺星期四進行"),
+        ("支持率為百分之三", "最新支持率係百分之四"),
+        ("氣溫升至三十度", "預測錄得四十度高溫"),
+        ("三歲兒童可參加", "四歲小童符合資格"),
+        ("提供三張門票", "另有四張入場券"),
+        ("涉及三條路線", "涵蓋四條巴士線"),
+        ("面積為三公頃", "面積達三英畝"),
+        ("東區有三間學校，西區有四間學校", "東區有四間學校，西區有三間學校"),
+        ("有三部巴士", "涉及三條道路"),
+        ("計劃進入第三階段", "相關工作進入第Ⅳ期"),
+        ("計劃進入第三階段", "相關工作進入第肆期"),
+        ("面積為3公頃", "面積達3英畝"),
+        ("服務涉及3間學校", "服務涉及3間醫院"),
+        ("用水量係3公升", "用水量係3毫升"),
+        ("溫度係3攝氏度", "溫度係3華氏度"),
+        ("速度係3海里", "速度係3英里"),
+        ("數量係3打", "數量係3箱"),
+        ("用水量係3 公升", "用水量係3 毫升"),
+        ("計劃進入第③階段", "相關工作進入第④階段"),
+        ("計劃進入第㉑階段", "相關工作進入第㉒階段"),
+        ("溫度係+3度", "溫度係−3度"),
+        ("有3宗，涉及學校", "有3宗，涉及醫院"),
+        ("資助額係£3", "資助額係$3"),
+        ("資助額係€3", "資助額係¥3"),
     ),
 )
 def test_changed_chinese_figure_or_date_fails_fidelity(
@@ -1675,6 +2554,54 @@ def test_changed_chinese_figure_or_date_fails_fidelity(
         for item in validate_writer_copy(copy, guarded_package)
         if item.result == "FAIL"
     }
+    assert "UNSUPPORTED_NUMBER_OR_DATE" in failed
+
+
+@pytest.mark.parametrize(
+    ("source_claim", "rendered_assertion"),
+    (
+        ("申請本月截止", "申請下月截止"),
+        ("活動今早開始", "活動今晚開始"),
+        ("限期係後日", "限期係月底"),
+        ("申請即日截止", "申請翌日截止"),
+        ("申請本季截止", "申請下季截止"),
+        ("The event is next month", "活動喺今年底舉行"),
+    ),
+)
+def test_changed_relative_time_fails_fidelity(
+    source_claim: str, rendered_assertion: str
+) -> None:
+    _candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    changed_substantive = replace(
+        substantive,
+        claim=source_claim,
+        supporting_excerpt=source_claim,
+        rendered_assertion_zh_hant_hk=rendered_assertion,
+    )
+    guarded_package = replace(
+        package,
+        passages=(source_claim,),
+        substantive_new_information=(source_claim,),
+        governed_claims=(headline, changed_substantive),
+    )
+    copy = WriterCopy(
+        title=f"【未出版】{headline.rendered_assertion_zh_hant_hk}",
+        body=f"本報根據已核實證據報道：{rendered_assertion}",
+        writer_id="changed-relative-time-writer",
+        evidence_package_digest=guarded_package.digest,
+        evidence_links=tuple(
+            WriterEvidenceLink(item.claim_id, item.rendered_assertion_zh_hant_hk)
+            for item in guarded_package.governed_claims
+        ),
+    )
+
+    failed = {
+        item.reason_code
+        for item in validate_writer_copy(copy, guarded_package)
+        if item.result == "FAIL"
+    }
+
     assert "UNSUPPORTED_NUMBER_OR_DATE" in failed
 
 
@@ -1782,7 +2709,7 @@ def test_default_package_builder_can_admit_explicit_governed_input(
     base_package = package_for(governed_candidate)
     claim_ids = ("governed-headline", "governed-development")
     evidence = {
-        "schema_version": "newsroom.governed-input.v5",
+        "schema_version": "newsroom.governed-input.v10",
         "candidate_id": governed_candidate.candidate_id,
         "hypothesis_id": governed_candidate.hypothesis_id,
         "base_package_digest": base_package.digest,
@@ -1802,16 +2729,19 @@ def test_default_package_builder_can_admit_explicit_governed_input(
                 "authority_scope": "Responsible body for its own deadline.",
                 "status": "CONFIRMED_FACT",
                 "attribution": "UK-02",
-                "rendered_assertion_zh_hant_hk": "英國官方公布咗最新限期安排",
+                "rendered_assertion_zh_hant_hk": "官方公布咗最新限期安排",
                 "claim_role": "HEADLINE",
+                "semantic_relation_evidence_id": "semantic:governed-headline",
                 "localised_factual_expressions": [],
+                "named_entity_evidence": [],
                 "named_entities": [],
+                "rendered_named_entities": [],
                 "quotations": [],
                 "certainty": "CONFIRMED",
                 "originality_basis": "FACTUAL_REWRITE_REQUIRED",
                 "originality_policy_version": "newsroom.cont-originality.v3",
                 "admitted_use": "PUBLICATION_EVIDENCE",
-                "policy_version": "newsroom.governed-claim.v2",
+                "policy_version": "newsroom.governed-claim.v7",
             },
             {
                 "claim_id": "governed-development",
@@ -1830,28 +2760,53 @@ def test_default_package_builder_can_admit_explicit_governed_input(
                 "attribution": "UK-02",
                 "rendered_assertion_zh_hant_hk": "新限期定喺九月三十日",
                 "claim_role": "SUBSTANTIVE",
+                "semantic_relation_evidence_id": "semantic:governed-development",
                 "localised_factual_expressions": [["30 September", "九月三十日"]],
+                "named_entity_evidence": [],
                 "named_entities": [],
+                "rendered_named_entities": [],
                 "quotations": [],
                 "certainty": "CONFIRMED",
                 "originality_basis": "FACTUAL_REWRITE_REQUIRED",
                 "originality_policy_version": "newsroom.cont-originality.v3",
                 "admitted_use": "PUBLICATION_EVIDENCE",
-                "policy_version": "newsroom.governed-claim.v2",
+                "policy_version": "newsroom.governed-claim.v7",
             },
         ],
-        "substantive_new_information": ["The deadline is now 30 September."],
+        "substantive_new_information": [
+            "Official deadline changed",
+            "The deadline is now 30 September.",
+        ],
         "qualification_evidence": [
+            {
+                "test": "OFFICIAL_ACTION_OR_DEADLINE",
+                "governed_claim_id": "governed-headline",
+                "qualification_record_id": "qualification:governed-headline",
+                "test_evidence": [
+                    ["action_class", "OFFICIAL_DEADLINE"],
+                    ["event_polarity", "AFFIRMED"],
+                    ["action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"],
+                    ["material_relation_span", "Official deadline changed"],
+                    ["reader_action", "Official deadline changed"],
+                ],
+                "policy_version": "newsroom.evid-012.v7",
+            },
             {
                 "test": "OFFICIAL_ACTION_OR_DEADLINE",
                 "governed_claim_id": "governed-development",
                 "qualification_record_id": "qualification:governed-development",
                 "test_evidence": [
                     ["action_class", "OFFICIAL_DEADLINE"],
+                    ["event_polarity", "AFFIRMED"],
+                    ["action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"],
+                    [
+                        "material_relation_span",
+                        "The deadline is now 30 September.",
+                    ],
                     ["reader_action", "The deadline is now 30 September."],
                 ],
-                "policy_version": "newsroom.evid-012.v2",
-            }
+                "policy_version": "newsroom.evid-012.v7",
+            },
         ],
         "selection_rationale": "Readers need the retained official deadline.",
         "geography": ["UK"],
@@ -1913,6 +2868,7 @@ def test_default_package_builder_can_admit_explicit_governed_input(
             "extraction_status": "COMPLETE",
             "rights_decision_id": "rights:UK-02",
             "originating_report_id": "official-release-1",
+            "originating_artefact_digest": digest_bytes(body),
             "dependency_evidence_ids": ["dependency:UK-02"],
         },
         {
@@ -1963,6 +2919,57 @@ def test_default_package_builder_can_admit_explicit_governed_input(
             "originating_report_id": "official-release-1",
         },
         {
+            "record_id": "semantic:governed-headline",
+            "record_type": "SEMANTIC_RELATION_EVIDENCE",
+            "candidate_id": governed_candidate.candidate_id,
+            "base_package_digest": base_package.digest,
+            "status": "CURRENT",
+            "governed_claim_id": "governed-headline",
+            "source_modality": "ASSERTED",
+            "rendered_modality": "ASSERTED",
+            "source_polarity": "AFFIRMED",
+            "rendered_polarity": "AFFIRMED",
+            "relation": "SEMANTICALLY_EQUIVALENT",
+            "claim_digest": digest_bytes(b"Official deadline changed"),
+            "rendered_assertion_digest": digest_bytes(
+                "官方公布咗最新限期安排".encode()
+            ),
+        },
+        {
+            "record_id": "semantic:governed-development",
+            "record_type": "SEMANTIC_RELATION_EVIDENCE",
+            "candidate_id": governed_candidate.candidate_id,
+            "base_package_digest": base_package.digest,
+            "status": "CURRENT",
+            "governed_claim_id": "governed-development",
+            "source_modality": "ASSERTED",
+            "rendered_modality": "ASSERTED",
+            "source_polarity": "AFFIRMED",
+            "rendered_polarity": "AFFIRMED",
+            "relation": "SEMANTICALLY_EQUIVALENT",
+            "claim_digest": digest_bytes(b"The deadline is now 30 September."),
+            "rendered_assertion_digest": digest_bytes("新限期定喺九月三十日".encode()),
+        },
+        {
+            "record_id": "qualification:governed-headline",
+            "record_type": "QUALIFICATION_EVIDENCE",
+            "candidate_id": governed_candidate.candidate_id,
+            "base_package_digest": base_package.digest,
+            "status": "CURRENT",
+            "governed_claim_id": "governed-headline",
+            "test": "OFFICIAL_ACTION_OR_DEADLINE",
+            "test_evidence": [
+                ["action_class", "OFFICIAL_DEADLINE"],
+                ["event_polarity", "AFFIRMED"],
+                ["action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"],
+                ["material_relation_span", "Official deadline changed"],
+                ["reader_action", "Official deadline changed"],
+            ],
+            "policy_version": "newsroom.evid-012.v7",
+            "evidence_span_digest": digest_bytes(b"Official deadline changed"),
+            "source_record_ids": ["source-record:UK-02"],
+        },
+        {
             "record_id": "qualification:governed-development",
             "record_type": "QUALIFICATION_EVIDENCE",
             "candidate_id": governed_candidate.candidate_id,
@@ -1972,9 +2979,15 @@ def test_default_package_builder_can_admit_explicit_governed_input(
             "test": "OFFICIAL_ACTION_OR_DEADLINE",
             "test_evidence": [
                 ["action_class", "OFFICIAL_DEADLINE"],
+                ["event_polarity", "AFFIRMED"],
+                ["action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"],
+                [
+                    "material_relation_span",
+                    "The deadline is now 30 September.",
+                ],
                 ["reader_action", "The deadline is now 30 September."],
             ],
-            "policy_version": "newsroom.evid-012.v2",
+            "policy_version": "newsroom.evid-012.v7",
             "evidence_span_digest": digest_bytes(b"The deadline is now 30 September."),
             "source_record_ids": ["source-record:UK-02"],
         },
@@ -2006,7 +3019,7 @@ def test_default_package_builder_can_admit_explicit_governed_input(
         "evidence_record_set_digest": evidence_record_set_digest,
         "hypothesis_id": governed_candidate.hypothesis_id,
         "package_json_digest": package_json_digest,
-        "policy_version": "newsroom.evidence-approval.v2",
+        "policy_version": "newsroom.evidence-approval.v8",
     }
     approval_raw = canonical_json_bytes(approval).decode()
     approval_key = b"fixture-evidence-controller-key-32-bytes"

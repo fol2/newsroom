@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -16,7 +17,11 @@ from typing import Literal, Protocol
 from newsroom.control_plane.child_environment import unprivileged_child_environment
 from newsroom.control_plane.editorial import StoryCandidateRecord
 from newsroom.control_plane.evidence import EvidencePackage
-from newsroom.control_plane.zh_hant import contains_simplified_variant
+from newsroom.control_plane.zh_hant import (
+    contains_discourse_filler,
+    contains_non_han_letter,
+    contains_simplified_variant,
+)
 
 GROK_BIN = os.environ.get("NEWSROOM_GROK_BIN", "/Users/jamesto/.grok/bin/grok")
 CURSOR_AGENT_BIN = os.environ.get(
@@ -61,10 +66,161 @@ _PROMPT = (
     "正文只可以係「本報根據已核實證據報道：」加 approved claims，claims 之間用「；」。"
     "唔可以自行加事實、名字、數字、日期、引句、因果或肯定程度。"
 )
-_TITLE_RESIDUE_PREFIXES = ("正在", "搜集", "查核", "先查")
+_TITLE_RESIDUE_PREFIXES = ("正在", "搜集", "查核", "先查", "草稿：")
 _TITLE_RESIDUE_EXACT = frozenset({"新聞稿任務", "Newsroom 原創稿"})
 _BODY_RESIDUE_PREFIXES = ("先查", "先核", "正在核")
-_FILLER_MARKERS = ("總括而言", "值得注意的是", "放眼未來", "時間會證明")
+_FILLER_MARKERS = (
+    "總括而言",
+    "總而言之",
+    "值得注意的是",
+    "放眼未來",
+    "時間會證明",
+    "草稿：",
+)
+_CHINESE_NUMERAL_FACT = re.compile(
+    r"(?:百分之|星期|第)?[零〇一二三四五六七八九十百千萬万億亿兆兩两"
+    r"壹貳贰參叁肆伍陸陆柒捌玖拾佰仟ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]+"
+    r"(?:[\u3400-\u9fff])?"
+)
+_QUANTIFIED_FACT = re.compile(
+    r"(?P<number>[+\-−]?\d+(?:[.,]\d+)*(?:%|％)?|"
+    r"[零〇一二三四五六七八九十百千萬万億亿兆兩两壹貳贰參叁肆伍陸陆柒捌玖拾佰仟"
+    r"ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ①-⑳⑴-⒇㉑-㊿]+)\s*"
+    r"(?P<unit>平方公里|平方米|公頃|英畝|港元|公噸|公斤|公里|分鐘|分钟|"
+    r"小時|小时|星期|個月|个月|階段|阶段|百分比|%|％|元|噸|吨|米|日|天|"
+    r"月|年|期|級|级|批|次|成|倍|間|间|部|條|条|所|座|架|輛|辆|艘|層|层|"
+    r"項|项|個|个|名|位|戶|户|宗|件|℃|℉|°C|°F)"
+    r"(?P<object>[\u3400-\u9fff]{1,8})?(?=$|[，,。；;：:\s])"
+)
+_NUMBER_ADJACENT_HAN_FACT = re.compile(
+    r"(?P<number>第?(?:[+\-−]?\d+(?:[.,]\d+)*(?:%|％)?|"
+    r"[零〇一二三四五六七八九十百千萬万億亿兆兩两壹貳贰參叁肆伍陸陆柒捌玖拾佰仟"
+    r"ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ①-⑳⑴-⒇㉑-㊿]+))"
+    r"\s*(?P<unit>[\u3400-\u9fff]{1,8})(?=$|[，,。；;：:\s])"
+)
+_CURRENCY_FACT = re.compile(
+    r"(?P<currency>HK\$|US\$|£|€|¥|￥|\$)\s*"
+    r"(?P<number>[+\-−]?\d+(?:[.,]\d+)*)|"
+    r"(?P<number_after>[+\-−]?\d+(?:[.,]\d+)*)\s*"
+    r"(?P<currency_after>港元|英鎊|歐元|美元|日圓|人民幣)"
+)
+_RELATIVE_TIME_FACT = re.compile(
+    r"\b(?:today|tomorrow|yesterday|tonight|this\s+(?:morning|afternoon|evening|"
+    r"week|month|year)|next\s+(?:week|month|year)|last\s+(?:week|month|year)|"
+    r"day\s+after\s+tomorrow|end\s+of\s+(?:the\s+)?(?:month|year)|year[ -]end)\b|"
+    r"今日|今天|明日|聽日|听日|昨日|尋日|寻日|下星期|下週|下周|本星期|"
+    r"本週|本周|上星期|上週|上周|本月|下月|上月|今年|明年|去年|今早|"
+    r"今朝|今晚|今午|後日|后日|月底|月尾|年底|年尾|即日|當日|当日|"
+    r"翌日|翌晨|翌晚|本季|今季|下季|上季|本季度|下季度|上季度|清晨|"
+    r"早上|上午|中午|下午|傍晚|黃昏|黄昏|晚間|晚间|深夜",
+    re.IGNORECASE,
+)
+
+
+def _remove_exact_expressions(text: str, expressions: tuple[str, ...]) -> str:
+    for expression in sorted(expressions, key=len, reverse=True):
+        text = text.replace(expression, "")
+    return text
+
+
+def _quantified_relations(text: str) -> tuple[tuple[str, str, str], ...]:
+    return tuple(
+        (
+            match.group("number"),
+            match.group("unit"),
+            match.group("object") or "",
+        )
+        for match in _QUANTIFIED_FACT.finditer(text)
+    )
+
+
+def _number_adjacent_han_relations(text: str) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (match.group("number"), match.group("unit"))
+        for match in _NUMBER_ADJACENT_HAN_FACT.finditer(text)
+    )
+
+
+def _currency_relations(text: str) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (
+            match.group("currency") or match.group("currency_after"),
+            match.group("number") or match.group("number_after"),
+        )
+        for match in _CURRENCY_FACT.finditer(text)
+    )
+
+
+def _unicode_currency_relations(text: str) -> tuple[tuple[str, str], ...]:
+    relations: list[tuple[str, str]] = []
+    for index, character in enumerate(text):
+        if unicodedata.category(character) != "Sc":
+            continue
+        before = re.search(r"[+\-−]?\d+(?:[.,]\d+)*\s*$", text[:index])
+        after = re.match(r"\s*([+\-−]?\d+(?:[.,]\d+)*)", text[index + 1 :])
+        if before is not None:
+            relations.append((character, before.group(0).strip()))
+        elif after is not None:
+            relations.append((character, after.group(1)))
+    return tuple(relations)
+
+
+def _unicode_number_relations(text: str) -> tuple[tuple[str, float], ...]:
+    return tuple(
+        (character, unicodedata.numeric(character))
+        for character in text
+        if unicodedata.category(character).startswith("N")
+    )
+
+
+def _has_unicode_quote_delimiter(text: str) -> bool:
+    for character in text:
+        name = unicodedata.name(character, "")
+        if (
+            unicodedata.category(character) in {"Pi", "Pf"}
+            or "QUOTATION MARK" in name
+            or "ANGLE BRACKET ORNAMENT" in name
+        ):
+            return True
+    return False
+
+
+def _unicode_quoted_contents(text: str) -> tuple[str, ...]:
+    positions = tuple(
+        index
+        for index, character in enumerate(text)
+        if _has_unicode_quote_delimiter(character)
+    )
+    return tuple(
+        text[start + 1 : end]
+        for start, end in zip(positions[::2], positions[1::2], strict=False)
+        if start + 1 < end
+    )
+
+
+def _unicode_quotes_are_balanced(text: str) -> bool:
+    return sum(_has_unicode_quote_delimiter(character) for character in text) % 2 == 0
+
+
+def _signed_number_relations(text: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"[+\-−]\d+(?:[.,]\d+)*", text))
+
+
+def _numeric_han_context(text: str) -> str:
+    match = re.search(
+        r"\d|[零〇一二三四五六七八九十百千萬万億亿兆兩两壹貳贰參叁肆伍陸陆"
+        r"柒捌玖拾佰仟ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ①-⑳⑴-⒇㉑-㊿]",
+        text,
+    )
+    if match is None or not re.search(r"[\u3400-\u9fff]", text):
+        return ""
+    return "".join(
+        character
+        for character in text
+        if character.isdigit() or "\u3400" <= character <= "\u9fff"
+    )
+
+
 _SYSTEMIC_MARKERS = (
     "authentication",
     "not logged in",
@@ -164,14 +320,12 @@ class FixtureWriter:
         self, candidate: StoryCandidateRecord, package: EvidencePackage
     ) -> WriterCopy:
         headline_claim = next(
-            claim
-            for claim in package.governed_claims
-            if claim.claim == candidate.headline
+            claim for claim in package.governed_claims if claim.claim_role == "HEADLINE"
         )
         body_claims = tuple(
             claim
             for claim in package.governed_claims
-            if claim.claim != candidate.headline
+            if claim.claim_role == "SUBSTANTIVE"
         )
         body = "本報根據已核實證據報道：" + "；".join(
             claim.rendered_assertion_zh_hant_hk for claim in body_claims
@@ -202,6 +356,7 @@ def _prompt(candidate: StoryCandidateRecord, package: EvidencePackage) -> str:
             "status": claim.status.value,
             "attribution": claim.attribution,
             "named_entities": list(claim.named_entities),
+            "rendered_named_entities": list(claim.rendered_named_entities),
             "quotations": list(claim.quotations),
             "certainty": claim.certainty,
             "originality_basis": claim.originality_basis,
@@ -305,16 +460,17 @@ def validate_writer_copy(
         "COMPLETED_ORIGINAL_ZH_HANT_HK_REPORT",
         bool(copy.title.strip() and copy.body.strip())
         and any("\u3400" <= character <= "\u9fff" for character in text)
-        and not re.search(r"[A-Za-z]", text_without_approved_entities)
+        and not contains_non_han_letter(text_without_approved_entities)
         and not contains_simplified_variant(text_without_approved_entities),
         "NOT_COMPLETED_ZH_HANT_HK_REPORT",
     )
     check(
         "NO_PLANNING_RESIDUE_OR_FILLER",
-        not copy.title.startswith(_TITLE_RESIDUE_PREFIXES)
-        and copy.title not in _TITLE_RESIDUE_EXACT
+        not copy.title.removeprefix("【未出版】").startswith(_TITLE_RESIDUE_PREFIXES)
+        and copy.title.removeprefix("【未出版】") not in _TITLE_RESIDUE_EXACT
         and not copy.body.startswith(_BODY_RESIDUE_PREFIXES)
-        and not any(marker in text for marker in _FILLER_MARKERS),
+        and not any(marker in text for marker in _FILLER_MARKERS)
+        and not contains_discourse_filler(text),
         "PLANNING_RESIDUE_OR_FILLER",
     )
     check(
@@ -343,6 +499,30 @@ def validate_writer_copy(
         for claim in package.governed_claims
         if claim.claim_role == "SUBSTANTIVE"
         and claim.claim in package.substantive_new_information
+    )
+    rendered_assertions = tuple(
+        claim.rendered_assertion_zh_hant_hk for claim in package.governed_claims
+    )
+    exact_role_structure = (
+        len(rendered_assertions) == len(set(rendered_assertions))
+        and len(headline_claims) == 1
+        and copy.title
+        == f"【未出版】{headline_claims[0].rendered_assertion_zh_hant_hk}"
+        and copy.body.startswith("本報根據已核實證據報道：")
+        and copy.body.count("本報根據已核實證據報道：") == 1
+        and all(
+            copy.title.count(claim.rendered_assertion_zh_hant_hk) == 1
+            and copy.body.count(claim.rendered_assertion_zh_hant_hk) == 0
+            if claim.claim_role == "HEADLINE"
+            else copy.title.count(claim.rendered_assertion_zh_hant_hk) == 0
+            and copy.body.count(claim.rendered_assertion_zh_hant_hk) == 1
+            for claim in package.governed_claims
+        )
+    )
+    check(
+        "ROLE_SPECIFIC_EXACT_ONCE_STRUCTURE",
+        exact_role_structure,
+        "DUPLICATE_OR_MISPLACED_GOVERNED_CLAIM",
     )
     check(
         "REQUIRED_GOVERNED_CLAIM_COVERAGE",
@@ -388,7 +568,7 @@ def validate_writer_copy(
             break
     check(
         "GOVERNED_CLAIM_ENTAILMENT_BOUNDARY",
-        exact_links and bounded_segments,
+        exact_links and exact_role_structure and bounded_segments,
         "UNSUPPORTED_CLAIM_RESIDUE",
     )
     source_expressions = (*package.passages,) + tuple(
@@ -409,6 +589,11 @@ def validate_writer_copy(
             r"小时|日|天|星期|個月|个月|年|戶|户|名|位|%|％)"
         ),
         re.compile(
+            r"第?[零〇一二三四五六七八九十百千萬万億亿兆兩两]+\s*"
+            r"(?:階段|阶段|間|间|批|次|項|项|個|个|所|座|架|輛|辆|艘|"
+            r"層|层|期|級|级|成|倍)"
+        ),
+        re.compile(
             r"\d+(?:[.,]\d+)*\s*(?:%|％|minutes?|mins?|hours?|hrs?|days?|"
             r"weeks?|months?|years?|million|billion|trillion|people|cases?|"
             r"tonnes?|kilograms?|kilometres?|公里|米|分鐘|分钟|小時|小时|日|天|"
@@ -421,6 +606,7 @@ def validate_writer_copy(
             r"(?:,?\s+\d{4})?",
             re.IGNORECASE,
         ),
+        re.compile(r"[零〇一二三四五六七八九十百千萬万億亿兆兩两]+"),
     )
     approved_numeric_expressions = tuple(
         match.group(0)
@@ -503,10 +689,84 @@ def validate_writer_copy(
         for pattern in numeric_expression_patterns
         for match in pattern.finditer(text)
     }
+    claim_numeric_relations = all(
+        _quantified_relations(source_without_localised)
+        == _quantified_relations(rendered_without_localised)
+        and _number_adjacent_han_relations(source_without_localised)
+        == _number_adjacent_han_relations(rendered_without_localised)
+        and _currency_relations(source_without_localised)
+        == _currency_relations(rendered_without_localised)
+        and _unicode_currency_relations(source_without_localised)
+        == _unicode_currency_relations(rendered_without_localised)
+        and _unicode_number_relations(source_without_localised)
+        == _unicode_number_relations(rendered_without_localised)
+        and _signed_number_relations(source_without_localised)
+        == _signed_number_relations(rendered_without_localised)
+        and _numeric_han_context(source_without_localised)
+        == _numeric_han_context(rendered_without_localised)
+        and tuple(
+            match.group(0)
+            for match in _CHINESE_NUMERAL_FACT.finditer(source_without_localised)
+        )
+        == tuple(
+            match.group(0)
+            for match in _CHINESE_NUMERAL_FACT.finditer(rendered_without_localised)
+        )
+        for claim in package.governed_claims
+        for source_without_localised, rendered_without_localised in (
+            (
+                _remove_exact_expressions(
+                    claim.claim,
+                    tuple(
+                        source
+                        for source, _target in claim.localised_factual_expressions
+                    ),
+                ),
+                _remove_exact_expressions(
+                    claim.rendered_assertion_zh_hant_hk,
+                    tuple(
+                        target
+                        for _source, target in claim.localised_factual_expressions
+                    ),
+                ),
+            ),
+        )
+    )
+    claim_relative_time_relations = all(
+        tuple(
+            match.group(0).casefold()
+            for match in _RELATIVE_TIME_FACT.finditer(source_without_localised)
+        )
+        == tuple(
+            match.group(0).casefold()
+            for match in _RELATIVE_TIME_FACT.finditer(rendered_without_localised)
+        )
+        for claim in package.governed_claims
+        for source_without_localised, rendered_without_localised in (
+            (
+                _remove_exact_expressions(
+                    claim.claim,
+                    tuple(
+                        source
+                        for source, _target in claim.localised_factual_expressions
+                    ),
+                ),
+                _remove_exact_expressions(
+                    claim.rendered_assertion_zh_hant_hk,
+                    tuple(
+                        target
+                        for _source, target in claim.localised_factual_expressions
+                    ),
+                ),
+            ),
+        )
+    )
     check(
         "NUMERIC_AND_DATE_FIDELITY",
         numbers.issubset(governed_numbers)
-        and draft_numeric_expressions.issubset(set(approved_numeric_expressions)),
+        and draft_numeric_expressions.issubset(set(approved_numeric_expressions))
+        and claim_numeric_relations
+        and claim_relative_time_relations,
         "UNSUPPORTED_NUMBER_OR_DATE",
     )
     quoted = {
@@ -516,12 +776,22 @@ def validate_writer_copy(
             r"“([^”\n]+)”",
             r"「([^」\n]+)」",
             r"『([^』\n]+)』",
+            r"‘([^’\n]+)’",
+            r"〝([^〞\n]+)〞",
+            r"﹁([^﹂\n]+)﹂",
+            r"❝([^❞\n]+)❞",
+            r"﹃([^﹄\n]+)﹄",
+            r"«([^»\n]+)»",
+            r"‹([^›\n]+)›",
+            r"(?<![A-Za-z])'([^'\n]+)'(?![A-Za-z])",
         )
         for match in re.findall(pattern, text)
     }
+    quoted.update(_unicode_quoted_contents(text))
     check(
         "QUOTE_FIDELITY",
-        all(
+        _unicode_quotes_are_balanced(text)
+        and all(
             any(
                 value in claim.quotations
                 and claim.attribution in claim.rendered_assertion_zh_hant_hk
@@ -550,15 +820,15 @@ def validate_writer_copy(
         attribution_bound,
         "REQUIRED_ATTRIBUTION_MISSING",
     )
-    certainty_terms = ("證實", "已確認", "必定", "肯定會", "proved", "confirmed")
-    used_certainty = tuple(term for term in certainty_terms if term in text)
+    resolved_record_ids = {
+        record_id for record_id, _digest in package.resolved_evidence_records
+    }
     check(
         "CERTAINTY_FIDELITY",
-        not used_certainty
-        or all(
-            term in governed_text
-            and any(claim.certainty == "CONFIRMED" for claim in package.governed_claims)
-            for term in used_certainty
+        all(
+            claim.certainty == "CONFIRMED"
+            and claim.semantic_relation_evidence_id in resolved_record_ids
+            for claim in package.governed_claims
         ),
         "CERTAINTY_EXCEEDS_EVIDENCE",
     )

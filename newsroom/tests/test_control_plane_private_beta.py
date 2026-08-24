@@ -23,6 +23,7 @@ from newsroom.control_plane.evidence import (
     GovernedClaimEvidence,
     GovernedClaimStatus,
     QualificationEvidence,
+    bounded_named_entities,
     package_for,
 )
 from newsroom.control_plane.intake import run_intake
@@ -80,16 +81,19 @@ def run_cycle(*args: Any, **kwargs: Any) -> CycleReport:
 
 def _fixture_evidence_package(candidate: StoryCandidateRecord) -> EvidencePackage:
     package = package_for(candidate)
-    claim = candidate.items[0].body
+    headline = f"Official action changed: {candidate.headline}"
+    claim = f"Official action changed: {candidate.items[0].body}"
     governed_claims = (
         GovernedClaimEvidence(
             claim_id=f"claim:{candidate.candidate_id}:headline",
-            claim=candidate.headline,
+            claim=headline,
             passage_index=0,
-            supporting_excerpt=candidate.headline,
+            supporting_excerpt=headline,
             source_ids=(candidate.items[0].source_id,),
             source_record_ids=(f"source-record:{candidate.items[0].source_id}",),
-            source_authority_decision_ids=(f"source-authority:{candidate.items[0].source_id}:headline",),
+            source_authority_decision_ids=(
+                f"source-authority:{candidate.items[0].source_id}:headline",
+            ),
             rights_decision_ids=(f"rights:{candidate.items[0].source_id}",),
             dependency_evidence_ids=(f"dependency:{candidate.items[0].source_id}",),
             evidential_origin_ids=(f"origin:{candidate.items[0].source_id}",),
@@ -99,6 +103,7 @@ def _fixture_evidence_package(candidate: StoryCandidateRecord) -> EvidencePackag
             attribution=candidate.items[0].source_id,
             rendered_assertion_zh_hant_hk="官方公布咗最新安排",
             claim_role="HEADLINE",
+            semantic_relation_evidence_id=f"semantic:{candidate.candidate_id}:headline",
         ),
         GovernedClaimEvidence(
             claim_id=f"claim:{candidate.candidate_id}:substantive",
@@ -107,7 +112,9 @@ def _fixture_evidence_package(candidate: StoryCandidateRecord) -> EvidencePackag
             supporting_excerpt=claim,
             source_ids=(candidate.items[0].source_id,),
             source_record_ids=(f"source-record:{candidate.items[0].source_id}",),
-            source_authority_decision_ids=(f"source-authority:{candidate.items[0].source_id}:substantive",),
+            source_authority_decision_ids=(
+                f"source-authority:{candidate.items[0].source_id}:substantive",
+            ),
             rights_decision_ids=(f"rights:{candidate.items[0].source_id}",),
             dependency_evidence_ids=(f"dependency:{candidate.items[0].source_id}",),
             evidential_origin_ids=(f"origin:{candidate.items[0].source_id}",),
@@ -117,23 +124,30 @@ def _fixture_evidence_package(candidate: StoryCandidateRecord) -> EvidencePackag
             attribution=candidate.items[0].source_id,
             rendered_assertion_zh_hant_hk="相關官方資料確認安排已經更新",
             claim_role="SUBSTANTIVE",
+            semantic_relation_evidence_id=f"semantic:{candidate.candidate_id}:substantive",
         ),
     )
+    governed_claims = tuple(_bind_fixture_entities(item) for item in governed_claims)
     claim_ids = tuple(item.claim_id for item in governed_claims)
     return replace(
         package,
-        substantive_new_information=(claim,),
+        passages=(f"{package.passages[0]}\n{headline}\n{claim}",),
+        substantive_new_information=(headline, claim),
         governed_claims=governed_claims,
-        qualification_evidence=(
+        qualification_evidence=tuple(
             QualificationEvidence(
                 Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE,
-                governed_claims[1].claim_id,
-                f"qualification:{governed_claims[1].claim_id}",
+                item.claim_id,
+                f"qualification:{item.claim_id}",
                 (
                     ("action_class", "OFFICIAL_DEADLINE"),
-                    ("reader_action", claim),
+                    ("event_polarity", "AFFIRMED"),
+                    ("action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"),
+                    ("material_relation_span", item.claim),
+                    ("reader_action", item.claim),
                 ),
-            ),
+            )
+            for item in governed_claims
         ),
         selection_rationale="Explicit private-beta fixture qualification.",
         geography=("Hong Kong" if "HK" in candidate.items[0].source_id else "UK",),
@@ -155,11 +169,47 @@ def _fixture_evidence_package(candidate: StoryCandidateRecord) -> EvidencePackag
         integrity_result="PASS",
         resolved_evidence_records=(
             ("fixture-evidence-record", f"digest:{candidate.candidate_id}"),
-            (
-                f"qualification:{governed_claims[1].claim_id}",
-                f"qualification-digest:{candidate.candidate_id}",
+            *(
+                (
+                    item.semantic_relation_evidence_id,
+                    f"semantic-digest:{item.claim_id}",
+                )
+                for item in governed_claims
+            ),
+            *(
+                (record_id, f"entity-digest:{record_id}")
+                for item in governed_claims
+                for _text, _entity_type, record_id in item.named_entity_evidence
+            ),
+            *(
+                (
+                    f"qualification:{item.claim_id}",
+                    f"qualification-digest:{item.claim_id}",
+                )
+                for item in governed_claims
             ),
         ),
+    )
+
+
+def _bind_fixture_entities(claim: GovernedClaimEvidence) -> GovernedClaimEvidence:
+    entities = tuple(
+        sorted(bounded_named_entities(f"{claim.claim}\n{claim.supporting_excerpt}"))
+    )
+    if not entities:
+        return claim
+    texts = tuple(text for text, _entity_type in entities)
+    return replace(
+        claim,
+        rendered_assertion_zh_hant_hk=(
+            "、".join(texts) + "：" + claim.rendered_assertion_zh_hant_hk
+        ),
+        named_entity_evidence=tuple(
+            (text, entity_type, f"entity:{claim.claim_id}:{index}")
+            for index, (text, entity_type) in enumerate(entities)
+        ),
+        named_entities=texts,
+        rendered_named_entities=texts,
     )
 
 
@@ -197,7 +247,9 @@ SAME_URL_RSS = """<?xml version="1.0" encoding="UTF-8"?>
 
 
 def _evaluation_cycle_destinations() -> tuple[str, ...]:
-    return tuple(sorted({*FIXTURE_DESTINATIONS, *GRAPHITI_EVALUATION_DESTINATION_TOKENS}))
+    return tuple(
+        sorted({*FIXTURE_DESTINATIONS, *GRAPHITI_EVALUATION_DESTINATION_TOKENS})
+    )
 
 
 def _cycle_rights_inventory(
@@ -413,9 +465,7 @@ def test_control_plane_state_root_preserves_legacy_pair_or_bootstraps_fresh(
     assert _canonical_state_root(tmp_path / "legacy") == legacy
 
     conflict_home = tmp_path / "conflict"
-    conflict_legacy = (
-        conflict_home / "Coding" / "newsroom" / "data" / "newsroom"
-    )
+    conflict_legacy = conflict_home / "Coding" / "newsroom" / "data" / "newsroom"
     conflict_fresh = conflict_home / ".local" / "share" / "newsroom"
     conflict_legacy.mkdir(parents=True)
     conflict_fresh.mkdir(parents=True)
@@ -659,12 +709,16 @@ def test_cycle_reserves_graphiti_spend_before_stub_extract(tmp_path: Path) -> No
     assert first.minted == 3
     assert len(calls) == 1
     connection = __import__("sqlite3").connect(unpublished)
-    kinds = [row[0] for row in connection.execute("SELECT kind FROM ledger ORDER BY seq")]
+    kinds = [
+        row[0] for row in connection.execute("SELECT kind FROM ledger ORDER BY seq")
+    ]
     connection.close()
     assert kinds.count("GRAPHITI_SPEND_RESERVE") == 1
     assert kinds.count("GRAPHITI_SPEND_RECONCILE") == 1
     assert kinds.count("GRAPHITI_EVALUATION_ATTEMPT") == 1
-    assert kinds.index("GRAPHITI_SPEND_RESERVE") < kinds.index("GRAPHITI_EVALUATION_ATTEMPT")
+    assert kinds.index("GRAPHITI_SPEND_RESERVE") < kinds.index(
+        "GRAPHITI_EVALUATION_ATTEMPT"
+    )
     second = run_cycle(
         proving_store=str(proving),
         unpublished_store=str(unpublished),
@@ -676,7 +730,9 @@ def test_cycle_reserves_graphiti_spend_before_stub_extract(tmp_path: Path) -> No
     assert second.graphiti == 1
     assert len(calls) == 2
     connection = __import__("sqlite3").connect(unpublished)
-    kinds = [row[0] for row in connection.execute("SELECT kind FROM ledger ORDER BY seq")]
+    kinds = [
+        row[0] for row in connection.execute("SELECT kind FROM ledger ORDER BY seq")
+    ]
     connection.close()
     assert kinds.count("GRAPHITI_SPEND_RESERVE") == 2
     assert kinds.count("GRAPHITI_SPEND_RECONCILE") == 2
@@ -811,7 +867,10 @@ def test_evaluation_packet_authorises_evaluation_and_refuses_production() -> Non
     assert WRITER_FALLBACK == "cursor-agent-cli"
     assert EVALUATION_GRAPHITI_PACKET.model_release == GRAPHITI_CHAT_MODEL
     assert "placeholder" not in EVALUATION_GRAPHITI_PACKET.framework_release
-    assert EVALUATION_WORKSPACE_POLICY.egress_policy is GraphitiEgressPolicy.APPROVED_PROVIDER_ONLY
+    assert (
+        EVALUATION_WORKSPACE_POLICY.egress_policy
+        is GraphitiEgressPolicy.APPROVED_PROVIDER_ONLY
+    )
     assert (
         EVALUATION_WORKSPACE_POLICY.credential_class
         is GraphitiCredentialClass.PROPOSAL_WORKSPACE_ONLY
@@ -823,8 +882,12 @@ def test_evaluation_packet_authorises_evaluation_and_refuses_production() -> Non
         configuration_id=FAKE_CONFIGURATION_ID,
         runtime_mode=GraphitiRuntimeMode.REAL_GRAPHITI,
         execution_profile=GraphitiExecutionProfile.EVALUATION,
-        framework=VersionedExtractionComponent("graphiti.framework", GRAPHITI_CORE_RELEASE, digest),
-        model=VersionedExtractionComponent("graphiti.model", GRAPHITI_CHAT_MODEL, digest),
+        framework=VersionedExtractionComponent(
+            "graphiti.framework", GRAPHITI_CORE_RELEASE, digest
+        ),
+        model=VersionedExtractionComponent(
+            "graphiti.model", GRAPHITI_CHAT_MODEL, digest
+        ),
         embedding=VersionedExtractionComponent(
             "graphiti.embedding", GRAPHITI_EMBEDDING_MODEL, digest
         ),
@@ -846,8 +909,12 @@ def test_evaluation_packet_authorises_evaluation_and_refuses_production() -> Non
         configuration_id=FAKE_CONFIGURATION_ID,
         runtime_mode=GraphitiRuntimeMode.REAL_GRAPHITI,
         execution_profile=GraphitiExecutionProfile.PRODUCTION,
-        framework=VersionedExtractionComponent("graphiti.framework", GRAPHITI_CORE_RELEASE, digest),
-        model=VersionedExtractionComponent("graphiti.model", GRAPHITI_CHAT_MODEL, digest),
+        framework=VersionedExtractionComponent(
+            "graphiti.framework", GRAPHITI_CORE_RELEASE, digest
+        ),
+        model=VersionedExtractionComponent(
+            "graphiti.model", GRAPHITI_CHAT_MODEL, digest
+        ),
         embedding=VersionedExtractionComponent(
             "graphiti.embedding", GRAPHITI_EMBEDDING_MODEL, digest
         ),
@@ -997,7 +1064,9 @@ def _sample_candidate_package() -> tuple[StoryCandidateRecord, EvidencePackage]:
                 observation_digest="sha256:" + ("b" * 64),
             ),
         ),
-        leads=(NewsLeadRecord(lead_id="l1", signal_id="s1", headline="Home Office update"),),
+        leads=(
+            NewsLeadRecord(lead_id="l1", signal_id="s1", headline="Home Office update"),
+        ),
     )
     package = EvidencePackage(
         candidate_id="c1",
@@ -1017,10 +1086,15 @@ def test_cli_writer_uses_grok_then_falls_back_to_cursor_agent() -> None:
 
     def cursor(_prompt: str) -> str:
         return json.dumps(
-            {"title": "【未出版】測試稿", "body": "【未出版原創】根據證據包改寫，唔係來源標題複本。"}
+            {
+                "title": "【未出版】測試稿",
+                "body": "【未出版原創】根據證據包改寫，唔係來源標題複本。",
+            }
         )
 
-    copy = CliChainWriter(primary=grok, fallback=cursor).write(*_sample_candidate_package())
+    copy = CliChainWriter(primary=grok, fallback=cursor).write(
+        *_sample_candidate_package()
+    )
     assert copy.writer_id == "cursor-agent-cli-cont-writer"
     assert copy.title.startswith("【未出版】")
 
@@ -1040,7 +1114,9 @@ def test_cli_writer_prefers_grok_build_cli() -> None:
     def cursor(_prompt: str) -> str:
         raise AssertionError("fallback must not run")
 
-    copy = CliChainWriter(primary=grok, fallback=cursor).write(*_sample_candidate_package())
+    copy = CliChainWriter(primary=grok, fallback=cursor).write(
+        *_sample_candidate_package()
+    )
     assert copy.writer_id == "grok-build-cli-cont-writer"
     assert "Grok" in copy.title
 
@@ -1048,7 +1124,10 @@ def test_cli_writer_prefers_grok_build_cli() -> None:
 def test_cli_writer_rejects_planning_residue_and_falls_back() -> None:
     def grok(_prompt: str) -> str:
         return json.dumps(
-            {"title": "正在核實幼稚園收生與家長智Net來源", "body": "先查 CONT 記者稿例。"}
+            {
+                "title": "正在核實幼稚園收生與家長智Net來源",
+                "body": "先查 CONT 記者稿例。",
+            }
         )
 
     def cursor(_prompt: str) -> str:
@@ -1060,7 +1139,9 @@ def test_cli_writer_rejects_planning_residue_and_falls_back() -> None:
             ensure_ascii=False,
         )
 
-    copy = CliChainWriter(primary=grok, fallback=cursor).write(*_sample_candidate_package())
+    copy = CliChainWriter(primary=grok, fallback=cursor).write(
+        *_sample_candidate_package()
+    )
     assert copy.writer_id == "cursor-agent-cli-cont-writer"
     assert copy.title == "【未出版】立法會教育議案"
     assert not copy.title.startswith("正在")
@@ -1080,7 +1161,9 @@ def test_cli_writer_accepts_finished_copy_that_mentions_verification() -> None:
     def cursor(_prompt: str) -> str:
         raise AssertionError("fallback must not run")
 
-    copy = CliChainWriter(primary=grok, fallback=cursor).write(*_sample_candidate_package())
+    copy = CliChainWriter(primary=grok, fallback=cursor).write(
+        *_sample_candidate_package()
+    )
     assert copy.writer_id == "grok-build-cli-cont-writer"
     assert "核實資格" in copy.body
 
@@ -1137,7 +1220,9 @@ def test_cli_writer_reads_title_from_grok_text_envelope() -> None:
     def cursor(_prompt: str) -> str:
         raise AssertionError("fallback must not run")
 
-    copy = CliChainWriter(primary=grok, fallback=cursor).write(*_sample_candidate_package())
+    copy = CliChainWriter(primary=grok, fallback=cursor).write(
+        *_sample_candidate_package()
+    )
     assert copy.title == "【未出版】信封稿"
 
 
