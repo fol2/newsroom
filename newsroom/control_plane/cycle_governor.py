@@ -293,6 +293,8 @@ CREATE TABLE IF NOT EXISTS unpublished_route_health_probes(
     route TEXT NOT NULL,
     bound_failure_reason TEXT NOT NULL,
     attempted_at TEXT NOT NULL,
+    probe_state TEXT NOT NULL CHECK(probe_state IN ('RESERVED','TERMINAL')),
+    terminal_at TEXT,
     outcome TEXT NOT NULL CHECK(outcome IN ('PASSED','FAILED')),
     provider_dispatched INTEGER NOT NULL CHECK(provider_dispatched IN (0,1)),
     provider_receipt_reference TEXT,
@@ -304,12 +306,17 @@ ON unpublished_governed_cycles(lease_state) WHERE lease_state='ACTIVE';
 """
 
 
-def ensure_cycle_governor_schema(connection: sqlite3.Connection) -> None:
+def ensure_cycle_governor_schema(
+    connection: sqlite3.Connection,
+    *,
+    policy_version: str | None = None,
+) -> None:
     connection.executescript(_SCHEMA)
+    configured_policy_version = policy_version or EvaluationCyclePolicy().version
     connection.execute(
         "INSERT OR IGNORE INTO unpublished_cycle_governor_state("
         "singleton, policy_version) VALUES(1, ?)",
-        (EvaluationCyclePolicy().version,),
+        (configured_policy_version,),
     )
     connection.execute(
         "INSERT OR IGNORE INTO unpublished_route_circuits("
@@ -328,6 +335,27 @@ def ensure_cycle_governor_schema(connection: sqlite3.Connection) -> None:
         if column not in cycle_columns:
             connection.execute(
                 f"ALTER TABLE unpublished_governed_cycles ADD COLUMN {column} {declaration}"
+            )
+    health_probe_columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(unpublished_route_health_probes)"
+        )
+    }
+    for column, declaration in (
+        (
+            "probe_state",
+            (
+                "TEXT NOT NULL DEFAULT 'TERMINAL' "
+                "CHECK(probe_state IN ('RESERVED','TERMINAL'))"
+            ),
+        ),
+        ("terminal_at", "TEXT"),
+    ):
+        if column not in health_probe_columns:
+            connection.execute(
+                "ALTER TABLE unpublished_route_health_probes "
+                f"ADD COLUMN {column} {declaration}"
             )
     connection.commit()
 
@@ -387,7 +415,9 @@ class DurableCycleGovernor:
         self._writer_route_health_probe = writer_route_health_probe
         connection = connect(self._path)
         try:
-            ensure_cycle_governor_schema(connection)
+            ensure_cycle_governor_schema(
+                connection, policy_version=self._policy.version
+            )
             row = connection.execute(
                 "SELECT policy_version FROM unpublished_cycle_governor_state "
                 "WHERE singleton=1"
@@ -429,7 +459,9 @@ class DurableCycleGovernor:
         now, now_text = self._now()
         connection = connect(self._path)
         try:
-            ensure_cycle_governor_schema(connection)
+            ensure_cycle_governor_schema(
+                connection, policy_version=self._policy.version
+            )
             connection.execute("BEGIN IMMEDIATE")
             state = connection.execute(
                 "SELECT next_cycle_eligible_at, last_observed_utc, "
@@ -636,7 +668,9 @@ class DurableCycleGovernor:
         renewed_until = _utc_text(now + timedelta(seconds=self._lease_seconds))
         connection = connect(self._path)
         try:
-            ensure_cycle_governor_schema(connection)
+            ensure_cycle_governor_schema(
+                connection, policy_version=self._policy.version
+            )
             connection.execute("BEGIN IMMEDIATE")
             state = connection.execute(
                 "SELECT last_observed_utc FROM unpublished_cycle_governor_state "
@@ -770,7 +804,9 @@ class DurableCycleGovernor:
         next_text = _utc_text(now + timedelta(seconds=cooldown))
         connection = connect(self._path)
         try:
-            ensure_cycle_governor_schema(connection)
+            ensure_cycle_governor_schema(
+                connection, policy_version=self._policy.version
+            )
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT owner_digest, lease_state FROM unpublished_governed_cycles "
@@ -951,7 +987,9 @@ class DurableCycleGovernor:
         now, now_text = self._now()
         connection = connect(self._path)
         try:
-            ensure_cycle_governor_schema(connection)
+            ensure_cycle_governor_schema(
+                connection, policy_version=self._policy.version
+            )
             connection.execute("BEGIN IMMEDIATE")
             circuit = connection.execute(
                 "SELECT state, open_reason, opened_at FROM unpublished_route_circuits "
@@ -1021,9 +1059,31 @@ class DurableCycleGovernor:
         if self._writer_route_health_probe is None:
             raise ValueError("CONT writer route health probe is not configured")
         now, now_text = self._now()
+        probe_id = digest_bytes(
+            canonical_json_bytes(
+                {
+                    "route": CONT_WRITER_ROUTE,
+                    "bound_failure_reason": bound_failure_reason,
+                    "attempted_at": now_text,
+                }
+            )
+        )
+        reservation: dict[str, object] = {
+            "probe_id": probe_id,
+            "route": CONT_WRITER_ROUTE,
+            "bound_failure_reason": bound_failure_reason,
+            "attempted_at": now_text,
+            "probe_state": "RESERVED",
+            "outcome": "FAILED",
+            "no_content_probe": True,
+            "provider_dispatched": False,
+        }
+        reservation_digest = digest_bytes(canonical_json_bytes(reservation))
         connection = connect(self._path)
         try:
-            ensure_cycle_governor_schema(connection)
+            ensure_cycle_governor_schema(
+                connection, policy_version=self._policy.version
+            )
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT state, open_reason, opened_at, last_probe_at "
@@ -1061,71 +1121,24 @@ class DurableCycleGovernor:
                     remaining_seconds=_remaining_seconds(now, earliest),
                     next_cycle_eligible_at=_utc_text(earliest),
                 )
-            probe_exception_class = ""
-            try:
-                proof = self._writer_route_health_probe()
-            except (OSError, RuntimeError, ValueError) as exc:
-                probe_exception_class = type(exc).__name__
-                proof = WriterRouteHealthProof(
-                    executable_ok=False,
-                    authentication_ok=False,
-                    configuration_ok=False,
-                    provider_available=False,
-                    provider_dispatched=False,
-                    provider_receipt_reference=None,
-                )
-            provider_receipt_complete = (
-                not proof.provider_dispatched
-                or proof.provider_receipt_reference is not None
-            )
-            passed = provider_receipt_complete and all(
-                (
-                    proof.executable_ok,
-                    proof.authentication_ok,
-                    proof.configuration_ok,
-                    proof.provider_available,
-                )
-            )
-            evidence: dict[str, object] = {
-                "route": CONT_WRITER_ROUTE,
-                "bound_failure_reason": bound_failure_reason,
-                "attempted_at": now_text,
-                "outcome": "PASSED" if passed else "FAILED",
-                "no_content_probe": True,
-                "executable_ok": proof.executable_ok,
-                "authentication_ok": proof.authentication_ok,
-                "configuration_ok": proof.configuration_ok,
-                "provider_available": proof.provider_available,
-                "provider_dispatched": proof.provider_dispatched,
-                "provider_receipt_reference": proof.provider_receipt_reference,
-                "provider_receipt_complete": provider_receipt_complete,
-                "probe_exception_class": probe_exception_class,
-            }
-            evidence_digest = digest_bytes(canonical_json_bytes(evidence))
-            probe_id = digest_bytes(
-                canonical_json_bytes(
-                    {
-                        "route": CONT_WRITER_ROUTE,
-                        "bound_failure_reason": bound_failure_reason,
-                        "attempted_at": now_text,
-                    }
-                )
-            )
             connection.execute(
                 "INSERT INTO unpublished_route_health_probes("
-                "probe_id, route, bound_failure_reason, attempted_at, outcome, "
-                "provider_dispatched, provider_receipt_reference, evidence_json, "
-                "evidence_digest) VALUES(?,?,?,?,?,?,?,?,?)",
+                "probe_id, route, bound_failure_reason, attempted_at, probe_state, "
+                "terminal_at, outcome, provider_dispatched, "
+                "provider_receipt_reference, evidence_json, evidence_digest) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     probe_id,
                     CONT_WRITER_ROUTE,
                     bound_failure_reason,
                     now_text,
-                    "PASSED" if passed else "FAILED",
-                    int(proof.provider_dispatched),
-                    proof.provider_receipt_reference,
-                    canonical_json_bytes(evidence).decode(),
-                    evidence_digest,
+                    "RESERVED",
+                    None,
+                    "FAILED",
+                    0,
+                    None,
+                    canonical_json_bytes(reservation).decode(),
+                    reservation_digest,
                 ),
             )
             connection.execute(
@@ -1136,6 +1149,110 @@ class DurableCycleGovernor:
                 "UPDATE unpublished_cycle_governor_state SET last_observed_utc=? "
                 "WHERE singleton=1",
                 (now_text,),
+            )
+            append_ledger(
+                connection,
+                "PRIVATE_WRITER_ROUTE_HEALTH_PROBE_RESERVED",
+                reservation,
+            )
+            connection.commit()
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+        probe_exception_class = ""
+        try:
+            proof = self._writer_route_health_probe()
+        except (OSError, RuntimeError, ValueError) as exc:
+            probe_exception_class = type(exc).__name__
+            proof = WriterRouteHealthProof(
+                executable_ok=False,
+                authentication_ok=False,
+                configuration_ok=False,
+                provider_available=False,
+                provider_dispatched=False,
+                provider_receipt_reference=None,
+            )
+        provider_receipt_complete = (
+            not proof.provider_dispatched
+            or proof.provider_receipt_reference is not None
+        )
+        passed = provider_receipt_complete and all(
+            (
+                proof.executable_ok,
+                proof.authentication_ok,
+                proof.configuration_ok,
+                proof.provider_available,
+            )
+        )
+        terminal_now, terminal_text = self._now()
+        if terminal_now < now:
+            raise CycleNotEligible(
+                "UTC_CLOCK_BACKWARDS",
+                remaining_seconds=math.inf,
+                next_cycle_eligible_at=None,
+            )
+        evidence: dict[str, object] = {
+            "probe_id": probe_id,
+            "route": CONT_WRITER_ROUTE,
+            "bound_failure_reason": bound_failure_reason,
+            "attempted_at": now_text,
+            "terminal_at": terminal_text,
+            "probe_state": "TERMINAL",
+            "outcome": "PASSED" if passed else "FAILED",
+            "no_content_probe": True,
+            "executable_ok": proof.executable_ok,
+            "authentication_ok": proof.authentication_ok,
+            "configuration_ok": proof.configuration_ok,
+            "provider_available": proof.provider_available,
+            "provider_dispatched": proof.provider_dispatched,
+            "provider_receipt_reference": proof.provider_receipt_reference,
+            "provider_receipt_complete": provider_receipt_complete,
+            "probe_exception_class": probe_exception_class,
+        }
+        evidence_digest = digest_bytes(canonical_json_bytes(evidence))
+        connection = connect(self._path)
+        try:
+            ensure_cycle_governor_schema(
+                connection, policy_version=self._policy.version
+            )
+            connection.execute("BEGIN IMMEDIATE")
+            state = connection.execute(
+                "SELECT last_observed_utc FROM unpublished_cycle_governor_state "
+                "WHERE singleton=1"
+            ).fetchone()
+            if state is None:
+                raise RuntimeError("cycle governor state is missing")
+            if state[0] is not None and terminal_now < _parse_utc(str(state[0])):
+                raise CycleNotEligible(
+                    "UTC_CLOCK_BACKWARDS",
+                    remaining_seconds=math.inf,
+                    next_cycle_eligible_at=None,
+                )
+            changed = connection.execute(
+                "UPDATE unpublished_route_health_probes SET probe_state='TERMINAL', "
+                "terminal_at=?, outcome=?, provider_dispatched=?, "
+                "provider_receipt_reference=?, evidence_json=?, evidence_digest=? "
+                "WHERE probe_id=? AND probe_state='RESERVED'",
+                (
+                    terminal_text,
+                    "PASSED" if passed else "FAILED",
+                    int(proof.provider_dispatched),
+                    proof.provider_receipt_reference,
+                    canonical_json_bytes(evidence).decode(),
+                    evidence_digest,
+                    probe_id,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise RuntimeError("health probe reservation is no longer active")
+            connection.execute(
+                "UPDATE unpublished_cycle_governor_state SET last_observed_utc=? "
+                "WHERE singleton=1",
+                (terminal_text,),
             )
             append_ledger(connection, "PRIVATE_WRITER_ROUTE_HEALTH_PROBE", evidence)
             connection.commit()
@@ -1202,7 +1319,9 @@ class DurableCycleGovernor:
     def status(self) -> CycleGovernorStatus:
         connection = connect(self._path)
         try:
-            ensure_cycle_governor_schema(connection)
+            ensure_cycle_governor_schema(
+                connection, policy_version=self._policy.version
+            )
             state = connection.execute(
                 "SELECT policy_version, next_cycle_eligible_at, last_observed_utc, "
                 "writer_unproductive_streak, refused_early_start_count, "

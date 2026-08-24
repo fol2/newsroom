@@ -101,6 +101,18 @@ def test_productive_cooldown_starts_after_complete_work(tmp_path: Path) -> None:
     assert governor.claim(owner_id="worker-b").cycle_id != lease.cycle_id
 
 
+def test_fresh_store_binds_configured_conservative_policy(tmp_path: Path) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    policy = EvaluationCyclePolicy(
+        normal_cooldown_seconds=600,
+        unproductive_cooldown_seconds=1200,
+    )
+
+    governor = DurableCycleGovernor(str(path), policy=policy)
+
+    assert governor.status().policy_version == policy.version
+
+
 def test_long_cycle_has_no_fixed_rate_catch_up(tmp_path: Path) -> None:
     clocks = InjectedClocks(datetime(2026, 8, 24, tzinfo=UTC))
     governor = _governor(tmp_path / "unpublished.sqlite3", clocks)
@@ -497,6 +509,57 @@ def test_failed_provider_health_probe_is_receipted_and_rate_limited(
     ).fetchone()
     connection.close()
     assert probe == ("FAILED", 1, "receipt://health/1")
+
+
+def test_provider_health_probe_reservation_is_durable_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    clocks = InjectedClocks(datetime(2026, 8, 24, tzinfo=UTC))
+
+    def interrupted_route() -> WriterRouteHealthProof:
+        connection = sqlite3.connect(path)
+        probe = connection.execute(
+            "SELECT probe_state, provider_dispatched FROM "
+            "unpublished_route_health_probes"
+        ).fetchone()
+        last_probe_at = connection.execute(
+            "SELECT last_probe_at FROM unpublished_route_circuits WHERE route='CONT'"
+        ).fetchone()
+        connection.close()
+        assert probe == ("RESERVED", 0)
+        assert last_probe_at == ("2026-08-24T01:00:00.000000Z",)
+        raise KeyboardInterrupt
+
+    governor = DurableCycleGovernor(
+        str(path),
+        utc_clock=clocks.utc_now,
+        monotonic_clock=clocks.monotonic_now,
+        writer_route_health_probe=interrupted_route,
+    )
+    lease = governor.claim(owner_id="worker-a")
+    failed = governor.complete(
+        lease,
+        CycleOutcomeInput(
+            write_ready=1,
+            provider_dispatches=1,
+            accepted_payload_count=0,
+            systemic_provider_failure_reason="PROVIDER_CONFIGURATION_FAILURE",
+        ),
+    )
+    clocks.advance(3600)
+
+    with pytest.raises(KeyboardInterrupt):
+        governor.release_with_health_probe(
+            bound_failure_reason=failed.writer_circuit_open_reason,
+        )
+    with pytest.raises(CycleNotEligible) as throttled:
+        governor.release_with_health_probe(
+            bound_failure_reason=failed.writer_circuit_open_reason,
+        )
+
+    assert throttled.value.reason == "HEALTH_PROBE_INTERVAL"
+    assert throttled.value.remaining_seconds == 3600.0
 
 
 def test_operator_reset_is_bound_to_current_failure_and_policy(tmp_path: Path) -> None:
