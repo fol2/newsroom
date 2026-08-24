@@ -525,6 +525,72 @@ def test_apply_is_authenticated_idempotent_and_emits_canonical_receipt(
     assert ledger_count == 1
 
 
+def test_apply_migrates_the_legacy_ledger_before_retaining_its_event(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-ledger-unpublished.sqlite3"
+    connection = connect(str(path))
+    spend_id = _reserve(connection, ingest_id="legacy-ledger", attempt=1)
+    accounting = reconcile_graphiti_spend(
+        connection, spend_id=spend_id, embedding_usage=None
+    )
+    insert_graphiti_attempt_receipt(
+        connection,
+        ingest_id="legacy-ledger",
+        attempt_number=1,
+        outcome="FAILED",
+        receipt={
+            "ingest_id": "legacy-ledger",
+            "attempt_number": 1,
+            "outcome": "FAILED",
+            "provider_attempt_number": 1,
+            "chat_invocations": [],
+            "embedding_usage": None,
+            "accounting": accounting,
+        },
+    )
+    connection.commit()
+    connection.close()
+    evaluated_at = datetime(2026, 8, 24, tzinfo=UTC)
+    plan = plan_graphiti_spend_reconciliation(str(path), evaluated_at=evaluated_at)
+
+    with sqlite3.connect(path) as legacy:
+        legacy.execute("DROP INDEX IF EXISTS ledger_one_child_per_digest")
+        legacy.execute("ALTER TABLE ledger RENAME TO ledger_v12")
+        legacy.execute(
+            "CREATE TABLE ledger("
+            "seq INTEGER PRIMARY KEY, at TEXT NOT NULL, kind TEXT NOT NULL, "
+            "payload_digest TEXT NOT NULL, prev_digest TEXT NOT NULL, "
+            "digest TEXT NOT NULL)"
+        )
+        legacy.execute(
+            "INSERT INTO ledger(seq, at, kind, payload_digest, prev_digest, digest) "
+            "SELECT seq, at, kind, payload_digest, prev_digest, digest FROM ledger_v12"
+        )
+        legacy.execute("DROP TABLE ledger_v12")
+        legacy.execute(
+            "CREATE UNIQUE INDEX ledger_one_child_per_digest ON ledger(prev_digest)"
+        )
+
+    receipt = _command_service().reconcile_graphiti_spend(
+        unpublished_store=str(path),
+        dry_run_plan=plan.as_dict(),
+        evaluated_at=evaluated_at,
+        idempotency_key="legacy-ledger",
+        expected_plan_digest=plan.plan_digest,
+        proof=AuthenticationProof(method="STATIC_TOKEN", credential="operator-token"),
+    )
+
+    with sqlite3.connect(path) as reopened:
+        columns = {str(row[1]) for row in reopened.execute("PRAGMA table_info(ledger)")}
+        retained_payload = reopened.execute(
+            "SELECT payload_json FROM ledger WHERE digest=?",
+            (receipt.ledger_digest,),
+        ).fetchone()[0]
+    assert "payload_json" in columns
+    assert json.loads(retained_payload)["plan_digest"] == plan.plan_digest
+
+
 def test_plan_fails_closed_when_attempt_receipt_join_or_digest_is_tampered(
     tmp_path: Path,
 ) -> None:
