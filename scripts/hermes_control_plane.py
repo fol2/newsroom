@@ -33,12 +33,16 @@ from newsroom.control_plane.cycle_governor import (
     EvaluationCyclePolicy,
     WriterRouteHealthProof,
 )
-from newsroom.control_plane.cont_calibration import assess_cont_calibration
+from newsroom.control_plane.cont_calibration import (
+    assess_cont_calibration,
+    stage_cont_calibration_policy,
+)
 from newsroom.control_plane.graphiti_events import GraphitiEventQueue
 from newsroom.control_plane.intake import IntakeReport, run_intake
 from newsroom.control_plane.model_usage import (
     InvocationAllocation,
     InvocationTerminal,
+    ModelUsageAdmissionError,
     ModelUsageService,
     UsageComponents,
     UsageStatus,
@@ -52,7 +56,11 @@ from newsroom.control_plane.paths import (
 )
 from newsroom.control_plane.store import list_payloads
 from newsroom.control_plane.veto import VetoError
-from newsroom.control_plane.writer import default_writer, probe_grok_writer_route
+from newsroom.control_plane.writer import (
+    cont_writer_implementation_identity,
+    default_writer,
+    probe_grok_writer_route,
+)
 
 DEFAULT_PROVING = str(CANONICAL_PROVING_STORE)
 DEFAULT_UNPUBLISHED = str(CANONICAL_UNPUBLISHED_STORE)
@@ -541,6 +549,20 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="register the policy only when every productive calibration gate passes",
     )
+    parser.add_argument(
+        "--stage-calibration-policy",
+        action="store_true",
+        help=(
+            "register a candidate-scoped exact-head EVALUATION bootstrap policy "
+            "before productive calibration"
+        ),
+    )
+    parser.add_argument(
+        "--calibration-max-prompt-bytes",
+        type=int,
+        default=131_072,
+        help="hard exact-input byte bound for the candidate-scoped bootstrap policy",
+    )
     args = parser.parse_args(argv)
     try:
         cooldown_seconds = _resolve_cooldown(
@@ -575,12 +597,66 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             parser.error(str(exc))
         usage = ModelUsageService(args.unpublished)
+        revision, worktree_clean = cont_writer_implementation_identity()
+        if not worktree_clean:
+            parser.error(
+                "writer-calibration requires a clean versioned exact-head worktree"
+            )
+        exact_version = f"{args.calibration_version}+{revision[:12]}"
+        if args.stage_calibration_policy:
+            if args.register_policy:
+                parser.error(
+                    "--stage-calibration-policy and --register-policy are separate steps"
+                )
+            try:
+                staged_policy = stage_cont_calibration_policy(
+                    candidate_ids=candidate_ids,
+                    version=exact_version,
+                    implementation_revision=revision,
+                    max_prompt_bytes=args.calibration_max_prompt_bytes,
+                )
+            except (ModelUsageAdmissionError, ValueError) as exc:
+                parser.error(str(exc))
+            usage.register_policy(staged_policy)
+            sys.stdout.write(
+                json.dumps(
+                    {
+                        "stage": "CALIBRATION_POLICY_REGISTERED",
+                        "implementation_revision": revision,
+                        "policy": staged_policy.as_record(),
+                        "public_effects": 0,
+                        "public_effect_proof": (
+                            "POLICY_REGISTRATION_HAS_NO_PUBLIC_DISPATCH_PATH"
+                        ),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n"
+            )
+            return 0
         query = usage.query(start=start, end=end)
+        payloads = [
+            payload
+            for payload in list_payloads(args.unpublished, limit=10_000)
+            if payload.story_candidate_id in candidate_ids
+        ]
+        public_effect_count = sum(
+            1
+            for payload in payloads
+            if payload.publication_bundle
+            or payload.auto_publish
+            or payload.status != "UNPUBLISHED"
+        )
         packet = assess_cont_calibration(
             query["leaves"],  # type: ignore[arg-type]
             candidate_ids=candidate_ids,
-            version=args.calibration_version,
-            public_effect_count=0,
+            version=exact_version,
+            implementation_revision=revision,
+            public_effect_count=public_effect_count,
+            unpublished_payload_candidate_ids=tuple(
+                payload.story_candidate_id for payload in payloads
+            ),
         )
         body = packet.as_record()
         if packet.passed:

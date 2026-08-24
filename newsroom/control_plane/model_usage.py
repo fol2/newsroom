@@ -35,6 +35,15 @@ class ModelUsageIntegrityError(ValueError):
 class ModelUsageAdmissionError(RuntimeError):
     """A leaf failed deterministic pre-dispatch admission."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str = "MODEL_USAGE_ADMISSION_HELD",
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
 
 class WorkloadClass(StrEnum):
     CONT_WRITER_PRIMARY = "CONT_WRITER_PRIMARY"
@@ -326,6 +335,13 @@ class InvocationEfficiencyPolicy:
     tools_enabled: bool
     mcp_enabled: bool
     prior_message_count: int
+    command_semantic_version: str
+    command_flags: tuple[str, ...]
+    context_manifest_schema_version: str
+    disabled_capabilities: tuple[str, ...]
+    implementation_revision: str
+    calibration_only: bool
+    allowed_candidate_ids: tuple[str, ...]
     max_prompt_bytes: int
     max_context_tokens: int
     max_output_tokens: int
@@ -342,6 +358,13 @@ class InvocationEfficiencyPolicy:
     @classmethod
     def create(cls, **values: object) -> InvocationEfficiencyPolicy:
         values.pop("canonical_digest", None)
+        values.setdefault("command_semantic_version", "UNSPECIFIED")
+        values.setdefault("command_flags", ())
+        values.setdefault("context_manifest_schema_version", "UNSPECIFIED")
+        values.setdefault("disabled_capabilities", ())
+        values.setdefault("implementation_revision", "UNSPECIFIED")
+        values.setdefault("calibration_only", False)
+        values.setdefault("allowed_candidate_ids", ())
         workload = values.get("workload_class")
         if not isinstance(workload, WorkloadClass):
             raise ModelUsageIntegrityError("policy workload class must be typed")
@@ -373,6 +396,9 @@ class InvocationEfficiencyPolicy:
             "prompt_contract_version",
             "output_schema_digest",
             "evidence_digest",
+            "command_semantic_version",
+            "implementation_revision",
+            "context_manifest_schema_version",
         ):
             _token(str(getattr(self, name)), field=name)
         for name in (
@@ -391,6 +417,28 @@ class InvocationEfficiencyPolicy:
         for name in ("skills_enabled", "tools_enabled", "mcp_enabled"):
             if not isinstance(getattr(self, name), bool):
                 raise ModelUsageIntegrityError(f"policy {name} must be boolean")
+        if not isinstance(self.calibration_only, bool):
+            raise ModelUsageIntegrityError("policy calibration_only must be boolean")
+        if self.calibration_only and not self.allowed_candidate_ids:
+            raise ModelUsageIntegrityError(
+                "calibration policy must bind at least one candidate"
+            )
+        if not self.calibration_only and self.allowed_candidate_ids:
+            raise ModelUsageIntegrityError(
+                "non-calibration policy cannot bind calibration candidates"
+            )
+        for candidate_id in self.allowed_candidate_ids:
+            _token(candidate_id, field="allowed_candidate_id")
+        if len(set(self.allowed_candidate_ids)) != len(self.allowed_candidate_ids):
+            raise ModelUsageIntegrityError("allowed calibration candidates repeat")
+        if not isinstance(self.command_flags, tuple) or not all(
+            isinstance(value, str) for value in self.command_flags
+        ):
+            raise ModelUsageIntegrityError("policy command flags are invalid")
+        if len(set(self.disabled_capabilities)) != len(self.disabled_capabilities):
+            raise ModelUsageIntegrityError("disabled capabilities repeat")
+        for capability in self.disabled_capabilities:
+            _token(capability, field="disabled_capability")
         if not _is_int(self.prior_message_count) or self.prior_message_count < 0:
             raise ModelUsageIntegrityError(
                 "policy prior message count must be non-negative"
@@ -440,6 +488,13 @@ class InvocationEfficiencyPolicy:
             "tools_enabled": self.tools_enabled,
             "mcp_enabled": self.mcp_enabled,
             "prior_message_count": self.prior_message_count,
+            "command_semantic_version": self.command_semantic_version,
+            "command_flags": list(self.command_flags),
+            "context_manifest_schema_version": self.context_manifest_schema_version,
+            "disabled_capabilities": list(self.disabled_capabilities),
+            "implementation_revision": self.implementation_revision,
+            "calibration_only": self.calibration_only,
+            "allowed_candidate_ids": list(self.allowed_candidate_ids),
             "max_prompt_bytes": self.max_prompt_bytes,
             "max_context_tokens": self.max_context_tokens,
             "max_output_tokens": self.max_output_tokens,
@@ -970,6 +1025,9 @@ class ModelUsageService:
         route: str,
         model: str,
         reasoning: str,
+        candidate_id: str | None = None,
+        implementation_revision: str | None = None,
+        config_identity: str | None = None,
     ) -> InvocationEfficiencyPolicy:
         """Resolve one exact qualified route policy without fallback guessing."""
 
@@ -989,9 +1047,28 @@ class ModelUsageService:
             for record in policy_records
             if str(record.get("reasoning")) == reasoning
         ]
+        if config_identity is not None:
+            policies = [
+                policy
+                for policy in policies
+                if config_identity in policy.allowed_config_identities
+            ]
+        policies = [
+            policy
+            for policy in policies
+            if not policy.calibration_only
+            or (
+                candidate_id in policy.allowed_candidate_ids
+                and implementation_revision == policy.implementation_revision
+            )
+        ]
+        general_policies = [policy for policy in policies if not policy.calibration_only]
+        if general_policies:
+            policies = general_policies
         if len(policies) != 1:
             raise ModelUsageAdmissionError(
-                "exact qualified invocation policy is absent or ambiguous"
+                "exact qualified invocation policy is absent or ambiguous",
+                reason_code="INVOCATION_POLICY_UNAVAILABLE",
             )
         return policies[0]
 
@@ -1029,6 +1106,8 @@ class ModelUsageService:
             "model",
             "reasoning",
             "command_semantic_version",
+            "implementation_revision",
+            "schema_version",
             "prompt_digest",
             "schema_digest",
             "system_digest",
@@ -1181,6 +1260,23 @@ class ModelUsageService:
         allocation: InvocationAllocation,
         policy: InvocationEfficiencyPolicy,
     ) -> None:
+        manifest: dict[str, object] = {}
+        if policy.command_semantic_version != "UNSPECIFIED":
+            manifest_row = connection.execute(
+                "SELECT record_json FROM model_invocation_context_manifests "
+                "WHERE context_manifest_digest=?",
+                (allocation.context_manifest_digest,),
+            ).fetchone()
+            if manifest_row is None:
+                raise ModelUsageAdmissionError("context manifest is absent")
+            manifest = _object(manifest_row[0])
+        envelope_row = connection.execute(
+            "SELECT record_json FROM model_work_envelopes WHERE envelope_id=?",
+            (allocation.envelope_id,),
+        ).fetchone()
+        if envelope_row is None:
+            raise ModelUsageAdmissionError("work envelope is absent")
+        envelope = _object(envelope_row[0])
         if (
             allocation.workload_class != policy.workload_class
             or allocation.provider != policy.provider
@@ -1198,8 +1294,30 @@ class ModelUsageService:
             or allocation.prior_message_count != policy.prior_message_count
         ):
             raise ModelUsageAdmissionError("allocation differs from invocation policy")
+        if policy.command_semantic_version != "UNSPECIFIED" and (
+            manifest.get("schema_version") != policy.context_manifest_schema_version
+            or manifest.get("command_semantic_version")
+            != policy.command_semantic_version
+            or tuple(manifest.get("command_flags", ())) != policy.command_flags
+            or tuple(manifest.get("disabled_capabilities", ()))
+            != policy.disabled_capabilities
+            or manifest.get("implementation_revision")
+            != policy.implementation_revision
+        ):
+            raise ModelUsageAdmissionError(
+                "context manifest command contract differs from invocation policy"
+            )
+        if policy.calibration_only and envelope.get("candidate_id") not in (
+            policy.allowed_candidate_ids
+        ):
+            raise ModelUsageAdmissionError(
+                "candidate is outside the bounded calibration policy"
+            )
         if allocation.prompt_bytes > policy.max_prompt_bytes:
-            raise ModelUsageAdmissionError("prompt bytes exceed qualified policy")
+            raise ModelUsageAdmissionError(
+                "prompt bytes exceed qualified policy",
+                reason_code="EXACT_INPUT_EXCEEDS_QUALIFIED_BOUND",
+            )
         if allocation.context_identity not in policy.allowed_context_identities:
             raise ModelUsageAdmissionError(
                 "context identity is outside qualified policy"
@@ -3079,6 +3197,23 @@ def _policy_from_record(record: Mapping[str, object]) -> InvocationEfficiencyPol
         tools_enabled=bool(record["tools_enabled"]),
         mcp_enabled=bool(record["mcp_enabled"]),
         prior_message_count=_record_int(record, "prior_message_count"),
+        command_semantic_version=str(
+            record.get("command_semantic_version", "UNSPECIFIED")
+        ),
+        command_flags=tuple(str(value) for value in record.get("command_flags", ())),
+        context_manifest_schema_version=str(
+            record.get("context_manifest_schema_version", "UNSPECIFIED")
+        ),
+        disabled_capabilities=tuple(
+            str(value) for value in record.get("disabled_capabilities", ())
+        ),
+        implementation_revision=str(
+            record.get("implementation_revision", "UNSPECIFIED")
+        ),
+        calibration_only=bool(record.get("calibration_only", False)),
+        allowed_candidate_ids=tuple(
+            str(value) for value in record.get("allowed_candidate_ids", ())
+        ),
         max_prompt_bytes=_record_int(record, "max_prompt_bytes"),
         max_context_tokens=_record_int(record, "max_context_tokens"),
         max_output_tokens=_record_int(record, "max_output_tokens"),

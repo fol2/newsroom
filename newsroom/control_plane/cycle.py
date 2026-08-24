@@ -2111,6 +2111,7 @@ def _run_write_loop(
         validators: tuple[WriterValidatorResult, ...] = ()
         accepted_copy: WriterCopy | None = None
         last_reason = "NO_USEFUL_OUTPUT"
+        candidate_hold_reason = ""
         usage_envelope_id: str | None = None
         if model_usage is not None:
             usage_envelope = WorkEnvelope.create(
@@ -2180,6 +2181,9 @@ def _run_write_loop(
                         route=manifest.route,
                         model=manifest.model,
                         reasoning=manifest.reasoning,
+                        candidate_id=candidate.candidate_id,
+                        implementation_revision=manifest.implementation_revision,
+                        config_identity=manifest.config_identity,
                     )
                     manifest_controls = (
                         manifest.one_turn,
@@ -2200,6 +2204,20 @@ def _run_write_loop(
                     if manifest_controls != policy_controls:
                         raise ModelUsageAdmissionError(
                             "writer invocation controls do not match qualified policy"
+                        )
+                    if usage_policy.command_semantic_version != "UNSPECIFIED" and (
+                        manifest.schema_version
+                        != usage_policy.context_manifest_schema_version
+                        or manifest.command_semantic_version
+                        != usage_policy.command_semantic_version
+                        or manifest.command_flags != usage_policy.command_flags
+                        or manifest.disabled_capabilities
+                        != usage_policy.disabled_capabilities
+                        or manifest.implementation_revision
+                        != usage_policy.implementation_revision
+                    ):
+                        raise ModelUsageAdmissionError(
+                            "writer manifest contract does not match qualified policy"
                         )
                     allocated_at = clock().astimezone(UTC)
                     usage_allocation = InvocationAllocation.create(
@@ -2239,8 +2257,12 @@ def _run_write_loop(
                         usage_allocation, owner_emergency_stop=False
                     )
                     usage_invocation_ids.append(usage_allocation.invocation_id)
-                except ModelUsageAdmissionError:
-                    last_reason = "MODEL_USAGE_ADMISSION_HELD"
+                except ModelUsageAdmissionError as exc:
+                    last_reason = exc.reason_code
+                    if exc.reason_code == "EXACT_INPUT_EXCEEDS_QUALIFIED_BOUND":
+                        candidate_hold_reason = exc.reason_code
+                    else:
+                        writer_circuit_reason = exc.reason_code
                     break
             provider_dispatches += 1
             if route == "PRIMARY":
@@ -2428,7 +2450,11 @@ def _run_write_loop(
             break
 
         if accepted_copy is None:
-            result = "HOLD" if writer_circuit_reason else "REJECT"
+            result = (
+                "HOLD"
+                if writer_circuit_reason or candidate_hold_reason
+                else "REJECT"
+            )
             outcome(
                 decision=decision,
                 candidate_attempt_id=candidate_attempt_id,
@@ -2438,7 +2464,7 @@ def _run_write_loop(
                 reasons=(last_reason,),
                 usage_envelope_id=usage_envelope_id,
             )
-            if not writer_circuit_reason:
+            if not writer_circuit_reason and not candidate_hold_reason:
                 no_useful_reason = last_reason
             unpublished.commit()
             continue
