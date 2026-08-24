@@ -322,6 +322,18 @@ _Avoid_: Default-allow, config flag, DNS blocklist, HTTP 200
 The metadata-only admission record of one outbound request: destination class, host, policy digest and applicable bounds. It never carries secret bytes. It is not a network packet capture, not a Target Acknowledgement and not a First I/O Gate Record.
 _Avoid_: HTTP log, secret bytes, GateRecord, worker success
 
+**Model Work Envelope**:
+The controller-owned, immutable identity of one admitted unit of model work. It binds the exact cycle and editorial or Graphiti work references before any provider leaf is allocated, and joins every later invocation and productive or no-result outcome without aggregating child usage into a second parent total. A held or rejected zero-call decision creates no Model Work Envelope.
+_Avoid_: Provider session, token bucket, mutable job, parent token total
+
+**Model Invocation Receipt**:
+The append-only lifecycle for one exact provider leaf under a Model Work Envelope: qualified policy, pre-dispatch allocation, transport observation, terminal usage evidence and any later reconciliation. Missing usage is explicitly `UNREPORTED` or `AMBIGUOUS`, never zero; exact zero requires proof that provider dispatch did not occur. Route-local uncertainty may open that route's circuit, while usage totals remain telemetry and do not impose a normal daily hard cut.
+_Avoid_: Approximate aggregate log, missing-is-zero, parent-child double count, daily token quota
+
+**Invocation Efficiency Policy**:
+The exact qualified policy a controller must resolve before allocating one model invocation. It binds workload, provider, route, pinned model and reasoning, one-turn shape, prompt and context identities, and output and total bounds. A missing or ambiguous policy holds dispatch rather than guessing a nearby route policy.
+_Avoid_: Provider default, rolling token budget, best-effort model choice, post-dispatch limit
+
 **Prefunded Wallet**:
 The sole funding pool for incremental paid-API spend within an Epoch: fixed capacity at the OD-011 £250 cap, prefunded at opening, non-replenishing and non-transferable. Subscription-class usage is ledgered but never debited from it. It is not a live provider prepaid balance and not an unlimited or replenishable budget.
 _Avoid_: Provider prepaid balance, subscription wallet, top-up account, credit line

@@ -4,6 +4,19 @@ import asyncio
 import json
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
+
+
+def _reported_usage() -> dict[str, object]:
+    return {
+        "usage_basis": "PROVIDER_REPORTED",
+        "input_tokens": 10,
+        "output_tokens": 2,
+        "cached_read_tokens": 0,
+        "cached_write_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 12,
+    }
 
 
 def test_cursor_json_output_retains_provider_reported_tokens() -> None:
@@ -188,6 +201,163 @@ def test_cli_chain_retains_cursor_usage_on_the_invocation() -> None:
             "usage": usage,
         }
     ]
+
+
+def test_cli_chain_allocates_each_hidden_leaf_before_provider_runner() -> None:
+    from newsroom.graphiti_adapter.cli_client import CliExecution, run_cli_chain
+
+    events: list[tuple[str, str]] = []
+
+    class Observer:
+        def before_cli_invocation(
+            self, *, provider: str, model: str, prompt: str, schema: str | None
+        ) -> object:
+            del model, prompt, schema
+            events.append(("ALLOCATE", provider))
+            return provider
+
+        def after_cli_invocation(
+            self,
+            token: object,
+            *,
+            outcome: str,
+            usage: dict[str, object],
+        ) -> None:
+            del usage
+            events.append((outcome, str(token)))
+
+    usage = {
+        "usage_basis": "PROVIDER_REPORTED",
+        "input_tokens": 10,
+        "output_tokens": 2,
+        "cached_read_tokens": 0,
+        "cached_write_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 12,
+    }
+
+    def cursor(_prompt: str) -> CliExecution:
+        events.append(("DISPATCH", "cursor-agent-cli"))
+        return CliExecution(text="malformed", usage=usage)
+
+    def grok(_prompt: str, _schema: str | None) -> CliExecution:
+        events.append(("DISPATCH", "grok-build-cli"))
+        return CliExecution(text='{"value":"fallback"}', usage=usage)
+
+    result = asyncio.run(
+        run_cli_chain(
+            prompt="prompt",
+            schema=None,
+            cursor_runner=cursor,
+            grok_runner=grok,
+            invocations=[],
+            invocation_observer=Observer(),
+        )
+    )
+
+    assert result == {"value": "fallback"}
+    assert events == [
+        ("ALLOCATE", "cursor-agent-cli"),
+        ("DISPATCH", "cursor-agent-cli"),
+        ("MALFORMED_OUTPUT", "cursor-agent-cli"),
+        ("ALLOCATE", "grok-build-cli"),
+        ("DISPATCH", "grok-build-cli"),
+        ("COMPLETE", "grok-build-cli"),
+    ]
+
+
+def test_cli_chain_retains_exact_zero_for_missing_executable_before_dispatch() -> None:
+    from newsroom.graphiti_adapter.cli_client import CliExecution, run_cli_chain
+
+    completions: list[tuple[str, str, dict[str, object]]] = []
+
+    class Observer:
+        def before_cli_invocation(
+            self, *, provider: str, model: str, prompt: str, schema: str | None
+        ) -> object:
+            del model, prompt, schema
+            return provider
+
+        def after_cli_invocation(
+            self,
+            token: object,
+            *,
+            outcome: str,
+            usage: dict[str, object],
+        ) -> None:
+            completions.append((str(token), outcome, usage))
+
+    def cursor(_prompt: str) -> CliExecution:
+        raise FileNotFoundError("cursor-agent")
+
+    result = asyncio.run(
+        run_cli_chain(
+            prompt="prompt",
+            schema=None,
+            cursor_runner=cursor,
+            grok_runner=lambda _prompt, _schema: CliExecution(
+                text='{"value":"fallback"}', usage=_reported_usage()
+            ),
+            invocations=[],
+            invocation_observer=Observer(),
+        )
+    )
+
+    assert result == {"value": "fallback"}
+    assert completions[0] == (
+        "cursor-agent-cli",
+        "EXECUTABLE_NOT_FOUND",
+        {
+            "usage_basis": "NO_PROVIDER_CALL",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_read_tokens": 0,
+            "cached_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": 0,
+        },
+    )
+
+
+def test_embedding_meter_allocates_leaf_before_provider_request() -> None:
+    from newsroom.graphiti_adapter.embedding_meter import MeteredOpenAIEmbedder
+
+    events: list[str] = []
+
+    class Embeddings:
+        async def create(self, **_values: object) -> object:
+            events.append("DISPATCH")
+            return SimpleNamespace(
+                id="embedding-1",
+                data=[SimpleNamespace(embedding=[1.0, 2.0])],
+                usage={"prompt_tokens": 4, "total_tokens": 4, "cost": "0.000001"},
+            )
+
+    class Observer:
+        def before_embedding_invocation(self, **_values: object) -> object:
+            events.append("ALLOCATE")
+            return "leaf-1"
+
+        def after_embedding_invocation(
+            self, token: object, *, outcome: str, usage: dict[str, object]
+        ) -> None:
+            assert token == "leaf-1"
+            assert usage["total_tokens"] == 4
+            events.append(outcome)
+
+    delegate = SimpleNamespace(
+        client=SimpleNamespace(embeddings=Embeddings()),
+        config=SimpleNamespace(
+            embedding_model="openai/text-embedding-3-large",
+            embedding_dim=2,
+        ),
+    )
+    embedder = MeteredOpenAIEmbedder(delegate, invocation_observer=Observer())
+
+    result = asyncio.run(embedder.create("input"))
+
+    assert result == [1.0, 2.0]
+    assert events == ["ALLOCATE", "DISPATCH", "COMPLETE"]
 
 
 def test_usage_report_groups_attempt_receipts_into_300_second_windows(

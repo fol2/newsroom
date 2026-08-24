@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Any, TypeGuard
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from typing import Any, Protocol, TypeGuard
 
 from newsroom.graphiti_adapter.evaluation_packet import OPENROUTER_EMBEDDING_SLUG
-
 
 _PROVIDER_USAGE_KEYS = frozenset(
     {
@@ -30,6 +30,20 @@ _PROVIDER_REQUEST_KEYS = frozenset(
         "outcome",
     }
 )
+
+
+class EmbeddingInvocationObserver(Protocol):
+    def before_embedding_invocation(
+        self, *, provider: str, model: str, input_data: object
+    ) -> object: ...
+
+    def after_embedding_invocation(
+        self,
+        token: object,
+        *,
+        outcome: str,
+        usage: dict[str, object],
+    ) -> None: ...
 
 
 def _is_non_negative_int(value: object) -> TypeGuard[int]:
@@ -105,7 +119,7 @@ def _usd_microunits(value: object) -> int | None:
         return None
     if amount < 0:
         return None
-    return int((amount * Decimal(1_000_000)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return int((amount * Decimal(1_000_000)).quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 
 def _usage_value(response: Any) -> dict[str, object]:
@@ -127,8 +141,14 @@ def _usage_value(response: Any) -> dict[str, object]:
 class MeteredOpenAIEmbedder:
     """Embedder-compatible wrapper retaining each provider response's usage."""
 
-    def __init__(self, delegate: Any) -> None:
+    def __init__(
+        self,
+        delegate: Any,
+        *,
+        invocation_observer: EmbeddingInvocationObserver | None = None,
+    ) -> None:
         self._delegate = delegate
+        self._invocation_observer = invocation_observer
         self.requests: list[dict[str, object]] = []
 
     async def _create(self, input_data: object) -> Any:
@@ -143,10 +163,52 @@ class MeteredOpenAIEmbedder:
             "outcome": "UNOBSERVED",
         }
         self.requests.append(request)
-        response = await self._delegate.client.embeddings.create(
-            input=input_data,
-            model=self._delegate.config.embedding_model,
+        observer_token = (
+            None
+            if self._invocation_observer is None
+            else self._invocation_observer.before_embedding_invocation(
+                provider="openrouter",
+                model=self._delegate.config.embedding_model,
+                input_data=input_data,
+            )
         )
+        try:
+            response = await self._delegate.client.embeddings.create(
+                input=input_data,
+                model=self._delegate.config.embedding_model,
+            )
+        except asyncio.CancelledError:
+            if self._invocation_observer is not None:
+                self._invocation_observer.after_embedding_invocation(
+                    observer_token,
+                    outcome="CANCELLED",
+                    usage={
+                        "usage_basis": "UNREPORTED",
+                        "input_tokens": None,
+                        "output_tokens": None,
+                        "cached_read_tokens": None,
+                        "cached_write_tokens": None,
+                        "reasoning_tokens": None,
+                        "total_tokens": None,
+                    },
+                )
+            raise
+        except Exception:
+            if self._invocation_observer is not None:
+                self._invocation_observer.after_embedding_invocation(
+                    observer_token,
+                    outcome="FAILED",
+                    usage={
+                        "usage_basis": "UNREPORTED",
+                        "input_tokens": None,
+                        "output_tokens": None,
+                        "cached_read_tokens": None,
+                        "cached_write_tokens": None,
+                        "reasoning_tokens": None,
+                        "total_tokens": None,
+                    },
+                )
+            raise
         usage = _usage_value(response)
         cost = _usd_microunits(usage.get("cost"))
         request.update(
@@ -159,6 +221,25 @@ class MeteredOpenAIEmbedder:
                 "outcome": "COMPLETE",
             }
         )
+        if self._invocation_observer is not None:
+            self._invocation_observer.after_embedding_invocation(
+                observer_token,
+                outcome="COMPLETE",
+                usage={
+                    "usage_basis": (
+                        "PROVIDER_REPORTED"
+                        if request["total_tokens"] is not None
+                        else "UNREPORTED"
+                    ),
+                    "input_tokens": request["prompt_tokens"],
+                    "output_tokens": 0,
+                    "cached_read_tokens": 0,
+                    "cached_write_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "total_tokens": request["total_tokens"],
+                    "provider_telemetry": dict(request),
+                },
+            )
         return response
 
     async def create(self, input_data: object) -> list[float]:
@@ -172,14 +253,14 @@ class MeteredOpenAIEmbedder:
 
     def receipt(self) -> dict[str, object]:
         token_values = [
-            int(item["total_tokens"])
+            value
             for item in self.requests
-            if isinstance(item.get("total_tokens"), int)
+            if _is_non_negative_int(value := item.get("total_tokens"))
         ]
         costs = [
-            int(item["cost_usd_microunits"])
+            value
             for item in self.requests
-            if isinstance(item.get("cost_usd_microunits"), int)
+            if _is_non_negative_int(value := item.get("cost_usd_microunits"))
         ]
         all_costs_reported = bool(self.requests) and len(costs) == len(self.requests)
         all_tokens_reported = bool(self.requests) and len(token_values) == len(self.requests)
@@ -198,4 +279,8 @@ class MeteredOpenAIEmbedder:
         }
 
 
-__all__ = ["MeteredOpenAIEmbedder", "is_exact_provider_reported_usage"]
+__all__ = [
+    "EmbeddingInvocationObserver",
+    "MeteredOpenAIEmbedder",
+    "is_exact_provider_reported_usage",
+]

@@ -14,7 +14,11 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Literal, Protocol
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+)
 from newsroom.control_plane.child_environment import unprivileged_child_environment
 from newsroom.control_plane.editorial import StoryCandidateRecord
 from newsroom.control_plane.evidence import EvidencePackage
@@ -23,6 +27,11 @@ from newsroom.control_plane.zh_hant import (
     contains_discourse_filler,
     contains_non_han_letter,
     contains_simplified_variant,
+)
+from newsroom.graphiti_adapter.usage_meter import (
+    cursor_cli_usage,
+    grok_cli_usage,
+    unreported_cli_usage,
 )
 
 GROK_BIN = os.environ.get("NEWSROOM_GROK_BIN", "/Users/jamesto/.grok/bin/grok")
@@ -53,6 +62,17 @@ WRITER_SCHEMA = {
     "required": ["title", "body", "evidence_links"],
     "additionalProperties": False,
 }
+CONT_WRITER_PROMPT_CONTRACT_VERSION = "newsroom.cont-writer.prompt.v1"
+CONT_WRITER_CONTEXT_IDENTITY = "cont-evidence-package-only-v1"
+CONT_WRITER_OUTPUT_SCHEMA_DIGEST = digest_canonical(WRITER_SCHEMA)
+CONT_PRIMARY_PROVIDER = "grok-build-cli"
+CONT_PRIMARY_ROUTE = "CONT_PRIMARY"
+CONT_PRIMARY_MODEL = "grok-4.6"
+CONT_PRIMARY_REASONING = "low"
+CONT_FALLBACK_PROVIDER = "cursor-agent-cli"
+CONT_FALLBACK_ROUTE = "CONT_FALLBACK"
+CONT_FALLBACK_MODEL = "cursor-pinned"
+CONT_FALLBACK_REASONING = "provider-default"
 _PROMPT = (
     "你係 Newsroom 嘅 CONT 原創記者，唔係 Graphiti。"
     "用香港繁體中文寫一篇已經完成嘅未出版新聞稿。"
@@ -274,6 +294,28 @@ class WriterCopy:
     writer_id: str
     evidence_package_digest: str = ""
     evidence_links: tuple[WriterEvidenceLink, ...] = ()
+    usage: dict[str, object] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WriterInvocationManifest:
+    provider: str
+    route: str
+    model: str
+    reasoning: str
+    prompt_contract_version: str
+    prompt_bytes: int
+    prompt_digest: str
+    request_digest: str
+    output_schema_digest: str
+    context_manifest_digest: str
+    context_identity: str
+
+
+@dataclass(frozen=True, slots=True)
+class WriterCliExecution:
+    text: str
+    usage: dict[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,10 +335,14 @@ class WriterDispatchError(RuntimeError):
         *,
         failure_class: WriterFailureClass,
         reason_code: str,
+        usage: dict[str, object] | None = None,
+        provider_dispatched: bool = True,
     ) -> None:
         super().__init__(message)
         self.failure_class = failure_class
         self.reason_code = reason_code
+        self.usage = usage
+        self.provider_dispatched = provider_dispatched
 
 
 class CliProcessError(RuntimeError):
@@ -916,7 +962,10 @@ def _provider_control_status(message: str) -> int | None:
 
 
 def _failure(
-    message: str, *, provider_status: int | None = None
+    message: str,
+    *,
+    provider_status: int | None = None,
+    usage: dict[str, object] | None = None,
 ) -> WriterDispatchError:
     lowered = message.lower()
     if (
@@ -928,11 +977,13 @@ def _failure(
             message,
             failure_class="SYSTEMIC",
             reason_code="SYSTEMIC_PROVIDER_FAILURE",
+            usage=usage,
         )
     return WriterDispatchError(
         message,
         failure_class="FALLBACK_ELIGIBLE",
         reason_code="PRIMARY_OUTPUT_UNUSABLE",
+        usage=usage,
     )
 
 
@@ -948,6 +999,13 @@ def _run(command: tuple[str, ...], *, timeout: int, cwd: str | None = None) -> s
             cwd=cwd,
             env=unprivileged_child_environment(),
         )
+    except FileNotFoundError as exc:
+        raise WriterDispatchError(
+            f"{name} executable not found",
+            failure_class="SYSTEMIC",
+            reason_code="EXECUTABLE_NOT_FOUND",
+            provider_dispatched=False,
+        ) from exc
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"{name} writer timed out") from None
     if result.returncode != 0:
@@ -961,13 +1019,63 @@ def _run(command: tuple[str, ...], *, timeout: int, cwd: str | None = None) -> s
     return result.stdout
 
 
-def run_grok_cli(prompt: str) -> str:
+def _parse_cursor_writer_output(raw: str) -> WriterCliExecution:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return WriterCliExecution(raw, unreported_cli_usage())
+    if not isinstance(payload, dict) or not isinstance(payload.get("result"), str):
+        return WriterCliExecution(raw, unreported_cli_usage())
+    return WriterCliExecution(
+        str(payload["result"]), cursor_cli_usage(payload.get("usage"))
+    )
+
+
+def _grok_writer_update(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    params = value.get("params")
+    if isinstance(params, dict) and isinstance(params.get("update"), dict):
+        return params["update"]
+    update = value.get("update")
+    return update if isinstance(update, dict) else value
+
+
+def _parse_grok_writer_output(raw: str) -> WriterCliExecution:
+    chunks: list[str] = []
+    usage = unreported_cli_usage()
+    recognised = False
+    for line in raw.splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        update = _grok_writer_update(value)
+        if update is None:
+            continue
+        kind = update.get("sessionUpdate") or update.get("type")
+        if kind in {"agent_message_chunk", "assistant_message_chunk"}:
+            content = update.get("content")
+            text = content.get("text") if isinstance(content, dict) else content
+            if isinstance(text, str):
+                chunks.append(text)
+                recognised = True
+        elif kind in {"turn_completed", "turnEnded"}:
+            usage = grok_cli_usage(update.get("usage"))
+            recognised = True
+    return WriterCliExecution(
+        "".join(chunks) if recognised and chunks else raw,
+        usage,
+    )
+
+
+def run_grok_cli(prompt: str) -> WriterCliExecution:
     schema = json.dumps(WRITER_SCHEMA, ensure_ascii=False)
     with tempfile.TemporaryDirectory(prefix="newsroom-grok-writer-") as cwd:
         path = os.path.join(cwd, "prompt.txt")
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(prompt)
-        return _run(
+        raw = _run(
             (
                 GROK_BIN,
                 "--prompt-file",
@@ -991,21 +1099,24 @@ def run_grok_cli(prompt: str) -> str:
                 "--no-subagents",
                 "--reasoning-effort",
                 "low",
+                "--output-format",
+                "streaming-json",
             ),
             timeout=300,
             cwd=cwd,
         )
+        return _parse_grok_writer_output(raw)
 
 
-def run_cursor_agent_cli(prompt: str) -> str:
-    return _run(
+def run_cursor_agent_cli(prompt: str) -> WriterCliExecution:
+    raw = _run(
         (
             CURSOR_AGENT_BIN,
             "--print",
             "--mode",
             "ask",
             "--output-format",
-            "text",
+            "json",
             "--sandbox",
             "enabled",
             "--trust",
@@ -1013,6 +1124,7 @@ def run_cursor_agent_cli(prompt: str) -> str:
         ),
         timeout=180,
     )
+    return _parse_cursor_writer_output(raw)
 
 
 class CliChainWriter:
@@ -1023,8 +1135,8 @@ class CliChainWriter:
     def __init__(
         self,
         *,
-        primary: Callable[[str], str] | None = None,
-        fallback: Callable[[str], str] | None = None,
+        primary: Callable[[str], str | WriterCliExecution] | None = None,
+        fallback: Callable[[str], str | WriterCliExecution] | None = None,
     ) -> None:
         self._primary = primary or run_grok_cli
         self._fallback = fallback or run_cursor_agent_cli
@@ -1052,25 +1164,93 @@ class CliChainWriter:
         writer_id = (
             self.writer_id if route == "PRIMARY" else "cursor-agent-cli-cont-writer"
         )
+        execution: WriterCliExecution | None = None
         try:
-            title, body, links = _parse_copy(invoke(prompt))
+            raw = invoke(prompt)
+            execution = (
+                raw
+                if isinstance(raw, WriterCliExecution)
+                else WriterCliExecution(
+                    text=raw, usage={"usage_basis": "UNREPORTED"}
+                )
+            )
+            title, body, links = _parse_copy(execution.text)
         except WriterDispatchError:
             raise
         except CliProcessError as exc:
-            raise _failure(str(exc), provider_status=exc.provider_status) from exc
+            raise _failure(
+                str(exc),
+                provider_status=exc.provider_status,
+                usage=(None if execution is None else execution.usage),
+            ) from exc
         except (
             RuntimeError,
             json.JSONDecodeError,
             OSError,
             subprocess.TimeoutExpired,
         ) as exc:
-            raise _failure(str(exc)) from exc
+            raise _failure(
+                str(exc), usage=(None if execution is None else execution.usage)
+            ) from exc
         return WriterCopy(
             title=title,
             body=body,
             writer_id=writer_id,
             evidence_package_digest=package.digest,
             evidence_links=links,
+            usage=execution.usage,
+        )
+
+    def invocation_manifest(
+        self,
+        candidate: StoryCandidateRecord,
+        package: EvidencePackage,
+        *,
+        route: WriterRoute,
+    ) -> WriterInvocationManifest:
+        """Return the non-secret exact dispatch contract before provider I/O."""
+
+        prompt = _prompt(candidate, package)
+        prompt_bytes = prompt.encode("utf-8")
+        if route == "PRIMARY":
+            provider = CONT_PRIMARY_PROVIDER
+            provider_route = CONT_PRIMARY_ROUTE
+            model = CONT_PRIMARY_MODEL
+            reasoning = CONT_PRIMARY_REASONING
+        else:
+            provider = CONT_FALLBACK_PROVIDER
+            provider_route = CONT_FALLBACK_ROUTE
+            model = CONT_FALLBACK_MODEL
+            reasoning = CONT_FALLBACK_REASONING
+        context_manifest = {
+            "context_identity": CONT_WRITER_CONTEXT_IDENTITY,
+            "candidate_id": candidate.candidate_id,
+            "hypothesis_id": candidate.hypothesis_id,
+            "evidence_package_digest": package.digest,
+            "source_ids": sorted(package.source_ids),
+            "observation_digests": sorted(package.observation_digests),
+        }
+        return WriterInvocationManifest(
+            provider=provider,
+            route=provider_route,
+            model=model,
+            reasoning=reasoning,
+            prompt_contract_version=CONT_WRITER_PROMPT_CONTRACT_VERSION,
+            prompt_bytes=len(prompt_bytes),
+            prompt_digest=digest_bytes(prompt_bytes),
+            request_digest=digest_canonical(
+                {
+                    "provider": provider,
+                    "route": provider_route,
+                    "model": model,
+                    "reasoning": reasoning,
+                    "prompt_digest": digest_bytes(prompt_bytes),
+                    "output_schema_digest": CONT_WRITER_OUTPUT_SCHEMA_DIGEST,
+                }
+            ),
+            output_schema_digest=CONT_WRITER_OUTPUT_SCHEMA_DIGEST,
+            context_manifest_digest=digest_canonical(context_manifest),
+            context_identity=CONT_WRITER_CONTEXT_IDENTITY,
         )
 
 
