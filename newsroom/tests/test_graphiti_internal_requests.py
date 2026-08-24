@@ -883,6 +883,57 @@ def test_embedding_transport_observes_separate_preallocated_leaf_and_od011_recei
     assert leaf["od_011_reference"] == "OD-011:EVALUATION_GRAPHITI_EMBEDDING"
 
 
+def test_invalid_embedding_token_telemetry_terminalises_as_uncertain(
+    tmp_path: Path,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-embedding-invalid-usage",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-embedding-invalid-usage",
+        graphiti_attempt_id="ingest-embedding-invalid-usage:1",
+    )
+    service.open_envelope(envelope)
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=20),
+        owner_stop_check=lambda: None,
+    )
+
+    class Embeddings:
+        async def create(self, **_values: object) -> object:
+            return SimpleNamespace(
+                id="embedding-invalid-usage",
+                data=[SimpleNamespace(embedding=[1.0, 2.0])],
+                usage={"prompt_tokens": -1, "total_tokens": -1, "cost": "0.000001"},
+            )
+
+    delegate = SimpleNamespace(
+        client=SimpleNamespace(embeddings=Embeddings()),
+        config=SimpleNamespace(
+            embedding_model="openai/text-embedding-3-large",
+            embedding_dim=2,
+        ),
+    )
+    embedder = MeteredOpenAIEmbedder(delegate, invocation_observer=observer)
+
+    assert asyncio.run(embedder.create("embedding input")) == [1.0, 2.0]
+    request = embedder.receipt()["requests"][0]
+    assert request["prompt_tokens"] is None
+    assert request["total_tokens"] is None
+    assert request["model_invocation_terminal_digest"]
+    leaf = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"][0]
+    assert leaf["transport_dispatch_observed"] is True
+    assert leaf["usage_status"] in {"ESTIMATED", "UNREPORTED"}
+    assert leaf["terminal_digest"] is not None
+
+
 def test_embedding_dispatch_fence_refusal_terminalises_exact_zero(
     tmp_path: Path,
 ) -> None:
