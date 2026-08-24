@@ -1,24 +1,30 @@
-from pathlib import Path
 import json
 import os
 import stat
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime
-from types import SimpleNamespace
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
-from newsroom.effective_revision import (
-    create_effective_revision_schema,
-    retain_observation_revision_first_seen,
-)
-from newsroom.control_plane.cycle import CycleReport, run_cycle as _run_cycle
 from newsroom.control_plane.corpus import CorpusIngestUnit
+from newsroom.control_plane.cycle import CycleReport
+from newsroom.control_plane.cycle import run_cycle as _run_cycle
 from newsroom.control_plane.editorial import StoryCandidateRecord
-from newsroom.control_plane.evidence import EvidencePackage
+from newsroom.control_plane.evidence import (
+    ClaimAuthorityClass,
+    Evid012QualificationTest,
+    EvidenceGateEvidence,
+    EvidencePackage,
+    GovernedClaimEvidence,
+    GovernedClaimStatus,
+    QualificationEvidence,
+    package_for,
+)
 from newsroom.control_plane.intake import run_intake
 from newsroom.control_plane.items import parse_observation
 from newsroom.control_plane.reports import news_report
@@ -30,6 +36,10 @@ from newsroom.control_plane.writer import (
     FixtureWriter,
     WriterCopy,
     run_grok_cli,
+)
+from newsroom.effective_revision import (
+    create_effective_revision_schema,
+    retain_observation_revision_first_seen,
 )
 from newsroom.graphiti_adapter.evaluation_packet import (
     EVALUATION_GRAPHITI_PACKET,
@@ -64,7 +74,88 @@ from newsroom.increment9.rights import (
 
 def run_cycle(*args: Any, **kwargs: Any) -> CycleReport:
     kwargs.setdefault("clock", lambda: datetime(2026, 8, 20, tzinfo=UTC))
+    kwargs.setdefault("evidence_package_builder", _fixture_evidence_package)
     return _run_cycle(*args, **kwargs)
+
+
+def _fixture_evidence_package(candidate: StoryCandidateRecord) -> EvidencePackage:
+    package = package_for(candidate)
+    claim = candidate.items[0].body
+    governed_claims = (
+        GovernedClaimEvidence(
+            claim_id=f"claim:{candidate.candidate_id}:headline",
+            claim=candidate.headline,
+            passage_index=0,
+            supporting_excerpt=candidate.headline,
+            source_ids=(candidate.items[0].source_id,),
+            source_record_ids=(f"source-record:{candidate.items[0].source_id}",),
+            source_authority_decision_ids=(f"source-authority:{candidate.items[0].source_id}:headline",),
+            rights_decision_ids=(f"rights:{candidate.items[0].source_id}",),
+            dependency_evidence_ids=(f"dependency:{candidate.items[0].source_id}",),
+            evidential_origin_ids=(f"origin:{candidate.items[0].source_id}",),
+            authority_class=ClaimAuthorityClass.RESPONSIBLE_PRIMARY,
+            authority_scope="Fixture responsible source for its own update.",
+            status=GovernedClaimStatus.CONFIRMED_FACT,
+            attribution=candidate.items[0].source_id,
+            rendered_assertion_zh_hant_hk="官方公布咗最新安排",
+            claim_role="HEADLINE",
+        ),
+        GovernedClaimEvidence(
+            claim_id=f"claim:{candidate.candidate_id}:substantive",
+            claim=claim,
+            passage_index=0,
+            supporting_excerpt=claim,
+            source_ids=(candidate.items[0].source_id,),
+            source_record_ids=(f"source-record:{candidate.items[0].source_id}",),
+            source_authority_decision_ids=(f"source-authority:{candidate.items[0].source_id}:substantive",),
+            rights_decision_ids=(f"rights:{candidate.items[0].source_id}",),
+            dependency_evidence_ids=(f"dependency:{candidate.items[0].source_id}",),
+            evidential_origin_ids=(f"origin:{candidate.items[0].source_id}",),
+            authority_class=ClaimAuthorityClass.RESPONSIBLE_PRIMARY,
+            authority_scope="Fixture responsible source for its own update.",
+            status=GovernedClaimStatus.CONFIRMED_FACT,
+            attribution=candidate.items[0].source_id,
+            rendered_assertion_zh_hant_hk="相關官方資料確認安排已經更新",
+            claim_role="SUBSTANTIVE",
+        ),
+    )
+    claim_ids = tuple(item.claim_id for item in governed_claims)
+    return replace(
+        package,
+        substantive_new_information=(claim,),
+        governed_claims=governed_claims,
+        qualification_evidence=(
+            QualificationEvidence(
+                Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE,
+                governed_claims[1].claim_id,
+                (
+                    ("action_class", "OFFICIAL_DEADLINE"),
+                    ("reader_action", claim),
+                ),
+            ),
+        ),
+        selection_rationale="Explicit private-beta fixture qualification.",
+        geography=("Hong Kong" if "HK" in candidate.items[0].source_id else "UK",),
+        categories=("Politics and law",),
+        evidence_gate_results=(
+            ("CLAIM_TRACEABILITY", "PASS"),
+            ("EVIDENCE_SUFFICIENCY", "PASS"),
+            ("SOURCE_AUTHORITY", "PASS"),
+        ),
+        evidence_gate_evidence=tuple(
+            EvidenceGateEvidence(gate, "PASS", claim_ids)  # type: ignore[arg-type]
+            for gate in (
+                "CLAIM_TRACEABILITY",
+                "EVIDENCE_SUFFICIENCY",
+                "SOURCE_AUTHORITY",
+            )
+        ),
+        freshness_result="PASS",
+        integrity_result="PASS",
+        resolved_evidence_records=(
+            ("fixture-evidence-record", f"digest:{candidate.candidate_id}"),
+        ),
+    )
 
 
 ATOM = b"""<?xml version="1.0" encoding="UTF-8"?>
@@ -253,8 +344,8 @@ def _proving(tmp_path: Path, extra: tuple[tuple[str, bytes], ...] = ()) -> Path:
 def test_real_graphiti_cycle_requires_canonical_shared_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from newsroom.control_plane import paths as control_paths
     import scripts.hermes_control_plane as hermes
+    from newsroom.control_plane import paths as control_paths
 
     anchored_default = Path(hermes.DEFAULT_UNPUBLISHED)
     anchored_proving = Path(hermes.DEFAULT_PROVING)
@@ -476,7 +567,7 @@ def test_cycle_mints_unpublished_payloads_with_evidence(tmp_path: Path) -> None:
     assert len(list_payloads(str(unpublished))) == 3
 
 
-def test_cycle_continues_after_one_writer_failure(tmp_path: Path) -> None:
+def test_cycle_stops_backlog_walk_after_unknown_writer_failure(tmp_path: Path) -> None:
     proving = _proving(tmp_path)
     unpublished = tmp_path / "unpublished_store.sqlite3"
 
@@ -501,13 +592,13 @@ def test_cycle_continues_after_one_writer_failure(tmp_path: Path) -> None:
         writer=writer,
         max_writes=10,
     )
-    assert writer.calls >= 2
-    assert report.minted == 2
+    assert writer.calls == 1
+    assert report.minted == 0
     assert report.candidates == 3
+    assert report.candidate_attempts == 1
+    assert report.no_useful_output_circuit_open is True
     payloads = list_payloads(str(unpublished))
-    assert len(payloads) == 2
-    assert all(item.auto_publish is False for item in payloads)
-    assert all(item.status == "UNPUBLISHED" for item in payloads)
+    assert payloads == ()
 
 
 def test_same_event_url_consolidates_to_one_candidate(tmp_path: Path) -> None:
@@ -699,7 +790,10 @@ def test_evaluation_packet_authorises_evaluation_and_refuses_production() -> Non
         GRAPHITI_PROMPT_COMPONENT,
     )
     from newsroom.graphiti_adapter.models import GraphitiAdapterConfiguration
-    from newsroom.graphiti_adapter.types import GraphitiExecutionProfile, GraphitiRuntimeMode
+    from newsroom.graphiti_adapter.types import (
+        GraphitiExecutionProfile,
+        GraphitiRuntimeMode,
+    )
     from newsroom.tests.extraction_4a_helpers import contract_request
     from newsroom.tests.graphiti_adapter_4d_helpers import FAKE_CONFIGURATION_ID
 

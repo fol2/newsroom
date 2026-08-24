@@ -8,6 +8,7 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import cast
 
 from newsroom.authority.canonical import (
     canonical_json_bytes,
@@ -25,7 +26,7 @@ from newsroom.control_plane.veto import (
 from newsroom.effective_revision import EffectiveRevisionIdentity
 from newsroom.graphiti_adapter.embedding_meter import is_exact_provider_reported_usage
 
-SCHEMA_VERSION = "newsroom.control-plane.unpublished.v11"
+SCHEMA_VERSION = "newsroom.control-plane.unpublished.v12"
 EFFECTIVE_REVISION_LANDED = "EFFECTIVE_REVISION_LANDED"
 LEDGER_GENESIS = "sha256:" + ("0" * 64)
 GRAPHITI_MAX_FAILURES = 3
@@ -89,8 +90,58 @@ CREATE TABLE IF NOT EXISTS ledger(
     at TEXT NOT NULL,
     kind TEXT NOT NULL,
     payload_digest TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
     prev_digest TEXT NOT NULL,
     digest TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS unpublished_write_admission_decisions(
+    decision_id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL,
+    evidence_package_digest TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK(decision IN ('WRITE_READY','HOLD','REJECT')),
+    reason_codes_json TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    at TEXT NOT NULL,
+    UNIQUE(candidate_id, evidence_package_digest, policy_version)
+);
+CREATE TABLE IF NOT EXISTS unpublished_write_selections(
+    selection_id TEXT PRIMARY KEY,
+    decision_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    evidence_package_digest TEXT NOT NULL,
+    rank INTEGER NOT NULL,
+    record_json TEXT NOT NULL,
+    at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS unpublished_write_candidate_attempts(
+    candidate_attempt_id TEXT PRIMARY KEY,
+    cycle_execution_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    evidence_package_digest TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS unpublished_writer_provider_attempts(
+    provider_attempt_id TEXT PRIMARY KEY,
+    candidate_attempt_id TEXT NOT NULL,
+    route TEXT NOT NULL CHECK(route IN ('PRIMARY','FALLBACK')),
+    ordinal INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('RESERVED','COMPLETE','FAILED','REJECTED_OUTPUT')),
+    reason_code TEXT NOT NULL,
+    at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS unpublished_draft_outcomes(
+    outcome_id TEXT PRIMARY KEY,
+    decision_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    evidence_package_digest TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN ('ACCEPTED','HOLD','REJECT')),
+    reason_codes_json TEXT NOT NULL,
+    payload_digest TEXT,
+    record_json TEXT NOT NULL,
+    at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS unpublished_graphiti_attempts(
     story_candidate_id TEXT PRIMARY KEY,
@@ -376,6 +427,13 @@ def connect(path: str) -> sqlite3.Connection:
     connection = sqlite3.connect(path)
     apply_control_plane_sqlite_profile(connection)
     connection.executescript(_PAYLOAD_SQL)
+    ledger_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(ledger)")
+    }
+    if "payload_json" not in ledger_columns:
+        connection.execute(
+            "ALTER TABLE ledger ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'"
+        )
     _ensure_landed_schema(connection)
     ensure_reconciliation_schema(connection)
     columns = {
@@ -422,10 +480,179 @@ def append_ledger(
         )
     )
     connection.execute(
-        "INSERT INTO ledger(at, kind, payload_digest, prev_digest, digest) VALUES(?,?,?,?,?)",
-        (at, kind, payload_digest, prev, digest),
+        "INSERT INTO ledger(at, kind, payload_digest, payload_json, prev_digest, digest) "
+        "VALUES(?,?,?,?,?,?)",
+        (
+            at,
+            kind,
+            payload_digest,
+            canonical_json_bytes(payload).decode("utf-8"),
+            prev,
+            digest,
+        ),
     )
     return digest
+
+
+def retain_write_admission_decision(
+    connection: sqlite3.Connection, decision: object
+) -> None:
+    from newsroom.control_plane.admission import WriteAdmissionDecision
+
+    if not isinstance(decision, WriteAdmissionDecision):
+        raise TypeError("write admission decision record required")
+    record = decision.as_record()
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO unpublished_write_admission_decisions(
+            decision_id, candidate_id, evidence_package_digest, policy_version, decision,
+            reason_codes_json, record_json, at
+        ) VALUES(?,?,?,?,?,?,?,?)
+        """,
+        (
+            decision.decision_id,
+            decision.candidate_id,
+            decision.evidence_package_digest,
+            decision.policy_version,
+            decision.decision,
+            json.dumps(list(decision.stable_reason_codes), ensure_ascii=False),
+            json.dumps(record, ensure_ascii=False, sort_keys=True),
+            _now(),
+        ),
+    )
+
+
+def retain_write_selection(connection: sqlite3.Connection, selection: object) -> None:
+    from newsroom.control_plane.admission import WriteSelectionRecord
+
+    if not isinstance(selection, WriteSelectionRecord):
+        raise TypeError("write selection record required")
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO unpublished_write_selections(
+            selection_id, decision_id, candidate_id, evidence_package_digest,
+            rank, record_json, at
+        ) VALUES(?,?,?,?,?,?,?)
+        """,
+        (
+            selection.selection_id,
+            selection.decision_id,
+            selection.candidate_id,
+            selection.evidence_package_digest,
+            selection.rank,
+            json.dumps(selection.as_record(), ensure_ascii=False, sort_keys=True),
+            _now(),
+        ),
+    )
+
+
+def reserve_write_candidate_attempt(
+    connection: sqlite3.Connection,
+    *,
+    cycle_execution_id: str,
+    decision_id: str,
+    candidate_id: str,
+    evidence_package_digest: str,
+    ordinal: int,
+) -> str:
+    identity = {
+        "cycle_execution_id": cycle_execution_id,
+        "decision_id": decision_id,
+        "candidate_id": candidate_id,
+        "evidence_package_digest": evidence_package_digest,
+        "ordinal": ordinal,
+    }
+    attempt_id = digest_bytes(canonical_json_bytes(identity))
+    connection.execute(
+        """
+        INSERT INTO unpublished_write_candidate_attempts(
+            candidate_attempt_id, cycle_execution_id, decision_id, candidate_id,
+            evidence_package_digest, ordinal, at
+        ) VALUES(?,?,?,?,?,?,?)
+        """,
+        (
+            attempt_id,
+            cycle_execution_id,
+            decision_id,
+            candidate_id,
+            evidence_package_digest,
+            ordinal,
+            _now(),
+        ),
+    )
+    return attempt_id
+
+
+def reserve_writer_provider_attempt(
+    connection: sqlite3.Connection,
+    *,
+    candidate_attempt_id: str,
+    route: str,
+    ordinal: int,
+) -> str:
+    identity = {
+        "candidate_attempt_id": candidate_attempt_id,
+        "route": route,
+        "ordinal": ordinal,
+    }
+    attempt_id = digest_bytes(canonical_json_bytes(identity))
+    connection.execute(
+        """
+        INSERT INTO unpublished_writer_provider_attempts(
+            provider_attempt_id, candidate_attempt_id, route, ordinal,
+            status, reason_code, at
+        ) VALUES(?,?,?,?,?,?,?)
+        """,
+        (attempt_id, candidate_attempt_id, route, ordinal, "RESERVED", "RESERVED", _now()),
+    )
+    return attempt_id
+
+
+def complete_writer_provider_attempt(
+    connection: sqlite3.Connection,
+    *,
+    provider_attempt_id: str,
+    status: str,
+    reason_code: str,
+) -> None:
+    if status not in {"COMPLETE", "FAILED", "REJECTED_OUTPUT"}:
+        raise ValueError("invalid writer provider attempt status")
+    changed = connection.execute(
+        """
+        UPDATE unpublished_writer_provider_attempts
+        SET status=?, reason_code=?
+        WHERE provider_attempt_id=? AND status='RESERVED'
+        """,
+        (status, reason_code, provider_attempt_id),
+    ).rowcount
+    if changed != 1:
+        raise ValueError("writer provider attempt was not reserved")
+
+
+def retain_draft_outcome(connection: sqlite3.Connection, outcome: object) -> None:
+    from newsroom.control_plane.drafting import DraftOutcomeRecord
+
+    if not isinstance(outcome, DraftOutcomeRecord):
+        raise TypeError("draft outcome record required")
+    connection.execute(
+        """
+        INSERT INTO unpublished_draft_outcomes(
+            outcome_id, decision_id, candidate_id, evidence_package_digest,
+            outcome, reason_codes_json, payload_digest, record_json, at
+        ) VALUES(?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            outcome.outcome_id,
+            outcome.write_admission_decision_id,
+            outcome.candidate_id,
+            outcome.evidence_package_digest,
+            outcome.outcome,
+            json.dumps(list(outcome.stable_reason_codes), ensure_ascii=False),
+            outcome.payload_digest,
+            json.dumps(outcome.as_record(), ensure_ascii=False, sort_keys=True),
+            _now(),
+        ),
+    )
 
 
 def effective_revision_landed_payload(
@@ -841,7 +1068,7 @@ def reconcile_graphiti_spend(
     # Conservative versioned parity conversion until a separately accepted FX
     # table supersedes this policy: USD 1.00 reserves/debits GBP 1.00.
     fx_policy = "USD_GBP_CONSERVATIVE_PARITY_V1"
-    actual_usd = 0 if no_call else (int(raw_cost) if reported else None)
+    actual_usd = 0 if no_call else (int(cast(int, raw_cost)) if reported else None)
     actual_gbp = actual_usd
     status = "RECONCILED" if reported or no_call else "UNRECONCILED"
     connection.execute(
@@ -1163,8 +1390,8 @@ def graphiti_coverage(
                     batch,
                 ).fetchall()
             )
-        ingested_ids = {row[0] for row in rows}
-        proposal_counts = {str(row[0]): int(row[1]) for row in rows}
+        ingested_ids = {str(row[0]) for row in rows}
+        proposal_counts = {str(row[0]): int(cast(int, row[1])) for row in rows}
     successful = tuple(
         revision
         for revision in revisions

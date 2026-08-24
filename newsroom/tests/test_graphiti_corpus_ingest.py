@@ -23,12 +23,14 @@ from newsroom.control_plane.corpus import (
     units_from,
 )
 from newsroom.control_plane.cycle import (
+    CycleReport,
     _bind_result,
     _dispatch_rights_decision,
     _latest_run_id,
     _latest_run_with_global_authority,
     _reconcile_result_spend,
-    CycleReport,
+)
+from newsroom.control_plane.cycle import (
     run_cycle as _run_cycle,
 )
 from newsroom.control_plane.editorial import (
@@ -56,9 +58,9 @@ from newsroom.control_plane.store import (
 from newsroom.control_plane.veto import VetoError
 from newsroom.control_plane.writer import FixtureWriter, WriterCopy
 from newsroom.effective_revision import (
-    create_effective_revision_schema,
     EffectiveRevisionIdentity,
     EffectiveRevisionIdentityResolver,
+    create_effective_revision_schema,
     retain_effective_pull_first_seen,
     retain_effective_revision_first_seen,
     retain_observation_revision_first_seen,
@@ -81,7 +83,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     OD_011_CASH_CEILING_GBP,
     OPENROUTER_EMBEDDING_SLUG,
 )
-from newsroom.graphiti_adapter.identity import content_digest, MAX_EPISODE_BYTES
+from newsroom.graphiti_adapter.identity import MAX_EPISODE_BYTES, content_digest
 from newsroom.graphiti_adapter.models import GraphitiAdapterContractError
 from newsroom.graphiti_adapter.real import _is_source_registry_name
 from newsroom.graphiti_adapter.recovery_vocabulary import (
@@ -94,10 +96,12 @@ from newsroom.graphiti_adapter.temporal import (
     map_reference_time,
 )
 from newsroom.increment9.proving import (
-    _connect as connect_proving,
-    ProvingError,
     PROVING_WRITE_TIMEOUT_SECONDS,
     SOURCE_URLS,
+    ProvingError,
+)
+from newsroom.increment9.proving import (
+    _connect as connect_proving,
 )
 from newsroom.increment9.rights import (
     FIXTURE_DESTINATIONS,
@@ -110,12 +114,14 @@ from newsroom.increment9.rights import (
 from newsroom.tests.test_control_plane_private_beta import (
     _cycle_rights_inventory,
     _evaluation_cycle_destinations,
+    _fixture_evidence_package,
     _proving,
 )
 
 
 def run_cycle(*args: Any, **kwargs: Any) -> CycleReport:
     kwargs.setdefault("clock", lambda: datetime(2026, 8, 20, tzinfo=UTC))
+    kwargs.setdefault("evidence_package_builder", _fixture_evidence_package)
     return _run_cycle(*args, **kwargs)
 
 
