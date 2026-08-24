@@ -188,6 +188,7 @@ GraphitiAdmissionFactory = Callable[
 class _DispatchAuthority:
     rights: dict[str, object]
     deadline: datetime
+    owner_stop_check: Callable[[], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +289,18 @@ def assert_no_owner_emergency_stop(proving_store: str) -> None:
         pass
 
 
+def _assert_owner_emergency_stop_clear(connection: sqlite3.Connection) -> None:
+    row = connection.execute(
+        "WITH latest AS (SELECT run_id FROM proving_runs "
+        f"ORDER BY {_PROVING_RUN_LATEST_ORDER} LIMIT 1) "
+        "SELECT g.status FROM latest "
+        "JOIN proving_gates g ON g.run_id=latest.run_id "
+        "AND g.gate_id='NO_ACTIVE_HUMAN_EMERGENCY_STOP'"
+    ).fetchone()
+    if row != ("PASS",):
+        raise VetoError("owner emergency stop is active or unproved")
+
+
 @contextmanager
 def owner_emergency_stop_fence(proving_store: str) -> Iterator[None]:
     """Hold the owner-stop authority stable across one provider dispatch."""
@@ -302,17 +315,9 @@ def owner_emergency_stop_fence(proving_store: str) -> Iterator[None]:
     try:
         try:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "WITH latest AS (SELECT run_id FROM proving_runs "
-                f"ORDER BY {_PROVING_RUN_LATEST_ORDER} LIMIT 1) "
-                "SELECT g.status FROM latest "
-                "JOIN proving_gates g ON g.run_id=latest.run_id "
-                "AND g.gate_id='NO_ACTIVE_HUMAN_EMERGENCY_STOP'"
-            ).fetchone()
+            _assert_owner_emergency_stop_clear(connection)
         except sqlite3.OperationalError as exc:
             raise VetoError("owner emergency stop authority is unavailable") from exc
-        if row != ("PASS",):
-            raise VetoError("owner emergency stop is active or unproved")
         yield
     finally:
         if connection.in_transaction:
@@ -880,7 +885,6 @@ def _ingest(
     on_systemic_failure: Callable[[str, bool], None] | None = None,
     model_usage: ModelUsageService | None = None,
     cycle_id: str | None = None,
-    owner_stop_check: Callable[[], None] | None = None,
 ) -> int:
     if isinstance(graphiti, GovernedRealGraphitiPort) and (
         model_usage is None
@@ -1078,10 +1082,6 @@ def _ingest(
                 attempted += 1
                 ingest_with_usage = getattr(graphiti, "ingest_with_usage", None)
                 if model_usage is not None and callable(ingest_with_usage):
-                    if owner_stop_check is None:
-                        raise VetoError(
-                            "Graphiti owner emergency-stop authority is unavailable"
-                        )
                     usage_arguments: dict[str, object] = {
                         "model_usage": model_usage,
                         "cycle_id": cycle_id or unit.proving_run_id,
@@ -1091,7 +1091,7 @@ def _ingest(
                             else None
                         ),
                         "dispatch_authority": final_dispatch_rights,
-                        "owner_stop_check": owner_stop_check,
+                        "owner_stop_check": dispatch_authority.owner_stop_check,
                     }
                     returned_result = cast(
                         GraphitiCycleResult,
@@ -2585,13 +2585,26 @@ def _graphiti_dispatch_controls(
         apply_control_plane_sqlite_profile(
             current, wal=None, busy_timeout_ms=timeout_ms
         )
+        fence_active = False
         try:
             try:
                 current.execute("BEGIN IMMEDIATE")
+                _assert_owner_emergency_stop_clear(current)
             except sqlite3.OperationalError as exc:
                 raise _ProvingFenceUnavailable(
                     "proving writer fence was unavailable"
                 ) from exc
+            fence_active = True
+
+            def prove_owner_stop_clear() -> None:
+                # BEGIN IMMEDIATE excludes any proving-gate writer. Rechecking
+                # this active fence therefore proves the PASS row read above
+                # without attempting a self-deadlocking second transaction.
+                if not fence_active:
+                    raise VetoError(
+                        "Graphiti owner emergency-stop fence is no longer active"
+                    )
+
             evaluated_at = clock().astimezone(UTC)
             decision = _dispatch_rights_decision(
                 current,
@@ -2607,9 +2620,11 @@ def _graphiti_dispatch_controls(
                     rights=decision,
                     deadline=evaluated_at
                     + timedelta(milliseconds=GRAPHITI_EXTRACTION_TIMEOUT_MS),
+                    owner_stop_check=prove_owner_stop_clear,
                 )
             )
         finally:
+            fence_active = False
             if current.in_transaction:
                 current.rollback()
             current.close()
@@ -2743,9 +2758,6 @@ def consume_next_graphiti_event(
                     on_systemic_failure=systemic_failure,
                     model_usage=model_usage,
                     cycle_id=event.event_id,
-                    owner_stop_check=lambda: assert_no_owner_emergency_stop(
-                        proving_store
-                    ),
                 )
                 provider_dispatched = provider_dispatched or attempted > 0
                 if all(has_graphiti_ingest(unpublished, item) for item in ingest_ids):
@@ -2981,9 +2993,6 @@ def run_cycle(
                 clock=clock,
                 model_usage=model_usage,
                 cycle_id=cycle_id,
-                owner_stop_check=lambda: assert_no_owner_emergency_stop(
-                    proving_store
-                ),
             )
             unpublished.commit()
         if graphiti_admission_factory is not None:

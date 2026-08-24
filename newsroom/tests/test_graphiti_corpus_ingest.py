@@ -852,6 +852,60 @@ def test_cycle_ingests_corpus_without_writes(tmp_path: Path) -> None:
     assert coverage["ingest_watermark_at"]
 
 
+def test_graphiti_owner_stop_proof_reuses_the_active_rights_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from newsroom.control_plane import paths as control_paths
+
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "owner-stop-rights-fence.sqlite3"
+    monkeypatch.setattr(control_paths, "CANONICAL_PROVING_STORE", proving)
+    monkeypatch.setattr(control_paths, "CANONICAL_UNPUBLISHED_STORE", unpublished)
+    owner_stop_checks = 0
+
+    class FencedUsageGraphiti:
+        requires_canonical_control_plane_stores = True
+
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            raise AssertionError("governed usage path required")
+
+        def ingest_until(
+            self, unit: CorpusIngestUnit, *, deadline: datetime
+        ) -> GraphitiCycleResult:
+            raise AssertionError("governed usage path required")
+
+        def ingest_with_usage(
+            self,
+            unit: CorpusIngestUnit,
+            *,
+            model_usage: ModelUsageService,
+            cycle_id: str,
+            dispatch_authority: dict[str, object],
+            owner_stop_check: Any,
+            deadline: datetime | None = None,
+        ) -> GraphitiCycleResult:
+            nonlocal owner_stop_checks
+            del model_usage, cycle_id, dispatch_authority, deadline
+            owner_stop_check()
+            owner_stop_check()
+            owner_stop_checks += 2
+            return _complete(unit, proposal_count=0)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=FencedUsageGraphiti(),
+        max_graphiti=1,
+        model_usage=ModelUsageService(str(unpublished)),
+    )
+
+    assert report.graphiti == 1
+    assert owner_stop_checks == 2
+
+
 def test_units_from_observations_cover_items_not_candidates() -> None:
     item = SourceItem("HK-04", "k", "headline", "body", "https://example.invalid/a")
     rows = (
