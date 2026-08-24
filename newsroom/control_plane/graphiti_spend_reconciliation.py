@@ -13,10 +13,10 @@ from pathlib import Path
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.command_auth import HERMES_COMMAND_PRINCIPAL
-from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.store import (
     GRAPHITI_SPEND_FX_POLICY,
     append_ledger,
+    connect,
     graphiti_usd_to_gbp_microunits,
     is_exact_no_embedding_call,
 )
@@ -1938,8 +1938,7 @@ def _apply_graphiti_spend_reconciliation(
 
     _assert_command_authority(command)
     resolved_path = _private_resolved_path(path)
-    connection = sqlite3.connect(str(resolved_path))
-    apply_control_plane_sqlite_profile(connection)
+    connection = connect(str(resolved_path))
     try:
         connection.execute("BEGIN IMMEDIATE")
         _ensure_reconciliation_schema(connection)
