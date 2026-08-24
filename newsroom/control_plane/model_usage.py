@@ -1359,6 +1359,24 @@ class ModelUsageService:
             raise ModelUsageAdmissionError(
                 "context manifest Evidence Package differs from work envelope"
             )
+        expected_request_digest = digest_canonical(
+            {
+                "provider": manifest.get("provider"),
+                "route": manifest.get("route"),
+                "model": manifest.get("model"),
+                "reasoning": manifest.get("reasoning"),
+                "command_semantic_version": manifest.get(
+                    "command_semantic_version"
+                ),
+                "command_flags": manifest.get("command_flags"),
+                "implementation_revision": manifest.get(
+                    "implementation_revision"
+                ),
+                "system_digest": manifest.get("system_digest"),
+                "prompt_digest": manifest.get("prompt_digest"),
+                "output_schema_digest": manifest.get("output_schema_digest"),
+            }
+        )
         if policy.command_semantic_version != "UNSPECIFIED" and (
             manifest.get("provider") != allocation.provider
             or manifest.get("route") != allocation.route
@@ -1379,6 +1397,8 @@ class ModelUsageService:
             or manifest.get("mcp_enabled") != allocation.mcp_enabled
             or manifest.get("prior_message_count")
             != allocation.prior_message_count
+            or manifest.get("request_digest") != expected_request_digest
+            or manifest.get("request_digest") != allocation.request_digest
         ):
             raise ModelUsageAdmissionError(
                 "context manifest invocation identity differs from allocation"

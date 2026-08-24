@@ -285,9 +285,17 @@ def test_bootstrap_policy_resolves_only_for_bound_candidate_and_revision(
         )
 
 
-def test_hermetic_allocation_rejects_manifest_evidence_package_drift(
+def _hermetic_preflight_fixture(
     tmp_path: Path,
-) -> None:
+    *,
+    manifest_evidence_package_digest: str | None = None,
+) -> tuple[
+    ModelUsageService,
+    InvocationEfficiencyPolicy,
+    WorkEnvelope,
+    dict[str, object],
+    str,
+]:
     service = ModelUsageService(str(tmp_path / "usage.sqlite3"))
     policy = stage_cont_calibration_policy(
         candidate_ids=("short",),
@@ -295,6 +303,7 @@ def test_hermetic_allocation_rejects_manifest_evidence_package_drift(
         implementation_revision=REVISION,
         max_prompt_bytes=8_000,
     )
+    evidence_package_digest = digest_canonical({"evidence": "envelope"})
     envelope = WorkEnvelope.create(
         cycle_id="00000000-0000-4000-8000-000000000001",
         workload_class=WorkloadClass.CONT_WRITER_PRIMARY,
@@ -302,7 +311,7 @@ def test_hermetic_allocation_rejects_manifest_evidence_package_drift(
         admission_decision_id="decision-1",
         candidate_id="short",
         hypothesis_digest=digest_canonical({"hypothesis": 1}),
-        evidence_package_digest=digest_canonical({"evidence": "envelope"}),
+        evidence_package_digest=evidence_package_digest,
         ingest_id=None,
         graphiti_attempt_id=None,
     )
@@ -326,7 +335,9 @@ def test_hermetic_allocation_rejects_manifest_evidence_package_drift(
         "output_schema_digest": policy.output_schema_digest,
         "context_identity": policy.allowed_context_identities[0],
         "config_identity": policy.allowed_config_identities[0],
-        "evidence_package_digest": digest_canonical({"evidence": "manifest"}),
+        "evidence_package_digest": (
+            manifest_evidence_package_digest or evidence_package_digest
+        ),
         "evidence_package_bytes": 100,
         "disabled_capabilities": list(CONT_DISABLED_CAPABILITIES),
         "one_turn": True,
@@ -340,15 +351,41 @@ def test_hermetic_allocation_rejects_manifest_evidence_package_drift(
         "mcp_server_count": 0,
         "mcp_tool_count": 0,
     }
+    manifest["request_digest"] = digest_canonical(
+        {
+            "provider": manifest["provider"],
+            "route": manifest["route"],
+            "model": manifest["model"],
+            "reasoning": manifest["reasoning"],
+            "command_semantic_version": manifest["command_semantic_version"],
+            "command_flags": manifest["command_flags"],
+            "implementation_revision": manifest["implementation_revision"],
+            "system_digest": manifest["system_digest"],
+            "prompt_digest": manifest["prompt_digest"],
+            "output_schema_digest": manifest["output_schema_digest"],
+        }
+    )
     manifest_digest = digest_canonical(manifest)
     service.retain_context_manifest(
         {"context_manifest_digest": manifest_digest, **manifest}
     )
+    return service, policy, envelope, manifest, manifest_digest
+
+
+def _hermetic_allocation(
+    policy: InvocationEfficiencyPolicy,
+    envelope: WorkEnvelope,
+    manifest: dict[str, object],
+    manifest_digest: str,
+    *,
+    leaf_ordinal: int = 1,
+    request_digest: str | None = None,
+) -> InvocationAllocation:
     allocated_at = datetime(2026, 8, 24, 10, 0, 1, tzinfo=UTC)
-    allocation = InvocationAllocation.create(
+    return InvocationAllocation.create(
         envelope_id=envelope.envelope_id,
         cycle_id=envelope.cycle_id,
-        leaf_ordinal=1,
+        leaf_ordinal=leaf_ordinal,
         workload_class=WorkloadClass.CONT_WRITER_PRIMARY,
         invocation_policy_digest=policy.canonical_digest,
         provider=policy.provider,
@@ -358,7 +395,7 @@ def test_hermetic_allocation_rejects_manifest_evidence_package_drift(
         prompt_contract_version=policy.prompt_contract_version,
         prompt_bytes=200,
         prompt_digest=manifest["prompt_digest"],
-        request_digest=digest_canonical({"request": 1}),
+        request_digest=request_digest or str(manifest["request_digest"]),
         output_schema_digest=policy.output_schema_digest,
         max_output_tokens=policy.max_output_tokens,
         context_manifest_digest=manifest_digest,
@@ -375,11 +412,54 @@ def test_hermetic_allocation_rejects_manifest_evidence_package_drift(
         parent_invocation_id=None,
     )
 
+
+def test_hermetic_allocation_rejects_manifest_evidence_package_drift(
+    tmp_path: Path,
+) -> None:
+    service, policy, envelope, manifest, manifest_digest = (
+        _hermetic_preflight_fixture(
+            tmp_path,
+            manifest_evidence_package_digest=digest_canonical(
+                {"evidence": "manifest"}
+            ),
+        )
+    )
+    allocation = _hermetic_allocation(
+        policy,
+        envelope,
+        manifest,
+        manifest_digest,
+    )
+
     with pytest.raises(
         ModelUsageAdmissionError,
         match="Evidence Package differs",
     ):
         service.allocate(allocation, owner_emergency_stop=False)
+
+
+def test_hermetic_allocation_cannot_reuse_manifest_with_new_request_digest(
+    tmp_path: Path,
+) -> None:
+    service, policy, envelope, manifest, manifest_digest = (
+        _hermetic_preflight_fixture(tmp_path)
+    )
+    first = _hermetic_allocation(policy, envelope, manifest, manifest_digest)
+    service.allocate(first, owner_emergency_stop=False)
+    replay = _hermetic_allocation(
+        policy,
+        envelope,
+        manifest,
+        manifest_digest,
+        leaf_ordinal=2,
+        request_digest=digest_canonical({"request": "forged-replay"}),
+    )
+
+    with pytest.raises(
+        ModelUsageAdmissionError,
+        match="invocation identity differs",
+    ):
+        service.allocate(replay, owner_emergency_stop=False)
 
 
 def test_new_head_bootstrap_supersedes_old_final_and_later_final_tightening(
