@@ -12,7 +12,11 @@ from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+<<<<<<< HEAD
 from typing import Callable, ContextManager, Final, Iterator, TypedDict, cast
+=======
+from typing import Callable, ContextManager, Final, Iterator, Protocol, TypedDict
+>>>>>>> 724a2153 (Wire Graphiti admission into governed authority seams (#758))
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.admission import (
@@ -143,6 +147,21 @@ class _ProviderAttemptRecoveryAccounting(TypedDict):
     retained_attempt_receipt: bool
     reconciled_again: bool
     accounting: dict[str, object] | None
+
+
+class GraphitiAdmissionCycleAtom(Protocol):
+    """Bounded admission work configured by the Hermes composition root."""
+
+    def enqueue_complete_receipts(self) -> int: ...
+
+    def drain(self, *, worker_id: str, limit: int = 100) -> object: ...
+
+    def reconcile_rights(self, *, limit: int = 100) -> int: ...
+
+
+GraphitiAdmissionFactory = Callable[
+    [sqlite3.Connection], GraphitiAdmissionCycleAtom
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1979,6 +1998,7 @@ def run_cycle(
     max_writes: int = 5,
     graphiti: GraphitiPort | None = None,
     max_graphiti: int = 1,
+<<<<<<< HEAD
     evidence_package_builder: Callable[[StoryCandidateRecord], EvidencePackage]
     | None = None,
     max_write_ready_candidates: int = 5,
@@ -1999,6 +2019,18 @@ def run_cycle(
             candidate,
             proving_store=proving_store,
         )
+=======
+    graphiti_admission_factory: GraphitiAdmissionFactory | None = None,
+    max_graphiti_admissions: int = 100,
+    clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
+) -> CycleReport:
+    if (
+        isinstance(max_graphiti_admissions, bool)
+        or not isinstance(max_graphiti_admissions, int)
+        or max_graphiti_admissions <= 0
+    ):
+        raise ValueError("maximum Graphiti admissions must be positive")
+>>>>>>> 724a2153 (Wire Graphiti admission into governed authority seams (#758))
     if isinstance(graphiti, GovernedRealGraphitiPort):
         require_canonical_proving_store(proving_store)
         require_canonical_unpublished_store(unpublished_store)
@@ -2177,6 +2209,15 @@ def run_cycle(
                 rights_fence=rights_fence,
                 clock=clock,
             )
+            unpublished.commit()
+        if graphiti_admission_factory is not None:
+            admission = graphiti_admission_factory(unpublished)
+            admission.enqueue_complete_receipts()
+            admission.drain(
+                worker_id=f"hermes-cycle:{run_id}",
+                limit=max_graphiti_admissions,
+            )
+            admission.reconcile_rights(limit=max_graphiti_admissions)
             unpublished.commit()
         for candidate in candidates:
             package = evidence_package_builder(candidate)
