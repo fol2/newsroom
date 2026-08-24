@@ -2,24 +2,60 @@
 
 from __future__ import annotations
 
+import re
+
 import hanzidentifier
-from opencc import OpenCC
 
-ZH_HANT_HK_SHAPE_POLICY_VERSION = "newsroom.zh-hant-hk-shape.v3"
-_SIMPLIFIED_TO_TRADITIONAL = OpenCC("s2tw")
-_HK_ACCEPTED_VARIANTS = str.maketrans({"臺": "台", "裡": "裏"})
+ZH_HANT_HK_SHAPE_POLICY_VERSION = "newsroom.zh-hant-hk-shape.v5"
+_HK_ACCEPTED_CHARACTER_VARIANTS = str.maketrans({"着": "著"})
+_TRADITIONAL_HOU_LEXEMES = ("皇后", "太后", "王后", "后羿", "后土", "后稷")
+_TRADITIONAL_LI_LEXEMES = (
+    "公里",
+    "英里",
+    "海里",
+    "里程",
+    "里數",
+    "鄰里",
+    "萬里",
+    "千里",
+    "百里",
+    "故里",
+    "里長",
+    "里巷",
+    "里弄",
+)
+_TRADITIONAL_GAN_LEXEMES = (
+    "干涉",
+    "干預",
+    "干犯",
+    "干戈",
+    "干支",
+    "天干",
+    "若干",
+    "相干",
+    "無干",
+    "干政",
+)
 
 
-def _normalise_hk_variants(text: str) -> str:
-    return text.translate(_HK_ACCEPTED_VARIANTS).replace("公佈", "公布")
+def _without_accepted_ambiguous_lexemes(text: str) -> str:
+    for lexeme in (
+        *_TRADITIONAL_HOU_LEXEMES,
+        *_TRADITIONAL_LI_LEXEMES,
+        *_TRADITIONAL_GAN_LEXEMES,
+    ):
+        text = text.replace(lexeme, "")
+    return re.sub(r"[零〇一二三四五六七八九十百千萬兩0-9]+里", "", text)
 
 
 def contains_simplified_variant(text: str) -> bool:
-    """Return true when Chinese text is not wholly valid Traditional Chinese."""
+    """Return true when Chinese text contains Simplified-only forms."""
 
     if not hanzidentifier.has_chinese(text):
         return False
-    if not hanzidentifier.is_traditional(text):
+    if not hanzidentifier.is_traditional(
+        text.translate(_HK_ACCEPTED_CHARACTER_VARIANTS)
+    ):
         return True
-    converted = _SIMPLIFIED_TO_TRADITIONAL.convert(text)
-    return _normalise_hk_variants(text) != _normalise_hk_variants(converted)
+    remaining = _without_accepted_ambiguous_lexemes(text)
+    return any(character in remaining for character in "后里干")

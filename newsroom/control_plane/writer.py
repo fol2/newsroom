@@ -80,6 +80,8 @@ _SYSTEMIC_MARKERS = (
     "quota",
     "rate limit",
     "rate-limit",
+    "rate_limit_exceeded",
+    "rate_limit_error",
     "too many requests",
     "payment required",
     "billing required",
@@ -395,11 +397,39 @@ def validate_writer_copy(
         for value in re.split(r"(?<=[.!?。！？；;])|\n+", item)
         if value.strip()
     )
-    approved_overlap = tuple(
-        value
+    numeric_expression_patterns = (
+        re.compile(r"\d+(?:(?:[年月日時时分秒號号點点])|(?:[.,:/-]\d+)|\d+)+"),
+        re.compile(
+            r"(?:[零〇一二三四五六七八九十百千兩两]+"
+            r"(?:年|月|日|號|号|時|时|分|秒|點|点))+"
+        ),
+        re.compile(
+            r"\d+(?:[.,]\d+)*\s*(?:%|％|minutes?|mins?|hours?|hrs?|days?|"
+            r"weeks?|months?|years?|公里|米|分鐘|分钟|小時|小时|日|天|星期|個月|个月|年)",
+            re.I,
+        ),
+        re.compile(
+            r"(?:\d{1,2}\s+)?(?:January|February|March|April|May|June|July|"
+            r"August|September|October|November|December)(?:\s+\d{1,2})?"
+            r"(?:,?\s+\d{4})?",
+            re.I,
+        ),
+    )
+    approved_numeric_expressions = tuple(
+        match.group(0)
         for claim in package.governed_claims
-        for value in (*claim.named_entities, *claim.quotations)
-        if value
+        for evidence_text in (claim.claim, claim.supporting_excerpt)
+        for pattern in numeric_expression_patterns
+        for match in pattern.finditer(evidence_text)
+    )
+    approved_overlap = (
+        tuple(
+            value
+            for claim in package.governed_claims
+            for value in (*claim.named_entities, *claim.quotations)
+            if value
+        )
+        + approved_numeric_expressions
     )
 
     def normalise_originality(value: str) -> str:
@@ -468,6 +498,7 @@ def validate_writer_copy(
         all(
             any(
                 value in claim.quotations
+                and claim.attribution in claim.rendered_assertion_zh_hant_hk
                 and any(
                     value in segment and claim.attribution in segment
                     for segment in narrative_segments
@@ -479,7 +510,8 @@ def validate_writer_copy(
         "UNSUPPORTED_OR_UNATTRIBUTED_QUOTATION",
     )
     attribution_bound = all(
-        any(
+        claim.attribution in claim.rendered_assertion_zh_hant_hk
+        and any(
             claim.rendered_assertion_zh_hant_hk in segment
             and claim.attribution in segment
             for segment in narrative_segments

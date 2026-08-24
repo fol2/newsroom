@@ -17,7 +17,7 @@ from newsroom.control_plane.editorial import StoryCandidateRecord
 EVID_012_POLICY_VERSION = "newsroom.evid-012.v1"
 GOVERNED_CLAIM_POLICY_VERSION = "newsroom.governed-claim.v1"
 EVIDENCE_GATE_POLICY_VERSION = "newsroom.evidence-gates.v1"
-GOVERNED_INPUT_SCHEMA_VERSION = "newsroom.governed-input.v2"
+GOVERNED_INPUT_SCHEMA_VERSION = "newsroom.governed-input.v3"
 EVIDENCE_APPROVAL_POLICY_VERSION = "newsroom.evidence-approval.v1"
 EVIDENCE_APPROVAL_PRINCIPAL = "HERMES_EVIDENCE_CONTROLLER"
 ORIGINALITY_POLICY_VERSION = "newsroom.cont-originality.v2"
@@ -187,6 +187,8 @@ class QualificationEvidence:
                 "service_kind": frozenset(
                     {"TRANSPORT", "UTILITY", "SCHOOL", "WORKPLACE", "LOCALITY"}
                 ),
+                "event_polarity": frozenset({"AFFIRMED"}),
+                "duration_relation": frozenset({"DISRUPTION_DURATION"}),
                 "duration_minutes": None,
                 "affected_group": None,
             },
@@ -391,14 +393,80 @@ def _decode_governed_package(
     base: EvidencePackage,
     raw: str,
 ) -> EvidencePackage:
+    package_fields = {
+        "schema_version",
+        "candidate_id",
+        "hypothesis_id",
+        "base_package_digest",
+        "governed_claims",
+        "substantive_new_information",
+        "qualification_evidence",
+        "selection_rationale",
+        "geography",
+        "categories",
+        "evidence_gate_results",
+        "evidence_gate_evidence",
+        "freshness_result",
+        "integrity_result",
+        "explicit_exclusions",
+    }
+    claim_fields = {
+        "claim_id",
+        "claim",
+        "passage_index",
+        "supporting_excerpt",
+        "source_ids",
+        "source_record_ids",
+        "source_authority_decision_ids",
+        "rights_decision_ids",
+        "dependency_evidence_ids",
+        "evidential_origin_ids",
+        "authority_class",
+        "authority_scope",
+        "status",
+        "attribution",
+        "rendered_assertion_zh_hant_hk",
+        "claim_role",
+        "named_entities",
+        "quotations",
+        "certainty",
+        "originality_basis",
+        "originality_policy_version",
+        "admitted_use",
+        "policy_version",
+    }
+    qualification_fields = {
+        "test",
+        "governed_claim_id",
+        "test_evidence",
+        "policy_version",
+    }
+    gate_fields = {"gate", "result", "governed_claim_ids", "policy_version"}
     try:
         value = json.loads(raw)
         if (
-            value["schema_version"] != GOVERNED_INPUT_SCHEMA_VERSION
+            not isinstance(value, dict)
+            or set(value) != package_fields
+            or value["schema_version"] != GOVERNED_INPUT_SCHEMA_VERSION
             or value["candidate_id"] != candidate.candidate_id
             or value["hypothesis_id"] != candidate.hypothesis_id
             or value["base_package_digest"] != base.digest
             or canonical_json_bytes(value).decode("utf-8") != raw
+        ):
+            return base
+        if (
+            any(
+                not isinstance(item, dict) or set(item) != claim_fields
+                for item in value["governed_claims"]
+            )
+            or any(
+                not isinstance(item, dict) or set(item) != qualification_fields
+                for item in value["qualification_evidence"]
+            )
+            or any(
+                not isinstance(item, dict) or set(item) != gate_fields
+                for item in value["evidence_gate_evidence"]
+            )
         ):
             return base
         claims = tuple(
@@ -421,9 +489,13 @@ def _decode_governed_package(
                 attribution=item["attribution"],
                 rendered_assertion_zh_hant_hk=item["rendered_assertion_zh_hant_hk"],
                 claim_role=item["claim_role"],
-                named_entities=tuple(item.get("named_entities", ())),
-                quotations=tuple(item.get("quotations", ())),
+                named_entities=tuple(item["named_entities"]),
+                quotations=tuple(item["quotations"]),
+                certainty=item["certainty"],
+                originality_basis=item["originality_basis"],
                 originality_policy_version=item["originality_policy_version"],
+                admitted_use=item["admitted_use"],
+                policy_version=item["policy_version"],
             )
             for item in value["governed_claims"]
         )
@@ -442,6 +514,7 @@ def _decode_governed_package(
                     Evid012QualificationTest(item["test"]),
                     item["governed_claim_id"],
                     tuple(tuple(value) for value in item["test_evidence"]),
+                    item["policy_version"],
                 )
                 for item in value["qualification_evidence"]
             ),
@@ -462,7 +535,7 @@ def _decode_governed_package(
             ),
             freshness_result=value["freshness_result"],
             integrity_result=value["integrity_result"],
-            explicit_exclusions=tuple(value.get("explicit_exclusions", ())),
+            explicit_exclusions=tuple(value["explicit_exclusions"]),
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return base

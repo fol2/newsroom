@@ -61,16 +61,40 @@ def test_non_controller_children_do_not_receive_evidence_approval_key(
 
 
 @pytest.mark.parametrize(
-    "text", ("官方說明最新安排", "衛生署與群組公佈安排", "衞生署公佈安排")
+    "text",
+    (
+        "官方說明最新安排",
+        "衛生署與群組公佈安排",
+        "衞生署公佈安排",
+        "了解安排",
+        "高峯期安排",
+        "着數安排",
+        "穿着校服安排",
+        "嘉峯臺最新安排",
+        "麪粉供應安排",
+        "皇后出席活動",
+        "路程全長十公里",
+        "當局不會干預安排",
+    ),
 )
 def test_hong_kong_traditional_variants_are_not_simplified(text: str) -> None:
     assert not contains_simplified_variant(text)
 
 
 def test_unambiguous_simplified_shape_is_rejected() -> None:
-    assert contains_simplified_variant("官方说新安排")
-    assert contains_simplified_variant("里面安排不变")
-    assert contains_simplified_variant("后台程序更新")
+    for text in (
+        "官方说新安排",
+        "里面安排不变",
+        "后台程序更新",
+        "后天公布安排",
+        "后年公布安排",
+        "后半段安排",
+        "干部公布安排",
+        "干事公布安排",
+        "心里已有安排",
+        "屋里等候安排",
+    ):
+        assert contains_simplified_variant(text)
 
 
 def test_governed_records_reject_cross_source_claim_link() -> None:
@@ -424,6 +448,8 @@ def test_ordinary_short_delay_cannot_satisfy_material_disruption_evidence() -> N
             "claim-short-delay",
             (
                 ("service_kind", "TRANSPORT"),
+                ("event_polarity", "AFFIRMED"),
+                ("duration_relation", "DISRUPTION_DURATION"),
                 ("material_effect_class", "MINOR_DELAY"),
                 ("affected_group", "Two passengers for two minutes"),
             ),
@@ -451,6 +477,8 @@ def test_material_duration_classifier_must_be_exact_in_retained_fact() -> None:
                 changed_substantive.claim_id,
                 (
                     ("service_kind", "TRANSPORT"),
+                    ("event_polarity", "AFFIRMED"),
+                    ("duration_relation", "DISRUPTION_DURATION"),
                     ("duration_minutes", "60"),
                     ("affected_group", short_delay),
                 ),
@@ -486,6 +514,8 @@ def test_route_number_cannot_masquerade_as_material_disruption_duration() -> Non
                 changed_substantive.claim_id,
                 (
                     ("service_kind", "TRANSPORT"),
+                    ("event_polarity", "AFFIRMED"),
+                    ("duration_relation", "DISRUPTION_DURATION"),
                     ("duration_minutes", "60"),
                     ("affected_group", short_delay),
                 ),
@@ -524,6 +554,8 @@ def test_scheduled_journey_duration_cannot_masquerade_as_disruption_duration() -
                 changed_substantive.claim_id,
                 (
                     ("service_kind", "TRANSPORT"),
+                    ("event_polarity", "AFFIRMED"),
+                    ("duration_relation", "DISRUPTION_DURATION"),
                     ("duration_minutes", "60"),
                     ("affected_group", short_delay),
                 ),
@@ -560,6 +592,8 @@ def test_material_disruption_duration_relation_is_admitted() -> None:
                 changed_substantive.claim_id,
                 (
                     ("service_kind", "TRANSPORT"),
+                    ("event_polarity", "AFFIRMED"),
+                    ("duration_relation", "DISRUPTION_DURATION"),
                     ("duration_minutes", "60"),
                     ("affected_group", material_delay),
                 ),
@@ -583,6 +617,11 @@ def test_material_disruption_duration_relation_is_admitted() -> None:
             "HOLD",
         ),
         ("Train services face delays of up to 60 minutes.", "WRITE_READY"),
+        ("Officials denied train delays of 60 minutes.", "HOLD"),
+        ("Officials denied reports of delays of up to 60 minutes.", "HOLD"),
+        ("There were zero 60-minute service disruptions.", "HOLD"),
+        ("The claim of a 60-minute delay is false.", "HOLD"),
+        ("Reports of train delays of 60 minutes were incorrect.", "HOLD"),
         ("列車只延誤兩分鐘，原定車程為60分鐘。", "HOLD"),
     ),
 )
@@ -608,6 +647,8 @@ def test_material_disruption_duration_requires_positive_exact_relation(
                 changed_substantive.claim_id,
                 (
                     ("service_kind", "TRANSPORT"),
+                    ("event_polarity", "AFFIRMED"),
+                    ("duration_relation", "DISRUPTION_DURATION"),
                     ("duration_minutes", "60"),
                     ("affected_group", fact),
                 ),
@@ -918,6 +959,8 @@ def test_systemic_authentication_failure_opens_route_circuit_immediately(
         '{"statusCode":429}',
         '{"status":429}',
         '{"code":402}',
+        "429 rate_limit_exceeded",
+        '{"type":"rate_limit_error"}',
         "grok writer failed: 429",
     ),
 )
@@ -1282,6 +1325,56 @@ def test_approved_named_entity_is_removed_before_originality_overlap() -> None:
     assert "VERBATIM_SOURCE_EXPRESSION" not in failed
 
 
+@pytest.mark.parametrize(
+    ("source_claim", "rendered_assertion"),
+    (
+        (
+            "會議定於2026年12月31日上午9時30分舉行",
+            "活動安排喺2026年12月31日上午9時30分開始",
+        ),
+        (
+            "會議定於二零二六年十二月三十一日上午九時三十分舉行",
+            "活動安排喺二零二六年十二月三十一日上午九時三十分開始",
+        ),
+    ),
+)
+def test_approved_date_is_removed_before_originality_overlap(
+    source_claim: str, rendered_assertion: str
+) -> None:
+    _candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    changed_substantive = replace(
+        substantive,
+        claim=source_claim,
+        supporting_excerpt=source_claim,
+        rendered_assertion_zh_hant_hk=rendered_assertion,
+    )
+    guarded_package = replace(
+        package,
+        passages=(source_claim,),
+        substantive_new_information=(source_claim,),
+        governed_claims=(headline, changed_substantive),
+    )
+    copy = WriterCopy(
+        title=f"【未出版】{headline.rendered_assertion_zh_hant_hk}",
+        body=(
+            f"本報根據已核實證據報道：{changed_substantive.rendered_assertion_zh_hant_hk}"
+        ),
+        writer_id="approved-date-writer",
+        evidence_package_digest=guarded_package.digest,
+        evidence_links=tuple(
+            WriterEvidenceLink(item.claim_id, item.rendered_assertion_zh_hant_hk)
+            for item in guarded_package.governed_claims
+        ),
+    )
+    failed = {
+        item.reason_code
+        for item in validate_writer_copy(copy, guarded_package)
+        if item.result == "FAIL"
+    }
+    assert "VERBATIM_SOURCE_EXPRESSION" not in failed
+
+
 def test_approved_quotation_must_retain_exact_attribution() -> None:
     _candidate, package = _candidate_package()
     headline, substantive = package.governed_claims
@@ -1386,7 +1479,7 @@ def test_default_package_builder_can_admit_explicit_governed_input(
     base_package = package_for(governed_candidate)
     claim_ids = ("governed-headline", "governed-development")
     evidence = {
-        "schema_version": "newsroom.governed-input.v2",
+        "schema_version": "newsroom.governed-input.v3",
         "candidate_id": governed_candidate.candidate_id,
         "hypothesis_id": governed_candidate.hypothesis_id,
         "base_package_digest": base_package.digest,
@@ -1408,7 +1501,13 @@ def test_default_package_builder_can_admit_explicit_governed_input(
                 "attribution": "UK-02",
                 "rendered_assertion_zh_hant_hk": "英國官方公布咗最新限期安排",
                 "claim_role": "HEADLINE",
+                "named_entities": [],
+                "quotations": [],
+                "certainty": "CONFIRMED",
+                "originality_basis": "FACTUAL_REWRITE_REQUIRED",
                 "originality_policy_version": "newsroom.cont-originality.v2",
+                "admitted_use": "PUBLICATION_EVIDENCE",
+                "policy_version": "newsroom.governed-claim.v1",
             },
             {
                 "claim_id": "governed-development",
@@ -1427,7 +1526,13 @@ def test_default_package_builder_can_admit_explicit_governed_input(
                 "attribution": "UK-02",
                 "rendered_assertion_zh_hant_hk": "新限期定喺九月三十日",
                 "claim_role": "SUBSTANTIVE",
+                "named_entities": [],
+                "quotations": [],
+                "certainty": "CONFIRMED",
+                "originality_basis": "FACTUAL_REWRITE_REQUIRED",
                 "originality_policy_version": "newsroom.cont-originality.v2",
+                "admitted_use": "PUBLICATION_EVIDENCE",
+                "policy_version": "newsroom.governed-claim.v1",
             },
         ],
         "substantive_new_information": ["The deadline is now 30 September."],
@@ -1439,6 +1544,7 @@ def test_default_package_builder_can_admit_explicit_governed_input(
                     ["action_class", "OFFICIAL_DEADLINE"],
                     ["reader_action", "The deadline is now 30 September."],
                 ],
+                "policy_version": "newsroom.evid-012.v1",
             }
         ],
         "selection_rationale": "Readers need the retained official deadline.",
@@ -1464,6 +1570,7 @@ def test_default_package_builder_can_admit_explicit_governed_input(
         ],
         "freshness_result": "PASS",
         "integrity_result": "PASS",
+        "explicit_exclusions": [],
     }
     connection = sqlite3.connect(proving)
     connection.execute(

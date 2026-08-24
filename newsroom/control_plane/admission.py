@@ -63,6 +63,8 @@ _QUALIFICATION_CLASSIFIER_FIELDS = frozenset(
         "domain",
         "action_class",
         "importance_class",
+        "event_polarity",
+        "duration_relation",
     }
 )
 
@@ -115,7 +117,9 @@ def _duration_is_exactly_supported(
             r"\b(?:no|not)\s+less\s+than\b|不少於|不少于", "", clause, flags=re.I
         )
         if re.search(
-            r"\b(?:no|not|without|never)\b|未有|沒有|没有|並無|并无|否認|否认",
+            r"\b(?:no|not|without|never|zero|den(?:y|ies|ied|ying)|false|incorrect|"
+            r"inaccurate|untrue|baseless|refut(?:e|es|ed)|disput(?:e|es|ed))\b|"
+            r"未有|沒有|没有|並無|并无|否認|否认|不實|不实|錯誤|错误",
             polarity_text,
             flags=re.I,
         ):
