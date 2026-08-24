@@ -24,7 +24,7 @@ GOVERNED_INPUT_SCHEMA_VERSION = "newsroom.governed-input.v10"
 EVIDENCE_APPROVAL_POLICY_VERSION = "newsroom.evidence-approval.v8"
 EVIDENCE_APPROVAL_PRINCIPAL = "HERMES_EVIDENCE_CONTROLLER"
 ORIGINALITY_POLICY_VERSION = "newsroom.cont-originality.v3"
-NAMED_ENTITY_POLICY_VERSION = "newsroom.named-entity.v7"
+NAMED_ENTITY_POLICY_VERSION = "newsroom.named-entity.v8"
 
 _SOURCE_RECORD_FIELDS = frozenset(
     {
@@ -199,6 +199,24 @@ _OWNER_APPROVED_ENTITY_REGISTRY = {
     "干德道": "PLACE",
     "干諾道中": "PLACE",
     "香港": "PLACE",
+    "中西區": "PLACE",
+    "灣仔": "PLACE",
+    "東區": "PLACE",
+    "南區": "PLACE",
+    "油尖旺": "PLACE",
+    "深水埗": "PLACE",
+    "九龍城": "PLACE",
+    "黃大仙": "PLACE",
+    "觀塘": "PLACE",
+    "葵青": "PLACE",
+    "荃灣": "PLACE",
+    "屯門": "PLACE",
+    "元朗": "PLACE",
+    "北區": "PLACE",
+    "大埔": "PLACE",
+    "沙田": "PLACE",
+    "西貢": "PLACE",
+    "離島": "PLACE",
     "九龍": "PLACE",
     "倫敦": "PLACE",
     "深圳": "PLACE",
@@ -365,8 +383,18 @@ def bounded_named_entities(text: str) -> frozenset[tuple[str, str]]:
         r"辭職|辞职|請辭|请辞))"
     )
     for match in chinese_person.finditer(text):
-        if match.group(1) not in {"方資料"}:
+        if match.group(1) not in {"方資料"} and not any(
+            marker in match.group(1)
+            for marker in ("任命", "委任", "出任", "局長", "署長", "司長")
+        ):
             candidates.append((match.start(1), match.end(1), match.group(1), "PERSON"))
+    bounded_chinese_person = re.compile(
+        r"([趙錢孫李周吳鄭王馮陳褚衛蔣沈韓楊朱秦尤許何呂施張孔曹嚴華金魏陶姜戚謝鄒喻柏水竇章雲蘇潘葛奚范彭郎魯韋昌馬苗鳳花方俞任袁柳唐羅薛伍余米貝姚孟顧尹江鍾蔡葉杜夏汪田]"
+        r"[\u3400-\u9fff]"
+        r"[明華偉強敏芳麗傑文玲婷豪俊欣怡琪雯峰鋒輝雄平安健誠成達德昌榮])"
+    )
+    for match in bounded_chinese_person.finditer(text):
+        candidates.append((match.start(1), match.end(1), match.group(1), "PERSON"))
     chinese_organisation = re.compile(
         r"(?<![\u3400-\u9fff])"
         r"([\u3400-\u9fff]{2,16}(?:政府|醫院管理局|管理局|委員會|協會|"

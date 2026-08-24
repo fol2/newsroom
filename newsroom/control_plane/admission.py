@@ -171,6 +171,44 @@ _MATERIAL_RELATION_SPAN_PATTERNS = {
     ),
 }
 
+_MATERIAL_SUBJECT_SPAN_PATTERNS = {
+    Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION: re.compile(
+        r"service|route|rail|train|bus|ferry|flight|road|power|water|"
+        r"服務|路线|路線|鐵路|铁路|列車|列车|巴士|渡輪|渡轮|航班|道路|"
+        r"電力|电力|供水",
+        re.IGNORECASE,
+    ),
+    Evid012QualificationTest.LAW_RIGHT_STATUS_POLICY: re.compile(
+        r"law|regulation|rule|policy|right|status|visa|benefit|tax|"
+        r"法例|法律|規例|规例|規則|规则|政策|權利|权利|身份|簽證|签证|"
+        r"福利|稅|税",
+        re.IGNORECASE,
+    ),
+    Evid012QualificationTest.SAFETY_OR_PUBLIC_HEALTH: re.compile(
+        r"safety|risk|warning|health|disease|infection|medicine|"
+        r"安全|風險|风险|警告|健康|疾病|感染|藥物|药物",
+        re.IGNORECASE,
+    ),
+    Evid012QualificationTest.HOUSEHOLD_PRACTICAL_EFFECT: re.compile(
+        r"household|rent|mortgage|bill|price|money|school|childcare|"
+        r"家庭|住戶|住户|租金|按揭|帳單|账单|價格|价格|金錢|金钱|學校|"
+        r"学校|託兒|托儿",
+        re.IGNORECASE,
+    ),
+    Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE: re.compile(
+        r"official|authority|government|department|agency|deadline|application|"
+        r"官方|當局|当局|政府|部門|部门|機構|机构|限期|截止|申請|申请|"
+        r"公布|宣佈|宣布|推出|延長|延长|縮短|缩短",
+        re.IGNORECASE,
+    ),
+    Evid012QualificationTest.EXCEPTIONAL_PUBLIC_IMPORTANCE: re.compile(
+        r"emergency|unprecedented|national|constitutional|war|disaster|"
+        r"緊急|紧急|史無前例|史无前例|全國|全国|憲制|宪制|戰爭|战争|"
+        r"災難|灾难",
+        re.IGNORECASE,
+    ),
+}
+
 
 def _qualification_relation_is_proven(
     qualification: QualificationEvidence, claim: GovernedClaimEvidence
@@ -185,6 +223,7 @@ def _qualification_relation_is_proven(
         )
     )
     pattern = _MATERIAL_RELATION_SPAN_PATTERNS.get(qualification.test)
+    subject_pattern = _MATERIAL_SUBJECT_SPAN_PATTERNS.get(qualification.test)
     clauses = {
         clause.strip().strip(".,，。;；!?！？")
         for clause in re.split(
@@ -195,9 +234,11 @@ def _qualification_relation_is_proven(
     return (
         len(spans) == 1
         and pattern is not None
+        and subject_pattern is not None
         and spans[0].strip().strip(".,，。;；!?！？") in clauses
         and _qualification_text_is_affirmative(spans[0])
         and bool(pattern.search(spans[0]))
+        and bool(subject_pattern.search(spans[0]))
     )
 
 

@@ -4,11 +4,27 @@ from __future__ import annotations
 
 import os
 
-_CONTROLLER_ONLY_ENVIRONMENT = frozenset({"NEWSROOM_EVIDENCE_APPROVAL_KEY"})
+_UNPRIVILEGED_ENVIRONMENT_ALLOWLIST = frozenset(
+    {
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LOGNAME",
+        "PATH",
+        "SHELL",
+        "TMPDIR",
+        "USER",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+    }
+)
 
 
 def unprivileged_child_environment() -> dict[str, str]:
-    environment = os.environ.copy()
-    for name in _CONTROLLER_ONLY_ENVIRONMENT:
-        environment.pop(name, None)
-    return environment
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name in _UNPRIVILEGED_ENVIRONMENT_ALLOWLIST
+    }

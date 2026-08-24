@@ -1898,6 +1898,7 @@ def _run_write_loop(
             )
             if not writer_circuit_reason:
                 no_useful_reason = last_reason
+            unpublished.commit()
             continue
 
         payload = UnpublishedSurfacePayload(
@@ -1936,6 +1937,7 @@ def _run_write_loop(
                 validators=validators,
                 reasons=("DUPLICATE_INSERT_RACE",),
             )
+        unpublished.commit()
 
     return _WriteLoopResult(
         minted=minted,
@@ -2190,6 +2192,7 @@ def run_cycle(
                 "WRITE_ADMISSION_DECISION",
                 decision.as_record(),
             )
+            unpublished.commit()
             decisions.append((candidate, package, decision))
             admission_counts[decision.decision] += 1
             admission_reasons.update(decision.stable_reason_codes)

@@ -94,6 +94,8 @@ CREATE TABLE IF NOT EXISTS ledger(
     prev_digest TEXT NOT NULL,
     digest TEXT NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS ledger_one_child_per_digest
+ON ledger(prev_digest);
 CREATE TABLE IF NOT EXISTS unpublished_write_admission_decisions(
     decision_id TEXT PRIMARY KEY,
     candidate_id TEXT NOT NULL,
@@ -103,7 +105,8 @@ CREATE TABLE IF NOT EXISTS unpublished_write_admission_decisions(
     reason_codes_json TEXT NOT NULL,
     record_json TEXT NOT NULL,
     at TEXT NOT NULL,
-    UNIQUE(candidate_id, evidence_package_digest, policy_version)
+    UNIQUE(candidate_id, evidence_package_digest, policy_version),
+    UNIQUE(decision_id, candidate_id, evidence_package_digest)
 );
 CREATE TABLE IF NOT EXISTS unpublished_write_selections(
     selection_id TEXT PRIMARY KEY,
@@ -112,7 +115,11 @@ CREATE TABLE IF NOT EXISTS unpublished_write_selections(
     evidence_package_digest TEXT NOT NULL,
     rank INTEGER NOT NULL,
     record_json TEXT NOT NULL,
-    at TEXT NOT NULL
+    at TEXT NOT NULL,
+    FOREIGN KEY(decision_id, candidate_id, evidence_package_digest)
+        REFERENCES unpublished_write_admission_decisions(
+            decision_id, candidate_id, evidence_package_digest
+        ) ON UPDATE RESTRICT ON DELETE RESTRICT
 );
 CREATE TABLE IF NOT EXISTS unpublished_write_candidate_attempts(
     candidate_attempt_id TEXT PRIMARY KEY,
@@ -121,7 +128,12 @@ CREATE TABLE IF NOT EXISTS unpublished_write_candidate_attempts(
     candidate_id TEXT NOT NULL,
     evidence_package_digest TEXT NOT NULL,
     ordinal INTEGER NOT NULL,
-    at TEXT NOT NULL
+    at TEXT NOT NULL,
+    UNIQUE(cycle_execution_id, ordinal),
+    FOREIGN KEY(decision_id, candidate_id, evidence_package_digest)
+        REFERENCES unpublished_write_admission_decisions(
+            decision_id, candidate_id, evidence_package_digest
+        ) ON UPDATE RESTRICT ON DELETE RESTRICT
 );
 CREATE TABLE IF NOT EXISTS unpublished_writer_provider_attempts(
     provider_attempt_id TEXT PRIMARY KEY,
@@ -130,7 +142,11 @@ CREATE TABLE IF NOT EXISTS unpublished_writer_provider_attempts(
     ordinal INTEGER NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('RESERVED','COMPLETE','FAILED','REJECTED_OUTPUT')),
     reason_code TEXT NOT NULL,
-    at TEXT NOT NULL
+    at TEXT NOT NULL,
+    UNIQUE(candidate_attempt_id, route),
+    FOREIGN KEY(candidate_attempt_id)
+        REFERENCES unpublished_write_candidate_attempts(candidate_attempt_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
 );
 CREATE TABLE IF NOT EXISTS unpublished_draft_outcomes(
     outcome_id TEXT PRIMARY KEY,
@@ -141,7 +157,11 @@ CREATE TABLE IF NOT EXISTS unpublished_draft_outcomes(
     reason_codes_json TEXT NOT NULL,
     payload_digest TEXT,
     record_json TEXT NOT NULL,
-    at TEXT NOT NULL
+    at TEXT NOT NULL,
+    FOREIGN KEY(decision_id, candidate_id, evidence_package_digest)
+        REFERENCES unpublished_write_admission_decisions(
+            decision_id, candidate_id, evidence_package_digest
+        ) ON UPDATE RESTRICT ON DELETE RESTRICT
 );
 CREATE TABLE IF NOT EXISTS unpublished_graphiti_attempts(
     story_candidate_id TEXT PRIMARY KEY,
@@ -431,9 +451,7 @@ def connect(path: str) -> sqlite3.Connection:
         str(row[1]) for row in connection.execute("PRAGMA table_info(ledger)")
     }
     if "payload_json" not in ledger_columns:
-        connection.execute(
-            "ALTER TABLE ledger ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'"
-        )
+        connection.execute("ALTER TABLE ledger ADD COLUMN payload_json TEXT")
     _ensure_landed_schema(connection)
     ensure_reconciliation_schema(connection)
     columns = {
@@ -471,6 +489,8 @@ def append_ledger(
     connection: sqlite3.Connection, kind: str, payload: dict[str, object]
 ) -> str:
     refuse_public_effect(kind)
+    if not connection.in_transaction:
+        connection.execute("BEGIN IMMEDIATE")
     payload_digest = digest_bytes(canonical_json_bytes(payload))
     prev = _head_digest(connection)
     at = _now()
@@ -502,24 +522,44 @@ def retain_write_admission_decision(
     if not isinstance(decision, WriteAdmissionDecision):
         raise TypeError("write admission decision record required")
     record = decision.as_record()
-    connection.execute(
-        """
-        INSERT OR IGNORE INTO unpublished_write_admission_decisions(
-            decision_id, candidate_id, evidence_package_digest, policy_version, decision,
-            reason_codes_json, record_json, at
-        ) VALUES(?,?,?,?,?,?,?,?)
-        """,
-        (
-            decision.decision_id,
-            decision.candidate_id,
-            decision.evidence_package_digest,
-            decision.policy_version,
-            decision.decision,
-            json.dumps(list(decision.stable_reason_codes), ensure_ascii=False),
-            json.dumps(record, ensure_ascii=False, sort_keys=True),
-            _now(),
-        ),
-    )
+    try:
+        connection.execute(
+            """
+            INSERT INTO unpublished_write_admission_decisions(
+                decision_id, candidate_id, evidence_package_digest, policy_version,
+                decision, reason_codes_json, record_json, at
+            ) VALUES(?,?,?,?,?,?,?,?)
+            """,
+            (
+                decision.decision_id,
+                decision.candidate_id,
+                decision.evidence_package_digest,
+                decision.policy_version,
+                decision.decision,
+                json.dumps(list(decision.stable_reason_codes), ensure_ascii=False),
+                json.dumps(record, ensure_ascii=False, sort_keys=True),
+                _now(),
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        rows = connection.execute(
+            """
+            SELECT decision_id, decision FROM unpublished_write_admission_decisions
+            WHERE decision_id=? OR (
+                candidate_id=? AND evidence_package_digest=? AND policy_version=?
+            )
+            """,
+            (
+                decision.decision_id,
+                decision.candidate_id,
+                decision.evidence_package_digest,
+                decision.policy_version,
+            ),
+        ).fetchall()
+        if rows != [(decision.decision_id, decision.decision)]:
+            raise sqlite3.IntegrityError(
+                "conflicting write-admission decision replay"
+            ) from exc
 
 
 def retain_write_selection(connection: sqlite3.Connection, selection: object) -> None:
@@ -527,23 +567,38 @@ def retain_write_selection(connection: sqlite3.Connection, selection: object) ->
 
     if not isinstance(selection, WriteSelectionRecord):
         raise TypeError("write selection record required")
-    connection.execute(
-        """
-        INSERT OR IGNORE INTO unpublished_write_selections(
-            selection_id, decision_id, candidate_id, evidence_package_digest,
-            rank, record_json, at
-        ) VALUES(?,?,?,?,?,?,?)
-        """,
-        (
-            selection.selection_id,
+    try:
+        connection.execute(
+            """
+            INSERT INTO unpublished_write_selections(
+                selection_id, decision_id, candidate_id, evidence_package_digest,
+                rank, record_json, at
+            ) VALUES(?,?,?,?,?,?,?)
+            """,
+            (
+                selection.selection_id,
+                selection.decision_id,
+                selection.candidate_id,
+                selection.evidence_package_digest,
+                selection.rank,
+                json.dumps(selection.as_record(), ensure_ascii=False, sort_keys=True),
+                _now(),
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        row = connection.execute(
+            "SELECT decision_id, candidate_id, evidence_package_digest, rank "
+            "FROM unpublished_write_selections WHERE selection_id=?",
+            (selection.selection_id,),
+        ).fetchone()
+        expected = (
             selection.decision_id,
             selection.candidate_id,
             selection.evidence_package_digest,
             selection.rank,
-            json.dumps(selection.as_record(), ensure_ascii=False, sort_keys=True),
-            _now(),
-        ),
-    )
+        )
+        if row != expected:
+            raise sqlite3.IntegrityError("conflicting write-selection replay") from exc
 
 
 def reserve_write_candidate_attempt(
@@ -603,7 +658,15 @@ def reserve_writer_provider_attempt(
             status, reason_code, at
         ) VALUES(?,?,?,?,?,?,?)
         """,
-        (attempt_id, candidate_attempt_id, route, ordinal, "RESERVED", "RESERVED", _now()),
+        (
+            attempt_id,
+            candidate_attempt_id,
+            route,
+            ordinal,
+            "RESERVED",
+            "RESERVED",
+            _now(),
+        ),
     )
     return attempt_id
 

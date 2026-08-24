@@ -4,6 +4,8 @@ import hashlib
 import hmac
 import json
 import sqlite3
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -47,7 +49,15 @@ from newsroom.control_plane.evidence import (
     package_for,
 )
 from newsroom.control_plane.items import SourceItem, parse_observation
-from newsroom.control_plane.store import connect, list_payloads
+from newsroom.control_plane.store import (
+    LEDGER_GENESIS,
+    append_ledger,
+    connect,
+    list_payloads,
+    reserve_write_candidate_attempt,
+    reserve_writer_provider_attempt,
+    retain_write_admission_decision,
+)
 from newsroom.control_plane.writer import (
     CliChainWriter,
     FixtureWriter,
@@ -70,8 +80,23 @@ _CLOCK = lambda: datetime(2026, 8, 20, tzinfo=UTC)
 def test_non_controller_children_do_not_receive_evidence_approval_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("NEWSROOM_EVIDENCE_APPROVAL_KEY", "secret" * 8)
-    assert "NEWSROOM_EVIDENCE_APPROVAL_KEY" not in unprivileged_child_environment()
+    for name in (
+        "NEWSROOM_EVIDENCE_APPROVAL_KEY",
+        "GITHUB_TOKEN",
+        "NEO4J_PASSWORD",
+        "CUSTOM_SECRET",
+    ):
+        monkeypatch.setenv(name, "secret" * 8)
+    environment = unprivileged_child_environment()
+    assert (
+        not {
+            "NEWSROOM_EVIDENCE_APPROVAL_KEY",
+            "GITHUB_TOKEN",
+            "NEO4J_PASSWORD",
+            "CUSTOM_SECRET",
+        }
+        & environment.keys()
+    )
 
 
 @pytest.mark.parametrize(
@@ -250,6 +275,117 @@ def test_approved_proper_name_is_exempt_from_contextual_shape_gate(
     )
 
     assert decision.decision == "WRITE_READY"
+
+
+@pytest.mark.parametrize(
+    ("source_claim", "rendered_claim", "source_entity", "rendered_entity"),
+    (
+        (
+            "香港政府公布荃灣新安排",
+            "香港政府最新公告涉及沙田安排",
+            ("荃灣", "PLACE"),
+            ("沙田", "PLACE"),
+        ),
+        (
+            "政府任命王小明出任局長並公布新安排",
+            "政府任命李小明出任局長並公布新安排",
+            ("王小明", "PERSON"),
+            ("李小明", "PERSON"),
+        ),
+    ),
+)
+def test_changed_chinese_identity_fails_closed_before_writer(
+    source_claim: str,
+    rendered_claim: str,
+    source_entity: tuple[str, str],
+    rendered_entity: tuple[str, str],
+) -> None:
+    assert source_entity in bounded_named_entities(source_claim)
+    assert rendered_entity in bounded_named_entities(rendered_claim)
+    candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    source_entities = tuple(sorted(bounded_named_entities(source_claim)))
+    changed_headline = replace(
+        headline,
+        claim=source_claim,
+        supporting_excerpt=source_claim,
+        rendered_assertion_zh_hant_hk=rendered_claim,
+        named_entity_evidence=tuple(
+            (text, entity_type, f"entity:identity:{index}")
+            for index, (text, entity_type) in enumerate(source_entities)
+        ),
+        named_entities=tuple(text for text, _entity_type in source_entities),
+        rendered_named_entities=tuple(text for text, _entity_type in source_entities),
+    )
+    guarded = replace(
+        package,
+        passages=(f"{source_claim}\n{substantive.claim}",),
+        substantive_new_information=(source_claim, substantive.claim),
+        governed_claims=(changed_headline, substantive),
+        qualification_evidence=(
+            replace(
+                package.qualification_evidence[0],
+                test_evidence=(
+                    ("action_class", "OFFICIAL_DEADLINE"),
+                    ("event_polarity", "AFFIRMED"),
+                    ("action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"),
+                    ("material_relation_span", source_claim),
+                    ("reader_action", source_claim),
+                ),
+            ),
+            package.qualification_evidence[1],
+        ),
+        resolved_evidence_records=(
+            *package.resolved_evidence_records,
+            *(
+                (f"entity:identity:{index}", f"digest:identity:{index}")
+                for index, _item in enumerate(source_entities)
+            ),
+        ),
+    )
+    decision = DeterministicWriteAdmission().decide(
+        candidate, guarded, decided_at="2026-08-20T00:00:00Z"
+    )
+    assert decision.decision == "HOLD"
+    assert "INVALID_GOVERNED_CLAIM_EVIDENCE" in decision.stable_reason_codes
+
+
+def test_short_service_delay_cannot_masquerade_as_law_change() -> None:
+    candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    service_noise = "服務公布新增十分鐘延誤"
+    changed_headline = replace(
+        headline,
+        claim=service_noise,
+        supporting_excerpt=service_noise,
+        rendered_assertion_zh_hant_hk="服務新增十分鐘延誤安排",
+    )
+    guarded = replace(
+        package,
+        passages=(f"{service_noise}\n{substantive.claim}",),
+        substantive_new_information=(service_noise, substantive.claim),
+        governed_claims=(changed_headline, substantive),
+        qualification_evidence=(
+            QualificationEvidence(
+                Evid012QualificationTest.LAW_RIGHT_STATUS_POLICY,
+                changed_headline.claim_id,
+                package.qualification_evidence[0].qualification_record_id,
+                (
+                    ("change_kind", "LAW"),
+                    ("event_polarity", "AFFIRMED"),
+                    ("change_relation", "NEW_OR_CHANGED_STATE"),
+                    ("material_relation_span", service_noise),
+                    ("new_state", service_noise),
+                ),
+            ),
+            package.qualification_evidence[1],
+        ),
+    )
+    decision = DeterministicWriteAdmission().decide(
+        candidate, guarded, decided_at="2026-08-20T00:00:00Z"
+    )
+    assert decision.decision == "HOLD"
+    assert decision.stable_reason_codes == ("QUALIFICATION_EVIDENCE_NOT_EXACT",)
 
 
 def test_governed_records_reject_cross_source_claim_link() -> None:
@@ -3311,11 +3447,165 @@ def test_connect_upgrades_legacy_ledger_for_retained_counter_payloads(
         "CREATE TABLE ledger(seq INTEGER PRIMARY KEY, at TEXT NOT NULL, kind TEXT NOT NULL, "
         "payload_digest TEXT NOT NULL, prev_digest TEXT NOT NULL, digest TEXT NOT NULL)"
     )
+    legacy_digest = digest_bytes(b"legacy payload bytes are unavailable")
+    connection.execute(
+        "INSERT INTO ledger VALUES(1,?,?,?,?,?)",
+        (
+            "2026-08-20T00:00:00Z",
+            "LEGACY_EVENT",
+            legacy_digest,
+            LEDGER_GENESIS,
+            "sha256:" + ("a" * 64),
+        ),
+    )
     connection.commit()
     connection.close()
 
     upgraded = connect(str(path))
     columns = {row[1] for row in upgraded.execute("PRAGMA table_info(ledger)")}
+    migrated = upgraded.execute(
+        "SELECT payload_digest, payload_json FROM ledger WHERE seq=1"
+    ).fetchone()
     upgraded.close()
 
     assert "payload_json" in columns
+    assert migrated == (legacy_digest, None)
+
+
+def test_concurrent_ledger_appends_form_one_contiguous_chain(tmp_path: Path) -> None:
+    path = tmp_path / "concurrent-unpublished.sqlite3"
+    connection = connect(str(path))
+    connection.commit()
+    connection.close()
+
+    def append(value: int) -> None:
+        worker = connect(str(path))
+        append_ledger(worker, "CONCURRENT_FIXTURE", {"value": value})
+        time.sleep(0.05)
+        worker.commit()
+        worker.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for future in (pool.submit(append, 1), pool.submit(append, 2)):
+            future.result()
+
+    connection = connect(str(path))
+    rows = connection.execute(
+        "SELECT prev_digest, digest FROM ledger ORDER BY seq"
+    ).fetchall()
+    connection.close()
+    assert len(rows) == 2
+    assert rows[0][0] == LEDGER_GENESIS
+    assert rows[1][0] == rows[0][1]
+
+
+def test_write_attempt_relations_fail_closed_on_orphans_and_cross_binding(
+    tmp_path: Path,
+) -> None:
+    connection = connect(str(tmp_path / "fk-unpublished.sqlite3"))
+    with pytest.raises(sqlite3.IntegrityError):
+        reserve_writer_provider_attempt(
+            connection,
+            candidate_attempt_id="missing",
+            route="PRIMARY",
+            ordinal=1,
+        )
+    candidate, package = _candidate_package()
+    decision = DeterministicWriteAdmission().decide(
+        candidate, package, decided_at="2026-08-20T00:00:00Z"
+    )
+    retain_write_admission_decision(connection, decision)
+    with pytest.raises(sqlite3.IntegrityError):
+        reserve_write_candidate_attempt(
+            connection,
+            cycle_execution_id="cycle-1",
+            decision_id=decision.decision_id,
+            candidate_id="another-candidate",
+            evidence_package_digest=decision.evidence_package_digest,
+            ordinal=1,
+        )
+    connection.close()
+
+
+def test_conflicting_admission_for_same_package_is_not_silently_ignored(
+    tmp_path: Path,
+) -> None:
+    connection = connect(str(tmp_path / "conflict-unpublished.sqlite3"))
+    candidate, package = _candidate_package()
+    decision = DeterministicWriteAdmission().decide(
+        candidate, package, decided_at="2026-08-20T00:00:00Z"
+    )
+    retain_write_admission_decision(connection, decision)
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            "INSERT INTO unpublished_write_admission_decisions VALUES(?,?,?,?,?,?,?,?)",
+            (
+                "sha256:" + ("f" * 64),
+                decision.candidate_id,
+                decision.evidence_package_digest,
+                decision.policy_version,
+                "HOLD",
+                '["CONFLICT"]',
+                "{}",
+                "2026-08-20T00:00:01Z",
+            ),
+        )
+    connection.close()
+
+
+def test_admission_is_durable_when_later_package_construction_fails(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def build(candidate: StoryCandidateRecord) -> EvidencePackage:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("later governed package failed")
+        return package_for(candidate)
+
+    unpublished = tmp_path / "durable-admission.sqlite3"
+    with pytest.raises(RuntimeError, match="later governed package failed"):
+        run_cycle(
+            proving_store=str(_proving(tmp_path)),
+            unpublished_store=str(unpublished),
+            evidence_package_builder=build,
+            writer=FixtureWriter(),
+            clock=_CLOCK,
+        )
+    connection = sqlite3.connect(unpublished)
+    assert connection.execute(
+        "SELECT COUNT(*) FROM unpublished_write_admission_decisions"
+    ).fetchone() == (1,)
+    connection.close()
+
+
+def test_validated_payload_and_outcome_survive_later_coverage_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unpublished = tmp_path / "durable-outcome.sqlite3"
+
+    def fail_coverage(*_args: object, **_kwargs: object) -> dict[str, int]:
+        raise RuntimeError("coverage closeout failed")
+
+    monkeypatch.setattr("newsroom.control_plane.cycle.graphiti_coverage", fail_coverage)
+    with pytest.raises(RuntimeError, match="coverage closeout failed"):
+        run_cycle(
+            proving_store=str(_proving(tmp_path)),
+            unpublished_store=str(unpublished),
+            evidence_package_builder=_qualified_builder(frozenset({"HK-01"})),
+            writer=RecordingFixtureWriter(),
+            clock=_CLOCK,
+        )
+    connection = sqlite3.connect(unpublished)
+    assert connection.execute(
+        "SELECT status FROM unpublished_writer_provider_attempts"
+    ).fetchall() == [("COMPLETE",)]
+    assert connection.execute(
+        "SELECT COUNT(*) FROM unpublished_surface_payloads"
+    ).fetchone() == (1,)
+    assert connection.execute(
+        "SELECT outcome FROM unpublished_draft_outcomes"
+    ).fetchall() == [("ACCEPTED",)]
+    connection.close()
