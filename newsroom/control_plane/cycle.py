@@ -2215,6 +2215,7 @@ def _run_write_loop(
                         != usage_policy.disabled_capabilities
                         or manifest.implementation_revision
                         != usage_policy.implementation_revision
+                        or manifest.implementation_worktree_clean is not True
                     ):
                         raise ModelUsageAdmissionError(
                             "writer manifest contract does not match qualified policy"

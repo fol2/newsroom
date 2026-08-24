@@ -75,6 +75,9 @@ from newsroom.control_plane.store import (
 )
 from newsroom.control_plane.veto import VetoError
 from newsroom.control_plane.writer import (
+    CONT_CONTEXT_MANIFEST_SCHEMA_VERSION,
+    CONT_DISABLED_CAPABILITIES,
+    CONT_FALLBACK_COMMAND_FLAGS,
     CONT_FALLBACK_MODEL,
     CONT_FALLBACK_CONFIG_IDENTITY,
     CONT_FALLBACK_PROVIDER,
@@ -85,6 +88,7 @@ from newsroom.control_plane.writer import (
     CONT_PRIMARY_PROVIDER,
     CONT_PRIMARY_REASONING,
     CONT_PRIMARY_ROUTE,
+    CONT_PRIMARY_COMMAND_FLAGS,
     CONT_WRITER_CONTEXT_IDENTITY,
     CONT_WRITER_OUTPUT_SCHEMA_DIGEST,
     CONT_WRITER_PROMPT_CONTRACT_VERSION,
@@ -94,6 +98,8 @@ from newsroom.control_plane.writer import (
     WriterCopy,
     WriterDispatchError,
     WriterEvidenceLink,
+    GROK_COMMAND_SEMANTIC_VERSION,
+    CURSOR_COMMAND_SEMANTIC_VERSION,
     validate_writer_copy,
 )
 from newsroom.control_plane.zh_hant import (
@@ -105,6 +111,15 @@ from newsroom.effective_revision import retain_observation_revision_first_seen
 from newsroom.tests.test_control_plane_private_beta import _proving
 
 _CLOCK = lambda: datetime(2026, 8, 20, tzinfo=UTC)
+_WRITER_REVISION = "a" * 40
+
+
+@pytest.fixture(autouse=True)
+def _exact_writer_head(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "newsroom.control_plane.writer.cont_writer_implementation_identity",
+        lambda: (_WRITER_REVISION, True),
+    )
 
 
 def test_cont_context_manifest_is_canonical_zero_capability_evidence() -> None:
@@ -4301,6 +4316,19 @@ def _register_cont_usage_policy(
             tools_enabled=False,
             mcp_enabled=False,
             prior_message_count=0,
+            command_semantic_version=(
+                GROK_COMMAND_SEMANTIC_VERSION
+                if route == CONT_PRIMARY_ROUTE
+                else CURSOR_COMMAND_SEMANTIC_VERSION
+            ),
+            command_flags=(
+                CONT_PRIMARY_COMMAND_FLAGS
+                if route == CONT_PRIMARY_ROUTE
+                else CONT_FALLBACK_COMMAND_FLAGS
+            ),
+            context_manifest_schema_version=CONT_CONTEXT_MANIFEST_SCHEMA_VERSION,
+            disabled_capabilities=CONT_DISABLED_CAPABILITIES,
+            implementation_revision=_WRITER_REVISION,
             max_prompt_bytes=max_prompt_bytes,
             max_context_tokens=10_000,
             max_output_tokens=2_000,
@@ -4484,6 +4512,46 @@ def test_oversized_exact_evidence_is_held_before_dispatch_without_truncation(
     connection.close()
     assert manifest["prompt_bytes"] > 1
     assert manifest["evidence_package_digest"]
+
+
+def test_dirty_writer_implementation_is_held_before_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unpublished = tmp_path / "usage-dirty-writer.sqlite3"
+    usage = ModelUsageService(str(unpublished))
+    _register_cont_usage_policy(
+        usage,
+        workload_class=WorkloadClass.CONT_WRITER_PRIMARY,
+        provider=CONT_PRIMARY_PROVIDER,
+        route=CONT_PRIMARY_ROUTE,
+        model=CONT_PRIMARY_MODEL,
+        reasoning=CONT_PRIMARY_REASONING,
+    )
+    monkeypatch.setattr(
+        "newsroom.control_plane.writer.cont_writer_implementation_identity",
+        lambda: (_WRITER_REVISION, False),
+    )
+    calls = 0
+
+    def primary(_prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        return "must-not-dispatch"
+
+    report = run_cycle(
+        proving_store=str(_proving(tmp_path)),
+        unpublished_store=str(unpublished),
+        writer=CliChainWriter(primary=primary),
+        evidence_package_builder=_qualified_builder(frozenset({"HK-01"})),
+        clock=_CLOCK,
+        model_usage=usage,
+    )
+
+    assert calls == 0
+    assert report.provider_dispatches == 0
+    assert report.draft_hold == 1
+    assert ("MODEL_USAGE_ADMISSION_HELD", 1) in report.draft_reason_counts
 
 
 def test_controller_retains_explicit_zero_when_writer_executable_is_missing(

@@ -13,7 +13,7 @@ import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from newsroom.authority.canonical import (
     canonical_json_bytes,
@@ -102,32 +102,69 @@ _HERMETIC_ENVIRONMENT_KEYS = frozenset(
 )
 
 
-def cont_writer_implementation_identity() -> tuple[str, bool]:
+def cont_writer_implementation_identity(
+    repository: str | None = None,
+) -> tuple[str, bool]:
     """Return the Git revision and exact clean-tree state for calibration binding."""
 
-    repository = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    repository = repository or os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..")
+    )
+    environment = {
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "HOME": "/var/empty",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+    }
+    git = (
+        _TRUSTED_GIT_EXECUTABLE,
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.trustctime=true",
+        "-c",
+        "core.checkStat=default",
+        "-c",
+        "core.ignoreStat=false",
+    )
     try:
         revision = subprocess.run(
-            (_TRUSTED_GIT_EXECUTABLE, "rev-parse", "HEAD"),
+            (*git, "rev-parse", "HEAD"),
             cwd=repository,
+            env=environment,
             check=True,
             capture_output=True,
             text=True,
             timeout=5,
         ).stdout.strip()
         status = subprocess.run(
-            (_TRUSTED_GIT_EXECUTABLE, "status", "--porcelain"),
+            (*git, "status", "--porcelain=v1", "--untracked-files=all"),
             cwd=repository,
+            env=environment,
             check=True,
             capture_output=True,
             text=True,
+            timeout=5,
+        ).stdout
+        flags = subprocess.run(
+            (*git, "ls-files", "-v", "-z"),
+            cwd=repository,
+            env=environment,
+            check=True,
+            capture_output=True,
             timeout=5,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return "UNVERSIONED", False
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         return "UNVERSIONED", False
-    return revision, status == ""
+    index_flags_clean = all(
+        record.startswith(b"H ") for record in flags.split(b"\0") if record
+    )
+    return revision, status == "" and index_flags_clean
 _PROMPT = (
     "你係 Newsroom 嘅 CONT 原創記者，唔係 Graphiti。"
     "用香港繁體中文寫一篇已經完成嘅未出版新聞稿。"
@@ -396,10 +433,11 @@ class WriterInvocationManifest:
         """Build one canonical manifest from the typed serialisation contract."""
 
         values.pop("context_manifest_digest", None)
-        draft = cls(**values, context_manifest_digest="")  # type: ignore[arg-type]
+        constructor = cast(Callable[..., WriterInvocationManifest], cls)
+        draft = constructor(**values, context_manifest_digest="")
         canonical = draft.as_record()
         canonical.pop("context_manifest_digest")
-        return cls(  # type: ignore[arg-type]
+        return constructor(
             **values,
             context_manifest_digest=digest_canonical(canonical),
         )
