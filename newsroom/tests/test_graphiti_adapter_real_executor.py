@@ -2132,12 +2132,23 @@ def test_cursor_cli_runs_outside_repository_cwd(
     observed: dict[str, object] = {}
 
     def capture(
-        command: tuple[str, ...], *, timeout: int, cwd: str | None = None
+        command: tuple[str, ...],
+        *,
+        timeout: int,
+        cwd: str | None = None,
+        environment: dict[str, str] | None = None,
     ) -> str:
-        observed.update(command=command, timeout=timeout, cwd=cwd)
+        observed.update(
+            command=command,
+            timeout=timeout,
+            cwd=cwd,
+            environment=environment,
+            inventory=([] if cwd is None else list(Path(cwd).iterdir())),
+        )
         return "{}"
 
     monkeypatch.setattr(cli_client, "run_cli", capture)
+    monkeypatch.setattr(cli_client, "_prove_cli_controls", lambda **_values: None)
     cursor_execution = cli_client.run_cursor_agent_llm(
         "untrusted source", max_tokens=512
     )
@@ -2148,6 +2159,15 @@ def test_cursor_cli_runs_outside_repository_cwd(
     assert Path(cwd) != _REPOSITORY_ROOT
     assert "newsroom-cursor-graphiti-" in cwd
     assert observed["timeout"] == cli_client.CLI_CALL_TIMEOUT_SECONDS
+    assert tuple(observed["command"])[-3:-1] == (
+        "--model",
+        cli_client.CURSOR_AGENT_MODEL_ID,
+    )
+    assert "--max-output-tokens" in observed["command"]
+    environment = observed["environment"]
+    assert isinstance(environment, dict)
+    assert Path(environment["HOME"]).parent == Path(cwd).parent
+    assert observed["inventory"] == []
 
     observed.clear()
     grok_execution = cli_client.run_grok_llm(
@@ -2160,6 +2180,8 @@ def test_cursor_cli_runs_outside_repository_cwd(
     assert Path(grok_cwd) != _REPOSITORY_ROOT
     assert "newsroom-grok-graphiti-" in grok_cwd
     assert observed["timeout"] == cli_client.CLI_CALL_TIMEOUT_SECONDS
+    assert "--max-output-tokens" in observed["command"]
+    assert observed["inventory"] == []
 
 
 def test_async_cli_child_is_terminated_when_attempt_deadline_cancels() -> None:

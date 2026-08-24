@@ -1171,6 +1171,72 @@ class ModelUsageService:
             ),
         )
 
+    def resume_or_open_graphiti_envelope(
+        self, envelope: WorkEnvelope
+    ) -> WorkEnvelope:
+        """Open a Graphiti envelope or return its exact durable restart value."""
+
+        envelope._validate()
+        if envelope.graphiti_attempt_id is None:
+            raise ModelUsageIntegrityError(
+                "Graphiti envelope resume lacks an attempt identity"
+            )
+        connection = self._connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT record_json FROM model_work_envelopes WHERE envelope_id=?",
+                (envelope.envelope_id,),
+            ).fetchone()
+            if row is None:
+                self._insert_exact(
+                    table="model_work_envelopes",
+                    identity_column="envelope_id",
+                    identity=envelope.envelope_id,
+                    record=envelope.as_record(),
+                    sql="INSERT INTO model_work_envelopes("
+                    "envelope_id,cycle_id,workload_class,admitted_at,"
+                    "canonical_digest,record_json) VALUES(?,?,?,?,?,?)",
+                    values=(
+                        envelope.envelope_id,
+                        envelope.cycle_id,
+                        envelope.workload_class.value,
+                        _utc_text(envelope.admitted_at),
+                        envelope.canonical_digest,
+                        _json(envelope.as_record()),
+                    ),
+                    connection=connection,
+                )
+                connection.commit()
+                return envelope
+            record = _object(row[0])
+            resumed = WorkEnvelope.create(
+                cycle_id=str(record["cycle_id"]),
+                workload_class=WorkloadClass(str(record["workload_class"])),
+                admitted_at=_instant(str(record["admitted_at"])),
+                admission_decision_id=record.get("admission_decision_id"),
+                candidate_id=record.get("candidate_id"),
+                hypothesis_digest=record.get("hypothesis_digest"),
+                evidence_package_digest=record.get("evidence_package_digest"),
+                ingest_id=record.get("ingest_id"),
+                graphiti_attempt_id=record.get("graphiti_attempt_id"),
+            )
+            if (
+                resumed.envelope_id != envelope.envelope_id
+                or resumed.canonical_digest != record.get("canonical_digest")
+            ):
+                raise ModelUsageIntegrityError(
+                    "retained Graphiti envelope identity is invalid"
+                )
+            connection.commit()
+            return resumed
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def retain_context_manifest(self, record: Mapping[str, object]) -> None:
         """Retain the non-secret context proof before any provider dispatch."""
 
@@ -1367,6 +1433,30 @@ class ModelUsageService:
             ):
                 raise ModelUsageAdmissionError(
                     "Graphiti context manifest differs from its request identity"
+                )
+            expected_environment_keys = (
+                []
+                if allocation.workload_class is WorkloadClass.GRAPHITI_EMBEDDING
+                else [
+                    "HOME",
+                    "LANG",
+                    "LC_ALL",
+                    "PATH",
+                    "TMPDIR",
+                    "XDG_CACHE_HOME",
+                    "XDG_CONFIG_HOME",
+                    "XDG_DATA_HOME",
+                    "XDG_STATE_HOME",
+                ]
+            )
+            if (
+                manifest.get("working_directory_inventory") != []
+                or manifest.get("working_directory_inventory_digest")
+                != digest_canonical([])
+                or manifest.get("environment_keys") != expected_environment_keys
+            ):
+                raise ModelUsageAdmissionError(
+                    "Graphiti hermetic workspace proof differs from policy"
                 )
 
             semantic_state_digest = str(record["semantic_state_digest"])
@@ -2071,12 +2161,31 @@ class ModelUsageService:
         try:
             if owns_connection:
                 current.execute("BEGIN IMMEDIATE")
+            envelope_row = current.execute(
+                "SELECT record_json FROM model_work_envelopes WHERE envelope_id=?",
+                (envelope_id,),
+            ).fetchone()
+            graphiti_attempt_id = (
+                None
+                if envelope_row is None
+                else _object(envelope_row[0]).get("graphiti_attempt_id")
+            )
             unresolved_graphiti_leaf = current.execute(
                 "SELECT 1 FROM graphiti_internal_requests g "
                 "LEFT JOIN model_invocation_terminals t "
                 "ON t.invocation_id=g.invocation_id "
-                "WHERE g.envelope_id=? AND t.invocation_id IS NULL LIMIT 1",
-                (envelope_id,),
+                "WHERE "
+                + (
+                    "g.graphiti_attempt_id=? "
+                    if isinstance(graphiti_attempt_id, str)
+                    else "g.envelope_id=? "
+                )
+                + "AND t.invocation_id IS NULL LIMIT 1",
+                (
+                    graphiti_attempt_id
+                    if isinstance(graphiti_attempt_id, str)
+                    else envelope_id,
+                ),
             ).fetchone()
             if unresolved_graphiti_leaf is not None:
                 raise ModelUsageIntegrityError(
