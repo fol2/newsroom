@@ -231,6 +231,81 @@ def _qualification_relation_is_proven(
         )
         if clause.strip()
     }
+    span = spans[0] if len(spans) == 1 else ""
+    chinese_digits = {
+        "一": 1,
+        "二": 2,
+        "兩": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+    }
+
+    def chinese_minutes(value: str) -> int:
+        if value == "十":
+            return 10
+        if "十" in value:
+            left, right = value.split("十", 1)
+            return chinese_digits.get(left, 1) * 10 + chinese_digits.get(right, 0)
+        return chinese_digits.get(value, 0)
+
+    minute_values = [
+        int(value)
+        for value in re.findall(
+            r"(?<!\d)(\d{1,3})(?!\d)\s*(?:minutes?|mins?|分鐘|分钟)",
+            span,
+            flags=re.IGNORECASE,
+        )
+    ] + [
+        chinese_minutes(value)
+        for value in re.findall(
+            r"([一二兩两三四五六七八九]?十?[一二兩两三四五六七八九]?)\s*"
+            r"(?:分鐘|分钟)",
+            span,
+        )
+        if value
+    ]
+    service_noise = bool(
+        _MATERIAL_SUBJECT_SPAN_PATTERNS[
+            Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION
+        ].search(span)
+        and _MATERIAL_RELATION_SPAN_PATTERNS[
+            Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION
+        ].search(span)
+        and any(0 < value < 60 for value in minute_values)
+    )
+    if (
+        service_noise
+        and qualification.test
+        is not Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION
+    ):
+        return False
+    if qualification.test is Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE:
+        evidence = dict(qualification.test_evidence)
+        action_pattern = {
+            "INSTRUCTION": re.compile(
+                r"must|need(?:s)? to|required? to|should|instruct(?:ed|ion)?|"
+                r"必須|必须|需要|應該|应该|指示|要求",
+                re.IGNORECASE,
+            ),
+            "PROCESS": re.compile(
+                r"process|procedure|apply|application|register|submit|form|"
+                r"程序|流程|申請|申请|登記|登记|提交|表格",
+                re.IGNORECASE,
+            ),
+            "OFFICIAL_DEADLINE": re.compile(
+                r"official action|deadline|closing date|expires?|by\s+\d|"
+                r"官方行動|官方行动|限期|截止|屆滿|届满|公布|宣佈|宣布",
+                re.IGNORECASE,
+            ),
+        }[evidence["action_class"]]
+        if evidence["reader_action"] != span or not action_pattern.search(span):
+            return False
     return (
         len(spans) == 1
         and pattern is not None

@@ -292,6 +292,18 @@ def test_approved_proper_name_is_exempt_from_contextual_shape_gate(
             ("王小明", "PERSON"),
             ("李小明", "PERSON"),
         ),
+        (
+            "政府任命王小龍出任局長並公布新安排",
+            "政府任命李小宇出任局長並公布新安排",
+            ("王小龍", "PERSON"),
+            ("李小宇", "PERSON"),
+        ),
+        (
+            "香港政府公布旺角新安排",
+            "香港政府最新公告涉及尖沙咀安排",
+            ("旺角", "PLACE"),
+            ("尖沙咀", "PLACE"),
+        ),
     ),
 )
 def test_changed_chinese_identity_fails_closed_before_writer(
@@ -376,6 +388,44 @@ def test_short_service_delay_cannot_masquerade_as_law_change() -> None:
                     ("change_relation", "NEW_OR_CHANGED_STATE"),
                     ("material_relation_span", service_noise),
                     ("new_state", service_noise),
+                ),
+            ),
+            package.qualification_evidence[1],
+        ),
+    )
+    decision = DeterministicWriteAdmission().decide(
+        candidate, guarded, decided_at="2026-08-20T00:00:00Z"
+    )
+    assert decision.decision == "HOLD"
+    assert decision.stable_reason_codes == ("QUALIFICATION_EVIDENCE_NOT_EXACT",)
+
+
+def test_short_service_delay_cannot_masquerade_as_official_instruction() -> None:
+    candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    service_noise = "服務公布新增十分鐘延誤"
+    changed_headline = replace(
+        headline,
+        claim=service_noise,
+        supporting_excerpt=service_noise,
+        rendered_assertion_zh_hant_hk="服務新增十分鐘延誤安排",
+    )
+    guarded = replace(
+        package,
+        passages=(f"{service_noise}\n{substantive.claim}",),
+        substantive_new_information=(service_noise, substantive.claim),
+        governed_claims=(changed_headline, substantive),
+        qualification_evidence=(
+            QualificationEvidence(
+                Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE,
+                changed_headline.claim_id,
+                package.qualification_evidence[0].qualification_record_id,
+                (
+                    ("action_class", "INSTRUCTION"),
+                    ("event_polarity", "AFFIRMED"),
+                    ("action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"),
+                    ("material_relation_span", service_noise),
+                    ("reader_action", service_noise),
                 ),
             ),
             package.qualification_evidence[1],
