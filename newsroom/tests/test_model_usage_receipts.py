@@ -1381,6 +1381,7 @@ def test_graphiti_provider_observer_persists_chat_and_embedding_leaves(
         service=service,
         envelope=envelope,
         clock=lambda: T0 + timedelta(seconds=10),
+        owner_stop_check=lambda: None,
     )
     chat = observer.before_cli_invocation(
         provider="cursor-agent-cli",
@@ -1472,6 +1473,7 @@ def test_graphiti_missing_telemetry_without_a_hard_bound_is_unreported(
         service=service,
         envelope=envelope,
         clock=lambda: T0 + timedelta(seconds=10),
+        owner_stop_check=lambda: None,
     )
     token = observer.before_cli_invocation(
         provider="cursor-agent-cli",

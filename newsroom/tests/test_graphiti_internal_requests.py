@@ -341,7 +341,6 @@ def test_atomic_graphiti_allocation_refuses_duplicate_and_call_shape_drift(
         first,
         identity=first_identity,
         max_distinct_internal_requests=shape.max_distinct_internal_requests,
-        owner_emergency_stop=False,
     )
 
     duplicate, duplicate_identity = _bound_request(
@@ -356,7 +355,6 @@ def test_atomic_graphiti_allocation_refuses_duplicate_and_call_shape_drift(
             duplicate,
             identity=duplicate_identity,
             max_distinct_internal_requests=shape.max_distinct_internal_requests,
-            owner_emergency_stop=False,
         )
     assert duplicate_error.value.reason_code == "DUPLICATE_INTERNAL_REQUEST"
 
@@ -384,7 +382,6 @@ def test_atomic_graphiti_allocation_refuses_duplicate_and_call_shape_drift(
             restarted,
             identity=restarted_identity,
             max_distinct_internal_requests=shape.max_distinct_internal_requests,
-            owner_emergency_stop=False,
         )
     assert restart_duplicate.value.reason_code == "DUPLICATE_INTERNAL_REQUEST"
 
@@ -400,7 +397,6 @@ def test_atomic_graphiti_allocation_refuses_duplicate_and_call_shape_drift(
             allocation,
             identity=identity,
             max_distinct_internal_requests=shape.max_distinct_internal_requests,
-            owner_emergency_stop=False,
         )
 
     drift, drift_identity = _bound_request(
@@ -415,7 +411,6 @@ def test_atomic_graphiti_allocation_refuses_duplicate_and_call_shape_drift(
             drift,
             identity=drift_identity,
             max_distinct_internal_requests=shape.max_distinct_internal_requests,
-            owner_emergency_stop=False,
         )
     assert drift_error.value.reason_code == "CALL_SHAPE_DRIFT"
 
@@ -448,6 +443,7 @@ def test_chat_transport_observes_committed_identity_and_receipts_requested_max_t
         service=service,
         envelope=envelope,
         clock=lambda: T0 + timedelta(seconds=10),
+        owner_stop_check=lambda: None,
         effective_revision_digest=digest_canonical({"effective_revision": "r1"}),
         ingest_obligation_id="ingest-wrapper",
         provider_attempt_number=1,
@@ -539,6 +535,7 @@ def test_embedding_transport_observes_separate_preallocated_leaf_and_od011_recei
         service=service,
         envelope=envelope,
         clock=lambda: T0 + timedelta(seconds=20),
+        owner_stop_check=lambda: None,
         effective_revision_digest=digest_canonical({"effective_revision": "r2"}),
         ingest_obligation_id="ingest-embedding",
         provider_attempt_number=1,
@@ -597,6 +594,7 @@ def test_requested_max_tokens_is_forwarded_and_enforced_on_reported_usage(
         service=service,
         envelope=envelope,
         clock=lambda: T0 + timedelta(seconds=10),
+        owner_stop_check=lambda: None,
         deadline=T0 + timedelta(minutes=3),
     )
     captured_prompt = ""
@@ -655,6 +653,7 @@ def test_cancellation_retains_uncertain_leaf_before_control_returns(
         service=service,
         envelope=envelope,
         clock=lambda: T0 + timedelta(seconds=10),
+        owner_stop_check=lambda: None,
         deadline=T0 + timedelta(minutes=3),
     )
     invocations: list[dict[str, object]] = []
@@ -715,6 +714,7 @@ def test_typed_fallback_has_a_distinct_identity_and_exact_parent(
         service=service,
         envelope=envelope,
         clock=lambda: T0 + timedelta(seconds=30),
+        owner_stop_check=lambda: None,
     )
     invocations: list[dict[str, object]] = []
 
@@ -777,6 +777,7 @@ def test_deadline_owner_stop_and_max_tokens_refuse_before_transport(
         service=service,
         envelope=envelope,
         clock=lambda: T0 + timedelta(minutes=4),
+        owner_stop_check=lambda: None,
         deadline=T0 + timedelta(minutes=3),
     )
     with pytest.raises(ValueError, match="deadline has expired"):
@@ -794,13 +795,13 @@ def test_deadline_owner_stop_and_max_tokens_refuse_before_transport(
     def prove_owner_stop() -> None:
         nonlocal owner_stop_checks
         owner_stop_checks += 1
+        raise ModelUsageAdmissionError("owner emergency stop is active")
 
     stopped = GraphitiModelUsageObserver(
         service=service,
         envelope=envelope,
         clock=lambda: T0 + timedelta(seconds=1),
         deadline=T0 + timedelta(minutes=3),
-        owner_emergency_stop=lambda: True,
         owner_stop_check=prove_owner_stop,
     )
     with pytest.raises(ModelUsageAdmissionError, match="emergency stop"):
@@ -818,6 +819,7 @@ def test_deadline_owner_stop_and_max_tokens_refuse_before_transport(
         service=service,
         envelope=envelope,
         clock=lambda: T0 + timedelta(seconds=2),
+        owner_stop_check=lambda: None,
         deadline=T0 + timedelta(minutes=3),
     )
     with pytest.raises(ModelUsageAdmissionError, match="differs from invocation policy"):
@@ -862,7 +864,6 @@ def test_restart_distinguishes_pre_dispatch_zero_from_possible_io_uncertainty(
         pre_allocation,
         identity=pre_identity,
         max_distinct_internal_requests=shape.max_distinct_internal_requests,
-        owner_emergency_stop=False,
     )
 
     restarted_pre = ModelUsageService(pre_service.path)
@@ -889,7 +890,6 @@ def test_restart_distinguishes_pre_dispatch_zero_from_possible_io_uncertainty(
         io_allocation,
         identity=io_identity,
         max_distinct_internal_requests=io_shape.max_distinct_internal_requests,
-        owner_emergency_stop=False,
     )
     io_service.observe_transport(
         invocation_id=io_allocation.invocation_id,
@@ -923,7 +923,6 @@ def test_graphiti_attempt_cannot_complete_before_every_leaf_has_a_terminal(
         allocation,
         identity=identity,
         max_distinct_internal_requests=shape.max_distinct_internal_requests,
-        owner_emergency_stop=False,
     )
 
     with pytest.raises(ModelUsageIntegrityError, match="terminal receipt"):
