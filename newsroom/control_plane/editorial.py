@@ -6,9 +6,11 @@ These records are the private-beta composition, not Increment 6 closeout.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.control_plane.governed_context import GovernedContext
 from newsroom.control_plane.items import SourceItem
 
 
@@ -44,6 +46,7 @@ class EventHypothesisRecord:
     event_key: str
     lead_ids: tuple[str, ...]
     source_ids: tuple[str, ...]
+    governed_context: GovernedContext | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +57,7 @@ class StoryCandidateRecord:
     items: tuple[SourceItem, ...]
     signals: tuple[DiscoverySignalRecord, ...]
     leads: tuple[NewsLeadRecord, ...]
+    governed_context: GovernedContext | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,12 +70,32 @@ class GroupedObservation:
 
 def form_candidates(
     observations: tuple[GroupedObservation, ...],
+    *,
+    governed_context: GovernedContext | None = None,
+    governed_context_builder: Callable[
+        [tuple[GroupedObservation, ...]], GovernedContext
+    ]
+    | None = None,
 ) -> tuple[StoryCandidateRecord, ...]:
+    if governed_context is not None and governed_context_builder is not None:
+        raise ValueError("governed context and builder are mutually exclusive")
     buckets: dict[str, list[GroupedObservation]] = {}
     for row in observations:
         buckets.setdefault(event_key(row.item), []).append(row)
     candidates: list[StoryCandidateRecord] = []
     for key, rows in buckets.items():
+        canonical_rows = tuple(rows)
+        candidate_context = (
+            governed_context_builder(canonical_rows)
+            if governed_context_builder is not None
+            else (
+                None
+                if governed_context is None
+                else governed_context.scoped_to(
+                    frozenset((row.source_id, row.item.item_key) for row in rows)
+                )
+            )
+        )
         signals: list[DiscoverySignalRecord] = []
         leads: list[NewsLeadRecord] = []
         items: list[SourceItem] = []
@@ -80,7 +104,10 @@ def form_candidates(
             items.append(row.item)
             sources.append(row.source_id)
             signal = DiscoverySignalRecord(
-                signal_id=_id("discovery_signal", f"{row.source_id}:{row.item.item_key}:{row.observation_digest}"),
+                signal_id=_id(
+                    "discovery_signal",
+                    f"{row.source_id}:{row.item.item_key}:{row.observation_digest}",
+                ),
                 source_id=row.source_id,
                 item_key=row.item.item_key,
                 observation_digest=row.observation_digest,
@@ -98,6 +125,7 @@ def form_candidates(
             event_key=key,
             lead_ids=tuple(lead.lead_id for lead in leads),
             source_ids=tuple(sorted(set(sources))),
+            governed_context=candidate_context,
         )
         candidates.append(
             StoryCandidateRecord(
@@ -107,6 +135,7 @@ def form_candidates(
                 items=tuple(items),
                 signals=tuple(signals),
                 leads=tuple(leads),
+                governed_context=hypothesis.governed_context,
             )
         )
     return tuple(sorted(candidates, key=lambda item: item.candidate_id))
