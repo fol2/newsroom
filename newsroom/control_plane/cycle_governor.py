@@ -33,7 +33,7 @@ CycleOutcomeClass = Literal[
 class EvaluationCyclePolicy:
     """Versioned, checked-in EVALUATION cooldown and circuit policy."""
 
-    version: str = "newsroom.evaluation-cycle.v1"
+    policy_name: str = "newsroom.evaluation-cycle.v1"
     normal_cooldown_seconds: int = _MIN_NORMAL_COOLDOWN_SECONDS
     unproductive_cooldown_seconds: int = _MIN_UNPRODUCTIVE_COOLDOWN_SECONDS
     health_probe_interval_seconds: int = _MIN_HEALTH_PROBE_INTERVAL_SECONDS
@@ -58,8 +58,18 @@ class EvaluationCyclePolicy:
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
                 raise ValueError(f"{label} must be at least {minimum} seconds")
-        if not self.version.strip():
-            raise ValueError("cycle policy version is required")
+        if not self.policy_name.strip():
+            raise ValueError("cycle policy name is required")
+
+    @property
+    def version(self) -> str:
+        values = {
+            "policy_name": self.policy_name,
+            "normal_cooldown_seconds": self.normal_cooldown_seconds,
+            "unproductive_cooldown_seconds": self.unproductive_cooldown_seconds,
+            "health_probe_interval_seconds": self.health_probe_interval_seconds,
+        }
+        return f"{self.policy_name}@{digest_bytes(canonical_json_bytes(values))}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +82,6 @@ class CycleOutcomeInput:
     admission_hold: int | None = 0
     admission_reject: int | None = 0
     systemic_provider_failure_reason: str = ""
-    dispatch_suppressed_reason: str = ""
 
     def __post_init__(self) -> None:
         for name in (
@@ -95,10 +104,6 @@ class CycleOutcomeInput:
             raise ValueError("accepted payloads require a retained provider dispatch")
         if self.systemic_provider_failure_reason and self.provider_dispatches == 0:
             raise ValueError("a systemic provider failure requires a provider dispatch")
-        if self.dispatch_suppressed_reason not in {"", "ZERO_WRITE_QUOTA"}:
-            raise ValueError("unknown writer dispatch suppression reason")
-        if self.dispatch_suppressed_reason and self.provider_dispatches != 0:
-            raise ValueError("dispatch suppression requires zero provider dispatches")
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +134,6 @@ class CycleTerminalResult:
     admission_counts: dict[str, int | None]
     accepted_payload_count: int | None
     writer_provider_dispatch_count: int | None
-    writer_dispatch_suppressed_reason: str
     work_started_at: str
     terminal_at: str
     elapsed_seconds: float
@@ -184,6 +188,16 @@ class OperatorResetRequest:
     requested_at: str
 
 
+@dataclass(frozen=True, slots=True)
+class WriterRouteHealthProof:
+    executable_ok: bool
+    authentication_ok: bool
+    configuration_ok: bool
+    provider_available: bool
+    provider_dispatched: bool
+    provider_receipt_reference: str | None
+
+
 class CycleNotEligible(RuntimeError):
     def __init__(
         self,
@@ -216,6 +230,7 @@ class CycleLeaseConflict(CycleNotEligible):
 
 
 OperatorResetVerifier = Callable[[OperatorResetRequest], bool]
+WriterRouteHealthProbe = Callable[[], WriterRouteHealthProof]
 
 
 _SCHEMA = """
@@ -258,7 +273,6 @@ CREATE TABLE IF NOT EXISTS unpublished_governed_cycles(
     admission_reject INTEGER,
     accepted_payload_count INTEGER,
     provider_dispatches INTEGER,
-    writer_dispatch_suppressed_reason TEXT NOT NULL DEFAULT '',
     cooldown_policy_version TEXT NOT NULL,
     cooldown_seconds INTEGER,
     cooldown_started_at TEXT,
@@ -310,7 +324,6 @@ def ensure_cycle_governor_schema(connection: sqlite3.Connection) -> None:
         ("refused_early_start_reason_before", "TEXT NOT NULL DEFAULT ''"),
         ("refused_early_start_count", "INTEGER"),
         ("refused_early_start_reason", "TEXT"),
-        ("writer_dispatch_suppressed_reason", "TEXT NOT NULL DEFAULT ''"),
     ):
         if column not in cycle_columns:
             connection.execute(
@@ -357,6 +370,7 @@ class DurableCycleGovernor:
         monotonic_clock: Callable[[], float] = time.monotonic,
         lease_seconds: int = 21_600,
         operator_reset_verifier: OperatorResetVerifier | None = None,
+        writer_route_health_probe: WriterRouteHealthProbe | None = None,
     ) -> None:
         if (
             isinstance(lease_seconds, bool)
@@ -370,6 +384,7 @@ class DurableCycleGovernor:
         self._monotonic_clock = monotonic_clock
         self._lease_seconds = lease_seconds
         self._operator_reset_verifier = operator_reset_verifier
+        self._writer_route_health_probe = writer_route_health_probe
         connection = connect(self._path)
         try:
             ensure_cycle_governor_schema(connection)
@@ -635,6 +650,24 @@ class DurableCycleGovernor:
                     remaining_seconds=math.inf,
                     next_cycle_eligible_at=lease.lease_expires_at,
                 )
+            retained = connection.execute(
+                "SELECT owner_digest, lease_state, lease_expires_at "
+                "FROM unpublished_governed_cycles WHERE cycle_id=?",
+                (lease.cycle_id,),
+            ).fetchone()
+            if retained is None or retained[:2] != (lease.owner_digest, "ACTIVE"):
+                raise CycleLeaseConflict(
+                    lease.cycle_id,
+                    remaining_seconds=0.0,
+                    lease_expires_at=lease.lease_expires_at,
+                )
+            retained_expiry = _parse_utc(str(retained[2]))
+            if now >= retained_expiry:
+                raise CycleNotEligible(
+                    "STALE_LEASE_EXPIRED",
+                    remaining_seconds=0.0,
+                    next_cycle_eligible_at=str(retained[2]),
+                )
             changed = connection.execute(
                 "UPDATE unpublished_governed_cycles SET lease_expires_at=? "
                 "WHERE cycle_id=? AND owner_digest=? AND lease_state='ACTIVE'",
@@ -692,8 +725,6 @@ class DurableCycleGovernor:
             return "IDLE_QUALIFIED_ZERO", ""
         if lease.writer_circuit_state == "OPEN":
             return "SYSTEMIC_PROVIDER_FAILURE", lease.writer_circuit_open_reason
-        if outcome.dispatch_suppressed_reason == "ZERO_WRITE_QUOTA":
-            return "IDLE_QUALIFIED_ZERO", ""
         raise ValueError(
             "WRITE_READY work with no payload and no provider dispatch is inconsistent"
         )
@@ -772,7 +803,6 @@ class DurableCycleGovernor:
                 "terminal_at=?, elapsed_seconds=?, terminal_state=?, outcome_class=?, "
                 "write_ready=?, admission_hold=?, admission_reject=?, "
                 "accepted_payload_count=?, provider_dispatches=?, cooldown_seconds=?, "
-                "writer_dispatch_suppressed_reason=?, "
                 "cooldown_started_at=?, next_cycle_eligible_at=?, "
                 "writer_unproductive_streak_after=?, writer_circuit_state=?, "
                 "writer_circuit_open_reason=?, writer_circuit_release_evidence_json=?, "
@@ -789,7 +819,6 @@ class DurableCycleGovernor:
                     outcome.accepted_payload_count,
                     outcome.provider_dispatches,
                     cooldown,
-                    outcome.dispatch_suppressed_reason,
                     cooldown_started_at,
                     next_text,
                     after,
@@ -833,9 +862,6 @@ class DurableCycleGovernor:
                 },
                 "accepted_payload_count": outcome.accepted_payload_count,
                 "writer_provider_dispatch_count": outcome.provider_dispatches,
-                "writer_dispatch_suppressed_reason": (
-                    outcome.dispatch_suppressed_reason
-                ),
                 "cooldown_policy_version": self._policy.version,
                 "cooldown_seconds": cooldown,
                 "cooldown_started_at": cooldown_started_at,
@@ -875,7 +901,6 @@ class DurableCycleGovernor:
             },
             accepted_payload_count=outcome.accepted_payload_count,
             writer_provider_dispatch_count=outcome.provider_dispatches,
-            writer_dispatch_suppressed_reason=outcome.dispatch_suppressed_reason,
             work_started_at=lease.work_started_at,
             terminal_at=now_text,
             elapsed_seconds=elapsed,
@@ -992,17 +1017,9 @@ class DurableCycleGovernor:
         self,
         *,
         bound_failure_reason: str,
-        executable_ok: bool,
-        authentication_ok: bool,
-        configuration_ok: bool,
-        provider_available: bool,
-        provider_dispatched: bool,
-        provider_receipt_reference: str | None,
     ) -> CircuitReleaseEvidence:
-        if provider_dispatched and not provider_receipt_reference:
-            raise ValueError(
-                "provider-reaching health probe requires a receipt reference"
-            )
+        if self._writer_route_health_probe is None:
+            raise ValueError("CONT writer route health probe is not configured")
         now, now_text = self._now()
         connection = connect(self._path)
         try:
@@ -1044,12 +1061,29 @@ class DurableCycleGovernor:
                     remaining_seconds=_remaining_seconds(now, earliest),
                     next_cycle_eligible_at=_utc_text(earliest),
                 )
-            passed = all(
+            probe_exception_class = ""
+            try:
+                proof = self._writer_route_health_probe()
+            except (OSError, RuntimeError, ValueError) as exc:
+                probe_exception_class = type(exc).__name__
+                proof = WriterRouteHealthProof(
+                    executable_ok=False,
+                    authentication_ok=False,
+                    configuration_ok=False,
+                    provider_available=False,
+                    provider_dispatched=False,
+                    provider_receipt_reference=None,
+                )
+            provider_receipt_complete = (
+                not proof.provider_dispatched
+                or proof.provider_receipt_reference is not None
+            )
+            passed = provider_receipt_complete and all(
                 (
-                    executable_ok,
-                    authentication_ok,
-                    configuration_ok,
-                    provider_available,
+                    proof.executable_ok,
+                    proof.authentication_ok,
+                    proof.configuration_ok,
+                    proof.provider_available,
                 )
             )
             evidence: dict[str, object] = {
@@ -1058,12 +1092,14 @@ class DurableCycleGovernor:
                 "attempted_at": now_text,
                 "outcome": "PASSED" if passed else "FAILED",
                 "no_content_probe": True,
-                "executable_ok": executable_ok,
-                "authentication_ok": authentication_ok,
-                "configuration_ok": configuration_ok,
-                "provider_available": provider_available,
-                "provider_dispatched": provider_dispatched,
-                "provider_receipt_reference": provider_receipt_reference,
+                "executable_ok": proof.executable_ok,
+                "authentication_ok": proof.authentication_ok,
+                "configuration_ok": proof.configuration_ok,
+                "provider_available": proof.provider_available,
+                "provider_dispatched": proof.provider_dispatched,
+                "provider_receipt_reference": proof.provider_receipt_reference,
+                "provider_receipt_complete": provider_receipt_complete,
+                "probe_exception_class": probe_exception_class,
             }
             evidence_digest = digest_bytes(canonical_json_bytes(evidence))
             probe_id = digest_bytes(
@@ -1086,8 +1122,8 @@ class DurableCycleGovernor:
                     bound_failure_reason,
                     now_text,
                     "PASSED" if passed else "FAILED",
-                    int(provider_dispatched),
-                    provider_receipt_reference,
+                    int(proof.provider_dispatched),
+                    proof.provider_receipt_reference,
                     canonical_json_bytes(evidence).decode(),
                     evidence_digest,
                 ),
@@ -1186,8 +1222,7 @@ class DurableCycleGovernor:
                 "SELECT cycle_id, owner_digest, lease_state, terminal_state, outcome_class, "
                 "work_started_at, terminal_at, elapsed_seconds, write_ready, "
                 "admission_hold, admission_reject, accepted_payload_count, "
-                "provider_dispatches, writer_dispatch_suppressed_reason, "
-                "cooldown_policy_version, cooldown_seconds, "
+                "provider_dispatches, cooldown_policy_version, cooldown_seconds, "
                 "cooldown_started_at, next_cycle_eligible_at, "
                 "writer_unproductive_streak_before, writer_unproductive_streak_after, "
                 "writer_circuit_state, writer_circuit_open_reason, "
@@ -1213,7 +1248,6 @@ class DurableCycleGovernor:
             "admission_reject",
             "accepted_payload_count",
             "writer_provider_dispatch_count",
-            "writer_dispatch_suppressed_reason",
             "cooldown_policy_version",
             "cooldown_seconds",
             "cooldown_started_at",

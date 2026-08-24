@@ -9,6 +9,7 @@ from newsroom.control_plane.cycle_governor import (
     DurableCycleGovernor,
     EvaluationCyclePolicy,
     OperatorResetRequest,
+    WriterRouteHealthProof,
 )
 from newsroom.control_plane.graphiti_admission import (
     GraphitiAdmissionConsumer,
@@ -40,6 +41,7 @@ __all__ = [
     "UnpublishedDraft",
     "UnpublishedSurfacePayload",
     "VetoError",
+    "WriterRouteHealthProof",
     "list_drafts",
     "list_payloads",
     "refuse_public_effect",

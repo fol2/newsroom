@@ -20,6 +20,7 @@ from newsroom.control_plane.cycle_governor import (
     CycleTerminalResult,
     DurableCycleGovernor,
     EvaluationCyclePolicy,
+    WriterRouteHealthProof,
 )
 from newsroom.control_plane.graphiti_events import GraphitiEventQueue
 from newsroom.control_plane.intake import IntakeReport, run_intake
@@ -31,7 +32,7 @@ from newsroom.control_plane.paths import (
 from newsroom.control_plane.store import list_payloads
 from newsroom.control_plane.usage import graphiti_usage_report
 from newsroom.control_plane.veto import VetoError
-from newsroom.control_plane.writer import default_writer
+from newsroom.control_plane.writer import default_writer, probe_grok_writer_route
 
 DEFAULT_PROVING = str(CANONICAL_PROVING_STORE)
 DEFAULT_UNPUBLISHED = str(CANONICAL_UNPUBLISHED_STORE)
@@ -73,6 +74,30 @@ def _resolve_cooldown(*, cooldown: int | None, interval: int | None) -> int:
     if value < 300:
         raise ValueError("EVALUATION post-cycle cooldown must be at least 300 seconds")
     return value
+
+
+def _validate_max_writes(max_writes: int) -> None:
+    if not 1 <= max_writes <= 5:
+        raise ValueError("--max-writes must be between 1 and 5 inclusive")
+
+
+def _evaluation_policy(cooldown_seconds: int) -> EvaluationCyclePolicy:
+    return EvaluationCyclePolicy(
+        normal_cooldown_seconds=cooldown_seconds,
+        unproductive_cooldown_seconds=max(900, cooldown_seconds),
+    )
+
+
+def _probe_cont_writer_route() -> WriterRouteHealthProof:
+    proof = probe_grok_writer_route()
+    return WriterRouteHealthProof(
+        executable_ok=proof.executable_ok,
+        authentication_ok=proof.authentication_ok,
+        configuration_ok=proof.configuration_ok,
+        provider_available=proof.provider_available,
+        provider_dispatched=proof.provider_dispatched,
+        provider_receipt_reference=proof.provider_receipt_reference,
+    )
 
 
 def _report_body(report: CycleReport) -> dict[str, object]:
@@ -132,10 +157,8 @@ def _governed_unit(
     *,
     cooldown_seconds: int,
 ) -> tuple[IntakeReport, CycleReport, CycleTerminalResult]:
-    policy = EvaluationCyclePolicy(
-        normal_cooldown_seconds=cooldown_seconds,
-        unproductive_cooldown_seconds=max(900, cooldown_seconds),
-    )
+    _validate_max_writes(args.max_writes)
+    policy = _evaluation_policy(cooldown_seconds)
     governor = DurableCycleGovernor(args.unpublished, policy=policy)
     lease = governor.claim(owner_id=f"hermes-cycle:{uuid.uuid4()}")
 
@@ -162,11 +185,6 @@ def _governed_unit(
                 systemic_provider_failure_reason=(
                     report.writer_circuit_open_reason
                     if report.writer_circuit_open
-                    else ""
-                ),
-                dispatch_suppressed_reason=(
-                    "ZERO_WRITE_QUOTA"
-                    if args.max_writes == 0 and report.provider_dispatches == 0
                     else ""
                 ),
             ),
@@ -224,7 +242,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
-        "command", choices=("cycle", "status", "serve", "intake", "usage")
+        "command",
+        choices=(
+            "cycle",
+            "status",
+            "serve",
+            "intake",
+            "usage",
+            "writer-health-probe",
+        ),
     )
     parser.add_argument("--proving", default=DEFAULT_PROVING)
     parser.add_argument("--unpublished", default=DEFAULT_UNPUBLISHED)
@@ -258,6 +284,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     except ValueError as exc:
         parser.error(str(exc))
+    try:
+        _validate_max_writes(args.max_writes)
+    except ValueError as exc:
+        parser.error(str(exc))
     ensure_control_plane_state_root()
     if args.command == "usage":
         sys.stdout.write(
@@ -272,10 +302,72 @@ def main(argv: list[str] | None = None) -> int:
             + "\n"
         )
         return 0
+    if args.command == "writer-health-probe":
+        governor = DurableCycleGovernor(
+            args.unpublished,
+            policy=_evaluation_policy(cooldown_seconds),
+            writer_route_health_probe=_probe_cont_writer_route,
+        )
+        health = governor.status()
+        if health.writer_circuit_state != "OPEN":
+            sys.stdout.write(
+                json.dumps(
+                    {
+                        "event": "CONT_WRITER_HEALTH_PROBE_NOT_REQUIRED",
+                        "writer_circuit_state": health.writer_circuit_state,
+                        "provider_dispatched": False,
+                    }
+                )
+                + "\n"
+            )
+            return 0
+        try:
+            release = governor.release_with_health_probe(
+                bound_failure_reason=health.writer_circuit_open_reason,
+            )
+        except CycleNotEligible as exc:
+            sys.stdout.write(
+                json.dumps(
+                    {
+                        "event": "CONT_WRITER_HEALTH_PROBE_REFUSED",
+                        "reason": exc.reason,
+                        "remaining_seconds": _reported_wait(exc.remaining_seconds),
+                        "next_probe_eligible_at": exc.next_cycle_eligible_at,
+                    }
+                )
+                + "\n"
+            )
+            return 3
+        except ValueError as exc:
+            sys.stdout.write(
+                json.dumps(
+                    {
+                        "event": "CONT_WRITER_HEALTH_PROBE_FAILED",
+                        "failure_class": type(exc).__name__,
+                        "writer_circuit_state": "OPEN",
+                    }
+                )
+                + "\n"
+            )
+            return 2
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "event": "CONT_WRITER_HEALTH_PROBE_PASSED",
+                    "release": asdict(release),
+                    "writer_circuit_state": "CLOSED",
+                }
+            )
+            + "\n"
+        )
+        return 0
     if args.command == "status":
         payloads = list_payloads(args.unpublished)
         graphiti_events = GraphitiEventQueue(args.unpublished).health()
-        cycle_governor = DurableCycleGovernor(args.unpublished).status()
+        cycle_governor = DurableCycleGovernor(
+            args.unpublished,
+            policy=_evaluation_policy(cooldown_seconds),
+        ).status()
         body = {
             "count": len(payloads),
             "public_dispatch": False,
