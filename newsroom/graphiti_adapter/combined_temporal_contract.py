@@ -10,6 +10,9 @@ from newsroom.graphiti_adapter.combined_temporal_evidence import (
     EvidenceSegment,
     segment_source,
 )
+from newsroom.graphiti_adapter.deterministic_sidecar import (
+    SEMANTIC_SIDECAR_EXCLUSION_INSTRUCTION,
+)
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_EXTRACTION_INSTRUCTIONS,
     GRAPHITI_WORKSPACE_GROUP,
@@ -167,7 +170,7 @@ def build_compact_prompt(revision: SourceRevisionInput) -> CompactPrompt:
         "Put valid_at and invalid_at on each fact. Resolve relative dates against REFERENCE_TIME to ISO-8601 UTC, or null.",
         "Cite evidence with the integer segment IDs below. Do not invent byte offsets.",
         "A valid empty object is terminal success.",
-        "Exclude source-registry identifiers and deterministic corpus metadata (SourceItem, SourceRevision, DERIVED_FROM, OBSERVED_IN).",
+        SEMANTIC_SIDECAR_EXCLUSION_INSTRUCTION,
         GRAPHITI_EXTRACTION_INSTRUCTIONS,
         f"REFERENCE_TIME: {revision.reference_time}",
         f"TEMPORAL_BASIS: {revision.temporal_basis}",
