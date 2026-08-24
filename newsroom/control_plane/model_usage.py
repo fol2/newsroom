@@ -2644,6 +2644,7 @@ class ModelUsageService:
         envelopes = self.query(start=start, end=end)["envelopes"]
         assert isinstance(envelopes, list)
         fields = (
+            "schema_version",
             "envelope_id",
             "cycle_id",
             "workload_class",

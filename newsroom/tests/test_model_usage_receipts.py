@@ -1530,6 +1530,7 @@ def test_hermes_usage_command_exports_allocation_free_envelope_outcome(
     assert hermes.main([*common, "--usage-format", "envelope-csv"]) == 0
     rows = list(csv.DictReader(io.StringIO(capsys.readouterr().out)))
     assert len(rows) == 1
+    assert rows[0]["schema_version"] == "newsroom.model-usage.v1"
     assert rows[0]["envelope_id"] == envelope.envelope_id
     assert rows[0]["outcome"] == "HOLD"
     assert rows[0]["work_outcome_terminal_at"] == "2026-08-24T10:00:01.000000Z"
