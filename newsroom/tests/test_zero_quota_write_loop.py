@@ -3627,6 +3627,7 @@ def test_owner_emergency_stop_is_rechecked_at_writer_dispatch(
 ) -> None:
     proving = _proving(tmp_path)
     unpublished = tmp_path / "owner-stop-before-dispatch.sqlite3"
+    usage = ModelUsageService(str(unpublished))
     fence_calls = 0
 
     def activate_owner_stop() -> None:
@@ -3649,12 +3650,23 @@ def test_owner_emergency_stop_is_rechecked_at_writer_dispatch(
             evidence_package_builder=_qualified_builder(frozenset({"HK-01"})),
             clock=_CLOCK,
             writer_dispatch_fence=activate_owner_stop,
+            model_usage=usage,
         )
 
     connection = sqlite3.connect(unpublished)
     assert fence_calls == 1
     assert connection.execute(
         "SELECT COUNT(*) FROM unpublished_writer_provider_attempts"
+    ).fetchone() == (0,)
+    assert connection.execute(
+        "SELECT outcome,reason_codes_json FROM unpublished_draft_outcomes"
+    ).fetchone() == ("HOLD", '["OWNER_EMERGENCY_STOP"]')
+    assert connection.execute(
+        "SELECT outcome,json_extract(record_json,'$.stable_reason_codes') "
+        "FROM model_work_outcomes"
+    ).fetchone() == ("HOLD", '["OWNER_EMERGENCY_STOP"]')
+    assert connection.execute(
+        "SELECT COUNT(*) FROM model_invocation_allocations"
     ).fetchone() == (0,)
     connection.close()
 
@@ -3667,7 +3679,23 @@ def test_owner_emergency_stop_after_reservation_vetoes_writer_provider_call(
 
     proving = _proving(tmp_path)
     unpublished = tmp_path / "owner-stop-after-reservation.sqlite3"
-    writer = RecordingFixtureWriter()
+    usage = ModelUsageService(str(unpublished))
+    _register_cont_usage_policy(
+        usage,
+        workload_class=WorkloadClass.CONT_WRITER_PRIMARY,
+        provider=CONT_PRIMARY_PROVIDER,
+        route=CONT_PRIMARY_ROUTE,
+        model=CONT_PRIMARY_MODEL,
+        reasoning=CONT_PRIMARY_REASONING,
+    )
+    provider_calls = 0
+
+    def primary(_prompt: str) -> str:
+        nonlocal provider_calls
+        provider_calls += 1
+        return json.dumps({"title": "must not dispatch", "body": "must not dispatch"})
+
+    writer = CliChainWriter(primary=primary, fallback=primary)
     reserve = cycle.reserve_writer_provider_attempt
 
     def reserve_then_stop(*args: object, **kwargs: object) -> str:
@@ -3691,13 +3719,28 @@ def test_owner_emergency_stop_after_reservation_vetoes_writer_provider_call(
             writer=writer,
             evidence_package_builder=_qualified_builder(frozenset({"HK-01"})),
             clock=_CLOCK,
+            model_usage=usage,
         )
 
-    assert writer.calls == []
+    assert provider_calls == 0
     connection = sqlite3.connect(unpublished)
     assert connection.execute(
         "SELECT status,reason_code FROM unpublished_writer_provider_attempts"
     ).fetchone() == ("FAILED", "OWNER_EMERGENCY_STOP")
+    assert connection.execute(
+        "SELECT outcome,reason_codes_json FROM unpublished_draft_outcomes"
+    ).fetchone() == ("HOLD", '["OWNER_EMERGENCY_STOP"]')
+    assert connection.execute(
+        "SELECT outcome,json_extract(record_json,'$.stable_reason_codes') "
+        "FROM model_work_outcomes"
+    ).fetchone() == ("HOLD", '["OWNER_EMERGENCY_STOP"]')
+    assert connection.execute(
+        "SELECT outcome,failure_class,usage_status FROM model_invocation_terminals"
+    ).fetchone() == (
+        "VETOED_BEFORE_PROVIDER_DISPATCH",
+        "OWNER_EMERGENCY_STOP",
+        "REPORTED",
+    )
     connection.close()
 
 

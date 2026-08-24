@@ -2138,7 +2138,20 @@ def _run_write_loop(
                     last_reason = "PROVIDER_BUDGET_EXHAUSTED"
                     break
             if writer_dispatch_fence is not None:
-                writer_dispatch_fence()
+                try:
+                    writer_dispatch_fence()
+                except VetoError:
+                    outcome(
+                        decision=decision,
+                        candidate_attempt_id=candidate_attempt_id,
+                        provider_attempt_ids=tuple(provider_attempt_ids),
+                        result="HOLD",
+                        validators=validators,
+                        reasons=("OWNER_EMERGENCY_STOP",),
+                        usage_envelope_id=usage_envelope_id,
+                    )
+                    unpublished.commit()
+                    raise
             usage_allocation: InvocationAllocation | None = None
             usage_policy: InvocationEfficiencyPolicy | None = None
             usage_dispatch_at: datetime | None = None
@@ -2309,6 +2322,15 @@ def _run_write_loop(
                     provider_attempt_id=provider_attempt_id,
                     status="FAILED",
                     reason_code="OWNER_EMERGENCY_STOP",
+                )
+                outcome(
+                    decision=decision,
+                    candidate_attempt_id=candidate_attempt_id,
+                    provider_attempt_ids=tuple(provider_attempt_ids),
+                    result="HOLD",
+                    validators=validators,
+                    reasons=("OWNER_EMERGENCY_STOP",),
+                    usage_envelope_id=usage_envelope_id,
                 )
                 unpublished.commit()
                 raise
