@@ -3669,6 +3669,16 @@ def test_owner_emergency_stop_is_rechecked_at_writer_dispatch(
         "SELECT COUNT(*) FROM model_invocation_allocations"
     ).fetchone() == (0,)
     connection.close()
+    query = usage.query(
+        start=datetime(2026, 8, 19, tzinfo=UTC),
+        end=datetime(2026, 8, 21, tzinfo=UTC),
+    )
+    assert query["leaves"] == []
+    assert len(query["envelopes"]) == 1
+    assert query["envelopes"][0]["outcome"] == "HOLD"  # type: ignore[index]
+    assert query["envelopes"][0]["stable_reason_codes"] == [  # type: ignore[index]
+        "OWNER_EMERGENCY_STOP"
+    ]
 
 
 def test_owner_emergency_stop_after_reservation_vetoes_writer_provider_call(

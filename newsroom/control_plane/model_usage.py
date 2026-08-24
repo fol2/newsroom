@@ -1907,6 +1907,22 @@ class ModelUsageService:
                     _utc_text(end),
                 ),
             ).fetchall()
+            outcome_rows = connection.execute(
+                "SELECT o.record_json,e.record_json "
+                "FROM model_work_outcomes o "
+                "JOIN model_work_envelopes e ON e.envelope_id=o.envelope_id "
+                "WHERE o.terminal_at<? AND ("
+                "(e.admitted_at>=? AND e.admitted_at<?) OR "
+                "(o.terminal_at>=? AND o.terminal_at<?)) "
+                "ORDER BY o.terminal_at,o.envelope_id",
+                (
+                    _utc_text(end),
+                    _utc_text(start),
+                    _utc_text(end),
+                    _utc_text(start),
+                    _utc_text(end),
+                ),
+            ).fetchall()
             reconciliations = {
                 str(row[0]): _object(row[1])
                 for row in connection.execute(
@@ -1974,13 +1990,21 @@ class ModelUsageService:
             }
         finally:
             connection.close()
-        outcomes = {}
+        outcomes: dict[str, dict[str, object]] = {}
         envelopes = []
         envelope_ids: set[str] = set()
         for row in envelope_rows:
             record = _object(row[0])
             envelopes.append(record)
             envelope_ids.add(str(record["envelope_id"]))
+        for outcome_json, envelope_json in outcome_rows:
+            outcome = _object(outcome_json)
+            envelope = _object(envelope_json)
+            envelope_id = str(envelope["envelope_id"])
+            outcomes[envelope_id] = outcome
+            if envelope_id not in envelope_ids:
+                envelopes.append(envelope)
+                envelope_ids.add(envelope_id)
         leaves: list[dict[str, object]] = []
         for allocation_json, terminal_json, outcome_json, envelope_json in leaf_rows:
             allocation = _object(allocation_json)
