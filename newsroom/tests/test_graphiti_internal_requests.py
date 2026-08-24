@@ -991,8 +991,18 @@ def test_reported_output_uses_exact_provider_tokens_not_byte_ceiling() -> None:
     assert invocations[0]["outcome"] == "COMPLETE"
 
 
-def test_cli_capability_refusal_remains_proved_pre_dispatch_zero(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("failure", "expected_outcome"),
+    [
+        (
+            CliPredispatchRefusal("unsupported max token control"),
+            "PREDISPATCH_REFUSED",
+        ),
+        (OSError("hermetic workspace unavailable"), "FAILED"),
+    ],
+)
+def test_cli_setup_failure_remains_proved_pre_dispatch_zero(
+    tmp_path: Path, failure: Exception, expected_outcome: str
 ) -> None:
     service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
     envelope = WorkEnvelope.create(
@@ -1021,7 +1031,7 @@ def test_cli_capability_refusal_remains_proved_pre_dispatch_zero(
         dispatch_started: object = None,
     ) -> CliExecution:
         del max_tokens, dispatch_started
-        raise CliPredispatchRefusal("unsupported max token control")
+        raise failure
 
     result = asyncio.run(
         run_cli_chain(
@@ -1053,7 +1063,7 @@ def test_cli_capability_refusal_remains_proved_pre_dispatch_zero(
         for leaf in leaves
         if leaf["workload_class"] == "GRAPHITI_CHAT_PRIMARY"
     )
-    assert primary["invocation_outcome"] == "PREDISPATCH_REFUSED"
+    assert primary["invocation_outcome"] == expected_outcome
     assert primary["transport_dispatch_observed"] is False
     assert primary["pre_dispatch_zero_proved"] is True
     assert primary["total_tokens"] == 0
