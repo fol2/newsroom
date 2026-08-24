@@ -101,6 +101,17 @@ class GovernedRealGraphitiPort(GraphitiPort, Protocol):
         self, unit: CorpusIngestUnit, *, deadline: datetime
     ) -> GraphitiCycleResult: ...
 
+    def ingest_with_usage(
+        self,
+        unit: CorpusIngestUnit,
+        *,
+        model_usage: ModelUsageService,
+        cycle_id: str,
+        dispatch_authority: Mapping[str, object],
+        owner_stop_check: Callable[[], None],
+        deadline: datetime | None = None,
+    ) -> GraphitiCycleResult: ...
+
 
 GRAPHITI_CONTEXT_IDENTITY = "graphiti-combined-temporal-hermetic-v1"
 GRAPHITI_CHAT_PRIMARY_ROUTE = "GRAPHITI_CHAT_PRIMARY"
@@ -120,8 +131,7 @@ class GraphitiModelUsageObserver:
         provider_attempt_number: int = 1,
         deadline: datetime | None = None,
         dispatch_authority_digest: str | None = None,
-        owner_emergency_stop: Callable[[], bool] = lambda: False,
-        owner_stop_check: Callable[[], None] = lambda: None,
+        owner_stop_check: Callable[[], None],
         call_shape_policy: GraphitiCallShapePolicy | None = None,
     ) -> None:
         self._service = service
@@ -152,7 +162,6 @@ class GraphitiModelUsageObserver:
                 }
             )
         )
-        self._owner_emergency_stop = owner_emergency_stop
         self._owner_stop_check = owner_stop_check
 
     def _policy_for(
@@ -359,9 +368,6 @@ class GraphitiModelUsageObserver:
             parent_invocation_id=parent_invocation_id,
         )
         self._owner_stop_check()
-        owner_stop_active = self._owner_emergency_stop()
-        if owner_stop_active:
-            raise ModelUsageAdmissionError("Graphiti owner emergency stop is active")
         route_circuit_state = str(self._service.route_state(route)["state"])
         identity = GraphitiInternalRequestIdentity.create(
             effective_revision_digest=self._effective_revision_digest,
@@ -397,14 +403,13 @@ class GraphitiModelUsageObserver:
                 if self._deadline is None
                 else self._deadline.astimezone(UTC).isoformat()
             ),
-            owner_stop_clear=not owner_stop_active,
+            owner_stop_clear=True,
             route_circuit_state=route_circuit_state,
         )
         self._service.allocate_graphiti_request(
             allocation,
             identity=identity,
             max_distinct_internal_requests=self._shape.max_distinct_internal_requests,
-            owner_emergency_stop=owner_stop_active,
         )
         self._allocations.append(allocation)
         self._policies[allocation.invocation_id] = policy
@@ -673,7 +678,7 @@ class EvaluationGraphitiRunner:
         model_usage: ModelUsageService,
         cycle_id: str,
         dispatch_authority: Mapping[str, object],
-        owner_stop_check: Callable[[], None] = lambda: None,
+        owner_stop_check: Callable[[], None],
         deadline: datetime | None = None,
     ) -> GraphitiCycleResult:
         envelope = WorkEnvelope.create(

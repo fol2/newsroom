@@ -5,7 +5,6 @@ Graphiti corpus ingest is independent of CONT writes (GING-001).
 
 from __future__ import annotations
 
-import inspect
 import json
 import sqlite3
 import uuid
@@ -1079,6 +1078,10 @@ def _ingest(
                 attempted += 1
                 ingest_with_usage = getattr(graphiti, "ingest_with_usage", None)
                 if model_usage is not None and callable(ingest_with_usage):
+                    if owner_stop_check is None:
+                        raise VetoError(
+                            "Graphiti owner emergency-stop authority is unavailable"
+                        )
                     usage_arguments: dict[str, object] = {
                         "model_usage": model_usage,
                         "cycle_id": cycle_id or unit.proving_run_id,
@@ -1088,13 +1091,8 @@ def _ingest(
                             else None
                         ),
                         "dispatch_authority": final_dispatch_rights,
+                        "owner_stop_check": owner_stop_check,
                     }
-                    if (
-                        owner_stop_check is not None
-                        and "owner_stop_check"
-                        in inspect.signature(ingest_with_usage).parameters
-                    ):
-                        usage_arguments["owner_stop_check"] = owner_stop_check
                     returned_result = cast(
                         GraphitiCycleResult,
                         ingest_with_usage(

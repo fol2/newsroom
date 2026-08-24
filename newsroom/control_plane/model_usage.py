@@ -1312,17 +1312,10 @@ class ModelUsageService:
         *,
         identity: GraphitiInternalRequestIdentity,
         max_distinct_internal_requests: int,
-        owner_emergency_stop: bool,
     ) -> None:
         """Atomically retain one #728 leaf and its Graphiti request identity."""
 
         allocation._validate()
-        if not isinstance(owner_emergency_stop, bool):
-            raise ModelUsageAdmissionError(
-                "owner emergency stop authority must be an explicit boolean"
-            )
-        if owner_emergency_stop:
-            raise ModelUsageAdmissionError("owner emergency stop is active")
         if (
             isinstance(max_distinct_internal_requests, bool)
             or not isinstance(max_distinct_internal_requests, int)
