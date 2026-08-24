@@ -128,6 +128,7 @@ def _fixture_evidence_package(candidate: StoryCandidateRecord) -> EvidencePackag
             QualificationEvidence(
                 Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE,
                 governed_claims[1].claim_id,
+                f"qualification:{governed_claims[1].claim_id}",
                 (
                     ("action_class", "OFFICIAL_DEADLINE"),
                     ("reader_action", claim),
@@ -154,6 +155,10 @@ def _fixture_evidence_package(candidate: StoryCandidateRecord) -> EvidencePackag
         integrity_result="PASS",
         resolved_evidence_records=(
             ("fixture-evidence-record", f"digest:{candidate.candidate_id}"),
+            (
+                f"qualification:{governed_claims[1].claim_id}",
+                f"qualification-digest:{candidate.candidate_id}",
+            ),
         ),
     )
 

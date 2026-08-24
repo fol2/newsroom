@@ -306,7 +306,7 @@ def validate_writer_copy(
         bool(copy.title.strip() and copy.body.strip())
         and any("\u3400" <= character <= "\u9fff" for character in text)
         and not re.search(r"[A-Za-z]", text_without_approved_entities)
-        and not contains_simplified_variant(text),
+        and not contains_simplified_variant(text_without_approved_entities),
         "NOT_COMPLETED_ZH_HANT_HK_REPORT",
     )
     check(
@@ -400,19 +400,26 @@ def validate_writer_copy(
     numeric_expression_patterns = (
         re.compile(r"\d+(?:(?:[年月日時时分秒號号點点])|(?:[.,:/-]\d+)|\d+)+"),
         re.compile(
-            r"(?:[零〇一二三四五六七八九十百千兩两]+"
+            r"(?:[零〇一二三四五六七八九十百千萬万億亿兆兩两]+"
             r"(?:年|月|日|號|号|時|时|分|秒|點|点))+"
         ),
         re.compile(
+            r"[零〇一二三四五六七八九十百千萬万億亿兆兩两]+\s*"
+            r"(?:港元|元|人|宗|件|公噸|噸|吨|公斤|公里|米|分鐘|分钟|小時|"
+            r"小时|日|天|星期|個月|个月|年|戶|户|名|位|%|％)"
+        ),
+        re.compile(
             r"\d+(?:[.,]\d+)*\s*(?:%|％|minutes?|mins?|hours?|hrs?|days?|"
-            r"weeks?|months?|years?|公里|米|分鐘|分钟|小時|小时|日|天|星期|個月|个月|年)",
-            re.I,
+            r"weeks?|months?|years?|million|billion|trillion|people|cases?|"
+            r"tonnes?|kilograms?|kilometres?|公里|米|分鐘|分钟|小時|小时|日|天|"
+            r"星期|個月|个月|年|港元|元|人|宗|件|公噸|噸|吨|公斤|戶|户|名|位)",
+            re.IGNORECASE,
         ),
         re.compile(
             r"(?:\d{1,2}\s+)?(?:January|February|March|April|May|June|July|"
             r"August|September|October|November|December)(?:\s+\d{1,2})?"
             r"(?:,?\s+\d{4})?",
-            re.I,
+            re.IGNORECASE,
         ),
     )
     approved_numeric_expressions = tuple(
@@ -421,6 +428,12 @@ def validate_writer_copy(
         for evidence_text in (claim.claim, claim.supporting_excerpt)
         for pattern in numeric_expression_patterns
         for match in pattern.finditer(evidence_text)
+    ) + tuple(
+        match.group(0)
+        for claim in package.governed_claims
+        for _source, target in claim.localised_factual_expressions
+        for pattern in numeric_expression_patterns
+        for match in pattern.finditer(target)
     )
     approved_overlap = (
         tuple(
@@ -478,9 +491,22 @@ def validate_writer_copy(
         for value in (claim.claim, claim.supporting_excerpt)
     )
     numbers = set(re.findall(r"\d+(?:[.,]\d+)*(?:%|％)?", text))
+    governed_numbers = set(re.findall(r"\d+(?:[.,]\d+)*(?:%|％)?", governed_text))
+    governed_numbers.update(
+        number
+        for claim in package.governed_claims
+        for _source, target in claim.localised_factual_expressions
+        for number in re.findall(r"\d+(?:[.,]\d+)*(?:%|％)?", target)
+    )
+    draft_numeric_expressions = {
+        match.group(0)
+        for pattern in numeric_expression_patterns
+        for match in pattern.finditer(text)
+    }
     check(
         "NUMERIC_AND_DATE_FIDELITY",
-        all(number in governed_text for number in numbers),
+        numbers.issubset(governed_numbers)
+        and draft_numeric_expressions.issubset(set(approved_numeric_expressions)),
         "UNSUPPORTED_NUMBER_OR_DATE",
     )
     quoted = {

@@ -10,7 +10,11 @@ from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.editorial import StoryCandidateRecord
 from newsroom.control_plane.evidence import (
     EVID_012_POLICY_VERSION,
+    EVIDENCE_APPROVAL_POLICY_VERSION,
     EVIDENCE_GATE_POLICY_VERSION,
+    GOVERNED_CLAIM_POLICY_VERSION,
+    GOVERNED_INPUT_SCHEMA_VERSION,
+    ORIGINALITY_POLICY_VERSION,
     ClaimAuthorityClass,
     EvidencePackage,
     GovernedClaimEvidence,
@@ -22,8 +26,11 @@ from newsroom.control_plane.zh_hant import (
 )
 
 WRITE_ADMISSION_POLICY_VERSION = (
-    "newsroom.write-admission.v2+"
-    f"{EVID_012_POLICY_VERSION}+{ZH_HANT_HK_SHAPE_POLICY_VERSION}"
+    "newsroom.write-admission.v3+"
+    f"{EVID_012_POLICY_VERSION}+{EVIDENCE_APPROVAL_POLICY_VERSION}+"
+    f"{EVIDENCE_GATE_POLICY_VERSION}+"
+    f"{GOVERNED_CLAIM_POLICY_VERSION}+{GOVERNED_INPUT_SCHEMA_VERSION}+"
+    f"{ORIGINALITY_POLICY_VERSION}+{ZH_HANT_HK_SHAPE_POLICY_VERSION}"
 )
 WRITE_SELECTION_POLICY_VERSION = "newsroom.write-selection.v1"
 
@@ -114,14 +121,19 @@ def _duration_is_exactly_supported(
         if not clause.strip() or not relation.search(clause):
             continue
         polarity_text = re.sub(
-            r"\b(?:no|not)\s+less\s+than\b|不少於|不少于", "", clause, flags=re.I
+            r"\b(?:no|not)\s+less\s+than\b|不少於|不少于",
+            "",
+            clause,
+            flags=re.IGNORECASE,
         )
         if re.search(
             r"\b(?:no|not|without|never|zero|den(?:y|ies|ied|ying)|false|incorrect|"
             r"inaccurate|untrue|baseless|refut(?:e|es|ed)|disput(?:e|es|ed))\b|"
-            r"未有|沒有|没有|並無|并无|否認|否认|不實|不实|錯誤|错误",
+            r"\b(?:rule(?:d)?\s+out|dismiss(?:es|ed)?|reject(?:s|ed)?|"
+            r"disprov(?:e|es|ed))\b|未有|沒有|没有|並無|并无|不存在|"
+            r"否認|否认|不實|不实|錯誤|错误|排除|澄清",
             polarity_text,
-            flags=re.I,
+            flags=re.IGNORECASE,
         ):
             continue
         return True
@@ -136,7 +148,7 @@ def _valid_zh_hant_hk_rendering(claim: GovernedClaimEvidence) -> bool:
     return (
         any("\u3400" <= character <= "\u9fff" for character in rendered)
         and not re.search(r"[A-Za-z]", without_entities)
-        and not contains_simplified_variant(rendered)
+        and not contains_simplified_variant(without_entities)
         and all(
             len(value) < 8 or value not in rendered
             for value in (claim.claim, claim.supporting_excerpt)
@@ -316,6 +328,14 @@ class DeterministicWriteAdmission:
             missing.append("MISSING_SELECTION_RATIONALE")
         if not package.resolved_evidence_records:
             missing.append("UNRESOLVED_GOVERNED_EVIDENCE_RECORDS")
+        elif any(
+            item.qualification_record_id
+            not in {
+                record_id for record_id, _digest in package.resolved_evidence_records
+            }
+            for item in package.qualification_evidence
+        ):
+            missing.append("UNRESOLVED_QUALIFICATION_EVIDENCE")
         governed_claims = {item.claim_id: item for item in package.governed_claims}
         invalid_claims = tuple(
             item
@@ -355,8 +375,11 @@ class DeterministicWriteAdmission:
             missing.append("INVALID_SUBSTANTIVE_CLAIM_INVENTORY")
         expected_claim_ids = frozenset(governed_claims)
         gate_evidence = {item.gate: item for item in package.evidence_gate_evidence}
-        if len(gate_evidence) != len(package.evidence_gate_evidence):
-            missing.append("DUPLICATE_EVIDENCE_GATE_PROVENANCE")
+        if (
+            len(gate_evidence) != len(package.evidence_gate_evidence)
+            or set(gate_evidence) != _REQUIRED_EVIDENCE_GATES
+        ):
+            missing.append("INVALID_EVIDENCE_GATE_INVENTORY")
         for gate in sorted(_REQUIRED_EVIDENCE_GATES):
             provenance = gate_evidence.get(gate)
             if (

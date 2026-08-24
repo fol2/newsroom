@@ -14,13 +14,13 @@ from typing import Literal
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.editorial import StoryCandidateRecord
 
-EVID_012_POLICY_VERSION = "newsroom.evid-012.v1"
-GOVERNED_CLAIM_POLICY_VERSION = "newsroom.governed-claim.v1"
-EVIDENCE_GATE_POLICY_VERSION = "newsroom.evidence-gates.v1"
-GOVERNED_INPUT_SCHEMA_VERSION = "newsroom.governed-input.v3"
-EVIDENCE_APPROVAL_POLICY_VERSION = "newsroom.evidence-approval.v1"
+EVID_012_POLICY_VERSION = "newsroom.evid-012.v2"
+GOVERNED_CLAIM_POLICY_VERSION = "newsroom.governed-claim.v2"
+EVIDENCE_GATE_POLICY_VERSION = "newsroom.evidence-gates.v2"
+GOVERNED_INPUT_SCHEMA_VERSION = "newsroom.governed-input.v5"
+EVIDENCE_APPROVAL_POLICY_VERSION = "newsroom.evidence-approval.v2"
 EVIDENCE_APPROVAL_PRINCIPAL = "HERMES_EVIDENCE_CONTROLLER"
-ORIGINALITY_POLICY_VERSION = "newsroom.cont-originality.v2"
+ORIGINALITY_POLICY_VERSION = "newsroom.cont-originality.v3"
 
 
 class Evid012QualificationTest(StrEnum):
@@ -63,6 +63,7 @@ class GovernedClaimEvidence:
     attribution: str
     rendered_assertion_zh_hant_hk: str
     claim_role: Literal["HEADLINE", "SUBSTANTIVE", "CONTEXT"]
+    localised_factual_expressions: tuple[tuple[str, str], ...] = ()
     named_entities: tuple[str, ...] = ()
     quotations: tuple[str, ...] = ()
     certainty: Literal["CONFIRMED"] = "CONFIRMED"
@@ -80,9 +81,13 @@ class GovernedClaimEvidence:
             self.attribution,
             self.rendered_assertion_zh_hant_hk,
         )
-        if any(not value.strip() for value in required):
+        if any(not isinstance(value, str) or not value.strip() for value in required):
             raise ValueError("governed claim evidence fields are required")
-        if self.passage_index < 0:
+        if (
+            not isinstance(self.passage_index, int)
+            or isinstance(self.passage_index, bool)
+            or self.passage_index < 0
+        ):
             raise ValueError("governed claim passage index must be non-negative")
         if any(
             not values
@@ -98,6 +103,21 @@ class GovernedClaimEvidence:
             raise ValueError(
                 "governed claim requires source, authority, rights and dependency provenance"
             )
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for values in (
+                self.source_ids,
+                self.source_record_ids,
+                self.source_authority_decision_ids,
+                self.rights_decision_ids,
+                self.dependency_evidence_ids,
+                self.evidential_origin_ids,
+                self.named_entities,
+                self.quotations,
+            )
+            for value in values
+        ):
+            raise ValueError("governed claim provenance values must be strings")
         if len(set(self.source_ids)) != len(self.source_ids):
             raise ValueError("governed claim source IDs must be unique")
         if any(
@@ -112,8 +132,42 @@ class GovernedClaimEvidence:
             raise ValueError("governed claim provenance IDs must be unique")
         if len(set(self.evidential_origin_ids)) != len(self.evidential_origin_ids):
             raise ValueError("governed claim evidential origins must be unique")
+        if any(
+            not isinstance(item, (tuple, list))
+            or len(item) != 2
+            or any(not isinstance(value, str) or not value.strip() for value in item)
+            for item in self.localised_factual_expressions
+        ):
+            raise ValueError(
+                "localised factual expressions must be source-target pairs"
+            )
+        localised_sources = tuple(
+            source for source, _target in self.localised_factual_expressions
+        )
+        localised_targets = tuple(
+            target for _source, target in self.localised_factual_expressions
+        )
+        if (
+            len(set(localised_sources)) != len(localised_sources)
+            or len(set(localised_targets)) != len(localised_targets)
+            or any(
+                source not in self.claim and source not in self.supporting_excerpt
+                for source in localised_sources
+            )
+            or any(
+                target not in self.rendered_assertion_zh_hant_hk
+                for target in localised_targets
+            )
+        ):
+            raise ValueError("localised factual expressions must bind exact claim text")
         if self.admitted_use != "PUBLICATION_EVIDENCE":
             raise ValueError("governed claim is not admitted for publication evidence")
+        if self.claim_role not in {"HEADLINE", "SUBSTANTIVE", "CONTEXT"}:
+            raise ValueError("governed claim role is not supported")
+        if self.certainty != "CONFIRMED":
+            raise ValueError("governed claim certainty is not supported")
+        if self.originality_basis != "FACTUAL_REWRITE_REQUIRED":
+            raise ValueError("governed claim originality basis is not supported")
         if self.policy_version != GOVERNED_CLAIM_POLICY_VERSION:
             raise ValueError("governed claim policy version is not supported")
         if self.originality_policy_version != ORIGINALITY_POLICY_VERSION:
@@ -135,7 +189,20 @@ class EvidenceGateEvidence:
     policy_version: str = EVIDENCE_GATE_POLICY_VERSION
 
     def __post_init__(self) -> None:
-        if not self.governed_claim_ids:
+        if (
+            self.gate
+            not in {
+                "CLAIM_TRACEABILITY",
+                "EVIDENCE_SUFFICIENCY",
+                "SOURCE_AUTHORITY",
+            }
+            or self.result != "PASS"
+        ):
+            raise ValueError("evidence gate or result is not supported")
+        if not self.governed_claim_ids or any(
+            not isinstance(value, str) or not value.strip()
+            for value in self.governed_claim_ids
+        ):
             raise ValueError("evidence gate requires governed claim provenance")
         if len(set(self.governed_claim_ids)) != len(self.governed_claim_ids):
             raise ValueError("evidence gate claim provenance must be unique")
@@ -147,6 +214,7 @@ class EvidenceGateEvidence:
 class QualificationEvidence:
     test: Evid012QualificationTest
     governed_claim_id: str
+    qualification_record_id: str
     test_evidence: tuple[tuple[str, str], ...]
     policy_version: str = EVID_012_POLICY_VERSION
 
@@ -156,7 +224,12 @@ class QualificationEvidence:
         except ValueError:
             raise ValueError("qualification test is not in EVID-012") from None
         object.__setattr__(self, "test", canonical_test)
-        if not self.governed_claim_id.strip():
+        if (
+            not isinstance(self.governed_claim_id, str)
+            or not self.governed_claim_id.strip()
+            or not isinstance(self.qualification_record_id, str)
+            or not self.qualification_record_id.strip()
+        ):
             raise ValueError("qualification governed claim is required")
         if self.policy_version != EVID_012_POLICY_VERSION:
             raise ValueError("qualification policy version is not supported")
@@ -281,6 +354,26 @@ class EvidencePackage:
         claim_ids = tuple(item.claim_id for item in self.governed_claims)
         if len(set(claim_ids)) != len(claim_ids):
             raise ValueError("Evidence Package governed claim IDs must be unique")
+        qualification_record_ids = tuple(
+            item.qualification_record_id for item in self.qualification_evidence
+        )
+        qualification_logical_ids = tuple(
+            (item.test, item.governed_claim_id) for item in self.qualification_evidence
+        )
+        if len(set(qualification_record_ids)) != len(qualification_record_ids) or len(
+            set(qualification_logical_ids)
+        ) != len(qualification_logical_ids):
+            raise ValueError("Evidence Package qualification evidence must be unique")
+        if any(
+            len(set(values)) != len(values)
+            for values in (
+                self.substantive_new_information,
+                self.geography,
+                self.categories,
+                self.explicit_exclusions,
+            )
+        ):
+            raise ValueError("Evidence Package governed inventories must be unique")
 
     @property
     def digest(self) -> str:
@@ -321,6 +414,10 @@ class EvidencePackage:
                                 item.rendered_assertion_zh_hant_hk
                             ),
                             "claim_role": item.claim_role,
+                            "localised_factual_expressions": [
+                                list(value)
+                                for value in item.localised_factual_expressions
+                            ],
                             "named_entities": list(item.named_entities),
                             "quotations": list(item.quotations),
                             "certainty": item.certainty,
@@ -337,6 +434,7 @@ class EvidencePackage:
                         {
                             "test": item.test.value,
                             "governed_claim_id": item.governed_claim_id,
+                            "qualification_record_id": item.qualification_record_id,
                             "test_evidence": [
                                 list(value) for value in item.test_evidence
                             ],
@@ -427,6 +525,7 @@ def _decode_governed_package(
         "attribution",
         "rendered_assertion_zh_hant_hk",
         "claim_role",
+        "localised_factual_expressions",
         "named_entities",
         "quotations",
         "certainty",
@@ -438,10 +537,15 @@ def _decode_governed_package(
     qualification_fields = {
         "test",
         "governed_claim_id",
+        "qualification_record_id",
         "test_evidence",
         "policy_version",
     }
     gate_fields = {"gate", "result", "governed_claim_ids", "policy_version"}
+
+    def string_list(item: object) -> bool:
+        return isinstance(item, list) and all(isinstance(value, str) for value in item)
+
     try:
         value = json.loads(raw)
         if (
@@ -455,6 +559,26 @@ def _decode_governed_package(
         ):
             return base
         if (
+            not isinstance(value["governed_claims"], list)
+            or not isinstance(value["qualification_evidence"], list)
+            or not isinstance(value["evidence_gate_evidence"], list)
+            or not string_list(value["substantive_new_information"])
+            or not string_list(value["geography"])
+            or not string_list(value["categories"])
+            or not string_list(value["explicit_exclusions"])
+            or not isinstance(value["selection_rationale"], str)
+            or not isinstance(value["freshness_result"], str)
+            or not isinstance(value["integrity_result"], str)
+            or not isinstance(value["evidence_gate_results"], list)
+            or any(
+                not isinstance(item, list)
+                or len(item) != 2
+                or not all(isinstance(part, str) for part in item)
+                for item in value["evidence_gate_results"]
+            )
+        ):
+            return base
+        if (
             any(
                 not isinstance(item, dict) or set(item) != claim_fields
                 for item in value["governed_claims"]
@@ -465,6 +589,47 @@ def _decode_governed_package(
             )
             or any(
                 not isinstance(item, dict) or set(item) != gate_fields
+                for item in value["evidence_gate_evidence"]
+            )
+        ):
+            return base
+        if (
+            any(
+                not string_list(item[field])
+                for item in value["governed_claims"]
+                for field in (
+                    "source_ids",
+                    "source_record_ids",
+                    "source_authority_decision_ids",
+                    "rights_decision_ids",
+                    "dependency_evidence_ids",
+                    "evidential_origin_ids",
+                    "named_entities",
+                    "quotations",
+                )
+            )
+            or any(
+                not isinstance(item["localised_factual_expressions"], list)
+                or any(
+                    not isinstance(part, list)
+                    or len(part) != 2
+                    or not all(isinstance(value, str) for value in part)
+                    for part in item["localised_factual_expressions"]
+                )
+                for item in value["governed_claims"]
+            )
+            or any(
+                not isinstance(item["test_evidence"], list)
+                or any(
+                    not isinstance(part, list)
+                    or len(part) != 2
+                    or not all(isinstance(value, str) for value in part)
+                    for part in item["test_evidence"]
+                )
+                for item in value["qualification_evidence"]
+            )
+            or any(
+                not string_list(item["governed_claim_ids"])
                 for item in value["evidence_gate_evidence"]
             )
         ):
@@ -489,6 +654,9 @@ def _decode_governed_package(
                 attribution=item["attribution"],
                 rendered_assertion_zh_hant_hk=item["rendered_assertion_zh_hant_hk"],
                 claim_role=item["claim_role"],
+                localised_factual_expressions=tuple(
+                    tuple(value) for value in item["localised_factual_expressions"]
+                ),
                 named_entities=tuple(item["named_entities"]),
                 quotations=tuple(item["quotations"]),
                 certainty=item["certainty"],
@@ -513,6 +681,7 @@ def _decode_governed_package(
                 QualificationEvidence(
                     Evid012QualificationTest(item["test"]),
                     item["governed_claim_id"],
+                    item["qualification_record_id"],
                     tuple(tuple(value) for value in item["test_evidence"]),
                     item["policy_version"],
                 )
@@ -656,6 +825,12 @@ def _resolve_governed_records(
                 existing_type = expected_types.setdefault(record_id, record_type)
                 if existing_type != record_type:
                     return None
+    for qualification in package.qualification_evidence:
+        existing_type = expected_types.setdefault(
+            qualification.qualification_record_id, "QUALIFICATION_EVIDENCE"
+        )
+        if existing_type != "QUALIFICATION_EVIDENCE":
+            return None
     if not expected_types:
         return None
     placeholders = ",".join("?" for _item in expected_types)
@@ -807,5 +982,22 @@ def _resolve_governed_records(
             for record_id in claim.dependency_evidence_ids
         }
         if resolved_origins != set(claim.evidential_origin_ids):
+            return None
+    governed_claims = {claim.claim_id: claim for claim in package.governed_claims}
+    for qualification in package.qualification_evidence:
+        claim = governed_claims.get(qualification.governed_claim_id)
+        record = records[qualification.qualification_record_id]
+        if (
+            claim is None
+            or record.get("governed_claim_id") != qualification.governed_claim_id
+            or record.get("test") != qualification.test.value
+            or record.get("test_evidence")
+            != [list(item) for item in qualification.test_evidence]
+            or record.get("policy_version") != qualification.policy_version
+            or record.get("evidence_span_digest")
+            != digest_bytes(claim.supporting_excerpt.encode("utf-8"))
+            or record_id_set(record.get("source_record_ids"))
+            != set(claim.source_record_ids)
+        ):
             return None
     return tuple(sorted(digests))
