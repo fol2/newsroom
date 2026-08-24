@@ -624,17 +624,6 @@ def _require_positive_max_tokens(max_tokens: int) -> None:
         raise ValueError("Graphiti requested max_tokens must be positive")
 
 
-def _reported_output_exceeds(
-    execution: CliExecution, *, max_tokens: int
-) -> bool:
-    output_tokens = execution.usage.get("output_tokens")
-    return (
-        isinstance(output_tokens, int)
-        and not isinstance(output_tokens, bool)
-        and output_tokens > max_tokens
-    )
-
-
 def _output_exceeds_conservative_transport_ceiling(
     execution: CliExecution, *, max_tokens: int
 ) -> bool:
@@ -646,8 +635,13 @@ def _output_exceeds_conservative_transport_ceiling(
 def _output_limit_exceeded(
     execution: CliExecution, *, max_tokens: int
 ) -> bool:
-    if execution.usage.get("usage_basis") == "PROVIDER_REPORTED":
-        return _reported_output_exceeds(execution, max_tokens=max_tokens)
+    output_tokens = execution.usage.get("output_tokens")
+    if (
+        execution.usage.get("usage_basis") == "PROVIDER_REPORTED"
+        and isinstance(output_tokens, int)
+        and not isinstance(output_tokens, bool)
+    ):
+        return output_tokens > max_tokens
     return _output_exceeds_conservative_transport_ceiling(
         execution, max_tokens=max_tokens
     )
@@ -784,7 +778,26 @@ async def run_cli_chain(
                 raw = await asyncio.to_thread(
                     cursor_runner, prompt, max_tokens=max_tokens
                 )
-    except CliDispatchMarkerError:
+    except CliDispatchMarkerError as exc:
+        cursor_usage = no_provider_call_cli_usage()
+        binding = observe(
+            cursor_token,
+            outcome="DISPATCH_FENCE_REFUSED",
+            usage=cursor_usage,
+        )
+        invocations.append(
+            _invocation(
+                provider="cursor-agent-cli",
+                model=CURSOR_AGENT_MODEL_ID,
+                outcome="DISPATCH_FENCE_REFUSED",
+                execution=CliExecution(text="", usage=cursor_usage),
+                failure=type(exc.__cause__ or exc).__name__,
+                requested_max_tokens=max_tokens,
+                receipt_binding=binding,
+            )
+        )
+        if isinstance(exc.__cause__, Exception):
+            raise exc.__cause__
         raise
     except asyncio.CancelledError as exc:
         cursor_usage = (
@@ -798,6 +811,7 @@ async def run_cli_chain(
                 provider="cursor-agent-cli",
                 model=CURSOR_AGENT_MODEL_ID,
                 outcome="CANCELLED",
+                execution=CliExecution(text="", usage=cursor_usage),
                 failure=type(exc).__name__,
                 requested_max_tokens=max_tokens,
                 receipt_binding=binding,
@@ -838,6 +852,7 @@ async def run_cli_chain(
                 provider="cursor-agent-cli",
                 model=CURSOR_AGENT_MODEL_ID,
                 outcome="FAILED",
+                execution=CliExecution(text="", usage=cursor_usage),
                 failure=type(exc).__name__,
                 requested_max_tokens=max_tokens,
                 receipt_binding=binding,
@@ -931,7 +946,26 @@ async def run_cli_chain(
                 raw = await asyncio.to_thread(
                     grok_runner, prompt, schema, max_tokens=max_tokens
                 )
-    except CliDispatchMarkerError:
+    except CliDispatchMarkerError as exc:
+        grok_usage = no_provider_call_cli_usage()
+        binding = observe(
+            grok_token,
+            outcome="DISPATCH_FENCE_REFUSED",
+            usage=grok_usage,
+        )
+        invocations.append(
+            _invocation(
+                provider="grok-build-cli",
+                model=GROK_CHAT_MODEL_ID,
+                outcome="DISPATCH_FENCE_REFUSED",
+                execution=CliExecution(text="", usage=grok_usage),
+                failure=type(exc.__cause__ or exc).__name__,
+                requested_max_tokens=max_tokens,
+                receipt_binding=binding,
+            )
+        )
+        if isinstance(exc.__cause__, Exception):
+            raise exc.__cause__
         raise
     except asyncio.CancelledError as exc:
         grok_usage = (
@@ -945,6 +979,7 @@ async def run_cli_chain(
                 provider="grok-build-cli",
                 model=GROK_CHAT_MODEL_ID,
                 outcome="CANCELLED",
+                execution=CliExecution(text="", usage=grok_usage),
                 failure=type(exc).__name__,
                 requested_max_tokens=max_tokens,
                 receipt_binding=binding,
@@ -985,6 +1020,7 @@ async def run_cli_chain(
                 provider="grok-build-cli",
                 model=GROK_CHAT_MODEL_ID,
                 outcome="FAILED",
+                execution=CliExecution(text="", usage=grok_usage),
                 failure=type(exc).__name__,
                 requested_max_tokens=max_tokens,
                 receipt_binding=binding,
