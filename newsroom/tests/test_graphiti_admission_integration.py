@@ -242,3 +242,25 @@ def test_existing_authority_rejects_unbound_graphiti_plan() -> None:
             required_action=None,
             idempotency_key="graphiti-admit:proposal-key",
         )
+
+
+def test_required_rights_rejection_is_checked_before_authority_mutation() -> None:
+    request = _request()
+    plan = _plan(request)
+    entities = _Entities(plan)
+    authority = ExistingGovernedGraphitiAdmissionAuthority(
+        entities=entities,  # type: ignore[arg-type]
+        relations=SimpleNamespace(),  # type: ignore[arg-type]
+        proof=AuthenticationProof(method="STATIC_TOKEN", credential="fixture"),
+        entity_plan=lambda *_: plan,
+        relation_plan=lambda *_: pytest.fail("relation planner called"),
+    )
+
+    with pytest.raises(GraphitiAdmissionConsumerError, match="required admission"):
+        authority.decide_entity_resolution(
+            request,
+            required_action=GraphitiProposalAdmissionAction.REJECT,
+            idempotency_key="graphiti-admit:proposal-key",
+        )
+
+    assert entities.calls == []
