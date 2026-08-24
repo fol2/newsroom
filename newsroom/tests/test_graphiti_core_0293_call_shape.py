@@ -291,7 +291,7 @@ def test_graphiti_core_response_schemas_are_stable() -> None:
     assert len(json.dumps(CombinedExtraction.model_json_schema())) == 2_144
 
 
-def test_newsroom_cli_client_discards_requested_max_tokens() -> None:
+def test_newsroom_cli_client_receipts_requested_max_tokens() -> None:
     captured: dict[str, object] = {}
 
     async def cursor_runner(prompt: str) -> CliExecution:
@@ -324,3 +324,4 @@ def test_newsroom_cli_client_discards_requested_max_tokens() -> None:
     assert payload == {"extracted_entities": []}
     assert captured["prompt"] == "system:\nsystem\n\nuser:\nuser"
     assert client.invocations[0]["outcome"] == "COMPLETE"
+    assert client.invocations[0]["requested_max_tokens"] == 99

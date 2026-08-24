@@ -81,9 +81,12 @@ def test_v1_store_replays_v2_context_manifest_migration_idempotently(
     assert migrations == [
         ("model-usage-v1", "newsroom.model-usage.v1"),
         ("model-usage-v2", "newsroom.model-usage.v2"),
+        ("model-usage-v3", "newsroom.model-usage.v3"),
     ]
     assert "model_invocation_context_manifests" in tables
     assert "model_invocation_context_observations" in tables
+    assert "graphiti_internal_requests" in tables
+    assert "graphiti_internal_request_refusals" in tables
 
 
 def _policy(
@@ -1570,7 +1573,7 @@ def test_hermes_usage_command_exports_allocation_free_envelope_outcome(
     assert hermes.main([*common, "--usage-format", "envelope-csv"]) == 0
     rows = list(csv.DictReader(io.StringIO(capsys.readouterr().out)))
     assert len(rows) == 1
-    assert rows[0]["schema_version"] == "newsroom.model-usage.v2"
+    assert rows[0]["schema_version"] == "newsroom.model-usage.v3"
     assert rows[0]["envelope_id"] == envelope.envelope_id
     assert rows[0]["outcome"] == "HOLD"
     assert rows[0]["work_outcome_terminal_at"] == "2026-08-24T10:00:01.000000Z"

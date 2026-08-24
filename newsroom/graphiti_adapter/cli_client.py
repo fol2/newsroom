@@ -8,7 +8,7 @@ import json
 import os
 import subprocess
 import tempfile
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
@@ -67,7 +67,14 @@ class GraphitiCliClient(Protocol):
 
 class CliInvocationObserver(Protocol):
     def before_cli_invocation(
-        self, *, provider: str, model: str, prompt: str, schema: str | None
+        self,
+        *,
+        provider: str,
+        model: str,
+        prompt: str,
+        schema: str | None,
+        semantic_request_class: str,
+        max_tokens: int,
     ) -> object: ...
 
     def after_cli_invocation(
@@ -76,7 +83,7 @@ class CliInvocationObserver(Protocol):
         *,
         outcome: str,
         usage: dict[str, object],
-    ) -> None: ...
+    ) -> Mapping[str, str] | None: ...
 
 
 def extract_json(raw: str) -> str:
@@ -327,6 +334,8 @@ def _invocation(
     outcome: str,
     execution: CliExecution | None = None,
     failure: str | None = None,
+    requested_max_tokens: int = 0,
+    receipt_binding: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     value: dict[str, object] = {
         "provider": provider,
@@ -335,10 +344,47 @@ def _invocation(
         "usage": (
             dict(execution.usage) if execution is not None else unreported_cli_usage()
         ),
+        "requested_max_tokens": requested_max_tokens,
     }
+    if receipt_binding is not None:
+        value.update(receipt_binding)
     if failure is not None:
         value["failure"] = failure
     return value
+
+
+def _before_observed_cli_invocation(
+    observer: CliInvocationObserver,
+    *,
+    provider: str,
+    model: str,
+    prompt: str,
+    schema: str | None,
+    semantic_request_class: str,
+    max_tokens: int,
+) -> object:
+    method = observer.before_cli_invocation
+    parameters = inspect.signature(method).parameters.values()
+    accepts_extended_contract = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    ) or {"semantic_request_class", "max_tokens"}.issubset(
+        inspect.signature(method).parameters
+    )
+    values: dict[str, object] = {
+        "provider": provider,
+        "model": model,
+        "prompt": prompt,
+        "schema": schema,
+    }
+    if accepts_extended_contract:
+        values.update(
+            {
+                "semantic_request_class": semantic_request_class,
+                "max_tokens": max_tokens,
+            }
+        )
+    return method(**values)  # type: ignore[arg-type]
 
 
 async def run_cli_chain(
@@ -349,19 +395,39 @@ async def run_cli_chain(
     grok_runner: GrokRunner | AsyncGrokRunner,
     invocations: list[dict[str, object]],
     invocation_observer: CliInvocationObserver | None = None,
+    semantic_request_class: str = "UNSTRUCTURED",
+    max_tokens: int = 16_384,
 ) -> dict[str, Any]:
     """Execute cursor then Grok fallback while retaining every call outcome."""
 
     cursor_token = (
         None
         if invocation_observer is None
-        else invocation_observer.before_cli_invocation(
+        else _before_observed_cli_invocation(
+            invocation_observer,
             provider="cursor-agent-cli",
             model=CURSOR_AGENT_MODEL_ID,
             prompt=prompt,
             schema=schema,
+            semantic_request_class=semantic_request_class,
+            max_tokens=max_tokens,
         )
     )
+
+    def observe(
+        token: object,
+        *,
+        outcome: str,
+        usage: dict[str, object],
+    ) -> Mapping[str, str] | None:
+        if invocation_observer is None:
+            return None
+        return invocation_observer.after_cli_invocation(
+            token,
+            outcome=outcome,
+            usage=usage,
+        )
+
     try:
         if inspect.iscoroutinefunction(cursor_runner):
             raw = await cursor_runner(prompt)
@@ -369,25 +435,23 @@ async def run_cli_chain(
             raw = await asyncio.to_thread(cursor_runner, prompt)
     except asyncio.CancelledError as exc:
         cursor_usage = unreported_cli_usage()
-        if invocation_observer is not None:
-            invocation_observer.after_cli_invocation(
-                cursor_token, outcome="CANCELLED", usage=cursor_usage
-            )
+        binding = observe(cursor_token, outcome="CANCELLED", usage=cursor_usage)
         invocations.append(
             _invocation(
                 provider="cursor-agent-cli",
                 model=CURSOR_AGENT_MODEL_ID,
                 outcome="CANCELLED",
                 failure=type(exc).__name__,
+                requested_max_tokens=max_tokens,
+                receipt_binding=binding,
             )
         )
         raise
     except FileNotFoundError as exc:
         cursor_usage = no_provider_call_cli_usage()
-        if invocation_observer is not None:
-            invocation_observer.after_cli_invocation(
-                cursor_token, outcome="EXECUTABLE_NOT_FOUND", usage=cursor_usage
-            )
+        binding = observe(
+            cursor_token, outcome="EXECUTABLE_NOT_FOUND", usage=cursor_usage
+        )
         invocations.append(
             _invocation(
                 provider="cursor-agent-cli",
@@ -395,52 +459,58 @@ async def run_cli_chain(
                 outcome="EXECUTABLE_NOT_FOUND",
                 execution=CliExecution(text="", usage=cursor_usage),
                 failure=type(exc).__name__,
+                requested_max_tokens=max_tokens,
+                receipt_binding=binding,
             )
         )
         payload = None
     except (RuntimeError, OSError) as exc:
         cursor_usage = unreported_cli_usage()
-        if invocation_observer is not None:
-            invocation_observer.after_cli_invocation(
-                cursor_token, outcome="FAILED", usage=cursor_usage
-            )
+        binding = observe(cursor_token, outcome="FAILED", usage=cursor_usage)
         invocations.append(
             _invocation(
                 provider="cursor-agent-cli",
                 model=CURSOR_AGENT_MODEL_ID,
                 outcome="FAILED",
                 failure=type(exc).__name__,
+                requested_max_tokens=max_tokens,
+                receipt_binding=binding,
             )
         )
         payload = None
     else:
         cursor_execution = _execution(cast(CliOutput, raw))
         payload = _parsed_object(cursor_execution.text)
+        cursor_outcome = "COMPLETE" if payload is not None else "MALFORMED_OUTPUT"
+        binding = observe(
+            cursor_token,
+            outcome=cursor_outcome,
+            usage=dict(cursor_execution.usage),
+        )
         invocations.append(
             _invocation(
                 provider="cursor-agent-cli",
                 model=CURSOR_AGENT_MODEL_ID,
-                outcome=("COMPLETE" if payload is not None else "MALFORMED_OUTPUT"),
+                outcome=cursor_outcome,
                 execution=cursor_execution,
+                requested_max_tokens=max_tokens,
+                receipt_binding=binding,
             )
         )
-        if invocation_observer is not None:
-            invocation_observer.after_cli_invocation(
-                cursor_token,
-                outcome=("COMPLETE" if payload is not None else "MALFORMED_OUTPUT"),
-                usage=dict(cursor_execution.usage),
-            )
     if payload is not None:
         return payload
 
     grok_token = (
         None
         if invocation_observer is None
-        else invocation_observer.before_cli_invocation(
+        else _before_observed_cli_invocation(
+            invocation_observer,
             provider="grok-build-cli",
             model=GROK_CHAT_MODEL_ID,
             prompt=prompt,
             schema=schema,
+            semantic_request_class=semantic_request_class,
+            max_tokens=max_tokens,
         )
     )
     try:
@@ -450,25 +520,23 @@ async def run_cli_chain(
             raw = await asyncio.to_thread(grok_runner, prompt, schema)
     except asyncio.CancelledError as exc:
         grok_usage = unreported_cli_usage()
-        if invocation_observer is not None:
-            invocation_observer.after_cli_invocation(
-                grok_token, outcome="CANCELLED", usage=grok_usage
-            )
+        binding = observe(grok_token, outcome="CANCELLED", usage=grok_usage)
         invocations.append(
             _invocation(
                 provider="grok-build-cli",
                 model=GROK_CHAT_MODEL_ID,
                 outcome="CANCELLED",
                 failure=type(exc).__name__,
+                requested_max_tokens=max_tokens,
+                receipt_binding=binding,
             )
         )
         raise
     except FileNotFoundError as exc:
         grok_usage = no_provider_call_cli_usage()
-        if invocation_observer is not None:
-            invocation_observer.after_cli_invocation(
-                grok_token, outcome="EXECUTABLE_NOT_FOUND", usage=grok_usage
-            )
+        binding = observe(
+            grok_token, outcome="EXECUTABLE_NOT_FOUND", usage=grok_usage
+        )
         invocations.append(
             _invocation(
                 provider="grok-build-cli",
@@ -476,40 +544,43 @@ async def run_cli_chain(
                 outcome="EXECUTABLE_NOT_FOUND",
                 execution=CliExecution(text="", usage=grok_usage),
                 failure=type(exc).__name__,
+                requested_max_tokens=max_tokens,
+                receipt_binding=binding,
             )
         )
         raise CliResponseError("Graphiti fallback CLI executable not found") from exc
     except (RuntimeError, OSError) as exc:
         grok_usage = unreported_cli_usage()
-        if invocation_observer is not None:
-            invocation_observer.after_cli_invocation(
-                grok_token, outcome="FAILED", usage=grok_usage
-            )
+        binding = observe(grok_token, outcome="FAILED", usage=grok_usage)
         invocations.append(
             _invocation(
                 provider="grok-build-cli",
                 model=GROK_CHAT_MODEL_ID,
                 outcome="FAILED",
                 failure=type(exc).__name__,
+                requested_max_tokens=max_tokens,
+                receipt_binding=binding,
             )
         )
         raise CliResponseError("Graphiti fallback CLI failed") from exc
     grok_execution = _execution(cast(CliOutput, raw))
     payload = _parsed_object(grok_execution.text)
+    grok_outcome = "COMPLETE" if payload is not None else "MALFORMED_OUTPUT"
+    binding = observe(
+        grok_token,
+        outcome=grok_outcome,
+        usage=dict(grok_execution.usage),
+    )
     invocations.append(
         _invocation(
             provider="grok-build-cli",
             model=GROK_CHAT_MODEL_ID,
-            outcome="COMPLETE" if payload is not None else "MALFORMED_OUTPUT",
+            outcome=grok_outcome,
             execution=grok_execution,
+            requested_max_tokens=max_tokens,
+            receipt_binding=binding,
         )
     )
-    if invocation_observer is not None:
-        invocation_observer.after_cli_invocation(
-            grok_token,
-            outcome="COMPLETE" if payload is not None else "MALFORMED_OUTPUT",
-            usage=dict(grok_execution.usage),
-        )
     if payload is None:
         raise CliResponseError("Graphiti CLI JSON was not an object")
     return payload
@@ -548,13 +619,19 @@ def build_cli_llm_client(
             max_tokens: int = 0,
             model_size: object = None,
         ) -> dict[str, Any]:
-            del max_tokens, model_size
+            del model_size
             prompt = messages_to_prompt(messages)
             schema = (
                 json.dumps(response_model.model_json_schema())
                 if response_model is not None
                 else None
             )
+            semantic_request_class = (
+                response_model.__name__
+                if response_model is not None
+                else "UNSTRUCTURED"
+            )
+            requested_max_tokens = max_tokens if max_tokens > 0 else 16_384
             try:
                 return await run_cli_chain(
                     prompt=prompt,
@@ -563,6 +640,8 @@ def build_cli_llm_client(
                     grok_runner=grok,
                     invocations=self.invocations,
                     invocation_observer=invocation_observer,
+                    semantic_request_class=semantic_request_class,
+                    max_tokens=requested_max_tokens,
                 )
             except CliResponseError as exc:
                 raise EmptyResponseError(str(exc)) from exc

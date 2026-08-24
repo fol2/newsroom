@@ -24,10 +24,11 @@ from newsroom.control_plane.cycle_governor import CONT_WRITER_ROUTE
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.veto import assert_private_store
 
-MODEL_USAGE_SCHEMA_VERSION = "newsroom.model-usage.v2"
-MODEL_USAGE_MIGRATION_ID = "model-usage-v2"
+MODEL_USAGE_SCHEMA_VERSION = "newsroom.model-usage.v3"
+MODEL_USAGE_MIGRATION_ID = "model-usage-v3"
 _MODEL_USAGE_MIGRATIONS = (
     ("model-usage-v1", "newsroom.model-usage.v1"),
+    ("model-usage-v2", "newsroom.model-usage.v2"),
     (MODEL_USAGE_MIGRATION_ID, MODEL_USAGE_SCHEMA_VERSION),
 )
 _HERMETIC_CONT_CONFIG_IDENTITIES = frozenset(
@@ -222,6 +223,34 @@ CREATE TABLE IF NOT EXISTS model_usage_route_circuit_events(
     invocation_id TEXT,
     recorded_at TEXT NOT NULL,
     record_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS graphiti_internal_requests(
+    canonical_digest TEXT PRIMARY KEY,
+    invocation_id TEXT NOT NULL UNIQUE,
+    envelope_id TEXT NOT NULL,
+    internal_ordinal INTEGER NOT NULL CHECK(internal_ordinal > 0),
+    semantic_state_digest TEXT NOT NULL,
+    provider_attempt_id TEXT NOT NULL,
+    call_shape_policy_digest TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    UNIQUE(envelope_id, semantic_state_digest),
+    FOREIGN KEY(invocation_id) REFERENCES model_invocation_allocations(invocation_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY(envelope_id) REFERENCES model_work_envelopes(envelope_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+);
+CREATE TABLE IF NOT EXISTS graphiti_internal_request_refusals(
+    refusal_digest TEXT PRIMARY KEY,
+    envelope_id TEXT NOT NULL,
+    attempted_ordinal INTEGER NOT NULL CHECK(attempted_ordinal > 0),
+    route TEXT NOT NULL,
+    semantic_state_digest TEXT NOT NULL,
+    call_shape_policy_digest TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    refused_at TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    FOREIGN KEY(envelope_id) REFERENCES model_work_envelopes(envelope_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
 );
 CREATE INDEX IF NOT EXISTS model_usage_allocated_at
 ON model_invocation_allocations(allocated_at, invocation_id);
@@ -1049,6 +1078,7 @@ class ModelUsageService:
         candidate_id: str | None = None,
         implementation_revision: str | None = None,
         config_identity: str | None = None,
+        output_schema_digest: str | None = None,
     ) -> InvocationEfficiencyPolicy:
         """Resolve one exact qualified route policy without fallback guessing."""
 
@@ -1073,6 +1103,12 @@ class ModelUsageService:
                 policy
                 for policy in policies
                 if config_identity in policy.allowed_config_identities
+            ]
+        if output_schema_digest is not None:
+            policies = [
+                policy
+                for policy in policies
+                if policy.output_schema_digest == output_schema_digest
             ]
         policies = [
             policy
@@ -1259,36 +1295,7 @@ class ModelUsageService:
             if not policy.qualified:
                 raise ModelUsageAdmissionError("invocation policy is not qualified")
             self._validate_preflight(connection, allocation, policy)
-            record = allocation.as_record()
-            try:
-                connection.execute(
-                    "INSERT INTO model_invocation_allocations("
-                    "invocation_id,envelope_id,cycle_id,leaf_ordinal,workload_class,"
-                    "policy_digest,provider,route,model,request_digest,parent_invocation_id,"
-                    "allocated_at,canonical_digest,record_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        allocation.invocation_id,
-                        allocation.envelope_id,
-                        allocation.cycle_id,
-                        allocation.leaf_ordinal,
-                        allocation.workload_class.value,
-                        allocation.invocation_policy_digest,
-                        allocation.provider,
-                        allocation.route,
-                        allocation.model,
-                        allocation.request_digest,
-                        allocation.parent_invocation_id,
-                        _utc_text(allocation.allocated_at),
-                        allocation.canonical_digest,
-                        _json(record),
-                    ),
-                )
-            except sqlite3.IntegrityError as exc:
-                if "request_digest" in str(exc):
-                    raise ModelUsageAdmissionError(
-                        "duplicate request digest in work envelope"
-                    ) from exc
-                raise
+            self._insert_allocation(connection, allocation)
             connection.commit()
         except Exception:
             if connection.in_transaction:
@@ -1296,6 +1303,275 @@ class ModelUsageService:
             raise
         finally:
             connection.close()
+
+    def allocate_graphiti_request(
+        self,
+        allocation: InvocationAllocation,
+        *,
+        identity: Mapping[str, object],
+        max_distinct_internal_requests: int,
+        owner_emergency_stop: bool,
+    ) -> None:
+        """Atomically retain one #728 leaf and its Graphiti request identity."""
+
+        allocation._validate()
+        if not isinstance(owner_emergency_stop, bool):
+            raise ModelUsageAdmissionError(
+                "owner emergency stop authority must be an explicit boolean"
+            )
+        if owner_emergency_stop:
+            raise ModelUsageAdmissionError("owner emergency stop is active")
+        if (
+            isinstance(max_distinct_internal_requests, bool)
+            or not isinstance(max_distinct_internal_requests, int)
+            or max_distinct_internal_requests <= 0
+        ):
+            raise ModelUsageAdmissionError("Graphiti call-shape bound is invalid")
+        record = dict(identity)
+        self._validate_graphiti_identity(allocation, record)
+        connection = self._connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            envelope = connection.execute(
+                "SELECT cycle_id FROM model_work_envelopes WHERE envelope_id=?",
+                (allocation.envelope_id,),
+            ).fetchone()
+            if envelope is None or str(envelope[0]) != allocation.cycle_id:
+                raise ModelUsageAdmissionError("work envelope is absent or mismatched")
+            policy_row = connection.execute(
+                "SELECT record_json FROM model_invocation_policies WHERE canonical_digest=?",
+                (allocation.invocation_policy_digest,),
+            ).fetchone()
+            if policy_row is None:
+                raise ModelUsageAdmissionError("invocation policy is not registered")
+            policy = _policy_from_record(_object(policy_row[0]))
+            if not policy.qualified:
+                raise ModelUsageAdmissionError("invocation policy is not qualified")
+
+            semantic_state_digest = str(record["semantic_state_digest"])
+            duplicate = connection.execute(
+                "SELECT 1 FROM graphiti_internal_requests "
+                "WHERE envelope_id=? AND semantic_state_digest=?",
+                (allocation.envelope_id, semantic_state_digest),
+            ).fetchone()
+            retained_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM graphiti_internal_requests WHERE envelope_id=?",
+                    (allocation.envelope_id,),
+                ).fetchone()[0]
+            )
+            reason_code = (
+                "DUPLICATE_INTERNAL_REQUEST"
+                if duplicate is not None
+                else "CALL_SHAPE_DRIFT"
+                if retained_count >= max_distinct_internal_requests
+                else None
+            )
+            if reason_code is not None:
+                self._retain_graphiti_refusal(
+                    connection,
+                    allocation=allocation,
+                    identity=record,
+                    reason_code=reason_code,
+                )
+                if reason_code == "CALL_SHAPE_DRIFT":
+                    self._append_route_state(
+                        connection,
+                        route=allocation.route,
+                        state="OPEN",
+                        reason=reason_code,
+                        invocation_id=None,
+                        recorded_at=allocation.allocated_at,
+                    )
+                connection.commit()
+                raise ModelUsageAdmissionError(
+                    "Graphiti internal request was refused before provider I/O",
+                    reason_code=reason_code,
+                )
+
+            self._validate_preflight(connection, allocation, policy)
+            self._insert_allocation(connection, allocation)
+            connection.execute(
+                "INSERT INTO graphiti_internal_requests("
+                "canonical_digest,invocation_id,envelope_id,internal_ordinal,"
+                "semantic_state_digest,provider_attempt_id,call_shape_policy_digest,"
+                "record_json) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    record["canonical_digest"],
+                    allocation.invocation_id,
+                    allocation.envelope_id,
+                    allocation.leaf_ordinal,
+                    semantic_state_digest,
+                    record["provider_attempt_id"],
+                    record["call_shape_policy_digest"],
+                    _json(record),
+                ),
+            )
+            self.link_provider_attempt(
+                invocation_id=allocation.invocation_id,
+                provider_attempt_id=str(record["provider_attempt_id"]),
+                linked_at=allocation.allocated_at,
+                connection=connection,
+            )
+            connection.commit()
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _insert_allocation(
+        self, connection: sqlite3.Connection, allocation: InvocationAllocation
+    ) -> None:
+        record = allocation.as_record()
+        try:
+            connection.execute(
+                "INSERT INTO model_invocation_allocations("
+                "invocation_id,envelope_id,cycle_id,leaf_ordinal,workload_class,"
+                "policy_digest,provider,route,model,request_digest,parent_invocation_id,"
+                "allocated_at,canonical_digest,record_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    allocation.invocation_id,
+                    allocation.envelope_id,
+                    allocation.cycle_id,
+                    allocation.leaf_ordinal,
+                    allocation.workload_class.value,
+                    allocation.invocation_policy_digest,
+                    allocation.provider,
+                    allocation.route,
+                    allocation.model,
+                    allocation.request_digest,
+                    allocation.parent_invocation_id,
+                    _utc_text(allocation.allocated_at),
+                    allocation.canonical_digest,
+                    _json(record),
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            if "request_digest" in str(exc):
+                raise ModelUsageAdmissionError(
+                    "duplicate request digest in work envelope"
+                ) from exc
+            raise
+
+    def _validate_graphiti_identity(
+        self,
+        allocation: InvocationAllocation,
+        record: Mapping[str, object],
+    ) -> None:
+        expected = {
+            "invocation_id": allocation.invocation_id,
+            "envelope_id": allocation.envelope_id,
+            "internal_ordinal": allocation.leaf_ordinal,
+            "provider": allocation.provider,
+            "model": allocation.model,
+            "reasoning": allocation.reasoning,
+            "prompt_bytes": allocation.prompt_bytes,
+            "prompt_digest": allocation.prompt_digest,
+            "response_schema_digest": allocation.output_schema_digest,
+            "requested_max_tokens": allocation.max_output_tokens,
+            "context_manifest_digest": allocation.context_manifest_digest,
+            "parent_invocation_id": allocation.parent_invocation_id,
+            "invocation_policy_digest": allocation.invocation_policy_digest,
+        }
+        if any(record.get(field) != value for field, value in expected.items()):
+            raise ModelUsageAdmissionError(
+                "Graphiti request identity differs from its #728 allocation"
+            )
+        required = (
+            "canonical_digest",
+            "effective_revision_digest",
+            "ingest_obligation_id",
+            "graphiti_attempt_id",
+            "provider_attempt_id",
+            "semantic_request_class",
+            "response_schema_identity",
+            "framework_identity",
+            "prompt_identity",
+            "ontology_identity",
+            "temporal_identity",
+            "generation_policy_identity",
+            "leaf_class",
+            "retry_state_digest",
+            "call_shape_policy_digest",
+            "dispatch_authority_digest",
+            "route_circuit_state",
+            "semantic_state_digest",
+        )
+        if any(not isinstance(record.get(field), str) for field in required):
+            raise ModelUsageAdmissionError("Graphiti request identity is incomplete")
+        if record.get("owner_stop_clear") is not True:
+            raise ModelUsageAdmissionError("Graphiti owner-stop proof is not clear")
+        if record.get("route_circuit_state") != "CLOSED":
+            raise ModelUsageAdmissionError("Graphiti route-circuit proof is not clear")
+        unsigned = dict(record)
+        canonical_digest = str(unsigned.pop("canonical_digest"))
+        unsigned["canonical_digest"] = ""
+        if digest_canonical(unsigned) != canonical_digest:
+            raise ModelUsageAdmissionError("Graphiti request identity digest is invalid")
+
+    def _retain_graphiti_refusal(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        allocation: InvocationAllocation,
+        identity: Mapping[str, object],
+        reason_code: str,
+    ) -> None:
+        record = {
+            "schema_version": "newsroom.graphiti-internal-request-refusal.v1",
+            "envelope_id": allocation.envelope_id,
+            "attempted_ordinal": allocation.leaf_ordinal,
+            "route": allocation.route,
+            "semantic_state_digest": identity["semantic_state_digest"],
+            "call_shape_policy_digest": identity["call_shape_policy_digest"],
+            "reason_code": reason_code,
+            "refused_at": _utc_text(allocation.allocated_at),
+        }
+        refusal_digest = digest_canonical(record)
+        connection.execute(
+            "INSERT OR IGNORE INTO graphiti_internal_request_refusals("
+            "refusal_digest,envelope_id,attempted_ordinal,route,"
+            "semantic_state_digest,call_shape_policy_digest,reason_code,refused_at,"
+            "record_json) VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                refusal_digest,
+                allocation.envelope_id,
+                allocation.leaf_ordinal,
+                allocation.route,
+                identity["semantic_state_digest"],
+                identity["call_shape_policy_digest"],
+                reason_code,
+                record["refused_at"],
+                _json({**record, "refusal_digest": refusal_digest}),
+            ),
+        )
+
+    def graphiti_request_records(
+        self, *, envelope_id: str
+    ) -> dict[str, list[dict[str, object]]]:
+        connection = self._connection()
+        try:
+            requests = [
+                _object(row[0])
+                for row in connection.execute(
+                    "SELECT record_json FROM graphiti_internal_requests "
+                    "WHERE envelope_id=? ORDER BY internal_ordinal,canonical_digest",
+                    (envelope_id,),
+                )
+            ]
+            refusals = [
+                _object(row[0])
+                for row in connection.execute(
+                    "SELECT record_json FROM graphiti_internal_request_refusals "
+                    "WHERE envelope_id=? ORDER BY refused_at,refusal_digest",
+                    (envelope_id,),
+                )
+            ]
+        finally:
+            connection.close()
+        return {"requests": requests, "refusals": refusals}
 
     def _validate_preflight(
         self,
@@ -1328,7 +1604,7 @@ class ModelUsageService:
             or allocation.reasoning != policy.reasoning
             or allocation.prompt_contract_version != policy.prompt_contract_version
             or allocation.output_schema_digest != policy.output_schema_digest
-            or allocation.max_output_tokens != policy.max_output_tokens
+            or allocation.max_output_tokens > policy.max_output_tokens
             or allocation.one_turn != policy.one_turn
             or allocation.exact_input != policy.exact_input
             or allocation.skills_enabled != policy.skills_enabled
@@ -1524,7 +1800,7 @@ class ModelUsageService:
         terminal: InvocationTerminal,
         *,
         provider_telemetry: Mapping[str, object] | None = None,
-    ) -> None:
+    ) -> InvocationTerminal:
         terminal._validate_shape()
         connection = self._connection()
         try:
@@ -1656,6 +1932,7 @@ class ModelUsageService:
                     recorded_at=retained.observed_at,
                 )
             connection.commit()
+            return retained
         except Exception:
             if connection.in_transaction:
                 connection.rollback()
@@ -1754,23 +2031,48 @@ class ModelUsageService:
         if retained_proposal_count is not None:
             _non_negative(retained_proposal_count, field="retained proposal count")
         digest = digest_canonical(record)
-        self._insert_exact(
-            table="model_work_outcomes",
-            identity_column="envelope_id",
-            identity=envelope_id,
-            record={**record, "outcome_digest": digest},
-            sql="INSERT INTO model_work_outcomes("
-            "outcome_digest,envelope_id,outcome,terminal_at,record_json) "
-            "VALUES(?,?,?,?,?)",
-            values=(
-                digest,
-                envelope_id,
-                outcome,
-                record["terminal_at"],
-                _json({**record, "outcome_digest": digest}),
-            ),
-            connection=connection,
-        )
+        owns_connection = connection is None
+        current = self._connection() if connection is None else connection
+        try:
+            if owns_connection:
+                current.execute("BEGIN IMMEDIATE")
+            unresolved_graphiti_leaf = current.execute(
+                "SELECT 1 FROM graphiti_internal_requests g "
+                "LEFT JOIN model_invocation_terminals t "
+                "ON t.invocation_id=g.invocation_id "
+                "WHERE g.envelope_id=? AND t.invocation_id IS NULL LIMIT 1",
+                (envelope_id,),
+            ).fetchone()
+            if unresolved_graphiti_leaf is not None:
+                raise ModelUsageIntegrityError(
+                    "Graphiti work outcome lacks a terminal receipt for every leaf"
+                )
+            self._insert_exact(
+                table="model_work_outcomes",
+                identity_column="envelope_id",
+                identity=envelope_id,
+                record={**record, "outcome_digest": digest},
+                sql="INSERT INTO model_work_outcomes("
+                "outcome_digest,envelope_id,outcome,terminal_at,record_json) "
+                "VALUES(?,?,?,?,?)",
+                values=(
+                    digest,
+                    envelope_id,
+                    outcome,
+                    record["terminal_at"],
+                    _json({**record, "outcome_digest": digest}),
+                ),
+                connection=current,
+            )
+            if owns_connection:
+                current.commit()
+        except Exception:
+            if owns_connection and current.in_transaction:
+                current.rollback()
+            raise
+        finally:
+            if owns_connection:
+                current.close()
 
     def record_cycle_outcome(
         self,
@@ -1828,7 +2130,9 @@ class ModelUsageService:
                 "(SELECT MIN(o.observed_at) FROM model_transport_observations o "
                 "WHERE o.invocation_id=a.invocation_id "
                 "AND o.state='DISPATCH_STARTED'),"
-                "json_extract(a.record_json,'$.recovery_deadline_at') "
+                "json_extract(a.record_json,'$.recovery_deadline_at'),"
+                "EXISTS(SELECT 1 FROM graphiti_internal_requests g "
+                "WHERE g.invocation_id=a.invocation_id) "
                 "FROM model_invocation_allocations a "
                 "LEFT JOIN model_invocation_terminals t ON t.invocation_id=a.invocation_id "
                 "WHERE t.invocation_id IS NULL "
@@ -1842,14 +2146,35 @@ class ModelUsageService:
         for row in rows:
             workload = WorkloadClass(str(row[2]))
             embedding = workload is WorkloadClass.GRAPHITI_EMBEDDING
-            dispatch_at = _instant(str(row[3] or row[1]))
+            graphiti_pre_dispatch = bool(row[5]) and row[3] is None
+            dispatch_at = (
+                None
+                if graphiti_pre_dispatch
+                else _instant(str(row[3] or row[1]))
+            )
             recovery_terminal_at = _instant(str(row[4]))
             terminal = InvocationTerminal.create(
                 invocation_id=str(row[0]),
-                outcome="RECOVERED_UNRESOLVED",
-                failure_class="PROCESS_LOST_AFTER_ALLOCATION",
-                usage_status=UsageStatus.AMBIGUOUS,
-                components=UsageComponents(provenance="UNAVAILABLE"),
+                outcome=(
+                    "RECOVERED_PRE_DISPATCH"
+                    if graphiti_pre_dispatch
+                    else "RECOVERED_UNRESOLVED"
+                ),
+                failure_class=(
+                    "PROCESS_LOST_BEFORE_DISPATCH"
+                    if graphiti_pre_dispatch
+                    else "PROCESS_LOST_AFTER_ALLOCATION"
+                ),
+                usage_status=(
+                    UsageStatus.REPORTED
+                    if graphiti_pre_dispatch
+                    else UsageStatus.AMBIGUOUS
+                ),
+                components=(
+                    UsageComponents(total_tokens=0, provenance="CLI_DERIVED")
+                    if graphiti_pre_dispatch
+                    else UsageComponents(provenance="UNAVAILABLE")
+                ),
                 dispatch_at=dispatch_at,
                 completed_at=recovery_terminal_at,
                 observed_at=recovery_terminal_at,
@@ -1857,6 +2182,7 @@ class ModelUsageService:
                     "OD-011:EVALUATION_GRAPHITI_EMBEDDING" if embedding else None
                 ),
                 subscription_cli_chat_not_cash_debited=not embedding,
+                pre_dispatch_zero_proved=graphiti_pre_dispatch,
             )
             try:
                 self.complete(terminal)
@@ -2267,6 +2593,13 @@ class ModelUsageService:
                     "FROM model_invocation_provider_attempt_links"
                 )
             }
+            graphiti_internal_requests = {
+                str(row[0]): _object(row[1])
+                for row in connection.execute(
+                    "SELECT invocation_id,record_json "
+                    "FROM graphiti_internal_requests"
+                )
+            }
             context_manifests = {
                 str(row[0]): _object(row[1])
                 for row in connection.execute(
@@ -2391,6 +2724,9 @@ class ModelUsageService:
                     None
                     if provider_attempt is None
                     else provider_attempt.get("provider_attempt_id")
+                ),
+                "graphiti_internal_request": graphiti_internal_requests.get(
+                    str(allocation["invocation_id"])
                 ),
                 "context_manifest": context_manifests.get(
                     str(allocation["context_manifest_digest"])

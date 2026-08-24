@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,10 +16,18 @@ from newsroom.authority.canonical import (
     digest_canonical,
 )
 from newsroom.control_plane.corpus import CorpusIngestUnit
+from newsroom.control_plane.graphiti_requests import (
+    GraphitiCallShapePolicy,
+    GraphitiInternalRequestIdentity,
+    GraphitiLeafClass,
+    graphiti_semantic_state_digest,
+    load_checked_graphiti_call_shape_policy,
+)
 from newsroom.control_plane.model_usage import (
     InvocationAllocation,
     InvocationEfficiencyPolicy,
     InvocationTerminal,
+    ModelUsageAdmissionError,
     ModelUsageService,
     UsageComponents,
     UsageStatus,
@@ -98,6 +106,10 @@ GRAPHITI_CONTEXT_IDENTITY = "graphiti-combined-temporal-hermetic-v1"
 GRAPHITI_CHAT_PRIMARY_ROUTE = "GRAPHITI_CHAT_PRIMARY"
 GRAPHITI_CHAT_FALLBACK_ROUTE = "GRAPHITI_CHAT_FALLBACK"
 GRAPHITI_EMBEDDING_ROUTE = "GRAPHITI_EMBEDDING"
+GRAPHITI_MAX_PROMPT_BYTES = 262_144
+GRAPHITI_MAX_CONTEXT_TOKENS = 131_072
+GRAPHITI_MAX_OUTPUT_TOKENS = 16_384
+GRAPHITI_MAX_TOTAL_TOKENS = 147_456
 
 
 class GraphitiModelUsageObserver:
@@ -107,6 +119,13 @@ class GraphitiModelUsageObserver:
         service: ModelUsageService,
         envelope: WorkEnvelope,
         clock: Callable[[], datetime],
+        effective_revision_digest: str | None = None,
+        ingest_obligation_id: str | None = None,
+        provider_attempt_number: int = 1,
+        deadline: datetime | None = None,
+        dispatch_authority_digest: str | None = None,
+        owner_emergency_stop: Callable[[], bool] = lambda: False,
+        call_shape_policy: GraphitiCallShapePolicy | None = None,
     ) -> None:
         self._service = service
         self._envelope = envelope
@@ -115,7 +134,93 @@ class GraphitiModelUsageObserver:
         self._allocations: list[InvocationAllocation] = []
         self._dispatch_at: dict[str, datetime] = {}
         self._policies: dict[str, InvocationEfficiencyPolicy] = {}
-        self._primary_by_prompt: dict[str, str] = {}
+        self._primary_by_request: dict[str, str] = {}
+        self._shape = call_shape_policy or load_checked_graphiti_call_shape_policy()
+        self._effective_revision_digest = effective_revision_digest or digest_canonical(
+            {"ingest_id": envelope.ingest_id, "basis": "LEGACY_TEST_FIXTURE"}
+        )
+        self._ingest_obligation_id = ingest_obligation_id or envelope.ingest_id
+        if self._ingest_obligation_id is None:
+            raise ValueError("Graphiti usage observer lacks an ingest obligation")
+        if provider_attempt_number <= 0:
+            raise ValueError("Graphiti provider attempt number must be positive")
+        self._provider_attempt_number = provider_attempt_number
+        self._deadline = deadline
+        self._dispatch_authority_digest = (
+            dispatch_authority_digest
+            or digest_canonical(
+                {
+                    "envelope_id": envelope.envelope_id,
+                    "basis": "LEGACY_TEST_FIXTURE",
+                }
+            )
+        )
+        self._owner_emergency_stop = owner_emergency_stop
+
+    def _policy_for(
+        self,
+        *,
+        workload: WorkloadClass,
+        provider: str,
+        route: str,
+        model: str,
+        reasoning: str,
+        output_schema_digest: str,
+        semantic_request_class: str,
+    ) -> InvocationEfficiencyPolicy:
+        embedding = workload is WorkloadClass.GRAPHITI_EMBEDDING
+        policy = InvocationEfficiencyPolicy.create(
+            policy_id=(
+                f"graphiti-{workload.value.lower()}-{semantic_request_class.lower()}-"
+                f"{output_schema_digest.removeprefix('sha256:')[:12]}"
+            ),
+            version=self._shape.version,
+            workload_class=workload,
+            provider=provider,
+            route=route,
+            model=model,
+            reasoning=reasoning,
+            one_turn=True,
+            exact_input=True,
+            skills_enabled=False,
+            tools_enabled=False,
+            mcp_enabled=False,
+            prior_message_count=0,
+            max_prompt_bytes=GRAPHITI_MAX_PROMPT_BYTES,
+            max_context_tokens=GRAPHITI_MAX_CONTEXT_TOKENS,
+            max_output_tokens=1 if embedding else GRAPHITI_MAX_OUTPUT_TOKENS,
+            max_total_tokens=(
+                GRAPHITI_MAX_CONTEXT_TOKENS
+                if embedding
+                else GRAPHITI_MAX_TOTAL_TOKENS
+            ),
+            prompt_contract_version=GRAPHITI_PROMPT_COMPONENT.component_version,
+            output_schema_digest=output_schema_digest,
+            allowed_context_identities=(GRAPHITI_CONTEXT_IDENTITY,),
+            allowed_config_identities=(
+                "graphiti-embedding-command-v1"
+                if embedding
+                else "graphiti-cli-command-v1",
+            ),
+            hard_estimate_ceiling_tokens=None,
+            evidence_digest=digest_canonical(
+                {
+                    "call_shape_policy_digest": self._shape.canonical_digest,
+                    "semantic_request_class": semantic_request_class,
+                    "output_schema_digest": output_schema_digest,
+                    "bounds": {
+                        "prompt_bytes": GRAPHITI_MAX_PROMPT_BYTES,
+                        "context_tokens": GRAPHITI_MAX_CONTEXT_TOKENS,
+                        "output_tokens": (
+                            1 if embedding else GRAPHITI_MAX_OUTPUT_TOKENS
+                        ),
+                    },
+                }
+            ),
+            qualified=True,
+        )
+        self._service.register_policy(policy)
+        return policy
 
     def _allocate(
         self,
@@ -126,16 +231,29 @@ class GraphitiModelUsageObserver:
         model: str,
         reasoning: str,
         prompt_bytes: bytes,
+        semantic_request_class: str,
+        response_schema_identity: str,
         output_schema_digest: str,
+        requested_max_tokens: int,
         parent_invocation_id: str | None = None,
     ) -> InvocationAllocation:
-        policy = self._service.qualified_policy(
-            workload_class=workload,
+        now = self._clock().astimezone(UTC)
+        if self._deadline is not None:
+            if self._deadline.tzinfo is None or self._deadline.utcoffset() is None:
+                raise ValueError("Graphiti dispatch deadline must be timezone-aware")
+            if now >= self._deadline.astimezone(UTC):
+                raise ValueError("Graphiti dispatch deadline has expired")
+        policy = self._policy_for(
+            workload=workload,
             provider=provider,
             route=route,
             model=model,
             reasoning=reasoning,
+            output_schema_digest=output_schema_digest,
+            semantic_request_class=semantic_request_class,
         )
+        if requested_max_tokens <= 0:
+            requested_max_tokens = policy.max_output_tokens
         if (
             not policy.one_turn
             or not policy.exact_input
@@ -148,8 +266,55 @@ class GraphitiModelUsageObserver:
                 "Graphiti invocation controls do not match the exact one-turn contract"
             )
         self._ordinal += 1
-        allocated_at = self._clock().astimezone(UTC)
+        allocated_at = now
         prompt_digest = digest_bytes(prompt_bytes)
+        leaf_class = (
+            GraphitiLeafClass.EMBEDDING
+            if workload is WorkloadClass.GRAPHITI_EMBEDDING
+            else GraphitiLeafClass.FALLBACK
+            if workload is WorkloadClass.GRAPHITI_CHAT_FALLBACK
+            else GraphitiLeafClass.PRIMARY
+        )
+        retry_state_digest = digest_canonical(
+            {
+                "leaf_class": leaf_class.value,
+                "parent_invocation_id": parent_invocation_id,
+                "semantic_request_class": semantic_request_class,
+            }
+        )
+        semantic_state_digest = graphiti_semantic_state_digest(
+            semantic_request_class=semantic_request_class,
+            prompt_digest=prompt_digest,
+            response_schema_digest=output_schema_digest,
+            requested_max_tokens=requested_max_tokens,
+            leaf_class=leaf_class,
+            retry_state_digest=retry_state_digest,
+        )
+        provider_attempt_id = (
+            f"{self._envelope.graphiti_attempt_id}:provider-attempt:"
+            f"{self._provider_attempt_number}:leaf:{self._ordinal}"
+        )
+        context_manifest_digest = digest_canonical(
+            {
+                "schema_version": "newsroom.graphiti-hermetic-context-manifest.v1",
+                "effective_revision_digest": self._effective_revision_digest,
+                "ingest_obligation_id": self._ingest_obligation_id,
+                "graphiti_attempt_id": self._envelope.graphiti_attempt_id,
+                "provider_attempt_id": provider_attempt_id,
+                "dispatch_authority_digest": self._dispatch_authority_digest,
+                "dispatch_deadline": (
+                    None
+                    if self._deadline is None
+                    else self._deadline.astimezone(UTC).isoformat()
+                ),
+                "semantic_state_digest": semantic_state_digest,
+                "call_shape_policy_digest": self._shape.canonical_digest,
+                "prior_message_count": 0,
+                "skill_count": 0,
+                "tool_count": 0,
+                "mcp_count": 0,
+            }
+        )
         allocation = InvocationAllocation.create(
             envelope_id=self._envelope.envelope_id,
             cycle_id=self._envelope.cycle_id,
@@ -163,25 +328,10 @@ class GraphitiModelUsageObserver:
             prompt_contract_version=GRAPHITI_PROMPT_COMPONENT.component_version,
             prompt_bytes=len(prompt_bytes),
             prompt_digest=prompt_digest,
-            request_digest=digest_canonical(
-                {
-                    "provider": provider,
-                    "route": route,
-                    "model": model,
-                    "prompt_digest": prompt_digest,
-                    "output_schema_digest": output_schema_digest,
-                }
-            ),
+            request_digest=semantic_state_digest,
             output_schema_digest=output_schema_digest,
-            max_output_tokens=policy.max_output_tokens,
-            context_manifest_digest=digest_canonical(
-                {
-                    "context_identity": GRAPHITI_CONTEXT_IDENTITY,
-                    "ingest_id": self._envelope.ingest_id,
-                    "graphiti_attempt_id": self._envelope.graphiti_attempt_id,
-                    "prompt_digest": prompt_digest,
-                }
-            ),
+            max_output_tokens=requested_max_tokens,
+            context_manifest_digest=context_manifest_digest,
             context_identity=GRAPHITI_CONTEXT_IDENTITY,
             config_identity=(
                 "graphiti-embedding-command-v1"
@@ -198,7 +348,53 @@ class GraphitiModelUsageObserver:
             recovery_deadline_at=allocated_at + timedelta(minutes=16),
             parent_invocation_id=parent_invocation_id,
         )
-        self._service.allocate(allocation, owner_emergency_stop=False)
+        owner_stop_active = self._owner_emergency_stop()
+        if owner_stop_active:
+            raise ModelUsageAdmissionError("Graphiti owner emergency stop is active")
+        route_circuit_state = str(self._service.route_state(route)["state"])
+        identity = GraphitiInternalRequestIdentity.create(
+            effective_revision_digest=self._effective_revision_digest,
+            ingest_obligation_id=self._ingest_obligation_id,
+            graphiti_attempt_id=str(self._envelope.graphiti_attempt_id),
+            provider_attempt_id=provider_attempt_id,
+            internal_ordinal=self._ordinal,
+            semantic_request_class=semantic_request_class,
+            provider=provider,
+            model=model,
+            reasoning=reasoning,
+            prompt_bytes=len(prompt_bytes),
+            prompt_digest=prompt_digest,
+            response_schema_identity=response_schema_identity,
+            response_schema_digest=output_schema_digest,
+            requested_max_tokens=requested_max_tokens,
+            framework_identity=self._shape.framework_identity,
+            prompt_identity=self._shape.prompt_identity,
+            ontology_identity=self._shape.ontology_identity,
+            temporal_identity=self._shape.temporal_identity,
+            generation_policy_identity=self._shape.generation_policy_identity,
+            context_manifest_digest=context_manifest_digest,
+            leaf_class=leaf_class,
+            retry_state_digest=retry_state_digest,
+            parent_invocation_id=parent_invocation_id,
+            envelope_id=self._envelope.envelope_id,
+            invocation_id=allocation.invocation_id,
+            invocation_policy_digest=policy.canonical_digest,
+            call_shape_policy_digest=self._shape.canonical_digest,
+            dispatch_authority_digest=self._dispatch_authority_digest,
+            dispatch_deadline_at=(
+                None
+                if self._deadline is None
+                else self._deadline.astimezone(UTC).isoformat()
+            ),
+            owner_stop_clear=not owner_stop_active,
+            route_circuit_state=route_circuit_state,
+        )
+        self._service.allocate_graphiti_request(
+            allocation,
+            identity=identity.as_record(),
+            max_distinct_internal_requests=self._shape.max_distinct_internal_requests,
+            owner_emergency_stop=owner_stop_active,
+        )
         self._allocations.append(allocation)
         self._policies[allocation.invocation_id] = policy
         dispatch_at = self._clock().astimezone(UTC)
@@ -223,23 +419,34 @@ class GraphitiModelUsageObserver:
     ) -> None:
         if provider_attempt_number <= 0:
             raise ValueError("Graphiti provider attempt number must be positive")
-        attempt_id = self._envelope.graphiti_attempt_id
-        if attempt_id is None:
-            raise ValueError("Graphiti work envelope lacks an attempt identity")
-        for allocation in self._allocations:
-            self._service.link_provider_attempt(
-                invocation_id=allocation.invocation_id,
-                provider_attempt_id=(
-                    f"{attempt_id}:provider-attempt:{provider_attempt_number}:"
-                    f"leaf:{allocation.leaf_ordinal}"
-                ),
-                linked_at=linked_at,
-            )
+        del linked_at
+        if not self._allocations:
+            return
+        if provider_attempt_number != self._provider_attempt_number:
+            raise ValueError("Graphiti provider attempt identity changed after dispatch")
 
     def before_cli_invocation(
-        self, *, provider: str, model: str, prompt: str, schema: str | None
+        self,
+        *,
+        provider: str,
+        model: str,
+        prompt: str,
+        schema: str | None,
+        semantic_request_class: str = "UNSTRUCTURED",
+        max_tokens: int = 0,
     ) -> object:
         prompt_digest = digest_bytes(prompt.encode("utf-8"))
+        schema_digest = digest_canonical(
+            {"response_schema": schema or "UNSTRUCTURED"}
+        )
+        request_key = digest_canonical(
+            {
+                "semantic_request_class": semantic_request_class,
+                "prompt_digest": prompt_digest,
+                "response_schema_digest": schema_digest,
+                "requested_max_tokens": max_tokens,
+            }
+        )
         primary = provider == "cursor-agent-cli"
         allocation = self._allocate(
             workload=(
@@ -256,15 +463,16 @@ class GraphitiModelUsageObserver:
             model=model,
             reasoning="provider-default" if primary else GROK_CHAT_REASONING,
             prompt_bytes=prompt.encode("utf-8"),
-            output_schema_digest=digest_canonical(
-                {"response_schema": schema or "UNSTRUCTURED"}
-            ),
+            semantic_request_class=semantic_request_class,
+            response_schema_identity=semantic_request_class,
+            output_schema_digest=schema_digest,
+            requested_max_tokens=max_tokens,
             parent_invocation_id=(
-                None if primary else self._primary_by_prompt.get(prompt_digest)
+                None if primary else self._primary_by_request.get(request_key)
             ),
         )
         if primary:
-            self._primary_by_prompt[prompt_digest] = allocation.invocation_id
+            self._primary_by_request[request_key] = allocation.invocation_id
         return allocation
 
     def after_cli_invocation(
@@ -273,10 +481,10 @@ class GraphitiModelUsageObserver:
         *,
         outcome: str,
         usage: dict[str, object],
-    ) -> None:
+    ) -> dict[str, str]:
         if not isinstance(token, InvocationAllocation):
             raise TypeError("Graphiti chat usage token is not an allocation")
-        self._complete(
+        return self._complete(
             token,
             outcome=outcome,
             usage=usage,
@@ -295,9 +503,12 @@ class GraphitiModelUsageObserver:
             model=model,
             reasoning="none",
             prompt_bytes=prompt_bytes,
+            semantic_request_class="EMBEDDING_VECTOR",
+            response_schema_identity="embedding-vector",
             output_schema_digest=digest_canonical(
                 {"schema": "embedding-vector", "model": model}
             ),
+            requested_max_tokens=1,
         )
 
     def after_embedding_invocation(
@@ -306,10 +517,10 @@ class GraphitiModelUsageObserver:
         *,
         outcome: str,
         usage: dict[str, object],
-    ) -> None:
+    ) -> dict[str, str]:
         if not isinstance(token, InvocationAllocation):
             raise TypeError("Graphiti embedding usage token is not an allocation")
-        self._complete(
+        return self._complete(
             token,
             outcome=outcome,
             usage=usage,
@@ -325,7 +536,7 @@ class GraphitiModelUsageObserver:
         usage: dict[str, object],
         od_011_reference: str | None,
         subscription_not_debited: bool,
-    ) -> None:
+    ) -> dict[str, str]:
         reported = usage.get("usage_basis") == "PROVIDER_REPORTED"
         no_provider_call = usage.get("usage_basis") == "NO_PROVIDER_CALL"
         policy = self._policies[allocation.invocation_id]
@@ -357,7 +568,7 @@ class GraphitiModelUsageObserver:
         telemetry = usage.get("provider_telemetry", usage)
         telemetry_mapping = telemetry if isinstance(telemetry, dict) else usage
         completed_at = self._clock().astimezone(UTC)
-        self._service.complete(
+        terminal = self._service.complete(
             InvocationTerminal.create(
                 invocation_id=allocation.invocation_id,
                 outcome=outcome,
@@ -415,6 +626,12 @@ class GraphitiModelUsageObserver:
             ),
             provider_telemetry=telemetry_mapping if reported else None,
         )
+        return {
+            "model_work_envelope_id": allocation.envelope_id,
+            "model_invocation_id": allocation.invocation_id,
+            "model_invocation_allocation_digest": allocation.canonical_digest,
+            "model_invocation_terminal_digest": terminal.terminal_digest,
+        }
 
 
 class EvaluationGraphitiRunner:
@@ -444,6 +661,7 @@ class EvaluationGraphitiRunner:
         *,
         model_usage: ModelUsageService,
         cycle_id: str,
+        dispatch_authority: Mapping[str, object],
         deadline: datetime | None = None,
     ) -> GraphitiCycleResult:
         envelope = WorkEnvelope.create(
@@ -462,6 +680,18 @@ class EvaluationGraphitiRunner:
             service=model_usage,
             envelope=envelope,
             clock=self._clock,
+            effective_revision_digest=digest_canonical(
+                {
+                    "source_id": unit.effective_revision.source_id,
+                    "item_key": unit.effective_revision.item_key,
+                    "revision_digest": unit.effective_revision.revision_digest,
+                    "first_observed_at": unit.effective_revision.first_observed_at,
+                }
+            ),
+            ingest_obligation_id=unit.ingest_id,
+            provider_attempt_number=unit.attempt_number,
+            deadline=deadline,
+            dispatch_authority_digest=digest_canonical(dict(dispatch_authority)),
         )
         self._pending_usage[(unit.ingest_id, unit.attempt_number)] = (
             model_usage,
