@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 import sqlite3
 from collections import Counter
 from collections.abc import Mapping
@@ -23,8 +24,18 @@ from newsroom.control_plane.cycle_governor import CONT_WRITER_ROUTE
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.veto import assert_private_store
 
-MODEL_USAGE_SCHEMA_VERSION = "newsroom.model-usage.v1"
-MODEL_USAGE_MIGRATION_ID = "model-usage-v1"
+MODEL_USAGE_SCHEMA_VERSION = "newsroom.model-usage.v2"
+MODEL_USAGE_MIGRATION_ID = "model-usage-v2"
+_MODEL_USAGE_MIGRATIONS = (
+    ("model-usage-v1", "newsroom.model-usage.v1"),
+    (MODEL_USAGE_MIGRATION_ID, MODEL_USAGE_SCHEMA_VERSION),
+)
+_HERMETIC_CONT_CONFIG_IDENTITIES = frozenset(
+    {
+        "cont-writer-grok-hermetic-command-v2",
+        "cont-writer-cursor-hermetic-command-v2",
+    }
+)
 DAILY_USAGE_ALERT_TOKENS = 500_000
 
 
@@ -439,6 +450,16 @@ class InvocationEfficiencyPolicy:
             raise ModelUsageIntegrityError("disabled capabilities repeat")
         for capability in self.disabled_capabilities:
             _token(capability, field="disabled_capability")
+        if _is_hermetic_cont_policy(self) and (
+            self.command_semantic_version == "UNSPECIFIED"
+            or not self.command_flags
+            or self.context_manifest_schema_version == "UNSPECIFIED"
+            or not self.disabled_capabilities
+            or not re.fullmatch(r"[0-9a-f]{40}", self.implementation_revision)
+        ):
+            raise ModelUsageIntegrityError(
+                "hermetic CONT policy lacks an exact command/manifest binding"
+            )
         if not _is_int(self.prior_message_count) or self.prior_message_count < 0:
             raise ModelUsageIntegrityError(
                 "policy prior message count must be non-negative"
@@ -973,13 +994,13 @@ class ModelUsageService:
         connection = self._connection()
         try:
             connection.executescript(_SCHEMA)
-            connection.execute(
+            applied_at = _utc_text(datetime.now(tz=UTC))
+            connection.executemany(
                 "INSERT OR IGNORE INTO model_usage_migrations("
                 "migration_id,schema_version,applied_at) VALUES(?,?,?)",
                 (
-                    MODEL_USAGE_MIGRATION_ID,
-                    MODEL_USAGE_SCHEMA_VERSION,
-                    _utc_text(datetime.now(tz=UTC)),
+                    (migration_id, schema_version, applied_at)
+                    for migration_id, schema_version in _MODEL_USAGE_MIGRATIONS
                 ),
             )
             connection.commit()
@@ -1036,7 +1057,7 @@ class ModelUsageService:
             rows = connection.execute(
                 "SELECT record_json FROM model_invocation_policies "
                 "WHERE workload_class=? AND provider=? AND route=? AND model=? "
-                "AND qualified=1 ORDER BY canonical_digest",
+                "AND qualified=1 ORDER BY rowid DESC",
                 (workload_class.value, provider, route, model),
             ).fetchall()
         finally:
@@ -1056,6 +1077,15 @@ class ModelUsageService:
         policies = [
             policy
             for policy in policies
+            if not _is_hermetic_cont_policy(policy)
+            or (
+                policy.command_semantic_version != "UNSPECIFIED"
+                and policy.implementation_revision == implementation_revision
+            )
+        ]
+        policies = [
+            policy
+            for policy in policies
             if not policy.calibration_only
             or (
                 candidate_id in policy.allowed_candidate_ids
@@ -1064,7 +1094,15 @@ class ModelUsageService:
         ]
         general_policies = [policy for policy in policies if not policy.calibration_only]
         if general_policies:
-            policies = general_policies
+            policies = (
+                general_policies[:1]
+                if all(_is_hermetic_cont_policy(policy) for policy in general_policies)
+                else general_policies
+            )
+        elif policies and all(_is_hermetic_cont_policy(policy) for policy in policies):
+            # A later exact-head restaging supersedes an older bootstrap for the
+            # same bounded candidate without mutating retained policy history.
+            policies = policies[:1]
         if len(policies) != 1:
             raise ModelUsageAdmissionError(
                 "exact qualified invocation policy is absent or ambiguous",
@@ -1298,11 +1336,13 @@ class ModelUsageService:
             manifest.get("schema_version") != policy.context_manifest_schema_version
             or manifest.get("command_semantic_version")
             != policy.command_semantic_version
-            or tuple(manifest.get("command_flags", ())) != policy.command_flags
-            or tuple(manifest.get("disabled_capabilities", ()))
+            or _record_string_tuple(manifest, "command_flags")
+            != policy.command_flags
+            or _record_string_tuple(manifest, "disabled_capabilities")
             != policy.disabled_capabilities
             or manifest.get("implementation_revision")
             != policy.implementation_revision
+            or manifest.get("implementation_worktree_clean") is not True
         ):
             raise ModelUsageAdmissionError(
                 "context manifest command contract differs from invocation policy"
@@ -3200,19 +3240,19 @@ def _policy_from_record(record: Mapping[str, object]) -> InvocationEfficiencyPol
         command_semantic_version=str(
             record.get("command_semantic_version", "UNSPECIFIED")
         ),
-        command_flags=tuple(str(value) for value in record.get("command_flags", ())),
+        command_flags=_record_string_tuple(record, "command_flags", default=()),
         context_manifest_schema_version=str(
             record.get("context_manifest_schema_version", "UNSPECIFIED")
         ),
-        disabled_capabilities=tuple(
-            str(value) for value in record.get("disabled_capabilities", ())
+        disabled_capabilities=_record_string_tuple(
+            record, "disabled_capabilities", default=()
         ),
         implementation_revision=str(
             record.get("implementation_revision", "UNSPECIFIED")
         ),
         calibration_only=bool(record.get("calibration_only", False)),
-        allowed_candidate_ids=tuple(
-            str(value) for value in record.get("allowed_candidate_ids", ())
+        allowed_candidate_ids=_record_string_tuple(
+            record, "allowed_candidate_ids", default=()
         ),
         max_prompt_bytes=_record_int(record, "max_prompt_bytes"),
         max_context_tokens=_record_int(record, "max_context_tokens"),
@@ -3244,6 +3284,28 @@ def _record_int(record: Mapping[str, object], field: str) -> int:
     if not _is_int(value):
         raise ModelUsageIntegrityError(f"retained policy {field} is invalid")
     return value
+
+
+def _is_hermetic_cont_policy(policy: InvocationEfficiencyPolicy) -> bool:
+    return bool(
+        _HERMETIC_CONT_CONFIG_IDENTITIES.intersection(
+            policy.allowed_config_identities
+        )
+    )
+
+
+def _record_string_tuple(
+    record: Mapping[str, object],
+    field: str,
+    *,
+    default: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    value = record.get(field, default)
+    if not isinstance(value, (list, tuple)) or not all(
+        isinstance(item, str) for item in value
+    ):
+        raise ModelUsageIntegrityError(f"retained policy {field} is invalid")
+    return tuple(value)
 
 
 __all__ = [

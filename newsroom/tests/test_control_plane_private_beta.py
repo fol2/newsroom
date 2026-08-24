@@ -37,6 +37,7 @@ from newsroom.control_plane.writer import (
     FixtureWriter,
     WriterCopy,
     WriterDispatchError,
+    cont_writer_implementation_identity,
     run_cursor_agent_cli,
     run_grok_cli,
 )
@@ -1321,6 +1322,55 @@ def test_grok_cli_uses_hermetic_single_turn_context(
     cwd = provider_call["cwd"]
     assert isinstance(cwd, str)
     assert cwd != os.getcwd()
+
+
+def test_writer_head_proof_rejects_hidden_index_flags_and_git_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(("/usr/bin/git", "init", "-q"), cwd=repository, check=True)
+    subprocess.run(
+        ("/usr/bin/git", "config", "user.email", "fixture@example.invalid"),
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ("/usr/bin/git", "config", "user.name", "Fixture"),
+        cwd=repository,
+        check=True,
+    )
+    tracked = repository / "tracked.py"
+    tracked.write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(("/usr/bin/git", "add", "tracked.py"), cwd=repository, check=True)
+    subprocess.run(
+        ("/usr/bin/git", "commit", "-q", "-m", "fixture"),
+        cwd=repository,
+        check=True,
+    )
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "poison"))
+
+    revision, clean = cont_writer_implementation_identity(str(repository))
+    assert len(revision) == 40
+    assert clean is True
+    monkeypatch.delenv("GIT_DIR")
+
+    subprocess.run(
+        ("/usr/bin/git", "update-index", "--assume-unchanged", "tracked.py"),
+        cwd=repository,
+        check=True,
+    )
+    tracked.write_text("VALUE = 2\n", encoding="utf-8")
+    assert subprocess.run(
+        ("/usr/bin/git", "status", "--porcelain"),
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == ""
+
+    assert cont_writer_implementation_identity(str(repository)) == (revision, False)
 
 
 def test_grok_cli_missing_minimal_auth_fails_before_provider_dispatch(

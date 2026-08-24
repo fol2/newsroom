@@ -94,9 +94,17 @@ class ContCalibrationPacket:
             )
         if digest_canonical(self._evidence_value()) != self.calibration_evidence_digest:
             raise ModelUsageAdmissionError("calibration packet digest is invalid")
-        maximum_prompt_bytes = int(self.metrics["maximum_prompt_bytes"])
-        maximum_output_tokens = int(self.metrics["maximum_output_tokens"])
-        maximum_total_tokens = int(self.metrics["maximum_total_tokens"])
+        maximum_prompt_bytes = _integer(self.metrics, "maximum_prompt_bytes")
+        maximum_output_tokens = _integer(self.metrics, "maximum_output_tokens")
+        maximum_total_tokens = _integer(self.metrics, "maximum_total_tokens")
+        if (
+            maximum_prompt_bytes is None
+            or maximum_output_tokens is None
+            or maximum_total_tokens is None
+        ):
+            raise ModelUsageAdmissionError(
+                "calibration packet token metrics are invalid"
+            )
         output_headroom = max(
             CONT_POLICY_MIN_HEADROOM_TOKENS,
             ceil(maximum_output_tokens * CONT_POLICY_HEADROOM_FRACTION),
@@ -168,7 +176,7 @@ def assess_cont_calibration(
     fallback_attempts = 0
     fallback_recoveries = 0
     primary_rows: list[Mapping[str, object]] = []
-    actual_rows: list[Mapping[str, object]] = []
+    dispatched_rows: list[Mapping[str, object]] = []
     for candidate_id in candidates:
         rows = by_candidate.get(candidate_id, [])
         primaries = [
@@ -189,7 +197,7 @@ def assess_cont_calibration(
         primary_rows.extend(
             row for row in primaries if row.get("actual_provider_dispatch") is True
         )
-        actual_rows.extend(dispatched)
+        dispatched_rows.extend(dispatched)
         accepted_rows = [
             row
             for row in dispatched
@@ -216,7 +224,7 @@ def assess_cont_calibration(
 
     contexts = [
         value
-        for row in actual_rows
+        for row in dispatched_rows
         if (value := _integer(row, "context_tokens")) is not None
     ]
     prompt_sizes = [
@@ -226,16 +234,16 @@ def assess_cont_calibration(
     ]
     output_tokens = [
         value
-        for row in actual_rows
+        for row in dispatched_rows
         if (value := _integer(row, "output_tokens")) is not None
     ]
     total_tokens = [
         value
-        for row in actual_rows
+        for row in dispatched_rows
         if (value := _integer(row, "total_tokens")) is not None
     ]
-    complete_total_telemetry = len(total_tokens) == len(actual_rows)
-    complete_output_telemetry = len(output_tokens) == len(actual_rows)
+    complete_total_telemetry = len(total_tokens) == len(dispatched_rows)
+    complete_output_telemetry = len(output_tokens) == len(dispatched_rows)
     no_result_tokens = (
         sum(total_tokens) - sum(accepted_token_totals)
         if complete_total_telemetry
@@ -280,7 +288,7 @@ def assess_cont_calibration(
         == CONT_PRIMARY_COMMAND_FLAGS
         and tuple(row["context_manifest"].get("disabled_capabilities", ()))  # type: ignore[union-attr]
         == CONT_DISABLED_CAPABILITIES
-        for row in actual_rows
+        for row in dispatched_rows
     )
     exact_route_pins = all(
         row.get("provider") == CONT_PRIMARY_PROVIDER
@@ -314,7 +322,7 @@ def assess_cont_calibration(
             set(accepted).issubset(set(unpublished_payload_candidate_ids)),
             "ACCEPTED_UNPUBLISHED_PAYLOAD_MISSING",
         ),
-        (len(contexts) == len(actual_rows), "CONTEXT_TELEMETRY_MISSING"),
+        (len(contexts) == len(dispatched_rows), "CONTEXT_TELEMETRY_MISSING"),
         (
             p50_context is not None
             and p50_context <= CONT_CALIBRATION_P50_CONTEXT_MAX,
@@ -355,11 +363,23 @@ def assess_cont_calibration(
                 "long_bytes": max(prompt_sizes),
             }
         ),
-        "maximum_output_tokens": max(output_tokens) if output_tokens else 0,
-        "maximum_total_tokens": max(total_tokens) if total_tokens else 0,
+        "maximum_output_tokens": (
+            max(output_tokens) if complete_output_telemetry else None
+        ),
+        "maximum_total_tokens": (
+            max(total_tokens) if complete_total_telemetry else None
+        ),
         "accepted_payload_token_totals": accepted_token_totals,
-        "total_tokens_for_accepted_payloads": sum(accepted_token_totals),
-        "median_tokens_per_accepted_payload": _median_int(accepted_token_totals),
+        "total_tokens_for_accepted_payloads": (
+            sum(accepted_token_totals)
+            if len(accepted_token_totals) == len(accepted)
+            else None
+        ),
+        "median_tokens_per_accepted_payload": (
+            _median_int(accepted_token_totals)
+            if len(accepted_token_totals) == len(accepted)
+            else None
+        ),
         "tokens_on_hold_reject_or_no_result": (
             None if no_result_tokens is None else max(no_result_tokens, 0)
         ),

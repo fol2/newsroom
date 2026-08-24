@@ -46,6 +46,46 @@ def _service(tmp_path: Path) -> ModelUsageService:
     return ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
 
 
+def test_v1_store_replays_v2_context_manifest_migration_idempotently(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE model_usage_migrations("
+        "migration_id TEXT PRIMARY KEY,schema_version TEXT NOT NULL,"
+        "applied_at TEXT NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO model_usage_migrations VALUES(?,?,?)",
+        ("model-usage-v1", "newsroom.model-usage.v1", T0.isoformat()),
+    )
+    connection.commit()
+    connection.close()
+
+    ModelUsageService(str(path))
+    ModelUsageService(str(path))
+
+    connection = sqlite3.connect(path)
+    migrations = connection.execute(
+        "SELECT migration_id,schema_version FROM model_usage_migrations "
+        "ORDER BY migration_id"
+    ).fetchall()
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    connection.close()
+    assert migrations == [
+        ("model-usage-v1", "newsroom.model-usage.v1"),
+        ("model-usage-v2", "newsroom.model-usage.v2"),
+    ]
+    assert "model_invocation_context_manifests" in tables
+    assert "model_invocation_context_observations" in tables
+
+
 def _policy(
     *,
     workload: WorkloadClass = WorkloadClass.CONT_WRITER_PRIMARY,
@@ -1530,7 +1570,7 @@ def test_hermes_usage_command_exports_allocation_free_envelope_outcome(
     assert hermes.main([*common, "--usage-format", "envelope-csv"]) == 0
     rows = list(csv.DictReader(io.StringIO(capsys.readouterr().out)))
     assert len(rows) == 1
-    assert rows[0]["schema_version"] == "newsroom.model-usage.v1"
+    assert rows[0]["schema_version"] == "newsroom.model-usage.v2"
     assert rows[0]["envelope_id"] == envelope.envelope_id
     assert rows[0]["outcome"] == "HOLD"
     assert rows[0]["work_outcome_terminal_at"] == "2026-08-24T10:00:01.000000Z"

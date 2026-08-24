@@ -29,7 +29,9 @@ state.
 ## Retained evidence
 
 Before allocation and dispatch, the shared model-usage store retains the
-canonical non-secret context manifest. It binds:
+canonical non-secret context manifest. The append-only
+`newsroom.model-usage.v2` migration preserves the v1 receipt history while
+adding manifest and context-observation provenance. The manifest binds:
 
 - provider, route, model, reasoning, command version and semantic flags;
 - the exact Git revision and proof that its tracked worktree was clean;
@@ -76,7 +78,10 @@ Add `--register-policy` only after the packet passes. The command then mints
 and registers the exact primary invocation-efficiency policy. A failed packet
 cannot mint or register a policy. Both the bootstrap and final policy versions
 include the current Git revision; a dirty or unversioned worktree fails before
-registration or assessment.
+registration, allocation or assessment. On a later clean revision, its matching
+candidate-scoped bootstrap takes precedence over an old-revision final policy;
+after another successful calibration, the latest retained final policy for that
+exact revision supersedes its predecessor without editing policy history.
 
 The assessment requires three accepted unpublished payloads from at most five
 candidates, three distinct prompt sizes, complete context telemetry, p50
