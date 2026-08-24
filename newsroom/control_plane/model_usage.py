@@ -1494,12 +1494,15 @@ class ModelUsageService:
         connection = self._connection()
         try:
             terminal_row = connection.execute(
-                "SELECT record_json FROM model_invocation_terminals WHERE invocation_id=?",
+                "SELECT t.record_json,a.route FROM model_invocation_terminals t "
+                "JOIN model_invocation_allocations a "
+                "ON a.invocation_id=t.invocation_id WHERE t.invocation_id=?",
                 (invocation_id,),
             ).fetchone()
             if terminal_row is None:
                 raise ModelUsageIntegrityError("terminal usage state is absent")
             terminal = _object(terminal_row[0])
+            route = str(terminal_row[1])
             if terminal.get("usage_status") not in {
                 "UNREPORTED",
                 "AMBIGUOUS",
@@ -1560,6 +1563,25 @@ class ModelUsageService:
                     _json({**record, "reconciliation_digest": digest}),
                 ),
             )
+            unresolved_on_route = connection.execute(
+                "SELECT COUNT(*) FROM model_invocation_terminals t "
+                "JOIN model_invocation_allocations a "
+                "ON a.invocation_id=t.invocation_id "
+                "WHERE a.route=? AND t.usage_status IN "
+                "('UNREPORTED','AMBIGUOUS','INVALID') "
+                "AND NOT EXISTS (SELECT 1 FROM model_usage_reconciliations r "
+                "WHERE r.invocation_id=t.invocation_id)",
+                (route,),
+            ).fetchone()
+            if unresolved_on_route is not None and int(unresolved_on_route[0]) == 0:
+                self._append_route_state(
+                    connection,
+                    route=route,
+                    state="CLOSED",
+                    reason="VALID_PROVIDER_TELEMETRY_RECONCILED",
+                    invocation_id=invocation_id,
+                    recorded_at=observed_at,
+                )
             connection.commit()
         finally:
             connection.close()
