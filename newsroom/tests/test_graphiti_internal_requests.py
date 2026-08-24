@@ -983,6 +983,67 @@ def test_embedding_dispatch_fence_refusal_terminalises_exact_zero(
     assert accounting["unused_reservation_released"] is True
 
 
+@pytest.mark.parametrize("refusal", ["expired_deadline", "owner_stop"])
+def test_embedding_refusal_before_allocation_retains_no_phantom_request(
+    tmp_path: Path, refusal: str
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id=f"cycle-embedding-{refusal}",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id=f"ingest-embedding-{refusal}",
+        graphiti_attempt_id=f"ingest-embedding-{refusal}:1",
+    )
+    service.open_envelope(envelope)
+
+    def owner_stop_check() -> None:
+        if refusal == "owner_stop":
+            raise RuntimeError("owner stop asserted")
+
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=1),
+        owner_stop_check=owner_stop_check,
+        deadline=T0 if refusal == "expired_deadline" else None,
+    )
+    provider_calls = 0
+
+    class Embeddings:
+        async def create(self, **_values: object) -> object:
+            nonlocal provider_calls
+            provider_calls += 1
+            raise AssertionError("embedding provider must remain fenced")
+
+    delegate = SimpleNamespace(
+        client=SimpleNamespace(embeddings=Embeddings()),
+        config=SimpleNamespace(
+            embedding_model="openai/text-embedding-3-large",
+            embedding_dim=2,
+        ),
+    )
+    embedder = MeteredOpenAIEmbedder(delegate, invocation_observer=observer)
+
+    expected_error = ValueError if refusal == "expired_deadline" else RuntimeError
+    with pytest.raises(expected_error):
+        asyncio.run(embedder.create("embedding input"))
+
+    assert provider_calls == 0
+    assert embedder.receipt() == {
+        "requests": [],
+        "request_count": 0,
+        "embedding_tokens": 0,
+        "cost_usd_microunits": 0,
+        "usage_basis": "NO_EMBEDDING_CALL",
+    }
+    assert service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"] == []
+
+
 def test_requested_max_tokens_is_forwarded_and_enforced_on_reported_usage(
     tmp_path: Path,
 ) -> None:

@@ -220,7 +220,6 @@ class MeteredOpenAIEmbedder:
             "cost_reported": False,
             "outcome": "UNOBSERVED",
         }
-        self.requests.append(request)
         observer_token = (
             None
             if self._invocation_observer is None
@@ -230,6 +229,7 @@ class MeteredOpenAIEmbedder:
                 input_data=input_data,
             )
         )
+        self.requests.append(request)
         transport_started = False
         try:
             if self._invocation_observer is not None:
