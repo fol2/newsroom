@@ -14,6 +14,11 @@
     "schema_sha256",
     "usage",
     "usage_status",
+    "validator_version",
+    "semantic_failure_codes",
+    "entity_count",
+    "fact_count",
+    "key_set_digest",
     "tool_call_count",
     "isolation"
   ],
@@ -48,6 +53,40 @@
     "json_valid": { "type": ["boolean", "null"] },
     "semantic_fixture_result": {
       "enum": ["PASS", "FAIL", "PENDING", "UNRESOLVED"]
+    },
+    "validator_version": {
+      "enum": [
+        "newsroom.graphiti-sdk-no-tool-validator.v1",
+        "newsroom.graphiti-sdk-no-tool-validator.v2"
+      ]
+    },
+    "semantic_failure_codes": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "DISPATCH_FAILED",
+          "INVALID_JSON",
+          "INVALID_TOP_LEVEL",
+          "MISSING_ENTITY_LIST",
+          "MISSING_EXPECTED_ENTITY",
+          "MISSING_EXPECTED_OK",
+          "MISSING_FACT_LIST",
+          "MISSING_RELATION_TYPE",
+          "MISSING_TEMPORAL_KEYS",
+          "MISSING_TIMESTAMP_LIST",
+          "MISSING_VALID_AT",
+          "UNCLASSIFIED_CONTRACT_MISMATCH",
+          "UNCLASSIFIED_RETAINED_FAILURE",
+          "UNEXPECTED_NONEMPTY_ZERO"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "entity_count": { "type": ["integer", "null"], "minimum": 0 },
+    "fact_count": { "type": ["integer", "null"], "minimum": 0 },
+    "key_set_digest": {
+      "type": ["string", "null"],
+      "pattern": "^sha256:[0-9a-f]{64}$"
     },
     "stream_message_classes": {
       "type": "array",

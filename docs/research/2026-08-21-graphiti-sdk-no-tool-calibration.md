@@ -14,7 +14,7 @@ This note is non-normative research evidence. It does not amend `GING-010`, auth
 
 ## 1. What is checked in
 
-The default runner is provider-free. It reconstructs the #739 source-safe 368-byte fixture, the 49-character tiny prompt, graphiti-core 0.29.3 combined and batch-timestamp prompt shapes, and the compact combined-temporal candidate prompts. Dry-run writes one redacted receipt per leaf plus an aggregate manifest. Missing usage is `UNREPORTED`, never zero.
+The default runner is provider-free and lives under `newsroom.research`, outside the protected production Graphiti adapter boundary. It reconstructs the #739 source-safe 368-byte fixture, the 49-character tiny prompt, graphiti-core 0.29.3 combined and batch-timestamp prompt shapes, and the historical compact combined-temporal candidate prompts. Dry-run writes one redacted receipt per leaf plus an aggregate manifest. Missing usage is `UNREPORTED`, never zero.
 
 ```text
 uv sync --dev --extra graphiti --locked
@@ -93,9 +93,23 @@ Live execute on 2026-08-22, `cursor-sdk==1.0.28`, `composer-2.5`, `tools=[]`, `s
 | `sdk-compact-temporal-long` | none | — | 4,958 / 10,169 | FAIL (`json_valid` false) |
 | `sdk-predeclared-repeat` | exact repeat of leaf 6 | — | 28,221 / 35,705 | PASS |
 
-Tiny-prompt input fell 82.9% below the CLI floor of 20,103, which meets both the 50% minimum and the 75% preferred reduction. Upstream combined input also fell well below the hermetic CLI 23,674 / 25,000 observation. The packet still recommends `REJECT`: compact leaves failed the gold contracts, the exact repeat of leaf 6 did not reproduce leaf 6's tokens or semantic result, and cheaper-but-invalid JSON is not success.
+Tiny-prompt input fell 82.9% below the CLI floor of 20,103, which meets both the 50% minimum and the 75% preferred reduction. Upstream combined input also fell well below the hermetic CLI 23,674 / 25,000 observation. The packet still recommends `REJECT`: four of eight leaves failed, all three first compact leaves failed, and the exact repeat of leaf 6 changed from failure to pass while input increased by 6,463 tokens (29.7%). Cheaper-but-invalid JSON is not success.
 
-The no-tool SDK floor is therefore a useful research transport. It does not by itself qualify the compact combined-temporal contract. That remains #747.
+The no-tool SDK floor is therefore a useful **text-only Cursor agent research transport**. `tools=[]` removes built-in tools; it does not prove a raw inference path or a guaranteed fixed floor. The original compact prompt contract remains rejected. #747 subsequently qualified a corrected contract provider-free and merged it through PR #751; its live quality and token usage remain separately unmeasured.
+
+### Redaction-safe diagnostics
+
+The historical v1 receipts correctly omitted model text, full prompts and account data, but retained only binary semantic results. The original causes of three JSON-valid failures are therefore unrecoverable and are labelled `UNCLASSIFIED_RETAINED_FAILURE`; the invalid long response is labelled `INVALID_JSON`. No failure cause has been invented after the fact.
+
+Provider-free validator v2 now retains only content-free diagnostics:
+
+- typed failure codes such as `UNEXPECTED_NONEMPTY_ZERO`, `MISSING_EXPECTED_ENTITY`, `MISSING_RELATION_TYPE`, `MISSING_TEMPORAL_KEYS` and `INVALID_JSON`;
+- entity and fact counts;
+- a digest of object key sets, never values;
+- validator version; and
+- aggregate pass/fail counts plus exact-repeat token and outcome divergence.
+
+The seventh historical live leaf was exactly 8,192 bytes and did not cross the chunk boundary. A separate provider-free fixture now uses `MAX_EPISODE_BYTES + 50`, requires two bounded chunks and proves complete ordered reconstruction. No further provider call was made or authorised.
 
 ## 4. Non-effects
 

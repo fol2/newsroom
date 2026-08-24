@@ -177,8 +177,8 @@ The separate graphiti-core edge schema already carries `valid_at` and `invalid_a
 | Upstream combined, zero-edge fixture | 25,000 measured chat tokens | 1 | JSON shape only | Measurement only, not general recommendation |
 | Upstream combined, relation-bearing fixture | No live token measurement | 2 before other conditional work | Provider-free call shape proved | Not an efficiency successor by itself |
 | Cross-revision batching | Amortises fixed context | fewer per item | Can invent cross-item relations | Reject |
-| Official Cursor SDK `tools=[]` | Unresolved live floor | one-shot candidate | Requires #746 local qualification | Preferred transport research candidate |
-| Compact combined-temporal object | Unresolved live usage | target: 1 for zero and non-zero | Requires #747 gold fixtures | Preferred semantic research candidate |
+| Official Cursor SDK `tools=[]` | 3,430 tiny input measured; 82.9% below CLI | one-shot text-only agent route | #746 transport useful; 4/8 packet leaves failed semantic fixtures | Research transport only; packet `REJECT` |
+| `NewsroomCombinedTemporalExtractionV1` | Live usage unmeasured | 1 per admitted chunk for zero and non-zero | #747 qualified provider-free and merged | Candidate requires live gold before adoption |
 
 ## 10. Cache is discounted usage, not token removal
 
@@ -238,11 +238,11 @@ Use route-specific systemic/no-result circuits and durable backoff. Fixed UTC-da
 6. Keep one effective revision per episode; reject cross-revision batching.
 7. **Do not adopt unmodified upstream combined extraction as the general efficiency route.** Its measured approximately 21k saving applies to the zero-edge fixture; a relation-bearing result dispatches `BatchEdgeTimestamps` and remains two chat leaves.
 
-### Preferred successor research
+### Successor research state
 
-- #746: measure the official Cursor Python SDK local `Agent.prompt` path with `tools=[]`, no MCP/subagents/custom tools, omitted setting sources and a fully isolated process/home/store boundary.
-- #747: qualify one compact combined-temporal response containing entities, facts, temporal bounds and deterministic evidence segment references.
-- #748: remove deterministic corpus metadata, common node-resolution and short-summary provider work.
+- #746 is complete as retained evidence: the official Cursor Python SDK local `Agent.prompt` path materially reduced the fixed floor, but the original compact prompts failed quality and the packet recommendation is `REJECT`.
+- #747 is complete and merged: the corrected provider-free `NewsroomCombinedTemporalExtractionV1` contract contains entities, facts, temporal bounds and deterministic evidence segment references in one leaf per admitted chunk. Live quality and token usage remain unmeasured.
+- #748 is ready: remove deterministic corpus metadata, common node-resolution and short-summary provider work without provider calls.
 
 The target is:
 
@@ -258,6 +258,15 @@ The target is:
 Changing GING-010 from cursor-agent CLI to the official SDK remains an owner decision; this report does not authorise it.
 
 ## 13. Tokens per effective revision and per hour
+
+Revision-level planning uses expected call counts, not one Bernoulli probability per conditional class:
+
+```text
+T_avg_revision ≈ Σ_class E[N_class per revision] × T̄_class
+               + E[T_embedding per revision]
+```
+
+`E[N_primary]` includes expected admitted chunks per effective revision. Dedupe, summary and fallback classes may also dispatch more than once; a single `P(condition) × T_class` term would understate them.
 
 The retained effective-revision arrival rates from #737 are:
 
@@ -279,13 +288,16 @@ The retained effective-revision arrival rates from #737 are:
 | Retry failure mode | up to 4× one internal chain | unresolved | Pure waste if digest is unchanged |
 | Upstream combined zero-edge sample | 25,000 measured chat | about 177k / h | Not representative of non-zero edges |
 | Upstream combined non-zero result | unresolved live usage | unresolved | Provider-free proof shows 2 chat leaves |
-| No-tool SDK + compact combined-temporal | unresolved | unresolved | Requires #746–#747 |
+| SDK no-tool tiny fixture | 3,878 measured total; 3,430 input | about 27k total / h | Fixed-floor observation only; semantic tiny PASS |
+| SDK upstream relation + timestamp | 12,588 measured across two leaves | about 89k / h | Source-safe bounded fixture; not the corrected #747 contract |
+| Original SDK compact packet | unresolved as a valid route | unresolved | 4/8 leaves failed; recommendation `REJECT` |
+| Corrected #747 combined-temporal contract | provider-free qualified; live usage unmeasured | unresolved | One leaf per admitted chunk; live gold still required |
 
 The wrong polling grain would multiply 54,287 by approximately 2,092 observation identities per hour and produce a fictitious approximately 113.6 million tokens/hour. Coverage planning must use effective revisions, not repeated poll observations.
 
 ## 14. Provider-free fixture evidence
 
-The retained CI path installs and verifies `graphiti-core==0.29.3`, then runs:
+The retained CI Graphiti path installs and verifies `graphiti-core==0.29.3`, then runs the pinned call-shape, SDK calibration and combined-temporal fixtures. The ordinary deterministic core path separately retains token-meter arithmetic. Together they cover:
 
 - separate node/edge call-shape fixtures;
 - zero-result combined fixture;
@@ -304,7 +316,7 @@ Required follow-on gold fixtures include:
 - explicit and relative temporal bounds;
 - existing-node ambiguity;
 - valid zero result;
-- long retained chunk;
+- exact 8,192-byte historical live leaf plus provider-free `MAX_EPISODE_BYTES + 50` reconstruction across every chunk;
 - correction/new revision;
 - same-name distinct entities;
 - malformed primary; and

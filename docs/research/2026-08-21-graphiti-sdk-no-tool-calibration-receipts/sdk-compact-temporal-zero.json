@@ -1,7 +1,9 @@
 {
   "agent_id_sha256": "sha256:20a15d7644d1f52379be6e38ea65ae09dd0c8957bb6217b0aac32fa245f35f24",
   "bridge_protocol": "sdk.v1",
+  "entity_count": null,
   "environment_allow_list_digest": "sha256:df48e445407ea450138c07d526a73151c7f38562b49679cf7a25e361dc9d82b9",
+  "fact_count": null,
   "fixture_id": "zero-result-368",
   "isolation": {
     "custom_tool_count": 0,
@@ -40,6 +42,7 @@
   },
   "isolation_digest": "sha256:af5186eb990b770ebad3dd6aeb8c28ec6be521eda4fb15de7fd29722ad517e77",
   "json_valid": true,
+  "key_set_digest": null,
   "label": "sdk-compact-temporal-zero",
   "latency_ms": 17978,
   "model": "composer-2.5",
@@ -53,6 +56,9 @@
   "schema_sha256": "sha256:7e39987fffe589d94c8b3dcf6416f538b5ed31883389bc67774826684fdccd16",
   "schema_version": "newsroom.graphiti-sdk-no-tool-calibration.v1",
   "sdk_version": "1.0.28",
+  "semantic_failure_codes": [
+    "UNCLASSIFIED_RETAINED_FAILURE"
+  ],
   "semantic_fixture_result": "FAIL",
   "status": "finished",
   "stream_message_classes": [],
@@ -66,5 +72,6 @@
     "total_tokens": 29322,
     "usage_basis": "PROVIDER_REPORTED"
   },
-  "usage_status": "PROVIDER_REPORTED"
+  "usage_status": "PROVIDER_REPORTED",
+  "validator_version": "newsroom.graphiti-sdk-no-tool-validator.v1"
 }
