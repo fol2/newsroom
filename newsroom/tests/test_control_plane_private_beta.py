@@ -622,7 +622,51 @@ def test_cycle_mints_unpublished_payloads_with_evidence(tmp_path: Path) -> None:
     assert len(list_payloads(str(unpublished))) == 3
 
 
+<<<<<<< HEAD
 def test_cycle_stops_backlog_walk_after_unknown_writer_failure(tmp_path: Path) -> None:
+=======
+def test_cycle_runs_configured_graphiti_admission_atom(tmp_path: Path) -> None:
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "unpublished_store.sqlite3"
+    calls: list[object] = []
+
+    class AdmissionAtom:
+        def enqueue_complete_receipts(self) -> int:
+            calls.append("enqueue")
+            return 0
+
+        def drain(self, *, worker_id: str, limit: int = 100) -> object:
+            calls.append(("drain", worker_id, limit))
+            return SimpleNamespace()
+
+        def reconcile_rights(self, *, limit: int = 100) -> int:
+            calls.append(("rights", limit))
+            return 0
+
+    def admission_factory(connection: object) -> AdmissionAtom:
+        assert connection is not None
+        calls.append("factory")
+        return AdmissionAtom()
+
+    run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti_admission_factory=admission_factory,
+        max_graphiti_admissions=7,
+    )
+
+    assert calls == [
+        "factory",
+        "enqueue",
+        ("drain", "hermes-cycle:run-1", 7),
+        ("rights", 7),
+    ]
+
+
+def test_cycle_continues_after_one_writer_failure(tmp_path: Path) -> None:
+>>>>>>> 724a2153 (Wire Graphiti admission into governed authority seams (#758))
     proving = _proving(tmp_path)
     unpublished = tmp_path / "unpublished_store.sqlite3"
 
