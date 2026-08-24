@@ -442,6 +442,11 @@ def _census_unpublished(
             f"{_schema_table('unpublished_graphiti_failures', schema=schema)}",
         ),
         (
+            "unpublished_graphiti_revision_events",
+            "SELECT event_id FROM "
+            f"{_schema_table('unpublished_graphiti_revision_events', schema=schema)}",
+        ),
+        (
             "unpublished_surface_payloads",
             "SELECT payload_id FROM "
             f"{_schema_table('unpublished_surface_payloads', schema=schema)}",
@@ -1550,6 +1555,7 @@ def _empty_unpublished_census() -> dict[str, frozenset[str]]:
         "unpublished_graphiti_authority_records": frozenset(),
         "unpublished_graphiti_spend": frozenset(),
         "unpublished_graphiti_failures": frozenset(),
+        "unpublished_graphiti_revision_events": frozenset(),
         "unpublished_surface_payloads": frozenset(),
         "unpublished_effective_revision_landed": frozenset(),
     }

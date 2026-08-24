@@ -347,6 +347,59 @@ CREATE TABLE IF NOT EXISTS unpublished_graphiti_spend(
     at TEXT NOT NULL,
     UNIQUE(ingest_id, attempt_number)
 );
+CREATE TABLE IF NOT EXISTS unpublished_graphiti_revision_events(
+    event_id TEXT PRIMARY KEY,
+    ledger_seq INTEGER NOT NULL UNIQUE,
+    ledger_digest TEXT NOT NULL UNIQUE,
+    source_id TEXT NOT NULL,
+    item_key TEXT NOT NULL,
+    revision_digest TEXT NOT NULL,
+    published_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT '',
+    landed_at TEXT NOT NULL,
+    manifest_json TEXT NOT NULL,
+    manifest_digest TEXT NOT NULL,
+    unit_count INTEGER NOT NULL,
+    projector_version TEXT NOT NULL,
+    projection_generation TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN (
+        'QUEUED','CLAIMED','RUNNING','RETRY_HELD','RIGHTS_HELD',
+        'DEAD_LETTER','TERMINAL'
+    )),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    available_at TEXT NOT NULL,
+    claim_owner TEXT,
+    claim_expires_at TEXT,
+    last_failure_code TEXT,
+    provider_dispatched INTEGER NOT NULL DEFAULT 0 CHECK(provider_dispatched IN (0,1)),
+    terminal_at TEXT,
+    proposal_count INTEGER,
+    UNIQUE(source_id,item_key,revision_digest,published_at,updated_at)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_graphiti_revision_events_claim
+ON unpublished_graphiti_revision_events(state,available_at,ledger_seq);
+CREATE TABLE IF NOT EXISTS unpublished_graphiti_event_checkpoint(
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    ledger_seq INTEGER NOT NULL,
+    projector_version TEXT NOT NULL,
+    projection_generation TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS unpublished_graphiti_event_circuit(
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    state TEXT NOT NULL CHECK(state IN ('CLOSED','OPEN')),
+    opened_at TEXT,
+    available_at TEXT,
+    failure_code TEXT
+);
+INSERT OR IGNORE INTO unpublished_graphiti_event_circuit(singleton,state)
+VALUES(1,'CLOSED');
+INSERT OR IGNORE INTO unpublished_graphiti_event_checkpoint(
+    singleton,ledger_seq,projector_version,projection_generation,updated_at
+) VALUES(
+    1,0,'newsroom.graphiti-event-projector.v1',
+    'graphiti-event-projection-2026-08','1970-01-01T00:00:00.000000Z'
+);
 """
 
 

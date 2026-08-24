@@ -10,7 +10,7 @@ import time
 from typing import Protocol, cast
 
 from newsroom.control_plane.cycle import CycleReport, run_cycle
-from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
+from newsroom.control_plane.graphiti_events import GraphitiEventQueue
 from newsroom.control_plane.intake import run_intake
 from newsroom.control_plane.paths import (
     CANONICAL_PROVING_STORE,
@@ -21,7 +21,6 @@ from newsroom.control_plane.store import list_payloads
 from newsroom.control_plane.usage import graphiti_usage_report
 from newsroom.control_plane.veto import VetoError
 from newsroom.control_plane.writer import default_writer
-from newsroom.graphiti_adapter.models import REAL_GRAPHITI_RUNTIME_ENABLED
 
 DEFAULT_PROVING = str(CANONICAL_PROVING_STORE)
 DEFAULT_UNPUBLISHED = str(CANONICAL_UNPUBLISHED_STORE)
@@ -39,8 +38,8 @@ def _cycle(args: _CycleArgs) -> CycleReport:
         unpublished_store=args.unpublished,
         writer=default_writer(),
         max_writes=args.max_writes,
-        graphiti=EvaluationGraphitiRunner() if REAL_GRAPHITI_RUNTIME_ENABLED else None,
-        max_graphiti=1,
+        graphiti=None,
+        max_graphiti=0,
     )
 
 
@@ -73,10 +72,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "status":
         payloads = list_payloads(args.unpublished)
+        graphiti_events = GraphitiEventQueue(args.unpublished).health()
         body = {
             "count": len(payloads),
             "public_dispatch": False,
             "auto_publish": False,
+            "graphiti_events": graphiti_events.as_dict(),
             "payloads": [
                 {
                     "story_candidate_id": item.story_candidate_id,

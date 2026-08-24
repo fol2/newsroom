@@ -41,6 +41,15 @@ from newsroom.control_plane.graphiti import (
     GraphitiCycleResult,
     GraphitiPort,
 )
+from newsroom.control_plane.graphiti_events import (
+    GraphitiDispatchGate,
+    GraphitiDispatchResult,
+    GraphitiEventQueue,
+    GraphitiProcessResult,
+    GraphitiRevisionEvent,
+    SystemicGraphitiEventFailure,
+    ensure_graphiti_event_schema,
+)
 from newsroom.control_plane.items import parse_observation
 from newsroom.control_plane.paths import (
     require_canonical_proving_store,
@@ -806,7 +815,17 @@ def _ingest(
         [CorpusIngestUnit], ContextManager[_DispatchAuthority | None]
     ],
     clock: Callable[[], datetime],
+    on_systemic_failure: Callable[[str, bool], None] | None = None,
 ) -> int:
+    def systemic_result_failure(result: GraphitiCycleResult) -> str | None:
+        if result.failure_code != "PRODUCER_INTERNAL_ERROR":
+            return None
+        raw = result.raw_receipt
+        if not isinstance(raw, dict):
+            return None
+        failure = raw.get("setup_failure") or raw.get("producer_failure")
+        return str(failure) if isinstance(failure, str) and failure else None
+
     attempted = 0
     for (
         _is_retry,
@@ -1062,12 +1081,16 @@ def _ingest(
                     result=returned_result,
                     binding_validated=False,
                 )
-            _fail(
-                unpublished,
-                unit,
-                outcome="FAILED",
-                failure_code="PRODUCER_INTERNAL_ERROR",
+            systemic_exception = isinstance(exc, (OSError, RuntimeError)) and (
+                on_systemic_failure is not None
             )
+            if not systemic_exception:
+                _fail(
+                    unpublished,
+                    unit,
+                    outcome="FAILED",
+                    failure_code="PRODUCER_INTERNAL_ERROR",
+                )
             failure_receipt = {
                 "ingest_id": unit.ingest_id,
                 "source_id": unit.source_id,
@@ -1119,8 +1142,11 @@ def _ingest(
             failure_receipt["receipt_digest"] = final_digest
             append_ledger(unpublished, "GRAPHITI_EVALUATION_ATTEMPT", failure_receipt)
             unpublished.commit()
+            if systemic_exception and on_systemic_failure is not None:
+                on_systemic_failure(type(exc).__name__, attempted > 0)
             continue
         terminal_outcome = result.outcome in {"COMPLETE", "PARTIAL"}
+        systemic_failure = systemic_result_failure(result)
         recovery_classification = _recovery_classification(result)
         marker_recovery = (
             recovery_classification
@@ -1159,12 +1185,13 @@ def _ingest(
                     _GRAPHITI_RECOVERY_CLOSED_LEDGER_KIND,
                     transition_payload,
                 )
-                _fail(
-                    unpublished,
-                    unit,
-                    outcome=result.outcome,
-                    failure_code=result.failure_code,
-                )
+                if systemic_failure is None:
+                    _fail(
+                        unpublished,
+                        unit,
+                        outcome=result.outcome,
+                        failure_code=result.failure_code,
+                    )
                 _retain_attempt_receipt(
                     unpublished,
                     unit=unit,
@@ -1180,6 +1207,11 @@ def _ingest(
                     transition_payload,
                 )
             unpublished.commit()
+            if systemic_failure is not None and on_systemic_failure is not None:
+                on_systemic_failure(
+                    systemic_failure,
+                    attempted > 0 and not _proves_no_provider_dispatch(result),
+                )
             continue
         accounting = _reconcile_result_spend(
             unpublished,
@@ -1214,13 +1246,19 @@ def _ingest(
             )
             clear_graphiti_failure(unpublished, unit.ingest_id)
         else:
-            _fail(
-                unpublished,
-                unit,
-                outcome=result.outcome,
-                failure_code=result.failure_code,
-            )
+            if systemic_failure is None:
+                _fail(
+                    unpublished,
+                    unit,
+                    outcome=result.outcome,
+                    failure_code=result.failure_code,
+                )
         unpublished.commit()
+        if systemic_failure is not None and on_systemic_failure is not None:
+            on_systemic_failure(
+                systemic_failure,
+                attempted > 0 and not _proves_no_provider_dispatch(result),
+            )
     return attempted
 
 
@@ -1986,6 +2024,240 @@ def _run_write_loop(
     )
 
 
+def _graphiti_dispatch_controls(
+    proving_store: str,
+    *,
+    clock: Callable[[], datetime],
+) -> tuple[
+    Callable[[CorpusIngestUnit], dict[str, object] | None],
+    Callable[[CorpusIngestUnit], ContextManager[_DispatchAuthority | None]],
+]:
+    def rights_check(unit: CorpusIngestUnit) -> dict[str, object] | None:
+        current = sqlite3.connect(proving_store)
+        apply_control_plane_sqlite_profile(current, query_only=True)
+        try:
+            evaluated_at = clock().astimezone(UTC)
+            return _dispatch_rights_decision(
+                current,
+                source_id=unit.source_id,
+                source_url=unit.source_definition_url,
+                evaluated_at=_utc_text(evaluated_at),
+                required_valid_until=_dispatch_valid_until(evaluated_at),
+            )
+        finally:
+            current.close()
+
+    @contextmanager
+    def rights_fence(
+        unit: CorpusIngestUnit,
+    ) -> Iterator[_DispatchAuthority | None]:
+        timeout_ms = max(1, int(_PROVING_FENCE_TIMEOUT_SECONDS * 1_000))
+        current = sqlite3.connect(proving_store, timeout=_PROVING_FENCE_TIMEOUT_SECONDS)
+        apply_control_plane_sqlite_profile(
+            current, wal=None, busy_timeout_ms=timeout_ms
+        )
+        try:
+            try:
+                current.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                raise _ProvingFenceUnavailable(
+                    "proving writer fence was unavailable"
+                ) from exc
+            evaluated_at = clock().astimezone(UTC)
+            decision = _dispatch_rights_decision(
+                current,
+                source_id=unit.source_id,
+                source_url=unit.source_definition_url,
+                evaluated_at=_utc_text(evaluated_at),
+                required_valid_until=_dispatch_valid_until(evaluated_at),
+            )
+            yield (
+                None
+                if decision is None
+                else _DispatchAuthority(
+                    rights=decision,
+                    deadline=evaluated_at
+                    + timedelta(milliseconds=GRAPHITI_EXTRACTION_TIMEOUT_MS),
+                )
+            )
+        finally:
+            if current.in_transaction:
+                current.rollback()
+            current.close()
+
+    return rights_check, rights_fence
+
+
+def consume_next_graphiti_event(
+    *,
+    proving_store: str,
+    unpublished_store: str,
+    graphiti: GraphitiPort,
+    owner_id: str,
+    clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
+) -> GraphitiProcessResult | None:
+    """Claim and process one durable revision, independently from source polling."""
+
+    if isinstance(graphiti, GovernedRealGraphitiPort):
+        require_canonical_proving_store(proving_store)
+        require_canonical_unpublished_store(unpublished_store)
+    rights_check, rights_fence = _graphiti_dispatch_controls(proving_store, clock=clock)
+    queue = GraphitiEventQueue(unpublished_store, clock=clock)
+    resolved_units: dict[str, tuple[CorpusIngestUnit, ...]] = {}
+
+    def units_for(event: GraphitiRevisionEvent) -> tuple[CorpusIngestUnit, ...]:
+        cached = resolved_units.get(event.event_id)
+        if cached is not None:
+            return cached
+        evaluated_at = clock().astimezone(UTC)
+        proving = sqlite3.connect(proving_store)
+        apply_control_plane_sqlite_profile(proving, query_only=True)
+        collected: list[CorpusIngestUnit] = []
+        try:
+            _run_id, _latest, corpus_rows = _permitted_rows(
+                proving,
+                evaluated_at=_utc_text(evaluated_at),
+                required_valid_until=_dispatch_valid_until(evaluated_at),
+            )
+            resolver = EffectiveRevisionIdentityResolver(proving)
+            for row in corpus_rows:
+                collected.extend(
+                    units_from(
+                        _parsed_observations((row,)),
+                        proving_run_id=row.run_id,
+                        rights_authority_run_id=row.rights_authority_run_id,
+                        rights_gate_id=row.rights_gate_id,
+                        rights_gate_reason=row.rights_gate_reason,
+                        source_definition_url=row.url,
+                        effective_revision_resolver=resolver,
+                    )
+                )
+        finally:
+            proving.close()
+        selected = tuple(
+            unit
+            for unit in unique_chunk_units(tuple(collected))
+            if (
+                unit.source_id,
+                unit.item_key,
+                unit.revision_digest,
+                unit.published_at or "",
+                unit.updated_at or "",
+            )
+            == (
+                event.source_id,
+                event.item_key,
+                event.revision_digest,
+                event.published_at,
+                event.updated_at,
+            )
+        )
+        if event.unit_refs:
+            expected_refs = tuple(
+                (
+                    ref.get("ingest_id"),
+                    ref.get("chunk_digest"),
+                    ref.get("chunk_ordinal"),
+                    ref.get("predecessor_ingest_id"),
+                )
+                for ref in event.unit_refs
+            )
+            actual_refs = tuple(
+                (
+                    unit.ingest_id,
+                    unit.digest,
+                    unit.chunk_ordinal,
+                    unit.predecessor_ingest_id,
+                )
+                for unit in selected
+            )
+            if actual_refs != expected_refs:
+                selected = ()
+        resolved_units[event.event_id] = selected
+        return selected
+
+    def gate(event: GraphitiRevisionEvent) -> GraphitiDispatchGate:
+        units = units_for(event)
+        if not units:
+            return GraphitiDispatchGate.hold("CANONICAL_INPUT_UNAVAILABLE")
+        for unit in units:
+            if rights_check(unit) is None:
+                return GraphitiDispatchGate.hold("NO_CURRENT_DISPATCH_RIGHTS")
+        queue.bind_resolved_units(event, owner_id=owner_id, units=units)
+        return GraphitiDispatchGate.allow()
+
+    def dispatch(event: GraphitiRevisionEvent) -> GraphitiDispatchResult:
+        event = replace(event, units=units_for(event))
+        unpublished = connect(unpublished_store)
+        try:
+            ingest_ids = tuple(unit.ingest_id for unit in event.units)
+            provider_dispatched = False
+
+            def systemic_failure(code: str, dispatched: bool) -> None:
+                raise SystemicGraphitiEventFailure(code, provider_dispatched=dispatched)
+
+            # _queue() exposes only the next predecessor-qualified chunk. Keep
+            # one revision attempt bounded while draining its ordered chunks.
+            for _chunk in event.units:
+                attempted = _ingest(
+                    unpublished,
+                    graphiti=graphiti,
+                    units=event.units,
+                    max_graphiti=1,
+                    rights_check=rights_check,
+                    rights_fence=rights_fence,
+                    clock=clock,
+                    on_systemic_failure=systemic_failure,
+                )
+                provider_dispatched = provider_dispatched or attempted > 0
+                if all(has_graphiti_ingest(unpublished, item) for item in ingest_ids):
+                    placeholders = ",".join("?" for _ in ingest_ids)
+                    proposal_count = int(
+                        unpublished.execute(
+                            f"SELECT COALESCE(SUM(proposal_count),0) "
+                            f"FROM unpublished_graphiti_ingest "
+                            f"WHERE ingest_id IN ({placeholders})",
+                            ingest_ids,
+                        ).fetchone()[0]
+                    )
+                    return GraphitiDispatchResult.terminal(
+                        proposal_count=proposal_count,
+                        provider_dispatched=provider_dispatched,
+                    )
+                failure_rows = list(
+                    unpublished.execute(
+                        f"""
+                        SELECT dead_lettered,last_failure_code
+                        FROM unpublished_graphiti_failures
+                        WHERE ingest_id IN ({",".join("?" for _ in ingest_ids)})
+                        ORDER BY at DESC
+                        """,
+                        ingest_ids,
+                    )
+                )
+                if failure_rows:
+                    failure_code = str(failure_rows[0][1])
+                    if any(bool(row[0]) for row in failure_rows):
+                        return GraphitiDispatchResult.dead_letter(
+                            failure_code=failure_code,
+                            provider_dispatched=provider_dispatched,
+                        )
+                    return GraphitiDispatchResult.retry_held(
+                        failure_code=failure_code,
+                        provider_dispatched=provider_dispatched,
+                    )
+                if attempted == 0:
+                    break
+            return GraphitiDispatchResult.retry_held(
+                failure_code="DISPATCH_INCOMPLETE",
+                provider_dispatched=provider_dispatched,
+            )
+        finally:
+            unpublished.close()
+
+    return queue.process_one(owner_id=owner_id, gate=gate, dispatch=dispatch)
+
+
 def run_cycle(
     *,
     proving_store: str,
@@ -2042,60 +2314,9 @@ def run_cycle(
     finally:
         proving.close()
 
-    def rights_check(unit: CorpusIngestUnit) -> dict[str, object] | None:
-        current = sqlite3.connect(proving_store)
-        apply_control_plane_sqlite_profile(current, query_only=True)
-        try:
-            evaluated_at = clock().astimezone(UTC)
-            return _dispatch_rights_decision(
-                current,
-                source_id=unit.source_id,
-                source_url=unit.source_definition_url,
-                evaluated_at=_utc_text(evaluated_at),
-                required_valid_until=_dispatch_valid_until(evaluated_at),
-            )
-        finally:
-            current.close()
-
-    @contextmanager
-    def rights_fence(
-        unit: CorpusIngestUnit,
-    ) -> Iterator[_DispatchAuthority | None]:
-        timeout_ms = max(1, int(_PROVING_FENCE_TIMEOUT_SECONDS * 1_000))
-        current = sqlite3.connect(
-            proving_store, timeout=_PROVING_FENCE_TIMEOUT_SECONDS
-        )
-        apply_control_plane_sqlite_profile(
-            current, wal=None, busy_timeout_ms=timeout_ms
-        )
-        try:
-            try:
-                current.execute("BEGIN IMMEDIATE")
-            except sqlite3.OperationalError as exc:
-                raise _ProvingFenceUnavailable(
-                    "proving writer fence was unavailable"
-                ) from exc
-            evaluated_at = clock().astimezone(UTC)
-            decision = _dispatch_rights_decision(
-                current,
-                source_id=unit.source_id,
-                source_url=unit.source_definition_url,
-                evaluated_at=_utc_text(evaluated_at),
-                required_valid_until=_dispatch_valid_until(evaluated_at),
-            )
-            yield (
-                None
-                if decision is None
-                else _DispatchAuthority(
-                    rights=decision,
-                    deadline=evaluated_at
-                    + timedelta(milliseconds=GRAPHITI_EXTRACTION_TIMEOUT_MS),
-                )
-            )
-        finally:
-            if current.in_transaction:
-                current.rollback()
-            current.close()
+    rights_check, rights_fence = _graphiti_dispatch_controls(
+        proving_store, clock=clock
+    )
 
     observations = _parsed_observations(latest_rows)
     collected_units: list[CorpusIngestUnit] = []
@@ -2132,6 +2353,7 @@ def run_cycle(
     candidates = form_candidates(observations)
     sources = len({row.source_id for row in latest_rows})
     unpublished = connect(unpublished_store)
+    ensure_graphiti_event_schema(unpublished)
     graphiti_ok = 0
     admission_policy = DeterministicWriteAdmission()
     admission_counts: Counter[str] = Counter()
@@ -2159,6 +2381,7 @@ def run_cycle(
         write_budget_exhausted=False,
     )
     try:
+        unpublished.execute("BEGIN IMMEDIATE")
         _emit_effective_revision_landed(
             unpublished,
             units,
