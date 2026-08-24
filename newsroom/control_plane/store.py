@@ -24,7 +24,10 @@ from newsroom.control_plane.veto import (
     refuse_public_effect,
 )
 from newsroom.effective_revision import EffectiveRevisionIdentity
-from newsroom.graphiti_adapter.embedding_meter import is_exact_provider_reported_usage
+from newsroom.graphiti_adapter.embedding_meter import (
+    is_exact_no_provider_call_usage,
+    is_exact_provider_reported_usage,
+)
 
 SCHEMA_VERSION = "newsroom.control-plane.unpublished.v12"
 EFFECTIVE_REVISION_LANDED = "EFFECTIVE_REVISION_LANDED"
@@ -1466,7 +1469,9 @@ def reconcile_graphiti_spend(
     usage = embedding_usage or {}
     usage_basis = str(usage.get("usage_basis") or "UNREPORTED")
     raw_cost = usage.get("cost_usd_microunits")
-    no_call = is_exact_no_embedding_call(embedding_usage)
+    no_call = is_exact_no_embedding_call(
+        embedding_usage
+    ) or is_exact_no_provider_call_usage(embedding_usage)
     reported = is_exact_provider_reported_usage(embedding_usage)
     actual_usd: int | None
     if no_call:

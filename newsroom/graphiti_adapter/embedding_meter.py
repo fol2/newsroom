@@ -30,6 +30,15 @@ _PROVIDER_REQUEST_KEYS = frozenset(
         "outcome",
     }
 )
+_EMBEDDING_USAGE_KEYS = frozenset(
+    {
+        "requests",
+        "request_count",
+        "embedding_tokens",
+        "cost_usd_microunits",
+        "usage_basis",
+    }
+)
 
 
 class EmbeddingInvocationObserver(Protocol):
@@ -102,6 +111,42 @@ def is_exact_provider_reported_usage(
         request_tokens += total_tokens
         request_cost += item_cost
     return request_tokens == embedding_tokens and request_cost == cost
+
+
+def is_exact_no_provider_call_usage(
+    embedding_usage: Mapping[str, object] | None,
+) -> bool:
+    """Validate retained embedding requests proved to stop before provider I/O."""
+
+    if embedding_usage is None or set(embedding_usage) != _EMBEDDING_USAGE_KEYS:
+        return False
+    requests = embedding_usage["requests"]
+    request_count = embedding_usage["request_count"]
+    if (
+        embedding_usage["usage_basis"] != "NO_PROVIDER_CALL"
+        or not isinstance(requests, list)
+        or not requests
+        or not _is_non_negative_int(request_count)
+        or request_count != len(requests)
+        or not _is_non_negative_int(embedding_usage["embedding_tokens"])
+        or embedding_usage["embedding_tokens"] != 0
+        or not _is_non_negative_int(embedding_usage["cost_usd_microunits"])
+        or embedding_usage["cost_usd_microunits"] != 0
+    ):
+        return False
+    return all(
+        isinstance(request, Mapping)
+        and request.get("provider") == "openrouter"
+        and request.get("model") == OPENROUTER_EMBEDDING_SLUG
+        and request.get("request_id") == ""
+        and request.get("prompt_tokens") is None
+        and request.get("total_tokens") is None
+        and request.get("cost_usd_microunits") is None
+        and request.get("cost_reported") is False
+        and request.get("outcome") in {"FAILED", "CANCELLED"}
+        and request.get("usage_basis") == "NO_PROVIDER_CALL"
+        for request in requests
+    )
 
 
 def _integer(value: object) -> int | None:
@@ -317,6 +362,15 @@ class MeteredOpenAIEmbedder:
         ]
         all_costs_reported = bool(self.requests) and len(costs) == len(self.requests)
         all_tokens_reported = bool(self.requests) and len(token_values) == len(self.requests)
+        exact_zero = {
+            "requests": list(self.requests),
+            "request_count": len(self.requests),
+            "embedding_tokens": 0,
+            "cost_usd_microunits": 0,
+            "usage_basis": "NO_PROVIDER_CALL",
+        }
+        if is_exact_no_provider_call_usage(exact_zero):
+            return exact_zero
         if all_costs_reported and all_tokens_reported:
             basis = "PROVIDER_REPORTED"
         elif self.requests:
@@ -335,5 +389,6 @@ class MeteredOpenAIEmbedder:
 __all__ = [
     "EmbeddingInvocationObserver",
     "MeteredOpenAIEmbedder",
+    "is_exact_no_provider_call_usage",
     "is_exact_provider_reported_usage",
 ]
