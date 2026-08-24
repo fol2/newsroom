@@ -827,7 +827,11 @@ async def run_cli_chain(
         )
         payload = None
     except (RuntimeError, OSError) as exc:
-        cursor_usage = unreported_cli_usage()
+        cursor_usage = (
+            unreported_cli_usage()
+            if cursor_transport_started
+            else no_provider_call_cli_usage()
+        )
         binding = observe(cursor_token, outcome="FAILED", usage=cursor_usage)
         invocations.append(
             _invocation(
@@ -970,7 +974,11 @@ async def run_cli_chain(
         )
         raise CliResponseError("Graphiti fallback CLI executable not found") from exc
     except (RuntimeError, OSError) as exc:
-        grok_usage = unreported_cli_usage()
+        grok_usage = (
+            unreported_cli_usage()
+            if grok_transport_started
+            else no_provider_call_cli_usage()
+        )
         binding = observe(grok_token, outcome="FAILED", usage=grok_usage)
         invocations.append(
             _invocation(
