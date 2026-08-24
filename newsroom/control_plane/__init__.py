@@ -1,6 +1,14 @@
 """Private unpublished editorial-beta Control Plane. No public effect."""
 
 from newsroom.control_plane.cycle import CycleReport, run_cycle
+from newsroom.control_plane.cycle_governor import (
+    CycleLease,
+    CycleNotEligible,
+    CycleOutcomeInput,
+    CycleTerminalResult,
+    DurableCycleGovernor,
+    EvaluationCyclePolicy,
+)
 from newsroom.control_plane.graphiti_admission import (
     GraphitiAdmissionConsumer,
     GraphitiAdmissionTelemetry,
@@ -15,10 +23,16 @@ from newsroom.control_plane.surface import UnpublishedSurfacePayload
 from newsroom.control_plane.veto import VetoError, refuse_public_effect
 
 __all__ = [
+    "CycleLease",
+    "CycleNotEligible",
+    "CycleOutcomeInput",
     "CycleReport",
+    "CycleTerminalResult",
+    "DurableCycleGovernor",
+    "EvaluationCyclePolicy",
+    "ExistingGovernedGraphitiAdmissionAuthority",
     "GraphitiAdmissionConsumer",
     "GraphitiAdmissionTelemetry",
-    "ExistingGovernedGraphitiAdmissionAuthority",
     "GraphitiEntityAdmissionPlan",
     "GraphitiRelationAdmissionPlan",
     "UnpublishedDraft",
