@@ -8,7 +8,7 @@ import json
 import os
 import subprocess
 import tempfile
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
@@ -39,10 +39,26 @@ class CliExecution:
 
 
 CliOutput = str | CliExecution
-CliRunner = Callable[[str], CliOutput]
-GrokRunner = Callable[[str, str | None], CliOutput]
-AsyncCliRunner = Callable[[str], Awaitable[CliOutput]]
-AsyncGrokRunner = Callable[[str, str | None], Awaitable[CliOutput]]
+
+
+class CliRunner(Protocol):
+    def __call__(self, prompt: str, *, max_tokens: int) -> CliOutput: ...
+
+
+class GrokRunner(Protocol):
+    def __call__(
+        self, prompt: str, schema: str | None, *, max_tokens: int
+    ) -> CliOutput: ...
+
+
+class AsyncCliRunner(Protocol):
+    async def __call__(self, prompt: str, *, max_tokens: int) -> CliOutput: ...
+
+
+class AsyncGrokRunner(Protocol):
+    async def __call__(
+        self, prompt: str, schema: str | None, *, max_tokens: int
+    ) -> CliOutput: ...
 
 
 class CliResponseError(RuntimeError):
@@ -262,7 +278,8 @@ def parse_grok_stream_output(raw: str) -> CliExecution:
     )
 
 
-def run_cursor_agent_llm(prompt: str) -> CliExecution:
+def run_cursor_agent_llm(prompt: str, *, max_tokens: int) -> CliExecution:
+    _require_positive_max_tokens(max_tokens)
     with tempfile.TemporaryDirectory(prefix="newsroom-cursor-graphiti-") as cwd:
         return parse_cursor_output(
             run_cli(
@@ -273,7 +290,10 @@ def run_cursor_agent_llm(prompt: str) -> CliExecution:
         )
 
 
-async def run_cursor_agent_llm_async(prompt: str) -> CliExecution:
+async def run_cursor_agent_llm_async(
+    prompt: str, *, max_tokens: int
+) -> CliExecution:
+    _require_positive_max_tokens(max_tokens)
     with tempfile.TemporaryDirectory(prefix="newsroom-cursor-graphiti-") as cwd:
         return parse_cursor_output(
             await run_cli_async(
@@ -284,7 +304,10 @@ async def run_cursor_agent_llm_async(prompt: str) -> CliExecution:
         )
 
 
-def run_grok_llm(prompt: str, schema: str | None) -> CliExecution:
+def run_grok_llm(
+    prompt: str, schema: str | None, *, max_tokens: int
+) -> CliExecution:
+    _require_positive_max_tokens(max_tokens)
     with tempfile.TemporaryDirectory(prefix="newsroom-grok-graphiti-") as cwd:
         return parse_grok_stream_output(
             run_cli(
@@ -295,7 +318,10 @@ def run_grok_llm(prompt: str, schema: str | None) -> CliExecution:
         )
 
 
-async def run_grok_llm_async(prompt: str, schema: str | None) -> CliExecution:
+async def run_grok_llm_async(
+    prompt: str, schema: str | None, *, max_tokens: int
+) -> CliExecution:
+    _require_positive_max_tokens(max_tokens)
     with tempfile.TemporaryDirectory(prefix="newsroom-grok-graphiti-") as cwd:
         return parse_grok_stream_output(
             await run_cli_async(
@@ -354,13 +380,28 @@ def _invocation(
 
 
 def _bind_requested_max_tokens(prompt: str, max_tokens: int) -> str:
-    if isinstance(max_tokens, bool) or max_tokens <= 0:
-        raise ValueError("Graphiti requested max_tokens must be positive")
+    _require_positive_max_tokens(max_tokens)
     return (
         f"{prompt}\n\n"
         "<newsroom_controller_output_contract>\n"
         f"maximum_output_tokens={max_tokens}\n"
         "</newsroom_controller_output_contract>"
+    )
+
+
+def _require_positive_max_tokens(max_tokens: int) -> None:
+    if isinstance(max_tokens, bool) or max_tokens <= 0:
+        raise ValueError("Graphiti requested max_tokens must be positive")
+
+
+def _reported_output_exceeds(
+    execution: CliExecution, *, max_tokens: int
+) -> bool:
+    output_tokens = execution.usage.get("output_tokens")
+    return (
+        isinstance(output_tokens, int)
+        and not isinstance(output_tokens, bool)
+        and output_tokens > max_tokens
     )
 
 
@@ -442,9 +483,11 @@ async def run_cli_chain(
 
     try:
         if inspect.iscoroutinefunction(cursor_runner):
-            raw = await cursor_runner(prompt)
+            raw = await cursor_runner(prompt, max_tokens=max_tokens)
         else:
-            raw = await asyncio.to_thread(cursor_runner, prompt)
+            raw = await asyncio.to_thread(
+                cursor_runner, prompt, max_tokens=max_tokens
+            )
     except asyncio.CancelledError as exc:
         cursor_usage = unreported_cli_usage()
         binding = observe(cursor_token, outcome="CANCELLED", usage=cursor_usage)
@@ -493,7 +536,16 @@ async def run_cli_chain(
     else:
         cursor_execution = _execution(cast(CliOutput, raw))
         payload = _parsed_object(cursor_execution.text)
-        cursor_outcome = "COMPLETE" if payload is not None else "MALFORMED_OUTPUT"
+        output_limit_exceeded = _reported_output_exceeds(
+            cursor_execution, max_tokens=max_tokens
+        )
+        cursor_outcome = (
+            "OUTPUT_LIMIT_EXCEEDED"
+            if output_limit_exceeded
+            else "COMPLETE"
+            if payload is not None
+            else "MALFORMED_OUTPUT"
+        )
         binding = observe(
             cursor_token,
             outcome=cursor_outcome,
@@ -509,6 +561,10 @@ async def run_cli_chain(
                 receipt_binding=binding,
             )
         )
+        if output_limit_exceeded:
+            raise CliResponseError(
+                "Cursor Graphiti response exceeded requested max_tokens"
+            )
     if payload is not None:
         return payload
 
@@ -527,9 +583,11 @@ async def run_cli_chain(
     )
     try:
         if inspect.iscoroutinefunction(grok_runner):
-            raw = await grok_runner(prompt, schema)
+            raw = await grok_runner(prompt, schema, max_tokens=max_tokens)
         else:
-            raw = await asyncio.to_thread(grok_runner, prompt, schema)
+            raw = await asyncio.to_thread(
+                grok_runner, prompt, schema, max_tokens=max_tokens
+            )
     except asyncio.CancelledError as exc:
         grok_usage = unreported_cli_usage()
         binding = observe(grok_token, outcome="CANCELLED", usage=grok_usage)
@@ -577,7 +635,16 @@ async def run_cli_chain(
         raise CliResponseError("Graphiti fallback CLI failed") from exc
     grok_execution = _execution(cast(CliOutput, raw))
     payload = _parsed_object(grok_execution.text)
-    grok_outcome = "COMPLETE" if payload is not None else "MALFORMED_OUTPUT"
+    output_limit_exceeded = _reported_output_exceeds(
+        grok_execution, max_tokens=max_tokens
+    )
+    grok_outcome = (
+        "OUTPUT_LIMIT_EXCEEDED"
+        if output_limit_exceeded
+        else "COMPLETE"
+        if payload is not None
+        else "MALFORMED_OUTPUT"
+    )
     binding = observe(
         grok_token,
         outcome=grok_outcome,
@@ -593,6 +660,8 @@ async def run_cli_chain(
             receipt_binding=binding,
         )
     )
+    if output_limit_exceeded:
+        raise CliResponseError("Grok Graphiti response exceeded requested max_tokens")
     if payload is None:
         raise CliResponseError("Graphiti CLI JSON was not an object")
     return payload

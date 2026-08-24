@@ -76,6 +76,10 @@ class GraphitiQualifiedRoute:
     model: str
     reasoning: str
     config_identity: str
+    command_semantic_version: str
+    command_flags: tuple[str, ...]
+    disabled_capabilities: tuple[str, ...]
+    implementation_revision: str
     max_prompt_bytes: int
     max_context_tokens: int
     max_output_tokens: int
@@ -96,13 +100,31 @@ class GraphitiQualifiedRoute:
             model=str(value.get("model", "")),
             reasoning=str(value.get("reasoning", "")),
             config_identity=str(value.get("config_identity", "")),
+            command_semantic_version=str(value.get("command_semantic_version", "")),
+            command_flags=_string_tuple(value.get("command_flags")),
+            disabled_capabilities=_string_tuple(value.get("disabled_capabilities")),
+            implementation_revision=str(value.get("implementation_revision", "")),
             max_prompt_bytes=value.get("max_prompt_bytes", 0),  # type: ignore[arg-type]
             max_context_tokens=value.get("max_context_tokens", 0),  # type: ignore[arg-type]
             max_output_tokens=value.get("max_output_tokens", 0),  # type: ignore[arg-type]
             max_total_tokens=value.get("max_total_tokens", 0),  # type: ignore[arg-type]
         )
-        for name in ("provider", "route", "model", "reasoning", "config_identity"):
+        for name in (
+            "provider",
+            "route",
+            "model",
+            "reasoning",
+            "config_identity",
+            "command_semantic_version",
+            "implementation_revision",
+        ):
             _token(str(getattr(route, name)), field=f"qualified route {name}")
+        if not route.command_flags or not route.disabled_capabilities:
+            raise GraphitiRequestContractError(
+                "qualified Graphiti route lacks command/capability bindings"
+            )
+        for item in (*route.command_flags, *route.disabled_capabilities):
+            _token(item, field="qualified route command value")
         for name in (
             "max_prompt_bytes",
             "max_context_tokens",
@@ -120,11 +142,25 @@ class GraphitiQualifiedRoute:
             "model": self.model,
             "reasoning": self.reasoning,
             "config_identity": self.config_identity,
+            "command_semantic_version": self.command_semantic_version,
+            "command_flags": list(self.command_flags),
+            "disabled_capabilities": list(self.disabled_capabilities),
+            "implementation_revision": self.implementation_revision,
             "max_prompt_bytes": self.max_prompt_bytes,
             "max_context_tokens": self.max_context_tokens,
             "max_output_tokens": self.max_output_tokens,
             "max_total_tokens": self.max_total_tokens,
         }
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or not all(
+        isinstance(item, str) for item in value
+    ):
+        raise GraphitiRequestContractError(
+            "qualified Graphiti route string list is invalid"
+        )
+    return tuple(value)
 
 
 @dataclass(frozen=True, slots=True)

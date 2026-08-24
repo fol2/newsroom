@@ -184,10 +184,10 @@ def test_cli_chain_retains_cursor_usage_on_the_invocation() -> None:
         run_cli_chain(
             prompt="prompt",
             schema=None,
-            cursor_runner=lambda _prompt: CliExecution(
+            cursor_runner=lambda _prompt, *, max_tokens: CliExecution(
                 text='{"value":"primary"}', usage=usage
             ),
-            grok_runner=lambda _prompt, _schema: "not called",
+            grok_runner=lambda _prompt, _schema, *, max_tokens: "not called",
             invocations=invocations,
         )
     )
@@ -237,11 +237,11 @@ def test_cli_chain_allocates_each_hidden_leaf_before_provider_runner() -> None:
         "total_tokens": 12,
     }
 
-    def cursor(_prompt: str) -> CliExecution:
+    def cursor(_prompt: str, *, max_tokens: int) -> CliExecution:
         events.append(("DISPATCH", "cursor-agent-cli"))
         return CliExecution(text="malformed", usage=usage)
 
-    def grok(_prompt: str, _schema: str | None) -> CliExecution:
+    def grok(_prompt: str, _schema: str | None, *, max_tokens: int) -> CliExecution:
         events.append(("DISPATCH", "grok-build-cli"))
         return CliExecution(text='{"value":"fallback"}', usage=usage)
 
@@ -288,7 +288,7 @@ def test_cli_chain_retains_exact_zero_for_missing_executable_before_dispatch() -
         ) -> None:
             completions.append((str(token), outcome, usage))
 
-    def cursor(_prompt: str) -> CliExecution:
+    def cursor(_prompt: str, *, max_tokens: int) -> CliExecution:
         raise FileNotFoundError("cursor-agent")
 
     result = asyncio.run(
@@ -296,7 +296,7 @@ def test_cli_chain_retains_exact_zero_for_missing_executable_before_dispatch() -
             prompt="prompt",
             schema=None,
             cursor_runner=cursor,
-            grok_runner=lambda _prompt, _schema: CliExecution(
+            grok_runner=lambda _prompt, _schema, *, max_tokens: CliExecution(
                 text='{"value":"fallback"}', usage=_reported_usage()
             ),
             invocations=[],

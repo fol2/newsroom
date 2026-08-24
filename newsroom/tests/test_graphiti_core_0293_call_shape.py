@@ -294,14 +294,14 @@ def test_graphiti_core_response_schemas_are_stable() -> None:
 def test_newsroom_cli_client_receipts_requested_max_tokens() -> None:
     captured: dict[str, object] = {}
 
-    async def cursor_runner(prompt: str) -> CliExecution:
+    async def cursor_runner(prompt: str, *, max_tokens: int) -> CliExecution:
         captured["prompt"] = prompt
         return CliExecution(
             text='{"extracted_entities":[]}',
             usage=unreported_cli_usage(),
         )
 
-    async def grok_runner(prompt: str, schema: str | None) -> CliExecution:
+    async def grok_runner(prompt: str, schema: str | None, *, max_tokens: int) -> CliExecution:
         captured["grok_schema"] = schema
         raise AssertionError("Grok fallback must not run on well-formed Cursor JSON")
 

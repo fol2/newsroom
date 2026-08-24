@@ -114,6 +114,9 @@ class GovernedRealGraphitiPort(GraphitiPort, Protocol):
 
 
 GRAPHITI_CONTEXT_IDENTITY = "graphiti-combined-temporal-hermetic-v1"
+GRAPHITI_CONTEXT_MANIFEST_SCHEMA_VERSION = (
+    "newsroom.graphiti-hermetic-context-manifest.v1"
+)
 GRAPHITI_CHAT_PRIMARY_ROUTE = "GRAPHITI_CHAT_PRIMARY"
 GRAPHITI_CHAT_FALLBACK_ROUTE = "GRAPHITI_CHAT_FALLBACK"
 GRAPHITI_EMBEDDING_ROUTE = "GRAPHITI_EMBEDDING"
@@ -137,7 +140,14 @@ class GraphitiModelUsageObserver:
         self._service = service
         self._envelope = envelope
         self._clock = clock
-        self._ordinal = 0
+        if envelope.graphiti_attempt_id is None:
+            raise ValueError("Graphiti usage observer lacks an attempt identity")
+        self._ordinal = (
+            service.next_graphiti_internal_ordinal(
+                graphiti_attempt_id=envelope.graphiti_attempt_id
+            )
+            - 1
+        )
         self._allocations: list[InvocationAllocation] = []
         self._dispatch_at: dict[str, datetime] = {}
         self._policies: dict[str, InvocationEfficiencyPolicy] = {}
@@ -214,6 +224,11 @@ class GraphitiModelUsageObserver:
             tools_enabled=False,
             mcp_enabled=False,
             prior_message_count=0,
+            command_semantic_version=route_contract.command_semantic_version,
+            command_flags=route_contract.command_flags,
+            context_manifest_schema_version=GRAPHITI_CONTEXT_MANIFEST_SCHEMA_VERSION,
+            disabled_capabilities=route_contract.disabled_capabilities,
+            implementation_revision=route_contract.implementation_revision,
             max_prompt_bytes=route_contract.max_prompt_bytes,
             max_context_tokens=route_contract.max_context_tokens,
             max_output_tokens=route_contract.max_output_tokens,
@@ -294,6 +309,7 @@ class GraphitiModelUsageObserver:
             if workload is WorkloadClass.GRAPHITI_CHAT_FALLBACK
             else GraphitiLeafClass.PRIMARY
         )
+        route_contract = self._shape.route_for(leaf_class)
         retry_state_digest = digest_canonical(
             {
                 "leaf_class": leaf_class.value,
@@ -313,25 +329,76 @@ class GraphitiModelUsageObserver:
             f"{self._envelope.graphiti_attempt_id}:provider-attempt:"
             f"{self._provider_attempt_number}:leaf:{self._ordinal}"
         )
-        context_manifest_digest = digest_canonical(
+        system_digest = digest_canonical(
+            {"system_identity": self._shape.prompt_identity}
+        )
+        request_digest = digest_canonical(
             {
-                "schema_version": "newsroom.graphiti-hermetic-context-manifest.v1",
-                "effective_revision_digest": self._effective_revision_digest,
-                "ingest_obligation_id": self._ingest_obligation_id,
-                "graphiti_attempt_id": self._envelope.graphiti_attempt_id,
-                "provider_attempt_id": provider_attempt_id,
-                "dispatch_authority_digest": self._dispatch_authority_digest,
-                "dispatch_deadline": (
-                    None
-                    if self._deadline is None
-                    else self._deadline.astimezone(UTC).isoformat()
-                ),
-                "semantic_state_digest": semantic_state_digest,
-                "call_shape_policy_digest": self._shape.canonical_digest,
-                "prior_message_count": 0,
-                "skill_count": 0,
-                "tool_count": 0,
-                "mcp_count": 0,
+                "provider": provider,
+                "route": route,
+                "model": model,
+                "reasoning": reasoning,
+                "command_semantic_version": route_contract.command_semantic_version,
+                "command_flags": list(route_contract.command_flags),
+                "implementation_revision": route_contract.implementation_revision,
+                "system_digest": system_digest,
+                "prompt_digest": prompt_digest,
+                "output_schema_digest": output_schema_digest,
+            }
+        )
+        context_manifest = {
+            "schema_version": GRAPHITI_CONTEXT_MANIFEST_SCHEMA_VERSION,
+            "provider": provider,
+            "route": route,
+            "model": model,
+            "reasoning": reasoning,
+            "command_semantic_version": route_contract.command_semantic_version,
+            "command_flags": list(route_contract.command_flags),
+            "implementation_revision": route_contract.implementation_revision,
+            "implementation_worktree_clean": True,
+            "disabled_capabilities": list(route_contract.disabled_capabilities),
+            "clean_working_directory_inventory_digest": digest_canonical(
+                {"inventory": "EMPTY_NON_REPOSITORY_WORKSPACE"}
+            ),
+            "config_identity": route_contract.config_identity,
+            "context_identity": GRAPHITI_CONTEXT_IDENTITY,
+            "system_digest": system_digest,
+            "prompt_contract_version": GRAPHITI_PROMPT_COMPONENT.component_version,
+            "prompt_bytes": len(prompt_bytes),
+            "prompt_digest": prompt_digest,
+            "schema_digest": output_schema_digest,
+            "output_schema_digest": output_schema_digest,
+            "evidence_package_digest": self._effective_revision_digest,
+            "evidence_package_bytes": len(prompt_bytes),
+            "effective_revision_digest": self._effective_revision_digest,
+            "ingest_obligation_id": self._ingest_obligation_id,
+            "graphiti_attempt_id": self._envelope.graphiti_attempt_id,
+            "provider_attempt_id": provider_attempt_id,
+            "dispatch_authority_digest": self._dispatch_authority_digest,
+            "dispatch_deadline": (
+                None
+                if self._deadline is None
+                else self._deadline.astimezone(UTC).isoformat()
+            ),
+            "semantic_state_digest": semantic_state_digest,
+            "request_digest": request_digest,
+            "call_shape_policy_digest": self._shape.canonical_digest,
+            "one_turn": True,
+            "exact_input": True,
+            "skills_enabled": False,
+            "tools_enabled": False,
+            "mcp_enabled": False,
+            "prior_message_count": 0,
+            "skill_count": 0,
+            "tool_count": 0,
+            "mcp_server_count": 0,
+            "mcp_tool_count": 0,
+        }
+        context_manifest_digest = digest_canonical(context_manifest)
+        self._service.retain_context_manifest(
+            {
+                "context_manifest_digest": context_manifest_digest,
+                **context_manifest,
             }
         )
         allocation = InvocationAllocation.create(
@@ -347,7 +414,7 @@ class GraphitiModelUsageObserver:
             prompt_contract_version=GRAPHITI_PROMPT_COMPONENT.component_version,
             prompt_bytes=len(prompt_bytes),
             prompt_digest=prompt_digest,
-            request_digest=semantic_state_digest,
+            request_digest=request_digest,
             output_schema_digest=output_schema_digest,
             max_output_tokens=requested_max_tokens,
             context_manifest_digest=context_manifest_digest,
