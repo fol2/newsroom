@@ -240,7 +240,32 @@ def test_usage_report_groups_attempt_receipts_into_300_second_windows(
                 1,
                 "COMPLETE",
                 "sha256:test",
-                json.dumps({"token_usage": usage}),
+                json.dumps(
+                    {
+                        "chat_invocations": [
+                            {
+                                "provider": "cursor-agent-cli",
+                                "usage": {
+                                    "usage_basis": "PROVIDER_REPORTED",
+                                    "input_tokens": 100,
+                                    "output_tokens": 20,
+                                    "cached_read_tokens": 5,
+                                    "cached_write_tokens": 0,
+                                    "reasoning_tokens": 0,
+                                    "total_tokens": 125,
+                                },
+                            }
+                        ],
+                        "embedding_usage": {
+                            "usage_basis": "PROVIDER_REPORTED",
+                            "request_count": 1,
+                            "embedding_tokens": 10,
+                            "cost_usd_microunits": 2,
+                            "requests": [{}],
+                        },
+                        "token_usage": usage,
+                    }
+                ),
                 at,
             ),
         )
