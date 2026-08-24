@@ -51,6 +51,8 @@ def is_exact_no_embedding_call(
 ) -> bool:
     """Return whether provider telemetry is the complete canonical no-call shape."""
 
+    if is_exact_no_provider_call_usage(embedding_usage):
+        return True
     if embedding_usage is None or set(embedding_usage) != _NO_EMBEDDING_USAGE_KEYS:
         return False
     zero_fields = (
@@ -1469,9 +1471,7 @@ def reconcile_graphiti_spend(
     usage = embedding_usage or {}
     usage_basis = str(usage.get("usage_basis") or "UNREPORTED")
     raw_cost = usage.get("cost_usd_microunits")
-    no_call = is_exact_no_embedding_call(
-        embedding_usage
-    ) or is_exact_no_provider_call_usage(embedding_usage)
+    no_call = is_exact_no_embedding_call(embedding_usage)
     reported = is_exact_provider_reported_usage(embedding_usage)
     actual_usd: int | None
     if no_call:
