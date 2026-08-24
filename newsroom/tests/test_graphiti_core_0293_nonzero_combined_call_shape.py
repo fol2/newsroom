@@ -121,8 +121,7 @@ def _episode() -> EpisodicNode:
         source=EpisodeType.text,
         source_description="newsroom-eval-proposal",
         content=(
-            "The Legislative Council asked about the Technology and Living "
-            "curriculum."
+            "The Legislative Council asked about the Technology and Living curriculum."
         ),
         created_at=datetime(2026, 8, 21, tzinfo=UTC),
         valid_at=datetime(2026, 8, 20, tzinfo=UTC),
@@ -192,7 +191,11 @@ def test_second_stage_experiment_plan_is_serial_bounded_and_owner_gated() -> Non
     assert sdk["custom_tools"] == {}
     assert sdk["setting_sources"] == "OMITTED"
     assert sdk["prior_messages"] == 0
-    assert sdk["required_stream_tool_call_count"] == 0
+    assert sdk["required_stream_tool_call_count"] is None
+    assert sdk["agent_prompt_stream_exposure"] == (
+        "UNAVAILABLE_IN_CURSOR_SDK_1_0_28_RUN_RESULT"
+    )
+    assert sdk["future_qualification_requires_observable_event_lifecycle"] is True
 
     shape = payload["call_shape"]
     assert shape["graphiti_core_version"] == "0.29.3"
@@ -209,8 +212,7 @@ def test_second_stage_experiment_plan_is_serial_bounded_and_owner_gated() -> Non
     average = payload["average_token_model"]
     assert average["bernoulli_condition_terms_are_sufficient"] is False
     assert (
-        average["primary_count_includes_expected_chunks_per_effective_revision"]
-        is True
+        average["primary_count_includes_expected_chunks_per_effective_revision"] is True
     )
 
     outcome = payload["retained_live_outcome"]
@@ -218,6 +220,7 @@ def test_second_stage_experiment_plan_is_serial_bounded_and_owner_gated() -> Non
     assert outcome["tiny_input_tokens"] == 3_430
     assert outcome["semantic_pass_count"] == 4
     assert outcome["semantic_fail_count"] == 4
+    assert outcome["invalid_zero_expectation_leaf_count"] == 2
     assert outcome["recommendation"] == "REJECT"
 
     over_limit = payload["provider_free_over_limit_proof"]
@@ -233,4 +236,5 @@ def test_second_stage_experiment_plan_is_serial_bounded_and_owner_gated() -> Non
     assert decision["quality_must_not_regress"] is True
     assert decision["source_content_must_not_be_truncated"] is True
     assert decision["tool_call_count_must_equal"] == 0
+    assert decision["tool_call_execution_must_be_observed_for_qualification"] is True
     assert decision["missing_usage_is_zero"] is False

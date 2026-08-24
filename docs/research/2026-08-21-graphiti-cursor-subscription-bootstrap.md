@@ -177,7 +177,7 @@ The separate graphiti-core edge schema already carries `valid_at` and `invalid_a
 | Upstream combined, zero-edge fixture | 25,000 measured chat tokens | 1 | JSON shape only | Measurement only, not general recommendation |
 | Upstream combined, relation-bearing fixture | No live token measurement | 2 before other conditional work | Provider-free call shape proved | Not an efficiency successor by itself |
 | Cross-revision batching | Amortises fixed context | fewer per item | Can invent cross-item relations | Reject |
-| Official Cursor SDK `tools=[]` | 3,430 tiny input measured; 82.9% below CLI | one-shot text-only agent route | #746 transport useful; 4/8 packet leaves failed semantic fixtures | Research transport only; packet `REJECT` |
+| Official Cursor SDK `tools=[]` | 3,430 tiny input measured; 82.9% below CLI | one-shot text-only agent route | #746 transport useful; 4/8 historical FAIL labels, including two invalid zero expectations | Research transport only; packet `REJECT` |
 | `NewsroomCombinedTemporalExtractionV1` | Live usage unmeasured | 1 per admitted chunk for zero and non-zero | #747 qualified provider-free and merged | Candidate requires live gold before adoption |
 
 ## 10. Cache is discounted usage, not token removal
@@ -290,7 +290,7 @@ The retained effective-revision arrival rates from #737 are:
 | Upstream combined non-zero result | unresolved live usage | unresolved | Provider-free proof shows 2 chat leaves |
 | SDK no-tool tiny fixture | 3,878 measured total; 3,430 input | about 27k total / h | Fixed-floor observation only; semantic tiny PASS |
 | SDK upstream relation + timestamp | 12,588 measured across two leaves | about 89k / h | Source-safe bounded fixture; not the corrected #747 contract |
-| Original SDK compact packet | unresolved as a valid route | unresolved | 4/8 leaves failed; recommendation `REJECT` |
+| Original SDK compact packet | unresolved as a valid route | unresolved | 4/8 historical FAIL labels; two zero expectations invalid; recommendation `REJECT` |
 | Corrected #747 combined-temporal contract | provider-free qualified; live usage unmeasured | unresolved | One leaf per admitted chunk; live gold still required |
 
 The wrong polling grain would multiply 54,287 by approximately 2,092 observation identities per hour and produce a fictitious approximately 113.6 million tokens/hour. Coverage planning must use effective revisions, not repeated poll observations.

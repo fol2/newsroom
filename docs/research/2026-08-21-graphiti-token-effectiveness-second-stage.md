@@ -86,7 +86,7 @@ minimum-effect ceiling:    10,051 input tokens
 
 This threshold qualifies a research effect size; it is not a production token quota. The route must also prove zero tool calls, zero MCP, zero subagents, zero ambient setting sources, zero prior messages and non-regressing extraction quality.
 
-The owner-authorised #746 packet later measured 3,430 input tokens on the 49-character fixture, an 82.9% reduction from 20,103. The SDK is therefore a useful **text-only Cursor agent route** for research; `tools=[]` removes built-in tools but does not turn the SDK into raw model inference. The packet recommendation remains `REJECT`: four of eight leaves failed semantic fixtures, all three first compact leaves failed, and the exact repeat changed from failure to pass while input rose by 29.7%. The retained binary receipts did not keep model text, so their original failure reasons cannot be reconstructed; provider-free validator v2 now emits redaction-safe failure codes, counts and key-set digests for future packets.
+The owner-authorised #746 packet later measured 3,430 input tokens on the 49-character fixture, an 82.9% reduction from 20,103. The SDK is therefore a useful **text-only Cursor agent route** for research; `tools=[]` removes built-in tools but does not turn the SDK into raw model inference. The packet recommendation remains `REJECT`: four of eight leaves carried historical pre-v3 FAIL labels, the exact repeat changed from failure to pass while input rose by 29.7%, and the long result was invalid JSON. Provider-free re-review found that both supposed zero-result fixtures actually contain explicit entities and a relation, so those two labels are not proof of model failure. The retained binary receipts did not keep model text, so their original failure reasons cannot be reconstructed; provider-free validator v3 now emits redaction-safe strict-schema, duplicate-key, fixture-validity, model-basis, tool-observation, temporal, evidence, count and key-set diagnostics for future packets. SDK 1.0.28 `Agent.prompt` returns a `RunResult` without stream events, so the historical zero tool-call field proves the configured empty tool surface, not observed execution. The historical default-bridge workspace was also not retained. These limitations independently prevent qualification.
 
 ## 3. Correction: upstream combined extraction is conditional two-leaf work
 
@@ -215,7 +215,7 @@ The first-stage measured baselines remain:
 | Hermetic upstream combined, zero edges | 25,000 | Does not include the conditional timestamp leaf |
 | SDK no-tool tiny | 3,878 total; 3,430 input | PASS; observed floor, not a guarantee |
 | SDK upstream combined, relation-bearing + timestamp | 12,588 across two leaves | Both semantic fixtures PASS; not the #747 compact contract |
-| Original SDK compact packet | 4/8 total leaves failed | `REJECT`; repeat changed outcome and input |
+| Original SDK compact packet | 4/8 historical FAIL labels; two zero expectations invalid | `REJECT`; repeat changed outcome and input |
 
 The second-stage architecture aims for:
 

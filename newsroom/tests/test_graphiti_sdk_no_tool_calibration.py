@@ -9,11 +9,14 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import os
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from typing import Self
 
-from jsonschema import Draft202012Validator
 import pytest
+from jsonschema import Draft202012Validator
 
 pytest.importorskip("graphiti_core")
 
@@ -28,11 +31,13 @@ from newsroom.research.graphiti_sdk_no_tool_calibration import (
     TINY_PROMPT,
     VALIDATOR_VERSION,
     CalibrationClosed,
+    DispatchRequest,
     IsolationViolation,
     LeafBudget,
     assess_result,
     compare_to_cli_baseline,
     inspect_isolation,
+    live_dispatcher,
     long_retained_chunk,
     main,
     normalise_usage,
@@ -116,6 +121,9 @@ def test_packet_defaults_to_dry_run_and_does_not_dispatch(tmp_path: Path) -> Non
         raise AssertionError("provider dispatch is forbidden in dry-run")
 
     result = run_packet(output_dir=tmp_path, dispatcher=dispatcher)
+    validator = Draft202012Validator(
+        json.loads(_RECEIPT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    )
 
     assert calls == []
     assert result["mode"] == "DRY_RUN"
@@ -132,6 +140,7 @@ def test_packet_defaults_to_dry_run_and_does_not_dispatch(tmp_path: Path) -> Non
         assert len(digest.removeprefix("sha256:")) == 64
         receipt = tmp_path / f"{leaf['label']}.json"
         assert receipt.is_file()
+        validator.validate(json.loads(receipt.read_text(encoding="utf-8")))
         raw = receipt.read_text(encoding="utf-8")
         for forbidden in (
             "/Users/",
@@ -145,33 +154,64 @@ def test_packet_defaults_to_dry_run_and_does_not_dispatch(tmp_path: Path) -> Non
     assert aggregate["recommendation"] == "UNMEASURED"
     assert aggregate["cli_path_comparison"][0]["cli_label"] == "hermetic-tiny"
     assert (
-        aggregate["cli_path_comparison"][0]["cli_input_tokens"]
-        == CLI_TINY_INPUT_TOKENS
+        aggregate["cli_path_comparison"][0]["cli_input_tokens"] == CLI_TINY_INPUT_TOKENS
     )
     assert aggregate["cli_path_comparison"][0]["sdk_input_tokens"] is None
     assert aggregate["cli_path_comparison"][1]["cli_chat_total"] == 25_000
+
+
+def test_packet_refuses_to_mix_with_prior_output(tmp_path: Path) -> None:
+    run_packet(output_dir=tmp_path)
+
+    with pytest.raises(CalibrationClosed, match="must be empty"):
+        run_packet(output_dir=tmp_path)
 
 
 def test_retained_receipts_validate_with_content_free_diagnostics() -> None:
     schema = json.loads(_RECEIPT_SCHEMA_PATH.read_text(encoding="utf-8"))
     validator = Draft202012Validator(schema)
     receipts = sorted(_RECEIPT_DIR.glob("sdk-*.json"))
+    retained_by_label: dict[str, object] = {}
 
     assert len(receipts) == 8
     for path in receipts:
         payload = json.loads(path.read_text(encoding="utf-8"))
         validator.validate(payload)
+        retained_by_label[payload["label"]] = payload
         assert "prompt" not in payload
         assert "result" not in payload
         assert "response" not in payload
+        assert payload["tool_call_observation_basis"] == "ROUTE_CONFIGURATION_ONLY"
+        assert payload["observed_model"] is None
+        assert payload["model_identity_basis"] == "REQUEST_AND_CATALOGUE"
+        expected_validity = (
+            "INVALID_ZERO_EXPECTATION"
+            if payload["label"]
+            in {"sdk-upstream-combined-zero", "sdk-compact-temporal-zero"}
+            else "VALID"
+        )
+        assert payload["fixture_validity"] == expected_validity
 
     aggregate = json.loads((_RECEIPT_DIR / "aggregate.json").read_text())
+    assert {leaf["label"]: leaf for leaf in aggregate["leaves"]} == retained_by_label
     assert aggregate["recommendation"] == "REJECT"
     assert aggregate["semantic_summary"]["pass_count"] == 4
     assert aggregate["semantic_summary"]["fail_count"] == 4
+    assert aggregate["semantic_summary"]["invalid_fixture_count"] == 2
+    assert aggregate["semantic_summary"]["retained_label_basis"] == (
+        "HISTORICAL_PRE_V3"
+    )
     assert aggregate["exact_repeat"]["prompt_digest_matches"] is True
     assert aggregate["exact_repeat"]["semantic_outcome_matches"] is False
     assert aggregate["exact_repeat"]["input_token_delta"] == 6_463
+    assert aggregate["evidence_limitations"] == {
+        "agent_prompt_stream_events_observed": False,
+        "bridge_workspace_isolation_proved": False,
+        "model_catalogue_identity_verified": True,
+        "run_result_model_identity_retained": False,
+        "tool_call_count_basis": "ROUTE_CONFIGURATION_ONLY",
+        "invalid_zero_expectation_leaf_count": 2,
+    }
 
 
 def test_live_execute_fails_closed_without_owner_flag_and_call_cap(
@@ -198,16 +238,14 @@ def test_reconstructed_prompts_match_739_source_safe_fixtures() -> None:
     assert len(long_retained_chunk().encode("utf-8")) == MAX_EPISODE_BYTES
     assert _sha256(prompts["sdk-no-tool-tiny"].prompt) == _TINY_SHA256
     assert (
-        _sha256(prompts["sdk-upstream-combined-zero"].prompt)
-        == _COMBINED_ZERO_SHA256
+        _sha256(prompts["sdk-upstream-combined-zero"].prompt) == _COMBINED_ZERO_SHA256
     )
     assert (
         prompts["sdk-predeclared-repeat"].prompt
         == prompts["sdk-compact-temporal-relations"].prompt
     )
-    assert (
-        _sha256(prompts["sdk-predeclared-repeat"].prompt)
-        == _sha256(prompts["sdk-compact-temporal-relations"].prompt)
+    assert _sha256(prompts["sdk-predeclared-repeat"].prompt) == _sha256(
+        prompts["sdk-compact-temporal-relations"].prompt
     )
     calibration = json.loads(_CALIBRATION_PATH.read_text(encoding="utf-8"))
     hermetic = next(
@@ -238,7 +276,15 @@ def test_semantic_diagnostics_are_content_free_and_actionable() -> None:
         prompt=prompts["sdk-compact-temporal-zero"],
     )
     assert zero.result == "FAIL"
-    assert zero.failure_codes == ("UNEXPECTED_NONEMPTY_ZERO",)
+    assert zero.failure_codes == (
+        "SCHEMA_VALIDATION_FAILED",
+        "FIXTURE_EXPECTATION_INVALID",
+        "MISSING_EXPECTED_ENTITY",
+        "MISSING_RELATION_TYPE",
+        "MISSING_EVIDENCE_SEGMENT_IDS",
+        "INVALID_LOCAL_REFERENCE",
+        "EVIDENCE_CONTRACT_UNVERIFIABLE",
+    )
     assert zero.entity_count == 1
     assert zero.fact_count == 0
     assert str(zero.key_set_digest).startswith("sha256:")
@@ -249,16 +295,282 @@ def test_semantic_diagnostics_are_content_free_and_actionable() -> None:
     )
     assert relations.result == "FAIL"
     assert relations.failure_codes == (
+        "SCHEMA_VALIDATION_FAILED",
         "MISSING_EXPECTED_ENTITY",
         "MISSING_RELATION_TYPE",
         "MISSING_TEMPORAL_KEYS",
+        "MISSING_EVIDENCE_SEGMENT_IDS",
+        "INVALID_LOCAL_REFERENCE",
+        "MISSING_FACT_TEXT",
+        "EVIDENCE_CONTRACT_UNVERIFIABLE",
     )
 
-    invalid = assess_result(
-        "not-json", prompt=prompts["sdk-compact-temporal-long"]
-    )
+    invalid = assess_result("not-json", prompt=prompts["sdk-compact-temporal-long"])
     assert invalid.json_valid is False
     assert invalid.failure_codes == ("INVALID_JSON",)
+
+    duplicate = assess_result(
+        '{"ok":true,"ok":false}', prompt=prompts["sdk-no-tool-tiny"]
+    )
+    assert duplicate.json_valid is False
+    assert duplicate.failure_codes == ("DUPLICATE_JSON_KEY",)
+
+
+def test_strict_validator_rejects_unqualifiable_historical_contracts() -> None:
+    prompts = {item.label: item for item in reconstruct_packet_prompts()}
+    relation_body = (
+        "The Legislative Council asked about the Technology and Living curriculum."
+    )
+    upstream_relations = {
+        "extracted_entities": [
+            {"name": "Legislative Council", "entity_type_id": 0},
+            {"name": "Technology and Living curriculum", "entity_type_id": 0},
+        ],
+        "edges": [
+            {
+                "source_entity_name": "Legislative Council",
+                "target_entity_name": "Technology and Living curriculum",
+                "relation_type": "ASKED_ABOUT",
+                "fact": relation_body,
+                "episode_indices": [0],
+            }
+        ],
+    }
+    compact_relations = {
+        "entities": [
+            {
+                "local_id": 1,
+                "name": "Legislative Council",
+                "entity_type_id": 0,
+                "evidence_segment_ids": ["segment-1"],
+            },
+            {
+                "local_id": 2,
+                "name": "Technology and Living curriculum",
+                "entity_type_id": 0,
+                "evidence_segment_ids": ["segment-1"],
+            },
+        ],
+        "facts": [
+            {
+                "source_local_id": 1,
+                "target_local_id": 2,
+                "relation_type": "ASKED_ABOUT",
+                "fact": relation_body,
+                "valid_at": "2026-08-20T00:00:00Z",
+                "invalid_at": None,
+                "evidence_segment_ids": ["segment-1"],
+            }
+        ],
+    }
+    payloads = {
+        "sdk-no-tool-tiny": {"ok": True},
+        "sdk-upstream-combined-zero": {"extracted_entities": [], "edges": []},
+        "sdk-upstream-combined-relations": upstream_relations,
+        "sdk-upstream-batch-timestamps": {
+            "timestamps": [{"valid_at": "2026-08-20T00:00:00Z", "invalid_at": None}]
+        },
+        "sdk-compact-temporal-zero": {"entities": [], "facts": []},
+        "sdk-compact-temporal-relations": compact_relations,
+        "sdk-compact-temporal-long": compact_relations,
+        "sdk-predeclared-repeat": compact_relations,
+    }
+
+    qualified = {
+        "sdk-no-tool-tiny",
+        "sdk-upstream-combined-relations",
+        "sdk-upstream-batch-timestamps",
+    }
+    invalid_zero = {"sdk-upstream-combined-zero", "sdk-compact-temporal-zero"}
+    for label, payload in payloads.items():
+        assessment = assess_result(json.dumps(payload), prompt=prompts[label])
+        if label in qualified:
+            assert assessment.result == "PASS", (label, assessment.failure_codes)
+        elif label in invalid_zero:
+            assert "FIXTURE_EXPECTATION_INVALID" in assessment.failure_codes
+        else:
+            assert assessment.failure_codes == ("EVIDENCE_CONTRACT_UNVERIFIABLE",)
+
+
+def test_compact_validator_checks_temporal_evidence_and_local_references() -> None:
+    prompt = next(
+        item
+        for item in reconstruct_packet_prompts()
+        if item.label == "sdk-compact-temporal-relations"
+    )
+    payload = {
+        "entities": [
+            {
+                "local_id": 1,
+                "name": "Legislative Council",
+                "entity_type_id": 0,
+                "evidence_segment_ids": [],
+            },
+            {
+                "local_id": 2,
+                "name": "Technology and Living curriculum",
+                "entity_type_id": 0,
+                "evidence_segment_ids": ["segment-1"],
+            },
+        ],
+        "facts": [
+            {
+                "source_local_id": 1,
+                "target_local_id": 99,
+                "relation_type": "ASKED_ABOUT",
+                "fact": "relation",
+                "valid_at": "not-a-timestamp",
+                "invalid_at": None,
+                "evidence_segment_ids": [],
+            }
+        ],
+    }
+
+    assessment = assess_result(json.dumps(payload), prompt=prompt)
+    assert assessment.failure_codes == (
+        "INVALID_TEMPORAL_VALUE",
+        "MISSING_EVIDENCE_SEGMENT_IDS",
+        "INVALID_LOCAL_REFERENCE",
+        "EVIDENCE_CONTRACT_UNVERIFIABLE",
+    )
+
+    timestamp_prompt = next(
+        item
+        for item in reconstruct_packet_prompts()
+        if item.label == "sdk-upstream-batch-timestamps"
+    )
+    invalid_timestamp = assess_result(
+        '{"timestamps":[{"valid_at":"not-a-timestamp","invalid_at":null}]}',
+        prompt=timestamp_prompt,
+    )
+    assert invalid_timestamp.failure_codes == ("INVALID_TEMPORAL_VALUE",)
+
+
+def test_observed_model_mismatch_fails_the_leaf(tmp_path: Path) -> None:
+    def dispatcher(request: object) -> object:
+        del request
+        result = _finished(text='{"ok":true}', input_tokens=4_000)
+        result.model = SimpleNamespace(id="different-model")
+        return result
+
+    result = run_packet(
+        output_dir=tmp_path,
+        execute=True,
+        authorised=True,
+        call_cap=1,
+        api_key="purpose-created",
+        dispatcher=dispatcher,
+    )
+
+    leaf = result["leaves"][0]
+    assert leaf["observed_model"] == "different-model"
+    assert leaf["semantic_failure_codes"] == ["MODEL_IDENTITY_MISMATCH"]
+    assert leaf["semantic_fixture_result"] == "FAIL"
+    assert result["recommendation"] == "REJECT"
+
+
+def test_agent_prompt_without_stream_observation_is_not_qualified(
+    tmp_path: Path,
+) -> None:
+    def dispatcher(request: object) -> object:
+        del request
+        result = _finished(text='{"ok":true}', input_tokens=4_000)
+        delattr(result, "messages")
+        return result
+
+    result = run_packet(
+        output_dir=tmp_path,
+        execute=True,
+        authorised=True,
+        call_cap=1,
+        api_key="purpose-created",
+        dispatcher=dispatcher,
+    )
+
+    leaf = result["leaves"][0]
+    assert leaf["tool_call_count"] is None
+    assert leaf["tool_call_observation_basis"] == "NOT_EXPOSED_BY_AGENT_PROMPT"
+    assert result["recommendation"] == "REJECT"
+
+
+def test_live_dispatcher_launches_a_fresh_isolated_bridge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: dict[str, object] = {}
+
+    class _Options:
+        def __init__(self, **kwargs: object) -> None:
+            self.values = kwargs
+
+    class _Models:
+        def list(self, *, api_key: str) -> list[object]:
+            calls["catalogue_api_key"] = api_key
+            return [SimpleNamespace(id=PINNED_MODEL)]
+
+    class _Client:
+        models = _Models()
+
+        @classmethod
+        def launch_bridge(cls, **kwargs: object) -> _Client:
+            calls["bridge"] = kwargs
+            return cls()
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            calls["closed"] = True
+
+    class _Agent:
+        @classmethod
+        def prompt(cls, prompt: str, options: _Options, *, client: _Client) -> object:
+            calls["prompt"] = prompt
+            calls["agent_options"] = options.values
+            calls["client"] = client
+            return _finished(text='{"ok":true}', input_tokens=4_000)
+
+    fake_sdk = ModuleType("cursor_sdk")
+    fake_sdk.Agent = _Agent  # type: ignore[attr-defined]
+    fake_sdk.AgentOptions = _Options  # type: ignore[attr-defined]
+    fake_sdk.Client = _Client  # type: ignore[attr-defined]
+    fake_sdk.LocalAgentOptions = _Options  # type: ignore[attr-defined]
+    fake_sdk.LocalAgentStoreConfig = _Options  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "cursor_sdk", fake_sdk)
+    real_version = importlib.metadata.version
+    monkeypatch.setattr(
+        importlib.metadata,
+        "version",
+        lambda name: PINNED_SDK_VERSION if name == "cursor-sdk" else real_version(name),
+    )
+
+    isolated = prepare_isolated_leaf(api_key="purpose-created")
+    before = dict(os.environ)
+    try:
+        request = DispatchRequest(
+            prompt=TINY_PROMPT,
+            options={
+                "local": {
+                    "cwd": str(isolated.cwd),
+                    "custom_tools": {},
+                    "store": {"type": "jsonl", "root_dir": str(isolated.store)},
+                }
+            },
+            environ=isolated.environ,
+        )
+        result = live_dispatcher(request)
+    finally:
+        isolated.cleanup()
+
+    bridge = calls["bridge"]
+    assert bridge["workspace"] == str(isolated.cwd)
+    assert Path(bridge["state_root"]).name == "bridge-state"
+    assert bridge["allow_api_key_env_fallback"] is False
+    assert calls["closed"] is True
+    assert calls["prompt"] == TINY_PROMPT
+    assert calls["agent_options"]["tools"] == []
+    assert calls["catalogue_api_key"] == "purpose-created"
+    assert result.model.id == PINNED_MODEL
+    assert dict(os.environ) == before
 
 
 def test_route_options_are_no_tool_and_omit_setting_sources() -> None:

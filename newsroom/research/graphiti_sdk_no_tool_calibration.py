@@ -18,6 +18,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from jsonschema import Draft202012Validator, FormatChecker
+
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.graphiti_adapter.cli_client import messages_to_prompt
 from newsroom.graphiti_adapter.evaluation_packet import (
@@ -40,7 +42,7 @@ RELATIONS_BODY = (
 )
 REFERENCE_TIME = "2026-08-20T00:00:00Z"
 SCHEMA_VERSION = "newsroom.graphiti-sdk-no-tool-calibration.v1"
-VALIDATOR_VERSION = "newsroom.graphiti-sdk-no-tool-validator.v2"
+VALIDATOR_VERSION = "newsroom.graphiti-sdk-no-tool-validator.v3"
 FORBIDDEN_SETTING_SOURCES = frozenset(
     {"project", "user", "team", "mdm", "plugins", "all"}
 )
@@ -170,6 +172,10 @@ class ToolCallRejected(RuntimeError):
     """A tool-call stream event occurred on a no-tool route."""
 
 
+class _DuplicateJsonKey(ValueError):
+    """A model result repeated a key and therefore has ambiguous semantics."""
+
+
 @dataclass(frozen=True, slots=True)
 class LeafPrompt:
     ordinal: int
@@ -236,8 +242,7 @@ Dispatcher = Callable[[DispatchRequest], object]
 
 def source_safe_body(*, size: int = 368) -> str:
     seed = (
-        "The Legislative Council asked about the Technology and Living curriculum. "
-        * 8
+        "The Legislative Council asked about the Technology and Living curriculum. " * 8
     )
     return seed.encode("utf-8")[:size].decode("utf-8")
 
@@ -495,14 +500,10 @@ def normalise_usage(value: object) -> dict[str, object]:
         }
     fields = {
         "input_tokens": _token(
-            _first_present(
-                mapping.get("input_tokens"), mapping.get("inputTokens")
-            )
+            _first_present(mapping.get("input_tokens"), mapping.get("inputTokens"))
         ),
         "output_tokens": _token(
-            _first_present(
-                mapping.get("output_tokens"), mapping.get("outputTokens")
-            )
+            _first_present(mapping.get("output_tokens"), mapping.get("outputTokens"))
         ),
         "cached_read_tokens": _token(
             _first_present(
@@ -566,6 +567,10 @@ def compare_to_cli_baseline(usage: Mapping[str, object]) -> dict[str, object]:
 def recommend(leaves: Sequence[Mapping[str, object]]) -> str:
     if not leaves:
         return "UNMEASURED"
+    if all(
+        leaf.get("tool_call_observation_basis") == "NOT_DISPATCHED" for leaf in leaves
+    ):
+        return "UNMEASURED"
     if any(
         leaf.get("tool_call_count") != 0
         or leaf.get("isolation", {}).get("hook_count") != 0
@@ -587,8 +592,7 @@ def recommend(leaves: Sequence[Mapping[str, object]]) -> str:
     if comparison["fails_minimum_useful_reduction"]:
         return "REJECT"
     quality_ok = all(
-        leaf.get("semantic_fixture_result") in {"PASS", "PENDING"}
-        for leaf in leaves
+        leaf.get("semantic_fixture_result") in {"PASS", "PENDING"} for leaf in leaves
     ) and all(leaf.get("json_valid") is not False for leaf in leaves)
     if not quality_ok:
         return "REJECT"
@@ -614,7 +618,7 @@ def run_packet(
     authorised: bool = False,
     api_key: str | None = None,
 ) -> dict[str, object]:
-    output_dir.mkdir(parents=True, exist_ok=True)
+    _prepare_output_dir(output_dir)
     if execute:
         if not authorised:
             raise CalibrationClosed("live calibration is owner-gated")
@@ -648,7 +652,10 @@ def run_packet(
             "key_set_digest": None,
             "validator_version": VALIDATOR_VERSION,
             "stream_message_classes": [],
-            "tool_call_count": 0,
+            "tool_call_count": None,
+            "tool_call_observation_basis": "NOT_DISPATCHED",
+            "observed_model": None,
+            "model_identity_basis": "REQUEST_ONLY",
             "usage": unreported_cli_usage(),
             "latency_ms": None,
             "agent_id_sha256": None,
@@ -661,8 +668,8 @@ def run_packet(
                 home=isolated.home, cwd=isolated.cwd, store=isolated.store
             )
             if execute:
-                assert dispatcher is not None
-                assert budget is not None
+                if dispatcher is None or budget is None:
+                    raise CalibrationClosed("live dispatcher or budget is unavailable")
                 budget.consume()
                 request = DispatchRequest(
                     prompt=prompt.prompt,
@@ -677,7 +684,8 @@ def run_packet(
                     outcome.update(_failure_outcome(exc, started=started))
                     outcome["status"] = "TOOL_CALL_REJECTED"
                     outcome["tool_call_count"] = 1
-                except (TimeoutError, Exception) as exc:
+                    outcome["tool_call_observation_basis"] = "OBSERVED_STREAM"
+                except Exception as exc:  # noqa: BLE001 - retain a redacted failure receipt
                     outcome.update(_failure_outcome(exc, started=started))
             leaves.append(
                 _write_leaf(
@@ -704,11 +712,7 @@ def run_packet(
         "call_cap": call_cap,
         "leaves": leaves,
         "cli_baseline": compare_to_cli_baseline(
-            next(
-                leaf["usage"]
-                for leaf in leaves
-                if leaf["label"] == LEAF_LABELS[0]
-            )  # type: ignore[arg-type, index]
+            next(leaf["usage"] for leaf in leaves if leaf["label"] == LEAF_LABELS[0])  # type: ignore[arg-type, index]
         ),
         "cli_path_comparison": compare_packet_to_cli(leaves),
         "semantic_summary": _semantic_summary(leaves),
@@ -724,12 +728,11 @@ def run_packet(
 def live_dispatcher(request: DispatchRequest) -> object:
     try:
         import importlib.metadata
-        from concurrent.futures import ThreadPoolExecutor
 
         from cursor_sdk import (
             Agent,
             AgentOptions,
-            Cursor,
+            Client,
             LocalAgentOptions,
             LocalAgentStoreConfig,
         )
@@ -744,41 +747,48 @@ def live_dispatcher(request: DispatchRequest) -> object:
     if not api_key:
         raise CalibrationClosed("purpose-created Cursor API key is required")
     local = request.options["local"]
-    assert isinstance(local, dict)
+    if not isinstance(local, Mapping):
+        raise CalibrationClosed("isolated local options are required")
     if "setting_sources" in local:
         raise CalibrationClosed("setting_sources must be omitted")
     store_cfg = local["store"]
     if not isinstance(store_cfg, Mapping):
         raise CalibrationClosed("ephemeral JSONL store is required")
+    local_options = LocalAgentOptions(
+        cwd=str(local["cwd"]),
+        custom_tools={},
+        store=LocalAgentStoreConfig(
+            type=str(store_cfg["type"]),
+            root_dir=str(store_cfg["root_dir"]),
+        ),
+    )
+    bridge_state = Path(str(local["cwd"])).parent / "bridge-state"
     previous = os.environ.copy()
     try:
         os.environ.clear()
         os.environ.update(request.environ)
-        models = Cursor.models.list(api_key=api_key)
-        identities = {getattr(model, "id", None) for model in models}
-        if PINNED_MODEL not in identities:
-            raise CalibrationClosed(
-                "exact composer-2.5 is absent from the model catalogue"
+        with Client.launch_bridge(
+            workspace=str(local["cwd"]),
+            state_root=str(bridge_state),
+            local=local_options,
+            client_timeout=180,
+            allow_api_key_env_fallback=False,
+        ) as client:
+            models = client.models.list(api_key=api_key)
+            identities = {getattr(model, "id", None) for model in models}
+            if PINNED_MODEL not in identities:
+                raise CalibrationClosed(
+                    "exact composer-2.5 is absent from the model catalogue"
+                )
+            options = AgentOptions(
+                model=PINNED_MODEL,
+                api_key=api_key,
+                tools=[],
+                mcp_servers={},
+                agents={},
+                local=local_options,
             )
-        options = AgentOptions(
-            model=PINNED_MODEL,
-            api_key=api_key,
-            tools=[],
-            mcp_servers={},
-            agents={},
-            local=LocalAgentOptions(
-                cwd=str(local["cwd"]),
-                custom_tools={},
-                store=LocalAgentStoreConfig(
-                    type=str(store_cfg["type"]),
-                    root_dir=str(store_cfg["root_dir"]),
-                ),
-            ),
-        )
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(Agent.prompt, request.prompt, options).result(
-                timeout=180
-            )
+            return Agent.prompt(request.prompt, options, client=client)
     finally:
         os.environ.clear()
         os.environ.update(previous)
@@ -890,9 +900,7 @@ def _record_upstream(body: str, *, nonempty: bool) -> tuple[str, str]:
                 }
             if response_model is BatchEdgeTimestamps:
                 return {
-                    "timestamps": [
-                        {"valid_at": REFERENCE_TIME, "invalid_at": None}
-                    ]
+                    "timestamps": [{"valid_at": REFERENCE_TIME, "invalid_at": None}]
                 }
             raise AssertionError(name)
 
@@ -905,7 +913,7 @@ def _record_upstream(body: str, *, nonempty: bool) -> tuple[str, str]:
         source_description="newsroom-eval-proposal",
         content=body,
         created_at=datetime(2026, 8, 21, tzinfo=UTC),
-        valid_at=datetime.fromisoformat(REFERENCE_TIME.replace("Z", "+00:00")),
+        valid_at=datetime.fromisoformat(REFERENCE_TIME),
     )
     asyncio.run(
         extract_nodes_and_edges(
@@ -989,14 +997,10 @@ def compare_packet_to_cli(
                 "cli_input_tokens": cli_input,
                 "cli_chat_total": cli_chat_total,
                 "sdk_input_tokens": (
-                    usage.get("input_tokens")
-                    if isinstance(usage, Mapping)
-                    else None
+                    usage.get("input_tokens") if isinstance(usage, Mapping) else None
                 ),
                 "sdk_total_tokens": (
-                    usage.get("total_tokens")
-                    if isinstance(usage, Mapping)
-                    else None
+                    usage.get("total_tokens") if isinstance(usage, Mapping) else None
                 ),
                 "usage_status": (
                     usage.get("usage_basis")
@@ -1010,19 +1014,26 @@ def compare_packet_to_cli(
 
 def _observe_dispatch(result: object, *, prompt: LeafPrompt) -> dict[str, object]:
     classes: list[str] = []
-    tool_calls = 0
+    tool_calls: int | None = 0
     messages = getattr(result, "messages", None)
     if callable(messages):
         messages = messages()
     if messages is None:
-        messages = getattr(result, "stream_messages", ())
-    for message in messages or ():
+        messages = getattr(result, "stream_messages", None)
+    if messages is None:
+        tool_calls = None
+        tool_observation_basis = "NOT_EXPOSED_BY_AGENT_PROMPT"
+        messages = ()
+    else:
+        tool_observation_basis = "OBSERVED_STREAM"
+    for message in messages:
         kind = str(
-            getattr(message, "type", None)
-            or getattr(message, "kind", "unknown")
+            getattr(message, "type", None) or getattr(message, "kind", "unknown")
         )
         classes.append(kind)
         if kind in {"tool_call", "tool-call", "tool_use"}:
+            if tool_calls is None:
+                raise CalibrationClosed("tool-call observation state is inconsistent")
             tool_calls += 1
     if tool_calls:
         raise ToolCallRejected("no-tool route emitted a tool-call event")
@@ -1032,6 +1043,17 @@ def _observe_dispatch(result: object, *, prompt: LeafPrompt) -> dict[str, object
         if callable(text):
             text = text()
     assessment = assess_result(text, prompt=prompt)
+    observed_model = _model_id(result)
+    failure_codes = list(assessment.failure_codes)
+    if observed_model is None:
+        failure_codes.append("MODEL_IDENTITY_UNREPORTED")
+        model_identity_basis = "REQUEST_AND_CATALOGUE"
+    elif observed_model != PINNED_MODEL:
+        failure_codes.append("MODEL_IDENTITY_MISMATCH")
+        model_identity_basis = "RUN_RESULT"
+    else:
+        model_identity_basis = "RUN_RESULT"
+    semantic_result = "PASS" if assessment.json_valid and not failure_codes else "FAIL"
     agent_id = getattr(result, "agent_id", None) or getattr(result, "id", None)
     duration = getattr(result, "duration_ms", None)
     status = getattr(result, "status", "finished")
@@ -1039,14 +1061,15 @@ def _observe_dispatch(result: object, *, prompt: LeafPrompt) -> dict[str, object
     return {
         "status": status,
         "json_valid": assessment.json_valid,
-        "semantic_fixture_result": assessment.result,
-        "semantic_failure_codes": list(assessment.failure_codes),
+        "semantic_fixture_result": semantic_result,
+        "semantic_failure_codes": failure_codes,
         "entity_count": assessment.entity_count,
         "fact_count": assessment.fact_count,
         "key_set_digest": assessment.key_set_digest,
         "validator_version": VALIDATOR_VERSION,
         "stream_message_classes": classes,
         "tool_call_count": tool_calls,
+        "tool_call_observation_basis": tool_observation_basis,
         "usage": normalise_usage(getattr(result, "usage", None)),
         "latency_ms": duration if isinstance(duration, int) else None,
         "agent_id_sha256": (
@@ -1055,6 +1078,8 @@ def _observe_dispatch(result: object, *, prompt: LeafPrompt) -> dict[str, object
         "sdk_version": PINNED_SDK_VERSION,
         "bridge_protocol": PINNED_BRIDGE_PROTOCOL,
         "model": PINNED_MODEL,
+        "observed_model": observed_model,
+        "model_identity_basis": model_identity_basis,
     }
 
 
@@ -1064,15 +1089,23 @@ def assess_result(text: object, *, prompt: LeafPrompt) -> SemanticAssessment:
     if not isinstance(text, str) or not text.strip():
         return _assessment(False, ("INVALID_JSON",))
     try:
-        payload = json.loads(text[text.find("{") : text.rfind("}") + 1])
-    except (ValueError, json.JSONDecodeError):
+        payload = json.loads(
+            text[text.find("{") : text.rfind("}") + 1],
+            object_pairs_hook=_unique_json_object,
+        )
+    except _DuplicateJsonKey:
+        return _assessment(False, ("DUPLICATE_JSON_KEY",))
+    except json.JSONDecodeError:
         return _assessment(False, ("INVALID_JSON",))
     if not isinstance(payload, dict):
         return _assessment(False, ("INVALID_TOP_LEVEL",))
     entity_count, fact_count = _diagnostic_counts(payload, prompt=prompt)
     key_set_digest = _key_set_digest(payload)
+    schema_codes = list(_schema_failure_codes(payload, prompt=prompt))
     if prompt.prompt_class == "tiny":
-        codes = () if payload.get("ok") is True else ("MISSING_EXPECTED_OK",)
+        codes = schema_codes
+        if payload.get("ok") is not True:
+            codes.append("MISSING_EXPECTED_OK")
         return _assessment(
             True,
             codes,
@@ -1084,19 +1117,15 @@ def assess_result(text: object, *, prompt: LeafPrompt) -> SemanticAssessment:
         prompt.prompt_class == "upstream_combined"
         and prompt.fixture_id == "zero-result-368"
     ):
-        entities = payload.get("extracted_entities")
-        edges = payload.get("edges")
-        codes: list[str] = []
-        if not isinstance(entities, list):
-            codes.append("MISSING_ENTITY_LIST")
-        if not isinstance(edges, list):
-            codes.append("MISSING_FACT_LIST")
-        if (
-            isinstance(entities, list)
-            and isinstance(edges, list)
-            and (entities or edges)
-        ):
-            codes.append("UNEXPECTED_NONEMPTY_ZERO")
+        codes = schema_codes + ["FIXTURE_EXPECTATION_INVALID"]
+        codes.extend(
+            _relation_failure_codes(
+                payload,
+                entity_key="extracted_entities",
+                fact_key="edges",
+                require_temporal=False,
+            )
+        )
         return _assessment(
             True,
             codes,
@@ -1105,11 +1134,13 @@ def assess_result(text: object, *, prompt: LeafPrompt) -> SemanticAssessment:
             key_set_digest=key_set_digest,
         )
     if prompt.prompt_class == "upstream_combined" and prompt.fixture_id == "relations":
-        codes = _relation_failure_codes(
-            payload,
-            entity_key="extracted_entities",
-            fact_key="edges",
-            require_temporal=False,
+        codes = schema_codes + list(
+            _relation_failure_codes(
+                payload,
+                entity_key="extracted_entities",
+                fact_key="edges",
+                require_temporal=False,
+            )
         )
         return _assessment(
             True,
@@ -1120,14 +1151,24 @@ def assess_result(text: object, *, prompt: LeafPrompt) -> SemanticAssessment:
         )
     if prompt.prompt_class == "upstream_batch_timestamps":
         stamps = payload.get("timestamps")
-        codes = []
+        codes = schema_codes
         if not isinstance(stamps, list) or not stamps:
             codes.append("MISSING_TIMESTAMP_LIST")
         elif any(
-            not isinstance(item, dict) or "valid_at" not in item
-            for item in stamps
+            not isinstance(item, dict) or "valid_at" not in item for item in stamps
         ):
             codes.append("MISSING_VALID_AT")
+        if (
+            isinstance(stamps, list)
+            and stamps
+            and any(
+                not isinstance(item, dict)
+                or not _valid_optional_timestamp(item.get("valid_at"))
+                or not _valid_optional_timestamp(item.get("invalid_at"))
+                for item in stamps
+            )
+        ):
+            codes.append("INVALID_TEMPORAL_VALUE")
         return _assessment(
             True,
             codes,
@@ -1136,20 +1177,18 @@ def assess_result(text: object, *, prompt: LeafPrompt) -> SemanticAssessment:
             key_set_digest=key_set_digest,
         )
     if prompt.prompt_class == "compact_combined_temporal":
-        entities = payload.get("entities")
-        facts = payload.get("facts")
         if prompt.fixture_id == "zero-result-368":
-            codes = []
-            if not isinstance(entities, list):
-                codes.append("MISSING_ENTITY_LIST")
-            if not isinstance(facts, list):
-                codes.append("MISSING_FACT_LIST")
-            if isinstance(entities, list) and isinstance(facts, list) and (
-                entities or facts
-            ):
-                codes.append("UNEXPECTED_NONEMPTY_ZERO")
+            codes = schema_codes + ["FIXTURE_EXPECTATION_INVALID"]
+            codes.extend(
+                _relation_failure_codes(
+                    payload,
+                    entity_key="entities",
+                    fact_key="facts",
+                    require_temporal=True,
+                )
+            )
         else:
-            codes = list(
+            codes = schema_codes + list(
                 _relation_failure_codes(
                     payload,
                     entity_key="entities",
@@ -1259,7 +1298,91 @@ def _relation_failure_codes(
         for item in facts
     ):
         codes.append("MISSING_TEMPORAL_KEYS")
+    if require_temporal:
+        if any(
+            not isinstance(item, dict)
+            or not _valid_optional_timestamp(item.get("valid_at"))
+            or not _valid_optional_timestamp(item.get("invalid_at"))
+            for item in facts
+        ):
+            codes.append("INVALID_TEMPORAL_VALUE")
+        if any(
+            not isinstance(item, dict)
+            or not _nonempty_string_list(item.get("evidence_segment_ids"))
+            for item in (*entities, *facts)
+        ):
+            codes.append("MISSING_EVIDENCE_SEGMENT_IDS")
+        local_ids = [
+            item.get("local_id") for item in entities if isinstance(item, dict)
+        ]
+        valid_local_ids = {
+            item
+            for item in local_ids
+            if isinstance(item, int) and not isinstance(item, bool)
+        }
+        if len(valid_local_ids) != len(entities) or any(
+            not isinstance(item, dict)
+            or item.get("source_local_id") not in valid_local_ids
+            or item.get("target_local_id") not in valid_local_ids
+            for item in facts
+        ):
+            codes.append("INVALID_LOCAL_REFERENCE")
+        if any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("fact"), str)
+            or not str(item.get("fact")).strip()
+            for item in facts
+        ):
+            codes.append("MISSING_FACT_TEXT")
+        codes.append("EVIDENCE_CONTRACT_UNVERIFIABLE")
     return tuple(codes)
+
+
+def _valid_optional_timestamp(value: object) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+def _nonempty_string_list(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(item, str) and bool(item) for item in value)
+    )
+
+
+def _schema_failure_codes(
+    payload: Mapping[str, object], *, prompt: LeafPrompt
+) -> tuple[str, ...]:
+    validator = Draft202012Validator(prompt.schema, format_checker=FormatChecker())
+    return () if validator.is_valid(payload) else ("SCHEMA_VALIDATION_FAILED",)
+
+
+def _unique_json_object(pairs: Sequence[tuple[str, object]]) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise _DuplicateJsonKey
+        payload[key] = value
+    return payload
+
+
+def _model_id(result: object) -> str | None:
+    model = getattr(result, "model", None)
+    if isinstance(model, str):
+        return model
+    if isinstance(model, Mapping):
+        candidate = model.get("id")
+    else:
+        candidate = getattr(model, "id", None)
+    return candidate if isinstance(candidate, str) and candidate else None
 
 
 def _failure_outcome(exc: BaseException, *, started: datetime) -> dict[str, object]:
@@ -1279,11 +1402,14 @@ def _failure_outcome(exc: BaseException, *, started: datetime) -> dict[str, obje
         "key_set_digest": None,
         "validator_version": VALIDATOR_VERSION,
         "stream_message_classes": [],
-        "tool_call_count": 0,
+        "tool_call_count": None,
+        "tool_call_observation_basis": "NOT_AVAILABLE_AFTER_DISPATCH_FAILURE",
         "usage": unreported_cli_usage(),
         "latency_ms": _elapsed_ms(started),
         "agent_id_sha256": None,
         "failure": name,
+        "observed_model": None,
+        "model_identity_basis": "REQUEST_ONLY",
     }
 
 
@@ -1307,6 +1433,11 @@ def _write_leaf(
         "label": prompt.label,
         "prompt_class": prompt.prompt_class,
         "fixture_id": prompt.fixture_id,
+        "fixture_validity": (
+            "INVALID_ZERO_EXPECTATION"
+            if prompt.fixture_id == "zero-result-368"
+            else "VALID"
+        ),
         "prompt_chars": len(prompt.prompt),
         "prompt_bytes": len(prompt_bytes),
         "prompt_sha256": digest_bytes(prompt_bytes),
@@ -1327,16 +1458,17 @@ def _write_leaf(
         "latency_ms": outcome.get("latency_ms") or _elapsed_ms(started),
         "json_valid": outcome.get("json_valid"),
         "semantic_fixture_result": outcome.get("semantic_fixture_result"),
-        "semantic_failure_codes": list(
-            outcome.get("semantic_failure_codes") or ()
-        ),
+        "semantic_failure_codes": list(outcome.get("semantic_failure_codes") or ()),
         "entity_count": outcome.get("entity_count"),
         "fact_count": outcome.get("fact_count"),
         "key_set_digest": outcome.get("key_set_digest"),
         "validator_version": outcome.get("validator_version"),
         "stream_message_classes": list(outcome.get("stream_message_classes") or ()),
-        "tool_call_count": outcome.get("tool_call_count", 0),
+        "tool_call_count": outcome.get("tool_call_count"),
+        "tool_call_observation_basis": outcome.get("tool_call_observation_basis"),
         "status": outcome.get("status"),
+        "observed_model": outcome.get("observed_model"),
+        "model_identity_basis": outcome.get("model_identity_basis"),
     }
     if "failure" in outcome:
         receipt["failure"] = outcome["failure"]
@@ -1379,9 +1511,7 @@ def _exact_repeat_summary(
         else None
     )
     repeat_input = (
-        repeat_usage.get("input_tokens")
-        if isinstance(repeat_usage, Mapping)
-        else None
+        repeat_usage.get("input_tokens") if isinstance(repeat_usage, Mapping) else None
     )
     delta = (
         repeat_input - original_input
@@ -1405,10 +1535,29 @@ def _exact_repeat_summary(
 
 
 def _write_json(path: Path, payload: Mapping[str, object]) -> None:
-    path.write_text(
-        json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=True) + "\n",
+    rendered = json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=True) + "\n"
+    with tempfile.NamedTemporaryFile(
+        mode="w",
         encoding="utf-8",
-    )
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        temporary = Path(handle.name)
+        handle.write(rendered)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _prepare_output_dir(output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if any(output_dir.iterdir()):
+        raise CalibrationClosed("output directory must be empty for a new packet")
 
 
 def _assert_omitted_setting_sources(options: Mapping[str, object]) -> None:
@@ -1468,24 +1617,24 @@ def _elapsed_ms(started: datetime) -> int:
 
 __all__ = [
     "CLI_TINY_INPUT_TOKENS",
-    "CalibrationClosed",
-    "DispatchRequest",
     "ENVIRONMENT_ALLOW_LIST",
-    "IsolationViolation",
     "LEAF_LABELS",
-    "LeafBudget",
-    "LeafPrompt",
     "MAXIMUM_LEAVES",
     "MINIMUM_EFFECT_CEILING",
     "PINNED_MODEL",
     "PINNED_SDK_VERSION",
-    "SemanticAssessment",
     "TINY_PROMPT",
-    "ToolCallRejected",
     "VALIDATOR_VERSION",
+    "CalibrationClosed",
+    "DispatchRequest",
+    "IsolationViolation",
+    "LeafBudget",
+    "LeafPrompt",
+    "SemanticAssessment",
+    "ToolCallRejected",
     "assess_result",
-    "compare_to_cli_baseline",
     "compact_prompt",
+    "compare_to_cli_baseline",
     "inspect_isolation",
     "isolated_environ",
     "live_dispatcher",
