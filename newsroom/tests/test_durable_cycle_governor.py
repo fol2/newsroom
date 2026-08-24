@@ -958,3 +958,104 @@ def test_cli_health_probe_releases_open_route_with_configured_probe(
     assert len(leaves) == 1
     assert leaves[0]["workload_class"] == "CONT_ROUTE_HEALTH_PROBE"
     assert leaves[0]["total_tokens"] == 0
+
+
+def test_health_probe_owner_stop_after_allocation_vetoes_provider_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.hermes_control_plane as hermes
+
+    path = tmp_path / "unpublished.sqlite3"
+    proving = tmp_path / "proving.sqlite3"
+    usage = ModelUsageService(str(path))
+    usage.register_policy(
+        InvocationEfficiencyPolicy.create(
+            policy_id="fixture-health-probe",
+            version="v1",
+            workload_class=WorkloadClass.CONT_ROUTE_HEALTH_PROBE,
+            provider=hermes.CONT_HEALTH_PROBE_PROVIDER,
+            route=hermes.CONT_HEALTH_PROBE_ROUTE,
+            model=hermes.CONT_HEALTH_PROBE_MODEL,
+            reasoning=hermes.CONT_HEALTH_PROBE_REASONING,
+            one_turn=True,
+            exact_input=True,
+            skills_enabled=False,
+            tools_enabled=False,
+            mcp_enabled=False,
+            prior_message_count=0,
+            max_prompt_bytes=1_000,
+            max_context_tokens=1,
+            max_output_tokens=1,
+            max_total_tokens=1,
+            prompt_contract_version=hermes.CONT_HEALTH_PROBE_PROMPT_CONTRACT,
+            output_schema_digest=digest_canonical(
+                {"schema": "writer-route-health"}
+            ),
+            allowed_context_identities=(
+                hermes.CONT_HEALTH_PROBE_CONTEXT_IDENTITY,
+            ),
+            allowed_config_identities=("cont-health-probe-command-v1",),
+            hard_estimate_ceiling_tokens=None,
+            evidence_digest=digest_canonical({"fixture": "health-probe"}),
+            qualified=True,
+        )
+    )
+    connection = sqlite3.connect(proving)
+    connection.executescript(
+        """
+        CREATE TABLE proving_runs(run_id TEXT PRIMARY KEY);
+        CREATE TABLE proving_gates(
+            run_id TEXT NOT NULL,
+            gate_id TEXT NOT NULL,
+            status TEXT NOT NULL
+        );
+        INSERT INTO proving_runs VALUES('run-1');
+        INSERT INTO proving_gates VALUES(
+            'run-1', 'NO_ACTIVE_HUMAN_EMERGENCY_STOP', 'PASS'
+        );
+        """
+    )
+    connection.close()
+    provider_calls = 0
+    allocate = ModelUsageService.allocate
+
+    def allocate_then_stop(
+        service: ModelUsageService,
+        allocation: object,
+        *,
+        owner_emergency_stop: bool,
+    ) -> None:
+        allocate(
+            service,
+            allocation,  # type: ignore[arg-type]
+            owner_emergency_stop=owner_emergency_stop,
+        )
+        connection = sqlite3.connect(proving)
+        connection.execute(
+            "UPDATE proving_gates SET status='FAIL' "
+            "WHERE gate_id='NO_ACTIVE_HUMAN_EMERGENCY_STOP'"
+        )
+        connection.commit()
+        connection.close()
+
+    def provider_probe() -> WriterRouteHealthProof:
+        nonlocal provider_calls
+        provider_calls += 1
+        return _healthy_route()
+
+    monkeypatch.setattr(ModelUsageService, "allocate", allocate_then_stop)
+    monkeypatch.setattr(hermes, "_probe_cont_writer_route", provider_probe)
+
+    with pytest.raises(ValueError, match="owner emergency stop"):
+        hermes._metered_cont_writer_route_probe(str(path), str(proving))()
+
+    assert provider_calls == 0
+    leaves = usage.query(
+        start=datetime.now(tz=UTC) - timedelta(minutes=1),
+        end=datetime.now(tz=UTC) + timedelta(minutes=1),
+    )["leaves"]
+    assert len(leaves) == 1
+    assert leaves[0]["usage_status"] == "REPORTED"
+    assert leaves[0]["total_tokens"] == 0
+    assert leaves[0]["pre_dispatch_zero_proved"] is True

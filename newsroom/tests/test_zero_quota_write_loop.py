@@ -3659,6 +3659,48 @@ def test_owner_emergency_stop_is_rechecked_at_writer_dispatch(
     connection.close()
 
 
+def test_owner_emergency_stop_after_reservation_vetoes_writer_provider_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from newsroom.control_plane import cycle
+
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "owner-stop-after-reservation.sqlite3"
+    writer = RecordingFixtureWriter()
+    reserve = cycle.reserve_writer_provider_attempt
+
+    def reserve_then_stop(*args: object, **kwargs: object) -> str:
+        provider_attempt_id = reserve(*args, **kwargs)  # type: ignore[arg-type]
+        connection = sqlite3.connect(proving)
+        connection.execute(
+            "UPDATE proving_gates SET status='FAIL' "
+            "WHERE run_id='run-1' "
+            "AND gate_id='NO_ACTIVE_HUMAN_EMERGENCY_STOP'"
+        )
+        connection.commit()
+        connection.close()
+        return provider_attempt_id
+
+    monkeypatch.setattr(cycle, "reserve_writer_provider_attempt", reserve_then_stop)
+
+    with pytest.raises(VetoError, match="owner emergency stop"):
+        run_cycle(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            writer=writer,
+            evidence_package_builder=_qualified_builder(frozenset({"HK-01"})),
+            clock=_CLOCK,
+        )
+
+    assert writer.calls == []
+    connection = sqlite3.connect(unpublished)
+    assert connection.execute(
+        "SELECT status,reason_code FROM unpublished_writer_provider_attempts"
+    ).fetchone() == ("FAILED", "OWNER_EMERGENCY_STOP")
+    connection.close()
+
+
 def test_hold_and_reject_candidates_never_reach_injected_writer(
     tmp_path: Path,
 ) -> None:
