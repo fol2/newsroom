@@ -251,6 +251,39 @@ def test_rejected_primary_tokens_remain_no_result_after_fallback_recovery() -> N
     }
 
 
+def test_fallback_usage_cannot_relax_primary_policy_token_bounds() -> None:
+    rejected_primary = _leaf(
+        "short",
+        prompt_bytes=1_000,
+        context_tokens=3_000,
+        accepted=False,
+    )
+    rejected_primary["work_outcome"] = "ACCEPTED"
+    fallback = _fallback_leaf(
+        "short",
+        prompt_bytes=1_000,
+        context_tokens=3_500,
+    )
+    fallback["output_tokens"] = 3_500
+    fallback["total_tokens"] = 7_000
+    packet = assess_cont_calibration(
+        [rejected_primary, fallback, *_passing_leaves()[1:]],
+        candidate_ids=("short", "medium", "long"),
+        version="issue-730-v1",
+        implementation_revision=REVISION,
+        unpublished_payload_candidate_ids=("short", "medium", "long"),
+    )
+
+    assert packet.passed is True
+    assert packet.metrics["maximum_output_tokens"] == 400
+    assert packet.metrics["maximum_total_tokens"] == 5_400
+    assert packet.metrics["maximum_leaf_output_tokens"] == 3_500
+    assert packet.metrics["maximum_leaf_total_tokens"] == 7_000
+    policy = packet.mint_primary_policy()
+    assert policy.max_output_tokens == 1_400
+    assert policy.max_total_tokens == 16_400
+
+
 @pytest.mark.parametrize(
     ("field", "value", "reason"),
     (
