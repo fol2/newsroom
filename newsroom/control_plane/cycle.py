@@ -177,6 +177,7 @@ class _DispatchAuthority:
 
 @dataclass(frozen=True, slots=True)
 class CycleReport:
+    cycle_id: str
     proving_run_id: str
     minted: int
     duplicate: int
@@ -1767,6 +1768,8 @@ def _run_write_loop(
     max_writer_provider_dispatches: int,
     max_writer_fallback_dispatches: int,
     selected_at: str,
+    cycle_execution_id: str,
+    writer_dispatch_fence: Callable[[], None] | None,
 ) -> _WriteLoopResult:
     duplicate = 0
     for candidate, package, decision in admitted:
@@ -1794,7 +1797,6 @@ def _run_write_loop(
         retain_write_selection(unpublished, selection)
         append_ledger(unpublished, "WRITE_READY_SELECTION", selection.as_record())
 
-    cycle_execution_id = str(uuid.uuid4())
     minted = 0
     candidate_attempts = 0
     provider_dispatches = 0
@@ -1871,6 +1873,8 @@ def _run_write_loop(
                 if provider_dispatches >= max_writer_provider_dispatches:
                     last_reason = "PROVIDER_BUDGET_EXHAUSTED"
                     break
+            if writer_dispatch_fence is not None:
+                writer_dispatch_fence()
             provider_dispatches += 1
             if route == "PRIMARY":
                 primary_dispatches += 1
@@ -2274,7 +2278,17 @@ def run_cycle(
     max_writer_provider_dispatches: int = 5,
     max_writer_fallback_dispatches: int = 1,
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
+    cycle_id: str | None = None,
+    writer_dispatch_fence: Callable[[], None] | None = None,
 ) -> CycleReport:
+    if cycle_id is None:
+        cycle_id = str(uuid.uuid4())
+    else:
+        try:
+            if str(uuid.UUID(cycle_id)) != cycle_id:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("cycle_id must be a canonical UUID") from exc
     for name, value in (
         ("max_writes", max_writes),
         ("max_write_ready_candidates", max_write_ready_candidates),
@@ -2403,6 +2417,7 @@ def run_cycle(
             "PRIVATE_CYCLE_START",
             {
                 "proving_run_id": run_id,
+                "cycle_id": cycle_id,
                 "observations": len(latest_rows),
                 "poll_observation_count": poll_observation_count,
                 "feed_snapshot_item_count": feed_snapshot_item_count,
@@ -2460,6 +2475,8 @@ def run_cycle(
             max_writer_provider_dispatches=min(max_writer_provider_dispatches, 5),
             max_writer_fallback_dispatches=min(max_writer_fallback_dispatches, 1),
             selected_at=_utc_text(admission_evaluated_at),
+            cycle_execution_id=cycle_id,
+            writer_dispatch_fence=writer_dispatch_fence,
         )
         coverage = graphiti_coverage(
             unpublished,
@@ -2473,6 +2490,7 @@ def run_cycle(
             "PRIVATE_CYCLE_CLOSE",
             {
                 "proving_run_id": run_id,
+                "cycle_id": cycle_id,
                 "minted": write_result.minted,
                 "duplicate": write_result.duplicate,
                 "sources": sources,
@@ -2510,6 +2528,7 @@ def run_cycle(
         unpublished.close()
     draft_counts = dict(write_result.draft_counts)
     return CycleReport(
+        cycle_id=cycle_id,
         proving_run_id=run_id,
         minted=write_result.minted,
         duplicate=write_result.duplicate,

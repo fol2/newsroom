@@ -10,6 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
+from uuid import UUID
 
 import pytest
 
@@ -3530,12 +3531,19 @@ def test_final_ledger_counters_equal_retained_attempts_outcomes_and_inserts(
     tmp_path: Path,
 ) -> None:
     unpublished = tmp_path / "unpublished_store.sqlite3"
+    fence_calls = 0
+
+    def writer_dispatch_fence() -> None:
+        nonlocal fence_calls
+        fence_calls += 1
+
     report = run_cycle(
         proving_store=str(_proving(tmp_path)),
         unpublished_store=str(unpublished),
         writer=RecordingFixtureWriter(),
         evidence_package_builder=_qualified_builder(frozenset({"HK-01", "UK-01"})),
         clock=_CLOCK,
+        writer_dispatch_fence=writer_dispatch_fence,
     )
 
     connection = sqlite3.connect(unpublished)
@@ -3544,6 +3552,17 @@ def test_final_ledger_counters_equal_retained_attempts_outcomes_and_inserts(
             "SELECT payload_json FROM ledger WHERE kind='PRIVATE_CYCLE_CLOSE'"
         ).fetchone()[0]
     )
+    start = json.loads(
+        connection.execute(
+            "SELECT payload_json FROM ledger WHERE kind='PRIVATE_CYCLE_START'"
+        ).fetchone()[0]
+    )
+    attempt_cycle_ids = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT cycle_execution_id FROM unpublished_write_candidate_attempts"
+        )
+    }
     retained = {
         "candidate_attempts": connection.execute(
             "SELECT COUNT(*) FROM unpublished_write_candidate_attempts"
@@ -3576,6 +3595,10 @@ def test_final_ledger_counters_equal_retained_attempts_outcomes_and_inserts(
         == report.draft_accepted
     )
     assert close["accepted_payload_count"] == retained["payloads"] == report.minted
+    assert str(UUID(report.cycle_id)) == report.cycle_id
+    assert start["cycle_id"] == close["cycle_id"] == report.cycle_id
+    assert attempt_cycle_ids == {report.cycle_id}
+    assert fence_calls == report.provider_dispatches
 
 
 def test_hold_and_reject_candidates_never_reach_injected_writer(

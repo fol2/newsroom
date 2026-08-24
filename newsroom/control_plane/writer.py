@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Literal, Protocol
 
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.child_environment import unprivileged_child_environment
 from newsroom.control_plane.editorial import StoryCandidateRecord
 from newsroom.control_plane.evidence import EvidencePackage
@@ -272,6 +273,16 @@ class WriterCopy:
     writer_id: str
     evidence_package_digest: str = ""
     evidence_links: tuple[WriterEvidenceLink, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class WriterRouteProbeResult:
+    executable_ok: bool
+    authentication_ok: bool
+    configuration_ok: bool
+    provider_available: bool
+    provider_dispatched: bool
+    provider_receipt_reference: str | None
 
 
 class WriterDispatchError(RuntimeError):
@@ -1036,6 +1047,53 @@ def prove_grok_cli() -> None:
     )
     if result.returncode != 0 or "grok" not in result.stdout.lower():
         raise RuntimeError("Grok Build CLI is not logged in or not runnable")
+
+
+def probe_grok_writer_route() -> WriterRouteProbeResult:
+    """Run the no-content CONT route probe against the pinned Grok model list."""
+
+    executable_ok = grok_cli_ready()
+    if not executable_ok:
+        return WriterRouteProbeResult(False, False, False, False, False, None)
+    try:
+        result = subprocess.run(
+            (GROK_BIN, "models"),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env=unprivileged_child_environment(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        receipt = digest_bytes(
+            canonical_json_bytes(
+                {
+                    "probe": "GROK_MODELS_NO_CONTENT",
+                    "exception_class": type(exc).__name__,
+                }
+            )
+        )
+        return WriterRouteProbeResult(True, False, False, False, True, receipt)
+    receipt = digest_bytes(
+        canonical_json_bytes(
+            {
+                "probe": "GROK_MODELS_NO_CONTENT",
+                "return_code": result.returncode,
+                "stdout_digest": digest_bytes(result.stdout.encode()),
+                "stderr_digest": digest_bytes(result.stderr.encode()),
+            }
+        )
+    )
+    available = result.returncode == 0
+    configured = available and "grok-4.6" in result.stdout
+    return WriterRouteProbeResult(
+        executable_ok=True,
+        authentication_ok=available,
+        configuration_ok=configured,
+        provider_available=available,
+        provider_dispatched=True,
+        provider_receipt_reference=receipt,
+    )
 
 
 def prove_cursor_agent_cli() -> None:
