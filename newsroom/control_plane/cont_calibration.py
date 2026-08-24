@@ -261,6 +261,16 @@ def assess_cont_calibration(
         for row in dispatched_rows
         if (value := _integer(row, "total_tokens")) is not None
     ]
+    primary_output_tokens = [
+        value
+        for row in primary_rows
+        if (value := _integer(row, "output_tokens")) is not None
+    ]
+    primary_total_tokens = [
+        value
+        for row in primary_rows
+        if (value := _integer(row, "total_tokens")) is not None
+    ]
     complete_total_telemetry = len(total_tokens) == len(dispatched_rows)
     complete_output_telemetry = len(output_tokens) == len(dispatched_rows)
     reported_usage = all(
@@ -440,9 +450,21 @@ def assess_cont_calibration(
             }
         ),
         "maximum_output_tokens": (
-            max(output_tokens) if complete_output_telemetry else None
+            max(primary_output_tokens)
+            if len(primary_output_tokens) == len(primary_rows)
+            and primary_output_tokens
+            else None
         ),
         "maximum_total_tokens": (
+            max(primary_total_tokens)
+            if len(primary_total_tokens) == len(primary_rows)
+            and primary_total_tokens
+            else None
+        ),
+        "maximum_leaf_output_tokens": (
+            max(output_tokens) if complete_output_telemetry else None
+        ),
+        "maximum_leaf_total_tokens": (
             max(total_tokens) if complete_total_telemetry else None
         ),
         "accepted_payload_token_totals": accepted_token_totals,
