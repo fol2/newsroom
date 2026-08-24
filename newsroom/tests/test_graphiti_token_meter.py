@@ -197,10 +197,11 @@ def test_cli_chain_retains_cursor_usage_on_the_invocation() -> None:
         {
             "provider": "cursor-agent-cli",
             "model": "composer-2.5",
-            "outcome": "COMPLETE",
-            "usage": usage,
-        }
-    ]
+                "outcome": "COMPLETE",
+                "usage": usage,
+                "requested_max_tokens": 16_384,
+            }
+        ]
 
 
 def test_cli_chain_allocates_each_hidden_leaf_before_provider_runner() -> None:

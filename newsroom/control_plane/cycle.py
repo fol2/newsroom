@@ -1087,6 +1087,7 @@ def _ingest(
                                 if isinstance(graphiti, GovernedRealGraphitiPort)
                                 else None
                             ),
+                            dispatch_authority=final_dispatch_rights,
                         ),
                     )
                 elif isinstance(graphiti, GovernedRealGraphitiPort):

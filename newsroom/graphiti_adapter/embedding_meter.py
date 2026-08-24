@@ -43,7 +43,7 @@ class EmbeddingInvocationObserver(Protocol):
         *,
         outcome: str,
         usage: dict[str, object],
-    ) -> None: ...
+    ) -> Mapping[str, str] | None: ...
 
 
 def _is_non_negative_int(value: object) -> TypeGuard[int]:
@@ -179,7 +179,7 @@ class MeteredOpenAIEmbedder:
             )
         except asyncio.CancelledError:
             if self._invocation_observer is not None:
-                self._invocation_observer.after_embedding_invocation(
+                binding = self._invocation_observer.after_embedding_invocation(
                     observer_token,
                     outcome="CANCELLED",
                     usage={
@@ -192,10 +192,12 @@ class MeteredOpenAIEmbedder:
                         "total_tokens": None,
                     },
                 )
+                if binding is not None:
+                    request.update(binding)
             raise
         except Exception:
             if self._invocation_observer is not None:
-                self._invocation_observer.after_embedding_invocation(
+                binding = self._invocation_observer.after_embedding_invocation(
                     observer_token,
                     outcome="FAILED",
                     usage={
@@ -208,6 +210,8 @@ class MeteredOpenAIEmbedder:
                         "total_tokens": None,
                     },
                 )
+                if binding is not None:
+                    request.update(binding)
             raise
         usage = _usage_value(response)
         cost = _usd_microunits(usage.get("cost"))
@@ -222,7 +226,7 @@ class MeteredOpenAIEmbedder:
             }
         )
         if self._invocation_observer is not None:
-            self._invocation_observer.after_embedding_invocation(
+            binding = self._invocation_observer.after_embedding_invocation(
                 observer_token,
                 outcome="COMPLETE",
                 usage={
@@ -240,6 +244,8 @@ class MeteredOpenAIEmbedder:
                     "provider_telemetry": dict(request),
                 },
             )
+            if binding is not None:
+                request.update(binding)
         return response
 
     async def create(self, input_data: object) -> list[float]:
