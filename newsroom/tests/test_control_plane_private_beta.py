@@ -622,9 +622,6 @@ def test_cycle_mints_unpublished_payloads_with_evidence(tmp_path: Path) -> None:
     assert len(list_payloads(str(unpublished))) == 3
 
 
-<<<<<<< HEAD
-def test_cycle_stops_backlog_walk_after_unknown_writer_failure(tmp_path: Path) -> None:
-=======
 def test_cycle_runs_configured_graphiti_admission_atom(tmp_path: Path) -> None:
     proving = _proving(tmp_path)
     unpublished = tmp_path / "unpublished_store.sqlite3"
@@ -637,7 +634,7 @@ def test_cycle_runs_configured_graphiti_admission_atom(tmp_path: Path) -> None:
 
         def drain(self, *, worker_id: str, limit: int = 100) -> object:
             calls.append(("drain", worker_id, limit))
-            return SimpleNamespace()
+            return object()
 
         def reconcile_rights(self, *, limit: int = 100) -> int:
             calls.append(("rights", limit))
@@ -665,8 +662,7 @@ def test_cycle_runs_configured_graphiti_admission_atom(tmp_path: Path) -> None:
     ]
 
 
-def test_cycle_continues_after_one_writer_failure(tmp_path: Path) -> None:
->>>>>>> 724a2153 (Wire Graphiti admission into governed authority seams (#758))
+def test_cycle_stops_backlog_walk_after_unknown_writer_failure(tmp_path: Path) -> None:
     proving = _proving(tmp_path)
     unpublished = tmp_path / "unpublished_store.sqlite3"
 
