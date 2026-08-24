@@ -1486,3 +1486,51 @@ def test_hermes_usage_command_exports_shared_receipts_as_json_and_csv(
     assert hermes.main([*common, "--usage-format", "leaf-csv"]) == 0
     rows = list(csv.DictReader(io.StringIO(capsys.readouterr().out)))
     assert [row["invocation_id"] for row in rows] == [allocation.invocation_id]
+
+
+def test_hermes_usage_command_exports_allocation_free_envelope_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts import hermes_control_plane as hermes
+
+    path = tmp_path / "unpublished.sqlite3"
+    service = ModelUsageService(str(path))
+    envelope = _envelope()
+    service.open_envelope(envelope)
+    service.record_work_outcome(
+        envelope_id=envelope.envelope_id,
+        outcome="HOLD",
+        outcome_record_id="owner-stop-outcome",
+        payload_digest=None,
+        terminal_at=T0 + timedelta(seconds=1),
+        stable_reason_codes=("OWNER_EMERGENCY_STOP",),
+    )
+    monkeypatch.setattr(hermes, "ensure_control_plane_state_root", lambda: None)
+    common = [
+        "usage",
+        "--unpublished",
+        str(path),
+        "--usage-start",
+        "2026-08-24T10:00:00Z",
+        "--usage-end",
+        "2026-08-24T10:01:00Z",
+    ]
+
+    assert hermes.main(common) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["leaf_dispatch_count"] == 0
+    assert report["envelope_outcome_counts"] == {"HOLD": 1}
+    assert report["envelopes"][0]["outcome"] == "HOLD"
+    assert report["envelopes"][0]["stable_reason_codes"] == [
+        "OWNER_EMERGENCY_STOP"
+    ]
+
+    assert hermes.main([*common, "--usage-format", "envelope-csv"]) == 0
+    rows = list(csv.DictReader(io.StringIO(capsys.readouterr().out)))
+    assert len(rows) == 1
+    assert rows[0]["envelope_id"] == envelope.envelope_id
+    assert rows[0]["outcome"] == "HOLD"
+    assert rows[0]["work_outcome_terminal_at"] == "2026-08-24T10:00:01.000000Z"
+    assert rows[0]["stable_reason_codes"] == '["OWNER_EMERGENCY_STOP"]'

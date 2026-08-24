@@ -521,7 +521,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--usage-format",
-        choices=("json", "csv", "leaf-csv"),
+        choices=("json", "csv", "envelope-csv", "leaf-csv"),
         default="json",
         help="deterministic shared model-usage export format",
     )
@@ -562,6 +562,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.usage_format == "leaf-csv":
             sys.stdout.write(usage.export_csv(start=start, end=end))
+        elif args.usage_format == "envelope-csv":
+            sys.stdout.write(usage.export_envelope_csv(start=start, end=end))
         else:
             sys.stdout.write(
                 json.dumps(

@@ -2151,7 +2151,10 @@ class ModelUsageService:
             if outcome is not None:
                 outcomes[str(outcome["envelope_id"])] = outcome
         for envelope in envelopes:
-            envelope.update(outcomes.get(str(envelope["envelope_id"]), {}))
+            work_outcome = outcomes.get(str(envelope["envelope_id"]))
+            if work_outcome is not None:
+                envelope.update(work_outcome)
+                envelope["work_outcome_terminal_at"] = work_outcome["terminal_at"]
             envelope.update(cycle_outcomes.get(str(envelope["cycle_id"]), {}))
         return {
             "envelopes": envelopes,
@@ -2172,7 +2175,9 @@ class ModelUsageService:
             raise ValueError("usage bucket must be positive")
         data = self.query(start=start, end=end)
         leaves = data["leaves"]
+        envelopes = data["envelopes"]
         assert isinstance(leaves, list)
+        assert isinstance(envelopes, list)
         allocated_leaves = [
             row
             for row in leaves
@@ -2376,12 +2381,17 @@ class ModelUsageService:
             and start <= _instant(str(row["dispatch_at"])) < end
         ]
         outstanding = len(allocated_leaves) - len(allocation_terminals)
+        envelope_outcome_counts = Counter(
+            str(row["outcome"]) for row in envelopes if row.get("outcome")
+        )
         return {
             "schema_version": MODEL_USAGE_SCHEMA_VERSION,
             "start": _utc_text(start),
             "end": _utc_text(end),
             "bucket_seconds": bucket_seconds,
             "envelope_count": len(data["envelopes"]),  # type: ignore[arg-type]
+            "envelopes": envelopes,
+            "envelope_outcome_counts": dict(sorted(envelope_outcome_counts.items())),
             "allocation_count": len(allocated_leaves),
             "actual_provider_dispatch_count": len(dispatches),
             "terminal_count": len(allocation_terminals),
@@ -2569,6 +2579,7 @@ class ModelUsageService:
         leaves = self.query(start=start, end=end)["leaves"]
         assert isinstance(leaves, list)
         fields = (
+            "schema_version",
             "envelope_id",
             "invocation_id",
             "cycle_id",
@@ -2627,6 +2638,50 @@ class ModelUsageService:
         writer.writeheader()
         for row in leaves:
             writer.writerow({field: row.get(field) for field in fields})
+        return output.getvalue()
+
+    def export_envelope_csv(self, *, start: datetime, end: datetime) -> str:
+        envelopes = self.query(start=start, end=end)["envelopes"]
+        assert isinstance(envelopes, list)
+        fields = (
+            "envelope_id",
+            "cycle_id",
+            "workload_class",
+            "admitted_at",
+            "admission_decision_id",
+            "candidate_id",
+            "hypothesis_digest",
+            "evidence_package_digest",
+            "ingest_id",
+            "graphiti_attempt_id",
+            "canonical_digest",
+            "outcome",
+            "outcome_record_id",
+            "outcome_digest",
+            "payload_digest",
+            "work_outcome_terminal_at",
+            "terminal_at",
+            "cycle_outcome",
+            "route_circuit_state",
+            "route_circuit_reason",
+            "retained_proposal_count",
+            "accepted_provider_attempt_id",
+            "stable_reason_codes",
+        )
+        output = io.StringIO(newline="")
+        writer = csv.DictWriter(output, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        for row in envelopes:
+            writer.writerow(
+                {
+                    **{field: row.get(field) for field in fields},
+                    "stable_reason_codes": json.dumps(
+                        row.get("stable_reason_codes", []),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                }
+            )
         return output.getvalue()
 
     def export_bucket_csv(
