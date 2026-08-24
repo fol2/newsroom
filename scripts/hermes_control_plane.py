@@ -19,7 +19,11 @@ from newsroom.authority.canonical import (
     digest_bytes,
     digest_canonical,
 )
-from newsroom.control_plane.cycle import CycleReport, run_cycle
+from newsroom.control_plane.cycle import (
+    CycleReport,
+    assert_no_owner_emergency_stop,
+    run_cycle,
+)
 from newsroom.control_plane.cycle_governor import (
     CycleNotEligible,
     CycleOutcomeInput,
@@ -123,8 +127,11 @@ def _probe_cont_writer_route() -> WriterRouteHealthProof:
     )
 
 
-def _metered_cont_writer_route_probe(path: str) -> Callable[[], WriterRouteHealthProof]:
+def _metered_cont_writer_route_probe(
+    path: str, proving_store: str
+) -> Callable[[], WriterRouteHealthProof]:
     def probe() -> WriterRouteHealthProof:
+        assert_no_owner_emergency_stop(proving_store)
         service = ModelUsageService(path)
         service.recover_unresolved(observed_at=datetime.now(tz=UTC))
         admitted_at = datetime.now(tz=UTC)
@@ -170,6 +177,7 @@ def _metered_cont_writer_route_probe(path: str) -> Callable[[], WriterRouteHealt
                 {"context_identity": CONT_HEALTH_PROBE_CONTEXT_IDENTITY}
             ),
             context_identity=CONT_HEALTH_PROBE_CONTEXT_IDENTITY,
+            config_identity="cont-health-probe-command-v1",
             one_turn=True,
             exact_input=True,
             skills_enabled=False,
@@ -177,9 +185,10 @@ def _metered_cont_writer_route_probe(path: str) -> Callable[[], WriterRouteHealt
             mcp_enabled=False,
             prior_message_count=0,
             allocated_at=admitted_at,
+            recovery_deadline_at=admitted_at + timedelta(minutes=1),
             parent_invocation_id=None,
         )
-        service.allocate(allocation)
+        service.allocate(allocation, owner_emergency_stop=False)
         dispatch_started_at = datetime.now(tz=UTC)
         service.observe_transport(
             invocation_id=allocation.invocation_id,
@@ -232,13 +241,19 @@ def _metered_cont_writer_route_probe(path: str) -> Callable[[], WriterRouteHealt
                 usage_status=(
                     UsageStatus.ESTIMATED
                     if provider_dispatched
+                    and policy.hard_estimate_ceiling_tokens is not None
+                    else UsageStatus.UNREPORTED
+                    if provider_dispatched
                     else UsageStatus.REPORTED
                 ),
                 components=(
                     UsageComponents(
-                        total_tokens=policy.max_total_tokens,
+                        total_tokens=policy.hard_estimate_ceiling_tokens,
                         provenance="BOUNDED_ESTIMATE",
                     )
+                    if provider_dispatched
+                    and policy.hard_estimate_ceiling_tokens is not None
+                    else UsageComponents(provenance="UNAVAILABLE")
                     if provider_dispatched
                     else UsageComponents(total_tokens=0, provenance="CLI_DERIVED")
                 ),
@@ -253,11 +268,16 @@ def _metered_cont_writer_route_probe(path: str) -> Callable[[], WriterRouteHealt
                 pre_dispatch_zero_proved=not provider_dispatched,
                 subscription_cli_chat_not_cash_debited=True,
                 estimate_policy_digest=(
-                    policy.canonical_digest if provider_dispatched else None
+                    policy.canonical_digest
+                    if provider_dispatched
+                    and policy.hard_estimate_ceiling_tokens is not None
+                    else None
                 ),
                 estimate_calculation=(
-                    f"qualified_policy.max_total_tokens={policy.max_total_tokens}"
+                    "qualified_policy.hard_estimate_ceiling_tokens="
+                    f"{policy.hard_estimate_ceiling_tokens}"
                     if provider_dispatched
+                    and policy.hard_estimate_ceiling_tokens is not None
                     else None
                 ),
             ),
@@ -530,7 +550,7 @@ def main(argv: list[str] | None = None) -> int:
             args.unpublished,
             policy=_evaluation_policy(cooldown_seconds),
             writer_route_health_probe=_metered_cont_writer_route_probe(
-                args.unpublished
+                args.unpublished, args.proving
             ),
         )
         health = governor.status()

@@ -21,6 +21,7 @@ from newsroom.control_plane.model_usage import (
     InvocationEfficiencyPolicy,
     InvocationTerminal,
     ModelUsageAdmissionError,
+    ModelUsageIntegrityError,
     ModelUsageService,
     UsageComponents,
     UsageStatus,
@@ -50,6 +51,7 @@ def _policy(
     provider: str = "grok-build-cli",
     route: str = "CONT_PRIMARY",
     model: str = "grok-4.6",
+    hard_estimate_ceiling_tokens: int | None = 2_500,
 ) -> InvocationEfficiencyPolicy:
     return InvocationEfficiencyPolicy.create(
         policy_id=f"policy-{workload.value.lower()}",
@@ -72,6 +74,8 @@ def _policy(
         prompt_contract_version="prompt-v1",
         output_schema_digest=_digest({"schema": 1}),
         allowed_context_identities=("context-v1",),
+        allowed_config_identities=("config-v1",),
+        hard_estimate_ceiling_tokens=hard_estimate_ceiling_tokens,
         evidence_digest=_digest({"qualification": "fixture"}),
         qualified=True,
     )
@@ -106,6 +110,7 @@ def _allocation(
     workload: WorkloadClass | None = None,
     parent_invocation_id: str | None = None,
     prompt_bytes: int = 200,
+    config_identity: str = "config-v1",
 ) -> InvocationAllocation:
     return InvocationAllocation.create(
         envelope_id=envelope.envelope_id,
@@ -125,6 +130,7 @@ def _allocation(
         max_output_tokens=policy.max_output_tokens,
         context_manifest_digest=_digest({"context": "v1"}),
         context_identity="context-v1",
+        config_identity=config_identity,
         one_turn=policy.one_turn,
         exact_input=policy.exact_input,
         skills_enabled=policy.skills_enabled,
@@ -132,6 +138,7 @@ def _allocation(
         mcp_enabled=policy.mcp_enabled,
         prior_message_count=policy.prior_message_count,
         allocated_at=T0 + timedelta(seconds=leaf_ordinal),
+        recovery_deadline_at=T0 + timedelta(seconds=30 + leaf_ordinal),
         parent_invocation_id=parent_invocation_id,
     )
 
@@ -177,7 +184,7 @@ def _open_and_allocate(
     service.register_policy(policy)
     service.open_envelope(envelope)
     allocation = _allocation(envelope, policy)
-    service.allocate(allocation)
+    service.allocate(allocation, owner_emergency_stop=False)
     return envelope, policy, allocation
 
 
@@ -223,7 +230,7 @@ def test_primary_and_fallback_are_distinct_leaves_joined_to_one_outcome(
         request="request-fallback",
         parent_invocation_id=primary.invocation_id,
     )
-    service.allocate(fallback)
+    service.allocate(fallback, owner_emergency_stop=False)
     service.link_provider_attempt(
         invocation_id=primary.invocation_id,
         provider_attempt_id="provider-primary",
@@ -321,7 +328,7 @@ def test_reported_components_validate_without_context_double_counting(
     )
     service.open_envelope(invalid_envelope)
     invalid_allocation = _allocation(invalid_envelope, _policy_value, request="invalid")
-    service.allocate(invalid_allocation)
+    service.allocate(invalid_allocation, owner_emergency_stop=False)
     service.complete(
         InvocationTerminal.create(
             invocation_id=invalid_allocation.invocation_id,
@@ -373,7 +380,7 @@ def test_estimate_is_explicit_and_unbounded_missing_usage_opens_only_route(
             completed_at=T0 + timedelta(seconds=2),
             observed_at=T0 + timedelta(seconds=2),
             estimate_policy_digest=policy.canonical_digest,
-            estimate_calculation="max_total_tokens=2500",
+            estimate_calculation="hard_estimate_ceiling_tokens=2500",
             subscription_cli_chat_not_cash_debited=True,
         )
     )
@@ -383,7 +390,7 @@ def test_estimate_is_explicit_and_unbounded_missing_usage_opens_only_route(
     )
     service.open_envelope(second_envelope)
     second = _allocation(second_envelope, policy, request="request-2")
-    service.allocate(second)
+    service.allocate(second, owner_emergency_stop=False)
     service.complete(
         InvocationTerminal.create(
             invocation_id=second.invocation_id,
@@ -411,7 +418,8 @@ def test_estimate_is_explicit_and_unbounded_missing_usage_opens_only_route(
                 policy,
                 leaf_ordinal=2,
                 request="request-3",
-            )
+            ),
+            owner_emergency_stop=False,
         )
 
 
@@ -480,7 +488,8 @@ def test_duplicate_request_digest_is_stopped_before_dispatch(tmp_path: Path) -> 
                 policy,
                 leaf_ordinal=2,
                 request="request-1",
-            )
+            ),
+            owner_emergency_stop=False,
         )
 
     assert (
@@ -499,10 +508,18 @@ def test_policy_preflight_and_post_dispatch_breach_are_route_local(
     service.register_policy(policy)
     service.open_envelope(envelope)
     with pytest.raises(ModelUsageAdmissionError, match="prompt bytes"):
-        service.allocate(_allocation(envelope, policy, prompt_bytes=4_097))
+        service.allocate(
+            _allocation(envelope, policy, prompt_bytes=4_097),
+            owner_emergency_stop=False,
+        )
+    with pytest.raises(ModelUsageAdmissionError, match="config identity"):
+        service.allocate(
+            _allocation(envelope, policy, config_identity="unqualified-config-v2"),
+            owner_emergency_stop=False,
+        )
 
     allocation = _allocation(envelope, policy, prompt_bytes=4_096)
-    service.allocate(allocation)
+    service.allocate(allocation, owner_emergency_stop=False)
     service.complete(_reported(allocation, total=2_501))
 
     row = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"][0]
@@ -510,8 +527,12 @@ def test_policy_preflight_and_post_dispatch_breach_are_route_local(
     assert service.route_state("CONT_PRIMARY")["state"] == "OPEN"
 
 
-def test_graphiti_chat_and_embedding_are_distinct_and_zero_proposals_are_valid(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "work_outcome",
+    ["GRAPHITI_SUCCESS_ZERO_PROPOSALS", "GRAPHITI_PARTIAL"],
+)
+def test_graphiti_chat_and_embedding_are_distinct_and_terminal_ingests_are_valid(
+    tmp_path: Path, work_outcome: str
 ) -> None:
     service = _service(tmp_path)
     envelope = _envelope(
@@ -543,8 +564,8 @@ def test_graphiti_chat_and_embedding_are_distinct_and_zero_proposals_are_valid(
         workload=WorkloadClass.GRAPHITI_EMBEDDING,
         parent_invocation_id=chat.invocation_id,
     )
-    service.allocate(chat)
-    service.allocate(embedding)
+    service.allocate(chat, owner_emergency_stop=False)
+    service.allocate(embedding, owner_emergency_stop=False)
     service.complete(_reported(chat, total=125, outcome="COMPLETE"))
     service.complete(
         InvocationTerminal.create(
@@ -568,7 +589,7 @@ def test_graphiti_chat_and_embedding_are_distinct_and_zero_proposals_are_valid(
     )
     service.record_work_outcome(
         envelope_id=envelope.envelope_id,
-        outcome="GRAPHITI_SUCCESS_ZERO_PROPOSALS",
+        outcome=work_outcome,
         outcome_record_id="graphiti-attempt-1",
         payload_digest=None,
         terminal_at=T0 + timedelta(seconds=4),
@@ -604,7 +625,7 @@ def test_parent_and_child_totals_are_not_double_counted(tmp_path: Path) -> None:
         request="fallback",
         parent_invocation_id=primary.invocation_id,
     )
-    service.allocate(fallback)
+    service.allocate(fallback, owner_emergency_stop=False)
     service.complete(_reported(primary, total=125))
     service.complete(_reported(fallback, total=125))
 
@@ -628,7 +649,7 @@ def test_fixed_buckets_include_zeros_rolling_views_and_daily_totals(
     )
     service.open_envelope(second_envelope)
     second = _allocation(second_envelope, policy, request="second")
-    service.allocate(second)
+    service.allocate(second, owner_emergency_stop=False)
     service.complete(
         _reported(
             second, total=125, completed_at=T0 + timedelta(minutes=10, seconds=10)
@@ -686,10 +707,16 @@ def test_more_than_daily_500k_is_alerted_but_not_an_admission_gate(
             field: getattr(baseline, field)
             for field in baseline.__dataclass_fields__
             if field
-            not in {"canonical_digest", "max_total_tokens", "max_output_tokens"}
+            not in {
+                "canonical_digest",
+                "max_total_tokens",
+                "max_output_tokens",
+                "hard_estimate_ceiling_tokens",
+            }
         },
         max_total_tokens=300_000,
         max_output_tokens=20_000,
+        hard_estimate_ceiling_tokens=300_000,
     )
     service.register_policy(policy)
     for index in range(2):
@@ -699,7 +726,7 @@ def test_more_than_daily_500k_is_alerted_but_not_an_admission_gate(
         )
         service.open_envelope(envelope)
         allocation = _allocation(envelope, policy, request=f"request-{index + 10}")
-        service.allocate(allocation)
+        service.allocate(allocation, owner_emergency_stop=False)
         service.complete(
             InvocationTerminal.create(
                 invocation_id=allocation.invocation_id,
@@ -764,6 +791,27 @@ def test_restart_recovery_retains_unresolved_leaf_without_duplication(
     assert service_row_count(path, "model_invocation_terminals") == 1
 
 
+def test_restart_recovery_does_not_claim_a_live_invocation(tmp_path: Path) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    active = ModelUsageService(str(path))
+    _envelope_value, _policy_value, allocation = _open_and_allocate(active)
+    active.observe_transport(
+        invocation_id=allocation.invocation_id,
+        observed_at=T0 + timedelta(seconds=2),
+        state="DISPATCH_STARTED",
+        evidence_digest=_digest({"live": True}),
+    )
+
+    concurrent = ModelUsageService(str(path))
+    assert concurrent.recover_unresolved(
+        observed_at=T0 + timedelta(seconds=3)
+    ) == 0
+    active.complete(_reported(allocation, completed_at=T0 + timedelta(seconds=4)))
+    assert active.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"][0][
+        "usage_status"
+    ] == "REPORTED"
+
+
 def test_later_provider_telemetry_appends_reconciliation_without_editing_history(
     tmp_path: Path,
 ) -> None:
@@ -825,6 +873,182 @@ def test_later_provider_telemetry_appends_reconciliation_without_editing_history
     )
 
 
+def test_reconciled_policy_breach_keeps_the_route_open(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    _envelope_value, _policy_value, allocation = _open_and_allocate(service)
+    service.complete(
+        InvocationTerminal.create(
+            invocation_id=allocation.invocation_id,
+            outcome="TRANSPORT_LOST",
+            failure_class="MISSING_TELEMETRY",
+            usage_status=UsageStatus.UNREPORTED,
+            components=UsageComponents(provenance="UNAVAILABLE"),
+            dispatch_at=T0 + timedelta(seconds=1),
+            completed_at=T0 + timedelta(seconds=2),
+            observed_at=T0 + timedelta(seconds=2),
+            subscription_cli_chat_not_cash_debited=True,
+        )
+    )
+    service.reconcile(
+        invocation_id=allocation.invocation_id,
+        components=UsageComponents(
+            input_tokens=2_900,
+            output_tokens=100,
+            total_tokens=3_000,
+            provenance="PROVIDER_REPORTED",
+        ),
+        provider_telemetry={"late": "over-limit"},
+        observed_at=T0 + timedelta(minutes=5),
+        raw_telemetry_pointer="private://late/over-limit",
+    )
+
+    row = service.query(start=T0, end=T0 + timedelta(minutes=6))["leaves"][0]
+    assert row["policy_breach"] == "MAX_TOTAL_TOKENS_EXCEEDED"
+    assert service.route_state("CONT_PRIMARY")["state"] == "OPEN"
+
+
+def test_reconciliation_closes_only_after_every_route_uncertainty_is_resolved(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    envelope = _envelope(
+        workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        candidate_id=None,
+        ingest_id="ingest-reconciliation",
+    )
+    policy = _policy(
+        workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        provider="cursor-agent-cli",
+        route="GRAPHITI_CHAT",
+        model="cursor-pinned",
+    )
+    _envelope_value, _policy_value, first = _open_and_allocate(
+        service, envelope=envelope, policy=policy
+    )
+    second = _allocation(
+        envelope,
+        policy,
+        leaf_ordinal=2,
+        request="request-2",
+    )
+    service.allocate(second, owner_emergency_stop=False)
+    for ordinal, allocation in enumerate((first, second), start=1):
+        service.complete(
+            InvocationTerminal.create(
+                invocation_id=allocation.invocation_id,
+                outcome="TRANSPORT_LOST",
+                failure_class="MISSING_TELEMETRY",
+                usage_status=UsageStatus.UNREPORTED,
+                components=UsageComponents(provenance="UNAVAILABLE"),
+                dispatch_at=T0 + timedelta(seconds=ordinal),
+                completed_at=T0 + timedelta(seconds=ordinal + 2),
+                observed_at=T0 + timedelta(seconds=ordinal + 2),
+                subscription_cli_chat_not_cash_debited=True,
+            )
+        )
+
+    for ordinal, allocation in enumerate((first, second), start=1):
+        service.reconcile(
+            invocation_id=allocation.invocation_id,
+            components=UsageComponents(
+                input_tokens=100,
+                output_tokens=25,
+                total_tokens=125,
+                provenance="PROVIDER_REPORTED",
+            ),
+            provider_telemetry={"late": ordinal},
+            observed_at=T0 + timedelta(minutes=ordinal),
+            raw_telemetry_pointer=f"private://late/{ordinal}",
+        )
+        assert service.route_state("GRAPHITI_CHAT")["state"] == (
+            "OPEN" if ordinal == 1 else "CLOSED"
+        )
+
+
+def test_reconciliation_does_not_clear_an_earlier_policy_breach(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    envelope = _envelope(
+        workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        candidate_id=None,
+        ingest_id="ingest-policy-breach",
+    )
+    policy = _policy(
+        workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        provider="cursor-agent-cli",
+        route="GRAPHITI_CHAT",
+        model="cursor-pinned",
+    )
+    _envelope_value, _policy_value, breached = _open_and_allocate(
+        service, envelope=envelope, policy=policy
+    )
+    uncertain = _allocation(
+        envelope,
+        policy,
+        leaf_ordinal=2,
+        request="request-uncertain",
+    )
+    service.allocate(uncertain, owner_emergency_stop=False)
+    service.complete(_reported(breached, total=2_501))
+    service.complete(
+        InvocationTerminal.create(
+            invocation_id=uncertain.invocation_id,
+            outcome="TRANSPORT_LOST",
+            failure_class="MISSING_TELEMETRY",
+            usage_status=UsageStatus.UNREPORTED,
+            components=UsageComponents(provenance="UNAVAILABLE"),
+            dispatch_at=T0 + timedelta(seconds=2),
+            completed_at=T0 + timedelta(seconds=4),
+            observed_at=T0 + timedelta(seconds=4),
+            subscription_cli_chat_not_cash_debited=True,
+        )
+    )
+    service.reconcile(
+        invocation_id=uncertain.invocation_id,
+        components=UsageComponents(
+            input_tokens=100,
+            output_tokens=25,
+            total_tokens=125,
+            provenance="PROVIDER_REPORTED",
+        ),
+        provider_telemetry={"late": "valid"},
+        observed_at=T0 + timedelta(minutes=1),
+        raw_telemetry_pointer="private://late/valid",
+    )
+
+    assert service.route_state("GRAPHITI_CHAT")["state"] == "OPEN"
+
+
+def test_cont_usage_circuit_uses_the_canonical_governor_route(tmp_path: Path) -> None:
+    from newsroom.control_plane.cycle_governor import DurableCycleGovernor
+
+    path = tmp_path / "unpublished.sqlite3"
+    DurableCycleGovernor(str(path))
+    service = ModelUsageService(str(path))
+    _envelope_value, _policy_value, allocation = _open_and_allocate(service)
+    service.complete(
+        InvocationTerminal.create(
+            invocation_id=allocation.invocation_id,
+            outcome="TRANSPORT_LOST",
+            failure_class="MISSING_TELEMETRY",
+            usage_status=UsageStatus.UNREPORTED,
+            components=UsageComponents(provenance="UNAVAILABLE"),
+            dispatch_at=T0 + timedelta(seconds=1),
+            completed_at=T0 + timedelta(seconds=2),
+            observed_at=T0 + timedelta(seconds=2),
+            subscription_cli_chat_not_cash_debited=True,
+        )
+    )
+
+    connection = sqlite3.connect(path)
+    routes = connection.execute(
+        "SELECT route,state FROM unpublished_route_circuits ORDER BY route"
+    ).fetchall()
+    connection.close()
+    assert routes == [("CONT", "OPEN")]
+
+
 def test_usage_windows_are_sliced_by_terminal_event_time(tmp_path: Path) -> None:
     service = _service(tmp_path)
     _envelope_value, _policy_value, allocation = _open_and_allocate(service)
@@ -849,6 +1073,44 @@ def test_usage_windows_are_sliced_by_terminal_event_time(tmp_path: Path) -> None
     assert second["utc_day_totals"] == {"2026-08-24": 125}
 
 
+def test_work_outcome_is_visible_in_its_own_cross_bucket_window(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    envelope, _policy_value, allocation = _open_and_allocate(service)
+    service.complete(
+        _reported(
+            allocation,
+            completed_at=T0 + timedelta(minutes=4, seconds=59),
+            outcome="ACCEPTED_OUTPUT",
+        )
+    )
+    service.record_work_outcome(
+        envelope_id=envelope.envelope_id,
+        outcome="ACCEPTED",
+        outcome_record_id="draft-cross-window",
+        payload_digest=_digest({"payload": "cross-window"}),
+        terminal_at=T0 + timedelta(minutes=5, seconds=1),
+    )
+
+    second = service.report(
+        start=T0 + timedelta(minutes=5),
+        end=T0 + timedelta(minutes=10),
+    )
+    buckets = list(
+        csv.DictReader(
+            io.StringIO(
+                service.export_bucket_csv(
+                    start=T0 + timedelta(minutes=5),
+                    end=T0 + timedelta(minutes=10),
+                )
+            )
+        )
+    )
+    assert second["accepted_payload_count"] == 1
+    assert buckets[0]["minted_reported"] == "1"
+
+
 def test_deterministic_csv_export_reconciles_leaf_count_and_uncertainty(
     tmp_path: Path,
 ) -> None:
@@ -871,7 +1133,6 @@ def test_deterministic_csv_export_reconciles_leaf_count_and_uncertainty(
         ]
         is True
     )
-
     bucket_rows = list(
         csv.DictReader(
             io.StringIO(
@@ -886,6 +1147,36 @@ def test_deterministic_csv_export_reconciles_leaf_count_and_uncertainty(
     assert bucket_rows[0]["grok_model_calls"] == "1"
     assert bucket_rows[0]["grok_total_tokens"] == "125"
     assert bucket_rows[1]["grok_total_tokens"] == "0"
+
+
+def test_estimate_requires_the_separately_qualified_hard_ceiling(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    policy = _policy(hard_estimate_ceiling_tokens=None)
+    _envelope_value, _policy_value, allocation = _open_and_allocate(
+        service, policy=policy
+    )
+
+    with pytest.raises(ModelUsageIntegrityError, match="bounded estimate evidence"):
+        service.complete(
+            InvocationTerminal.create(
+                invocation_id=allocation.invocation_id,
+                outcome="TRANSPORT_LOST",
+                failure_class="MISSING_TELEMETRY",
+                usage_status=UsageStatus.ESTIMATED,
+                components=UsageComponents(
+                    total_tokens=policy.max_total_tokens,
+                    provenance="BOUNDED_ESTIMATE",
+                ),
+                dispatch_at=T0 + timedelta(seconds=1),
+                completed_at=T0 + timedelta(seconds=2),
+                observed_at=T0 + timedelta(seconds=2),
+                subscription_cli_chat_not_cash_debited=True,
+                estimate_policy_digest=policy.canonical_digest,
+                estimate_calculation="unproved policy maximum",
+            )
+        )
 
 
 def test_graphiti_provider_observer_persists_chat_and_embedding_leaves(
@@ -920,6 +1211,8 @@ def test_graphiti_provider_observer_persists_chat_and_embedding_leaves(
             prompt_contract_version=GRAPHITI_PROMPT_COMPONENT.component_version,
             output_schema_digest=_digest({"response_schema": "UNSTRUCTURED"}),
             allowed_context_identities=(GRAPHITI_CONTEXT_IDENTITY,),
+            allowed_config_identities=("graphiti-cli-command-v1",),
+            hard_estimate_ceiling_tokens=2_500,
             evidence_digest=_digest({"graphiti": "chat"}),
             qualified=True,
         ),
@@ -946,6 +1239,8 @@ def test_graphiti_provider_observer_persists_chat_and_embedding_leaves(
                 {"schema": "embedding-vector", "model": OPENROUTER_EMBEDDING_SLUG}
             ),
             allowed_context_identities=(GRAPHITI_CONTEXT_IDENTITY,),
+            allowed_config_identities=("graphiti-embedding-command-v1",),
+            hard_estimate_ceiling_tokens=2_500,
             evidence_digest=_digest({"graphiti": "embedding"}),
             qualified=True,
         ),
@@ -1002,6 +1297,67 @@ def test_graphiti_provider_observer_persists_chat_and_embedding_leaves(
         "GRAPHITI_EMBEDDING",
     ]
     assert [leaf["total_tokens"] for leaf in leaves] == [12, 4]
+
+
+def test_graphiti_missing_telemetry_without_a_hard_bound_is_unreported(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    envelope = _envelope(
+        workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        candidate_id=None,
+        ingest_id="ingest-unbounded",
+    )
+    service.open_envelope(envelope)
+    service.register_policy(
+        InvocationEfficiencyPolicy.create(
+            policy_id="graphiti-chat-unbounded",
+            version="v1",
+            workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+            provider="cursor-agent-cli",
+            route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+            model=CURSOR_AGENT_MODEL_ID,
+            reasoning="provider-default",
+            one_turn=True,
+            exact_input=True,
+            skills_enabled=False,
+            tools_enabled=False,
+            mcp_enabled=False,
+            prior_message_count=0,
+            max_prompt_bytes=4_096,
+            max_context_tokens=2_000,
+            max_output_tokens=500,
+            max_total_tokens=2_500,
+            prompt_contract_version=GRAPHITI_PROMPT_COMPONENT.component_version,
+            output_schema_digest=_digest({"response_schema": "UNSTRUCTURED"}),
+            allowed_context_identities=(GRAPHITI_CONTEXT_IDENTITY,),
+            allowed_config_identities=("graphiti-cli-command-v1",),
+            hard_estimate_ceiling_tokens=None,
+            evidence_digest=_digest({"graphiti": "unbounded"}),
+            qualified=True,
+        )
+    )
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=10),
+    )
+    token = observer.before_cli_invocation(
+        provider="cursor-agent-cli",
+        model=CURSOR_AGENT_MODEL_ID,
+        prompt="chat prompt",
+        schema=None,
+    )
+    observer.after_cli_invocation(
+        token,
+        outcome="TRANSPORT_LOST",
+        usage={"usage_basis": "UNAVAILABLE"},
+    )
+
+    leaf = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"][0]
+    assert leaf["usage_status"] == "UNREPORTED"
+    assert leaf["total_tokens"] is None
+    assert service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)["state"] == "OPEN"
 
 
 def service_row_count(path: Path, table: str) -> int:

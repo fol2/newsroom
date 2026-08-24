@@ -310,6 +310,7 @@ class WriterInvocationManifest:
     output_schema_digest: str
     context_manifest_digest: str
     context_identity: str
+    config_identity: str
     one_turn: bool
     exact_input: bool
     skills_enabled: bool
@@ -1257,6 +1258,7 @@ class CliChainWriter:
             output_schema_digest=CONT_WRITER_OUTPUT_SCHEMA_DIGEST,
             context_manifest_digest=digest_canonical(context_manifest),
             context_identity=CONT_WRITER_CONTEXT_IDENTITY,
+            config_identity="cont-writer-hermetic-command-v1",
             one_turn=True,
             exact_input=True,
             skills_enabled=False,

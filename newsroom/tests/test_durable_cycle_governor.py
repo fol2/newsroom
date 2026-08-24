@@ -912,10 +912,29 @@ def test_cli_health_probe_releases_open_route_with_configured_probe(
             allowed_context_identities=(
                 hermes.CONT_HEALTH_PROBE_CONTEXT_IDENTITY,
             ),
+            allowed_config_identities=("cont-health-probe-command-v1",),
+            hard_estimate_ceiling_tokens=None,
             evidence_digest=digest_canonical({"fixture": "health-probe"}),
             qualified=True,
         )
     )
+    proving = tmp_path / "proving.sqlite3"
+    connection = sqlite3.connect(proving)
+    connection.executescript(
+        """
+        CREATE TABLE proving_runs(run_id TEXT PRIMARY KEY);
+        CREATE TABLE proving_gates(
+            run_id TEXT NOT NULL,
+            gate_id TEXT NOT NULL,
+            status TEXT NOT NULL
+        );
+        INSERT INTO proving_runs VALUES('run-1');
+        INSERT INTO proving_gates VALUES(
+            'run-1', 'NO_ACTIVE_HUMAN_EMERGENCY_STOP', 'PASS'
+        );
+        """
+    )
+    connection.close()
 
     return_code = hermes.main(
         [
@@ -923,7 +942,7 @@ def test_cli_health_probe_releases_open_route_with_configured_probe(
             "--unpublished",
             str(path),
             "--proving",
-            str(tmp_path / "proving.sqlite3"),
+            str(proving),
         ]
     )
 

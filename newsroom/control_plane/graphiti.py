@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Protocol, runtime_checkable
@@ -148,6 +148,7 @@ class GraphitiModelUsageObserver:
                 "Graphiti invocation controls do not match the exact one-turn contract"
             )
         self._ordinal += 1
+        allocated_at = self._clock().astimezone(UTC)
         prompt_digest = digest_bytes(prompt_bytes)
         allocation = InvocationAllocation.create(
             envelope_id=self._envelope.envelope_id,
@@ -182,16 +183,22 @@ class GraphitiModelUsageObserver:
                 }
             ),
             context_identity=GRAPHITI_CONTEXT_IDENTITY,
+            config_identity=(
+                "graphiti-embedding-command-v1"
+                if workload is WorkloadClass.GRAPHITI_EMBEDDING
+                else "graphiti-cli-command-v1"
+            ),
             one_turn=True,
             exact_input=True,
             skills_enabled=False,
             tools_enabled=False,
             mcp_enabled=False,
             prior_message_count=0,
-            allocated_at=self._clock().astimezone(UTC),
+            allocated_at=allocated_at,
+            recovery_deadline_at=allocated_at + timedelta(minutes=16),
             parent_invocation_id=parent_invocation_id,
         )
-        self._service.allocate(allocation)
+        self._service.allocate(allocation, owner_emergency_stop=False)
         self._allocations.append(allocation)
         self._policies[allocation.invocation_id] = policy
         dispatch_at = self._clock().astimezone(UTC)
@@ -338,8 +345,12 @@ class GraphitiModelUsageObserver:
                 UsageComponents(total_tokens=0, provenance="CLI_DERIVED")
                 if no_provider_call
                 else UsageComponents(
-                    total_tokens=policy.max_total_tokens,
+                    total_tokens=policy.hard_estimate_ceiling_tokens,
                     provenance="BOUNDED_ESTIMATE",
+                )
+                if policy.hard_estimate_ceiling_tokens is not None
+                else UsageComponents(
+                    provenance="UNAVAILABLE",
                 )
             )
         )
@@ -363,6 +374,8 @@ class GraphitiModelUsageObserver:
                     UsageStatus.REPORTED
                     if reported or no_provider_call
                     else UsageStatus.ESTIMATED
+                    if policy.hard_estimate_ceiling_tokens is not None
+                    else UsageStatus.UNREPORTED
                 ),
                 components=components,
                 dispatch_at=(
@@ -386,12 +399,17 @@ class GraphitiModelUsageObserver:
                 pre_dispatch_zero_proved=no_provider_call,
                 estimate_policy_digest=(
                     policy.canonical_digest
-                    if not reported and not no_provider_call
+                    if not reported
+                    and not no_provider_call
+                    and policy.hard_estimate_ceiling_tokens is not None
                     else None
                 ),
                 estimate_calculation=(
-                    f"qualified_policy.max_total_tokens={policy.max_total_tokens}"
-                    if not reported and not no_provider_call
+                    "qualified_policy.hard_estimate_ceiling_tokens="
+                    f"{policy.hard_estimate_ceiling_tokens}"
+                    if not reported
+                    and not no_provider_call
+                    and policy.hard_estimate_ceiling_tokens is not None
                     else None
                 ),
             ),
