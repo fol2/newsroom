@@ -228,6 +228,89 @@ CREATE TABLE IF NOT EXISTS unpublished_graphiti_failures(
     dead_lettered INTEGER NOT NULL DEFAULT 0 CHECK(dead_lettered IN (0,1)),
     at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS unpublished_graphiti_admission_queue(
+    queue_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    proposal_key TEXT NOT NULL UNIQUE,
+    ingest_id TEXT NOT NULL,
+    source_revision_id TEXT NOT NULL,
+    source_receipt_digest TEXT NOT NULL,
+    proposal_digest TEXT NOT NULL,
+    proposal_kind TEXT NOT NULL
+        CHECK(proposal_kind IN ('ENTITY_MENTION','ENTITY_EQUIVALENCE','RELATION')),
+    request_json TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    state TEXT NOT NULL
+        CHECK(state IN (
+            'READY','CLAIMED','DECIDED','TERMINAL','PROJECTED',
+            'DEAD_LETTER','REVOKED'
+        )),
+    claim_owner TEXT,
+    claim_until TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count>=0),
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(ingest_id, proposal_digest)
+);
+CREATE INDEX IF NOT EXISTS unpublished_graphiti_admission_ready
+    ON unpublished_graphiti_admission_queue(state, queue_seq);
+CREATE TABLE IF NOT EXISTS unpublished_graphiti_admission_decisions(
+    proposal_key TEXT PRIMARY KEY
+        REFERENCES unpublished_graphiti_admission_queue(proposal_key),
+    action TEXT NOT NULL CHECK(action IN ('ADMIT','REJECT','HOLD')),
+    decision_id TEXT NOT NULL UNIQUE,
+    authority_ledger_seq INTEGER NOT NULL CHECK(authority_ledger_seq>0),
+    reason_code TEXT NOT NULL,
+    authority_receipt_digest TEXT NOT NULL,
+    decision_json TEXT NOT NULL,
+    decision_digest TEXT NOT NULL,
+    decided_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS unpublished_graphiti_projection_receipts(
+    proposal_key TEXT PRIMARY KEY
+        REFERENCES unpublished_graphiti_admission_queue(proposal_key),
+    effect_id TEXT NOT NULL UNIQUE,
+    authority_watermark INTEGER NOT NULL CHECK(authority_watermark>0),
+    receipt_json TEXT NOT NULL,
+    receipt_digest TEXT NOT NULL,
+    projected_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS unpublished_graphiti_projection_tombstones(
+    proposal_key TEXT PRIMARY KEY
+        REFERENCES unpublished_graphiti_projection_receipts(proposal_key),
+    effect_id TEXT NOT NULL UNIQUE,
+    authority_watermark INTEGER NOT NULL CHECK(authority_watermark>0),
+    receipt_json TEXT NOT NULL,
+    receipt_digest TEXT NOT NULL,
+    tombstoned_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS unpublished_graphiti_admission_receipt_failures(
+    ingest_id TEXT PRIMARY KEY,
+    receipt_digest TEXT NOT NULL,
+    failure_code TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    occurrence_count INTEGER NOT NULL CHECK(occurrence_count>0),
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS immutable_graphiti_admission_decisions_update
+    BEFORE UPDATE ON unpublished_graphiti_admission_decisions
+    BEGIN SELECT RAISE(ABORT,'Graphiti admission decision is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_graphiti_admission_decisions_delete
+    BEFORE DELETE ON unpublished_graphiti_admission_decisions
+    BEGIN SELECT RAISE(ABORT,'Graphiti admission decision is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_graphiti_projection_receipts_update
+    BEFORE UPDATE ON unpublished_graphiti_projection_receipts
+    BEGIN SELECT RAISE(ABORT,'Graphiti projection receipt is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_graphiti_projection_receipts_delete
+    BEFORE DELETE ON unpublished_graphiti_projection_receipts
+    BEGIN SELECT RAISE(ABORT,'Graphiti projection receipt is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_graphiti_projection_tombstones_update
+    BEFORE UPDATE ON unpublished_graphiti_projection_tombstones
+    BEGIN SELECT RAISE(ABORT,'Graphiti projection tombstone is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_graphiti_projection_tombstones_delete
+    BEFORE DELETE ON unpublished_graphiti_projection_tombstones
+    BEGIN SELECT RAISE(ABORT,'Graphiti projection tombstone is immutable'); END;
 CREATE TABLE IF NOT EXISTS unpublished_graphiti_spend(
     spend_id TEXT PRIMARY KEY,
     ingest_id TEXT NOT NULL,
@@ -1759,6 +1842,44 @@ def graphiti_coverage(
         "unpublished_payload_count": payloads,
         "payload_count_is_not_coverage": True,
     }
+    if _sqlite_table_exists(connection, "unpublished_graphiti_admission_queue"):
+        admission_rows = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM unpublished_graphiti_admission_queue"
+            ).fetchone()[0]
+        )
+        integrity_holds = int(
+            connection.execute(
+                "SELECT COUNT(*) "
+                "FROM unpublished_graphiti_admission_receipt_failures"
+            ).fetchone()[0]
+        )
+        if admission_rows or integrity_holds:
+            from newsroom.control_plane.graphiti_admission import (
+                graphiti_admission_telemetry,
+            )
+
+            admission = graphiti_admission_telemetry(connection)
+            coverage.update(
+                {
+                    "proposal_denominator": admission.proposal_denominator,
+                    "admitted_proposal_count": admission.admitted_count,
+                    "rejected_proposal_count": admission.rejected_count,
+                    "held_proposal_count": admission.held_count,
+                    "admission_dead_letter_count": admission.dead_letter_count,
+                    "admission_integrity_hold_receipt_count": (
+                        admission.integrity_hold_receipt_count
+                    ),
+                    "oldest_admission_lag_seconds": admission.oldest_lag_seconds,
+                    "admission_backlog": admission.admission_backlog,
+                    "governed_projection_watermark": (
+                        admission.contiguous_projection_watermark
+                    ),
+                    "provider_model_calls_for_admission": (
+                        admission.provider_model_calls
+                    ),
+                }
+            )
     if poll_observation_count is not None:
         poll_count = _non_negative_count(
             poll_observation_count, field="poll_observation_count"
