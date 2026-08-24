@@ -53,17 +53,23 @@ def cursor_cli_usage(value: object) -> dict[str, object]:
         "cached_read_tokens": value.get("cacheReadTokens"),
         "cached_write_tokens": value.get("cacheWriteTokens"),
     }
+    context_tokens = value.get("contextTokensUsed")
     if not all(_is_non_negative_int(item) for item in fields.values()):
         return unreported_cli_usage()
     # Cursor's print-mode JSON reports uncached input separately from cache reads
     # and writes, so all four fields are disjoint parts of observed consumption.
     total = sum(item for item in fields.values() if _is_non_negative_int(item))
-    return {
+    if context_tokens is not None and not _is_non_negative_int(context_tokens):
+        return unreported_cli_usage()
+    result: dict[str, object] = {
         "usage_basis": CLI_USAGE_BASIS_REPORTED,
         **fields,
         "reasoning_tokens": None,
         "total_tokens": total,
     }
+    if context_tokens is not None:
+        result["context_tokens"] = context_tokens
+    return result
 
 
 def grok_cli_usage(value: object) -> dict[str, object]:
@@ -77,12 +83,15 @@ def grok_cli_usage(value: object) -> dict[str, object]:
     cached_read = value.get("cachedReadTokens", 0)
     cached_write = value.get("cacheCreationTokens", 0)
     reasoning = value.get("reasoningTokens")
+    context_tokens = value.get("contextTokensUsed")
     required = (input_tokens, output_tokens, total_tokens, cached_read, cached_write)
     if not all(_is_non_negative_int(item) for item in required):
         return unreported_cli_usage()
     if reasoning is not None and not _is_non_negative_int(reasoning):
         return unreported_cli_usage()
-    return {
+    if context_tokens is not None and not _is_non_negative_int(context_tokens):
+        return unreported_cli_usage()
+    result = {
         "usage_basis": CLI_USAGE_BASIS_REPORTED,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
@@ -91,12 +100,26 @@ def grok_cli_usage(value: object) -> dict[str, object]:
         "reasoning_tokens": reasoning,
         "total_tokens": total_tokens,
     }
+    if context_tokens is not None:
+        result["context_tokens"] = context_tokens
+    return result
 
 
-def _reported_chat_usage(value: object) -> Mapping[str, object] | None:
+def _exact_chat_usage(value: object) -> Mapping[str, object] | None:
     if not isinstance(value, Mapping):
         return None
-    if value.get("usage_basis") != CLI_USAGE_BASIS_REPORTED:
+    basis = value.get("usage_basis")
+    if basis == CLI_USAGE_BASIS_NO_PROVIDER_CALL:
+        return {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_read_tokens": 0,
+            "cached_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 0,
+            "total_tokens": 0,
+        }
+    if basis != CLI_USAGE_BASIS_REPORTED:
         return None
     required = (
         "input_tokens",
@@ -128,7 +151,7 @@ def summarise_graphiti_usage(
         provider = invocation.get("provider")
         cursor_requests += int(provider == "cursor-agent-cli")
         grok_requests += int(provider == "grok-build-cli")
-        usage = _reported_chat_usage(invocation.get("usage"))
+        usage = _exact_chat_usage(invocation.get("usage"))
         if usage is not None:
             reported.append(usage)
 
@@ -196,6 +219,7 @@ def summarise_graphiti_usage(
         "chat_cached_read_tokens": total("cached_read_tokens"),
         "chat_cached_write_tokens": total("cached_write_tokens"),
         "chat_reasoning_tokens": chat_reasoning,
+        "chat_context_tokens": total("context_tokens"),
         "chat_total_tokens": chat_total,
         "embedding_request_count": int(embedding_requests),
         "embedding_tokens": int(embedding_tokens),

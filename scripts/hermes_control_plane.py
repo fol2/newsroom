@@ -14,6 +14,11 @@ from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, cast
 
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+)
 from newsroom.control_plane.cycle import CycleReport, run_cycle
 from newsroom.control_plane.cycle_governor import (
     CycleNotEligible,
@@ -25,7 +30,15 @@ from newsroom.control_plane.cycle_governor import (
 )
 from newsroom.control_plane.graphiti_events import GraphitiEventQueue
 from newsroom.control_plane.intake import IntakeReport, run_intake
-from newsroom.control_plane.model_usage import ModelUsageService
+from newsroom.control_plane.model_usage import (
+    InvocationAllocation,
+    InvocationTerminal,
+    ModelUsageService,
+    UsageComponents,
+    UsageStatus,
+    WorkEnvelope,
+    WorkloadClass,
+)
 from newsroom.control_plane.paths import (
     CANONICAL_PROVING_STORE,
     CANONICAL_UNPUBLISHED_STORE,
@@ -37,6 +50,12 @@ from newsroom.control_plane.writer import default_writer, probe_grok_writer_rout
 
 DEFAULT_PROVING = str(CANONICAL_PROVING_STORE)
 DEFAULT_UNPUBLISHED = str(CANONICAL_UNPUBLISHED_STORE)
+CONT_HEALTH_PROBE_PROVIDER = "grok-build-cli"
+CONT_HEALTH_PROBE_ROUTE = "CONT_HEALTH_PROBE"
+CONT_HEALTH_PROBE_MODEL = "grok-4.6"
+CONT_HEALTH_PROBE_REASONING = "none"
+CONT_HEALTH_PROBE_PROMPT_CONTRACT = "newsroom.cont-health-probe.models.v1"
+CONT_HEALTH_PROBE_CONTEXT_IDENTITY = "cont-route-health-probe-v1"
 
 
 class _CycleArgs(Protocol):
@@ -53,6 +72,7 @@ def _cycle(
     writer_dispatch_fence: Callable[[], None],
 ) -> CycleReport:
     model_usage = ModelUsageService(args.unpublished)
+    model_usage.recover_unresolved(observed_at=datetime.now(tz=UTC))
     return run_cycle(
         proving_store=args.proving,
         unpublished_store=args.unpublished,
@@ -101,6 +121,158 @@ def _probe_cont_writer_route() -> WriterRouteHealthProof:
         provider_dispatched=proof.provider_dispatched,
         provider_receipt_reference=proof.provider_receipt_reference,
     )
+
+
+def _metered_cont_writer_route_probe(path: str) -> Callable[[], WriterRouteHealthProof]:
+    def probe() -> WriterRouteHealthProof:
+        service = ModelUsageService(path)
+        service.recover_unresolved(observed_at=datetime.now(tz=UTC))
+        admitted_at = datetime.now(tz=UTC)
+        cycle_id = str(uuid.uuid4())
+        envelope = WorkEnvelope.create(
+            cycle_id=cycle_id,
+            workload_class=WorkloadClass.CONT_ROUTE_HEALTH_PROBE,
+            admitted_at=admitted_at,
+            admission_decision_id=None,
+            candidate_id=None,
+            hypothesis_digest=None,
+            evidence_package_digest=None,
+            ingest_id=None,
+            graphiti_attempt_id=None,
+        )
+        service.open_envelope(envelope)
+        policy = service.qualified_policy(
+            workload_class=WorkloadClass.CONT_ROUTE_HEALTH_PROBE,
+            provider=CONT_HEALTH_PROBE_PROVIDER,
+            route=CONT_HEALTH_PROBE_ROUTE,
+            model=CONT_HEALTH_PROBE_MODEL,
+            reasoning=CONT_HEALTH_PROBE_REASONING,
+        )
+        request = canonical_json_bytes({"command": ["grok", "models"]})
+        request_digest = digest_bytes(request)
+        allocation = InvocationAllocation.create(
+            envelope_id=envelope.envelope_id,
+            cycle_id=cycle_id,
+            leaf_ordinal=1,
+            workload_class=WorkloadClass.CONT_ROUTE_HEALTH_PROBE,
+            invocation_policy_digest=policy.canonical_digest,
+            provider=CONT_HEALTH_PROBE_PROVIDER,
+            route=CONT_HEALTH_PROBE_ROUTE,
+            model=CONT_HEALTH_PROBE_MODEL,
+            reasoning=CONT_HEALTH_PROBE_REASONING,
+            prompt_contract_version=CONT_HEALTH_PROBE_PROMPT_CONTRACT,
+            prompt_bytes=len(request),
+            prompt_digest=request_digest,
+            request_digest=request_digest,
+            output_schema_digest=digest_canonical({"schema": "writer-route-health"}),
+            max_output_tokens=policy.max_output_tokens,
+            context_manifest_digest=digest_canonical(
+                {"context_identity": CONT_HEALTH_PROBE_CONTEXT_IDENTITY}
+            ),
+            context_identity=CONT_HEALTH_PROBE_CONTEXT_IDENTITY,
+            one_turn=True,
+            exact_input=True,
+            skills_enabled=False,
+            tools_enabled=False,
+            mcp_enabled=False,
+            prior_message_count=0,
+            allocated_at=admitted_at,
+            parent_invocation_id=None,
+        )
+        service.allocate(allocation)
+        dispatch_started_at = datetime.now(tz=UTC)
+        service.observe_transport(
+            invocation_id=allocation.invocation_id,
+            observed_at=dispatch_started_at,
+            state="DISPATCH_STARTED",
+            evidence_digest=request_digest,
+        )
+        try:
+            proof = _probe_cont_writer_route()
+        except (OSError, RuntimeError, ValueError):
+            failed_at = datetime.now(tz=UTC)
+            service.complete(
+                InvocationTerminal.create(
+                    invocation_id=allocation.invocation_id,
+                    outcome="PROBE_EXCEPTION",
+                    failure_class="PROBE_EXCEPTION_AFTER_POSSIBLE_DISPATCH",
+                    usage_status=UsageStatus.AMBIGUOUS,
+                    components=UsageComponents(provenance="UNAVAILABLE"),
+                    dispatch_at=dispatch_started_at,
+                    completed_at=failed_at,
+                    observed_at=failed_at,
+                    subscription_cli_chat_not_cash_debited=True,
+                )
+            )
+            service.record_work_outcome(
+                envelope_id=envelope.envelope_id,
+                outcome="FAILED",
+                outcome_record_id=allocation.invocation_id,
+                payload_digest=None,
+                terminal_at=failed_at,
+            )
+            raise
+        terminal_at = datetime.now(tz=UTC)
+        telemetry = asdict(proof)
+        provider_attempt_id = (
+            proof.provider_receipt_reference
+            or f"{allocation.invocation_id}:pre-dispatch"
+        )
+        service.link_provider_attempt(
+            invocation_id=allocation.invocation_id,
+            provider_attempt_id=provider_attempt_id,
+            linked_at=terminal_at,
+        )
+        provider_dispatched = proof.provider_dispatched
+        service.complete(
+            InvocationTerminal.create(
+                invocation_id=allocation.invocation_id,
+                outcome=("COMPLETE" if proof.provider_available else "FAILED"),
+                failure_class=(None if proof.provider_available else "PROBE_FAILED"),
+                usage_status=(
+                    UsageStatus.ESTIMATED
+                    if provider_dispatched
+                    else UsageStatus.REPORTED
+                ),
+                components=(
+                    UsageComponents(
+                        total_tokens=policy.max_total_tokens,
+                        provenance="BOUNDED_ESTIMATE",
+                    )
+                    if provider_dispatched
+                    else UsageComponents(total_tokens=0, provenance="CLI_DERIVED")
+                ),
+                dispatch_at=(dispatch_started_at if provider_dispatched else None),
+                completed_at=terminal_at,
+                observed_at=terminal_at,
+                provider_telemetry_digest=digest_canonical(telemetry),
+                raw_telemetry_pointer=(
+                    "sqlite-private://model_provider_telemetry/"
+                    f"{allocation.invocation_id}"
+                ),
+                pre_dispatch_zero_proved=not provider_dispatched,
+                subscription_cli_chat_not_cash_debited=True,
+                estimate_policy_digest=(
+                    policy.canonical_digest if provider_dispatched else None
+                ),
+                estimate_calculation=(
+                    f"qualified_policy.max_total_tokens={policy.max_total_tokens}"
+                    if provider_dispatched
+                    else None
+                ),
+            ),
+            provider_telemetry=telemetry,
+        )
+        service.record_work_outcome(
+            envelope_id=envelope.envelope_id,
+            outcome=("ACCEPTED" if proof.provider_available else "REJECT"),
+            outcome_record_id=provider_attempt_id,
+            payload_digest=None,
+            terminal_at=terminal_at,
+        )
+        return proof
+
+    return probe
 
 
 def _report_body(report: CycleReport) -> dict[str, object]:
@@ -155,23 +327,6 @@ class GovernedUnitFailure(RuntimeError):
         self.terminal = terminal
 
 
-def _retain_usage_cycle_outcome(path: str, terminal: CycleTerminalResult) -> None:
-    ModelUsageService(path).record_cycle_outcome(
-        cycle_id=terminal.cycle_id,
-        outcome_class=terminal.outcome_class,
-        terminal_at=_usage_instant(
-            terminal.terminal_at,
-            default=datetime.now(tz=UTC),
-        ),
-        writer_unproductive_streak_before=(
-            terminal.writer_unproductive_streak_before
-        ),
-        writer_unproductive_streak_after=terminal.writer_unproductive_streak_after,
-        writer_circuit_state=terminal.writer_circuit_state,
-        writer_circuit_open_reason=terminal.writer_circuit_open_reason,
-    )
-
-
 def _governed_unit(
     args: _CycleArgs,
     *,
@@ -209,14 +364,12 @@ def _governed_unit(
                 ),
             ),
         )
-        _retain_usage_cycle_outcome(args.unpublished, terminal)
     except Exception as exc:
         try:
             terminal = governor.fail_ambiguous(
                 lease,
                 failure_reason=f"GOVERNED_UNIT_EXCEPTION:{type(exc).__name__}",
             )
-            _retain_usage_cycle_outcome(args.unpublished, terminal)
         except Exception as terminal_error:
             exc.add_note(
                 "durable ambiguous-cycle terminalisation also failed: "
@@ -317,7 +470,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--usage-format",
-        choices=("json", "csv"),
+        choices=("json", "csv", "leaf-csv"),
         default="json",
         help="deterministic shared model-usage export format",
     )
@@ -349,6 +502,14 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(str(exc))
         usage = ModelUsageService(args.unpublished)
         if args.usage_format == "csv":
+            sys.stdout.write(
+                usage.export_bucket_csv(
+                    start=start,
+                    end=end,
+                    bucket_seconds=args.usage_window,
+                )
+            )
+        elif args.usage_format == "leaf-csv":
             sys.stdout.write(usage.export_csv(start=start, end=end))
         else:
             sys.stdout.write(
@@ -368,7 +529,9 @@ def main(argv: list[str] | None = None) -> int:
         governor = DurableCycleGovernor(
             args.unpublished,
             policy=_evaluation_policy(cooldown_seconds),
-            writer_route_health_probe=_probe_cont_writer_route,
+            writer_route_health_probe=_metered_cont_writer_route_probe(
+                args.unpublished
+            ),
         )
         health = governor.status()
         if health.writer_circuit_state != "OPEN":

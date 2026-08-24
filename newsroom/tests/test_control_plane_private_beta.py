@@ -1231,7 +1231,7 @@ def test_grok_cli_uses_empty_cwd_and_three_turns(
     command = captured["command"]
     assert isinstance(command, tuple)
     assert captured["timeout"] == 300
-    assert command[command.index("--max-turns") + 1] == "3"
+    assert command[command.index("--max-turns") + 1] == "1"
     assert command[command.index("--reasoning-effort") + 1] == "low"
     assert "--json-schema" in command
     assert "--no-plan" in command
