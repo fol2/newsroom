@@ -6,6 +6,8 @@ import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 def _reported_usage() -> dict[str, object]:
     return {
@@ -365,6 +367,67 @@ def test_embedding_meter_allocates_leaf_before_provider_request() -> None:
 
     assert result == [1.0, 2.0]
     assert events == ["ALLOCATE", "DISPATCH", "COMPLETE"]
+
+
+def test_embedding_meter_aggregates_reported_and_fenced_requests_exactly() -> None:
+    from newsroom.graphiti_adapter.embedding_meter import (
+        MeteredOpenAIEmbedder,
+        is_exact_provider_reported_usage,
+    )
+
+    provider_calls = 0
+
+    class Embeddings:
+        async def create(self, **_values: object) -> object:
+            nonlocal provider_calls
+            provider_calls += 1
+            return SimpleNamespace(
+                id="embedding-1",
+                data=[SimpleNamespace(embedding=[1.0, 2.0])],
+                usage={"prompt_tokens": 3, "total_tokens": 3, "cost": "0.000007"},
+            )
+
+    class Observer:
+        allocation_count = 0
+
+        def before_embedding_invocation(self, **_values: object) -> object:
+            self.allocation_count += 1
+            return self.allocation_count
+
+        def transport_dispatch_started(self, token: object) -> None:
+            if token == 2:
+                raise RuntimeError("deadline expired before provider I/O")
+
+        def after_embedding_invocation(
+            self, token: object, *, outcome: str, usage: dict[str, object]
+        ) -> None:
+            if token == 1:
+                assert outcome == "COMPLETE"
+                assert usage["usage_basis"] == "PROVIDER_REPORTED"
+            else:
+                assert outcome == "FAILED"
+                assert usage["usage_basis"] == "NO_PROVIDER_CALL"
+
+    delegate = SimpleNamespace(
+        client=SimpleNamespace(embeddings=Embeddings()),
+        config=SimpleNamespace(
+            embedding_model="openai/text-embedding-3-large",
+            embedding_dim=2,
+        ),
+    )
+    meter = MeteredOpenAIEmbedder(delegate, invocation_observer=Observer())
+
+    assert asyncio.run(meter.create("first")) == [1.0, 2.0]
+    with pytest.raises(RuntimeError, match="deadline expired"):
+        asyncio.run(meter.create("second"))
+
+    receipt = meter.receipt()
+    assert provider_calls == 1
+    assert receipt["usage_basis"] == "PROVIDER_REPORTED"
+    assert receipt["request_count"] == 2
+    assert receipt["embedding_tokens"] == 3
+    assert receipt["cost_usd_microunits"] == 7
+    assert is_exact_provider_reported_usage(receipt) is True
 
 
 def test_usage_report_groups_attempt_receipts_into_300_second_windows(

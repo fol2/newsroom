@@ -61,6 +61,21 @@ def _is_non_negative_int(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+def _is_exact_no_provider_request(request: object) -> bool:
+    return (
+        isinstance(request, Mapping)
+        and request.get("provider") == "openrouter"
+        and request.get("model") == OPENROUTER_EMBEDDING_SLUG
+        and request.get("request_id") == ""
+        and request.get("prompt_tokens") is None
+        and request.get("total_tokens") is None
+        and request.get("cost_usd_microunits") is None
+        and request.get("cost_reported") is False
+        and request.get("outcome") in {"FAILED", "CANCELLED"}
+        and request.get("usage_basis") == "NO_PROVIDER_CALL"
+    )
+
+
 def is_exact_provider_reported_usage(
     embedding_usage: Mapping[str, object] | None,
 ) -> bool:
@@ -84,7 +99,10 @@ def is_exact_provider_reported_usage(
         return False
     request_tokens = 0
     request_cost = 0
+    provider_request_count = 0
     for request in requests:
+        if _is_exact_no_provider_request(request):
+            continue
         if (
             not isinstance(request, Mapping)
             or not _PROVIDER_REQUEST_KEYS <= set(request)
@@ -108,9 +126,14 @@ def is_exact_provider_reported_usage(
             or prompt_tokens > total_tokens
         ):
             return False
+        provider_request_count += 1
         request_tokens += total_tokens
         request_cost += item_cost
-    return request_tokens == embedding_tokens and request_cost == cost
+    return (
+        provider_request_count > 0
+        and request_tokens == embedding_tokens
+        and request_cost == cost
+    )
 
 
 def is_exact_no_provider_call_usage(
@@ -134,19 +157,7 @@ def is_exact_no_provider_call_usage(
         or embedding_usage["cost_usd_microunits"] != 0
     ):
         return False
-    return all(
-        isinstance(request, Mapping)
-        and request.get("provider") == "openrouter"
-        and request.get("model") == OPENROUTER_EMBEDDING_SLUG
-        and request.get("request_id") == ""
-        and request.get("prompt_tokens") is None
-        and request.get("total_tokens") is None
-        and request.get("cost_usd_microunits") is None
-        and request.get("cost_reported") is False
-        and request.get("outcome") in {"FAILED", "CANCELLED"}
-        and request.get("usage_basis") == "NO_PROVIDER_CALL"
-        for request in requests
-    )
+    return all(_is_exact_no_provider_request(request) for request in requests)
 
 
 def _integer(value: object) -> int | None:
@@ -360,8 +371,6 @@ class MeteredOpenAIEmbedder:
             for item in self.requests
             if _is_non_negative_int(value := item.get("cost_usd_microunits"))
         ]
-        all_costs_reported = bool(self.requests) and len(costs) == len(self.requests)
-        all_tokens_reported = bool(self.requests) and len(token_values) == len(self.requests)
         exact_zero = {
             "requests": list(self.requests),
             "request_count": len(self.requests),
@@ -371,19 +380,21 @@ class MeteredOpenAIEmbedder:
         }
         if is_exact_no_provider_call_usage(exact_zero):
             return exact_zero
-        if all_costs_reported and all_tokens_reported:
-            basis = "PROVIDER_REPORTED"
-        elif self.requests:
-            basis = "PROVIDER_PARTIALLY_UNREPORTED"
-        else:
-            basis = "NO_EMBEDDING_CALL"
-        return {
+        aggregate = {
             "requests": list(self.requests),
             "request_count": len(self.requests),
             "embedding_tokens": sum(token_values),
             "cost_usd_microunits": sum(costs),
-            "usage_basis": basis,
+            "usage_basis": "PROVIDER_REPORTED",
         }
+        if is_exact_provider_reported_usage(aggregate):
+            return aggregate
+        aggregate["usage_basis"] = (
+            "PROVIDER_PARTIALLY_UNREPORTED"
+            if self.requests
+            else "NO_EMBEDDING_CALL"
+        )
+        return aggregate
 
 
 __all__ = [

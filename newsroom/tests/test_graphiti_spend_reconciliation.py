@@ -74,6 +74,89 @@ def _provider_usage(cost: int = 17) -> dict[str, object]:
     }
 
 
+def _fenced_embedding_usage() -> dict[str, object]:
+    return {
+        "requests": [
+            {
+                "provider": "openrouter",
+                "model": "openai/text-embedding-3-large",
+                "request_id": "",
+                "prompt_tokens": None,
+                "total_tokens": None,
+                "cost_usd_microunits": None,
+                "cost_reported": False,
+                "outcome": "FAILED",
+                "usage_basis": "NO_PROVIDER_CALL",
+                "model_invocation_id": "invocation-1",
+            }
+        ],
+        "request_count": 1,
+        "embedding_tokens": 0,
+        "cost_usd_microunits": 0,
+        "usage_basis": "NO_PROVIDER_CALL",
+    }
+
+
+def test_fenced_embedding_zero_survives_dry_run_and_apply(tmp_path: Path) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    connection = connect(str(path))
+    spend_id = _reserve(connection, ingest_id="ingest-fenced", attempt=1)
+    accounting = reconcile_graphiti_spend(
+        connection,
+        spend_id=spend_id,
+        embedding_usage=_fenced_embedding_usage(),
+    )
+    assert accounting["status"] == "RECONCILED"
+    assert accounting["actual_usd_microunits"] == 0
+    assert accounting["unused_reservation_released"] is True
+    insert_graphiti_attempt_receipt(
+        connection,
+        ingest_id="ingest-fenced",
+        attempt_number=1,
+        outcome="FAILED",
+        receipt={
+            "ingest_id": "ingest-fenced",
+            "attempt_number": 1,
+            "outcome": "FAILED",
+            "provider_attempt_number": 1,
+            "chat_invocations": [],
+            "embedding_usage": _fenced_embedding_usage(),
+            "accounting": accounting,
+        },
+    )
+    connection.commit()
+    connection.close()
+
+    evaluated_at = datetime(2026, 8, 24, tzinfo=UTC)
+    dry_run = plan_graphiti_spend_reconciliation(str(path), evaluated_at=evaluated_at)
+    transition = dry_run.transitions[0]
+    assert transition.disposition is (
+        GraphitiSpendDisposition.RELEASED_BEFORE_PROVIDER_IO
+    )
+    assert transition.target_status == "RECONCILED"
+    assert transition.actual_usd_microunits == 0
+    assert transition.unused_reservation_released is True
+
+    receipt = _command_service().reconcile_graphiti_spend(
+        unpublished_store=str(path),
+        dry_run_plan=dry_run.as_dict(),
+        evaluated_at=evaluated_at,
+        idempotency_key="reconcile-fenced",
+        expected_plan_digest=dry_run.plan_digest,
+        proof=AuthenticationProof(method="STATIC_TOKEN", credential="operator-token"),
+    )
+    assert receipt.applied_transition_count == 1
+    assert receipt.disposition_counts == {"RELEASED_BEFORE_PROVIDER_IO": 1}
+    connection = connect(str(path))
+    retained = connection.execute(
+        "SELECT status, actual_usd_microunits, actual_gbp_microunits "
+        "FROM unpublished_graphiti_spend WHERE spend_id=?",
+        (spend_id,),
+    ).fetchone()
+    connection.close()
+    assert tuple(retained) == ("RECONCILED", 0, 0)
+
+
 def _no_embedding_usage() -> dict[str, object]:
     return {
         "requests": [],

@@ -219,7 +219,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:e3fbdf0e41db727a301e382750d2859f362451af9a31777793e681171a6e90d4"
+      "implementation_revision": "sha256:d4d1b00750ffba693896c2ab4acc664eff233faf05b2db613d00dd557dbc5fc9"
     }
   ],
   "qualified_request_shapes": [
@@ -338,6 +338,6 @@
       "response_schema_digest": "sha256:9a654d3f546e144a1d829e0939c44f24fded717777651e6ebe82538161c8dc22"
     }
   ],
-  "evidence_digest": "sha256:616f1cd1e8ff68289b24a4bb7f936622625aa519c83637c6b645879feb2aa677",
-  "canonical_digest": "sha256:6b31d5794325fb04a3c6d48efc8c10242867b54aca18780ba2a2b8a787d86dfc"
+  "evidence_digest": "sha256:b9faf17298cbbf6aa13236480df61125b0229a72fc2bcbef72586cb8985a6352",
+  "canonical_digest": "sha256:b678454dbfffe7021a930fcf5c0f82d4e5974928ee8bf454cb9705a679b01210"
 }
