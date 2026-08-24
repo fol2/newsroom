@@ -68,26 +68,40 @@ def _duration_is_exactly_supported(
     except ValueError:
         return False
     evidence_text = f"{claim.claim}\n{claim.supporting_excerpt}"
-    minute_pattern = re.compile(
+    minute_pattern = (
         rf"(?<!\d){minutes}(?!\d)\s*(?:-|–|—)?\s*"
-        r"(?:minutes?|mins?|分鐘|分钟)",
+        r"(?:minutes?|mins?|分鐘|分钟)"
+    )
+    duration_patterns = [minute_pattern]
+    if minutes % 60 == 0:
+        hours = minutes // 60
+        hour_values = {str(hours)}
+        if hours == 1:
+            hour_values.update({"one", "an", "一"})
+        duration_patterns.append(
+            rf"(?<![A-Za-z0-9])(?:{'|'.join(sorted(hour_values))})"
+            rf"(?![A-Za-z0-9])\s*(?:-|–|—)?\s*(?:hours?|hrs?|小時|小时)"
+        )
+    duration = rf"(?:{'|'.join(duration_patterns)})"
+    english_disruption = (
+        r"(?:delay(?:ed)?|disruption|suspend(?:ed|sion)?|clos(?:ed|ure)|"
+        r"outage|interrupt(?:ed|ion)?|unavailable)"
+    )
+    chinese_disruption = (
+        r"(?:延誤|延误|停駛|停驶|中斷|中断|暫停|暂停|關閉|关闭|停電|停电)"
+    )
+    relation = re.compile(
+        rf"(?:{english_disruption}\s*(?:(?:for|by|of|lasting|lasted)\s+)?"
+        rf"{duration}|{duration}\s*(?:-|–|—)?\s*(?:service\s+)?"
+        rf"{english_disruption}|{chinese_disruption}.{{0,12}}{duration}|"
+        rf"{duration}.{{0,12}}{chinese_disruption})",
         re.IGNORECASE,
     )
-    if minute_pattern.search(evidence_text):
-        return True
-    if minutes % 60:
-        return False
-    hours = minutes // 60
-    hour_values = {str(hours)}
-    if hours == 1:
-        hour_values.update({"one", "an", "一"})
-    hour_pattern = re.compile(
-        rf"(?<![A-Za-z0-9])(?:{'|'.join(sorted(hour_values))})"
-        rf"(?![A-Za-z0-9])\s*(?:-|–|—)?\s*"
-        r"(?:hours?|hrs?|小時|小时)",
-        re.IGNORECASE,
+    return any(
+        relation.search(clause)
+        for clause in re.split(r"[\n.;；。!?！？]+", evidence_text)
+        if clause.strip()
     )
-    return bool(hour_pattern.search(evidence_text))
 
 
 def _valid_zh_hant_hk_rendering(claim: GovernedClaimEvidence) -> bool:

@@ -20,7 +20,7 @@ EVIDENCE_GATE_POLICY_VERSION = "newsroom.evidence-gates.v1"
 GOVERNED_INPUT_SCHEMA_VERSION = "newsroom.governed-input.v1"
 EVIDENCE_APPROVAL_POLICY_VERSION = "newsroom.evidence-approval.v1"
 EVIDENCE_APPROVAL_PRINCIPAL = "HERMES_EVIDENCE_CONTROLLER"
-ORIGINALITY_POLICY_VERSION = "newsroom.cont-originality.v1"
+ORIGINALITY_POLICY_VERSION = "newsroom.cont-originality.v2"
 
 
 class Evid012QualificationTest(StrEnum):
@@ -67,6 +67,7 @@ class GovernedClaimEvidence:
     quotations: tuple[str, ...] = ()
     certainty: Literal["CONFIRMED"] = "CONFIRMED"
     originality_basis: Literal["FACTUAL_REWRITE_REQUIRED"] = "FACTUAL_REWRITE_REQUIRED"
+    originality_policy_version: str = ORIGINALITY_POLICY_VERSION
     admitted_use: Literal["PUBLICATION_EVIDENCE"] = "PUBLICATION_EVIDENCE"
     policy_version: str = GOVERNED_CLAIM_POLICY_VERSION
 
@@ -115,6 +116,10 @@ class GovernedClaimEvidence:
             raise ValueError("governed claim is not admitted for publication evidence")
         if self.policy_version != GOVERNED_CLAIM_POLICY_VERSION:
             raise ValueError("governed claim policy version is not supported")
+        if self.originality_policy_version != ORIGINALITY_POLICY_VERSION:
+            raise ValueError(
+                "governed claim originality policy version is not supported"
+            )
         if self.rendered_assertion_zh_hant_hk in {
             self.claim,
             self.supporting_excerpt,
@@ -318,6 +323,9 @@ class EvidencePackage:
                             "quotations": list(item.quotations),
                             "certainty": item.certainty,
                             "originality_basis": item.originality_basis,
+                            "originality_policy_version": (
+                                item.originality_policy_version
+                            ),
                             "admitted_use": item.admitted_use,
                             "policy_version": item.policy_version,
                         }
@@ -415,6 +423,9 @@ def _decode_governed_package(
                 claim_role=item["claim_role"],
                 named_entities=tuple(item.get("named_entities", ())),
                 quotations=tuple(item.get("quotations", ())),
+                originality_policy_version=item.get(
+                    "originality_policy_version", ORIGINALITY_POLICY_VERSION
+                ),
             )
             for item in value["governed_claims"]
         )

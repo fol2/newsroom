@@ -69,6 +69,7 @@ def test_hong_kong_traditional_variants_are_not_simplified(text: str) -> None:
 
 def test_unambiguous_simplified_shape_is_rejected() -> None:
     assert contains_simplified_variant("官方说新安排")
+    assert contains_simplified_variant("里面安排不变")
 
 
 def test_governed_records_reject_cross_source_claim_link() -> None:
@@ -490,6 +491,79 @@ def test_route_number_cannot_masquerade_as_material_disruption_duration() -> Non
     assert decision.stable_reason_codes == ("QUALIFICATION_EVIDENCE_NOT_EXACT",)
 
 
+def test_scheduled_journey_duration_cannot_masquerade_as_disruption_duration() -> None:
+    candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    short_delay = (
+        "Route 60 train delayed by two minutes; its scheduled journey takes 60 minutes."
+    )
+    changed_substantive = replace(
+        substantive,
+        claim=short_delay,
+        supporting_excerpt=short_delay,
+        rendered_assertion_zh_hant_hk="六十號線列車只係延誤咗兩分鐘",
+    )
+    unsupported = replace(
+        package,
+        passages=(f"HK-01: {headline.claim}\n{short_delay}",),
+        substantive_new_information=(short_delay,),
+        governed_claims=(headline, changed_substantive),
+        qualification_evidence=(
+            QualificationEvidence(
+                Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION,
+                changed_substantive.claim_id,
+                (
+                    ("service_kind", "TRANSPORT"),
+                    ("duration_minutes", "60"),
+                    ("affected_group", short_delay),
+                ),
+            ),
+        ),
+    )
+
+    decision = DeterministicWriteAdmission().decide(
+        candidate, unsupported, decided_at="2026-08-20T00:00:00.000000Z"
+    )
+
+    assert decision.decision == "HOLD"
+    assert decision.stable_reason_codes == ("QUALIFICATION_EVIDENCE_NOT_EXACT",)
+
+
+def test_material_disruption_duration_relation_is_admitted() -> None:
+    candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    material_delay = "Train services were delayed for 60 minutes."
+    changed_substantive = replace(
+        substantive,
+        claim=material_delay,
+        supporting_excerpt=material_delay,
+        rendered_assertion_zh_hant_hk="列車服務延誤咗六十分鐘",
+    )
+    supported = replace(
+        package,
+        passages=(f"HK-01: {headline.claim}\n{material_delay}",),
+        substantive_new_information=(material_delay,),
+        governed_claims=(headline, changed_substantive),
+        qualification_evidence=(
+            QualificationEvidence(
+                Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION,
+                changed_substantive.claim_id,
+                (
+                    ("service_kind", "TRANSPORT"),
+                    ("duration_minutes", "60"),
+                    ("affected_group", material_delay),
+                ),
+            ),
+        ),
+    )
+
+    decision = DeterministicWriteAdmission().decide(
+        candidate, supported, decided_at="2026-08-20T00:00:00.000000Z"
+    )
+
+    assert decision.decision == "WRITE_READY"
+
+
 def test_self_reported_pass_gates_without_governed_claims_fail_closed() -> None:
     candidate, package = _candidate_package()
     ungoverned = replace(
@@ -781,6 +855,11 @@ def test_systemic_authentication_failure_opens_route_circuit_immediately(
         "API Error: 429",
         "Request failed [429]",
         "Error 402",
+        "APIError: 429",
+        "HTTPError: 429",
+        '{"statusCode":429}',
+        '{"code":402}',
+        "grok writer failed: 429",
     ),
 )
 def test_actual_cli_classifier_marks_provider_control_failures_systemic(
@@ -1044,6 +1123,43 @@ def test_inserted_characters_cannot_break_source_sequence_alignment() -> None:
     failed = {
         item.reason_code
         for item in validate_writer_copy(copy, package)
+        if item.result == "FAIL"
+    }
+    assert "VERBATIM_SOURCE_EXPRESSION" in failed
+
+
+def test_long_passage_cannot_hide_interrupted_sentence_copy() -> None:
+    _candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    copied_sentence = (
+        "The retained authority announced a distinctive material deadline."
+    )
+    long_source = (
+        "Background context contains many unrelated words and details. "
+        f"{copied_sentence} "
+        "Further context continues with many unrelated words and details."
+    )
+    interrupted_copy = "的".join(
+        copied_sentence[index : index + 11]
+        for index in range(0, len(copied_sentence), 11)
+    )
+    guarded_package = replace(package, passages=(long_source,))
+    copy = WriterCopy(
+        title=f"【未出版】{headline.rendered_assertion_zh_hant_hk}",
+        body=(
+            "本報根據已核實證據報道："
+            f"{substantive.rendered_assertion_zh_hant_hk}\n{interrupted_copy}"
+        ),
+        writer_id="long-passage-copying-writer",
+        evidence_package_digest=guarded_package.digest,
+        evidence_links=tuple(
+            WriterEvidenceLink(item.claim_id, item.rendered_assertion_zh_hant_hk)
+            for item in guarded_package.governed_claims
+        ),
+    )
+    failed = {
+        item.reason_code
+        for item in validate_writer_copy(copy, guarded_package)
         if item.result == "FAIL"
     }
     assert "VERBATIM_SOURCE_EXPRESSION" in failed

@@ -93,6 +93,7 @@ WriterRoute = Literal["PRIMARY", "FALLBACK"]
 WriterFailureClass = Literal[
     "FALLBACK_ELIGIBLE", "SYSTEMIC", "CANDIDATE_LOCAL", "UNKNOWN"
 ]
+ORIGINALITY_ALIGNMENT_MIN_SOURCE_COVERAGE = 0.8
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +129,12 @@ class WriterDispatchError(RuntimeError):
         super().__init__(message)
         self.failure_class = failure_class
         self.reason_code = reason_code
+
+
+class CliProcessError(RuntimeError):
+    def __init__(self, message: str, *, provider_status: int | None) -> None:
+        super().__init__(message)
+        self.provider_status = provider_status
 
 
 class WriterPort(Protocol):
@@ -198,6 +205,7 @@ def _prompt(candidate: StoryCandidateRecord, package: EvidencePackage) -> str:
             "quotations": list(claim.quotations),
             "certainty": claim.certainty,
             "originality_basis": claim.originality_basis,
+            "originality_policy_version": claim.originality_policy_version,
         }
         for claim in package.governed_claims
     ]
@@ -386,7 +394,7 @@ def validate_writer_copy(
     source_expressions = (*package.passages,) + tuple(
         value.strip()
         for item in package.passages
-        for value in item.splitlines()
+        for value in re.split(r"(?<=[.!?。！？；;])|\n+", item)
         if value.strip()
     )
     normalised_draft = "".join(
@@ -418,7 +426,7 @@ def validate_writer_copy(
             if block.size >= 4
         )
         / len(normalised_expression)
-        >= 0.8
+        >= ORIGINALITY_ALIGNMENT_MIN_SOURCE_COVERAGE
         for expression in source_expressions
         for normalised_expression in (
             "".join(
@@ -481,14 +489,36 @@ def validate_writer_copy(
     return tuple(results)
 
 
-def _failure(message: str) -> WriterDispatchError:
+def _provider_control_status(message: str) -> int | None:
     lowered = message.lower()
-    systemic_http_status = re.search(
-        r"\b(?:http(?:\s+status)?|status(?:\s+code)?|api\s+error|"
-        r"provider\s+error|request\s+failed|error)\s*[:=\[(]?\s*(?:402|429)\b",
+    status = re.search(
+        r"\b(?:http(?:\s*(?:status|error))?|status(?:\s+code)?|api\s*error|"
+        r"provider\s+error|request\s+failed|writer\s+failed|error)"
+        r"\s*[:=\[(]?\s*(402|429)\b",
         lowered,
     )
-    if systemic_http_status or any(marker in lowered for marker in _SYSTEMIC_MARKERS):
+    if status:
+        return int(status.group(1))
+    machine_status = re.search(
+        r"""["']?(?:status\s*_?\s*code|code)["']?\s*:\s*(402|429)\b""",
+        lowered,
+    )
+    if machine_status:
+        return int(machine_status.group(1))
+    if re.fullmatch(r"\s*(?:402|429)\s*", lowered):
+        return int(lowered.strip())
+    return None
+
+
+def _failure(
+    message: str, *, provider_status: int | None = None
+) -> WriterDispatchError:
+    lowered = message.lower()
+    if (
+        provider_status in {402, 429}
+        or _provider_control_status(message) in {402, 429}
+        or any(marker in lowered for marker in _SYSTEMIC_MARKERS)
+    ):
         return WriterDispatchError(
             message,
             failure_class="SYSTEMIC",
@@ -517,7 +547,10 @@ def _run(command: tuple[str, ...], *, timeout: int, cwd: str | None = None) -> s
         raise RuntimeError(f"{name} writer timed out") from None
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(f"{name} writer failed: {detail}".rstrip())
+        raise CliProcessError(
+            f"{name} writer failed: {detail}".rstrip(),
+            provider_status=_provider_control_status(detail),
+        )
     if not result.stdout.strip():
         raise RuntimeError("writer returned empty stdout")
     return result.stdout
@@ -586,25 +619,12 @@ class CliChainWriter:
     def write(
         self, candidate: StoryCandidateRecord, package: EvidencePackage
     ) -> WriterCopy:
-        prompt = _prompt(candidate, package)
         try:
-            title, body, links = _parse_copy(self._primary(prompt))
-            return WriterCopy(
-                title=title,
-                body=body,
-                writer_id=self.writer_id,
-                evidence_package_digest=package.digest,
-                evidence_links=links,
-            )
-        except (RuntimeError, json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
-            title, body, links = _parse_copy(self._fallback(prompt))
-            return WriterCopy(
-                title=title,
-                body=body,
-                writer_id="cursor-agent-cli-cont-writer",
-                evidence_package_digest=package.digest,
-                evidence_links=links,
-            )
+            return self.dispatch(candidate, package, route="PRIMARY")
+        except WriterDispatchError as exc:
+            if exc.failure_class == "SYSTEMIC":
+                raise
+            return self.dispatch(candidate, package, route="FALLBACK")
 
     def dispatch(
         self,
@@ -622,6 +642,8 @@ class CliChainWriter:
             title, body, links = _parse_copy(invoke(prompt))
         except WriterDispatchError:
             raise
+        except CliProcessError as exc:
+            raise _failure(str(exc), provider_status=exc.provider_status) from exc
         except (
             RuntimeError,
             json.JSONDecodeError,
