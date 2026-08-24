@@ -12,11 +12,7 @@ from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-<<<<<<< HEAD
-from typing import Callable, ContextManager, Final, Iterator, TypedDict, cast
-=======
-from typing import Callable, ContextManager, Final, Iterator, Protocol, TypedDict
->>>>>>> 724a2153 (Wire Graphiti admission into governed authority seams (#758))
+from typing import Callable, ContextManager, Final, Iterator, Protocol, TypedDict, cast
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.admission import (
@@ -1998,7 +1994,8 @@ def run_cycle(
     max_writes: int = 5,
     graphiti: GraphitiPort | None = None,
     max_graphiti: int = 1,
-<<<<<<< HEAD
+    graphiti_admission_factory: GraphitiAdmissionFactory | None = None,
+    max_graphiti_admissions: int = 100,
     evidence_package_builder: Callable[[StoryCandidateRecord], EvidencePackage]
     | None = None,
     max_write_ready_candidates: int = 5,
@@ -2014,23 +2011,17 @@ def run_cycle(
     ):
         if value < 0:
             raise ValueError(f"{name} must be non-negative")
-    if evidence_package_builder is None:
-        evidence_package_builder = lambda candidate: retained_package_for(
-            candidate,
-            proving_store=proving_store,
-        )
-=======
-    graphiti_admission_factory: GraphitiAdmissionFactory | None = None,
-    max_graphiti_admissions: int = 100,
-    clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
-) -> CycleReport:
     if (
         isinstance(max_graphiti_admissions, bool)
         or not isinstance(max_graphiti_admissions, int)
         or max_graphiti_admissions <= 0
     ):
         raise ValueError("maximum Graphiti admissions must be positive")
->>>>>>> 724a2153 (Wire Graphiti admission into governed authority seams (#758))
+    if evidence_package_builder is None:
+        evidence_package_builder = lambda candidate: retained_package_for(
+            candidate,
+            proving_store=proving_store,
+        )
     if isinstance(graphiti, GovernedRealGraphitiPort):
         require_canonical_proving_store(proving_store)
         require_canonical_unpublished_store(unpublished_store)
