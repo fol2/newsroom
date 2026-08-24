@@ -72,6 +72,7 @@ from newsroom.control_plane.store import (
     retain_write_admission_decision,
     retain_write_selection,
 )
+from newsroom.control_plane.veto import VetoError
 from newsroom.control_plane.writer import (
     CONT_FALLBACK_MODEL,
     CONT_FALLBACK_PROVIDER,
@@ -3599,7 +3600,6 @@ def test_final_ledger_counters_equal_retained_attempts_outcomes_and_inserts(
         ).fetchone()[0],
     }
     connection.close()
-
     assert (
         close["candidate_attempts"]
         == retained["candidate_attempts"]
@@ -3620,6 +3620,43 @@ def test_final_ledger_counters_equal_retained_attempts_outcomes_and_inserts(
     assert start["cycle_id"] == close["cycle_id"] == report.cycle_id
     assert attempt_cycle_ids == {report.cycle_id}
     assert fence_calls == report.provider_dispatches
+
+
+def test_owner_emergency_stop_is_rechecked_at_writer_dispatch(
+    tmp_path: Path,
+) -> None:
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "owner-stop-before-dispatch.sqlite3"
+    fence_calls = 0
+
+    def activate_owner_stop() -> None:
+        nonlocal fence_calls
+        fence_calls += 1
+        connection = sqlite3.connect(proving)
+        connection.execute(
+            "UPDATE proving_gates SET status='FAIL' "
+            "WHERE run_id='run-1' "
+            "AND gate_id='NO_ACTIVE_HUMAN_EMERGENCY_STOP'"
+        )
+        connection.commit()
+        connection.close()
+
+    with pytest.raises(VetoError, match="owner emergency stop"):
+        run_cycle(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            writer=RecordingFixtureWriter(),
+            evidence_package_builder=_qualified_builder(frozenset({"HK-01"})),
+            clock=_CLOCK,
+            writer_dispatch_fence=activate_owner_stop,
+        )
+
+    connection = sqlite3.connect(unpublished)
+    assert fence_calls == 1
+    assert connection.execute(
+        "SELECT COUNT(*) FROM unpublished_writer_provider_attempts"
+    ).fetchone() == (0,)
+    connection.close()
 
 
 def test_hold_and_reject_candidates_never_reach_injected_writer(
@@ -4130,6 +4167,8 @@ def _register_cont_usage_policy(
             prompt_contract_version=CONT_WRITER_PROMPT_CONTRACT_VERSION,
             output_schema_digest=CONT_WRITER_OUTPUT_SCHEMA_DIGEST,
             allowed_context_identities=(CONT_WRITER_CONTEXT_IDENTITY,),
+            allowed_config_identities=("cont-writer-hermetic-command-v1",),
+            hard_estimate_ceiling_tokens=12_000,
             evidence_digest=digest_canonical({"issue": 728, "route": route}),
             qualified=True,
         )

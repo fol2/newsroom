@@ -48,6 +48,7 @@ from newsroom.control_plane.items import (
     parse_observation,
     parse_source_time,
 )
+from newsroom.control_plane.model_usage import ModelUsageService
 from newsroom.control_plane.store import (
     claim_graphiti_attempt,
     connect,
@@ -4989,6 +4990,7 @@ def test_pre_dispatch_failure_releases_graphiti_reservation(
         max_writes=0,
         graphiti=EvaluationGraphitiRunner(),
         max_graphiti=1,
+        model_usage=ModelUsageService(str(unpublished)),
     )
 
     connection = __import__("sqlite3").connect(unpublished)

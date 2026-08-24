@@ -19,6 +19,7 @@ from enum import StrEnum
 from typing import TypeGuard
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_canonical
+from newsroom.control_plane.cycle_governor import CONT_WRITER_ROUTE
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.veto import assert_private_store
 
@@ -288,6 +289,8 @@ class InvocationEfficiencyPolicy:
     prompt_contract_version: str
     output_schema_digest: str
     allowed_context_identities: tuple[str, ...]
+    allowed_config_identities: tuple[str, ...]
+    hard_estimate_ceiling_tokens: int | None
     evidence_digest: str
     qualified: bool
     canonical_digest: str
@@ -360,6 +363,19 @@ class InvocationEfficiencyPolicy:
             raise ModelUsageIntegrityError("allowed context identities are invalid")
         for identity in self.allowed_context_identities:
             _token(identity, field="allowed_context_identity")
+        if not self.allowed_config_identities or len(
+            set(self.allowed_config_identities)
+        ) != len(self.allowed_config_identities):
+            raise ModelUsageIntegrityError("allowed config identities are invalid")
+        for identity in self.allowed_config_identities:
+            _token(identity, field="allowed_config_identity")
+        if self.hard_estimate_ceiling_tokens is not None and (
+            not _is_int(self.hard_estimate_ceiling_tokens)
+            or self.hard_estimate_ceiling_tokens < self.max_total_tokens
+        ):
+            raise ModelUsageIntegrityError(
+                "hard estimate ceiling must cover the policy total"
+            )
         if not isinstance(self.one_turn, bool) or not isinstance(self.qualified, bool):
             raise ModelUsageIntegrityError("policy booleans must be typed")
 
@@ -387,6 +403,8 @@ class InvocationEfficiencyPolicy:
             "prompt_contract_version": self.prompt_contract_version,
             "output_schema_digest": self.output_schema_digest,
             "allowed_context_identities": list(self.allowed_context_identities),
+            "allowed_config_identities": list(self.allowed_config_identities),
+            "hard_estimate_ceiling_tokens": self.hard_estimate_ceiling_tokens,
             "evidence_digest": self.evidence_digest,
             "qualified": self.qualified,
         }
@@ -508,6 +526,7 @@ class InvocationAllocation:
     max_output_tokens: int
     context_manifest_digest: str
     context_identity: str
+    config_identity: str
     one_turn: bool
     exact_input: bool
     skills_enabled: bool
@@ -515,6 +534,7 @@ class InvocationAllocation:
     mcp_enabled: bool
     prior_message_count: int
     allocated_at: datetime
+    recovery_deadline_at: datetime
     parent_invocation_id: str | None
     canonical_digest: str
 
@@ -528,6 +548,11 @@ class InvocationAllocation:
             raise ModelUsageIntegrityError("allocation workload class must be typed")
         if not isinstance(allocated_at, datetime):
             raise ModelUsageIntegrityError("allocation timestamp must be datetime")
+        recovery_deadline_at = values.get("recovery_deadline_at")
+        if not isinstance(recovery_deadline_at, datetime):
+            raise ModelUsageIntegrityError(
+                "allocation recovery deadline must be datetime"
+            )
         identity = {
             "schema_version": MODEL_USAGE_SCHEMA_VERSION,
             "envelope_id": values["envelope_id"],
@@ -557,6 +582,7 @@ class InvocationAllocation:
                     "max_output_tokens": values["max_output_tokens"],
                     "context_manifest_digest": values["context_manifest_digest"],
                     "context_identity": values["context_identity"],
+                    "config_identity": values["config_identity"],
                     "one_turn": values["one_turn"],
                     "exact_input": values["exact_input"],
                     "skills_enabled": values["skills_enabled"],
@@ -564,6 +590,7 @@ class InvocationAllocation:
                     "mcp_enabled": values["mcp_enabled"],
                     "prior_message_count": values["prior_message_count"],
                     "allocated_at": _utc_text(allocated_at),
+                    "recovery_deadline_at": _utc_text(recovery_deadline_at),
                 }
             ),
         )
@@ -585,6 +612,7 @@ class InvocationAllocation:
             "output_schema_digest",
             "context_manifest_digest",
             "context_identity",
+            "config_identity",
         ):
             _token(str(getattr(self, name)), field=name)
         if not _is_int(self.leaf_ordinal) or self.leaf_ordinal <= 0:
@@ -608,7 +636,12 @@ class InvocationAllocation:
             raise ModelUsageIntegrityError(
                 "allocation prior message count must be non-negative"
             )
+        if self.recovery_deadline_at <= self.allocated_at:
+            raise ModelUsageIntegrityError(
+                "allocation recovery deadline must follow allocation"
+            )
         _utc_text(self.allocated_at)
+        _utc_text(self.recovery_deadline_at)
 
     def as_record(self) -> dict[str, object]:
         return {
@@ -632,6 +665,7 @@ class InvocationAllocation:
             "max_output_tokens": self.max_output_tokens,
             "context_manifest_digest": self.context_manifest_digest,
             "context_identity": self.context_identity,
+            "config_identity": self.config_identity,
             "one_turn": self.one_turn,
             "exact_input": self.exact_input,
             "skills_enabled": self.skills_enabled,
@@ -639,6 +673,7 @@ class InvocationAllocation:
             "mcp_enabled": self.mcp_enabled,
             "prior_message_count": self.prior_message_count,
             "allocated_at": _utc_text(self.allocated_at),
+            "recovery_deadline_at": _utc_text(self.recovery_deadline_at),
             "parent_invocation_id": self.parent_invocation_id,
         }
 
@@ -968,9 +1003,13 @@ class ModelUsageService:
         self,
         allocation: InvocationAllocation,
         *,
-        owner_emergency_stop: bool = False,
+        owner_emergency_stop: bool,
     ) -> None:
         allocation._validate()
+        if not isinstance(owner_emergency_stop, bool):
+            raise ModelUsageAdmissionError(
+                "owner emergency stop authority must be an explicit boolean"
+            )
         if owner_emergency_stop:
             raise ModelUsageAdmissionError("owner emergency stop is active")
         connection = self._connection()
@@ -1058,6 +1097,10 @@ class ModelUsageService:
         if allocation.context_identity not in policy.allowed_context_identities:
             raise ModelUsageAdmissionError(
                 "context identity is outside qualified policy"
+            )
+        if allocation.config_identity not in policy.allowed_config_identities:
+            raise ModelUsageAdmissionError(
+                "config identity is outside qualified policy"
             )
         if self._route_state(connection, allocation.route)["state"] == "OPEN":
             raise ModelUsageAdmissionError("affected route circuit is open")
@@ -1284,8 +1327,10 @@ class ModelUsageService:
                     "invalid reported usage was not classified"
                 )
         elif terminal.usage_status is UsageStatus.ESTIMATED:
+            hard_ceiling = policy.hard_estimate_ceiling_tokens
             if (
-                total is None
+                hard_ceiling is None
+                or total != hard_ceiling
                 or components.provenance != "BOUNDED_ESTIMATE"
                 or terminal.estimate_policy_digest != policy.canonical_digest
                 or not terminal.estimate_calculation
@@ -1305,6 +1350,8 @@ class ModelUsageService:
             raise ModelUsageIntegrityError(
                 "subscription CLI chat cash-debit confirmation is absent"
             )
+        if terminal.usage_status is not UsageStatus.REPORTED:
+            return terminal.policy_breach
         if total is not None and total > policy.max_total_tokens:
             return "MAX_TOTAL_TOKENS_EXCEEDED"
         context = components.context_tokens
@@ -1425,7 +1472,10 @@ class ModelUsageService:
                 "FROM model_invocation_allocations a "
                 "LEFT JOIN model_invocation_terminals t ON t.invocation_id=a.invocation_id "
                 "WHERE t.invocation_id IS NULL "
-                "ORDER BY a.invocation_id"
+                "AND json_extract(a.record_json,'$.recovery_deadline_at') IS NOT NULL "
+                "AND json_extract(a.record_json,'$.recovery_deadline_at')<=? "
+                "ORDER BY a.invocation_id",
+                (_utc_text(observed_at),),
             ).fetchall()
         finally:
             connection.close()
@@ -1461,7 +1511,12 @@ class ModelUsageService:
                 "LEFT JOIN model_invocation_terminals t "
                 "ON t.invocation_id=a.invocation_id "
                 "WHERE a.envelope_id=e.envelope_id AND t.invocation_id IS NULL) "
-                "ORDER BY e.envelope_id"
+                "AND NOT EXISTS (SELECT 1 FROM model_invocation_allocations a "
+                "WHERE a.envelope_id=e.envelope_id AND ("
+                "json_extract(a.record_json,'$.recovery_deadline_at') IS NULL OR "
+                "json_extract(a.record_json,'$.recovery_deadline_at')>?)) "
+                "ORDER BY e.envelope_id",
+                (_utc_text(observed_at),),
             ).fetchall()
         finally:
             connection.close()
@@ -1494,15 +1549,20 @@ class ModelUsageService:
         connection = self._connection()
         try:
             terminal_row = connection.execute(
-                "SELECT t.record_json,a.route FROM model_invocation_terminals t "
+                "SELECT t.record_json,a.route,p.record_json "
+                "FROM model_invocation_terminals t "
                 "JOIN model_invocation_allocations a "
-                "ON a.invocation_id=t.invocation_id WHERE t.invocation_id=?",
+                "ON a.invocation_id=t.invocation_id "
+                "JOIN model_invocation_policies p "
+                "ON p.canonical_digest=a.policy_digest "
+                "WHERE t.invocation_id=?",
                 (invocation_id,),
             ).fetchone()
             if terminal_row is None:
                 raise ModelUsageIntegrityError("terminal usage state is absent")
             terminal = _object(terminal_row[0])
             route = str(terminal_row[1])
+            policy = _policy_from_record(_object(terminal_row[2]))
             if terminal.get("usage_status") not in {
                 "UNREPORTED",
                 "AMBIGUOUS",
@@ -1550,6 +1610,17 @@ class ModelUsageService:
                 "provider_telemetry_digest": provider_telemetry_digest,
                 "raw_telemetry_pointer": raw_telemetry_pointer,
                 "observed_at": _utc_text(observed_at),
+                "policy_breach": (
+                    "MAX_TOTAL_TOKENS_EXCEEDED"
+                    if components.total_tokens > policy.max_total_tokens
+                    else "MAX_CONTEXT_TOKENS_EXCEEDED"
+                    if components.context_tokens is not None
+                    and components.context_tokens > policy.max_context_tokens
+                    else "MAX_OUTPUT_TOKENS_EXCEEDED"
+                    if components.output_tokens is not None
+                    and components.output_tokens > policy.max_output_tokens
+                    else None
+                ),
             }
             digest = digest_canonical(record)
             connection.execute(
@@ -1563,17 +1634,49 @@ class ModelUsageService:
                     _json({**record, "reconciliation_digest": digest}),
                 ),
             )
-            unresolved_on_route = connection.execute(
-                "SELECT COUNT(*) FROM model_invocation_terminals t "
+            blocking_routes = connection.execute(
+                "SELECT a.route FROM model_invocation_terminals t "
                 "JOIN model_invocation_allocations a "
                 "ON a.invocation_id=t.invocation_id "
-                "WHERE a.route=? AND t.usage_status IN "
+                "WHERE (t.usage_status IN "
                 "('UNREPORTED','AMBIGUOUS','INVALID') "
                 "AND NOT EXISTS (SELECT 1 FROM model_usage_reconciliations r "
-                "WHERE r.invocation_id=t.invocation_id)",
-                (route,),
-            ).fetchone()
-            if unresolved_on_route is not None and int(unresolved_on_route[0]) == 0:
+                "WHERE r.invocation_id=t.invocation_id)) "
+                "OR json_extract(t.record_json,'$.policy_breach') IS NOT NULL "
+                "OR EXISTS (SELECT 1 FROM model_usage_reconciliations r "
+                "WHERE r.invocation_id=t.invocation_id "
+                "AND json_extract(r.record_json,'$.policy_breach') IS NOT NULL)"
+            ).fetchall()
+            canonical_route = (
+                CONT_WRITER_ROUTE
+                if route.startswith("CONT_") and route != "CONT_HEALTH_PROBE"
+                else route
+            )
+            blocking_cause_on_canonical_route = any(
+                (
+                    CONT_WRITER_ROUTE
+                    if str(row[0]).startswith("CONT_")
+                    and str(row[0]) != "CONT_HEALTH_PROBE"
+                    else str(row[0])
+                )
+                == canonical_route
+                for row in blocking_routes
+            )
+            prior_route_state = self._route_state(connection, route)
+            if record["policy_breach"] is not None:
+                self._append_route_state(
+                    connection,
+                    route=route,
+                    state="OPEN",
+                    reason=str(record["policy_breach"]),
+                    invocation_id=invocation_id,
+                    recorded_at=observed_at,
+                )
+            elif (
+                not blocking_cause_on_canonical_route
+                and prior_route_state["state"] == "OPEN"
+                and prior_route_state.get("invocation_id") == invocation_id
+            ):
                 self._append_route_state(
                     connection,
                     route=route,
@@ -1597,7 +1700,7 @@ class ModelUsageService:
         self, connection: sqlite3.Connection, route: str
     ) -> dict[str, object]:
         canonical_route = (
-            "CONT_WRITER_ROUTE"
+            CONT_WRITER_ROUTE
             if route.startswith("CONT_") and route != "CONT_HEALTH_PROBE"
             else route
         )
@@ -1605,7 +1708,7 @@ class ModelUsageService:
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='unpublished_route_circuits'"
         ).fetchone()
-        if canonical_route == "CONT_WRITER_ROUTE" and has_canonical is not None:
+        if canonical_route == CONT_WRITER_ROUTE and has_canonical is not None:
             canonical = connection.execute(
                 "SELECT state,open_reason,opened_at FROM unpublished_route_circuits "
                 "WHERE route=?",
@@ -1652,7 +1755,7 @@ class ModelUsageService:
         recorded_at: datetime,
     ) -> None:
         canonical_route = (
-            "CONT_WRITER_ROUTE"
+            CONT_WRITER_ROUTE
             if route.startswith("CONT_") and route != "CONT_HEALTH_PROBE"
             else route
         )
@@ -1662,7 +1765,7 @@ class ModelUsageService:
         ).fetchone()
         if (
             state == "OPEN"
-            and canonical_route == "CONT_WRITER_ROUTE"
+            and canonical_route == CONT_WRITER_ROUTE
             and has_canonical is not None
         ):
             connection.execute(
@@ -1728,8 +1831,11 @@ class ModelUsageService:
                 "WHERE x.invocation_id=a.invocation_id "
                 "AND x.state='DISPATCH_STARTED' "
                 "AND x.observed_at>=? AND x.observed_at<?) "
+                "OR (o.terminal_at>=? AND o.terminal_at<?) "
                 "ORDER BY a.allocated_at,a.cycle_id,a.envelope_id,a.leaf_ordinal",
                 (
+                    _utc_text(start),
+                    _utc_text(end),
                     _utc_text(start),
                     _utc_text(end),
                     _utc_text(start),
@@ -1840,6 +1946,7 @@ class ModelUsageService:
                         ],
                         "reconciled_at": reconciliation["observed_at"],
                         "completed_at": reconciliation["observed_at"],
+                        "policy_breach": reconciliation.get("policy_breach"),
                     }
                 )
             components = effective.get("components")
@@ -2030,6 +2137,7 @@ class ModelUsageService:
             str(row["envelope_id"])
             for row in leaves
             if str(row["work_outcome"] or "").startswith("GRAPHITI_SUCCESS")
+            or row["work_outcome"] == "GRAPHITI_PARTIAL"
         }
 
         def productive_leaf(row: Mapping[str, object]) -> bool:
@@ -2521,6 +2629,7 @@ class ModelUsageService:
                 if str(row.get("work_outcome") or "").startswith(
                     "GRAPHITI_SUCCESS"
                 )
+                or row.get("work_outcome") == "GRAPHITI_PARTIAL"
             ]
             accounted = [
                 row
@@ -2607,6 +2716,7 @@ class ModelUsageService:
                             or str(row.get("work_outcome") or "").startswith(
                                 "GRAPHITI_SUCCESS"
                             )
+                            or row.get("work_outcome") == "GRAPHITI_PARTIAL"
                         )
                     ),
                     "no_result_tokens": sum(
@@ -2620,6 +2730,7 @@ class ModelUsageService:
                             or str(row.get("work_outcome") or "").startswith(
                                 "GRAPHITI_SUCCESS"
                             )
+                            or row.get("work_outcome") == "GRAPHITI_PARTIAL"
                         )
                     ),
                 }
@@ -2699,6 +2810,15 @@ def _policy_from_record(record: Mapping[str, object]) -> InvocationEfficiencyPol
         allowed_context_identities=tuple(
             str(value)
             for value in record["allowed_context_identities"]  # type: ignore[union-attr]
+        ),
+        allowed_config_identities=tuple(
+            str(value)
+            for value in record["allowed_config_identities"]  # type: ignore[union-attr]
+        ),
+        hard_estimate_ceiling_tokens=(
+            None
+            if record.get("hard_estimate_ceiling_tokens") is None
+            else _record_int(record, "hard_estimate_ceiling_tokens")
         ),
         evidence_digest=str(record["evidence_digest"]),
         qualified=bool(record["qualified"]),

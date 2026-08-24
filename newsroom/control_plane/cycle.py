@@ -280,6 +280,28 @@ def _parse_utc(value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def assert_no_owner_emergency_stop(proving_store: str) -> None:
+    """Fail closed unless the latest proving authority retains the stop gate PASS."""
+
+    connection = sqlite3.connect(proving_store)
+    apply_control_plane_sqlite_profile(connection, query_only=True)
+    try:
+        try:
+            row = connection.execute(
+                "WITH latest AS (SELECT run_id FROM proving_runs "
+                f"ORDER BY {_PROVING_RUN_LATEST_ORDER} LIMIT 1) "
+                "SELECT g.status FROM latest "
+                "JOIN proving_gates g ON g.run_id=latest.run_id "
+                "AND g.gate_id='NO_ACTIVE_HUMAN_EMERGENCY_STOP'"
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            raise VetoError("owner emergency stop authority is unavailable") from exc
+    finally:
+        connection.close()
+    if row != ("PASS",):
+        raise VetoError("owner emergency stop is active or unproved")
+
+
 def _dispatch_valid_until(evaluated_at: datetime) -> str:
     return _utc_text(
         evaluated_at + timedelta(milliseconds=GRAPHITI_EXTRACTION_TIMEOUT_MS)
@@ -1883,11 +1905,20 @@ def _complete_writer_usage(
         usage_status = UsageStatus.REPORTED
         telemetry_digest = digest_bytes(canonical_json_bytes(usage_value))
     else:
-        components = UsageComponents(
-            total_tokens=policy.max_total_tokens,
-            provenance="BOUNDED_ESTIMATE",
+        ceiling = policy.hard_estimate_ceiling_tokens
+        components = (
+            UsageComponents(
+                total_tokens=ceiling,
+                provenance="BOUNDED_ESTIMATE",
+            )
+            if ceiling is not None
+            else UsageComponents(provenance="UNAVAILABLE")
         )
-        usage_status = UsageStatus.ESTIMATED
+        usage_status = (
+            UsageStatus.ESTIMATED
+            if ceiling is not None
+            else UsageStatus.UNREPORTED
+        )
         telemetry_digest = None
     model_usage.complete(
         InvocationTerminal.create(
@@ -1914,7 +1945,8 @@ def _complete_writer_usage(
                 else None
             ),
             estimate_calculation=(
-                f"qualified_policy.max_total_tokens={policy.max_total_tokens}"
+                "qualified_policy.hard_estimate_ceiling_tokens="
+                f"{policy.hard_estimate_ceiling_tokens}"
                 if usage_status is UsageStatus.ESTIMATED
                 else None
             ),
@@ -2156,6 +2188,7 @@ def _run_write_loop(
                         max_output_tokens=usage_policy.max_output_tokens,
                         context_manifest_digest=manifest.context_manifest_digest,
                         context_identity=manifest.context_identity,
+                        config_identity=manifest.config_identity,
                         one_turn=manifest.one_turn,
                         exact_input=manifest.exact_input,
                         skills_enabled=manifest.skills_enabled,
@@ -2163,13 +2196,16 @@ def _run_write_loop(
                         mcp_enabled=manifest.mcp_enabled,
                         prior_message_count=manifest.prior_message_count,
                         allocated_at=allocated_at,
+                        recovery_deadline_at=allocated_at + timedelta(minutes=6),
                         parent_invocation_id=(
                             None
                             if not usage_invocation_ids
                             else usage_invocation_ids[0]
                         ),
                     )
-                    model_usage.allocate(usage_allocation)
+                    model_usage.allocate(
+                        usage_allocation, owner_emergency_stop=False
+                    )
                     usage_invocation_ids.append(usage_allocation.invocation_id)
                 except ModelUsageAdmissionError:
                     last_reason = "MODEL_USAGE_ADMISSION_HELD"
@@ -2871,6 +2907,12 @@ def run_cycle(
             decisions.append((candidate, package, decision))
             admission_counts[decision.decision] += 1
             admission_reasons.update(decision.stable_reason_codes)
+
+        def exact_writer_dispatch_fence() -> None:
+            if writer_dispatch_fence is not None:
+                writer_dispatch_fence()
+            assert_no_owner_emergency_stop(proving_store)
+
         write_result = _run_write_loop(
             unpublished,
             writer=writer,
@@ -2881,7 +2923,7 @@ def run_cycle(
             max_writer_fallback_dispatches=min(max_writer_fallback_dispatches, 1),
             selected_at=_utc_text(admission_evaluated_at),
             cycle_execution_id=cycle_id,
-            writer_dispatch_fence=writer_dispatch_fence,
+            writer_dispatch_fence=exact_writer_dispatch_fence,
             model_usage=model_usage,
             clock=clock,
         )
