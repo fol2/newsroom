@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Literal, Protocol
 
 from newsroom.control_plane.child_environment import unprivileged_child_environment
@@ -404,9 +405,36 @@ def validate_writer_copy(
             for index in range(max(0, len(normalised_expression) - 11))
         )
     )
+    aligned_source_expression = any(
+        len(normalised_expression) >= 12
+        and sum(
+            block.size
+            for block in SequenceMatcher(
+                None,
+                normalised_expression,
+                normalised_segment,
+                autojunk=False,
+            ).get_matching_blocks()
+            if block.size >= 4
+        )
+        / len(normalised_expression)
+        >= 0.8
+        for expression in source_expressions
+        for normalised_expression in (
+            "".join(
+                character.casefold() for character in expression if character.isalnum()
+            ),
+        )
+        for segment in narrative_segments
+        for normalised_segment in (
+            "".join(
+                character.casefold() for character in segment if character.isalnum()
+            ),
+        )
+    )
     check(
         "ORIGINALITY_BOUNDARY",
-        not copied_source_expression,
+        not copied_source_expression and not aligned_source_expression,
         "VERBATIM_SOURCE_EXPRESSION",
     )
     governed_text = "\n".join(
@@ -456,7 +484,8 @@ def validate_writer_copy(
 def _failure(message: str) -> WriterDispatchError:
     lowered = message.lower()
     systemic_http_status = re.search(
-        r"\b(?:http(?:\s+status)?|status(?:\s+code)?)\s*[:=]?\s*(?:402|429)\b",
+        r"\b(?:http(?:\s+status)?|status(?:\s+code)?|api\s+error|"
+        r"provider\s+error|request\s+failed|error)\s*[:=\[(]?\s*(?:402|429)\b",
         lowered,
     )
     if systemic_http_status or any(marker in lowered for marker in _SYSTEMIC_MARKERS):

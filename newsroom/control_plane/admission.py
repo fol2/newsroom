@@ -60,6 +60,36 @@ _QUALIFICATION_CLASSIFIER_FIELDS = frozenset(
 )
 
 
+def _duration_is_exactly_supported(
+    claim: GovernedClaimEvidence, duration_minutes: str
+) -> bool:
+    try:
+        minutes = int(duration_minutes)
+    except ValueError:
+        return False
+    evidence_text = f"{claim.claim}\n{claim.supporting_excerpt}"
+    minute_pattern = re.compile(
+        rf"(?<!\d){minutes}(?!\d)\s*(?:-|–|—)?\s*"
+        r"(?:minutes?|mins?|分鐘|分钟)",
+        re.IGNORECASE,
+    )
+    if minute_pattern.search(evidence_text):
+        return True
+    if minutes % 60:
+        return False
+    hours = minutes // 60
+    hour_values = {str(hours)}
+    if hours == 1:
+        hour_values.update({"one", "an", "一"})
+    hour_pattern = re.compile(
+        rf"(?<![A-Za-z0-9])(?:{'|'.join(sorted(hour_values))})"
+        rf"(?![A-Za-z0-9])\s*(?:-|–|—)?\s*"
+        r"(?:hours?|hrs?|小時|小时)",
+        re.IGNORECASE,
+    )
+    return bool(hour_pattern.search(evidence_text))
+
+
 def _valid_zh_hant_hk_rendering(claim: GovernedClaimEvidence) -> bool:
     rendered = claim.rendered_assertion_zh_hant_hk
     without_entities = rendered
@@ -347,7 +377,19 @@ class DeterministicWriteAdmission:
                 for field, value in item.test_evidence
             )
         )
-        if unsupported:
+        unsupported_duration = tuple(
+            item
+            for item in package.qualification_evidence
+            if item.test.value == "ESSENTIAL_SERVICE_DISRUPTION"
+            and (
+                item.governed_claim_id not in governed_claims
+                or not _duration_is_exactly_supported(
+                    governed_claims[item.governed_claim_id],
+                    dict(item.test_evidence)["duration_minutes"],
+                )
+            )
+        )
+        if unsupported or unsupported_duration:
             return _make_decision(
                 package,
                 decision="HOLD",

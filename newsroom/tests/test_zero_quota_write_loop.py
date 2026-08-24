@@ -33,6 +33,7 @@ from newsroom.control_plane.evidence import (
     GovernedClaimEvidence,
     GovernedClaimStatus,
     QualificationEvidence,
+    _resolve_governed_records,
     package_for,
 )
 from newsroom.control_plane.items import SourceItem, parse_observation
@@ -45,6 +46,7 @@ from newsroom.control_plane.writer import (
     WriterEvidenceLink,
     validate_writer_copy,
 )
+from newsroom.control_plane.zh_hant import contains_simplified_variant
 from newsroom.effective_revision import retain_observation_revision_first_seen
 from newsroom.tests.test_control_plane_private_beta import _proving
 
@@ -56,6 +58,137 @@ def test_non_controller_children_do_not_receive_evidence_approval_key(
 ) -> None:
     monkeypatch.setenv("NEWSROOM_EVIDENCE_APPROVAL_KEY", "secret" * 8)
     assert "NEWSROOM_EVIDENCE_APPROVAL_KEY" not in unprivileged_child_environment()
+
+
+@pytest.mark.parametrize(
+    "text", ("官方說明最新安排", "衛生署與群組公佈安排", "衞生署公佈安排")
+)
+def test_hong_kong_traditional_variants_are_not_simplified(text: str) -> None:
+    assert not contains_simplified_variant(text)
+
+
+def test_unambiguous_simplified_shape_is_rejected() -> None:
+    assert contains_simplified_variant("官方说新安排")
+
+
+def test_governed_records_reject_cross_source_claim_link() -> None:
+    items = (
+        SourceItem(
+            "A", "a", "Discovery A", "Background A", "https://example.test/same"
+        ),
+        SourceItem(
+            "B",
+            "b",
+            "Claim from B",
+            "Deadline is 30 September.",
+            "https://example.test/same",
+        ),
+    )
+    candidate = StoryCandidateRecord(
+        "candidate-cross",
+        "hypothesis-cross",
+        "Discovery A",
+        items,
+        (DiscoverySignalRecord("signal-a", "A", "a", "digest-a"),),
+        (NewsLeadRecord("lead-a", "signal-a", "Discovery A"),),
+    )
+    base = package_for(candidate)
+    claim = GovernedClaimEvidence(
+        "claim-cross",
+        "Claim from B",
+        1,
+        "Claim from B",
+        ("A",),
+        ("source-record-B",),
+        ("authority-A",),
+        ("rights-A",),
+        ("dependency-A",),
+        ("origin-A",),
+        ClaimAuthorityClass.RESPONSIBLE_PRIMARY,
+        "Own deadline",
+        GovernedClaimStatus.CONFIRMED_FACT,
+        "A",
+        "官方公布最新限期安排",
+        "HEADLINE",
+    )
+    package = replace(base, governed_claims=(claim,))
+    records = (
+        {
+            "record_id": "source-record-B",
+            "record_type": "SOURCE_RECORD",
+            "candidate_id": candidate.candidate_id,
+            "base_package_digest": base.digest,
+            "status": "CURRENT",
+            "source_id": "B",
+            "canonical_url": "https://example.test/same",
+            "publisher": "B",
+            "responsible_body": "B",
+            "source_type": "PRIMARY_OFFICIAL",
+            "authority_class": "RESPONSIBLE_PRIMARY",
+            "publication_time": "2026-01-01",
+            "retrieval_time": "2026-01-01",
+            "geography": "UK",
+            "language": "en",
+            "extraction_status": "COMPLETE",
+            "rights_decision_id": "rights-A",
+            "originating_report_id": "origin-A",
+            "dependency_evidence_ids": ["dependency-A"],
+        },
+        {
+            "record_id": "authority-A",
+            "record_type": "SOURCE_AUTHORITY_DECISION",
+            "candidate_id": candidate.candidate_id,
+            "base_package_digest": base.digest,
+            "status": "CURRENT",
+            "source_id": "A",
+            "decision": "ADMITTED",
+            "authority_class": "RESPONSIBLE_PRIMARY",
+            "authority_scope": "Own deadline",
+            "governed_claim_id": claim.claim_id,
+            "claim_digest": digest_bytes(claim.claim.encode()),
+        },
+        {
+            "record_id": "rights-A",
+            "record_type": "RIGHTS_DECISION",
+            "candidate_id": candidate.candidate_id,
+            "base_package_digest": base.digest,
+            "status": "CURRENT",
+            "source_id": "A",
+            "decision": "PERMITTED",
+            "permitted_use": "PUBLICATION_EVIDENCE",
+        },
+        {
+            "record_id": "dependency-A",
+            "record_type": "DEPENDENCY_EVIDENCE",
+            "candidate_id": candidate.candidate_id,
+            "base_package_digest": base.digest,
+            "status": "CURRENT",
+            "source_id": "A",
+            "dependency_status": "RESOLVED",
+            "evidential_origin_id": "origin-A",
+            "originating_report_id": "origin-A",
+        },
+    )
+    connection = sqlite3.connect(":memory:")
+    connection.execute(
+        "CREATE TABLE proving_write_evidence_records("
+        "record_id TEXT PRIMARY KEY, record_type TEXT, "
+        "record_json TEXT, record_digest TEXT)"
+    )
+    for record in records:
+        raw = canonical_json_bytes(record).decode()
+        connection.execute(
+            "INSERT INTO proving_write_evidence_records VALUES(?,?,?,?)",
+            (
+                record["record_id"],
+                record["record_type"],
+                raw,
+                digest_bytes(raw.encode()),
+            ),
+        )
+
+    assert _resolve_governed_records(connection, candidate, base, package) is None
+    connection.close()
 
 
 def _admit_package(
@@ -317,6 +450,42 @@ def test_material_duration_classifier_must_be_exact_in_retained_fact() -> None:
     decision = DeterministicWriteAdmission().decide(
         candidate, unsupported, decided_at="2026-08-20T00:00:00.000000Z"
     )
+    assert decision.decision == "HOLD"
+    assert decision.stable_reason_codes == ("QUALIFICATION_EVIDENCE_NOT_EXACT",)
+
+
+def test_route_number_cannot_masquerade_as_material_disruption_duration() -> None:
+    candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    short_delay = "Route 60 train delayed by two minutes."
+    changed_substantive = replace(
+        substantive,
+        claim=short_delay,
+        supporting_excerpt=short_delay,
+        rendered_assertion_zh_hant_hk="六十號線列車只係延誤咗兩分鐘",
+    )
+    unsupported = replace(
+        package,
+        passages=(f"HK-01: {headline.claim}\n{short_delay}",),
+        substantive_new_information=(short_delay,),
+        governed_claims=(headline, changed_substantive),
+        qualification_evidence=(
+            QualificationEvidence(
+                Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION,
+                changed_substantive.claim_id,
+                (
+                    ("service_kind", "TRANSPORT"),
+                    ("duration_minutes", "60"),
+                    ("affected_group", short_delay),
+                ),
+            ),
+        ),
+    )
+
+    decision = DeterministicWriteAdmission().decide(
+        candidate, unsupported, decided_at="2026-08-20T00:00:00.000000Z"
+    )
+
     assert decision.decision == "HOLD"
     assert decision.stable_reason_codes == ("QUALIFICATION_EVIDENCE_NOT_EXACT",)
 
@@ -609,6 +778,9 @@ def test_systemic_authentication_failure_opens_route_circuit_immediately(
         "invalid model configuration",
         "HTTP 429 Too Many Requests",
         "402 Payment Required",
+        "API Error: 429",
+        "Request failed [429]",
+        "Error 402",
     ),
 )
 def test_actual_cli_classifier_marks_provider_control_failures_systemic(
@@ -835,6 +1007,34 @@ def test_punctuation_cannot_split_copied_source_sequence() -> None:
             f"{substantive.rendered_assertion_zh_hant_hk}\n{punctuated_copy}"
         ),
         writer_id="punctuation-copying-writer",
+        evidence_package_digest=package.digest,
+        evidence_links=tuple(
+            WriterEvidenceLink(item.claim_id, item.rendered_assertion_zh_hant_hk)
+            for item in package.governed_claims
+        ),
+    )
+    failed = {
+        item.reason_code
+        for item in validate_writer_copy(copy, package)
+        if item.result == "FAIL"
+    }
+    assert "VERBATIM_SOURCE_EXPRESSION" in failed
+
+
+def test_inserted_characters_cannot_break_source_sequence_alignment() -> None:
+    _candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    source = package.passages[0]
+    interrupted_copy = "的".join(
+        source[index : index + 11] for index in range(0, len(source), 11)
+    )
+    copy = WriterCopy(
+        title=f"【未出版】{headline.rendered_assertion_zh_hant_hk}",
+        body=(
+            "本報根據已核實證據報道："
+            f"{substantive.rendered_assertion_zh_hant_hk}\n{interrupted_copy}"
+        ),
+        writer_id="interrupted-copying-writer",
         evidence_package_digest=package.digest,
         evidence_links=tuple(
             WriterEvidenceLink(item.claim_id, item.rendered_assertion_zh_hant_hk)

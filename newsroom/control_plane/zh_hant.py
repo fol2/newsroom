@@ -44,5 +44,22 @@ _SIMPLIFIED_TO_HK_VARIANT_CHARACTERS = frozenset(
 )
 
 
+def _is_unambiguous_simplified_shape(character: str) -> bool:
+    """Exclude shared/traditional forms that OpenCC canonicalises as variants."""
+
+    try:
+        character.encode("big5hkscs")
+    except UnicodeEncodeError:
+        return True
+    return False
+
+
+_UNAMBIGUOUS_SIMPLIFIED_CHARACTERS = frozenset(
+    character
+    for character in _SIMPLIFIED_TO_HK_VARIANT_CHARACTERS
+    if _is_unambiguous_simplified_shape(character)
+)
+
+
 def contains_simplified_variant(text: str) -> bool:
-    return any(character in _SIMPLIFIED_TO_HK_VARIANT_CHARACTERS for character in text)
+    return any(character in _UNAMBIGUOUS_SIMPLIFIED_CHARACTERS for character in text)

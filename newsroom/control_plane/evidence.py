@@ -552,6 +552,16 @@ def _resolve_governed_records(
             return None
         return set(value)
 
+    def has_exact_source_ids(
+        record_ids: tuple[str, ...], expected_source_ids: tuple[str, ...]
+    ) -> bool:
+        source_ids = tuple(
+            records[record_id].get("source_id") for record_id in record_ids
+        )
+        return all(isinstance(source_id, str) for source_id in source_ids) and set(
+            source_ids
+        ) == set(expected_source_ids)
+
     expected_types: dict[str, str] = {}
     for claim in package.governed_claims:
         for record_type, record_ids in (
@@ -613,6 +623,18 @@ def _resolve_governed_records(
         "dependency_evidence_ids",
     )
     for claim in package.governed_claims:
+        if claim.passage_index >= len(candidate.items):
+            return None
+        source_records = [records[record_id] for record_id in claim.source_record_ids]
+        if not has_exact_source_ids(claim.source_record_ids, claim.source_ids):
+            return None
+        passage_item = candidate.items[claim.passage_index]
+        if not any(
+            record.get("source_id") == passage_item.source_id
+            and record.get("canonical_url") == passage_item.canonical_url
+            for record in source_records
+        ):
+            return None
         if any(
             (
                 records[record_id].get("source_id"),
@@ -625,14 +647,24 @@ def _resolve_governed_records(
                 for field in required_source_record_fields
             )
             or records[record_id].get("authority_class") != claim.authority_class.value
-            or records[record_id].get("rights_decision_id")
-            not in claim.rights_decision_ids
-            or record_id_set(
-                records[record_id].get("dependency_evidence_ids")
-            )
-            != set(claim.dependency_evidence_ids)
             for record_id in claim.source_record_ids
         ):
+            return None
+        source_rights_id_values = tuple(
+            record.get("rights_decision_id") for record in source_records
+        )
+        if not all(isinstance(rights_id, str) for rights_id in source_rights_id_values):
+            return None
+        source_rights_ids = set(source_rights_id_values)
+        source_dependency_ids: set[str] = set()
+        for record in source_records:
+            dependency_ids = record_id_set(record.get("dependency_evidence_ids"))
+            if dependency_ids is None:
+                return None
+            source_dependency_ids.update(dependency_ids)
+        if source_rights_ids != set(
+            claim.rights_decision_ids
+        ) or source_dependency_ids != set(claim.dependency_evidence_ids):
             return None
         if any(
             records[record_id].get("source_id") not in claim.source_ids
@@ -645,12 +677,18 @@ def _resolve_governed_records(
             for record_id in claim.source_authority_decision_ids
         ):
             return None
+        if not has_exact_source_ids(
+            claim.source_authority_decision_ids, claim.source_ids
+        ):
+            return None
         if any(
             records[record_id].get("source_id") not in claim.source_ids
             or records[record_id].get("decision") != "PERMITTED"
             or records[record_id].get("permitted_use") != "PUBLICATION_EVIDENCE"
             for record_id in claim.rights_decision_ids
         ):
+            return None
+        if not has_exact_source_ids(claim.rights_decision_ids, claim.source_ids):
             return None
         if any(
             records[record_id].get("source_id") not in claim.source_ids
@@ -661,6 +699,27 @@ def _resolve_governed_records(
             for record_id in claim.dependency_evidence_ids
         ):
             return None
+        if not has_exact_source_ids(claim.dependency_evidence_ids, claim.source_ids):
+            return None
+        for source_record in source_records:
+            source_id = source_record.get("source_id")
+            rights_id = source_record.get("rights_decision_id")
+            if (
+                not isinstance(rights_id, str)
+                or records[rights_id].get("source_id") != source_id
+            ):
+                return None
+            dependency_ids = record_id_set(source_record.get("dependency_evidence_ids"))
+            if dependency_ids is None:
+                return None
+            for dependency_id in dependency_ids:
+                dependency_record = records[dependency_id]
+                if dependency_record.get(
+                    "source_id"
+                ) != source_id or dependency_record.get(
+                    "originating_report_id"
+                ) != source_record.get("originating_report_id"):
+                    return None
         resolved_origins = {
             records[record_id].get("evidential_origin_id")
             for record_id in claim.dependency_evidence_ids
