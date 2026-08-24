@@ -4,7 +4,8 @@
     "authority_bytes_and_digests_verified": true,
     "combined_temporal_gold_quality": "EXTERNAL_RUN_REQUIRED",
     "common_entity_resolution_zero_provider_leaves": true,
-    "conditional_leaf_probabilities": "UNRESOLVED",
+    "conditional_leaf_expected_counts": "UNRESOLVED",
+    "conditional_leaf_prevalence": "UNRESOLVED",
     "existing_regression_suites": "EXTERNAL_RUN_REQUIRED",
     "overlong_summary_explicitly_held": true,
     "replay_identities_identical": true,
@@ -140,7 +141,7 @@
     "remaining_exceptional_leaves": "DISTINCT_QUALIFIED_RECEIPTED_ONLY",
     "runtime_activation_authorised": false
   },
-  "schema_version": "newsroom.graphiti-deterministic-work-qualification.v1",
+  "schema_version": "newsroom.graphiti-deterministic-work-qualification.v2",
   "sidecar": {
     "authority": "SQLITE_GOVERNED_RECORDS",
     "projection_digests": [
@@ -176,17 +177,21 @@
       "unresolved": 0,
       "unresolved_leaf_count": 0
     },
-    "conditional_leaf_probabilities_ppm": {
+    "conditional_leaf_distribution_basis": "UNRESOLVED_NO_EXECUTED_EFFECTIVE_REVISION_TRACE",
+    "conditional_leaf_expected_counts_ppm": {
       "current": "UNRESOLVED",
       "target": "UNRESOLVED"
     },
-    "conditional_probability_basis": "UNRESOLVED_NO_EXECUTED_EFFECTIVE_REVISION_TRACE",
+    "conditional_leaf_prevalence_ppm": {
+      "current": "UNRESOLVED",
+      "target": "UNRESOLVED"
+    },
     "effective_revision_count": 11,
     "embedding_tokens": {
       "basis": "ESTIMATED_SOURCE_SAFE_WHITESPACE_TOKEN_PROXY",
       "total": 1240
     },
-    "mandatory_primary_leaves_per_revision": 1,
+    "mandatory_primary_leaves_per_revision": "UNRESOLVED",
     "quality": {
       "gold_match_count": 0,
       "regression_count": 0,
@@ -228,7 +233,7 @@
       "terminal_effective_revision_count": 2,
       "unresolved_chat_leaf_count": 5
     },
-    "schema_version": "newsroom.graphiti-token-effectiveness-report.v1",
+    "schema_version": "newsroom.graphiti-token-effectiveness-report.v2",
     "scope": "PROVIDER_FREE_ISSUE_747_FIXTURE_SAMPLE",
     "sensitivity_tokens_per_conditional_leaf": {
       "dedupe": {

@@ -179,6 +179,7 @@ def _token_cases() -> tuple[EffectiveRevisionTokenCase, ...]:
                 case_id=fixture.name,
                 outcome=outcome,
                 primary_tokens=_token_range_from_bytes(byte_count),
+                primary_leaf_count=1,
                 current=ConditionalLeafProfile(),
                 target=ConditionalLeafProfile(),
                 embedding_tokens=len(fixture.revision.body.split()),
@@ -399,7 +400,7 @@ def run_provider_free_qualification() -> dict[str, object]:
             sensitivity=sensitivity,
             distribution_measured=False,
         ),
-        "conditional_probability_basis": (
+        "conditional_leaf_distribution_basis": (
             "UNRESOLVED_NO_EXECUTED_EFFECTIVE_REVISION_TRACE"
         ),
         "average_token_basis": (
@@ -465,10 +466,11 @@ def run_provider_free_qualification() -> dict[str, object]:
         "replay_identities_identical": sidecars == replayed_sidecars,
         "combined_temporal_gold_quality": "EXTERNAL_RUN_REQUIRED",
         "existing_regression_suites": "EXTERNAL_RUN_REQUIRED",
-        "conditional_leaf_probabilities": "UNRESOLVED",
+        "conditional_leaf_expected_counts": "UNRESOLVED",
+        "conditional_leaf_prevalence": "UNRESOLVED",
     }
     return {
-        "schema_version": "newsroom.graphiti-deterministic-work-qualification.v1",
+        "schema_version": "newsroom.graphiti-deterministic-work-qualification.v2",
         "issue": 748,
         "parent_issue": 739,
         "implementation_atom": 731,
