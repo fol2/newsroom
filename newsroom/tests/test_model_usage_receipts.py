@@ -806,6 +806,7 @@ def test_later_provider_telemetry_appends_reconciliation_without_editing_history
     assert row["terminal_usage_status"] == "UNREPORTED"
     assert row["reconciliation_usage_status"] == "REPORTED"
     assert row["reconciled_at"] == "2026-08-24T10:05:00.000000Z"
+    assert service.route_state("CONT_PRIMARY")["state"] == "CLOSED"
     assert (
         service_row_count(
             tmp_path / "unpublished.sqlite3", "model_invocation_terminals"
