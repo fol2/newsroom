@@ -32,6 +32,44 @@ from newsroom.graphiti_adapter.embedding_meter import MeteredOpenAIEmbedder
 from newsroom.graphiti_adapter.usage_meter import cursor_cli_usage
 
 T0 = datetime(2026, 8, 24, 20, 0, tzinfo=UTC)
+QUALIFIED_ROUTES = (
+    {
+        "leaf_class": "PRIMARY",
+        "provider": "cursor-agent-cli",
+        "route": "GRAPHITI_CHAT_PRIMARY",
+        "model": "composer-2.5",
+        "reasoning": "provider-default",
+        "config_identity": "graphiti-cli-command-v1",
+        "max_prompt_bytes": 4_096,
+        "max_context_tokens": 4_096,
+        "max_output_tokens": 1_024,
+        "max_total_tokens": 8_192,
+    },
+    {
+        "leaf_class": "FALLBACK",
+        "provider": "grok-build-cli",
+        "route": "GRAPHITI_CHAT_FALLBACK",
+        "model": "grok-4.6",
+        "reasoning": "medium",
+        "config_identity": "graphiti-cli-command-v1",
+        "max_prompt_bytes": 4_096,
+        "max_context_tokens": 4_096,
+        "max_output_tokens": 1_024,
+        "max_total_tokens": 8_192,
+    },
+    {
+        "leaf_class": "EMBEDDING",
+        "provider": "openrouter",
+        "route": "GRAPHITI_EMBEDDING",
+        "model": "openai/text-embedding-3-large",
+        "reasoning": "none",
+        "config_identity": "graphiti-embedding-command-v1",
+        "max_prompt_bytes": 4_096,
+        "max_context_tokens": 4_096,
+        "max_output_tokens": 1,
+        "max_total_tokens": 4_096,
+    },
+)
 
 
 def test_checked_call_shape_policy_derives_headroom_from_qualified_fixtures() -> None:
@@ -72,6 +110,7 @@ def test_internal_request_identity_binds_semantics_without_source_expression() -
         ontology_identity="ontology-v1",
         temporal_identity="temporal-v1",
         generation_policy_identity="generation-v1",
+        qualified_routes=QUALIFIED_ROUTES,
         fixtures=(
             {
                 "fixture_id": "zero",
@@ -186,6 +225,7 @@ def _service_fixture(
         ontology_identity="ontology-v1",
         temporal_identity="temporal-v1",
         generation_policy_identity="generation-v1",
+        qualified_routes=QUALIFIED_ROUTES,
         fixtures=(
             {
                 "fixture_id": "single",
@@ -299,7 +339,7 @@ def test_atomic_graphiti_allocation_refuses_duplicate_and_call_shape_drift(
     )
     service.allocate_graphiti_request(
         first,
-        identity=first_identity.as_record(),
+        identity=first_identity,
         max_distinct_internal_requests=shape.max_distinct_internal_requests,
         owner_emergency_stop=False,
     )
@@ -314,11 +354,39 @@ def test_atomic_graphiti_allocation_refuses_duplicate_and_call_shape_drift(
     with pytest.raises(ModelUsageAdmissionError) as duplicate_error:
         service.allocate_graphiti_request(
             duplicate,
-            identity=duplicate_identity.as_record(),
+            identity=duplicate_identity,
             max_distinct_internal_requests=shape.max_distinct_internal_requests,
             owner_emergency_stop=False,
         )
     assert duplicate_error.value.reason_code == "DUPLICATE_INTERNAL_REQUEST"
+
+    restarted_envelope = WorkEnvelope.create(
+        cycle_id="cycle-769-restarted",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0 + timedelta(seconds=3),
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id=envelope.ingest_id,
+        graphiti_attempt_id=envelope.graphiti_attempt_id,
+    )
+    service.open_envelope(restarted_envelope)
+    restarted, restarted_identity = _bound_request(
+        envelope=restarted_envelope,
+        policy=policy,
+        shape=shape,
+        ordinal=1,
+        semantic="first",
+    )
+    with pytest.raises(ModelUsageAdmissionError) as restart_duplicate:
+        service.allocate_graphiti_request(
+            restarted,
+            identity=restarted_identity,
+            max_distinct_internal_requests=shape.max_distinct_internal_requests,
+            owner_emergency_stop=False,
+        )
+    assert restart_duplicate.value.reason_code == "DUPLICATE_INTERNAL_REQUEST"
 
     for ordinal in (2, 3):
         allocation, identity = _bound_request(
@@ -330,7 +398,7 @@ def test_atomic_graphiti_allocation_refuses_duplicate_and_call_shape_drift(
         )
         service.allocate_graphiti_request(
             allocation,
-            identity=identity.as_record(),
+            identity=identity,
             max_distinct_internal_requests=shape.max_distinct_internal_requests,
             owner_emergency_stop=False,
         )
@@ -345,7 +413,7 @@ def test_atomic_graphiti_allocation_refuses_duplicate_and_call_shape_drift(
     with pytest.raises(ModelUsageAdmissionError) as drift_error:
         service.allocate_graphiti_request(
             drift,
-            identity=drift_identity.as_record(),
+            identity=drift_identity,
             max_distinct_internal_requests=shape.max_distinct_internal_requests,
             owner_emergency_stop=False,
         )
@@ -509,6 +577,124 @@ def test_embedding_transport_observes_separate_preallocated_leaf_and_od011_recei
     assert leaf["od_011_reference"] == "OD-011:EVALUATION_GRAPHITI_EMBEDDING"
 
 
+def test_requested_max_tokens_is_forwarded_and_enforced_on_reported_usage(
+    tmp_path: Path,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-max-output",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-max-output",
+        graphiti_attempt_id="ingest-max-output:1",
+    )
+    service.open_envelope(envelope)
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=10),
+        deadline=T0 + timedelta(minutes=3),
+    )
+    captured_prompt = ""
+
+    async def cursor_runner(prompt: str) -> CliExecution:
+        nonlocal captured_prompt
+        captured_prompt = prompt
+        return CliExecution(
+            text='{"extracted_entities":[]}',
+            usage=cursor_cli_usage(
+                {
+                    "inputTokens": 10,
+                    "outputTokens": 4,
+                    "cacheReadTokens": 0,
+                    "cacheWriteTokens": 0,
+                }
+            ),
+        )
+
+    asyncio.run(
+        run_cli_chain(
+            prompt="bounded prompt",
+            schema=None,
+            semantic_request_class="ExtractedEntities",
+            max_tokens=3,
+            cursor_runner=cursor_runner,
+            grok_runner=lambda _prompt, _schema: "not called",
+            invocations=[],
+            invocation_observer=observer,
+        )
+    )
+
+    assert "maximum_output_tokens=3" in captured_prompt
+    leaf = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"][0]
+    assert leaf["policy_breach"] == "REQUESTED_MAX_OUTPUT_TOKENS_EXCEEDED"
+    assert service.route_state("GRAPHITI_CHAT_PRIMARY")["state"] == "OPEN"
+
+
+def test_cancellation_retains_uncertain_leaf_before_control_returns(
+    tmp_path: Path,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-cancel",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-cancel",
+        graphiti_attempt_id="ingest-cancel:1",
+    )
+    service.open_envelope(envelope)
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=10),
+        deadline=T0 + timedelta(minutes=3),
+    )
+    invocations: list[dict[str, object]] = []
+
+    async def cancel_during_transport() -> None:
+        started = asyncio.Event()
+
+        async def cursor_runner(_prompt: str) -> CliExecution:
+            started.set()
+            await asyncio.sleep(60)
+            raise AssertionError("cancelled transport resumed")
+
+        task = asyncio.create_task(
+            run_cli_chain(
+                prompt="cancel prompt",
+                schema=None,
+                semantic_request_class="ExtractedEntities",
+                max_tokens=100,
+                cursor_runner=cursor_runner,
+                grok_runner=lambda _prompt, _schema: "not called",
+                invocations=invocations,
+                invocation_observer=observer,
+            )
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancel_during_transport())
+
+    leaf = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"][0]
+    assert leaf["invocation_outcome"] == "CANCELLED"
+    assert leaf["usage_status"] == "UNREPORTED"
+    assert leaf["total_tokens"] is None
+    assert invocations[0]["model_invocation_terminal_digest"] == leaf[
+        "terminal_digest"
+    ]
+
+
 def test_typed_fallback_has_a_distinct_identity_and_exact_parent(
     tmp_path: Path,
 ) -> None:
@@ -603,12 +789,19 @@ def test_deadline_owner_stop_and_max_tokens_refuse_before_transport(
             max_tokens=100,
         )
 
+    owner_stop_checks = 0
+
+    def prove_owner_stop() -> None:
+        nonlocal owner_stop_checks
+        owner_stop_checks += 1
+
     stopped = GraphitiModelUsageObserver(
         service=service,
         envelope=envelope,
         clock=lambda: T0 + timedelta(seconds=1),
         deadline=T0 + timedelta(minutes=3),
         owner_emergency_stop=lambda: True,
+        owner_stop_check=prove_owner_stop,
     )
     with pytest.raises(ModelUsageAdmissionError, match="emergency stop"):
         stopped.before_cli_invocation(
@@ -619,6 +812,7 @@ def test_deadline_owner_stop_and_max_tokens_refuse_before_transport(
             semantic_request_class="ExtractedEntities",
             max_tokens=100,
         )
+    assert owner_stop_checks == 1
 
     oversized = GraphitiModelUsageObserver(
         service=service,
@@ -634,6 +828,16 @@ def test_deadline_owner_stop_and_max_tokens_refuse_before_transport(
             schema=None,
             semantic_request_class="ExtractedEntities",
             max_tokens=16_385,
+        )
+
+    with pytest.raises(ModelUsageAdmissionError, match="checked qualified policy"):
+        oversized.before_cli_invocation(
+            provider="unqualified-provider",
+            model="unqualified-model",
+            prompt="route drift",
+            schema=None,
+            semantic_request_class="ExtractedEntities",
+            max_tokens=100,
         )
 
     assert service.graphiti_request_records(envelope_id=envelope.envelope_id)[
@@ -656,7 +860,7 @@ def test_restart_distinguishes_pre_dispatch_zero_from_possible_io_uncertainty(
     )
     pre_service.allocate_graphiti_request(
         pre_allocation,
-        identity=pre_identity.as_record(),
+        identity=pre_identity,
         max_distinct_internal_requests=shape.max_distinct_internal_requests,
         owner_emergency_stop=False,
     )
@@ -683,7 +887,7 @@ def test_restart_distinguishes_pre_dispatch_zero_from_possible_io_uncertainty(
     )
     io_service.allocate_graphiti_request(
         io_allocation,
-        identity=io_identity.as_record(),
+        identity=io_identity,
         max_distinct_internal_requests=io_shape.max_distinct_internal_requests,
         owner_emergency_stop=False,
     )
@@ -717,7 +921,7 @@ def test_graphiti_attempt_cannot_complete_before_every_leaf_has_a_terminal(
     )
     service.allocate_graphiti_request(
         allocation,
-        identity=identity.as_record(),
+        identity=identity,
         max_distinct_internal_requests=shape.max_distinct_internal_requests,
         owner_emergency_stop=False,
     )
