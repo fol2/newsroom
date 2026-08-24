@@ -7,11 +7,30 @@ import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 from newsroom.authority.auth import AuthenticationProof
 from newsroom.authority.types import UtcTimestamp
 from newsroom.control_plane import backlog_reconciliation as backlog
+from newsroom.control_plane.command_auth import HERMES_COMMAND_PRINCIPAL
+from newsroom.control_plane.graphiti_spend_reconciliation import (
+    GRAPHITI_SPEND_RECONCILE_COMMAND_TYPE,
+    GraphitiSpendReconciliationReceipt,
+    _GraphitiSpendReconciliationCommand,
+    _apply_graphiti_spend_reconciliation,
+)
+
+
+class _VerifiedAuthentication(Protocol):
+    principal_id: str
+
+    def require_current(self, now: UtcTimestamp) -> None: ...
+
+
+class _Authenticator(Protocol):
+    def authenticate(
+        self, proof: object, *, now: UtcTimestamp
+    ) -> _VerifiedAuthentication: ...
 
 
 class ControlPlaneCommandService:
@@ -22,13 +41,47 @@ class ControlPlaneCommandService:
     def __init__(
         self,
         *,
-        authenticator: object,
+        authenticator: _Authenticator,
         clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
     ) -> None:
         if authenticator is None:
             raise ValueError("command service requires an authenticator")
         self._authenticator = authenticator
         self._clock = clock
+
+    def reconcile_graphiti_spend(
+        self,
+        *,
+        unpublished_store: str,
+        dry_run_plan: Mapping[str, object],
+        evaluated_at: datetime,
+        idempotency_key: str,
+        expected_plan_digest: str,
+        proof: AuthenticationProof,
+        graph_journal_evidence: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> GraphitiSpendReconciliationReceipt:
+        """Authenticate and apply one provider-free spend reconciliation plan."""
+
+        now = self._clock()
+        authentication = self._authenticator.authenticate(proof, now=now)
+        authentication.require_current(now)
+        if authentication.principal_id != HERMES_COMMAND_PRINCIPAL:
+            raise PermissionError(
+                "Graphiti spend reconciliation requires the Hermes principal"
+            )
+        return _apply_graphiti_spend_reconciliation(
+            unpublished_store,
+            dry_run_plan=dry_run_plan,
+            evaluated_at=evaluated_at,
+            graph_journal_evidence=graph_journal_evidence,
+            command=_GraphitiSpendReconciliationCommand(
+                caller_principal=authentication.principal_id,
+                writer_principal=self.principal,
+                command_type=GRAPHITI_SPEND_RECONCILE_COMMAND_TYPE,
+                idempotency_key=idempotency_key,
+                expected_plan_digest=expected_plan_digest,
+            ),
+        )
 
     def reconcile_effective_revision_backlog(
         self,

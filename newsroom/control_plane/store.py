@@ -30,6 +30,7 @@ SCHEMA_VERSION = "newsroom.control-plane.unpublished.v12"
 EFFECTIVE_REVISION_LANDED = "EFFECTIVE_REVISION_LANDED"
 LEDGER_GENESIS = "sha256:" + ("0" * 64)
 GRAPHITI_MAX_FAILURES = 3
+GRAPHITI_SPEND_FX_POLICY = "USD_GBP_CONSERVATIVE_PARITY_V1"
 _SQLITE_BIND_BATCH_SIZE = 500
 _NO_EMBEDDING_USAGE_KEYS = frozenset(
     {
@@ -59,6 +60,14 @@ def is_exact_no_embedding_call(
         and embedding_usage["requests"] == []
         and all(type(value) is int and value == 0 for value in zero_fields)
     )
+
+
+def graphiti_usd_to_gbp_microunits(usd_microunits: int) -> tuple[int, str]:
+    """Apply the accepted, versioned conservative Graphiti spend FX policy."""
+
+    if isinstance(usd_microunits, bool) or usd_microunits < 0:
+        raise ValueError("Graphiti USD microunits must be a non-negative integer")
+    return usd_microunits, GRAPHITI_SPEND_FX_POLICY
 
 
 def _bind_batches(values: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
@@ -1459,11 +1468,20 @@ def reconcile_graphiti_spend(
     raw_cost = usage.get("cost_usd_microunits")
     no_call = is_exact_no_embedding_call(embedding_usage)
     reported = is_exact_provider_reported_usage(embedding_usage)
-    # Conservative versioned parity conversion until a separately accepted FX
-    # table supersedes this policy: USD 1.00 reserves/debits GBP 1.00.
-    fx_policy = "USD_GBP_CONSERVATIVE_PARITY_V1"
-    actual_usd = 0 if no_call else (int(cast(int, raw_cost)) if reported else None)
-    actual_gbp = actual_usd
+    actual_usd: int | None
+    if no_call:
+        actual_usd = 0
+    elif reported:
+        if not isinstance(raw_cost, int) or isinstance(raw_cost, bool):
+            raise ValueError("provider-reported Graphiti cost must be an integer")
+        actual_usd = raw_cost
+    else:
+        actual_usd = None
+    actual_gbp, fx_policy = (
+        graphiti_usd_to_gbp_microunits(actual_usd)
+        if actual_usd is not None
+        else (None, GRAPHITI_SPEND_FX_POLICY)
+    )
     status = "RECONCILED" if reported or no_call else "UNRECONCILED"
     connection.execute(
         """
