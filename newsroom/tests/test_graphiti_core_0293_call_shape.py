@@ -322,6 +322,11 @@ def test_newsroom_cli_client_receipts_requested_max_tokens() -> None:
         )
     )
     assert payload == {"extracted_entities": []}
-    assert captured["prompt"] == "system:\nsystem\n\nuser:\nuser"
+    assert captured["prompt"] == (
+        "system:\nsystem\n\nuser:\nuser\n\n"
+        "<newsroom_controller_output_contract>\n"
+        "maximum_output_tokens=99\n"
+        "</newsroom_controller_output_contract>"
+    )
     assert client.invocations[0]["outcome"] == "COMPLETE"
     assert client.invocations[0]["requested_max_tokens"] == 99

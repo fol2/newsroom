@@ -69,6 +69,65 @@ def _positive(value: int, *, field: str) -> int:
 
 
 @dataclass(frozen=True, slots=True)
+class GraphitiQualifiedRoute:
+    leaf_class: GraphitiLeafClass
+    provider: str
+    route: str
+    model: str
+    reasoning: str
+    config_identity: str
+    max_prompt_bytes: int
+    max_context_tokens: int
+    max_output_tokens: int
+    max_total_tokens: int
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> GraphitiQualifiedRoute:
+        try:
+            leaf_class = GraphitiLeafClass(str(value.get("leaf_class", "")))
+        except ValueError as exc:
+            raise GraphitiRequestContractError(
+                "qualified Graphiti route has an invalid leaf class"
+            ) from exc
+        route = cls(
+            leaf_class=leaf_class,
+            provider=str(value.get("provider", "")),
+            route=str(value.get("route", "")),
+            model=str(value.get("model", "")),
+            reasoning=str(value.get("reasoning", "")),
+            config_identity=str(value.get("config_identity", "")),
+            max_prompt_bytes=value.get("max_prompt_bytes", 0),  # type: ignore[arg-type]
+            max_context_tokens=value.get("max_context_tokens", 0),  # type: ignore[arg-type]
+            max_output_tokens=value.get("max_output_tokens", 0),  # type: ignore[arg-type]
+            max_total_tokens=value.get("max_total_tokens", 0),  # type: ignore[arg-type]
+        )
+        for name in ("provider", "route", "model", "reasoning", "config_identity"):
+            _token(str(getattr(route, name)), field=f"qualified route {name}")
+        for name in (
+            "max_prompt_bytes",
+            "max_context_tokens",
+            "max_output_tokens",
+            "max_total_tokens",
+        ):
+            _positive(getattr(route, name), field=f"qualified route {name}")
+        return route
+
+    def as_record(self) -> dict[str, object]:
+        return {
+            "leaf_class": self.leaf_class.value,
+            "provider": self.provider,
+            "route": self.route,
+            "model": self.model,
+            "reasoning": self.reasoning,
+            "config_identity": self.config_identity,
+            "max_prompt_bytes": self.max_prompt_bytes,
+            "max_context_tokens": self.max_context_tokens,
+            "max_output_tokens": self.max_output_tokens,
+            "max_total_tokens": self.max_total_tokens,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class GraphitiCallShapeFixture:
     fixture_id: str
     fixture_class: str
@@ -142,6 +201,7 @@ class GraphitiCallShapePolicy:
     ontology_identity: str
     temporal_identity: str
     generation_policy_identity: str
+    qualified_routes: tuple[GraphitiQualifiedRoute, ...]
     fixtures: tuple[GraphitiCallShapeFixture, ...]
     evidence_digest: str
     maximum_qualified_fixture_count: int
@@ -166,11 +226,23 @@ class GraphitiCallShapePolicy:
             else (_raise_fixture_type())
             for item in raw_fixtures
         )
+        raw_routes = values.get("qualified_routes")
+        if not isinstance(raw_routes, tuple) or not raw_routes:
+            raise GraphitiRequestContractError("qualified Graphiti routes must be a tuple")
+        routes = tuple(
+            item
+            if isinstance(item, GraphitiQualifiedRoute)
+            else GraphitiQualifiedRoute.from_mapping(item)
+            if isinstance(item, Mapping)
+            else _raise_route_type()
+            for item in raw_routes
+        )
         supplied_evidence_digest = values.pop("evidence_digest", None)
         evidence_digest = digest_canonical(
             {
                 "graphiti_core_release": values.get("graphiti_core_release"),
                 "fixtures": [item.as_record() for item in fixtures],
+                "qualified_routes": [item.as_record() for item in routes],
             }
         )
         if (
@@ -186,14 +258,24 @@ class GraphitiCallShapePolicy:
         maximum_with_headroom = maximum + headroom
         record = {
             "schema_version": GRAPHITI_CALL_SHAPE_SCHEMA_VERSION,
-            **{key: value for key, value in values.items() if key != "fixtures"},
+            **{
+                key: value
+                for key, value in values.items()
+                if key not in {"fixtures", "qualified_routes"}
+            },
             "fixtures": [item.as_record() for item in fixtures],
+            "qualified_routes": [item.as_record() for item in routes],
             "maximum_qualified_fixture_count": maximum,
             "headroom": headroom,
             "max_distinct_internal_requests": maximum_with_headroom,
         }
         policy = cls(
-            **{key: value for key, value in values.items() if key != "fixtures"},  # type: ignore[arg-type]
+            **{
+                key: value
+                for key, value in values.items()
+                if key not in {"fixtures", "qualified_routes"}
+            },  # type: ignore[arg-type]
+            qualified_routes=routes,
             fixtures=fixtures,
             maximum_qualified_fixture_count=maximum,
             headroom=headroom,
@@ -220,6 +302,7 @@ class GraphitiCallShapePolicy:
             {
                 "graphiti_core_release": self.graphiti_core_release,
                 "fixtures": [item.as_record() for item in self.fixtures],
+                "qualified_routes": [item.as_record() for item in self.qualified_routes],
             }
         )
         if self.evidence_digest != expected_evidence_digest:
@@ -228,6 +311,20 @@ class GraphitiCallShapePolicy:
             )
         if len({item.fixture_id for item in self.fixtures}) != len(self.fixtures):
             raise GraphitiRequestContractError("call-shape fixture identities repeat")
+        if {item.leaf_class for item in self.qualified_routes} != set(GraphitiLeafClass):
+            raise GraphitiRequestContractError(
+                "qualified Graphiti routes must bind every leaf class exactly once"
+            )
+
+    def route_for(self, leaf_class: GraphitiLeafClass) -> GraphitiQualifiedRoute:
+        matches = tuple(
+            route for route in self.qualified_routes if route.leaf_class is leaf_class
+        )
+        if len(matches) != 1:
+            raise GraphitiRequestContractError(
+                "qualified Graphiti route identity is ambiguous"
+            )
+        return matches[0]
 
     def as_record(self) -> dict[str, object]:
         return {
@@ -241,6 +338,7 @@ class GraphitiCallShapePolicy:
             "ontology_identity": self.ontology_identity,
             "temporal_identity": self.temporal_identity,
             "generation_policy_identity": self.generation_policy_identity,
+            "qualified_routes": [item.as_record() for item in self.qualified_routes],
             "fixtures": [item.as_record() for item in self.fixtures],
             "evidence_digest": self.evidence_digest,
             "maximum_qualified_fixture_count": self.maximum_qualified_fixture_count,
@@ -251,6 +349,10 @@ class GraphitiCallShapePolicy:
 
 def _raise_fixture_type() -> GraphitiCallShapeFixture:
     raise GraphitiRequestContractError("call-shape fixture must be a mapping")
+
+
+def _raise_route_type() -> GraphitiQualifiedRoute:
+    raise GraphitiRequestContractError("qualified Graphiti route must be a mapping")
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,6 +474,11 @@ class GraphitiInternalRequestIdentity:
                 "semantic request class is outside the qualified Graphiti shape"
             )
 
+    def validate(self) -> None:
+        """Revalidate an identity reconstructed outside :meth:`create`."""
+
+        self._validate()
+
     def as_record(self) -> dict[str, object]:
         return _identity_record(
             {
@@ -467,6 +574,10 @@ def load_checked_graphiti_call_shape_policy() -> GraphitiCallShapePolicy:
     if not isinstance(raw_fixtures, list):
         raise GraphitiRequestContractError("checked call-shape fixtures are absent")
     payload["fixtures"] = tuple(raw_fixtures)
+    raw_routes = payload.get("qualified_routes")
+    if not isinstance(raw_routes, list):
+        raise GraphitiRequestContractError("checked qualified routes are absent")
+    payload["qualified_routes"] = tuple(raw_routes)
     policy = GraphitiCallShapePolicy.create(**payload)
     if expected_digest is not None and expected_digest != policy.canonical_digest:
         raise GraphitiRequestContractError("checked call-shape policy digest changed")
@@ -481,6 +592,7 @@ __all__ = [
     "GraphitiCallShapePolicy",
     "GraphitiInternalRequestIdentity",
     "GraphitiLeafClass",
+    "GraphitiQualifiedRoute",
     "GraphitiRequestContractError",
     "graphiti_semantic_state_digest",
     "load_checked_graphiti_call_shape_policy",

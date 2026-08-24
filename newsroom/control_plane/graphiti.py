@@ -106,10 +106,6 @@ GRAPHITI_CONTEXT_IDENTITY = "graphiti-combined-temporal-hermetic-v1"
 GRAPHITI_CHAT_PRIMARY_ROUTE = "GRAPHITI_CHAT_PRIMARY"
 GRAPHITI_CHAT_FALLBACK_ROUTE = "GRAPHITI_CHAT_FALLBACK"
 GRAPHITI_EMBEDDING_ROUTE = "GRAPHITI_EMBEDDING"
-GRAPHITI_MAX_PROMPT_BYTES = 262_144
-GRAPHITI_MAX_CONTEXT_TOKENS = 131_072
-GRAPHITI_MAX_OUTPUT_TOKENS = 16_384
-GRAPHITI_MAX_TOTAL_TOKENS = 147_456
 
 
 class GraphitiModelUsageObserver:
@@ -125,6 +121,7 @@ class GraphitiModelUsageObserver:
         deadline: datetime | None = None,
         dispatch_authority_digest: str | None = None,
         owner_emergency_stop: Callable[[], bool] = lambda: False,
+        owner_stop_check: Callable[[], None] = lambda: None,
         call_shape_policy: GraphitiCallShapePolicy | None = None,
     ) -> None:
         self._service = service
@@ -156,6 +153,7 @@ class GraphitiModelUsageObserver:
             )
         )
         self._owner_emergency_stop = owner_emergency_stop
+        self._owner_stop_check = owner_stop_check
 
     def _policy_for(
         self,
@@ -168,7 +166,28 @@ class GraphitiModelUsageObserver:
         output_schema_digest: str,
         semantic_request_class: str,
     ) -> InvocationEfficiencyPolicy:
-        embedding = workload is WorkloadClass.GRAPHITI_EMBEDDING
+        leaf_class = (
+            GraphitiLeafClass.EMBEDDING
+            if workload is WorkloadClass.GRAPHITI_EMBEDDING
+            else GraphitiLeafClass.FALLBACK
+            if workload is WorkloadClass.GRAPHITI_CHAT_FALLBACK
+            else GraphitiLeafClass.PRIMARY
+        )
+        route_contract = self._shape.route_for(leaf_class)
+        if (
+            provider,
+            route,
+            model,
+            reasoning,
+        ) != (
+            route_contract.provider,
+            route_contract.route,
+            route_contract.model,
+            route_contract.reasoning,
+        ):
+            raise ModelUsageAdmissionError(
+                "Graphiti route differs from the checked qualified policy"
+            )
         policy = InvocationEfficiencyPolicy.create(
             policy_id=(
                 f"graphiti-{workload.value.lower()}-{semantic_request_class.lower()}-"
@@ -186,34 +205,25 @@ class GraphitiModelUsageObserver:
             tools_enabled=False,
             mcp_enabled=False,
             prior_message_count=0,
-            max_prompt_bytes=GRAPHITI_MAX_PROMPT_BYTES,
-            max_context_tokens=GRAPHITI_MAX_CONTEXT_TOKENS,
-            max_output_tokens=1 if embedding else GRAPHITI_MAX_OUTPUT_TOKENS,
-            max_total_tokens=(
-                GRAPHITI_MAX_CONTEXT_TOKENS
-                if embedding
-                else GRAPHITI_MAX_TOTAL_TOKENS
-            ),
+            max_prompt_bytes=route_contract.max_prompt_bytes,
+            max_context_tokens=route_contract.max_context_tokens,
+            max_output_tokens=route_contract.max_output_tokens,
+            max_total_tokens=route_contract.max_total_tokens,
             prompt_contract_version=GRAPHITI_PROMPT_COMPONENT.component_version,
             output_schema_digest=output_schema_digest,
             allowed_context_identities=(GRAPHITI_CONTEXT_IDENTITY,),
-            allowed_config_identities=(
-                "graphiti-embedding-command-v1"
-                if embedding
-                else "graphiti-cli-command-v1",
-            ),
+            allowed_config_identities=(route_contract.config_identity,),
             hard_estimate_ceiling_tokens=None,
             evidence_digest=digest_canonical(
                 {
                     "call_shape_policy_digest": self._shape.canonical_digest,
+                    "qualified_route": route_contract.as_record(),
                     "semantic_request_class": semantic_request_class,
                     "output_schema_digest": output_schema_digest,
                     "bounds": {
-                        "prompt_bytes": GRAPHITI_MAX_PROMPT_BYTES,
-                        "context_tokens": GRAPHITI_MAX_CONTEXT_TOKENS,
-                        "output_tokens": (
-                            1 if embedding else GRAPHITI_MAX_OUTPUT_TOKENS
-                        ),
+                        "prompt_bytes": route_contract.max_prompt_bytes,
+                        "context_tokens": route_contract.max_context_tokens,
+                        "output_tokens": route_contract.max_output_tokens,
                     },
                 }
             ),
@@ -348,6 +358,7 @@ class GraphitiModelUsageObserver:
             recovery_deadline_at=allocated_at + timedelta(minutes=16),
             parent_invocation_id=parent_invocation_id,
         )
+        self._owner_stop_check()
         owner_stop_active = self._owner_emergency_stop()
         if owner_stop_active:
             raise ModelUsageAdmissionError("Graphiti owner emergency stop is active")
@@ -391,7 +402,7 @@ class GraphitiModelUsageObserver:
         )
         self._service.allocate_graphiti_request(
             allocation,
-            identity=identity.as_record(),
+            identity=identity,
             max_distinct_internal_requests=self._shape.max_distinct_internal_requests,
             owner_emergency_stop=owner_stop_active,
         )
@@ -662,6 +673,7 @@ class EvaluationGraphitiRunner:
         model_usage: ModelUsageService,
         cycle_id: str,
         dispatch_authority: Mapping[str, object],
+        owner_stop_check: Callable[[], None] = lambda: None,
         deadline: datetime | None = None,
     ) -> GraphitiCycleResult:
         envelope = WorkEnvelope.create(
@@ -692,6 +704,7 @@ class EvaluationGraphitiRunner:
             provider_attempt_number=unit.attempt_number,
             deadline=deadline,
             dispatch_authority_digest=digest_canonical(dict(dispatch_authority)),
+            owner_stop_check=owner_stop_check,
         )
         self._pending_usage[(unit.ingest_id, unit.attempt_number)] = (
             model_usage,

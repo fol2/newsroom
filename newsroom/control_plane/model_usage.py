@@ -21,6 +21,7 @@ from typing import TypeGuard
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_canonical
 from newsroom.control_plane.cycle_governor import CONT_WRITER_ROUTE
+from newsroom.control_plane.graphiti_requests import GraphitiInternalRequestIdentity
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.veto import assert_private_store
 
@@ -228,12 +229,13 @@ CREATE TABLE IF NOT EXISTS graphiti_internal_requests(
     canonical_digest TEXT PRIMARY KEY,
     invocation_id TEXT NOT NULL UNIQUE,
     envelope_id TEXT NOT NULL,
+    graphiti_attempt_id TEXT NOT NULL,
     internal_ordinal INTEGER NOT NULL CHECK(internal_ordinal > 0),
     semantic_state_digest TEXT NOT NULL,
     provider_attempt_id TEXT NOT NULL,
     call_shape_policy_digest TEXT NOT NULL,
     record_json TEXT NOT NULL,
-    UNIQUE(envelope_id, semantic_state_digest),
+    UNIQUE(graphiti_attempt_id, semantic_state_digest),
     FOREIGN KEY(invocation_id) REFERENCES model_invocation_allocations(invocation_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
     FOREIGN KEY(envelope_id) REFERENCES model_work_envelopes(envelope_id)
@@ -1308,7 +1310,7 @@ class ModelUsageService:
         self,
         allocation: InvocationAllocation,
         *,
-        identity: Mapping[str, object],
+        identity: GraphitiInternalRequestIdentity,
         max_distinct_internal_requests: int,
         owner_emergency_stop: bool,
     ) -> None:
@@ -1327,8 +1329,9 @@ class ModelUsageService:
             or max_distinct_internal_requests <= 0
         ):
             raise ModelUsageAdmissionError("Graphiti call-shape bound is invalid")
-        record = dict(identity)
-        self._validate_graphiti_identity(allocation, record)
+        identity.validate()
+        record = identity.as_record()
+        self._validate_graphiti_identity(allocation, identity)
         connection = self._connection()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -1351,13 +1354,14 @@ class ModelUsageService:
             semantic_state_digest = str(record["semantic_state_digest"])
             duplicate = connection.execute(
                 "SELECT 1 FROM graphiti_internal_requests "
-                "WHERE envelope_id=? AND semantic_state_digest=?",
-                (allocation.envelope_id, semantic_state_digest),
+                "WHERE graphiti_attempt_id=? AND semantic_state_digest=?",
+                (identity.graphiti_attempt_id, semantic_state_digest),
             ).fetchone()
             retained_count = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM graphiti_internal_requests WHERE envelope_id=?",
-                    (allocation.envelope_id,),
+                    "SELECT COUNT(*) FROM graphiti_internal_requests "
+                    "WHERE graphiti_attempt_id=?",
+                    (identity.graphiti_attempt_id,),
                 ).fetchone()[0]
             )
             reason_code = (
@@ -1393,13 +1397,15 @@ class ModelUsageService:
             self._insert_allocation(connection, allocation)
             connection.execute(
                 "INSERT INTO graphiti_internal_requests("
-                "canonical_digest,invocation_id,envelope_id,internal_ordinal,"
+                "canonical_digest,invocation_id,envelope_id,graphiti_attempt_id,"
+                "internal_ordinal,"
                 "semantic_state_digest,provider_attempt_id,call_shape_policy_digest,"
-                "record_json) VALUES(?,?,?,?,?,?,?,?)",
+                "record_json) VALUES(?,?,?,?,?,?,?,?,?)",
                 (
                     record["canonical_digest"],
                     allocation.invocation_id,
                     allocation.envelope_id,
+                    identity.graphiti_attempt_id,
                     allocation.leaf_ordinal,
                     semantic_state_digest,
                     record["provider_attempt_id"],
@@ -1458,7 +1464,7 @@ class ModelUsageService:
     def _validate_graphiti_identity(
         self,
         allocation: InvocationAllocation,
-        record: Mapping[str, object],
+        identity: GraphitiInternalRequestIdentity,
     ) -> None:
         expected = {
             "invocation_id": allocation.invocation_id,
@@ -1475,41 +1481,10 @@ class ModelUsageService:
             "parent_invocation_id": allocation.parent_invocation_id,
             "invocation_policy_digest": allocation.invocation_policy_digest,
         }
-        if any(record.get(field) != value for field, value in expected.items()):
+        if any(getattr(identity, field) != value for field, value in expected.items()):
             raise ModelUsageAdmissionError(
                 "Graphiti request identity differs from its #728 allocation"
             )
-        required = (
-            "canonical_digest",
-            "effective_revision_digest",
-            "ingest_obligation_id",
-            "graphiti_attempt_id",
-            "provider_attempt_id",
-            "semantic_request_class",
-            "response_schema_identity",
-            "framework_identity",
-            "prompt_identity",
-            "ontology_identity",
-            "temporal_identity",
-            "generation_policy_identity",
-            "leaf_class",
-            "retry_state_digest",
-            "call_shape_policy_digest",
-            "dispatch_authority_digest",
-            "route_circuit_state",
-            "semantic_state_digest",
-        )
-        if any(not isinstance(record.get(field), str) for field in required):
-            raise ModelUsageAdmissionError("Graphiti request identity is incomplete")
-        if record.get("owner_stop_clear") is not True:
-            raise ModelUsageAdmissionError("Graphiti owner-stop proof is not clear")
-        if record.get("route_circuit_state") != "CLOSED":
-            raise ModelUsageAdmissionError("Graphiti route-circuit proof is not clear")
-        unsigned = dict(record)
-        canonical_digest = str(unsigned.pop("canonical_digest"))
-        unsigned["canonical_digest"] = ""
-        if digest_canonical(unsigned) != canonical_digest:
-            raise ModelUsageAdmissionError("Graphiti request identity digest is invalid")
 
     def _retain_graphiti_refusal(
         self,
@@ -1807,7 +1782,8 @@ class ModelUsageService:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT a.route,a.workload_class,p.record_json,"
-                "json_extract(a.record_json,'$.context_manifest_digest') "
+                "json_extract(a.record_json,'$.context_manifest_digest'),"
+                "json_extract(a.record_json,'$.max_output_tokens') "
                 "FROM model_invocation_allocations a "
                 "JOIN model_invocation_policies p ON p.canonical_digest=a.policy_digest "
                 "WHERE a.invocation_id=?",
@@ -1817,6 +1793,7 @@ class ModelUsageService:
                 raise ModelUsageIntegrityError("invocation allocation is absent")
             route, workload = str(row[0]), WorkloadClass(str(row[1]))
             context_manifest_digest = str(row[3])
+            requested_max_output_tokens = int(row[4])
             policy = _policy_from_record(_object(row[2]))
             retained = terminal
             if provider_telemetry is not None:
@@ -1840,7 +1817,12 @@ class ModelUsageService:
                     failure_class=invalid_report,
                     terminal_digest="",
                 )
-            policy_breach = self._validate_terminal(retained, workload, policy)
+            policy_breach = self._validate_terminal(
+                retained,
+                workload,
+                policy,
+                requested_max_output_tokens=requested_max_output_tokens,
+            )
             if policy_breach is not None:
                 retained = replace(
                     retained,
@@ -1945,6 +1927,8 @@ class ModelUsageService:
         terminal: InvocationTerminal,
         workload: WorkloadClass,
         policy: InvocationEfficiencyPolicy,
+        *,
+        requested_max_output_tokens: int,
     ) -> str | None:
         components = terminal.components
         total = components.total_tokens
@@ -1994,6 +1978,8 @@ class ModelUsageService:
         if context is not None and context > policy.max_context_tokens:
             return "MAX_CONTEXT_TOKENS_EXCEEDED"
         output = components.output_tokens
+        if output is not None and output > requested_max_output_tokens:
+            return "REQUESTED_MAX_OUTPUT_TOKENS_EXCEEDED"
         if output is not None and output > policy.max_output_tokens:
             return "MAX_OUTPUT_TOKENS_EXCEEDED"
         return terminal.policy_breach
@@ -2735,6 +2721,9 @@ class ModelUsageService:
                     str(allocation["invocation_id"])
                 ),
                 "usage_status": effective.get("usage_status"),
+                "terminal_digest": (
+                    None if terminal is None else terminal.get("terminal_digest")
+                ),
                 "terminal_usage_status": (
                     None if terminal is None else terminal.get("usage_status")
                 ),

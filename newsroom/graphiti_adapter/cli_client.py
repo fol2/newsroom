@@ -353,6 +353,17 @@ def _invocation(
     return value
 
 
+def _bind_requested_max_tokens(prompt: str, max_tokens: int) -> str:
+    if isinstance(max_tokens, bool) or max_tokens <= 0:
+        raise ValueError("Graphiti requested max_tokens must be positive")
+    return (
+        f"{prompt}\n\n"
+        "<newsroom_controller_output_contract>\n"
+        f"maximum_output_tokens={max_tokens}\n"
+        "</newsroom_controller_output_contract>"
+    )
+
+
 def _before_observed_cli_invocation(
     observer: CliInvocationObserver,
     *,
@@ -400,6 +411,7 @@ async def run_cli_chain(
 ) -> dict[str, Any]:
     """Execute cursor then Grok fallback while retaining every call outcome."""
 
+    prompt = _bind_requested_max_tokens(prompt, max_tokens)
     cursor_token = (
         None
         if invocation_observer is None

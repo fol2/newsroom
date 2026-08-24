@@ -5,14 +5,16 @@ Graphiti corpus ingest is independent of CONT writes (GING-001).
 
 from __future__ import annotations
 
+import inspect
 import json
 import sqlite3
 import uuid
 from collections import Counter
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Callable, ContextManager, Final, Iterator, Protocol, TypedDict, cast
+from typing import ContextManager, Final, Protocol, TypedDict, cast
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.admission import (
@@ -879,6 +881,7 @@ def _ingest(
     on_systemic_failure: Callable[[str, bool], None] | None = None,
     model_usage: ModelUsageService | None = None,
     cycle_id: str | None = None,
+    owner_stop_check: Callable[[], None] | None = None,
 ) -> int:
     if isinstance(graphiti, GovernedRealGraphitiPort) and (
         model_usage is None
@@ -1076,18 +1079,27 @@ def _ingest(
                 attempted += 1
                 ingest_with_usage = getattr(graphiti, "ingest_with_usage", None)
                 if model_usage is not None and callable(ingest_with_usage):
+                    usage_arguments: dict[str, object] = {
+                        "model_usage": model_usage,
+                        "cycle_id": cycle_id or unit.proving_run_id,
+                        "deadline": (
+                            dispatch_authority.deadline
+                            if isinstance(graphiti, GovernedRealGraphitiPort)
+                            else None
+                        ),
+                        "dispatch_authority": final_dispatch_rights,
+                    }
+                    if (
+                        owner_stop_check is not None
+                        and "owner_stop_check"
+                        in inspect.signature(ingest_with_usage).parameters
+                    ):
+                        usage_arguments["owner_stop_check"] = owner_stop_check
                     returned_result = cast(
                         GraphitiCycleResult,
                         ingest_with_usage(
                             unit,
-                            model_usage=model_usage,
-                            cycle_id=cycle_id or unit.proving_run_id,
-                            deadline=(
-                                dispatch_authority.deadline
-                                if isinstance(graphiti, GovernedRealGraphitiPort)
-                                else None
-                            ),
-                            dispatch_authority=final_dispatch_rights,
+                            **usage_arguments,
                         ),
                     )
                 elif isinstance(graphiti, GovernedRealGraphitiPort):
@@ -2733,6 +2745,9 @@ def consume_next_graphiti_event(
                     on_systemic_failure=systemic_failure,
                     model_usage=model_usage,
                     cycle_id=event.event_id,
+                    owner_stop_check=lambda: assert_no_owner_emergency_stop(
+                        proving_store
+                    ),
                 )
                 provider_dispatched = provider_dispatched or attempted > 0
                 if all(has_graphiti_ingest(unpublished, item) for item in ingest_ids):
@@ -2968,6 +2983,9 @@ def run_cycle(
                 clock=clock,
                 model_usage=model_usage,
                 cycle_id=cycle_id,
+                owner_stop_check=lambda: assert_no_owner_emergency_stop(
+                    proving_store
+                ),
             )
             unpublished.commit()
         if graphiti_admission_factory is not None:
