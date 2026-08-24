@@ -40,6 +40,7 @@ RELATIONS_BODY = (
 )
 REFERENCE_TIME = "2026-08-20T00:00:00Z"
 SCHEMA_VERSION = "newsroom.graphiti-sdk-no-tool-calibration.v1"
+VALIDATOR_VERSION = "newsroom.graphiti-sdk-no-tool-validator.v2"
 FORBIDDEN_SETTING_SOURCES = frozenset(
     {"project", "user", "team", "mdm", "plugins", "all"}
 )
@@ -180,6 +181,18 @@ class LeafPrompt:
 
 
 @dataclass(frozen=True, slots=True)
+class SemanticAssessment:
+    """Content-free semantic diagnostics retained beside one model leaf."""
+
+    json_valid: bool
+    result: str
+    failure_codes: tuple[str, ...]
+    entity_count: int | None
+    fact_count: int | None
+    key_set_digest: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class DispatchRequest:
     prompt: str
     options: dict[str, object]
@@ -230,10 +243,18 @@ def source_safe_body(*, size: int = 368) -> str:
 
 
 def long_retained_chunk() -> str:
+    """Return the exact historical 8,192-byte live-packet fixture."""
+
     seed = source_safe_body().encode("utf-8")
     return (seed * ((MAX_EPISODE_BYTES // len(seed)) + 1))[:MAX_EPISODE_BYTES].decode(
         "utf-8"
     )
+
+
+def over_limit_revision() -> str:
+    """Return a provider-free fixture that crosses the episode chunk boundary."""
+
+    return long_retained_chunk() + ("x" * 50)
 
 
 def compact_prompt(body: str) -> str:
@@ -621,6 +642,11 @@ def run_packet(
             "status": "DRY_RUN",
             "json_valid": None,
             "semantic_fixture_result": "PENDING",
+            "semantic_failure_codes": [],
+            "entity_count": None,
+            "fact_count": None,
+            "key_set_digest": None,
+            "validator_version": VALIDATOR_VERSION,
             "stream_message_classes": [],
             "tool_call_count": 0,
             "usage": unreported_cli_usage(),
@@ -678,9 +704,15 @@ def run_packet(
         "call_cap": call_cap,
         "leaves": leaves,
         "cli_baseline": compare_to_cli_baseline(
-            next(leaf["usage"] for leaf in leaves if leaf["label"] == LEAF_LABELS[0])  # type: ignore[arg-type, index]
+            next(
+                leaf["usage"]
+                for leaf in leaves
+                if leaf["label"] == LEAF_LABELS[0]
+            )  # type: ignore[arg-type, index]
         ),
         "cli_path_comparison": compare_packet_to_cli(leaves),
+        "semantic_summary": _semantic_summary(leaves),
+        "exact_repeat": _exact_repeat_summary(leaves),
         "recommendation": recommend(leaves),
         "no_grok": True,
         "no_openrouter": True,
@@ -883,7 +915,9 @@ def _record_upstream(body: str, *, nonempty: bool) -> tuple[str, str]:
             custom_extraction_instructions=GRAPHITI_EXTRACTION_INSTRUCTIONS,
         )
     )
-    combined = next(prompt for name, prompt in recorder.calls if name == "CombinedExtraction")
+    combined = next(
+        prompt for name, prompt in recorder.calls if name == "CombinedExtraction"
+    )
     timestamps = next(
         (prompt for name, prompt in recorder.calls if name == "BatchEdgeTimestamps"),
         "",
@@ -923,7 +957,9 @@ def _route_isolation(
         "tool_count": len(options.get("tools") or ()),
         "mcp_count": len(options.get("mcp_servers") or {}),
         "subagent_count": len(options.get("agents") or {}),
-        "custom_tool_count": len(custom_tools) if isinstance(custom_tools, Mapping) else 0,
+        "custom_tool_count": (
+            len(custom_tools) if isinstance(custom_tools, Mapping) else 0
+        ),
         "prior_message_count": 0,
     }
 
@@ -952,10 +988,20 @@ def compare_packet_to_cli(
                 "cli_label": cli_label,
                 "cli_input_tokens": cli_input,
                 "cli_chat_total": cli_chat_total,
-                "sdk_input_tokens": usage.get("input_tokens") if isinstance(usage, Mapping) else None,
-                "sdk_total_tokens": usage.get("total_tokens") if isinstance(usage, Mapping) else None,
+                "sdk_input_tokens": (
+                    usage.get("input_tokens")
+                    if isinstance(usage, Mapping)
+                    else None
+                ),
+                "sdk_total_tokens": (
+                    usage.get("total_tokens")
+                    if isinstance(usage, Mapping)
+                    else None
+                ),
                 "usage_status": (
-                    usage.get("usage_basis") if isinstance(usage, Mapping) else "UNREPORTED"
+                    usage.get("usage_basis")
+                    if isinstance(usage, Mapping)
+                    else "UNREPORTED"
                 ),
             }
         )
@@ -971,7 +1017,10 @@ def _observe_dispatch(result: object, *, prompt: LeafPrompt) -> dict[str, object
     if messages is None:
         messages = getattr(result, "stream_messages", ())
     for message in messages or ():
-        kind = str(getattr(message, "type", None) or getattr(message, "kind", "unknown"))
+        kind = str(
+            getattr(message, "type", None)
+            or getattr(message, "kind", "unknown")
+        )
         classes.append(kind)
         if kind in {"tool_call", "tool-call", "tool_use"}:
             tool_calls += 1
@@ -982,15 +1031,20 @@ def _observe_dispatch(result: object, *, prompt: LeafPrompt) -> dict[str, object
         text = getattr(result, "text", None)
         if callable(text):
             text = text()
-    json_valid, semantic = _score_result(text, prompt=prompt)
+    assessment = assess_result(text, prompt=prompt)
     agent_id = getattr(result, "agent_id", None) or getattr(result, "id", None)
     duration = getattr(result, "duration_ms", None)
     status = getattr(result, "status", "finished")
     status = str(getattr(status, "value", status))
     return {
         "status": status,
-        "json_valid": json_valid,
-        "semantic_fixture_result": semantic,
+        "json_valid": assessment.json_valid,
+        "semantic_fixture_result": assessment.result,
+        "semantic_failure_codes": list(assessment.failure_codes),
+        "entity_count": assessment.entity_count,
+        "fact_count": assessment.fact_count,
+        "key_set_digest": assessment.key_set_digest,
+        "validator_version": VALIDATOR_VERSION,
         "stream_message_classes": classes,
         "tool_call_count": tool_calls,
         "usage": normalise_usage(getattr(result, "usage", None)),
@@ -1004,65 +1058,208 @@ def _observe_dispatch(result: object, *, prompt: LeafPrompt) -> dict[str, object
     }
 
 
-def _score_result(text: object, *, prompt: LeafPrompt) -> tuple[bool | None, str]:
+def assess_result(text: object, *, prompt: LeafPrompt) -> SemanticAssessment:
+    """Score a leaf while retaining only content-free failure diagnostics."""
+
     if not isinstance(text, str) or not text.strip():
-        return False, "FAIL"
+        return _assessment(False, ("INVALID_JSON",))
     try:
         payload = json.loads(text[text.find("{") : text.rfind("}") + 1])
     except (ValueError, json.JSONDecodeError):
-        return False, "FAIL"
+        return _assessment(False, ("INVALID_JSON",))
     if not isinstance(payload, dict):
-        return False, "FAIL"
+        return _assessment(False, ("INVALID_TOP_LEVEL",))
+    entity_count, fact_count = _diagnostic_counts(payload, prompt=prompt)
+    key_set_digest = _key_set_digest(payload)
     if prompt.prompt_class == "tiny":
-        return True, "PASS" if payload.get("ok") is True else "FAIL"
-    if prompt.prompt_class == "upstream_combined" and prompt.fixture_id == "zero-result-368":
+        codes = () if payload.get("ok") is True else ("MISSING_EXPECTED_OK",)
+        return _assessment(
+            True,
+            codes,
+            entity_count=entity_count,
+            fact_count=fact_count,
+            key_set_digest=key_set_digest,
+        )
+    if (
+        prompt.prompt_class == "upstream_combined"
+        and prompt.fixture_id == "zero-result-368"
+    ):
         entities = payload.get("extracted_entities")
         edges = payload.get("edges")
-        ok = entities == [] and edges == []
-        return True, "PASS" if ok else "FAIL"
+        codes: list[str] = []
+        if not isinstance(entities, list):
+            codes.append("MISSING_ENTITY_LIST")
+        if not isinstance(edges, list):
+            codes.append("MISSING_FACT_LIST")
+        if (
+            isinstance(entities, list)
+            and isinstance(edges, list)
+            and (entities or edges)
+        ):
+            codes.append("UNEXPECTED_NONEMPTY_ZERO")
+        return _assessment(
+            True,
+            codes,
+            entity_count=entity_count,
+            fact_count=fact_count,
+            key_set_digest=key_set_digest,
+        )
     if prompt.prompt_class == "upstream_combined" and prompt.fixture_id == "relations":
-        return True, "PASS" if _combined_relations_ok(payload) else "FAIL"
+        codes = _relation_failure_codes(
+            payload,
+            entity_key="extracted_entities",
+            fact_key="edges",
+            require_temporal=False,
+        )
+        return _assessment(
+            True,
+            codes,
+            entity_count=entity_count,
+            fact_count=fact_count,
+            key_set_digest=key_set_digest,
+        )
     if prompt.prompt_class == "upstream_batch_timestamps":
         stamps = payload.get("timestamps")
-        ok = (
-            isinstance(stamps, list)
-            and stamps
-            and all(isinstance(item, dict) and "valid_at" in item for item in stamps)
+        codes = []
+        if not isinstance(stamps, list) or not stamps:
+            codes.append("MISSING_TIMESTAMP_LIST")
+        elif any(
+            not isinstance(item, dict) or "valid_at" not in item
+            for item in stamps
+        ):
+            codes.append("MISSING_VALID_AT")
+        return _assessment(
+            True,
+            codes,
+            entity_count=entity_count,
+            fact_count=fact_count,
+            key_set_digest=key_set_digest,
         )
-        return True, "PASS" if ok else "FAIL"
     if prompt.prompt_class == "compact_combined_temporal":
         entities = payload.get("entities")
         facts = payload.get("facts")
-        if not isinstance(entities, list) or not isinstance(facts, list):
-            return True, "FAIL"
         if prompt.fixture_id == "zero-result-368":
-            return True, "PASS" if entities == [] and facts == [] else "FAIL"
-        names = {item.get("name") for item in entities if isinstance(item, dict)}
-        types = {item.get("relation_type") for item in facts if isinstance(item, dict)}
-        temporal = all(
-            isinstance(item, dict) and "valid_at" in item and "invalid_at" in item
-            for item in facts
+            codes = []
+            if not isinstance(entities, list):
+                codes.append("MISSING_ENTITY_LIST")
+            if not isinstance(facts, list):
+                codes.append("MISSING_FACT_LIST")
+            if isinstance(entities, list) and isinstance(facts, list) and (
+                entities or facts
+            ):
+                codes.append("UNEXPECTED_NONEMPTY_ZERO")
+        else:
+            codes = list(
+                _relation_failure_codes(
+                    payload,
+                    entity_key="entities",
+                    fact_key="facts",
+                    require_temporal=True,
+                )
+            )
+        return _assessment(
+            True,
+            codes,
+            entity_count=entity_count,
+            fact_count=fact_count,
+            key_set_digest=key_set_digest,
         )
-        expected = {
-            "Legislative Council",
-            "Technology and Living curriculum",
-        }
-        ok = expected <= names and "ASKED_ABOUT" in types and temporal
-        return True, "PASS" if ok else "FAIL"
-    return True, "FAIL"
+    return _assessment(
+        True,
+        ("UNCLASSIFIED_CONTRACT_MISMATCH",),
+        entity_count=entity_count,
+        fact_count=fact_count,
+        key_set_digest=key_set_digest,
+    )
 
 
-def _combined_relations_ok(payload: Mapping[str, object]) -> bool:
-    entities = payload.get("extracted_entities")
-    edges = payload.get("edges")
-    if not isinstance(entities, list) or not isinstance(edges, list) or not edges:
-        return False
+def _assessment(
+    json_valid: bool,
+    codes: Sequence[str],
+    *,
+    entity_count: int | None = None,
+    fact_count: int | None = None,
+    key_set_digest: str | None = None,
+) -> SemanticAssessment:
+    failures = tuple(dict.fromkeys(codes))
+    return SemanticAssessment(
+        json_valid=json_valid,
+        result="PASS" if json_valid and not failures else "FAIL",
+        failure_codes=failures,
+        entity_count=entity_count,
+        fact_count=fact_count,
+        key_set_digest=key_set_digest,
+    )
+
+
+def _diagnostic_counts(
+    payload: Mapping[str, object], *, prompt: LeafPrompt
+) -> tuple[int | None, int | None]:
+    if prompt.prompt_class == "upstream_combined":
+        entities = payload.get("extracted_entities")
+        facts = payload.get("edges")
+    elif prompt.prompt_class == "upstream_batch_timestamps":
+        entities = []
+        facts = payload.get("timestamps")
+    elif prompt.prompt_class == "compact_combined_temporal":
+        entities = payload.get("entities")
+        facts = payload.get("facts")
+    else:
+        entities = []
+        facts = []
+    return (
+        len(entities) if isinstance(entities, list) else None,
+        len(facts) if isinstance(facts, list) else None,
+    )
+
+
+def _key_set_digest(payload: Mapping[str, object]) -> str:
+    shape: dict[str, object] = {"top_level": sorted(map(str, payload))}
+    for name, value in sorted(payload.items()):
+        if isinstance(value, list):
+            shape[str(name)] = [
+                (
+                    sorted(map(str, item))
+                    if isinstance(item, Mapping)
+                    else type(item).__name__
+                )
+                for item in value
+            ]
+    return digest_bytes(canonical_json_bytes(shape))
+
+
+def _relation_failure_codes(
+    payload: Mapping[str, object],
+    *,
+    entity_key: str,
+    fact_key: str,
+    require_temporal: bool,
+) -> tuple[str, ...]:
+    entities = payload.get(entity_key)
+    facts = payload.get(fact_key)
+    codes: list[str] = []
+    if not isinstance(entities, list):
+        codes.append("MISSING_ENTITY_LIST")
+    if not isinstance(facts, list):
+        codes.append("MISSING_FACT_LIST")
+    if not isinstance(entities, list) or not isinstance(facts, list):
+        return tuple(codes)
     names = {item.get("name") for item in entities if isinstance(item, dict)}
-    types = {item.get("relation_type") for item in edges if isinstance(item, dict)}
-    return {
+    expected = {
         "Legislative Council",
         "Technology and Living curriculum",
-    } <= names and "ASKED_ABOUT" in types
+    }
+    if not expected <= names:
+        codes.append("MISSING_EXPECTED_ENTITY")
+    types = {item.get("relation_type") for item in facts if isinstance(item, dict)}
+    if "ASKED_ABOUT" not in types:
+        codes.append("MISSING_RELATION_TYPE")
+    if require_temporal and any(
+        not isinstance(item, dict) or "valid_at" not in item or "invalid_at" not in item
+        for item in facts
+    ):
+        codes.append("MISSING_TEMPORAL_KEYS")
+    return tuple(codes)
 
 
 def _failure_outcome(exc: BaseException, *, started: datetime) -> dict[str, object]:
@@ -1076,6 +1273,11 @@ def _failure_outcome(exc: BaseException, *, started: datetime) -> dict[str, obje
         "status": status,
         "json_valid": None,
         "semantic_fixture_result": "UNRESOLVED",
+        "semantic_failure_codes": ["DISPATCH_FAILED"],
+        "entity_count": None,
+        "fact_count": None,
+        "key_set_digest": None,
+        "validator_version": VALIDATOR_VERSION,
         "stream_message_classes": [],
         "tool_call_count": 0,
         "usage": unreported_cli_usage(),
@@ -1125,6 +1327,13 @@ def _write_leaf(
         "latency_ms": outcome.get("latency_ms") or _elapsed_ms(started),
         "json_valid": outcome.get("json_valid"),
         "semantic_fixture_result": outcome.get("semantic_fixture_result"),
+        "semantic_failure_codes": list(
+            outcome.get("semantic_failure_codes") or ()
+        ),
+        "entity_count": outcome.get("entity_count"),
+        "fact_count": outcome.get("fact_count"),
+        "key_set_digest": outcome.get("key_set_digest"),
+        "validator_version": outcome.get("validator_version"),
         "stream_message_classes": list(outcome.get("stream_message_classes") or ()),
         "tool_call_count": outcome.get("tool_call_count", 0),
         "status": outcome.get("status"),
@@ -1133,6 +1342,66 @@ def _write_leaf(
         receipt["failure"] = outcome["failure"]
     _write_json(output_dir / f"{prompt.label}.json", receipt)
     return receipt
+
+
+def _semantic_summary(
+    leaves: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    outcomes = [leaf.get("semantic_fixture_result") for leaf in leaves]
+    return {
+        "pass_count": outcomes.count("PASS"),
+        "fail_count": outcomes.count("FAIL"),
+        "pending_count": outcomes.count("PENDING"),
+        "unresolved_count": outcomes.count("UNRESOLVED"),
+        "invalid_json_count": sum(leaf.get("json_valid") is False for leaf in leaves),
+    }
+
+
+def _exact_repeat_summary(
+    leaves: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    by_label = {str(leaf.get("label")): leaf for leaf in leaves}
+    original = by_label.get("sdk-compact-temporal-relations")
+    repeat = by_label.get("sdk-predeclared-repeat")
+    if original is None or repeat is None:
+        return {
+            "available": False,
+            "prompt_digest_matches": None,
+            "semantic_outcome_matches": None,
+            "input_token_delta": None,
+            "input_token_delta_fraction": None,
+        }
+    original_usage = original.get("usage")
+    repeat_usage = repeat.get("usage")
+    original_input = (
+        original_usage.get("input_tokens")
+        if isinstance(original_usage, Mapping)
+        else None
+    )
+    repeat_input = (
+        repeat_usage.get("input_tokens")
+        if isinstance(repeat_usage, Mapping)
+        else None
+    )
+    delta = (
+        repeat_input - original_input
+        if isinstance(original_input, int) and isinstance(repeat_input, int)
+        else None
+    )
+    fraction = (
+        delta / original_input
+        if isinstance(delta, int) and isinstance(original_input, int) and original_input
+        else None
+    )
+    return {
+        "available": True,
+        "prompt_digest_matches": original.get("prompt_sha256")
+        == repeat.get("prompt_sha256"),
+        "semantic_outcome_matches": original.get("semantic_fixture_result")
+        == repeat.get("semantic_fixture_result"),
+        "input_token_delta": delta,
+        "input_token_delta_fraction": fraction,
+    }
 
 
 def _write_json(path: Path, payload: Mapping[str, object]) -> None:
@@ -1210,8 +1479,11 @@ __all__ = [
     "MINIMUM_EFFECT_CEILING",
     "PINNED_MODEL",
     "PINNED_SDK_VERSION",
+    "SemanticAssessment",
     "TINY_PROMPT",
     "ToolCallRejected",
+    "VALIDATOR_VERSION",
+    "assess_result",
     "compare_to_cli_baseline",
     "compact_prompt",
     "inspect_isolation",
@@ -1220,6 +1492,7 @@ __all__ = [
     "long_retained_chunk",
     "main",
     "normalise_usage",
+    "over_limit_revision",
     "prepare_isolated_leaf",
     "recommend",
     "reconstruct_packet_prompts",

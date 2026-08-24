@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from newsroom.graphiti_adapter.sdk_no_tool_calibration import main
+from newsroom.research.graphiti_sdk_no_tool_calibration import main
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -12,26 +12,31 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from jsonschema import Draft202012Validator
 import pytest
 
 pytest.importorskip("graphiti_core")
 
+from newsroom.control_plane.corpus import chunk_text
 from newsroom.graphiti_adapter.identity import MAX_EPISODE_BYTES
-from newsroom.graphiti_adapter.sdk_no_tool_calibration import (
+from newsroom.research.graphiti_sdk_no_tool_calibration import (
     CLI_TINY_INPUT_TOKENS,
     LEAF_LABELS,
     MINIMUM_EFFECT_CEILING,
     PINNED_MODEL,
     PINNED_SDK_VERSION,
     TINY_PROMPT,
+    VALIDATOR_VERSION,
     CalibrationClosed,
     IsolationViolation,
     LeafBudget,
+    assess_result,
     compare_to_cli_baseline,
     inspect_isolation,
     long_retained_chunk,
     main,
     normalise_usage,
+    over_limit_revision,
     prepare_isolated_leaf,
     recommend,
     reconstruct_packet_prompts,
@@ -56,6 +61,18 @@ _PACKET_PATH = (
     / "docs"
     / "research"
     / "2026-08-21-graphiti-sdk-no-tool-calibration-packet.json"
+)
+_RECEIPT_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "docs"
+    / "research"
+    / "2026-08-21-graphiti-sdk-no-tool-calibration.schema.json"
+)
+_RECEIPT_DIR = (
+    Path(__file__).resolve().parents[2]
+    / "docs"
+    / "research"
+    / "2026-08-21-graphiti-sdk-no-tool-calibration-receipts"
 )
 _COMBINED_ZERO_SHA256 = (
     "aac0a07a75af3290409f79fd50e5b6f8838a9bd2fcb899e90d33961b30ac7b2d"
@@ -127,9 +144,34 @@ def test_packet_defaults_to_dry_run_and_does_not_dispatch(tmp_path: Path) -> Non
     aggregate = json.loads((tmp_path / "aggregate.json").read_text(encoding="utf-8"))
     assert aggregate["recommendation"] == "UNMEASURED"
     assert aggregate["cli_path_comparison"][0]["cli_label"] == "hermetic-tiny"
-    assert aggregate["cli_path_comparison"][0]["cli_input_tokens"] == CLI_TINY_INPUT_TOKENS
+    assert (
+        aggregate["cli_path_comparison"][0]["cli_input_tokens"]
+        == CLI_TINY_INPUT_TOKENS
+    )
     assert aggregate["cli_path_comparison"][0]["sdk_input_tokens"] is None
     assert aggregate["cli_path_comparison"][1]["cli_chat_total"] == 25_000
+
+
+def test_retained_receipts_validate_with_content_free_diagnostics() -> None:
+    schema = json.loads(_RECEIPT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    validator = Draft202012Validator(schema)
+    receipts = sorted(_RECEIPT_DIR.glob("sdk-*.json"))
+
+    assert len(receipts) == 8
+    for path in receipts:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        validator.validate(payload)
+        assert "prompt" not in payload
+        assert "result" not in payload
+        assert "response" not in payload
+
+    aggregate = json.loads((_RECEIPT_DIR / "aggregate.json").read_text())
+    assert aggregate["recommendation"] == "REJECT"
+    assert aggregate["semantic_summary"]["pass_count"] == 4
+    assert aggregate["semantic_summary"]["fail_count"] == 4
+    assert aggregate["exact_repeat"]["prompt_digest_matches"] is True
+    assert aggregate["exact_repeat"]["semantic_outcome_matches"] is False
+    assert aggregate["exact_repeat"]["input_token_delta"] == 6_463
 
 
 def test_live_execute_fails_closed_without_owner_flag_and_call_cap(
@@ -155,7 +197,10 @@ def test_reconstructed_prompts_match_739_source_safe_fixtures() -> None:
     assert len(source_safe_body().encode("utf-8")) == 368
     assert len(long_retained_chunk().encode("utf-8")) == MAX_EPISODE_BYTES
     assert _sha256(prompts["sdk-no-tool-tiny"].prompt) == _TINY_SHA256
-    assert _sha256(prompts["sdk-upstream-combined-zero"].prompt) == _COMBINED_ZERO_SHA256
+    assert (
+        _sha256(prompts["sdk-upstream-combined-zero"].prompt)
+        == _COMBINED_ZERO_SHA256
+    )
     assert (
         prompts["sdk-predeclared-repeat"].prompt
         == prompts["sdk-compact-temporal-relations"].prompt
@@ -169,9 +214,51 @@ def test_reconstructed_prompts_match_739_source_safe_fixtures() -> None:
         call for call in calibration["calls"] if call["label"] == "hermetic-combined"
     )
     assert hermetic["prompt_sha256"] == _COMBINED_ZERO_SHA256
-    tiny = next(call for call in calibration["calls"] if call["label"] == "hermetic-tiny")
+    tiny = next(
+        call for call in calibration["calls"] if call["label"] == "hermetic-tiny"
+    )
     assert tiny["prompt_sha256"] == _TINY_SHA256
     assert tiny["usage"]["inputTokens"] == CLI_TINY_INPUT_TOKENS
+
+
+def test_over_limit_revision_reconstructs_every_chunk_without_truncation() -> None:
+    body = over_limit_revision()
+    chunks = chunk_text(body)
+
+    assert len(body.encode("utf-8")) == MAX_EPISODE_BYTES + 50
+    assert len(chunks) == 2
+    assert "".join(chunks) == body
+    assert all(len(chunk.encode("utf-8")) <= MAX_EPISODE_BYTES for chunk in chunks)
+
+
+def test_semantic_diagnostics_are_content_free_and_actionable() -> None:
+    prompts = {item.label: item for item in reconstruct_packet_prompts()}
+    zero = assess_result(
+        '{"entities":[{"name":"unexpected"}],"facts":[]}',
+        prompt=prompts["sdk-compact-temporal-zero"],
+    )
+    assert zero.result == "FAIL"
+    assert zero.failure_codes == ("UNEXPECTED_NONEMPTY_ZERO",)
+    assert zero.entity_count == 1
+    assert zero.fact_count == 0
+    assert str(zero.key_set_digest).startswith("sha256:")
+
+    relations = assess_result(
+        '{"entities":[],"facts":[{"relation_type":"OTHER"}]}',
+        prompt=prompts["sdk-compact-temporal-relations"],
+    )
+    assert relations.result == "FAIL"
+    assert relations.failure_codes == (
+        "MISSING_EXPECTED_ENTITY",
+        "MISSING_RELATION_TYPE",
+        "MISSING_TEMPORAL_KEYS",
+    )
+
+    invalid = assess_result(
+        "not-json", prompt=prompts["sdk-compact-temporal-long"]
+    )
+    assert invalid.json_valid is False
+    assert invalid.failure_codes == ("INVALID_JSON",)
 
 
 def test_route_options_are_no_tool_and_omit_setting_sources() -> None:
@@ -295,6 +382,16 @@ def test_injected_execute_compares_tiny_floor_to_cli_baseline(
     assert comparison["fails_minimum_useful_reduction"] is False
     assert result["recommendation"] == "RESEARCH_ONLY"
     assert result["provider_calls"] == 1
+    assert result["semantic_summary"] == {
+        "pass_count": 1,
+        "fail_count": 0,
+        "pending_count": 0,
+        "unresolved_count": 0,
+        "invalid_json_count": 0,
+    }
+    assert result["exact_repeat"]["available"] is False
+    assert result["leaves"][0]["validator_version"] == VALIDATOR_VERSION
+    assert result["leaves"][0]["semantic_failure_codes"] == []
     assert result["cli_path_comparison"][0]["cli_label"] == "hermetic-tiny"
     assert result["cli_path_comparison"][0]["sdk_input_tokens"] == 4_000
     assert result["cli_path_comparison"][1]["cli_chat_total"] == 25_000

@@ -84,12 +84,21 @@
       "usage_status": "PROVIDER_REPORTED"
     }
   ],
+  "exact_repeat": {
+    "available": true,
+    "input_token_delta": 6463,
+    "input_token_delta_fraction": 0.29704016913319237,
+    "prompt_digest_matches": true,
+    "semantic_outcome_matches": false
+  },
   "issue": 746,
   "leaves": [
     {
       "agent_id_sha256": "sha256:dc13499081f24f2cf348f9672a88484e0611d648e33643eef7d58a5b35c75f1d",
       "bridge_protocol": "sdk.v1",
+      "entity_count": null,
       "environment_allow_list_digest": "sha256:df48e445407ea450138c07d526a73151c7f38562b49679cf7a25e361dc9d82b9",
+      "fact_count": null,
       "fixture_id": "tiny-json",
       "isolation": {
         "custom_tool_count": 0,
@@ -128,6 +137,7 @@
       },
       "isolation_digest": "sha256:af5186eb990b770ebad3dd6aeb8c28ec6be521eda4fb15de7fd29722ad517e77",
       "json_valid": true,
+      "key_set_digest": null,
       "label": "sdk-no-tool-tiny",
       "latency_ms": 4901,
       "model": "composer-2.5",
@@ -141,6 +151,7 @@
       "schema_sha256": "sha256:f157a8091447abb5c3be08fede7dcb2152cd66ed07ad19b7ce6e8a5b7d247e2a",
       "schema_version": "newsroom.graphiti-sdk-no-tool-calibration.v1",
       "sdk_version": "1.0.28",
+      "semantic_failure_codes": [],
       "semantic_fixture_result": "PASS",
       "status": "finished",
       "stream_message_classes": [],
@@ -154,12 +165,15 @@
         "total_tokens": 3878,
         "usage_basis": "PROVIDER_REPORTED"
       },
-      "usage_status": "PROVIDER_REPORTED"
+      "usage_status": "PROVIDER_REPORTED",
+      "validator_version": "newsroom.graphiti-sdk-no-tool-validator.v1"
     },
     {
       "agent_id_sha256": "sha256:239220030c39939098f2a3bd15113cb8fae7c91ccfb64fa8f1998fb02ec4a180",
       "bridge_protocol": "sdk.v1",
+      "entity_count": null,
       "environment_allow_list_digest": "sha256:df48e445407ea450138c07d526a73151c7f38562b49679cf7a25e361dc9d82b9",
+      "fact_count": null,
       "fixture_id": "zero-result-368",
       "isolation": {
         "custom_tool_count": 0,
@@ -198,6 +212,7 @@
       },
       "isolation_digest": "sha256:af5186eb990b770ebad3dd6aeb8c28ec6be521eda4fb15de7fd29722ad517e77",
       "json_valid": true,
+      "key_set_digest": null,
       "label": "sdk-upstream-combined-zero",
       "latency_ms": 4631,
       "model": "composer-2.5",
@@ -211,6 +226,9 @@
       "schema_sha256": "sha256:ddae8af1219096cb52af19e721d46b7fa310552db4c0143c8bbfc2673f72fcc2",
       "schema_version": "newsroom.graphiti-sdk-no-tool-calibration.v1",
       "sdk_version": "1.0.28",
+      "semantic_failure_codes": [
+        "UNCLASSIFIED_RETAINED_FAILURE"
+      ],
       "semantic_fixture_result": "FAIL",
       "status": "finished",
       "stream_message_classes": [],
@@ -224,12 +242,15 @@
         "total_tokens": 8002,
         "usage_basis": "PROVIDER_REPORTED"
       },
-      "usage_status": "PROVIDER_REPORTED"
+      "usage_status": "PROVIDER_REPORTED",
+      "validator_version": "newsroom.graphiti-sdk-no-tool-validator.v1"
     },
     {
       "agent_id_sha256": "sha256:16ebb38c458c1a797545c520c8d559ad37dd92f4750d9258d8d9792fc70af56a",
       "bridge_protocol": "sdk.v1",
+      "entity_count": null,
       "environment_allow_list_digest": "sha256:df48e445407ea450138c07d526a73151c7f38562b49679cf7a25e361dc9d82b9",
+      "fact_count": null,
       "fixture_id": "relations",
       "isolation": {
         "custom_tool_count": 0,
@@ -268,6 +289,7 @@
       },
       "isolation_digest": "sha256:af5186eb990b770ebad3dd6aeb8c28ec6be521eda4fb15de7fd29722ad517e77",
       "json_valid": true,
+      "key_set_digest": null,
       "label": "sdk-upstream-combined-relations",
       "latency_ms": 4018,
       "model": "composer-2.5",
@@ -281,6 +303,7 @@
       "schema_sha256": "sha256:ddae8af1219096cb52af19e721d46b7fa310552db4c0143c8bbfc2673f72fcc2",
       "schema_version": "newsroom.graphiti-sdk-no-tool-calibration.v1",
       "sdk_version": "1.0.28",
+      "semantic_failure_codes": [],
       "semantic_fixture_result": "PASS",
       "status": "finished",
       "stream_message_classes": [],
@@ -294,12 +317,15 @@
         "total_tokens": 7810,
         "usage_basis": "PROVIDER_REPORTED"
       },
-      "usage_status": "PROVIDER_REPORTED"
+      "usage_status": "PROVIDER_REPORTED",
+      "validator_version": "newsroom.graphiti-sdk-no-tool-validator.v1"
     },
     {
       "agent_id_sha256": "sha256:f0b811e84b0eb55f5577e3ddfc38d7dd289d4ca0c79c19bff7fc3e43d84d080c",
       "bridge_protocol": "sdk.v1",
+      "entity_count": null,
       "environment_allow_list_digest": "sha256:df48e445407ea450138c07d526a73151c7f38562b49679cf7a25e361dc9d82b9",
+      "fact_count": null,
       "fixture_id": "relations-timestamps",
       "isolation": {
         "custom_tool_count": 0,
@@ -338,6 +364,7 @@
       },
       "isolation_digest": "sha256:af5186eb990b770ebad3dd6aeb8c28ec6be521eda4fb15de7fd29722ad517e77",
       "json_valid": true,
+      "key_set_digest": null,
       "label": "sdk-upstream-batch-timestamps",
       "latency_ms": 3264,
       "model": "composer-2.5",
@@ -351,6 +378,7 @@
       "schema_sha256": "sha256:fd18e28319c09b4930749ee3a1545d0766db660af0d3101bd80d5c254741f12e",
       "schema_version": "newsroom.graphiti-sdk-no-tool-calibration.v1",
       "sdk_version": "1.0.28",
+      "semantic_failure_codes": [],
       "semantic_fixture_result": "PASS",
       "status": "finished",
       "stream_message_classes": [],
@@ -364,12 +392,15 @@
         "total_tokens": 4778,
         "usage_basis": "PROVIDER_REPORTED"
       },
-      "usage_status": "PROVIDER_REPORTED"
+      "usage_status": "PROVIDER_REPORTED",
+      "validator_version": "newsroom.graphiti-sdk-no-tool-validator.v1"
     },
     {
       "agent_id_sha256": "sha256:20a15d7644d1f52379be6e38ea65ae09dd0c8957bb6217b0aac32fa245f35f24",
       "bridge_protocol": "sdk.v1",
+      "entity_count": null,
       "environment_allow_list_digest": "sha256:df48e445407ea450138c07d526a73151c7f38562b49679cf7a25e361dc9d82b9",
+      "fact_count": null,
       "fixture_id": "zero-result-368",
       "isolation": {
         "custom_tool_count": 0,
@@ -408,6 +439,7 @@
       },
       "isolation_digest": "sha256:af5186eb990b770ebad3dd6aeb8c28ec6be521eda4fb15de7fd29722ad517e77",
       "json_valid": true,
+      "key_set_digest": null,
       "label": "sdk-compact-temporal-zero",
       "latency_ms": 17978,
       "model": "composer-2.5",
@@ -421,6 +453,9 @@
       "schema_sha256": "sha256:7e39987fffe589d94c8b3dcf6416f538b5ed31883389bc67774826684fdccd16",
       "schema_version": "newsroom.graphiti-sdk-no-tool-calibration.v1",
       "sdk_version": "1.0.28",
+      "semantic_failure_codes": [
+        "UNCLASSIFIED_RETAINED_FAILURE"
+      ],
       "semantic_fixture_result": "FAIL",
       "status": "finished",
       "stream_message_classes": [],
@@ -434,12 +469,15 @@
         "total_tokens": 29322,
         "usage_basis": "PROVIDER_REPORTED"
       },
-      "usage_status": "PROVIDER_REPORTED"
+      "usage_status": "PROVIDER_REPORTED",
+      "validator_version": "newsroom.graphiti-sdk-no-tool-validator.v1"
     },
     {
       "agent_id_sha256": "sha256:3b783b4058eb4eae10f6b881a9a64e357cd833561ad4033eba46c922a506cf93",
       "bridge_protocol": "sdk.v1",
+      "entity_count": null,
       "environment_allow_list_digest": "sha256:df48e445407ea450138c07d526a73151c7f38562b49679cf7a25e361dc9d82b9",
+      "fact_count": null,
       "fixture_id": "relations",
       "isolation": {
         "custom_tool_count": 0,
@@ -478,6 +516,7 @@
       },
       "isolation_digest": "sha256:af5186eb990b770ebad3dd6aeb8c28ec6be521eda4fb15de7fd29722ad517e77",
       "json_valid": true,
+      "key_set_digest": null,
       "label": "sdk-compact-temporal-relations",
       "latency_ms": 30587,
       "model": "composer-2.5",
@@ -491,6 +530,9 @@
       "schema_sha256": "sha256:7e39987fffe589d94c8b3dcf6416f538b5ed31883389bc67774826684fdccd16",
       "schema_version": "newsroom.graphiti-sdk-no-tool-calibration.v1",
       "sdk_version": "1.0.28",
+      "semantic_failure_codes": [
+        "UNCLASSIFIED_RETAINED_FAILURE"
+      ],
       "semantic_fixture_result": "FAIL",
       "status": "finished",
       "stream_message_classes": [],
@@ -504,12 +546,15 @@
         "total_tokens": 31912,
         "usage_basis": "PROVIDER_REPORTED"
       },
-      "usage_status": "PROVIDER_REPORTED"
+      "usage_status": "PROVIDER_REPORTED",
+      "validator_version": "newsroom.graphiti-sdk-no-tool-validator.v1"
     },
     {
       "agent_id_sha256": "sha256:8be7e41e40c7b2b89187051221d254ce9c175af01a04bd58d93f06e97adc3428",
       "bridge_protocol": "sdk.v1",
+      "entity_count": null,
       "environment_allow_list_digest": "sha256:df48e445407ea450138c07d526a73151c7f38562b49679cf7a25e361dc9d82b9",
+      "fact_count": null,
       "fixture_id": "long-8192",
       "isolation": {
         "custom_tool_count": 0,
@@ -548,6 +593,7 @@
       },
       "isolation_digest": "sha256:af5186eb990b770ebad3dd6aeb8c28ec6be521eda4fb15de7fd29722ad517e77",
       "json_valid": false,
+      "key_set_digest": null,
       "label": "sdk-compact-temporal-long",
       "latency_ms": 17474,
       "model": "composer-2.5",
@@ -561,6 +607,9 @@
       "schema_sha256": "sha256:7e39987fffe589d94c8b3dcf6416f538b5ed31883389bc67774826684fdccd16",
       "schema_version": "newsroom.graphiti-sdk-no-tool-calibration.v1",
       "sdk_version": "1.0.28",
+      "semantic_failure_codes": [
+        "INVALID_JSON"
+      ],
       "semantic_fixture_result": "FAIL",
       "status": "finished",
       "stream_message_classes": [],
@@ -574,12 +623,15 @@
         "total_tokens": 10169,
         "usage_basis": "PROVIDER_REPORTED"
       },
-      "usage_status": "PROVIDER_REPORTED"
+      "usage_status": "PROVIDER_REPORTED",
+      "validator_version": "newsroom.graphiti-sdk-no-tool-validator.v1"
     },
     {
       "agent_id_sha256": "sha256:f4769eb2c7f74a8b89a21811e06e679947639646537a11b13af000b9cd721ffb",
       "bridge_protocol": "sdk.v1",
+      "entity_count": null,
       "environment_allow_list_digest": "sha256:df48e445407ea450138c07d526a73151c7f38562b49679cf7a25e361dc9d82b9",
+      "fact_count": null,
       "fixture_id": "relations-repeat",
       "isolation": {
         "custom_tool_count": 0,
@@ -618,6 +670,7 @@
       },
       "isolation_digest": "sha256:af5186eb990b770ebad3dd6aeb8c28ec6be521eda4fb15de7fd29722ad517e77",
       "json_valid": true,
+      "key_set_digest": null,
       "label": "sdk-predeclared-repeat",
       "latency_ms": 28694,
       "model": "composer-2.5",
@@ -631,6 +684,7 @@
       "schema_sha256": "sha256:7e39987fffe589d94c8b3dcf6416f538b5ed31883389bc67774826684fdccd16",
       "schema_version": "newsroom.graphiti-sdk-no-tool-calibration.v1",
       "sdk_version": "1.0.28",
+      "semantic_failure_codes": [],
       "semantic_fixture_result": "PASS",
       "status": "finished",
       "stream_message_classes": [],
@@ -644,7 +698,8 @@
         "total_tokens": 35705,
         "usage_basis": "PROVIDER_REPORTED"
       },
-      "usage_status": "PROVIDER_REPORTED"
+      "usage_status": "PROVIDER_REPORTED",
+      "validator_version": "newsroom.graphiti-sdk-no-tool-validator.v1"
     }
   ],
   "maximum_leaves": 8,
@@ -654,6 +709,18 @@
   "no_openrouter": true,
   "provider_calls": 8,
   "recommendation": "REJECT",
+  "retained_diagnostics": {
+    "provenance": "BINARY_V1_RESULTS_ENRICHED_PROVIDER_FREE",
+    "raw_model_output_retained": false,
+    "unclassified_failure_count": 3
+  },
   "schema_version": "newsroom.graphiti-sdk-no-tool-calibration.v1",
-  "sdk_version": "1.0.28"
+  "sdk_version": "1.0.28",
+  "semantic_summary": {
+    "fail_count": 4,
+    "invalid_json_count": 1,
+    "pass_count": 4,
+    "pending_count": 0,
+    "unresolved_count": 0
+  }
 }

@@ -2,7 +2,7 @@
 
 The first #739 calibration returned no edges, so upstream combined extraction
 made only one LLM request. A relation-bearing result makes a second
-BatchEdgeTimestamps request. This fixture pins that conditional behavior and
+BatchEdgeTimestamps request. This fixture pins that conditional behaviour and
 validates the owner-gated second-stage experiment manifest.
 """
 
@@ -164,6 +164,12 @@ def test_second_stage_experiment_plan_is_serial_bounded_and_owner_gated() -> Non
     assert payload["parent_issue"] == 739
     assert payload["pull_request"] == 745
     assert payload["serial_issues"] == [746, 747, 748]
+    assert payload["status"] == "COMPLETED_RETAINED_PACKET_REJECT"
+    assert payload["serial_state"] == {
+        "746": "COMPLETE_RETAINED_REJECT",
+        "747": "COMPLETE_MERGED_PROVIDER_FREE_QUALIFICATION",
+        "748": "READY_PROVIDER_FREE",
+    }
 
     authority = payload["live_authority"]
     assert authority["authorised"] is False
@@ -199,6 +205,26 @@ def test_second_stage_experiment_plan_is_serial_bounded_and_owner_gated() -> Non
     experiments = payload["experiments"]
     assert [item["ordinal"] for item in experiments] == list(range(1, 9))
     assert len({item["label"] for item in experiments}) == 8
+
+    average = payload["average_token_model"]
+    assert average["bernoulli_condition_terms_are_sufficient"] is False
+    assert (
+        average["primary_count_includes_expected_chunks_per_effective_revision"]
+        is True
+    )
+
+    outcome = payload["retained_live_outcome"]
+    assert outcome["provider_calls"] == 8
+    assert outcome["tiny_input_tokens"] == 3_430
+    assert outcome["semantic_pass_count"] == 4
+    assert outcome["semantic_fail_count"] == 4
+    assert outcome["recommendation"] == "REJECT"
+
+    over_limit = payload["provider_free_over_limit_proof"]
+    assert over_limit["fixture"] == "MAX_EPISODE_BYTES + 50"
+    assert over_limit["expected_chunk_count"] == 2
+    assert over_limit["complete_ordered_reconstruction_required"] is True
+    assert over_limit["provider_calls"] == 0
 
     decision = payload["decision_rule"]
     assert decision["minimum_tiny_input_reduction_fraction"] == 0.5
