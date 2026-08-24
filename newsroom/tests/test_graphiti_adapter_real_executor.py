@@ -297,11 +297,11 @@ def test_cursor_malformed_json_executes_grok_fallback_and_records_both_calls() -
 
     calls: list[str] = []
 
-    def cursor(_prompt: str) -> str:
+    def cursor(_prompt: str, *, max_tokens: int) -> str:
         calls.append("cursor")
         return "not-json"
 
-    def grok(_prompt: str, _schema: str | None) -> str:
+    def grok(_prompt: str, _schema: str | None, *, max_tokens: int) -> str:
         calls.append("grok")
         return '{"value":"fallback"}'
 
@@ -341,8 +341,8 @@ def test_both_cli_malformed_json_results_fail_after_recording_both_calls() -> No
             run_cli_chain(
                 prompt="prompt",
                 schema=None,
-                cursor_runner=lambda _prompt: "[]",
-                grok_runner=lambda _prompt, _schema: "also malformed",
+                cursor_runner=lambda _prompt, *, max_tokens: "[]",
+                grok_runner=lambda _prompt, _schema, *, max_tokens: "also malformed",
                 invocations=invocations,
             )
         )
@@ -355,7 +355,7 @@ def test_both_cli_malformed_json_results_fail_after_recording_both_calls() -> No
 def test_non_utf8_cursor_is_recorded_before_grok_fallback() -> None:
     from newsroom.graphiti_adapter.cli_client import run_cli_async, run_cli_chain
 
-    async def invalid_cursor(_prompt: str) -> str:
+    async def invalid_cursor(_prompt: str, *, max_tokens: int) -> str:
         return await run_cli_async(
             (
                 sys.executable,
@@ -371,7 +371,7 @@ def test_non_utf8_cursor_is_recorded_before_grok_fallback() -> None:
             prompt="prompt",
             schema=None,
             cursor_runner=invalid_cursor,
-            grok_runner=lambda _prompt, _schema: '{"value":"fallback"}',
+            grok_runner=lambda _prompt, _schema, *, max_tokens: '{"value":"fallback"}',
             invocations=invocations,
         )
     )
@@ -387,7 +387,7 @@ def test_non_utf8_grok_is_recorded_before_chain_failure() -> None:
         run_cli_chain,
     )
 
-    async def invalid_grok(_prompt: str, _schema: str | None) -> str:
+    async def invalid_grok(_prompt: str, _schema: str | None, *, max_tokens: int) -> str:
         return await run_cli_async(
             (
                 sys.executable,
@@ -403,7 +403,7 @@ def test_non_utf8_grok_is_recorded_before_chain_failure() -> None:
             run_cli_chain(
                 prompt="prompt",
                 schema=None,
-                cursor_runner=lambda _prompt: "not-json",
+                cursor_runner=lambda _prompt, *, max_tokens: "not-json",
                 grok_runner=invalid_grok,
                 invocations=invocations,
             )
@@ -436,13 +436,13 @@ def test_sync_cli_rejects_non_utf8_output_with_typed_failure() -> None:
 def test_cli_deadline_cancellation_is_recorded(cancelled_provider: str) -> None:
     from newsroom.graphiti_adapter.cli_client import run_cli_chain
 
-    async def cancelled_cursor(_prompt: str) -> str:
+    async def cancelled_cursor(_prompt: str, *, max_tokens: int) -> str:
         raise asyncio.CancelledError
 
-    async def malformed_cursor(_prompt: str) -> str:
+    async def malformed_cursor(_prompt: str, *, max_tokens: int) -> str:
         return "not-json"
 
-    async def cancelled_grok(_prompt: str, _schema: str | None) -> str:
+    async def cancelled_grok(_prompt: str, _schema: str | None, *, max_tokens: int) -> str:
         raise asyncio.CancelledError
 
     invocations: list[dict[str, object]] = []
@@ -2138,7 +2138,9 @@ def test_cursor_cli_runs_outside_repository_cwd(
         return "{}"
 
     monkeypatch.setattr(cli_client, "run_cli", capture)
-    cursor_execution = cli_client.run_cursor_agent_llm("untrusted source")
+    cursor_execution = cli_client.run_cursor_agent_llm(
+        "untrusted source", max_tokens=512
+    )
     assert cursor_execution.text == "{}"
     assert cursor_execution.usage["usage_basis"] == "UNREPORTED"
     cwd = observed["cwd"]
@@ -2148,7 +2150,9 @@ def test_cursor_cli_runs_outside_repository_cwd(
     assert observed["timeout"] == cli_client.CLI_CALL_TIMEOUT_SECONDS
 
     observed.clear()
-    grok_execution = cli_client.run_grok_llm("untrusted source", None)
+    grok_execution = cli_client.run_grok_llm(
+        "untrusted source", None, max_tokens=512
+    )
     assert grok_execution.text == "{}"
     assert grok_execution.usage["usage_basis"] == "UNREPORTED"
     grok_cwd = observed["cwd"]

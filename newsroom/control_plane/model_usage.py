@@ -236,6 +236,8 @@ CREATE TABLE IF NOT EXISTS graphiti_internal_requests(
     call_shape_policy_digest TEXT NOT NULL,
     record_json TEXT NOT NULL,
     UNIQUE(graphiti_attempt_id, semantic_state_digest),
+    UNIQUE(graphiti_attempt_id, internal_ordinal),
+    UNIQUE(provider_attempt_id),
     FOREIGN KEY(invocation_id) REFERENCES model_invocation_allocations(invocation_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
     FOREIGN KEY(envelope_id) REFERENCES model_work_envelopes(envelope_id)
@@ -1343,8 +1345,41 @@ class ModelUsageService:
             policy = _policy_from_record(_object(policy_row[0]))
             if not policy.qualified:
                 raise ModelUsageAdmissionError("invocation policy is not qualified")
+            manifest_row = connection.execute(
+                "SELECT record_json FROM model_invocation_context_manifests "
+                "WHERE context_manifest_digest=?",
+                (identity.context_manifest_digest,),
+            ).fetchone()
+            if manifest_row is None:
+                raise ModelUsageAdmissionError("Graphiti context manifest is absent")
+            manifest = _object(manifest_row[0])
+            if (
+                manifest.get("effective_revision_digest")
+                != identity.effective_revision_digest
+                or manifest.get("ingest_obligation_id")
+                != identity.ingest_obligation_id
+                or manifest.get("graphiti_attempt_id")
+                != identity.graphiti_attempt_id
+                or manifest.get("provider_attempt_id")
+                != identity.provider_attempt_id
+                or manifest.get("semantic_state_digest")
+                != identity.semantic_state_digest
+            ):
+                raise ModelUsageAdmissionError(
+                    "Graphiti context manifest differs from its request identity"
+                )
 
             semantic_state_digest = str(record["semantic_state_digest"])
+            reused_attempt_identity = connection.execute(
+                "SELECT 1 FROM graphiti_internal_requests "
+                "WHERE graphiti_attempt_id=? AND "
+                "(internal_ordinal=? OR provider_attempt_id=?)",
+                (
+                    identity.graphiti_attempt_id,
+                    identity.internal_ordinal,
+                    identity.provider_attempt_id,
+                ),
+            ).fetchone()
             duplicate = connection.execute(
                 "SELECT 1 FROM graphiti_internal_requests "
                 "WHERE graphiti_attempt_id=? AND semantic_state_digest=?",
@@ -1360,6 +1395,8 @@ class ModelUsageService:
             reason_code = (
                 "DUPLICATE_INTERNAL_REQUEST"
                 if duplicate is not None
+                else "GRAPHITI_ATTEMPT_IDENTITY_REUSE"
+                if reused_attempt_identity is not None
                 else "CALL_SHAPE_DRIFT"
                 if retained_count >= max_distinct_internal_requests
                 else None
@@ -1541,6 +1578,21 @@ class ModelUsageService:
             connection.close()
         return {"requests": requests, "refusals": refusals}
 
+    def next_graphiti_internal_ordinal(self, *, graphiti_attempt_id: str) -> int:
+        """Return the next durable leaf ordinal for one Graphiti attempt."""
+
+        _token(graphiti_attempt_id, field="Graphiti attempt id")
+        connection = self._connection()
+        try:
+            row = connection.execute(
+                "SELECT COALESCE(MAX(internal_ordinal),0) "
+                "FROM graphiti_internal_requests WHERE graphiti_attempt_id=?",
+                (graphiti_attempt_id,),
+            ).fetchone()
+        finally:
+            connection.close()
+        return int(row[0]) + 1
+
     def _validate_preflight(
         self,
         connection: sqlite3.Connection,
@@ -1596,9 +1648,13 @@ class ModelUsageService:
             raise ModelUsageAdmissionError(
                 "context manifest command contract differs from invocation policy"
             )
-        if policy.command_semantic_version != "UNSPECIFIED" and (
-            manifest.get("evidence_package_digest")
-            != envelope.get("evidence_package_digest")
+        if (
+            policy.command_semantic_version != "UNSPECIFIED"
+            and not allocation.workload_class.value.startswith("GRAPHITI_")
+            and (
+                manifest.get("evidence_package_digest")
+                != envelope.get("evidence_package_digest")
+            )
         ):
             raise ModelUsageAdmissionError(
                 "context manifest Evidence Package differs from work envelope"

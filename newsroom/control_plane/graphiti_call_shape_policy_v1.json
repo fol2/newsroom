@@ -118,7 +118,7 @@
       "distinct_internal_request_count": 3
     }
   ],
-  "evidence_digest": "sha256:2ab671a86781983b8eacbb963725a6a8a9eb4826ea758cd7331b7408b11d29e9",
+  "evidence_digest": "sha256:c3eecc519f2475471fabbe81df1c5f319b9d795f8918d832c7d28fcdea72a76e",
   "qualified_routes": [
     {
       "leaf_class": "PRIMARY",
@@ -130,7 +130,27 @@
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
-      "max_total_tokens": 147456
+      "max_total_tokens": 147456,
+      "command_semantic_version": "newsroom.graphiti-provider-dispatch.v1",
+      "command_flags": [
+        "--print",
+        "--mode=ask",
+        "--output-format=json",
+        "--sandbox=enabled",
+        "--trust",
+        "--model=composer-2.5"
+      ],
+      "disabled_capabilities": [
+        "repository-discovery",
+        "prior-conversation",
+        "skills",
+        "tools",
+        "mcp",
+        "web",
+        "planning",
+        "subagents"
+      ],
+      "implementation_revision": "newsroom-graphiti-adapter-issue-769-v1"
     },
     {
       "leaf_class": "FALLBACK",
@@ -142,7 +162,33 @@
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
-      "max_total_tokens": 147456
+      "max_total_tokens": 147456,
+      "command_semantic_version": "newsroom.graphiti-provider-dispatch.v1",
+      "command_flags": [
+        "--prompt-file",
+        "--model=grok-4.6",
+        "--disable-web-search",
+        "--sandbox=read-only",
+        "--permission-mode=plan",
+        "--tools=",
+        "--deny=*",
+        "--no-plan",
+        "--max-turns=1",
+        "--no-subagents",
+        "--reasoning-effort=medium",
+        "--output-format=streaming-json"
+      ],
+      "disabled_capabilities": [
+        "repository-discovery",
+        "prior-conversation",
+        "skills",
+        "tools",
+        "mcp",
+        "web",
+        "planning",
+        "subagents"
+      ],
+      "implementation_revision": "newsroom-graphiti-adapter-issue-769-v1"
     },
     {
       "leaf_class": "EMBEDDING",
@@ -154,7 +200,23 @@
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 1,
-      "max_total_tokens": 131072
+      "max_total_tokens": 131072,
+      "command_semantic_version": "newsroom.graphiti-provider-dispatch.v1",
+      "command_flags": [
+        "POST=/embeddings",
+        "--model=openai/text-embedding-3-large"
+      ],
+      "disabled_capabilities": [
+        "repository-discovery",
+        "prior-conversation",
+        "skills",
+        "tools",
+        "mcp",
+        "web",
+        "planning",
+        "subagents"
+      ],
+      "implementation_revision": "newsroom-graphiti-adapter-issue-769-v1"
     }
   ]
 }

@@ -27,7 +27,11 @@ from newsroom.control_plane.model_usage import (
     WorkEnvelope,
     WorkloadClass,
 )
-from newsroom.graphiti_adapter.cli_client import CliExecution, run_cli_chain
+from newsroom.graphiti_adapter.cli_client import (
+    CliExecution,
+    CliResponseError,
+    run_cli_chain,
+)
 from newsroom.graphiti_adapter.embedding_meter import MeteredOpenAIEmbedder
 from newsroom.graphiti_adapter.usage_meter import cursor_cli_usage
 
@@ -40,6 +44,10 @@ QUALIFIED_ROUTES = (
         "model": "composer-2.5",
         "reasoning": "provider-default",
         "config_identity": "graphiti-cli-command-v1",
+        "command_semantic_version": "newsroom.graphiti-provider-dispatch.v1",
+        "command_flags": ["fixture-command"],
+        "disabled_capabilities": ["skills", "tools", "mcp"],
+        "implementation_revision": "newsroom-graphiti-adapter-issue-769-v1",
         "max_prompt_bytes": 4_096,
         "max_context_tokens": 4_096,
         "max_output_tokens": 1_024,
@@ -52,6 +60,10 @@ QUALIFIED_ROUTES = (
         "model": "grok-4.6",
         "reasoning": "medium",
         "config_identity": "graphiti-cli-command-v1",
+        "command_semantic_version": "newsroom.graphiti-provider-dispatch.v1",
+        "command_flags": ["fixture-command"],
+        "disabled_capabilities": ["skills", "tools", "mcp"],
+        "implementation_revision": "newsroom-graphiti-adapter-issue-769-v1",
         "max_prompt_bytes": 4_096,
         "max_context_tokens": 4_096,
         "max_output_tokens": 1_024,
@@ -64,6 +76,10 @@ QUALIFIED_ROUTES = (
         "model": "openai/text-embedding-3-large",
         "reasoning": "none",
         "config_identity": "graphiti-embedding-command-v1",
+        "command_semantic_version": "newsroom.graphiti-provider-dispatch.v1",
+        "command_flags": ["fixture-command"],
+        "disabled_capabilities": ["skills", "tools", "mcp"],
+        "implementation_revision": "newsroom-graphiti-adapter-issue-769-v1",
         "max_prompt_bytes": 4_096,
         "max_context_tokens": 4_096,
         "max_output_tokens": 1,
@@ -98,6 +114,12 @@ def test_checked_call_shape_policy_derives_headroom_from_qualified_fixtures() ->
         "RESTART_POSSIBLE_IO",
         "EMBEDDING",
     } <= {fixture.fixture_class for fixture in policy.fixtures}
+    assert all(
+        route.command_semantic_version != "UNSPECIFIED"
+        and route.command_flags
+        and route.disabled_capabilities
+        for route in policy.qualified_routes
+    )
 
 
 def test_internal_request_identity_binds_semantics_without_source_expression() -> None:
@@ -204,6 +226,13 @@ def _service_fixture(
         tools_enabled=False,
         mcp_enabled=False,
         prior_message_count=0,
+        command_semantic_version="newsroom.graphiti-provider-dispatch.v1",
+        command_flags=("fixture-command",),
+        context_manifest_schema_version=(
+            "newsroom.graphiti-hermetic-context-manifest.v1"
+        ),
+        disabled_capabilities=("skills", "tools", "mcp"),
+        implementation_revision="fixture-implementation-v1",
         max_prompt_bytes=4_096,
         max_context_tokens=4_096,
         max_output_tokens=1_024,
@@ -241,6 +270,7 @@ def _service_fixture(
 
 def _bound_request(
     *,
+    service: ModelUsageService,
     envelope: WorkEnvelope,
     policy: InvocationEfficiencyPolicy,
     shape: GraphitiCallShapePolicy,
@@ -250,7 +280,7 @@ def _bound_request(
     prompt_digest = digest_canonical({"prompt": semantic})
     schema_digest = policy.output_schema_digest
     retry_state_digest = digest_canonical({"state": semantic})
-    request_digest = digest_canonical(
+    semantic_state_digest = digest_canonical(
         {
             "semantic_request_class": "ExtractedEntities",
             "prompt_digest": prompt_digest,
@@ -259,6 +289,65 @@ def _bound_request(
             "leaf_class": "PRIMARY",
             "retry_state_digest": retry_state_digest,
         }
+    )
+    effective_revision_digest = digest_canonical({"revision": "r1"})
+    system_digest = digest_canonical({"system": "fixture"})
+    request_digest = digest_canonical(
+        {
+            "provider": policy.provider,
+            "route": policy.route,
+            "model": policy.model,
+            "reasoning": policy.reasoning,
+            "command_semantic_version": policy.command_semantic_version,
+            "command_flags": list(policy.command_flags),
+            "implementation_revision": policy.implementation_revision,
+            "system_digest": system_digest,
+            "prompt_digest": prompt_digest,
+            "output_schema_digest": schema_digest,
+        }
+    )
+    provider_attempt_id = f"ingest-769:1:provider-attempt:1:leaf:{ordinal}"
+    manifest = {
+        "schema_version": policy.context_manifest_schema_version,
+        "provider": policy.provider,
+        "route": policy.route,
+        "model": policy.model,
+        "reasoning": policy.reasoning,
+        "command_semantic_version": policy.command_semantic_version,
+        "command_flags": list(policy.command_flags),
+        "implementation_revision": policy.implementation_revision,
+        "implementation_worktree_clean": True,
+        "disabled_capabilities": list(policy.disabled_capabilities),
+        "config_identity": "graphiti-cli-command-v1",
+        "context_identity": "graphiti-context-v1",
+        "system_digest": system_digest,
+        "prompt_contract_version": policy.prompt_contract_version,
+        "prompt_bytes": 128,
+        "prompt_digest": prompt_digest,
+        "schema_digest": schema_digest,
+        "output_schema_digest": schema_digest,
+        "evidence_package_digest": effective_revision_digest,
+        "evidence_package_bytes": 128,
+        "effective_revision_digest": effective_revision_digest,
+        "ingest_obligation_id": "ingest-769",
+        "graphiti_attempt_id": "ingest-769:1",
+        "provider_attempt_id": provider_attempt_id,
+        "semantic_state_digest": semantic_state_digest,
+        "request_digest": request_digest,
+        "one_turn": True,
+        "exact_input": True,
+        "skills_enabled": False,
+        "tools_enabled": False,
+        "mcp_enabled": False,
+        "prior_message_count": 0,
+        "skill_count": 0,
+        "tool_count": 0,
+        "mcp_server_count": 0,
+        "mcp_tool_count": 0,
+    }
+    context_manifest_digest = digest_canonical(manifest)
+    service.retain_context_manifest(
+        {"context_manifest_digest": context_manifest_digest, **manifest}
     )
     allocation = InvocationAllocation.create(
         envelope_id=envelope.envelope_id,
@@ -276,7 +365,7 @@ def _bound_request(
         request_digest=request_digest,
         output_schema_digest=schema_digest,
         max_output_tokens=512,
-        context_manifest_digest=digest_canonical({"manifest": semantic}),
+        context_manifest_digest=context_manifest_digest,
         context_identity="graphiti-context-v1",
         config_identity="graphiti-cli-command-v1",
         one_turn=True,
@@ -289,9 +378,8 @@ def _bound_request(
         recovery_deadline_at=T0 + timedelta(minutes=20, seconds=ordinal),
         parent_invocation_id=None,
     )
-    provider_attempt_id = f"ingest-769:1:provider-attempt:1:leaf:{ordinal}"
     identity = GraphitiInternalRequestIdentity.create(
-        effective_revision_digest=digest_canonical({"revision": "r1"}),
+        effective_revision_digest=effective_revision_digest,
         ingest_obligation_id="ingest-769",
         graphiti_attempt_id="ingest-769:1",
         provider_attempt_id=provider_attempt_id,
@@ -331,6 +419,7 @@ def test_atomic_graphiti_allocation_refuses_duplicate_and_call_shape_drift(
 ) -> None:
     service, envelope, policy, shape = _service_fixture(tmp_path)
     first, first_identity = _bound_request(
+        service=service,
         envelope=envelope,
         policy=policy,
         shape=shape,
@@ -344,6 +433,7 @@ def test_atomic_graphiti_allocation_refuses_duplicate_and_call_shape_drift(
     )
 
     duplicate, duplicate_identity = _bound_request(
+        service=service,
         envelope=envelope,
         policy=policy,
         shape=shape,
@@ -371,6 +461,7 @@ def test_atomic_graphiti_allocation_refuses_duplicate_and_call_shape_drift(
     )
     service.open_envelope(restarted_envelope)
     restarted, restarted_identity = _bound_request(
+        service=service,
         envelope=restarted_envelope,
         policy=policy,
         shape=shape,
@@ -384,9 +475,34 @@ def test_atomic_graphiti_allocation_refuses_duplicate_and_call_shape_drift(
             max_distinct_internal_requests=shape.max_distinct_internal_requests,
         )
     assert restart_duplicate.value.reason_code == "DUPLICATE_INTERNAL_REQUEST"
+    restarted_distinct, restarted_distinct_identity = _bound_request(
+        service=service,
+        envelope=restarted_envelope,
+        policy=policy,
+        shape=shape,
+        ordinal=1,
+        semantic="different-after-restart",
+    )
+    with pytest.raises(ModelUsageAdmissionError) as restart_identity_reuse:
+        service.allocate_graphiti_request(
+            restarted_distinct,
+            identity=restarted_distinct_identity,
+            max_distinct_internal_requests=shape.max_distinct_internal_requests,
+        )
+    assert (
+        restart_identity_reuse.value.reason_code
+        == "GRAPHITI_ATTEMPT_IDENTITY_REUSE"
+    )
+    assert (
+        service.next_graphiti_internal_ordinal(
+            graphiti_attempt_id=str(envelope.graphiti_attempt_id)
+        )
+        == 2
+    )
 
     for ordinal in (2, 3):
         allocation, identity = _bound_request(
+            service=service,
             envelope=envelope,
             policy=policy,
             shape=shape,
@@ -400,6 +516,7 @@ def test_atomic_graphiti_allocation_refuses_duplicate_and_call_shape_drift(
         )
 
     drift, drift_identity = _bound_request(
+        service=service,
         envelope=envelope,
         policy=policy,
         shape=shape,
@@ -453,8 +570,9 @@ def test_chat_transport_observes_committed_identity_and_receipts_requested_max_t
     invocations: list[dict[str, object]] = []
     provider_calls = 0
 
-    async def cursor_runner(prompt: str) -> CliExecution:
+    async def cursor_runner(prompt: str, *, max_tokens: int) -> CliExecution:
         nonlocal provider_calls
+        assert max_tokens == 77
         provider_calls += 1
         retained = service.graphiti_request_records(envelope_id=envelope.envelope_id)
         assert len(retained["requests"]) == 1
@@ -464,6 +582,16 @@ def test_chat_transport_observes_committed_identity_and_receipts_requested_max_t
         leaf = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"][0]
         assert leaf["provider_attempt_id"] == identity["provider_attempt_id"]
         assert leaf["transport_dispatch_observed"] is True
+        assert leaf["context_manifest"]["schema_version"] == (
+            "newsroom.graphiti-hermetic-context-manifest.v1"
+        )
+        assert leaf["context_manifest"]["effective_revision_digest"] == identity[
+            "effective_revision_digest"
+        ]
+        assert leaf["context_manifest"]["prior_message_count"] == 0
+        assert leaf["context_manifest"]["skill_count"] == 0
+        assert leaf["context_manifest"]["tool_count"] == 0
+        assert leaf["context_manifest"]["mcp_server_count"] == 0
         return CliExecution(
             text='{"extracted_entities":[]}',
             usage=cursor_cli_usage(
@@ -476,7 +604,7 @@ def test_chat_transport_observes_committed_identity_and_receipts_requested_max_t
             ),
         )
 
-    async def grok_runner(_prompt: str, _schema: str | None) -> CliExecution:
+    async def grok_runner(_prompt: str, _schema: str | None, *, max_tokens: int) -> CliExecution:
         raise AssertionError("fallback should not run")
 
     result = asyncio.run(
@@ -599,8 +727,9 @@ def test_requested_max_tokens_is_forwarded_and_enforced_on_reported_usage(
     )
     captured_prompt = ""
 
-    async def cursor_runner(prompt: str) -> CliExecution:
+    async def cursor_runner(prompt: str, *, max_tokens: int) -> CliExecution:
         nonlocal captured_prompt
+        assert max_tokens == 3
         captured_prompt = prompt
         return CliExecution(
             text='{"extracted_entities":[]}',
@@ -614,18 +743,19 @@ def test_requested_max_tokens_is_forwarded_and_enforced_on_reported_usage(
             ),
         )
 
-    asyncio.run(
-        run_cli_chain(
-            prompt="bounded prompt",
-            schema=None,
-            semantic_request_class="ExtractedEntities",
-            max_tokens=3,
-            cursor_runner=cursor_runner,
-            grok_runner=lambda _prompt, _schema: "not called",
-            invocations=[],
-            invocation_observer=observer,
+    with pytest.raises(CliResponseError, match="exceeded requested max_tokens"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="bounded prompt",
+                schema=None,
+                semantic_request_class="ExtractedEntities",
+                max_tokens=3,
+                cursor_runner=cursor_runner,
+                grok_runner=lambda _prompt, _schema, *, max_tokens: "not called",
+                invocations=[],
+                invocation_observer=observer,
+            )
         )
-    )
 
     assert "maximum_output_tokens=3" in captured_prompt
     leaf = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"][0]
@@ -661,7 +791,7 @@ def test_cancellation_retains_uncertain_leaf_before_control_returns(
     async def cancel_during_transport() -> None:
         started = asyncio.Event()
 
-        async def cursor_runner(_prompt: str) -> CliExecution:
+        async def cursor_runner(_prompt: str, *, max_tokens: int) -> CliExecution:
             started.set()
             await asyncio.sleep(60)
             raise AssertionError("cancelled transport resumed")
@@ -673,7 +803,7 @@ def test_cancellation_retains_uncertain_leaf_before_control_returns(
                 semantic_request_class="ExtractedEntities",
                 max_tokens=100,
                 cursor_runner=cursor_runner,
-                grok_runner=lambda _prompt, _schema: "not called",
+                grok_runner=lambda _prompt, _schema, *, max_tokens: "not called",
                 invocations=invocations,
                 invocation_observer=observer,
             )
@@ -724,11 +854,11 @@ def test_typed_fallback_has_a_distinct_identity_and_exact_parent(
             schema='{"type":"object"}',
             semantic_request_class="ExtractedEdges",
             max_tokens=512,
-            cursor_runner=lambda _prompt: CliExecution(
+            cursor_runner=lambda _prompt, *, max_tokens: CliExecution(
                 text="malformed",
                 usage={"usage_basis": "UNAVAILABLE"},
             ),
-            grok_runner=lambda _prompt, _schema: CliExecution(
+            grok_runner=lambda _prompt, _schema, *, max_tokens: CliExecution(
                 text='{"edges":[]}',
                 usage={
                     "usage_basis": "PROVIDER_REPORTED",
@@ -854,6 +984,7 @@ def test_restart_distinguishes_pre_dispatch_zero_from_possible_io_uncertainty(
         tmp_path / "pre"
     )
     pre_allocation, pre_identity = _bound_request(
+        service=pre_service,
         envelope=pre_envelope,
         policy=pre_policy,
         shape=shape,
@@ -880,6 +1011,7 @@ def test_restart_distinguishes_pre_dispatch_zero_from_possible_io_uncertainty(
 
     io_service, io_envelope, io_policy, io_shape = _service_fixture(tmp_path / "io")
     io_allocation, io_identity = _bound_request(
+        service=io_service,
         envelope=io_envelope,
         policy=io_policy,
         shape=io_shape,
@@ -913,6 +1045,7 @@ def test_graphiti_attempt_cannot_complete_before_every_leaf_has_a_terminal(
 ) -> None:
     service, envelope, policy, shape = _service_fixture(tmp_path)
     allocation, identity = _bound_request(
+        service=service,
         envelope=envelope,
         policy=policy,
         shape=shape,
