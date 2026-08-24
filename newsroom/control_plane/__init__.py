@@ -8,6 +8,7 @@ from newsroom.control_plane.cycle_governor import (
     CycleTerminalResult,
     DurableCycleGovernor,
     EvaluationCyclePolicy,
+    OperatorResetRequest,
 )
 from newsroom.control_plane.graphiti_admission import (
     GraphitiAdmissionConsumer,
@@ -35,6 +36,7 @@ __all__ = [
     "GraphitiAdmissionTelemetry",
     "GraphitiEntityAdmissionPlan",
     "GraphitiRelationAdmissionPlan",
+    "OperatorResetRequest",
     "UnpublishedDraft",
     "UnpublishedSurfacePayload",
     "VetoError",

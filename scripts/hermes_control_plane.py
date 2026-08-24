@@ -9,6 +9,7 @@ import math
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict
 from typing import Protocol, cast
 
@@ -47,6 +48,7 @@ def _cycle(
     *,
     cycle_id: str,
     writer_dispatch_permitted: bool,
+    writer_dispatch_fence: Callable[[], None],
 ) -> CycleReport:
     return run_cycle(
         proving_store=args.proving,
@@ -58,6 +60,7 @@ def _cycle(
         max_writer_provider_dispatches=5 if writer_dispatch_permitted else 0,
         max_writer_fallback_dispatches=1 if writer_dispatch_permitted else 0,
         cycle_id=cycle_id,
+        writer_dispatch_fence=writer_dispatch_fence,
     )
 
 
@@ -117,6 +120,13 @@ def _report_body(report: CycleReport) -> dict[str, object]:
     }
 
 
+class GovernedUnitFailure(RuntimeError):
+    def __init__(self, failure_class: str, terminal: CycleTerminalResult) -> None:
+        super().__init__(f"governed cycle failed: {failure_class}")
+        self.failure_class = failure_class
+        self.terminal = terminal
+
+
 def _governed_unit(
     args: _CycleArgs,
     *,
@@ -128,12 +138,18 @@ def _governed_unit(
     )
     governor = DurableCycleGovernor(args.unpublished, policy=policy)
     lease = governor.claim(owner_id=f"hermes-cycle:{uuid.uuid4()}")
+
+    def writer_dispatch_fence() -> None:
+        governor.renew(lease)
+
     try:
         intake = run_intake(proving_store=args.proving)
+        governor.renew(lease)
         report = _cycle(
             args,
             cycle_id=lease.cycle_id,
             writer_dispatch_permitted=lease.writer_dispatch_permitted,
+            writer_dispatch_fence=writer_dispatch_fence,
         )
         terminal = governor.complete(
             lease,
@@ -148,20 +164,26 @@ def _governed_unit(
                     if report.writer_circuit_open
                     else ""
                 ),
+                dispatch_suppressed_reason=(
+                    "ZERO_WRITE_QUOTA"
+                    if args.max_writes == 0 and report.provider_dispatches == 0
+                    else ""
+                ),
             ),
         )
     except Exception as exc:
         try:
-            governor.fail_ambiguous(
+            terminal = governor.fail_ambiguous(
                 lease,
                 failure_reason=f"GOVERNED_UNIT_EXCEPTION:{type(exc).__name__}",
             )
-        except Exception as terminal_error:  # noqa: BLE001 - preserve original failure
+        except Exception as terminal_error:
             exc.add_note(
                 "durable ambiguous-cycle terminalisation also failed: "
                 f"{type(terminal_error).__name__}"
             )
-        raise
+            raise
+        raise GovernedUnitFailure(type(exc).__name__, terminal) from exc
     return intake, report, terminal
 
 
@@ -179,13 +201,26 @@ def _reported_wait(seconds: float) -> float | None:
     return seconds if math.isfinite(seconds) else None
 
 
+def _reporting_boundaries(
+    *, cooldown_seconds: int, usage_window_seconds: int
+) -> dict[str, object]:
+    return {
+        "post_cycle_cooldown_seconds": cooldown_seconds,
+        "writer_no_result_backoff_is_route_specific": True,
+        "fixed_utc_token_reporting_bucket_seconds": usage_window_seconds,
+        "token_usage_reporting_command": "usage",
+        "human_emergency_stop_is_separate": True,
+        "daily_article_quota": None,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Private unpublished editorial beta (no AUTO_PUBLISH).",
         epilog=(
             "Post-cycle cooldown and writer no-result backoff are durable. "
             "The usage command reports fixed UTC token buckets separately; "
-            "owner emergency stop is a separate authority."
+            "Human Emergency Stop is a separate authority."
         ),
     )
     parser.add_argument(
@@ -247,14 +282,10 @@ def main(argv: list[str] | None = None) -> int:
             "auto_publish": False,
             "graphiti_events": graphiti_events.as_dict(),
             "cycle_governor": asdict(cycle_governor),
-            "reporting_boundaries": {
-                "post_cycle_cooldown_seconds": cooldown_seconds,
-                "writer_no_result_backoff_is_route_specific": True,
-                "fixed_utc_token_reporting_bucket_seconds": args.usage_window,
-                "token_usage_reporting_command": "usage",
-                "owner_emergency_stop_is_separate": True,
-                "daily_article_quota": None,
-            },
+            "reporting_boundaries": _reporting_boundaries(
+                cooldown_seconds=cooldown_seconds,
+                usage_window_seconds=args.usage_window,
+            ),
             "payloads": [
                 {
                     "story_candidate_id": item.story_candidate_id,
@@ -316,17 +347,28 @@ def main(argv: list[str] | None = None) -> int:
                 + "\n"
             )
             return 3
+        except GovernedUnitFailure as exc:
+            sys.stdout.write(
+                json.dumps(
+                    {
+                        "event": "GOVERNED_CYCLE_SYSTEMIC_FAILURE",
+                        "failure_class": exc.failure_class,
+                        "cycle_governor": asdict(exc.terminal),
+                        "public_dispatch": False,
+                        "auto_publish": False,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            return 2
         body = _report_body(report)
         body["intake"] = asdict(intake)
         body["cycle_governor"] = asdict(terminal)
-        body["reporting_boundaries"] = {
-            "post_cycle_cooldown_seconds": cooldown_seconds,
-            "writer_no_result_backoff_is_route_specific": True,
-            "fixed_utc_token_reporting_bucket_seconds": args.usage_window,
-            "token_usage_reporting_command": "usage",
-            "owner_emergency_stop_is_separate": True,
-            "daily_article_quota": None,
-        }
+        body["reporting_boundaries"] = _reporting_boundaries(
+            cooldown_seconds=cooldown_seconds,
+            usage_window_seconds=args.usage_window,
+        )
         sys.stdout.write(json.dumps(body, ensure_ascii=False) + "\n")
         return 0
     while True:
@@ -342,21 +384,30 @@ def main(argv: list[str] | None = None) -> int:
                         "intake": asdict(intake),
                         "cycle": _report_body(report),
                         "cycle_governor": asdict(terminal),
-                        "reporting_boundaries": {
-                            "post_cycle_cooldown_seconds": cooldown_seconds,
-                            "writer_no_result_backoff_is_route_specific": True,
-                            "fixed_utc_token_reporting_bucket_seconds": (
-                                args.usage_window
-                            ),
-                            "token_usage_reporting_command": "usage",
-                            "owner_emergency_stop_is_separate": True,
-                            "daily_article_quota": None,
-                        },
+                        "reporting_boundaries": _reporting_boundaries(
+                            cooldown_seconds=cooldown_seconds,
+                            usage_window_seconds=args.usage_window,
+                        ),
                     },
                     ensure_ascii=False,
                 ),
                 flush=True,
             )
+        except GovernedUnitFailure as exc:
+            print(
+                json.dumps(
+                    {
+                        "event": "GOVERNED_CYCLE_SYSTEMIC_FAILURE",
+                        "failure_class": exc.failure_class,
+                        "cycle_governor": asdict(exc.terminal),
+                        "public_dispatch": False,
+                        "auto_publish": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+            _wait_monotonic(1.0)
         except CycleNotEligible as exc:
             print(
                 json.dumps(

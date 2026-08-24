@@ -72,6 +72,7 @@ class CycleOutcomeInput:
     admission_hold: int | None = 0
     admission_reject: int | None = 0
     systemic_provider_failure_reason: str = ""
+    dispatch_suppressed_reason: str = ""
 
     def __post_init__(self) -> None:
         for name in (
@@ -94,6 +95,10 @@ class CycleOutcomeInput:
             raise ValueError("accepted payloads require a retained provider dispatch")
         if self.systemic_provider_failure_reason and self.provider_dispatches == 0:
             raise ValueError("a systemic provider failure requires a provider dispatch")
+        if self.dispatch_suppressed_reason not in {"", "ZERO_WRITE_QUOTA"}:
+            raise ValueError("unknown writer dispatch suppression reason")
+        if self.dispatch_suppressed_reason and self.provider_dispatches != 0:
+            raise ValueError("dispatch suppression requires zero provider dispatches")
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +129,7 @@ class CycleTerminalResult:
     admission_counts: dict[str, int | None]
     accepted_payload_count: int | None
     writer_provider_dispatch_count: int | None
+    writer_dispatch_suppressed_reason: str
     work_started_at: str
     terminal_at: str
     elapsed_seconds: float
@@ -168,6 +174,16 @@ class CircuitReleaseEvidence:
     evidence_digest: str
 
 
+@dataclass(frozen=True, slots=True)
+class OperatorResetRequest:
+    route: str
+    bound_failure_reason: str
+    policy_version: str
+    authorised_by: str
+    evidence_reference: str
+    requested_at: str
+
+
 class CycleNotEligible(RuntimeError):
     def __init__(
         self,
@@ -197,6 +213,9 @@ class CycleLeaseConflict(CycleNotEligible):
         )
         self.cycle_id = cycle_id
         self.lease_expires_at = lease_expires_at
+
+
+OperatorResetVerifier = Callable[[OperatorResetRequest], bool]
 
 
 _SCHEMA = """
@@ -239,6 +258,7 @@ CREATE TABLE IF NOT EXISTS unpublished_governed_cycles(
     admission_reject INTEGER,
     accepted_payload_count INTEGER,
     provider_dispatches INTEGER,
+    writer_dispatch_suppressed_reason TEXT NOT NULL DEFAULT '',
     cooldown_policy_version TEXT NOT NULL,
     cooldown_seconds INTEGER,
     cooldown_started_at TEXT,
@@ -253,6 +273,17 @@ CREATE TABLE IF NOT EXISTS unpublished_governed_cycles(
     refused_early_start_reason_before TEXT NOT NULL,
     refused_early_start_count INTEGER,
     refused_early_start_reason TEXT
+);
+CREATE TABLE IF NOT EXISTS unpublished_route_health_probes(
+    probe_id TEXT PRIMARY KEY,
+    route TEXT NOT NULL,
+    bound_failure_reason TEXT NOT NULL,
+    attempted_at TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN ('PASSED','FAILED')),
+    provider_dispatched INTEGER NOT NULL CHECK(provider_dispatched IN (0,1)),
+    provider_receipt_reference TEXT,
+    evidence_json TEXT NOT NULL,
+    evidence_digest TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS unpublished_one_active_governed_cycle
 ON unpublished_governed_cycles(lease_state) WHERE lease_state='ACTIVE';
@@ -279,6 +310,7 @@ def ensure_cycle_governor_schema(connection: sqlite3.Connection) -> None:
         ("refused_early_start_reason_before", "TEXT NOT NULL DEFAULT ''"),
         ("refused_early_start_count", "INTEGER"),
         ("refused_early_start_reason", "TEXT"),
+        ("writer_dispatch_suppressed_reason", "TEXT NOT NULL DEFAULT ''"),
     ):
         if column not in cycle_columns:
             connection.execute(
@@ -324,6 +356,7 @@ class DurableCycleGovernor:
         utc_clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
         monotonic_clock: Callable[[], float] = time.monotonic,
         lease_seconds: int = 21_600,
+        operator_reset_verifier: OperatorResetVerifier | None = None,
     ) -> None:
         if (
             isinstance(lease_seconds, bool)
@@ -336,6 +369,7 @@ class DurableCycleGovernor:
         self._utc_clock = utc_clock
         self._monotonic_clock = monotonic_clock
         self._lease_seconds = lease_seconds
+        self._operator_reset_verifier = operator_reset_verifier
         connection = connect(self._path)
         try:
             ensure_cycle_governor_schema(connection)
@@ -580,6 +614,63 @@ class DurableCycleGovernor:
         finally:
             connection.close()
 
+    def renew(self, lease: CycleLease) -> str:
+        """Renew and fence an active unit before another governed-work boundary."""
+
+        now, now_text = self._now()
+        renewed_until = _utc_text(now + timedelta(seconds=self._lease_seconds))
+        connection = connect(self._path)
+        try:
+            ensure_cycle_governor_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            state = connection.execute(
+                "SELECT last_observed_utc FROM unpublished_cycle_governor_state "
+                "WHERE singleton=1"
+            ).fetchone()
+            if state is None:
+                raise RuntimeError("cycle governor state is missing")
+            if state[0] is not None and now < _parse_utc(str(state[0])):
+                raise CycleNotEligible(
+                    "UTC_CLOCK_BACKWARDS",
+                    remaining_seconds=math.inf,
+                    next_cycle_eligible_at=lease.lease_expires_at,
+                )
+            changed = connection.execute(
+                "UPDATE unpublished_governed_cycles SET lease_expires_at=? "
+                "WHERE cycle_id=? AND owner_digest=? AND lease_state='ACTIVE'",
+                (renewed_until, lease.cycle_id, lease.owner_digest),
+            ).rowcount
+            if changed != 1:
+                raise CycleLeaseConflict(
+                    lease.cycle_id,
+                    remaining_seconds=0.0,
+                    lease_expires_at=lease.lease_expires_at,
+                )
+            connection.execute(
+                "UPDATE unpublished_cycle_governor_state SET last_observed_utc=? "
+                "WHERE singleton=1",
+                (now_text,),
+            )
+            append_ledger(
+                connection,
+                "PRIVATE_GOVERNED_CYCLE_LEASE_RENEWED",
+                {
+                    "cycle_id": lease.cycle_id,
+                    "lease_owner_digest": lease.owner_digest,
+                    "lease_state": "ACTIVE",
+                    "renewed_at": now_text,
+                    "lease_expires_at": renewed_until,
+                },
+            )
+            connection.commit()
+            return renewed_until
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     @staticmethod
     def _classify(
         lease: CycleLease, outcome: CycleOutcomeInput
@@ -601,6 +692,8 @@ class DurableCycleGovernor:
             return "IDLE_QUALIFIED_ZERO", ""
         if lease.writer_circuit_state == "OPEN":
             return "SYSTEMIC_PROVIDER_FAILURE", lease.writer_circuit_open_reason
+        if outcome.dispatch_suppressed_reason == "ZERO_WRITE_QUOTA":
+            return "IDLE_QUALIFIED_ZERO", ""
         raise ValueError(
             "WRITE_READY work with no payload and no provider dispatch is inconsistent"
         )
@@ -679,6 +772,7 @@ class DurableCycleGovernor:
                 "terminal_at=?, elapsed_seconds=?, terminal_state=?, outcome_class=?, "
                 "write_ready=?, admission_hold=?, admission_reject=?, "
                 "accepted_payload_count=?, provider_dispatches=?, cooldown_seconds=?, "
+                "writer_dispatch_suppressed_reason=?, "
                 "cooldown_started_at=?, next_cycle_eligible_at=?, "
                 "writer_unproductive_streak_after=?, writer_circuit_state=?, "
                 "writer_circuit_open_reason=?, writer_circuit_release_evidence_json=?, "
@@ -695,6 +789,7 @@ class DurableCycleGovernor:
                     outcome.accepted_payload_count,
                     outcome.provider_dispatches,
                     cooldown,
+                    outcome.dispatch_suppressed_reason,
                     cooldown_started_at,
                     next_text,
                     after,
@@ -738,6 +833,9 @@ class DurableCycleGovernor:
                 },
                 "accepted_payload_count": outcome.accepted_payload_count,
                 "writer_provider_dispatch_count": outcome.provider_dispatches,
+                "writer_dispatch_suppressed_reason": (
+                    outcome.dispatch_suppressed_reason
+                ),
                 "cooldown_policy_version": self._policy.version,
                 "cooldown_seconds": cooldown,
                 "cooldown_started_at": cooldown_started_at,
@@ -777,6 +875,7 @@ class DurableCycleGovernor:
             },
             accepted_payload_count=outcome.accepted_payload_count,
             writer_provider_dispatch_count=outcome.provider_dispatches,
+            writer_dispatch_suppressed_reason=outcome.dispatch_suppressed_reason,
             work_started_at=lease.work_started_at,
             terminal_at=now_text,
             elapsed_seconds=elapsed,
@@ -820,7 +919,6 @@ class DurableCycleGovernor:
     def _release_circuit(
         self,
         *,
-        route: str,
         bound_failure_reason: str,
         release_kind: str,
         evidence: dict[str, object],
@@ -833,7 +931,7 @@ class DurableCycleGovernor:
             circuit = connection.execute(
                 "SELECT state, open_reason, opened_at FROM unpublished_route_circuits "
                 "WHERE route=?",
-                (route,),
+                (CONT_WRITER_ROUTE,),
             ).fetchone()
             if circuit is None or str(circuit[0]) != "OPEN":
                 raise ValueError("route circuit is not open")
@@ -852,7 +950,7 @@ class DurableCycleGovernor:
                     next_cycle_eligible_at=None,
                 )
             record = {
-                "route": route,
+                "route": CONT_WRITER_ROUTE,
                 "release_kind": release_kind,
                 "released_at": now_text,
                 "policy_version": self._policy.version,
@@ -866,7 +964,7 @@ class DurableCycleGovernor:
                 "UPDATE unpublished_route_circuits SET state='CLOSED', open_reason='', "
                 "opened_at=NULL, release_evidence_json=?, release_evidence_digest=? "
                 "WHERE route=? AND state='OPEN' AND open_reason=?",
-                (raw, digest, route, bound_failure_reason),
+                (raw, digest, CONT_WRITER_ROUTE, bound_failure_reason),
             )
             connection.execute(
                 "UPDATE unpublished_cycle_governor_state SET "
@@ -876,7 +974,7 @@ class DurableCycleGovernor:
             append_ledger(connection, "PRIVATE_WRITER_CIRCUIT_RELEASED", record)
             connection.commit()
             return CircuitReleaseEvidence(
-                route=route,
+                route=CONT_WRITER_ROUTE,
                 release_kind=release_kind,
                 released_at=now_text,
                 policy_version=self._policy.version,
@@ -893,7 +991,6 @@ class DurableCycleGovernor:
     def release_with_health_probe(
         self,
         *,
-        route: str,
         bound_failure_reason: str,
         executable_ok: bool,
         authentication_ok: bool,
@@ -902,62 +999,119 @@ class DurableCycleGovernor:
         provider_dispatched: bool,
         provider_receipt_reference: str | None,
     ) -> CircuitReleaseEvidence:
-        if route != CONT_WRITER_ROUTE:
-            raise ValueError("this governor only releases the CONT writer route")
-        if not all(
-            (executable_ok, authentication_ok, configuration_ok, provider_available)
-        ):
-            raise ValueError("health probe did not prove every required route property")
         if provider_dispatched and not provider_receipt_reference:
             raise ValueError(
                 "provider-reaching health probe requires a receipt reference"
             )
-        now, _ = self._now()
+        now, now_text = self._now()
         connection = connect(self._path)
         try:
             ensure_cycle_governor_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT state, open_reason, opened_at, last_probe_at "
                 "FROM unpublished_route_circuits WHERE route=?",
-                (route,),
+                (CONT_WRITER_ROUTE,),
             ).fetchone()
-        finally:
-            connection.close()
-        if row is None or str(row[0]) != "OPEN":
-            raise ValueError("route circuit is not open")
-        if str(row[1]) != bound_failure_reason:
-            raise ValueError("release is not bound to the current circuit failure")
-        opened_at = _parse_utc(str(row[2]))
-        earliest = opened_at + timedelta(
-            seconds=self._policy.health_probe_interval_seconds
-        )
-        if now < earliest:
-            raise CycleNotEligible(
-                "HEALTH_PROBE_INTERVAL",
-                remaining_seconds=_remaining_seconds(now, earliest),
-                next_cycle_eligible_at=_utc_text(earliest),
-            )
-        if row[3] is not None:
-            probe_earliest = _parse_utc(str(row[3])) + timedelta(
+            if row is None or str(row[0]) != "OPEN":
+                raise ValueError("route circuit is not open")
+            if str(row[1]) != bound_failure_reason:
+                raise ValueError("release is not bound to the current circuit failure")
+            state = connection.execute(
+                "SELECT last_observed_utc FROM unpublished_cycle_governor_state "
+                "WHERE singleton=1"
+            ).fetchone()
+            if state is None:
+                raise RuntimeError("cycle governor state is missing")
+            if state[0] is not None and now < _parse_utc(str(state[0])):
+                raise CycleNotEligible(
+                    "UTC_CLOCK_BACKWARDS",
+                    remaining_seconds=math.inf,
+                    next_cycle_eligible_at=None,
+                )
+            earliest = _parse_utc(str(row[2])) + timedelta(
                 seconds=self._policy.health_probe_interval_seconds
             )
-            if now < probe_earliest:
+            if row[3] is not None:
+                earliest = max(
+                    earliest,
+                    _parse_utc(str(row[3]))
+                    + timedelta(seconds=self._policy.health_probe_interval_seconds),
+                )
+            if now < earliest:
                 raise CycleNotEligible(
                     "HEALTH_PROBE_INTERVAL",
-                    remaining_seconds=_remaining_seconds(now, probe_earliest),
-                    next_cycle_eligible_at=_utc_text(probe_earliest),
+                    remaining_seconds=_remaining_seconds(now, earliest),
+                    next_cycle_eligible_at=_utc_text(earliest),
                 )
-        evidence = {
-            "no_content_probe": True,
-            "executable_ok": executable_ok,
-            "authentication_ok": authentication_ok,
-            "configuration_ok": configuration_ok,
-            "provider_available": provider_available,
-            "provider_dispatched": provider_dispatched,
-            "provider_receipt_reference": provider_receipt_reference,
-        }
+            passed = all(
+                (
+                    executable_ok,
+                    authentication_ok,
+                    configuration_ok,
+                    provider_available,
+                )
+            )
+            evidence: dict[str, object] = {
+                "route": CONT_WRITER_ROUTE,
+                "bound_failure_reason": bound_failure_reason,
+                "attempted_at": now_text,
+                "outcome": "PASSED" if passed else "FAILED",
+                "no_content_probe": True,
+                "executable_ok": executable_ok,
+                "authentication_ok": authentication_ok,
+                "configuration_ok": configuration_ok,
+                "provider_available": provider_available,
+                "provider_dispatched": provider_dispatched,
+                "provider_receipt_reference": provider_receipt_reference,
+            }
+            evidence_digest = digest_bytes(canonical_json_bytes(evidence))
+            probe_id = digest_bytes(
+                canonical_json_bytes(
+                    {
+                        "route": CONT_WRITER_ROUTE,
+                        "bound_failure_reason": bound_failure_reason,
+                        "attempted_at": now_text,
+                    }
+                )
+            )
+            connection.execute(
+                "INSERT INTO unpublished_route_health_probes("
+                "probe_id, route, bound_failure_reason, attempted_at, outcome, "
+                "provider_dispatched, provider_receipt_reference, evidence_json, "
+                "evidence_digest) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    probe_id,
+                    CONT_WRITER_ROUTE,
+                    bound_failure_reason,
+                    now_text,
+                    "PASSED" if passed else "FAILED",
+                    int(provider_dispatched),
+                    provider_receipt_reference,
+                    canonical_json_bytes(evidence).decode(),
+                    evidence_digest,
+                ),
+            )
+            connection.execute(
+                "UPDATE unpublished_route_circuits SET last_probe_at=? WHERE route=?",
+                (now_text, CONT_WRITER_ROUTE),
+            )
+            connection.execute(
+                "UPDATE unpublished_cycle_governor_state SET last_observed_utc=? "
+                "WHERE singleton=1",
+                (now_text,),
+            )
+            append_ledger(connection, "PRIVATE_WRITER_ROUTE_HEALTH_PROBE", evidence)
+            connection.commit()
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if not passed:
+            raise ValueError("health probe did not prove every required route property")
         return self._release_circuit(
-            route=route,
             bound_failure_reason=bound_failure_reason,
             release_kind="DETERMINISTIC_HEALTH_PROBE",
             evidence=evidence,
@@ -966,25 +1120,46 @@ class DurableCycleGovernor:
     def authorised_operator_reset(
         self,
         *,
-        route: str,
         bound_failure_reason: str,
         policy_version: str,
         authorised_by: str,
         evidence_reference: str,
     ) -> CircuitReleaseEvidence:
-        if route != CONT_WRITER_ROUTE:
-            raise ValueError("this governor only releases the CONT writer route")
         if policy_version != self._policy.version:
             raise ValueError("operator reset policy version is not current")
         if not authorised_by.strip() or not evidence_reference.strip():
             raise ValueError("operator reset requires authority and evidence reference")
+        requested_at = _utc_text(self._utc_clock())
+        request = OperatorResetRequest(
+            route=CONT_WRITER_ROUTE,
+            bound_failure_reason=bound_failure_reason,
+            policy_version=policy_version,
+            authorised_by=authorised_by,
+            evidence_reference=evidence_reference,
+            requested_at=requested_at,
+        )
+        if self._operator_reset_verifier is None or not self._operator_reset_verifier(
+            request
+        ):
+            raise ValueError("operator reset authority proof is absent or invalid")
         return self._release_circuit(
-            route=route,
             bound_failure_reason=bound_failure_reason,
             release_kind="AUTHORISED_OPERATOR_RESET",
             evidence={
                 "authorised_by": authorised_by,
                 "evidence_reference": evidence_reference,
+                "authority_request_digest": digest_bytes(
+                    canonical_json_bytes(
+                        {
+                            "route": request.route,
+                            "bound_failure_reason": request.bound_failure_reason,
+                            "policy_version": request.policy_version,
+                            "authorised_by": request.authorised_by,
+                            "evidence_reference": request.evidence_reference,
+                            "requested_at": request.requested_at,
+                        }
+                    )
+                ),
             },
         )
 
@@ -1011,7 +1186,8 @@ class DurableCycleGovernor:
                 "SELECT cycle_id, owner_digest, lease_state, terminal_state, outcome_class, "
                 "work_started_at, terminal_at, elapsed_seconds, write_ready, "
                 "admission_hold, admission_reject, accepted_payload_count, "
-                "provider_dispatches, cooldown_policy_version, cooldown_seconds, "
+                "provider_dispatches, writer_dispatch_suppressed_reason, "
+                "cooldown_policy_version, cooldown_seconds, "
                 "cooldown_started_at, next_cycle_eligible_at, "
                 "writer_unproductive_streak_before, writer_unproductive_streak_after, "
                 "writer_circuit_state, writer_circuit_open_reason, "
@@ -1037,6 +1213,7 @@ class DurableCycleGovernor:
             "admission_reject",
             "accepted_payload_count",
             "writer_provider_dispatch_count",
+            "writer_dispatch_suppressed_reason",
             "cooldown_policy_version",
             "cooldown_seconds",
             "cooldown_started_at",

@@ -1769,6 +1769,7 @@ def _run_write_loop(
     max_writer_fallback_dispatches: int,
     selected_at: str,
     cycle_execution_id: str,
+    writer_dispatch_fence: Callable[[], None] | None,
 ) -> _WriteLoopResult:
     duplicate = 0
     for candidate, package, decision in admitted:
@@ -1872,6 +1873,8 @@ def _run_write_loop(
                 if provider_dispatches >= max_writer_provider_dispatches:
                     last_reason = "PROVIDER_BUDGET_EXHAUSTED"
                     break
+            if writer_dispatch_fence is not None:
+                writer_dispatch_fence()
             provider_dispatches += 1
             if route == "PRIMARY":
                 primary_dispatches += 1
@@ -2276,6 +2279,7 @@ def run_cycle(
     max_writer_fallback_dispatches: int = 1,
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
     cycle_id: str | None = None,
+    writer_dispatch_fence: Callable[[], None] | None = None,
 ) -> CycleReport:
     if cycle_id is None:
         cycle_id = str(uuid.uuid4())
@@ -2472,6 +2476,7 @@ def run_cycle(
             max_writer_fallback_dispatches=min(max_writer_fallback_dispatches, 1),
             selected_at=_utc_text(admission_evaluated_at),
             cycle_execution_id=cycle_id,
+            writer_dispatch_fence=writer_dispatch_fence,
         )
         coverage = graphiti_coverage(
             unpublished,
