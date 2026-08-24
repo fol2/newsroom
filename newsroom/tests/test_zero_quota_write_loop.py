@@ -188,6 +188,12 @@ def test_official_programme_terms_have_a_structured_entity_type() -> None:
         "方針明確公布安排",
         "方表示支持新安排",
         "政府任命任務安排",
+        "政府任命任務安排為項目",
+        "機構邀請相關安排",
+        "機構邀請方表示",
+        "政府公布政策將實施",
+        "政府公布措施將推行",
+        "政府公布計劃將啟用",
     ),
 )
 def test_common_chinese_words_are_not_invented_as_people_or_places(text: str) -> None:
@@ -379,6 +385,18 @@ def test_approved_proper_name_is_exempt_from_contextual_shape_gate(
             ("銅鑼灣", "PLACE"),
             ("佐敦", "PLACE"),
         ),
+        (
+            "香港政府公布新人事安排由劉志偉出任局長",
+            "香港政府最新公告指新人事由郭志強出任局長",
+            ("劉志偉", "PERSON"),
+            ("郭志強", "PERSON"),
+        ),
+        (
+            "香港政府公布新中心將設於銅鑼灣",
+            "香港政府最新公告顯示新中心設於佐敦",
+            ("銅鑼灣", "PLACE"),
+            ("佐敦", "PLACE"),
+        ),
     ),
 )
 def test_changed_chinese_identity_fails_closed_before_writer(
@@ -476,16 +494,18 @@ def test_short_service_delay_cannot_masquerade_as_law_change() -> None:
 
 
 @pytest.mark.parametrize(
-    "service_noise",
+    ("service_noise", "action_class"),
     (
-        "服務公布新增十分鐘延誤",
-        "服務公布新增半小時延誤",
-        "服務公布零分鐘延誤",
-        "青松學校公布校巴新增半小時延誤",
+        ("服務公布新增十分鐘延誤", "INSTRUCTION"),
+        ("服務公布新增半小時延誤", "INSTRUCTION"),
+        ("服務公布零分鐘延誤", "INSTRUCTION"),
+        ("青松學校公布校巴新增半小時延誤", "INSTRUCTION"),
+        ("服務公布半小時延誤後乘客要求賠償", "INSTRUCTION"),
+        ("服務重申申請截止日期並公布新增半小時延誤", "OFFICIAL_DEADLINE"),
     ),
 )
 def test_service_delay_cannot_masquerade_as_official_instruction(
-    service_noise: str,
+    service_noise: str, action_class: str
 ) -> None:
     candidate, package = _candidate_package()
     headline, substantive = package.governed_claims
@@ -513,7 +533,7 @@ def test_service_delay_cannot_masquerade_as_official_instruction(
                 changed_headline.claim_id,
                 package.qualification_evidence[0].qualification_record_id,
                 (
-                    ("action_class", "INSTRUCTION"),
+                    ("action_class", action_class),
                     ("event_polarity", "AFFIRMED"),
                     ("action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"),
                     ("material_relation_span", service_noise),
@@ -3733,7 +3753,8 @@ def test_conflicting_admission_for_same_package_is_not_silently_ignored(
     retain_write_admission_decision(connection, decision)
     with pytest.raises(sqlite3.IntegrityError):
         connection.execute(
-            "INSERT INTO unpublished_write_admission_decisions VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO unpublished_write_admission_decisions "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
             (
                 "sha256:" + ("f" * 64),
                 decision.candidate_id,
@@ -3742,6 +3763,7 @@ def test_conflicting_admission_for_same_package_is_not_silently_ignored(
                 "HOLD",
                 '["CONFLICT"]',
                 "{}",
+                "2026-08-20T00:00:01Z",
                 "2026-08-20T00:00:01Z",
             ),
         )
@@ -3802,12 +3824,44 @@ def test_write_selection_replay_requires_exact_canonical_record(tmp_path: Path) 
             selected_at=selection.selected_at,
         )
 
-    connection.execute(
-        "UPDATE unpublished_write_selections SET record_json='{}' WHERE selection_id=?",
-        (selection.selection_id,),
+    original_record = selection.as_record()
+    poisoned_records = (
+        {},
+        {**original_record, "ordering_evidence": ["FORGED"]},
+        {**original_record, "evil": "value"},
+        {**original_record, "selected_at": "attacker-time"},
     )
-    with pytest.raises(sqlite3.IntegrityError, match="conflicting write-selection"):
-        retain_write_selection(connection, selection)
+    for poisoned in poisoned_records:
+        connection.execute(
+            "UPDATE unpublished_write_selections SET record_json=? "
+            "WHERE selection_id=?",
+            (canonical_json_bytes(poisoned).decode(), selection.selection_id),
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="conflicting write-selection"):
+            retain_write_selection(connection, selection)
+        connection.execute(
+            "UPDATE unpublished_write_selections SET record_json=? "
+            "WHERE selection_id=?",
+            (canonical_json_bytes(original_record).decode(), selection.selection_id),
+        )
+    connection.close()
+
+
+def test_admission_replay_rejects_tampered_canonical_record(tmp_path: Path) -> None:
+    connection = connect(str(tmp_path / "admission-replay.sqlite3"))
+    candidate, package = _candidate_package()
+    decision = DeterministicWriteAdmission().decide(
+        candidate, package, decided_at="2026-08-20T00:00:00Z"
+    )
+    retain_write_admission_decision(connection, decision)
+    connection.execute(
+        "UPDATE unpublished_write_admission_decisions "
+        "SET reason_codes_json='[\"TAMPERED\"]', record_json='{}' "
+        "WHERE decision_id=?",
+        (decision.decision_id,),
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="conflicting write-admission"):
+        retain_write_admission_decision(connection, decision)
     connection.close()
 
 

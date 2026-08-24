@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS unpublished_write_admission_decisions(
     reason_codes_json TEXT NOT NULL,
     record_json TEXT NOT NULL,
     at TEXT NOT NULL,
+    decided_at TEXT,
     UNIQUE(candidate_id, evidence_package_digest, policy_version),
     UNIQUE(decision_id, candidate_id, evidence_package_digest)
 );
@@ -116,6 +117,7 @@ CREATE TABLE IF NOT EXISTS unpublished_write_selections(
     rank INTEGER NOT NULL,
     record_json TEXT NOT NULL,
     at TEXT NOT NULL,
+    selected_at TEXT,
     FOREIGN KEY(decision_id, candidate_id, evidence_package_digest)
         REFERENCES unpublished_write_admission_decisions(
             decision_id, candidate_id, evidence_package_digest
@@ -451,11 +453,6 @@ def connect(path: str) -> sqlite3.Connection:
     connection = sqlite3.connect(path)
     apply_control_plane_sqlite_profile(connection)
     connection.executescript(_PAYLOAD_SQL)
-    if connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ledger_pre_v12'"
-    ).fetchone():
-        raise RuntimeError("stranded ledger migration requires manual recovery")
-    ledger_info = connection.execute("PRAGMA table_info(ledger)").fetchall()
     expected_ledger_info = (
         (0, "seq", "INTEGER", 0, None, 1),
         (1, "at", "TEXT", 1, None, 0),
@@ -465,9 +462,14 @@ def connect(path: str) -> sqlite3.Connection:
         (5, "prev_digest", "TEXT", 1, None, 0),
         (6, "digest", "TEXT", 1, None, 0),
     )
-    if tuple(ledger_info) != expected_ledger_info:
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ledger_pre_v12'"
+        ).fetchone():
+            raise RuntimeError("stranded ledger migration requires manual recovery")
+        ledger_info = connection.execute("PRAGMA table_info(ledger)").fetchall()
+        if tuple(ledger_info) != expected_ledger_info:
             ledger_columns = {str(row[1]) for row in ledger_info}
             payload_projection = (
                 "payload_json" if "payload_json" in ledger_columns else "NULL"
@@ -489,22 +491,45 @@ def connect(path: str) -> sqlite3.Connection:
             connection.execute(
                 "CREATE UNIQUE INDEX ledger_one_child_per_digest ON ledger(prev_digest)"
             )
-            connection.commit()
-        except Exception:
-            if connection.in_transaction:
-                connection.rollback()
-            raise
-    outcome_columns = {
-        str(row[1])
-        for row in connection.execute("PRAGMA table_info(unpublished_draft_outcomes)")
-    }
-    if "candidate_attempt_id" not in outcome_columns:
-        connection.execute(
-            "ALTER TABLE unpublished_draft_outcomes "
-            "ADD COLUMN candidate_attempt_id TEXT REFERENCES "
-            "unpublished_write_candidate_attempts(candidate_attempt_id) "
-            "ON UPDATE RESTRICT ON DELETE RESTRICT"
-        )
+        outcome_columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(unpublished_draft_outcomes)"
+            )
+        }
+        if "candidate_attempt_id" not in outcome_columns:
+            connection.execute(
+                "ALTER TABLE unpublished_draft_outcomes "
+                "ADD COLUMN candidate_attempt_id TEXT REFERENCES "
+                "unpublished_write_candidate_attempts(candidate_attempt_id) "
+                "ON UPDATE RESTRICT ON DELETE RESTRICT"
+            )
+        decision_columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(unpublished_write_admission_decisions)"
+            )
+        }
+        if "decided_at" not in decision_columns:
+            connection.execute(
+                "ALTER TABLE unpublished_write_admission_decisions "
+                "ADD COLUMN decided_at TEXT"
+            )
+        selection_columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(unpublished_write_selections)"
+            )
+        }
+        if "selected_at" not in selection_columns:
+            connection.execute(
+                "ALTER TABLE unpublished_write_selections ADD COLUMN selected_at TEXT"
+            )
+        connection.commit()
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
     _ensure_landed_schema(connection)
     ensure_reconciliation_schema(connection)
     columns = {
@@ -575,13 +600,17 @@ def retain_write_admission_decision(
     if not isinstance(decision, WriteAdmissionDecision):
         raise TypeError("write admission decision record required")
     record = decision.as_record()
+    record_json = canonical_json_bytes(record).decode("utf-8")
+    reason_codes_json = canonical_json_bytes(list(decision.stable_reason_codes)).decode(
+        "utf-8"
+    )
     try:
         connection.execute(
             """
             INSERT INTO unpublished_write_admission_decisions(
                 decision_id, candidate_id, evidence_package_digest, policy_version,
-                decision, reason_codes_json, record_json, at
-            ) VALUES(?,?,?,?,?,?,?,?)
+                decision, reason_codes_json, record_json, at, decided_at
+            ) VALUES(?,?,?,?,?,?,?,?,?)
             """,
             (
                 decision.decision_id,
@@ -589,15 +618,18 @@ def retain_write_admission_decision(
                 decision.evidence_package_digest,
                 decision.policy_version,
                 decision.decision,
-                json.dumps(list(decision.stable_reason_codes), ensure_ascii=False),
-                json.dumps(record, ensure_ascii=False, sort_keys=True),
+                reason_codes_json,
+                record_json,
                 _now(),
+                decision.decided_at,
             ),
         )
     except sqlite3.IntegrityError as exc:
         rows = connection.execute(
             """
-            SELECT decision_id, decision FROM unpublished_write_admission_decisions
+            SELECT decision_id, candidate_id, evidence_package_digest, policy_version,
+                   decision, reason_codes_json, record_json, decided_at
+            FROM unpublished_write_admission_decisions
             WHERE decision_id=? OR (
                 candidate_id=? AND evidence_package_digest=? AND policy_version=?
             )
@@ -609,7 +641,33 @@ def retain_write_admission_decision(
                 decision.policy_version,
             ),
         ).fetchall()
-        if rows != [(decision.decision_id, decision.decision)]:
+        replay_valid = False
+        if len(rows) == 1:
+            row = rows[0]
+            try:
+                stored_raw = json.loads(row[6])
+                if not isinstance(stored_raw, dict):
+                    raise TypeError("stored write admission is not an object")
+                stored = WriteAdmissionDecision.from_record(stored_raw)
+                stored_reasons = json.loads(row[5])
+                replay_valid = (
+                    canonical_json_bytes(stored_raw).decode("utf-8") == row[6]
+                    and canonical_json_bytes(stored_reasons).decode("utf-8") == row[5]
+                    and stored_reasons == list(stored.stable_reason_codes)
+                    and stored.decided_at == row[7]
+                    and row[:5]
+                    == (
+                        decision.decision_id,
+                        decision.candidate_id,
+                        decision.evidence_package_digest,
+                        decision.policy_version,
+                        decision.decision,
+                    )
+                    and stored.decision_id == decision.decision_id
+                )
+            except (KeyError, TypeError, ValueError):
+                replay_valid = False
+        if not replay_valid:
             raise sqlite3.IntegrityError(
                 "conflicting write-admission decision replay"
             ) from exc
@@ -626,8 +684,8 @@ def retain_write_selection(connection: sqlite3.Connection, selection: object) ->
             """
             INSERT INTO unpublished_write_selections(
                 selection_id, decision_id, candidate_id, evidence_package_digest,
-                rank, record_json, at
-            ) VALUES(?,?,?,?,?,?,?)
+                rank, record_json, at, selected_at
+            ) VALUES(?,?,?,?,?,?,?,?)
             """,
             (
                 selection.selection_id,
@@ -637,12 +695,13 @@ def retain_write_selection(connection: sqlite3.Connection, selection: object) ->
                 selection.rank,
                 record_json,
                 _now(),
+                selection.selected_at,
             ),
         )
     except sqlite3.IntegrityError as exc:
         row = connection.execute(
             "SELECT decision_id, candidate_id, evidence_package_digest, rank, "
-            "record_json "
+            "record_json, selected_at "
             "FROM unpublished_write_selections WHERE selection_id=?",
             (selection.selection_id,),
         ).fetchone()
@@ -656,36 +715,18 @@ def retain_write_selection(connection: sqlite3.Connection, selection: object) ->
             stored_record = json.loads(row[4]) if row is not None else None
             if not isinstance(stored_record, dict):
                 raise TypeError("stored write selection is not an object")
-            stored_identity = {
-                field: stored_record[field]
-                for field in (
-                    "decision_id",
-                    "candidate_id",
-                    "evidence_package_digest",
-                    "rank",
-                    "quality_score",
-                    "policy_version",
-                )
-            }
+            stored_selection = WriteSelectionRecord.from_record(stored_record)
             canonical_stored = canonical_json_bytes(stored_record).decode("utf-8")
         except (KeyError, TypeError, ValueError):
-            stored_identity = None
+            stored_selection = None
             canonical_stored = None
-        incoming_identity = {
-            "decision_id": selection.decision_id,
-            "candidate_id": selection.candidate_id,
-            "evidence_package_digest": selection.evidence_package_digest,
-            "rank": selection.rank,
-            "quality_score": list(selection.quality_score),
-            "policy_version": selection.policy_version,
-        }
         if (
             row is None
             or row[:4] != expected_columns
-            or stored_identity != incoming_identity
+            or stored_selection is None
+            or stored_selection.selection_id != selection.selection_id
+            or stored_selection.selected_at != row[5]
             or canonical_stored != row[4]
-            or digest_bytes(canonical_json_bytes(stored_identity))
-            != selection.selection_id
         ):
             raise sqlite3.IntegrityError("conflicting write-selection replay") from exc
 

@@ -215,6 +215,12 @@ _OWNER_APPROVED_ENTITY_REGISTRY = {
     "北區": "PLACE",
     "大埔": "PLACE",
     "沙田": "PLACE",
+    "北角": "PLACE",
+    "太子": "PLACE",
+    "旺角": "PLACE",
+    "尖沙咀": "PLACE",
+    "銅鑼灣": "PLACE",
+    "佐敦": "PLACE",
     "西貢": "PLACE",
     "離島": "PLACE",
     "九龍": "PLACE",
@@ -393,19 +399,24 @@ def bounded_named_entities(text: str) -> frozenset[tuple[str, str]]:
         ):
             candidates.append((match.start(1), match.end(1), match.group(1), "PERSON"))
     appointed_chinese_person = re.compile(
-        r"(?:任命|委任|提名|公布[：:]?|指[：:]?)"
+        r"(?:任命|委任|提名|公布[：:]?|指[：:]?|由)"
         r"([\u3400-\u9fff]{2,4}?)"
-        r"(?=(?:出任|擔任|担任|任職|任职|獲委任|获委任|為|为))"
+        r"(?=(?:出任|擔任|担任|任職|任职|獲委任|获委任))"
     )
     for match in appointed_chinese_person.finditer(text):
-        candidates.append((match.start(1), match.end(1), match.group(1), "PERSON"))
+        person = match.group(1)
+        if person not in {"任務安排", "政策措施", "相關安排", "方案甲"}:
+            candidates.append((match.start(1), match.end(1), person, "PERSON"))
     interaction_chinese_person = re.compile(
         r"(?:會見|会见|接見|接见|拘捕|起訴|起诉|邀請|邀请)"
-        r"([\u3400-\u9fff]{2,4})"
+        r"([趙錢孫李周吳鄭王馮陳褚衛蔣沈韓楊朱秦尤許何呂施張孔曹嚴華金魏陶姜戚謝鄒喻柏水竇章雲蘇潘葛奚范彭郎魯韋昌馬苗鳳花方俞任袁柳唐羅薛伍余米貝姚孟顧尹江鍾蔡葉杜夏汪田劉郭梁黃林]"
+        r"[\u3400-\u9fff]{2})"
         r"(?=$|[，,。；;：:]|(?:後|后|時|时|並|并|出席|表示|獲准|获准))"
     )
     for match in interaction_chinese_person.finditer(text):
-        candidates.append((match.start(1), match.end(1), match.group(1), "PERSON"))
+        person = match.group(1)
+        if person[1:] not in {"表示", "安排", "措施", "政策", "案甲"}:
+            candidates.append((match.start(1), match.end(1), person, "PERSON"))
     structural_chinese_place = re.compile(
         r"(?:公布|涉及|位於|位于|前往|覆蓋|覆盖|影響|影响)"
         r"([\u3400-\u9fff]{1,4}?(?:市|區|区|國|国|灣|湾|道|路|山|河|島|岛|"
@@ -414,11 +425,18 @@ def bounded_named_entities(text: str) -> frozenset[tuple[str, str]]:
     )
     for match in structural_chinese_place.finditer(text):
         candidates.append((match.start(1), match.end(1), match.group(1), "PLACE"))
-    action_context_chinese_place = re.compile(
-        r"(?:公布|指)[：:]?([\u3400-\u9fff]{2,5}?)(?=(?:將|将)"
+    action_context_structural_place = re.compile(
+        r"(?:公布|指)[：:]?([\u3400-\u9fff]{1,4}?(?:市|區|区|國|国|灣|湾|"
+        r"道|路|山|河|島|岛|州|縣|县|鎮|镇|角|咀))(?=(?:將|将)"
         r"(?:實施|实施|推行|設立|设立|開設|开设|啟用|启用))"
     )
-    for match in action_context_chinese_place.finditer(text):
+    for match in action_context_structural_place.finditer(text):
+        candidates.append((match.start(1), match.end(1), match.group(1), "PLACE"))
+    located_chinese_place = re.compile(
+        r"(?:設於|设于|位於|位于)([\u3400-\u9fff]{2,5})"
+        r"(?=$|[，,。；;：:]|(?:嘅|的)?(?:中心|地區|地区|附近|一帶|一带))"
+    )
+    for match in located_chinese_place.finditer(text):
         candidates.append((match.start(1), match.end(1), match.group(1), "PLACE"))
     chinese_organisation = re.compile(
         r"(?<![\u3400-\u9fff])"

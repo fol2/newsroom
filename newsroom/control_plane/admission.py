@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -243,7 +244,7 @@ def _qualification_relation_is_proven(
         and qualification_fields.get("action_class") == "INSTRUCTION"
         and re.search(
             r"must|need(?:s)? to|required? to|should|instruct(?:ed|ion)?|"
-            r"必須|必须|需要|應該|应该|指示|要求|改乘|改搭",
+            r"必須|必须|需要|應該|应该|改乘|改搭",
             span,
             flags=re.IGNORECASE,
         )
@@ -252,7 +253,11 @@ def _qualification_relation_is_proven(
         qualification.test is Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE
         and qualification_fields.get("action_class") == "OFFICIAL_DEADLINE"
         and re.search(
-            r"deadline|closing date|限期|截止|屆滿|届满",
+            r"(?:deadline|closing date)\s+(?:changed|extended|shortened|moved)|"
+            r"(?:changed|extended|shortened|moved)\s+(?:the\s+)?"
+            r"(?:deadline|closing date)|"
+            r"(?:限期|截止日期)(?:已|將|会|會)?(?:更改|改為|延長|縮短|押後|提前)|"
+            r"(?:更改|延長|縮短|押後|提前)(?:申請)?(?:限期|截止日期)",
             span,
             flags=re.IGNORECASE,
         )
@@ -400,6 +405,8 @@ class WriteAdmissionDecision:
     def __post_init__(self) -> None:
         if self.decision not in {"WRITE_READY", "HOLD", "REJECT"}:
             raise ValueError("invalid write-admission result")
+        if self.policy_version != WRITE_ADMISSION_POLICY_VERSION:
+            raise ValueError("unsupported write-admission policy version")
         expected = _decision_id(
             candidate_id=self.candidate_id,
             evidence_package_digest=self.evidence_package_digest,
@@ -438,6 +445,80 @@ class WriteAdmissionDecision:
             "policy_version": self.policy_version,
             "decided_at": self.decided_at,
         }
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> WriteAdmissionDecision:
+        expected_keys = {
+            "decision_id",
+            "candidate_id",
+            "evidence_package_digest",
+            "decision",
+            "substantive_new_information",
+            "qualification_tests",
+            "selection_rationale",
+            "geography",
+            "categories",
+            "evidence_gate_results",
+            "freshness_result",
+            "integrity_result",
+            "stable_reason_codes",
+            "policy_version",
+            "decided_at",
+        }
+        if set(record) != expected_keys:
+            raise ValueError("write-admission record fields are not exact")
+        string_fields = (
+            "decision_id",
+            "candidate_id",
+            "evidence_package_digest",
+            "decision",
+            "freshness_result",
+            "integrity_result",
+            "policy_version",
+            "decided_at",
+        )
+        for field in string_fields:
+            value = record[field]
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("write-admission string fields are required")
+        if not isinstance(record["selection_rationale"], str):
+            raise ValueError("write-admission selection rationale must be a string")
+
+        def string_tuple(field: str) -> tuple[str, ...]:
+            value = record[field]
+            if not isinstance(value, list) or any(
+                not isinstance(item, str) or not item.strip() for item in value
+            ):
+                raise ValueError(f"write-admission {field} is invalid")
+            return tuple(value)
+
+        gate_results = record["evidence_gate_results"]
+        if not isinstance(gate_results, list) or any(
+            not isinstance(item, list)
+            or len(item) != 2
+            or any(not isinstance(value, str) or not value.strip() for value in item)
+            for item in gate_results
+        ):
+            raise ValueError("write-admission evidence gates are invalid")
+        return cls(
+            decision_id=str(record["decision_id"]),
+            candidate_id=str(record["candidate_id"]),
+            evidence_package_digest=str(record["evidence_package_digest"]),
+            decision=str(record["decision"]),  # type: ignore[arg-type]
+            substantive_new_information=string_tuple("substantive_new_information"),
+            qualification_tests=string_tuple("qualification_tests"),
+            selection_rationale=str(record["selection_rationale"]),
+            geography=string_tuple("geography"),
+            categories=string_tuple("categories"),
+            evidence_gate_results=tuple(
+                (str(item[0]), str(item[1])) for item in gate_results
+            ),
+            freshness_result=str(record["freshness_result"]),
+            integrity_result=str(record["integrity_result"]),
+            stable_reason_codes=string_tuple("stable_reason_codes"),
+            policy_version=str(record["policy_version"]),
+            decided_at=str(record["decided_at"]),
+        )
 
 
 class WriteAdmissionPort(Protocol):
@@ -496,6 +577,68 @@ class WriteSelectionRecord:
             "policy_version": self.policy_version,
             "selected_at": self.selected_at,
         }
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> WriteSelectionRecord:
+        expected_keys = {
+            "selection_id",
+            "decision_id",
+            "candidate_id",
+            "evidence_package_digest",
+            "rank",
+            "quality_score",
+            "ordering_evidence",
+            "policy_version",
+            "selected_at",
+        }
+        if set(record) != expected_keys:
+            raise ValueError("write selection record fields are not exact")
+        string_fields = (
+            "selection_id",
+            "decision_id",
+            "candidate_id",
+            "evidence_package_digest",
+            "policy_version",
+            "selected_at",
+        )
+        for field in string_fields:
+            value = record[field]
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("write selection string fields are required")
+        rank = record["rank"]
+        quality_score = record["quality_score"]
+        ordering_evidence = record["ordering_evidence"]
+        if not isinstance(rank, int) or isinstance(rank, bool) or rank < 1:
+            raise ValueError("write selection rank is invalid")
+        if (
+            not isinstance(quality_score, list)
+            or len(quality_score) != 4
+            or any(
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+                for value in quality_score
+            )
+        ):
+            raise ValueError("write selection quality score is invalid")
+        if (
+            not isinstance(ordering_evidence, list)
+            or len(ordering_evidence) != 4
+            or any(
+                not isinstance(value, str) or not value.strip()
+                for value in ordering_evidence
+            )
+        ):
+            raise ValueError("write selection ordering evidence is invalid")
+        return cls(
+            selection_id=str(record["selection_id"]),
+            decision_id=str(record["decision_id"]),
+            candidate_id=str(record["candidate_id"]),
+            evidence_package_digest=str(record["evidence_package_digest"]),
+            rank=rank,
+            quality_score=tuple(quality_score),  # type: ignore[arg-type]
+            ordering_evidence=tuple(ordering_evidence),  # type: ignore[arg-type]
+            policy_version=str(record["policy_version"]),
+            selected_at=str(record["selected_at"]),
+        )
 
 
 def _decision_id(**record: object) -> str:
