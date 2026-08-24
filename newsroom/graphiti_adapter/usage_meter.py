@@ -198,10 +198,16 @@ def summarise_graphiti_usage(
     embedding_complete = embedding_basis in {
         "PROVIDER_REPORTED",
         "NO_EMBEDDING_CALL",
+        "NO_PROVIDER_CALL",
     }
     observed_any = bool(reported) or bool(embedding_requests)
     incomplete = unreported_chat > 0 or not embedding_complete
-    if not invocations and not embedding_requests and embedding_complete:
+    provider_reported = embedding_basis == "PROVIDER_REPORTED" or any(
+        isinstance(usage := invocation.get("usage"), Mapping)
+        and usage.get("usage_basis") == "PROVIDER_REPORTED"
+        for invocation in invocations
+    )
+    if not incomplete and not provider_reported:
         basis = "NO_PROVIDER_CALL"
     elif incomplete:
         basis = "PROVIDER_PARTIALLY_UNREPORTED" if observed_any else "UNREPORTED"

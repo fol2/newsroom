@@ -935,15 +935,52 @@ def test_embedding_dispatch_fence_refusal_terminalises_exact_zero(
         asyncio.run(embedder.create("embedding input"))
 
     assert provider_calls == 0
-    request = embedder.receipt()["requests"][0]
+    receipt = embedder.receipt()
+    request = receipt["requests"][0]
     assert request["outcome"] == "FAILED"
     assert request["usage_basis"] == "NO_PROVIDER_CALL"
     assert request["model_invocation_terminal_digest"]
+    assert receipt["usage_basis"] == "NO_PROVIDER_CALL"
+    assert receipt["request_count"] == 1
+    assert receipt["embedding_tokens"] == 0
+    assert receipt["cost_usd_microunits"] == 0
+    from newsroom.graphiti_adapter.usage_meter import summarise_graphiti_usage
+
+    assert summarise_graphiti_usage(
+        chat_invocations=(), embedding_usage=receipt
+    )["usage_basis"] == "NO_PROVIDER_CALL"
     leaf = service.query(start=T0, end=T0 + timedelta(minutes=3))["leaves"][0]
     assert leaf["invocation_outcome"] == "FAILED"
     assert leaf["transport_dispatch_observed"] is False
     assert leaf["pre_dispatch_zero_proved"] is True
     assert leaf["total_tokens"] == 0
+
+    from newsroom.control_plane.store import (
+        connect,
+        reconcile_graphiti_spend,
+        reserve_graphiti_spend,
+    )
+
+    spend_connection = connect(str(tmp_path / "unpublished-spend.sqlite3"))
+    assert reserve_graphiti_spend(
+        spend_connection,
+        spend_id="ingest-embedding-fence:1",
+        ingest_id="ingest-embedding-fence",
+        attempt_number=1,
+        proving_run_id="proving-run-1",
+        generation_id="generation-1",
+        reserved_gbp_microunits=100,
+        ceiling_gbp_microunits=1_000,
+    )
+    accounting = reconcile_graphiti_spend(
+        spend_connection,
+        spend_id="ingest-embedding-fence:1",
+        embedding_usage=receipt,
+    )
+    assert accounting["status"] == "RECONCILED"
+    assert accounting["actual_usd_microunits"] == 0
+    assert accounting["actual_gbp_microunits"] == 0
+    assert accounting["unused_reservation_released"] is True
 
 
 def test_requested_max_tokens_is_forwarded_and_enforced_on_reported_usage(
