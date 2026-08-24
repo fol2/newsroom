@@ -6,11 +6,13 @@ owner-gated and is injected only through an explicit dispatcher seam.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib.metadata
 import json
 import os
 import sys
+import tomllib
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Self
@@ -32,6 +34,7 @@ from newsroom.research.graphiti_sdk_no_tool_calibration import (
     VALIDATOR_VERSION,
     CalibrationClosed,
     DispatchRequest,
+    IsolatedLeaf,
     IsolationViolation,
     LeafBudget,
     assess_result,
@@ -83,6 +86,16 @@ _COMBINED_ZERO_SHA256 = (
     "aac0a07a75af3290409f79fd50e5b6f8838a9bd2fcb899e90d33961b30ac7b2d"
 )
 _TINY_SHA256 = "32e612e97c74afda5f116d596361e1a174eabaa758d8966b146c7ba98df92ca7"
+
+
+def test_cursor_sdk_is_locked_in_a_research_only_optional_extra() -> None:
+    root = Path(__file__).resolve().parents[2]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+
+    extras = project["project"]["optional-dependencies"]
+    assert extras["cursor-research"] == [f"cursor-sdk=={PINNED_SDK_VERSION}"]
+    assert "cursor-sdk" not in " ".join(extras["graphiti"])
+    assert f'name = "cursor-sdk"' in (root / "uv.lock").read_text(encoding="utf-8")
 
 
 def _sha256(text: str) -> str:
@@ -644,6 +657,54 @@ def test_missing_usage_is_unreported_never_zero() -> None:
     )
     assert zero["usage_basis"] == "PROVIDER_REPORTED"
     assert zero["input_tokens"] == 0
+
+
+@pytest.mark.parametrize("interruption", [KeyboardInterrupt(), asyncio.CancelledError()])
+def test_cancellation_writes_unreported_receipts_before_cleanup_and_reraises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interruption: BaseException,
+) -> None:
+    dispatches = 0
+    original_cleanup = IsolatedLeaf.cleanup
+
+    def dispatcher(request: object) -> object:
+        nonlocal dispatches
+        del request
+        dispatches += 1
+        raise interruption
+
+    def cleanup(isolated: IsolatedLeaf) -> None:
+        assert (tmp_path / f"{LEAF_LABELS[0]}.json").is_file()
+        assert (tmp_path / "aggregate.json").is_file()
+        original_cleanup(isolated)
+
+    monkeypatch.setattr(IsolatedLeaf, "cleanup", cleanup)
+
+    with pytest.raises(type(interruption)):
+        run_packet(
+            output_dir=tmp_path,
+            execute=True,
+            authorised=True,
+            call_cap=2,
+            api_key="purpose-created",
+            dispatcher=dispatcher,
+        )
+
+    assert dispatches == 1
+    leaf = json.loads(
+        (tmp_path / f"{LEAF_LABELS[0]}.json").read_text(encoding="utf-8")
+    )
+    aggregate = json.loads(
+        (tmp_path / "aggregate.json").read_text(encoding="utf-8")
+    )
+    assert leaf["status"] == "CANCELLED"
+    assert leaf["failure"] == type(interruption).__name__
+    assert leaf["usage_status"] == "UNREPORTED"
+    assert leaf["usage"]["total_tokens"] is None
+    assert aggregate["provider_calls"] == 1
+    assert aggregate["leaves"] == [leaf]
+    assert aggregate["recommendation"] == "REJECT"
 
 
 def test_tool_call_stream_event_is_rejected_without_retry(tmp_path: Path) -> None:

@@ -29,7 +29,7 @@ On 2026-08-21 the owner authorised the local eight-leaf packet in-session. A pur
 Live command:
 
 ```text
-uv pip install cursor-sdk==1.0.28
+uv sync --dev --extra graphiti --extra cursor-research --locked
 export CURSOR_API_KEY=...   # purpose-created key only
 uv run python -m scripts.graphiti_sdk_no_tool_calibration \
   --output docs/research/2026-08-21-graphiti-sdk-no-tool-calibration-receipts \
@@ -47,11 +47,11 @@ model identity composer-2.5
 graphiti-core==0.29.3
 ```
 
-Install the SDK only on the measuring host. Do not add it to the production Graphiti extra:
+Install the locked research-only SDK extra on the measuring host. It remains separate from the production Graphiti extra:
 
 ```text
-uv pip install cursor-sdk==1.0.28
-python -c "import importlib.metadata as m; print(m.version('cursor-sdk'))"
+uv sync --dev --extra graphiti --extra cursor-research --locked
+uv run python -c "import importlib.metadata as m; print(m.version('cursor-sdk'))"
 ```
 
 Create a purpose-created Cursor user or service-account API key. Export it as `CURSOR_API_KEY` for that shell only. Do not copy `~/.cursor`, `cli-config.json`, transcripts, rules, skills, MCP catalogues or login cookies into the fixture.
@@ -63,7 +63,8 @@ The runner then:
 3. launches and closes a fresh SDK bridge per leaf with its workspace, state root and agent `cwd` inside that isolated root;
 4. fails before dispatch if hooks, `.cursor` files, git metadata or prior store entries are present;
 5. calls `Agent.prompt` with `tools=[]`, empty MCP/subagents/custom tools, and `setting_sources` omitted;
-6. consumes one slot from a monotonic 1–8 leaf budget and never retries an unchanged request.
+6. consumes one slot from a monotonic 1–8 leaf budget and never retries an unchanged request; and
+7. records a `CANCELLED` leaf and aggregate with `UNREPORTED` usage before temporary cleanup, stops later leaves, then propagates cancellation.
 
 ## 3. Decision rule
 

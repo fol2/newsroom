@@ -7,6 +7,7 @@ dispatcher. This module does not amend GING-010 or the production transport.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -612,6 +613,43 @@ def recommend(leaves: Sequence[Mapping[str, object]]) -> str:
     return "REJECT"
 
 
+def _build_packet_aggregate(
+    leaves: Sequence[Mapping[str, object]],
+    *,
+    execute: bool,
+    authorised: bool,
+    call_cap: int | None,
+) -> dict[str, object]:
+    tiny_usage = next(
+        (
+            leaf["usage"]
+            for leaf in leaves
+            if leaf.get("label") == LEAF_LABELS[0]
+        ),
+        unreported_cli_usage(),
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "issue": 746,
+        "mode": "EXECUTE" if execute else "DRY_RUN",
+        "authorised": authorised,
+        "provider_calls": 0 if not execute else len(leaves),
+        "sdk_version": PINNED_SDK_VERSION,
+        "bridge_protocol": PINNED_BRIDGE_PROTOCOL,
+        "model": PINNED_MODEL,
+        "maximum_leaves": MAXIMUM_LEAVES,
+        "call_cap": call_cap,
+        "leaves": list(leaves),
+        "cli_baseline": compare_to_cli_baseline(tiny_usage),  # type: ignore[arg-type]
+        "cli_path_comparison": compare_packet_to_cli(leaves),
+        "semantic_summary": _semantic_summary(leaves),
+        "exact_repeat": _exact_repeat_summary(leaves),
+        "recommendation": recommend(leaves),
+        "no_grok": True,
+        "no_openrouter": True,
+    }
+
+
 def run_packet(
     *,
     output_dir: Path,
@@ -683,6 +721,26 @@ def run_packet(
                     outcome.update(
                         _observe_dispatch(dispatcher(request), prompt=prompt)
                     )
+                except (KeyboardInterrupt, asyncio.CancelledError) as exc:
+                    outcome.update(_failure_outcome(exc, started=started))
+                    leaves.append(
+                        _write_leaf(
+                            output_dir,
+                            prompt=prompt,
+                            isolated=isolated,
+                            options=options,
+                            outcome=outcome,
+                            started=started,
+                        )
+                    )
+                    aggregate = _build_packet_aggregate(
+                        leaves,
+                        execute=execute,
+                        authorised=authorised,
+                        call_cap=call_cap,
+                    )
+                    _write_json(output_dir / "aggregate.json", aggregate)
+                    raise
                 except ToolCallRejected as exc:
                     outcome.update(_failure_outcome(exc, started=started))
                     outcome["status"] = "TOOL_CALL_REJECTED"
@@ -702,28 +760,12 @@ def run_packet(
             )
         finally:
             isolated.cleanup()
-    aggregate = {
-        "schema_version": SCHEMA_VERSION,
-        "issue": 746,
-        "mode": "EXECUTE" if execute else "DRY_RUN",
-        "authorised": authorised,
-        "provider_calls": 0 if not execute else len(leaves),
-        "sdk_version": PINNED_SDK_VERSION,
-        "bridge_protocol": PINNED_BRIDGE_PROTOCOL,
-        "model": PINNED_MODEL,
-        "maximum_leaves": MAXIMUM_LEAVES,
-        "call_cap": call_cap,
-        "leaves": leaves,
-        "cli_baseline": compare_to_cli_baseline(
-            next(leaf["usage"] for leaf in leaves if leaf["label"] == LEAF_LABELS[0])  # type: ignore[arg-type, index]
-        ),
-        "cli_path_comparison": compare_packet_to_cli(leaves),
-        "semantic_summary": _semantic_summary(leaves),
-        "exact_repeat": _exact_repeat_summary(leaves),
-        "recommendation": recommend(leaves),
-        "no_grok": True,
-        "no_openrouter": True,
-    }
+    aggregate = _build_packet_aggregate(
+        leaves,
+        execute=execute,
+        authorised=authorised,
+        call_cap=call_cap,
+    )
     _write_json(output_dir / "aggregate.json", aggregate)
     return aggregate
 
