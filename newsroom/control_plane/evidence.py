@@ -332,6 +332,7 @@ def _has_bounded_named_entity_shape(text: str, entity_type: str) -> bool:
             "州",
             "縣",
             "鎮",
+            "角",
         ),
         "OFFICIAL_TITLE": ("長", "司", "官", "大臣", "主席", "總統"),
     }
@@ -378,9 +379,10 @@ def bounded_named_entities(text: str) -> frozenset[tuple[str, str]]:
         )
         candidates.append((match.start(2), match.end(2), match.group(2), "PERSON"))
     chinese_person = re.compile(
+        r"(?<![\u3400-\u9fff])"
         r"([趙錢孫李周吳鄭王馮陳褚衛蔣沈韓楊朱秦尤許何呂施張孔曹嚴華金魏陶姜戚謝鄒喻柏水竇章雲蘇潘葛奚范彭郎魯韋昌馬苗鳳花方俞任袁柳唐羅薛伍余米貝姚孟顧尹江鍾蔡葉杜夏汪田]"
         r"[\u3400-\u9fff]{1,2})"
-        r"(?=[\u3400-\u9fff]{0,8}(?:公布|宣佈|宣布|表示|指出|證實|確認|警告|"
+        r"(?=(?:公布|宣佈|宣布|表示|指出|證實|確認|警告|"
         r"稱|說|指|主持|出席|會見|簽署|签署|視察|视察|任命|接見|接见|"
         r"辭職|辞职|請辭|请辞))"
     )
@@ -391,9 +393,11 @@ def bounded_named_entities(text: str) -> frozenset[tuple[str, str]]:
         ):
             candidates.append((match.start(1), match.end(1), match.group(1), "PERSON"))
     bounded_chinese_person = re.compile(
-        r"(?:任命|委任|提名|會見|会见|接見|接见|拘捕|起訴|起诉|邀請|邀请)"
+        r"(?:任命|委任|提名|會見|会见|接見|接见|拘捕|起訴|起诉|邀請|邀请|"
+        r"公布[：:]?|指[：:]?)"
         r"([趙錢孫李周吳鄭王馮陳褚衛蔣沈韓楊朱秦尤許何呂施張孔曹嚴華金魏陶姜戚謝鄒喻柏水竇章雲蘇潘葛奚范彭郎魯韋昌馬苗鳳花方俞任袁柳唐羅薛伍余米貝姚孟顧尹江鍾蔡葉杜夏汪田]"
-        r"[\u3400-\u9fff]{2})"
+        r"[\u3400-\u9fff]{1,2})"
+        r"(?=(?:出任|擔任|担任|任職|任职|獲委任|获委任|為|为))"
     )
     for match in bounded_chinese_person.finditer(text):
         candidates.append((match.start(1), match.end(1), match.group(1), "PERSON"))
@@ -402,21 +406,40 @@ def bounded_named_entities(text: str) -> frozenset[tuple[str, str]]:
         r"([\u3400-\u9fff]{2,5}?)"
         r"(?=(?:嘅|的)?(?:新安排|安排|措施|計劃|计划|服務|服务|居民|地區|地区))"
     )
+    generic_markers = (
+        "最新",
+        "限期",
+        "截止",
+        "新的",
+        "相關",
+        "相关",
+        "有關",
+        "有关",
+        "未來",
+        "未来",
+        "交通",
+        "防疫",
+        "服務",
+        "服务",
+        "學生",
+        "学生",
+        "弱勢",
+        "弱势",
+        "申請",
+        "申请",
+    )
     for match in contextual_chinese_place.finditer(text):
         place = match.group(1)
-        generic_markers = (
-            "最新",
-            "限期",
-            "截止",
-            "新的",
-            "相關",
-            "相关",
-            "有關",
-            "有关",
-        )
         if not place.startswith(("咗", "了")) and not any(
             marker in place for marker in generic_markers
         ):
+            candidates.append((match.start(1), match.end(1), place, "PLACE"))
+    action_context_chinese_place = re.compile(
+        r"(?:公布|指)[：:]?([\u3400-\u9fff]{2,5}?)(?=(?:將|将)(?:實施|实施|推行))"
+    )
+    for match in action_context_chinese_place.finditer(text):
+        place = match.group(1)
+        if not any(marker in place for marker in generic_markers):
             candidates.append((match.start(1), match.end(1), place, "PLACE"))
     chinese_organisation = re.compile(
         r"(?<![\u3400-\u9fff])"

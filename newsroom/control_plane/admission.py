@@ -232,44 +232,6 @@ def _qualification_relation_is_proven(
         if clause.strip()
     }
     span = spans[0] if len(spans) == 1 else ""
-    chinese_digits = {
-        "一": 1,
-        "二": 2,
-        "兩": 2,
-        "两": 2,
-        "三": 3,
-        "四": 4,
-        "五": 5,
-        "六": 6,
-        "七": 7,
-        "八": 8,
-        "九": 9,
-    }
-
-    def chinese_minutes(value: str) -> int:
-        if value == "十":
-            return 10
-        if "十" in value:
-            left, right = value.split("十", 1)
-            return chinese_digits.get(left, 1) * 10 + chinese_digits.get(right, 0)
-        return chinese_digits.get(value, 0)
-
-    minute_values = [
-        int(value)
-        for value in re.findall(
-            r"(?<!\d)(\d{1,3})(?!\d)\s*(?:minutes?|mins?|分鐘|分钟)",
-            span,
-            flags=re.IGNORECASE,
-        )
-    ] + [
-        chinese_minutes(value)
-        for value in re.findall(
-            r"([一二兩两三四五六七八九]?十?[一二兩两三四五六七八九]?)\s*"
-            r"(?:分鐘|分钟)",
-            span,
-        )
-        if value
-    ]
     service_noise = bool(
         _MATERIAL_SUBJECT_SPAN_PATTERNS[
             Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION
@@ -277,7 +239,6 @@ def _qualification_relation_is_proven(
         and _MATERIAL_RELATION_SPAN_PATTERNS[
             Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION
         ].search(span)
-        and any(0 < value < 60 for value in minute_values)
     )
     if (
         service_noise
@@ -480,6 +441,26 @@ class WriteSelectionRecord:
     ordering_evidence: tuple[str, ...]
     policy_version: str
     selected_at: str
+
+    def __post_init__(self) -> None:
+        identity = {
+            "decision_id": self.decision_id,
+            "candidate_id": self.candidate_id,
+            "evidence_package_digest": self.evidence_package_digest,
+            "rank": self.rank,
+            "quality_score": self.quality_score,
+            "policy_version": self.policy_version,
+        }
+        if self.selection_id != digest_bytes(canonical_json_bytes(identity)):
+            raise ValueError("write selection identity does not match retained fields")
+        expected_ordering = (
+            f"qualification_tests={self.quality_score[0]}",
+            f"claim_authority_score={self.quality_score[1]}",
+            f"independent_evidential_origins={self.quality_score[2]}",
+            f"substantive_new_information={self.quality_score[3]}",
+        )
+        if self.ordering_evidence != expected_ordering:
+            raise ValueError("write selection ordering evidence does not match score")
 
     def as_record(self) -> dict[str, object]:
         return {

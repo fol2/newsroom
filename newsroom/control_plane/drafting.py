@@ -23,6 +23,23 @@ class DraftOutcomeRecord:
     stable_reason_codes: tuple[str, ...]
     payload_digest: str | None
     recorded_at: str
+    candidate_attempt_id: str
+
+    def __post_init__(self) -> None:
+        identity = {
+            "candidate_attempt_id": self.candidate_attempt_id,
+            "write_admission_decision_id": self.write_admission_decision_id,
+            "candidate_id": self.candidate_id,
+            "evidence_package_digest": self.evidence_package_digest,
+            "provider_attempt_ids": self.provider_attempt_ids,
+            "outcome": self.outcome,
+            "stable_reason_codes": self.stable_reason_codes,
+            "payload_digest": self.payload_digest,
+        }
+        if self.outcome_id != digest_bytes(canonical_json_bytes(identity)):
+            raise ValueError("draft outcome identity does not match retained fields")
+        if len(set(self.provider_attempt_ids)) != len(self.provider_attempt_ids):
+            raise ValueError("draft outcome provider attempts must be unique")
 
     @classmethod
     def create(
@@ -60,6 +77,7 @@ class DraftOutcomeRecord:
             stable_reason_codes=stable_reason_codes,
             payload_digest=payload_digest,
             recorded_at=recorded_at,
+            candidate_attempt_id=candidate_attempt_id,
         )
 
     def as_record(self) -> dict[str, object]:
@@ -81,4 +99,5 @@ class DraftOutcomeRecord:
             "stable_reason_codes": list(self.stable_reason_codes),
             "payload_digest": self.payload_digest,
             "recorded_at": self.recorded_at,
+            "candidate_attempt_id": self.candidate_attempt_id,
         }

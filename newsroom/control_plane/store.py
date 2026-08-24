@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS ledger(
     at TEXT NOT NULL,
     kind TEXT NOT NULL,
     payload_digest TEXT NOT NULL,
-    payload_json TEXT NOT NULL DEFAULT '{}',
+    payload_json TEXT,
     prev_digest TEXT NOT NULL,
     digest TEXT NOT NULL
 );
@@ -158,10 +158,14 @@ CREATE TABLE IF NOT EXISTS unpublished_draft_outcomes(
     payload_digest TEXT,
     record_json TEXT NOT NULL,
     at TEXT NOT NULL,
+    candidate_attempt_id TEXT,
     FOREIGN KEY(decision_id, candidate_id, evidence_package_digest)
         REFERENCES unpublished_write_admission_decisions(
             decision_id, candidate_id, evidence_package_digest
-        ) ON UPDATE RESTRICT ON DELETE RESTRICT
+        ) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY(candidate_attempt_id)
+        REFERENCES unpublished_write_candidate_attempts(candidate_attempt_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
 );
 CREATE TABLE IF NOT EXISTS unpublished_graphiti_attempts(
     story_candidate_id TEXT PRIMARY KEY,
@@ -447,11 +451,48 @@ def connect(path: str) -> sqlite3.Connection:
     connection = sqlite3.connect(path)
     apply_control_plane_sqlite_profile(connection)
     connection.executescript(_PAYLOAD_SQL)
-    ledger_columns = {
-        str(row[1]) for row in connection.execute("PRAGMA table_info(ledger)")
+    ledger_info = connection.execute("PRAGMA table_info(ledger)").fetchall()
+    expected_ledger_info = (
+        (0, "seq", "INTEGER", 0, None, 1),
+        (1, "at", "TEXT", 1, None, 0),
+        (2, "kind", "TEXT", 1, None, 0),
+        (3, "payload_digest", "TEXT", 1, None, 0),
+        (4, "payload_json", "TEXT", 0, None, 0),
+        (5, "prev_digest", "TEXT", 1, None, 0),
+        (6, "digest", "TEXT", 1, None, 0),
+    )
+    if tuple(ledger_info) != expected_ledger_info:
+        ledger_columns = {str(row[1]) for row in ledger_info}
+        payload_projection = (
+            "payload_json" if "payload_json" in ledger_columns else "NULL"
+        )
+        connection.execute("DROP INDEX IF EXISTS ledger_one_child_per_digest")
+        connection.execute("ALTER TABLE ledger RENAME TO ledger_pre_v12")
+        connection.execute(
+            "CREATE TABLE ledger("
+            "seq INTEGER PRIMARY KEY, at TEXT NOT NULL, kind TEXT NOT NULL, "
+            "payload_digest TEXT NOT NULL, payload_json TEXT, "
+            "prev_digest TEXT NOT NULL, digest TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO ledger(seq, at, kind, payload_digest, payload_json, "
+            "prev_digest, digest) SELECT seq, at, kind, payload_digest, "
+            f"{payload_projection}, prev_digest, digest FROM ledger_pre_v12"
+        )
+        connection.execute("DROP TABLE ledger_pre_v12")
+        connection.execute(
+            "CREATE UNIQUE INDEX ledger_one_child_per_digest ON ledger(prev_digest)"
+        )
+    outcome_columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(unpublished_draft_outcomes)")
     }
-    if "payload_json" not in ledger_columns:
-        connection.execute("ALTER TABLE ledger ADD COLUMN payload_json TEXT")
+    if "candidate_attempt_id" not in outcome_columns:
+        connection.execute(
+            "ALTER TABLE unpublished_draft_outcomes "
+            "ADD COLUMN candidate_attempt_id TEXT REFERENCES "
+            "unpublished_write_candidate_attempts(candidate_attempt_id)"
+        )
     _ensure_landed_schema(connection)
     ensure_reconciliation_schema(connection)
     columns = {
@@ -567,6 +608,7 @@ def retain_write_selection(connection: sqlite3.Connection, selection: object) ->
 
     if not isinstance(selection, WriteSelectionRecord):
         raise TypeError("write selection record required")
+    record_json = canonical_json_bytes(selection.as_record()).decode("utf-8")
     try:
         connection.execute(
             """
@@ -581,13 +623,14 @@ def retain_write_selection(connection: sqlite3.Connection, selection: object) ->
                 selection.candidate_id,
                 selection.evidence_package_digest,
                 selection.rank,
-                json.dumps(selection.as_record(), ensure_ascii=False, sort_keys=True),
+                record_json,
                 _now(),
             ),
         )
     except sqlite3.IntegrityError as exc:
         row = connection.execute(
-            "SELECT decision_id, candidate_id, evidence_package_digest, rank "
+            "SELECT decision_id, candidate_id, evidence_package_digest, rank, "
+            "record_json "
             "FROM unpublished_write_selections WHERE selection_id=?",
             (selection.selection_id,),
         ).fetchone()
@@ -596,6 +639,7 @@ def retain_write_selection(connection: sqlite3.Connection, selection: object) ->
             selection.candidate_id,
             selection.evidence_package_digest,
             selection.rank,
+            record_json,
         )
         if row != expected:
             raise sqlite3.IntegrityError("conflicting write-selection replay") from exc
@@ -697,12 +741,40 @@ def retain_draft_outcome(connection: sqlite3.Connection, outcome: object) -> Non
 
     if not isinstance(outcome, DraftOutcomeRecord):
         raise TypeError("draft outcome record required")
+    candidate_attempt = connection.execute(
+        "SELECT decision_id, candidate_id, evidence_package_digest "
+        "FROM unpublished_write_candidate_attempts WHERE candidate_attempt_id=?",
+        (outcome.candidate_attempt_id,),
+    ).fetchone()
+    if candidate_attempt != (
+        outcome.write_admission_decision_id,
+        outcome.candidate_id,
+        outcome.evidence_package_digest,
+    ):
+        raise sqlite3.IntegrityError("draft outcome candidate attempt is not retained")
+    if outcome.provider_attempt_ids:
+        placeholders = ",".join("?" for _ in outcome.provider_attempt_ids)
+        provider_rows = connection.execute(
+            "SELECT provider_attempt_id, candidate_attempt_id "
+            "FROM unpublished_writer_provider_attempts "
+            f"WHERE provider_attempt_id IN ({placeholders})",
+            outcome.provider_attempt_ids,
+        ).fetchall()
+        expected_providers = {
+            (provider_attempt_id, outcome.candidate_attempt_id)
+            for provider_attempt_id in outcome.provider_attempt_ids
+        }
+        if set(provider_rows) != expected_providers:
+            raise sqlite3.IntegrityError(
+                "draft outcome provider attempts are not retained for candidate"
+            )
     connection.execute(
         """
         INSERT INTO unpublished_draft_outcomes(
             outcome_id, decision_id, candidate_id, evidence_package_digest,
-            outcome, reason_codes_json, payload_digest, record_json, at
-        ) VALUES(?,?,?,?,?,?,?,?,?)
+            outcome, reason_codes_json, payload_digest, record_json, at,
+            candidate_attempt_id
+        ) VALUES(?,?,?,?,?,?,?,?,?,?)
         """,
         (
             outcome.outcome_id,
@@ -714,6 +786,7 @@ def retain_draft_outcome(connection: sqlite3.Connection, outcome: object) -> Non
             outcome.payload_digest,
             json.dumps(outcome.as_record(), ensure_ascii=False, sort_keys=True),
             _now(),
+            outcome.candidate_attempt_id,
         ),
     )
 

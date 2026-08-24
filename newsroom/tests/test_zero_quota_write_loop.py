@@ -17,10 +17,12 @@ from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.admission import (
     WRITE_ADMISSION_POLICY_VERSION,
     DeterministicWriteAdmission,
+    WriteSelectionRecord,
     select_write_ready,
 )
 from newsroom.control_plane.child_environment import unprivileged_child_environment
 from newsroom.control_plane.cycle import run_cycle
+from newsroom.control_plane.drafting import DraftOutcomeRecord
 from newsroom.control_plane.editorial import (
     DiscoverySignalRecord,
     GroupedObservation,
@@ -56,7 +58,9 @@ from newsroom.control_plane.store import (
     list_payloads,
     reserve_write_candidate_attempt,
     reserve_writer_provider_attempt,
+    retain_draft_outcome,
     retain_write_admission_decision,
+    retain_write_selection,
 )
 from newsroom.control_plane.writer import (
     CliChainWriter,
@@ -160,6 +164,29 @@ def test_official_programme_terms_have_a_structured_entity_type() -> None:
         assert bounded_named_entities(f"{text} changed") == frozenset(
             {(text, "OFFICIAL_TERM")}
         )
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "香港政府公布未來安排",
+        "香港政府公布交通安排",
+        "香港政府公布防疫安排",
+        "香港政府公布服務安排",
+        "香港政府公布學生安排",
+        "香港政府公布弱勢安排",
+        "香港政府公布申請安排",
+        "方針明確公布安排",
+        "方表示支持新安排",
+        "政府任命任務安排",
+    ),
+)
+def test_common_chinese_words_are_not_invented_as_people_or_places(text: str) -> None:
+    assert not {
+        entity
+        for entity in bounded_named_entities(text)
+        if entity[1] in {"PERSON", "PLACE"}
+    }
 
 
 def test_owner_approved_hong_kong_charter_has_no_simplified_shapes() -> None:
@@ -304,6 +331,18 @@ def test_approved_proper_name_is_exempt_from_contextual_shape_gate(
             ("旺角", "PLACE"),
             ("尖沙咀", "PLACE"),
         ),
+        (
+            "香港政府公布王小龍獲委任為局長",
+            "香港政府最新公告指李小宇獲委任做局長",
+            ("王小龍", "PERSON"),
+            ("李小宇", "PERSON"),
+        ),
+        (
+            "香港政府公布：北角將實施新安排",
+            "香港政府最新公告指：太子將實施新安排",
+            ("北角", "PLACE"),
+            ("太子", "PLACE"),
+        ),
     ),
 )
 def test_changed_chinese_identity_fails_closed_before_writer(
@@ -400,10 +439,19 @@ def test_short_service_delay_cannot_masquerade_as_law_change() -> None:
     assert decision.stable_reason_codes == ("QUALIFICATION_EVIDENCE_NOT_EXACT",)
 
 
-def test_short_service_delay_cannot_masquerade_as_official_instruction() -> None:
+@pytest.mark.parametrize(
+    "service_noise",
+    (
+        "服務公布新增十分鐘延誤",
+        "服務公布新增半小時延誤",
+        "服務公布零分鐘延誤",
+    ),
+)
+def test_service_delay_cannot_masquerade_as_official_instruction(
+    service_noise: str,
+) -> None:
     candidate, package = _candidate_package()
     headline, substantive = package.governed_claims
-    service_noise = "服務公布新增十分鐘延誤"
     changed_headline = replace(
         headline,
         claim=service_noise,
@@ -3512,14 +3560,17 @@ def test_connect_upgrades_legacy_ledger_for_retained_counter_payloads(
     connection.close()
 
     upgraded = connect(str(path))
-    columns = {row[1] for row in upgraded.execute("PRAGMA table_info(ledger)")}
+    migrated_schema = upgraded.execute("PRAGMA table_info(ledger)").fetchall()
     migrated = upgraded.execute(
         "SELECT payload_digest, payload_json FROM ledger WHERE seq=1"
     ).fetchone()
     upgraded.close()
 
-    assert "payload_json" in columns
     assert migrated == (legacy_digest, None)
+    fresh = connect(str(tmp_path / "fresh-unpublished.sqlite3"))
+    fresh_schema = fresh.execute("PRAGMA table_info(ledger)").fetchall()
+    fresh.close()
+    assert migrated_schema == fresh_schema
 
 
 def test_concurrent_ledger_appends_form_one_contiguous_chain(tmp_path: Path) -> None:
@@ -3600,6 +3651,130 @@ def test_conflicting_admission_for_same_package_is_not_silently_ignored(
                 "2026-08-20T00:00:01Z",
             ),
         )
+    connection.close()
+
+
+def test_write_selection_replay_requires_exact_canonical_record(tmp_path: Path) -> None:
+    connection = connect(str(tmp_path / "selection-replay.sqlite3"))
+    candidate, package = _candidate_package()
+    decision = DeterministicWriteAdmission().decide(
+        candidate, package, decided_at="2026-08-20T00:00:00Z"
+    )
+    retain_write_admission_decision(connection, decision)
+    selection = select_write_ready(
+        ((candidate, package, decision),),
+        limit=1,
+        selected_at="2026-08-20T00:00:00Z",
+    )[0][3]
+    retain_write_selection(connection, selection)
+
+    with pytest.raises(ValueError, match="selection identity"):
+        WriteSelectionRecord(
+            selection_id=selection.selection_id,
+            decision_id=selection.decision_id,
+            candidate_id=selection.candidate_id,
+            evidence_package_digest=selection.evidence_package_digest,
+            rank=selection.rank,
+            quality_score=(0, *selection.quality_score[1:]),
+            ordering_evidence=selection.ordering_evidence,
+            policy_version=selection.policy_version,
+            selected_at=selection.selected_at,
+        )
+
+    connection.execute(
+        "UPDATE unpublished_write_selections SET record_json='{}' WHERE selection_id=?",
+        (selection.selection_id,),
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="conflicting write-selection"):
+        retain_write_selection(connection, selection)
+    connection.close()
+
+
+def test_draft_outcome_retains_and_enforces_attempt_identity(tmp_path: Path) -> None:
+    connection = connect(str(tmp_path / "outcome-attempts.sqlite3"))
+    candidate, package = _candidate_package()
+    decision = DeterministicWriteAdmission().decide(
+        candidate, package, decided_at="2026-08-20T00:00:00Z"
+    )
+    retain_write_admission_decision(connection, decision)
+    candidate_attempt_id = reserve_write_candidate_attempt(
+        connection,
+        cycle_execution_id="cycle-1",
+        decision_id=decision.decision_id,
+        candidate_id=decision.candidate_id,
+        evidence_package_digest=decision.evidence_package_digest,
+        ordinal=1,
+    )
+    provider_attempt_id = reserve_writer_provider_attempt(
+        connection,
+        candidate_attempt_id=candidate_attempt_id,
+        route="PRIMARY",
+        ordinal=1,
+    )
+    outcome = DraftOutcomeRecord.create(
+        write_admission_decision_id=decision.decision_id,
+        candidate_id=decision.candidate_id,
+        evidence_package_digest=decision.evidence_package_digest,
+        provider_attempt_ids=(provider_attempt_id,),
+        outcome="HOLD",
+        validator_results=(),
+        stable_reason_codes=("FIXTURE_HOLD",),
+        payload_digest=None,
+        recorded_at="2026-08-20T00:00:00Z",
+        candidate_attempt_id=candidate_attempt_id,
+    )
+    retain_draft_outcome(connection, outcome)
+    retained = json.loads(
+        connection.execute(
+            "SELECT record_json FROM unpublished_draft_outcomes WHERE outcome_id=?",
+            (outcome.outcome_id,),
+        ).fetchone()[0]
+    )
+    assert retained["candidate_attempt_id"] == candidate_attempt_id
+
+    orphan = DraftOutcomeRecord.create(
+        write_admission_decision_id=decision.decision_id,
+        candidate_id=decision.candidate_id,
+        evidence_package_digest=decision.evidence_package_digest,
+        provider_attempt_ids=(),
+        outcome="HOLD",
+        validator_results=(),
+        stable_reason_codes=("ORPHAN",),
+        payload_digest=None,
+        recorded_at="2026-08-20T00:00:01Z",
+        candidate_attempt_id="missing-attempt",
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="candidate attempt"):
+        retain_draft_outcome(connection, orphan)
+
+    second_attempt_id = reserve_write_candidate_attempt(
+        connection,
+        cycle_execution_id="cycle-2",
+        decision_id=decision.decision_id,
+        candidate_id=decision.candidate_id,
+        evidence_package_digest=decision.evidence_package_digest,
+        ordinal=1,
+    )
+    cross_provider_id = reserve_writer_provider_attempt(
+        connection,
+        candidate_attempt_id=second_attempt_id,
+        route="PRIMARY",
+        ordinal=1,
+    )
+    cross_bound = DraftOutcomeRecord.create(
+        write_admission_decision_id=decision.decision_id,
+        candidate_id=decision.candidate_id,
+        evidence_package_digest=decision.evidence_package_digest,
+        provider_attempt_ids=(cross_provider_id,),
+        outcome="HOLD",
+        validator_results=(),
+        stable_reason_codes=("CROSS_BOUND",),
+        payload_digest=None,
+        recorded_at="2026-08-20T00:00:02Z",
+        candidate_attempt_id=candidate_attempt_id,
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="provider attempts"):
+        retain_draft_outcome(connection, cross_bound)
     connection.close()
 
 
