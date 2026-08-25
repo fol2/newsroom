@@ -269,6 +269,11 @@ def extract_combined_temporal(
             )
             if pipeline_result.completed_receipt is not None:
                 receipt = dict(pipeline_result.completed_receipt)
+                if request_identity is not None:
+                    receipt.setdefault(
+                        "request_identity_digest",
+                        request_identity.identity_digest,
+                    )
         except CombinedTemporalPipelineError as exc:
             return _leaf(
                 prompt,
@@ -364,24 +369,53 @@ def _retain_artifact(
     if donor_store is None or request_identity is None:
         return
     try:
+        raw_output_digest, framework_version, model_version = (
+            _donor_identity_fields(receipt)
+        )
         artifact = build_validated_artifact(
             request_identity=request_identity,
             payload=payload,
             payload_digest=digest_canonical(payload),
-            raw_output_digest=str(receipt["raw_output_digest"]),
+            raw_output_digest=raw_output_digest,
             prompt=prompt,
-            framework_version=str(receipt["framework_version"]),
-            model_version=(
-                str(receipt["model_version"])
-                if receipt.get("model_version") is not None
-                else None
-            ),
+            framework_version=framework_version,
+            model_version=model_version,
             outcome=outcome.value,
         )
         donor_store.retain_validated_artifact(artifact)
         receipt["donor_artifact_digest"] = artifact.artifact_digest
     except Exception:
         return
+
+
+def _donor_identity_fields(
+    receipt: Mapping[str, object],
+) -> tuple[str, str, str | None]:
+    nested = receipt.get("combined_temporal_receipt")
+    sources: tuple[Mapping[str, object], ...] = (
+        (nested, receipt) if isinstance(nested, Mapping) else (receipt,)
+    )
+    raw_output_digest: object = None
+    framework_version: object = None
+    model_version: object = None
+    for source in sources:
+        if raw_output_digest in {None, ""}:
+            raw_output_digest = source.get("raw_output_digest")
+        if framework_version in {None, ""}:
+            framework_version = source.get("framework_version") or source.get(
+                "framework"
+            )
+        if model_version is None:
+            model_version = source.get("model_version")
+    if not isinstance(raw_output_digest, str) or not raw_output_digest:
+        raise KeyError("raw_output_digest")
+    if not isinstance(framework_version, str) or not framework_version:
+        raise KeyError("framework_version")
+    return (
+        raw_output_digest,
+        framework_version,
+        str(model_version) if model_version is not None else None,
+    )
 
 
 def _prepare_attempt(

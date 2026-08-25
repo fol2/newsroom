@@ -623,6 +623,47 @@ def test_embedding_request_identity_binds_input_model_and_dimensions() -> None:
     ).identity_digest != baseline
 
 
+class _EvaluationEnvelopePipeline(_ProviderFreePipeline):
+    def execute(
+        self,
+        *,
+        nodes: tuple[Any, ...],
+        edges: tuple[Any, ...],
+        receipt: Mapping[str, object],
+    ) -> CombinedTemporalPipelineResult:
+        inner = super().execute(nodes=nodes, edges=edges, receipt=receipt)
+        return CombinedTemporalPipelineResult(
+            nodes=inner.nodes,
+            edges=inner.edges,
+            guarded_edges=inner.guarded_edges,
+            node_resolutions=inner.node_resolutions,
+            graph_effect_attempted=inner.graph_effect_attempted,
+            embedding_skipped=inner.embedding_skipped,
+            journal_skipped=inner.journal_skipped,
+            rollback_skipped=inner.rollback_skipped,
+            completed_receipt={
+                "framework": GRAPHITI_CORE_RELEASE,
+                "combined_temporal_receipt": dict(receipt),
+            },
+        )
+
+
+def test_evaluation_envelope_receipt_still_mints_a_donor_artefact() -> None:
+    store = InMemoryDonorStore()
+    case = fixture("pair-current")
+    leaf = extract_combined_temporal(
+        case.revision,
+        transport=_FakeTransport(case.gold),
+        pipeline=_EvaluationEnvelopePipeline(),
+        donor_store=store,
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert leaf.donor_artifact_digest is not None
+    assert leaf.request_identity_digest is not None
+    assert store.validated_artifact_count(leaf.request_identity_digest) == 1
+
+
 def test_async_extraction_retains_the_same_non_serving_donor_contract() -> None:
     store = InMemoryDonorStore()
     case = fixture("pair-current")

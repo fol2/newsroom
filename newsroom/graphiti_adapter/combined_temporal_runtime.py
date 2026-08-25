@@ -482,6 +482,11 @@ async def extract_combined_temporal_async(
         raise
     if pipeline_result.completed_receipt is not None:
         receipt = dict(pipeline_result.completed_receipt)
+        if request_identity is not None:
+            receipt.setdefault(
+                "request_identity_digest",
+                request_identity.identity_digest,
+            )
     outcome = (
         CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
         if not normalised["facts"]
