@@ -89,11 +89,7 @@
       "item": 11,
       "behaviour": "no generic daily cut",
       "tests": [
-        "test_more_than_daily_500k_is_alerted_but_not_an_admission_gate",
-        "test_after_csv_distinguishes_usage_workload_admission_and_cycle_identities",
-        "test_committed_after_csv_matches_deterministic_fixture_export",
-        "test_closeout_markdown_retains_baseline_as_grok_writer_lower_bound",
-        "test_issue_732_behaviour_mapping_names_exist"
+        "test_more_than_daily_500k_is_alerted_but_not_an_admission_gate"
       ]
     },
     {
