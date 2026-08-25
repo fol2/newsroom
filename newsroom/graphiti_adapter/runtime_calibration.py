@@ -20,6 +20,8 @@ from newsroom.control_plane.graphiti import (
     GraphitiModelUsageObserver,
 )
 from newsroom.control_plane.graphiti_fallback_policy import (
+    FallbackEligibility,
+    classify_graphiti_fallback,
     load_checked_graphiti_fallback_circuit_policy,
 )
 from newsroom.control_plane.graphiti_requests import (
@@ -214,7 +216,11 @@ def validate_redacted_receipts(
         if leaf.get("leaf_class") == "FALLBACK":
             parent_id = leaf.get("parent_invocation_id")
             parent = by_invocation.get(str(parent_id))
-            if parent is None or parent.get("outcome") != "MALFORMED_OUTPUT":
+            parent_outcome = None if parent is None else parent.get("outcome")
+            if parent is None or not isinstance(parent_outcome, str) or (
+                classify_graphiti_fallback(parent_outcome).eligibility
+                is not FallbackEligibility.ELIGIBLE
+            ):
                 reasons.add("FALLBACK_WITHOUT_ELIGIBLE_PARENT")
             if parent_id is not None:
                 fallback_counts[str(parent_id)] += 1

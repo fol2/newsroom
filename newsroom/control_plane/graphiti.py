@@ -17,6 +17,7 @@ from newsroom.authority.canonical import (
 )
 from newsroom.control_plane.corpus import CorpusIngestUnit
 from newsroom.control_plane.graphiti_fallback_policy import (
+    FallbackEligibility,
     classify_graphiti_fallback,
     load_checked_graphiti_fallback_circuit_policy,
 )
@@ -611,9 +612,15 @@ class GraphitiModelUsageObserver:
         parent_invocation_id = (
             self._primary_by_request.get(request_key) if fallback else None
         )
+        parent_outcome = (
+            None
+            if parent_invocation_id is None
+            else self._terminal_outcome.get(parent_invocation_id)
+        )
         if fallback and (
-            parent_invocation_id is None
-            or self._terminal_outcome.get(parent_invocation_id) != "MALFORMED_OUTPUT"
+            parent_outcome is None
+            or classify_graphiti_fallback(parent_outcome).eligibility
+            is not FallbackEligibility.ELIGIBLE
         ):
             raise ModelUsageAdmissionError(
                 "Graphiti fallback requires a malformed primary"
