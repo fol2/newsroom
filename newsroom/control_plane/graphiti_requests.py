@@ -25,6 +25,7 @@ ALLOWED_GRAPHITI_SEMANTIC_REQUEST_CLASSES = frozenset(
         "SummarizedEntities",
         "CombinedExtraction",
         "BatchEdgeTimestamps",
+        "NewsroomCombinedTemporalExtractionV1",
         "EMBEDDING_VECTOR",
         "UNSTRUCTURED",
     }

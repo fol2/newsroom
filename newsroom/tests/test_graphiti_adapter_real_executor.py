@@ -91,6 +91,51 @@ EVALUATION_ATTEMPT_ID = GraphitiAttemptId.parse(
 )
 
 
+def _combined_runtime_inputs(
+    body: str, episode_id: str
+) -> tuple[GraphitiAdapterConfiguration, object]:
+    import newsroom.graphiti_adapter.real as real
+
+    attempt = evaluation_attempt_for((body,))
+    revision = real._source_revision_input(
+        attempt,
+        body=body,
+        ingested_at=UtcTimestamp.parse("2026-08-25T00:00:00Z"),
+    )
+    return attempt.configuration, replace(revision, episode_uuid=episode_id)
+
+
+def _provider_free_pipeline(**values: object) -> object:
+    import newsroom.graphiti_adapter.real as real
+
+    async def resolve(
+        nodes: list[object],
+    ) -> tuple[list[object], dict[str, str], list[tuple[object, object]]]:
+        return nodes, {str(node.uuid): str(node.uuid) for node in nodes}, []
+
+    def pointers(edges: list[object], _uuid_map: dict[str, str]) -> list[object]:
+        return edges
+
+    async def embed(_embedder: object, _edges: list[object]) -> None:
+        return None
+
+    async def persist(_nodes: list[object], _edges: list[object]) -> None:
+        return None
+
+    graphiti = values["graphiti"]
+    return real.ExistingGraphitiPipeline(
+        guard=values["guard"],
+        resolve_nodes=resolve,
+        resolve_pointers=pointers,
+        create_embeddings=embed,
+        persist_graph=persist,
+        embedder=graphiti.clients.embedder,
+        run_async=asyncio.run,
+        chat_receipt=lambda: list(graphiti.clients.llm_client.invocations),
+        embedding_receipt=graphiti.clients.embedder.receipt,
+    )
+
+
 def _digest(label: str) -> str:
     return digest_canonical({"contract": label})
 
@@ -221,7 +266,8 @@ def test_cli_llm_client_is_wired_for_graphiti_chat() -> None:
     assert "uuid=episode_id" in source
     assert "EpisodicNode.get_by_uuid" in inspect.getsource(_ensure_episode)
     assert "EpisodicNode(" in inspect.getsource(_ensure_episode)
-    assert "GRAPHITI_EXTRACTION_INSTRUCTIONS" in source
+    assert "extract_combined_temporal_async" in source
+    assert "graphiti.add_episode" not in source
 
 
 def test_guarded_graphiti_never_invalidates_or_reuses_existing_edges(
@@ -579,9 +625,13 @@ def test_episode_uses_default_database_and_validates_before_complete(
             raise AssertionError("group_id must not replace the configured database")
 
     class Graphiti:
-        def __init__(self, *_args: object, **_values: object) -> None:
+        def __init__(self, *_args: object, **values: object) -> None:
             self.driver = Driver()
-            self.clients = SimpleNamespace(driver=self.driver)
+            self.clients = SimpleNamespace(
+                driver=self.driver,
+                llm_client=values["llm_client"],
+                embedder=values["embedder"],
+            )
 
         async def retrieve_episodes(
             self, *_args: object, **_values: object
@@ -591,13 +641,7 @@ def test_episode_uses_default_database_and_validates_before_complete(
             )
 
         async def add_episode(self, **values: object) -> object:
-            assert values["group_id"] == GRAPHITI_WORKSPACE_GROUP
-            assert values["previous_episode_uuids"] == []
-            return SimpleNamespace(
-                episode=retained[str(values["uuid"])],
-                nodes=(),
-                edges=(),
-            )
+            raise AssertionError("ordinary graphiti-core extraction must stay unused")
 
         async def close(self) -> None:
             return None
@@ -618,7 +662,8 @@ def test_episode_uses_default_database_and_validates_before_complete(
             guard_events.append("restored")
 
         async def complete(self, raw: dict[str, object]) -> None:
-            assert raw == {"provider_attempt_number": 1}
+            assert raw["provider_attempt_number"] == 1
+            assert "combined_temporal_receipt" in raw
             guard_events.append("complete")
 
     delegate = SimpleNamespace(
@@ -640,10 +685,16 @@ def test_episode_uses_default_database_and_validates_before_complete(
         MutationGuard=lambda *_args, **_values: Guard(),
     )
     monkeypatch.setattr(real, "_load_graphiti", lambda: runtime)
+
+    class LlmClient:
+        invocations: list[dict[str, object]] = []
+
+        async def _generate_response(self, *_args: object, **_values: object) -> object:
+            return {"entities": [], "facts": []}
+
+    monkeypatch.setattr(real, "build_cli_llm_client", LlmClient)
     monkeypatch.setattr(
-        real,
-        "build_cli_llm_client",
-        lambda: SimpleNamespace(invocations=[]),
+        real, "combined_temporal_pipeline_for", _provider_free_pipeline
     )
     telemetry = real._EpisodeTelemetry()
     validation_states: list[str] = []
@@ -652,6 +703,7 @@ def test_episode_uses_default_database_and_validates_before_complete(
         validation_states.append(guard_events[-1])
         return {"provider_attempt_number": 1}
 
+    configuration, revision = _combined_runtime_inputs("Body", "episode-id")
     result = asyncio.run(
         real._add_episode(
             api_key="key",
@@ -664,11 +716,13 @@ def test_episode_uses_default_database_and_validates_before_complete(
             attempt_number=1,
             validate_result=validate,
             restore_result=lambda _raw, _telemetry: None,
+            configuration=configuration,
+            revision=revision,
         )
     )
     assert result.episode.uuid == "episode-id"
-    assert validation_states == ["restored"]
-    assert guard_events == ["begin", "metered", "restored", "complete"]
+    assert validation_states == ["metered"]
+    assert guard_events == ["begin", "metered", "complete"]
     assert saves == ["episode-id"]
 
 
@@ -689,8 +743,12 @@ def test_process_recovery_uses_durable_guard_before_provider_dispatch(
     events: list[str] = []
 
     class Graphiti:
-        def __init__(self, *_args: object, **_values: object) -> None:
+        def __init__(self, *_args: object, **values: object) -> None:
             self.driver = object()
+            self.clients = SimpleNamespace(
+                llm_client=values["llm_client"],
+                embedder=values["embedder"],
+            )
 
         async def add_episode(self, **_values: object) -> object:
             raise AssertionError("recovery must happen before provider dispatch")
@@ -727,17 +785,23 @@ def test_process_recovery_uses_durable_guard_before_provider_dispatch(
         OpenAIEmbedderConfig=lambda **values: SimpleNamespace(**values),
         MeteredOpenAIEmbedder=real.MeteredOpenAIEmbedder,
         IdentityCrossEncoder=lambda: object(),
+        EpisodeType=SimpleNamespace(text="text"),
+        EpisodicNode=lambda **values: SimpleNamespace(**values),
         MutationGuard=lambda *_args, **_values: Guard(),
     )
     monkeypatch.setattr(real, "_load_graphiti", lambda: runtime)
     monkeypatch.setattr(
         real, "build_cli_llm_client", lambda: SimpleNamespace(invocations=[])
     )
+    monkeypatch.setattr(
+        real, "combined_temporal_pipeline_for", _provider_free_pipeline
+    )
 
     def restore(raw: dict[str, object], _telemetry: object) -> None:
         assert raw == {"immutable": True}
         events.append("restore_complete")
 
+    configuration, revision = _combined_runtime_inputs("Body", "episode-id")
     call = real._add_episode(
         api_key="key",
         password="password",
@@ -749,9 +813,11 @@ def test_process_recovery_uses_durable_guard_before_provider_dispatch(
         attempt_number=1,
         validate_result=lambda _result, _telemetry: {},
         restore_result=restore,
+        configuration=configuration,
+        revision=revision,
     )
     if state == "PENDING":
-        with pytest.raises(real.AmbiguousEpisodeEffect, match="process ended"):
+        with pytest.raises(real.AmbiguousEpisodeEffect, match="blocks another"):
             asyncio.run(call)
     else:
         asyncio.run(call)
@@ -768,13 +834,15 @@ def test_cancelled_episode_cleanup_is_ordered_and_bounded(
     events: list[str] = []
 
     class Graphiti:
-        def __init__(self, *_args: object, **_values: object) -> None:
+        def __init__(self, *_args: object, **values: object) -> None:
             self.driver = object()
+            self.clients = SimpleNamespace(
+                llm_client=values["llm_client"],
+                embedder=values["embedder"],
+            )
 
         async def add_episode(self, **_values: object) -> SimpleNamespace:
-            events.append("provider-start")
-            await asyncio.Event().wait()
-            raise AssertionError("cancelled provider unexpectedly resumed")
+            raise AssertionError("ordinary graphiti-core extraction must stay unused")
 
         async def close(self) -> None:
             events.append("close")
@@ -811,17 +879,29 @@ def test_cancelled_episode_cleanup_is_ordered_and_bounded(
         MeteredOpenAIEmbedder=real.MeteredOpenAIEmbedder,
         IdentityCrossEncoder=lambda: object(),
         EpisodeType=SimpleNamespace(text="text"),
+        EpisodicNode=lambda **values: SimpleNamespace(**values),
         MutationGuard=lambda *_args, **_values: Guard(),
     )
     monkeypatch.setattr(real, "_load_graphiti", lambda: runtime)
     monkeypatch.setattr(real, "_ensure_episode", created_episode)
+
+    class LlmClient:
+        invocations: list[dict[str, object]] = []
+
+        async def _generate_response(self, *_args: object, **_values: object) -> object:
+            events.append("provider-start")
+            await asyncio.Event().wait()
+            raise AssertionError("cancelled provider unexpectedly resumed")
+
+    monkeypatch.setattr(real, "build_cli_llm_client", LlmClient)
     monkeypatch.setattr(
-        real, "build_cli_llm_client", lambda: SimpleNamespace(invocations=[])
+        real, "combined_temporal_pipeline_for", _provider_free_pipeline
     )
     if slow_cleanup:
         monkeypatch.setattr(real, "GRAPHITI_CLEANUP_TIMEOUT_MS", 10)
 
     started = time.monotonic()
+    configuration, revision = _combined_runtime_inputs("Body", "episode-id")
     with pytest.raises(asyncio.TimeoutError):
         asyncio.run(
             asyncio.wait_for(
@@ -836,6 +916,8 @@ def test_cancelled_episode_cleanup_is_ordered_and_bounded(
                     attempt_number=1,
                     validate_result=lambda _result, _telemetry: {},
                     restore_result=lambda _raw, _telemetry: None,
+                    configuration=configuration,
+                    revision=revision,
                 ),
                 timeout=0.01,
             )

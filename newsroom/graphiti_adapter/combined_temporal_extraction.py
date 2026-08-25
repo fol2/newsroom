@@ -126,6 +126,9 @@ class CombinedTemporalLeaf:
     temporal_basis: str | None = None
     configuration_digest: str | None = None
     temporal_policy_digest: str | None = None
+    deterministic_sidecar: Mapping[str, object] | None = None
+    sidecar_collapse: Mapping[str, object] | None = None
+    deterministic_summary: Mapping[str, object] | None = None
 
 
 class CombinedTemporalTransport(Protocol):
@@ -206,13 +209,11 @@ def extract_combined_temporal(
             failure_code=CombinedTemporalFailureCode.PIPELINE_FAILED,
         )
     try:
-        payload = parse_payload(raw)
-        normalised, ranges = normalise(
-            payload,
-            prompt.segments,
-            UtcTimestamp.parse(revision.reference_time).value,
+        normalised, ranges, nodes, edges = _validate_and_expand(
+            revision=revision,
+            prompt=prompt,
+            raw=raw,
         )
-        nodes, edges = _expand(revision, normalised)
         receipt["proposal_receipt"] = _proposal_receipt(
             revision=revision,
             payload=normalised,
@@ -410,6 +411,27 @@ def _proposal_receipt(
     }
 
 
+def _validate_and_expand(
+    *,
+    revision: SourceRevisionInput,
+    prompt: CompactPrompt,
+    raw: object,
+) -> tuple[
+    dict[str, Any],
+    dict[str, tuple[EvidenceSegment, ...]],
+    tuple[Any, ...],
+    tuple[Any, ...],
+]:
+    payload = parse_payload(raw)
+    normalised, ranges = normalise(
+        payload,
+        prompt.segments,
+        UtcTimestamp.parse(revision.reference_time).value,
+    )
+    nodes, edges = _expand(revision, normalised)
+    return normalised, ranges, nodes, edges
+
+
 def _leaf_from_completed(
     *,
     revision: SourceRevisionInput,
@@ -531,8 +553,16 @@ def _leaf_from_completed(
                 graph_effect_attempted=False,
                 rollback_completed=False,
             )
-        node.uuid = str(mention["canonical_identity"])
         resolution = str(mention["resolution"])
+        canonical_identity = mention.get("canonical_identity")
+        if resolution != "AMBIGUOUS_HOLD":
+            if not isinstance(canonical_identity, str) or not canonical_identity:
+                raise CombinedTemporalPipelineError(
+                    "combined-temporal completed Canonical Entity identity is malformed",
+                    graph_effect_attempted=False,
+                    rollback_completed=False,
+                )
+            node.uuid = canonical_identity
         node.attributes = {**node.attributes, "resolution": resolution}
         resolutions.append(resolution)
     for relation, edge in zip(relations, edges, strict=True):
@@ -647,6 +677,21 @@ def _leaf(
         temporal_policy_digest=(
             str(receipt.get("temporal_policy_digest") or "") or None
         ),
+        deterministic_sidecar=(
+            dict(receipt["deterministic_sidecar"])
+            if isinstance(receipt.get("deterministic_sidecar"), Mapping)
+            else None
+        ),
+        sidecar_collapse=(
+            dict(receipt["sidecar_collapse"])
+            if isinstance(receipt.get("sidecar_collapse"), Mapping)
+            else None
+        ),
+        deterministic_summary=(
+            dict(receipt["deterministic_summary"])
+            if isinstance(receipt.get("deterministic_summary"), Mapping)
+            else None
+        ),
     )
 
 
@@ -679,6 +724,7 @@ def _expand(
                 "evidence_segment_ids": list(entity["evidence_segment_ids"]),
                 "resolution": "UNRESOLVED",
                 "ingest_id": ingest_id,
+                "source_id": revision.source_id,
             },
         )
         nodes_by_id[entity["local_id"]] = node

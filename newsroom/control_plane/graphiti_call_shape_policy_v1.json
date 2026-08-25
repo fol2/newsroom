@@ -1,123 +1,14 @@
 {
   "schema_version": "newsroom.graphiti-call-shape-policy.v1",
+  "canonical_digest": "sha256:e867607a4a30f5db89c2093203df02c7cfc20e8869a24ce7b4b0c3f7dcd70b1c",
   "policy_id": "graphiti-core-0.29.3-newsroom-adapter-v1",
-  "version": "issue-769-v1",
+  "version": "issue-770-v1",
   "graphiti_core_release": "graphiti-core-0.29.3",
   "framework_identity": "graphiti-core-0.29.3",
   "prompt_identity": "newsroom.graphiti.proposal-only-prompt:v1",
   "ontology_identity": "newsroom.graphiti.adapter-result-schema:v1",
   "temporal_identity": "graphiti-source-reference-time-v1",
   "generation_policy_identity": "newsroom-evaluation-graphiti-generation-v1",
-  "fixtures": [
-    {
-      "fixture_id": "zero-proposal",
-      "fixture_class": "ZERO_PROPOSAL",
-      "fixture_source": "newsroom/tests/test_graphiti_core_0293_call_shape.py",
-      "primary_chat_request_count": 1,
-      "fallback_chat_request_count": 0,
-      "embedding_request_count": 0,
-      "distinct_internal_request_count": 1
-    },
-    {
-      "fixture_id": "one-relation",
-      "fixture_class": "RELATIONS",
-      "fixture_source": "docs/research/2026-08-22-graphiti-combined-temporal-call-shapes.json",
-      "primary_chat_request_count": 3,
-      "fallback_chat_request_count": 0,
-      "embedding_request_count": 3,
-      "distinct_internal_request_count": 6
-    },
-    {
-      "fixture_id": "several-relations",
-      "fixture_class": "RELATIONS",
-      "fixture_source": "newsroom/tests/test_graphiti_core_0293_nonzero_combined_call_shape.py",
-      "primary_chat_request_count": 4,
-      "fallback_chat_request_count": 0,
-      "embedding_request_count": 3,
-      "distinct_internal_request_count": 7
-    },
-    {
-      "fixture_id": "temporal-current",
-      "fixture_class": "TEMPORAL_CURRENT",
-      "fixture_source": "newsroom/tests/test_graphiti_core_0293_nonzero_combined_call_shape.py",
-      "primary_chat_request_count": 4,
-      "fallback_chat_request_count": 0,
-      "embedding_request_count": 3,
-      "distinct_internal_request_count": 7
-    },
-    {
-      "fixture_id": "contradiction-invalidation",
-      "fixture_class": "CONTRADICTION_INVALIDATION",
-      "fixture_source": "newsroom/tests/test_graphiti_adapter_real_executor.py",
-      "primary_chat_request_count": 4,
-      "fallback_chat_request_count": 0,
-      "embedding_request_count": 3,
-      "distinct_internal_request_count": 7
-    },
-    {
-      "fixture_id": "existing-entity-resolution",
-      "fixture_class": "EXISTING_ENTITY_RESOLUTION",
-      "fixture_source": "newsroom/tests/test_graphiti_adapter_real_executor.py",
-      "primary_chat_request_count": 3,
-      "fallback_chat_request_count": 0,
-      "embedding_request_count": 3,
-      "distinct_internal_request_count": 6
-    },
-    {
-      "fixture_id": "long-multi-chunk-per-attempt",
-      "fixture_class": "LONG_MULTI_CHUNK",
-      "fixture_source": "newsroom/research/graphiti_sdk_no_tool_calibration.py",
-      "primary_chat_request_count": 4,
-      "fallback_chat_request_count": 0,
-      "embedding_request_count": 3,
-      "distinct_internal_request_count": 7
-    },
-    {
-      "fixture_id": "malformed-output-single-fallback",
-      "fixture_class": "MALFORMED_FALLBACK",
-      "fixture_source": "newsroom/tests/test_graphiti_adapter_real_executor.py",
-      "primary_chat_request_count": 4,
-      "fallback_chat_request_count": 1,
-      "embedding_request_count": 3,
-      "distinct_internal_request_count": 8
-    },
-    {
-      "fixture_id": "timeout-cancellation",
-      "fixture_class": "TIMEOUT_CANCELLATION",
-      "fixture_source": "newsroom/tests/test_graphiti_adapter_real_executor.py",
-      "primary_chat_request_count": 1,
-      "fallback_chat_request_count": 0,
-      "embedding_request_count": 0,
-      "distinct_internal_request_count": 1
-    },
-    {
-      "fixture_id": "restart-after-pre-dispatch-allocation",
-      "fixture_class": "RESTART_PRE_DISPATCH",
-      "fixture_source": "newsroom/tests/test_model_usage_receipts.py",
-      "primary_chat_request_count": 1,
-      "fallback_chat_request_count": 0,
-      "embedding_request_count": 0,
-      "distinct_internal_request_count": 1
-    },
-    {
-      "fixture_id": "restart-after-possible-provider-io",
-      "fixture_class": "RESTART_POSSIBLE_IO",
-      "fixture_source": "newsroom/tests/test_model_usage_receipts.py",
-      "primary_chat_request_count": 1,
-      "fallback_chat_request_count": 0,
-      "embedding_request_count": 0,
-      "distinct_internal_request_count": 1
-    },
-    {
-      "fixture_id": "embedding-leaves",
-      "fixture_class": "EMBEDDING",
-      "fixture_source": "newsroom/tests/test_graphiti_token_meter.py",
-      "primary_chat_request_count": 0,
-      "fallback_chat_request_count": 0,
-      "embedding_request_count": 3,
-      "distinct_internal_request_count": 3
-    }
-  ],
   "qualified_routes": [
     {
       "leaf_class": "PRIMARY",
@@ -126,10 +17,6 @@
       "model": "composer-2.5",
       "reasoning": "provider-default",
       "config_identity": "graphiti-cli-command-v1",
-      "max_prompt_bytes": 262144,
-      "max_context_tokens": 131072,
-      "max_output_tokens": 16384,
-      "max_total_tokens": 147456,
       "command_semantic_version": "newsroom.graphiti-provider-dispatch.v1",
       "command_flags": [
         "--print",
@@ -152,7 +39,11 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:3582db5181666496b7bff438460f760452745cd92aca36f0a0d345692c871207"
+      "implementation_revision": "sha256:3582db5181666496b7bff438460f760452745cd92aca36f0a0d345692c871207",
+      "max_prompt_bytes": 262144,
+      "max_context_tokens": 131072,
+      "max_output_tokens": 16384,
+      "max_total_tokens": 147456
     },
     {
       "leaf_class": "FALLBACK",
@@ -161,10 +52,6 @@
       "model": "grok-4.6",
       "reasoning": "medium",
       "config_identity": "graphiti-cli-command-v1",
-      "max_prompt_bytes": 262144,
-      "max_context_tokens": 131072,
-      "max_output_tokens": 16384,
-      "max_total_tokens": 147456,
       "command_semantic_version": "newsroom.graphiti-provider-dispatch.v1",
       "command_flags": [
         "--prompt-file",
@@ -191,7 +78,11 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:3582db5181666496b7bff438460f760452745cd92aca36f0a0d345692c871207"
+      "implementation_revision": "sha256:3582db5181666496b7bff438460f760452745cd92aca36f0a0d345692c871207",
+      "max_prompt_bytes": 262144,
+      "max_context_tokens": 131072,
+      "max_output_tokens": 16384,
+      "max_total_tokens": 147456
     },
     {
       "leaf_class": "EMBEDDING",
@@ -200,10 +91,6 @@
       "model": "openai/text-embedding-3-large",
       "reasoning": "none",
       "config_identity": "graphiti-embedding-command-v1",
-      "max_prompt_bytes": 262144,
-      "max_context_tokens": 131072,
-      "max_output_tokens": 1,
-      "max_total_tokens": 131072,
       "command_semantic_version": "newsroom.graphiti-provider-dispatch.v1",
       "command_flags": [
         "POST=/embeddings",
@@ -219,7 +106,11 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:16d88cd7e0f115d0ea533a0406e0ed7a10c2578e9e878cd9c1f82ea7a0bb143e"
+      "implementation_revision": "sha256:16d88cd7e0f115d0ea533a0406e0ed7a10c2578e9e878cd9c1f82ea7a0bb143e",
+      "max_prompt_bytes": 262144,
+      "max_context_tokens": 131072,
+      "max_output_tokens": 1,
+      "max_total_tokens": 131072
     }
   ],
   "qualified_request_shapes": [
@@ -336,8 +227,132 @@
       "semantic_request_class": "UNSTRUCTURED",
       "response_schema_identity": "UNSTRUCTURED",
       "response_schema_digest": "sha256:9a654d3f546e144a1d829e0939c44f24fded717777651e6ebe82538161c8dc22"
+    },
+    {
+      "leaf_class": "PRIMARY",
+      "semantic_request_class": "NewsroomCombinedTemporalExtractionV1",
+      "response_schema_identity": "NewsroomCombinedTemporalExtractionV1",
+      "response_schema_digest": "sha256:439cd662886a4f3d14c12503a505dc0f721eb0083b1e2678f54320678fe12621"
+    },
+    {
+      "leaf_class": "FALLBACK",
+      "semantic_request_class": "NewsroomCombinedTemporalExtractionV1",
+      "response_schema_identity": "NewsroomCombinedTemporalExtractionV1",
+      "response_schema_digest": "sha256:439cd662886a4f3d14c12503a505dc0f721eb0083b1e2678f54320678fe12621"
     }
   ],
-  "evidence_digest": "sha256:15d875c7d8d567dfd2e28f5fb67708e7104be4fd19599526b3c42d8dff6cddee",
-  "canonical_digest": "sha256:942b1cf9d93189e48ab1c7b6d1c0e558bc5ac470923c0b4ea1607fc46a5f58ef"
+  "fixtures": [
+    {
+      "fixture_id": "zero-proposal",
+      "fixture_class": "ZERO_PROPOSAL",
+      "fixture_source": "newsroom/tests/test_graphiti_core_0293_call_shape.py",
+      "primary_chat_request_count": 1,
+      "fallback_chat_request_count": 0,
+      "embedding_request_count": 0,
+      "distinct_internal_request_count": 1
+    },
+    {
+      "fixture_id": "one-relation",
+      "fixture_class": "RELATIONS",
+      "fixture_source": "docs/research/2026-08-22-graphiti-combined-temporal-call-shapes.json",
+      "primary_chat_request_count": 1,
+      "fallback_chat_request_count": 0,
+      "embedding_request_count": 3,
+      "distinct_internal_request_count": 4
+    },
+    {
+      "fixture_id": "several-relations",
+      "fixture_class": "RELATIONS",
+      "fixture_source": "newsroom/tests/test_graphiti_core_0293_nonzero_combined_call_shape.py",
+      "primary_chat_request_count": 1,
+      "fallback_chat_request_count": 0,
+      "embedding_request_count": 3,
+      "distinct_internal_request_count": 4
+    },
+    {
+      "fixture_id": "temporal-current",
+      "fixture_class": "TEMPORAL_CURRENT",
+      "fixture_source": "newsroom/tests/test_graphiti_core_0293_nonzero_combined_call_shape.py",
+      "primary_chat_request_count": 1,
+      "fallback_chat_request_count": 0,
+      "embedding_request_count": 3,
+      "distinct_internal_request_count": 4
+    },
+    {
+      "fixture_id": "contradiction-invalidation",
+      "fixture_class": "CONTRADICTION_INVALIDATION",
+      "fixture_source": "newsroom/tests/test_graphiti_adapter_real_executor.py",
+      "primary_chat_request_count": 1,
+      "fallback_chat_request_count": 0,
+      "embedding_request_count": 3,
+      "distinct_internal_request_count": 4
+    },
+    {
+      "fixture_id": "existing-entity-resolution",
+      "fixture_class": "EXISTING_ENTITY_RESOLUTION",
+      "fixture_source": "newsroom/tests/test_graphiti_adapter_real_executor.py",
+      "primary_chat_request_count": 1,
+      "fallback_chat_request_count": 0,
+      "embedding_request_count": 3,
+      "distinct_internal_request_count": 4
+    },
+    {
+      "fixture_id": "long-multi-chunk-per-attempt",
+      "fixture_class": "LONG_MULTI_CHUNK",
+      "fixture_source": "newsroom/research/graphiti_sdk_no_tool_calibration.py",
+      "primary_chat_request_count": 1,
+      "fallback_chat_request_count": 0,
+      "embedding_request_count": 3,
+      "distinct_internal_request_count": 4
+    },
+    {
+      "fixture_id": "malformed-output-single-fallback",
+      "fixture_class": "MALFORMED_FALLBACK",
+      "fixture_source": "newsroom/tests/test_graphiti_adapter_real_executor.py",
+      "primary_chat_request_count": 1,
+      "fallback_chat_request_count": 1,
+      "embedding_request_count": 0,
+      "distinct_internal_request_count": 2
+    },
+    {
+      "fixture_id": "timeout-cancellation",
+      "fixture_class": "TIMEOUT_CANCELLATION",
+      "fixture_source": "newsroom/tests/test_graphiti_adapter_real_executor.py",
+      "primary_chat_request_count": 1,
+      "fallback_chat_request_count": 0,
+      "embedding_request_count": 0,
+      "distinct_internal_request_count": 1
+    },
+    {
+      "fixture_id": "restart-after-pre-dispatch-allocation",
+      "fixture_class": "RESTART_PRE_DISPATCH",
+      "fixture_source": "newsroom/tests/test_model_usage_receipts.py",
+      "primary_chat_request_count": 1,
+      "fallback_chat_request_count": 0,
+      "embedding_request_count": 0,
+      "distinct_internal_request_count": 1
+    },
+    {
+      "fixture_id": "restart-after-possible-provider-io",
+      "fixture_class": "RESTART_POSSIBLE_IO",
+      "fixture_source": "newsroom/tests/test_model_usage_receipts.py",
+      "primary_chat_request_count": 1,
+      "fallback_chat_request_count": 0,
+      "embedding_request_count": 0,
+      "distinct_internal_request_count": 1
+    },
+    {
+      "fixture_id": "embedding-leaves",
+      "fixture_class": "EMBEDDING",
+      "fixture_source": "newsroom/tests/test_graphiti_token_meter.py",
+      "primary_chat_request_count": 0,
+      "fallback_chat_request_count": 0,
+      "embedding_request_count": 3,
+      "distinct_internal_request_count": 3
+    }
+  ],
+  "evidence_digest": "sha256:418f7cc86fcee4f7d3605451703417c1eec6bd1dba59ee9e8b411053bbacbf15",
+  "maximum_qualified_fixture_count": 4,
+  "headroom": 2,
+  "max_distinct_internal_requests": 6
 }

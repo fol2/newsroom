@@ -153,7 +153,9 @@ jobs:
             newsroom/tests/test_graphiti_core_0293_nonzero_combined_call_shape.py \
             newsroom/tests/test_graphiti_sdk_no_tool_calibration.py \
             newsroom/tests/test_graphiti_combined_temporal_extraction.py \
-            newsroom/tests/test_graphiti_combined_temporal_pipeline.py
+            newsroom/tests/test_graphiti_combined_temporal_pipeline.py \
+            newsroom/tests/test_graphiti_combined_temporal_runtime.py \
+            newsroom/tests/test_graphiti_deterministic_work.py
 
       - name: Verify Graphiti combined-temporal live pin
         run: .venv/bin/python scripts/graphiti_combined_temporal_extraction.py

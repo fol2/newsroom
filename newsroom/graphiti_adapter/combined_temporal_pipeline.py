@@ -16,6 +16,12 @@ ResolveNodes = Callable[
 ResolvePointers = Callable[[list[Any], dict[str, str]], list[Any]]
 CreateEmbeddings = Callable[[Any, list[Any]], Awaitable[None]]
 PersistGraph = Callable[[list[Any], list[Any]], Awaitable[None]]
+CompleteReceipt = Callable[
+    [list[Any], list[Any], Mapping[str, object]], Mapping[str, object]
+]
+CompleteFailureReceipt = Callable[
+    [Mapping[str, object]], Mapping[str, object]
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,8 +79,11 @@ def _durable_receipt(
     durable.setdefault("provider_attempt_number", 1)
     durable["pipeline_chat_invocations"] = [dict(item) for item in chat_invocations]
     durable["embedding_usage"] = dict(embedding_usage)
-    durable["invocation_count"] = int(durable.get("invocation_count", 0)) + len(
-        chat_invocations
+    retained_invocations = int(durable.get("invocation_count", 0))
+    durable["invocation_count"] = (
+        max(retained_invocations, len(chat_invocations))
+        if durable.get("chat_receipts_include_transport") is True
+        else retained_invocations + len(chat_invocations)
     )
     proposal_raw = durable.get("proposal_receipt")
     if not isinstance(proposal_raw, Mapping):
@@ -94,8 +103,24 @@ def _durable_receipt(
         item = dict(raw)
         item.update(
             {
-                "canonical_identity": str(node.uuid),
+                "canonical_identity": (
+                    None
+                    if resolution == "AMBIGUOUS_HOLD"
+                    else str(node.uuid)
+                ),
                 "resolution": resolution,
+                "entity_resolution_proposal": {
+                    "outcome": resolution,
+                    "basis": (getattr(node, "attributes", {}) or {}).get(
+                        "resolution_basis"
+                    ),
+                    "considered_canonical_entity_ids": list(
+                        (getattr(node, "attributes", {}) or {}).get(
+                            "considered_canonical_entity_ids", ()
+                        )
+                    ),
+                    "provider_leaf_count": 0,
+                },
             }
         )
         mentions.append(item)
@@ -111,6 +136,17 @@ def _durable_receipt(
                 "source_identity": str(edge.source_node_uuid),
                 "target_identity": str(edge.target_node_uuid),
                 "fact_embedding": getattr(edge, "fact_embedding", None),
+                "proposal_status": (
+                    "COLLAPSED_EXACT_SIDECAR_DUPLICATE"
+                    if (getattr(edge, "attributes", {}) or {}).get(
+                        "collapsed_sidecar_duplicate"
+                    )
+                    else (
+                        "AMBIGUOUS_HOLD_ENDPOINT"
+                        if getattr(edge, "fact_embedding", None) is None
+                        else "PROPOSED"
+                    )
+                ),
             }
         )
         relations.append(item)
@@ -137,7 +173,10 @@ class ExistingGraphitiPipeline:
     expected_group_id: str | None = None
     expected_episode_uuid: str | None = None
     expected_ingest_id: str | None = None
+    complete_receipt: CompleteReceipt | None = None
+    complete_failure_receipt: CompleteFailureReceipt | None = None
     _attempt_started: bool = field(default=False, init=False)
+    recovery_marker: Any | None = field(default=None, init=False)
 
     def prepare_attempt(self) -> Mapping[str, object] | None:
         return self.run_async(self._prepare_attempt())
@@ -164,6 +203,7 @@ class ExistingGraphitiPipeline:
                     rollback_completed=False,
                 ) from exc
         rollback_completed = marker.state is GuardState.RECOVERED_AMBIGUOUS
+        self.recovery_marker = marker
         if marker.state in {GuardState.PENDING, GuardState.ROLLING_BACK}:
             try:
                 rollback_completed = await self.guard.rollback_pending(
@@ -203,13 +243,18 @@ class ExistingGraphitiPipeline:
             chat_invocations=chat_invocations,
             embedding_usage=embedding_usage,
         )
+        completed = (
+            durable
+            if self.complete_failure_receipt is None
+            else dict(self.complete_failure_receipt(durable))
+        )
         await self.guard.record_pending_telemetry(
             chat_invocations=chat_invocations,
             embedding_usage=embedding_usage,
         )
-        await self.guard.complete(durable)
+        await self.guard.complete(completed)
         self._attempt_started = False
-        return durable
+        return completed
 
     def execute(
         self,
@@ -252,7 +297,12 @@ class ExistingGraphitiPipeline:
                 chat_invocations=chat_invocations,
                 embedding_usage=embedding_usage,
             )
-            await self.guard.complete(durable_receipt)
+            completed_receipt = (
+                durable_receipt
+                if self.complete_receipt is None
+                else dict(self.complete_receipt([], [], durable_receipt))
+            )
+            await self.guard.complete(completed_receipt)
             self._attempt_started = False
             return CombinedTemporalPipelineResult(
                 nodes=(),
@@ -263,33 +313,68 @@ class ExistingGraphitiPipeline:
                 embedding_skipped=True,
                 journal_skipped=False,
                 rollback_skipped=True,
-                completed_receipt=durable_receipt,
+                completed_receipt=completed_receipt,
             )
         try:
             resolved_nodes, uuid_map, _duplicates = await self.resolve_nodes(
                 list(nodes)
             )
+            resolutions = tuple(
+                str((getattr(node, "attributes", {}) or {}).get("resolution"))
+                if (getattr(node, "attributes", {}) or {}).get("resolution")
+                in {
+                    "DETERMINISTIC_EXISTING_NODE",
+                    "DETERMINISTIC_NEW_NODE",
+                    "AMBIGUOUS_HOLD",
+                }
+                else (
+                    "NEW"
+                    if str(node.uuid) in {str(item.uuid) for item in nodes}
+                    else "RESOLVED_EXISTING"
+                )
+                for node in resolved_nodes
+            )
+            persistable_nodes = [
+                node
+                for node, resolution in zip(
+                    resolved_nodes, resolutions, strict=True
+                )
+                if resolution != "AMBIGUOUS_HOLD"
+            ]
+            persistable_edges = [
+                edge
+                for edge in edges
+                if not (getattr(edge, "attributes", {}) or {}).get(
+                    "collapsed_sidecar_duplicate"
+                )
+                and str(edge.source_node_uuid) in uuid_map
+                and str(edge.target_node_uuid) in uuid_map
+            ]
             guarded, _invalidated, episode_edges = await guard_extracted_edges(
-                extracted_edges=list(edges),
+                extracted_edges=persistable_edges,
                 uuid_map=uuid_map,
                 embedder=self.embedder,
                 resolve_pointers=self.resolve_pointers,
                 create_embeddings=self.create_embeddings,
             )
-            if len(guarded) != len(edges) or len(episode_edges) != len(edges):
+            if (
+                len(guarded) != len(persistable_edges)
+                or len(episode_edges) != len(persistable_edges)
+            ):
                 raise RuntimeError("edge guard dropped a combined-temporal relation")
-            original_ids = {str(node.uuid) for node in nodes}
-            resolutions = tuple(
-                "NEW" if str(node.uuid) in original_ids else "RESOLVED_EXISTING"
-                for node in resolved_nodes
-            )
             for node, resolution in zip(resolved_nodes, resolutions, strict=True):
                 attributes = dict(getattr(node, "attributes", {}) or {})
                 attributes["resolution"] = resolution
                 node.attributes = attributes
             async with self.guard.fenced_graph_mutation():
-                await self.persist_graph(resolved_nodes, guarded)
+                await self.persist_graph(persistable_nodes, guarded)
                 await self.guard.restore_preexisting()
+            guarded_iterator = iter(guarded)
+            persistable_edge_ids = {id(edge) for edge in persistable_edges}
+            output_edges = [
+                next(guarded_iterator) if id(edge) in persistable_edge_ids else edge
+                for edge in edges
+            ]
             chat_invocations = self.chat_receipt()
             embedding_usage = self.embedding_receipt()
             await self.guard.record_pending_telemetry(
@@ -299,12 +384,21 @@ class ExistingGraphitiPipeline:
             durable_receipt = _durable_receipt(
                 receipt,
                 nodes=resolved_nodes,
-                edges=guarded,
+                edges=output_edges,
                 resolutions=resolutions,
                 chat_invocations=chat_invocations,
                 embedding_usage=embedding_usage,
             )
-            await self.guard.complete(durable_receipt)
+            completed_receipt = (
+                durable_receipt
+                if self.complete_receipt is None
+                else dict(
+                    self.complete_receipt(
+                        resolved_nodes, output_edges, durable_receipt
+                    )
+                )
+            )
+            await self.guard.complete(completed_receipt)
         except Exception as exc:
             rollback_completed = False
             try:
@@ -326,14 +420,14 @@ class ExistingGraphitiPipeline:
 
         return CombinedTemporalPipelineResult(
             nodes=tuple(resolved_nodes),
-            edges=tuple(guarded),
+            edges=tuple(output_edges),
             guarded_edges=tuple(guarded),
             node_resolutions=resolutions,
-            graph_effect_attempted=True,
-            embedding_skipped=False,
+            graph_effect_attempted=bool(persistable_nodes or guarded),
+            embedding_skipped=not persistable_edges,
             journal_skipped=False,
             rollback_skipped=True,
-            completed_receipt=durable_receipt,
+            completed_receipt=completed_receipt,
         )
 
     def _validate_context(
