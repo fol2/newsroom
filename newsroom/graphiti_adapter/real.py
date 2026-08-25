@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib.metadata
-import math
 import os
 import time
 from collections.abc import Mapping
@@ -47,7 +46,7 @@ from newsroom.graphiti_adapter.combined_temporal_extraction import (
 from newsroom.graphiti_adapter.combined_temporal_runtime import (
     CliCombinedTemporalTransport,
     extract_combined_temporal_async,
-    resolve_nodes_locally,
+    resolve_nodes_with_optional_embeddings,
 )
 from newsroom.graphiti_adapter.deterministic_sidecar import DeterministicSidecarInput
 from newsroom.graphiti_adapter.deterministic_summary import AdmittedSummaryAssertion
@@ -337,40 +336,12 @@ def combined_temporal_pipeline_for(
                 key=lambda item: str(item.uuid),
             )
         )
-        similarities: dict[tuple[str, str], int] = {}
-        if existing:
-            for node in typed_nodes:
-                mention_embedding = await graphiti.clients.embedder.create(
-                    str(node.name)
-                )
-                for candidate in existing:
-                    candidate_embedding = getattr(
-                        candidate, "name_embedding", None
-                    )
-                    if not candidate_embedding:
-                        continue
-                    denominator = math.sqrt(
-                        sum(value * value for value in mention_embedding)
-                    ) * math.sqrt(
-                        sum(value * value for value in candidate_embedding)
-                    )
-                    if denominator:
-                        cosine = sum(
-                            left * right
-                            for left, right in zip(
-                                mention_embedding,
-                                candidate_embedding,
-                                strict=True,
-                            )
-                        ) / denominator
-                        similarities[(str(node.uuid), str(candidate.uuid))] = max(
-                            0, min(1_000_000, round(cosine * 1_000_000))
-                        )
-        return resolve_nodes_locally(
+        create = getattr(graphiti.clients.embedder, "create", None)
+        return await resolve_nodes_with_optional_embeddings(
             typed_nodes,
             existing,
             source_id=source_id,
-            similarities_ppm=similarities,
+            embed_name=create if callable(create) else None,
         )
 
     def resolve_pointers(edges: list[Any], uuid_map: dict[str, str]) -> list[Any]:

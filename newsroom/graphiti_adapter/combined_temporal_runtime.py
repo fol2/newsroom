@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from math import sqrt
 from types import SimpleNamespace
 from typing import Any, Protocol
 
@@ -53,8 +54,13 @@ from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_VERSIO
 from newsroom.graphiti_adapter.local_entity_resolution import (
     CanonicalEntityCandidate,
     EntityMentionInput,
+    LocalEntityResolutionBasis,
     LocalEntityResolutionOutcome,
     resolve_entity_locally,
+)
+
+_EMBEDDING_RETRY_BASES = frozenset(
+    {LocalEntityResolutionBasis.BELOW_NEW_CANONICAL_ENTITY_CEILING}
 )
 
 
@@ -114,6 +120,22 @@ class CliCombinedTemporalTransport:
                 else None
             ),
         )
+
+
+def _cosine_ppm(left: list[float], right: object) -> int | None:
+    if not isinstance(right, (list, tuple)) or not right:
+        return None
+    try:
+        pairs = tuple(zip(left, right, strict=True))
+    except ValueError:
+        return None
+    denominator = sqrt(sum(value * value for value in left)) * sqrt(
+        sum(value * value for value in right)
+    )
+    if not denominator:
+        return None
+    cosine = sum(a * b for a, b in pairs) / denominator
+    return max(0, min(1_000_000, round(cosine * 1_000_000)))
 
 
 def resolve_nodes_locally(
@@ -181,7 +203,7 @@ def resolve_nodes_locally(
             is LocalEntityResolutionOutcome.DETERMINISTIC_NEW_NODE
         ):
             uuid_map[local_id] = local_id
-        attributes = dict(getattr(selected, "attributes", {}) or {})
+        attributes = dict(getattr(node, "attributes", {}) or {})
         attributes.update(
             {
                 "resolution": resolution.outcome.value,
@@ -189,11 +211,62 @@ def resolve_nodes_locally(
                 "considered_canonical_entity_ids": list(
                     resolution.considered_canonical_entity_ids
                 ),
+                "canonical_identity": (
+                    str(selected.uuid)
+                    if resolution.outcome
+                    is LocalEntityResolutionOutcome.DETERMINISTIC_EXISTING_NODE
+                    else None
+                ),
             }
         )
-        selected.attributes = attributes
-        resolved_nodes.append(selected)
+        node.attributes = attributes
+        resolved_nodes.append(node)
     return resolved_nodes, uuid_map, []
+
+
+async def resolve_nodes_with_optional_embeddings(
+    nodes: list[Any],
+    existing_nodes: tuple[Any, ...],
+    *,
+    source_id: str,
+    embed_name: Callable[[str], Awaitable[list[float]]] | None = None,
+) -> tuple[list[Any], dict[str, str], list[tuple[Any, Any]]]:
+    """Embed mention names only when exact/alias/normalised resolution is insufficient."""
+
+    resolved, uuid_map, extra = resolve_nodes_locally(
+        nodes, existing_nodes, source_id=source_id
+    )
+    if not existing_nodes or embed_name is None:
+        return resolved, uuid_map, extra
+    retry_ids = {
+        str(node.uuid)
+        for node in resolved
+        if (getattr(node, "attributes", {}) or {}).get("resolution_basis")
+        in {item.value for item in _EMBEDDING_RETRY_BASES}
+    }
+    if not retry_ids:
+        return resolved, uuid_map, extra
+    similarities: dict[tuple[str, str], int] = {}
+    for node in nodes:
+        local_id = str(node.uuid)
+        if local_id not in retry_ids:
+            continue
+        mention_embedding = await embed_name(str(node.name))
+        for candidate in existing_nodes:
+            ppm = _cosine_ppm(
+                mention_embedding, getattr(candidate, "name_embedding", None)
+            )
+            if ppm is None:
+                continue
+            similarities[(local_id, str(candidate.uuid))] = ppm
+    if not similarities:
+        return resolved, uuid_map, extra
+    return resolve_nodes_locally(
+        nodes,
+        existing_nodes,
+        source_id=source_id,
+        similarities_ppm=similarities,
+    )
 
 
 async def _complete_failure(
@@ -425,4 +498,5 @@ __all__ = [
     "NewsroomCombinedTemporalExtractionV1",
     "extract_combined_temporal_async",
     "resolve_nodes_locally",
+    "resolve_nodes_with_optional_embeddings",
 ]

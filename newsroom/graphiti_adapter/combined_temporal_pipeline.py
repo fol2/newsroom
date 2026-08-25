@@ -106,7 +106,12 @@ def _durable_receipt(
                 "canonical_identity": (
                     None
                     if resolution == "AMBIGUOUS_HOLD"
-                    else str(node.uuid)
+                    else str(
+                        (getattr(node, "attributes", {}) or {}).get(
+                            "canonical_identity"
+                        )
+                        or node.uuid
+                    )
                 ),
                 "resolution": resolution,
                 "entity_resolution_proposal": {
@@ -339,7 +344,11 @@ class ExistingGraphitiPipeline:
                 for node, resolution in zip(
                     resolved_nodes, resolutions, strict=True
                 )
-                if resolution != "AMBIGUOUS_HOLD"
+                if resolution
+                not in {
+                    "AMBIGUOUS_HOLD",
+                    "DETERMINISTIC_EXISTING_NODE",
+                }
             ]
             persistable_edges = [
                 edge
