@@ -2,7 +2,7 @@
   "issue": 732,
   "title": "Prove exact-main useful-output efficiency and retain before/after evidence",
   "canonical_split": "#727 → #729 → #728 → #730 → #731 → #732 closeout",
-  "exact_base": "d3b9e21c6857643e9932e186bc2d63307bba92d4",
+  "exact_base": "8d722ff1826473c7ab86b39c320bf3d8ec006bb3",
   "behaviour_tests": [
     {
       "item": 1,
