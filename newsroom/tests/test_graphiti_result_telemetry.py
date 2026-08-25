@@ -39,8 +39,10 @@ from newsroom.tests.test_model_usage_receipts import (
     _service,
 )
 
-CLOSEOUT_JSON = Path(
-    "docs/research/2026-08-25-graphiti-internal-call-efficiency-closeout.json"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+CLOSEOUT_JSON = (
+    _REPO_ROOT
+    / "docs/research/2026-08-25-graphiti-internal-call-efficiency-closeout.json"
 )
 GRAPHITI_TELEMETRY_KEYS = (
     "completed_ingests_with_proposals",
@@ -853,7 +855,7 @@ def test_graphiti_admission_lag_is_independent_of_cont_usage_report(
 def test_issue_731_behaviour_mapping_names_exist() -> None:
     mapping = json.loads(CLOSEOUT_JSON.read_text(encoding="utf-8"))
     defined: set[str] = set()
-    for path in Path("newsroom/tests").rglob("test_*.py"):
+    for path in (_REPO_ROOT / "newsroom/tests").rglob("test_*.py"):
         defined.update(
             re.findall(r"^def (test_[A-Za-z0-9_]+)\(", path.read_text(), re.M)
         )
