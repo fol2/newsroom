@@ -20,6 +20,7 @@ from newsroom.graphiti_adapter.combined_temporal_contract import (
     _candidate_prompt_digest,
     build_compact_prompt,
 )
+from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_CORE_RELEASE
 from newsroom.graphiti_adapter.combined_temporal_extraction import (
     CombinedTemporalLeaf,
     CombinedTemporalOutcome,
@@ -107,7 +108,7 @@ class CliCombinedTemporalTransport:
         usage = latest.get("usage")
         return CombinedTemporalTransportResult(
             raw=raw,
-            framework_version="graphiti-core-0.29.3",
+            framework_version=GRAPHITI_CORE_RELEASE,
             model_version=(
                 str(latest["model"]) if latest.get("model") is not None else None
             ),
