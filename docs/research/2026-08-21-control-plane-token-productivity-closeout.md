@@ -30,6 +30,7 @@ It is a ledger export of the deterministic #732 fixture through
 ```
 
 Exact base: `d3b9e21c6857643e9932e186bc2d63307bba92d4`.
+Implementation branch: `jamesto/issue-732-exact-main-closeout`.
 
 Deterministic commands:
 
