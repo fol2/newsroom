@@ -14,6 +14,10 @@ from graphiti_core.prompts.extract_edges import ExtractedEdges
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
 
 from newsroom.authority.canonical import digest_canonical
+from newsroom.control_plane.cycle_governor import (
+    CycleOutcomeInput,
+    DurableCycleGovernor,
+)
 from newsroom.control_plane.graphiti import GraphitiModelUsageObserver
 from newsroom.graphiti_adapter.combined_temporal_contract import (
     CONTRACT_NAME,
@@ -1143,6 +1147,7 @@ def test_requested_max_tokens_is_forwarded_and_enforced_on_reported_usage(
         deadline=T0 + timedelta(minutes=3),
     )
     captured_prompt = ""
+    invocations: list[dict[str, object]] = []
 
     async def cursor_runner(prompt: str, *, max_tokens: int) -> CliExecution:
         nonlocal captured_prompt
@@ -1169,13 +1174,16 @@ def test_requested_max_tokens_is_forwarded_and_enforced_on_reported_usage(
                 max_tokens=3,
                 cursor_runner=cursor_runner,
                 grok_runner=lambda _prompt, _schema, *, max_tokens: "not called",
-                invocations=[],
+                invocations=invocations,
                 invocation_observer=observer,
             )
         )
 
     assert "maximum_output_tokens=3" in captured_prompt
     leaf = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"][0]
+    assert invocations[0]["outcome"] == "OUTPUT_LIMIT_EXCEEDED"
+    assert leaf["invocation_outcome"] == "OUTPUT_LIMIT_EXCEEDED"
+    assert leaf["work_outcome"] is None
     assert leaf["policy_breach"] == "REQUESTED_MAX_OUTPUT_TOKENS_EXCEEDED"
     assert service.route_state("GRAPHITI_CHAT_PRIMARY")["state"] == "OPEN"
 
@@ -1323,30 +1331,28 @@ def test_post_marker_executable_loss_is_usage_uncertain(
         dispatch_started()
         raise FileNotFoundError("fixture executable disappeared")
 
-    result = asyncio.run(
-        run_cli_chain(
-            prompt="source-safe prompt",
-            schema=EXTRACTED_ENTITIES_SCHEMA,
-            semantic_request_class="ExtractedEntities",
-            max_tokens=100,
-            cursor_runner=missing_after_marker,
-            grok_runner=lambda _prompt, _schema, *, max_tokens: CliExecution(
-                text='{"extracted_entities":[]}',
-                usage=cursor_cli_usage(
-                    {
-                        "inputTokens": 2,
-                        "outputTokens": 2,
-                        "cacheReadTokens": 0,
-                        "cacheWriteTokens": 0,
-                    }
-                ),
-            ),
-            invocations=invocations,
-            invocation_observer=observer,
-        )
-    )
+    grok_called = False
 
-    assert result == {"extracted_entities": []}
+    def grok(_prompt: str, _schema: str | None, *, max_tokens: int) -> str:
+        nonlocal grok_called
+        grok_called = True
+        return '{"extracted_entities":[]}'
+
+    with pytest.raises(CliResponseError, match="ineligible for fallback"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="source-safe prompt",
+                schema=EXTRACTED_ENTITIES_SCHEMA,
+                semantic_request_class="ExtractedEntities",
+                max_tokens=100,
+                cursor_runner=missing_after_marker,
+                grok_runner=grok,
+                invocations=invocations,
+                invocation_observer=observer,
+            )
+        )
+
+    assert grok_called is False
     assert invocations[0]["usage"]["usage_basis"] == "UNREPORTED"
     primary = next(
         leaf
@@ -1359,17 +1365,21 @@ def test_post_marker_executable_loss_is_usage_uncertain(
 
 
 @pytest.mark.parametrize(
-    ("failure", "expected_outcome"),
+    ("failure", "expected_outcome", "expected_circuit_state"),
     [
         (
             CliPredispatchRefusal("unsupported max token control"),
             "PREDISPATCH_REFUSED",
+            "CLOSED",
         ),
-        (OSError("hermetic workspace unavailable"), "FAILED"),
+        (OSError("hermetic workspace unavailable"), "FAILED", "OPEN"),
     ],
 )
 def test_cli_setup_failure_remains_proved_pre_dispatch_zero(
-    tmp_path: Path, failure: Exception, expected_outcome: str
+    tmp_path: Path,
+    failure: Exception,
+    expected_outcome: str,
+    expected_circuit_state: str,
 ) -> None:
     service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
     envelope = WorkEnvelope.create(
@@ -1400,30 +1410,28 @@ def test_cli_setup_failure_remains_proved_pre_dispatch_zero(
         del max_tokens, dispatch_started
         raise failure
 
-    result = asyncio.run(
-        run_cli_chain(
-            prompt="source-safe prompt",
-            schema=EXTRACTED_ENTITIES_SCHEMA,
-            semantic_request_class="ExtractedEntities",
-            max_tokens=100,
-            cursor_runner=refused_cursor,
-            grok_runner=lambda _prompt, _schema, *, max_tokens: CliExecution(
-                text='{"extracted_entities":[]}',
-                usage=cursor_cli_usage(
-                    {
-                        "inputTokens": 2,
-                        "outputTokens": 2,
-                        "cacheReadTokens": 0,
-                        "cacheWriteTokens": 0,
-                    }
-                ),
-            ),
-            invocations=[],
-            invocation_observer=observer,
-        )
-    )
+    grok_called = False
 
-    assert result == {"extracted_entities": []}
+    def grok(_prompt: str, _schema: str | None, *, max_tokens: int) -> str:
+        nonlocal grok_called
+        grok_called = True
+        return '{"extracted_entities":[]}'
+
+    with pytest.raises(CliResponseError, match="ineligible for fallback"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="source-safe prompt",
+                schema=EXTRACTED_ENTITIES_SCHEMA,
+                semantic_request_class="ExtractedEntities",
+                max_tokens=100,
+                cursor_runner=refused_cursor,
+                grok_runner=grok,
+                invocations=[],
+                invocation_observer=observer,
+            )
+        )
+
+    assert grok_called is False
     leaves = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"]
     primary = next(
         leaf
@@ -1434,6 +1442,124 @@ def test_cli_setup_failure_remains_proved_pre_dispatch_zero(
     assert primary["transport_dispatch_observed"] is False
     assert primary["pre_dispatch_zero_proved"] is True
     assert primary["total_tokens"] == 0
+    assert service.route_state("GRAPHITI_CHAT_PRIMARY")["state"] == (
+        expected_circuit_state
+    )
+
+
+def test_systemic_graphiti_circuit_does_not_block_a_qualified_cont_cycle(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    service = ModelUsageService(str(path))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-graphiti-failure",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-graphiti-failure",
+        graphiti_attempt_id="ingest-graphiti-failure:1",
+    )
+    service.open_envelope(envelope)
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=10),
+        owner_stop_check=lambda: None,
+    )
+
+    def systemic_before_dispatch(
+        _prompt: str,
+        *,
+        max_tokens: int,
+        dispatch_started: object = None,
+    ) -> CliExecution:
+        del max_tokens, dispatch_started
+        raise OSError("systemic transport failure")
+
+    with pytest.raises(CliResponseError, match="ineligible for fallback"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="source-safe prompt",
+                schema=EXTRACTED_ENTITIES_SCHEMA,
+                semantic_request_class="ExtractedEntities",
+                max_tokens=100,
+                cursor_runner=systemic_before_dispatch,
+                grok_runner=lambda _prompt, _schema, *, max_tokens: "not called",
+                invocations=[],
+                invocation_observer=observer,
+            )
+        )
+
+    later_envelope = WorkEnvelope.create(
+        cycle_id="cycle-later-revision",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0 + timedelta(seconds=20),
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-later-revision",
+        graphiti_attempt_id="ingest-later-revision:1",
+    )
+    service.open_envelope(later_envelope)
+    later_observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=later_envelope,
+        clock=lambda: T0 + timedelta(seconds=30),
+        owner_stop_check=lambda: None,
+    )
+    with pytest.raises(
+        ModelUsageAdmissionError,
+        match="affected route circuit is open",
+    ):
+        later_observer.before_cli_invocation(
+            provider="cursor-agent-cli",
+            model="composer-2.5",
+            prompt="later source-safe prompt",
+            schema=EXTRACTED_ENTITIES_SCHEMA,
+            semantic_request_class="ExtractedEntities",
+            max_tokens=100,
+        )
+
+    governor = DurableCycleGovernor(
+        str(path),
+        utc_clock=lambda: T0 + timedelta(minutes=1),
+        monotonic_clock=lambda: 60.0,
+    )
+    lease = governor.claim(owner_id="cont-writer-fixture")
+    result = governor.complete(
+        lease,
+        CycleOutcomeInput(
+            write_ready=1,
+            provider_dispatches=1,
+            accepted_payload_count=1,
+        ),
+    )
+    assert service.route_state("GRAPHITI_CHAT_PRIMARY")["state"] == "OPEN"
+    assert result.outcome_class == "PRODUCTIVE"
+    assert result.writer_circuit_state == "CLOSED"
+
+    open_state = service.route_state("GRAPHITI_CHAT_PRIMARY")
+    service.release_route_circuit(
+        route="GRAPHITI_CHAT_PRIMARY",
+        release_kind="DETERMINISTIC_HEALTH_PROBE",
+        bound_failure_reason=str(open_state["reason"]),
+        evidence_digest=digest_canonical({"local_health": "PASSED"}),
+        recorded_at=T0 + timedelta(seconds=40),
+    )
+    assert service.route_state("GRAPHITI_CHAT_PRIMARY")["state"] == "CLOSED"
+    later_observer.before_cli_invocation(
+        provider="cursor-agent-cli",
+        model="composer-2.5",
+        prompt="later source-safe prompt",
+        schema=EXTRACTED_ENTITIES_SCHEMA,
+        semantic_request_class="ExtractedEntities",
+        max_tokens=100,
+    )
 
 
 def test_async_cli_capability_preflight_kills_child_on_cancellation(
@@ -1741,6 +1867,121 @@ def test_typed_fallback_has_a_distinct_identity_and_exact_parent(
     assert requests[1]["semantic_state_digest"] != requests[0][
         "semantic_state_digest"
     ]
+
+
+def test_observer_refuses_fallback_without_a_malformed_primary(
+    tmp_path: Path,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-ineligible-fallback",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-ineligible-fallback",
+        graphiti_attempt_id="ingest-ineligible-fallback:1",
+    )
+    service.open_envelope(envelope)
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=10),
+        owner_stop_check=lambda: None,
+    )
+    primary = observer.before_cli_invocation(
+        provider="cursor-agent-cli",
+        model="composer-2.5",
+        prompt="source-safe prompt",
+        schema=EXTRACTED_ENTITIES_SCHEMA,
+        semantic_request_class="ExtractedEntities",
+        max_tokens=100,
+    )
+    observer.transport_dispatch_started(primary)
+    observer.after_cli_invocation(
+        primary,
+        outcome="COMPLETE",
+        usage=cursor_cli_usage(
+            {
+                "inputTokens": 2,
+                "outputTokens": 2,
+                "cacheReadTokens": 0,
+                "cacheWriteTokens": 0,
+            }
+        ),
+    )
+
+    with pytest.raises(
+        ModelUsageAdmissionError,
+        match="fallback requires a malformed primary",
+    ):
+        observer.before_cli_invocation(
+            provider="grok-build-cli",
+            model="grok-4.6",
+            prompt="source-safe prompt",
+            schema=EXTRACTED_ENTITIES_SCHEMA,
+            semantic_request_class="ExtractedEntities",
+            max_tokens=100,
+        )
+
+
+def test_observer_refuses_a_second_fallback_for_the_same_primary(
+    tmp_path: Path,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-second-fallback",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-second-fallback",
+        graphiti_attempt_id="ingest-second-fallback:1",
+    )
+    service.open_envelope(envelope)
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: T0 + timedelta(seconds=10),
+        owner_stop_check=lambda: None,
+    )
+    invocation = {
+        "prompt": "source-safe prompt",
+        "schema": EXTRACTED_ENTITIES_SCHEMA,
+        "semantic_request_class": "ExtractedEntities",
+        "max_tokens": 100,
+    }
+    primary = observer.before_cli_invocation(
+        provider="cursor-agent-cli", model="composer-2.5", **invocation
+    )
+    observer.transport_dispatch_started(primary)
+    observer.after_cli_invocation(
+        primary,
+        outcome="MALFORMED_OUTPUT",
+        usage=cursor_cli_usage(
+            {
+                "inputTokens": 2,
+                "outputTokens": 2,
+                "cacheReadTokens": 0,
+                "cacheWriteTokens": 0,
+            }
+        ),
+    )
+    observer.before_cli_invocation(
+        provider="grok-build-cli", model="grok-4.6", **invocation
+    )
+
+    with pytest.raises(
+        ModelUsageAdmissionError,
+        match="already has its single fallback leaf",
+    ):
+        observer.before_cli_invocation(
+            provider="grok-build-cli", model="grok-4.6", **invocation
+        )
 
 
 def test_deadline_owner_stop_and_max_tokens_refuse_before_transport(

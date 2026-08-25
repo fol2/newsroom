@@ -16,6 +16,10 @@ from newsroom.authority.canonical import (
     digest_canonical,
 )
 from newsroom.control_plane.corpus import CorpusIngestUnit
+from newsroom.control_plane.graphiti_fallback_policy import (
+    classify_graphiti_fallback,
+    load_checked_graphiti_fallback_circuit_policy,
+)
 from newsroom.control_plane.graphiti_requests import (
     GraphitiCallShapePolicy,
     GraphitiInternalRequestIdentity,
@@ -175,7 +179,12 @@ class GraphitiModelUsageObserver:
         self._dispatch_at: dict[str, datetime] = {}
         self._policies: dict[str, InvocationEfficiencyPolicy] = {}
         self._primary_by_request: dict[str, str] = {}
+        self._terminal_outcome: dict[str, str] = {}
+        self._fallback_by_primary: set[str] = set()
         self._shape = call_shape_policy or load_checked_graphiti_call_shape_policy()
+        self._fallback_policy = load_checked_graphiti_fallback_circuit_policy()
+        if self._fallback_policy.call_shape_policy_digest != self._shape.canonical_digest:
+            raise ValueError("Graphiti fallback policy differs from the call shape")
         self._effective_revision_digest = effective_revision_digest or digest_canonical(
             {"ingest_id": envelope.ingest_id, "basis": "LEGACY_TEST_FIXTURE"}
         )
@@ -278,6 +287,9 @@ class GraphitiModelUsageObserver:
             evidence_digest=digest_canonical(
                 {
                     "call_shape_policy_digest": self._shape.canonical_digest,
+                    "fallback_circuit_policy_digest": (
+                        self._fallback_policy.canonical_digest
+                    ),
                     "qualified_route": route_contract.as_record(),
                     "semantic_request_class": semantic_request_class,
                     "output_schema_digest": output_schema_digest,
@@ -481,6 +493,8 @@ class GraphitiModelUsageObserver:
         )
         self._owner_stop_check()
         route_circuit_state = str(self._service.route_state(route)["state"])
+        if route_circuit_state != "CLOSED":
+            raise ModelUsageAdmissionError("affected route circuit is open")
         identity = GraphitiInternalRequestIdentity.create(
             effective_revision_digest=self._effective_revision_digest,
             ingest_obligation_id=self._ingest_obligation_id,
@@ -593,6 +607,21 @@ class GraphitiModelUsageObserver:
             }
         )
         primary = provider == "cursor-agent-cli"
+        fallback = provider == "grok-build-cli"
+        parent_invocation_id = (
+            self._primary_by_request.get(request_key) if fallback else None
+        )
+        if fallback and (
+            parent_invocation_id is None
+            or self._terminal_outcome.get(parent_invocation_id) != "MALFORMED_OUTPUT"
+        ):
+            raise ModelUsageAdmissionError(
+                "Graphiti fallback requires a malformed primary"
+            )
+        if fallback and parent_invocation_id in self._fallback_by_primary:
+            raise ModelUsageAdmissionError(
+                "Graphiti primary already has its single fallback leaf"
+            )
         allocation = self._allocate(
             workload=(
                 WorkloadClass.GRAPHITI_CHAT_PRIMARY
@@ -612,12 +641,12 @@ class GraphitiModelUsageObserver:
             response_schema_identity=semantic_request_class,
             output_schema_digest=schema_digest,
             requested_max_tokens=max_tokens,
-            parent_invocation_id=(
-                None if primary else self._primary_by_request.get(request_key)
-            ),
+            parent_invocation_id=parent_invocation_id,
         )
         if primary:
             self._primary_by_request[request_key] = allocation.invocation_id
+        elif fallback and parent_invocation_id is not None:
+            self._fallback_by_primary.add(parent_invocation_id)
         return allocation
 
     def after_cli_invocation(
@@ -629,13 +658,15 @@ class GraphitiModelUsageObserver:
     ) -> dict[str, str]:
         if not isinstance(token, InvocationAllocation):
             raise TypeError("Graphiti chat usage token is not an allocation")
-        return self._complete(
+        binding = self._complete(
             token,
             outcome=outcome,
             usage=usage,
             od_011_reference=None,
             subscription_not_debited=True,
         )
+        self._terminal_outcome[token.invocation_id] = outcome
+        return binding
 
     def before_embedding_invocation(
         self, *, provider: str, model: str, input_data: object
@@ -713,6 +744,12 @@ class GraphitiModelUsageObserver:
         telemetry = usage.get("provider_telemetry", usage)
         telemetry_mapping = telemetry if isinstance(telemetry, dict) else usage
         completed_at = self._clock().astimezone(UTC)
+        outcome_class = classify_graphiti_fallback(outcome).outcome_class
+        route_circuit_reason = (
+            outcome_class.value
+            if outcome_class in self._fallback_policy.circuit_open_classes
+            else None
+        )
         terminal = self._service.complete(
             InvocationTerminal.create(
                 invocation_id=allocation.invocation_id,
@@ -771,6 +808,13 @@ class GraphitiModelUsageObserver:
             ),
             provider_telemetry=telemetry_mapping if reported else None,
         )
+        if route_circuit_reason is not None:
+            self._service.open_route_circuit(
+                route=allocation.route,
+                reason=route_circuit_reason,
+                invocation_id=allocation.invocation_id,
+                recorded_at=completed_at,
+            )
         return {
             "model_work_envelope_id": allocation.envelope_id,
             "model_invocation_id": allocation.invocation_id,

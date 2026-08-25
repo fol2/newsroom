@@ -1,0 +1,563 @@
+{
+  "attempt_usage": {
+    "failed_or_rolled_back": [
+      {
+        "attempt_id": "rolled-back-attempt",
+        "usage_basis": "UNRESOLVED"
+      }
+    ],
+    "terminal_success": [
+      {
+        "attempt_id": "calibration-ingest:1",
+        "usage_basis": "ESTIMATED"
+      }
+    ]
+  },
+  "decision_gate_results": {
+    "every primary cache miss uses one #747 primary leaf": true,
+    "fallback improves terminal valid results without increasing unchanged retries": true,
+    "low/base/high average provider tokens strictly below the retained current path": true,
+    "no increase in held ambiguity hidden as token saving": true,
+    "ordinary timestamp, dedupe and summary leaves are zero where #748 qualifies deterministic work": true,
+    "provider usage is reported or explicitly estimated/unresolved under #728 (never silent zero)": true,
+    "public effects remain zero": true,
+    "remaining leaves are distinct, pre-receipted and outcome-linked": true,
+    "source/evidence/temporal/rights/Entity Resolution/proposal-only/journal/rollback gold does not regress": true
+  },
+  "deterministic_local_work": {
+    "basis": "PROVIDER_FREE_LOCAL_VALIDATION",
+    "fixture_count": 11,
+    "reported_as_provider_tokens": false
+  },
+  "evidence_digest": "sha256:42138e9990cab35ab31b7983c448da5e17fe515950b90c18931e8929acecd890",
+  "fallback_eligible_outcomes": [
+    "MALFORMED_OUTPUT"
+  ],
+  "fallback_ineligible_outcomes": [
+    "AUTHENTICATION_FAILED",
+    "AUTHENTICATION_FAILURE",
+    "CANCELLATION",
+    "CANCELLED",
+    "CONFIGURATION_FAILURE",
+    "DISPATCH_FENCE_REFUSED",
+    "EXECUTABLE_NOT_FOUND",
+    "FAILED",
+    "OUTPUT_LIMIT_EXCEEDED",
+    "PREDISPATCH_REFUSED",
+    "PROVIDER_QUOTA_FAILURE",
+    "QUOTA_EXCEEDED",
+    "QUOTA_FAILURE",
+    "SYSTEMIC_PROVIDER_FAILURE",
+    "TIMEOUT",
+    "TRANSPORT_FAILURE"
+  ],
+  "fallback_not_needed_outcomes": [
+    "COMPLETE"
+  ],
+  "fixture_slices": [
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "pair-current"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "several-relations"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "explicit-valid-at"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "explicit-invalid-at"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "relative-date"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "null-temporal"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "zero-result"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "long-8192"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "correction-revision"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 1,
+      "expected_primary_misses": 1,
+      "fixture_id": "same-name"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "no-implied-relation"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "existing-entity-resolution"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "new-entity-resolution"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "short-summary"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "overlong-summary"
+    },
+    {
+      "expected_conditional_leaves": 1,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "malformed-output-single-fallback"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "systemic-failure"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "timeout"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "cancellation"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "restart-immutable-usage"
+    },
+    {
+      "expected_conditional_leaves": 0,
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "rolled-back-attempt"
+    }
+  ],
+  "identities": {
+    "call_shape_policy_digest": "sha256:cc16866de98ea0034a780a85a867a360c20f73c533582cdb23344d9d8941e465",
+    "context_manifest": "graphiti-combined-temporal-hermetic-v1",
+    "fallback_circuit_policy_digest": "sha256:896cfb0c56fcd65166eaec65a3bce3c6570fa76a296772a9f16833fa1054765f",
+    "prompt": "newsroom.graphiti.proposal-only-prompt:v1",
+    "qualified_routes": [
+      {
+        "command_flags": [
+          "--print",
+          "--mode=ask",
+          "--output-format=json",
+          "--sandbox=enabled",
+          "--disable-tools",
+          "--disable-mcp",
+          "--max-output-tokens=REQUEST_MAX_TOKENS",
+          "--trust",
+          "--model=composer-2.5"
+        ],
+        "command_semantic_version": "newsroom.graphiti-provider-dispatch.v1",
+        "config_identity": "graphiti-cli-command-v1",
+        "disabled_capabilities": [
+          "repository-discovery",
+          "prior-conversation",
+          "skills",
+          "tools",
+          "mcp",
+          "web",
+          "planning",
+          "subagents"
+        ],
+        "implementation_revision": "sha256:70d32dfbfedb4d98ebbf0646bf71cb15a84fc5da678d7d4e12ce2df1b12f6831",
+        "leaf_class": "PRIMARY",
+        "max_context_tokens": 131072,
+        "max_output_tokens": 16384,
+        "max_prompt_bytes": 262144,
+        "max_total_tokens": 147456,
+        "model": "composer-2.5",
+        "provider": "cursor-agent-cli",
+        "reasoning": "provider-default",
+        "route": "GRAPHITI_CHAT_PRIMARY"
+      },
+      {
+        "command_flags": [
+          "--prompt-file",
+          "--model=grok-4.6",
+          "--disable-web-search",
+          "--sandbox=read-only",
+          "--permission-mode=plan",
+          "--tools=",
+          "--deny=*",
+          "--no-plan",
+          "--max-turns=1",
+          "--max-output-tokens=REQUEST_MAX_TOKENS",
+          "--no-subagents",
+          "--reasoning-effort=medium",
+          "--output-format=streaming-json"
+        ],
+        "command_semantic_version": "newsroom.graphiti-provider-dispatch.v1",
+        "config_identity": "graphiti-cli-command-v1",
+        "disabled_capabilities": [
+          "repository-discovery",
+          "prior-conversation",
+          "skills",
+          "tools",
+          "mcp",
+          "web",
+          "planning",
+          "subagents"
+        ],
+        "implementation_revision": "sha256:70d32dfbfedb4d98ebbf0646bf71cb15a84fc5da678d7d4e12ce2df1b12f6831",
+        "leaf_class": "FALLBACK",
+        "max_context_tokens": 131072,
+        "max_output_tokens": 16384,
+        "max_prompt_bytes": 262144,
+        "max_total_tokens": 147456,
+        "model": "grok-4.6",
+        "provider": "grok-build-cli",
+        "reasoning": "medium",
+        "route": "GRAPHITI_CHAT_FALLBACK"
+      },
+      {
+        "command_flags": [
+          "POST=/embeddings",
+          "--model=openai/text-embedding-3-large"
+        ],
+        "command_semantic_version": "newsroom.graphiti-provider-dispatch.v1",
+        "config_identity": "graphiti-embedding-command-v1",
+        "disabled_capabilities": [
+          "repository-discovery",
+          "prior-conversation",
+          "skills",
+          "tools",
+          "mcp",
+          "web",
+          "planning",
+          "subagents"
+        ],
+        "implementation_revision": "sha256:16d88cd7e0f115d0ea533a0406e0ed7a10c2578e9e878cd9c1f82ea7a0bb143e",
+        "leaf_class": "EMBEDDING",
+        "max_context_tokens": 131072,
+        "max_output_tokens": 1,
+        "max_prompt_bytes": 262144,
+        "max_total_tokens": 131072,
+        "model": "openai/text-embedding-3-large",
+        "provider": "openrouter",
+        "reasoning": "none",
+        "route": "GRAPHITI_EMBEDDING"
+      }
+    ],
+    "schema": "NewsroomCombinedTemporalExtractionV1",
+    "schema_digest": "sha256:439cd662886a4f3d14c12503a505dc0f721eb0083b1e2678f54320678fe12621"
+  },
+  "ineligible_runtime": {
+    "cancellation": {
+      "fallback_called": false,
+      "outcomes": [
+        "CANCELLED"
+      ]
+    },
+    "systemic-failure": {
+      "fallback_called": false,
+      "outcomes": [
+        "FAILED"
+      ]
+    },
+    "timeout": {
+      "fallback_called": false,
+      "outcomes": [
+        "TIMEOUT"
+      ]
+    }
+  },
+  "issue": 771,
+  "live_owner_gated_execution_authorised": false,
+  "non_effects": [
+    "NO_PROVIDER_CALL",
+    "NO_PRODUCTION_MUTATION",
+    "NO_PUBLICATION",
+    "NO_BACKLOG_ACTIVATION",
+    "NO_GING_010_AMENDMENT"
+  ],
+  "parent_issue": 731,
+  "provider_calls": 0,
+  "public_effects": 0,
+  "quality_gold": {
+    "all_passed": true,
+    "combined_temporal": {
+      "correction-revision": true,
+      "explicit-invalid-at": true,
+      "explicit-valid-at": true,
+      "long-8192": true,
+      "no-implied-relation": true,
+      "null-temporal": true,
+      "pair-current": true,
+      "relative-date": true,
+      "same-name": true,
+      "several-relations": true,
+      "zero-result": true
+    },
+    "embedding_transport": {
+      "fake_transport_calls": 1,
+      "outcome": "AMBIGUOUS_HOLD"
+    },
+    "held_ambiguity_outcome": "AMBIGUOUS_HOLD",
+    "local_deterministic": {
+      "ambiguity_held": true,
+      "authority_and_rights": true,
+      "deterministic_summary": true,
+      "entity_resolution": true,
+      "replay": true
+    },
+    "proposal_only": true,
+    "public_effects": 0
+  },
+  "reason_code": null,
+  "receipt_validation": {
+    "attempt_count": 1,
+    "fallback_recovery_count": 1,
+    "immutable_after_restart": true,
+    "invocation_efficiency_policies": [
+      {
+        "canonical_digest": "sha256:1edbc80eb8d7e5cb796dd55dc433c1c8903000e145be17a7da078a88b1268d38",
+        "evidence_digest": "sha256:aaad8695b76665a98d0bbc58b647e81c3a81bf9d55f67bb46a74e748ea63fb60",
+        "hard_estimate_ceiling_tokens": null,
+        "max_context_tokens": 131072,
+        "max_output_tokens": 16384,
+        "max_prompt_bytes": 262144,
+        "max_total_tokens": 147456,
+        "route": "GRAPHITI_CHAT_PRIMARY"
+      },
+      {
+        "canonical_digest": "sha256:aa7353cd34d2be66c49e21d72f3d7778576cae0235fbf64950ecbd911948507f",
+        "evidence_digest": "sha256:23fadf622b3b52844235c0a9cc46bebaf1987bfb3ff894ce3fb1770d8421d508",
+        "hard_estimate_ceiling_tokens": null,
+        "max_context_tokens": 131072,
+        "max_output_tokens": 16384,
+        "max_prompt_bytes": 262144,
+        "max_total_tokens": 147456,
+        "route": "GRAPHITI_CHAT_FALLBACK"
+      }
+    ],
+    "leaf_count": 2,
+    "passed": true,
+    "reason_codes": [],
+    "unchanged_retry_count": 0,
+    "validated_attempt_count": 1,
+    "validated_leaf_count": 2
+  },
+  "recommendation": "ADOPT",
+  "schema_version": "newsroom.graphiti-runtime-calibration.v1",
+  "stop_conditions": {
+    "circuit_release_preference": [
+      "DETERMINISTIC_HEALTH_PROBE",
+      "AUTHORISED_OPERATOR_RESET"
+    ],
+    "max_distinct_internal_requests": 6,
+    "max_fallback_leaves_per_primary": 1,
+    "unchanged_request_redispatch": false
+  },
+  "terminal_outcomes": {
+    "correction-revision": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "explicit-invalid-at": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "explicit-valid-at": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "long-8192": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "no-implied-relation": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "null-temporal": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "pair-current": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "relative-date": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "same-name": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "several-relations": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "zero-result": "TERMINAL_SUCCESS_ZERO_PROPOSALS"
+  },
+  "token_effectiveness": {
+    "average_tokens_per_terminal_revision": {
+      "current": {
+        "base": 3454,
+        "high": 9189,
+        "low": 1738
+      },
+      "target": {
+        "base": 1808,
+        "high": 2814,
+        "low": 1305
+      }
+    },
+    "chat_tokens": {
+      "estimated_primary": {
+        "base": 17406,
+        "high": 26105,
+        "low": 13055
+      },
+      "reported": 0,
+      "unresolved": 0,
+      "unresolved_leaf_count": 0
+    },
+    "conditional_leaf_expected_counts_ppm": {
+      "current": {
+        "dedupe": 181818,
+        "fallback": 90909,
+        "summary": 0,
+        "timestamp": 90909
+      },
+      "target": {
+        "dedupe": 0,
+        "fallback": 90909,
+        "summary": 0,
+        "timestamp": 0
+      }
+    },
+    "conditional_leaf_prevalence_ppm": {
+      "current": {
+        "dedupe": 181818,
+        "fallback": 90909,
+        "summary": 0,
+        "timestamp": 90909
+      },
+      "target": {
+        "dedupe": 0,
+        "fallback": 90909,
+        "summary": 0,
+        "timestamp": 0
+      }
+    },
+    "effective_revision_count": 11,
+    "embedding_tokens": {
+      "basis": "ESTIMATED_SOURCE_SAFE_WHITESPACE_TOKEN_PROXY",
+      "total": 1
+    },
+    "fixture_measured_average_tokens": {
+      "current": {
+        "base": 2113,
+        "high": 3375,
+        "low": 1483
+      },
+      "target": {
+        "base": 1808,
+        "high": 2814,
+        "low": 1305
+      }
+    },
+    "formula": "T_avg_revision = E[Σ_(primary misses) T_primary] + E[Σ_(conditional leaves) T_conditional] + E[Σ_(embedding misses) T_embedding]",
+    "grain": "ISSUE_737_EFFECTIVE_REVISION",
+    "mandatory_primary_leaves_per_revision": {
+      "basis": "MEASURED_EFFECTIVE_REVISION_CASES",
+      "expected_count_ppm": 1000000,
+      "revision_count": 11,
+      "total_leaf_count": 11
+    },
+    "quality": {
+      "gold_match_count": 11,
+      "regression_count": 0,
+      "unresolved_count": 0
+    },
+    "recommendation": "ADOPT_IN_731_IMPLEMENTATION_ATOM",
+    "retained_current_path": {
+      "adoption_gate": "HOLD_UNRESOLVED_CLASSES_AND_QUALITY",
+      "average_total_token_estimate_per_terminal_effective_revision": {
+        "current": {
+          "base": 3454,
+          "high": 9189,
+          "low": 1738
+        },
+        "target": {
+          "base": 1918,
+          "high": 3045,
+          "low": 1354
+        }
+      },
+      "basis": "TWO_RETAINED_ISSUE_737_GRAIN_TERMINAL_OUTCOMES",
+      "chat_tokens": "UNRESOLVED",
+      "conditional_leaf_classes": "UNRESOLVED",
+      "embedding_tokens": "ESTIMATED_SOURCE_SAFE_WHITESPACE_PROXY",
+      "observed_additional_chat_leaf_count": 3,
+      "observed_chat_leaf_counts": [
+        3,
+        2
+      ],
+      "observed_embedding_request_counts": [
+        3,
+        3
+      ],
+      "sensitivity_tokens_per_unclassified_conditional_leaf": {
+        "base": 1024,
+        "high": 4096,
+        "low": 256
+      },
+      "terminal_effective_revision_count": 2,
+      "unresolved_chat_leaf_count": 5
+    },
+    "schema_version": "newsroom.graphiti-token-effectiveness-report.v2",
+    "sensitivity_tokens_per_conditional_leaf": {
+      "dedupe": {
+        "base": 1024,
+        "high": 2048,
+        "low": 512
+      },
+      "fallback": {
+        "base": 2048,
+        "high": 4096,
+        "low": 1024
+      },
+      "summary": {
+        "base": 512,
+        "high": 1024,
+        "low": 256
+      },
+      "timestamp": {
+        "base": 1008,
+        "high": 1511,
+        "low": 756
+      }
+    },
+    "terminal_outcomes": {
+      "held_ambiguity": 1,
+      "terminal_success_with_proposals": 9,
+      "terminal_success_zero_proposals": 1
+    }
+  }
+}

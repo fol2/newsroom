@@ -402,7 +402,11 @@ def test_both_cli_malformed_json_results_fail_after_recording_both_calls() -> No
 
 
 def test_non_utf8_cursor_is_recorded_before_grok_fallback() -> None:
-    from newsroom.graphiti_adapter.cli_client import run_cli_async, run_cli_chain
+    from newsroom.graphiti_adapter.cli_client import (
+        CliResponseError,
+        run_cli_async,
+        run_cli_chain,
+    )
 
     async def invalid_cursor(_prompt: str, *, max_tokens: int) -> str:
         return await run_cli_async(
@@ -415,17 +419,25 @@ def test_non_utf8_cursor_is_recorded_before_grok_fallback() -> None:
         )
 
     invocations: list[dict[str, object]] = []
-    result = asyncio.run(
-        run_cli_chain(
-            prompt="prompt",
-            schema=None,
-            cursor_runner=invalid_cursor,
-            grok_runner=lambda _prompt, _schema, *, max_tokens: '{"value":"fallback"}',
-            invocations=invocations,
+    grok_called = False
+
+    def grok(_prompt: str, _schema: str | None, *, max_tokens: int) -> str:
+        nonlocal grok_called
+        grok_called = True
+        return '{"value":"fallback"}'
+
+    with pytest.raises(CliResponseError, match="ineligible for fallback"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="prompt",
+                schema=None,
+                cursor_runner=invalid_cursor,
+                grok_runner=grok,
+                invocations=invocations,
+            )
         )
-    )
-    assert result == {"value": "fallback"}
-    assert [item["outcome"] for item in invocations] == ["FAILED", "COMPLETE"]
+    assert grok_called is False
+    assert [item["outcome"] for item in invocations] == ["FAILED"]
     assert invocations[0]["failure"] == "CliOutputDecodeError"
 
 
@@ -462,6 +474,35 @@ def test_non_utf8_grok_is_recorded_before_chain_failure() -> None:
         "FAILED",
     ]
     assert invocations[1]["failure"] == "CliOutputDecodeError"
+
+
+def test_cursor_timeout_is_ineligible_for_fallback() -> None:
+    from newsroom.graphiti_adapter.cli_client import CliResponseError, run_cli_chain
+
+    grok_called = False
+
+    def timeout(_prompt: str, *, max_tokens: int) -> str:
+        raise TimeoutError("cursor-agent Graphiti LLM timed out")
+
+    def grok(_prompt: str, _schema: str | None, *, max_tokens: int) -> str:
+        nonlocal grok_called
+        grok_called = True
+        return '{"value":"fallback"}'
+
+    invocations: list[dict[str, object]] = []
+    with pytest.raises(CliResponseError, match="ineligible for fallback"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="prompt",
+                schema=None,
+                cursor_runner=timeout,
+                grok_runner=grok,
+                invocations=invocations,
+            )
+        )
+
+    assert grok_called is False
+    assert [item["outcome"] for item in invocations] == ["TIMEOUT"]
 
 
 def test_sync_cli_rejects_non_utf8_output_with_typed_failure() -> None:
