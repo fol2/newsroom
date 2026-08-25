@@ -21,7 +21,10 @@ from typing import TypeGuard
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_canonical
 from newsroom.control_plane.cycle_governor import CONT_WRITER_ROUTE
-from newsroom.control_plane.graphiti_requests import GraphitiInternalRequestIdentity
+from newsroom.control_plane.graphiti_requests import (
+    GraphitiInternalRequestIdentity,
+    load_checked_graphiti_call_shape_policy,
+)
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.veto import assert_private_store
 
@@ -73,6 +76,19 @@ class UsageStatus(StrEnum):
     UNREPORTED = "UNREPORTED"
     AMBIGUOUS = "AMBIGUOUS"
     INVALID = "INVALID"
+
+
+_GRAPHITI_COMPLETED_USEFUL_OUTCOMES = frozenset(
+    {"GRAPHITI_SUCCESS", "GRAPHITI_SUCCESS_ZERO_PROPOSALS"}
+)
+_UNRESOLVED_USAGE_STATUSES = frozenset(
+    {"UNREPORTED", "AMBIGUOUS", "INVALID"}
+)
+_GRAPHITI_CIRCUIT_ROUTES = (
+    WorkloadClass.GRAPHITI_CHAT_PRIMARY.value,
+    WorkloadClass.GRAPHITI_CHAT_FALLBACK.value,
+    WorkloadClass.GRAPHITI_EMBEDDING.value,
+)
 
 
 _PROVENANCE = frozenset(
@@ -3140,8 +3156,7 @@ class ModelUsageService:
         graphiti_envelopes = {
             str(row["envelope_id"])
             for row in leaves
-            if str(row["work_outcome"] or "").startswith("GRAPHITI_SUCCESS")
-            or row["work_outcome"] == "GRAPHITI_PARTIAL"
+            if row["work_outcome"] in _GRAPHITI_COMPLETED_USEFUL_OUTCOMES
         }
 
         def productive_leaf(row: Mapping[str, object]) -> bool:
@@ -3394,6 +3409,194 @@ class ModelUsageService:
             "utc_day_totals": dict(sorted(daily.items())),
             "daily_500k_alert": any(
                 value > DAILY_USAGE_ALERT_TOKENS for value in daily.values()
+            ),
+            "normal_daily_hard_cut": None,
+            "missing_usage_is_zero": False,
+            "graphiti_result_telemetry": self._graphiti_result_telemetry(
+                leaves=leaves,
+                allocated_leaves=allocated_leaves,
+                terminal_leaves=terminal_leaves,
+                accounted_leaves=accounted_leaves,
+                envelopes=envelopes,
+                start=start,
+                end=end,
+            ),
+        }
+
+    def _graphiti_result_telemetry(
+        self,
+        *,
+        leaves: list[dict[str, object]],
+        allocated_leaves: list[dict[str, object]],
+        terminal_leaves: list[dict[str, object]],
+        accounted_leaves: list[dict[str, object]],
+        envelopes: list[dict[str, object]],
+        start: datetime,
+        end: datetime,
+    ) -> dict[str, object]:
+        def graphiti_leaf(row: Mapping[str, object]) -> bool:
+            return str(row.get("workload_class") or "").startswith("GRAPHITI_")
+
+        def token_sum(
+            rows: list[dict[str, object]],
+            *,
+            status: str | None = None,
+            workload: str | None = None,
+        ) -> int:
+            total = 0
+            for row in rows:
+                if status is not None and row.get("usage_status") != status:
+                    continue
+                if workload is not None and row.get("workload_class") != workload:
+                    continue
+                value = row.get("total_tokens")
+                if _is_int(value):
+                    total += value
+            return total
+
+        def ratio(numerator: int, denominator: int) -> dict[str, int] | None:
+            if denominator == 0:
+                return None
+            return {"numerator": numerator, "denominator": denominator}
+
+        with_proposals = {
+            str(row["envelope_id"])
+            for row in leaves
+            if row.get("work_outcome") == "GRAPHITI_SUCCESS"
+        }
+        zero_proposals = {
+            str(row["envelope_id"])
+            for row in leaves
+            if row.get("work_outcome") == "GRAPHITI_SUCCESS_ZERO_PROPOSALS"
+        }
+        completed = with_proposals | zero_proposals
+        request_leaves = [
+            row
+            for row in leaves
+            if isinstance(row.get("graphiti_internal_request"), dict)
+        ]
+        distinct_internal_requests = len(request_leaves)
+        connection = self._connection()
+        try:
+            refusal_rows = connection.execute(
+                "SELECT reason_code FROM graphiti_internal_request_refusals "
+                "WHERE refused_at>=? AND refused_at<?",
+                (_utc_text(start), _utc_text(end)),
+            ).fetchall()
+        finally:
+            connection.close()
+        graphiti_terminals = [row for row in terminal_leaves if graphiti_leaf(row)]
+        graphiti_accounted = [row for row in accounted_leaves if graphiti_leaf(row)]
+        failed_envelopes = {
+            str(row["envelope_id"])
+            for row in leaves
+            if graphiti_leaf(row)
+            and row.get("work_outcome")
+            and str(row["envelope_id"]) not in completed
+        }
+        failed_tokens = sum(
+            int(row["total_tokens"])
+            for row in graphiti_accounted
+            if str(row["envelope_id"]) in failed_envelopes
+            and _is_int(row.get("total_tokens"))
+        )
+        success_tokens = sum(
+            int(row["total_tokens"])
+            for row in graphiti_accounted
+            if str(row["envelope_id"]) in completed
+            and _is_int(row.get("total_tokens"))
+        )
+        proposals = sum(
+            int(row["retained_proposal_count"])
+            for row in envelopes
+            if str(row.get("envelope_id")) in completed
+            and _is_int(row.get("retained_proposal_count"))
+        )
+        context_values = [
+            int(row["context_tokens"])
+            for row in request_leaves
+            if _is_int(row.get("context_tokens"))
+        ]
+        context_overhead = (
+            None
+            if len(context_values) != distinct_internal_requests
+            else ratio(sum(context_values), distinct_internal_requests)
+        )
+        call_shape = load_checked_graphiti_call_shape_policy()
+        return {
+            "completed_ingests_with_proposals": len(with_proposals),
+            "completed_ingests_zero_proposals": len(zero_proposals),
+            "completed_useful_ingest_count": len(completed),
+            "distinct_internal_requests": distinct_internal_requests,
+            "distinct_internal_requests_per_completed_ingest": ratio(
+                distinct_internal_requests, len(completed)
+            ),
+            "call_shape_max_distinct_internal_requests": (
+                call_shape.max_distinct_internal_requests
+            ),
+            "call_shape_headroom": call_shape.headroom,
+            "duplicate_request_refusals": sum(
+                reason == "DUPLICATE_INTERNAL_REQUEST" for reason, in refusal_rows
+            ),
+            "call_shape_drift_refusals": sum(
+                reason == "CALL_SHAPE_DRIFT" for reason, in refusal_rows
+            ),
+            "primary_leaf_count": sum(
+                row["workload_class"] == WorkloadClass.GRAPHITI_CHAT_PRIMARY.value
+                for row in allocated_leaves
+            ),
+            "fallback_leaf_count": sum(
+                row["workload_class"] == WorkloadClass.GRAPHITI_CHAT_FALLBACK.value
+                for row in allocated_leaves
+            ),
+            "embedding_leaf_count": sum(
+                row["workload_class"] == WorkloadClass.GRAPHITI_EMBEDDING.value
+                for row in allocated_leaves
+            ),
+            "fallback_recovery_count": len(
+                {
+                    str(row["envelope_id"])
+                    for row in allocated_leaves
+                    if row["workload_class"]
+                    == WorkloadClass.GRAPHITI_CHAT_FALLBACK.value
+                    and str(row["envelope_id"]) in completed
+                }
+            ),
+            "reported_tokens": token_sum(graphiti_terminals, status="REPORTED"),
+            "estimated_tokens": token_sum(graphiti_terminals, status="ESTIMATED"),
+            "unresolved_invocation_count": sum(
+                row.get("usage_status") in _UNRESOLVED_USAGE_STATUSES
+                for row in graphiti_terminals
+            ),
+            "failed_or_rolled_back_attempt_tokens": failed_tokens,
+            "tokens_per_proposal": ratio(success_tokens, proposals),
+            "context_overhead_per_internal_request": context_overhead,
+            "route_circuit_states": {
+                route: str(self.route_state(route)["state"])
+                for route in _GRAPHITI_CIRCUIT_ROUTES
+            },
+            "embedding_tokens": token_sum(
+                graphiti_accounted,
+                workload=WorkloadClass.GRAPHITI_EMBEDDING.value,
+            ),
+            "embedding_od_011_references": sorted(
+                {
+                    str(row["od_011_reference"])
+                    for row in graphiti_terminals
+                    if row["workload_class"]
+                    == WorkloadClass.GRAPHITI_EMBEDDING.value
+                    and isinstance(row.get("od_011_reference"), str)
+                    and row["od_011_reference"]
+                }
+            ),
+            "cli_chat_cash_debited": any(
+                row.get("subscription_cli_chat_not_cash_debited") is False
+                for row in graphiti_terminals
+                if row["workload_class"]
+                in {
+                    WorkloadClass.GRAPHITI_CHAT_PRIMARY.value,
+                    WorkloadClass.GRAPHITI_CHAT_FALLBACK.value,
+                }
             ),
             "normal_daily_hard_cut": None,
             "missing_usage_is_zero": False,
@@ -3681,10 +3884,7 @@ class ModelUsageService:
             graphiti_successes = [
                 row
                 for row in outcomes.values()
-                if str(row.get("work_outcome") or "").startswith(
-                    "GRAPHITI_SUCCESS"
-                )
-                or row.get("work_outcome") == "GRAPHITI_PARTIAL"
+                if row.get("work_outcome") in _GRAPHITI_COMPLETED_USEFUL_OUTCOMES
             ]
             accounted = [
                 row
@@ -3721,10 +3921,8 @@ class ModelUsageService:
                     bool(row.get("accepted_provider_attempt_id"))
                     and row.get("provider_attempt_id")
                     == row.get("accepted_provider_attempt_id")
-                    or str(row.get("work_outcome") or "").startswith(
-                        "GRAPHITI_SUCCESS"
-                    )
-                    or row.get("work_outcome") == "GRAPHITI_PARTIAL"
+                    or row.get("work_outcome")
+                    in _GRAPHITI_COMPLETED_USEFUL_OUTCOMES
                 )
 
             writer.writerow(

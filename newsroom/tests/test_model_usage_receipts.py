@@ -571,12 +571,8 @@ def test_policy_preflight_and_post_dispatch_breach_are_route_local(
     assert service.route_state("CONT_PRIMARY")["state"] == "OPEN"
 
 
-@pytest.mark.parametrize(
-    "work_outcome",
-    ["GRAPHITI_SUCCESS_ZERO_PROPOSALS", "GRAPHITI_PARTIAL"],
-)
 def test_graphiti_chat_and_embedding_are_distinct_and_terminal_ingests_are_valid(
-    tmp_path: Path, work_outcome: str
+    tmp_path: Path,
 ) -> None:
     service = _service(tmp_path)
     envelope = _envelope(
@@ -633,7 +629,7 @@ def test_graphiti_chat_and_embedding_are_distinct_and_terminal_ingests_are_valid
     )
     service.record_work_outcome(
         envelope_id=envelope.envelope_id,
-        outcome=work_outcome,
+        outcome="GRAPHITI_SUCCESS_ZERO_PROPOSALS",
         outcome_record_id="graphiti-attempt-1",
         payload_digest=None,
         terminal_at=T0 + timedelta(seconds=4),
@@ -650,6 +646,86 @@ def test_graphiti_chat_and_embedding_are_distinct_and_terminal_ingests_are_valid
     assert report["graphiti_tokens_per_retained_proposal"] is None
     assert report["workload_totals"]["GRAPHITI_CHAT_PRIMARY"] == 125
     assert report["workload_totals"]["GRAPHITI_EMBEDDING"] == 40
+    assert report["graphiti_result_telemetry"]["completed_useful_ingest_count"] == 1
+    assert (
+        report["graphiti_result_telemetry"]["completed_ingests_zero_proposals"] == 1
+    )
+
+
+def test_graphiti_partial_is_excluded_from_completed_useful_ingests(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    envelope = _envelope(
+        workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        candidate_id=None,
+        ingest_id="ingest-1",
+    )
+    service.open_envelope(envelope)
+    chat_policy = _policy(
+        workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        provider="cursor-agent-cli",
+        route="GRAPHITI_CHAT",
+        model="cursor-pinned",
+    )
+    embedding_policy = _policy(
+        workload=WorkloadClass.GRAPHITI_EMBEDDING,
+        provider="openrouter",
+        route="GRAPHITI_EMBEDDING",
+        model="openai/text-embedding-3-small",
+    )
+    service.register_policy(chat_policy)
+    service.register_policy(embedding_policy)
+    chat = _allocation(envelope, chat_policy)
+    embedding = _allocation(
+        envelope,
+        embedding_policy,
+        leaf_ordinal=2,
+        request="embedding-request",
+        workload=WorkloadClass.GRAPHITI_EMBEDDING,
+        parent_invocation_id=chat.invocation_id,
+    )
+    service.allocate(chat, owner_emergency_stop=False)
+    service.allocate(embedding, owner_emergency_stop=False)
+    service.complete(_reported(chat, total=125, outcome="COMPLETE"))
+    service.complete(
+        InvocationTerminal.create(
+            invocation_id=embedding.invocation_id,
+            outcome="COMPLETE",
+            failure_class=None,
+            usage_status=UsageStatus.REPORTED,
+            components=UsageComponents(
+                input_tokens=40,
+                total_tokens=40,
+                provenance="PROVIDER_REPORTED",
+            ),
+            dispatch_at=T0 + timedelta(seconds=2),
+            completed_at=T0 + timedelta(seconds=3),
+            observed_at=T0 + timedelta(seconds=3),
+            provider_telemetry_digest=_digest({"embedding": 1}),
+            raw_telemetry_pointer="private://embedding/1",
+            od_011_reference="OD-011:EVALUATION",
+            subscription_cli_chat_not_cash_debited=False,
+        )
+    )
+    service.record_work_outcome(
+        envelope_id=envelope.envelope_id,
+        outcome="GRAPHITI_PARTIAL",
+        outcome_record_id="graphiti-attempt-partial",
+        payload_digest=None,
+        terminal_at=T0 + timedelta(seconds=4),
+        retained_proposal_count=2,
+    )
+
+    report = service.report(start=T0, end=T0 + timedelta(minutes=1))
+    telemetry = report["graphiti_result_telemetry"]
+
+    assert report["graphiti_valid_ingest_count"] == 0
+    assert report["graphiti_tokens_per_valid_ingest"] is None
+    assert telemetry["completed_useful_ingest_count"] == 0
+    assert telemetry["completed_ingests_with_proposals"] == 0
+    assert telemetry["completed_ingests_zero_proposals"] == 0
+    assert telemetry["failed_or_rolled_back_attempt_tokens"] == 165
 
 
 def test_parent_and_child_totals_are_not_double_counted(tmp_path: Path) -> None:
