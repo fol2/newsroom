@@ -29,7 +29,8 @@ It is a ledger export of the deterministic #732 fixture through
 #727 → #729 → #728 → #730 → #731 → #732 closeout
 ```
 
-Exact base: `d3b9e21c6857643e9932e186bc2d63307bba92d4`.
+Exact base: `8d722ff1826473c7ab86b39c320bf3d8ec006bb3` (`#772` merged first,
+as the #732 dependency recheck required).
 Implementation branch: `jamesto/issue-732-exact-main-closeout`.
 
 Deterministic commands:
@@ -54,6 +55,7 @@ Looked up from `git log origin/main --oneline` and GitHub PR merge commits:
 | #728 usage receipts | `22dee69` Persist exact model usage receipts; later 728 review closures through envelope CSV `e8259b2` |
 | #730 hermetic CONT writer | `6745261` through `0a08d8f` |
 | #731 Graphiti closeout | PR #780 `d3b9e21c6857643e9932e186bc2d63307bba92d4` (`f2ea43a` is the feature commit on that line) |
+| #772 optional donor seed | PR #781 `8d722ff1826473c7ab86b39c320bf3d8ec006bb3` |
 
 ## Policy versions from code
 
