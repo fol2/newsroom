@@ -17,6 +17,9 @@ from newsroom.extraction.types import (
     ProposalPredicateHint,
 )
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
+from newsroom.graphiti_adapter.combined_temporal_types import (
+    CombinedTemporalFailureCode,
+)
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_FALLBACK,
     GRAPHITI_CHAT_MODEL,
@@ -199,26 +202,42 @@ def restore_validated_snapshot(
     )
     embedding_usage = dict(usage)
     combined_failure = recovered_raw.get("combined_temporal_failure_code")
+    pipeline_failed = (
+        combined_failure == CombinedTemporalFailureCode.PIPELINE_FAILED.value
+    )
     produced = produced_extraction(
         attempt,
         outcome=(
-            ExtractionOutcome.INVALID_OUTPUT
-            if isinstance(combined_failure, str)
-            else ExtractionOutcome.SUCCESS
+            ExtractionOutcome.RETRYABLE_FAILURE
+            if pipeline_failed
+            else (
+                ExtractionOutcome.INVALID_OUTPUT
+                if isinstance(combined_failure, str)
+                else ExtractionOutcome.SUCCESS
+            )
         ),
         failure_code=(
-            ExtractionFailureCode.OUTPUT_SCHEMA_INVALID
-            if isinstance(combined_failure, str)
-            else ExtractionFailureCode.NONE
+            ExtractionFailureCode.PRODUCER_INTERNAL_ERROR
+            if pipeline_failed
+            else (
+                ExtractionFailureCode.OUTPUT_SCHEMA_INVALID
+                if isinstance(combined_failure, str)
+                else ExtractionFailureCode.NONE
+            )
         ),
         validation=(
-            ExtractionOutputValidation.INVALID
-            if isinstance(combined_failure, str)
-            else ExtractionOutputValidation.VALID
+            None
+            if pipeline_failed
+            else (
+                ExtractionOutputValidation.INVALID
+                if isinstance(combined_failure, str)
+                else ExtractionOutputValidation.VALID
+            )
         ),
-        raw=recovered_raw,
+        raw=None if pipeline_failed else recovered_raw,
         proposals=proposals,
         embedding_usage=embedding_usage,
+        attempt_receipt=recovered_raw if pipeline_failed else None,
     )
     produced.usage.require_within(attempt.extraction_request.budget)
     return SnapshotRestoration(

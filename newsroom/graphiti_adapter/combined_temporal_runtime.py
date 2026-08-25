@@ -459,16 +459,14 @@ async def extract_combined_temporal_async(
             receipt={**receipt, "provider_attempt_number": 1},
         )
     except CombinedTemporalPipelineError as exc:
-        return _leaf(
-            prompt,
-            receipt,
-            outcome=CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE,
-            failure_code=CombinedTemporalFailureCode.PIPELINE_FAILED,
-            embedding_skipped=False,
-            journal_skipped=False,
-            rollback_skipped=not exc.rollback_completed,
-            graph_effect_attempted=exc.graph_effect_attempted,
-        )
+        if not exc.graph_effect_attempted and not exc.rollback_completed:
+            return await _complete_failure(
+                pipeline,
+                prompt,
+                receipt,
+                failure_code=CombinedTemporalFailureCode.PIPELINE_FAILED,
+            )
+        raise
     if pipeline_result.completed_receipt is not None:
         receipt = dict(pipeline_result.completed_receipt)
     return _leaf(

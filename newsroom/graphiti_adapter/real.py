@@ -41,6 +41,7 @@ from newsroom.graphiti_adapter.combined_temporal_pipeline import (
 )
 from newsroom.graphiti_adapter.combined_temporal_contract import SourceRevisionInput
 from newsroom.graphiti_adapter.combined_temporal_extraction import (
+    CombinedTemporalFailureCode,
     CombinedTemporalOutcome,
 )
 from newsroom.graphiti_adapter.combined_temporal_runtime import (
@@ -716,6 +717,26 @@ async def _add_episode(
                     reason="OUTPUT_VALIDATION_FAILED",
                 )
             raise
+        except CombinedTemporalPipelineError as exc:
+            if not exc.rollback_completed:
+                await _record_guard_telemetry(
+                    guard=guard,
+                    llm_client=llm_client,
+                    embedder=embedder,
+                    telemetry=telemetry,
+                    attempt_number=attempt_number,
+                )
+                await guard.rollback_pending(
+                    chat_invocations=telemetry.chat_invocations,
+                    embedding_usage=telemetry.embedding_usage,
+                    reason=type(exc).__name__,
+                )
+            telemetry.recovery_classification = (
+                GraphitiRecoveryClassification.ROLLED_BACK_AMBIGUOUS_EFFECT
+            )
+            raise AmbiguousEpisodeEffect(
+                "Graphiti write failed after provider dispatch and was rolled back"
+            ) from exc
         except (GuardError, GraphitiAdapterContractError):
             raise
         except Exception as exc:
@@ -1085,19 +1106,34 @@ class RealGraphitiAdapter:
                 proposals=(),
             )
             raw.pop("raw_output_digest", None)
-            raw["combined_temporal_failure_code"] = str(
+            failure_code = str(
                 combined_receipt.get("failure_code", "PIPELINE_FAILED")
             )
+            raw["combined_temporal_failure_code"] = failure_code
             raw["combined_temporal_receipt"] = combined_receipt
             raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
+            pipeline_failed = (
+                failure_code == CombinedTemporalFailureCode.PIPELINE_FAILED.value
+            )
             validated["produced"] = produced_extraction(
                 attempt,
-                outcome=ExtractionOutcome.INVALID_OUTPUT,
-                failure_code=ExtractionFailureCode.OUTPUT_SCHEMA_INVALID,
-                validation=ExtractionOutputValidation.INVALID,
-                raw=raw,
+                outcome=(
+                    ExtractionOutcome.RETRYABLE_FAILURE
+                    if pipeline_failed
+                    else ExtractionOutcome.INVALID_OUTPUT
+                ),
+                failure_code=(
+                    ExtractionFailureCode.PRODUCER_INTERNAL_ERROR
+                    if pipeline_failed
+                    else ExtractionFailureCode.OUTPUT_SCHEMA_INVALID
+                ),
+                validation=(
+                    None if pipeline_failed else ExtractionOutputValidation.INVALID
+                ),
+                raw=None if pipeline_failed else raw,
                 proposals=(),
                 embedding_usage=current_telemetry.embedding_usage,
+                attempt_receipt=raw if pipeline_failed else None,
             )
             return raw
 
