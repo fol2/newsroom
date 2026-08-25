@@ -26,7 +26,7 @@ Exact base: `d3b9e21c6857643e9932e186bc2d63307bba92d4`.
 
 ## Child line on exact main
 
-Looked up from `git log origin/main --oneline` at this closeout:
+Looked up from `git log origin/main --oneline` and GitHub PR merge commits:
 
 | Child | Merge identity on `origin/main` |
 | --- | --- |
@@ -34,10 +34,7 @@ Looked up from `git log origin/main --oneline` at this closeout:
 | #729 durable cooldown | PR #773 `c7f8bf3` |
 | #728 usage receipts | `22dee69` Persist exact model usage receipts; later 728 review closures through envelope CSV `e8259b2` |
 | #730 hermetic CONT writer | `6745261` through `0a08d8f` |
-| #731 Graphiti closeout | PR #731 `f2ea43a`; exact main then `d3b9e21` |
-
-PR #780 does not appear as a merge subject on this exact main. Graphiti
-closeout evidence is the #731 line above.
+| #731 Graphiti closeout | PR #780 `d3b9e21c6857643e9932e186bc2d63307bba92d4` (`f2ea43a` is the feature commit on that line) |
 
 ## Policy versions from code
 
