@@ -1,5 +1,12 @@
 # Control Plane token-productivity closeout (#732)
 
+- **Role:** Dated research closeout
+- **Status:** Deterministic exact-main closeout; live CONT calibration pending
+- **Owner:** Hermes Control Plane
+- **Canonical language:** English
+- **Issue:** #732
+- **Date:** 2026-08-25
+
 ## Status
 
 Deterministic exact-main closeout. This issue grants no live provider
@@ -23,6 +30,17 @@ It is a ledger export of the deterministic #732 fixture through
 ```
 
 Exact base: `d3b9e21c6857643e9932e186bc2d63307bba92d4`.
+
+Deterministic commands:
+
+```text
+uv run pytest newsroom/tests/test_token_productivity_closeout.py \
+  newsroom/tests/test_model_usage_receipts.py \
+  newsroom/tests/test_durable_cycle_governor.py -v
+```
+
+Those files passed on this atom. Live CONT calibration commands from
+`docs/operations/2026-08-24-hermetic-cont-writer.md` were not run.
 
 ## Child line on exact main
 
@@ -83,9 +101,9 @@ Companion before CSV:
 | 3 | No filler | `test_filler_output_is_rejected_and_never_inserted` |
 | 4 | Bounded provider leaves | `test_malformed_primary_then_one_valid_fallback_consumes_two_leaf_calls`, `test_second_candidate_cannot_consume_second_cycle_fallback` |
 | 5 | Useful-output circuit | `test_exhausted_candidate_routes_open_no_useful_output_circuit`, `test_systemic_authentication_failure_opens_route_circuit_immediately` |
-| 6 | Outcome-aware backoff | `test_idle_cycle_keeps_normal_cooldown_and_streak`, `test_first_unproductive_provider_cycle_uses_900_second_backoff` |
+| 6 | Outcome-aware backoff | `test_idle_cycle_keeps_normal_cooldown_and_streak`, `test_first_unproductive_provider_cycle_uses_900_second_backoff`, `test_second_unproductive_cycle_opens_cont_route_and_suppresses_dispatch` |
 | 7 | Durable cooldown | `test_restart_reuses_retained_normal_and_longer_cooldowns`, `test_productive_cooldown_starts_after_complete_work`, `test_governed_cli_cycle_identities_are_visible_on_export_bucket_csv` |
-| 8 | Exact receipts | `test_controller_allocates_every_primary_and_fallback_leaf_before_dispatch`, `test_graphiti_chat_and_embedding_are_distinct_and_terminal_ingests_are_valid` |
+| 8 | Exact receipts | `test_controller_allocates_every_primary_and_fallback_leaf_before_dispatch`, `test_graphiti_chat_and_embedding_are_distinct_and_terminal_ingests_are_valid`, `test_provider_health_probe_reservation_is_durable_before_dispatch` |
 | 9 | No silent zero | `test_estimate_is_explicit_and_unbounded_missing_usage_opens_only_route`, `test_missing_usage_is_not_inferred_as_zero` |
 | 10 | No parent/child double count | `test_parent_and_child_totals_are_not_double_counted` |
 | 11 | No generic daily cut | `test_more_than_daily_500k_is_alerted_but_not_an_admission_gate` |
@@ -112,7 +130,7 @@ in `newsroom/tests/test_token_productivity_closeout.py`.
 | Accepted calibration payloads | not tied to efficiency proof | >= 3 from <= 5 known-ready candidates | **not closed on this atom** |
 | Median Grok writer context | 37,479 | <= 10,000 and >=70% reduction | **not closed on this atom** |
 | Maximum calibration context | historical max far larger | <= 15,000 | **not closed on this atom** |
-| Tokens per accepted payload | unavailable | reported with usage status | after CSV `productive_tokens` on the deterministic fixture |
+| Tokens per accepted payload | unavailable | reported with usage status | leaf-csv reports each invocation's tokens with `usage_status`; bucket `productive_tokens` is the accepted-payload token total |
 | No-result tokens | hidden in aggregate | reported explicitly | after CSV `no_result_tokens` |
 | Dispatch/receipt mismatch | historical gaps | 0 | mapped exact-receipt tests |
 | Missing usage rendered as zero | historical Graphiti gap | 0 | `UNREPORTED`/`AMBIGUOUS`/`INVALID` remain explicit; after CSV splits those counts |
@@ -145,7 +163,9 @@ evidence gap.
 Empty interior buckets inside the proof window are still emitted. Cycle
 cooldown fields are projected from `unpublished_governed_cycles` when
 that table exists; `model_usage_cycle_outcomes` remains the fallback
-store.
+store. Historical `cursor_fallback_sessions` still counts every
+`cursor-agent-cli` leaf, including Graphiti chat; CONT versus Graphiti
+is the `cont_reported_tokens` / `graphiti_reported_tokens` pair.
 
 ## Limitations
 
