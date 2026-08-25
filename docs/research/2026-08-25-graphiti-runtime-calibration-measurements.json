@@ -29,7 +29,7 @@
     "fixture_count": 11,
     "reported_as_provider_tokens": false
   },
-  "evidence_digest": "sha256:1cd924a43cadfaf5f9f275e89d0177f435256677968f9963407a0ec9233e29d6",
+  "evidence_digest": "sha256:4f5337b25f8b181d8fee96a8f768f36be6ee244bdfa7844d658317d7cf124844",
   "fallback_eligible_outcomes": [
     "MALFORMED_OUTPUT"
   ],
@@ -183,9 +183,9 @@
     }
   ],
   "identities": {
-    "call_shape_policy_digest": "sha256:d759e5ded495c380c041cb113e051cc74032dde9cf2a2b1cd4917785a289f478",
+    "call_shape_policy_digest": "sha256:62bc8984cf5e3593fc7d04a11e38bb00e9b6e6666dfdbc0830ffe9c76e3c66af",
     "context_manifest": "graphiti-combined-temporal-hermetic-v1",
-    "fallback_circuit_policy_digest": "sha256:bcd757389037d93c863ac459f9921d23c8f809b79b92c6e2638f0b7be0c44731",
+    "fallback_circuit_policy_digest": "sha256:b939e51ad07b15a3a327439f7e69f5eb05d924830df5b075ac4d1b9b663de02c",
     "prompt": "newsroom.graphiti.proposal-only-prompt:v1",
     "qualified_routes": [
       {
@@ -279,7 +279,7 @@
           "planning",
           "subagents"
         ],
-        "implementation_revision": "sha256:16d88cd7e0f115d0ea533a0406e0ed7a10c2578e9e878cd9c1f82ea7a0bb143e",
+        "implementation_revision": "sha256:8e32f8e9cdf4079d461c51a41058383ad82ed5cc2bbd134b5233e773ddbeebf2",
         "leaf_class": "EMBEDDING",
         "max_context_tokens": 131072,
         "max_output_tokens": 1,
@@ -363,8 +363,8 @@
     "immutable_after_restart": true,
     "invocation_efficiency_policies": [
       {
-        "canonical_digest": "sha256:c8a23f22e2862d614d04c9254d8c63e7b96f965571df9d31bd3354f22d4cb93a",
-        "evidence_digest": "sha256:460ed514867661c7327f7dac6b19b47311fa1f3c5aeb8f34210bab92f118436d",
+        "canonical_digest": "sha256:d638df9836248b9940e75f9e039a59c7be871382b6dcf80ee4858275e2945e21",
+        "evidence_digest": "sha256:cbe7bb9c8ede78e5ebdb69331714b745a704ab9d772eb4a4b64ef471c859f1ea",
         "hard_estimate_ceiling_tokens": null,
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
@@ -373,8 +373,8 @@
         "route": "GRAPHITI_CHAT_PRIMARY"
       },
       {
-        "canonical_digest": "sha256:150ee38a437282379803d0aabb75f693ab3e5168716f60533139a710baf98c0a",
-        "evidence_digest": "sha256:ad6fe488048c1bf8c5825386248ad753822f9abe1d7cd69bc4debec32347215c",
+        "canonical_digest": "sha256:4a46f3255514d6c897121296eaef3138a287f352ed7816ab0dcccf7afc8ead88",
+        "evidence_digest": "sha256:4b74cdf3e2f0daf915905d68470b72b0f684c0dde74a02aad74516685969c5e8",
         "hard_estimate_ceiling_tokens": null,
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
@@ -417,21 +417,21 @@
   "token_effectiveness": {
     "average_tokens_per_terminal_revision": {
       "current": {
-        "base": 3454,
-        "high": 9189,
-        "low": 1738
+        "base": 3435,
+        "high": 9160,
+        "low": 1724
       },
       "target": {
-        "base": 1808,
-        "high": 2814,
-        "low": 1305
+        "base": 1789,
+        "high": 2785,
+        "low": 1290
       }
     },
     "chat_tokens": {
       "estimated_primary": {
-        "base": 17406,
-        "high": 26105,
-        "low": 13055
+        "base": 17194,
+        "high": 25785,
+        "low": 12895
       },
       "reported": 0,
       "unresolved": 0,
@@ -472,14 +472,14 @@
     },
     "fixture_measured_average_tokens": {
       "current": {
-        "base": 2113,
-        "high": 3375,
-        "low": 1483
+        "base": 2094,
+        "high": 3346,
+        "low": 1468
       },
       "target": {
-        "base": 1808,
-        "high": 2814,
-        "low": 1305
+        "base": 1789,
+        "high": 2785,
+        "low": 1290
       }
     },
     "formula": "T_avg_revision = E[Σ_(primary misses) T_primary] + E[Σ_(conditional leaves) T_conditional] + E[Σ_(embedding misses) T_embedding]",
@@ -500,14 +500,14 @@
       "adoption_gate": "HOLD_UNRESOLVED_CLASSES_AND_QUALITY",
       "average_total_token_estimate_per_terminal_effective_revision": {
         "current": {
-          "base": 3454,
-          "high": 9189,
-          "low": 1738
+          "base": 3435,
+          "high": 9160,
+          "low": 1724
         },
         "target": {
-          "base": 1918,
-          "high": 3045,
-          "low": 1354
+          "base": 1899,
+          "high": 3016,
+          "low": 1340
         }
       },
       "basis": "TWO_RETAINED_ISSUE_737_GRAIN_TERMINAL_OUTCOMES",

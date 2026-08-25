@@ -780,10 +780,10 @@ def test_provider_free_packet_covers_issue_748_acceptance() -> None:
     assert retained_sensitivity["unresolved_chat_leaf_count"] == 5
     assert retained_sensitivity[
         "average_total_token_estimate_per_terminal_effective_revision"
-    ] == {
-        "current": {"low": 1_738, "base": 3_454, "high": 9_189},
-        "target": {"low": 1_354, "base": 1_918, "high": 3_045},
-    }
+        ] == {
+            "current": {"low": 1_724, "base": 3_435, "high": 9_160},
+            "target": {"low": 1_340, "base": 1_899, "high": 3_016},
+        }
     assert retained_sensitivity["adoption_gate"] == (
         "HOLD_UNRESOLVED_CLASSES_AND_QUALITY"
     )

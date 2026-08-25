@@ -129,6 +129,9 @@ def test_ci_is_an_exact_head_bounded_compatibility_gate() -> None:
     assert "newsroom/tests/test_graphiti_combined_temporal_runtime.py" in (
         graphiti_research["run"]
     )
+    assert "newsroom/tests/test_graphiti_donor_identities.py" in (
+        graphiti_research["run"]
+    )
     assert "newsroom/tests/test_graphiti_deterministic_work.py" in (
         graphiti_research["run"]
     )

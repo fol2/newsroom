@@ -25,6 +25,8 @@ from newsroom.graphiti_adapter.combined_temporal_types import (
 from newsroom.graphiti_adapter.result_mapping import is_source_registry_name
 
 GOVERNED_ENTITY_TYPE_IDS = frozenset({0})
+VALIDATOR_CONTRACT_VERSION = "NewsroomCombinedTemporalNormaliseV1"
+RELATION_TYPE_RULE_VERSION = "ScreamingSnakeCaseGroundedPredicateV1"
 _RELATION_TYPE = re.compile(r"^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$")
 _CORRECTION = re.compile(r"(?i)(?:\bcorrection\s*[:\-–—]|(?:更正|修正)\s*[:：\-–—])")
 
@@ -399,4 +401,9 @@ def _resolve_segments(
         ) from exc
 
 
-__all__ = ["GOVERNED_ENTITY_TYPE_IDS", "normalise"]
+__all__ = [
+    "GOVERNED_ENTITY_TYPE_IDS",
+    "RELATION_TYPE_RULE_VERSION",
+    "VALIDATOR_CONTRACT_VERSION",
+    "normalise",
+]

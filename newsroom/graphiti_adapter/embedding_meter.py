@@ -7,6 +7,12 @@ from collections.abc import Mapping
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Protocol, TypeGuard
 
+from newsroom.graphiti_adapter.donor_identities import (
+    EmbeddingRequestIdentityV1,
+    build_embedding_request_identity,
+    build_embedding_vector_integrity,
+)
+from newsroom.graphiti_adapter.donor_store import DonorStore
 from newsroom.graphiti_adapter.evaluation_packet import OPENROUTER_EMBEDDING_SLUG
 
 _PROVIDER_USAGE_KEYS = frozenset(
@@ -204,12 +210,17 @@ class MeteredOpenAIEmbedder:
         delegate: Any,
         *,
         invocation_observer: EmbeddingInvocationObserver | None = None,
+        donor_store: DonorStore | None = None,
     ) -> None:
         self._delegate = delegate
         self._invocation_observer = invocation_observer
+        self._donor_store = donor_store
         self.requests: list[dict[str, object]] = []
 
-    async def _create(self, input_data: object) -> Any:
+    async def _create(
+        self, input_data: object
+    ) -> tuple[Any, EmbeddingRequestIdentityV1 | None, Mapping[str, str]]:
+        identity = self._embedding_identity(input_data)
         request: dict[str, object] = {
             "provider": "openrouter",
             "model": self._delegate.config.embedding_model,
@@ -281,6 +292,7 @@ class MeteredOpenAIEmbedder:
                 )
                 if binding is not None:
                     request.update(binding)
+            self._retain_embedding_request(identity)
             raise
         except Exception:
             if self._invocation_observer is not None:
@@ -315,6 +327,7 @@ class MeteredOpenAIEmbedder:
                 )
                 if binding is not None:
                     request.update(binding)
+            self._retain_embedding_request(identity)
             raise
         usage = _usage_value(response)
         cost = _usd_microunits(usage.get("cost"))
@@ -328,6 +341,7 @@ class MeteredOpenAIEmbedder:
                 "outcome": "COMPLETE",
             }
         )
+        binding: Mapping[str, str] | None = None
         if self._invocation_observer is not None:
             binding = self._invocation_observer.after_embedding_invocation(
                 observer_token,
@@ -349,16 +363,80 @@ class MeteredOpenAIEmbedder:
             )
             if binding is not None:
                 request.update(binding)
-        return response
+        self._retain_embedding_request(identity)
+        return response, identity, binding or {}
 
     async def create(self, input_data: object) -> list[float]:
-        response = await self._create(input_data)
-        return response.data[0].embedding[: self._delegate.config.embedding_dim]
+        response, identity, binding = await self._create(input_data)
+        vector = response.data[0].embedding[: self._delegate.config.embedding_dim]
+        self._retain_embedding_integrity(
+            identity=identity,
+            response=response,
+            vectors=[vector],
+            binding=binding,
+        )
+        return vector
 
     async def create_batch(self, input_data_list: list[str]) -> list[list[float]]:
-        response = await self._create(input_data_list)
+        response, identity, binding = await self._create(input_data_list)
         dimension = self._delegate.config.embedding_dim
-        return [item.embedding[:dimension] for item in response.data]
+        vectors = [item.embedding[:dimension] for item in response.data]
+        self._retain_embedding_integrity(
+            identity=identity,
+            response=response,
+            vectors=vectors,
+            binding=binding,
+        )
+        return vectors
+
+    def _embedding_identity(
+        self, input_data: object
+    ) -> EmbeddingRequestIdentityV1 | None:
+        if self._donor_store is None:
+            return None
+        try:
+            return build_embedding_request_identity(
+                provider="openrouter",
+                model=self._delegate.config.embedding_model,
+                dimensions=getattr(self._delegate.config, "embedding_dim", None),
+                input_data=input_data,
+                provider_options={},
+            )
+        except Exception:
+            return None
+
+    def _retain_embedding_request(
+        self, identity: EmbeddingRequestIdentityV1 | None
+    ) -> None:
+        if self._donor_store is None or identity is None:
+            return
+        try:
+            self._donor_store.retain_embedding_request(identity)
+        except Exception:
+            return
+
+    def _retain_embedding_integrity(
+        self,
+        *,
+        identity: EmbeddingRequestIdentityV1 | None,
+        response: Any,
+        vectors: list[list[float]],
+        binding: Mapping[str, str],
+    ) -> None:
+        if self._donor_store is None or identity is None:
+            return
+        try:
+            integrity = build_embedding_vector_integrity(
+                request_identity=identity,
+                provider="openrouter",
+                model=self._delegate.config.embedding_model,
+                vectors=vectors,
+                provider_request_id=str(getattr(response, "id", "") or ""),
+                receipt_linkage=binding,
+            )
+            self._donor_store.retain_embedding_integrity(integrity)
+        except Exception:
+            return
 
     def receipt(self) -> dict[str, object]:
         token_values = [

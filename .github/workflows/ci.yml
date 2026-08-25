@@ -155,6 +155,7 @@ jobs:
             newsroom/tests/test_graphiti_combined_temporal_extraction.py \
             newsroom/tests/test_graphiti_combined_temporal_pipeline.py \
             newsroom/tests/test_graphiti_combined_temporal_runtime.py \
+            newsroom/tests/test_graphiti_donor_identities.py \
             newsroom/tests/test_graphiti_deterministic_work.py
 
       - name: Verify Graphiti combined-temporal live pin

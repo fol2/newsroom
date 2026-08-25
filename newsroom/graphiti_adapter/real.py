@@ -52,6 +52,7 @@ from newsroom.graphiti_adapter.combined_temporal_runtime import (
 from newsroom.graphiti_adapter.deterministic_sidecar import DeterministicSidecarInput
 from newsroom.graphiti_adapter.deterministic_summary import AdmittedSummaryAssertion
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
+from newsroom.graphiti_adapter.donor_store import DonorStore, SqliteDonorStore
 from newsroom.graphiti_adapter.embedding_meter import MeteredOpenAIEmbedder
 from newsroom.graphiti_adapter.usage_meter import summarise_graphiti_usage
 from newsroom.graphiti_adapter.edge_guard import guard_extracted_edges
@@ -532,6 +533,7 @@ async def _add_episode(
     sidecar_input: DeterministicSidecarInput | None = None,
     admitted_summary_assertions: tuple[AdmittedSummaryAssertion, ...] = (),
     invocation_observer: Any | None = None,
+    donor_store: DonorStore | None = None,
 ) -> Any:
     os.environ.setdefault("GRAPHITI_TELEMETRY_ENABLED", "false")
     runtime = _load_graphiti()
@@ -548,10 +550,12 @@ async def _add_episode(
         )
     )
     embedder = (
-        runtime.MeteredOpenAIEmbedder(delegate)
+        runtime.MeteredOpenAIEmbedder(delegate, donor_store=donor_store)
         if invocation_observer is None
         else runtime.MeteredOpenAIEmbedder(
-            delegate, invocation_observer=invocation_observer
+            delegate,
+            invocation_observer=invocation_observer,
+            donor_store=donor_store,
         )
     )
     graphiti = runtime.Graphiti(
@@ -673,6 +677,7 @@ async def _add_episode(
                 sidecar_input=sidecar_input,
                 admitted_summary_assertions=admitted_summary_assertions,
                 attempt_prepared=True,
+                donor_store=donor_store,
             )
             if leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE:
                 failure_completed = leaf.journal_skipped is False
@@ -942,6 +947,7 @@ class RealGraphitiAdapter:
                 attempt,
                 started_at,
                 execution_deadline=monotonic_deadline,
+                donor_workspace_root=workspace_root,
             )
             outcome = adapter_outcome_for(produced)
             raw = (
@@ -989,6 +995,7 @@ class RealGraphitiAdapter:
         started_at: UtcTimestamp,
         *,
         execution_deadline: float | None = None,
+        donor_workspace_root: Path | None = None,
     ) -> ProducedExtraction:
         timeout_s = attempt.extraction_request.budget.timeout_ms / 1000
         if execution_deadline is None:
@@ -1184,6 +1191,13 @@ class RealGraphitiAdapter:
         remaining_timeout_s = execution_deadline - self._monotonic()
         if remaining_timeout_s <= 0:
             return timeout_result()
+        donor_store = (
+            None
+            if donor_workspace_root is None
+            else SqliteDonorStore(
+                donor_workspace_root / "donor_identities.sqlite3"
+            )
+        )
         try:
             result = asyncio.run(
                 asyncio.wait_for(
@@ -1209,6 +1223,7 @@ class RealGraphitiAdapter:
                             attempt.extraction_request.budget.max_response_tokens
                         ),
                         invocation_observer=self._invocation_observer,
+                        donor_store=donor_store,
                     ),
                     timeout=remaining_timeout_s,
                 )

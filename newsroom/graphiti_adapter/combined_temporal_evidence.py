@@ -7,6 +7,7 @@ import re
 from newsroom.graphiti_adapter.combined_temporal_types import EvidenceSegment
 
 MAX_SEGMENT_BYTES = 512
+SEGMENTATION_ALGORITHM_VERSION = "NewsroomCombinedTemporalEvidenceSegmentationV1"
 _SPLIT = re.compile(
     rb"(?:(?<=[.!?])[ \t]+)|(?:\n+)|"
     rb"(?:(?:\xe3\x80\x82|\xef\xbc\x81|\xef\xbc\x9f|\xef\xbc\x9b)[ \t]*)"
@@ -85,4 +86,9 @@ def _utf8_cut(data: bytes, start: int, limit: int) -> int:
     return start
 
 
-__all__ = ["EvidenceSegment", "segment_source"]
+__all__ = [
+    "MAX_SEGMENT_BYTES",
+    "SEGMENTATION_ALGORITHM_VERSION",
+    "EvidenceSegment",
+    "segment_source",
+]

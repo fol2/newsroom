@@ -48,6 +48,12 @@ from newsroom.graphiti_adapter.combined_temporal_validation import (
     GOVERNED_ENTITY_TYPE_IDS,
     normalise,
 )
+from newsroom.graphiti_adapter.donor_identities import (
+    SemanticExtractionRequestIdentityV1,
+    build_semantic_request_identity,
+    build_validated_artifact,
+)
+from newsroom.graphiti_adapter.donor_store import DonorStore
 from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_CORE_RELEASE
 from newsroom.graphiti_adapter.identity import (
     configuration_digest,
@@ -129,6 +135,8 @@ class CombinedTemporalLeaf:
     deterministic_sidecar: Mapping[str, object] | None = None
     sidecar_collapse: Mapping[str, object] | None = None
     deterministic_summary: Mapping[str, object] | None = None
+    request_identity_digest: str | None = None
+    donor_artifact_digest: str | None = None
 
 
 class CombinedTemporalTransport(Protocol):
@@ -146,6 +154,7 @@ def extract_combined_temporal(
     *,
     transport: CombinedTemporalTransport,
     pipeline: CombinedTemporalPipeline | None = None,
+    donor_store: DonorStore | None = None,
 ) -> CombinedTemporalLeaf:
     _require_pipeline(pipeline)
     ingest_id = revision.ingest_id
@@ -161,15 +170,24 @@ def extract_combined_temporal(
             prompt_digest=prompt_digest,
             completed=completed,
         )
+    request_identity = _retain_request_identity(
+        donor_store=donor_store,
+        revision=revision,
+        prompt=prompt,
+    )
     receipt: dict[str, object] = {
         "prompt_digest": prompt_digest,
         "ingest_id": ingest_id,
+        "source_revision_id": revision.revision_id,
+        "predecessor_revision_id": revision.predecessor_revision_id,
         "temporal_basis": temporal_basis,
         "configuration_digest": configuration_digest(),
         "temporal_policy_digest": digest_canonical(TEMPORAL_POLICY_VERSION),
         "invocation_count": 1,
         "transport_calls": [],
     }
+    if request_identity is not None:
+        receipt["request_identity_digest"] = request_identity.identity_digest
     try:
         result = transport.generate_response(
             prompt=prompt.text,
@@ -285,6 +303,14 @@ def extract_combined_temporal(
         if not normalised["facts"]
         else CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
     )
+    _retain_artifact(
+        donor_store=donor_store,
+        request_identity=request_identity,
+        payload=normalised,
+        prompt=prompt,
+        receipt=receipt,
+        outcome=outcome,
+    )
     return _leaf(
         prompt,
         receipt,
@@ -301,6 +327,61 @@ def extract_combined_temporal(
         rollback_skipped=rollback_skipped,
         graph_effect_attempted=graph_effect_attempted,
     )
+
+
+def _retain_request_identity(
+    *,
+    donor_store: DonorStore | None,
+    revision: SourceRevisionInput,
+    prompt: CompactPrompt,
+) -> SemanticExtractionRequestIdentityV1 | None:
+    if donor_store is None:
+        return None
+    try:
+        identity = build_semantic_request_identity(revision, prompt)
+    except Exception:
+        return None
+    try:
+        donor_store.count_semantic_opportunity(identity)
+    except Exception:
+        pass
+    try:
+        donor_store.retain_extraction_request(identity)
+    except Exception:
+        return None
+    return identity
+
+
+def _retain_artifact(
+    *,
+    donor_store: DonorStore | None,
+    request_identity: SemanticExtractionRequestIdentityV1 | None,
+    payload: Mapping[str, Any],
+    prompt: CompactPrompt,
+    receipt: dict[str, object],
+    outcome: CombinedTemporalOutcome,
+) -> None:
+    if donor_store is None or request_identity is None:
+        return
+    try:
+        artifact = build_validated_artifact(
+            request_identity=request_identity,
+            payload=payload,
+            payload_digest=digest_canonical(payload),
+            raw_output_digest=str(receipt["raw_output_digest"]),
+            prompt=prompt,
+            framework_version=str(receipt["framework_version"]),
+            model_version=(
+                str(receipt["model_version"])
+                if receipt.get("model_version") is not None
+                else None
+            ),
+            outcome=outcome.value,
+        )
+        donor_store.retain_validated_artifact(artifact)
+        receipt["donor_artifact_digest"] = artifact.artifact_digest
+    except Exception:
+        return
 
 
 def _prepare_attempt(
@@ -398,6 +479,7 @@ def _proposal_receipt(
         "ingest_id": revision.ingest_id,
         "source_id": revision.source_id,
         "source_revision_id": revision.revision_id,
+        "predecessor_revision_id": revision.predecessor_revision_id,
         "representation_digest": revision.representation_digest,
         "episode_id": revision.episode_uuid or revision.ingest_id,
         "reference_time": revision.reference_time,
@@ -691,6 +773,12 @@ def _leaf(
             dict(receipt["deterministic_summary"])
             if isinstance(receipt.get("deterministic_summary"), Mapping)
             else None
+        ),
+        request_identity_digest=(
+            str(receipt.get("request_identity_digest") or "") or None
+        ),
+        donor_artifact_digest=(
+            str(receipt.get("donor_artifact_digest") or "") or None
         ),
     )
 

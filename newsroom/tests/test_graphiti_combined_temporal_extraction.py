@@ -223,7 +223,8 @@ def test_prompt_retains_every_segment_and_excludes_predecessor_body() -> None:
     assert case.revision.body in prompt.text
     assert "Technology and Living curriculum" not in prompt.text
     assert "Design and Applied Technology" in prompt.text
-    assert case.revision.predecessor_revision_id in prompt.text
+    assert "REVISION_ID:" not in prompt.text
+    assert "PREDECESSOR_REVISION_ID:" not in prompt.text
     assert str(SCHEMA["required"]) not in prompt.text or "entities" in prompt.text
     for segment in prompt.segments:
         assert f"[{segment.segment_id}]" in prompt.text
@@ -2093,14 +2094,24 @@ def test_prompt_or_schema_binding_mints_a_new_ingest_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     leaf, case = _extract("pair-current")
-    shifted = extract_combined_temporal(
+    predecessor_shifted = extract_combined_temporal(
         replace(case.revision, predecessor_revision_id="other-rev"),
         transport=_FakeTransport(case.gold),
         pipeline=_PIPELINE,
     )
-    assert shifted.ingest_id != leaf.ingest_id
-    assert {node.uuid for node in shifted.nodes} != {node.uuid for node in leaf.nodes}
-    assert {edge.uuid for edge in shifted.edges} != {edge.uuid for edge in leaf.edges}
+    assert predecessor_shifted.ingest_id == leaf.ingest_id
+    assert {node.uuid for node in predecessor_shifted.nodes} == {
+        node.uuid for node in leaf.nodes
+    }
+    revision_shifted = extract_combined_temporal(
+        replace(case.revision, revision_id="other-rev"),
+        transport=_FakeTransport(case.gold),
+        pipeline=_PIPELINE,
+    )
+    assert revision_shifted.ingest_id != leaf.ingest_id
+    assert {node.uuid for node in revision_shifted.nodes} != {
+        node.uuid for node in leaf.nodes
+    }
     monkeypatch.setattr(
         "newsroom.graphiti_adapter.combined_temporal_contract.SCHEMA_DIGEST",
         "sha256:" + "ab" * 32,
