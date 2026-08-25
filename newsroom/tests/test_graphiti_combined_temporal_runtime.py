@@ -16,11 +16,13 @@ from newsroom.graphiti_adapter.combined_temporal_contract import (
     SCHEMA,
 )
 from newsroom.graphiti_adapter.combined_temporal_extraction import (
+    CombinedTemporalFailureCode,
     CombinedTemporalOutcome,
     CombinedTemporalTransportResult,
 )
 from newsroom.graphiti_adapter.combined_temporal_fixtures import fixture
 from newsroom.graphiti_adapter.combined_temporal_pipeline import (
+    CombinedTemporalPipelineError,
     CombinedTemporalPipelineResult,
     ExistingGraphitiPipeline,
 )
@@ -276,6 +278,86 @@ def test_invalid_compact_output_fails_before_graph_effect_without_redispatch() -
     assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
     assert leaf.graph_effect_attempted is False
     assert len(transport.calls) == 1
+
+
+def test_pre_effect_pipeline_failure_completes_the_pending_journal() -> None:
+    case = fixture("pair-current")
+
+    class IdentityMismatchPipeline(_Pipeline):
+        complete_failure_calls = 0
+
+        async def _complete_failure(
+            self, receipt: Mapping[str, object]
+        ) -> Mapping[str, object]:
+            self.complete_failure_calls += 1
+            return await super()._complete_failure(receipt)
+
+        async def _execute(
+            self,
+            *,
+            nodes: tuple[Any, ...],
+            edges: tuple[Any, ...],
+            receipt: Mapping[str, object],
+        ) -> CombinedTemporalPipelineResult:
+            raise CombinedTemporalPipelineError(
+                "combined-temporal pipeline identity differs",
+                graph_effect_attempted=False,
+                rollback_completed=False,
+            )
+
+    pipeline = IdentityMismatchPipeline()
+    leaf = asyncio.run(
+        extract_combined_temporal_async(
+            case.revision,
+            transport=_Transport(case.gold),
+            pipeline=pipeline,
+        )
+    )
+
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
+    assert leaf.failure_code is CombinedTemporalFailureCode.PIPELINE_FAILED
+    assert leaf.graph_effect_attempted is False
+    assert leaf.journal_skipped is False
+    assert pipeline.complete_failure_calls == 1
+
+
+def test_rolled_back_pipeline_failure_is_not_returned_as_complete() -> None:
+    case = fixture("pair-current")
+
+    class RolledBackPipeline(_Pipeline):
+        complete_failure_calls = 0
+
+        async def _complete_failure(
+            self, receipt: Mapping[str, object]
+        ) -> Mapping[str, object]:
+            self.complete_failure_calls += 1
+            return await super()._complete_failure(receipt)
+
+        async def _execute(
+            self,
+            *,
+            nodes: tuple[Any, ...],
+            edges: tuple[Any, ...],
+            receipt: Mapping[str, object],
+        ) -> CombinedTemporalPipelineResult:
+            raise CombinedTemporalPipelineError(
+                "combined-temporal pipeline failed",
+                graph_effect_attempted=True,
+                rollback_completed=True,
+            )
+
+    pipeline = RolledBackPipeline()
+    with pytest.raises(CombinedTemporalPipelineError) as failure:
+        asyncio.run(
+            extract_combined_temporal_async(
+                case.revision,
+                transport=_Transport(case.gold),
+                pipeline=pipeline,
+            )
+        )
+
+    assert failure.value.rollback_completed is True
+    assert pipeline.complete_failure_calls == 0
 
 
 def test_sidecar_uses_no_extra_provider_leaf_and_exact_collapse_keeps_attribution(

@@ -54,6 +54,9 @@ from newsroom.graphiti_adapter.contracts import (
     GRAPHITI_ADAPTER_TEMPORAL_COMPONENT,
     GRAPHITI_PROMPT_COMPONENT,
 )
+from newsroom.graphiti_adapter.combined_temporal_extraction import (
+    CombinedTemporalFailureCode,
+)
 from newsroom.graphiti_adapter.evaluation_packet import (
     EVALUATION_GRAPHITI_PACKET,
     EVALUATION_WORKSPACE_POLICY,
@@ -822,6 +825,99 @@ def test_process_recovery_uses_durable_guard_before_provider_dispatch(
     else:
         asyncio.run(call)
     assert events == [expected_event, "close"]
+
+
+def test_rolled_back_pipeline_failure_is_not_rolled_back_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    events: list[str] = []
+
+    class Graphiti:
+        def __init__(self, *_args: object, **values: object) -> None:
+            self.driver = object()
+            self.clients = SimpleNamespace(
+                llm_client=values["llm_client"],
+                embedder=values["embedder"],
+            )
+
+        async def close(self) -> None:
+            events.append("close")
+
+    class Guard:
+        async def begin(self) -> GuardMarker:
+            return GuardMarker(
+                state=GuardState.CREATED,
+                attempt_number=1,
+                input_digest="sha256:" + "0" * 64,
+            )
+
+        async def rollback_pending(self, **_values: object) -> None:
+            events.append("rollback")
+
+    class Pipeline:
+        complete_receipt = None
+        complete_failure_receipt = None
+        recovery_marker = None
+
+        async def _prepare_attempt(self) -> None:
+            return None
+
+    async def created_episode(**_values: object) -> tuple[SimpleNamespace, str]:
+        return SimpleNamespace(uuid="episode-id"), "CREATED"
+
+    async def rolled_back_extract(*_args: object, **_values: object) -> object:
+        raise real.CombinedTemporalPipelineError(
+            "combined-temporal pipeline failed",
+            graph_effect_attempted=True,
+            rollback_completed=True,
+        )
+
+    delegate = SimpleNamespace(
+        client=SimpleNamespace(embeddings=SimpleNamespace()),
+        config=SimpleNamespace(embedding_model="model", embedding_dim=2),
+    )
+    runtime = SimpleNamespace(
+        Graphiti=Graphiti,
+        OpenAIEmbedder=lambda **_values: delegate,
+        OpenAIEmbedderConfig=lambda **values: SimpleNamespace(**values),
+        MeteredOpenAIEmbedder=real.MeteredOpenAIEmbedder,
+        IdentityCrossEncoder=lambda: object(),
+        EpisodeType=SimpleNamespace(text="text"),
+        EpisodicNode=lambda **values: SimpleNamespace(**values),
+        MutationGuard=lambda *_args, **_values: Guard(),
+    )
+    monkeypatch.setattr(real, "_load_graphiti", lambda: runtime)
+    monkeypatch.setattr(
+        real, "build_cli_llm_client", lambda: SimpleNamespace(invocations=[])
+    )
+    monkeypatch.setattr(real, "_ensure_episode", created_episode)
+    monkeypatch.setattr(
+        real, "combined_temporal_pipeline_for", lambda **_values: Pipeline()
+    )
+    monkeypatch.setattr(real, "extract_combined_temporal_async", rolled_back_extract)
+
+    configuration, revision = _combined_runtime_inputs("Body", "episode-id")
+    with pytest.raises(real.AmbiguousEpisodeEffect, match="rolled back"):
+        asyncio.run(
+            real._add_episode(
+                api_key="key",
+                password="password",
+                body="Body",
+                name="episode-id",
+                episode_id="episode-id",
+                reference_time=datetime(2026, 8, 20, tzinfo=UTC),
+                telemetry=real._EpisodeTelemetry(),
+                attempt_number=1,
+                validate_result=lambda _result, _telemetry: {},
+                restore_result=lambda _raw, _telemetry: None,
+                configuration=configuration,
+                revision=revision,
+            )
+        )
+
+    assert events == ["close"]
 
 
 @pytest.mark.parametrize("slow_cleanup", (False, True))
@@ -1712,6 +1808,42 @@ def test_immutable_completion_snapshot_restores_without_graph_rehydration(
         restore_validated_snapshot(raw=corrupted, attempt=attempt)
 
 
+def test_completed_pipeline_failure_snapshot_restores_as_retryable(
+    tmp_path: Path,
+) -> None:
+    from newsroom.graphiti_adapter.real import _EpisodeTelemetry, _raw_receipt
+    from newsroom.graphiti_adapter.result_snapshot import restore_validated_snapshot
+
+    instant = UtcTimestamp(datetime(2026, 8, 20, tzinfo=UTC))
+    attempt = replace(
+        _real_attempt(tmp_path),
+        reference_time=instant,
+        temporal_basis=TemporalBasis.SOURCE_PUBLISHED,
+    )
+    raw = _raw_receipt(
+        attempt,
+        started_at=instant,
+        telemetry=_EpisodeTelemetry(provider_attempt_number=1),
+        result=None,
+        proposals=(),
+    )
+    raw.pop("raw_output_digest")
+    raw["combined_temporal_failure_code"] = "PIPELINE_FAILED"
+    raw["combined_temporal_receipt"] = {"failure_code": "PIPELINE_FAILED"}
+    raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
+
+    restored = restore_validated_snapshot(raw=raw, attempt=attempt)
+
+    assert restored.produced.outcome is ExtractionOutcome.RETRYABLE_FAILURE
+    assert (
+        restored.produced.failure_code
+        is ExtractionFailureCode.PRODUCER_INTERNAL_ERROR
+    )
+    assert restored.produced.validation is None
+    assert restored.produced.raw_output_value is None
+    assert restored.produced.attempt_receipt_value == raw
+
+
 def test_immutable_completion_preserves_original_access_after_rights_renewal(
     tmp_path: Path,
 ) -> None:
@@ -1978,6 +2110,88 @@ def test_retryable_failure_returns_diagnostic_receipt_without_structured_output(
     assert produced.attempt_receipt_value["token_usage"][
         "unreported_chat_requests"
     ] == 1
+
+
+def test_completed_pipeline_failure_is_retryable_not_schema_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    async def completed_failure(**values: object) -> object:
+        validate_failure = values["validate_failure"]
+        assert callable(validate_failure)
+        validate_failure(
+            {
+                "failure_code": CombinedTemporalFailureCode.PIPELINE_FAILED,
+                "provider_attempt_number": 1,
+                "pipeline_chat_invocations": [],
+                "embedding_usage": {
+                    "usage_basis": "NO_EMBEDDING_CALL",
+                    "request_count": 0,
+                    "embedding_tokens": 0,
+                    "cost_usd_microunits": 0,
+                    "requests": [],
+                },
+            },
+            values["telemetry"],
+        )
+        raise real.ExtractionContractError("combined-temporal leaf failed")
+
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(real, "openrouter_api_key", lambda: "key")
+    monkeypatch.setattr(real, "neo4j_community_password", lambda: "password")
+    monkeypatch.setattr(real, "_add_episode", completed_failure)
+
+    produced = RealGraphitiAdapter()._produce(
+        evaluation_attempt_for(("A retained source passage.",)),
+        UtcTimestamp.parse("2026-08-20T00:00:00.000000Z"),
+    )
+
+    assert produced.outcome is ExtractionOutcome.RETRYABLE_FAILURE
+    assert produced.failure_code is ExtractionFailureCode.PRODUCER_INTERNAL_ERROR
+    assert produced.validation is None
+    assert produced.raw_output_value is None
+    assert produced.attempt_receipt_value is not None
+    assert produced.attempt_receipt_value["combined_temporal_failure_code"] == (
+        "PIPELINE_FAILED"
+    )
+
+
+def test_rollback_after_a_success_receipt_does_not_return_that_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    async def stash_success_then_roll_back(**values: object) -> object:
+        values["telemetry"].embedding_usage = {
+            "usage_basis": "NO_EMBEDDING_CALL",
+            "request_count": 0,
+            "embedding_tokens": 0,
+            "cost_usd_microunits": 0,
+            "requests": [],
+        }
+        values["validate_result"](
+            SimpleNamespace(episode=None, nodes=(), edges=()),
+            values["telemetry"],
+        )
+        raise real.AmbiguousEpisodeEffect(
+            "Graphiti write failed after provider dispatch and was rolled back"
+        )
+
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(real, "openrouter_api_key", lambda: "key")
+    monkeypatch.setattr(real, "neo4j_community_password", lambda: "password")
+    monkeypatch.setattr(real, "_add_episode", stash_success_then_roll_back)
+
+    produced = RealGraphitiAdapter()._produce(
+        evaluation_attempt_for(("A retained source passage.",)),
+        UtcTimestamp.parse("2026-08-20T00:00:00.000000Z"),
+    )
+
+    assert produced.outcome is ExtractionOutcome.RETRYABLE_FAILURE
+    assert produced.failure_code is ExtractionFailureCode.AMBIGUOUS_EFFECT
+    assert produced.validation is None
+    assert produced.raw_output_value is None
 
 
 def test_pre_dispatch_setup_failure_is_a_proved_no_call_receipt(
