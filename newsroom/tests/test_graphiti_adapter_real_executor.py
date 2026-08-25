@@ -505,6 +505,33 @@ def test_cursor_timeout_is_ineligible_for_fallback() -> None:
     assert [item["outcome"] for item in invocations] == ["TIMEOUT"]
 
 
+def test_grok_timeout_is_recorded_as_timeout_not_failed() -> None:
+    from newsroom.graphiti_adapter.cli_client import CliResponseError, run_cli_chain
+
+    def malformed(_prompt: str, *, max_tokens: int) -> str:
+        return "not-json"
+
+    def timeout(_prompt: str, _schema: str | None, *, max_tokens: int) -> str:
+        raise TimeoutError("grok Graphiti LLM timed out")
+
+    invocations: list[dict[str, object]] = []
+    with pytest.raises(CliResponseError, match="timed out"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="prompt",
+                schema=None,
+                cursor_runner=malformed,
+                grok_runner=timeout,
+                invocations=invocations,
+            )
+        )
+
+    assert [item["outcome"] for item in invocations] == [
+        "MALFORMED_OUTPUT",
+        "TIMEOUT",
+    ]
+
+
 def test_sync_cli_rejects_non_utf8_output_with_typed_failure() -> None:
     from newsroom.graphiti_adapter.cli_client import (
         CliOutputDecodeError,

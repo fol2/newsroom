@@ -1024,6 +1024,25 @@ async def run_cli_chain(
             )
         )
         raise
+    except (TimeoutError, subprocess.TimeoutExpired) as exc:
+        grok_usage = (
+            unreported_cli_usage()
+            if grok_transport_started
+            else no_provider_call_cli_usage()
+        )
+        binding = observe(grok_token, outcome="TIMEOUT", usage=grok_usage)
+        invocations.append(
+            _invocation(
+                provider="grok-build-cli",
+                model=GROK_CHAT_MODEL_ID,
+                outcome="TIMEOUT",
+                execution=CliExecution(text="", usage=grok_usage),
+                failure=type(exc).__name__,
+                requested_max_tokens=max_tokens,
+                receipt_binding=binding,
+            )
+        )
+        raise CliResponseError("Graphiti fallback CLI timed out") from exc
     except (FileNotFoundError, CliPredispatchRefusal) as exc:
         grok_usage = (
             unreported_cli_usage()
