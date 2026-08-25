@@ -461,15 +461,12 @@ def test_real_factory_uses_graphiti_types_and_bulk_persistence(
         def __init__(self, **values: Any) -> None:
             vars(self).update(values)
 
-    async def resolve_nodes(
-        _clients: Any,
-        nodes: list[Any],
-        _episode: Any,
-        _previous: list[Any],
-        _entity_types: Any,
-    ) -> tuple[list[Any], dict[str, str], list[tuple[Any, Any]]]:
-        calls.append("resolve")
-        return nodes, {node.uuid: node.uuid for node in nodes}, []
+        @classmethod
+        async def get_by_group_ids(
+            cls, *_args: Any, **_kwargs: Any
+        ) -> list[Any]:
+            calls.append("retrieve")
+            return []
 
     def resolve_pointers(edges: list[Any], _uuid_map: dict[str, str]) -> list[Any]:
         calls.append("pointers")
@@ -483,7 +480,6 @@ def test_real_factory_uses_graphiti_types_and_bulk_persistence(
     runtime = SimpleNamespace(
         EntityNode=RuntimeObject,
         EntityEdge=RuntimeObject,
-        resolve_extracted_nodes=resolve_nodes,
         resolve_edge_pointers=resolve_pointers,
         create_entity_edge_embeddings=create_embeddings,
     )
@@ -511,7 +507,7 @@ def test_real_factory_uses_graphiti_types_and_bulk_persistence(
             labels=["Entity"],
             created_at=now,
             summary="",
-            attributes={},
+            attributes={"entity_type_id": 0},
         )
         for value in ("source", "target")
     )
@@ -551,7 +547,7 @@ def test_real_factory_uses_graphiti_types_and_bulk_persistence(
         receipt=receipt,
     )
 
-    assert calls == ["resolve", "pointers", "embed", "persist"]
+    assert calls == ["retrieve", "pointers", "embed", "persist"]
     assert isinstance(result.nodes[0], RuntimeObject)
     assert isinstance(result.edges[0], RuntimeObject)
     assert result.edges[0].fact_embedding == [0.5]

@@ -198,11 +198,24 @@ def restore_validated_snapshot(
         )
     )
     embedding_usage = dict(usage)
+    combined_failure = recovered_raw.get("combined_temporal_failure_code")
     produced = produced_extraction(
         attempt,
-        outcome=ExtractionOutcome.SUCCESS,
-        failure_code=ExtractionFailureCode.NONE,
-        validation=ExtractionOutputValidation.VALID,
+        outcome=(
+            ExtractionOutcome.INVALID_OUTPUT
+            if isinstance(combined_failure, str)
+            else ExtractionOutcome.SUCCESS
+        ),
+        failure_code=(
+            ExtractionFailureCode.OUTPUT_SCHEMA_INVALID
+            if isinstance(combined_failure, str)
+            else ExtractionFailureCode.NONE
+        ),
+        validation=(
+            ExtractionOutputValidation.INVALID
+            if isinstance(combined_failure, str)
+            else ExtractionOutputValidation.VALID
+        ),
         raw=recovered_raw,
         proposals=proposals,
         embedding_usage=embedding_usage,

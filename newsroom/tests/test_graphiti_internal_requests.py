@@ -15,6 +15,10 @@ from graphiti_core.prompts.extract_nodes import ExtractedEntities
 
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane.graphiti import GraphitiModelUsageObserver
+from newsroom.graphiti_adapter.combined_temporal_contract import (
+    CONTRACT_NAME,
+    SCHEMA,
+)
 from newsroom.control_plane.graphiti_requests import (
     GraphitiCallShapePolicy,
     GraphitiInternalRequestIdentity,
@@ -163,10 +167,27 @@ def test_checked_call_shape_policy_derives_headroom_from_qualified_fixtures() ->
         "SummarizedEntities",
         "CombinedExtraction",
         "BatchEdgeTimestamps",
+        "NewsroomCombinedTemporalExtractionV1",
         "EMBEDDING_VECTOR",
         "UNSTRUCTURED",
     } == {
         shape.semantic_request_class for shape in policy.qualified_request_shapes
+    }
+
+
+def test_combined_temporal_schema_matches_the_cli_observer_digest() -> None:
+    policy = load_checked_graphiti_call_shape_policy()
+    observer_digest = digest_canonical(
+        {"response_schema": json.dumps(SCHEMA)}
+    )
+    compact = {
+        (shape.leaf_class, shape.response_schema_digest)
+        for shape in policy.qualified_request_shapes
+        if shape.semantic_request_class == CONTRACT_NAME
+    }
+    assert compact == {
+        (GraphitiLeafClass.PRIMARY, observer_digest),
+        (GraphitiLeafClass.FALLBACK, observer_digest),
     }
 
 

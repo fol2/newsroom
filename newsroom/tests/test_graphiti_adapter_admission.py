@@ -269,7 +269,8 @@ def test_real_adapter_cannot_mutate_ledger_or_admitted_labels() -> None:
     }
     source = (_ADAPTER_ROOT / "real.py").read_text(encoding="utf-8")
     assert "group_id=GRAPHITI_WORKSPACE_GROUP" in source
-    assert "update_communities=False" in source
+    assert "graphiti.add_episode(" not in source
+    assert "graphiti._process_episode_data(" in source
     for label in ADMITTED_NEO4J_LABELS:
         assert label not in source
     assert "VECTOR_GENERATION_1024" not in source

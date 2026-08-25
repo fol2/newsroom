@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import importlib.metadata
+import math
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,8 +37,20 @@ from newsroom.extraction.types import (
 )
 from newsroom.graphiti_adapter.cli_client import build_cli_llm_client
 from newsroom.graphiti_adapter.combined_temporal_pipeline import (
+    CombinedTemporalPipelineError,
     ExistingGraphitiPipeline,
 )
+from newsroom.graphiti_adapter.combined_temporal_contract import SourceRevisionInput
+from newsroom.graphiti_adapter.combined_temporal_extraction import (
+    CombinedTemporalOutcome,
+)
+from newsroom.graphiti_adapter.combined_temporal_runtime import (
+    CliCombinedTemporalTransport,
+    extract_combined_temporal_async,
+    resolve_nodes_locally,
+)
+from newsroom.graphiti_adapter.deterministic_sidecar import DeterministicSidecarInput
+from newsroom.graphiti_adapter.deterministic_summary import AdmittedSummaryAssertion
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
 from newsroom.graphiti_adapter.embedding_meter import MeteredOpenAIEmbedder
 from newsroom.graphiti_adapter.usage_meter import summarise_graphiti_usage
@@ -47,7 +61,6 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CLEANUP_TIMEOUT_MS,
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_EMBEDDING_MODEL,
-    GRAPHITI_EXTRACTION_INSTRUCTIONS,
     GRAPHITI_GENERATION_ID,
     GRAPHITI_WORKSPACE_GROUP,
     OPENROUTER_BASE_URL,
@@ -170,6 +183,9 @@ class _EpisodeTelemetry:
 
 ResultValidator = Callable[[Any, _EpisodeTelemetry], dict[str, object]]
 SnapshotRestorer = Callable[[dict[str, object], _EpisodeTelemetry], None]
+FailureValidator = Callable[
+    [dict[str, object], _EpisodeTelemetry], dict[str, object]
+]
 
 
 def _runtime_metered_embedder_type(
@@ -278,6 +294,8 @@ def combined_temporal_pipeline_for(
     episode: Any,
     previous_episodes: tuple[Any, ...] = (),
     entity_types: dict[str, type[Any]] | None = None,
+    source_id: str = "UNPERMITTED",
+    expected_ingest_id: str | None = None,
 ) -> ExistingGraphitiPipeline:
     """Wire combined-temporal proposals to the pinned existing Graphiti pipeline."""
 
@@ -294,9 +312,6 @@ def combined_temporal_pipeline_for(
         raise GraphitiAdapterContractError(
             "combined-temporal graph, journal and episode identity differ"
         )
-    if isinstance(guard, Neo4jMutationGuard):
-        asyncio.run(_bootstrap_graphiti_schema(graphiti.driver))
-
     async def resolve_nodes(nodes: list[Any]) -> tuple[
         list[Any], dict[str, str], list[tuple[Any, Any]]
     ]:
@@ -312,12 +327,50 @@ def combined_temporal_pipeline_for(
             )
             for node in nodes
         ]
-        return await runtime.resolve_extracted_nodes(
-            graphiti.clients,
+        existing = tuple(
+            sorted(
+                await runtime.EntityNode.get_by_group_ids(
+                    graphiti.driver,
+                    [expected_group_id],
+                    with_embeddings=True,
+                ),
+                key=lambda item: str(item.uuid),
+            )
+        )
+        similarities: dict[tuple[str, str], int] = {}
+        if existing:
+            for node in typed_nodes:
+                mention_embedding = await graphiti.clients.embedder.create(
+                    str(node.name)
+                )
+                for candidate in existing:
+                    candidate_embedding = getattr(
+                        candidate, "name_embedding", None
+                    )
+                    if not candidate_embedding:
+                        continue
+                    denominator = math.sqrt(
+                        sum(value * value for value in mention_embedding)
+                    ) * math.sqrt(
+                        sum(value * value for value in candidate_embedding)
+                    )
+                    if denominator:
+                        cosine = sum(
+                            left * right
+                            for left, right in zip(
+                                mention_embedding,
+                                candidate_embedding,
+                                strict=True,
+                            )
+                        ) / denominator
+                        similarities[(str(node.uuid), str(candidate.uuid))] = max(
+                            0, min(1_000_000, round(cosine * 1_000_000))
+                        )
+        return resolve_nodes_locally(
             typed_nodes,
-            episode,
-            list(previous_episodes),
-            entity_types,
+            existing,
+            source_id=source_id,
+            similarities_ppm=similarities,
         )
 
     def resolve_pointers(edges: list[Any], uuid_map: dict[str, str]) -> list[Any]:
@@ -373,7 +426,7 @@ def combined_temporal_pipeline_for(
         embedding_receipt=embedding_receipt,
         expected_group_id=expected_group_id,
         expected_episode_uuid=expected_episode_uuid,
-        expected_ingest_id=guard.input_digest,
+        expected_ingest_id=expected_ingest_id or guard.input_digest,
     )
 
 
@@ -452,6 +505,42 @@ async def _record_guard_telemetry(
     )
 
 
+def _source_revision_input(
+    attempt: GraphitiAttemptRequest,
+    *,
+    body: str,
+    ingested_at: UtcTimestamp,
+) -> SourceRevisionInput:
+    if attempt.reference_time is None:
+        raise GraphitiAdapterContractError("source reference_time is required")
+    reference_time = attempt.reference_time.to_text()
+    published_at = (
+        reference_time
+        if attempt.temporal_basis.value == "SOURCE_PUBLISHED"
+        else None
+    )
+    updated_at = (
+        reference_time
+        if attempt.temporal_basis.value == "SOURCE_UPDATED"
+        else None
+    )
+    return SourceRevisionInput(
+        body=body,
+        revision_id=str(attempt.manifest.revision_id),
+        source_id=str(attempt.manifest.definition_id),
+        item_key=str(attempt.manifest.item_id),
+        representation_digest=str(attempt.manifest.representation_id),
+        published_at=published_at,
+        updated_at=updated_at,
+        observed_at=reference_time,
+        ingested_at=ingested_at.to_text(),
+        chunk_ordinal=int(getattr(attempt, "chunk_ordinal", 1)),
+        predecessor_revision_id=attempt.predecessor_episode_uuid,
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        episode_uuid=attempt.episode_uuid or str(attempt.attempt_id),
+    )
+
+
 async def _add_episode(
     *,
     api_key: str,
@@ -464,6 +553,12 @@ async def _add_episode(
     attempt_number: int,
     validate_result: ResultValidator,
     restore_result: SnapshotRestorer,
+    configuration: GraphitiAdapterConfiguration | None = None,
+    revision: SourceRevisionInput | None = None,
+    max_tokens: int = 16_384,
+    validate_failure: FailureValidator | None = None,
+    sidecar_input: DeterministicSidecarInput | None = None,
+    admitted_summary_assertions: tuple[AdmittedSummaryAssertion, ...] = (),
     invocation_observer: Any | None = None,
 ) -> Any:
     os.environ.setdefault("GRAPHITI_TELEMETRY_ENABLED", "false")
@@ -514,35 +609,76 @@ async def _add_episode(
         input_digest=input_digest,
     )
     cancellation_cleanup_active = False
+    failure_completed = False
     try:
         if runtime.MutationGuard is Neo4jMutationGuard:
             await _bootstrap_graphiti_schema(graphiti.driver)
-        marker = await guard.begin()
-        if marker.state is GuardState.COMPLETE:
-            raw = await guard.completed_raw()
-            restore_result(raw, telemetry)
+        if configuration is None or revision is None:
+            raise GraphitiAdapterContractError(
+                "combined-temporal runtime requires typed attempt authority"
+            )
+        episode = runtime.EpisodicNode(
+            uuid=episode_id,
+            name=name,
+            group_id=GRAPHITI_WORKSPACE_GROUP,
+            labels=[],
+            source=runtime.EpisodeType.text,
+            source_description=GRAPHITI_WORKSPACE_GROUP,
+            content=body,
+            created_at=datetime.now(tz=UTC),
+            valid_at=reference_time,
+        )
+        pipeline = combined_temporal_pipeline_for(
+            configuration=configuration,
+            graphiti=graphiti,
+            guard=guard,
+            episode=episode,
+            source_id=revision.source_id,
+            expected_ingest_id=revision.ingest_id,
+        )
+
+        def complete_receipt(
+            nodes: list[Any],
+            edges: list[Any],
+            combined_receipt: Mapping[str, object],
+        ) -> Mapping[str, object]:
+            telemetry.chat_invocations = list(
+                getattr(llm_client, "invocations", ())
+            )
+            telemetry.embedding_usage = embedder.receipt()
+            telemetry.provider_attempt_number = attempt_number
+            raw = validate_result(
+                SimpleNamespace(
+                    episode=episode,
+                    nodes=tuple(nodes),
+                    edges=tuple(edges),
+                ),
+                telemetry,
+            )
+            return {**raw, "combined_temporal_receipt": dict(combined_receipt)}
+
+        pipeline.complete_receipt = complete_receipt
+        if validate_failure is not None:
+            pipeline.complete_failure_receipt = lambda receipt: validate_failure(
+                dict(receipt), telemetry
+            )
+        try:
+            completed = await pipeline._prepare_attempt()
+        except CombinedTemporalPipelineError as exc:
+            marker = pipeline.recovery_marker
+            if isinstance(marker, GuardMarker):
+                _restore_marker_telemetry(telemetry, marker)
+                telemetry.recovery_classification = (
+                    GraphitiRecoveryClassification.RECOVERED_AMBIGUOUS
+                    if marker.state is GuardState.RECOVERED_AMBIGUOUS
+                    else GraphitiRecoveryClassification.RECOVERED_PENDING_PROCESS_DEATH
+                )
+            raise AmbiguousEpisodeEffect(
+                "prior Graphiti attempt blocks another provider leaf"
+            ) from exc
+        if completed is not None:
+            restore_result(dict(completed), telemetry)
             return SimpleNamespace(episode=None, nodes=(), edges=())
-        if marker.state is GuardState.RECOVERED_AMBIGUOUS:
-            _restore_marker_telemetry(telemetry, marker)
-            telemetry.recovery_classification = (
-                GraphitiRecoveryClassification.RECOVERED_AMBIGUOUS
-            )
-            raise AmbiguousEpisodeEffect(
-                "prior Graphiti attempt was rolled back after an ambiguous effect"
-            )
-        if marker.state in {GuardState.PENDING, GuardState.ROLLING_BACK}:
-            _restore_marker_telemetry(telemetry, marker)
-            telemetry.recovery_classification = (
-                GraphitiRecoveryClassification.RECOVERED_PENDING_PROCESS_DEATH
-            )
-            await guard.rollback_pending(
-                chat_invocations=telemetry.chat_invocations,
-                embedding_usage=telemetry.embedding_usage,
-                reason=telemetry.recovery_classification,
-            )
-            raise AmbiguousEpisodeEffect(
-                "prior Graphiti process ended before durable completion"
-            )
 
         _retained, state = await _ensure_episode(
             graphiti=graphiti,
@@ -556,36 +692,26 @@ async def _add_episode(
             raise GraphitiAdapterContractError(
                 "deterministic episode predates its durable mutation marker"
             )
-        # Do not reuse ambient completed episodes: their source rights may have
-        # changed since retention. Ordered chunks may use only their explicit,
-        # currently permitted predecessor.
-        previous_episode_ids: list[str] = []
-        predecessor = telemetry.predecessor_episode_uuid
-        if isinstance(predecessor, str) and predecessor:
-            previous_episode_ids.insert(0, predecessor)
         try:
-            result = await graphiti.add_episode(
-                name=name,
-                episode_body=body,
-                source_description=GRAPHITI_WORKSPACE_GROUP,
-                reference_time=reference_time,
-                source=runtime.EpisodeType.text,
-                group_id=GRAPHITI_WORKSPACE_GROUP,
-                uuid=episode_id,
-                previous_episode_uuids=list(dict.fromkeys(previous_episode_ids)),
-                update_communities=False,
-                custom_extraction_instructions=GRAPHITI_EXTRACTION_INSTRUCTIONS,
+            leaf = await extract_combined_temporal_async(
+                revision,
+                transport=CliCombinedTemporalTransport(llm_client),
+                pipeline=pipeline,
+                max_tokens=max_tokens,
+                sidecar_input=sidecar_input,
+                admitted_summary_assertions=admitted_summary_assertions,
+                attempt_prepared=True,
             )
-            await _record_guard_telemetry(
-                guard=guard,
-                llm_client=llm_client,
-                embedder=embedder,
-                telemetry=telemetry,
-                attempt_number=attempt_number,
+            if leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE:
+                failure_completed = leaf.journal_skipped is False
+                raise ExtractionContractError(
+                    f"combined-temporal leaf failed: {leaf.failure_code.value}"
+                )
+            result = SimpleNamespace(
+                episode=episode,
+                nodes=leaf.nodes,
+                edges=leaf.edges,
             )
-            await guard.restore_preexisting()
-            raw = validate_result(result, telemetry)
-            await guard.complete(raw)
         except asyncio.CancelledError:
             cancellation_cleanup_active = True
 
@@ -612,11 +738,12 @@ async def _add_episode(
                 pass
             raise
         except ExtractionContractError:
-            await guard.rollback_pending(
-                chat_invocations=telemetry.chat_invocations,
-                embedding_usage=telemetry.embedding_usage,
-                reason="OUTPUT_VALIDATION_FAILED",
-            )
+            if not failure_completed:
+                await guard.rollback_pending(
+                    chat_invocations=telemetry.chat_invocations,
+                    embedding_usage=telemetry.embedding_usage,
+                    reason="OUTPUT_VALIDATION_FAILED",
+                )
             raise
         except (GuardError, GraphitiAdapterContractError):
             raise
@@ -960,6 +1087,49 @@ class RealGraphitiAdapter:
             validated["produced"] = produced
             return raw
 
+        def validate_failure(
+            combined_receipt: dict[str, object],
+            current_telemetry: _EpisodeTelemetry,
+        ) -> dict[str, object]:
+            pipeline_calls = combined_receipt.get("pipeline_chat_invocations")
+            embedding_usage = combined_receipt.get("embedding_usage")
+            current_telemetry.chat_invocations = (
+                [dict(item) for item in pipeline_calls]
+                if isinstance(pipeline_calls, list)
+                else []
+            )
+            current_telemetry.embedding_usage = (
+                dict(embedding_usage)
+                if isinstance(embedding_usage, dict)
+                else _no_embedding_usage()
+            )
+            current_telemetry.provider_attempt_number = int(
+                combined_receipt.get("provider_attempt_number", 1)
+            )
+            raw = _raw_receipt(
+                attempt,
+                started_at=started_at,
+                telemetry=current_telemetry,
+                result=None,
+                proposals=(),
+            )
+            raw.pop("raw_output_digest", None)
+            raw["combined_temporal_failure_code"] = str(
+                combined_receipt.get("failure_code", "PIPELINE_FAILED")
+            )
+            raw["combined_temporal_receipt"] = combined_receipt
+            raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
+            validated["produced"] = produced_extraction(
+                attempt,
+                outcome=ExtractionOutcome.INVALID_OUTPUT,
+                failure_code=ExtractionFailureCode.OUTPUT_SCHEMA_INVALID,
+                validation=ExtractionOutputValidation.INVALID,
+                raw=raw,
+                proposals=(),
+                embedding_usage=current_telemetry.embedding_usage,
+            )
+            return raw
+
         def restore_result(
             raw: dict[str, object], current_telemetry: _EpisodeTelemetry
         ) -> None:
@@ -1021,6 +1191,16 @@ class RealGraphitiAdapter:
                         attempt_number=attempt.attempt_number,
                         validate_result=validate_result,
                         restore_result=restore_result,
+                        validate_failure=validate_failure,
+                        configuration=attempt.configuration,
+                        revision=_source_revision_input(
+                            attempt,
+                            body=episode_body(attempt),
+                            ingested_at=started_at,
+                        ),
+                        max_tokens=(
+                            attempt.extraction_request.budget.max_response_tokens
+                        ),
                         invocation_observer=self._invocation_observer,
                     ),
                     timeout=remaining_timeout_s,
