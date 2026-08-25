@@ -155,7 +155,6 @@ class CompactPrompt:
 def build_compact_prompt(revision: SourceRevisionInput) -> CompactPrompt:
     segments = segment_source(revision.body)
     schema_text = canonical_json_bytes(SCHEMA).decode("utf-8")
-    predecessor = revision.predecessor_revision_id or "null"
     lines = [
         CONTRACT_NAME,
         "Return exactly one JSON object. No prose, planning residue or schema echo.",
@@ -175,8 +174,6 @@ def build_compact_prompt(revision: SourceRevisionInput) -> CompactPrompt:
         f"REFERENCE_TIME: {revision.reference_time}",
         f"TEMPORAL_BASIS: {revision.temporal_basis}",
         f"TEMPORAL_POLICY: {TEMPORAL_POLICY_VERSION}",
-        f"REVISION_ID: {revision.revision_id}",
-        f"PREDECESSOR_REVISION_ID: {predecessor}",
         "SCHEMA:",
         schema_text,
         "SEGMENTS:",

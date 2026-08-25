@@ -28,6 +28,8 @@ from newsroom.graphiti_adapter.combined_temporal_extraction import (
     _leaf,
     _leaf_from_completed,
     _proposal_receipt,
+    _retain_artifact,
+    _retain_request_identity,
     _validate_and_expand,
 )
 from newsroom.graphiti_adapter.combined_temporal_pipeline import (
@@ -51,6 +53,7 @@ from newsroom.graphiti_adapter.deterministic_summary import (
     AdmittedSummaryAssertion,
     build_deterministic_summary,
 )
+from newsroom.graphiti_adapter.donor_store import DonorStore
 from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_VERSION
 from newsroom.graphiti_adapter.local_entity_resolution import (
     CanonicalEntityCandidate,
@@ -301,6 +304,7 @@ async def extract_combined_temporal_async(
     sidecar_input: DeterministicSidecarInput | None = None,
     admitted_summary_assertions: tuple[AdmittedSummaryAssertion, ...] = (),
     attempt_prepared: bool = False,
+    donor_store: DonorStore | None = None,
 ) -> CombinedTemporalLeaf:
     """Run one combined-temporal leaf without crossing event loops."""
 
@@ -315,9 +319,16 @@ async def extract_combined_temporal_async(
             prompt_digest=prompt_digest,
             completed=completed,
         )
+    request_identity = _retain_request_identity(
+        donor_store=donor_store,
+        revision=revision,
+        prompt=prompt,
+    )
     receipt: dict[str, object] = {
         "prompt_digest": prompt_digest,
         "ingest_id": revision.ingest_id,
+        "source_revision_id": revision.revision_id,
+        "predecessor_revision_id": revision.predecessor_revision_id,
         "temporal_basis": revision.temporal_basis,
         "configuration_digest": configuration_digest(),
         "temporal_policy_digest": digest_canonical(TEMPORAL_POLICY_VERSION),
@@ -325,6 +336,8 @@ async def extract_combined_temporal_async(
         "chat_receipts_include_transport": True,
         "transport_calls": [],
     }
+    if request_identity is not None:
+        receipt["request_identity_digest"] = request_identity.identity_digest
     try:
         result = await transport.generate_response(
             prompt=prompt.text,
@@ -469,14 +482,23 @@ async def extract_combined_temporal_async(
         raise
     if pipeline_result.completed_receipt is not None:
         receipt = dict(pipeline_result.completed_receipt)
+    outcome = (
+        CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+        if not normalised["facts"]
+        else CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    )
+    _retain_artifact(
+        donor_store=donor_store,
+        request_identity=request_identity,
+        payload=normalised,
+        prompt=prompt,
+        receipt=receipt,
+        outcome=outcome,
+    )
     return _leaf(
         prompt,
         receipt,
-        outcome=(
-            CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
-            if not normalised["facts"]
-            else CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
-        ),
+        outcome=outcome,
         payload=normalised,
         payload_digest=digest_canonical(normalised),
         nodes=pipeline_result.nodes,
