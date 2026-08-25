@@ -88,7 +88,7 @@ Companion before CSV:
 | 8 | Exact receipts | `test_controller_allocates_every_primary_and_fallback_leaf_before_dispatch`, `test_graphiti_chat_and_embedding_are_distinct_and_terminal_ingests_are_valid` |
 | 9 | No silent zero | `test_estimate_is_explicit_and_unbounded_missing_usage_opens_only_route`, `test_missing_usage_is_not_inferred_as_zero` |
 | 10 | No parent/child double count | `test_parent_and_child_totals_are_not_double_counted` |
-| 11 | No generic daily cut | `test_more_than_daily_500k_is_alerted_but_not_an_admission_gate`, plus after-CSV and closeout artefact tests |
+| 11 | No generic daily cut | `test_more_than_daily_500k_is_alerted_but_not_an_admission_gate` |
 | 12 | Per-invocation control | `test_policy_preflight_and_post_dispatch_breach_are_route_local` |
 | 13 | Graphiti call shape | `test_checked_call_shape_policy_derives_headroom_from_qualified_fixtures`, `test_atomic_graphiti_allocation_refuses_duplicate_and_call_shape_drift` |
 | 14 | Graphiti valid zero result | `test_true_empty_graphiti_extraction_is_a_valid_zero_proposal_success`, `test_zero_proposal_result_is_terminal_revision_coverage` |
@@ -97,6 +97,8 @@ Companion before CSV:
 
 This closeout does not re-run those sixteen suites. The JSON mapping
 asserts that every listed function name exists under `newsroom/tests/`.
+The after-CSV contract, golden export and closeout-markdown checks live
+in `newsroom/tests/test_token_productivity_closeout.py`.
 
 ## Quantitative pass table
 

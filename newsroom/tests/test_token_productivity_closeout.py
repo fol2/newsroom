@@ -140,7 +140,9 @@ def _issue_732_closeout_fixture(tmp_path: Path) -> tuple[ModelUsageService, dict
         ),
         policy=_policy(
             workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+            provider="cursor-agent-cli",
             route="GRAPHITI_CHAT",
+            model="composer-2.5",
         ),
     )
     _unreported_envelope, _unreported_policy, unreported = _open_and_allocate(
@@ -239,28 +241,13 @@ def _issue_732_closeout_fixture(tmp_path: Path) -> tuple[ModelUsageService, dict
         )
     )
     service.complete(
-        InvocationTerminal.create(
-            invocation_id=invalid.invocation_id,
+        _reported(
+            invalid,
+            total=125,
             outcome="ACCEPTED_OUTPUT",
-            failure_class=None,
-            usage_status=UsageStatus.REPORTED,
-            components=UsageComponents(
-                input_tokens=100,
-                output_tokens=20,
-                cached_read_tokens=5,
-                cached_write_tokens=0,
-                reasoning_tokens=0,
-                context_tokens=100,
-                total_tokens=224,
-                provenance="PROVIDER_REPORTED",
-            ),
-            dispatch_at=T0 + timedelta(seconds=12),
             completed_at=T0 + timedelta(seconds=13),
-            observed_at=T0 + timedelta(seconds=13),
-            provider_telemetry_digest=_digest({"invalid": "closeout"}),
-            raw_telemetry_pointer="private://invalid-closeout",
-            subscription_cli_chat_not_cash_debited=True,
-        )
+        ),
+        provider_telemetry={"different": "content"},
     )
     service.complete(
         InvocationTerminal.create(
