@@ -270,7 +270,11 @@ def test_cli_chain_allocates_each_hidden_leaf_before_provider_runner() -> None:
 
 
 def test_cli_chain_retains_exact_zero_for_missing_executable_before_dispatch() -> None:
-    from newsroom.graphiti_adapter.cli_client import CliExecution, run_cli_chain
+    from newsroom.graphiti_adapter.cli_client import (
+        CliExecution,
+        CliResponseError,
+        run_cli_chain,
+    )
 
     completions: list[tuple[str, str, dict[str, object]]] = []
 
@@ -299,20 +303,28 @@ def test_cli_chain_retains_exact_zero_for_missing_executable_before_dispatch() -
         del max_tokens, dispatch_started
         raise FileNotFoundError("cursor-agent")
 
-    result = asyncio.run(
-        run_cli_chain(
-            prompt="prompt",
-            schema=None,
-            cursor_runner=cursor,
-            grok_runner=lambda _prompt, _schema, *, max_tokens: CliExecution(
-                text='{"value":"fallback"}', usage=_reported_usage()
-            ),
-            invocations=[],
-            invocation_observer=Observer(),
-        )
-    )
+    grok_called = False
 
-    assert result == {"value": "fallback"}
+    def grok(
+        _prompt: str, _schema: str | None, *, max_tokens: int
+    ) -> CliExecution:
+        nonlocal grok_called
+        grok_called = True
+        return CliExecution(text='{"value":"fallback"}', usage=_reported_usage())
+
+    with pytest.raises(CliResponseError, match="ineligible for fallback"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="prompt",
+                schema=None,
+                cursor_runner=cursor,
+                grok_runner=grok,
+                invocations=[],
+                invocation_observer=Observer(),
+            )
+        )
+
+    assert grok_called is False
     assert completions[0] == (
         "cursor-agent-cli",
         "EXECUTABLE_NOT_FOUND",

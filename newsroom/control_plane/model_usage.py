@@ -2547,6 +2547,89 @@ class ModelUsageService:
         finally:
             connection.close()
 
+    def open_route_circuit(
+        self,
+        *,
+        route: str,
+        reason: str,
+        invocation_id: str | None,
+        recorded_at: datetime,
+    ) -> None:
+        """Open one affected Graphiti route after a typed systemic outcome."""
+
+        if not route.startswith("GRAPHITI_"):
+            raise ModelUsageAdmissionError(
+                "Graphiti route circuit operation targeted another workload"
+            )
+        connection = self._connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._append_route_state(
+                connection,
+                route=route,
+                state="OPEN",
+                reason=_token(reason, field="route circuit reason"),
+                invocation_id=invocation_id,
+                recorded_at=recorded_at,
+            )
+            connection.commit()
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def release_route_circuit(
+        self,
+        *,
+        route: str,
+        release_kind: str,
+        bound_failure_reason: str,
+        evidence_digest: str,
+        recorded_at: datetime,
+    ) -> None:
+        """Release a Graphiti route using the checked #729 evidence vocabulary."""
+
+        if release_kind not in {
+            "DETERMINISTIC_HEALTH_PROBE",
+            "AUTHORISED_OPERATOR_RESET",
+        }:
+            raise ModelUsageAdmissionError("Graphiti circuit release kind is invalid")
+        if not route.startswith("GRAPHITI_"):
+            raise ModelUsageAdmissionError(
+                "Graphiti route circuit operation targeted another workload"
+            )
+        connection = self._connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            state = self._route_state(connection, route)
+            if state["state"] != "OPEN":
+                raise ModelUsageAdmissionError("Graphiti route circuit is not open")
+            if state["reason"] != bound_failure_reason:
+                raise ModelUsageAdmissionError(
+                    "Graphiti circuit release is not bound to the current failure"
+                )
+            if _canonical_circuit_route(route) in _usage_blocking_routes(connection):
+                raise ModelUsageAdmissionError(
+                    "Graphiti circuit has unresolved usage or a policy breach"
+                )
+            self._append_route_state(
+                connection,
+                route=route,
+                state="CLOSED",
+                reason=f"{release_kind}:{_token(evidence_digest, field='evidence digest')}",
+                invocation_id=None,
+                recorded_at=recorded_at,
+            )
+            connection.commit()
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def _route_state(
         self, connection: sqlite3.Connection, route: str
     ) -> dict[str, object]:

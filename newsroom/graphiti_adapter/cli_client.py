@@ -13,6 +13,10 @@ from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
 from newsroom.control_plane.child_environment import unprivileged_child_environment
+from newsroom.control_plane.graphiti_fallback_policy import (
+    FallbackEligibility,
+    classify_graphiti_fallback,
+)
 from newsroom.graphiti_adapter.evaluation_packet import (
     CURSOR_AGENT_MODEL_ID,
     GROK_CHAT_MODEL_ID,
@@ -161,7 +165,7 @@ def run_cli(
             env=dict(environment or unprivileged_child_environment()),
         )
     except subprocess.TimeoutExpired:
-        raise RuntimeError(f"{name} Graphiti LLM timed out") from None
+        raise TimeoutError(f"{name} Graphiti LLM timed out") from None
     if result.returncode != 0:
         raise RuntimeError(f"{name} Graphiti LLM failed")
     text = _decode_stdout(result.stdout, name=name)
@@ -201,7 +205,7 @@ async def run_cli_async(
     except TimeoutError:
         process.kill()
         await process.wait()
-        raise RuntimeError(f"{name} Graphiti LLM timed out") from None
+        raise TimeoutError(f"{name} Graphiti LLM timed out") from None
     except asyncio.CancelledError:
         process.kill()
         await process.wait()
@@ -819,6 +823,26 @@ async def run_cli_chain(
             )
         )
         raise
+    except (TimeoutError, subprocess.TimeoutExpired) as exc:
+        cursor_usage = (
+            unreported_cli_usage()
+            if cursor_transport_started
+            else no_provider_call_cli_usage()
+        )
+        binding = observe(cursor_token, outcome="TIMEOUT", usage=cursor_usage)
+        invocations.append(
+            _invocation(
+                provider="cursor-agent-cli",
+                model=CURSOR_AGENT_MODEL_ID,
+                outcome="TIMEOUT",
+                execution=CliExecution(text="", usage=cursor_usage),
+                failure=type(exc).__name__,
+                requested_max_tokens=max_tokens,
+                receipt_binding=binding,
+            )
+        )
+        cursor_outcome = "TIMEOUT"
+        payload = None
     except (FileNotFoundError, CliPredispatchRefusal) as exc:
         cursor_usage = (
             unreported_cli_usage()
@@ -844,6 +868,7 @@ async def run_cli_chain(
                 receipt_binding=binding,
             )
         )
+        cursor_outcome = refusal_outcome
         payload = None
     except (RuntimeError, OSError) as exc:
         cursor_usage = (
@@ -863,6 +888,7 @@ async def run_cli_chain(
                 receipt_binding=binding,
             )
         )
+        cursor_outcome = "FAILED"
         payload = None
     else:
         cursor_execution = _execution(cast(CliOutput, raw))
@@ -898,6 +924,13 @@ async def run_cli_chain(
             )
     if payload is not None:
         return payload
+    if (
+        classify_graphiti_fallback(cursor_outcome).eligibility
+        is not FallbackEligibility.ELIGIBLE
+    ):
+        raise CliResponseError(
+            f"Cursor Graphiti outcome {cursor_outcome} is ineligible for fallback"
+        )
 
     grok_token = (
         None

@@ -1,0 +1,45 @@
+{
+  "schema_version": "newsroom.graphiti-fallback-circuit-policy.v1",
+  "canonical_digest": "sha256:896cfb0c56fcd65166eaec65a3bce3c6570fa76a296772a9f16833fa1054765f",
+  "policy_id": "newsroom.graphiti-fallback-circuit-policy",
+  "version": "issue-771-v1",
+  "call_shape_policy_digest": "sha256:cc16866de98ea0034a780a85a867a360c20f73c533582cdb23344d9d8941e465",
+  "eligible_outcomes": [
+    "MALFORMED_OUTPUT"
+  ],
+  "no_fallback_needed_outcomes": [
+    "COMPLETE"
+  ],
+  "outcome_classes": {
+    "MALFORMED_OUTPUT": "MALFORMED_OUTPUT",
+    "COMPLETE": "COMPLETE",
+    "EXECUTABLE_NOT_FOUND": "EXECUTABLE",
+    "PREDISPATCH_REFUSED": "CONFIGURATION",
+    "FAILED": "SYSTEMIC_TRANSPORT",
+    "TIMEOUT": "TIMEOUT",
+    "CANCELLED": "CANCELLATION",
+    "DISPATCH_FENCE_REFUSED": "DISPATCH_FENCE",
+    "OUTPUT_LIMIT_EXCEEDED": "CONTEXT_OUTPUT_BREACH",
+    "AUTHENTICATION_FAILED": "AUTHENTICATION",
+    "AUTHENTICATION_FAILURE": "AUTHENTICATION",
+    "CONFIGURATION_FAILURE": "CONFIGURATION",
+    "QUOTA_EXCEEDED": "QUOTA",
+    "QUOTA_FAILURE": "QUOTA",
+    "PROVIDER_QUOTA_FAILURE": "QUOTA",
+    "SYSTEMIC_PROVIDER_FAILURE": "SYSTEMIC_TRANSPORT",
+    "TRANSPORT_FAILURE": "SYSTEMIC_TRANSPORT",
+    "CANCELLATION": "CANCELLATION"
+  },
+  "circuit_open_classes": [
+    "SYSTEMIC_TRANSPORT",
+    "TIMEOUT",
+    "CONTEXT_OUTPUT_BREACH",
+    "AUTHENTICATION",
+    "QUOTA"
+  ],
+  "max_fallback_leaves_per_primary": 1,
+  "circuit_release_preference": [
+    "DETERMINISTIC_HEALTH_PROBE",
+    "AUTHORISED_OPERATOR_RESET"
+  ]
+}
