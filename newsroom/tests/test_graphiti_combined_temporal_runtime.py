@@ -28,6 +28,7 @@ from newsroom.graphiti_adapter.combined_temporal_runtime import (
     CliCombinedTemporalTransport,
     extract_combined_temporal_async,
     resolve_nodes_locally,
+    resolve_nodes_with_optional_embeddings,
 )
 from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_CORE_RELEASE
 from newsroom.graphiti_adapter.neo4j_guard import GuardState
@@ -439,17 +440,56 @@ def test_common_entity_mentions_resolve_locally_without_chat_leaf(
         },
     )
 
+    original_canonical = dict(canonical.attributes)
+
     resolved, uuid_map, provider_calls = resolve_nodes_locally(
         [mention],
         (canonical,),
         source_id="source:legco",
     )
 
-    assert resolved == [canonical]
+    assert resolved == [mention]
     assert uuid_map == {"mention:1": "canonical:edb"}
-    assert canonical.attributes["resolution"] == "DETERMINISTIC_EXISTING_NODE"
-    assert canonical.attributes["resolution_basis"] == expected_basis
+    assert mention.attributes["resolution"] == "DETERMINISTIC_EXISTING_NODE"
+    assert mention.attributes["resolution_basis"] == expected_basis
+    assert mention.attributes["canonical_identity"] == "canonical:edb"
+    assert canonical.attributes == original_canonical
     assert provider_calls == []
+
+
+def test_exact_name_resolution_does_not_call_the_embedder() -> None:
+    mention = SimpleNamespace(
+        uuid="mention:1",
+        name="Education Bureau",
+        attributes={"entity_type_id": 2},
+    )
+    canonical = SimpleNamespace(
+        uuid="canonical:edb",
+        name="Education Bureau",
+        name_embedding=[1.0, 0.0],
+        attributes={
+            "entity_type_id": 2,
+            "permitted_source_ids": ("source:legco",),
+        },
+    )
+    embed_calls: list[str] = []
+
+    async def embed_name(name: str) -> list[float]:
+        embed_calls.append(name)
+        return [1.0, 0.0]
+
+    resolved, uuid_map, _provider = asyncio.run(
+        resolve_nodes_with_optional_embeddings(
+            [mention],
+            (canonical,),
+            source_id="source:legco",
+            embed_name=embed_name,
+        )
+    )
+
+    assert embed_calls == []
+    assert uuid_map == {"mention:1": "canonical:edb"}
+    assert resolved[0].attributes["resolution"] == "DETERMINISTIC_EXISTING_NODE"
 
 
 def test_similar_distinct_and_low_margin_mentions_are_not_forced_to_merge() -> None:
