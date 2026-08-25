@@ -2885,7 +2885,9 @@ class ModelUsageService:
                     "SELECT cycle_id,outcome_class,terminal_at,"
                     "writer_unproductive_streak_before,"
                     "writer_unproductive_streak_after,writer_circuit_state,"
-                    "writer_circuit_open_reason FROM unpublished_governed_cycles "
+                    "writer_circuit_open_reason,cooldown_seconds,"
+                    "cooldown_policy_version,next_cycle_eligible_at "
+                    "FROM unpublished_governed_cycles "
                     "WHERE lease_state IN ('TERMINAL','RECOVERED') "
                     "AND terminal_at>=? AND terminal_at<? "
                     "ORDER BY terminal_at,cycle_id",
@@ -2900,12 +2902,36 @@ class ModelUsageService:
                         "writer_unproductive_streak_after": int(row[4]),
                         "writer_circuit_state": str(row[5]),
                         "writer_circuit_open_reason": str(row[6]),
+                        "cooldown_seconds": (
+                            None if row[7] is None else int(row[7])
+                        ),
+                        "cooldown_policy_version": (
+                            None if row[8] is None else str(row[8])
+                        ),
+                        "next_cycle_eligible_at": (
+                            None if row[9] is None else str(row[9])
+                        ),
                         "authority": "UNPUBLISHED_GOVERNED_CYCLE_TERMINAL",
                     }
             cycle_outcomes = {
                 **projected_cycle_outcomes,
                 **canonical_cycle_outcomes,
             }
+            zero_call_admissions = [
+                {
+                    "decision_id": str(row[0]),
+                    "decision": str(row[1]),
+                    "cycle_id": str(row[2]),
+                    "recorded_at": str(row[3]),
+                }
+                for row in connection.execute(
+                    "SELECT decision_id,decision,cycle_id,recorded_at "
+                    "FROM model_zero_call_admissions "
+                    "WHERE recorded_at>=? AND recorded_at<? "
+                    "ORDER BY recorded_at,decision_id",
+                    (_utc_text(start), _utc_text(end)),
+                )
+            ]
         finally:
             connection.close()
         outcomes: dict[str, dict[str, object]] = {}
@@ -3096,6 +3122,7 @@ class ModelUsageService:
                     key=lambda item: (str(cycle_outcomes[item]["terminal_at"]), item),
                 )
             ],
+            "zero_call_admissions": zero_call_admissions,
         }
 
     def report(
@@ -3810,8 +3837,10 @@ class ModelUsageService:
         data = self.query(start=start, end=end)
         leaves = data["leaves"]
         cycles = data["cycle_outcomes"]
+        admissions = data["zero_call_admissions"]
         assert isinstance(leaves, list)
         assert isinstance(cycles, list)
+        assert isinstance(admissions, list)
         fields = (
             "bucket_start_utc",
             "bucket_end_utc",
@@ -3836,6 +3865,21 @@ class ModelUsageService:
             "unresolved_invocations",
             "productive_tokens",
             "no_result_tokens",
+            "unreported_invocations",
+            "ambiguous_invocations",
+            "invalid_invocations",
+            "admission_only_hold",
+            "admission_only_reject",
+            "idle_qualified_zero_cycles",
+            "productive_cycles",
+            "unproductive_provider_cycles",
+            "systemic_provider_failure_cycles",
+            "cont_reported_tokens",
+            "graphiti_reported_tokens",
+            "cycle_ids",
+            "cycle_outcome_classes",
+            "cooldown_seconds_values",
+            "next_cycle_eligible_at_values",
         )
         output = io.StringIO(newline="")
         writer = csv.DictWriter(output, fieldnames=fields, lineterminator="\n")
@@ -3899,6 +3943,12 @@ class ModelUsageService:
                 and row.get("provider_attempt_id")
                 == accepted_row.get("accepted_provider_attempt_id")
             )
+            bucket_cycles = [
+                row for row in cycles if in_bucket(row.get("terminal_at"))
+            ]
+            reported = [
+                row for row in terminal if row.get("usage_status") == "REPORTED"
+            ]
 
             def token_sum(rows: list[dict[str, object]], field: str) -> int:
                 return sum(
@@ -3906,6 +3956,11 @@ class ModelUsageService:
                     for row in rows
                     if _is_int(value := row.get(field))
                     and row.get("usage_status") in {"REPORTED", "ESTIMATED"}
+                )
+
+            def json_column(values: list[object]) -> str:
+                return json.dumps(
+                    values, ensure_ascii=False, separators=(",", ":")
                 )
 
             def productive_as_of_bucket(
@@ -3988,6 +4043,76 @@ class ModelUsageService:
                         for row in accounted
                         if _is_int(row.get("total_tokens"))
                         and not productive_as_of_bucket(row)
+                    ),
+                    "unreported_invocations": sum(
+                        row.get("usage_status") == "UNREPORTED" for row in terminal
+                    ),
+                    "ambiguous_invocations": sum(
+                        row.get("usage_status") == "AMBIGUOUS" for row in terminal
+                    ),
+                    "invalid_invocations": sum(
+                        row.get("usage_status") == "INVALID" for row in terminal
+                    ),
+                    "admission_only_hold": sum(
+                        row.get("decision") == "HOLD"
+                        and in_bucket(row.get("recorded_at"))
+                        for row in admissions
+                    ),
+                    "admission_only_reject": sum(
+                        row.get("decision") == "REJECT"
+                        and in_bucket(row.get("recorded_at"))
+                        for row in admissions
+                    ),
+                    "idle_qualified_zero_cycles": sum(
+                        row.get("outcome_class") == "IDLE_QUALIFIED_ZERO"
+                        for row in bucket_cycles
+                    ),
+                    "productive_cycles": sum(
+                        row.get("outcome_class") == "PRODUCTIVE"
+                        for row in bucket_cycles
+                    ),
+                    "unproductive_provider_cycles": sum(
+                        row.get("outcome_class") == "UNPRODUCTIVE_PROVIDER"
+                        for row in bucket_cycles
+                    ),
+                    "systemic_provider_failure_cycles": sum(
+                        row.get("outcome_class") == "SYSTEMIC_PROVIDER_FAILURE"
+                        for row in bucket_cycles
+                    ),
+                    "cont_reported_tokens": token_sum(
+                        [
+                            row
+                            for row in reported
+                            if str(row.get("workload_class") or "").startswith(
+                                "CONT_"
+                            )
+                        ],
+                        "total_tokens",
+                    ),
+                    "graphiti_reported_tokens": token_sum(
+                        [
+                            row
+                            for row in reported
+                            if str(row.get("workload_class") or "").startswith(
+                                "GRAPHITI_"
+                            )
+                        ],
+                        "total_tokens",
+                    ),
+                    "cycle_ids": json_column(
+                        [row.get("cycle_id") for row in bucket_cycles]
+                    ),
+                    "cycle_outcome_classes": json_column(
+                        [row.get("outcome_class") for row in bucket_cycles]
+                    ),
+                    "cooldown_seconds_values": json_column(
+                        [row.get("cooldown_seconds") for row in bucket_cycles]
+                    ),
+                    "next_cycle_eligible_at_values": json_column(
+                        [
+                            row.get("next_cycle_eligible_at")
+                            for row in bucket_cycles
+                        ]
                     ),
                 }
             )

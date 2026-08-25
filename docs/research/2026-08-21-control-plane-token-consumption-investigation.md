@@ -10,7 +10,8 @@ Graphiti route. No public dispatch or production effect was exercised.
 **Companion data:**
 [`2026-08-21-control-plane-token-consumption-300s.csv`](2026-08-21-control-plane-token-consumption-300s.csv)
 contains one row per 300-second UTC bucket from 2026-08-20T00:55:00Z through
-2026-08-21T09:20:00Z.
+2026-08-21T09:20:00Z. The exact-main closeout is
+[`2026-08-21-control-plane-token-productivity-closeout.md`](2026-08-21-control-plane-token-productivity-closeout.md).
 
 ## Executive finding
 
