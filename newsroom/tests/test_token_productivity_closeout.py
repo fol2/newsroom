@@ -38,13 +38,26 @@ from newsroom.tests.test_model_usage_receipts import (
     _reported,
     _service,
 )
+from newsroom.control_plane.writer import (
+    CONT_FALLBACK_MODEL,
+    CONT_FALLBACK_PROVIDER,
+    CONT_FALLBACK_REASONING,
+    CONT_FALLBACK_ROUTE,
+    CONT_PRIMARY_MODEL,
+    CONT_PRIMARY_PROVIDER,
+    CONT_PRIMARY_REASONING,
+    CONT_PRIMARY_ROUTE,
+    CliChainWriter,
+    WriterCliExecution,
+)
 from newsroom.tests.test_zero_quota_write_loop import (
     _CLOCK,
     _WRITER_REVISION,
     _proving,
     _qualified_builder,
+    _register_cont_usage_policy,
+    _valid_cli_json,
     CountingWriter,
-    RecordingFixtureWriter,
 )
 
 CLOSEOUT_START = T0
@@ -111,8 +124,8 @@ def _exact_writer_head(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _cycle_id(suffix: int) -> str:
-    return f"00000000-0000-4000-8000-{suffix:012d}"
+PRODUCTIVE_CYCLE_ID = "00000000-0000-4000-8000-000000000201"
+IDLE_CYCLE_ID = "00000000-0000-4000-8000-000000000202"
 
 
 def _issue_732_closeout_fixture(tmp_path: Path) -> tuple[ModelUsageService, dict[str, str]]:
@@ -124,16 +137,16 @@ def _issue_732_closeout_fixture(tmp_path: Path) -> tuple[ModelUsageService, dict
 
     accepted_envelope, _accepted_policy, accepted = _open_and_allocate(
         service,
-        envelope=_envelope(cycle_id=_cycle_id(101), candidate_id="accepted-cont"),
+        envelope=_envelope(cycle_id=PRODUCTIVE_CYCLE_ID, candidate_id="accepted-cont"),
     )
     no_result_envelope, _no_result_policy, no_result = _open_and_allocate(
         service,
-        envelope=_envelope(cycle_id=_cycle_id(102), candidate_id="no-result-cont"),
+        envelope=_envelope(cycle_id=PRODUCTIVE_CYCLE_ID, candidate_id="no-result-cont"),
     )
     graphiti_envelope, _graphiti_policy, graphiti = _open_and_allocate(
         service,
         envelope=_envelope(
-            cycle_id=_cycle_id(103),
+            cycle_id=PRODUCTIVE_CYCLE_ID,
             workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
             candidate_id=None,
             ingest_id="ingest-closeout",
@@ -147,19 +160,19 @@ def _issue_732_closeout_fixture(tmp_path: Path) -> tuple[ModelUsageService, dict
     )
     _unreported_envelope, _unreported_policy, unreported = _open_and_allocate(
         service,
-        envelope=_envelope(cycle_id=_cycle_id(104), candidate_id="unreported-cont"),
+        envelope=_envelope(cycle_id=PRODUCTIVE_CYCLE_ID, candidate_id="unreported-cont"),
     )
     _ambiguous_envelope, _ambiguous_policy, ambiguous = _open_and_allocate(
         service,
-        envelope=_envelope(cycle_id=_cycle_id(105), candidate_id="ambiguous-cont"),
+        envelope=_envelope(cycle_id=PRODUCTIVE_CYCLE_ID, candidate_id="ambiguous-cont"),
     )
     _invalid_envelope, _invalid_policy, invalid = _open_and_allocate(
         service,
-        envelope=_envelope(cycle_id=_cycle_id(106), candidate_id="invalid-cont"),
+        envelope=_envelope(cycle_id=PRODUCTIVE_CYCLE_ID, candidate_id="invalid-cont"),
     )
     _estimated_envelope, estimated_policy, estimated = _open_and_allocate(
         service,
-        envelope=_envelope(cycle_id=_cycle_id(107), candidate_id="estimated-cont"),
+        envelope=_envelope(cycle_id=PRODUCTIVE_CYCLE_ID, candidate_id="estimated-cont"),
     )
 
     service.link_provider_attempt(
@@ -270,27 +283,27 @@ def _issue_732_closeout_fixture(tmp_path: Path) -> tuple[ModelUsageService, dict
     service.retain_zero_call_admission(
         decision_id="closeout-hold-1",
         decision="HOLD",
-        cycle_id=_cycle_id(108),
+        cycle_id=PRODUCTIVE_CYCLE_ID,
         recorded_at=T0 + timedelta(seconds=20),
     )
     service.retain_zero_call_admission(
         decision_id="closeout-hold-2",
         decision="HOLD",
-        cycle_id=_cycle_id(108),
+        cycle_id=PRODUCTIVE_CYCLE_ID,
         recorded_at=T0 + timedelta(seconds=21),
     )
     service.retain_zero_call_admission(
         decision_id="closeout-reject-1",
         decision="REJECT",
-        cycle_id=_cycle_id(108),
+        cycle_id=IDLE_CYCLE_ID,
         recorded_at=T0 + timedelta(minutes=10, seconds=1),
     )
 
     clocks = InjectedClocks(T0)
     governor = _governor(path, clocks)
     cycle_uuids = (
-        UUID("00000000-0000-4000-8000-000000000201"),
-        UUID("00000000-0000-4000-8000-000000000202"),
+        UUID(PRODUCTIVE_CYCLE_ID),
+        UUID(IDLE_CYCLE_ID),
     )
     with patch(
         "newsroom.control_plane.cycle_governor.uuid.uuid4",
@@ -428,6 +441,9 @@ def test_after_csv_distinguishes_usage_workload_admission_and_cycle_identities(
     )
 
     queried = service.query(start=CLOSEOUT_START, end=CLOSEOUT_END)
+    assert {str(row["cycle_id"]) for row in queried["leaves"]} == {
+        identities["productive_cycle_id"]
+    }
     cycles = {str(row["cycle_id"]): row for row in queried["cycle_outcomes"]}
     productive = cycles[identities["productive_cycle_id"]]
     idle = cycles[identities["idle_cycle_id"]]
@@ -480,22 +496,61 @@ def test_two_write_ready_run_cycle_attempts_two_not_three_with_usage_join(
     tmp_path: Path,
 ) -> None:
     unpublished = tmp_path / "unpublished.sqlite3"
-    writer = RecordingFixtureWriter()
+    usage = ModelUsageService(str(unpublished))
+    _register_cont_usage_policy(
+        usage,
+        workload_class=WorkloadClass.CONT_WRITER_PRIMARY,
+        provider=CONT_PRIMARY_PROVIDER,
+        route=CONT_PRIMARY_ROUTE,
+        model=CONT_PRIMARY_MODEL,
+        reasoning=CONT_PRIMARY_REASONING,
+    )
+    _register_cont_usage_policy(
+        usage,
+        workload_class=WorkloadClass.CONT_WRITER_FALLBACK,
+        provider=CONT_FALLBACK_PROVIDER,
+        route=CONT_FALLBACK_ROUTE,
+        model=CONT_FALLBACK_MODEL,
+        reasoning=CONT_FALLBACK_REASONING,
+    )
+    calls: list[str] = []
+
+    def _primary(prompt: str) -> WriterCliExecution:
+        calls.append("primary")
+        return WriterCliExecution(
+            text=_valid_cli_json(prompt),
+            usage={
+                "usage_basis": "PROVIDER_REPORTED",
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cached_read_tokens": 5,
+                "cached_write_tokens": 0,
+                "reasoning_tokens": 0,
+                "context_tokens": 80,
+                "total_tokens": 125,
+            },
+        )
 
     report = run_cycle(
         proving_store=str(_proving(tmp_path)),
         unpublished_store=str(unpublished),
-        writer=writer,
+        writer=CliChainWriter(primary=_primary, fallback=_primary),
         evidence_package_builder=_qualified_builder(frozenset({"HK-01", "UK-01"})),
         max_writes=5,
         clock=_CLOCK,
+        model_usage=usage,
+    )
+    usage_report = usage.report(
+        start=_CLOCK(),
+        end=_CLOCK() + timedelta(minutes=1),
     )
 
     assert report.write_ready == 2
     assert report.candidate_attempts == 2
     assert report.provider_dispatches == 2
-    assert len(writer.calls) == 2
-    assert report.candidate_attempts != 3
+    assert calls == ["primary", "primary"]
+    assert usage_report["leaf_dispatch_count"] == 2
+    assert usage_report["leaf_dispatch_count"] != 3
 
 
 def test_governed_cli_cycle_identities_are_visible_on_export_bucket_csv(
@@ -603,6 +658,7 @@ def test_closeout_markdown_retains_baseline_as_grok_writer_lower_bound() -> None
     assert "grok" in lowered
     assert "writer" in lowered
     assert "not a whole-system total" in lowered
+    assert "not closed on this atom" in lowered
     assert "Measure" in body
     assert "Historical behaviour" in body
     assert "Required exact-head outcome" in body
