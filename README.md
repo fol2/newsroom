@@ -40,7 +40,7 @@ Start with these records:
 - [Neo4j B3 rebuild and promotion guide](docs/operations/neo4j-b3-rebuild-promotion.md)
 - [SDLC v2 specification](docs/specs/sdlc/high-performance-evidence-sdlc.md)
 - [SDLC v2 owner acceptance record](docs/specs/sdlc/2026-07-22-sdlc-v2-owner-acceptance.md)
-- [Machine gate contract](.sdlc/gates.toml)
+- [Repository automation contract](.sdlc/gates.toml)
 - [Architecture](ARCHITECTURE.md)
 - [Agent guide](AGENTS.md)
 - [Contributing](CONTRIBUTING.md)
@@ -61,18 +61,16 @@ uv sync --dev --locked
 
 ## Testing and evidence
 
-Run the locked deterministic suite:
+For local iteration, run the smallest relevant files or node IDs:
 
 ```bash
-uv lock --check
-uv sync --dev --locked
-uv run --no-sync python -m pytest -q newsroom/tests
+uv run --no-sync python -m pytest -q \
+  newsroom/tests/test_RELEVANT.py
 ```
 
-Changes to authority, persistence, Neo4j integration, workflows, or SDLC
-contracts are routed through the repository-owned risk classifier and may
-require the authenticated actual-service lane. See `.sdlc/gates.toml` rather
-than weakening or bypassing the selected evidence.
+Agent validation follows [`AGENTS.md`](AGENTS.md) and
+[`docs/testing.md`](docs/testing.md). Repository automation reports separately;
+agent handover and merge eligibility are distinct decisions.
 
 ## Key areas
 
