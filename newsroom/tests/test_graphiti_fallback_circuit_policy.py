@@ -96,7 +96,7 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
     policy = load_checked_graphiti_fallback_circuit_policy()
     call_shape = load_checked_graphiti_call_shape_policy()
 
-    assert policy.version == "issue-790-v2"
+    assert policy.version == "issue-790-v3"
     assert policy.call_shape_policy_digest == call_shape.canonical_digest
     assert policy.eligible_outcomes == ("MALFORMED_OUTPUT",)
     assert policy.max_fallback_leaves_per_primary == 1
@@ -121,6 +121,15 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
     )
     assert (
         f"CONTROLLER_STDOUT_CONTRACT={cursor_transport.CURSOR_STDOUT_LIMIT_IDENTITY}"
+        in primary.command_flags
+    )
+    assert (
+        f"AUTHENTICATION_BRIDGE={cursor_transport.CURSOR_AUTHENTICATION_BRIDGE}"
+        in primary.command_flags
+    )
+    assert (
+        "AUTHENTICATION_STATUS_PREFLIGHT="
+        f"{cursor_transport.CURSOR_AUTHENTICATION_STATUS}"
         in primary.command_flags
     )
     assert (

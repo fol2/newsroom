@@ -1,8 +1,8 @@
 {
   "schema_version": "newsroom.graphiti-call-shape-policy.v1",
-  "canonical_digest": "sha256:9d4040ebd140720d6290b47a09f9ccbdbf79b1d88e1455810fcaaec312e39e16",
+  "canonical_digest": "sha256:7d942fce0c95f1405c44ac709b9657e45c98072a0911d00259e5a84768e35190",
   "policy_id": "graphiti-core-0.29.3-newsroom-adapter-v1",
-  "version": "issue-790-v2",
+  "version": "issue-790-v3",
   "graphiti_core_release": "graphiti-core-0.29.3",
   "framework_identity": "graphiti-core-0.29.3",
   "prompt_identity": "newsroom.graphiti.proposal-only-prompt:v1",
@@ -16,8 +16,8 @@
       "route": "GRAPHITI_CHAT_PRIMARY",
       "model": "composer-2.5",
       "reasoning": "provider-default",
-      "config_identity": "cursor-agent-cli-2026.08.11-e8db854-pinned-package-v2",
-      "command_semantic_version": "newsroom.graphiti-provider-dispatch.v3",
+      "config_identity": "cursor-agent-cli-2026.08.11-e8db854-pinned-package-v3",
+      "command_semantic_version": "newsroom.graphiti-provider-dispatch.v4",
       "command_flags": [
         "binary=/Users/jamesto/.local/bin/cursor-agent",
         "resolved-binary=/Users/jamesto/.local/share/cursor-agent/versions/2026.08.11-e8db854/cursor-agent",
@@ -37,7 +37,12 @@
         "--trust",
         "--model=composer-2.5",
         "--workspace=HERMETIC_EMPTY",
-        "HOME_XDG=HERMETIC_EMPTY",
+        "HOME_XDG=HERMETIC_EMPTY_EXCEPT_FIXED_LOGIN_KEYCHAIN",
+        "CURSOR_CONFIGURATION=HERMETIC_EMPTY",
+        "AUTHENTICATION_BRIDGE=MACOS_LOGIN_KEYCHAIN_FILE_SYMLINK_V1",
+        "AUTHENTICATION_BRIDGE_DIGEST=sha256:5bfe59adbf441621ae4c410ddb58e9991cfa7d11961ddd6c280e3e31dc463711",
+        "AUTHENTICATION_STATUS_PREFLIGHT=AUTHENTICATED_ACCESS_REFRESH",
+        "AUTHENTICATION_STATUS_DIGEST=sha256:36ddcd68e46478d8ed4ce2d13a26856cb10693496c2bf0cba0e243d17440fd3e",
         "PROMPT_MAX_OUTPUT_TOKENS=REQUEST_MAX_TOKENS",
         "CONTROLLER_STDOUT_CONTRACT=cursor-controller-stdout-v1:65536+64*REQUEST_MAX_TOKENS"
       ],
@@ -51,7 +56,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:a9b5bf59942d9ec79261739dc8295c07ddf57fb7789b4f126b29434d18192f00",
+      "implementation_revision": "sha256:5aaa3277dbbaa7afea8341bcd60e98f653abb1962986b352be2d7186847befb4",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -90,7 +95,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:a9b5bf59942d9ec79261739dc8295c07ddf57fb7789b4f126b29434d18192f00",
+      "implementation_revision": "sha256:5aaa3277dbbaa7afea8341bcd60e98f653abb1962986b352be2d7186847befb4",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -363,7 +368,7 @@
       "distinct_internal_request_count": 3
     }
   ],
-  "evidence_digest": "sha256:ec05840e26d0f7e21f5f6e9887b47b6a083c5310aca71372b720d658a7879850",
+  "evidence_digest": "sha256:c577b4070b08d08c0df3a48ec26854ad9a38d548811c69b64f4f2a928ad92751",
   "maximum_qualified_fixture_count": 4,
   "headroom": 2,
   "max_distinct_internal_requests": 6
