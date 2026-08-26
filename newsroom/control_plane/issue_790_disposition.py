@@ -2209,6 +2209,8 @@ def _issue_790_controller_timeout_report(
                 and invocation.get("provider") == "cursor-agent-cli"
                 and invocation.get("transport_diagnostic") is not None
             )
+        if not raw_diagnostics:
+            continue
         try:
             diagnostics = validated_timeout_diagnostics(raw_diagnostics)
         except ValueError as exc:
