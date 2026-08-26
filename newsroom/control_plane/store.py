@@ -29,7 +29,7 @@ from newsroom.graphiti_adapter.embedding_meter import (
     is_exact_provider_reported_usage,
 )
 
-SCHEMA_VERSION = "newsroom.control-plane.unpublished.v12"
+SCHEMA_VERSION = "newsroom.control-plane.unpublished.v13"
 EFFECTIVE_REVISION_LANDED = "EFFECTIVE_REVISION_LANDED"
 LEDGER_GENESIS = "sha256:" + ("0" * 64)
 GRAPHITI_MAX_FAILURES = 3
@@ -80,6 +80,39 @@ def _bind_batches(values: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
         values[offset : offset + _SQLITE_BIND_BATCH_SIZE]
         for offset in range(0, len(values), _SQLITE_BIND_BATCH_SIZE)
     )
+
+
+_GRAPHITI_REVISION_EVENTS_SQL = """
+CREATE TABLE IF NOT EXISTS unpublished_graphiti_revision_events(
+    event_id TEXT PRIMARY KEY,
+    ledger_seq INTEGER NOT NULL UNIQUE,
+    ledger_digest TEXT NOT NULL UNIQUE,
+    source_id TEXT NOT NULL,
+    item_key TEXT NOT NULL,
+    revision_digest TEXT NOT NULL,
+    published_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT '',
+    landed_at TEXT NOT NULL,
+    manifest_json TEXT NOT NULL,
+    manifest_digest TEXT NOT NULL,
+    unit_count INTEGER NOT NULL,
+    projector_version TEXT NOT NULL,
+    projection_generation TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN (
+        'QUEUED','CLAIMED','RUNNING','RETRY_HELD','RIGHTS_HELD',
+        'CONFIGURATION_HELD','DEAD_LETTER','TERMINAL'
+    )),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    available_at TEXT NOT NULL,
+    claim_owner TEXT,
+    claim_expires_at TEXT,
+    last_failure_code TEXT,
+    provider_dispatched INTEGER NOT NULL DEFAULT 0 CHECK(provider_dispatched IN (0,1)),
+    terminal_at TEXT,
+    proposal_count INTEGER,
+    UNIQUE(source_id,item_key,revision_digest,published_at,updated_at)
+) WITHOUT ROWID
+"""
 
 
 _PAYLOAD_SQL = """
@@ -361,35 +394,6 @@ CREATE TABLE IF NOT EXISTS unpublished_graphiti_spend(
     at TEXT NOT NULL,
     UNIQUE(ingest_id, attempt_number)
 );
-CREATE TABLE IF NOT EXISTS unpublished_graphiti_revision_events(
-    event_id TEXT PRIMARY KEY,
-    ledger_seq INTEGER NOT NULL UNIQUE,
-    ledger_digest TEXT NOT NULL UNIQUE,
-    source_id TEXT NOT NULL,
-    item_key TEXT NOT NULL,
-    revision_digest TEXT NOT NULL,
-    published_at TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT '',
-    landed_at TEXT NOT NULL,
-    manifest_json TEXT NOT NULL,
-    manifest_digest TEXT NOT NULL,
-    unit_count INTEGER NOT NULL,
-    projector_version TEXT NOT NULL,
-    projection_generation TEXT NOT NULL,
-    state TEXT NOT NULL CHECK(state IN (
-        'QUEUED','CLAIMED','RUNNING','RETRY_HELD','RIGHTS_HELD',
-        'DEAD_LETTER','TERMINAL'
-    )),
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    available_at TEXT NOT NULL,
-    claim_owner TEXT,
-    claim_expires_at TEXT,
-    last_failure_code TEXT,
-    provider_dispatched INTEGER NOT NULL DEFAULT 0 CHECK(provider_dispatched IN (0,1)),
-    terminal_at TEXT,
-    proposal_count INTEGER,
-    UNIQUE(source_id,item_key,revision_digest,published_at,updated_at)
-) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_graphiti_revision_events_claim
 ON unpublished_graphiti_revision_events(state,available_at,ledger_seq);
 CREATE TABLE IF NOT EXISTS unpublished_graphiti_event_checkpoint(
@@ -619,10 +623,63 @@ def ensure_reconciliation_schema(
         raise
 
 
+def _ensure_graphiti_event_state_schema(connection: sqlite3.Connection) -> None:
+    """Migrate v12 event rows to the non-retry configuration-hold state set."""
+
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' "
+        "AND name='unpublished_graphiti_revision_events'"
+    ).fetchone()
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='unpublished_graphiti_revision_events_pre_v13'"
+    ).fetchone():
+        raise RuntimeError(
+            "stranded Graphiti event migration requires manual recovery"
+        )
+    if row is None or "CONFIGURATION_HELD" in str(row[0]):
+        return
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        before = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM unpublished_graphiti_revision_events"
+            ).fetchone()[0]
+        )
+        connection.execute(
+            "ALTER TABLE unpublished_graphiti_revision_events "
+            "RENAME TO unpublished_graphiti_revision_events_pre_v13"
+        )
+        connection.execute("DROP INDEX IF EXISTS idx_graphiti_revision_events_claim")
+        connection.execute(_GRAPHITI_REVISION_EVENTS_SQL)
+        connection.execute(
+            "INSERT INTO unpublished_graphiti_revision_events "
+            "SELECT * FROM unpublished_graphiti_revision_events_pre_v13"
+        )
+        after = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM unpublished_graphiti_revision_events"
+            ).fetchone()[0]
+        )
+        if before != after:
+            raise RuntimeError("Graphiti event migration changed retained row count")
+        connection.execute("DROP TABLE unpublished_graphiti_revision_events_pre_v13")
+        connection.execute(
+            "CREATE INDEX idx_graphiti_revision_events_claim ON "
+            "unpublished_graphiti_revision_events(state,available_at,ledger_seq)"
+        )
+        connection.commit()
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+
+
 def connect(path: str) -> sqlite3.Connection:
     assert_private_store(path)
     connection = sqlite3.connect(path)
     apply_control_plane_sqlite_profile(connection)
+    connection.execute(_GRAPHITI_REVISION_EVENTS_SQL)
     connection.executescript(_PAYLOAD_SQL)
     expected_ledger_info = (
         (0, "seq", "INTEGER", 0, None, 1),
@@ -710,6 +767,7 @@ def connect(path: str) -> sqlite3.Connection:
         if connection.in_transaction:
             connection.rollback()
         raise
+    _ensure_graphiti_event_state_schema(connection)
     _ensure_landed_schema(connection)
     ensure_reconciliation_schema(connection)
     columns = {

@@ -1898,6 +1898,31 @@ class ModelUsageService:
         finally:
             connection.close()
 
+    def has_committed_provider_dispatch(self, *, cycle_id: str) -> bool:
+        """Return event dispatch truth from a committed provider-leaf marker."""
+
+        cycle_id = _token(cycle_id, field="cycle id")
+        connection = self._connection()
+        try:
+            row = connection.execute(
+                "SELECT EXISTS("
+                "SELECT 1 FROM model_invocation_allocations AS allocation "
+                "JOIN model_transport_observations AS observation "
+                "ON observation.invocation_id=allocation.invocation_id "
+                "WHERE allocation.cycle_id=? "
+                "AND allocation.workload_class IN (?,?,?) "
+                "AND observation.state='DISPATCH_STARTED')",
+                (
+                    cycle_id,
+                    WorkloadClass.GRAPHITI_CHAT_PRIMARY.value,
+                    WorkloadClass.GRAPHITI_CHAT_FALLBACK.value,
+                    WorkloadClass.GRAPHITI_EMBEDDING.value,
+                ),
+            ).fetchone()
+            return bool(row and row[0])
+        finally:
+            connection.close()
+
     def link_provider_attempt(
         self,
         *,

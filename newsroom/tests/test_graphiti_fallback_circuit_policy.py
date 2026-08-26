@@ -9,8 +9,10 @@ from newsroom.control_plane.graphiti_fallback_policy import (
     load_checked_graphiti_fallback_circuit_policy,
 )
 from newsroom.control_plane.graphiti_requests import (
+    GraphitiLeafClass,
     load_checked_graphiti_call_shape_policy,
 )
+from newsroom.graphiti_adapter import cursor_transport
 
 
 @pytest.mark.parametrize(
@@ -94,7 +96,7 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
     policy = load_checked_graphiti_fallback_circuit_policy()
     call_shape = load_checked_graphiti_call_shape_policy()
 
-    assert policy.version == "issue-771-v1"
+    assert policy.version == "issue-790-v2"
     assert policy.call_shape_policy_digest == call_shape.canonical_digest
     assert policy.eligible_outcomes == ("MALFORMED_OUTPUT",)
     assert policy.max_fallback_leaves_per_primary == 1
@@ -107,3 +109,30 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
         "GRAPHITI_CHAT_FALLBACK",
         "GRAPHITI_EMBEDDING",
     }
+    primary = call_shape.route_for(GraphitiLeafClass.PRIMARY)
+    assert (
+        f"binary={cursor_transport.QUALIFIED_CURSOR_AGENT_BIN}"
+        in primary.command_flags
+    )
+    assert (
+        "resolved-binary="
+        f"{cursor_transport.QUALIFIED_CURSOR_AGENT_RESOLVED_BIN}"
+        in primary.command_flags
+    )
+    assert (
+        f"CONTROLLER_STDOUT_CONTRACT={cursor_transport.CURSOR_STDOUT_LIMIT_IDENTITY}"
+        in primary.command_flags
+    )
+    assert (
+        f"package-digest={cursor_transport.QUALIFIED_CURSOR_AGENT_PACKAGE_DIGEST}"
+        in primary.command_flags
+    )
+    assert (
+        "control-semantics-digest="
+        f"{cursor_transport.QUALIFIED_CURSOR_AGENT_CONTROL_SEMANTICS_DIGEST}"
+        in primary.command_flags
+    )
+    assert (
+        f"hidden-control-proof={cursor_transport.CURSOR_COMMAND_SURFACE_PROOF}"
+        in primary.command_flags
+    )

@@ -142,12 +142,19 @@ _GRAPHITI_HERMETIC_ENVIRONMENT_KEYS = (
 def _graphiti_transport_implementation_revision(
     leaf_class: GraphitiLeafClass,
 ) -> str:
-    source = (
-        _GRAPHITI_ADAPTER_DIRECTORY / "embedding_meter.py"
-        if leaf_class is GraphitiLeafClass.EMBEDDING
-        else _GRAPHITI_ADAPTER_DIRECTORY / "cli_client.py"
+    if leaf_class is GraphitiLeafClass.EMBEDDING:
+        return digest_bytes(
+            (_GRAPHITI_ADAPTER_DIRECTORY / "embedding_meter.py").read_bytes()
+        )
+    sources = (
+        _GRAPHITI_ADAPTER_DIRECTORY / "cli_client.py",
+        _GRAPHITI_ADAPTER_DIRECTORY / "cursor_transport.py",
     )
-    return digest_bytes(source.read_bytes())
+    retained = b"".join(
+        path.name.encode("utf-8") + b"\x00" + path.read_bytes() + b"\x00"
+        for path in sources
+    )
+    return digest_bytes(retained)
 
 
 class GraphitiModelUsageObserver:
@@ -477,11 +484,7 @@ class GraphitiModelUsageObserver:
             max_output_tokens=requested_max_tokens,
             context_manifest_digest=context_manifest_digest,
             context_identity=GRAPHITI_CONTEXT_IDENTITY,
-            config_identity=(
-                "graphiti-embedding-command-v1"
-                if workload is WorkloadClass.GRAPHITI_EMBEDDING
-                else "graphiti-cli-command-v1"
-            ),
+            config_identity=route_contract.config_identity,
             one_turn=True,
             exact_input=True,
             skills_enabled=False,

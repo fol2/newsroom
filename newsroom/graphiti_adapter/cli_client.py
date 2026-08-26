@@ -17,6 +17,17 @@ from newsroom.control_plane.graphiti_fallback_policy import (
     FallbackEligibility,
     classify_graphiti_fallback,
 )
+from newsroom.graphiti_adapter.cursor_transport import (
+    CURSOR_AGENT_BIN,
+    QUALIFIED_CURSOR_AGENT_VERSION,
+    CliOutputBoundExceeded,
+    CliOutputDecodeError,
+    CliPredispatchRefusal,
+    CursorCliQualification,
+    cursor_stdout_limit,
+    run_cursor_transport,
+    run_cursor_transport_async,
+)
 from newsroom.graphiti_adapter.evaluation_packet import (
     CURSOR_AGENT_MODEL_ID,
     GROK_CHAT_MODEL_ID,
@@ -29,9 +40,6 @@ from newsroom.graphiti_adapter.usage_meter import (
     unreported_cli_usage,
 )
 
-CURSOR_AGENT_BIN = os.environ.get(
-    "NEWSROOM_CURSOR_AGENT_BIN", "/Users/jamesto/.local/bin/cursor-agent"
-)
 GROK_BIN = os.environ.get("NEWSROOM_GROK_BIN", "/Users/jamesto/.grok/bin/grok")
 CLI_CALL_TIMEOUT_SECONDS = 80
 
@@ -40,6 +48,7 @@ CLI_CALL_TIMEOUT_SECONDS = 80
 class CliExecution:
     text: str
     usage: dict[str, object]
+    transport_qualification: dict[str, object] | None = None
 
 
 CliOutput = str | CliExecution
@@ -91,16 +100,8 @@ class CliResponseError(RuntimeError):
     """Both subscription CLI responses failed the Graphiti JSON contract."""
 
 
-class CliPredispatchRefusal(RuntimeError):
-    """The installed CLI cannot prove the checked transport contract."""
-
-
 class CliDispatchMarkerError(RuntimeError):
     """Durable dispatch observation failed before provider I/O."""
-
-
-class CliOutputDecodeError(RuntimeError):
-    """A dispatched subscription CLI returned non-UTF-8 output."""
 
 
 class GraphitiCliClient(Protocol):
@@ -216,27 +217,6 @@ async def run_cli_async(
     if not text.strip():
         raise RuntimeError("Graphiti LLM returned empty stdout")
     return text
-
-
-def _cursor_command(prompt: str, *, max_tokens: int) -> tuple[str, ...]:
-    return (
-        CURSOR_AGENT_BIN,
-        "--print",
-        "--mode",
-        "ask",
-        "--output-format",
-        "json",
-        "--sandbox",
-        "enabled",
-        "--disable-tools",
-        "--disable-mcp",
-        "--max-output-tokens",
-        str(max_tokens),
-        "--trust",
-        "--model",
-        CURSOR_AGENT_MODEL_ID,
-        prompt,
-    )
 
 
 def _grok_command(
@@ -451,24 +431,20 @@ def run_cursor_agent_llm(
     _require_positive_max_tokens(max_tokens)
     with tempfile.TemporaryDirectory(prefix="newsroom-cursor-graphiti-") as root:
         workspace = _hermetic_cli_workspace(root, binary=CURSOR_AGENT_BIN)
-        _prove_cli_controls(
+        raw, qualification = run_cursor_transport(
             binary=CURSOR_AGENT_BIN,
-            required_controls=(
-                "--disable-tools",
-                "--disable-mcp",
-                "--max-output-tokens",
-            ),
-            workspace=workspace,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            timeout=CLI_CALL_TIMEOUT_SECONDS,
+            cwd=workspace.cwd,
+            environment=workspace.environment,
+            dispatch_started=dispatch_started,
         )
-        if dispatch_started is not None:
-            dispatch_started()
-        return parse_cursor_output(
-            run_cli(
-                _cursor_command(prompt, max_tokens=max_tokens),
-                timeout=CLI_CALL_TIMEOUT_SECONDS,
-                cwd=workspace.cwd,
-                environment=workspace.environment,
-            )
+        execution = parse_cursor_output(raw)
+        return CliExecution(
+            text=execution.text,
+            usage=execution.usage,
+            transport_qualification=qualification.as_dict(),
         )
 
 
@@ -481,24 +457,20 @@ async def run_cursor_agent_llm_async(
     _require_positive_max_tokens(max_tokens)
     with tempfile.TemporaryDirectory(prefix="newsroom-cursor-graphiti-") as root:
         workspace = _hermetic_cli_workspace(root, binary=CURSOR_AGENT_BIN)
-        await _prove_cli_controls_async(
+        raw, qualification = await run_cursor_transport_async(
             binary=CURSOR_AGENT_BIN,
-            required_controls=(
-                "--disable-tools",
-                "--disable-mcp",
-                "--max-output-tokens",
-            ),
-            workspace=workspace,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            timeout=CLI_CALL_TIMEOUT_SECONDS,
+            cwd=workspace.cwd,
+            environment=workspace.environment,
+            dispatch_started=dispatch_started,
         )
-        if dispatch_started is not None:
-            dispatch_started()
-        return parse_cursor_output(
-            await run_cli_async(
-                _cursor_command(prompt, max_tokens=max_tokens),
-                timeout=CLI_CALL_TIMEOUT_SECONDS,
-                cwd=workspace.cwd,
-                environment=workspace.environment,
-            )
+        execution = parse_cursor_output(raw)
+        return CliExecution(
+            text=execution.text,
+            usage=execution.usage,
+            transport_qualification=qualification.as_dict(),
         )
 
 
@@ -608,6 +580,10 @@ def _invocation(
     }
     if receipt_binding is not None:
         value.update(receipt_binding)
+    if execution is not None and execution.transport_qualification is not None:
+        value["transport_qualification"] = dict(
+            execution.transport_qualification
+        )
     if failure is not None:
         value["failure"] = failure
     return value
@@ -843,6 +819,29 @@ async def run_cli_chain(
         )
         cursor_outcome = "TIMEOUT"
         payload = None
+    except CliOutputBoundExceeded as exc:
+        cursor_usage = (
+            unreported_cli_usage()
+            if cursor_transport_started
+            else no_provider_call_cli_usage()
+        )
+        binding = observe(
+            cursor_token, outcome="OUTPUT_LIMIT_EXCEEDED", usage=cursor_usage
+        )
+        invocations.append(
+            _invocation(
+                provider="cursor-agent-cli",
+                model=CURSOR_AGENT_MODEL_ID,
+                outcome="OUTPUT_LIMIT_EXCEEDED",
+                execution=CliExecution(text="", usage=cursor_usage),
+                failure=type(exc).__name__,
+                requested_max_tokens=max_tokens,
+                receipt_binding=binding,
+            )
+        )
+        raise CliResponseError(
+            "Cursor Graphiti response exceeded controller stdout bound"
+        ) from exc
     except (FileNotFoundError, CliPredispatchRefusal) as exc:
         cursor_usage = (
             unreported_cli_usage()
@@ -857,17 +856,20 @@ async def run_cli_chain(
         binding = observe(
             cursor_token, outcome=refusal_outcome, usage=cursor_usage
         )
-        invocations.append(
-            _invocation(
-                provider="cursor-agent-cli",
-                model=CURSOR_AGENT_MODEL_ID,
-                outcome=refusal_outcome,
-                execution=CliExecution(text="", usage=cursor_usage),
-                failure=type(exc).__name__,
-                requested_max_tokens=max_tokens,
-                receipt_binding=binding,
-            )
+        invocation = _invocation(
+            provider="cursor-agent-cli",
+            model=CURSOR_AGENT_MODEL_ID,
+            outcome=refusal_outcome,
+            execution=CliExecution(text="", usage=cursor_usage),
+            failure=type(exc).__name__,
+            requested_max_tokens=max_tokens,
+            receipt_binding=binding,
         )
+        if isinstance(exc, CliPredispatchRefusal) and exc.qualification_evidence:
+            invocation["transport_qualification"] = dict(
+                exc.qualification_evidence
+            )
+        invocations.append(invocation)
         cursor_outcome = refusal_outcome
         payload = None
     except (RuntimeError, OSError) as exc:
@@ -1186,10 +1188,15 @@ def build_cli_llm_client(
 
 
 __all__ = [
+    "QUALIFIED_CURSOR_AGENT_VERSION",
     "CliInvocationObserver",
+    "CliOutputBoundExceeded",
     "CliOutputDecodeError",
+    "CliPredispatchRefusal",
     "CliResponseError",
+    "CursorCliQualification",
     "build_cli_llm_client",
+    "cursor_stdout_limit",
     "extract_json",
     "run_cli",
     "run_cli_chain",

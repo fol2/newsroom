@@ -20,6 +20,7 @@ GRAPHITI_EVENT_STATES = (
     "RUNNING",
     "RETRY_HELD",
     "RIGHTS_HELD",
+    "CONFIGURATION_HELD",
     "DEAD_LETTER",
     "TERMINAL",
 )
@@ -179,6 +180,10 @@ class SystemicGraphitiEventFailure(RuntimeError):
     def __init__(self, message: str, *, provider_dispatched: bool = False) -> None:
         super().__init__(message)
         self.provider_dispatched = provider_dispatched
+
+
+class ConfigurationGraphitiEventFailure(SystemicGraphitiEventFailure):
+    """A deterministic local configuration refusal requiring operator change."""
 
 
 def _landed_rows(
@@ -546,6 +551,20 @@ class GraphitiEventQueue:
             result = dispatch(running)
             if not isinstance(result, GraphitiDispatchResult):
                 raise TypeError("Graphiti dispatch must return GraphitiDispatchResult")
+        except ConfigurationGraphitiEventFailure as exc:
+            code = str(exc) or type(exc).__name__
+            self._open_circuit(code, duration=circuit_for)
+            self._transition(
+                event.event_id,
+                owner_id=owner_id,
+                state="CONFIGURATION_HELD",
+                available_at=self._clock() + circuit_for,
+                failure_code=code,
+                provider_dispatched=exc.provider_dispatched,
+            )
+            return GraphitiProcessResult(
+                event.event_id, event.ledger_seq, "CONFIGURATION_HELD", attempt
+            )
         except SystemicGraphitiEventFailure as exc:
             code = str(exc) or type(exc).__name__
             self._open_circuit(code, duration=circuit_for)
@@ -877,6 +896,7 @@ class GraphitiEventQueue:
                         "RUNNING",
                         "RETRY_HELD",
                         "RIGHTS_HELD",
+                        "CONFIGURATION_HELD",
                     )
                 ),
                 float(arrivals),
@@ -902,6 +922,7 @@ class GraphitiEventQueue:
 
 __all__ = [
     "GRAPHITI_EVENT_STATES",
+    "ConfigurationGraphitiEventFailure",
     "GraphitiDispatchGate",
     "GraphitiDispatchResult",
     "GraphitiEventQueue",

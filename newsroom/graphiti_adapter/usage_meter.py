@@ -8,6 +8,14 @@ from typing import TypeGuard
 CLI_USAGE_BASIS_REPORTED = "PROVIDER_REPORTED"
 CLI_USAGE_BASIS_UNREPORTED = "UNREPORTED"
 CLI_USAGE_BASIS_NO_PROVIDER_CALL = "NO_PROVIDER_CALL"
+_EXACT_NO_PROVIDER_USAGE_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cached_read_tokens",
+    "cached_write_tokens",
+    "reasoning_tokens",
+    "total_tokens",
+)
 
 
 def _is_non_negative_int(value: object) -> TypeGuard[int]:
@@ -40,6 +48,25 @@ def no_provider_call_cli_usage() -> dict[str, object]:
         "reasoning_tokens": 0,
         "total_tokens": 0,
     }
+
+
+def is_exact_predispatch_no_provider_call(value: object) -> bool:
+    """Prove one CLI leaf stopped locally with exact zero provider usage."""
+
+    if not isinstance(value, Mapping):
+        return False
+    usage = value.get("usage")
+    return (
+        isinstance(usage, Mapping)
+        and value.get("outcome")
+        in {"PREDISPATCH_REFUSED", "EXECUTABLE_NOT_FOUND"}
+        and usage.get("usage_basis") == CLI_USAGE_BASIS_NO_PROVIDER_CALL
+        and set(usage) == {"usage_basis", *_EXACT_NO_PROVIDER_USAGE_FIELDS}
+        and all(
+            type(usage.get(field)) is int and usage.get(field) == 0
+            for field in _EXACT_NO_PROVIDER_USAGE_FIELDS
+        )
+    )
 
 
 def cursor_cli_usage(value: object) -> dict[str, object]:
@@ -246,6 +273,7 @@ def summarise_graphiti_usage(
 __all__ = [
     "cursor_cli_usage",
     "grok_cli_usage",
+    "is_exact_predispatch_no_provider_call",
     "no_provider_call_cli_usage",
     "summarise_graphiti_usage",
     "unreported_cli_usage",
