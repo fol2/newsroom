@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import newsroom.control_plane.issue_790_canary as issue_790_canary_module
 import newsroom.control_plane.issue_790_disposition as issue_790_operation
 import newsroom.control_plane.model_usage as model_usage_module
 from newsroom.authority.canonical import digest_canonical
@@ -34,6 +35,10 @@ from newsroom.control_plane.issue_790_disposition import (
     run_issue_790_canary,
     validate_issue_790_plan,
     write_issue_790_receipt,
+)
+from newsroom.control_plane.issue_790_canary import (
+    Issue790CanaryIntegrityError,
+    Issue790CanaryRepository,
 )
 from newsroom.control_plane.model_usage import (
     InvocationAllocation,
@@ -111,6 +116,7 @@ def test_v1_store_replays_v2_context_manifest_migration_idempotently(
 
     ModelUsageService(str(path))
     ModelUsageService(str(path))
+    Issue790CanaryRepository(str(path))
 
     connection = sqlite3.connect(path)
     migrations = connection.execute(
@@ -138,8 +144,9 @@ def test_v1_store_replays_v2_context_manifest_migration_idempotently(
     assert "graphiti_internal_requests" in tables
     assert "graphiti_internal_request_refusals" in tables
     assert "model_usage_conservative_dispositions" in tables
-    assert "model_usage_bounded_canary_consumptions" in tables
-    assert "model_usage_bounded_canary_outcomes" in tables
+    assert "issue_790_graphiti_retry_exclusions" in tables
+    assert "issue_790_bounded_canary_consumptions" in tables
+    assert "issue_790_bounded_canary_outcomes" in tables
 
 
 def _policy(
@@ -467,6 +474,16 @@ def _bind_issue_790_fixture_contract(
         "ISSUE_790_APPROVED_PLAN_DIGEST",
         plan_digest,
     )
+    monkeypatch.setattr(
+        issue_790_canary_module,
+        "ISSUE_790_APPROVED_PLAN_DIGEST",
+        plan_digest,
+    )
+    monkeypatch.setattr(
+        issue_790_canary_module,
+        "ISSUE_790_APPROVED_INVOCATION_ID",
+        allocation.invocation_id,
+    )
 
 
 def _seed_issue_790_retry_events(path: Path) -> None:
@@ -518,20 +535,33 @@ def _seed_issue_790_retry_events(path: Path) -> None:
         connection.close()
 
 
+def _fixture_issue_790_unit_ref(ledger_seq: int) -> dict[str, object]:
+    return {
+        "ingest_id": f"fresh-ingest-{ledger_seq}",
+        "revision_id": f"revision-{ledger_seq}",
+        "representation_digest": _digest({"representation": ledger_seq}),
+        "chunk_digest": _digest({"chunk": ledger_seq}),
+        "chunk_ordinal": 1,
+        "predecessor_ingest_id": None,
+    }
+
+
 def _seed_fresh_issue_790_event(
     path: Path,
     *,
     ledger_seq: int = 2001,
+    retain_unit_refs: bool = True,
 ) -> tuple[str, str]:
     event_id = _digest({"fresh-event": ledger_seq})
     ingest_id = f"fresh-ingest-{ledger_seq}"
+    unit_ref = _fixture_issue_790_unit_ref(ledger_seq)
     manifest = {
         "event_type": "EFFECTIVE_SOURCE_REVISION_LANDED",
         "ledger_seq": ledger_seq,
         "ledger_digest": event_id,
         "landed_ingest_ids": [ingest_id],
         "landed_payload_digest": _digest({"landed": ledger_seq}),
-        "unit_refs": [{"ingest_id": ingest_id}],
+        "unit_refs": [unit_ref] if retain_unit_refs else [],
     }
     connection = connect_unpublished_store(str(path))
     try:
@@ -553,7 +583,7 @@ def _seed_fresh_issue_790_event(
                 T0.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
                 json.dumps(manifest, sort_keys=True, separators=(",", ":")),
                 _digest(manifest),
-                1,
+                int(retain_unit_refs),
                 "test-projector",
                 "test-projection",
                 "QUEUED",
@@ -565,6 +595,44 @@ def _seed_fresh_issue_790_event(
     finally:
         connection.close()
     return event_id, ingest_id
+
+
+def _issue_790_canary_preflight(
+    path: Path,
+    *,
+    event_id: str,
+    ledger_seq: int,
+    evaluated_at: datetime,
+    resolved_units: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    connection = sqlite3.connect(path)
+    row = connection.execute(
+        "SELECT manifest_json,manifest_digest FROM "
+        "unpublished_graphiti_revision_events WHERE event_id=? AND ledger_seq=?",
+        (event_id, ledger_seq),
+    ).fetchone()
+    connection.close()
+    assert row is not None
+    manifest = json.loads(str(row[0]))
+    if resolved_units is None:
+        resolved_units = manifest["unit_refs"]
+    without_digest: dict[str, object] = {
+        "schema_version": "newsroom.graphiti-fresh-event-preflight.v1",
+        "event_id": event_id,
+        "ledger_seq": ledger_seq,
+        "event_state": "QUEUED",
+        "event_attempt_count": 0,
+        "event_manifest_digest": str(row[1]),
+        "resolved_units": resolved_units,
+        "rights_decision_digests": [
+            _digest({"rights": item["ingest_id"]}) for item in resolved_units
+        ],
+        "owner_emergency_stop_clear": True,
+        "provider_calls": 0,
+        "store_mutations": 0,
+        "evaluated_at": evaluated_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    }
+    return {**without_digest, "evidence_digest": _digest(without_digest)}
 
 
 def _issue_790_operational_evidence(
@@ -580,7 +648,17 @@ def _issue_790_operational_evidence(
         "tree": "b" * 40,
         "local_main_revision": "a" * 40,
         "origin_main_revision": "a" * 40,
+        "github_main_revision": "a" * 40,
         "worktree_clean": True,
+        "running_code": [
+            {
+                "module": module_name,
+                "repository_path": relative_path,
+                "git_blob": "c" * 40,
+                "sha256": "sha256:" + "d" * 64,
+            }
+            for module_name, relative_path in issue_790_operation._RUNNING_CODE_MODULES
+        ],
         "ci_test": {
             "name": "test",
             "status": "completed",
@@ -1952,6 +2030,7 @@ def test_issue_790_dry_run_mutates_only_isolated_copy(
         terminal=terminal,
         plan_digest=str(plan["canonical_digest"]),
     )
+    _seed_issue_790_retry_events(source)
 
     receipt = dry_run_issue_790_plan(
         source_store=source,
@@ -2039,6 +2118,22 @@ def test_issue_790_apply_retains_pre_operation_backup(
     assert backup_state == ("OPEN",)
     assert service_row_count(store, "model_usage_conservative_dispositions") == 1
     assert service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)["state"] == "CLOSED"
+    assert len(receipt["retry_exclusions"]) == 2
+    resumed_worker_queue = GraphitiEventQueue(
+        str(store),
+        clock=lambda: datetime(2026, 8, 27, tzinfo=UTC),
+    )
+    assert resumed_worker_queue.claim(
+        owner_id="resumed-persistent-worker",
+        lease_for=timedelta(minutes=1),
+    ) is None
+    for retained_failure in RETRY_FORBIDDEN_EVENTS:
+        with pytest.raises(ValueError, match="retry-excluded"):
+            resumed_worker_queue.claim(
+                owner_id="resumed-persistent-worker",
+                lease_for=timedelta(minutes=1),
+                event_id=str(retained_failure["event_id"]),
+            )
 
 
 def test_issue_790_bounded_canary_is_single_use_and_failed_attempt_is_inert(
@@ -2080,34 +2175,48 @@ def test_issue_790_bounded_canary_is_single_use_and_failed_attempt_is_inert(
         recorded_at=T0 + timedelta(seconds=11),
     )
     store = tmp_path / "unpublished.sqlite3"
-    event_id, _ingest_id = _seed_fresh_issue_790_event(store)
+    event_id, _ingest_id = _seed_fresh_issue_790_event(
+        store,
+        retain_unit_refs=False,
+    )
     owner_id = "issue-790-canary:fixture"
+    canary = Issue790CanaryRepository(str(store))
+    preflight = _issue_790_canary_preflight(
+        store,
+        event_id=event_id,
+        ledger_seq=2001,
+        evaluated_at=T0 + timedelta(seconds=19),
+        resolved_units=[_fixture_issue_790_unit_ref(2001)],
+    )
 
-    with pytest.raises(ModelUsageIntegrityError, match="retained failure"):
-        service.consume_issue_790_bounded_canary(
+    with pytest.raises(Issue790CanaryIntegrityError, match="retained failure"):
+        canary.consume(
             approved_plan_digest=FIXTURE_790_PLAN_DIGEST,
             disposition_digest=str(disposition["disposition_digest"]),
             event_id=event_id,
             ledger_seq=1932,
             owner_id=owner_id,
+            preflight_evidence=preflight,
             consumed_at=T0 + timedelta(seconds=20),
         )
 
-    consumption = service.consume_issue_790_bounded_canary(
+    consumption = canary.consume(
         approved_plan_digest=FIXTURE_790_PLAN_DIGEST,
         disposition_digest=str(disposition["disposition_digest"]),
         event_id=event_id,
         ledger_seq=2001,
         owner_id=owner_id,
+        preflight_evidence=preflight,
         consumed_at=T0 + timedelta(seconds=20),
     )
-    with pytest.raises(ModelUsageIntegrityError, match="already consumed"):
-        service.consume_issue_790_bounded_canary(
+    with pytest.raises(Issue790CanaryIntegrityError, match="already consumed"):
+        canary.consume(
             approved_plan_digest=FIXTURE_790_PLAN_DIGEST,
             disposition_digest=str(disposition["disposition_digest"]),
             event_id=event_id,
             ledger_seq=2001,
             owner_id=owner_id,
+            preflight_evidence=preflight,
             consumed_at=T0 + timedelta(seconds=21),
         )
 
@@ -2138,7 +2247,7 @@ def test_issue_790_bounded_canary_is_single_use_and_failed_attempt_is_inert(
 
     connection = connect_unpublished_store(str(store))
     connection.execute(
-        "UPDATE unpublished_graphiti_revision_events SET state='RETRY_HELD',"
+        "UPDATE unpublished_graphiti_revision_events SET state='DEAD_LETTER',"
         "attempt_count=1,last_failure_code='PRODUCER_INTERNAL_ERROR',"
         "provider_dispatched=1,claim_owner=NULL,claim_expires_at=NULL "
         "WHERE event_id=?",
@@ -2146,26 +2255,18 @@ def test_issue_790_bounded_canary_is_single_use_and_failed_attempt_is_inert(
     )
     connection.commit()
     connection.close()
-    process_result = {
-        "event_id": event_id,
-        "ledger_seq": 2001,
-        "state": "RETRY_HELD",
-        "attempt_count": 1,
-    }
-    outcome = service.complete_issue_790_bounded_canary(
+    outcome = canary.finalise_without_dispatch(
         consumption_digest=str(consumption["consumption_digest"]),
         event_id=event_id,
         ledger_seq=2001,
         owner_id=owner_id,
-        process_result=process_result,
         completed_at=T0 + timedelta(seconds=30),
     )
-    replay = service.complete_issue_790_bounded_canary(
+    replay = canary.finalise_without_dispatch(
         consumption_digest=str(consumption["consumption_digest"]),
         event_id=event_id,
         ledger_seq=2001,
         owner_id=owner_id,
-        process_result=process_result,
         completed_at=T0 + timedelta(seconds=31),
     )
 
@@ -2178,14 +2279,16 @@ def test_issue_790_bounded_canary_is_single_use_and_failed_attempt_is_inert(
     connection.close()
     assert replay == outcome
     assert outcome["state_after_seal"] == "CONFIGURATION_HELD"
+    assert outcome["completion_mode"] == "ZERO_IO_RECOVERY"
+    assert outcome["process_result"]["state"] == "DEAD_LETTER"
     assert outcome["retry_authorised"] is False
     assert retained == (
         "CONFIGURATION_HELD",
         1,
         "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:PRODUCER_INTERNAL_ERROR",
     )
-    assert service_row_count(store, "model_usage_bounded_canary_consumptions") == 1
-    assert service_row_count(store, "model_usage_bounded_canary_outcomes") == 1
+    assert service_row_count(store, "issue_790_bounded_canary_consumptions") == 1
+    assert service_row_count(store, "issue_790_bounded_canary_outcomes") == 1
 
 
 def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
@@ -2232,6 +2335,7 @@ def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
     store = tmp_path / "unpublished.sqlite3"
     _seed_issue_790_retry_events(store)
     event_id, ingest_id = _seed_fresh_issue_790_event(store, ledger_seq=2002)
+    Issue790CanaryRepository(str(store))
     proving = tmp_path / "proving.sqlite3"
     proving_connection = sqlite3.connect(proving)
     proving_connection.execute("CREATE TABLE fixture(value INTEGER)")
@@ -2243,8 +2347,22 @@ def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
         store=store,
         observed_at=observed_at,
     )
+    preflight = _issue_790_canary_preflight(
+        store,
+        event_id=event_id,
+        ledger_seq=2002,
+        evaluated_at=observed_at,
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_qualify_issue_790_event",
+        lambda **_values: preflight,
+    )
+
+    dispatch_calls: list[str] = []
 
     def consume_exact_event(**values: object) -> GraphitiProcessResult:
+        dispatch_calls.append(str(values["event_id"]))
         assert values["event_id"] == event_id
         assert values["unpublished_store"] == store
         canary_service = values["model_usage"]
@@ -2322,8 +2440,111 @@ def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
     assert receipt["usage_evidence"]["truthful_nonzero_usage_count"] == 1  # type: ignore[index]
     assert receipt["retry_forbidden_events_unchanged"] is True
     assert receipt["worker_remained_unloaded"] is True
+    assert dispatch_calls == [event_id]
     assert receipt["receipt_digest"] == _digest(
         {key: value for key, value in receipt.items() if key != "receipt_digest"}
+    )
+    resumed = run_issue_790_canary(
+        store=store,
+        proving_store=proving,
+        backup_path=tmp_path / "pre-resumed-finalisation.sqlite3",
+        plan=plan,
+        observed_at=observed_at,
+        repository_root=tmp_path,
+        event_id=event_id,
+        ledger_seq=2002,
+        disposition_digest=str(disposition["disposition_digest"]),
+    )
+    assert resumed["canary_evidence_passed"] is True
+    assert resumed["resumed_zero_io_finalisation"] is True
+    assert resumed["provider_dispatch_attempted_this_run"] is False
+    assert dispatch_calls == [event_id]
+
+
+def test_issue_790_consumed_but_unclaimed_canary_finalises_without_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    _policy_value, allocation, terminal = (
+        _open_unreported_graphiti_subscription_leaf(service)
+    )
+    _bind_issue_790_fixture_contract(
+        monkeypatch,
+        allocation=allocation,
+        terminal=terminal,
+    )
+    approved_at = T0 + timedelta(seconds=5)
+    authority, authority_digest = _conservative_disposition_authority(
+        allocation,
+        terminal,
+        approved_at=approved_at,
+    )
+    disposition = service.disposition_unreported_subscription_usage(
+        invocation_id=allocation.invocation_id,
+        expected_terminal_digest=terminal.terminal_digest,
+        expected_allocation_digest=allocation.canonical_digest,
+        approved_by=str(authority["approved_by"]),
+        approval_reference=str(authority["approval_reference"]),
+        approved_at=approved_at,
+        approved_plan_digest=FIXTURE_790_PLAN_DIGEST,
+        authority_digest=authority_digest,
+        observed_at=T0 + timedelta(seconds=10),
+    )
+    route = service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)
+    service.release_route_circuit(
+        route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+        release_kind="AUTHORISED_OPERATOR_RESET",
+        bound_failure_reason=str(route["reason"]),
+        evidence_digest=str(disposition["disposition_digest"]),
+        recorded_at=T0 + timedelta(seconds=11),
+    )
+    store = tmp_path / "unpublished.sqlite3"
+    event_id, _ingest_id = _seed_fresh_issue_790_event(
+        store,
+        ledger_seq=2003,
+        retain_unit_refs=False,
+    )
+    repository = Issue790CanaryRepository(str(store))
+    owner_id = "issue-790-canary:crash-before-claim"
+    consumption = repository.consume(
+        approved_plan_digest=FIXTURE_790_PLAN_DIGEST,
+        disposition_digest=str(disposition["disposition_digest"]),
+        event_id=event_id,
+        ledger_seq=2003,
+        owner_id=owner_id,
+        preflight_evidence=_issue_790_canary_preflight(
+            store,
+            event_id=event_id,
+            ledger_seq=2003,
+            evaluated_at=T0 + timedelta(seconds=19),
+            resolved_units=[_fixture_issue_790_unit_ref(2003)],
+        ),
+        consumed_at=T0 + timedelta(seconds=20),
+    )
+
+    outcome = repository.finalise_without_dispatch(
+        consumption_digest=str(consumption["consumption_digest"]),
+        event_id=event_id,
+        ledger_seq=2003,
+        owner_id=owner_id,
+        completed_at=T0 + timedelta(seconds=21),
+    )
+
+    connection = sqlite3.connect(store)
+    retained = connection.execute(
+        "SELECT state,attempt_count,provider_dispatched,last_failure_code "
+        "FROM unpublished_graphiti_revision_events WHERE event_id=?",
+        (event_id,),
+    ).fetchone()
+    connection.close()
+    assert outcome["completion_mode"] == "ZERO_IO_RECOVERY"
+    assert outcome["process_result"] is None
+    assert retained == (
+        "CONFIGURATION_HELD",
+        0,
+        0,
+        "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:NO_EVENT_RESULT",
     )
 
 

@@ -13,9 +13,14 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import ContextManager, Final, Protocol, TypedDict, cast
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+)
 from newsroom.control_plane.admission import (
     DeterministicWriteAdmission,
     WriteAdmissionDecision,
@@ -54,6 +59,7 @@ from newsroom.control_plane.graphiti_events import (
     ensure_graphiti_event_schema,
 )
 from newsroom.control_plane.items import parse_observation
+from newsroom.control_plane.issue_790_canary import Issue790CanaryRepository
 from newsroom.control_plane.model_usage import (
     InvocationAllocation,
     InvocationEfficiencyPolicy,
@@ -2661,6 +2667,205 @@ def _graphiti_dispatch_controls(
     return rights_check, rights_fence
 
 
+def _resolve_graphiti_event_units(
+    *,
+    proving_store: str,
+    event: GraphitiRevisionEvent,
+    evaluated_at: datetime,
+) -> tuple[CorpusIngestUnit, ...]:
+    proving = sqlite3.connect(proving_store)
+    apply_control_plane_sqlite_profile(proving, query_only=True)
+    collected: list[CorpusIngestUnit] = []
+    try:
+        _run_id, _latest, corpus_rows = _permitted_rows(
+            proving,
+            evaluated_at=_utc_text(evaluated_at),
+            required_valid_until=_dispatch_valid_until(evaluated_at),
+        )
+        resolver = EffectiveRevisionIdentityResolver(proving)
+        for row in corpus_rows:
+            collected.extend(
+                units_from(
+                    _parsed_observations((row,)),
+                    proving_run_id=row.run_id,
+                    rights_authority_run_id=row.rights_authority_run_id,
+                    rights_gate_id=row.rights_gate_id,
+                    rights_gate_reason=row.rights_gate_reason,
+                    source_definition_url=row.url,
+                    effective_revision_resolver=resolver,
+                )
+            )
+    finally:
+        proving.close()
+    selected = tuple(
+        unit
+        for unit in unique_chunk_units(tuple(collected))
+        if (
+            unit.source_id,
+            unit.item_key,
+            unit.revision_digest,
+            unit.published_at or "",
+            unit.updated_at or "",
+        )
+        == (
+            event.source_id,
+            event.item_key,
+            event.revision_digest,
+            event.published_at,
+            event.updated_at,
+        )
+    )
+    if event.unit_refs:
+        expected_refs = tuple(
+            (
+                ref.get("ingest_id"),
+                ref.get("chunk_digest"),
+                ref.get("chunk_ordinal"),
+                ref.get("predecessor_ingest_id"),
+            )
+            for ref in event.unit_refs
+        )
+        actual_refs = tuple(
+            (
+                unit.ingest_id,
+                unit.digest,
+                unit.chunk_ordinal,
+                unit.predecessor_ingest_id,
+            )
+            for unit in selected
+        )
+        if actual_refs != expected_refs:
+            return ()
+    return selected
+
+
+def qualify_fresh_graphiti_event(
+    *,
+    proving_store: str,
+    unpublished_store: str,
+    event_id: str,
+    ledger_seq: int,
+    clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
+) -> dict[str, object]:
+    """Resolve current input and rights for one untouched event without writes."""
+
+    evaluated_at = clock().astimezone(UTC)
+    unpublished = sqlite3.connect(
+        f"{Path(unpublished_store).absolute().as_uri()}?mode=ro",
+        uri=True,
+    )
+    apply_control_plane_sqlite_profile(unpublished, query_only=True)
+    try:
+        row = unpublished.execute(
+            "SELECT event_id,ledger_seq,source_id,item_key,revision_digest,"
+            "published_at,updated_at,unit_count,manifest_json,manifest_digest,"
+            "state,attempt_count,available_at,claim_owner,claim_expires_at "
+            "FROM unpublished_graphiti_revision_events "
+            "WHERE event_id=? AND ledger_seq=?",
+            (event_id, ledger_seq),
+        ).fetchone()
+    finally:
+        unpublished.close()
+    if (
+        row is None
+        or str(row[10]) != "QUEUED"
+        or int(row[11]) != 0
+        or str(row[12]) > _utc_text(evaluated_at)
+        or row[13] is not None
+        or row[14] is not None
+    ):
+        raise ValueError("bounded Graphiti event is not fresh and claimable")
+    try:
+        manifest = json.loads(str(row[8]))
+    except json.JSONDecodeError as exc:
+        raise ValueError("bounded Graphiti event manifest is malformed") from exc
+    if (
+        not isinstance(manifest, dict)
+        or digest_canonical(manifest) != str(row[9])
+        or manifest.get("ledger_seq") != int(row[1])
+    ):
+        raise ValueError("bounded Graphiti event manifest differs")
+    unit_refs = manifest.get("unit_refs")
+    landed_ingest_ids = manifest.get("landed_ingest_ids")
+    landed_payload_digest = manifest.get("landed_payload_digest")
+    if (
+        not isinstance(unit_refs, list)
+        or not all(isinstance(item, dict) for item in unit_refs)
+        or not isinstance(landed_ingest_ids, list)
+        or not all(isinstance(item, str) for item in landed_ingest_ids)
+        or not isinstance(landed_payload_digest, str)
+    ):
+        raise ValueError("bounded Graphiti event object is malformed")
+    event = GraphitiRevisionEvent(
+        event_id=str(row[0]),
+        ledger_seq=int(row[1]),
+        source_id=str(row[2]),
+        item_key=str(row[3]),
+        revision_digest=str(row[4]),
+        published_at=str(row[5]),
+        updated_at=str(row[6]),
+        expected_unit_count=int(row[7]),
+        landed_ingest_ids=tuple(landed_ingest_ids),
+        landed_payload_digest=landed_payload_digest,
+        unit_refs=tuple(unit_refs),
+        state="QUEUED",
+        attempt_count=0,
+        units=(),
+    )
+    units = _resolve_graphiti_event_units(
+        proving_store=proving_store,
+        event=event,
+        evaluated_at=evaluated_at,
+    )
+    if not units:
+        raise ValueError("bounded Graphiti event canonical input is unavailable")
+    proving = sqlite3.connect(proving_store)
+    apply_control_plane_sqlite_profile(proving, query_only=True)
+    try:
+        _assert_owner_emergency_stop_clear(proving)
+    finally:
+        proving.close()
+    rights_check, _rights_fence = _graphiti_dispatch_controls(
+        proving_store,
+        clock=lambda: evaluated_at,
+    )
+    rights_decisions = tuple(rights_check(unit) for unit in units)
+    if any(decision is None for decision in rights_decisions):
+        raise ValueError("bounded Graphiti event lacks current dispatch rights")
+    evidence_without_digest: dict[str, object] = {
+        "schema_version": "newsroom.graphiti-fresh-event-preflight.v1",
+        "event_id": event.event_id,
+        "ledger_seq": event.ledger_seq,
+        "event_state": event.state,
+        "event_attempt_count": event.attempt_count,
+        "event_manifest_digest": str(row[9]),
+        "resolved_units": [
+            {
+                "ingest_id": unit.ingest_id,
+                "revision_id": unit.revision_id,
+                "representation_digest": unit.representation_digest,
+                "chunk_digest": unit.digest,
+                "chunk_ordinal": unit.chunk_ordinal,
+                "predecessor_ingest_id": unit.predecessor_ingest_id,
+            }
+            for unit in units
+        ],
+        "rights_decision_digests": [
+            digest_canonical(decision)
+            for decision in rights_decisions
+            if decision is not None
+        ],
+        "owner_emergency_stop_clear": True,
+        "provider_calls": 0,
+        "store_mutations": 0,
+        "evaluated_at": _utc_text(evaluated_at),
+    }
+    return {
+        **evidence_without_digest,
+        "evidence_digest": digest_canonical(evidence_without_digest),
+    }
+
+
 def consume_next_graphiti_event(
     *,
     proving_store: str,
@@ -2686,75 +2891,27 @@ def consume_next_graphiti_event(
     rights_check, rights_fence = _graphiti_dispatch_controls(proving_store, clock=clock)
     queue = GraphitiEventQueue(unpublished_store, clock=clock)
     resolved_units: dict[str, tuple[CorpusIngestUnit, ...]] = {}
+    canary_preflight: dict[str, object] | None = None
+    if canary_consumption_digest is not None:
+        if event_id is None:
+            raise ValueError("bounded canary requires an exact event")
+        canary_preflight = Issue790CanaryRepository(
+            unpublished_store
+        ).preflight_for_consumption(
+            consumption_digest=canary_consumption_digest,
+            event_id=event_id,
+            owner_id=owner_id,
+        )
 
     def units_for(event: GraphitiRevisionEvent) -> tuple[CorpusIngestUnit, ...]:
         cached = resolved_units.get(event.event_id)
         if cached is not None:
             return cached
-        evaluated_at = clock().astimezone(UTC)
-        proving = sqlite3.connect(proving_store)
-        apply_control_plane_sqlite_profile(proving, query_only=True)
-        collected: list[CorpusIngestUnit] = []
-        try:
-            _run_id, _latest, corpus_rows = _permitted_rows(
-                proving,
-                evaluated_at=_utc_text(evaluated_at),
-                required_valid_until=_dispatch_valid_until(evaluated_at),
-            )
-            resolver = EffectiveRevisionIdentityResolver(proving)
-            for row in corpus_rows:
-                collected.extend(
-                    units_from(
-                        _parsed_observations((row,)),
-                        proving_run_id=row.run_id,
-                        rights_authority_run_id=row.rights_authority_run_id,
-                        rights_gate_id=row.rights_gate_id,
-                        rights_gate_reason=row.rights_gate_reason,
-                        source_definition_url=row.url,
-                        effective_revision_resolver=resolver,
-                    )
-                )
-        finally:
-            proving.close()
-        selected = tuple(
-            unit
-            for unit in unique_chunk_units(tuple(collected))
-            if (
-                unit.source_id,
-                unit.item_key,
-                unit.revision_digest,
-                unit.published_at or "",
-                unit.updated_at or "",
-            )
-            == (
-                event.source_id,
-                event.item_key,
-                event.revision_digest,
-                event.published_at,
-                event.updated_at,
-            )
+        selected = _resolve_graphiti_event_units(
+            proving_store=proving_store,
+            event=event,
+            evaluated_at=clock().astimezone(UTC),
         )
-        if event.unit_refs:
-            expected_refs = tuple(
-                (
-                    ref.get("ingest_id"),
-                    ref.get("chunk_digest"),
-                    ref.get("chunk_ordinal"),
-                    ref.get("predecessor_ingest_id"),
-                )
-                for ref in event.unit_refs
-            )
-            actual_refs = tuple(
-                (
-                    unit.ingest_id,
-                    unit.digest,
-                    unit.chunk_ordinal,
-                    unit.predecessor_ingest_id,
-                )
-                for unit in selected
-            )
-            if actual_refs != expected_refs:
-                selected = ()
         resolved_units[event.event_id] = selected
         return selected
 
@@ -2762,6 +2919,21 @@ def consume_next_graphiti_event(
         units = units_for(event)
         if not units:
             return GraphitiDispatchGate.hold("CANONICAL_INPUT_UNAVAILABLE")
+        if canary_preflight is not None:
+            expected = canary_preflight.get("resolved_units")
+            actual = [
+                {
+                    "ingest_id": unit.ingest_id,
+                    "revision_id": unit.revision_id,
+                    "representation_digest": unit.representation_digest,
+                    "chunk_digest": unit.digest,
+                    "chunk_ordinal": unit.chunk_ordinal,
+                    "predecessor_ingest_id": unit.predecessor_ingest_id,
+                }
+                for unit in units
+            ]
+            if expected != actual:
+                return GraphitiDispatchGate.hold("CANARY_PREFLIGHT_INPUT_DRIFT")
         for unit in units:
             if rights_check(unit) is None:
                 return GraphitiDispatchGate.hold("NO_CURRENT_DISPATCH_RIGHTS")
