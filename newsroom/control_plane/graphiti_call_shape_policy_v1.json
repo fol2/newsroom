@@ -1,6 +1,6 @@
 {
   "schema_version": "newsroom.graphiti-call-shape-policy.v1",
-  "canonical_digest": "sha256:7d942fce0c95f1405c44ac709b9657e45c98072a0911d00259e5a84768e35190",
+  "canonical_digest": "sha256:a9dca73d609ca9ca1b98783d235e07188d477706bbe079da2b98838d5f61dae9",
   "policy_id": "graphiti-core-0.29.3-newsroom-adapter-v1",
   "version": "issue-790-v3",
   "graphiti_core_release": "graphiti-core-0.29.3",
@@ -41,8 +41,13 @@
         "CURSOR_CONFIGURATION=HERMETIC_EMPTY",
         "AUTHENTICATION_BRIDGE=MACOS_LOGIN_KEYCHAIN_FILE_SYMLINK_V1",
         "AUTHENTICATION_BRIDGE_DIGEST=sha256:5bfe59adbf441621ae4c410ddb58e9991cfa7d11961ddd6c280e3e31dc463711",
-        "AUTHENTICATION_STATUS_PREFLIGHT=AUTHENTICATED_ACCESS_REFRESH",
-        "AUTHENTICATION_STATUS_DIGEST=sha256:36ddcd68e46478d8ed4ce2d13a26856cb10693496c2bf0cba0e243d17440fd3e",
+        "AUTHENTICATION_PROBE=MACOS_LOCAL_KEYCHAIN_ITEMS_READABLE_V1",
+        "AUTHENTICATION_PROBE_DIGEST=sha256:83ac1f5eadc66ea1377f136178a47ac5a87a1e12d752acc1f795079f0fe2245e",
+        "LOCAL_CREDENTIAL_PROBE_BIN=/usr/bin/security",
+        "LOCAL_CREDENTIAL_PROBE_SERVICES=cursor-access-token,cursor-refresh-token",
+        "LOCAL_CREDENTIAL_PROBE_OUTPUT=DEVNULL",
+        "CREDENTIAL_STATE=LOCAL_ACCESS_REFRESH_TOKENS_READABLE",
+        "CREDENTIAL_STATE_DIGEST=sha256:cdc30f62a0021fb7f9ab7c6742056493f87f179ee5b83d5fdeacc8a724c004d1",
         "PROMPT_MAX_OUTPUT_TOKENS=REQUEST_MAX_TOKENS",
         "CONTROLLER_STDOUT_CONTRACT=cursor-controller-stdout-v1:65536+64*REQUEST_MAX_TOKENS"
       ],
@@ -56,7 +61,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:5aaa3277dbbaa7afea8341bcd60e98f653abb1962986b352be2d7186847befb4",
+      "implementation_revision": "sha256:ded71d4d9117ca27c17d81dedf17208293ac6e68dbc3c2d269a387f08b5a68e1",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -95,7 +100,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:5aaa3277dbbaa7afea8341bcd60e98f653abb1962986b352be2d7186847befb4",
+      "implementation_revision": "sha256:ded71d4d9117ca27c17d81dedf17208293ac6e68dbc3c2d269a387f08b5a68e1",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -368,7 +373,7 @@
       "distinct_internal_request_count": 3
     }
   ],
-  "evidence_digest": "sha256:c577b4070b08d08c0df3a48ec26854ad9a38d548811c69b64f4f2a928ad92751",
+  "evidence_digest": "sha256:9ae0a9fe87a9080e1beb48595c4284716b91a217461fa5249df0b4a8acad4dc9",
   "maximum_qualified_fixture_count": 4,
   "headroom": 2,
   "max_distinct_internal_requests": 6

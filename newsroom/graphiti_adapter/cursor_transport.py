@@ -24,8 +24,11 @@ QUALIFIED_CURSOR_AGENT_RESOLVED_BIN = (
     f"{QUALIFIED_CURSOR_AGENT_VERSION}/cursor-agent"
 )
 QUALIFIED_CURSOR_LOGIN_KEYCHAIN = "/Users/jamesto/Library/Keychains/login.keychain-db"
+QUALIFIED_CURSOR_SECURITY_BIN = "/usr/bin/security"
+QUALIFIED_CURSOR_SECURITY_OWNER_UID = 0
 CURSOR_AUTHENTICATION_BRIDGE = "MACOS_LOGIN_KEYCHAIN_FILE_SYMLINK_V1"
-CURSOR_AUTHENTICATION_STATUS = "AUTHENTICATED_ACCESS_REFRESH"
+CURSOR_AUTHENTICATION_PROBE = "MACOS_LOCAL_KEYCHAIN_ITEMS_READABLE_V1"
+CURSOR_CREDENTIAL_STATE = "LOCAL_ACCESS_REFRESH_TOKENS_READABLE"
 CURSOR_AGENT_BIN = os.environ.get(
     "NEWSROOM_CURSOR_AGENT_BIN", QUALIFIED_CURSOR_AGENT_BIN
 )
@@ -42,6 +45,7 @@ QUALIFIED_CURSOR_AGENT_CONTROL_SEMANTICS_DIGEST = (
     "sha256:285e3f24126b457872064e9661d76ab0e35a0059256ffa4ab44507821efe334e"
 )
 CURSOR_PREFLIGHT_TIMEOUT_SECONDS = 20
+CURSOR_LOCAL_CREDENTIAL_PROBE_TIMEOUT_SECONDS = 5
 CURSOR_PREFLIGHT_MAX_BYTES = 64 * 1024
 CURSOR_STDOUT_BASE_BYTES = 64 * 1024
 CURSOR_STDOUT_BYTES_PER_TOKEN = 64
@@ -66,7 +70,11 @@ _CURSOR_ISOLATION_CONTROLS = (
     "--allowed-tools=EMPTY",
     "HERMETIC_HOME_XDG",
     CURSOR_AUTHENTICATION_BRIDGE,
-    "AUTHENTICATED_STATUS_PREFLIGHT",
+    CURSOR_AUTHENTICATION_PROBE,
+)
+_CURSOR_CREDENTIAL_SERVICES = (
+    "cursor-access-token",
+    "cursor-refresh-token",
 )
 _CURSOR_CONTROL_ARGUMENTS = (
     "--print",
@@ -139,8 +147,10 @@ class CursorCliQualification:
     stdout_limit_bytes: int
     authentication_bridge: str = "UNOBSERVED"
     authentication_bridge_digest: str = "UNOBSERVED"
-    authentication_status: str = "UNOBSERVED"
-    authentication_status_digest: str = "UNOBSERVED"
+    authentication_probe: str = "UNOBSERVED"
+    authentication_probe_digest: str = "UNOBSERVED"
+    credential_state: str = "UNOBSERVED"
+    credential_state_digest: str = "UNOBSERVED"
     _authentication_bridge_proof: _CursorAuthenticationBridgeProof | None = field(
         default=None,
         repr=False,
@@ -167,8 +177,10 @@ class CursorCliQualification:
             "stdout_limit_identity": CURSOR_STDOUT_LIMIT_IDENTITY,
             "authentication_bridge": self.authentication_bridge,
             "authentication_bridge_digest": self.authentication_bridge_digest,
-            "authentication_status": self.authentication_status,
-            "authentication_status_digest": self.authentication_status_digest,
+            "authentication_probe": self.authentication_probe,
+            "authentication_probe_digest": self.authentication_probe_digest,
+            "credential_state": self.credential_state,
+            "credential_state_digest": self.credential_state_digest,
         }
 
 
@@ -189,6 +201,13 @@ class _CursorPackageProof:
 
 
 @dataclass(frozen=True, slots=True)
+class _CursorQualificationPreparation:
+    package: _CursorPackageProof
+    resolved_binary: str
+    evidence: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
 class _CursorAuthenticationBridgeProof:
     method: str
     source: str
@@ -199,7 +218,7 @@ class _CursorAuthenticationBridgeProof:
     destination: str
 
     @property
-    def identity_digest(self) -> str:
+    def policy_digest(self) -> str:
         return _sha256_bytes(
             json.dumps(
                 {
@@ -214,25 +233,39 @@ class _CursorAuthenticationBridgeProof:
 
 
 @dataclass(frozen=True, slots=True)
-class _CursorAuthenticationStatusProof:
-    is_authenticated: bool
-    has_access_token: bool
-    has_refresh_token: bool
+class _CursorCredentialProbeProof:
+    security_binary: str
+    access_token_readable: bool
+    refresh_token_readable: bool
 
     @property
-    def status(self) -> str:
-        if self.is_authenticated and self.has_access_token and self.has_refresh_token:
-            return CURSOR_AUTHENTICATION_STATUS
-        return "UNAUTHENTICATED"
-
-    @property
-    def canonical_digest(self) -> str:
+    def probe_policy_digest(self) -> str:
         return _sha256_bytes(
             json.dumps(
                 {
-                    "has_access_token": self.has_access_token,
-                    "has_refresh_token": self.has_refresh_token,
-                    "is_authenticated": self.is_authenticated,
+                    "method": CURSOR_AUTHENTICATION_PROBE,
+                    "security_binary": self.security_binary,
+                    "services": list(_CURSOR_CREDENTIAL_SERVICES),
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        )
+
+    @property
+    def credential_state(self) -> str:
+        if self.access_token_readable and self.refresh_token_readable:
+            return CURSOR_CREDENTIAL_STATE
+        return "LOCAL_CREDENTIALS_UNAVAILABLE"
+
+    @property
+    def credential_state_digest(self) -> str:
+        return _sha256_bytes(
+            json.dumps(
+                {
+                    "access_token_readable": self.access_token_readable,
+                    "refresh_token_readable": self.refresh_token_readable,
                 },
                 ensure_ascii=True,
                 separators=(",", ":"),
@@ -362,6 +395,112 @@ def _install_cursor_authentication_bridge(
             "Cursor CLI authentication bridge could not be installed"
         ) from exc
     return _inspect_cursor_authentication_bridge(environment)
+
+
+def _qualified_cursor_security_binary() -> tuple[Path, os.stat_result]:
+    binary = Path(QUALIFIED_CURSOR_SECURITY_BIN)
+    try:
+        observed = binary.lstat()
+    except OSError as exc:
+        raise CliPredispatchRefusal(
+            "Cursor CLI local credential probe executable is absent"
+        ) from exc
+    if (
+        not binary.is_absolute()
+        or binary.is_symlink()
+        or not stat.S_ISREG(observed.st_mode)
+        or os.path.realpath(binary) != str(binary)
+        or observed.st_uid != QUALIFIED_CURSOR_SECURITY_OWNER_UID
+        or stat.S_IMODE(observed.st_mode) & 0o022
+        or not observed.st_mode & stat.S_IXUSR
+    ):
+        raise CliPredispatchRefusal(
+            "Cursor CLI local credential probe executable is not fixed"
+        )
+    return binary, observed
+
+
+def _probe_cursor_credentials_locally(
+    *,
+    environment: Mapping[str, str],
+    authentication_bridge: _CursorAuthenticationBridgeProof,
+    evidence: Mapping[str, object],
+) -> _CursorCredentialProbeProof:
+    security_binary, security_before = _qualified_cursor_security_binary()
+    returncodes: list[int] = []
+    command_environment = {
+        key: environment[key]
+        for key in ("HOME", "LANG", "LC_ALL", "PATH", "TMPDIR")
+        if key in environment
+    }
+    for service in _CURSOR_CREDENTIAL_SERVICES:
+        try:
+            result = subprocess.run(
+                (
+                    str(security_binary),
+                    "find-generic-password",
+                    "-s",
+                    service,
+                    "-w",
+                    authentication_bridge.destination,
+                ),
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=CURSOR_LOCAL_CREDENTIAL_PROBE_TIMEOUT_SECONDS,
+                cwd="/",
+                env=command_environment,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            retained = dict(evidence)
+            retained.update(
+                {
+                    "authentication_probe": CURSOR_AUTHENTICATION_PROBE,
+                    "credential_state": "LOCAL_PROBE_FAILED",
+                }
+            )
+            raise CliPredispatchRefusal(
+                "Cursor CLI local credential probe failed",
+                qualification_evidence=retained,
+            ) from exc
+        returncodes.append(result.returncode)
+    _security_after, security_after = _qualified_cursor_security_binary()
+    if (
+        security_before.st_dev,
+        security_before.st_ino,
+        security_before.st_uid,
+        stat.S_IMODE(security_before.st_mode),
+    ) != (
+        security_after.st_dev,
+        security_after.st_ino,
+        security_after.st_uid,
+        stat.S_IMODE(security_after.st_mode),
+    ):
+        raise CliPredispatchRefusal(
+            "Cursor CLI local credential probe executable changed",
+            qualification_evidence=evidence,
+        )
+    proof = _CursorCredentialProbeProof(
+        security_binary=str(security_binary),
+        access_token_readable=returncodes[0] == 0,
+        refresh_token_readable=returncodes[1] == 0,
+    )
+    if proof.credential_state != CURSOR_CREDENTIAL_STATE:
+        retained = dict(evidence)
+        retained.update(
+            {
+                "authentication_probe": CURSOR_AUTHENTICATION_PROBE,
+                "authentication_probe_digest": proof.probe_policy_digest,
+                "credential_state": proof.credential_state,
+                "credential_state_digest": proof.credential_state_digest,
+            }
+        )
+        raise CliPredispatchRefusal(
+            "Cursor CLI local credentials are not readable",
+            qualification_evidence=retained,
+        )
+    return proof
 
 
 def _decode_output(value: bytes, *, name: str) -> str:
@@ -661,7 +800,7 @@ def _qualification_evidence(
     version: str = "UNOBSERVED",
     package: _CursorPackageProof | None = None,
     authentication_bridge: _CursorAuthenticationBridgeProof | None = None,
-    authentication_status: _CursorAuthenticationStatusProof | None = None,
+    credential_probe: _CursorCredentialProbeProof | None = None,
 ) -> dict[str, object]:
     evidence: dict[str, object] = {
         "binary": binary,
@@ -681,17 +820,25 @@ def _qualification_evidence(
         "authentication_bridge_digest": (
             "UNOBSERVED"
             if authentication_bridge is None
-            else authentication_bridge.identity_digest
+            else authentication_bridge.policy_digest
         ),
-        "authentication_status": (
-            "UNOBSERVED"
-            if authentication_status is None
-            else authentication_status.status
+        "authentication_probe": (
+            "UNOBSERVED" if credential_probe is None else CURSOR_AUTHENTICATION_PROBE
         ),
-        "authentication_status_digest": (
+        "authentication_probe_digest": (
             "UNOBSERVED"
-            if authentication_status is None
-            else authentication_status.canonical_digest
+            if credential_probe is None
+            else credential_probe.probe_policy_digest
+        ),
+        "credential_state": (
+            "UNOBSERVED"
+            if credential_probe is None
+            else credential_probe.credential_state
+        ),
+        "credential_state_digest": (
+            "UNOBSERVED"
+            if credential_probe is None
+            else credential_probe.credential_state_digest
         ),
     }
     if package is not None:
@@ -704,66 +851,6 @@ def _qualification_evidence(
             }
         )
     return evidence
-
-
-def _cursor_authentication_status(
-    result: _ProcessOutput,
-    *,
-    evidence: Mapping[str, object],
-) -> _CursorAuthenticationStatusProof:
-    if result.returncode != 0:
-        retained = dict(evidence)
-        retained.update(
-            {
-                "authentication_status": "STATUS_COMMAND_FAILED",
-                "authentication_status_digest": _sha256_text(
-                    f"cursor-authentication-status-returncode-v1:{result.returncode}"
-                ),
-            }
-        )
-        raise CliPredispatchRefusal(
-            "Cursor CLI authentication status preflight failed",
-            qualification_evidence=retained,
-        )
-    try:
-        value = json.loads(result.stdout)
-    except (json.JSONDecodeError, TypeError):
-        value = None
-    if not isinstance(value, dict) or not all(
-        isinstance(value.get(key), bool)
-        for key in ("isAuthenticated", "hasAccessToken", "hasRefreshToken")
-    ):
-        retained = dict(evidence)
-        retained.update(
-            {
-                "authentication_status": "INVALID_STATUS",
-                "authentication_status_digest": _sha256_text(
-                    "cursor-authentication-status-invalid-v1"
-                ),
-            }
-        )
-        raise CliPredispatchRefusal(
-            "Cursor CLI authentication status is invalid",
-            qualification_evidence=retained,
-        )
-    proof = _CursorAuthenticationStatusProof(
-        is_authenticated=value["isAuthenticated"],
-        has_access_token=value["hasAccessToken"],
-        has_refresh_token=value["hasRefreshToken"],
-    )
-    retained = dict(evidence)
-    retained.update(
-        {
-            "authentication_status": proof.status,
-            "authentication_status_digest": proof.canonical_digest,
-        }
-    )
-    if proof.status != CURSOR_AUTHENTICATION_STATUS:
-        raise CliPredispatchRefusal(
-            "Cursor CLI is not authenticated in the isolated runtime",
-            qualification_evidence=retained,
-        )
-    return proof
 
 
 def _require_qualified_request_path(
@@ -803,7 +890,7 @@ def _build_qualification(
     max_tokens: int,
     package: _CursorPackageProof,
     authentication_bridge: _CursorAuthenticationBridgeProof,
-    authentication_status: _CursorAuthenticationStatusProof,
+    credential_probe: _CursorCredentialProbeProof,
     version_result: _ProcessOutput,
     help_result: _ProcessOutput,
 ) -> CursorCliQualification:
@@ -814,7 +901,7 @@ def _build_qualification(
         version=version or "UNOBSERVED",
         package=package,
         authentication_bridge=authentication_bridge,
-        authentication_status=authentication_status,
+        credential_probe=credential_probe,
     )
     _require_qualified_static_results(
         version_result=version_result,
@@ -838,20 +925,21 @@ def _build_qualification(
         command_surface_proof=CURSOR_COMMAND_SURFACE_PROOF,
         stdout_limit_bytes=cursor_stdout_limit(max_tokens),
         authentication_bridge=authentication_bridge.method,
-        authentication_bridge_digest=authentication_bridge.identity_digest,
-        authentication_status=authentication_status.status,
-        authentication_status_digest=authentication_status.canonical_digest,
+        authentication_bridge_digest=authentication_bridge.policy_digest,
+        authentication_probe=CURSOR_AUTHENTICATION_PROBE,
+        authentication_probe_digest=credential_probe.probe_policy_digest,
+        credential_state=credential_probe.credential_state,
+        credential_state_digest=credential_probe.credential_state_digest,
         _authentication_bridge_proof=authentication_bridge,
     )
 
 
-def _qualify_cursor_agent(
+def _prepare_cursor_qualification(
     *,
     binary: str,
-    cwd: str,
     environment: Mapping[str, str],
     max_tokens: int,
-) -> CursorCliQualification:
+) -> _CursorQualificationPreparation:
     evidence = _qualification_evidence(binary=binary, max_tokens=max_tokens)
     try:
         _require_qualified_request_path(binary, evidence=evidence)
@@ -860,27 +948,34 @@ def _qualify_cursor_agent(
             binary=binary, max_tokens=max_tokens, package=package
         )
         _authentication_bridge_destination(environment)
-        resolved_binary = os.path.realpath(binary)
-        version_result = _run_bounded_process(
-            (resolved_binary, "--version"),
-            timeout=CURSOR_PREFLIGHT_TIMEOUT_SECONDS,
-            max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
-            cwd=cwd,
-            environment=environment,
-        )
-        help_result = _run_bounded_process(
-            (resolved_binary, "--help"),
-            timeout=CURSOR_PREFLIGHT_TIMEOUT_SECONDS,
-            max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
-            cwd=cwd,
-            environment=environment,
-        )
-        evidence = _qualification_evidence(
-            binary=binary,
-            max_tokens=max_tokens,
-            version=version_result.stdout.strip() or "UNOBSERVED",
+        return _CursorQualificationPreparation(
             package=package,
+            resolved_binary=os.path.realpath(binary),
+            evidence=evidence,
         )
+    except CliPredispatchRefusal as exc:
+        if exc.qualification_evidence:
+            raise
+        raise CliPredispatchRefusal(str(exc), qualification_evidence=evidence) from exc
+
+
+def _complete_cursor_qualification(
+    *,
+    binary: str,
+    environment: Mapping[str, str],
+    max_tokens: int,
+    preparation: _CursorQualificationPreparation,
+    version_result: _ProcessOutput,
+    help_result: _ProcessOutput,
+) -> CursorCliQualification:
+    package = preparation.package
+    evidence = _qualification_evidence(
+        binary=binary,
+        max_tokens=max_tokens,
+        version=version_result.stdout.strip() or "UNOBSERVED",
+        package=package,
+    )
+    try:
         _require_qualified_static_results(
             version_result=version_result,
             help_result=help_result,
@@ -894,15 +989,9 @@ def _qualify_cursor_agent(
             package=package,
             authentication_bridge=authentication_bridge,
         )
-        authentication_result = _run_bounded_process(
-            (resolved_binary, "status", "--format", "json"),
-            timeout=CURSOR_PREFLIGHT_TIMEOUT_SECONDS,
-            max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
-            cwd=cwd,
+        credential_probe = _probe_cursor_credentials_locally(
             environment=environment,
-        )
-        authentication_status = _cursor_authentication_status(
-            authentication_result,
+            authentication_bridge=authentication_bridge,
             evidence=evidence,
         )
         qualification = _build_qualification(
@@ -910,11 +999,11 @@ def _qualify_cursor_agent(
             max_tokens=max_tokens,
             package=package,
             authentication_bridge=authentication_bridge,
-            authentication_status=authentication_status,
+            credential_probe=credential_probe,
             version_result=version_result,
             help_result=help_result,
         )
-        if _inspect_cursor_package(resolved_binary) != package:
+        if _inspect_cursor_package(preparation.resolved_binary) != package:
             raise CliPredispatchRefusal(
                 "Cursor CLI package changed during qualification",
                 qualification_evidence=evidence,
@@ -925,6 +1014,49 @@ def _qualify_cursor_agent(
                 qualification_evidence=qualification.as_dict(),
             )
         return qualification
+    except CliPredispatchRefusal as exc:
+        if exc.qualification_evidence:
+            raise
+        raise CliPredispatchRefusal(str(exc), qualification_evidence=evidence) from exc
+
+
+def _qualify_cursor_agent(
+    *,
+    binary: str,
+    cwd: str,
+    environment: Mapping[str, str],
+    max_tokens: int,
+) -> CursorCliQualification:
+    evidence = _qualification_evidence(binary=binary, max_tokens=max_tokens)
+    try:
+        preparation = _prepare_cursor_qualification(
+            binary=binary,
+            environment=environment,
+            max_tokens=max_tokens,
+        )
+        evidence = preparation.evidence
+        version_result = _run_bounded_process(
+            (preparation.resolved_binary, "--version"),
+            timeout=CURSOR_PREFLIGHT_TIMEOUT_SECONDS,
+            max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
+            cwd=cwd,
+            environment=environment,
+        )
+        help_result = _run_bounded_process(
+            (preparation.resolved_binary, "--help"),
+            timeout=CURSOR_PREFLIGHT_TIMEOUT_SECONDS,
+            max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
+            cwd=cwd,
+            environment=environment,
+        )
+        return _complete_cursor_qualification(
+            binary=binary,
+            environment=environment,
+            max_tokens=max_tokens,
+            preparation=preparation,
+            version_result=version_result,
+            help_result=help_result,
+        )
     except CliPredispatchRefusal as exc:
         if exc.qualification_evidence:
             raise
@@ -945,83 +1077,36 @@ async def _qualify_cursor_agent_async(
 ) -> CursorCliQualification:
     evidence = _qualification_evidence(binary=binary, max_tokens=max_tokens)
     try:
-        _require_qualified_request_path(binary, evidence=evidence)
-        package = await asyncio.to_thread(_inspect_cursor_package, binary)
-        evidence = _qualification_evidence(
-            binary=binary, max_tokens=max_tokens, package=package
+        preparation = await asyncio.to_thread(
+            _prepare_cursor_qualification,
+            binary=binary,
+            environment=environment,
+            max_tokens=max_tokens,
         )
-        _authentication_bridge_destination(environment)
-        resolved_binary = os.path.realpath(binary)
+        evidence = preparation.evidence
         version_result = await _run_bounded_process_async(
-            (resolved_binary, "--version"),
+            (preparation.resolved_binary, "--version"),
             timeout=CURSOR_PREFLIGHT_TIMEOUT_SECONDS,
             max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
             cwd=cwd,
             environment=environment,
         )
         help_result = await _run_bounded_process_async(
-            (resolved_binary, "--help"),
+            (preparation.resolved_binary, "--help"),
             timeout=CURSOR_PREFLIGHT_TIMEOUT_SECONDS,
             max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
             cwd=cwd,
             environment=environment,
         )
-        evidence = _qualification_evidence(
+        return await asyncio.to_thread(
+            _complete_cursor_qualification,
             binary=binary,
-            max_tokens=max_tokens,
-            version=version_result.stdout.strip() or "UNOBSERVED",
-            package=package,
-        )
-        _require_qualified_static_results(
-            version_result=version_result,
-            help_result=help_result,
-            evidence=evidence,
-        )
-        authentication_bridge = _install_cursor_authentication_bridge(environment)
-        evidence = _qualification_evidence(
-            binary=binary,
-            max_tokens=max_tokens,
-            version=version_result.stdout.strip() or "UNOBSERVED",
-            package=package,
-            authentication_bridge=authentication_bridge,
-        )
-        authentication_result = await _run_bounded_process_async(
-            (resolved_binary, "status", "--format", "json"),
-            timeout=CURSOR_PREFLIGHT_TIMEOUT_SECONDS,
-            max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
-            cwd=cwd,
             environment=environment,
-        )
-        authentication_status = _cursor_authentication_status(
-            authentication_result,
-            evidence=evidence,
-        )
-        qualification = _build_qualification(
-            binary=binary,
             max_tokens=max_tokens,
-            package=package,
-            authentication_bridge=authentication_bridge,
-            authentication_status=authentication_status,
+            preparation=preparation,
             version_result=version_result,
             help_result=help_result,
         )
-        retained_package = await asyncio.to_thread(
-            _inspect_cursor_package, resolved_binary
-        )
-        if retained_package != package:
-            raise CliPredispatchRefusal(
-                "Cursor CLI package changed during qualification",
-                qualification_evidence=evidence,
-            )
-        retained_bridge = await asyncio.to_thread(
-            _inspect_cursor_authentication_bridge, environment
-        )
-        if retained_bridge != authentication_bridge:
-            raise CliPredispatchRefusal(
-                "Cursor CLI authentication bridge changed during qualification",
-                qualification_evidence=qualification.as_dict(),
-            )
-        return qualification
     except CliPredispatchRefusal as exc:
         if exc.qualification_evidence:
             raise
@@ -1141,8 +1226,9 @@ async def run_cursor_transport_async(
 __all__ = [
     "CURSOR_AGENT_BIN",
     "CURSOR_AUTHENTICATION_BRIDGE",
-    "CURSOR_AUTHENTICATION_STATUS",
+    "CURSOR_AUTHENTICATION_PROBE",
     "CURSOR_COMMAND_SURFACE_PROOF",
+    "CURSOR_CREDENTIAL_STATE",
     "CURSOR_STDOUT_LIMIT_FORMULA",
     "CURSOR_STDOUT_LIMIT_IDENTITY",
     "QUALIFIED_CURSOR_AGENT_BIN",
@@ -1153,6 +1239,7 @@ __all__ = [
     "QUALIFIED_CURSOR_AGENT_RESOLVED_BIN",
     "QUALIFIED_CURSOR_AGENT_VERSION",
     "QUALIFIED_CURSOR_LOGIN_KEYCHAIN",
+    "QUALIFIED_CURSOR_SECURITY_BIN",
     "CliOutputBoundExceeded",
     "CliOutputDecodeError",
     "CliPredispatchRefusal",

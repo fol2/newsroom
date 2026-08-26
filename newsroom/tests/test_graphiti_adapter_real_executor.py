@@ -2689,6 +2689,19 @@ def _fixture_cursor_environment(
         "QUALIFIED_CURSOR_LOGIN_KEYCHAIN",
         str(keychain),
     )
+    security_binary = root / "security"
+    security_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    security_binary.chmod(0o700)
+    monkeypatch.setattr(
+        cursor_transport,
+        "QUALIFIED_CURSOR_SECURITY_BIN",
+        str(security_binary),
+    )
+    monkeypatch.setattr(
+        cursor_transport,
+        "QUALIFIED_CURSOR_SECURITY_OWNER_UID",
+        security_binary.stat().st_uid,
+    )
     return {"HOME": str(home)}
 
 
@@ -2749,6 +2762,45 @@ def test_cursor_authentication_bridge_rejects_a_symlinked_source(
         )
 
 
+def test_cursor_local_credential_probe_uses_only_pinned_keychain_items(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from newsroom.graphiti_adapter import cursor_transport
+
+    environment = _fixture_cursor_environment(
+        root=tmp_path,
+        monkeypatch=monkeypatch,
+    )
+    bridge = cursor_transport._install_cursor_authentication_bridge(environment)
+    command_log = tmp_path / "security-commands.log"
+    security_binary = Path(cursor_transport.QUALIFIED_CURSOR_SECURITY_BIN)
+    security_binary.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{command_log}"\nexit 0\n',
+        encoding="utf-8",
+    )
+    security_binary.chmod(0o700)
+
+    proof = cursor_transport._probe_cursor_credentials_locally(
+        environment=environment,
+        authentication_bridge=bridge,
+        evidence={},
+    )
+
+    assert proof.credential_state == cursor_transport.CURSOR_CREDENTIAL_STATE
+    assert command_log.read_text(encoding="utf-8").splitlines() == [
+        (
+            "find-generic-password -s cursor-access-token -w "
+            f"{bridge.destination}"
+        ),
+        (
+            "find-generic-password -s cursor-refresh-token -w "
+            f"{bridge.destination}"
+        ),
+    ]
+    assert "status" not in command_log.read_text(encoding="utf-8")
+
+
 def test_cursor_cli_qualifies_pinned_package_and_dispatches_resolved_binary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2807,16 +2859,6 @@ def test_cursor_cli_qualifies_pinned_package_and_dispatches_resolved_binary(
                 ),
                 stderr="",
             )
-        if command[1:] == ("status", "--format", "json"):
-            preflight_commands.append(command)
-            return cursor_transport._ProcessOutput(
-                returncode=0,
-                stdout=(
-                    '{"isAuthenticated":true,"hasAccessToken":true,'
-                    '"hasRefreshToken":true}'
-                ),
-                stderr="",
-            )
         provider_commands.append(command)
         assert max_output_bytes == cursor_transport.cursor_stdout_limit(512)
         return cursor_transport._ProcessOutput(
@@ -2842,7 +2884,6 @@ def test_cursor_cli_qualifies_pinned_package_and_dispatches_resolved_binary(
     assert [command[1:] for command in preflight_commands] == [
         ("--version",),
         ("--help",),
-        ("status", "--format", "json"),
     ]
     assert all(command[0] == str(resolved_binary) for command in preflight_commands)
     command = provider_commands[0]
@@ -2871,8 +2912,12 @@ def test_cursor_cli_qualifies_pinned_package_and_dispatches_resolved_binary(
     assert retained["authentication_bridge"] == (
         cursor_transport.CURSOR_AUTHENTICATION_BRIDGE
     )
-    assert retained["authentication_status"] == "AUTHENTICATED_ACCESS_REFRESH"
-    assert retained["authentication_status_digest"].startswith("sha256:")
+    assert retained["authentication_probe"] == (
+        cursor_transport.CURSOR_AUTHENTICATION_PROBE
+    )
+    assert retained["authentication_probe_digest"].startswith("sha256:")
+    assert retained["credential_state"] == cursor_transport.CURSOR_CREDENTIAL_STATE
+    assert retained["credential_state_digest"].startswith("sha256:")
 
 
 def test_async_cursor_cli_uses_the_same_exact_package_qualification(
@@ -2912,11 +2957,6 @@ def test_async_cursor_cli_uses_the_same_exact_package_qualification(
             if command[-1] == "--version"
             else "--print --mode --output-format --sandbox --workspace --trust --model"
             if command[-1] == "--help"
-            else (
-                '{"isAuthenticated":true,"hasAccessToken":true,'
-                '"hasRefreshToken":true}'
-            )
-            if command[1:] == ("status", "--format", "json")
             else '{"result":"{}","usage":{}}'
         )
         return cursor_transport._ProcessOutput(
@@ -2946,7 +2986,7 @@ def test_async_cursor_cli_uses_the_same_exact_package_qualification(
         cursor_transport.QUALIFIED_CURSOR_AGENT_PACKAGE_DIGEST
     )
     assert dispatches == ["started"]
-    assert len(commands) == 4
+    assert len(commands) == 3
     assert all(command[0] == str(resolved_binary) for command in commands)
 
 
@@ -3112,7 +3152,7 @@ def test_cursor_cli_version_drift_refuses_before_dispatch(
     )
 
 
-def test_cursor_cli_unauthenticated_status_refuses_before_dispatch_without_pii(
+def test_cursor_cli_missing_local_credential_refuses_before_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3134,6 +3174,14 @@ def test_cursor_cli_unauthenticated_status_refuses_before_dispatch_without_pii(
         root=tmp_path / "credential-fixture",
         monkeypatch=monkeypatch,
     )
+    Path(cursor_transport.QUALIFIED_CURSOR_SECURITY_BIN).write_text(
+        (
+            "#!/bin/sh\n"
+            'if [ "$3" = "cursor-refresh-token" ]; then exit 1; fi\n'
+            "exit 0\n"
+        ),
+        encoding="utf-8",
+    )
     package = _fixture_cursor_package(root=install)
     commands: list[tuple[str, ...]] = []
     dispatches: list[str] = []
@@ -3144,11 +3192,6 @@ def test_cursor_cli_unauthenticated_status_refuses_before_dispatch_without_pii(
             stdout = f"{cursor_transport.QUALIFIED_CURSOR_AGENT_VERSION}\n"
         elif command[-1] == "--help":
             stdout = "--print --mode --output-format --sandbox --workspace --trust --model"
-        elif command[1:] == ("status", "--format", "json"):
-            stdout = (
-                '{"isAuthenticated":false,"hasAccessToken":false,'
-                '"hasRefreshToken":false,"email":"private@example.invalid"}'
-            )
         else:
             pytest.fail("provider command reached dispatch")
         return cursor_transport._ProcessOutput(
@@ -3166,7 +3209,7 @@ def test_cursor_cli_unauthenticated_status_refuses_before_dispatch_without_pii(
 
     with pytest.raises(
         cursor_transport.CliPredispatchRefusal,
-        match="is not authenticated",
+        match="local credentials are not readable",
     ) as caught:
         cursor_transport.run_cursor_transport(
             binary=str(requested),
@@ -3182,12 +3225,13 @@ def test_cursor_cli_unauthenticated_status_refuses_before_dispatch_without_pii(
     assert [command[1:] for command in commands] == [
         ("--version",),
         ("--help",),
-        ("status", "--format", "json"),
     ]
     evidence = caught.value.qualification_evidence
-    assert evidence["authentication_status"] == "UNAUTHENTICATED"
-    assert evidence["authentication_status_digest"].startswith("sha256:")
-    assert "private@example.invalid" not in str(evidence)
+    assert evidence["authentication_probe"] == (
+        cursor_transport.CURSOR_AUTHENTICATION_PROBE
+    )
+    assert evidence["credential_state"] == "LOCAL_CREDENTIALS_UNAVAILABLE"
+    assert evidence["credential_state_digest"].startswith("sha256:")
 
 
 def test_cursor_cli_keychain_replacement_refuses_before_dispatch(
@@ -3220,15 +3264,6 @@ def test_cursor_cli_keychain_replacement_refuses_before_dispatch(
             stdout = f"{cursor_transport.QUALIFIED_CURSOR_AGENT_VERSION}\n"
         elif command[-1] == "--help":
             stdout = "--print --mode --output-format --sandbox --workspace --trust --model"
-        elif command[1:] == ("status", "--format", "json"):
-            stdout = (
-                '{"isAuthenticated":true,"hasAccessToken":true,'
-                '"hasRefreshToken":true}'
-            )
-            source = Path(cursor_transport.QUALIFIED_CURSOR_LOGIN_KEYCHAIN)
-            source.unlink()
-            source.write_bytes(b"replacement keychain")
-            source.chmod(0o600)
         else:
             pytest.fail("provider command reached dispatch")
         return cursor_transport._ProcessOutput(
@@ -3243,6 +3278,21 @@ def test_cursor_cli_keychain_replacement_refuses_before_dispatch(
         lambda _binary: package,
     )
     monkeypatch.setattr(cursor_transport, "_run_bounded_process", bounded)
+    local_probe = cursor_transport._probe_cursor_credentials_locally
+
+    def replace_after_probe(**values: object) -> object:
+        proof = local_probe(**values)
+        source = Path(cursor_transport.QUALIFIED_CURSOR_LOGIN_KEYCHAIN)
+        source.unlink()
+        source.write_bytes(b"replacement keychain")
+        source.chmod(0o600)
+        return proof
+
+    monkeypatch.setattr(
+        cursor_transport,
+        "_probe_cursor_credentials_locally",
+        replace_after_probe,
+    )
 
     with pytest.raises(
         cursor_transport.CliPredispatchRefusal,
