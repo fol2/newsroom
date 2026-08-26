@@ -1,5 +1,7 @@
 """Fail-closed production Operational Admission inspection and minting."""
 
+from __future__ import annotations
+
 from ._shared import (
     AuthenticationKey,
     FreezeIdentity,
