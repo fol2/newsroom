@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
-from jsonschema import Draft202012Validator
 import pytest
+from jsonschema import Draft202012Validator
 
 from scripts.sdlc.classify_change import (
     ChangedPath,
@@ -15,7 +15,6 @@ from scripts.sdlc.classify_change import (
     parse_name_status,
 )
 from scripts.sdlc.contracts import ContractError, SdlcContract, load_contract
-
 
 REPO_ROOT = Path(__file__).parents[2]
 BASE_SHA = "0" * 40
@@ -48,7 +47,9 @@ def _git(repo: Path, *arguments: str) -> str:
 
 
 def test_repository_globs_treat_double_star_as_zero_or_more_segments() -> None:
-    assert matches_repository_glob("newsroom/migrations.py", "newsroom/**/migrations.py")
+    assert matches_repository_glob(
+        "newsroom/migrations.py", "newsroom/**/migrations.py"
+    )
     assert matches_repository_glob(
         "newsroom/authority/deep/object_migrations.py",
         "newsroom/**/*_migrations.py",
@@ -60,24 +61,25 @@ def test_repository_globs_treat_double_star_as_zero_or_more_segments() -> None:
 
 def test_risk_routing_uses_maximum_triggered_tier() -> None:
     assert _route("README.md")["risk_tier"] == "R0_DOCUMENTATION"
-    assert _route("newsroom/tests/test_unrelated.py")["risk_tier"] == (
-        "R1_LOCAL_CODE"
-    )
+    assert _route("newsroom/tests/test_unrelated.py")["risk_tier"] == ("R1_LOCAL_CODE")
     assert _route("newsroom/authority/object_system.py")["risk_tier"] == (
         "R2_STATEFUL_CONTRACT"
     )
     assert _route("newsroom/projection/policy.py")["risk_tier"] == (
         "R3_EXTERNAL_SERVICE_SECURITY"
     )
-    assert _route("release/production.yml")["risk_tier"] == (
-        "R4_RELEASE_OPERATIONAL"
-    )
+    assert _route("release/production.yml")["risk_tier"] == ("R4_RELEASE_OPERATIONAL")
 
 
 @pytest.mark.parametrize(
     "path",
     (
-        "newsroom/production_admission.py",
+        "newsroom/production_admission/evidence.py",
+        "newsroom/production_admission/gate_evidence.py",
+        "newsroom/production_admission/identities.py",
+        "newsroom/production_admission/owner.py",
+        "newsroom/production_admission/readiness.py",
+        "newsroom/production_admission/admission.py",
         "scripts/production_operational_admission.py",
         "newsroom/tests/test_production_operational_admission.py",
         "newsroom/tests/test_production_operational_admission_cli.py",
@@ -190,7 +192,9 @@ def test_route_is_deterministic_and_matches_the_json_schema() -> None:
     )
 
     assert first == second
-    assert first["selected_test_manifest_digest"].startswith("sha256:")
+    selected_manifest_digest = first["selected_test_manifest_digest"]
+    assert isinstance(selected_manifest_digest, str)
+    assert selected_manifest_digest.startswith("sha256:")
     Draft202012Validator(schema).validate(first)
 
 

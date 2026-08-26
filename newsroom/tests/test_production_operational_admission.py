@@ -18,10 +18,14 @@ from newsroom.production_admission import (
     GateAttestation,
     IdentityClass,
     KeyClass,
+    KeyProvenance,
     OwnerAdmissionInstruction,
+    OwnerIssueRecord,
+    OwnerIssueSnapshot,
     ProductionAdmissionError,
     ProductionAdmissionVerdict,
     ProductionEvidenceManifest,
+    ProductionGateEvidence,
     ProductionGateId,
     ProductionIdentitySet,
     ProductionOperationalAdmission,
@@ -29,6 +33,7 @@ from newsroom.production_admission import (
     ReadinessStatus,
     inspect_readiness,
     mint_production_operational_admission,
+    owner_issue_binding_marker,
 )
 
 _FREEZE = FreezeIdentity(exact_main_sha="a" * 40, exact_main_tree="b" * 40)
@@ -53,18 +58,184 @@ _PUBLICATION_SPECS = {
 _EVIDENCE_KEY = AuthenticationKey(
     key_id="keychain:newsroom-evidence-v1",
     key_class=KeyClass.EVIDENCE_AUTHORITY,
+    provenance=KeyProvenance.PRODUCTION_TRUST_ROOT,
     secret=b"e" * 32,
 )
 _OWNER_KEY = AuthenticationKey(
     key_id="keychain:human-accountable-owner-v1",
     key_class=KeyClass.HUMAN_ACCOUNTABLE_OWNER,
+    provenance=KeyProvenance.PRODUCTION_TRUST_ROOT,
     secret=b"o" * 32,
 )
 _PRODUCTION_KEY = AuthenticationKey(
     key_id="keychain:production-operational-admission-v1",
     key_class=KeyClass.PRODUCTION_OPERATIONAL_ADMISSION,
+    provenance=KeyProvenance.PRODUCTION_TRUST_ROOT,
     secret=b"p" * 32,
 )
+
+
+def _gate_facts(
+    gate_id: ProductionGateId,
+    *,
+    identity_set: ProductionIdentitySet,
+    bound_artifacts: tuple[BoundArtifact, ...],
+) -> dict[str, object]:
+    identities = {item.identity_class: item for item in identity_set.identities}
+
+    def identity_facts(identity_class: IdentityClass) -> dict[str, object]:
+        identity = identities[identity_class]
+        return {
+            "identity_digest": identity.identity_digest,
+            "evaluation_evidence_digest": identity.evaluation_evidence_digest,
+        }
+
+    artifacts = {item.role: item for item in bound_artifacts}
+    if gate_id is ProductionGateId.RELATIONAL_SCHEMA_CURRENT:
+        return {
+            **identity_facts(IdentityClass.RELATIONAL_SCHEMA),
+            "relational_schema_version": identity_set.relational_schema_version,
+            "migration_history_digest": identity_set.migration_history_digest,
+            "schema_fingerprint": identity_set.schema_fingerprint,
+        }
+    if gate_id is ProductionGateId.OPERATIONAL_PROFILE_CURRENT:
+        return {
+            **identity_facts(IdentityClass.OPERATIONAL_PROFILE),
+            "profile_scope": "production",
+            "profile_current": True,
+        }
+    if gate_id is ProductionGateId.GRAPHRAG_DEPLOYMENT_CURRENT:
+        return {
+            **identity_facts(IdentityClass.GRAPHRAG_DEPLOYMENT),
+            "deployment_bytes_digest": identity_set.deployment_bytes_digest,
+            "projection_generation_digest": identity_set.projection_generation_digest,
+            "contiguous_projection_watermark": (
+                identity_set.contiguous_projection_watermark
+            ),
+            "admitted_only": True,
+        }
+    if gate_id is ProductionGateId.RETRIEVAL_CONTRACT_CURRENT:
+        return {
+            **identity_facts(IdentityClass.RETRIEVAL_CONTRACT),
+            "contract_current": True,
+            "admitted_only": True,
+        }
+    if gate_id is ProductionGateId.LIVE_EVIDENCE_INTAKE_CURRENT:
+        canary = artifacts[BoundArtifactRole.LIVE_EVIDENCE_INTAKE_CANARY_CLOSEOUT]
+        return {
+            **identity_facts(IdentityClass.LIVE_EVIDENCE_INTAKE),
+            "canary_closeout_digest": canary.artifact_digest,
+            "canary_outcome": "ELIGIBLE_FOR_ACTIVATION_PLANNING",
+            "run_window_closed": True,
+        }
+    if gate_id is ProductionGateId.PUBLICATION_ADAPTERS_CURRENT:
+        return {
+            **identity_facts(IdentityClass.PUBLICATION_ADAPTERS),
+            "adapter_inventory_digest": digest_canonical(
+                {"publication_adapters": "production"}
+            ),
+            "adapter_count": 1,
+            "adapters_current": True,
+        }
+    if gate_id is ProductionGateId.HANDOFF_NON_EFFECT_IDENTITIES_CURRENT:
+        return {
+            **identity_facts(IdentityClass.HANDOFF_NON_EFFECT),
+            "handoff_max_attempts": identity_set.handoff_max_attempts,
+            "publication_effects": 0,
+            "public_dispatch_effects": 0,
+            "production_mutations": 0,
+        }
+    if gate_id is ProductionGateId.EFFECTIVE_REVISION_COVERAGE_CURRENT:
+        return {
+            "coverage_policy": "FULL_TERMINAL",
+            "eligible_revisions": 1606,
+            "terminal_revisions": 1606,
+            "terminal_coverage_ppm": 1_000_000,
+            "required_terminal_coverage_ppm": 1_000_000,
+            "hidden_gap_count": 0,
+            "threshold_authority_digest": None,
+            "contiguous_projection_watermark": (
+                identity_set.contiguous_projection_watermark
+            ),
+        }
+    if gate_id is ProductionGateId.SPEND_ACCOUNTING_RECONCILED:
+        return {
+            "attempt_count": 564,
+            "reconciled_attempt_count": 564,
+            "unreconciled_attempt_count": 0,
+            "usage_uncertainty_count": 0,
+            "reserved_gbp_microunits": 0,
+            "actual_gbp_microunits": 9792,
+        }
+    if gate_id is ProductionGateId.RIGHTS_TERMS_CREDENTIALS_EGRESS_CURRENT:
+        return {
+            "rights_identity_digest": digest_canonical({"rights": "current"}),
+            "provider_terms_identity_digest": digest_canonical(
+                {"provider_terms": "current"}
+            ),
+            "credential_identity_digest": digest_canonical({"credentials": "current"}),
+            "egress_identity_digest": digest_canonical({"egress": "current"}),
+            "rights_current": True,
+            "provider_terms_current": True,
+            "credentials_current": True,
+            "egress_current": True,
+        }
+    if gate_id is ProductionGateId.HERMES_RUNTIME_CONTROLS_CURRENT:
+        return {
+            "control_plane": "HERMES",
+            "single_instance_count": 1,
+            "veto_ready": True,
+            "kill_switch_ready": True,
+            "signed_human_stop_digest": digest_canonical({"human_stop": "clear"}),
+            "human_stop_state": "CLEAR_SIGNED",
+            "legacy_stack_running": False,
+        }
+    if gate_id is ProductionGateId.STORAGE_BACKUP_RESTORE_ROLLBACK_CURRENT:
+        backup = artifacts[BoundArtifactRole.BACKUP]
+        restore = artifacts[BoundArtifactRole.RESTORE]
+        rollback = artifacts[BoundArtifactRole.ROLLBACK]
+        return {
+            "protected_storage": True,
+            "store_identity_digest": backup.store_identity_digest,
+            "backup_digest": backup.artifact_digest,
+            "restore_digest": restore.artifact_digest,
+            "rollback_digest": rollback.artifact_digest,
+            "ambiguous_effect_count": 0,
+            "unreconciled_ambiguous_effect_count": 0,
+        }
+    if gate_id is ProductionGateId.PUBLICATION_LIFECYCLE_SPECIFICATIONS_ACCEPTED:
+        return {
+            "accepted_spec_digests": _PUBLICATION_SPECS,
+            "draft_count": 0,
+        }
+    if gate_id is ProductionGateId.CANARY_ROLLBACK_RESTORE_IDENTITY_BOUND:
+        return {
+            "canary_digest": artifacts[
+                BoundArtifactRole.LIVE_EVIDENCE_INTAKE_CANARY_CLOSEOUT
+            ].artifact_digest,
+            "restore_digest": artifacts[BoundArtifactRole.RESTORE].artifact_digest,
+            "rollback_digest": artifacts[BoundArtifactRole.ROLLBACK].artifact_digest,
+            "same_identity": True,
+        }
+    if gate_id is ProductionGateId.SDLC_CORE_SERVICE_CURRENT:
+        return {
+            "risk_tier": "R4_RELEASE_OPERATIONAL",
+            "core_status": "PASS",
+            "service_status": "PASS",
+            "owner_authority_required": True,
+            "origin_main_present": True,
+            "source_main_sha": identity_set.freeze.exact_main_sha,
+            "source_main_tree": identity_set.freeze.exact_main_tree,
+            "merged_main_ci_digest": digest_canonical({"merged_main_ci": "pass"}),
+            "merged_main_ci_status": "PASS",
+        }
+    if gate_id is ProductionGateId.READINESS_INSPECTION_NON_EFFECT:
+        return {
+            "provider_calls": 0,
+            "publication_effects": 0,
+            "production_mutations": 0,
+        }
+    raise AssertionError(f"unhandled gate {gate_id}")
 
 
 def _complete_evidence() -> tuple[
@@ -127,26 +298,23 @@ def _complete_evidence() -> tuple[
         )
         for role, outcome in outcomes.items()
     )
-    gate_artifacts = {
-        gate_id: digest_canonical({"gate": gate_id.value})
+    gate_evidence = {
+        gate_id: ProductionGateEvidence.build(
+            gate_id=gate_id,
+            identity_set=identity_set,
+            bound_artifacts=bound_artifacts,
+            accepted_publication_spec_digests=_PUBLICATION_SPECS,
+            facts=_gate_facts(
+                gate_id,
+                identity_set=identity_set,
+                bound_artifacts=bound_artifacts,
+            ),
+        )
         for gate_id in PRODUCTION_GATE_IDS
     }
-    gate_artifacts[ProductionGateId.PUBLICATION_LIFECYCLE_SPECIFICATIONS_ACCEPTED] = (
-        digest_canonical(_PUBLICATION_SPECS)
-    )
-    for identity in identities:
-        gate_artifacts[identity.identity_class.gate_id] = (
-            identity.evaluation_evidence_digest
-        )
-    canary = next(
-        item
-        for item in bound_artifacts
-        if item.role is BoundArtifactRole.LIVE_EVIDENCE_INTAKE_CANARY_CLOSEOUT
-    )
-    gate_artifacts[IdentityClass.LIVE_EVIDENCE_INTAKE.gate_id] = canary.artifact_digest
     manifest = ProductionEvidenceManifest.build(
         identity_set=identity_set,
-        gate_artifact_digests=gate_artifacts,
+        gate_evidence=gate_evidence,
         bound_artifacts=bound_artifacts,
         accepted_publication_spec_digests=_PUBLICATION_SPECS,
         fixture_admission_digest=digest_canonical(
@@ -177,8 +345,12 @@ def _resign(manifest: ProductionEvidenceManifest) -> tuple[GateAttestation, ...]
         GateAttestation.build(
             gate_id=gate_id,
             evidence_manifest=manifest,
-            status=ReadinessStatus.PASS,
-            blockers=(),
+            status=(
+                ReadinessStatus.BLOCKED
+                if manifest.gate_evidence[gate_id].blockers
+                else ReadinessStatus.PASS
+            ),
+            blockers=manifest.gate_evidence[gate_id].blockers,
             issuer_identity="service:newsroom-evidence-authority",
             sealed_at="2026-08-26T10:00:00Z",
             signing_key=_EVIDENCE_KEY,
@@ -187,25 +359,111 @@ def _resign(manifest: ProductionEvidenceManifest) -> tuple[GateAttestation, ...]
     )
 
 
+def _owner_issue_record(
+    authority_issue_number: int = 900,
+    *,
+    report: ProductionReadinessReport | None = None,
+    manifest: ProductionEvidenceManifest | None = None,
+) -> OwnerIssueRecord:
+    if report is None and manifest is None:
+        manifest, attestations = _complete_evidence()
+        report = inspect_readiness(
+            freeze=_FREEZE,
+            evidence_manifest=manifest,
+            attestations=attestations,
+            trusted_evidence_keys={_EVIDENCE_KEY.key_id: _EVIDENCE_KEY},
+        )
+    if report is None or manifest is None:
+        raise AssertionError("owner issue helper needs both report and manifest")
+    return OwnerIssueRecord.from_github_api(
+        {
+            "number": authority_issue_number,
+            "html_url": (
+                f"https://github.com/fol2/newsroom/issues/{authority_issue_number}"
+            ),
+            "node_id": f"I_fixture_{authority_issue_number}",
+            "updated_at": "2026-08-26T10:28:00Z",
+            "user": {"login": "fol2"},
+            "author_association": "OWNER",
+            "state": "open",
+            "title": "Production Operational Admission instruction",
+            "body": (
+                "Exact owner production-admission instruction.\n\n"
+                + owner_issue_binding_marker(
+                    report=report,
+                    evidence_manifest=manifest,
+                    production_signing_key_id=_PRODUCTION_KEY.key_id,
+                )
+            ),
+        }
+    )
+
+
+def _owner_instruction(
+    *,
+    report: ProductionReadinessReport,
+    manifest: ProductionEvidenceManifest,
+    authority_issue_number: int = 900,
+    issued_at: str = "2026-08-26T10:30:00Z",
+) -> OwnerAdmissionInstruction:
+    snapshot = OwnerIssueSnapshot.build(
+        owner_issue=_owner_issue_record(
+            authority_issue_number,
+            report=report,
+            manifest=manifest,
+        ),
+        captured_at="2026-08-26T10:29:00Z",
+        report=report,
+        evidence_manifest=manifest,
+        production_signing_key_id=_PRODUCTION_KEY.key_id,
+        owner_signing_key=_OWNER_KEY,
+    )
+    return OwnerAdmissionInstruction.build(
+        authority_issue_snapshot=snapshot,
+        issued_at=issued_at,
+        report=report,
+        evidence_manifest=manifest,
+        production_signing_key_id=_PRODUCTION_KEY.key_id,
+        owner_signing_key=_OWNER_KEY,
+    )
+
+
 def _rebuild_manifest(
     source: ProductionEvidenceManifest,
     *,
     bound_artifacts: tuple[BoundArtifact, ...] | None = None,
     accepted_publication_spec_digests: dict[str, str] | None = None,
+    gate_fact_overrides: dict[ProductionGateId, dict[str, object]] | None = None,
     fixture_admission_inherited: bool | None = None,
     readiness_provider_calls: int | None = None,
 ) -> ProductionEvidenceManifest:
+    selected_bound = (
+        source.bound_artifacts if bound_artifacts is None else bound_artifacts
+    )
+    selected_specs = (
+        source.accepted_publication_spec_digests
+        if accepted_publication_spec_digests is None
+        else accepted_publication_spec_digests
+    )
+    gate_evidence = {
+        gate_id: ProductionGateEvidence.build(
+            gate_id=gate_id,
+            identity_set=source.identity_set,
+            bound_artifacts=selected_bound,
+            accepted_publication_spec_digests=selected_specs,
+            facts=(
+                evidence.facts
+                if gate_fact_overrides is None or gate_id not in gate_fact_overrides
+                else gate_fact_overrides[gate_id]
+            ),
+        )
+        for gate_id, evidence in source.gate_evidence.items()
+    }
     return ProductionEvidenceManifest.build(
         identity_set=source.identity_set,
-        gate_artifact_digests=source.gate_artifact_digests,
-        bound_artifacts=(
-            source.bound_artifacts if bound_artifacts is None else bound_artifacts
-        ),
-        accepted_publication_spec_digests=(
-            source.accepted_publication_spec_digests
-            if accepted_publication_spec_digests is None
-            else accepted_publication_spec_digests
-        ),
+        gate_evidence=gate_evidence,
+        bound_artifacts=selected_bound,
+        accepted_publication_spec_digests=selected_specs,
         fixture_admission_digest=source.fixture_admission_digest,
         fixture_admission_inherited=(
             source.fixture_admission_inherited
@@ -283,6 +541,42 @@ def test_complete_current_sealed_evidence_produces_a_replayable_ready_report() -
     assert report.handoff_max_attempts == 3
 
 
+def test_typed_coverage_evidence_prevents_an_arbitrary_signed_pass() -> None:
+    manifest, _ = _complete_evidence()
+    gate_id = ProductionGateId.EFFECTIVE_REVISION_COVERAGE_CURRENT
+    incomplete_facts = dict(manifest.gate_evidence[gate_id].facts)
+    incomplete_facts.update(
+        {
+            "terminal_revisions": 6,
+            "terminal_coverage_ppm": 3_735,
+        }
+    )
+    incomplete = _rebuild_manifest(
+        manifest,
+        gate_fact_overrides={gate_id: incomplete_facts},
+    )
+
+    with pytest.raises(ProductionAdmissionError, match="failing retained evidence"):
+        GateAttestation.build(
+            gate_id=gate_id,
+            evidence_manifest=incomplete,
+            status=ReadinessStatus.PASS,
+            blockers=(),
+            issuer_identity="service:newsroom-evidence-authority",
+            sealed_at="2026-08-26T10:00:00Z",
+            signing_key=_EVIDENCE_KEY,
+        )
+
+    report = inspect_readiness(
+        freeze=_FREEZE,
+        evidence_manifest=incomplete,
+        attestations=_resign(incomplete),
+        trusted_evidence_keys={_EVIDENCE_KEY.key_id: _EVIDENCE_KEY},
+    )
+    result = next(item for item in report.gates if item.gate_id is gate_id)
+    assert result.blockers == ("TERMINAL_EFFECTIVE_REVISION_COVERAGE_INCOMPLETE",)
+
+
 def test_publication_spec_inventory_is_exact_and_binds_the_gate() -> None:
     manifest, _ = _complete_evidence()
     incomplete = dict(_PUBLICATION_SPECS)
@@ -315,7 +609,7 @@ def test_publication_spec_inventory_is_exact_and_binds_the_gate() -> None:
         if item.gate_id
         is ProductionGateId.PUBLICATION_LIFECYCLE_SPECIFICATIONS_ACCEPTED
     )
-    assert result.blockers == ("PUBLICATION_SPEC_EVIDENCE_DRIFT",)
+    assert result.blockers == ("PUBLICATION_SPECIFICATIONS_NOT_ACCEPTED",)
 
 
 def test_invalid_evidence_seal_and_fixture_inheritance_fail_closed() -> None:
@@ -409,14 +703,9 @@ def test_authenticated_owner_instruction_mints_one_idempotent_non_activation_rec
         attestations=attestations,
         trusted_evidence_keys={_EVIDENCE_KEY.key_id: _EVIDENCE_KEY},
     )
-    instruction = OwnerAdmissionInstruction.build(
-        authority_issue_number=900,
-        owner_identity="github:fol2",
-        issued_at="2026-08-26T10:30:00Z",
+    instruction = _owner_instruction(
         report=report,
-        evidence_manifest=manifest,
-        production_signing_key_id=_PRODUCTION_KEY.key_id,
-        owner_signing_key=_OWNER_KEY,
+        manifest=manifest,
     )
 
     first = mint_production_operational_admission(
@@ -426,6 +715,7 @@ def test_authenticated_owner_instruction_mints_one_idempotent_non_activation_rec
         attestations=attestations,
         trusted_evidence_keys={_EVIDENCE_KEY.key_id: _EVIDENCE_KEY},
         owner_instruction=instruction,
+        current_owner_issue=_owner_issue_record(),
         trusted_owner_keys={_OWNER_KEY.key_id: _OWNER_KEY},
         production_signing_key=_PRODUCTION_KEY,
     )
@@ -436,6 +726,7 @@ def test_authenticated_owner_instruction_mints_one_idempotent_non_activation_rec
         attestations=attestations,
         trusted_evidence_keys={_EVIDENCE_KEY.key_id: _EVIDENCE_KEY},
         owner_instruction=instruction,
+        current_owner_issue=_owner_issue_record(),
         trusted_owner_keys={_OWNER_KEY.key_id: _OWNER_KEY},
         production_signing_key=_PRODUCTION_KEY,
     )
@@ -459,6 +750,16 @@ def test_authenticated_owner_instruction_mints_one_idempotent_non_activation_rec
     assert first.public_dispatch_authorised is False
     assert first.production_mutation_authorised is False
     assert dict(first.accepted_publication_spec_digests) == _PUBLICATION_SPECS
+    assert (
+        first.authority_issue_snapshot_digest
+        == instruction.authority_issue_snapshot.digest
+    )
+    assert (
+        OwnerIssueSnapshot.from_canonical_bytes(
+            instruction.authority_issue_snapshot.canonical_bytes
+        )
+        == instruction.authority_issue_snapshot
+    )
 
 
 @pytest.mark.parametrize("missing_gate", PRODUCTION_GATE_IDS)
@@ -510,11 +811,10 @@ def test_blocked_gate_cannot_be_hidden_by_a_signed_attestation() -> None:
 
     result = next(item for item in report.gates if item.gate_id is blocked_gate)
     assert result.blockers == ("TERMINAL_COVERAGE_INCOMPLETE",)
-    with pytest.raises(ProductionAdmissionError, match="ready evidence"):
-        OwnerAdmissionInstruction.build(
-            authority_issue_number=900,
-            owner_identity="github:fol2",
-            issued_at="2026-08-26T10:30:00Z",
+    with pytest.raises(ProductionAdmissionError, match="owner issue evidence"):
+        OwnerIssueSnapshot.build(
+            owner_issue=_owner_issue_record(),
+            captured_at="2026-08-26T10:29:00Z",
             report=report,
             evidence_manifest=manifest,
             production_signing_key_id=_PRODUCTION_KEY.key_id,
@@ -534,10 +834,45 @@ def test_implementation_issue_is_not_an_owner_production_admission_instruction()
     )
 
     with pytest.raises(ProductionAdmissionError, match="dedicated"):
-        OwnerAdmissionInstruction.build(
-            authority_issue_number=760,
-            owner_identity="github:fol2",
-            issued_at="2026-08-26T10:30:00Z",
+        OwnerIssueSnapshot.build(
+            owner_issue=OwnerIssueRecord(
+                authority_issue_number=760,
+                authority_issue_url="https://github.com/fol2/newsroom/issues/760",
+                authority_issue_node_id="I_fixture_760",
+                authority_issue_updated_at="2026-08-26T10:28:00Z",
+                owner_identity="github:fol2",
+                title="Production Operational Admission instruction",
+                body=owner_issue_binding_marker(
+                    report=report,
+                    evidence_manifest=manifest,
+                    production_signing_key_id=_PRODUCTION_KEY.key_id,
+                ),
+            ),
+            captured_at="2026-08-26T10:29:00Z",
+            report=report,
+            evidence_manifest=manifest,
+            production_signing_key_id=_PRODUCTION_KEY.key_id,
+            owner_signing_key=_OWNER_KEY,
+        )
+
+
+def test_owner_issue_must_retain_the_exact_machine_readable_binding() -> None:
+    manifest, attestations = _complete_evidence()
+    report = inspect_readiness(
+        freeze=_FREEZE,
+        evidence_manifest=manifest,
+        attestations=attestations,
+        trusted_evidence_keys={_EVIDENCE_KEY.key_id: _EVIDENCE_KEY},
+    )
+    issue_without_binding = replace(
+        _owner_issue_record(report=report, manifest=manifest),
+        body="An unstructured approval with no exact retained identities.",
+    )
+
+    with pytest.raises(ProductionAdmissionError, match="binding is absent"):
+        OwnerIssueSnapshot.build(
+            owner_issue=issue_without_binding,
+            captured_at="2026-08-26T10:29:00Z",
             report=report,
             evidence_manifest=manifest,
             production_signing_key_id=_PRODUCTION_KEY.key_id,
@@ -553,14 +888,9 @@ def test_tampered_owner_instruction_and_unlisted_production_key_are_refused() ->
         attestations=attestations,
         trusted_evidence_keys={_EVIDENCE_KEY.key_id: _EVIDENCE_KEY},
     )
-    instruction = OwnerAdmissionInstruction.build(
-        authority_issue_number=900,
-        owner_identity="github:fol2",
-        issued_at="2026-08-26T10:30:00Z",
+    instruction = _owner_instruction(
         report=report,
-        evidence_manifest=manifest,
-        production_signing_key_id=_PRODUCTION_KEY.key_id,
-        owner_signing_key=_OWNER_KEY,
+        manifest=manifest,
     )
 
     with pytest.raises(ProductionAdmissionError, match="owner instruction"):
@@ -571,6 +901,7 @@ def test_tampered_owner_instruction_and_unlisted_production_key_are_refused() ->
             attestations=attestations,
             trusted_evidence_keys={_EVIDENCE_KEY.key_id: _EVIDENCE_KEY},
             owner_instruction=replace(instruction, owner_identity="github:someone"),
+            current_owner_issue=_owner_issue_record(),
             trusted_owner_keys={_OWNER_KEY.key_id: _OWNER_KEY},
             production_signing_key=_PRODUCTION_KEY,
         )
@@ -578,6 +909,7 @@ def test_tampered_owner_instruction_and_unlisted_production_key_are_refused() ->
     other_key = AuthenticationKey(
         key_id="keychain:another-production-key",
         key_class=KeyClass.PRODUCTION_OPERATIONAL_ADMISSION,
+        provenance=KeyProvenance.TEST_FIXTURE,
         secret=b"x" * 32,
     )
     with pytest.raises(ProductionAdmissionError, match="signing key"):
@@ -588,8 +920,56 @@ def test_tampered_owner_instruction_and_unlisted_production_key_are_refused() ->
             attestations=attestations,
             trusted_evidence_keys={_EVIDENCE_KEY.key_id: _EVIDENCE_KEY},
             owner_instruction=instruction,
+            current_owner_issue=_owner_issue_record(),
             trusted_owner_keys={_OWNER_KEY.key_id: _OWNER_KEY},
             production_signing_key=other_key,
+        )
+
+    fixture_key = AuthenticationKey(
+        key_id=_PRODUCTION_KEY.key_id,
+        key_class=KeyClass.PRODUCTION_OPERATIONAL_ADMISSION,
+        provenance=KeyProvenance.TEST_FIXTURE,
+        secret=_PRODUCTION_KEY.secret,
+    )
+    with pytest.raises(ProductionAdmissionError, match="provenance"):
+        mint_production_operational_admission(
+            freeze=_FREEZE,
+            report=report,
+            evidence_manifest=manifest,
+            attestations=attestations,
+            trusted_evidence_keys={_EVIDENCE_KEY.key_id: _EVIDENCE_KEY},
+            owner_instruction=instruction,
+            current_owner_issue=_owner_issue_record(),
+            trusted_owner_keys={_OWNER_KEY.key_id: _OWNER_KEY},
+            production_signing_key=fixture_key,
+        )
+
+
+def test_mint_refuses_live_owner_issue_drift() -> None:
+    manifest, attestations = _complete_evidence()
+    report = inspect_readiness(
+        freeze=_FREEZE,
+        evidence_manifest=manifest,
+        attestations=attestations,
+        trusted_evidence_keys={_EVIDENCE_KEY.key_id: _EVIDENCE_KEY},
+    )
+    instruction = _owner_instruction(report=report, manifest=manifest)
+    drifted_issue = replace(
+        _owner_issue_record(),
+        title="Owner edited the issue",
+    )
+
+    with pytest.raises(ProductionAdmissionError, match="live authority"):
+        mint_production_operational_admission(
+            freeze=_FREEZE,
+            report=report,
+            evidence_manifest=manifest,
+            attestations=attestations,
+            trusted_evidence_keys={_EVIDENCE_KEY.key_id: _EVIDENCE_KEY},
+            owner_instruction=instruction,
+            current_owner_issue=drifted_issue,
+            trusted_owner_keys={_OWNER_KEY.key_id: _OWNER_KEY},
+            production_signing_key=_PRODUCTION_KEY,
         )
 
 
@@ -601,14 +981,9 @@ def test_verification_refuses_an_owner_instruction_for_different_evidence() -> N
         attestations=attestations,
         trusted_evidence_keys={_EVIDENCE_KEY.key_id: _EVIDENCE_KEY},
     )
-    instruction = OwnerAdmissionInstruction.build(
-        authority_issue_number=900,
-        owner_identity="github:fol2",
-        issued_at="2026-08-26T10:30:00Z",
+    instruction = _owner_instruction(
         report=report,
-        evidence_manifest=manifest,
-        production_signing_key_id=_PRODUCTION_KEY.key_id,
-        owner_signing_key=_OWNER_KEY,
+        manifest=manifest,
     )
     admission = mint_production_operational_admission(
         freeze=_FREEZE,
@@ -617,13 +992,14 @@ def test_verification_refuses_an_owner_instruction_for_different_evidence() -> N
         attestations=attestations,
         trusted_evidence_keys={_EVIDENCE_KEY.key_id: _EVIDENCE_KEY},
         owner_instruction=instruction,
+        current_owner_issue=_owner_issue_record(),
         trusted_owner_keys={_OWNER_KEY.key_id: _OWNER_KEY},
         production_signing_key=_PRODUCTION_KEY,
     )
 
     other_manifest = ProductionEvidenceManifest.build(
         identity_set=manifest.identity_set,
-        gate_artifact_digests=manifest.gate_artifact_digests,
+        gate_evidence=manifest.gate_evidence,
         bound_artifacts=manifest.bound_artifacts,
         accepted_publication_spec_digests=(manifest.accepted_publication_spec_digests),
         fixture_admission_digest=digest_canonical(
@@ -641,14 +1017,11 @@ def test_verification_refuses_an_owner_instruction_for_different_evidence() -> N
         attestations=other_attestations,
         trusted_evidence_keys={_EVIDENCE_KEY.key_id: _EVIDENCE_KEY},
     )
-    other_instruction = OwnerAdmissionInstruction.build(
+    other_instruction = _owner_instruction(
         authority_issue_number=901,
-        owner_identity="github:fol2",
         issued_at="2026-08-26T10:31:00Z",
         report=other_report,
-        evidence_manifest=other_manifest,
-        production_signing_key_id=_PRODUCTION_KEY.key_id,
-        owner_signing_key=_OWNER_KEY,
+        manifest=other_manifest,
     )
 
     forged = json.loads(admission.canonical_bytes)

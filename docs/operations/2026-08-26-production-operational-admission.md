@@ -35,6 +35,14 @@ It performs no network request, provider call, publication effect or production
 mutation. It always reports the complete gate inventory as `PASS` or with named
 blockers. An absent manifest therefore produces a useful, content-addressed
 blocked report rather than an exception or an empty result.
+Malformed manifest, attestation or trust configuration input also retains the
+same complete gate inventory with one precise fail-closed blocker on every
+gate; it does not collapse into an unstructured command error.
+
+The command wrapper resolves Git through `/usr/bin/git`, clears redirecting Git
+environment, and accepts only a clean checkout whose `HEAD`, local `main` and
+retained `origin/main` all identify the same commit and tree. A local branch
+without `origin/main` authority is not exact main.
 
 `newsroom.production_admission.mint_production_operational_admission()` is the
 public minting seam. It independently reconstructs the readiness report,
@@ -43,6 +51,23 @@ key and emits one deterministic record. Replaying the same instruction and
 evidence produces the same bytes and digest. Changing any identity requires new
 evaluation evidence, a new manifest, a new readiness report and a new owner
 instruction.
+
+## Change decomposition
+
+This R4 change exceeds the advisory executable-line review trigger, so the
+domain is deliberately split by responsibility rather than retained as one
+admission module:
+
+- `_shared.py` owns canonical primitives and trust-root key identities;
+- `identities.py` owns the seven exact identity classes and bound artefacts;
+- `gate_evidence.py` owns typed gate-fact reconstruction;
+- `evidence.py` owns manifests and signed gate attestations;
+- `readiness.py` owns provider-free blocker reporting;
+- `owner.py` owns the live issue snapshot and owner instruction; and
+- `admission.py` owns the final evidence binding, seal, mint and verifier.
+
+The command wrapper is the only Git/GitHub adapter. Tests retain the production
+contract and classifier routing separately from these domain responsibilities.
 
 ## Exact production identities
 
@@ -84,12 +109,16 @@ The canonical report always contains these gates in fixed order:
 - `SDLC_CORE_SERVICE_CURRENT`; and
 - `READINESS_INSPECTION_NON_EFFECT`.
 
-Gate evidence is a canonical HMAC-SHA-256 attestation from an injected
-`EVIDENCE_AUTHORITY` key. The attestation binds the exact evidence manifest,
-gate artefact, main SHA/tree and seven-class identity-set digest. The retained
-manifest also binds the qualifying shadow closeout, qualifying live canary
-closeout, backup, restore and rollback artefacts. Canary, restore and rollback
-must name the same identity set, deployment bytes and store identity.
+Each gate first retains a typed canonical evidence record. Its gate-specific
+facts are parsed and recomputed — including coverage arithmetic, spend
+reconciliation, source/CI authority, publication-spec inventory, runtime
+controls and recovery bindings — so an arbitrary digest cannot be signed as a
+passing fact. A canonical HMAC-SHA-256 `EVIDENCE_AUTHORITY` attestation then
+binds that record, the exact evidence manifest, main SHA/tree and seven-class
+identity-set digest. The retained manifest also binds the qualifying shadow
+closeout, qualifying live canary closeout, backup, restore and rollback
+artefacts. Canary, restore and rollback must name the same identity set,
+deployment bytes and store identity.
 
 The manifest and final admission record carry the individual content digests
 for the exact eight publication-facing specifications fixed by #560 and #589.
@@ -104,7 +133,13 @@ rollback each require `PASS`. Any other outcome remains a blocker.
 ## Owner instruction and seal
 
 The owner instruction is canonical, one-admission-only and authenticated by an
-injected `HUMAN_ACCOUNTABLE_OWNER` key. It binds:
+injected `HUMAN_ACCOUNTABLE_OWNER` key. Before minting, the wrapper independently
+reads the dedicated issue from the GitHub API and requires an open issue in
+`fol2/newsroom` whose author association is `OWNER`. Its immutable node
+identity, update time, author identity, URL and title/body digests must exactly
+match the sealed retained issue snapshot. A caller-provided issue number or
+locally invented issue digest is therefore insufficient. The instruction
+binds:
 
 - one dedicated owner issue other than #599 or #760;
 - the exact SHA, tree, operational manifest and identity set;
@@ -113,12 +148,22 @@ injected `HUMAN_ACCOUNTABLE_OWNER` key. It binds:
 - the owner identity and issue time; and
 - one named `PRODUCTION_OPERATIONAL_ADMISSION` signing key.
 
-The production record is then sealed with that named key. Key bytes enter only
-through injected process memory and never enter canonical evidence. Fixture,
-synthetic and Increment 9Q signing-key identities are rejected by the minter.
-The operational wrapper expects base64 key bytes in environment variables so a
-credential broker or Keychain launcher can inject them transiently without
-putting them on the command line.
+The issue body must contain the canonical
+`newsroom.owner-production-admission-binding.v1` marker rendered by
+`owner_issue_binding_marker()`. That marker names every binding above,
+`maximum_admissions=1`, and explicit false values for Increment 11R and
+production activation. Free-form approval prose without this exact marker is
+not an instruction.
+
+The production record is then sealed with that named key. Production trust-root
+key identifiers are fixed by key class in code; command-line input names only
+the environment variable containing a secret and cannot self-assert a key
+identifier or provenance. Key bytes enter only through injected process memory
+and never enter canonical evidence. Fixture, synthetic and Increment 9Q
+signing-key identities are rejected by the minter. The operational wrapper
+expects base64 key bytes in environment variables so a credential broker or
+Keychain launcher can inject them transiently without putting them on the
+command line.
 
 ## Provider-free command path
 
@@ -139,7 +184,7 @@ uv run python -m scripts.production_operational_admission inspect \
   --repo-root . \
   --evidence-manifest /ABSOLUTE_EVIDENCE_DIR/manifest.json \
   --attestation-directory /ABSOLUTE_EVIDENCE_DIR/gates \
-  --evidence-key-env 'keychain:newsroom-evidence-v1=EVIDENCE_KEY_B64' \
+  --evidence-key-env EVIDENCE_KEY_B64 \
   --output /ABSOLUTE_EVIDENCE_DIR/production-readiness.json
 ```
 
@@ -150,21 +195,23 @@ uv run python -m scripts.production_operational_admission mint \
   --repo-root . \
   --evidence-manifest /ABSOLUTE_EVIDENCE_DIR/manifest.json \
   --attestation-directory /ABSOLUTE_EVIDENCE_DIR/gates \
-  --evidence-key-env 'keychain:newsroom-evidence-v1=EVIDENCE_KEY_B64' \
+  --evidence-key-env EVIDENCE_KEY_B64 \
   --readiness-report /ABSOLUTE_EVIDENCE_DIR/production-readiness.json \
   --owner-instruction /ABSOLUTE_EVIDENCE_DIR/owner-instruction.json \
-  --owner-key-env 'keychain:human-accountable-owner-v1=OWNER_KEY_B64' \
-  --production-key-env 'keychain:production-operational-admission-v1=PRODUCTION_KEY_B64' \
+  --owner-key-env OWNER_KEY_B64 \
+  --production-key-env PRODUCTION_KEY_B64 \
   --output /ABSOLUTE_EVIDENCE_DIR/production-operational-admission.json
 ```
 
-`verify` takes the same evidence, report, instruction and key arguments, plus
-`--admission`. It re-runs exact-main cleanliness and readiness inspection before
-checking both the owner seal and production seal.
+`mint` performs the live read-only GitHub issue-currentness check. `verify`
+takes the same evidence, report, instruction and key arguments, plus
+`--admission`; it remains reproducible from the retained signed issue snapshot.
+It re-runs exact-main cleanliness and readiness inspection before checking both
+the owner seal and production seal.
 
 ## Permanent evidence and rollback
 
-Changes to the domain module, wrapper or focused tests route as
+Changes to the focused `newsroom.production_admission` package, wrapper or tests route as
 `R4_RELEASE_OPERATIONAL`. The accepted SDLC contract therefore requires owner
 authority, the complete deterministic core and the actual-service lane. Those
 checks are implementation evidence only; `SDLC_CORE_SERVICE_CURRENT` still
