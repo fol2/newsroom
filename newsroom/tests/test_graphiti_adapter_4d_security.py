@@ -69,6 +69,7 @@ def test_graphiti_adapter_boundary_has_no_real_provider_network_or_graph_runtime
         if path.name
         not in {
             "real.py",
+            "cli_process.py",
             "cli_client.py",
             "cursor_transport.py",
             "embedding_meter.py",

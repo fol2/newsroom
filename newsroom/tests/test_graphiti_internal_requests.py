@@ -1571,21 +1571,27 @@ def test_async_cli_capability_preflight_kills_child_on_cancellation(
     killed = False
     waited = False
 
-    class Process:
-        returncode = 0
-
-        async def communicate(self) -> tuple[bytes, bytes]:
+    class Stream:
+        async def read(self, _size: int) -> bytes:
             started.set()
             await asyncio.Future()
-            raise AssertionError("cancelled preflight resumed")
+            raise AssertionError("cancelled preflight stream resumed")
+
+    class Process:
+        returncode: int | None = None
+        stdout = Stream()
+        stderr = Stream()
 
         def kill(self) -> None:
             nonlocal killed
             killed = True
+            self.returncode = -9
 
-        async def wait(self) -> None:
+        async def wait(self) -> int:
             nonlocal waited
             waited = True
+            assert self.returncode is not None
+            return self.returncode
 
     async def create_process(*_command: str, **_values: object) -> Process:
         return Process()

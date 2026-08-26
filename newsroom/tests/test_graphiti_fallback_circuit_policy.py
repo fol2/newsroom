@@ -12,7 +12,7 @@ from newsroom.control_plane.graphiti_requests import (
     GraphitiLeafClass,
     load_checked_graphiti_call_shape_policy,
 )
-from newsroom.graphiti_adapter import cursor_transport
+from newsroom.graphiti_adapter import cli_client, cursor_transport
 
 
 @pytest.mark.parametrize(
@@ -96,7 +96,7 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
     policy = load_checked_graphiti_fallback_circuit_policy()
     call_shape = load_checked_graphiti_call_shape_policy()
 
-    assert policy.version == "issue-790-v5"
+    assert policy.version == "issue-790-v6"
     assert policy.call_shape_policy_digest == call_shape.canonical_digest
     assert policy.eligible_outcomes == ("MALFORMED_OUTPUT",)
     assert policy.max_fallback_leaves_per_primary == 1
@@ -132,6 +132,10 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
     assert "CONTROLLER_TIMEOUT_MS=160000" in fallback.command_flags
     assert (
         "TIMEOUT_DIAGNOSTIC_SCHEMA=newsroom.graphiti-timeout-diagnostic.v1"
+        in fallback.command_flags
+    )
+    assert (
+        f"CONTROLLER_STDOUT_CONTRACT={cli_client.GROK_STDOUT_LIMIT_IDENTITY}"
         in fallback.command_flags
     )
     assert (

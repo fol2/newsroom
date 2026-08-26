@@ -13,25 +13,26 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
-from newsroom.control_plane.child_environment import unprivileged_child_environment
 from newsroom.control_plane.graphiti_fallback_policy import (
     FallbackEligibility,
     classify_graphiti_fallback,
 )
+from newsroom.graphiti_adapter.cli_process import (
+    CliOutputBoundExceeded,
+    CliOutputDecodeError,
+    CliTransportTimeout,
+    run_bounded_process,
+    run_bounded_process_async,
+    timeout_diagnostic,
+)
 from newsroom.graphiti_adapter.cursor_transport import (
     CURSOR_AGENT_BIN,
     QUALIFIED_CURSOR_AGENT_VERSION,
-    CliOutputBoundExceeded,
-    CliOutputDecodeError,
     CliPredispatchRefusal,
-    CliTransportTimeout,
     CursorCliQualification,
     cursor_stdout_limit,
     run_cursor_transport,
     run_cursor_transport_async,
-    stop_process_async,
-    timeout_deadline_after,
-    timeout_diagnostic,
 )
 from newsroom.graphiti_adapter.evaluation_packet import (
     CURSOR_AGENT_MODEL_ID,
@@ -48,6 +49,14 @@ from newsroom.graphiti_adapter.usage_meter import (
 )
 
 GROK_BIN = os.environ.get("NEWSROOM_GROK_BIN", "/Users/jamesto/.grok/bin/grok")
+GROK_PREFLIGHT_TIMEOUT_SECONDS = 20
+GROK_PREFLIGHT_MAX_BYTES = 64 * 1024
+GROK_STDOUT_BASE_BYTES = 64 * 1024
+GROK_STDOUT_BYTES_PER_TOKEN = 64
+GROK_STDOUT_LIMIT_FORMULA = "65536+64*REQUEST_MAX_TOKENS"
+GROK_STDOUT_LIMIT_IDENTITY = (
+    "grok-controller-stdout-v1:" + GROK_STDOUT_LIMIT_FORMULA
+)
 CLI_CALL_TIMEOUT_SECONDS = (
     GRAPHITI_EXTRACTION_TIMEOUT_MS - GRAPHITI_MAX_CLEANUP_TIMEOUT_MS
 ) // 1_000
@@ -156,70 +165,37 @@ def extract_json(raw: str) -> str:
     return raw[start : end + 1]
 
 
+def grok_stdout_limit(max_tokens: int) -> int:
+    _require_positive_max_tokens(max_tokens)
+    return GROK_STDOUT_BASE_BYTES + GROK_STDOUT_BYTES_PER_TOKEN * max_tokens
+
+
 def run_cli(
     command: tuple[str, ...],
     *,
     timeout: float,
     cwd: str | None = None,
     environment: Mapping[str, str] | None = None,
+    max_output_bytes: int = (
+        GROK_STDOUT_BASE_BYTES + GROK_STDOUT_BYTES_PER_TOKEN * 16_384
+    ),
 ) -> str:
+    """Run one fallback CLI through the shared bounded-process contract."""
+
     name = os.path.basename(command[0])
-    started = time.monotonic()
-    deadline_at = timeout_deadline_after(timeout)
-    try:
-        result = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=False,
-            timeout=timeout,
-            cwd=cwd,
-            env=dict(environment or unprivileged_child_environment()),
-        )
-    except subprocess.TimeoutExpired as exc:
-        stdout = _timeout_output(exc.stdout)
-        stderr = _timeout_output(exc.stderr)
-        raise CliTransportTimeout(
-            f"{name} Graphiti LLM timed out",
-            evidence=timeout_diagnostic(
-                boundary="CONTROLLER_DEADLINE",
-                phase="FALLBACK_TRANSPORT",
-                cause="CONFIGURED_TIMEOUT_EXPIRED",
-                configured_timeout_ms=round(timeout * 1_000),
-                elapsed_ms=round((time.monotonic() - started) * 1_000),
-                deadline_at=deadline_at,
-                last_progress=(
-                    "OUTPUT_OBSERVED" if stdout or stderr else "NO_OUTPUT_OBSERVED"
-                ),
-                termination="PROCESS_KILLED",
-                process=name,
-                stdout=stdout,
-                stderr=stderr,
-            ),
-        ) from None
+    result = run_bounded_process(
+        command,
+        timeout=timeout,
+        max_output_bytes=max_output_bytes,
+        cwd=cwd,
+        environment=environment,
+        phase="FALLBACK_TRANSPORT",
+    )
     if result.returncode != 0:
         raise RuntimeError(f"{name} Graphiti LLM failed")
-    text = _decode_stdout(result.stdout, name=name)
-    if not text.strip():
+    if not result.stdout.strip():
         raise RuntimeError("Graphiti LLM returned empty stdout")
-    return text
-
-
-def _decode_stdout(stdout: bytes, *, name: str) -> str:
-    try:
-        return stdout.decode("utf-8")
-    except UnicodeDecodeError:
-        raise CliOutputDecodeError(
-            f"{name} Graphiti LLM returned malformed UTF-8"
-        ) from None
-
-
-def _timeout_output(value: bytes | str | None) -> bytes:
-    if isinstance(value, bytes):
-        return value
-    if isinstance(value, str):
-        return value.encode("utf-8")
-    return b""
+    return result.stdout
 
 
 async def run_cli_async(
@@ -228,78 +204,26 @@ async def run_cli_async(
     timeout: float,
     cwd: str | None = None,
     environment: Mapping[str, str] | None = None,
+    max_output_bytes: int = (
+        GROK_STDOUT_BASE_BYTES + GROK_STDOUT_BYTES_PER_TOKEN * 16_384
+    ),
 ) -> str:
-    """Run a cancellable CLI child so the extraction deadline remains authoritative."""
+    """Async fallback wrapper over the shared bounded-process contract."""
 
     name = os.path.basename(command[0])
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    result = await run_bounded_process_async(
+        command,
+        timeout=timeout,
+        max_output_bytes=max_output_bytes,
         cwd=cwd,
-        env=dict(environment or unprivileged_child_environment()),
+        environment=environment,
+        phase="FALLBACK_TRANSPORT",
     )
-    assert process.stdout is not None
-    assert process.stderr is not None
-    outputs = {"stdout": bytearray(), "stderr": bytearray()}
-
-    async def collect(stream: asyncio.StreamReader, destination: bytearray) -> None:
-        while True:
-            chunk = await stream.read(65_536)
-            if not chunk:
-                return
-            destination.extend(chunk)
-
-    loop = asyncio.get_running_loop()
-    started = loop.time()
-    deadline = started + timeout
-    deadline_at = timeout_deadline_after(timeout)
-    try:
-        await asyncio.wait_for(
-            asyncio.gather(
-                collect(process.stdout, outputs["stdout"]),
-                collect(process.stderr, outputs["stderr"]),
-            ),
-            timeout=timeout,
-        )
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            raise TimeoutError
-        await asyncio.wait_for(process.wait(), timeout=remaining)
-    except TimeoutError:
-        termination = await stop_process_async(process)
-        stdout = bytes(outputs["stdout"])
-        stderr = bytes(outputs["stderr"])
-        raise CliTransportTimeout(
-            f"{name} Graphiti LLM timed out",
-            evidence=timeout_diagnostic(
-                boundary="CONTROLLER_DEADLINE",
-                phase="FALLBACK_TRANSPORT",
-                cause="CONFIGURED_TIMEOUT_EXPIRED",
-                configured_timeout_ms=round(timeout * 1_000),
-                elapsed_ms=round((loop.time() - started) * 1_000),
-                deadline_at=deadline_at,
-                last_progress=(
-                    "OUTPUT_OBSERVED" if stdout or stderr else "NO_OUTPUT_OBSERVED"
-                ),
-                termination=termination,
-                process=name,
-                stdout=stdout,
-                stderr=stderr,
-            ),
-        ) from None
-    except asyncio.CancelledError:
-        await stop_process_async(process)
-        raise
-    except BaseException:
-        await stop_process_async(process)
-        raise
-    if process.returncode != 0:
+    if result.returncode != 0:
         raise RuntimeError(f"{name} Graphiti LLM failed")
-    text = _decode_stdout(bytes(outputs["stdout"]), name=name)
-    if not text.strip():
+    if not result.stdout.strip():
         raise RuntimeError("Graphiti LLM returned empty stdout")
-    return text
+    return result.stdout
 
 
 def _grok_command(
@@ -388,16 +312,20 @@ def _prove_cli_controls(
     workspace: _GraphitiCliWorkspace,
 ) -> None:
     try:
-        result = subprocess.run(
+        result = run_bounded_process(
             (binary, "--help"),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=20,
+            timeout=GROK_PREFLIGHT_TIMEOUT_SECONDS,
+            max_output_bytes=GROK_PREFLIGHT_MAX_BYTES,
             cwd=workspace.cwd,
-            env=workspace.environment,
+            environment=workspace.environment,
+            phase="PREDISPATCH_HELP",
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except CliTransportTimeout as exc:
+        raise CliPredispatchRefusal(
+            "Graphiti CLI preflight timed out",
+            qualification_evidence={"timeout_diagnostic": dict(exc.evidence)},
+        ) from exc
+    except (CliOutputBoundExceeded, CliOutputDecodeError, OSError) as exc:
         raise CliPredispatchRefusal("Graphiti CLI preflight failed") from exc
     if result.returncode != 0 or not all(
         control in result.stdout for control in required_controls
@@ -414,34 +342,23 @@ async def _prove_cli_controls_async(
     workspace: _GraphitiCliWorkspace,
 ) -> None:
     try:
-        process = await asyncio.create_subprocess_exec(
-            binary,
-            "--help",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        result = await run_bounded_process_async(
+            (binary, "--help"),
+            timeout=GROK_PREFLIGHT_TIMEOUT_SECONDS,
+            max_output_bytes=GROK_PREFLIGHT_MAX_BYTES,
             cwd=workspace.cwd,
-            env=workspace.environment,
+            environment=workspace.environment,
+            phase="PREDISPATCH_HELP",
         )
-    except OSError as exc:
-        raise CliPredispatchRefusal("Graphiti CLI preflight failed") from exc
-    try:
-        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=20)
-    except TimeoutError:
-        process.kill()
-        await process.wait()
-        raise CliPredispatchRefusal("Graphiti CLI preflight timed out") from None
-    except asyncio.CancelledError:
-        process.kill()
-        await process.wait()
-        raise
-    try:
-        help_text = stdout.decode("utf-8")
-    except UnicodeDecodeError as exc:
+    except CliTransportTimeout as exc:
         raise CliPredispatchRefusal(
-            "Graphiti CLI preflight returned malformed UTF-8"
+            "Graphiti CLI preflight timed out",
+            qualification_evidence={"timeout_diagnostic": dict(exc.evidence)},
         ) from exc
-    if process.returncode != 0 or not all(
-        control in help_text for control in required_controls
+    except (CliOutputBoundExceeded, CliOutputDecodeError, OSError) as exc:
+        raise CliPredispatchRefusal("Graphiti CLI preflight failed") from exc
+    if result.returncode != 0 or not all(
+        control in result.stdout for control in required_controls
     ):
         raise CliPredispatchRefusal(
             "Graphiti CLI cannot prove tool isolation and max_tokens enforcement"
@@ -585,6 +502,7 @@ def run_grok_llm(
                 timeout=CLI_CALL_TIMEOUT_SECONDS,
                 cwd=workspace.cwd,
                 environment=workspace.environment,
+                max_output_bytes=grok_stdout_limit(max_tokens),
             )
         )
 
@@ -617,6 +535,7 @@ async def run_grok_llm_async(
                 timeout=CLI_CALL_TIMEOUT_SECONDS,
                 cwd=workspace.cwd,
                 environment=workspace.environment,
+                max_output_bytes=grok_stdout_limit(max_tokens),
             )
         )
 
@@ -1210,17 +1129,20 @@ async def run_cli_chain(
         binding = observe(
             grok_token, outcome=refusal_outcome, usage=grok_usage
         )
-        invocations.append(
-            _invocation(
-                provider="grok-build-cli",
-                model=GROK_CHAT_MODEL_ID,
-                outcome=refusal_outcome,
-                execution=CliExecution(text="", usage=grok_usage),
-                failure=type(exc).__name__,
-                requested_max_tokens=max_tokens,
-                receipt_binding=binding,
-            )
+        invocation = _invocation(
+            provider="grok-build-cli",
+            model=GROK_CHAT_MODEL_ID,
+            outcome=refusal_outcome,
+            execution=CliExecution(text="", usage=grok_usage),
+            failure=type(exc).__name__,
+            requested_max_tokens=max_tokens,
+            receipt_binding=binding,
         )
+        if isinstance(exc, CliPredispatchRefusal) and exc.qualification_evidence:
+            invocation["transport_qualification"] = dict(
+                exc.qualification_evidence
+            )
+        invocations.append(invocation)
         raise CliResponseError("Graphiti fallback CLI executable not found") from exc
     except (RuntimeError, OSError) as exc:
         grok_usage = (
@@ -1339,6 +1261,7 @@ def build_cli_llm_client(
 
 
 __all__ = [
+    "GROK_STDOUT_LIMIT_IDENTITY",
     "QUALIFIED_CURSOR_AGENT_VERSION",
     "CliInvocationObserver",
     "CliOutputBoundExceeded",
@@ -1349,6 +1272,7 @@ __all__ = [
     "build_cli_llm_client",
     "cursor_stdout_limit",
     "extract_json",
+    "grok_stdout_limit",
     "run_cli",
     "run_cli_chain",
     "run_cursor_agent_llm",
