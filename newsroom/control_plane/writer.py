@@ -42,8 +42,11 @@ GROK_AUTH_FILE = os.environ.get(
 CURSOR_AGENT_BIN = os.environ.get(
     "NEWSROOM_CURSOR_AGENT_BIN", "/Users/jamesto/.local/bin/cursor-agent"
 )
+# Fixture-record default only. Live dispatch observes the installed binary and
+# does not compare it against this string.
 GROK_COMMAND_SEMANTIC_VERSION = "1.0.8"
 CURSOR_COMMAND_SEMANTIC_VERSION = "2026.08.11-e8db854"
+_GROK_COMMAND_SEMANTIC_VERSION_CACHE: str | None = None
 CONT_PRIMARY_CONFIG_IDENTITY = "cont-writer-grok-hermetic-command-v2"
 CONT_FALLBACK_CONFIG_IDENTITY = "cont-writer-cursor-hermetic-command-v2"
 CONT_WRITER_SYSTEM_INSTRUCTION = (
@@ -646,6 +649,32 @@ def _install_minimal_grok_auth(workspace: _HermeticWorkspace, raw: bytes) -> Non
         handle.write(raw)
 
 
+def parse_grok_command_semantic_version(text: str) -> str | None:
+    match = re.search(r"\bgrok\s+(\d+\.\d+\.\d+)\b", text)
+    return None if match is None else match.group(1)
+
+
+def read_grok_command_semantic_version() -> str:
+    """Return the installed Grok command version. Not a qualification pin."""
+
+    global _GROK_COMMAND_SEMANTIC_VERSION_CACHE
+    if _GROK_COMMAND_SEMANTIC_VERSION_CACHE is not None:
+        return _GROK_COMMAND_SEMANTIC_VERSION_CACHE
+    with tempfile.TemporaryDirectory(prefix="newsroom-grok-version-") as root:
+        workspace = _hermetic_workspace(root, binary=GROK_BIN)
+        result = _run_predispatch((GROK_BIN, "version"), workspace=workspace)
+    parsed = parse_grok_command_semantic_version(result.stdout)
+    if result.returncode != 0 or parsed is None:
+        raise WriterDispatchError(
+            "Grok command semantic version is not readable",
+            failure_class="SYSTEMIC",
+            reason_code="HERMETIC_COMMAND_VERSION_UNQUALIFIED",
+            provider_dispatched=False,
+        )
+    _GROK_COMMAND_SEMANTIC_VERSION_CACHE = parsed
+    return parsed
+
+
 def _run_predispatch(
     command: tuple[str, ...], *, workspace: _HermeticWorkspace
 ) -> subprocess.CompletedProcess[str]:
@@ -673,18 +702,16 @@ def _prove_grok_hermetic_capabilities(auth: bytes) -> None:
         workspace = _hermetic_workspace(root, binary=GROK_BIN)
         _install_minimal_grok_auth(workspace, auth)
         version = _run_predispatch((GROK_BIN, "version"), workspace=workspace)
-        match = re.search(r"\bgrok\s+(\d+\.\d+\.\d+)\b", version.stdout)
-        if (
-            version.returncode != 0
-            or match is None
-            or match.group(1) != GROK_COMMAND_SEMANTIC_VERSION
-        ):
+        observed = parse_grok_command_semantic_version(version.stdout)
+        if version.returncode != 0 or observed is None:
             raise WriterDispatchError(
-                "Grok command semantic version is not qualified",
+                "Grok command semantic version is not readable",
                 failure_class="SYSTEMIC",
                 reason_code="HERMETIC_COMMAND_VERSION_UNQUALIFIED",
                 provider_dispatched=False,
             )
+        global _GROK_COMMAND_SEMANTIC_VERSION_CACHE
+        _GROK_COMMAND_SEMANTIC_VERSION_CACHE = observed
         inspection = _run_predispatch(
             (GROK_BIN, "--cwd", workspace.cwd, "inspect", "--json"),
             workspace=workspace,
@@ -718,7 +745,7 @@ def _prove_grok_hermetic_capabilities(auth: bytes) -> None:
         )
         proved = (
             inspection.returncode == 0
-            and manifest.get("grokVersion") == GROK_COMMAND_SEMANTIC_VERSION
+            and manifest.get("grokVersion") == observed
             and manifest.get("projectRoot") is None
             and all(manifest.get(field) == [] for field in empty_fields)
             and isinstance(permissions, dict)
@@ -1673,7 +1700,7 @@ class CliChainWriter:
             provider_route = CONT_PRIMARY_ROUTE
             model = CONT_PRIMARY_MODEL
             reasoning = CONT_PRIMARY_REASONING
-            command_semantic_version = GROK_COMMAND_SEMANTIC_VERSION
+            command_semantic_version = read_grok_command_semantic_version()
             command_flags = _GROK_WRITER_SEMANTIC_FLAGS
             config_identity = CONT_PRIMARY_CONFIG_IDENTITY
             try:

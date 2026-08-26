@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -33,7 +34,7 @@ from newsroom.control_plane.writer import (
     CONT_WRITER_OUTPUT_SCHEMA_DIGEST,
     CONT_WRITER_PROMPT_CONTRACT_VERSION,
     CURSOR_COMMAND_SEMANTIC_VERSION,
-    GROK_COMMAND_SEMANTIC_VERSION,
+    read_grok_command_semantic_version,
 )
 
 CONT_INCIDENT_CONTEXT_BASELINE = 37_479
@@ -104,10 +105,13 @@ class ContCalibrationPacket:
         maximum_prompt_bytes = _integer(self.metrics, "maximum_prompt_bytes")
         maximum_output_tokens = _integer(self.metrics, "maximum_output_tokens")
         maximum_total_tokens = _integer(self.metrics, "maximum_total_tokens")
+        command_semantic_version = self.metrics.get("command_semantic_version")
         if (
             maximum_prompt_bytes is None
             or maximum_output_tokens is None
             or maximum_total_tokens is None
+            or not isinstance(command_semantic_version, str)
+            or re.fullmatch(r"\d+\.\d+\.\d+", command_semantic_version) is None
         ):
             raise ModelUsageAdmissionError(
                 "calibration packet token metrics are invalid"
@@ -139,7 +143,7 @@ class ContCalibrationPacket:
             tools_enabled=False,
             mcp_enabled=False,
             prior_message_count=0,
-            command_semantic_version=GROK_COMMAND_SEMANTIC_VERSION,
+            command_semantic_version=command_semantic_version,
             command_flags=CONT_PRIMARY_COMMAND_FLAGS,
             context_manifest_schema_version=CONT_CONTEXT_MANIFEST_SCHEMA_VERSION,
             disabled_capabilities=CONT_DISABLED_CAPABILITIES,
@@ -296,11 +300,30 @@ def assess_cont_calibration(
             "denominator": CONT_INCIDENT_CONTEXT_BASELINE,
         }
     )
+    primary_command_versions = tuple(
+        str(manifest.get("command_semantic_version"))
+        for row in primary_rows
+        if isinstance((manifest := row.get("context_manifest")), dict)
+        and isinstance(manifest.get("command_semantic_version"), str)
+    )
+    unique_primary_command_versions = frozenset(primary_command_versions)
+    observed_primary_command_version = (
+        next(iter(unique_primary_command_versions))
+        if (
+            len(primary_command_versions) == len(primary_rows)
+            and len(unique_primary_command_versions) == 1
+            and re.fullmatch(
+                r"\d+\.\d+\.\d+", next(iter(unique_primary_command_versions))
+            )
+            is not None
+        )
+        else None
+    )
 
     def manifest_controls_match(row: Mapping[str, object]) -> bool:
         workload = row.get("workload_class")
         if workload == WorkloadClass.CONT_WRITER_PRIMARY.value:
-            command_version = GROK_COMMAND_SEMANTIC_VERSION
+            command_version = observed_primary_command_version
             command_flags = CONT_PRIMARY_COMMAND_FLAGS
             config_identity = CONT_PRIMARY_CONFIG_IDENTITY
         elif workload == WorkloadClass.CONT_WRITER_FALLBACK.value:
@@ -414,6 +437,10 @@ def assess_cont_calibration(
             "MAXIMUM_CONTEXT_EXCEEDED",
         ),
         (primary_once, "PRIMARY_CALL_COUNT_NOT_ONE"),
+        (
+            observed_primary_command_version is not None,
+            "COMMAND_SEMANTIC_VERSION_INCONSISTENT",
+        ),
         (manifest_controls_pass, "AMBIENT_CAPABILITY_IN_MANIFEST"),
         (exact_route_pins, "ROUTE_PIN_DRIFT"),
         (public_effect_count == 0, "PUBLIC_EFFECT_DETECTED"),
@@ -491,6 +518,7 @@ def assess_cont_calibration(
         ),
         "context_to_newsroom_input_ratio_units": "context_tokens_per_prompt_byte",
         "primary_model_calls_per_attempt": 1 if primary_once else None,
+        "command_semantic_version": observed_primary_command_version,
         "public_effect_count": public_effect_count,
         "public_effect_proof": "UNPUBLISHED_PAYLOAD_SCHEMA_AND_RETAINED_ROWS",
         "implementation_revision": implementation_revision,
@@ -525,6 +553,7 @@ def stage_cont_calibration_policy(
     version: str,
     implementation_revision: str,
     max_prompt_bytes: int,
+    command_semantic_version: str | None = None,
 ) -> InvocationEfficiencyPolicy:
     """Create an exact-head, candidate-scoped EVALUATION bootstrap policy."""
 
@@ -541,6 +570,13 @@ def stage_cont_calibration_policy(
         raise ModelUsageAdmissionError(
             "calibration bootstrap prompt bound must be positive"
         )
+    observed_command_version = (
+        command_semantic_version or read_grok_command_semantic_version()
+    )
+    if re.fullmatch(r"\d+\.\d+\.\d+", observed_command_version) is None:
+        raise ModelUsageAdmissionError(
+            "calibration bootstrap command version is not a semantic version"
+        )
     evidence = {
         "schema_version": "newsroom.cont-hermetic-calibration-bootstrap.v1",
         "version": version,
@@ -549,7 +585,7 @@ def stage_cont_calibration_policy(
         "max_prompt_bytes": max_prompt_bytes,
         "max_context_tokens": CONT_CALIBRATION_MAX_CONTEXT,
         "max_output_tokens": CONT_CALIBRATION_BOOTSTRAP_MAX_OUTPUT_TOKENS,
-        "command_semantic_version": GROK_COMMAND_SEMANTIC_VERSION,
+        "command_semantic_version": observed_command_version,
         "command_flags": list(CONT_PRIMARY_COMMAND_FLAGS),
         "context_manifest_schema_version": CONT_CONTEXT_MANIFEST_SCHEMA_VERSION,
         "disabled_capabilities": list(CONT_DISABLED_CAPABILITIES),
@@ -572,7 +608,7 @@ def stage_cont_calibration_policy(
         tools_enabled=False,
         mcp_enabled=False,
         prior_message_count=0,
-        command_semantic_version=GROK_COMMAND_SEMANTIC_VERSION,
+        command_semantic_version=observed_command_version,
         command_flags=CONT_PRIMARY_COMMAND_FLAGS,
         context_manifest_schema_version=CONT_CONTEXT_MANIFEST_SCHEMA_VERSION,
         disabled_capabilities=CONT_DISABLED_CAPABILITIES,

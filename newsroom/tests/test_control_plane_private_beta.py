@@ -1324,6 +1324,128 @@ def test_grok_cli_uses_hermetic_single_turn_context(
     assert cwd != os.getcwd()
 
 
+def test_grok_cli_accepts_matching_unpinned_semantic_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from newsroom.control_plane.writer import run_grok_cli
+
+    monkeypatch.setattr(
+        "newsroom.control_plane.writer.read_grok_command_semantic_version",
+        lambda: "1.0.10",
+    )
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "https://auth.x.ai::fixture": {
+                    "auth_mode": "oauth",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "key": "fixture-access-token",
+                    "refresh_token": "fixture-refresh-token",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    auth_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    monkeypatch.setattr("newsroom.control_plane.writer.GROK_AUTH_FILE", str(auth_file))
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(command: tuple[str, ...], **kwargs: object) -> Result:
+        del kwargs
+        result = Result()
+        if "inspect" in command:
+            result.stdout = json.dumps(
+                {
+                    "grokVersion": "1.0.10",
+                    "projectRoot": None,
+                    "projectInstructions": [],
+                    "permissions": {"loaded": 0},
+                    "skills": [],
+                    "plugins": [],
+                    "marketplaces": [],
+                    "mcpServers": [],
+                    "hooks": [],
+                    "lspServers": [],
+                    "configSources": {"layers": []},
+                }
+            )
+        elif "version" in command:
+            result.stdout = "grok 1.0.10 (fixture) [alpha]\n"
+        else:
+            result.stdout = json.dumps({"title": "t", "body": "b"})
+        return result
+
+    monkeypatch.setattr("newsroom.control_plane.writer.subprocess.run", fake_run)
+    execution = run_grok_cli("prompt")
+    assert "title" in execution.text
+
+
+def test_grok_cli_rejects_inspect_command_version_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from newsroom.control_plane.writer import WriterDispatchError, run_grok_cli
+
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "https://auth.x.ai::fixture": {
+                    "auth_mode": "oauth",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "key": "fixture-access-token",
+                    "refresh_token": "fixture-refresh-token",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    auth_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    monkeypatch.setattr("newsroom.control_plane.writer.GROK_AUTH_FILE", str(auth_file))
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(command: tuple[str, ...], **kwargs: object) -> Result:
+        del kwargs
+        result = Result()
+        if "inspect" in command:
+            result.stdout = json.dumps(
+                {
+                    "grokVersion": "1.0.8",
+                    "projectRoot": None,
+                    "projectInstructions": [],
+                    "permissions": {"loaded": 0},
+                    "skills": [],
+                    "plugins": [],
+                    "marketplaces": [],
+                    "mcpServers": [],
+                    "hooks": [],
+                    "lspServers": [],
+                    "configSources": {"layers": []},
+                }
+            )
+        elif "version" in command:
+            result.stdout = "grok 1.0.10 (fixture) [alpha]\n"
+        else:
+            result.stdout = json.dumps({"title": "t", "body": "b"})
+        return result
+
+    monkeypatch.setattr("newsroom.control_plane.writer.subprocess.run", fake_run)
+    with pytest.raises(WriterDispatchError, match="zero-skill") as caught:
+        run_grok_cli("prompt")
+    assert caught.value.reason_code == "HERMETIC_CAPABILITY_UNPROVABLE"
+    assert caught.value.provider_dispatched is False
+
+
 def test_writer_head_proof_rejects_hidden_index_flags_and_git_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
