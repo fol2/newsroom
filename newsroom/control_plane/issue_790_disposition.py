@@ -1188,15 +1188,33 @@ def _require_sequence_predecessor(
             configured_timeout_ms, bool
         ):
             raise Issue790DispositionError("issue #790 causal timeout differs")
-        expected_deadline = dispatched_at + timedelta(
+        deadline_at = _instant(
+            diagnostic.get("deadline_at"),
+            field="causal timeout deadline_at",
+        )
+        process_started_at = deadline_at - timedelta(
             milliseconds=configured_timeout_ms
         )
+        elapsed_ms = int(diagnostic["elapsed_ms"])
+        clock_tolerance = timedelta(seconds=5)
         if (
-            diagnostic.get("elapsed_ms")
-            != round((completed_at - dispatched_at).total_seconds() * 1_000)
-            or diagnostic.get("deadline_at") != _utc_text(expected_deadline)
-            or diagnostic.get("last_progress") != "DISPATCH_STARTED"
+            diagnostic.get("last_progress")
+            not in {
+                "DISPATCH_STARTED",  # retained by the approved initial record
+                "NO_OUTPUT_OBSERVED",
+                "OUTPUT_OBSERVED",
+            }
             or diagnostic.get("provider_cause") != "UNOBSERVED"
+            or process_started_at < dispatched_at - clock_tolerance
+            or process_started_at > dispatched_at + clock_tolerance
+            or deadline_at > completed_at + clock_tolerance
+            or elapsed_ms
+            > round(
+                (
+                    completed_at - process_started_at + clock_tolerance
+                ).total_seconds()
+                * 1_000
+            )
         ):
             raise Issue790DispositionError(
                 "issue #790 causal timing evidence differs"
@@ -2098,6 +2116,44 @@ def _issue_790_canary_usage_evidence(
     }
 
 
+def _require_issue_790_canary_route(
+    *,
+    route_state: Mapping[str, object],
+    expected_closed_reason: str,
+    recovery_usage: Mapping[str, object] | None,
+) -> None:
+    """Require a fresh release or the exact consumed event's retained open route."""
+
+    if (
+        route_state.get("state") == "CLOSED"
+        and route_state.get("reason") == expected_closed_reason
+    ):
+        return
+    if recovery_usage is None or route_state.get("state") != "OPEN":
+        raise Issue790DispositionError(
+            "bounded canary route release authority differs"
+        )
+    invocation_id = route_state.get("invocation_id")
+    leaves = recovery_usage.get("leaves")
+    if not isinstance(invocation_id, str) or not isinstance(leaves, list):
+        raise Issue790DispositionError(
+            "interrupted bounded canary route differs"
+        )
+    matching = [
+        leaf
+        for leaf in leaves
+        if isinstance(leaf, dict)
+        and leaf.get("invocation_id") == invocation_id
+        and isinstance(leaf.get("terminal"), dict)
+        and leaf["terminal"].get("usage_status")
+        in {"UNREPORTED", "AMBIGUOUS", "INVALID"}
+    ]
+    if len(matching) != 1:
+        raise Issue790DispositionError(
+            "interrupted bounded canary route differs"
+        )
+
+
 def _issue_790_controller_timeout_report(
     store: Path,
     *,
@@ -2415,13 +2471,16 @@ def run_issue_790_canary(
     service = ModelUsageService(str(store))
     route_before = service.route_state(str(target["route"]))
     expected_route_reason = f"{_RELEASE_KIND}:{disposition_digest}"
-    if (
-        route_before.get("state") != "CLOSED"
-        or route_before.get("reason") != expected_route_reason
-    ):
-        raise Issue790DispositionError(
-            "bounded canary route release authority differs"
-        )
+    recovery_usage = (
+        None
+        if prior_consumption is None
+        else _issue_790_canary_usage_evidence(store, event_id=event_id)
+    )
+    _require_issue_790_canary_route(
+        route_state=route_before,
+        expected_closed_reason=expected_route_reason,
+        recovery_usage=recovery_usage,
+    )
     process_result: dict[str, object] | None = None
     exception: dict[str, object] | None = None
     completed_at = datetime.now(tz=UTC)
@@ -2522,6 +2581,10 @@ def run_issue_790_canary(
     worker_after = _worker_state()
     store_quick_check = _sqlite_quick_check(store, field="source unpublished store")
     route_after = service.route_state(str(target["route"]))
+    if resuming_zero_io_finalisation and route_after != route_before:
+        raise Issue790DispositionError(
+            "interrupted bounded canary route changed during recovery"
+        )
     state_counts_after = _record(
         event_after["state_counts"],
         field="canary state counts",
