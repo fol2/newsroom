@@ -21,6 +21,43 @@ def _reported_usage() -> dict[str, object]:
     }
 
 
+@pytest.mark.parametrize("invalid_zero", [False, 0.0])
+def test_predispatch_no_call_proof_requires_integer_zero(
+    invalid_zero: object,
+) -> None:
+    from newsroom.graphiti_adapter.usage_meter import (
+        is_exact_predispatch_no_provider_call,
+        no_provider_call_cli_usage,
+    )
+
+    usage = no_provider_call_cli_usage()
+    usage["total_tokens"] = invalid_zero
+
+    assert not is_exact_predispatch_no_provider_call(
+        {
+            "outcome": "PREDISPATCH_REFUSED",
+            "usage": usage,
+        }
+    )
+
+
+def test_predispatch_no_call_proof_rejects_extra_usage_fields() -> None:
+    from newsroom.graphiti_adapter.usage_meter import (
+        is_exact_predispatch_no_provider_call,
+        no_provider_call_cli_usage,
+    )
+
+    usage = no_provider_call_cli_usage()
+    usage["unproved"] = 0
+
+    assert not is_exact_predispatch_no_provider_call(
+        {
+            "outcome": "PREDISPATCH_REFUSED",
+            "usage": usage,
+        }
+    )
+
+
 def test_cursor_json_output_retains_provider_reported_tokens() -> None:
     from newsroom.graphiti_adapter.cli_client import parse_cursor_output
 

@@ -1695,3 +1695,34 @@ def test_hermes_usage_command_exports_allocation_free_envelope_outcome(
     assert rows[0]["outcome"] == "HOLD"
     assert rows[0]["work_outcome_terminal_at"] == "2026-08-24T10:00:01.000000Z"
     assert rows[0]["stable_reason_codes"] == '["OWNER_EMERGENCY_STOP"]'
+
+
+def test_committed_graphiti_transport_marker_is_cycle_dispatch_truth(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    envelope = _envelope(
+        cycle_id="00000000-0000-4000-8000-000000000790",
+        workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        candidate_id=None,
+        ingest_id="ingest-790",
+    )
+    policy = _policy(
+        workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        provider="cursor-agent-cli",
+        route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+        model=CURSOR_AGENT_MODEL_ID,
+    )
+    _envelope_value, _policy_value, allocation = _open_and_allocate(
+        service, envelope=envelope, policy=policy
+    )
+
+    assert service.has_committed_provider_dispatch(cycle_id=envelope.cycle_id) is False
+    service.observe_transport(
+        invocation_id=allocation.invocation_id,
+        observed_at=T0 + timedelta(seconds=2),
+        state="DISPATCH_STARTED",
+        evidence_digest=_digest({"dispatch": allocation.invocation_id}),
+    )
+    assert service.has_committed_provider_dispatch(cycle_id=envelope.cycle_id) is True
+    assert service.has_committed_provider_dispatch(cycle_id="different-cycle") is False

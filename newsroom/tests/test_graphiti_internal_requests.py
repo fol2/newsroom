@@ -19,10 +19,6 @@ from newsroom.control_plane.cycle_governor import (
     DurableCycleGovernor,
 )
 from newsroom.control_plane.graphiti import GraphitiModelUsageObserver
-from newsroom.graphiti_adapter.combined_temporal_contract import (
-    CONTRACT_NAME,
-    SCHEMA,
-)
 from newsroom.control_plane.graphiti_requests import (
     GraphitiCallShapePolicy,
     GraphitiInternalRequestIdentity,
@@ -46,6 +42,10 @@ from newsroom.graphiti_adapter.cli_client import (
     CliPredispatchRefusal,
     CliResponseError,
     run_cli_chain,
+)
+from newsroom.graphiti_adapter.combined_temporal_contract import (
+    CONTRACT_NAME,
+    SCHEMA,
 )
 from newsroom.graphiti_adapter.embedding_meter import MeteredOpenAIEmbedder
 from newsroom.graphiti_adapter.usage_meter import cursor_cli_usage

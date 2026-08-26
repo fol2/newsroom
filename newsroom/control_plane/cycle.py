@@ -44,6 +44,7 @@ from newsroom.control_plane.graphiti import (
     GraphitiPort,
 )
 from newsroom.control_plane.graphiti_events import (
+    ConfigurationGraphitiEventFailure,
     GraphitiDispatchGate,
     GraphitiDispatchResult,
     GraphitiEventQueue,
@@ -134,7 +135,10 @@ from newsroom.graphiti_adapter.evaluation_packet import (
 from newsroom.graphiti_adapter.recovery_vocabulary import (
     GraphitiRecoveryClassification,
 )
-from newsroom.graphiti_adapter.usage_meter import summarise_graphiti_usage
+from newsroom.graphiti_adapter.usage_meter import (
+    is_exact_predispatch_no_provider_call,
+    summarise_graphiti_usage,
+)
 from newsroom.increment9.proving import (
     FORBIDDEN_STORE_MARKERS,
     GLOBAL_PROVING_GATES,
@@ -675,10 +679,13 @@ def _recovery_classification(
 
 def _proves_no_provider_dispatch(result: GraphitiCycleResult) -> bool:
     raw = result.raw_receipt if isinstance(result.raw_receipt, dict) else {}
-    return (
-        raw.get("dispatch_state") == "NOT_DISPATCHED"
-        and _reports_no_embedding_call(result)
-        and not result.chat_invocations
+    if not _reports_no_embedding_call(result):
+        return False
+    if not result.chat_invocations:
+        return raw.get("dispatch_state") == "NOT_DISPATCHED"
+    return raw.get("dispatch_state") in {None, "NOT_DISPATCHED"} and all(
+        is_exact_predispatch_no_provider_call(item)
+        for item in result.chat_invocations
     )
 
 
@@ -913,11 +920,26 @@ def _ingest(
     def systemic_result_failure(result: GraphitiCycleResult) -> str | None:
         if result.failure_code != "PRODUCER_INTERNAL_ERROR":
             return None
+        if result_proves_no_provider_dispatch(result) and any(
+            invocation.get("outcome")
+            in {"PREDISPATCH_REFUSED", "EXECUTABLE_NOT_FOUND"}
+            for invocation in result.chat_invocations
+        ):
+            return "CLI_PREDISPATCH_CONFIGURATION_REFUSED"
         raw = result.raw_receipt
         if not isinstance(raw, dict):
             return None
         failure = raw.get("setup_failure") or raw.get("producer_failure")
         return str(failure) if isinstance(failure, str) and failure else None
+
+    def result_proves_no_provider_dispatch(result: GraphitiCycleResult) -> bool:
+        if (
+            model_usage is not None
+            and cycle_id is not None
+            and model_usage.has_committed_provider_dispatch(cycle_id=cycle_id)
+        ):
+            return False
+        return _proves_no_provider_dispatch(result)
 
     attempted = 0
     for (
@@ -1145,7 +1167,7 @@ def _ingest(
                 dispatch_state = (
                     "NOT_DISPATCHED"
                     if returned_result is not None
-                    and _proves_no_provider_dispatch(returned_result)
+                    and result_proves_no_provider_dispatch(returned_result)
                     else "UNKNOWN"
                 )
                 accounting = _preserve_reused_unresolved_spend(
@@ -1293,7 +1315,7 @@ def _ingest(
                 "token_usage": _result_token_usage(result),
                 "provider_dispatch_state": (
                     "NOT_DISPATCHED"
-                    if _proves_no_provider_dispatch(result)
+                    if result_proves_no_provider_dispatch(result)
                     else "UNKNOWN"
                 ),
             }
@@ -1341,7 +1363,8 @@ def _ingest(
             if systemic_failure is not None and on_systemic_failure is not None:
                 on_systemic_failure(
                     systemic_failure,
-                    attempted > 0 and not _proves_no_provider_dispatch(result),
+                    attempted > 0
+                    and not result_proves_no_provider_dispatch(result),
                 )
             continue
         accounting = _reconcile_result_spend(
@@ -1402,7 +1425,7 @@ def _ingest(
         if systemic_failure is not None and on_systemic_failure is not None:
             on_systemic_failure(
                 systemic_failure,
-                attempted > 0 and not _proves_no_provider_dispatch(result),
+                attempted > 0 and not result_proves_no_provider_dispatch(result),
             )
     return attempted
 
@@ -2747,8 +2770,23 @@ def consume_next_graphiti_event(
             ingest_ids = tuple(unit.ingest_id for unit in event.units)
             provider_dispatched = False
 
-            def systemic_failure(code: str, dispatched: bool) -> None:
-                raise SystemicGraphitiEventFailure(code, provider_dispatched=dispatched)
+            def committed_provider_dispatch() -> bool:
+                return bool(
+                    model_usage is not None
+                    and model_usage.has_committed_provider_dispatch(
+                        cycle_id=event.event_id
+                    )
+                )
+
+            def systemic_failure(code: str, _dispatched: bool) -> None:
+                dispatched = committed_provider_dispatch()
+                if code == "CLI_PREDISPATCH_CONFIGURATION_REFUSED":
+                    raise ConfigurationGraphitiEventFailure(
+                        code, provider_dispatched=dispatched
+                    )
+                raise SystemicGraphitiEventFailure(
+                    code, provider_dispatched=dispatched
+                )
 
             # _queue() exposes only the next predecessor-qualified chunk. Keep
             # one revision attempt bounded while draining its ordered chunks.
@@ -2765,7 +2803,9 @@ def consume_next_graphiti_event(
                     model_usage=model_usage,
                     cycle_id=event.event_id,
                 )
-                provider_dispatched = provider_dispatched or attempted > 0
+                provider_dispatched = (
+                    provider_dispatched or committed_provider_dispatch()
+                )
                 if all(has_graphiti_ingest(unpublished, item) for item in ingest_ids):
                     placeholders = ",".join("?" for _ in ingest_ids)
                     proposal_count = int(

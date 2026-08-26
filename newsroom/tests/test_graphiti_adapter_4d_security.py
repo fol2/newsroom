@@ -66,7 +66,13 @@ def test_graphiti_adapter_boundary_has_no_real_provider_network_or_graph_runtime
     files = sorted(
         path
         for path in (_REPOSITORY_ROOT / "newsroom/graphiti_adapter").glob("*.py")
-        if path.name not in {"real.py", "cli_client.py", "embedding_meter.py"}
+        if path.name
+        not in {
+            "real.py",
+            "cli_client.py",
+            "cursor_transport.py",
+            "embedding_meter.py",
+        }
     )
     files += sorted(
         (_REPOSITORY_ROOT / "newsroom/authority").glob("*graphiti_adapter*.py")

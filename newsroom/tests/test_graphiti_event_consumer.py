@@ -17,6 +17,7 @@ from newsroom.control_plane.corpus import CorpusIngestUnit
 from newsroom.control_plane.cycle import consume_next_graphiti_event, run_cycle
 from newsroom.control_plane.graphiti import GraphitiCycleResult
 from newsroom.control_plane.graphiti_events import (
+    ConfigurationGraphitiEventFailure,
     GraphitiDispatchGate,
     GraphitiDispatchResult,
     GraphitiEventQueue,
@@ -24,6 +25,7 @@ from newsroom.control_plane.graphiti_events import (
     ensure_graphiti_event_schema,
     reconcile_graphiti_events,
 )
+from newsroom.control_plane.model_usage import ModelUsageService
 from newsroom.control_plane.store import (
     EFFECTIVE_REVISION_LANDED,
     append_ledger,
@@ -100,6 +102,48 @@ def _enqueue_fixture(
     return inserted
 
 
+def _predispatch_refusal(unit: CorpusIngestUnit) -> GraphitiCycleResult:
+    result = replace(
+        _complete(unit),
+        outcome="RETRYABLE_FAILURE",
+        failure_code="PRODUCER_INTERNAL_ERROR",
+        chat_invocations=(
+            {
+                "provider": "cursor-agent-cli",
+                "outcome": "PREDISPATCH_REFUSED",
+                "usage": {
+                    "usage_basis": "NO_PROVIDER_CALL",
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cached_read_tokens": 0,
+                    "cached_write_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "total_tokens": 0,
+                },
+            },
+        ),
+        embedding_usage={
+            "usage_basis": "NO_EMBEDDING_CALL",
+            "request_count": 0,
+            "embedding_tokens": 0,
+            "cost_usd_microunits": 0,
+            "requests": [],
+        },
+    )
+    raw = dict(result.raw_receipt or {})
+    raw["chat_invocations"] = list(result.chat_invocations)
+    raw["chat_invocation_count"] = len(result.chat_invocations)
+    raw["embedding_usage"] = result.embedding_usage
+    raw["producer_failure"] = "CliPredispatchRefusal"
+    raw.pop("raw_output_digest", None)
+    raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
+    return replace(
+        result,
+        receipt_digest=str(raw["raw_output_digest"]),
+        raw_receipt=raw,
+    )
+
+
 def _insert_legacy_landed(path: Path, unit: CorpusIngestUnit) -> tuple[str, str]:
     payload = {
         "source_id": unit.source_id,
@@ -154,6 +198,7 @@ def test_committed_events_are_immediately_claimable_and_recover_after_restart(
         "RUNNING": 0,
         "RETRY_HELD": 0,
         "RIGHTS_HELD": 0,
+        "CONFIGURATION_HELD": 0,
         "DEAD_LETTER": 0,
         "TERMINAL": 0,
     }
@@ -1005,3 +1050,241 @@ def test_restart_after_provider_effect_recovers_marker_without_duplicate_effect(
         .terminal_revision_count
         == 1
     )
+
+
+def test_v12_event_state_check_migrates_without_losing_queue_rows(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    now = datetime(2026, 8, 24, 0, 1, tzinfo=UTC)
+    _enqueue_fixture(path, (_unit(1),), available_at=now)
+    legacy = sqlite3.connect(path)
+    table_sql = str(
+        legacy.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='unpublished_graphiti_revision_events'"
+        ).fetchone()[0]
+    )
+    legacy_sql = table_sql.replace(
+        "CREATE TABLE unpublished_graphiti_revision_events",
+        "CREATE TABLE unpublished_graphiti_revision_events_v12_fixture",
+        1,
+    ).replace("'CONFIGURATION_HELD',", "", 1)
+    assert "CONFIGURATION_HELD" not in legacy_sql
+    legacy.execute("DROP INDEX idx_graphiti_revision_events_claim")
+    legacy.execute(legacy_sql)
+    legacy.execute(
+        "INSERT INTO unpublished_graphiti_revision_events_v12_fixture "
+        "SELECT * FROM unpublished_graphiti_revision_events"
+    )
+    legacy.execute("DROP TABLE unpublished_graphiti_revision_events")
+    legacy.execute(
+        "ALTER TABLE unpublished_graphiti_revision_events_v12_fixture "
+        "RENAME TO unpublished_graphiti_revision_events"
+    )
+    legacy.execute(
+        "CREATE INDEX idx_graphiti_revision_events_claim ON "
+        "unpublished_graphiti_revision_events(state,available_at,ledger_seq)"
+    )
+    legacy.commit()
+    legacy.close()
+
+    migrated = connect(str(path))
+    assert migrated.execute(
+        "SELECT COUNT(*) FROM unpublished_graphiti_revision_events"
+    ).fetchone() == (1,)
+    migrated.execute(
+        "UPDATE unpublished_graphiti_revision_events SET state='CONFIGURATION_HELD'"
+    )
+    migrated.commit()
+    schema = str(
+        migrated.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='unpublished_graphiti_revision_events'"
+        ).fetchone()[0]
+    )
+    migrated.close()
+    assert "CONFIGURATION_HELD" in schema
+
+
+def test_configuration_failure_is_held_after_one_attempt_without_retry(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 24, 0, 1, tzinfo=UTC))
+    path = tmp_path / "unpublished.sqlite3"
+    queue = GraphitiEventQueue(str(path), clock=clock)
+    _enqueue_fixture(path, (_unit(1), _unit(2)), available_at=clock.value)
+
+    first = queue.process_one(
+        owner_id="worker",
+        gate=lambda _event: GraphitiDispatchGate.allow(),
+        dispatch=lambda _event: (_ for _ in ()).throw(
+            ConfigurationGraphitiEventFailure(
+                "CLI_PREDISPATCH_CONFIGURATION_REFUSED",
+                provider_dispatched=False,
+            )
+        ),
+        circuit_for=timedelta(seconds=1),
+    )
+
+    assert first is not None
+    assert first.state == "CONFIGURATION_HELD"
+    assert first.attempt_count == 1
+    clock.value += timedelta(seconds=2)
+    second = queue.process_one(
+        owner_id="worker",
+        gate=lambda _event: GraphitiDispatchGate.allow(),
+        dispatch=lambda _event: GraphitiDispatchResult.terminal(
+            proposal_count=0, provider_dispatched=False
+        ),
+    )
+    assert second is not None and second.event_id != first.event_id
+    retained = sqlite3.connect(path)
+    held = retained.execute(
+        "SELECT state,attempt_count,provider_dispatched,last_failure_code "
+        "FROM unpublished_graphiti_revision_events WHERE event_id=?",
+        (first.event_id,),
+    ).fetchone()
+    retained.close()
+    assert held == (
+        "CONFIGURATION_HELD",
+        1,
+        0,
+        "CLI_PREDISPATCH_CONFIGURATION_REFUSED",
+    )
+    health = queue.health()
+    assert health.state_counts["CONFIGURATION_HELD"] == 1
+    assert health.state_counts["DEAD_LETTER"] == 0
+    assert health.queue_depth == 1
+
+
+def test_event_consumer_does_not_infer_dispatch_from_an_ingest_attempt(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "unpublished.sqlite3"
+
+    class FixtureGraphiti:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            return _complete(unit)
+
+    run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=None,
+        max_graphiti=0,
+        clock=clock,
+    )
+    result = consume_next_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        graphiti=FixtureGraphiti(),
+        owner_id="fixture-worker",
+        clock=clock,
+        model_usage=ModelUsageService(str(unpublished)),
+    )
+
+    assert result is not None and result.state == "TERMINAL"
+    retained = sqlite3.connect(unpublished)
+    provider_dispatched = retained.execute(
+        "SELECT provider_dispatched FROM unpublished_graphiti_revision_events "
+        "WHERE event_id=?",
+        (result.event_id,),
+    ).fetchone()
+    retained.close()
+    assert provider_dispatched == (0,)
+
+
+def test_result_shaped_cli_predispatch_refusal_becomes_configuration_hold(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "unpublished.sqlite3"
+    run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=None,
+        max_graphiti=0,
+        clock=clock,
+    )
+
+    class PredispatchRefusalGraphiti:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            return _predispatch_refusal(unit)
+
+    result = consume_next_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        graphiti=PredispatchRefusalGraphiti(),
+        owner_id="fixture-worker",
+        clock=clock,
+    )
+
+    assert result is not None
+    assert result.state == "CONFIGURATION_HELD"
+    assert result.attempt_count == 1
+    retained = sqlite3.connect(unpublished)
+    row = retained.execute(
+        "SELECT state,attempt_count,provider_dispatched,last_failure_code "
+        "FROM unpublished_graphiti_revision_events WHERE event_id=?",
+        (result.event_id,),
+    ).fetchone()
+    retained.close()
+    assert row == (
+        "CONFIGURATION_HELD",
+        1,
+        0,
+        "CLI_PREDISPATCH_CONFIGURATION_REFUSED",
+    )
+
+
+def test_committed_leaf_dispatch_marker_overrides_a_no_call_claim(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "unpublished.sqlite3"
+    run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=None,
+        max_graphiti=0,
+        clock=clock,
+    )
+
+    class ContradictoryGraphiti:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            return _predispatch_refusal(unit)
+
+    class CommittedMarker:
+        def has_committed_provider_dispatch(self, *, cycle_id: str) -> bool:
+            return bool(cycle_id)
+
+    result = consume_next_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        graphiti=ContradictoryGraphiti(),
+        owner_id="fixture-worker",
+        clock=clock,
+        model_usage=CommittedMarker(),  # type: ignore[arg-type]
+    )
+
+    assert result is not None
+    assert result.state == "RETRY_HELD"
+    assert result.attempt_count == 1
+    retained = sqlite3.connect(unpublished)
+    provider_dispatched = retained.execute(
+        "SELECT provider_dispatched FROM unpublished_graphiti_revision_events "
+        "WHERE event_id=?",
+        (result.event_id,),
+    ).fetchone()
+    retained.close()
+    assert provider_dispatched == (1,)

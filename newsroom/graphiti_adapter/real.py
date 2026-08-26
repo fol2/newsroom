@@ -54,7 +54,10 @@ from newsroom.graphiti_adapter.deterministic_summary import AdmittedSummaryAsser
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
 from newsroom.graphiti_adapter.donor_store import DonorStore, SqliteDonorStore
 from newsroom.graphiti_adapter.embedding_meter import MeteredOpenAIEmbedder
-from newsroom.graphiti_adapter.usage_meter import summarise_graphiti_usage
+from newsroom.graphiti_adapter.usage_meter import (
+    is_exact_predispatch_no_provider_call,
+    summarise_graphiti_usage,
+)
 from newsroom.graphiti_adapter.edge_guard import guard_extracted_edges
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_FALLBACK,
@@ -140,6 +143,22 @@ def _no_embedding_usage() -> dict[str, object]:
         "cost_usd_microunits": 0,
         "usage_basis": "NO_EMBEDDING_CALL",
     }
+
+
+def _telemetry_proves_predispatch_refusal(telemetry: _EpisodeTelemetry) -> bool:
+    embedding = telemetry.embedding_usage
+    return (
+        bool(telemetry.chat_invocations)
+        and all(
+            is_exact_predispatch_no_provider_call(item)
+            for item in telemetry.chat_invocations
+        )
+        and embedding.get("usage_basis") == "NO_EMBEDDING_CALL"
+        and embedding.get("request_count") == 0
+        and embedding.get("embedding_tokens") == 0
+        and embedding.get("cost_usd_microunits") == 0
+        and embedding.get("requests") == []
+    )
 
 
 def _require_evaluation_authority(
@@ -1264,6 +1283,8 @@ class RealGraphitiAdapter:
                 proposals=(),
             )
             raw.pop("raw_output_digest", None)
+            if _telemetry_proves_predispatch_refusal(telemetry):
+                raw["dispatch_state"] = "NOT_DISPATCHED"
             raw["producer_failure"] = type(exc).__name__
             raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
             return produced_extraction(
