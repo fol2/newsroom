@@ -77,7 +77,7 @@ WRITER_SCHEMA = {
     "required": ["title", "body", "evidence_links"],
     "additionalProperties": False,
 }
-CONT_WRITER_PROMPT_CONTRACT_VERSION = "newsroom.cont-writer.prompt.v1"
+CONT_WRITER_PROMPT_CONTRACT_VERSION = "newsroom.cont-writer.prompt.v2"
 CONT_WRITER_CONTEXT_IDENTITY = "cont-evidence-package-only-v1"
 CONT_WRITER_OUTPUT_SCHEMA_DIGEST = digest_canonical(WRITER_SCHEMA)
 CONT_PRIMARY_PROVIDER = "grok-build-cli"
@@ -168,20 +168,33 @@ def cont_writer_implementation_identity(
         record.startswith(b"H ") for record in flags.split(b"\0") if record
     )
     return revision, status == "" and index_flags_clean
+
+
+def _required_title_and_body(package: EvidencePackage) -> tuple[str, str]:
+    headline = next(
+        claim for claim in package.governed_claims if claim.claim_role == "HEADLINE"
+    )
+    body_claims = tuple(
+        claim
+        for claim in package.governed_claims
+        if claim.claim_role == "SUBSTANTIVE"
+    )
+    return (
+        f"【未出版】{headline.rendered_assertion_zh_hant_hk}",
+        "本報根據已核實證據報道："
+        + "；".join(claim.rendered_assertion_zh_hant_hk for claim in body_claims),
+    )
+
+
 _PROMPT = (
-    "你係 Newsroom 嘅 CONT 原創記者，唔係 Graphiti。"
-    "用香港繁體中文寫一篇已經完成嘅未出版新聞稿。"
-    "JSON 嘅 title 同 body 必須係完稿正文，唔係計劃、核對清單、任務說明或工作備註。"
-    "標題唔可以「正在」「搜集」「查核」「先查」開頭，亦唔可以係「新聞稿任務」。"
-    "正文唔可以「先查」「先核」「正在核」開頭。"
-    "必須原創改寫，唔好複製來源標題或 dateline 模板。"
+    "你係一個單次、無工具嘅 Newsroom claim 拼裝器，唔係記者，亦唔係 Graphiti。"
+    "只輸出一個 JSON 物件，欄位 title、body、evidence_links。"
+    "title 同 body 必須同下方「必須輸出」完全相同，一個字、標點、空白都唔准改。"
+    "唔好抄來源標題或 dateline。"
+    "唔准加事實、名字、數字、日期、引句、因果、肯定程度或任何額外字。"
     "唔准 AUTO_PUBLISH，唔准當公開發行。"
-    "只輸出 JSON 物件，欄位 title 同 body。"
-    "另外輸出 evidence_links 陣列；每項必須使用以下 approved_governed_claims "
-    "入面完全相同嘅 governed_claim_id 同 rendered_assertion。"
-    "標題只可以係「【未出版】」加一個 approved claim；"
-    "正文只可以係「本報根據已核實證據報道：」加 approved claims，claims 之間用「；」。"
-    "唔可以自行加事實、名字、數字、日期、引句、因果或肯定程度。"
+    "evidence_links 必須用 approved_governed_claims 入面完全相同嘅 "
+    "governed_claim_id 同 rendered_assertion，唔准改寫。"
 )
 _TITLE_RESIDUE_PREFIXES = ("正在", "搜集", "查核", "先查", "草稿：")
 _TITLE_RESIDUE_EXACT = frozenset({"新聞稿任務", "Newsroom 原創稿"})
@@ -373,6 +386,31 @@ ORIGINALITY_ALIGNMENT_MIN_SOURCE_COVERAGE = 0.8
 class WriterEvidenceLink:
     governed_claim_id: str
     rendered_assertion: str
+
+
+def required_surface_copy(
+    package: EvidencePackage,
+) -> tuple[str, str, tuple[WriterEvidenceLink, ...]]:
+    title, body = _required_title_and_body(package)
+    headline = next(
+        claim for claim in package.governed_claims if claim.claim_role == "HEADLINE"
+    )
+    body_claims = tuple(
+        claim
+        for claim in package.governed_claims
+        if claim.claim_role == "SUBSTANTIVE"
+    )
+    return (
+        title,
+        body,
+        tuple(
+            WriterEvidenceLink(
+                governed_claim_id=claim.claim_id,
+                rendered_assertion=claim.rendered_assertion_zh_hant_hk,
+            )
+            for claim in (headline, *body_claims)
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -827,29 +865,13 @@ class FixtureWriter:
         self, candidate: StoryCandidateRecord, package: EvidencePackage
     ) -> WriterCopy:
         require_permitted_context(candidate, package)
-        headline_claim = next(
-            claim for claim in package.governed_claims if claim.claim_role == "HEADLINE"
-        )
-        body_claims = tuple(
-            claim
-            for claim in package.governed_claims
-            if claim.claim_role == "SUBSTANTIVE"
-        )
-        body = "本報根據已核實證據報道：" + "；".join(
-            claim.rendered_assertion_zh_hant_hk for claim in body_claims
-        )
+        title, body, links = required_surface_copy(package)
         return WriterCopy(
-            title=f"【未出版】{headline_claim.rendered_assertion_zh_hant_hk}",
+            title=title,
             body=body,
             writer_id=self.writer_id,
             evidence_package_digest=package.digest,
-            evidence_links=tuple(
-                WriterEvidenceLink(
-                    governed_claim_id=claim.claim_id,
-                    rendered_assertion=claim.rendered_assertion_zh_hant_hk,
-                )
-                for claim in (headline_claim, *body_claims)
-            ),
+            evidence_links=links,
         )
 
 
@@ -885,14 +907,29 @@ def _writer_evidence_value(package: EvidencePackage) -> dict[str, object]:
 
 
 def _prompt(candidate: StoryCandidateRecord, package: EvidencePackage) -> str:
+    del candidate
     evidence = _writer_evidence_value(package)
+    title, body, links = required_surface_copy(package)
+    links_json = json.dumps(
+        [
+            {
+                "governed_claim_id": link.governed_claim_id,
+                "rendered_assertion": link.rendered_assertion,
+            }
+            for link in links
+        ],
+        ensure_ascii=False,
+    )
     return (
-        f"{_PROMPT}\n題旨：{candidate.headline}\n"
+        f"{_PROMPT}\n"
+        f"必須輸出嘅 title：{title}\n"
+        f"必須輸出嘅 body：{body}\n"
+        f"必須輸出嘅 evidence_links：{links_json}\n"
         "approved_governed_claims："
         f"{json.dumps(evidence['approved_governed_claims'], ensure_ascii=False)}"
         "\npermitted_admitted_structured_context："
         f"{json.dumps(evidence['permitted_admitted_structured_context'], ensure_ascii=False)}"
-        "\n證據：\n" + "\n---\n".join(package.passages)
+        "\n來源（禁止入稿）：\n" + "\n---\n".join(package.passages)
     )
 
 
