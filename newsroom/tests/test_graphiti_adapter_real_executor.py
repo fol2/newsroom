@@ -2762,7 +2762,7 @@ def test_cursor_authentication_bridge_rejects_a_symlinked_source(
         )
 
 
-def test_cursor_local_credential_probe_uses_only_pinned_keychain_items(
+def test_cursor_local_credential_probe_matches_pinned_cursor_keychain_lookup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2789,16 +2789,15 @@ def test_cursor_local_credential_probe_uses_only_pinned_keychain_items(
 
     assert proof.credential_state == cursor_transport.CURSOR_CREDENTIAL_STATE
     assert command_log.read_text(encoding="utf-8").splitlines() == [
-        (
-            "find-generic-password -s cursor-access-token -w "
-            f"{bridge.destination}"
-        ),
-        (
-            "find-generic-password -s cursor-refresh-token -w "
-            f"{bridge.destination}"
-        ),
+        "find-generic-password -a cursor-user -s cursor-access-token -w",
+        "find-generic-password -a cursor-user -s cursor-refresh-token -w",
     ]
-    assert "status" not in command_log.read_text(encoding="utf-8")
+    assert proof.account == cursor_transport.CURSOR_CREDENTIAL_ACCOUNT
+    assert proof.search == cursor_transport.CURSOR_CREDENTIAL_SEARCH
+    retained_commands = command_log.read_text(encoding="utf-8")
+    assert bridge.source not in retained_commands
+    assert bridge.destination not in retained_commands
+    assert "status" not in retained_commands
 
 
 def test_cursor_cli_qualifies_pinned_package_and_dispatches_resolved_binary(
@@ -3177,7 +3176,7 @@ def test_cursor_cli_missing_local_credential_refuses_before_dispatch(
     Path(cursor_transport.QUALIFIED_CURSOR_SECURITY_BIN).write_text(
         (
             "#!/bin/sh\n"
-            'if [ "$3" = "cursor-refresh-token" ]; then exit 1; fi\n'
+            'if [ "$5" = "cursor-refresh-token" ]; then exit 1; fi\n'
             "exit 0\n"
         ),
         encoding="utf-8",

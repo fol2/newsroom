@@ -27,7 +27,9 @@ QUALIFIED_CURSOR_LOGIN_KEYCHAIN = "/Users/jamesto/Library/Keychains/login.keycha
 QUALIFIED_CURSOR_SECURITY_BIN = "/usr/bin/security"
 QUALIFIED_CURSOR_SECURITY_OWNER_UID = 0
 CURSOR_AUTHENTICATION_BRIDGE = "MACOS_LOGIN_KEYCHAIN_FILE_SYMLINK_V1"
-CURSOR_AUTHENTICATION_PROBE = "MACOS_LOCAL_KEYCHAIN_ITEMS_READABLE_V1"
+CURSOR_AUTHENTICATION_PROBE = "MACOS_CURSOR_KEYCHAIN_LOOKUP_V1"
+CURSOR_CREDENTIAL_ACCOUNT = "cursor-user"
+CURSOR_CREDENTIAL_SEARCH = "DEFAULT_KEYCHAIN_SEARCH_LIST"
 CURSOR_CREDENTIAL_STATE = "LOCAL_ACCESS_REFRESH_TOKENS_READABLE"
 CURSOR_AGENT_BIN = os.environ.get(
     "NEWSROOM_CURSOR_AGENT_BIN", QUALIFIED_CURSOR_AGENT_BIN
@@ -235,6 +237,8 @@ class _CursorAuthenticationBridgeProof:
 @dataclass(frozen=True, slots=True)
 class _CursorCredentialProbeProof:
     security_binary: str
+    account: str
+    search: str
     access_token_readable: bool
     refresh_token_readable: bool
 
@@ -245,6 +249,8 @@ class _CursorCredentialProbeProof:
                 {
                     "method": CURSOR_AUTHENTICATION_PROBE,
                     "security_binary": self.security_binary,
+                    "account": self.account,
+                    "search": self.search,
                     "services": list(_CURSOR_CREDENTIAL_SERVICES),
                 },
                 ensure_ascii=True,
@@ -264,8 +270,10 @@ class _CursorCredentialProbeProof:
         return _sha256_bytes(
             json.dumps(
                 {
+                    "account": self.account,
                     "access_token_readable": self.access_token_readable,
                     "refresh_token_readable": self.refresh_token_readable,
+                    "search": self.search,
                 },
                 ensure_ascii=True,
                 separators=(",", ":"),
@@ -427,6 +435,11 @@ def _probe_cursor_credentials_locally(
     evidence: Mapping[str, object],
 ) -> _CursorCredentialProbeProof:
     security_binary, security_before = _qualified_cursor_security_binary()
+    if _inspect_cursor_authentication_bridge(environment) != authentication_bridge:
+        raise CliPredispatchRefusal(
+            "Cursor CLI authentication bridge changed before credential lookup",
+            qualification_evidence=evidence,
+        )
     returncodes: list[int] = []
     command_environment = {
         key: environment[key]
@@ -439,10 +452,11 @@ def _probe_cursor_credentials_locally(
                 (
                     str(security_binary),
                     "find-generic-password",
+                    "-a",
+                    CURSOR_CREDENTIAL_ACCOUNT,
                     "-s",
                     service,
                     "-w",
-                    authentication_bridge.destination,
                 ),
                 check=False,
                 stdin=subprocess.DEVNULL,
@@ -483,6 +497,8 @@ def _probe_cursor_credentials_locally(
         )
     proof = _CursorCredentialProbeProof(
         security_binary=str(security_binary),
+        account=CURSOR_CREDENTIAL_ACCOUNT,
+        search=CURSOR_CREDENTIAL_SEARCH,
         access_token_readable=returncodes[0] == 0,
         refresh_token_readable=returncodes[1] == 0,
     )
@@ -1228,6 +1244,8 @@ __all__ = [
     "CURSOR_AUTHENTICATION_BRIDGE",
     "CURSOR_AUTHENTICATION_PROBE",
     "CURSOR_COMMAND_SURFACE_PROOF",
+    "CURSOR_CREDENTIAL_ACCOUNT",
+    "CURSOR_CREDENTIAL_SEARCH",
     "CURSOR_CREDENTIAL_STATE",
     "CURSOR_STDOUT_LIMIT_FORMULA",
     "CURSOR_STDOUT_LIMIT_IDENTITY",

@@ -1,9 +1,9 @@
 {
   "schema_version": "newsroom.graphiti-fallback-circuit-policy.v1",
-  "canonical_digest": "sha256:f30353bd7b83d07ba2ccf9a4ab194b13c7c94adbdce4c12a6f6c1d3c9d13cf7d",
+  "canonical_digest": "sha256:50c27d03c66c5d63d4e6c47729f1b9517a200b791cb4ad5b389793b89ebede08",
   "policy_id": "newsroom.graphiti-fallback-circuit-policy",
   "version": "issue-790-v3",
-  "call_shape_policy_digest": "sha256:a9dca73d609ca9ca1b98783d235e07188d477706bbe079da2b98838d5f61dae9",
+  "call_shape_policy_digest": "sha256:e148c797bbefc86ebaf7dba81e12c42b4848be6d0dc92c296eae78de4c47508a",
   "eligible_outcomes": [
     "MALFORMED_OUTPUT"
   ],
