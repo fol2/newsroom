@@ -2838,6 +2838,9 @@ def test_real_adapter_retains_truthful_predispatch_refusal_state(
     assert produced.attempt_receipt_value["producer_failure"] == "RuntimeError"
 
 
+_CURSOR_FIXTURE_VERSION = "fixture-version"
+
+
 def _fixture_cursor_qualification(
     *, binary: str, max_tokens: int
 ) -> object:
@@ -2846,8 +2849,8 @@ def _fixture_cursor_qualification(
     return cursor_transport.CursorCliQualification(
         binary=binary,
         resolved_binary=binary,
-        version=cursor_transport.QUALIFIED_CURSOR_AGENT_VERSION,
-        expected_version=cursor_transport.QUALIFIED_CURSOR_AGENT_VERSION,
+        version=_CURSOR_FIXTURE_VERSION,
+        expected_version="UNPINNED",
         controls=("--allowed-tools=EMPTY",),
         version_digest="sha256:version",
         help_digest="sha256:help",
@@ -2978,20 +2981,18 @@ def test_async_cli_child_is_terminated_when_attempt_deadline_cancels() -> None:
 
 
 def _fixture_cursor_package(
-    *, root: Path
+    *, root: Path, version: str | None = None
 ) -> object:
     from newsroom.graphiti_adapter import cursor_transport
 
     return cursor_transport._CursorPackageProof(
         root=str(root),
-        launcher_digest=cursor_transport.QUALIFIED_CURSOR_AGENT_LAUNCHER_DIGEST,
-        command_surface_digest=(
-            cursor_transport.QUALIFIED_CURSOR_AGENT_COMMAND_SURFACE_DIGEST
-        ),
-        control_semantics_digest=(
-            cursor_transport.QUALIFIED_CURSOR_AGENT_CONTROL_SEMANTICS_DIGEST
-        ),
-        package_digest=cursor_transport.QUALIFIED_CURSOR_AGENT_PACKAGE_DIGEST,
+        resolved_binary=str(root / "cursor-agent"),
+        version=version or root.name,
+        launcher_digest="sha256:launcher",
+        command_surface_digest="sha256:surface",
+        control_semantics_digest="sha256:semantics",
+        package_digest="sha256:package",
     )
 
 
@@ -3164,13 +3165,13 @@ def test_cursor_credential_probe_timeout_retains_causal_evidence(
     assert "cursor-refresh-token" not in repr(evidence)
 
 
-def test_cursor_cli_qualifies_pinned_package_and_dispatches_resolved_binary(
+def test_cursor_cli_runtime_qualifies_and_dispatches_one_resolved_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from newsroom.graphiti_adapter import cursor_transport
 
-    install = tmp_path / cursor_transport.QUALIFIED_CURSOR_AGENT_VERSION
+    install = tmp_path / _CURSOR_FIXTURE_VERSION
     install.mkdir()
     resolved_binary = install / "cursor-agent"
     resolved_binary.write_text("fixture", encoding="utf-8")
@@ -3178,11 +3179,6 @@ def test_cursor_cli_qualifies_pinned_package_and_dispatches_resolved_binary(
     requested.symlink_to(resolved_binary)
     monkeypatch.setattr(
         cursor_transport, "QUALIFIED_CURSOR_AGENT_BIN", str(requested)
-    )
-    monkeypatch.setattr(
-        cursor_transport,
-        "QUALIFIED_CURSOR_AGENT_RESOLVED_BIN",
-        str(resolved_binary),
     )
     package = _fixture_cursor_package(root=install)
     environment = _fixture_cursor_environment(
@@ -3206,11 +3202,18 @@ def test_cursor_cli_qualifies_pinned_package_and_dispatches_resolved_binary(
         phase: str,
     ) -> object:
         del timeout, cwd, environment, phase
+        if command[-1] == "about":
+            preflight_commands.append(command)
+            return cursor_transport._ProcessOutput(
+                returncode=0,
+                stdout=f"CLI Version  {_CURSOR_FIXTURE_VERSION}\n",
+                stderr="",
+            )
         if command[-1] == "--version":
             preflight_commands.append(command)
             return cursor_transport._ProcessOutput(
                 returncode=0,
-                stdout=f"{cursor_transport.QUALIFIED_CURSOR_AGENT_VERSION}\n",
+                stdout=f"{_CURSOR_FIXTURE_VERSION}\n",
                 stderr="",
             )
         if command[-1] == "--help":
@@ -3246,13 +3249,17 @@ def test_cursor_cli_qualifies_pinned_package_and_dispatches_resolved_binary(
     assert raw.startswith('{"result"')
     assert dispatches == ["started"]
     assert [command[1:] for command in preflight_commands] == [
+        cursor_transport._CURSOR_CAPABILITY_PROBE_ARGUMENTS,
         ("--version",),
         ("--help",),
     ]
-    assert all(command[0] == str(resolved_binary) for command in preflight_commands)
+    assert preflight_commands[0][0] == str(requested)
+    assert all(
+        command[0] == str(resolved_binary)
+        for command in preflight_commands[1:]
+    )
     command = provider_commands[0]
     assert command[0] == str(resolved_binary)
-    assert command[0] != str(requested)
     for control in (
         "--single-turn",
         "--exclude-workspace-context",
@@ -3263,10 +3270,9 @@ def test_cursor_cli_qualifies_pinned_package_and_dispatches_resolved_binary(
     for unsupported in ("--disable-tools", "--disable-mcp", "--max-output-tokens"):
         assert unsupported not in command
     retained = qualification.as_dict()
-    assert retained["version"] == cursor_transport.QUALIFIED_CURSOR_AGENT_VERSION
-    assert retained["package_digest"] == (
-        cursor_transport.QUALIFIED_CURSOR_AGENT_PACKAGE_DIGEST
-    )
+    assert retained["version"] == _CURSOR_FIXTURE_VERSION
+    assert retained["package_digest"] == "sha256:package"
+    assert retained["expected_version"] == "UNPINNED"
     assert retained["command_surface_proof"] == (
         cursor_transport.CURSOR_COMMAND_SURFACE_PROOF
     )
@@ -3284,13 +3290,13 @@ def test_cursor_cli_qualifies_pinned_package_and_dispatches_resolved_binary(
     assert retained["credential_state_digest"].startswith("sha256:")
 
 
-def test_async_cursor_cli_uses_the_same_exact_package_qualification(
+def test_async_cursor_cli_uses_the_same_runtime_capability_qualification(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from newsroom.graphiti_adapter import cursor_transport
 
-    install = tmp_path / cursor_transport.QUALIFIED_CURSOR_AGENT_VERSION
+    install = tmp_path / _CURSOR_FIXTURE_VERSION
     install.mkdir()
     resolved_binary = install / "cursor-agent"
     resolved_binary.write_text("fixture", encoding="utf-8")
@@ -3298,11 +3304,6 @@ def test_async_cursor_cli_uses_the_same_exact_package_qualification(
     requested.symlink_to(resolved_binary)
     monkeypatch.setattr(
         cursor_transport, "QUALIFIED_CURSOR_AGENT_BIN", str(requested)
-    )
-    monkeypatch.setattr(
-        cursor_transport,
-        "QUALIFIED_CURSOR_AGENT_RESOLVED_BIN",
-        str(resolved_binary),
     )
     package = _fixture_cursor_package(root=install)
     environment = _fixture_cursor_environment(
@@ -3317,7 +3318,9 @@ def test_async_cursor_cli_uses_the_same_exact_package_qualification(
     ) -> object:
         commands.append(command)
         stdout = (
-            f"{cursor_transport.QUALIFIED_CURSOR_AGENT_VERSION}\n"
+            f"CLI Version  {_CURSOR_FIXTURE_VERSION}\n"
+            if command[-1] == "about"
+            else f"{_CURSOR_FIXTURE_VERSION}\n"
             if command[-1] == "--version"
             else "--print --mode --output-format --sandbox --workspace --trust --model"
             if command[-1] == "--help"
@@ -3346,76 +3349,11 @@ def test_async_cursor_cli_uses_the_same_exact_package_qualification(
     )
 
     assert raw.startswith('{"result"')
-    assert qualification.package_digest == (
-        cursor_transport.QUALIFIED_CURSOR_AGENT_PACKAGE_DIGEST
-    )
+    assert qualification.package_digest == "sha256:package"
     assert dispatches == ["started"]
-    assert len(commands) == 3
-    assert all(command[0] == str(resolved_binary) for command in commands)
-
-
-def test_cursor_cli_hidden_controls_require_pinned_command_surface(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
-
-    install = tmp_path / cursor_transport.QUALIFIED_CURSOR_AGENT_VERSION
-    install.mkdir()
-    binary = install / "cursor-agent"
-    binary.write_text("fixture launcher", encoding="utf-8")
-    monkeypatch.setattr(
-        cursor_transport, "QUALIFIED_CURSOR_AGENT_BIN", str(binary)
-    )
-    monkeypatch.setattr(
-        cursor_transport, "QUALIFIED_CURSOR_AGENT_RESOLVED_BIN", str(binary)
-    )
-    (install / "index.js").write_text(
-        'addOption(new f.c$("--definitely-not-a-real-control"',
-        encoding="utf-8",
-    )
-    (install / "6260.index.js").write_text(
-        "\n".join(cursor_transport._CURSOR_CONTROL_SEMANTIC_SOURCE_MARKERS),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(
-        cursor_transport.CliPredispatchRefusal,
-        match="lacks qualified hidden isolation controls",
-    ):
-        cursor_transport._inspect_cursor_package(str(binary))
-
-
-def test_cursor_cli_hidden_controls_require_pinned_control_semantics(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
-
-    install = tmp_path / cursor_transport.QUALIFIED_CURSOR_AGENT_VERSION
-    install.mkdir()
-    binary = install / "cursor-agent"
-    binary.write_text("fixture launcher", encoding="utf-8")
-    monkeypatch.setattr(
-        cursor_transport, "QUALIFIED_CURSOR_AGENT_BIN", str(binary)
-    )
-    monkeypatch.setattr(
-        cursor_transport, "QUALIFIED_CURSOR_AGENT_RESOLVED_BIN", str(binary)
-    )
-    (install / "index.js").write_text(
-        "\n".join(cursor_transport._CURSOR_HIDDEN_CONTROL_SOURCE_MARKERS),
-        encoding="utf-8",
-    )
-    (install / "6260.index.js").write_text(
-        "control semantics absent",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(
-        cursor_transport.CliPredispatchRefusal,
-        match="does not apply the qualified isolation controls",
-    ):
-        cursor_transport._inspect_cursor_package(str(binary))
+    assert len(commands) == 4
+    assert commands[0][0] == str(requested)
+    assert all(command[0] == str(resolved_binary) for command in commands[1:])
 
 
 def test_cursor_cli_rejects_unqualified_path_before_package_inspection(
@@ -3423,15 +3361,42 @@ def test_cursor_cli_rejects_unqualified_path_before_package_inspection(
 ) -> None:
     from newsroom.graphiti_adapter import cursor_transport
 
-    clone = tmp_path / cursor_transport.QUALIFIED_CURSOR_AGENT_VERSION / "cursor-agent"
+    clone = tmp_path / _CURSOR_FIXTURE_VERSION / "cursor-agent"
     clone.parent.mkdir()
     clone.write_text("fixture launcher", encoding="utf-8")
 
     with pytest.raises(
         cursor_transport.CliPredispatchRefusal,
-        match="outside the qualified deployment paths",
+        match="outside the qualified version root",
     ):
         cursor_transport._inspect_cursor_package(str(clone))
+
+
+def test_cursor_cli_runtime_capability_probe_must_succeed() -> None:
+    from newsroom.graphiti_adapter import cursor_transport
+
+    with pytest.raises(
+        cursor_transport.CliPredispatchRefusal,
+        match="cannot prove required runtime capabilities",
+    ):
+        cursor_transport._require_qualified_static_results(
+            capability_result=cursor_transport._ProcessOutput(
+                returncode=2,
+                stdout="",
+                stderr="unknown option",
+            ),
+            version_result=cursor_transport._ProcessOutput(
+                returncode=0,
+                stdout="runtime-version\n",
+                stderr="",
+            ),
+            help_result=cursor_transport._ProcessOutput(
+                returncode=0,
+                stdout=" ".join(cursor_transport._CURSOR_PUBLIC_CONTROLS),
+                stderr="",
+            ),
+            evidence={},
+        )
 
 
 def test_cursor_cli_request_path_must_match_the_checked_policy(
@@ -3444,14 +3409,14 @@ def test_cursor_cli_request_path_must_match_the_checked_policy(
         match="request path differs from the checked policy",
     ):
         cursor_transport._qualify_cursor_agent(
-            binary=cursor_transport.QUALIFIED_CURSOR_AGENT_RESOLVED_BIN,
+            binary=str(tmp_path / "not-the-policy-launcher"),
             cwd=str(tmp_path),
             environment={},
             max_tokens=512,
         )
 
 
-def test_cursor_cli_version_drift_refuses_before_dispatch(
+def test_cursor_cli_accepts_the_runtime_reported_harness_version(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3462,10 +3427,7 @@ def test_cursor_cli_version_drift_refuses_before_dispatch(
     monkeypatch.setattr(
         cursor_transport, "QUALIFIED_CURSOR_AGENT_BIN", str(binary)
     )
-    monkeypatch.setattr(
-        cursor_transport, "QUALIFIED_CURSOR_AGENT_RESOLVED_BIN", str(binary)
-    )
-    package = _fixture_cursor_package(root=tmp_path)
+    package = _fixture_cursor_package(root=tmp_path, version="future-version")
     environment = _fixture_cursor_environment(
         root=tmp_path / "credential-fixture",
         monkeypatch=monkeypatch,
@@ -3476,14 +3438,16 @@ def test_cursor_cli_version_drift_refuses_before_dispatch(
     def bounded(*_args: object, **_values: object) -> object:
         nonlocal calls
         calls += 1
-        if calls > 2:
-            pytest.fail("provider command reached dispatch")
         return cursor_transport._ProcessOutput(
             returncode=0,
-            stdout=(
-                "future-version\n"
-                if calls == 1
-                else "--print --mode --output-format --sandbox --workspace --trust --model"
+                stdout=(
+                    "CLI Version  future-version\n"
+                    if calls == 1
+                    else "future-version\n"
+                    if calls == 2
+                    else "--print --mode --output-format --sandbox --workspace --trust --model"
+                    if calls == 3
+                    else '{"result":"{}","usage":{}}'
             ),
             stderr="",
         )
@@ -3497,23 +3461,20 @@ def test_cursor_cli_version_drift_refuses_before_dispatch(
         nonlocal dispatched
         dispatched = True
 
-    with pytest.raises(cursor_transport.CliPredispatchRefusal) as caught:
-        cursor_transport.run_cursor_transport(
-            binary=str(binary),
-            prompt="untrusted source",
-            max_tokens=512,
-            timeout=80,
-            cwd=str(tmp_path),
-            environment=environment,
-            dispatch_started=marker,
-        )
-
-    assert calls == 2
-    assert dispatched is False
-    assert caught.value.qualification_evidence["version"] == "future-version"
-    assert caught.value.qualification_evidence["expected_version"] == (
-        cursor_transport.QUALIFIED_CURSOR_AGENT_VERSION
+    _raw, qualification = cursor_transport.run_cursor_transport(
+        binary=str(binary),
+        prompt="untrusted source",
+        max_tokens=512,
+        timeout=80,
+        cwd=str(tmp_path),
+        environment=environment,
+        dispatch_started=marker,
     )
+
+    assert calls == 4
+    assert dispatched is True
+    assert qualification.version == "future-version"
+    assert qualification.expected_version == "UNPINNED"
 
 
 def test_cursor_cli_missing_local_credential_refuses_before_dispatch(
@@ -3522,7 +3483,7 @@ def test_cursor_cli_missing_local_credential_refuses_before_dispatch(
 ) -> None:
     from newsroom.graphiti_adapter import cursor_transport
 
-    install = tmp_path / cursor_transport.QUALIFIED_CURSOR_AGENT_VERSION
+    install = tmp_path / _CURSOR_FIXTURE_VERSION
     install.mkdir()
     binary = install / "cursor-agent"
     binary.write_text("fixture", encoding="utf-8")
@@ -3530,9 +3491,7 @@ def test_cursor_cli_missing_local_credential_refuses_before_dispatch(
     requested.symlink_to(binary)
     monkeypatch.setattr(cursor_transport, "QUALIFIED_CURSOR_AGENT_BIN", str(requested))
     monkeypatch.setattr(
-        cursor_transport,
-        "QUALIFIED_CURSOR_AGENT_RESOLVED_BIN",
-        str(binary),
+        cursor_transport, "QUALIFIED_CURSOR_AGENT_VERSION_ROOT", str(tmp_path)
     )
     environment = _fixture_cursor_environment(
         root=tmp_path / "credential-fixture",
@@ -3552,8 +3511,10 @@ def test_cursor_cli_missing_local_credential_refuses_before_dispatch(
 
     def bounded(command: tuple[str, ...], **_values: object) -> object:
         commands.append(command)
-        if command[-1] == "--version":
-            stdout = f"{cursor_transport.QUALIFIED_CURSOR_AGENT_VERSION}\n"
+        if command[-1] == "about":
+            stdout = f"CLI Version  {_CURSOR_FIXTURE_VERSION}\n"
+        elif command[-1] == "--version":
+            stdout = f"{_CURSOR_FIXTURE_VERSION}\n"
         elif command[-1] == "--help":
             stdout = "--print --mode --output-format --sandbox --workspace --trust --model"
         else:
@@ -3587,6 +3548,7 @@ def test_cursor_cli_missing_local_credential_refuses_before_dispatch(
 
     assert dispatches == []
     assert [command[1:] for command in commands] == [
+        cursor_transport._CURSOR_CAPABILITY_PROBE_ARGUMENTS,
         ("--version",),
         ("--help",),
     ]
@@ -3604,7 +3566,7 @@ def test_cursor_cli_keychain_replacement_refuses_before_dispatch(
 ) -> None:
     from newsroom.graphiti_adapter import cursor_transport
 
-    install = tmp_path / cursor_transport.QUALIFIED_CURSOR_AGENT_VERSION
+    install = tmp_path / _CURSOR_FIXTURE_VERSION
     install.mkdir()
     binary = install / "cursor-agent"
     binary.write_text("fixture", encoding="utf-8")
@@ -3612,9 +3574,7 @@ def test_cursor_cli_keychain_replacement_refuses_before_dispatch(
     requested.symlink_to(binary)
     monkeypatch.setattr(cursor_transport, "QUALIFIED_CURSOR_AGENT_BIN", str(requested))
     monkeypatch.setattr(
-        cursor_transport,
-        "QUALIFIED_CURSOR_AGENT_RESOLVED_BIN",
-        str(binary),
+        cursor_transport, "QUALIFIED_CURSOR_AGENT_VERSION_ROOT", str(tmp_path)
     )
     environment = _fixture_cursor_environment(
         root=tmp_path / "credential-fixture",
@@ -3624,8 +3584,10 @@ def test_cursor_cli_keychain_replacement_refuses_before_dispatch(
     dispatches: list[str] = []
 
     def bounded(command: tuple[str, ...], **_values: object) -> object:
-        if command[-1] == "--version":
-            stdout = f"{cursor_transport.QUALIFIED_CURSOR_AGENT_VERSION}\n"
+        if command[-1] == "about":
+            stdout = f"CLI Version  {_CURSOR_FIXTURE_VERSION}\n"
+        elif command[-1] == "--version":
+            stdout = f"{_CURSOR_FIXTURE_VERSION}\n"
         elif command[-1] == "--help":
             stdout = "--print --mode --output-format --sandbox --workspace --trust --model"
         else:

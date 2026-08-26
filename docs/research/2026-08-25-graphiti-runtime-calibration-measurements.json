@@ -29,7 +29,7 @@
     "fixture_count": 11,
     "reported_as_provider_tokens": false
   },
-  "evidence_digest": "sha256:82b624216e97228b9087e826bbb72b61d903415db1689a1ffd62a8906846b65b",
+  "evidence_digest": "sha256:9cfda1198d9805c8d5fd216a5de7e3bf8d092be5274fc6da9d9597fbfdcad45c",
   "fallback_eligible_outcomes": [
     "MALFORMED_OUTPUT"
   ],
@@ -183,21 +183,25 @@
     }
   ],
   "identities": {
-    "call_shape_policy_digest": "sha256:7e6bd15613cefda0820a1d339c8790f0185946aade1622dadbb8c468f558bb18",
+    "call_shape_policy_digest": "sha256:6a9af8036562330a9ba286a7bcd52fbd70c51aaf4b1b06af79a2761b179b1778",
     "context_manifest": "graphiti-combined-temporal-hermetic-v1",
-    "fallback_circuit_policy_digest": "sha256:4b35d8d22bcdfdedfd4985c767e8c36ed14b67017f2fa2e005b0bb8de6ac3b4a",
+    "fallback_circuit_policy_digest": "sha256:d48409fa6b0d255e6913aa12e83f45932cafb27c0bbcad463a3012c3880c3698",
     "prompt": "newsroom.graphiti.proposal-only-prompt:v1",
     "qualified_routes": [
       {
         "command_flags": [
           "binary=/Users/jamesto/.local/bin/cursor-agent",
-          "resolved-binary=/Users/jamesto/.local/share/cursor-agent/versions/2026.08.11-e8db854/cursor-agent",
-          "binary-version=2026.08.11-e8db854",
-          "launcher-digest=sha256:eed61c5224668c9236334c4c68936a16aecc37374b592f59e31eb50433817831",
-          "command-surface-digest=sha256:6aceb24b7c7ecddb1993946ebb18a7dd4d025842e6efda955eb0c13255b1e5f0",
-          "control-semantics-digest=sha256:285e3f24126b457872064e9661d76ab0e35a0059256ffa4ab44507821efe334e",
-          "package-digest=sha256:957df7e19a94bcdf3a263f6e2839af1f8c7e8059bc76ae339464df07982848ea",
-          "hidden-control-proof=PINNED_PACKAGE_HIDDEN_OPTION_REGISTRATIONS_V1",
+          "resolved-binary=OBSERVED_AT_PREDISPATCH",
+          "binary-version=UNPINNED",
+          "version-root=/Users/jamesto/.local/share/cursor-agent/versions",
+          "launcher-digest=OBSERVED_AT_PREDISPATCH",
+          "command-surface-digest=OBSERVED_AT_PREDISPATCH",
+          "control-semantics-digest=OBSERVED_AT_PREDISPATCH",
+          "package-digest=OBSERVED_AT_PREDISPATCH",
+          "hidden-control-proof=RUNTIME_CAPABILITY_QUALIFICATION_V1",
+          "AUTO_UPDATE_POLICY=AVAILABLE_BETWEEN_INVOCATIONS",
+          "PREDISPATCH_CAPABILITY_PROBE=ABOUT_WITH_REQUIRED_HIDDEN_CONTROLS",
+          "DISPATCH_GENERATION_BINDING=RESOLVE_RECHECK_SAME_GENERATION_V1",
           "--print",
           "--single-turn",
           "--mode=ask",
@@ -224,7 +228,7 @@
           "PROMPT_MAX_OUTPUT_TOKENS=REQUEST_MAX_TOKENS",
           "CONTROLLER_STDOUT_CONTRACT=cursor-controller-stdout-v1:65536+64*REQUEST_MAX_TOKENS",
           "CONTROLLER_PROCESS_CONTRACT=shared-bounded-cli-process-v2",
-          "PREDISPATCH_TIMEOUT_DIAGNOSTICS=EXACT_BINARY_AND_CREDENTIAL_PROBE",
+          "PREDISPATCH_TIMEOUT_DIAGNOSTICS=RUNTIME_CAPABILITY_AND_CREDENTIAL_PROBE",
           "CONTROLLER_TIMEOUT_MS=160000",
           "TIMEOUT_DIAGNOSTIC_SCHEMA=newsroom.graphiti-timeout-diagnostic.v1",
           "TIMEOUT_DIAGNOSTIC_VOCABULARY=FIXED_V1",
@@ -235,8 +239,8 @@
           "PROCESS_CLEANUP_DEADLINE_MS=500",
           "RESIDUAL_GROUP_CLEANUP=BEFORE_RESULT_HANDOFF_V1"
         ],
-        "command_semantic_version": "newsroom.graphiti-provider-dispatch.v9",
-        "config_identity": "cursor-agent-cli-2026.08.11-e8db854-pinned-package-v8",
+        "command_semantic_version": "newsroom.graphiti-provider-dispatch.v10",
+        "config_identity": "cursor-agent-cli-runtime-capability-qualified-v1",
         "disabled_capabilities": [
           "repository-discovery",
           "prior-conversation",
@@ -247,7 +251,7 @@
           "planning",
           "subagents"
         ],
-        "implementation_revision": "sha256:2973e1fb546675095e3083477d8742f90b208c12f647ea9b5c502a2934da6b54",
+        "implementation_revision": "sha256:f2471a7171ff82d09e0894f16d5ae81284480c16f7c110b1c57a70ce46d78818",
         "leaf_class": "PRIMARY",
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
@@ -298,7 +302,7 @@
           "planning",
           "subagents"
         ],
-        "implementation_revision": "sha256:2973e1fb546675095e3083477d8742f90b208c12f647ea9b5c502a2934da6b54",
+        "implementation_revision": "sha256:f2471a7171ff82d09e0894f16d5ae81284480c16f7c110b1c57a70ce46d78818",
         "leaf_class": "FALLBACK",
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
@@ -410,8 +414,8 @@
     "immutable_after_restart": true,
     "invocation_efficiency_policies": [
       {
-        "canonical_digest": "sha256:9955ca8f7e292320a0cb499254ff1989796d36159a3f0cf523eb65cb0cd10b61",
-        "evidence_digest": "sha256:3fd2072c1bf0f7a61ee7d40559d48aae689fed86e1923b8d9924b73e57bf8645",
+        "canonical_digest": "sha256:0d1b6d2f7b7163f26df1a5e382ba8341798726dad9e38e7d38a00ba2abf3a3eb",
+        "evidence_digest": "sha256:3a612485414f27d65fc46c0f57d152ecb799bfb915017c56e6039448f79ce380",
         "hard_estimate_ceiling_tokens": null,
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
@@ -420,8 +424,8 @@
         "route": "GRAPHITI_CHAT_PRIMARY"
       },
       {
-        "canonical_digest": "sha256:b78a2ab1f5b51a5bcae62ae9a24b587d56d3e379c3edb4ccc21e108f6a4c8ee8",
-        "evidence_digest": "sha256:6c171c39137624b8e3b830499f5d701fd29d478c665781c6b11e6f6e97437e1c",
+        "canonical_digest": "sha256:2802fe8880527ed17d5d0b2a7f6cde87210df0122f082d467fe3969fa26ef9e5",
+        "evidence_digest": "sha256:2bc15a1f5ad5f8e6a25727f6ce90810a5747e528de8cef821ba95dde14826289",
         "hard_estimate_ceiling_tokens": null,
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
