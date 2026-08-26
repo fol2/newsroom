@@ -14,6 +14,20 @@ import pytest
 
 collect_ignore_glob = ["_archive/*"]
 
+
+@pytest.fixture(autouse=True)
+def _grok_command_version_is_not_a_live_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "newsroom.control_plane.writer.read_grok_command_semantic_version",
+        lambda: "1.0.8",
+    )
+    monkeypatch.setattr(
+        "newsroom.control_plane.cont_calibration.read_grok_command_semantic_version",
+        lambda: "1.0.8",
+    )
+
 _D3_CACHE_FORMAT = "newsroom.d3-conformance-cache.v2"
 _D3_CACHE_CAPACITY = 6
 _D3_CACHE_TEMPLATE_KEYS = (

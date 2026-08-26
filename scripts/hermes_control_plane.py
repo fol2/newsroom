@@ -57,9 +57,11 @@ from newsroom.control_plane.paths import (
 from newsroom.control_plane.store import list_payloads
 from newsroom.control_plane.veto import VetoError
 from newsroom.control_plane.writer import (
+    WriterDispatchError,
     cont_writer_implementation_identity,
     default_writer,
     probe_grok_writer_route,
+    read_grok_command_semantic_version,
 )
 
 DEFAULT_PROVING = str(CANONICAL_PROVING_STORE)
@@ -614,8 +616,9 @@ def main(argv: list[str] | None = None) -> int:
                     version=exact_version,
                     implementation_revision=revision,
                     max_prompt_bytes=args.calibration_max_prompt_bytes,
+                    command_semantic_version=read_grok_command_semantic_version(),
                 )
-            except (ModelUsageAdmissionError, ValueError) as exc:
+            except (ModelUsageAdmissionError, ValueError, WriterDispatchError) as exc:
                 parser.error(str(exc))
             usage.register_policy(staged_policy)
             sys.stdout.write(

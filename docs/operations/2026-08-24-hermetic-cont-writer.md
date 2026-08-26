@@ -14,9 +14,11 @@ only copied provider state is the private Grok login file. The route rejects a
 missing, non-regular, over-sized or over-permissive login file before provider
 dispatch.
 
-The pinned Grok command is `1.0.8`, model `grok-4.6`, reasoning `low`, one
-turn. It overrides the coding-agent system instruction, passes the Newsroom
-prompt verbatim and disables web search, planning, subagents, tools and MCP.
+The Grok command version is observed from the installed binary (`grok version`
+must match `grok inspect --json` `grokVersion`). It is not a qualification pin.
+The model is `grok-4.6`, reasoning `low`, one turn. It overrides the
+coding-agent system instruction, passes the Newsroom prompt verbatim and
+disables web search, planning, subagents, tools and MCP.
 A machine-readable `grok inspect` preflight must prove no repository root,
 project instructions, skills, plugins, MCP servers, hooks, LSP servers or
 configuration layers before the provider command can run.

@@ -124,6 +124,48 @@ def _fallback_leaf(
     return row
 
 
+def test_observed_grok_command_version_is_not_pinned_to_fixture_default() -> None:
+    leaves = [
+        _leaf("short", prompt_bytes=1_000, context_tokens=3_000),
+        _leaf("medium", prompt_bytes=2_000, context_tokens=4_000),
+        _leaf("long", prompt_bytes=3_000, context_tokens=5_000),
+    ]
+    for row in leaves:
+        manifest = row["context_manifest"]
+        assert isinstance(manifest, dict)
+        manifest["command_semantic_version"] = "1.0.10"
+
+    packet = assess_cont_calibration(
+        leaves,
+        candidate_ids=("short", "medium", "long"),
+        version="issue-732-v1",
+        implementation_revision=REVISION,
+        unpublished_payload_candidate_ids=("short", "medium", "long"),
+    )
+
+    assert packet.passed is True
+    assert packet.metrics["command_semantic_version"] == "1.0.10"
+    assert packet.mint_primary_policy().command_semantic_version == "1.0.10"
+
+
+def test_mixed_primary_command_versions_fail_closed() -> None:
+    leaves = _passing_leaves()
+    manifest = leaves[1]["context_manifest"]
+    assert isinstance(manifest, dict)
+    manifest["command_semantic_version"] = "1.0.10"
+
+    packet = assess_cont_calibration(
+        leaves,
+        candidate_ids=("short", "medium", "long"),
+        version="issue-732-v1",
+        implementation_revision=REVISION,
+        unpublished_payload_candidate_ids=("short", "medium", "long"),
+    )
+
+    assert packet.passed is False
+    assert "COMMAND_SEMANTIC_VERSION_INCONSISTENT" in packet.failure_reasons
+
+
 def test_productive_low_context_packet_mints_exact_primary_policy() -> None:
     packet = assess_cont_calibration(
         _passing_leaves(),
