@@ -1298,6 +1298,12 @@ def test_grok_cli_uses_hermetic_single_turn_context(
     assert "--no-plan" in command
     assert "--disable-web-search" in command
     assert "--no-subagents" in command
+    assert "--disallowed-tools" in command
+    denied = command[command.index("--disallowed-tools") + 1]
+    assert isinstance(denied, str)
+    assert "run_terminal_command" in denied.split(",")
+    assert "spawn_subagent" in denied.split(",")
+    assert "search_tool" in denied.split(",")
     assert "--always-approve" not in command
     assert "--force" not in command
     assert "--yolo" not in command

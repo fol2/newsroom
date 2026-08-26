@@ -38,6 +38,7 @@ _MODEL_USAGE_MIGRATIONS = (
 _HERMETIC_CONT_CONFIG_IDENTITIES = frozenset(
     {
         "cont-writer-grok-hermetic-command-v2",
+        "cont-writer-grok-hermetic-command-v3",
         "cont-writer-cursor-hermetic-command-v2",
     }
 )
