@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import subprocess
 import sys
 import time
 from dataclasses import replace
@@ -503,6 +504,12 @@ def test_cursor_timeout_is_ineligible_for_fallback() -> None:
 
     assert grok_called is False
     assert [item["outcome"] for item in invocations] == ["TIMEOUT"]
+    assert invocations[0]["transport_diagnostic"]["boundary"] == (
+        "UNOBSERVED_TIMEOUT_BOUNDARY"
+    )
+    assert invocations[0]["transport_diagnostic"]["cause"] == (
+        "TIMEOUT_ORIGIN_UNOBSERVED"
+    )
 
 
 def test_cursor_timeout_retains_transport_diagnostic_in_invocation() -> None:
@@ -510,10 +517,16 @@ def test_cursor_timeout_retains_transport_diagnostic_in_invocation() -> None:
     from newsroom.graphiti_adapter.cursor_transport import CliTransportTimeout
 
     diagnostic = {
-        "schema_version": "newsroom.cli-transport-timeout.v1",
+        "schema_version": "newsroom.graphiti-timeout-diagnostic.v1",
         "boundary": "CONTROLLER_DEADLINE",
+        "phase": "PRIMARY_TRANSPORT",
+        "cause": "CONFIGURED_TIMEOUT_EXPIRED",
+        "provider_cause": "UNOBSERVED",
         "process": "cursor-agent",
         "configured_timeout_ms": 160_000,
+        "elapsed_ms": 160_000,
+        "deadline_at": "2026-08-26T17:06:10.000000Z",
+        "last_progress": "NO_OUTPUT_OBSERVED",
         "stdout_bytes": 0,
         "stderr_bytes": 0,
         "stdout_digest": digest_bytes(b""),
@@ -569,6 +582,9 @@ def test_grok_timeout_is_recorded_as_timeout_not_failed() -> None:
         "MALFORMED_OUTPUT",
         "TIMEOUT",
     ]
+    assert invocations[1]["transport_diagnostic"]["boundary"] == (
+        "UNOBSERVED_TIMEOUT_BOUNDARY"
+    )
 
 
 def test_sync_cli_rejects_non_utf8_output_with_typed_failure() -> None:
@@ -620,6 +636,17 @@ def test_cli_deadline_cancellation_is_recorded(cancelled_provider: str) -> None:
     assert invocations[-1]["provider"] == expected_provider
     assert invocations[-1]["outcome"] == "CANCELLED"
     assert invocations[-1]["failure"] == "CancelledError"
+    diagnostic = invocations[-1]["transport_diagnostic"]
+    assert diagnostic["schema_version"] == "newsroom.graphiti-timeout-diagnostic.v1"
+    assert diagnostic["boundary"] == "CALLER_CANCELLATION"
+    assert diagnostic["phase"] == (
+        "PRIMARY_TRANSPORT"
+        if cancelled_provider == "cursor"
+        else "FALLBACK_TRANSPORT"
+    )
+    assert diagnostic["cause"] == "CALLER_CANCELLED"
+    assert diagnostic["provider_cause"] == "UNOBSERVED"
+    assert diagnostic["termination"] == "TASK_CANCELLED"
     expected_outcomes = (
         ["CANCELLED"]
         if cancelled_provider == "cursor"
@@ -1105,6 +1132,7 @@ def test_cancelled_episode_cleanup_is_ordered_and_bounded(
 
     started = time.monotonic()
     configuration, revision = _combined_runtime_inputs("Body", "episode-id")
+    telemetry = real._EpisodeTelemetry()
     with pytest.raises(asyncio.TimeoutError):
         asyncio.run(
             asyncio.wait_for(
@@ -1115,7 +1143,7 @@ def test_cancelled_episode_cleanup_is_ordered_and_bounded(
                     name="episode-id",
                     episode_id="episode-id",
                     reference_time=datetime(2026, 8, 20, tzinfo=UTC),
-                    telemetry=real._EpisodeTelemetry(),
+                    telemetry=telemetry,
                     attempt_number=1,
                     validate_result=lambda _result, _telemetry: {},
                     restore_result=lambda _raw, _telemetry: None,
@@ -1129,6 +1157,18 @@ def test_cancelled_episode_cleanup_is_ordered_and_bounded(
     assert events == ["provider-start", "telemetry", "rollback", "close"]
     if slow_cleanup:
         assert elapsed < 0.2
+        assert [
+            item["phase"] for item in telemetry.timeout_diagnostics
+        ] == ["ROLLBACK_CLEANUP", "CONNECTION_CLEANUP"]
+        assert all(
+            item["boundary"] == "CLEANUP_DEADLINE"
+            and item["cause"] == "CLEANUP_DEADLINE_EXPIRED"
+            and item["provider_cause"] == "UNOBSERVED"
+            and item["deadline_at"].endswith("Z")
+            for item in telemetry.timeout_diagnostics
+        )
+    else:
+        assert telemetry.timeout_diagnostics == []
 
 
 def test_pending_guard_recovery_uses_retained_attempt_snapshot() -> None:
@@ -2371,6 +2411,105 @@ def test_credential_time_is_deducted_from_absolute_extraction_deadline(
     assert produced.failure_code is ExtractionFailureCode.EXECUTION_TIMEOUT
     assert produced.attempt_receipt_value is not None
     assert produced.attempt_receipt_value["embedding_usage"]["request_count"] == 0
+    diagnostics = produced.attempt_receipt_value["timeout_diagnostics"]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["boundary"] == "EXTRACTION_DEADLINE"
+    assert diagnostics[0]["phase"] == "PREDISPATCH_SETUP"
+    assert diagnostics[0]["cause"] == "EXTRACTION_DEADLINE_EXPIRED"
+    assert diagnostics[0]["provider_cause"] == "UNOBSERVED"
+    assert diagnostics[0]["last_progress"] == "NO_PROVIDER_INVOCATION"
+    assert diagnostics[0]["termination"] == "NO_PROVIDER_TASK"
+    assert diagnostics[0]["deadline_at"].endswith("Z")
+
+
+def test_outer_deadline_retains_causal_leaf_and_attempt_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+    from newsroom.graphiti_adapter.cli_client import run_cli_chain
+
+    async def cancelled_chain(**values: object) -> object:
+        async def pending_cursor(_prompt: str, *, max_tokens: int) -> str:
+            await asyncio.Event().wait()
+            raise AssertionError("cancelled provider unexpectedly resumed")
+
+        await run_cli_chain(
+            prompt="provider-free prompt",
+            schema=None,
+            cursor_runner=pending_cursor,
+            grok_runner=lambda *_args, **_values: pytest.fail(
+                "cancelled primary reached fallback"
+            ),
+            invocations=values["telemetry"].chat_invocations,
+        )
+        raise AssertionError("cancelled chain unexpectedly completed")
+
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(real, "openrouter_api_key", lambda: "key")
+    monkeypatch.setattr(real, "neo4j_community_password", lambda: "password")
+    monkeypatch.setattr(real, "_add_episode", cancelled_chain)
+
+    started_at = UtcTimestamp.parse("2026-08-20T00:00:00.000000Z")
+    produced = RealGraphitiAdapter()._produce(
+        evaluation_attempt_for(("A retained source passage.",)),
+        started_at,
+        execution_deadline=time.monotonic() + 0.05,
+        execution_deadline_at=datetime(2026, 8, 20, 0, 0, 0, 50_000, tzinfo=UTC),
+    )
+
+    receipt = produced.attempt_receipt_value
+    assert receipt is not None
+    assert produced.failure_code is ExtractionFailureCode.EXECUTION_TIMEOUT
+    assert receipt["chat_invocations"][0]["outcome"] == "CANCELLED"
+    leaf_diagnostic = receipt["chat_invocations"][0]["transport_diagnostic"]
+    assert leaf_diagnostic["boundary"] == "CALLER_CANCELLATION"
+    assert leaf_diagnostic["phase"] == "PRIMARY_TRANSPORT"
+    attempt_diagnostic = receipt["timeout_diagnostics"][-1]
+    assert attempt_diagnostic["boundary"] == "EXTRACTION_DEADLINE"
+    assert attempt_diagnostic["phase"] == "EXTRACTION"
+    assert attempt_diagnostic["last_progress"] == "CANCELLED"
+    assert attempt_diagnostic["termination"] == "TASK_CANCELLED"
+    assert attempt_diagnostic["deadline_at"] == "2026-08-20T00:00:00.050000Z"
+
+
+def test_connection_cleanup_timeout_is_durable_in_attempt_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+    from newsroom.graphiti_adapter.cursor_transport import timeout_diagnostic
+
+    diagnostic = timeout_diagnostic(
+        boundary="CLEANUP_DEADLINE",
+        phase="CONNECTION_CLEANUP",
+        cause="CLEANUP_DEADLINE_EXPIRED",
+        configured_timeout_ms=10_000,
+        elapsed_ms=10_000,
+        deadline_at="2026-08-20T00:00:10.000000Z",
+        last_progress="CONNECTION_CLOSE_INCOMPLETE",
+        termination="TASK_CANCELLED",
+    )
+
+    async def cleanup_timeout(**values: object) -> object:
+        values["telemetry"].timeout_diagnostics.append(diagnostic)
+        raise real.GraphitiCleanupTimeout(
+            "Graphiti connection cleanup timed out",
+            evidence=diagnostic,
+        )
+
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(real, "openrouter_api_key", lambda: "key")
+    monkeypatch.setattr(real, "neo4j_community_password", lambda: "password")
+    monkeypatch.setattr(real, "_add_episode", cleanup_timeout)
+    produced = RealGraphitiAdapter()._produce(
+        evaluation_attempt_for(("A retained source passage.",)),
+        UtcTimestamp.parse("2026-08-20T00:00:00.000000Z"),
+    )
+
+    receipt = produced.attempt_receipt_value
+    assert receipt is not None
+    assert produced.failure_code is ExtractionFailureCode.PRODUCER_INTERNAL_ERROR
+    assert receipt["producer_failure"] == "GraphitiCleanupTimeout"
+    assert receipt["timeout_diagnostics"] == [diagnostic]
 
 
 def test_public_execute_honours_expired_absolute_rights_deadline(
@@ -2890,8 +3029,9 @@ def test_cursor_cli_qualifies_pinned_package_and_dispatches_resolved_binary(
         max_output_bytes: int,
         cwd: str,
         environment: object,
+        phase: str,
     ) -> object:
-        del timeout, cwd, environment
+        del timeout, cwd, environment, phase
         if command[-1] == "--version":
             preflight_commands.append(command)
             return cursor_transport._ProcessOutput(
@@ -3401,14 +3541,21 @@ def test_controller_timeout_retains_secret_free_transport_diagnostics(
             max_output_bytes=1_024,
             cwd=str(tmp_path),
             environment={},
+            phase="PRIMARY_TRANSPORT",
         )
 
     evidence = caught.value.evidence
     assert evidence == {
-        "schema_version": "newsroom.cli-transport-timeout.v1",
+        "schema_version": "newsroom.graphiti-timeout-diagnostic.v1",
         "boundary": "CONTROLLER_DEADLINE",
+        "phase": "PRIMARY_TRANSPORT",
+        "cause": "CONFIGURED_TIMEOUT_EXPIRED",
+        "provider_cause": "UNOBSERVED",
         "process": Path(sys.executable).name,
         "configured_timeout_ms": 50,
+        "elapsed_ms": evidence["elapsed_ms"],
+        "deadline_at": evidence["deadline_at"],
+        "last_progress": "OUTPUT_OBSERVED",
         "stdout_bytes": len(stdout),
         "stderr_bytes": len(stderr),
         "stdout_digest": digest_bytes(stdout),
@@ -3417,6 +3564,8 @@ def test_controller_timeout_retains_secret_free_transport_diagnostics(
     }
     assert "partial stdout" not in repr(evidence)
     assert "partial stderr" not in repr(evidence)
+    assert evidence["elapsed_ms"] >= 50
+    assert evidence["deadline_at"].endswith("Z")
 
 
 def test_async_controller_timeout_retains_transport_diagnostics(
@@ -3440,6 +3589,7 @@ def test_async_controller_timeout_retains_transport_diagnostics(
             max_output_bytes=1_024,
             cwd=str(tmp_path),
             environment={},
+            phase="PRIMARY_TRANSPORT",
         )
 
     with pytest.raises(cursor_transport.CliTransportTimeout) as caught:
@@ -3447,6 +3597,113 @@ def test_async_controller_timeout_retains_transport_diagnostics(
 
     evidence = caught.value.evidence
     assert evidence["configured_timeout_ms"] == 50
+    assert evidence["stdout_bytes"] == len(stdout)
+    assert evidence["stderr_bytes"] == len(stderr)
+    assert evidence["stdout_digest"] == digest_bytes(stdout)
+    assert evidence["stderr_digest"] == digest_bytes(stderr)
+
+
+def test_controller_timeout_survives_process_exit_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.graphiti_adapter import cursor_transport
+
+    original_kill = subprocess.Popen.kill
+
+    def exits_during_kill(process: subprocess.Popen[bytes]) -> None:
+        original_kill(process)
+        raise ProcessLookupError
+
+    monkeypatch.setattr(subprocess.Popen, "kill", exits_during_kill)
+    with pytest.raises(cursor_transport.CliTransportTimeout) as caught:
+        cursor_transport._run_bounded_process(
+            (sys.executable, "-c", "import time; time.sleep(5)"),
+            timeout=0.05,
+            max_output_bytes=1_024,
+            cwd=str(tmp_path),
+            environment={},
+            phase="PRIMARY_TRANSPORT",
+        )
+
+    assert caught.value.evidence["termination"] == "PROCESS_EXIT_RACE"
+
+
+def test_cursor_preflight_timeout_retains_causal_qualification_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.graphiti_adapter import cursor_transport
+
+    diagnostic = cursor_transport.timeout_diagnostic(
+        boundary="CONTROLLER_DEADLINE",
+        phase="PREDISPATCH_VERSION",
+        cause="CONFIGURED_TIMEOUT_EXPIRED",
+        configured_timeout_ms=20_000,
+        elapsed_ms=20_000,
+        deadline_at="2026-08-26T18:00:20.000000Z",
+        last_progress="NO_OUTPUT_OBSERVED",
+        termination="PROCESS_KILLED",
+        process="cursor-agent",
+        stdout=b"",
+        stderr=b"",
+    )
+    monkeypatch.setattr(
+        cursor_transport,
+        "_prepare_cursor_qualification",
+        lambda **_values: SimpleNamespace(
+            resolved_binary=sys.executable,
+            evidence={"binary": "cursor-agent"},
+        ),
+    )
+
+    def timeout(*_args: object, **_values: object) -> object:
+        raise cursor_transport.CliTransportTimeout(
+            "cursor-agent Graphiti LLM timed out",
+            evidence=diagnostic,
+        )
+
+    monkeypatch.setattr(cursor_transport, "_run_bounded_process", timeout)
+    with pytest.raises(cursor_transport.CliPredispatchRefusal) as caught:
+        cursor_transport._qualify_cursor_agent(
+            binary="cursor-agent",
+            cwd=str(tmp_path),
+            environment={},
+            max_tokens=512,
+        )
+
+    assert caught.value.qualification_evidence["timeout_diagnostic"] == diagnostic
+
+
+@pytest.mark.parametrize("asynchronous", (False, True))
+def test_fallback_timeout_retains_causal_diagnostics(
+    tmp_path: Path, asynchronous: bool
+) -> None:
+    from newsroom.graphiti_adapter.cli_client import (
+        CliTransportTimeout,
+        run_cli,
+        run_cli_async,
+    )
+
+    stdout = b"fallback stdout\n"
+    stderr = b"fallback stderr\n"
+    script = (
+        "import sys,time; "
+        f"sys.stdout.buffer.write({stdout!r}); sys.stdout.flush(); "
+        f"sys.stderr.buffer.write({stderr!r}); sys.stderr.flush(); "
+        "time.sleep(5)"
+    )
+    command = (sys.executable, "-c", script)
+    with pytest.raises(CliTransportTimeout) as caught:
+        if asynchronous:
+            asyncio.run(run_cli_async(command, timeout=0.05, cwd=str(tmp_path)))
+        else:
+            run_cli(command, timeout=0.05, cwd=str(tmp_path))
+
+    evidence = caught.value.evidence
+    assert evidence["boundary"] == "CONTROLLER_DEADLINE"
+    assert evidence["phase"] == "FALLBACK_TRANSPORT"
+    assert evidence["cause"] == "CONFIGURED_TIMEOUT_EXPIRED"
+    assert evidence["provider_cause"] == "UNOBSERVED"
+    assert evidence["last_progress"] == "OUTPUT_OBSERVED"
     assert evidence["stdout_bytes"] == len(stdout)
     assert evidence["stderr_bytes"] == len(stderr)
     assert evidence["stdout_digest"] == digest_bytes(stdout)

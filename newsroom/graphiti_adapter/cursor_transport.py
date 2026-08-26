@@ -12,6 +12,7 @@ import subprocess
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from newsroom.control_plane.child_environment import unprivileged_child_environment
@@ -56,6 +57,9 @@ CURSOR_STDOUT_LIMIT_IDENTITY = (
     "cursor-controller-stdout-v1:" + CURSOR_STDOUT_LIMIT_FORMULA
 )
 CURSOR_COMMAND_SURFACE_PROOF = "PINNED_PACKAGE_HIDDEN_OPTION_REGISTRATIONS_V1"
+CLI_TIMEOUT_DIAGNOSTIC_SCHEMA_VERSION = (
+    "newsroom.graphiti-timeout-diagnostic.v1"
+)
 
 _CURSOR_PUBLIC_CONTROLS = (
     "--print",
@@ -663,62 +667,133 @@ def _inspect_cursor_package(binary: str) -> _CursorPackageProof:
     )
 
 
-def _stop_process(process: subprocess.Popen[bytes]) -> bool:
-    killed = process.poll() is None
-    if killed:
+def _stop_process(process: subprocess.Popen[bytes]) -> str:
+    if process.poll() is not None:
+        process.wait()
+        return "PROCESS_ALREADY_EXITED"
+    try:
         process.kill()
+    except ProcessLookupError:
+        termination = "PROCESS_EXIT_RACE"
+    else:
+        termination = "PROCESS_KILLED"
     process.wait()
-    return killed
+    return termination
 
 
-async def _stop_process_async(process: asyncio.subprocess.Process) -> bool:
-    killed = process.returncode is None
-    if killed:
-        try:
-            process.kill()
-        except ProcessLookupError:
-            killed = False
+async def stop_process_async(process: asyncio.subprocess.Process) -> str:
+    if process.returncode is not None:
+        await process.wait()
+        return "PROCESS_ALREADY_EXITED"
+    try:
+        process.kill()
+    except ProcessLookupError:
+        termination = "PROCESS_EXIT_RACE"
+    else:
+        termination = "PROCESS_KILLED"
     await process.wait()
-    return killed
+    return termination
+
+
+def timeout_deadline_after(timeout_seconds: float) -> str:
+    """Return a canonical UTC deadline for secret-free timeout evidence."""
+
+    deadline = datetime.now(tz=UTC) + timedelta(seconds=timeout_seconds)
+    return deadline.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def timeout_diagnostic(
+    *,
+    boundary: str,
+    phase: str,
+    cause: str,
+    configured_timeout_ms: int,
+    elapsed_ms: int,
+    deadline_at: str | None,
+    last_progress: str,
+    termination: str,
+    process: str | None = None,
+    stdout: bytes | None = None,
+    stderr: bytes | None = None,
+) -> dict[str, object]:
+    """Build one causal timeout record without retaining provider content."""
+
+    evidence: dict[str, object] = {
+        "schema_version": CLI_TIMEOUT_DIAGNOSTIC_SCHEMA_VERSION,
+        "boundary": boundary,
+        "phase": phase,
+        "cause": cause,
+        "provider_cause": "UNOBSERVED",
+        "configured_timeout_ms": configured_timeout_ms,
+        "elapsed_ms": elapsed_ms,
+        "deadline_at": deadline_at,
+        "last_progress": last_progress,
+        "termination": termination,
+    }
+    if process is not None:
+        evidence["process"] = process
+    if stdout is not None and stderr is not None:
+        evidence.update(
+            {
+                "stdout_bytes": len(stdout),
+                "stderr_bytes": len(stderr),
+                "stdout_digest": _sha256_bytes(stdout),
+                "stderr_digest": _sha256_bytes(stderr),
+            }
+        )
+    return evidence
 
 
 def _timeout_evidence(
     *,
     name: str,
+    phase: str,
     timeout: float,
+    elapsed: float,
+    deadline_at: str,
     stdout: bytes,
     stderr: bytes,
-    killed: bool,
+    termination: str,
 ) -> dict[str, object]:
-    return {
-        "schema_version": "newsroom.cli-transport-timeout.v1",
-        "boundary": "CONTROLLER_DEADLINE",
-        "process": name,
-        "configured_timeout_ms": round(timeout * 1_000),
-        "stdout_bytes": len(stdout),
-        "stderr_bytes": len(stderr),
-        "stdout_digest": _sha256_bytes(stdout),
-        "stderr_digest": _sha256_bytes(stderr),
-        "termination": "PROCESS_KILLED" if killed else "PROCESS_ALREADY_EXITED",
-    }
+    return timeout_diagnostic(
+        boundary="CONTROLLER_DEADLINE",
+        phase=phase,
+        cause="CONFIGURED_TIMEOUT_EXPIRED",
+        configured_timeout_ms=round(timeout * 1_000),
+        elapsed_ms=round(elapsed * 1_000),
+        deadline_at=deadline_at,
+        last_progress=(
+            "OUTPUT_OBSERVED" if stdout or stderr else "NO_OUTPUT_OBSERVED"
+        ),
+        termination=termination,
+        process=name,
+        stdout=stdout,
+        stderr=stderr,
+    )
 
 
 def _transport_timeout(
     *,
     name: str,
+    phase: str,
     timeout: float,
+    elapsed: float,
+    deadline_at: str,
     stdout: bytes,
     stderr: bytes,
-    killed: bool,
+    termination: str,
 ) -> CliTransportTimeout:
     return CliTransportTimeout(
         f"{name} Graphiti LLM timed out",
         evidence=_timeout_evidence(
             name=name,
+            phase=phase,
             timeout=timeout,
+            elapsed=elapsed,
+            deadline_at=deadline_at,
             stdout=stdout,
             stderr=stderr,
-            killed=killed,
+            termination=termination,
         ),
     )
 
@@ -730,6 +805,7 @@ def _run_bounded_process(
     max_output_bytes: int,
     cwd: str,
     environment: Mapping[str, str],
+    phase: str = "CLI_TRANSPORT",
 ) -> _ProcessOutput:
     if isinstance(max_output_bytes, bool) or max_output_bytes <= 0:
         raise ValueError("CLI max_output_bytes must be positive")
@@ -754,18 +830,23 @@ def _run_bounded_process(
     }
     for stream, _output in streams.values():
         selector.register(stream, selectors.EVENT_READ)
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
+    deadline_at = timeout_deadline_after(timeout)
     try:
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                killed = _stop_process(process)
+                termination = _stop_process(process)
                 raise _transport_timeout(
                     name=name,
+                    phase=phase,
                     timeout=timeout,
+                    elapsed=time.monotonic() - started,
+                    deadline_at=deadline_at,
                     stdout=bytes(stdout_output),
                     stderr=bytes(stderr_output),
-                    killed=killed,
+                    termination=termination,
                 )
             events = selector.select(timeout=min(remaining, 0.1))
             if not events:
@@ -786,24 +867,30 @@ def _run_bounded_process(
                     )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            killed = _stop_process(process)
+            termination = _stop_process(process)
             raise _transport_timeout(
                 name=name,
+                phase=phase,
                 timeout=timeout,
+                elapsed=time.monotonic() - started,
+                deadline_at=deadline_at,
                 stdout=bytes(stdout_output),
                 stderr=bytes(stderr_output),
-                killed=killed,
+                termination=termination,
             )
         try:
             process.wait(timeout=remaining)
         except subprocess.TimeoutExpired:
-            killed = _stop_process(process)
+            termination = _stop_process(process)
             raise _transport_timeout(
                 name=name,
+                phase=phase,
                 timeout=timeout,
+                elapsed=time.monotonic() - started,
+                deadline_at=deadline_at,
                 stdout=bytes(stdout_output),
                 stderr=bytes(stderr_output),
-                killed=killed,
+                termination=termination,
             ) from None
     except BaseException:
         if process.poll() is None:
@@ -827,6 +914,7 @@ async def _run_bounded_process_async(
     max_output_bytes: int,
     cwd: str,
     environment: Mapping[str, str],
+    phase: str = "CLI_TRANSPORT",
 ) -> _ProcessOutput:
     if isinstance(max_output_bytes, bool) or max_output_bytes <= 0:
         raise ValueError("CLI max_output_bytes must be positive")
@@ -857,7 +945,9 @@ async def _run_bounded_process_async(
                     f"{name} Graphiti LLM exceeded output byte limit"
                 )
 
-    deadline = asyncio.get_running_loop().time() + timeout
+    started = asyncio.get_running_loop().time()
+    deadline = started + timeout
+    deadline_at = timeout_deadline_after(timeout)
     try:
         await asyncio.wait_for(
             asyncio.gather(
@@ -871,19 +961,22 @@ async def _run_bounded_process_async(
             raise TimeoutError
         returncode = await asyncio.wait_for(process.wait(), timeout=remaining)
     except TimeoutError:
-        killed = await _stop_process_async(process)
+        termination = await stop_process_async(process)
         raise _transport_timeout(
             name=name,
+            phase=phase,
             timeout=timeout,
+            elapsed=asyncio.get_running_loop().time() - started,
+            deadline_at=deadline_at,
             stdout=bytes(outputs["stdout"]),
             stderr=bytes(outputs["stderr"]),
-            killed=killed,
+            termination=termination,
         ) from None
     except asyncio.CancelledError:
-        await _stop_process_async(process)
+        await stop_process_async(process)
         raise
     except BaseException:
-        await _stop_process_async(process)
+        await stop_process_async(process)
         raise
     return _ProcessOutput(
         returncode=returncode,
@@ -1140,6 +1233,7 @@ def _qualify_cursor_agent(
             max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
             cwd=cwd,
             environment=environment,
+            phase="PREDISPATCH_VERSION",
         )
         help_result = _run_bounded_process(
             (preparation.resolved_binary, "--help"),
@@ -1147,6 +1241,7 @@ def _qualify_cursor_agent(
             max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
             cwd=cwd,
             environment=environment,
+            phase="PREDISPATCH_HELP",
         )
         return _complete_cursor_qualification(
             binary=binary,
@@ -1161,6 +1256,8 @@ def _qualify_cursor_agent(
             raise
         raise CliPredispatchRefusal(str(exc), qualification_evidence=evidence) from exc
     except (CliOutputBoundExceeded, CliOutputDecodeError, OSError, TimeoutError) as exc:
+        if isinstance(exc, CliTransportTimeout):
+            evidence = {**evidence, "timeout_diagnostic": dict(exc.evidence)}
         raise CliPredispatchRefusal(
             "Cursor CLI exact-binary preflight failed",
             qualification_evidence=evidence,
@@ -1189,6 +1286,7 @@ async def _qualify_cursor_agent_async(
             max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
             cwd=cwd,
             environment=environment,
+            phase="PREDISPATCH_VERSION",
         )
         help_result = await _run_bounded_process_async(
             (preparation.resolved_binary, "--help"),
@@ -1196,6 +1294,7 @@ async def _qualify_cursor_agent_async(
             max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
             cwd=cwd,
             environment=environment,
+            phase="PREDISPATCH_HELP",
         )
         return await asyncio.to_thread(
             _complete_cursor_qualification,
@@ -1211,6 +1310,8 @@ async def _qualify_cursor_agent_async(
             raise
         raise CliPredispatchRefusal(str(exc), qualification_evidence=evidence) from exc
     except (CliOutputBoundExceeded, CliOutputDecodeError, OSError, TimeoutError) as exc:
+        if isinstance(exc, CliTransportTimeout):
+            evidence = {**evidence, "timeout_diagnostic": dict(exc.evidence)}
         raise CliPredispatchRefusal(
             "Cursor CLI exact-binary preflight failed",
             qualification_evidence=evidence,
@@ -1271,6 +1372,7 @@ def run_cursor_transport(
         max_output_bytes=qualification.stdout_limit_bytes,
         cwd=cwd,
         environment=environment,
+        phase="PRIMARY_TRANSPORT",
     )
     if result.returncode != 0:
         raise RuntimeError("cursor-agent Graphiti LLM failed")
@@ -1314,6 +1416,7 @@ async def run_cursor_transport_async(
         max_output_bytes=qualification.stdout_limit_bytes,
         cwd=cwd,
         environment=environment,
+        phase="PRIMARY_TRANSPORT",
     )
     if result.returncode != 0:
         raise RuntimeError("cursor-agent Graphiti LLM failed")
@@ -1323,6 +1426,7 @@ async def run_cursor_transport_async(
 
 
 __all__ = [
+    "CLI_TIMEOUT_DIAGNOSTIC_SCHEMA_VERSION",
     "CURSOR_AGENT_BIN",
     "CURSOR_AUTHENTICATION_BRIDGE",
     "CURSOR_AUTHENTICATION_PROBE",
@@ -1349,4 +1453,7 @@ __all__ = [
     "cursor_stdout_limit",
     "run_cursor_transport",
     "run_cursor_transport_async",
+    "stop_process_async",
+    "timeout_deadline_after",
+    "timeout_diagnostic",
 ]
