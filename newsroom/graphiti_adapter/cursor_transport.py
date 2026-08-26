@@ -131,6 +131,14 @@ class CliOutputBoundExceeded(RuntimeError):
     """A CLI exceeded its controller-owned output byte ceiling."""
 
 
+class CliTransportTimeout(TimeoutError):
+    """A controller deadline terminated a CLI with secret-free diagnostics."""
+
+    def __init__(self, message: str, *, evidence: Mapping[str, object]) -> None:
+        super().__init__(message)
+        self.evidence = dict(evidence)
+
+
 @dataclass(frozen=True, slots=True)
 class CursorCliQualification:
     binary: str
@@ -655,25 +663,70 @@ def _inspect_cursor_package(binary: str) -> _CursorPackageProof:
     )
 
 
-def _stop_process(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is None:
+def _stop_process(process: subprocess.Popen[bytes]) -> bool:
+    killed = process.poll() is None
+    if killed:
         process.kill()
     process.wait()
+    return killed
 
 
-async def _stop_process_async(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is None:
+async def _stop_process_async(process: asyncio.subprocess.Process) -> bool:
+    killed = process.returncode is None
+    if killed:
         try:
             process.kill()
         except ProcessLookupError:
-            pass
+            killed = False
     await process.wait()
+    return killed
+
+
+def _timeout_evidence(
+    *,
+    name: str,
+    timeout: float,
+    stdout: bytes,
+    stderr: bytes,
+    killed: bool,
+) -> dict[str, object]:
+    return {
+        "schema_version": "newsroom.cli-transport-timeout.v1",
+        "boundary": "CONTROLLER_DEADLINE",
+        "process": name,
+        "configured_timeout_ms": round(timeout * 1_000),
+        "stdout_bytes": len(stdout),
+        "stderr_bytes": len(stderr),
+        "stdout_digest": _sha256_bytes(stdout),
+        "stderr_digest": _sha256_bytes(stderr),
+        "termination": "PROCESS_KILLED" if killed else "PROCESS_ALREADY_EXITED",
+    }
+
+
+def _transport_timeout(
+    *,
+    name: str,
+    timeout: float,
+    stdout: bytes,
+    stderr: bytes,
+    killed: bool,
+) -> CliTransportTimeout:
+    return CliTransportTimeout(
+        f"{name} Graphiti LLM timed out",
+        evidence=_timeout_evidence(
+            name=name,
+            timeout=timeout,
+            stdout=stdout,
+            stderr=stderr,
+            killed=killed,
+        ),
+    )
 
 
 def _run_bounded_process(
     command: tuple[str, ...],
     *,
-    timeout: int,
+    timeout: float,
     max_output_bytes: int,
     cwd: str,
     environment: Mapping[str, str],
@@ -706,8 +759,14 @@ def _run_bounded_process(
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                _stop_process(process)
-                raise TimeoutError(f"{name} Graphiti LLM timed out")
+                killed = _stop_process(process)
+                raise _transport_timeout(
+                    name=name,
+                    timeout=timeout,
+                    stdout=bytes(stdout_output),
+                    stderr=bytes(stderr_output),
+                    killed=killed,
+                )
             events = selector.select(timeout=min(remaining, 0.1))
             if not events:
                 continue
@@ -727,13 +786,25 @@ def _run_bounded_process(
                     )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            _stop_process(process)
-            raise TimeoutError(f"{name} Graphiti LLM timed out")
+            killed = _stop_process(process)
+            raise _transport_timeout(
+                name=name,
+                timeout=timeout,
+                stdout=bytes(stdout_output),
+                stderr=bytes(stderr_output),
+                killed=killed,
+            )
         try:
             process.wait(timeout=remaining)
         except subprocess.TimeoutExpired:
-            _stop_process(process)
-            raise TimeoutError(f"{name} Graphiti LLM timed out") from None
+            killed = _stop_process(process)
+            raise _transport_timeout(
+                name=name,
+                timeout=timeout,
+                stdout=bytes(stdout_output),
+                stderr=bytes(stderr_output),
+                killed=killed,
+            ) from None
     except BaseException:
         if process.poll() is None:
             _stop_process(process)
@@ -752,7 +823,7 @@ def _run_bounded_process(
 async def _run_bounded_process_async(
     command: tuple[str, ...],
     *,
-    timeout: int,
+    timeout: float,
     max_output_bytes: int,
     cwd: str,
     environment: Mapping[str, str],
@@ -800,8 +871,14 @@ async def _run_bounded_process_async(
             raise TimeoutError
         returncode = await asyncio.wait_for(process.wait(), timeout=remaining)
     except TimeoutError:
-        await _stop_process_async(process)
-        raise TimeoutError(f"{name} Graphiti LLM timed out") from None
+        killed = await _stop_process_async(process)
+        raise _transport_timeout(
+            name=name,
+            timeout=timeout,
+            stdout=bytes(outputs["stdout"]),
+            stderr=bytes(outputs["stderr"]),
+            killed=killed,
+        ) from None
     except asyncio.CancelledError:
         await _stop_process_async(process)
         raise
@@ -1267,6 +1344,7 @@ __all__ = [
     "CliOutputBoundExceeded",
     "CliOutputDecodeError",
     "CliPredispatchRefusal",
+    "CliTransportTimeout",
     "CursorCliQualification",
     "cursor_stdout_limit",
     "run_cursor_transport",

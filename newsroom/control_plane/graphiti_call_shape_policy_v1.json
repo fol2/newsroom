@@ -1,8 +1,8 @@
 {
   "schema_version": "newsroom.graphiti-call-shape-policy.v1",
-  "canonical_digest": "sha256:2353968b06848173c1faa36a9255a9b482ee24ab55c817c600ab108574a6bc74",
+  "canonical_digest": "sha256:520e8083f274bd0c5199293e8c7488953519d7d260790485d4a5b7ac78fd3cab",
   "policy_id": "graphiti-core-0.29.3-newsroom-adapter-v1",
-  "version": "issue-790-v3",
+  "version": "issue-790-v4",
   "graphiti_core_release": "graphiti-core-0.29.3",
   "framework_identity": "graphiti-core-0.29.3",
   "prompt_identity": "newsroom.graphiti.proposal-only-prompt:v1",
@@ -16,8 +16,8 @@
       "route": "GRAPHITI_CHAT_PRIMARY",
       "model": "composer-2.5",
       "reasoning": "provider-default",
-      "config_identity": "cursor-agent-cli-2026.08.11-e8db854-pinned-package-v3",
-      "command_semantic_version": "newsroom.graphiti-provider-dispatch.v4",
+      "config_identity": "cursor-agent-cli-2026.08.11-e8db854-pinned-package-v4",
+      "command_semantic_version": "newsroom.graphiti-provider-dispatch.v5",
       "command_flags": [
         "binary=/Users/jamesto/.local/bin/cursor-agent",
         "resolved-binary=/Users/jamesto/.local/share/cursor-agent/versions/2026.08.11-e8db854/cursor-agent",
@@ -51,7 +51,8 @@
         "CREDENTIAL_STATE=LOCAL_ACCESS_REFRESH_TOKENS_READABLE",
         "CREDENTIAL_STATE_DIGEST=sha256:c4f5b14be367d9c6639c59ff13375652a957e600a85fbbe6339112b3392cba6a",
         "PROMPT_MAX_OUTPUT_TOKENS=REQUEST_MAX_TOKENS",
-        "CONTROLLER_STDOUT_CONTRACT=cursor-controller-stdout-v1:65536+64*REQUEST_MAX_TOKENS"
+        "CONTROLLER_STDOUT_CONTRACT=cursor-controller-stdout-v1:65536+64*REQUEST_MAX_TOKENS",
+        "CONTROLLER_TIMEOUT_MS=160000"
       ],
       "disabled_capabilities": [
         "repository-discovery",
@@ -63,7 +64,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:3219af54c3905852b880b5269270119e4e5716d42502b015fb86758a2ce51aaa",
+      "implementation_revision": "sha256:71f0893a557f1fb79a61057970023db91d68af3d9cddfe1dbc2d94b2d72596e3",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -75,8 +76,8 @@
       "route": "GRAPHITI_CHAT_FALLBACK",
       "model": "grok-4.6",
       "reasoning": "medium",
-      "config_identity": "graphiti-cli-command-v1",
-      "command_semantic_version": "newsroom.graphiti-provider-dispatch.v1",
+      "config_identity": "graphiti-cli-command-v2",
+      "command_semantic_version": "newsroom.graphiti-provider-dispatch.v2",
       "command_flags": [
         "--prompt-file",
         "--model=grok-4.6",
@@ -90,7 +91,8 @@
         "--max-output-tokens=REQUEST_MAX_TOKENS",
         "--no-subagents",
         "--reasoning-effort=medium",
-        "--output-format=streaming-json"
+        "--output-format=streaming-json",
+        "CONTROLLER_TIMEOUT_MS=160000"
       ],
       "disabled_capabilities": [
         "repository-discovery",
@@ -102,7 +104,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:3219af54c3905852b880b5269270119e4e5716d42502b015fb86758a2ce51aaa",
+      "implementation_revision": "sha256:71f0893a557f1fb79a61057970023db91d68af3d9cddfe1dbc2d94b2d72596e3",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -375,7 +377,7 @@
       "distinct_internal_request_count": 3
     }
   ],
-  "evidence_digest": "sha256:501c15c831a5a4374138a50333d60cda256dc6efaddce6cec9e6dc1ce312c229",
+  "evidence_digest": "sha256:a0fdd30aad0c9d251fb3aa26c1eb9674dce285ae8198a04347e84b86c915e83a",
   "maximum_qualified_fixture_count": 4,
   "headroom": 2,
   "max_distinct_internal_requests": 6

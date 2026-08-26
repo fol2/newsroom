@@ -23,6 +23,7 @@ from newsroom.graphiti_adapter.cursor_transport import (
     CliOutputBoundExceeded,
     CliOutputDecodeError,
     CliPredispatchRefusal,
+    CliTransportTimeout,
     CursorCliQualification,
     cursor_stdout_limit,
     run_cursor_transport,
@@ -32,6 +33,8 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     CURSOR_AGENT_MODEL_ID,
     GROK_CHAT_MODEL_ID,
     GROK_CHAT_REASONING,
+    GRAPHITI_EXTRACTION_TIMEOUT_MS,
+    GRAPHITI_MAX_CLEANUP_TIMEOUT_MS,
 )
 from newsroom.graphiti_adapter.usage_meter import (
     cursor_cli_usage,
@@ -41,7 +44,9 @@ from newsroom.graphiti_adapter.usage_meter import (
 )
 
 GROK_BIN = os.environ.get("NEWSROOM_GROK_BIN", "/Users/jamesto/.grok/bin/grok")
-CLI_CALL_TIMEOUT_SECONDS = 80
+CLI_CALL_TIMEOUT_SECONDS = (
+    GRAPHITI_EXTRACTION_TIMEOUT_MS - GRAPHITI_MAX_CLEANUP_TIMEOUT_MS
+) // 1_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -568,6 +573,7 @@ def _invocation(
     failure: str | None = None,
     requested_max_tokens: int = 0,
     receipt_binding: Mapping[str, str] | None = None,
+    transport_diagnostic: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     value: dict[str, object] = {
         "provider": provider,
@@ -586,6 +592,8 @@ def _invocation(
         )
     if failure is not None:
         value["failure"] = failure
+    if transport_diagnostic is not None:
+        value["transport_diagnostic"] = dict(transport_diagnostic)
     return value
 
 
@@ -815,6 +823,9 @@ async def run_cli_chain(
                 failure=type(exc).__name__,
                 requested_max_tokens=max_tokens,
                 receipt_binding=binding,
+                transport_diagnostic=(
+                    exc.evidence if isinstance(exc, CliTransportTimeout) else None
+                ),
             )
         )
         cursor_outcome = "TIMEOUT"
@@ -1042,6 +1053,9 @@ async def run_cli_chain(
                 failure=type(exc).__name__,
                 requested_max_tokens=max_tokens,
                 receipt_binding=binding,
+                transport_diagnostic=(
+                    exc.evidence if isinstance(exc, CliTransportTimeout) else None
+                ),
             )
         )
         raise CliResponseError("Graphiti fallback CLI timed out") from exc

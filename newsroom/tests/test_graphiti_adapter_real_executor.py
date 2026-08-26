@@ -505,6 +505,45 @@ def test_cursor_timeout_is_ineligible_for_fallback() -> None:
     assert [item["outcome"] for item in invocations] == ["TIMEOUT"]
 
 
+def test_cursor_timeout_retains_transport_diagnostic_in_invocation() -> None:
+    from newsroom.graphiti_adapter.cli_client import CliResponseError, run_cli_chain
+    from newsroom.graphiti_adapter.cursor_transport import CliTransportTimeout
+
+    diagnostic = {
+        "schema_version": "newsroom.cli-transport-timeout.v1",
+        "boundary": "CONTROLLER_DEADLINE",
+        "process": "cursor-agent",
+        "configured_timeout_ms": 160_000,
+        "stdout_bytes": 0,
+        "stderr_bytes": 0,
+        "stdout_digest": digest_bytes(b""),
+        "stderr_digest": digest_bytes(b""),
+        "termination": "PROCESS_KILLED",
+    }
+
+    def timeout(_prompt: str, *, max_tokens: int) -> str:
+        raise CliTransportTimeout(
+            "cursor-agent Graphiti LLM timed out",
+            evidence=diagnostic,
+        )
+
+    invocations: list[dict[str, object]] = []
+    with pytest.raises(CliResponseError, match="ineligible for fallback"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="prompt",
+                schema=None,
+                cursor_runner=timeout,
+                grok_runner=lambda *_args, **_values: pytest.fail(
+                    "timeout reached fallback"
+                ),
+                invocations=invocations,
+            )
+        )
+
+    assert invocations[0]["transport_diagnostic"] == diagnostic
+
+
 def test_grok_timeout_is_recorded_as_timeout_not_failed() -> None:
     from newsroom.graphiti_adapter.cli_client import CliResponseError, run_cli_chain
 
@@ -2634,6 +2673,18 @@ def test_cursor_cli_runs_outside_repository_cwd(
     assert observed["inventory"] == []
 
 
+def test_subscription_cli_deadline_reserves_only_cleanup_budget() -> None:
+    from newsroom.graphiti_adapter import cli_client
+    from newsroom.graphiti_adapter.evaluation_packet import (
+        GRAPHITI_EXTRACTION_TIMEOUT_MS,
+        GRAPHITI_MAX_CLEANUP_TIMEOUT_MS,
+    )
+
+    assert cli_client.CLI_CALL_TIMEOUT_SECONDS * 1_000 == (
+        GRAPHITI_EXTRACTION_TIMEOUT_MS - GRAPHITI_MAX_CLEANUP_TIMEOUT_MS
+    )
+
+
 def test_async_cli_child_is_terminated_when_attempt_deadline_cancels() -> None:
     from newsroom.graphiti_adapter.cli_client import run_cli_async
 
@@ -3328,3 +3379,75 @@ def test_controller_output_bound_terminates_oversized_cursor_output(
             cwd=str(tmp_path),
             environment={},
         )
+
+
+def test_controller_timeout_retains_secret_free_transport_diagnostics(
+    tmp_path: Path,
+) -> None:
+    from newsroom.graphiti_adapter import cursor_transport
+
+    stdout = b"partial stdout\n"
+    stderr = b"partial stderr\n"
+    script = (
+        "import sys,time; "
+        f"sys.stdout.buffer.write({stdout!r}); sys.stdout.flush(); "
+        f"sys.stderr.buffer.write({stderr!r}); sys.stderr.flush(); "
+        "time.sleep(5)"
+    )
+    with pytest.raises(cursor_transport.CliTransportTimeout) as caught:
+        cursor_transport._run_bounded_process(
+            (sys.executable, "-c", script),
+            timeout=0.05,
+            max_output_bytes=1_024,
+            cwd=str(tmp_path),
+            environment={},
+        )
+
+    evidence = caught.value.evidence
+    assert evidence == {
+        "schema_version": "newsroom.cli-transport-timeout.v1",
+        "boundary": "CONTROLLER_DEADLINE",
+        "process": Path(sys.executable).name,
+        "configured_timeout_ms": 50,
+        "stdout_bytes": len(stdout),
+        "stderr_bytes": len(stderr),
+        "stdout_digest": digest_bytes(stdout),
+        "stderr_digest": digest_bytes(stderr),
+        "termination": "PROCESS_KILLED",
+    }
+    assert "partial stdout" not in repr(evidence)
+    assert "partial stderr" not in repr(evidence)
+
+
+def test_async_controller_timeout_retains_transport_diagnostics(
+    tmp_path: Path,
+) -> None:
+    from newsroom.graphiti_adapter import cursor_transport
+
+    stdout = b"async stdout\n"
+    stderr = b"async stderr\n"
+    script = (
+        "import sys,time; "
+        f"sys.stdout.buffer.write({stdout!r}); sys.stdout.flush(); "
+        f"sys.stderr.buffer.write({stderr!r}); sys.stderr.flush(); "
+        "time.sleep(5)"
+    )
+
+    async def invoke() -> None:
+        await cursor_transport._run_bounded_process_async(
+            (sys.executable, "-c", script),
+            timeout=0.05,
+            max_output_bytes=1_024,
+            cwd=str(tmp_path),
+            environment={},
+        )
+
+    with pytest.raises(cursor_transport.CliTransportTimeout) as caught:
+        asyncio.run(invoke())
+
+    evidence = caught.value.evidence
+    assert evidence["configured_timeout_ms"] == 50
+    assert evidence["stdout_bytes"] == len(stdout)
+    assert evidence["stderr_bytes"] == len(stderr)
+    assert evidence["stdout_digest"] == digest_bytes(stdout)
+    assert evidence["stderr_digest"] == digest_bytes(stderr)
