@@ -4985,11 +4985,94 @@ def test_cycle_rejects_foreign_graphiti_identity(tmp_path: Path) -> None:
     connection.close()
     assert stored == 0
     assert failed == 1
-    assert attempt["returned_raw_receipt"] == returned[0].raw_receipt
-    assert attempt["chat_invocations"][0]["outcome"] == "COMPLETE"
-    assert attempt["embedding_usage"]["cost_usd_microunits"] == 17
+    assert attempt["returned_raw_receipt_digest"] == digest_bytes(
+        canonical_json_bytes(returned[0].raw_receipt)
+    )
+    assert attempt["returned_validated_raw_digest"] == returned[0].receipt_digest
+    assert attempt["chat_invocations"] == []
+    assert attempt["chat_invocation_count"] == 1
+    assert attempt["chat_invocations_digest"] == digest_bytes(
+        canonical_json_bytes(list(returned[0].chat_invocations))
+    )
+    assert attempt["embedding_usage"] is None
+    assert attempt["embedding_usage_digest"] == digest_bytes(
+        canonical_json_bytes(returned[0].embedding_usage)
+    )
     assert attempt["accounting"]["actual_usd_microunits"] == 17
     assert spend == ("RECONCILED", 17, "PROVIDER_REPORTED")
+
+
+def test_rejected_nested_timeout_secret_never_reaches_store_or_ledger(
+    tmp_path: Path,
+) -> None:
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "rejected-timeout-secret.sqlite3"
+    secret = "TOKEN=secret-provider-credential"
+
+    class SecretDiagnostic:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            diagnostic = {
+                "schema_version": "newsroom.graphiti-timeout-diagnostic.v1",
+                "boundary": "CONTROLLER_DEADLINE",
+                "phase": "PRIMARY_TRANSPORT",
+                "cause": "CONFIGURED_TIMEOUT_EXPIRED",
+                "provider_cause": "UNOBSERVED",
+                "configured_timeout_ms": 160_000,
+                "elapsed_ms": 160_000,
+                "deadline_at": "2026-08-26T18:00:20.000000Z",
+                "last_progress": secret,
+                "termination": "PROCESS_KILLED",
+            }
+            return _complete(
+                unit,
+                chat_invocations=(
+                    {
+                        "provider": "cursor-agent-cli",
+                        "model": "composer-2.5",
+                        "outcome": "PREDISPATCH_REFUSED",
+                        "transport_qualification": {
+                            "timeout_diagnostic": diagnostic
+                        },
+                    },
+                ),
+            )
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=SecretDiagnostic(),
+        max_graphiti=1,
+    )
+
+    connection = sqlite3.connect(unpublished)
+    receipt_json = str(
+        connection.execute(
+            "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts"
+        ).fetchone()[0]
+    )
+    ledger_json = "\n".join(
+        str(row[0])
+        for row in connection.execute("SELECT payload_json FROM ledger").fetchall()
+    )
+    connection.close()
+
+    assert report.graphiti == 1
+    assert secret not in receipt_json
+    assert secret not in ledger_json
+    receipt = json.loads(receipt_json)
+    assert "returned_raw_receipt" not in receipt
+    assert receipt["binding_failure"] == "RESULT_CONTRACT_REJECTED"
+    assert receipt["chat_invocations"] == []
+    assert receipt["chat_invocation_count"] == 1
+    assert receipt["returned_raw_receipt_digest"].startswith("sha256:")
+    attempt_event = next(
+        json.loads(row)
+        for row in ledger_json.splitlines()
+        if json.loads(row).get("binding_failure") == "RESULT_CONTRACT_REJECTED"
+    )
+    assert attempt_event["receipt_digest"] == receipt["receipt_digest"]
 
 
 def test_graphiti_cash_ceiling_holds_ingest_but_writer_continues(

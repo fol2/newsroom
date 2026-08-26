@@ -20,6 +20,7 @@ from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
     digest_canonical,
+    validate_sha256_digest,
 )
 from newsroom.authority.types import require_token
 from newsroom.control_plane.admission import (
@@ -126,7 +127,10 @@ from newsroom.effective_revision import (
     backfill_missing_first_seen,
     create_effective_revision_schema,
 )
-from newsroom.graphiti_adapter.cli_process import validated_timeout_diagnostics
+from newsroom.graphiti_adapter.cli_process import (
+    validated_timeout_diagnostics,
+    validated_transport_qualification,
+)
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_FALLBACK,
@@ -352,6 +356,87 @@ def _validated_producer_failure(value: object) -> str:
         raise ValueError("graphiti producer failure is invalid") from exc
 
 
+def _validate_chat_invocation_diagnostics(
+    invocations: tuple[dict[str, object], ...],
+) -> None:
+    """Reject unvalidated diagnostic leaves before durable propagation."""
+
+    for invocation in invocations:
+        if not isinstance(invocation, dict):
+            raise ValueError("graphiti chat invocation is invalid")
+        if "transport_diagnostic" in invocation:
+            validated_timeout_diagnostics([invocation["transport_diagnostic"]])
+        if "transport_qualification" in invocation:
+            validated_transport_qualification(invocation["transport_qualification"])
+
+
+def _canonical_digest_or_none(value: object) -> str | None:
+    try:
+        return digest_bytes(canonical_json_bytes(value))
+    except (TypeError, ValueError, UnicodeError):
+        return None
+
+
+def _validated_raw_output_digest_or_none(value: object) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    unsigned = dict(value)
+    supplied = unsigned.pop("raw_output_digest", None)
+    try:
+        calculated = digest_bytes(canonical_json_bytes(unsigned))
+    except (TypeError, ValueError, UnicodeError):
+        return None
+    return supplied if isinstance(supplied, str) and supplied == calculated else None
+
+
+def _rejected_result_metadata(
+    result: GraphitiCycleResult | None,
+) -> dict[str, object]:
+    """Describe rejected provider material without retaining its raw content."""
+
+    if result is None:
+        return {
+            "returned_raw_receipt_digest": None,
+            "returned_validated_raw_digest": None,
+            "chat_invocation_count": 0,
+            "chat_invocations_digest": None,
+            "embedding_usage_digest": None,
+            "chat_invocations": [],
+            "embedding_usage": None,
+            "token_usage": None,
+        }
+    invocations = list(result.chat_invocations)
+    return {
+        "returned_raw_receipt_digest": _canonical_digest_or_none(
+            result.raw_receipt
+        ),
+        "returned_validated_raw_digest": _validated_raw_output_digest_or_none(
+            result.raw_receipt
+        ),
+        "chat_invocation_count": len(invocations),
+        "chat_invocations_digest": _canonical_digest_or_none(invocations),
+        "embedding_usage_digest": _canonical_digest_or_none(
+            result.embedding_usage
+        ),
+        "chat_invocations": [],
+        "embedding_usage": None,
+        "token_usage": None,
+    }
+
+
+def _rejected_provider_attempt_number(
+    result: GraphitiCycleResult | None,
+) -> int | None:
+    if result is None:
+        return None
+    value = result.provider_attempt_number
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        else None
+    )
+
+
 def _bind_result(
     unit: CorpusIngestUnit,
     result: GraphitiCycleResult,
@@ -394,6 +479,7 @@ def _bind_result(
         validated_timeout_diagnostics(raw["timeout_diagnostics"])
     if "producer_failure" in raw:
         _validated_producer_failure(raw["producer_failure"])
+    _validate_chat_invocation_diagnostics(result.chat_invocations)
     if (
         raw.get("generation_id") != GRAPHITI_GENERATION_ID
         or raw.get("episode_uuid") != unit.ingest_id
@@ -758,6 +844,27 @@ def _retained_provider_raw_digest(
         supplied_digest = unsigned.pop("receipt_digest", None)
         calculated_digest = digest_bytes(canonical_json_bytes(unsigned))
     except (TypeError, ValueError, UnicodeError):
+        return None
+    sanitised_digest = retained.get("returned_validated_raw_digest")
+    if isinstance(sanitised_digest, str):
+        try:
+            validate_sha256_digest(
+                sanitised_digest,
+                field="returned validated raw digest",
+            )
+        except ValueError:
+            return None
+        if (
+            supplied_digest == receipt_digest == calculated_digest
+            and retained.get("ingest_id") == unit.ingest_id
+            and retained.get("attempt_number") == provider_attempt
+            and retained.get("provider_attempt_number") == provider_attempt
+            and retained.get("embedding_usage_digest")
+            == _canonical_digest_or_none(result.embedding_usage)
+            and retained.get("chat_invocations_digest")
+            == _canonical_digest_or_none(list(result.chat_invocations))
+        ):
+            return sanitised_digest
         return None
     envelope_matches = (
         supplied_digest == receipt_digest == calculated_digest
@@ -1213,21 +1320,7 @@ def _ingest(
                         "failure": type(exc).__name__,
                         "accounting": accounting,
                         "provider_dispatch_state": dispatch_state,
-                        "chat_invocations": (
-                            []
-                            if returned_result is None
-                            else list(returned_result.chat_invocations)
-                        ),
-                        "embedding_usage": (
-                            None
-                            if returned_result is None
-                            else returned_result.embedding_usage
-                        ),
-                        "token_usage": (
-                            None
-                            if returned_result is None
-                            else _result_token_usage(returned_result)
-                        ),
+                        **_rejected_result_metadata(returned_result),
                     },
                 )
                 unpublished.commit()
@@ -1263,31 +1356,11 @@ def _ingest(
                 "attempt_number": attempt_number,
                 "outcome": "FAILED",
                 "failure_code": "PRODUCER_INTERNAL_ERROR",
-                "binding_failure": str(exc),
-                "returned_raw_receipt": (
-                    None
-                    if returned_result is None
-                    else returned_result.raw_receipt
-                ),
-                "chat_invocations": (
-                    []
-                    if returned_result is None
-                    else list(returned_result.chat_invocations)
-                ),
-                "embedding_usage": (
-                    None
-                    if returned_result is None
-                    else returned_result.embedding_usage
-                ),
-                "token_usage": (
-                    None
-                    if returned_result is None
-                    else _result_token_usage(returned_result)
-                ),
+                "binding_failure": "RESULT_CONTRACT_REJECTED",
+                "binding_failure_type": type(exc).__name__,
+                **_rejected_result_metadata(returned_result),
                 "provider_attempt_number": (
-                    None
-                    if returned_result is None
-                    else returned_result.provider_attempt_number
+                    _rejected_provider_attempt_number(returned_result)
                 ),
                 "accounting": accounting,
                 "authority_record_ids": [

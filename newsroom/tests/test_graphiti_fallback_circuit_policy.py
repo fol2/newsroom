@@ -96,7 +96,7 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
     policy = load_checked_graphiti_fallback_circuit_policy()
     call_shape = load_checked_graphiti_call_shape_policy()
 
-    assert policy.version == "issue-790-v6"
+    assert policy.version == "issue-790-v7"
     assert policy.call_shape_policy_digest == call_shape.canonical_digest
     assert policy.eligible_outcomes == ("MALFORMED_OUTPUT",)
     assert policy.max_fallback_leaves_per_primary == 1

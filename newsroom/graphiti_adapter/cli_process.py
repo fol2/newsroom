@@ -14,7 +14,6 @@ from datetime import UTC, datetime, timedelta
 
 from newsroom.authority.canonical import validate_sha256_digest
 from newsroom.authority.types import UtcTimestamp
-from newsroom.control_plane.child_environment import unprivileged_child_environment
 
 CLI_TIMEOUT_DIAGNOSTIC_SCHEMA_VERSION = "newsroom.graphiti-timeout-diagnostic.v1"
 _TIMEOUT_DIAGNOSTIC_REQUIRED_FIELDS = frozenset(
@@ -41,6 +40,92 @@ _TIMEOUT_DIAGNOSTIC_OUTPUT_FIELDS = frozenset(
 )
 _TIMEOUT_DIAGNOSTIC_OPTIONAL_FIELDS = (
     frozenset({"process"}) | _TIMEOUT_DIAGNOSTIC_OUTPUT_FIELDS
+)
+_TIMEOUT_DIAGNOSTIC_VOCABULARY = {
+    "boundary": frozenset(
+        {
+            "CALLER_CANCELLATION",
+            "CLEANUP_DEADLINE",
+            "CONTROLLER_DEADLINE",
+            "EXTRACTION_DEADLINE",
+            "UNOBSERVED_TIMEOUT_BOUNDARY",
+        }
+    ),
+    "phase": frozenset(
+        {
+            "CLI_TRANSPORT",
+            "CONNECTION_CLEANUP",
+            "CREDENTIAL_PROBE",
+            "EXTRACTION",
+            "FALLBACK_TRANSPORT",
+            "PREDISPATCH_HELP",
+            "PREDISPATCH_SETUP",
+            "PREDISPATCH_VERSION",
+            "PRIMARY_TRANSPORT",
+            "ROLLBACK_CLEANUP",
+        }
+    ),
+    "cause": frozenset(
+        {
+            "CALLER_CANCELLED",
+            "CLEANUP_DEADLINE_EXPIRED",
+            "CONFIGURED_TIMEOUT_EXPIRED",
+            "EXTRACTION_DEADLINE_EXPIRED",
+            "TIMEOUT_ORIGIN_UNOBSERVED",
+        }
+    ),
+    "last_progress": frozenset(
+        {
+            "CANCELLED",
+            "COMPLETE",
+            "CONNECTION_CLOSE_INCOMPLETE",
+            "CREDENTIAL_PROBE_STARTED",
+            "DISPATCH_FENCE_REFUSED",
+            "DISPATCH_STARTED",
+            "EXECUTABLE_NOT_FOUND",
+            "FAILED",
+            "MALFORMED_OUTPUT",
+            "NO_OUTPUT_OBSERVED",
+            "NO_PROVIDER_INVOCATION",
+            "OUTPUT_LIMIT_EXCEEDED",
+            "OUTPUT_OBSERVED",
+            "PREDISPATCH",
+            "PREDISPATCH_REFUSED",
+            "ROLLBACK_INCOMPLETE",
+            "TIMEOUT",
+            "UNOBSERVED",
+        }
+    ),
+    "termination": frozenset(
+        {
+            "NO_PROVIDER_TASK",
+            "PROCESS_ALREADY_EXITED",
+            "PROCESS_EXIT_RACE",
+            "PROCESS_KILLED",
+            "TASK_CANCELLED",
+            "UNOBSERVED",
+        }
+    ),
+    "process": frozenset({"CLI_CHILD", "CURSOR_CREDENTIAL_HELPER"}),
+}
+CLI_QUALIFICATION_SCHEMA_VERSION = "newsroom.graphiti-cli-qualification.v1"
+_CLI_QUALIFICATION_DIGEST_FIELDS = frozenset(
+    {
+        "authentication_bridge_digest",
+        "authentication_probe_digest",
+        "command_surface_digest",
+        "command_template_digest",
+        "control_semantics_digest",
+        "credential_state_digest",
+        "help_digest",
+        "launcher_digest",
+        "package_digest",
+        "version_digest",
+    }
+)
+_CLI_QUALIFICATION_FIELDS = (
+    frozenset({"schema_version", "transport", "stdout_limit_bytes"})
+    | _CLI_QUALIFICATION_DIGEST_FIELDS
 )
 
 
@@ -95,6 +180,16 @@ def _require_execution_bounds(*, timeout: float, max_output_bytes: int) -> None:
         raise ValueError("CLI max_output_bytes must be positive")
 
 
+def _unprivileged_child_environment() -> dict[str, str]:
+    """Resolve the control-plane helper lazily to keep imports acyclic."""
+
+    from newsroom.control_plane.child_environment import (
+        unprivileged_child_environment,
+    )
+
+    return unprivileged_child_environment()
+
+
 def stop_process(process: subprocess.Popen[bytes]) -> str:
     """Stop one child and report the observed termination race truthfully."""
 
@@ -114,8 +209,16 @@ def stop_process(process: subprocess.Popen[bytes]) -> str:
 async def stop_process_async(process: asyncio.subprocess.Process) -> str:
     """Async equivalent of :func:`stop_process`."""
 
+    async def drain_and_wait() -> None:
+        communicate = getattr(process, "communicate", None)
+        if callable(communicate):
+            await communicate()
+        else:
+            # Minimal test doubles and non-pipe process adapters expose wait only.
+            await process.wait()
+
     if process.returncode is not None:
-        await process.wait()
+        await drain_and_wait()
         return "PROCESS_ALREADY_EXITED"
     try:
         process.kill()
@@ -123,7 +226,9 @@ async def stop_process_async(process: asyncio.subprocess.Process) -> str:
         termination = "PROCESS_EXIT_RACE"
     else:
         termination = "PROCESS_KILLED"
-    await process.wait()
+    # asyncio subprocesses can withhold wait() completion while unread pipe
+    # buffers remain.  communicate() drains both pipes before reaping.
+    await drain_and_wait()
     return termination
 
 
@@ -173,46 +278,63 @@ def timeout_diagnostic(
                 "stderr_digest": _sha256_bytes(stderr),
             }
         )
-    return evidence
+    return _validated_timeout_diagnostic(evidence)
 
 
-def validated_timeout_diagnostics(value: object) -> list[dict[str, object]]:
-    """Validate secret-free timeout evidence before durable propagation."""
-
-    if not isinstance(value, list) or not value:
-        raise ValueError("Graphiti timeout diagnostics must be a non-empty list")
-    retained: list[dict[str, object]] = []
+def _validated_timeout_diagnostic(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ValueError("Graphiti timeout diagnostic must be an object")
+    item = dict(value)
+    fields = frozenset(item)
     allowed_fields = (
         _TIMEOUT_DIAGNOSTIC_REQUIRED_FIELDS | _TIMEOUT_DIAGNOSTIC_OPTIONAL_FIELDS
     )
-    for raw_item in value:
-        if not isinstance(raw_item, dict):
-            raise ValueError("Graphiti timeout diagnostic must be an object")
-        item = dict(raw_item)
-        fields = frozenset(item)
-        if not _TIMEOUT_DIAGNOSTIC_REQUIRED_FIELDS.issubset(
-            fields
-        ) or not fields.issubset(allowed_fields):
-            raise ValueError("Graphiti timeout diagnostic fields are invalid")
-        if item["schema_version"] != CLI_TIMEOUT_DIAGNOSTIC_SCHEMA_VERSION:
-            raise ValueError("Graphiti timeout diagnostic schema is invalid")
-        for field in (
-            "boundary",
-            "phase",
-            "cause",
-            "last_progress",
-            "termination",
+    if not _TIMEOUT_DIAGNOSTIC_REQUIRED_FIELDS.issubset(fields) or not fields.issubset(
+        allowed_fields
+    ):
+        raise ValueError("Graphiti timeout diagnostic fields are invalid")
+    if item["schema_version"] != CLI_TIMEOUT_DIAGNOSTIC_SCHEMA_VERSION:
+        raise ValueError("Graphiti timeout diagnostic schema is invalid")
+    for field in (
+        "boundary",
+        "phase",
+        "cause",
+        "last_progress",
+        "termination",
+    ):
+        if item[field] not in _TIMEOUT_DIAGNOSTIC_VOCABULARY[field]:
+            raise ValueError(f"Graphiti timeout diagnostic {field} is invalid")
+    if item["provider_cause"] != "UNOBSERVED":
+        raise ValueError("Graphiti timeout provider cause must remain unobserved")
+    for field in ("configured_timeout_ms", "elapsed_ms"):
+        field_value = item[field]
+        if (
+            isinstance(field_value, bool)
+            or not isinstance(field_value, int)
+            or field_value < 0
         ):
-            field_value = item[field]
-            if (
-                not isinstance(field_value, str)
-                or not field_value
-                or len(field_value) > 128
-            ):
-                raise ValueError(f"Graphiti timeout diagnostic {field} is invalid")
-        if item["provider_cause"] != "UNOBSERVED":
-            raise ValueError("Graphiti timeout provider cause must remain unobserved")
-        for field in ("configured_timeout_ms", "elapsed_ms"):
+            raise ValueError(f"Graphiti timeout diagnostic {field} is invalid")
+    deadline_at = item["deadline_at"]
+    if deadline_at is not None:
+        try:
+            parsed_deadline = UtcTimestamp.parse(deadline_at)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Graphiti timeout diagnostic deadline is invalid") from exc
+        if parsed_deadline.to_text() != deadline_at:
+            raise ValueError(
+                "Graphiti timeout diagnostic deadline is not canonical UTC"
+            )
+    process = item.get("process")
+    if process is not None and process not in _TIMEOUT_DIAGNOSTIC_VOCABULARY["process"]:
+        raise ValueError("Graphiti timeout diagnostic process is invalid")
+    present_output_fields = _TIMEOUT_DIAGNOSTIC_OUTPUT_FIELDS.intersection(fields)
+    if (
+        present_output_fields
+        and present_output_fields != _TIMEOUT_DIAGNOSTIC_OUTPUT_FIELDS
+    ):
+        raise ValueError("Graphiti timeout output evidence is incomplete")
+    if present_output_fields:
+        for field in ("stdout_bytes", "stderr_bytes"):
             field_value = item[field]
             if (
                 isinstance(field_value, bool)
@@ -220,49 +342,85 @@ def validated_timeout_diagnostics(value: object) -> list[dict[str, object]]:
                 or field_value < 0
             ):
                 raise ValueError(f"Graphiti timeout diagnostic {field} is invalid")
-        deadline_at = item["deadline_at"]
-        if deadline_at is not None:
+        for field in ("stdout_digest", "stderr_digest"):
+            digest = item[field]
+            if not isinstance(digest, str):
+                raise ValueError(f"Graphiti timeout diagnostic {field} is invalid")
             try:
-                parsed_deadline = UtcTimestamp.parse(deadline_at)
-            except (TypeError, ValueError) as exc:
+                validate_sha256_digest(digest, field=field)
+            except ValueError as exc:
                 raise ValueError(
-                    "Graphiti timeout diagnostic deadline is invalid"
+                    f"Graphiti timeout diagnostic {field} is invalid"
                 ) from exc
-            if parsed_deadline.to_text() != deadline_at:
-                raise ValueError(
-                    "Graphiti timeout diagnostic deadline is not canonical UTC"
-                )
-        process = item.get("process")
-        if process is not None and (
-            not isinstance(process, str) or not process or len(process) > 255
-        ):
-            raise ValueError("Graphiti timeout diagnostic process is invalid")
-        present_output_fields = _TIMEOUT_DIAGNOSTIC_OUTPUT_FIELDS.intersection(fields)
-        if (
-            present_output_fields
-            and present_output_fields != _TIMEOUT_DIAGNOSTIC_OUTPUT_FIELDS
-        ):
-            raise ValueError("Graphiti timeout output evidence is incomplete")
-        if present_output_fields:
-            for field in ("stdout_bytes", "stderr_bytes"):
-                field_value = item[field]
-                if (
-                    isinstance(field_value, bool)
-                    or not isinstance(field_value, int)
-                    or field_value < 0
-                ):
-                    raise ValueError(f"Graphiti timeout diagnostic {field} is invalid")
-            for field in ("stdout_digest", "stderr_digest"):
-                digest = item[field]
-                if not isinstance(digest, str):
-                    raise ValueError(f"Graphiti timeout diagnostic {field} is invalid")
-                try:
-                    validate_sha256_digest(digest, field=field)
-                except ValueError as exc:
-                    raise ValueError(
-                        f"Graphiti timeout diagnostic {field} is invalid"
-                    ) from exc
-        retained.append(item)
+    return item
+
+
+def validated_timeout_diagnostics(value: object) -> list[dict[str, object]]:
+    """Validate secret-free timeout evidence before durable propagation."""
+
+    if not isinstance(value, list) or not value:
+        raise ValueError("Graphiti timeout diagnostics must be a non-empty list")
+    return [_validated_timeout_diagnostic(item) for item in value]
+
+
+def retained_cli_qualification(value: object) -> dict[str, object]:
+    """Reduce a successful qualification to fixed tokens and digests."""
+
+    if not isinstance(value, Mapping):
+        raise ValueError("Graphiti CLI qualification must be an object")
+    retained: dict[str, object] = {
+        "schema_version": CLI_QUALIFICATION_SCHEMA_VERSION,
+        "transport": "CURSOR_AGENT_CLI",
+        "stdout_limit_bytes": value.get("stdout_limit_bytes"),
+    }
+    retained.update(
+        {field: value.get(field) for field in _CLI_QUALIFICATION_DIGEST_FIELDS}
+    )
+    return validated_transport_qualification(retained)
+
+
+def validated_transport_qualification(value: object) -> dict[str, object]:
+    """Validate the only qualification forms permitted in durable receipts."""
+
+    if not isinstance(value, dict):
+        raise ValueError("Graphiti transport qualification must be an object")
+    retained = dict(value)
+    if frozenset(retained) == frozenset({"timeout_diagnostic"}):
+        return {
+            "timeout_diagnostic": validated_timeout_diagnostics(
+                [retained["timeout_diagnostic"]]
+            )[0]
+        }
+    if frozenset(retained) != _CLI_QUALIFICATION_FIELDS:
+        raise ValueError("Graphiti transport qualification fields are invalid")
+    if (
+        retained["schema_version"] != CLI_QUALIFICATION_SCHEMA_VERSION
+        or retained["transport"] != "CURSOR_AGENT_CLI"
+    ):
+        raise ValueError("Graphiti transport qualification identity is invalid")
+    stdout_limit = retained["stdout_limit_bytes"]
+    if (
+        isinstance(stdout_limit, bool)
+        or not isinstance(stdout_limit, int)
+        or stdout_limit <= 0
+    ):
+        raise ValueError("Graphiti transport qualification output limit is invalid")
+    for field in _CLI_QUALIFICATION_DIGEST_FIELDS:
+        digest = retained[field]
+        if digest == "UNOBSERVED" and field in {
+            "authentication_bridge_digest",
+            "authentication_probe_digest",
+            "credential_state_digest",
+        }:
+            continue
+        if not isinstance(digest, str):
+            raise ValueError(f"Graphiti transport qualification {field} is invalid")
+        try:
+            validate_sha256_digest(digest, field=field)
+        except ValueError as exc:
+            raise ValueError(
+                f"Graphiti transport qualification {field} is invalid"
+            ) from exc
     return retained
 
 
@@ -290,7 +448,7 @@ def _transport_timeout(
                 "OUTPUT_OBSERVED" if stdout or stderr else "NO_OUTPUT_OBSERVED"
             ),
             termination=termination,
-            process=name,
+            process="CLI_CHILD",
             stdout=stdout,
             stderr=stderr,
         ),
@@ -318,7 +476,7 @@ def run_bounded_process(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=cwd,
-        env=dict(environment or unprivileged_child_environment()),
+        env=dict(environment or _unprivileged_child_environment()),
     )
     assert process.stdout is not None
     assert process.stderr is not None
@@ -431,7 +589,7 @@ async def run_bounded_process_async(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
-        env=dict(environment or unprivileged_child_environment()),
+        env=dict(environment or _unprivileged_child_environment()),
     )
     assert process.stdout is not None
     assert process.stderr is not None
@@ -441,13 +599,14 @@ async def run_bounded_process_async(
     async def collect(stream: asyncio.StreamReader, *, destination: bytearray) -> None:
         nonlocal retained
         while True:
-            read_size = min(65_536, max_output_bytes - retained + 1)
-            chunk = await stream.read(max(read_size, 1))
+            chunk = await stream.read(65_536)
             if not chunk:
                 return
-            destination.extend(chunk)
-            retained += len(chunk)
-            if retained > max_output_bytes:
+            retainable = max(0, max_output_bytes + 1 - retained)
+            retained_chunk = chunk[:retainable]
+            destination.extend(retained_chunk)
+            retained += len(retained_chunk)
+            if len(retained_chunk) != len(chunk) or retained > max_output_bytes:
                 raise CliOutputBoundExceeded(
                     f"{name} Graphiti LLM exceeded output byte limit"
                 )
@@ -460,6 +619,14 @@ async def run_bounded_process_async(
         asyncio.create_task(collect(process.stdout, destination=outputs["stdout"])),
         asyncio.create_task(collect(process.stderr, destination=outputs["stderr"])),
     )
+
+    async def stop_collectors_and_process() -> str:
+        for collector in collectors:
+            if not collector.done():
+                collector.cancel()
+        await asyncio.gather(*collectors, return_exceptions=True)
+        return await stop_process_async(process)
+
     try:
         await asyncio.wait_for(
             asyncio.gather(*collectors),
@@ -470,7 +637,7 @@ async def run_bounded_process_async(
             raise TimeoutError
         returncode = await asyncio.wait_for(process.wait(), timeout=remaining)
     except TimeoutError:
-        termination = await stop_process_async(process)
+        termination = await stop_collectors_and_process()
         raise _transport_timeout(
             name=name,
             phase=phase,
@@ -482,10 +649,10 @@ async def run_bounded_process_async(
             termination=termination,
         ) from None
     except asyncio.CancelledError:
-        await stop_process_async(process)
+        await stop_collectors_and_process()
         raise
     except BaseException:
-        await stop_process_async(process)
+        await stop_collectors_and_process()
         raise
     finally:
         for collector in collectors:
@@ -500,6 +667,7 @@ async def run_bounded_process_async(
 
 
 __all__ = [
+    "CLI_QUALIFICATION_SCHEMA_VERSION",
     "CLI_TIMEOUT_DIAGNOSTIC_SCHEMA_VERSION",
     "CliOutputBoundExceeded",
     "CliOutputDecodeError",
@@ -507,9 +675,11 @@ __all__ = [
     "CliTransportTimeout",
     "run_bounded_process",
     "run_bounded_process_async",
+    "retained_cli_qualification",
     "stop_process",
     "stop_process_async",
     "timeout_deadline_after",
     "timeout_diagnostic",
     "validated_timeout_diagnostics",
+    "validated_transport_qualification",
 ]
