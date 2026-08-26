@@ -29,6 +29,7 @@ from newsroom.control_plane.graphiti_events import (
     ensure_graphiti_event_schema,
     reconcile_graphiti_events,
 )
+from newsroom.control_plane.issue_790_canary import Issue790CanaryIntegrityError
 from newsroom.control_plane.model_usage import ModelUsageService
 from newsroom.control_plane.store import (
     EFFECTIVE_REVISION_LANDED,
@@ -244,6 +245,56 @@ def test_fresh_event_preflight_hydrates_zero_ref_manifest_without_writes(
         }
     )
     assert after == before
+
+
+def test_invalid_canary_authority_does_not_install_coordinator_schema(
+    tmp_path: Path,
+) -> None:
+    unpublished = tmp_path / "unpublished.sqlite3"
+    clock = MutableClock(datetime(2026, 8, 24, 0, 1, tzinfo=UTC))
+    _enqueue_fixture(unpublished, (_unit(1),), available_at=clock.value)
+    connection = sqlite3.connect(unpublished)
+    event_id = str(
+        connection.execute(
+            "SELECT event_id FROM unpublished_graphiti_revision_events"
+        ).fetchone()[0]
+    )
+    tables_before = tuple(
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        )
+    )
+    connection.close()
+
+    class UnreachedGraphiti:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            raise AssertionError(f"provider boundary reached for {unit.ingest_id}")
+
+    with pytest.raises(
+        Issue790CanaryIntegrityError,
+        match="coordinator schema is absent",
+    ):
+        consume_next_graphiti_event(
+            proving_store=str(tmp_path / "unreached-proving.sqlite3"),
+            unpublished_store=str(unpublished),
+            graphiti=UnreachedGraphiti(),
+            owner_id="bogus-canary-owner",
+            clock=clock,
+            event_id=event_id,
+            require_fresh=True,
+            canary_consumption_digest=digest_canonical({"bogus": True}),
+        )
+
+    retained = sqlite3.connect(unpublished)
+    tables_after = tuple(
+        str(row[0])
+        for row in retained.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        )
+    )
+    retained.close()
+    assert tables_after == tables_before
 
 
 def test_committed_events_are_immediately_claimable_and_recover_after_restart(
