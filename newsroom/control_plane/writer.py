@@ -170,17 +170,19 @@ def cont_writer_implementation_identity(
     return revision, status == "" and index_flags_clean
 
 
-def _required_title_and_body(package: EvidencePackage) -> tuple[str, str]:
-    headline = next(
+def _required_title_and_body(package: EvidencePackage) -> tuple[str, str] | None:
+    headlines = tuple(
         claim for claim in package.governed_claims if claim.claim_role == "HEADLINE"
     )
+    if len(headlines) != 1:
+        return None
     body_claims = tuple(
         claim
         for claim in package.governed_claims
         if claim.claim_role == "SUBSTANTIVE"
     )
     return (
-        f"【未出版】{headline.rendered_assertion_zh_hant_hk}",
+        f"【未出版】{headlines[0].rendered_assertion_zh_hant_hk}",
         "本報根據已核實證據報道："
         + "；".join(claim.rendered_assertion_zh_hant_hk for claim in body_claims),
     )
@@ -391,7 +393,10 @@ class WriterEvidenceLink:
 def required_surface_copy(
     package: EvidencePackage,
 ) -> tuple[str, str, tuple[WriterEvidenceLink, ...]]:
-    title, body = _required_title_and_body(package)
+    required = _required_title_and_body(package)
+    if required is None:
+        raise ValueError("Evidence Package requires exactly one HEADLINE claim")
+    title, body = required
     headline = next(
         claim for claim in package.governed_claims if claim.claim_role == "HEADLINE"
     )
@@ -909,28 +914,40 @@ def _writer_evidence_value(package: EvidencePackage) -> dict[str, object]:
 def _prompt(candidate: StoryCandidateRecord, package: EvidencePackage) -> str:
     del candidate
     evidence = _writer_evidence_value(package)
-    title, body, links = required_surface_copy(package)
-    links_json = json.dumps(
-        [
-            {
-                "governed_claim_id": link.governed_claim_id,
-                "rendered_assertion": link.rendered_assertion,
-            }
-            for link in links
-        ],
-        ensure_ascii=False,
+    parts = [_PROMPT]
+    required = _required_title_and_body(package)
+    if required is not None:
+        title, body, links = required_surface_copy(package)
+        links_json = json.dumps(
+            [
+                {
+                    "governed_claim_id": link.governed_claim_id,
+                    "rendered_assertion": link.rendered_assertion,
+                }
+                for link in links
+            ],
+            ensure_ascii=False,
+        )
+        parts.extend(
+            (
+                f"必須輸出嘅 title：{title}",
+                f"必須輸出嘅 body：{body}",
+                f"必須輸出嘅 evidence_links：{links_json}",
+            )
+        )
+    parts.extend(
+        (
+            "approved_governed_claims："
+            + json.dumps(evidence["approved_governed_claims"], ensure_ascii=False),
+            "permitted_admitted_structured_context："
+            + json.dumps(
+                evidence["permitted_admitted_structured_context"],
+                ensure_ascii=False,
+            ),
+            "來源（禁止入稿）：\n" + "\n---\n".join(package.passages),
+        )
     )
-    return (
-        f"{_PROMPT}\n"
-        f"必須輸出嘅 title：{title}\n"
-        f"必須輸出嘅 body：{body}\n"
-        f"必須輸出嘅 evidence_links：{links_json}\n"
-        "approved_governed_claims："
-        f"{json.dumps(evidence['approved_governed_claims'], ensure_ascii=False)}"
-        "\npermitted_admitted_structured_context："
-        f"{json.dumps(evidence['permitted_admitted_structured_context'], ensure_ascii=False)}"
-        "\n來源（禁止入稿）：\n" + "\n---\n".join(package.passages)
-    )
+    return "\n".join(parts)
 
 
 def _extract_json(raw: str) -> str:
