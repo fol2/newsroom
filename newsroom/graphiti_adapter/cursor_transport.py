@@ -461,7 +461,7 @@ async def _run_bounded_process_async(
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0:
             raise TimeoutError
-        await asyncio.wait_for(process.wait(), timeout=remaining)
+        returncode = await asyncio.wait_for(process.wait(), timeout=remaining)
     except TimeoutError:
         await _stop_process_async(process)
         raise TimeoutError(f"{name} Graphiti LLM timed out") from None
@@ -472,7 +472,7 @@ async def _run_bounded_process_async(
         await _stop_process_async(process)
         raise
     return _ProcessOutput(
-        returncode=int(process.returncode),
+        returncode=returncode,
         stdout=_decode_output(bytes(outputs["stdout"]), name=name),
         stderr=_decode_output(bytes(outputs["stderr"]), name=name),
     )
