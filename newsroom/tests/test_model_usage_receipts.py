@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+import newsroom.control_plane.issue_790_disposition as issue_790_operation
+import newsroom.control_plane.model_usage as model_usage_module
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane.graphiti import (
     GRAPHITI_CHAT_PRIMARY_ROUTE,
@@ -18,13 +20,20 @@ from newsroom.control_plane.graphiti import (
     GRAPHITI_EMBEDDING_ROUTE,
     GraphitiModelUsageObserver,
 )
+from newsroom.control_plane.graphiti_events import (
+    GraphitiEventQueue,
+    GraphitiProcessResult,
+)
 from newsroom.control_plane.issue_790_disposition import (
     ISSUE_790_PLAN_SCHEMA,
     Issue790DispositionError,
     apply_issue_790_plan,
+    assert_issue_790_paths_disjoint,
     dry_run_issue_790_plan,
     load_issue_790_plan,
+    run_issue_790_canary,
     validate_issue_790_plan,
+    write_issue_790_receipt,
 )
 from newsroom.control_plane.model_usage import (
     InvocationAllocation,
@@ -43,8 +52,36 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     CURSOR_AGENT_MODEL_ID,
     OPENROUTER_EMBEDDING_SLUG,
 )
+from newsroom.control_plane.store import connect as connect_unpublished_store
 
 T0 = datetime(2026, 8, 24, 10, 0, tzinfo=UTC)
+FIXTURE_790_PLAN_DIGEST = digest_canonical(
+    {"issue": 790, "authority": "fixture-only"}
+)
+RETRY_FORBIDDEN_EVENTS = [
+    {
+        "attempt_count": 1,
+        "available_at": "2026-08-26T12:25:29.807056Z",
+        "event_id": (
+            "sha256:bacb9104c81dd86ca3f62a39f6c386cd4d84ab470e9675e31acf8e2feb50443e"
+        ),
+        "last_failure_code": "PRODUCER_INTERNAL_ERROR",
+        "ledger_seq": 1932,
+        "provider_dispatched": True,
+        "state": "RETRY_HELD",
+    },
+    {
+        "attempt_count": 1,
+        "available_at": "2026-08-26T13:52:15.763233Z",
+        "event_id": (
+            "sha256:de7bb58fde4829f4778936e7c5ebd1dd583a63f8658fb6af2fcb4b6fc873b0d5"
+        ),
+        "last_failure_code": "PRODUCER_INTERNAL_ERROR",
+        "ledger_seq": 1972,
+        "provider_dispatched": False,
+        "state": "RETRY_HELD",
+    },
+]
 
 
 def _digest(value: object) -> str:
@@ -93,7 +130,7 @@ def test_v1_store_replays_v2_context_manifest_migration_idempotently(
         ("model-usage-v3", "newsroom.model-usage.v3"),
         (
             "model-usage-v4-conservative-disposition",
-            "newsroom.model-usage.conservative-disposition.v1",
+            "newsroom.model-usage.v4",
         ),
     ]
     assert "model_invocation_context_manifests" in tables
@@ -101,6 +138,8 @@ def test_v1_store_replays_v2_context_manifest_migration_idempotently(
     assert "graphiti_internal_requests" in tables
     assert "graphiti_internal_request_refusals" in tables
     assert "model_usage_conservative_dispositions" in tables
+    assert "model_usage_bounded_canary_consumptions" in tables
+    assert "model_usage_bounded_canary_outcomes" in tables
 
 
 def _policy(
@@ -308,11 +347,13 @@ def _conservative_disposition_authority(
     approval_reference: str = (
         "https://github.com/fol2/newsroom/issues/790#issuecomment-fixture"
     ),
+    approved_plan_digest: str = FIXTURE_790_PLAN_DIGEST,
 ) -> tuple[dict[str, object], str]:
     record = {
         "schema_version": (
-            "newsroom.model-usage.conservative-disposition-authority.v1"
+            "newsroom.model-usage.conservative-disposition-authority.v2"
         ),
+        "approved_plan_digest": approved_plan_digest,
         "approved_by": approved_by,
         "approval_reference": approval_reference,
         "approved_at": approved_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
@@ -358,8 +399,10 @@ def _issue_790_plan(
             "kind": "AUTHORISED_OPERATOR_RESET",
             "evidence": "CONSERVATIVE_DISPOSITION_DIGEST",
         },
-        "retry_forbidden_ledger_ids": [1932, 1972],
+        "retry_forbidden_events": RETRY_FORBIDDEN_EVENTS,
         "canary": {
+            "authority_consumption": "APPEND_ONLY_SINGLE_USE_BEFORE_PROVIDER_IO",
+            "event_binding": "EXPLICIT_QUEUED_ATTEMPT_ZERO_EVENT",
             "fresh_provider_backed_attempt_count": 1,
             "persistent_worker_state_before_canary": "UNLOADED",
             "requires_exact_main_deployment": True,
@@ -372,11 +415,216 @@ def _issue_790_plan(
             "NO_PRODUCTION_OPERATIONAL_ADMISSION",
             "NO_WIDER_ACTIVATION",
             "NO_PROVIDER_SUBSTITUTION",
+            "NO_MODEL_SUBSTITUTION",
+            "NO_TOKEN_LIMIT_REMOVAL",
             "NO_UNRELATED_SPEND_DISPOSITION",
         ],
     }
     plan["canonical_digest"] = _digest(plan)
     return plan
+
+
+def _bind_issue_790_fixture_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    allocation: InvocationAllocation,
+    terminal: InvocationTerminal,
+    plan_digest: str = FIXTURE_790_PLAN_DIGEST,
+) -> None:
+    monkeypatch.setattr(
+        model_usage_module,
+        "ISSUE_790_APPROVED_PLAN_DIGEST",
+        plan_digest,
+    )
+    monkeypatch.setattr(
+        model_usage_module,
+        "ISSUE_790_APPROVED_INVOCATION_ID",
+        allocation.invocation_id,
+    )
+    monkeypatch.setattr(
+        model_usage_module,
+        "ISSUE_790_APPROVED_TERMINAL_DIGEST",
+        terminal.terminal_digest,
+    )
+    monkeypatch.setattr(
+        model_usage_module,
+        "ISSUE_790_APPROVED_ALLOCATION_DIGEST",
+        allocation.canonical_digest,
+    )
+    monkeypatch.setattr(model_usage_module, "ISSUE_790_APPROVED_BY", "github:fol2")
+    monkeypatch.setattr(
+        model_usage_module,
+        "ISSUE_790_APPROVAL_REFERENCE",
+        "https://github.com/fol2/newsroom/issues/790#issuecomment-fixture",
+    )
+    monkeypatch.setattr(
+        model_usage_module,
+        "ISSUE_790_APPROVED_AT",
+        "2026-08-24T10:00:05.000000Z",
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "ISSUE_790_APPROVED_PLAN_DIGEST",
+        plan_digest,
+    )
+
+
+def _seed_issue_790_retry_events(path: Path) -> None:
+    connection = connect_unpublished_store(str(path))
+    try:
+        for item in RETRY_FORBIDDEN_EVENTS:
+            manifest = {
+                "event_type": "EFFECTIVE_SOURCE_REVISION_LANDED",
+                "ledger_seq": item["ledger_seq"],
+                "ledger_digest": item["event_id"],
+                "landed_ingest_ids": [],
+                "landed_payload_digest": _digest(
+                    {"ledger_seq": item["ledger_seq"]}
+                ),
+                "unit_refs": [],
+            }
+            connection.execute(
+                "INSERT INTO unpublished_graphiti_revision_events("
+                "event_id,ledger_seq,ledger_digest,source_id,item_key,"
+                "revision_digest,published_at,updated_at,landed_at,manifest_json,"
+                "manifest_digest,unit_count,projector_version,"
+                "projection_generation,state,attempt_count,available_at,"
+                "last_failure_code,provider_dispatched) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    item["event_id"],
+                    item["ledger_seq"],
+                    item["event_id"],
+                    f"source-{item['ledger_seq']}",
+                    f"item-{item['ledger_seq']}",
+                    _digest({"revision": item["ledger_seq"]}),
+                    "",
+                    "",
+                    T0.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+                    _digest(manifest),
+                    0,
+                    "test-projector",
+                    "test-projection",
+                    item["state"],
+                    item["attempt_count"],
+                    item["available_at"],
+                    item["last_failure_code"],
+                    int(bool(item["provider_dispatched"])),
+                ),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _seed_fresh_issue_790_event(
+    path: Path,
+    *,
+    ledger_seq: int = 2001,
+) -> tuple[str, str]:
+    event_id = _digest({"fresh-event": ledger_seq})
+    ingest_id = f"fresh-ingest-{ledger_seq}"
+    manifest = {
+        "event_type": "EFFECTIVE_SOURCE_REVISION_LANDED",
+        "ledger_seq": ledger_seq,
+        "ledger_digest": event_id,
+        "landed_ingest_ids": [ingest_id],
+        "landed_payload_digest": _digest({"landed": ledger_seq}),
+        "unit_refs": [{"ingest_id": ingest_id}],
+    }
+    connection = connect_unpublished_store(str(path))
+    try:
+        connection.execute(
+            "INSERT INTO unpublished_graphiti_revision_events("
+            "event_id,ledger_seq,ledger_digest,source_id,item_key,revision_digest,"
+            "published_at,updated_at,landed_at,manifest_json,manifest_digest,"
+            "unit_count,projector_version,projection_generation,state,"
+            "attempt_count,available_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                event_id,
+                ledger_seq,
+                event_id,
+                f"source-{ledger_seq}",
+                f"item-{ledger_seq}",
+                _digest({"revision": ledger_seq}),
+                "",
+                "",
+                T0.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+                _digest(manifest),
+                1,
+                "test-projector",
+                "test-projection",
+                "QUEUED",
+                0,
+                T0.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return event_id, ingest_id
+
+
+def _issue_790_operational_evidence(
+    *,
+    store: Path,
+    observed_at: datetime,
+) -> dict[str, object]:
+    record: dict[str, object] = {
+        "schema_version": "newsroom.issue-790.operational-preconditions.v1",
+        "repository_root": "/fixture/repository",
+        "branch": "main",
+        "revision": "a" * 40,
+        "tree": "b" * 40,
+        "local_main_revision": "a" * 40,
+        "origin_main_revision": "a" * 40,
+        "worktree_clean": True,
+        "ci_test": {
+            "name": "test",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "a" * 40,
+            "url": "https://github.com/fol2/newsroom/actions/runs/1",
+        },
+        "worker": {
+            "label": "com.jamesto.newsroom-graphiti-worker",
+            "launchctl_loaded": False,
+            "process_ids": [],
+        },
+        "retry_forbidden_events": RETRY_FORBIDDEN_EVENTS,
+        "store": str(store.absolute()),
+        "store_quick_check": "ok",
+        "observed_at": observed_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    }
+    return {**record, "evidence_digest": _digest(record)}
+
+
+def _patch_issue_790_live_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    store: Path,
+    observed_at: datetime,
+) -> None:
+    evidence = _issue_790_operational_evidence(
+        store=store,
+        observed_at=observed_at,
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "collect_issue_790_operational_evidence",
+        lambda **_values: evidence,
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_worker_state",
+        lambda: {
+            "label": "com.jamesto.newsroom-graphiti-worker",
+            "launchctl_loaded": False,
+            "process_ids": [],
+        },
+    )
 
 
 def test_hold_or_reject_admission_creates_no_envelope_or_leaf(tmp_path: Path) -> None:
@@ -1209,10 +1457,16 @@ def test_later_provider_telemetry_appends_reconciliation_without_editing_history
 
 def test_authorised_conservative_disposition_preserves_unknown_terminal(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(tmp_path)
     policy, allocation, terminal = _open_unreported_graphiti_subscription_leaf(
         service
+    )
+    _bind_issue_790_fixture_contract(
+        monkeypatch,
+        allocation=allocation,
+        terminal=terminal,
     )
     approved_at = T0 + timedelta(seconds=5)
     authority, authority_digest = _conservative_disposition_authority(
@@ -1228,10 +1482,14 @@ def test_authorised_conservative_disposition_preserves_unknown_terminal(
         approved_by=str(authority["approved_by"]),
         approval_reference=str(authority["approval_reference"]),
         approved_at=approved_at,
+        approved_plan_digest=FIXTURE_790_PLAN_DIGEST,
         authority_digest=authority_digest,
         observed_at=T0 + timedelta(seconds=10),
     )
 
+    assert disposition["schema_version"] == (
+        "newsroom.model-usage.conservative-disposition.v2"
+    )
     assert disposition["usage_status"] == "ESTIMATED"
     assert disposition["components"] == UsageComponents(
         total_tokens=policy.max_total_tokens,
@@ -1256,6 +1514,7 @@ def test_authorised_conservative_disposition_preserves_unknown_terminal(
     assert current["disposition_usage_status"] == "ESTIMATED"
     assert current["total_tokens"] == policy.max_total_tokens
     assert current["exact_usage_remains_unknown"] is True
+    assert current["disposition_approved_plan_digest"] == FIXTURE_790_PLAN_DIGEST
     assert current["provider_telemetry_digest"] is None
     assert current["actual_provider_dispatch"] is True
 
@@ -1287,10 +1546,16 @@ def test_authorised_conservative_disposition_preserves_unknown_terminal(
 
 def test_conservative_disposition_replay_is_idempotent_and_conflicts_fail(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(tmp_path)
     _policy_value, allocation, terminal = (
         _open_unreported_graphiti_subscription_leaf(service)
+    )
+    _bind_issue_790_fixture_contract(
+        monkeypatch,
+        allocation=allocation,
+        terminal=terminal,
     )
     approved_at = T0 + timedelta(seconds=5)
     authority, authority_digest = _conservative_disposition_authority(
@@ -1305,6 +1570,7 @@ def test_conservative_disposition_replay_is_idempotent_and_conflicts_fail(
         "approved_by": str(authority["approved_by"]),
         "approval_reference": str(authority["approval_reference"]),
         "approved_at": approved_at,
+        "approved_plan_digest": FIXTURE_790_PLAN_DIGEST,
         "authority_digest": authority_digest,
     }
 
@@ -1331,19 +1597,26 @@ def test_conservative_disposition_replay_is_idempotent_and_conflicts_fail(
 @pytest.mark.parametrize(
     ("mutation", "message"),
     (
-        ("terminal", "terminal identity differs"),
-        ("allocation", "allocation identity differs"),
+        ("terminal", "approved terminal differs"),
+        ("allocation", "approved allocation differs"),
+        ("approval", "approval authority differs"),
         ("authority", "authority differs"),
     ),
 )
 def test_conservative_disposition_requires_exact_bound_evidence(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     mutation: str,
     message: str,
 ) -> None:
     service = _service(tmp_path)
     _policy_value, allocation, terminal = (
         _open_unreported_graphiti_subscription_leaf(service)
+    )
+    _bind_issue_790_fixture_contract(
+        monkeypatch,
+        allocation=allocation,
+        terminal=terminal,
     )
     approved_at = T0 + timedelta(seconds=5)
     authority, authority_digest = _conservative_disposition_authority(
@@ -1358,6 +1631,7 @@ def test_conservative_disposition_requires_exact_bound_evidence(
         "approved_by": str(authority["approved_by"]),
         "approval_reference": str(authority["approval_reference"]),
         "approved_at": approved_at,
+        "approved_plan_digest": FIXTURE_790_PLAN_DIGEST,
         "authority_digest": authority_digest,
         "observed_at": T0 + timedelta(seconds=10),
     }
@@ -1365,6 +1639,8 @@ def test_conservative_disposition_requires_exact_bound_evidence(
         values["expected_terminal_digest"] = _digest({"wrong": "terminal"})
     elif mutation == "allocation":
         values["expected_allocation_digest"] = _digest({"wrong": "allocation"})
+    elif mutation == "approval":
+        values["approved_by"] = "github:other"
     else:
         values["authority_digest"] = _digest({"wrong": "authority"})
 
@@ -1376,6 +1652,7 @@ def test_conservative_disposition_requires_exact_bound_evidence(
 
 def test_conservative_disposition_rejects_missing_committed_dispatch(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(tmp_path)
     _policy_value, allocation, terminal = (
@@ -1383,6 +1660,11 @@ def test_conservative_disposition_rejects_missing_committed_dispatch(
             service,
             observe_dispatch=False,
         )
+    )
+    _bind_issue_790_fixture_contract(
+        monkeypatch,
+        allocation=allocation,
+        terminal=terminal,
     )
     approved_at = T0 + timedelta(seconds=5)
     authority, authority_digest = _conservative_disposition_authority(
@@ -1402,6 +1684,7 @@ def test_conservative_disposition_rejects_missing_committed_dispatch(
             approved_by=str(authority["approved_by"]),
             approval_reference=str(authority["approval_reference"]),
             approved_at=approved_at,
+            approved_plan_digest=FIXTURE_790_PLAN_DIGEST,
             authority_digest=authority_digest,
             observed_at=T0 + timedelta(seconds=10),
         )
@@ -1409,6 +1692,7 @@ def test_conservative_disposition_rejects_missing_committed_dispatch(
 
 def test_conservative_disposition_does_not_clear_other_route_uncertainty(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(tmp_path)
     policy = _policy(
@@ -1460,6 +1744,11 @@ def test_conservative_disposition_does_not_clear_other_route_uncertainty(
         )
     first, _second = allocations
     first_terminal, _second_terminal = terminals
+    _bind_issue_790_fixture_contract(
+        monkeypatch,
+        allocation=first,
+        terminal=first_terminal,
+    )
     approved_at = T0 + timedelta(seconds=5)
     authority, authority_digest = _conservative_disposition_authority(
         first,
@@ -1473,6 +1762,7 @@ def test_conservative_disposition_does_not_clear_other_route_uncertainty(
         approved_by=str(authority["approved_by"]),
         approval_reference=str(authority["approval_reference"]),
         approved_at=approved_at,
+        approved_plan_digest=FIXTURE_790_PLAN_DIGEST,
         authority_digest=authority_digest,
         observed_at=T0 + timedelta(seconds=10),
     )
@@ -1493,10 +1783,16 @@ def test_conservative_disposition_does_not_clear_other_route_uncertainty(
 
 def test_late_provider_telemetry_supersedes_conservative_disposition(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(tmp_path)
     _policy_value, allocation, terminal = (
         _open_unreported_graphiti_subscription_leaf(service)
+    )
+    _bind_issue_790_fixture_contract(
+        monkeypatch,
+        allocation=allocation,
+        terminal=terminal,
     )
     approved_at = T0 + timedelta(seconds=5)
     authority, authority_digest = _conservative_disposition_authority(
@@ -1511,6 +1807,7 @@ def test_late_provider_telemetry_supersedes_conservative_disposition(
         approved_by=str(authority["approved_by"]),
         approval_reference=str(authority["approval_reference"]),
         approved_at=approved_at,
+        approved_plan_digest=FIXTURE_790_PLAN_DIGEST,
         authority_digest=authority_digest,
         observed_at=T0 + timedelta(seconds=10),
     )
@@ -1543,7 +1840,7 @@ def test_checked_issue_790_live_plan_retains_exact_approved_identity() -> None:
     )
 
     assert plan["canonical_digest"] == (
-        "sha256:e9d06bf838b4895021ddc92c4981068721ccc2b01562846046fbdb99b9816163"
+        "sha256:ce7ee7fd56c931b147158dad2a74047ada90b805e5a4c545e53db1f4d2ae7383"
     )
     assert plan["target"] == {
         "allocation_digest": (
@@ -1588,7 +1885,54 @@ def test_issue_790_plan_digest_and_bounds_fail_closed(tmp_path: Path) -> None:
         )
 
 
-def test_issue_790_dry_run_mutates_only_isolated_copy(tmp_path: Path) -> None:
+def test_issue_790_unapproved_structural_plan_is_rejected_before_backup(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    policy, allocation, terminal = _open_unreported_graphiti_subscription_leaf(
+        service
+    )
+    source = tmp_path / "unpublished.sqlite3"
+    scratch = tmp_path / "unapproved-dry-run.sqlite3"
+    plan = _issue_790_plan(policy, allocation, terminal)
+
+    assert validate_issue_790_plan(plan) == plan
+    with pytest.raises(
+        Issue790DispositionError,
+        match="approved plan identity differs",
+    ):
+        dry_run_issue_790_plan(
+            source_store=source,
+            scratch_store=scratch,
+            plan=plan,
+            observed_at=T0 + timedelta(seconds=10),
+        )
+
+    assert scratch.exists() is False
+
+
+def test_issue_790_evidence_paths_reject_aliases_and_existing_receipt(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "unpublished.sqlite3"
+    store.write_bytes(b"fixture")
+    hardlink = tmp_path / "store-hardlink.sqlite3"
+    hardlink.hardlink_to(store)
+
+    with pytest.raises(Issue790DispositionError, match="paths alias"):
+        assert_issue_790_paths_disjoint(store, hardlink)
+
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text("retained\n", encoding="utf-8")
+    with pytest.raises(Issue790DispositionError, match="already exists"):
+        write_issue_790_receipt(receipt, {"receipt_digest": _digest({"a": 1})})
+    assert receipt.read_text(encoding="utf-8") == "retained\n"
+
+
+def test_issue_790_dry_run_mutates_only_isolated_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = _service(tmp_path)
     policy, allocation, terminal = _open_unreported_graphiti_subscription_leaf(
         service
@@ -1601,11 +1945,18 @@ def test_issue_790_dry_run_mutates_only_isolated_copy(tmp_path: Path) -> None:
     )
     source = tmp_path / "unpublished.sqlite3"
     scratch = tmp_path / "dry-run.sqlite3"
+    plan = _issue_790_plan(policy, allocation, terminal)
+    _bind_issue_790_fixture_contract(
+        monkeypatch,
+        allocation=allocation,
+        terminal=terminal,
+        plan_digest=str(plan["canonical_digest"]),
+    )
 
     receipt = dry_run_issue_790_plan(
         source_store=source,
         scratch_store=scratch,
-        plan=_issue_790_plan(policy, allocation, terminal),
+        plan=plan,
         observed_at=T0 + timedelta(seconds=10),
     )
 
@@ -1629,7 +1980,10 @@ def test_issue_790_dry_run_mutates_only_isolated_copy(tmp_path: Path) -> None:
     assert service_row_count(scratch, "model_provider_telemetry") == 0
 
 
-def test_issue_790_apply_retains_pre_operation_backup(tmp_path: Path) -> None:
+def test_issue_790_apply_retains_pre_operation_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = _service(tmp_path)
     policy, allocation, terminal = _open_unreported_graphiti_subscription_leaf(
         service
@@ -1642,12 +1996,26 @@ def test_issue_790_apply_retains_pre_operation_backup(tmp_path: Path) -> None:
     )
     store = tmp_path / "unpublished.sqlite3"
     backup = tmp_path / "unpublished.pre-790.sqlite3"
+    plan = _issue_790_plan(policy, allocation, terminal)
+    _bind_issue_790_fixture_contract(
+        monkeypatch,
+        allocation=allocation,
+        terminal=terminal,
+        plan_digest=str(plan["canonical_digest"]),
+    )
+    _seed_issue_790_retry_events(store)
+    _patch_issue_790_live_evidence(
+        monkeypatch,
+        store=store,
+        observed_at=T0 + timedelta(seconds=10),
+    )
 
     receipt = apply_issue_790_plan(
         store=store,
         backup_path=backup,
-        plan=_issue_790_plan(policy, allocation, terminal),
+        plan=plan,
         observed_at=T0 + timedelta(seconds=10),
+        repository_root=tmp_path,
     )
 
     assert receipt["mode"] == "apply"
@@ -1673,12 +2041,314 @@ def test_issue_790_apply_retains_pre_operation_backup(tmp_path: Path) -> None:
     assert service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)["state"] == "CLOSED"
 
 
-def test_issue_790_route_mismatch_writes_no_disposition(tmp_path: Path) -> None:
+def test_issue_790_bounded_canary_is_single_use_and_failed_attempt_is_inert(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    policy, allocation, terminal = _open_unreported_graphiti_subscription_leaf(
+        service
+    )
+    _bind_issue_790_fixture_contract(
+        monkeypatch,
+        allocation=allocation,
+        terminal=terminal,
+    )
+    approved_at = T0 + timedelta(seconds=5)
+    authority, authority_digest = _conservative_disposition_authority(
+        allocation,
+        terminal,
+        approved_at=approved_at,
+    )
+    disposition = service.disposition_unreported_subscription_usage(
+        invocation_id=allocation.invocation_id,
+        expected_terminal_digest=terminal.terminal_digest,
+        expected_allocation_digest=allocation.canonical_digest,
+        approved_by=str(authority["approved_by"]),
+        approval_reference=str(authority["approval_reference"]),
+        approved_at=approved_at,
+        approved_plan_digest=FIXTURE_790_PLAN_DIGEST,
+        authority_digest=authority_digest,
+        observed_at=T0 + timedelta(seconds=10),
+    )
+    route = service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)
+    service.release_route_circuit(
+        route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+        release_kind="AUTHORISED_OPERATOR_RESET",
+        bound_failure_reason=str(route["reason"]),
+        evidence_digest=str(disposition["disposition_digest"]),
+        recorded_at=T0 + timedelta(seconds=11),
+    )
+    store = tmp_path / "unpublished.sqlite3"
+    event_id, _ingest_id = _seed_fresh_issue_790_event(store)
+    owner_id = "issue-790-canary:fixture"
+
+    with pytest.raises(ModelUsageIntegrityError, match="retained failure"):
+        service.consume_issue_790_bounded_canary(
+            approved_plan_digest=FIXTURE_790_PLAN_DIGEST,
+            disposition_digest=str(disposition["disposition_digest"]),
+            event_id=event_id,
+            ledger_seq=1932,
+            owner_id=owner_id,
+            consumed_at=T0 + timedelta(seconds=20),
+        )
+
+    consumption = service.consume_issue_790_bounded_canary(
+        approved_plan_digest=FIXTURE_790_PLAN_DIGEST,
+        disposition_digest=str(disposition["disposition_digest"]),
+        event_id=event_id,
+        ledger_seq=2001,
+        owner_id=owner_id,
+        consumed_at=T0 + timedelta(seconds=20),
+    )
+    with pytest.raises(ModelUsageIntegrityError, match="already consumed"):
+        service.consume_issue_790_bounded_canary(
+            approved_plan_digest=FIXTURE_790_PLAN_DIGEST,
+            disposition_digest=str(disposition["disposition_digest"]),
+            event_id=event_id,
+            ledger_seq=2001,
+            owner_id=owner_id,
+            consumed_at=T0 + timedelta(seconds=21),
+        )
+
+    queue = GraphitiEventQueue(
+        str(store),
+        clock=lambda: T0 + timedelta(seconds=20),
+    )
+    assert queue.claim(
+        owner_id="generic-worker",
+        lease_for=timedelta(seconds=30),
+    ) is None
+    with pytest.raises(ValueError, match="claim authority is required"):
+        queue.claim(
+            owner_id=owner_id,
+            lease_for=timedelta(seconds=30),
+            event_id=event_id,
+            require_fresh=True,
+        )
+    claimed = queue.claim(
+        owner_id=owner_id,
+        lease_for=timedelta(seconds=30),
+        event_id=event_id,
+        require_fresh=True,
+        canary_consumption_digest=str(consumption["consumption_digest"]),
+    )
+    assert claimed is not None
+    assert claimed.event_id == event_id
+
+    connection = connect_unpublished_store(str(store))
+    connection.execute(
+        "UPDATE unpublished_graphiti_revision_events SET state='RETRY_HELD',"
+        "attempt_count=1,last_failure_code='PRODUCER_INTERNAL_ERROR',"
+        "provider_dispatched=1,claim_owner=NULL,claim_expires_at=NULL "
+        "WHERE event_id=?",
+        (event_id,),
+    )
+    connection.commit()
+    connection.close()
+    process_result = {
+        "event_id": event_id,
+        "ledger_seq": 2001,
+        "state": "RETRY_HELD",
+        "attempt_count": 1,
+    }
+    outcome = service.complete_issue_790_bounded_canary(
+        consumption_digest=str(consumption["consumption_digest"]),
+        event_id=event_id,
+        ledger_seq=2001,
+        owner_id=owner_id,
+        process_result=process_result,
+        completed_at=T0 + timedelta(seconds=30),
+    )
+    replay = service.complete_issue_790_bounded_canary(
+        consumption_digest=str(consumption["consumption_digest"]),
+        event_id=event_id,
+        ledger_seq=2001,
+        owner_id=owner_id,
+        process_result=process_result,
+        completed_at=T0 + timedelta(seconds=31),
+    )
+
+    connection = sqlite3.connect(store)
+    retained = connection.execute(
+        "SELECT state,attempt_count,last_failure_code "
+        "FROM unpublished_graphiti_revision_events WHERE event_id=?",
+        (event_id,),
+    ).fetchone()
+    connection.close()
+    assert replay == outcome
+    assert outcome["state_after_seal"] == "CONFIGURATION_HELD"
+    assert outcome["retry_authorised"] is False
+    assert retained == (
+        "CONFIGURATION_HELD",
+        1,
+        "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:PRODUCER_INTERNAL_ERROR",
+    )
+    assert service_row_count(store, "model_usage_bounded_canary_consumptions") == 1
+    assert service_row_count(store, "model_usage_bounded_canary_outcomes") == 1
+
+
+def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    policy, allocation, terminal = _open_unreported_graphiti_subscription_leaf(
+        service
+    )
+    plan = _issue_790_plan(policy, allocation, terminal)
+    _bind_issue_790_fixture_contract(
+        monkeypatch,
+        allocation=allocation,
+        terminal=terminal,
+        plan_digest=str(plan["canonical_digest"]),
+    )
+    approved_at = T0 + timedelta(seconds=5)
+    authority, authority_digest = _conservative_disposition_authority(
+        allocation,
+        terminal,
+        approved_at=approved_at,
+        approved_plan_digest=str(plan["canonical_digest"]),
+    )
+    disposition = service.disposition_unreported_subscription_usage(
+        invocation_id=allocation.invocation_id,
+        expected_terminal_digest=terminal.terminal_digest,
+        expected_allocation_digest=allocation.canonical_digest,
+        approved_by=str(authority["approved_by"]),
+        approval_reference=str(authority["approval_reference"]),
+        approved_at=approved_at,
+        approved_plan_digest=str(plan["canonical_digest"]),
+        authority_digest=authority_digest,
+        observed_at=T0 + timedelta(seconds=10),
+    )
+    route = service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)
+    service.release_route_circuit(
+        route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+        release_kind="AUTHORISED_OPERATOR_RESET",
+        bound_failure_reason=str(route["reason"]),
+        evidence_digest=str(disposition["disposition_digest"]),
+        recorded_at=T0 + timedelta(seconds=11),
+    )
+    store = tmp_path / "unpublished.sqlite3"
+    _seed_issue_790_retry_events(store)
+    event_id, ingest_id = _seed_fresh_issue_790_event(store, ledger_seq=2002)
+    proving = tmp_path / "proving.sqlite3"
+    proving_connection = sqlite3.connect(proving)
+    proving_connection.execute("CREATE TABLE fixture(value INTEGER)")
+    proving_connection.commit()
+    proving_connection.close()
+    observed_at = T0 + timedelta(seconds=20)
+    _patch_issue_790_live_evidence(
+        monkeypatch,
+        store=store,
+        observed_at=observed_at,
+    )
+
+    def consume_exact_event(**values: object) -> GraphitiProcessResult:
+        assert values["event_id"] == event_id
+        assert values["unpublished_store"] == store
+        canary_service = values["model_usage"]
+        assert isinstance(canary_service, ModelUsageService)
+        canary_envelope = _envelope(
+            cycle_id=event_id,
+            workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+            candidate_id=None,
+            ingest_id=ingest_id,
+        )
+        canary_policy = _policy(
+            workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+            provider="cursor-agent-cli",
+            route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+            model="composer-2.5",
+            hard_estimate_ceiling_tokens=None,
+        )
+        canary_service.register_policy(canary_policy)
+        canary_service.open_envelope(canary_envelope)
+        canary_allocation = _allocation(
+            canary_envelope,
+            canary_policy,
+            request="issue-790-canary",
+        )
+        canary_service.allocate(canary_allocation, owner_emergency_stop=False)
+        canary_service.observe_transport(
+            invocation_id=canary_allocation.invocation_id,
+            observed_at=T0 + timedelta(seconds=21),
+            state="DISPATCH_STARTED",
+            evidence_digest=_digest({"dispatch": event_id}),
+        )
+        canary_service.complete(
+            _reported(
+                canary_allocation,
+                total=125,
+                completed_at=T0 + timedelta(seconds=22),
+            )
+        )
+        connection = connect_unpublished_store(str(store))
+        connection.execute(
+            "UPDATE unpublished_graphiti_revision_events SET state='TERMINAL',"
+            "attempt_count=1,provider_dispatched=1,terminal_at=?,proposal_count=1 "
+            "WHERE event_id=?",
+            (T0.strftime("%Y-%m-%dT%H:%M:%S.%fZ"), event_id),
+        )
+        connection.commit()
+        connection.close()
+        return GraphitiProcessResult(event_id, 2002, "TERMINAL", 1)
+
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_consume_issue_790_event",
+        consume_exact_event,
+    )
+    receipt = run_issue_790_canary(
+        store=store,
+        proving_store=proving,
+        backup_path=tmp_path / "pre-canary.sqlite3",
+        plan=plan,
+        observed_at=observed_at,
+        repository_root=tmp_path,
+        event_id=event_id,
+        ledger_seq=2002,
+        disposition_digest=str(disposition["disposition_digest"]),
+    )
+
+    assert receipt["canary_evidence_passed"] is True
+    assert receipt["process_result"] == {
+        "event_id": event_id,
+        "ledger_seq": 2002,
+        "state": "TERMINAL",
+        "attempt_count": 1,
+    }
+    assert receipt["usage_evidence"]["provider_backed_terminal_count"] == 1  # type: ignore[index]
+    assert receipt["usage_evidence"]["truthful_nonzero_usage_count"] == 1  # type: ignore[index]
+    assert receipt["retry_forbidden_events_unchanged"] is True
+    assert receipt["worker_remained_unloaded"] is True
+    assert receipt["receipt_digest"] == _digest(
+        {key: value for key, value in receipt.items() if key != "receipt_digest"}
+    )
+
+
+def test_issue_790_route_mismatch_writes_no_disposition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = _service(tmp_path)
     policy, allocation, terminal = _open_unreported_graphiti_subscription_leaf(
         service
     )
     store = tmp_path / "unpublished.sqlite3"
+    plan = _issue_790_plan(policy, allocation, terminal)
+    _bind_issue_790_fixture_contract(
+        monkeypatch,
+        allocation=allocation,
+        terminal=terminal,
+        plan_digest=str(plan["canonical_digest"]),
+    )
+    _seed_issue_790_retry_events(store)
+    _patch_issue_790_live_evidence(
+        monkeypatch,
+        store=store,
+        observed_at=T0 + timedelta(seconds=10),
+    )
 
     with pytest.raises(
         Issue790DispositionError,
@@ -1687,8 +2357,9 @@ def test_issue_790_route_mismatch_writes_no_disposition(tmp_path: Path) -> None:
         apply_issue_790_plan(
             store=store,
             backup_path=tmp_path / "unpublished.pre-790.sqlite3",
-            plan=_issue_790_plan(policy, allocation, terminal),
+            plan=plan,
             observed_at=T0 + timedelta(seconds=10),
+            repository_root=tmp_path,
         )
 
     assert service_row_count(
@@ -2277,12 +2948,15 @@ def test_hermes_usage_command_exports_shared_receipts_as_json_and_csv(
 
     assert hermes.main(common) == 0
     json_report = json.loads(capsys.readouterr().out)
+    assert json_report["schema_version"] == "newsroom.model-usage.v4"
     assert json_report["leaf_dispatch_count"] == 1
     assert json_report["observed_total_tokens"] == 125
 
     assert hermes.main([*common, "--usage-format", "leaf-csv"]) == 0
     rows = list(csv.DictReader(io.StringIO(capsys.readouterr().out)))
     assert [row["invocation_id"] for row in rows] == [allocation.invocation_id]
+    assert rows[0]["schema_version"] == "newsroom.model-usage.v4"
+    assert rows[0]["allocation_schema_version"] == "newsroom.model-usage.v3"
 
 
 def test_hermes_usage_command_exports_allocation_free_envelope_outcome(
@@ -2317,6 +2991,7 @@ def test_hermes_usage_command_exports_allocation_free_envelope_outcome(
 
     assert hermes.main(common) == 0
     report = json.loads(capsys.readouterr().out)
+    assert report["schema_version"] == "newsroom.model-usage.v4"
     assert report["leaf_dispatch_count"] == 0
     assert report["envelope_outcome_counts"] == {"HOLD": 1}
     assert report["envelopes"][0]["outcome"] == "HOLD"

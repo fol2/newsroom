@@ -2669,6 +2669,10 @@ def consume_next_graphiti_event(
     owner_id: str,
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
     model_usage: ModelUsageService | None = None,
+    event_id: str | None = None,
+    require_fresh: bool = False,
+    recover_model_usage: bool = True,
+    canary_consumption_digest: str | None = None,
 ) -> GraphitiProcessResult | None:
     """Claim and process one durable revision, independently from source polling."""
 
@@ -2677,7 +2681,8 @@ def consume_next_graphiti_event(
         require_canonical_unpublished_store(unpublished_store)
         if model_usage is None:
             model_usage = ModelUsageService(unpublished_store)
-        model_usage.recover_unresolved(observed_at=clock().astimezone(UTC))
+        if recover_model_usage:
+            model_usage.recover_unresolved(observed_at=clock().astimezone(UTC))
     rights_check, rights_fence = _graphiti_dispatch_controls(proving_store, clock=clock)
     queue = GraphitiEventQueue(unpublished_store, clock=clock)
     resolved_units: dict[str, tuple[CorpusIngestUnit, ...]] = {}
@@ -2851,7 +2856,14 @@ def consume_next_graphiti_event(
         finally:
             unpublished.close()
 
-    return queue.process_one(owner_id=owner_id, gate=gate, dispatch=dispatch)
+    return queue.process_one(
+        owner_id=owner_id,
+        gate=gate,
+        dispatch=dispatch,
+        event_id=event_id,
+        require_fresh=require_fresh,
+        canary_consumption_digest=canary_consumption_digest,
+    )
 
 
 def run_cycle(

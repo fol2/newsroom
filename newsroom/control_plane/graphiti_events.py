@@ -42,16 +42,30 @@ def _connect(path: str) -> sqlite3.Connection:
     return connection
 
 
+def _has_bounded_canary_consumptions(connection: sqlite3.Connection) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='model_usage_bounded_canary_consumptions'"
+        ).fetchone()
+        is not None
+    )
+
+
 def _recover_expired_claims(connection: sqlite3.Connection, *, now_text: str) -> None:
-    connection.execute(
-        """
+    statement = """
         UPDATE unpublished_graphiti_revision_events
         SET state='QUEUED', claim_owner=NULL, claim_expires_at=NULL
         WHERE state IN ('CLAIMED','RUNNING')
           AND claim_expires_at IS NOT NULL AND claim_expires_at<=?
-        """,
-        (now_text,),
-    )
+        """
+    if _has_bounded_canary_consumptions(connection):
+        statement += (
+            " AND NOT EXISTS (SELECT 1 "
+            "FROM model_usage_bounded_canary_consumptions c "
+            "WHERE c.event_id=unpublished_graphiti_revision_events.event_id)"
+        )
+    connection.execute(statement, (now_text,))
 
 
 def ensure_graphiti_event_schema(connection: sqlite3.Connection) -> None:
@@ -386,15 +400,49 @@ class GraphitiEventQueue:
         connection.close()
 
     def claim(
-        self, *, owner_id: str, lease_for: timedelta
+        self,
+        *,
+        owner_id: str,
+        lease_for: timedelta,
+        event_id: str | None = None,
+        require_fresh: bool = False,
+        canary_consumption_digest: str | None = None,
     ) -> GraphitiRevisionEvent | None:
         if not owner_id or lease_for <= timedelta(0):
             raise ValueError("claim requires an owner and positive lease")
+        if require_fresh and event_id is None:
+            raise ValueError("fresh claim requires an exact event identity")
+        if canary_consumption_digest is not None and (
+            event_id is None or not require_fresh
+        ):
+            raise ValueError(
+                "bounded canary authority requires an exact fresh event"
+            )
         now, now_text = self._clock(), _utc_text(self._clock())
         connection = _connect(self._path)
         try:
             connection.execute("BEGIN IMMEDIATE")
-            reconcile_graphiti_events(connection, (), available_at=now)
+            if event_id is None:
+                reconcile_graphiti_events(connection, (), available_at=now)
+            has_canary_consumptions = _has_bounded_canary_consumptions(connection)
+            if canary_consumption_digest is not None:
+                if not has_canary_consumptions or connection.execute(
+                    "SELECT 1 FROM model_usage_bounded_canary_consumptions "
+                    "WHERE consumption_digest=? AND event_id=? AND owner_id=?",
+                    (canary_consumption_digest, event_id, owner_id),
+                ).fetchone() is None:
+                    raise ValueError("bounded canary claim authority differs")
+            elif (
+                event_id is not None
+                and has_canary_consumptions
+                and connection.execute(
+                    "SELECT 1 FROM model_usage_bounded_canary_consumptions "
+                    "WHERE event_id=?",
+                    (event_id,),
+                ).fetchone()
+                is not None
+            ):
+                raise ValueError("bounded canary claim authority is required")
             circuit = connection.execute(
                 "SELECT state,available_at FROM unpublished_graphiti_event_circuit WHERE singleton=1"
             ).fetchone()
@@ -411,19 +459,40 @@ class GraphitiEventQueue:
                     "UPDATE unpublished_graphiti_event_circuit SET state='CLOSED',"
                     "opened_at=NULL,available_at=NULL,failure_code=NULL WHERE singleton=1"
                 )
-            _recover_expired_claims(connection, now_text=now_text)
+            if event_id is None:
+                _recover_expired_claims(connection, now_text=now_text)
             while True:
-                row = connection.execute(
-                    """
+                query = """
                     SELECT event_id,ledger_seq,source_id,item_key,revision_digest,
                            published_at,updated_at,unit_count,manifest_json,
                            manifest_digest,attempt_count
                     FROM unpublished_graphiti_revision_events
-                    WHERE state IN ('QUEUED','RETRY_HELD','RIGHTS_HELD') AND available_at<=?
-                    ORDER BY ledger_seq LIMIT 1
-                    """,
-                    (now_text,),
-                ).fetchone()
+                    WHERE """
+                if event_id is None:
+                    query += (
+                        "state IN ('QUEUED','RETRY_HELD','RIGHTS_HELD') "
+                        "AND available_at<=? "
+                    )
+                    if has_canary_consumptions:
+                        query += (
+                            "AND NOT EXISTS (SELECT 1 "
+                            "FROM model_usage_bounded_canary_consumptions c "
+                            "WHERE c.event_id="
+                            "unpublished_graphiti_revision_events.event_id) "
+                        )
+                    query += "ORDER BY ledger_seq LIMIT 1"
+                    parameters: tuple[object, ...] = (now_text,)
+                else:
+                    query += "event_id=? AND available_at<=? "
+                    if require_fresh:
+                        query += "AND state='QUEUED' AND attempt_count=0 "
+                    else:
+                        query += (
+                            "AND state IN ('QUEUED','RETRY_HELD','RIGHTS_HELD') "
+                        )
+                    query += "LIMIT 1"
+                    parameters = (event_id, now_text)
+                row = connection.execute(query, parameters).fetchone()
                 if row is None:
                     connection.commit()
                     return None
@@ -496,8 +565,17 @@ class GraphitiEventQueue:
         retry_after: timedelta = timedelta(seconds=30),
         circuit_for: timedelta = timedelta(minutes=5),
         max_attempts: int = 3,
+        event_id: str | None = None,
+        require_fresh: bool = False,
+        canary_consumption_digest: str | None = None,
     ) -> GraphitiProcessResult | None:
-        event = self.claim(owner_id=owner_id, lease_for=lease_for)
+        event = self.claim(
+            owner_id=owner_id,
+            lease_for=lease_for,
+            event_id=event_id,
+            require_fresh=require_fresh,
+            canary_consumption_digest=canary_consumption_digest,
+        )
         if event is None:
             return None
         attempt = self._start(event.event_id, owner_id=owner_id)
