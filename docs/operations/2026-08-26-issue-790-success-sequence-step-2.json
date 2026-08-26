@@ -1,7 +1,7 @@
 {
   "approval": {
-    "approval_reference": "https://github.com/fol2/newsroom/issues/790#issuecomment-5430967545",
-    "approved_at": "2026-08-26T20:51:55.000000Z",
+    "approval_reference": "https://github.com/fol2/newsroom/issues/790#issuecomment-5432307187",
+    "approved_at": "2026-08-26T23:29:50.000000Z",
     "approved_by": "github:fol2",
     "scope": "CONSERVATIVE_SUBSCRIPTION_CLI_USAGE_DISPOSITION"
   },
@@ -13,7 +13,7 @@
     "persistent_worker_state_before_canary": "UNLOADED",
     "requires_exact_main_deployment": true
   },
-  "canonical_digest": "sha256:4db4a7d65e6e43739a048a48aa92162966fd386df6310c437a73846139f5ce42",
+  "canonical_digest": "sha256:f759403c9838ef431cff38126989d8732ed5ba7e03ce92f554760ba0ef2d2c61",
   "issue": 790,
   "non_effects": [
     "NO_PUBLICATION",
