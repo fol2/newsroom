@@ -8,11 +8,12 @@
   "canary": {
     "authority_consumption": "APPEND_ONLY_SINGLE_USE_BEFORE_PROVIDER_IO",
     "event_binding": "EXPLICIT_QUEUED_ATTEMPT_ZERO_EVENT",
+    "fallback_mode": "DISABLED_BEFORE_PROVIDER_DISPATCH",
     "fresh_provider_backed_attempt_count": 1,
     "persistent_worker_state_before_canary": "UNLOADED",
     "requires_exact_main_deployment": true
   },
-  "canonical_digest": "sha256:587778ca69b954749b64b0f277e684da69105b8b752324edc089bfd54ae0ad70",
+  "canonical_digest": "sha256:3347669cc57fcc3740f9e7027cf7c9c6936626dfb1932eeec5ea2018fe6f6308",
   "issue": 790,
   "non_effects": [
     "NO_PUBLICATION",
@@ -52,12 +53,13 @@
   ],
   "schema_version": "newsroom.issue-790.iterative-canary-plan.v2",
   "sequence": {
-    "call_shape_policy_digest": "sha256:41072c3eb8a7f96fa11592037b94cc24c458e49d16ab29b72ee387d9ee518ec2",
-    "call_shape_policy_version": "issue-790-v8",
+    "call_shape_policy_digest": "sha256:7e6bd15613cefda0820a1d339c8790f0185946aade1622dadbb8c468f558bb18",
+    "call_shape_policy_version": "issue-790-v9",
     "cleanup_reserve_ms": 20000,
     "constraint_change": "INITIAL_QUALIFIED_BASELINE",
     "controller_timeout_ms": 160000,
     "extraction_timeout_ms": 180000,
+    "fixed_constraints_digest": "sha256:a3d6a7759c57df52e0a25feae3edcc740ce7ec26064996aae018b276fd36fbb2",
     "predecessor": {
       "consumption_digest": "sha256:6ec11fc9d1ee75421c6a4d5419e96abc6a960dd4e02b1c53ac396f6433d6b07a",
       "event_id": "sha256:46663a38929b02c74275e39ea986c416f9893ebeaf9b81fc92d34ac0b9e2efcd",
@@ -65,6 +67,29 @@
       "outcome_digest": "sha256:4c4ec972b8569e05c45dec60d549d9a5eac1950045d2454da9d86cd76293d05c",
       "plan_digest": "sha256:ce7ee7fd56c931b147158dad2a74047ada90b805e5a4c545e53db1f4d2ae7383"
     },
+    "predecessor_causal_report": {
+      "causal_constraint": "CONTROLLER_TIMEOUT_MS",
+      "classification": "CONTROLLER_TIMEOUT",
+      "diagnostic": {
+        "boundary": "CONTROLLER_DEADLINE",
+        "cause": "CONFIGURED_TIMEOUT_EXPIRED",
+        "configured_timeout_ms": 80000,
+        "deadline_at": "2026-08-26T17:04:50.926743Z",
+        "elapsed_ms": 81217,
+        "last_progress": "DISPATCH_STARTED",
+        "phase": "PRIMARY_TRANSPORT",
+        "process": "CLI_CHILD",
+        "provider_cause": "UNOBSERVED",
+        "schema_version": "newsroom.graphiti-timeout-diagnostic.v1",
+        "termination": "PROCESS_KILLED"
+      },
+      "diagnostic_reference": "https://github.com/fol2/newsroom/issues/790#issuecomment-5430759311",
+      "local_cause": "CONFIGURED_TIMEOUT_EXPIRED",
+      "provider_cause": "UNOBSERVED",
+      "report_digest": "sha256:cb1b72361e6f17d02e5f8ecce30d2ff53a79e9334ba942728f58fcf8d977f7f2",
+      "schema_version": "newsroom.issue-790.causal-report.v1"
+    },
+    "root_plan_digest": "sha256:ce7ee7fd56c931b147158dad2a74047ada90b805e5a4c545e53db1f4d2ae7383",
     "sequence_ordinal": 1,
     "stop_condition": "FIRST_TRUTHFUL_PROVIDER_BACKED_SUCCESS",
     "timeout_increment_ms": 10000

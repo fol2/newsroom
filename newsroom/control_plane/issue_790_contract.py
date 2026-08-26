@@ -28,7 +28,7 @@ ISSUE_790_APPROVED_TERMINAL_OUTCOME = "FAILED"
 ISSUE_790_APPROVED_ROUTE_OPEN_REASON = "SYSTEMIC_TRANSPORT"
 
 ISSUE_790_SUCCESS_SEQUENCE_PLAN_DIGEST = (
-    "sha256:587778ca69b954749b64b0f277e684da69105b8b752324edc089bfd54ae0ad70"
+    "sha256:3347669cc57fcc3740f9e7027cf7c9c6936626dfb1932eeec5ea2018fe6f6308"
 )
 
 
@@ -47,6 +47,16 @@ class Issue790ApprovedPlanContract:
     scope: str
     terminal_outcome: str
     route_open_reason: str
+    root_plan_digest: str
+    predecessor_plan_digest: str | None
+    sequence_ordinal: int
+    controller_timeout_ms: int
+    extraction_timeout_ms: int
+    cleanup_reserve_ms: int
+    fixed_constraints_digest: str | None
+    predecessor_causal_report_digest: str | None
+    constraint_change: str | None
+    reviewed_fix_digest: str | None
 
 
 _SUCCESS_SEQUENCE_CONTRACTS = (
@@ -70,6 +80,20 @@ _SUCCESS_SEQUENCE_CONTRACTS = (
         scope=ISSUE_790_APPROVED_SCOPE,
         terminal_outcome="TIMEOUT",
         route_open_reason="TIMEOUT",
+        root_plan_digest=ISSUE_790_APPROVED_PLAN_DIGEST,
+        predecessor_plan_digest=ISSUE_790_APPROVED_PLAN_DIGEST,
+        sequence_ordinal=1,
+        controller_timeout_ms=160_000,
+        extraction_timeout_ms=180_000,
+        cleanup_reserve_ms=20_000,
+        fixed_constraints_digest=(
+            "sha256:a3d6a7759c57df52e0a25feae3edcc740ce7ec26064996aae018b276fd36fbb2"
+        ),
+        predecessor_causal_report_digest=(
+            "sha256:cb1b72361e6f17d02e5f8ecce30d2ff53a79e9334ba942728f58fcf8d977f7f2"
+        ),
+        constraint_change="INITIAL_QUALIFIED_BASELINE",
+        reviewed_fix_digest=None,
     ),
 )
 
@@ -94,19 +118,21 @@ def issue_790_approved_plan_contract(
             scope=ISSUE_790_APPROVED_SCOPE,
             terminal_outcome=ISSUE_790_APPROVED_TERMINAL_OUTCOME,
             route_open_reason=ISSUE_790_APPROVED_ROUTE_OPEN_REASON,
+            root_plan_digest=ISSUE_790_APPROVED_PLAN_DIGEST,
+            predecessor_plan_digest=None,
+            sequence_ordinal=0,
+            controller_timeout_ms=80_000,
+            extraction_timeout_ms=180_000,
+            cleanup_reserve_ms=20_000,
+            fixed_constraints_digest=None,
+            predecessor_causal_report_digest=None,
+            constraint_change=None,
+            reviewed_fix_digest=None,
         )
     for contract in _SUCCESS_SEQUENCE_CONTRACTS:
         if contract.plan_digest == plan_digest:
             return contract
     raise KeyError(plan_digest)
-
-
-def issue_790_approved_plan_digests() -> frozenset[str]:
-    """Return only content identities embedded by reviewed code."""
-
-    return frozenset(
-        contract.plan_digest for contract in issue_790_approved_plan_contracts()
-    )
 
 
 def issue_790_approved_plan_contracts() -> tuple[Issue790ApprovedPlanContract, ...]:
@@ -132,5 +158,4 @@ __all__ = [
     "Issue790ApprovedPlanContract",
     "issue_790_approved_plan_contract",
     "issue_790_approved_plan_contracts",
-    "issue_790_approved_plan_digests",
 ]

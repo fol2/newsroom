@@ -572,14 +572,16 @@ async def _add_episode(
     admitted_summary_assertions: tuple[AdmittedSummaryAssertion, ...] = (),
     invocation_observer: Any | None = None,
     donor_store: DonorStore | None = None,
+    fallback_permitted: bool = True,
 ) -> Any:
     os.environ.setdefault("GRAPHITI_TELEMETRY_ENABLED", "false")
     runtime = _load_graphiti()
-    llm_client = (
-        build_cli_llm_client()
-        if invocation_observer is None
-        else build_cli_llm_client(invocation_observer=invocation_observer)
-    )
+    client_options: dict[str, object] = {}
+    if invocation_observer is not None:
+        client_options["invocation_observer"] = invocation_observer
+    if not fallback_permitted:
+        client_options["fallback_permitted"] = False
+    llm_client = build_cli_llm_client(**client_options)
     delegate = runtime.OpenAIEmbedder(
         config=runtime.OpenAIEmbedderConfig(
             api_key=api_key,
@@ -951,6 +953,7 @@ class RealGraphitiAdapter:
     __slots__ = (
         "_clock",
         "_execution_deadline",
+        "_fallback_permitted",
         "_invocation_observer",
         "_monotonic",
     )
@@ -962,10 +965,14 @@ class RealGraphitiAdapter:
         monotonic: Callable[[], float] = time.monotonic,
         execution_deadline: datetime | None = None,
         invocation_observer: Any | None = None,
+        fallback_permitted: bool = True,
     ) -> None:
+        if not isinstance(fallback_permitted, bool):
+            raise TypeError("Graphiti fallback permission must be boolean")
         self._clock = clock
         self._monotonic = monotonic
         self._execution_deadline = execution_deadline
+        self._fallback_permitted = fallback_permitted
         self._invocation_observer = invocation_observer
 
     def execute(
@@ -1338,6 +1345,7 @@ class RealGraphitiAdapter:
                         ),
                         invocation_observer=self._invocation_observer,
                         donor_store=donor_store,
+                        fallback_permitted=self._fallback_permitted,
                     ),
                     timeout=remaining_timeout_s,
                 )

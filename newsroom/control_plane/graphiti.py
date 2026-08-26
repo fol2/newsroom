@@ -840,9 +840,15 @@ class EvaluationGraphitiRunner:
     requires_canonical_control_plane_stores = True
 
     def __init__(
-        self, *, clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC)
+        self,
+        *,
+        clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
+        fallback_permitted: bool = True,
     ) -> None:
+        if not isinstance(fallback_permitted, bool):
+            raise TypeError("Graphiti fallback permission must be boolean")
         self._clock = clock
+        self._fallback_permitted = fallback_permitted
         self._pending_usage: dict[
             tuple[str, int], tuple[ModelUsageService, WorkEnvelope]
         ] = {}
@@ -976,14 +982,12 @@ class EvaluationGraphitiRunner:
             predecessor_episode_uuid=unit.predecessor_ingest_id,
         )
         with TemporaryDirectory() as root:
-            adapter = (
-                RealGraphitiAdapter(execution_deadline=deadline)
-                if invocation_observer is None
-                else RealGraphitiAdapter(
-                    execution_deadline=deadline,
-                    invocation_observer=invocation_observer,
-                )
-            )
+            adapter_options: dict[str, object] = {"execution_deadline": deadline}
+            if invocation_observer is not None:
+                adapter_options["invocation_observer"] = invocation_observer
+            if not self._fallback_permitted:
+                adapter_options["fallback_permitted"] = False
+            adapter = RealGraphitiAdapter(**adapter_options)
             execution = adapter.execute(
                 attempt=attempt,
                 workspace_root=Path(root),

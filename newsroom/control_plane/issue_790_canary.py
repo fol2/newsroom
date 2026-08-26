@@ -15,10 +15,15 @@ from newsroom.control_plane.issue_790_contract import (
 )
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.veto import assert_private_store
+from newsroom.graphiti_adapter.cli_process import validated_timeout_diagnostics
 
 CANARY_PREFLIGHT_SCHEMA = "newsroom.graphiti-fresh-event-preflight.v1"
+ITERATIVE_CANARY_PREFLIGHT_SCHEMA = (
+    "newsroom.issue-790.iterative-fresh-event-preflight.v2"
+)
 CANARY_CONSUMPTION_SCHEMA = "newsroom.issue-790.canary-consumption.v2"
 CANARY_OUTCOME_SCHEMA = "newsroom.issue-790.canary-outcome.v2"
+ITERATIVE_CANARY_OUTCOME_SCHEMA = "newsroom.issue-790.canary-outcome.v3"
 RETRY_EXCLUSION_SCHEMA = "newsroom.issue-790.graphiti-retry-exclusion.v1"
 
 _SCHEMA = """
@@ -122,6 +127,48 @@ def _content_addressed_record(
     if supplied != digest_canonical(without_digest):
         raise Issue790CanaryIntegrityError(f"{field} digest differs")
     return record
+
+
+def _validated_controller_timeout_report(
+    value: Mapping[str, object],
+) -> dict[str, object]:
+    report = dict(value)
+    supplied_digest = report.pop("report_digest", None)
+    if supplied_digest != digest_canonical(report):
+        raise Issue790CanaryIntegrityError("canary causal report digest differs")
+    if set(report) != {
+        "schema_version",
+        "classification",
+        "causal_constraint",
+        "local_cause",
+        "provider_cause",
+        "diagnostic_reference",
+        "diagnostic",
+    }:
+        raise Issue790CanaryIntegrityError("canary causal report fields differ")
+    try:
+        diagnostic = validated_timeout_diagnostics([report.get("diagnostic")])[0]
+    except ValueError as exc:
+        raise Issue790CanaryIntegrityError(
+            "canary causal timeout diagnostic differs"
+        ) from exc
+    if (
+        report.get("schema_version") != "newsroom.issue-790.causal-report.v1"
+        or report.get("classification") != "CONTROLLER_TIMEOUT"
+        or report.get("causal_constraint") != "CONTROLLER_TIMEOUT_MS"
+        or report.get("local_cause") != diagnostic.get("cause")
+        or report.get("provider_cause") != diagnostic.get("provider_cause")
+        or diagnostic.get("boundary") != "CONTROLLER_DEADLINE"
+        or diagnostic.get("phase") != "PRIMARY_TRANSPORT"
+        or diagnostic.get("cause") != "CONFIGURED_TIMEOUT_EXPIRED"
+        or diagnostic.get("provider_cause") != "UNOBSERVED"
+        or diagnostic.get("process") != "CLI_CHILD"
+        or int(diagnostic["elapsed_ms"])
+        < int(diagnostic["configured_timeout_ms"])
+    ):
+        raise Issue790CanaryIntegrityError("canary causal report differs")
+    _token(report.get("diagnostic_reference"), field="canary diagnostic reference")
+    return {**report, "report_digest": supplied_digest}
 
 
 def _bound_row_record(
@@ -258,13 +305,28 @@ def _validated_preflight(
     ledger_seq: int,
     manifest_digest: str,
     consumed_at: datetime,
+    approved_plan_digest: str,
 ) -> dict[str, object]:
     retained = dict(value)
     supplied_digest = retained.pop("evidence_digest", None)
     if supplied_digest != digest_canonical(retained):
         raise Issue790CanaryIntegrityError("bounded canary preflight digest differs")
+    try:
+        approved_contract = issue_790_approved_plan_contract(
+            approved_plan_digest
+        )
+    except KeyError as exc:
+        raise Issue790CanaryIntegrityError(
+            "bounded canary preflight plan differs"
+        ) from exc
+    iterative = approved_contract.sequence_ordinal > 0
+    expected_schema = (
+        ITERATIVE_CANARY_PREFLIGHT_SCHEMA
+        if iterative
+        else CANARY_PREFLIGHT_SCHEMA
+    )
     if (
-        retained.get("schema_version") != CANARY_PREFLIGHT_SCHEMA
+        retained.get("schema_version") != expected_schema
         or retained.get("event_id") != event_id
         or retained.get("ledger_seq") != ledger_seq
         or retained.get("event_state") != "QUEUED"
@@ -275,6 +337,16 @@ def _validated_preflight(
         or retained.get("store_mutations") != 0
     ):
         raise Issue790CanaryIntegrityError("bounded canary preflight differs")
+    if iterative and (
+        retained.get("approved_plan_digest") != approved_plan_digest
+        or retained.get("fallback_mode")
+        != "DISABLED_BEFORE_PROVIDER_DISPATCH"
+        or retained.get("fixed_constraints_digest")
+        != approved_contract.fixed_constraints_digest
+    ):
+        raise Issue790CanaryIntegrityError(
+            "bounded canary iterative preflight differs"
+        )
     evaluated_at = _instant(retained.get("evaluated_at"), field="preflight time")
     if evaluated_at > consumed_at.astimezone(UTC):
         raise Issue790CanaryIntegrityError("bounded canary preflight follows consumption")
@@ -599,6 +671,64 @@ class Issue790CanaryRepository:
         finally:
             connection.close()
 
+    def disposition_invocation(
+        self,
+        *,
+        approved_plan_digest: str,
+        disposition_digest: str,
+    ) -> str | None:
+        """Return the invocation bound by one exact retained disposition."""
+
+        connection = self._read_connection()
+        try:
+            row = connection.execute(
+                "SELECT invocation_id FROM model_usage_conservative_dispositions "
+                "WHERE approved_plan_digest=? AND disposition_digest=?",
+                (approved_plan_digest, disposition_digest),
+            ).fetchone()
+            return None if row is None else str(row[0])
+        finally:
+            connection.close()
+
+    def invocation_terminal(
+        self,
+        *,
+        invocation_id: str,
+    ) -> dict[str, object] | None:
+        """Return one content-addressed model terminal after SQL identity checks."""
+
+        invocation_id = _token(invocation_id, field="model terminal invocation id")
+        connection = self._read_connection()
+        try:
+            row = connection.execute(
+                "SELECT terminal_digest,invocation_id,usage_status,outcome,"
+                "failure_class,completed_at,record_json "
+                "FROM model_invocation_terminals WHERE invocation_id=?",
+                (invocation_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            record = _object(row[6], field="model invocation terminal")
+            digest = record.get("terminal_digest")
+            unsigned = dict(record)
+            unsigned["terminal_digest"] = ""
+            if (
+                not isinstance(digest, str)
+                or digest != row[0]
+                or digest_canonical(unsigned) != digest
+                or record.get("invocation_id") != row[1]
+                or record.get("usage_status") != row[2]
+                or record.get("outcome") != row[3]
+                or record.get("failure_class") != row[4]
+                or record.get("completed_at") != row[5]
+            ):
+                raise Issue790CanaryIntegrityError(
+                    "model invocation terminal identity differs"
+                )
+            return record
+        finally:
+            connection.close()
+
     def preflight_for_consumption(
         self,
         *,
@@ -765,6 +895,7 @@ class Issue790CanaryRepository:
                 ledger_seq=ledger_seq,
                 manifest_digest=str(event_row[7]),
                 consumed_at=consumed_at,
+                approved_plan_digest=approved_plan_digest,
             )
             resolved_units = preflight["resolved_units"]
             assert isinstance(resolved_units, list)
@@ -859,6 +990,8 @@ class Issue790CanaryRepository:
         completed_at: datetime,
         exception_code: str | None = None,
         completion_mode: str = "FOREGROUND",
+        result_class: str | None = None,
+        causal_report: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         consumption_digest = _token(
             consumption_digest, field="canary consumption digest"
@@ -903,6 +1036,41 @@ class Issue790CanaryRepository:
                 ),
                 field="canary consumption",
             )
+            try:
+                approved_contract = issue_790_approved_plan_contract(
+                    str(consumption["approved_plan_digest"])
+                )
+            except KeyError as exc:
+                raise Issue790CanaryIntegrityError(
+                    "bounded canary outcome plan differs"
+                ) from exc
+            iterative = approved_contract.sequence_ordinal > 0
+            retained_causal_report: dict[str, object] | None = None
+            if iterative:
+                if result_class not in {
+                    "TRUTHFUL_PROVIDER_SUCCESS",
+                    "CONTROLLER_TIMEOUT_NON_SUCCESS",
+                    "UNCLASSIFIED_NON_SUCCESS",
+                }:
+                    raise Issue790CanaryIntegrityError(
+                        "bounded canary result class differs"
+                    )
+                if result_class == "CONTROLLER_TIMEOUT_NON_SUCCESS":
+                    if causal_report is None:
+                        raise Issue790CanaryIntegrityError(
+                            "bounded canary causal report is absent"
+                        )
+                    retained_causal_report = _validated_controller_timeout_report(
+                        causal_report
+                    )
+                elif causal_report is not None:
+                    raise Issue790CanaryIntegrityError(
+                        "bounded canary causal report is ineligible"
+                    )
+            elif result_class is not None or causal_report is not None:
+                raise Issue790CanaryIntegrityError(
+                    "legacy bounded canary result fields differ"
+                )
             if consumption.get("owner_id") != owner_id:
                 raise Issue790CanaryIntegrityError(
                     "bounded canary consumption owner differs"
@@ -929,6 +1097,14 @@ class Issue790CanaryRepository:
                     retained_prior.get("event_id") != event_id
                     or retained_prior.get("ledger_seq") != ledger_seq
                     or retained_prior.get("owner_id") != owner_id
+                    or (
+                        iterative
+                        and (
+                            retained_prior.get("result_class") != result_class
+                            or retained_prior.get("causal_report")
+                            != retained_causal_report
+                        )
+                    )
                 ):
                     raise Issue790CanaryIntegrityError(
                         "conflicting bounded canary outcome replay"
@@ -964,6 +1140,22 @@ class Issue790CanaryRepository:
                 ),
             ).fetchone()
             provider_dispatched = bool(marker and marker[0])
+            if iterative and result_class == "TRUTHFUL_PROVIDER_SUCCESS" and (
+                state_before_seal != "TERMINAL"
+                or attempt_count != 1
+                or not provider_dispatched
+            ):
+                raise Issue790CanaryIntegrityError(
+                    "bounded canary truthful success evidence differs"
+                )
+            if iterative and result_class == "CONTROLLER_TIMEOUT_NON_SUCCESS" and (
+                state_before_seal == "TERMINAL"
+                or attempt_count != 1
+                or not provider_dispatched
+            ):
+                raise Issue790CanaryIntegrityError(
+                    "bounded canary controller timeout evidence differs"
+                )
             if attempt_count not in {0, 1}:
                 raise Issue790CanaryIntegrityError(
                     "bounded canary retained more than one attempt"
@@ -1043,7 +1235,11 @@ class Issue790CanaryRepository:
                         "bounded canary terminal telemetry sync lost its state"
                     )
             without_digest: dict[str, object] = {
-                "schema_version": CANARY_OUTCOME_SCHEMA,
+                "schema_version": (
+                    ITERATIVE_CANARY_OUTCOME_SCHEMA
+                    if iterative
+                    else CANARY_OUTCOME_SCHEMA
+                ),
                 "consumption_digest": consumption_digest,
                 "approved_plan_digest": consumption["approved_plan_digest"],
                 "event_id": event_id,
@@ -1064,6 +1260,9 @@ class Issue790CanaryRepository:
                 "retry_authorised": False,
                 "completed_at": completed_at_text,
             }
+            if iterative:
+                without_digest["result_class"] = result_class
+                without_digest["causal_report"] = retained_causal_report
             outcome_digest = digest_canonical(without_digest)
             record = {**without_digest, "outcome_digest": outcome_digest}
             connection.execute(
@@ -1113,9 +1312,12 @@ class Issue790CanaryRepository:
         connection = self._connection()
         try:
             row = connection.execute(
-                "SELECT state,attempt_count FROM unpublished_graphiti_revision_events "
-                "WHERE event_id=? AND ledger_seq=?",
-                (event_id, ledger_seq),
+                "SELECT e.state,e.attempt_count,c.approved_plan_digest "
+                "FROM unpublished_graphiti_revision_events e "
+                "JOIN issue_790_bounded_canary_consumptions c "
+                "ON c.consumption_digest=? "
+                "WHERE e.event_id=? AND e.ledger_seq=?",
+                (consumption_digest, event_id, ledger_seq),
             ).fetchone()
         finally:
             connection.close()
@@ -1132,6 +1334,7 @@ class Issue790CanaryRepository:
                 "attempt_count": attempt_count,
             }
         )
+        approved_contract = issue_790_approved_plan_contract(str(row[2]))
         return self.complete(
             consumption_digest=consumption_digest,
             event_id=event_id,
@@ -1140,11 +1343,17 @@ class Issue790CanaryRepository:
             process_result=process_result,
             completed_at=completed_at,
             completion_mode="ZERO_IO_RECOVERY",
+            result_class=(
+                "UNCLASSIFIED_NON_SUCCESS"
+                if approved_contract.sequence_ordinal > 0
+                else None
+            ),
         )
 
 
 __all__ = [
     "CANARY_PREFLIGHT_SCHEMA",
+    "ITERATIVE_CANARY_PREFLIGHT_SCHEMA",
     "Issue790CanaryIntegrityError",
     "Issue790CanaryRepository",
     "graphiti_event_has_canary_consumption",

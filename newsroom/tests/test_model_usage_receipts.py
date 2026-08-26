@@ -5,9 +5,10 @@ import hashlib
 import io
 import json
 import sqlite3
-from types import SimpleNamespace
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -59,7 +60,10 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     CURSOR_AGENT_MODEL_ID,
     OPENROUTER_EMBEDDING_SLUG,
 )
-from newsroom.control_plane.store import connect as connect_unpublished_store
+from newsroom.control_plane.store import (
+    connect as connect_unpublished_store,
+    insert_graphiti_attempt_receipt,
+)
 
 T0 = datetime(2026, 8, 24, 10, 0, tzinfo=UTC)
 FIXTURE_790_PLAN_DIGEST = digest_canonical(
@@ -303,6 +307,7 @@ def _open_unreported_graphiti_subscription_leaf(
     outcome: str = "FAILED",
     observe_dispatch: bool = True,
     subscription_not_cash_debited: bool = True,
+    elapsed_ms: int = 999,
 ) -> tuple[InvocationEfficiencyPolicy, InvocationAllocation, InvocationTerminal]:
     envelope = _envelope(
         cycle_id=cycle_id,
@@ -338,8 +343,8 @@ def _open_unreported_graphiti_subscription_leaf(
             usage_status=UsageStatus.UNREPORTED,
             components=UsageComponents(provenance="UNAVAILABLE"),
             dispatch_at=dispatch_at,
-            completed_at=allocation.allocated_at + timedelta(seconds=1),
-            observed_at=allocation.allocated_at + timedelta(seconds=1),
+            completed_at=dispatch_at + timedelta(milliseconds=elapsed_ms),
+            observed_at=dispatch_at + timedelta(milliseconds=elapsed_ms),
             subscription_cli_chat_not_cash_debited=(
                 subscription_not_cash_debited
             ),
@@ -434,6 +439,41 @@ def _issue_790_plan(
     return plan
 
 
+def _issue_790_controller_timeout_report_fixture(
+    terminal: InvocationTerminal,
+    *,
+    configured_timeout_ms: int,
+) -> dict[str, object]:
+    diagnostic = {
+        "schema_version": "newsroom.graphiti-timeout-diagnostic.v1",
+        "boundary": "CONTROLLER_DEADLINE",
+        "phase": "PRIMARY_TRANSPORT",
+        "cause": "CONFIGURED_TIMEOUT_EXPIRED",
+        "provider_cause": "UNOBSERVED",
+        "configured_timeout_ms": configured_timeout_ms,
+        "elapsed_ms": round(
+            (terminal.completed_at - terminal.dispatch_at).total_seconds() * 1_000
+        ),
+        "deadline_at": (
+            terminal.dispatch_at + timedelta(milliseconds=configured_timeout_ms)
+        ).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "last_progress": "DISPATCH_STARTED",
+        "termination": "PROCESS_KILLED",
+        "process": "CLI_CHILD",
+    }
+    causal_report: dict[str, object] = {
+        "schema_version": "newsroom.issue-790.causal-report.v1",
+        "classification": "CONTROLLER_TIMEOUT",
+        "causal_constraint": "CONTROLLER_TIMEOUT_MS",
+        "local_cause": "CONFIGURED_TIMEOUT_EXPIRED",
+        "provider_cause": "UNOBSERVED",
+        "diagnostic_reference": "fixture:issue-790-controller-timeout",
+        "diagnostic": diagnostic,
+    }
+    causal_report["report_digest"] = _digest(causal_report)
+    return causal_report
+
+
 def _issue_790_successor_plan(
     policy: InvocationEfficiencyPolicy,
     allocation: InvocationAllocation,
@@ -442,6 +482,16 @@ def _issue_790_successor_plan(
     approved_at: datetime,
     predecessor_consumption: dict[str, object],
     predecessor_outcome: dict[str, object],
+    sequence_ordinal: int = 1,
+    controller_timeout_ms: int = 160_000,
+    extraction_timeout_ms: int = 180_000,
+    predecessor_controller_timeout_ms: int = 80_000,
+    root_plan_digest: str | None = None,
+    fixed_constraints_digest: str | None = None,
+    call_shape_policy_digest: str = (
+        "sha256:7e6bd15613cefda0820a1d339c8790f0185946aade1622dadbb8c468f558bb18"
+    ),
+    call_shape_policy_version: str = "issue-790-v9",
 ) -> dict[str, object]:
     plan = _issue_790_plan(policy, allocation, terminal)
     plan.pop("canonical_digest")
@@ -453,18 +503,39 @@ def _issue_790_successor_plan(
     target["terminal_outcome"] = terminal.outcome
     target["route_open_reason"] = "TIMEOUT"
     plan["target"] = target
+    canary = dict(plan["canary"])  # type: ignore[arg-type]
+    canary["fallback_mode"] = "DISABLED_BEFORE_PROVIDER_DISPATCH"
+    plan["canary"] = canary
+    if sequence_ordinal == 1:
+        causal_report = _issue_790_controller_timeout_report_fixture(
+            terminal,
+            configured_timeout_ms=predecessor_controller_timeout_ms,
+        )
+    else:
+        causal_report = dict(predecessor_outcome["causal_report"])  # type: ignore[arg-type]
+    retained_fixed_digest = fixed_constraints_digest or _digest(
+        {"fixture": "fixed-constraints"}
+    )
     plan["sequence"] = {
-        "sequence_ordinal": 1,
+        "sequence_ordinal": sequence_ordinal,
         "stop_condition": "FIRST_TRUTHFUL_PROVIDER_BACKED_SUCCESS",
-        "constraint_change": "INITIAL_QUALIFIED_BASELINE",
-        "controller_timeout_ms": 160_000,
-        "extraction_timeout_ms": 180_000,
+        "constraint_change": (
+            "INITIAL_QUALIFIED_BASELINE"
+            if sequence_ordinal == 1
+            else "CONTROLLER_TIMEOUT_INCREMENT"
+        ),
+        "controller_timeout_ms": controller_timeout_ms,
+        "extraction_timeout_ms": extraction_timeout_ms,
         "cleanup_reserve_ms": 20_000,
         "timeout_increment_ms": 10_000,
-        "call_shape_policy_digest": (
-            "sha256:41072c3eb8a7f96fa11592037b94cc24c458e49d16ab29b72ee387d9ee518ec2"
+        "call_shape_policy_digest": call_shape_policy_digest,
+        "call_shape_policy_version": call_shape_policy_version,
+        "fixed_constraints_digest": retained_fixed_digest,
+        "root_plan_digest": (
+            predecessor_consumption["approved_plan_digest"]
+            if root_plan_digest is None
+            else root_plan_digest
         ),
-        "call_shape_policy_version": "issue-790-v8",
         "predecessor": {
             "plan_digest": predecessor_consumption["approved_plan_digest"],
             "consumption_digest": predecessor_consumption["consumption_digest"],
@@ -472,6 +543,7 @@ def _issue_790_successor_plan(
             "event_id": predecessor_consumption["event_id"],
             "ledger_seq": predecessor_consumption["ledger_seq"],
         },
+        "predecessor_causal_report": causal_report,
     }
     plan["canonical_digest"] = _digest(plan)
     return plan
@@ -531,17 +603,19 @@ def _bind_issue_790_fixture_contract(
     )
 
 
-def _bind_issue_790_successor_fixture_contract(
-    monkeypatch: pytest.MonkeyPatch,
+def _issue_790_successor_fixture_contract(
     *,
     allocation: InvocationAllocation,
     terminal: InvocationTerminal,
-    plan_digest: str,
+    plan: Mapping[str, object],
     approved_at: datetime,
-) -> None:
-    contract = issue_790_contract_module.Issue790ApprovedPlanContract(
+) -> issue_790_contract_module.Issue790ApprovedPlanContract:
+    sequence = dict(plan["sequence"])  # type: ignore[arg-type]
+    predecessor = dict(sequence["predecessor"])  # type: ignore[arg-type]
+    causal_report = dict(sequence["predecessor_causal_report"])  # type: ignore[arg-type]
+    return issue_790_contract_module.Issue790ApprovedPlanContract(
         schema_version="newsroom.issue-790.iterative-canary-plan.v2",
-        plan_digest=plan_digest,
+        plan_digest=str(plan["canonical_digest"]),
         invocation_id=allocation.invocation_id,
         terminal_digest=terminal.terminal_digest,
         allocation_digest=allocation.canonical_digest,
@@ -553,12 +627,43 @@ def _bind_issue_790_successor_fixture_contract(
         scope="CONSERVATIVE_SUBSCRIPTION_CLI_USAGE_DISPOSITION",
         terminal_outcome=terminal.outcome,
         route_open_reason="TIMEOUT",
+        root_plan_digest=str(sequence["root_plan_digest"]),
+        predecessor_plan_digest=str(predecessor["plan_digest"]),
+        sequence_ordinal=int(sequence["sequence_ordinal"]),
+        controller_timeout_ms=int(sequence["controller_timeout_ms"]),
+        extraction_timeout_ms=int(sequence["extraction_timeout_ms"]),
+        cleanup_reserve_ms=int(sequence["cleanup_reserve_ms"]),
+        fixed_constraints_digest=str(sequence["fixed_constraints_digest"]),
+        predecessor_causal_report_digest=str(causal_report["report_digest"]),
+        constraint_change=str(sequence["constraint_change"]),
+        reviewed_fix_digest=(
+            None
+            if sequence.get("reviewed_fix") is None
+            else str(dict(sequence["reviewed_fix"])["record_digest"])
+        ),
+    )
+
+
+def _bind_issue_790_successor_fixture_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    allocation: InvocationAllocation,
+    terminal: InvocationTerminal,
+    plan: Mapping[str, object],
+    approved_at: datetime,
+) -> issue_790_contract_module.Issue790ApprovedPlanContract:
+    contract = _issue_790_successor_fixture_contract(
+        allocation=allocation,
+        terminal=terminal,
+        plan=plan,
+        approved_at=approved_at,
     )
     monkeypatch.setattr(
         issue_790_contract_module,
         "_SUCCESS_SEQUENCE_CONTRACTS",
         (contract,),
     )
+    return contract
 
 
 def _seed_issue_790_retry_events(path: Path) -> None:
@@ -679,6 +784,8 @@ def _issue_790_canary_preflight(
     ledger_seq: int,
     evaluated_at: datetime,
     resolved_units: list[dict[str, object]] | None = None,
+    approved_plan_digest: str | None = None,
+    fixed_constraints_digest: str | None = None,
 ) -> dict[str, object]:
     connection = sqlite3.connect(path)
     row = connection.execute(
@@ -692,7 +799,11 @@ def _issue_790_canary_preflight(
     if resolved_units is None:
         resolved_units = manifest["unit_refs"]
     without_digest: dict[str, object] = {
-        "schema_version": "newsroom.graphiti-fresh-event-preflight.v1",
+        "schema_version": (
+            "newsroom.issue-790.iterative-fresh-event-preflight.v2"
+            if approved_plan_digest is not None
+            else "newsroom.graphiti-fresh-event-preflight.v1"
+        ),
         "event_id": event_id,
         "ledger_seq": ledger_seq,
         "event_state": "QUEUED",
@@ -707,6 +818,15 @@ def _issue_790_canary_preflight(
         "store_mutations": 0,
         "evaluated_at": evaluated_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
     }
+    if approved_plan_digest is not None:
+        assert fixed_constraints_digest is not None
+        without_digest.update(
+            {
+                "approved_plan_digest": approved_plan_digest,
+                "fallback_mode": "DISABLED_BEFORE_PROVIDER_DISPATCH",
+                "fixed_constraints_digest": fixed_constraints_digest,
+            }
+        )
     return {**without_digest, "evidence_digest": _digest(without_digest)}
 
 
@@ -2070,7 +2190,7 @@ def test_checked_issue_790_success_sequence_plan_binds_initial_160_second_step()
     )
 
     assert plan["canonical_digest"] == (
-        "sha256:587778ca69b954749b64b0f277e684da69105b8b752324edc089bfd54ae0ad70"
+        "sha256:3347669cc57fcc3740f9e7027cf7c9c6936626dfb1932eeec5ea2018fe6f6308"
     )
     assert plan["schema_version"] == "newsroom.issue-790.iterative-canary-plan.v2"
     assert plan["target"] == {
@@ -2096,33 +2216,75 @@ def test_checked_issue_790_success_sequence_plan_binds_initial_160_second_step()
         "terminal_usage_status": "UNREPORTED",
         "workload_class": "GRAPHITI_CHAT_PRIMARY",
     }
-    assert plan["sequence"] == {
+    sequence = dict(plan["sequence"])
+    assert {
+        key: sequence[key]
+        for key in (
+            "call_shape_policy_digest",
+            "call_shape_policy_version",
+            "cleanup_reserve_ms",
+            "constraint_change",
+            "controller_timeout_ms",
+            "extraction_timeout_ms",
+            "fixed_constraints_digest",
+            "root_plan_digest",
+            "sequence_ordinal",
+            "stop_condition",
+            "timeout_increment_ms",
+        )
+    } == {
         "call_shape_policy_digest": (
-            "sha256:41072c3eb8a7f96fa11592037b94cc24c458e49d16ab29b72ee387d9ee518ec2"
+            "sha256:7e6bd15613cefda0820a1d339c8790f0185946aade1622dadbb8c468f558bb18"
         ),
-        "call_shape_policy_version": "issue-790-v8",
+        "call_shape_policy_version": "issue-790-v9",
         "cleanup_reserve_ms": 20_000,
         "constraint_change": "INITIAL_QUALIFIED_BASELINE",
         "controller_timeout_ms": 160_000,
         "extraction_timeout_ms": 180_000,
-        "predecessor": {
-            "consumption_digest": (
-                "sha256:6ec11fc9d1ee75421c6a4d5419e96abc6a960dd4e02b1c53ac396f6433d6b07a"
-            ),
-            "event_id": (
-                "sha256:46663a38929b02c74275e39ea986c416f9893ebeaf9b81fc92d34ac0b9e2efcd"
-            ),
-            "ledger_seq": 8891,
-            "outcome_digest": (
-                "sha256:4c4ec972b8569e05c45dec60d549d9a5eac1950045d2454da9d86cd76293d05c"
-            ),
-            "plan_digest": (
-                "sha256:ce7ee7fd56c931b147158dad2a74047ada90b805e5a4c545e53db1f4d2ae7383"
-            ),
-        },
+        "fixed_constraints_digest": (
+            "sha256:a3d6a7759c57df52e0a25feae3edcc740ce7ec26064996aae018b276fd36fbb2"
+        ),
+        "root_plan_digest": (
+            "sha256:ce7ee7fd56c931b147158dad2a74047ada90b805e5a4c545e53db1f4d2ae7383"
+        ),
         "sequence_ordinal": 1,
         "stop_condition": "FIRST_TRUTHFUL_PROVIDER_BACKED_SUCCESS",
         "timeout_increment_ms": 10_000,
+    }
+    assert sequence["predecessor"] == {
+        "consumption_digest": (
+            "sha256:6ec11fc9d1ee75421c6a4d5419e96abc6a960dd4e02b1c53ac396f6433d6b07a"
+        ),
+        "event_id": (
+            "sha256:46663a38929b02c74275e39ea986c416f9893ebeaf9b81fc92d34ac0b9e2efcd"
+        ),
+        "ledger_seq": 8891,
+        "outcome_digest": (
+            "sha256:4c4ec972b8569e05c45dec60d549d9a5eac1950045d2454da9d86cd76293d05c"
+        ),
+        "plan_digest": (
+            "sha256:ce7ee7fd56c931b147158dad2a74047ada90b805e5a4c545e53db1f4d2ae7383"
+        ),
+    }
+    causal_report = dict(sequence["predecessor_causal_report"])
+    assert causal_report["report_digest"] == (
+        "sha256:cb1b72361e6f17d02e5f8ecce30d2ff53a79e9334ba942728f58fcf8d977f7f2"
+    )
+    assert causal_report["classification"] == "CONTROLLER_TIMEOUT"
+    assert causal_report["causal_constraint"] == "CONTROLLER_TIMEOUT_MS"
+    assert causal_report["provider_cause"] == "UNOBSERVED"
+    assert causal_report["diagnostic"] == {
+        "boundary": "CONTROLLER_DEADLINE",
+        "cause": "CONFIGURED_TIMEOUT_EXPIRED",
+        "configured_timeout_ms": 80_000,
+        "deadline_at": "2026-08-26T17:04:50.926743Z",
+        "elapsed_ms": 81_217,
+        "last_progress": "DISPATCH_STARTED",
+        "phase": "PRIMARY_TRANSPORT",
+        "process": "CLI_CHILD",
+        "provider_cause": "UNOBSERVED",
+        "schema_version": "newsroom.graphiti-timeout-diagnostic.v1",
+        "termination": "PROCESS_KILLED",
     }
 
 
@@ -2637,9 +2799,10 @@ def test_issue_790_successor_plan_consumes_a_new_event_after_failed_predecessor(
             cycle_id="graphiti-cycle-successor",
             request="graphiti-successor-request",
             outcome="TIMEOUT",
+            elapsed_ms=80_001,
         )
     )
-    second_approved_at = T0 + timedelta(seconds=35)
+    second_approved_at = T0 + timedelta(seconds=90)
     successor_plan = _issue_790_successor_plan(
         second_policy,
         second_allocation,
@@ -2649,11 +2812,11 @@ def test_issue_790_successor_plan_consumes_a_new_event_after_failed_predecessor(
         predecessor_outcome=first_outcome,
     )
     successor_plan_digest = str(successor_plan["canonical_digest"])
-    _bind_issue_790_successor_fixture_contract(
+    successor_contract = _bind_issue_790_successor_fixture_contract(
         monkeypatch,
         allocation=second_allocation,
         terminal=second_terminal,
-        plan_digest=successor_plan_digest,
+        plan=successor_plan,
         approved_at=second_approved_at,
     )
     monkeypatch.setattr(
@@ -2661,9 +2824,9 @@ def test_issue_790_successor_plan_consumes_a_new_event_after_failed_predecessor(
         "load_checked_graphiti_call_shape_policy",
         lambda: SimpleNamespace(
             canonical_digest=(
-                "sha256:41072c3eb8a7f96fa11592037b94cc24c458e49d16ab29b72ee387d9ee518ec2"
+                "sha256:7e6bd15613cefda0820a1d339c8790f0185946aade1622dadbb8c468f558bb18"
             ),
-            version="issue-790-v8",
+            version="issue-790-v9",
             qualified_routes=(
                 SimpleNamespace(
                     leaf_class=issue_790_operation.GraphitiLeafClass.PRIMARY,
@@ -2676,11 +2839,18 @@ def test_issue_790_successor_plan_consumes_a_new_event_after_failed_predecessor(
             ),
         ),
     )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_issue_790_fixed_constraints_digest",
+        lambda _policy: str(
+            dict(successor_plan["sequence"])["fixed_constraints_digest"]
+        ),
+    )
     service.open_route_circuit(
         route=GRAPHITI_CHAT_PRIMARY_ROUTE,
         reason="TIMEOUT",
         invocation_id=second_allocation.invocation_id,
-        recorded_at=T0 + timedelta(seconds=34),
+        recorded_at=T0 + timedelta(seconds=85),
     )
     second_authority, second_authority_digest = _conservative_disposition_authority(
         second_allocation,
@@ -2697,7 +2867,7 @@ def test_issue_790_successor_plan_consumes_a_new_event_after_failed_predecessor(
         approved_at=second_approved_at,
         approved_plan_digest=successor_plan_digest,
         authority_digest=second_authority_digest,
-        observed_at=T0 + timedelta(seconds=40),
+        observed_at=T0 + timedelta(seconds=95),
     )
     second_route = service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)
     service.release_route_circuit(
@@ -2705,14 +2875,14 @@ def test_issue_790_successor_plan_consumes_a_new_event_after_failed_predecessor(
         release_kind="AUTHORISED_OPERATOR_RESET",
         bound_failure_reason=str(second_route["reason"]),
         evidence_digest=str(second_disposition["disposition_digest"]),
-        recorded_at=T0 + timedelta(seconds=41),
+        recorded_at=T0 + timedelta(seconds=96),
     )
 
     dry_run_receipt = dry_run_issue_790_plan(
         source_store=store,
         scratch_store=tmp_path / "successor-dry-run.sqlite3",
         plan=successor_plan,
-        observed_at=T0 + timedelta(seconds=45),
+        observed_at=T0 + timedelta(seconds=100),
     )
     assert dry_run_receipt["schema_version"] == (
         "newsroom.issue-790.iterative-disposition-receipt.v2"
@@ -2728,20 +2898,42 @@ def test_issue_790_successor_plan_consumes_a_new_event_after_failed_predecessor(
         ledger_seq=2005,
         retain_unit_refs=False,
     )
+    iterative_preflight = _issue_790_canary_preflight(
+        store,
+        event_id=second_event_id,
+        ledger_seq=2005,
+        evaluated_at=T0 + timedelta(seconds=104),
+        resolved_units=[_fixture_issue_790_unit_ref(2005)],
+        approved_plan_digest=successor_plan_digest,
+        fixed_constraints_digest=str(
+            dict(successor_plan["sequence"])["fixed_constraints_digest"]
+        ),
+    )
+    tampered_preflight = dict(iterative_preflight)
+    tampered_preflight.pop("evidence_digest")
+    tampered_preflight["fallback_mode"] = "ELIGIBLE_AFTER_PRIMARY_FAILURE"
+    tampered_preflight["evidence_digest"] = _digest(tampered_preflight)
+    with pytest.raises(
+        Issue790CanaryIntegrityError,
+        match="iterative preflight differs",
+    ):
+        repository.consume(
+            approved_plan_digest=successor_plan_digest,
+            disposition_digest=str(second_disposition["disposition_digest"]),
+            event_id=second_event_id,
+            ledger_seq=2005,
+            owner_id="issue-790-canary:tampered-successor",
+            preflight_evidence=tampered_preflight,
+            consumed_at=T0 + timedelta(seconds=105),
+        )
     second_consumption = repository.consume(
         approved_plan_digest=successor_plan_digest,
         disposition_digest=str(second_disposition["disposition_digest"]),
         event_id=second_event_id,
         ledger_seq=2005,
         owner_id="issue-790-canary:successor",
-        preflight_evidence=_issue_790_canary_preflight(
-            store,
-            event_id=second_event_id,
-            ledger_seq=2005,
-            evaluated_at=T0 + timedelta(seconds=49),
-            resolved_units=[_fixture_issue_790_unit_ref(2005)],
-        ),
-        consumed_at=T0 + timedelta(seconds=50),
+        preflight_evidence=iterative_preflight,
+        consumed_at=T0 + timedelta(seconds=105),
     )
 
     assert second_consumption["approved_plan_digest"] == successor_plan_digest
@@ -2754,6 +2946,120 @@ def test_issue_790_successor_plan_consumes_a_new_event_after_failed_predecessor(
     assert {first_event_id, second_event_id}.issubset(excluded)
 
     connection = sqlite3.connect(store)
+    connection.execute(
+        "UPDATE unpublished_graphiti_revision_events SET state='RETRY_HELD',"
+        "attempt_count=1,last_failure_code='PRODUCER_INTERNAL_ERROR',"
+        "provider_dispatched=1 WHERE event_id=? AND ledger_seq=?",
+        (second_event_id, 2005),
+    )
+    connection.commit()
+    connection.close()
+    third_policy, third_allocation, third_terminal = (
+        _open_unreported_graphiti_subscription_leaf(
+            service,
+            cycle_id=second_event_id,
+            request="graphiti-second-successor-request",
+            outcome="TIMEOUT",
+            elapsed_ms=160_001,
+        )
+    )
+    second_causal_report = _issue_790_controller_timeout_report_fixture(
+        third_terminal,
+        configured_timeout_ms=160_000,
+    )
+    second_outcome = repository.complete(
+        consumption_digest=str(second_consumption["consumption_digest"]),
+        event_id=second_event_id,
+        ledger_seq=2005,
+        owner_id="issue-790-canary:successor",
+        process_result={
+            "event_id": second_event_id,
+            "ledger_seq": 2005,
+            "state": "RETRY_HELD",
+            "attempt_count": 1,
+        },
+        completed_at=T0 + timedelta(seconds=270),
+        result_class="CONTROLLER_TIMEOUT_NON_SUCCESS",
+        causal_report=second_causal_report,
+    )
+    assert second_outcome["causal_report"] == second_causal_report
+    assert second_outcome["result_class"] == "CONTROLLER_TIMEOUT_NON_SUCCESS"
+
+    service.open_route_circuit(
+        route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+        reason="TIMEOUT",
+        invocation_id=third_allocation.invocation_id,
+        recorded_at=T0 + timedelta(seconds=275),
+    )
+    step_two_approved_at = T0 + timedelta(seconds=280)
+    step_two_call_shape_digest = _digest({"call-shape": "issue-790-step-two"})
+    step_two_plan = _issue_790_successor_plan(
+        third_policy,
+        third_allocation,
+        third_terminal,
+        approved_at=step_two_approved_at,
+        predecessor_consumption=second_consumption,
+        predecessor_outcome=second_outcome,
+        sequence_ordinal=2,
+        controller_timeout_ms=170_000,
+        extraction_timeout_ms=190_000,
+        predecessor_controller_timeout_ms=160_000,
+        root_plan_digest=FIXTURE_790_PLAN_DIGEST,
+        fixed_constraints_digest=str(
+            dict(successor_plan["sequence"])["fixed_constraints_digest"]
+        ),
+        call_shape_policy_digest=step_two_call_shape_digest,
+        call_shape_policy_version="issue-790-v10",
+    )
+    step_two_contract = _issue_790_successor_fixture_contract(
+        allocation=third_allocation,
+        terminal=third_terminal,
+        plan=step_two_plan,
+        approved_at=step_two_approved_at,
+    )
+    monkeypatch.setattr(
+        issue_790_contract_module,
+        "_SUCCESS_SEQUENCE_CONTRACTS",
+        (successor_contract, step_two_contract),
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "load_checked_graphiti_call_shape_policy",
+        lambda: SimpleNamespace(
+            canonical_digest=step_two_call_shape_digest,
+            version="issue-790-v10",
+            qualified_routes=(
+                SimpleNamespace(
+                    leaf_class=issue_790_operation.GraphitiLeafClass.PRIMARY,
+                    provider="cursor-agent-cli",
+                    route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+                    model="composer-2.5",
+                    max_total_tokens=third_policy.max_total_tokens,
+                    command_flags=("CONTROLLER_TIMEOUT_MS=170000",),
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "GRAPHITI_EXTRACTION_TIMEOUT_MS",
+        190_000,
+    )
+    step_two_dry_run = dry_run_issue_790_plan(
+        source_store=store,
+        scratch_store=tmp_path / "step-two-dry-run.sqlite3",
+        plan=step_two_plan,
+        observed_at=T0 + timedelta(seconds=285),
+    )
+    assert step_two_dry_run["predecessor"]["causal_report"] == (
+        second_causal_report
+    )
+    assert {
+        record["approved_plan_digest"]
+        for record in step_two_dry_run["retry_exclusions"]
+    } == {FIXTURE_790_PLAN_DIGEST}
+
+    connection = sqlite3.connect(store)
     connection.execute("DELETE FROM issue_790_graphiti_retry_exclusions")
     connection.commit()
     connection.close()
@@ -2761,18 +3067,290 @@ def test_issue_790_successor_plan_consumes_a_new_event_after_failed_predecessor(
         approved_plan_digest=successor_plan_digest,
         disposition_digest=str(second_disposition["disposition_digest"]),
         events=RETRY_FORBIDDEN_EVENTS,
-        excluded_at=T0 + timedelta(seconds=51),
+        excluded_at=T0 + timedelta(seconds=106),
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "load_checked_graphiti_call_shape_policy",
+        lambda: SimpleNamespace(
+            canonical_digest=(
+                "sha256:7e6bd15613cefda0820a1d339c8790f0185946aade1622dadbb8c468f558bb18"
+            ),
+            version="issue-790-v9",
+            qualified_routes=(
+                SimpleNamespace(
+                    leaf_class=issue_790_operation.GraphitiLeafClass.PRIMARY,
+                    provider="cursor-agent-cli",
+                    route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+                    model="composer-2.5",
+                    max_total_tokens=second_policy.max_total_tokens,
+                    command_flags=("CONTROLLER_TIMEOUT_MS=160000",),
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "GRAPHITI_EXTRACTION_TIMEOUT_MS",
+        180_000,
     )
     with pytest.raises(
         Issue790DispositionError,
-        match="retry exclusions do not bind the predecessor",
+        match="retry exclusions do not bind the immutable root",
     ):
         dry_run_issue_790_plan(
             source_store=store,
             scratch_store=tmp_path / "rebound-exclusions-dry-run.sqlite3",
             plan=successor_plan,
-            observed_at=T0 + timedelta(seconds=55),
+            observed_at=T0 + timedelta(seconds=110),
         )
+
+
+def test_issue_790_success_sequence_stops_after_truthful_predecessor_success() -> None:
+    root = Path(__file__).resolve().parents[2]
+    plan = json.loads(
+        (
+            root
+            / "docs/operations/2026-08-26-issue-790-success-sequence-step-1.json"
+        ).read_text(encoding="utf-8")
+    )
+    sequence = dict(plan["sequence"])
+    predecessor = dict(sequence["predecessor"])
+    consumption = {
+        "consumption_digest": predecessor["consumption_digest"],
+        "approved_plan_digest": predecessor["plan_digest"],
+        "event_id": predecessor["event_id"],
+        "ledger_seq": predecessor["ledger_seq"],
+    }
+    outcome = {
+        "schema_version": "newsroom.issue-790.canary-outcome.v3",
+        "outcome_digest": predecessor["outcome_digest"],
+        "approved_plan_digest": predecessor["plan_digest"],
+        "event_id": predecessor["event_id"],
+        "ledger_seq": predecessor["ledger_seq"],
+        "retry_authorised": False,
+        "result_class": "TRUTHFUL_PROVIDER_SUCCESS",
+    }
+
+    class SuccessfulPredecessorRepository:
+        @staticmethod
+        def existing_consumption(*, approved_plan_digest: str) -> dict[str, object]:
+            assert approved_plan_digest == predecessor["plan_digest"]
+            return consumption
+
+        @staticmethod
+        def existing_outcome(*, consumption_digest: str) -> dict[str, object]:
+            assert consumption_digest == predecessor["consumption_digest"]
+            return outcome
+
+    with pytest.raises(
+        Issue790DispositionError,
+        match="predecessor already reached truthful success",
+    ):
+        issue_790_operation._require_sequence_predecessor(
+            SuccessfulPredecessorRepository(),  # type: ignore[arg-type]
+            plan=plan,
+        )
+
+
+def test_issue_790_sequence_does_not_loosen_after_unclassified_failure() -> None:
+    root = Path(__file__).resolve().parents[2]
+    plan = json.loads(
+        (
+            root
+            / "docs/operations/2026-08-26-issue-790-success-sequence-step-1.json"
+        ).read_text(encoding="utf-8")
+    )
+    sequence = dict(plan["sequence"])
+    sequence["sequence_ordinal"] = 2
+    plan["sequence"] = sequence
+    predecessor = dict(sequence["predecessor"])
+    consumption = {
+        "consumption_digest": predecessor["consumption_digest"],
+        "approved_plan_digest": predecessor["plan_digest"],
+        "event_id": predecessor["event_id"],
+        "ledger_seq": predecessor["ledger_seq"],
+    }
+    outcome = {
+        "schema_version": "newsroom.issue-790.canary-outcome.v3",
+        "outcome_digest": predecessor["outcome_digest"],
+        "approved_plan_digest": predecessor["plan_digest"],
+        "event_id": predecessor["event_id"],
+        "ledger_seq": predecessor["ledger_seq"],
+        "retry_authorised": False,
+        "result_class": "UNCLASSIFIED_NON_SUCCESS",
+        "causal_report": None,
+    }
+
+    class UnclassifiedPredecessorRepository:
+        @staticmethod
+        def existing_consumption(*, approved_plan_digest: str) -> dict[str, object]:
+            assert approved_plan_digest == predecessor["plan_digest"]
+            return consumption
+
+        @staticmethod
+        def existing_outcome(*, consumption_digest: str) -> dict[str, object]:
+            assert consumption_digest == predecessor["consumption_digest"]
+            return outcome
+
+    with pytest.raises(
+        Issue790DispositionError,
+        match="predecessor transition differs",
+    ):
+        issue_790_operation._require_sequence_predecessor(
+            UnclassifiedPredecessorRepository(),  # type: ignore[arg-type]
+            plan=plan,
+        )
+
+
+def test_issue_790_reviewed_non_timeout_fix_preserves_attempt_budgets() -> None:
+    root = Path(__file__).resolve().parents[2]
+    plan = json.loads(
+        (
+            root
+            / "docs/operations/2026-08-26-issue-790-success-sequence-step-1.json"
+        ).read_text(encoding="utf-8")
+    )
+    sequence = dict(plan["sequence"])
+    sequence["sequence_ordinal"] = 2
+    sequence["constraint_change"] = "REVIEWED_NON_TIMEOUT_FIX"
+    predecessor = dict(sequence["predecessor"])
+    causal_report: dict[str, object] = {
+        "schema_version": "newsroom.issue-790.non-timeout-causal-report.v1",
+        "classification": "NON_TIMEOUT_FAILURE",
+        "causal_constraint": "REVIEWED_CODE_OR_CONFIGURATION_FIX",
+        "local_cause": "RESULT_VALIDATION_FAILED",
+        "provider_cause": "MALFORMED_RESPONSE",
+        "predecessor_outcome_digest": predecessor["outcome_digest"],
+        "event_id": predecessor["event_id"],
+        "boundary": "RESPONSE_VALIDATION",
+        "configured_controller_timeout_ms": 160_000,
+        "configured_extraction_timeout_ms": 180_000,
+        "cleanup_reserve_ms": 20_000,
+        "deadline_at": None,
+        "elapsed_ms": 2_000,
+        "last_progress": "PROVIDER_RESPONSE_RECEIVED",
+        "termination": "PROCESS_EXITED",
+        "diagnostic_reference": "retained:fixture:non-timeout",
+    }
+    causal_report["report_digest"] = _digest(causal_report)
+    reviewed_fix: dict[str, object] = {
+        "schema_version": "newsroom.issue-790.reviewed-non-timeout-fix.v1",
+        "predecessor_outcome_digest": predecessor["outcome_digest"],
+        "causal_report_digest": causal_report["report_digest"],
+        "fix_kind": "CODE",
+        "pull_request_url": "https://github.com/fol2/newsroom/pull/999",
+        "reviewed_fix_revision": "a" * 40,
+        "review_receipt_digest": _digest({"review": "PASS"}),
+        "provider_free_qualification_digest": _digest(
+            {"focused_tests": "PASS"}
+        ),
+    }
+    reviewed_fix["record_digest"] = _digest(reviewed_fix)
+    sequence["predecessor_causal_report"] = causal_report
+    sequence["reviewed_fix"] = reviewed_fix
+    plan["sequence"] = sequence
+    plan["canonical_digest"] = _digest(
+        {key: value for key, value in plan.items() if key != "canonical_digest"}
+    )
+    assert validate_issue_790_plan(plan) == plan
+
+    consumption = {
+        "consumption_digest": predecessor["consumption_digest"],
+        "approved_plan_digest": predecessor["plan_digest"],
+        "event_id": predecessor["event_id"],
+        "ledger_seq": predecessor["ledger_seq"],
+    }
+    outcome = {
+        "schema_version": "newsroom.issue-790.canary-outcome.v3",
+        "outcome_digest": predecessor["outcome_digest"],
+        "approved_plan_digest": predecessor["plan_digest"],
+        "event_id": predecessor["event_id"],
+        "ledger_seq": predecessor["ledger_seq"],
+        "retry_authorised": False,
+        "result_class": "UNCLASSIFIED_NON_SUCCESS",
+        "causal_report": None,
+    }
+
+    class ReviewedFixRepository:
+        @staticmethod
+        def existing_consumption(*, approved_plan_digest: str) -> dict[str, object]:
+            assert approved_plan_digest == predecessor["plan_digest"]
+            return consumption
+
+        @staticmethod
+        def existing_outcome(*, consumption_digest: str) -> dict[str, object]:
+            assert consumption_digest == predecessor["consumption_digest"]
+            return outcome
+
+    retained = issue_790_operation._require_sequence_predecessor(
+        ReviewedFixRepository(),  # type: ignore[arg-type]
+        plan=plan,
+    )
+    assert retained is not None
+    assert retained["reviewed_fix"] == reviewed_fix
+    assert sequence["controller_timeout_ms"] == 160_000
+    assert sequence["extraction_timeout_ms"] == 180_000
+
+
+def test_issue_790_timeout_report_deduplicates_one_retained_diagnostic(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    event_id = _digest({"issue-790-timeout-event": 1})
+    _policy_value, _allocation, terminal = (
+        _open_unreported_graphiti_subscription_leaf(
+            service,
+            cycle_id=event_id,
+            request="issue-790-timeout-report",
+            outcome="TIMEOUT",
+            elapsed_ms=160_001,
+        )
+    )
+    diagnostic = dict(
+        _issue_790_controller_timeout_report_fixture(
+            terminal,
+            configured_timeout_ms=160_000,
+        )["diagnostic"]  # type: ignore[arg-type]
+    )
+    store = tmp_path / "unpublished.sqlite3"
+    connection = connect_unpublished_store(str(store))
+    try:
+        receipt = {
+            "ingest_id": f"ingest-{event_id}",
+            "attempt_number": 1,
+            "outcome": "FAILED",
+            "timeout_diagnostics": [diagnostic],
+            "chat_invocations": [
+                {
+                    "provider": "cursor-agent-cli",
+                    "transport_diagnostic": diagnostic,
+                }
+            ],
+            "receipt_digest": "",
+        }
+        receipt_digest = insert_graphiti_attempt_receipt(
+            connection,
+            ingest_id=f"ingest-{event_id}",
+            attempt_number=1,
+            outcome="FAILED",
+            receipt=receipt,
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    report = issue_790_operation._issue_790_controller_timeout_report(
+        store,
+        event_id=event_id,
+        configured_timeout_ms=160_000,
+    )
+
+    assert report is not None
+    assert report["diagnostic"] == diagnostic
+    assert report["diagnostic_reference"] == (
+        "retained:unpublished_graphiti_attempt_receipts:" + receipt_digest
+    )
 
 
 def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
