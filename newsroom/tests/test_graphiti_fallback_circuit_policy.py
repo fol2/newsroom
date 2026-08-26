@@ -96,7 +96,7 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
     policy = load_checked_graphiti_fallback_circuit_policy()
     call_shape = load_checked_graphiti_call_shape_policy()
 
-    assert policy.version == "issue-790-v4"
+    assert policy.version == "issue-790-v5"
     assert policy.call_shape_policy_digest == call_shape.canonical_digest
     assert policy.eligible_outcomes == ("MALFORMED_OUTPUT",)
     assert policy.max_fallback_leaves_per_primary == 1
@@ -124,6 +124,16 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
         in primary.command_flags
     )
     assert "CONTROLLER_TIMEOUT_MS=160000" in primary.command_flags
+    assert (
+        "TIMEOUT_DIAGNOSTIC_SCHEMA=newsroom.graphiti-timeout-diagnostic.v1"
+        in primary.command_flags
+    )
+    fallback = call_shape.route_for(GraphitiLeafClass.FALLBACK)
+    assert "CONTROLLER_TIMEOUT_MS=160000" in fallback.command_flags
+    assert (
+        "TIMEOUT_DIAGNOSTIC_SCHEMA=newsroom.graphiti-timeout-diagnostic.v1"
+        in fallback.command_flags
+    )
     assert (
         f"AUTHENTICATION_BRIDGE={cursor_transport.CURSOR_AUTHENTICATION_BRIDGE}"
         in primary.command_flags

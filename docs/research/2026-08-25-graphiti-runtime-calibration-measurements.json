@@ -29,7 +29,7 @@
     "fixture_count": 11,
     "reported_as_provider_tokens": false
   },
-  "evidence_digest": "sha256:a46e53380183346a78f7728ee26c702ebdb84e3237966243e6812c4e6d917d52",
+  "evidence_digest": "sha256:6d1eb62464c7970faa9eaeb12e3339776fae0ae39c74aa2fdaeb79a3d970c091",
   "fallback_eligible_outcomes": [
     "MALFORMED_OUTPUT"
   ],
@@ -183,9 +183,9 @@
     }
   ],
   "identities": {
-    "call_shape_policy_digest": "sha256:520e8083f274bd0c5199293e8c7488953519d7d260790485d4a5b7ac78fd3cab",
+    "call_shape_policy_digest": "sha256:8f24222f140607498f6a1569bb554f40a80b8f3e0e6575b69e69beb33fe9bc9f",
     "context_manifest": "graphiti-combined-temporal-hermetic-v1",
-    "fallback_circuit_policy_digest": "sha256:f3c4f829a93619ae7c5239fe9887f4d40359e8525f3ef523477eba48048bd383",
+    "fallback_circuit_policy_digest": "sha256:ac2637fc44f0a1e357ba9e2ee5860bf1183a196bb9cfe5782b19643e95d61620",
     "prompt": "newsroom.graphiti.proposal-only-prompt:v1",
     "qualified_routes": [
       {
@@ -223,10 +223,11 @@
           "CREDENTIAL_STATE_DIGEST=sha256:c4f5b14be367d9c6639c59ff13375652a957e600a85fbbe6339112b3392cba6a",
           "PROMPT_MAX_OUTPUT_TOKENS=REQUEST_MAX_TOKENS",
           "CONTROLLER_STDOUT_CONTRACT=cursor-controller-stdout-v1:65536+64*REQUEST_MAX_TOKENS",
-          "CONTROLLER_TIMEOUT_MS=160000"
+          "CONTROLLER_TIMEOUT_MS=160000",
+          "TIMEOUT_DIAGNOSTIC_SCHEMA=newsroom.graphiti-timeout-diagnostic.v1"
         ],
-        "command_semantic_version": "newsroom.graphiti-provider-dispatch.v5",
-        "config_identity": "cursor-agent-cli-2026.08.11-e8db854-pinned-package-v4",
+        "command_semantic_version": "newsroom.graphiti-provider-dispatch.v6",
+        "config_identity": "cursor-agent-cli-2026.08.11-e8db854-pinned-package-v5",
         "disabled_capabilities": [
           "repository-discovery",
           "prior-conversation",
@@ -237,7 +238,7 @@
           "planning",
           "subagents"
         ],
-        "implementation_revision": "sha256:71f0893a557f1fb79a61057970023db91d68af3d9cddfe1dbc2d94b2d72596e3",
+        "implementation_revision": "sha256:aa0c541318e6091ee0699755a3f1fc24f1eb790ce5b0080274fcef719a1d9f94",
         "leaf_class": "PRIMARY",
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
@@ -263,10 +264,11 @@
           "--no-subagents",
           "--reasoning-effort=medium",
           "--output-format=streaming-json",
-          "CONTROLLER_TIMEOUT_MS=160000"
+          "CONTROLLER_TIMEOUT_MS=160000",
+          "TIMEOUT_DIAGNOSTIC_SCHEMA=newsroom.graphiti-timeout-diagnostic.v1"
         ],
-        "command_semantic_version": "newsroom.graphiti-provider-dispatch.v2",
-        "config_identity": "graphiti-cli-command-v2",
+        "command_semantic_version": "newsroom.graphiti-provider-dispatch.v3",
+        "config_identity": "graphiti-cli-command-v3",
         "disabled_capabilities": [
           "repository-discovery",
           "prior-conversation",
@@ -277,7 +279,7 @@
           "planning",
           "subagents"
         ],
-        "implementation_revision": "sha256:71f0893a557f1fb79a61057970023db91d68af3d9cddfe1dbc2d94b2d72596e3",
+        "implementation_revision": "sha256:aa0c541318e6091ee0699755a3f1fc24f1eb790ce5b0080274fcef719a1d9f94",
         "leaf_class": "FALLBACK",
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
@@ -389,8 +391,8 @@
     "immutable_after_restart": true,
     "invocation_efficiency_policies": [
       {
-        "canonical_digest": "sha256:7609fd9b07238a6498a6fe5b5a1a3b28c5ebe6e6bff93d1fb898d922f9d3983e",
-        "evidence_digest": "sha256:3e2d4ba0a720b75b4fe77fe87f0441cd5c0758e3c58d433aa82e4d53012a5dc5",
+        "canonical_digest": "sha256:0b0a50365f0861d0daa12cae7cab35d6523011399fe0bcd39b016e2f4f2ae841",
+        "evidence_digest": "sha256:57e47a828e890615001a9b2ccd2221ca37450b33fb0544d00265aab513eda6a1",
         "hard_estimate_ceiling_tokens": null,
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
@@ -399,8 +401,8 @@
         "route": "GRAPHITI_CHAT_PRIMARY"
       },
       {
-        "canonical_digest": "sha256:46d7d7bd52685477d9a6c4af9566c8e3f4f014621ba5ccc7dfe15cd1186e0e62",
-        "evidence_digest": "sha256:ce1461f3e34a20e22431db22e63422480b70546df8f798fd7c1099484126d32b",
+        "canonical_digest": "sha256:06b31ac4155997e5ea2727a6fa869cb6e194517a1ebae03cc85d35075f371a48",
+        "evidence_digest": "sha256:22a50ac1b4a6627f20020c79f46400298731dd9d6488910948e016e3e0e025c9",
         "hard_estimate_ceiling_tokens": null,
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,

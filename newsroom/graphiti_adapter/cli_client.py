@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
@@ -28,6 +29,9 @@ from newsroom.graphiti_adapter.cursor_transport import (
     cursor_stdout_limit,
     run_cursor_transport,
     run_cursor_transport_async,
+    stop_process_async,
+    timeout_deadline_after,
+    timeout_diagnostic,
 )
 from newsroom.graphiti_adapter.evaluation_packet import (
     CURSOR_AGENT_MODEL_ID,
@@ -155,11 +159,13 @@ def extract_json(raw: str) -> str:
 def run_cli(
     command: tuple[str, ...],
     *,
-    timeout: int,
+    timeout: float,
     cwd: str | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> str:
     name = os.path.basename(command[0])
+    started = time.monotonic()
+    deadline_at = timeout_deadline_after(timeout)
     try:
         result = subprocess.run(
             command,
@@ -170,8 +176,27 @@ def run_cli(
             cwd=cwd,
             env=dict(environment or unprivileged_child_environment()),
         )
-    except subprocess.TimeoutExpired:
-        raise TimeoutError(f"{name} Graphiti LLM timed out") from None
+    except subprocess.TimeoutExpired as exc:
+        stdout = _timeout_output(exc.stdout)
+        stderr = _timeout_output(exc.stderr)
+        raise CliTransportTimeout(
+            f"{name} Graphiti LLM timed out",
+            evidence=timeout_diagnostic(
+                boundary="CONTROLLER_DEADLINE",
+                phase="FALLBACK_TRANSPORT",
+                cause="CONFIGURED_TIMEOUT_EXPIRED",
+                configured_timeout_ms=round(timeout * 1_000),
+                elapsed_ms=round((time.monotonic() - started) * 1_000),
+                deadline_at=deadline_at,
+                last_progress=(
+                    "OUTPUT_OBSERVED" if stdout or stderr else "NO_OUTPUT_OBSERVED"
+                ),
+                termination="PROCESS_KILLED",
+                process=name,
+                stdout=stdout,
+                stderr=stderr,
+            ),
+        ) from None
     if result.returncode != 0:
         raise RuntimeError(f"{name} Graphiti LLM failed")
     text = _decode_stdout(result.stdout, name=name)
@@ -189,10 +214,18 @@ def _decode_stdout(stdout: bytes, *, name: str) -> str:
         ) from None
 
 
+def _timeout_output(value: bytes | str | None) -> bytes:
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    return b""
+
+
 async def run_cli_async(
     command: tuple[str, ...],
     *,
-    timeout: int,
+    timeout: float,
     cwd: str | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> str:
@@ -206,19 +239,64 @@ async def run_cli_async(
         cwd=cwd,
         env=dict(environment or unprivileged_child_environment()),
     )
+    assert process.stdout is not None
+    assert process.stderr is not None
+    outputs = {"stdout": bytearray(), "stderr": bytearray()}
+
+    async def collect(stream: asyncio.StreamReader, destination: bytearray) -> None:
+        while True:
+            chunk = await stream.read(65_536)
+            if not chunk:
+                return
+            destination.extend(chunk)
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    deadline = started + timeout
+    deadline_at = timeout_deadline_after(timeout)
     try:
-        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        await asyncio.wait_for(
+            asyncio.gather(
+                collect(process.stdout, outputs["stdout"]),
+                collect(process.stderr, outputs["stderr"]),
+            ),
+            timeout=timeout,
+        )
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError
+        await asyncio.wait_for(process.wait(), timeout=remaining)
     except TimeoutError:
-        process.kill()
-        await process.wait()
-        raise TimeoutError(f"{name} Graphiti LLM timed out") from None
+        termination = await stop_process_async(process)
+        stdout = bytes(outputs["stdout"])
+        stderr = bytes(outputs["stderr"])
+        raise CliTransportTimeout(
+            f"{name} Graphiti LLM timed out",
+            evidence=timeout_diagnostic(
+                boundary="CONTROLLER_DEADLINE",
+                phase="FALLBACK_TRANSPORT",
+                cause="CONFIGURED_TIMEOUT_EXPIRED",
+                configured_timeout_ms=round(timeout * 1_000),
+                elapsed_ms=round((loop.time() - started) * 1_000),
+                deadline_at=deadline_at,
+                last_progress=(
+                    "OUTPUT_OBSERVED" if stdout or stderr else "NO_OUTPUT_OBSERVED"
+                ),
+                termination=termination,
+                process=name,
+                stdout=stdout,
+                stderr=stderr,
+            ),
+        ) from None
     except asyncio.CancelledError:
-        process.kill()
-        await process.wait()
+        await stop_process_async(process)
+        raise
+    except BaseException:
+        await stop_process_async(process)
         raise
     if process.returncode != 0:
         raise RuntimeError(f"{name} Graphiti LLM failed")
-    text = _decode_stdout(stdout, name=name)
+    text = _decode_stdout(bytes(outputs["stdout"]), name=name)
     if not text.strip():
         raise RuntimeError("Graphiti LLM returned empty stdout")
     return text
@@ -597,6 +675,27 @@ def _invocation(
     return value
 
 
+def _retained_timeout_diagnostic(
+    exc: BaseException,
+    *,
+    phase: str,
+    started: float,
+    transport_started: bool,
+) -> Mapping[str, object]:
+    if isinstance(exc, CliTransportTimeout):
+        return exc.evidence
+    return timeout_diagnostic(
+        boundary="UNOBSERVED_TIMEOUT_BOUNDARY",
+        phase=phase,
+        cause="TIMEOUT_ORIGIN_UNOBSERVED",
+        configured_timeout_ms=CLI_CALL_TIMEOUT_SECONDS * 1_000,
+        elapsed_ms=round((time.monotonic() - started) * 1_000),
+        deadline_at=None,
+        last_progress=("DISPATCH_STARTED" if transport_started else "PREDISPATCH"),
+        termination="UNOBSERVED",
+    )
+
+
 def _bind_requested_max_tokens(prompt: str, max_tokens: int) -> str:
     _require_positive_max_tokens(max_tokens)
     return (
@@ -716,6 +815,7 @@ async def run_cli_chain(
         )
     )
     cursor_transport_started = False
+    cursor_started = time.monotonic()
 
     def mark_cursor_transport_started() -> None:
         nonlocal cursor_transport_started
@@ -804,6 +904,22 @@ async def run_cli_chain(
                 failure=type(exc).__name__,
                 requested_max_tokens=max_tokens,
                 receipt_binding=binding,
+                transport_diagnostic=timeout_diagnostic(
+                    boundary="CALLER_CANCELLATION",
+                    phase="PRIMARY_TRANSPORT",
+                    cause="CALLER_CANCELLED",
+                    configured_timeout_ms=CLI_CALL_TIMEOUT_SECONDS * 1_000,
+                    elapsed_ms=round(
+                        (time.monotonic() - cursor_started) * 1_000
+                    ),
+                    deadline_at=None,
+                    last_progress=(
+                        "DISPATCH_STARTED"
+                        if cursor_transport_started
+                        else "PREDISPATCH"
+                    ),
+                    termination="TASK_CANCELLED",
+                ),
             )
         )
         raise
@@ -823,8 +939,11 @@ async def run_cli_chain(
                 failure=type(exc).__name__,
                 requested_max_tokens=max_tokens,
                 receipt_binding=binding,
-                transport_diagnostic=(
-                    exc.evidence if isinstance(exc, CliTransportTimeout) else None
+                transport_diagnostic=_retained_timeout_diagnostic(
+                    exc,
+                    phase="PRIMARY_TRANSPORT",
+                    started=cursor_started,
+                    transport_started=cursor_transport_started,
                 ),
             )
         )
@@ -959,6 +1078,7 @@ async def run_cli_chain(
         )
     )
     grok_transport_started = False
+    grok_started = time.monotonic()
 
     def mark_grok_transport_started() -> None:
         nonlocal grok_transport_started
@@ -1034,6 +1154,20 @@ async def run_cli_chain(
                 failure=type(exc).__name__,
                 requested_max_tokens=max_tokens,
                 receipt_binding=binding,
+                transport_diagnostic=timeout_diagnostic(
+                    boundary="CALLER_CANCELLATION",
+                    phase="FALLBACK_TRANSPORT",
+                    cause="CALLER_CANCELLED",
+                    configured_timeout_ms=CLI_CALL_TIMEOUT_SECONDS * 1_000,
+                    elapsed_ms=round((time.monotonic() - grok_started) * 1_000),
+                    deadline_at=None,
+                    last_progress=(
+                        "DISPATCH_STARTED"
+                        if grok_transport_started
+                        else "PREDISPATCH"
+                    ),
+                    termination="TASK_CANCELLED",
+                ),
             )
         )
         raise
@@ -1053,8 +1187,11 @@ async def run_cli_chain(
                 failure=type(exc).__name__,
                 requested_max_tokens=max_tokens,
                 receipt_binding=binding,
-                transport_diagnostic=(
-                    exc.evidence if isinstance(exc, CliTransportTimeout) else None
+                transport_diagnostic=_retained_timeout_diagnostic(
+                    exc,
+                    phase="FALLBACK_TRANSPORT",
+                    started=grok_started,
+                    transport_started=grok_transport_started,
                 ),
             )
         )
