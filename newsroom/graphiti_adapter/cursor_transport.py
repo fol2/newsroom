@@ -217,6 +217,9 @@ class _CursorAuthenticationBridgeProof:
     source_inode: int
     source_uid: int
     source_mode: int
+    source_size: int
+    source_mtime_ns: int
+    source_ctime_ns: int
     destination: str
 
     @property
@@ -383,6 +386,9 @@ def _inspect_cursor_authentication_bridge(
         source_inode=source_stat.st_ino,
         source_uid=source_stat.st_uid,
         source_mode=stat.S_IMODE(source_stat.st_mode),
+        source_size=source_stat.st_size,
+        source_mtime_ns=source_stat.st_mtime_ns,
+        source_ctime_ns=source_stat.st_ctime_ns,
         destination=str(destination),
     )
 
