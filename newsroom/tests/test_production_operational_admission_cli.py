@@ -8,8 +8,13 @@ from pathlib import Path
 import pytest
 
 import scripts.production_operational_admission as command
+from newsroom.increment9.provider_terms import (
+    FIXTURE_HMAC_KEY as PROVIDER_TERMS_FIXTURE_HMAC_KEY,
+)
+from newsroom.increment9.rights import FIXTURE_HMAC_KEY as RIGHTS_FIXTURE_HMAC_KEY
 from newsroom.production_admission import (
     PRODUCTION_GATE_IDS,
+    KeyClass,
     OwnerIssueRecord,
     ProductionAdmissionError,
     ProductionOperationalAdmission,
@@ -47,6 +52,20 @@ def test_keyring_loads_only_the_fixed_keychain_reference(
 
     assert keys == {_EVIDENCE_KEY.key_id: _EVIDENCE_KEY}
     assert requested == [_EVIDENCE_KEY.key_id]
+
+
+@pytest.mark.parametrize(
+    "fixture_secret",
+    (RIGHTS_FIXTURE_HMAC_KEY, PROVIDER_TERMS_FIXTURE_HMAC_KEY),
+)
+def test_keyring_rejects_every_increment9q_fixture_hmac_key(
+    fixture_secret: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(command, "_keychain_secret", lambda _key_id: fixture_secret)
+
+    with pytest.raises(ProductionAdmissionError, match="Increment 9Q fixture key"):
+        command._keyring(key_class=KeyClass.PRODUCTION_OPERATIONAL_ADMISSION)
 
 
 def test_keychain_loader_uses_the_fixed_account_and_service(

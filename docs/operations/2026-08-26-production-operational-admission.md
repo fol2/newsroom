@@ -177,7 +177,10 @@ minter compares the loaded Keychain key with that fingerprint before sealing.
 The same instruction and key therefore replay to the same one record, while a
 different secret under the same Keychain service is a blocker rather than a
 second admission. Fixture, synthetic and Increment 9Q signing-key identities
-are rejected by the minter.
+are rejected by the minter. The exact retained Increment 9Q rights and Provider
+Terms fixture-HMAC byte digests are also a fixed negative inventory: loading
+either secret from the production Keychain slot fails before a production
+signing-key object can exist.
 
 ## Provider-free command path
 
