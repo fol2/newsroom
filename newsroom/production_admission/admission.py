@@ -13,7 +13,6 @@ from ._shared import (
     AuthenticationKey,
     FreezeIdentity,
     KeyClass,
-    KeyProvenance,
     ProductionAdmissionError,
     _canonical_document,
     _digest,
@@ -66,6 +65,7 @@ class _AdmissionEvidenceBinding:
     bound_evidence_digests: Mapping[str, str]
     accepted_publication_spec_digests: Mapping[str, str]
     fixture_admission_digest: str
+    production_signing_key_fingerprint: str
     owner_instruction_id: str
     owner_instruction_digest: str
     authority_issue_snapshot_digest: str
@@ -125,6 +125,9 @@ class _AdmissionEvidenceBinding:
                 evidence_manifest.accepted_publication_spec_digests
             ),
             fixture_admission_digest=evidence_manifest.fixture_admission_digest,
+            production_signing_key_fingerprint=(
+                owner_instruction.production_signing_key_fingerprint
+            ),
             owner_instruction_id=owner_instruction.instruction_id,
             owner_instruction_digest=owner_instruction.digest,
             authority_issue_snapshot_digest=(
@@ -154,6 +157,9 @@ class _AdmissionEvidenceBinding:
                 self.accepted_publication_spec_digests
             ),
             "fixture_admission_digest": self.fixture_admission_digest,
+            "production_signing_key_fingerprint": (
+                self.production_signing_key_fingerprint
+            ),
             "owner_instruction_id": self.owner_instruction_id,
             "owner_instruction_digest": self.owner_instruction_digest,
             "authority_issue_snapshot_digest": self.authority_issue_snapshot_digest,
@@ -181,6 +187,8 @@ class _AdmissionEvidenceBinding:
             and dict(record.accepted_publication_spec_digests)
             == dict(self.accepted_publication_spec_digests)
             and record.fixture_admission_digest == self.fixture_admission_digest
+            and record.production_signing_key_fingerprint
+            == self.production_signing_key_fingerprint
             and record.owner_instruction_id == self.owner_instruction_id
             and record.owner_instruction_digest == self.owner_instruction_digest
             and record.authority_issue_snapshot_digest
@@ -208,6 +216,7 @@ class ProductionOperationalAdmission:
     bound_evidence_digests: Mapping[str, str]
     accepted_publication_spec_digests: Mapping[str, str]
     fixture_admission_digest: str
+    production_signing_key_fingerprint: str
     owner_instruction_id: str
     owner_instruction_digest: str
     authority_issue_snapshot_digest: str
@@ -256,6 +265,7 @@ class ProductionOperationalAdmission:
             "bound_evidence_digests",
             "accepted_publication_spec_digests",
             "fixture_admission_digest",
+            "production_signing_key_fingerprint",
             "owner_instruction_id",
             "owner_instruction_digest",
             "authority_issue_snapshot_digest",
@@ -346,6 +356,10 @@ class ProductionOperationalAdmission:
             bound_evidence,
             publication_spec_evidence,
             _digest(value["fixture_admission_digest"], "fixture_admission_digest"),
+            _digest(
+                value["production_signing_key_fingerprint"],
+                "production_signing_key_fingerprint",
+            ),
             _digest(value["owner_instruction_id"], "owner_instruction_id"),
             _digest(value["owner_instruction_digest"], "owner_instruction_digest"),
             _digest(
@@ -379,13 +393,14 @@ class ProductionOperationalAdmission:
         ):
             raise ProductionAdmissionError("production admission binding differs")
         key = trusted_production_keys.get(record.signing_key_id)
-        if (
-            key is None
-            or key.key_id != record.signing_key_id
-            or key.key_class is not KeyClass.PRODUCTION_OPERATIONAL_ADMISSION
-            or key.provenance is not KeyProvenance.PRODUCTION_TRUST_ROOT
-        ):
+        if key is None:
             raise ProductionAdmissionError("production admission key is untrusted")
+        key.require_production_trust_root(
+            KeyClass.PRODUCTION_OPERATIONAL_ADMISSION,
+            expected_key_id=record.signing_key_id,
+        )
+        if key.fingerprint != record.production_signing_key_fingerprint:
+            raise ProductionAdmissionError("production signing key fingerprint differs")
         _verify_seal(value, secret=key.secret)
         return record
 
@@ -419,16 +434,15 @@ def mint_production_operational_admission(
         trusted_owner_keys=trusted_owner_keys,
         current_owner_issue=current_owner_issue,
     )
+    production_signing_key.require_production_trust_root(
+        KeyClass.PRODUCTION_OPERATIONAL_ADMISSION,
+        expected_key_id=owner_instruction.production_signing_key_id,
+    )
     if (
-        production_signing_key.key_class
-        is not KeyClass.PRODUCTION_OPERATIONAL_ADMISSION
-        or production_signing_key.key_id != owner_instruction.production_signing_key_id
+        production_signing_key.fingerprint
+        != owner_instruction.production_signing_key_fingerprint
     ):
-        raise ProductionAdmissionError("production signing key differs")
-    if production_signing_key.provenance is not KeyProvenance.PRODUCTION_TRUST_ROOT:
-        raise ProductionAdmissionError(
-            "production signing key provenance is ineligible"
-        )
+        raise ProductionAdmissionError("production signing key fingerprint differs")
 
     binding = _AdmissionEvidenceBinding.from_authority(
         report=report,

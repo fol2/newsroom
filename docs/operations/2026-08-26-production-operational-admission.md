@@ -40,9 +40,11 @@ same complete gate inventory with one precise fail-closed blocker on every
 gate; it does not collapse into an unstructured command error.
 
 The command wrapper resolves Git through `/usr/bin/git`, clears redirecting Git
-environment, and accepts only a clean checkout whose `HEAD`, local `main` and
-retained `origin/main` all identify the same commit and tree. A local branch
-without `origin/main` authority is not exact main.
+environment, and accepts only a clean checkout whose `HEAD`, local `main`,
+retained `origin/main` and a read-only `ls-remote` of the fixed canonical GitHub
+repository all identify the same commit and tree. The live lookup runs outside
+the checkout so repository-local Git configuration cannot redirect it. A local
+branch without retained and live `origin/main` authority is not exact main.
 
 `newsroom.production_admission.mint_production_operational_admission()` is the
 public minting seam. It independently reconstructs the readiness report,
@@ -66,8 +68,9 @@ admission module:
 - `owner.py` owns the live issue snapshot and owner instruction; and
 - `admission.py` owns the final evidence binding, seal, mint and verifier.
 
-The command wrapper is the only Git/GitHub adapter. Tests retain the production
-contract and classifier routing separately from these domain responsibilities.
+The command wrapper is the only Git/GitHub/Keychain adapter. Tests retain the
+production contract and classifier routing separately from these domain
+responsibilities.
 
 ## Exact production identities
 
@@ -118,7 +121,9 @@ binds that record, the exact evidence manifest, main SHA/tree and seven-class
 identity-set digest. The retained manifest also binds the qualifying shadow
 closeout, qualifying live canary closeout, backup, restore and rollback
 artefacts. Canary, restore and rollback must name the same identity set,
-deployment bytes and store identity.
+deployment bytes and store identity. Backup, restore and rollback must all name
+the same protected store identity; updating a gate fact to follow a drifted
+backup cannot hide a recovery-target mismatch.
 
 The manifest and final admission record carry the individual content digests
 for the exact eight publication-facing specifications fixed by #560 and #589.
@@ -146,7 +151,8 @@ binds:
 - the exact readiness report and evidence manifest;
 - the qualifying shadow and canary closeouts;
 - the owner identity and issue time; and
-- one named `PRODUCTION_OPERATIONAL_ADMISSION` signing key.
+- one named `PRODUCTION_OPERATIONAL_ADMISSION` signing key and its exact public
+  fingerprint.
 
 The issue body must contain the canonical
 `newsroom.owner-production-admission-binding.v1` marker rendered by
@@ -156,14 +162,22 @@ production activation. Free-form approval prose without this exact marker is
 not an instruction.
 
 The production record is then sealed with that named key. Production trust-root
-key identifiers are fixed by key class in code; command-line input names only
-the environment variable containing a secret and cannot self-assert a key
-identifier or provenance. Key bytes enter only through injected process memory
-and never enter canonical evidence. Fixture, synthetic and Increment 9Q
-signing-key identities are rejected by the minter. The operational wrapper
-expects base64 key bytes in environment variables so a credential broker or
-Keychain launcher can inject them transiently without putting them on the
-command line.
+key identifiers are fixed by key class in code and have no command-line
+override. The wrapper loads canonical-base64 key bytes only from the fixed
+macOS Keychain services `newsroom-evidence-v1`,
+`human-accountable-owner-v1` and
+`production-operational-admission-v1`, all under the fixed account
+`newsroom-production-admission`. Environment variables and caller-selected
+Keychain references are ignored. Key bytes enter only through process memory
+and never enter canonical evidence.
+
+The owner issue marker, sealed issue snapshot, instruction and final record all
+bind a domain-separated fingerprint of the exact production sealing key. The
+minter compares the loaded Keychain key with that fingerprint before sealing.
+The same instruction and key therefore replay to the same one record, while a
+different secret under the same Keychain service is a blocker rather than a
+second admission. Fixture, synthetic and Increment 9Q signing-key identities
+are rejected by the minter.
 
 ## Provider-free command path
 
@@ -184,7 +198,6 @@ uv run python -m scripts.production_operational_admission inspect \
   --repo-root . \
   --evidence-manifest /ABSOLUTE_EVIDENCE_DIR/manifest.json \
   --attestation-directory /ABSOLUTE_EVIDENCE_DIR/gates \
-  --evidence-key-env EVIDENCE_KEY_B64 \
   --output /ABSOLUTE_EVIDENCE_DIR/production-readiness.json
 ```
 
@@ -195,19 +208,17 @@ uv run python -m scripts.production_operational_admission mint \
   --repo-root . \
   --evidence-manifest /ABSOLUTE_EVIDENCE_DIR/manifest.json \
   --attestation-directory /ABSOLUTE_EVIDENCE_DIR/gates \
-  --evidence-key-env EVIDENCE_KEY_B64 \
   --readiness-report /ABSOLUTE_EVIDENCE_DIR/production-readiness.json \
   --owner-instruction /ABSOLUTE_EVIDENCE_DIR/owner-instruction.json \
-  --owner-key-env OWNER_KEY_B64 \
-  --production-key-env PRODUCTION_KEY_B64 \
   --output /ABSOLUTE_EVIDENCE_DIR/production-operational-admission.json
 ```
 
-`mint` performs the live read-only GitHub issue-currentness check. `verify`
-takes the same evidence, report, instruction and key arguments, plus
-`--admission`; it remains reproducible from the retained signed issue snapshot.
-It re-runs exact-main cleanliness and readiness inspection before checking both
-the owner seal and production seal.
+Every command performs the live read-only GitHub main-currentness check. `mint`
+also performs the live read-only GitHub issue-currentness check. `verify` takes
+the same evidence, report and instruction arguments, plus `--admission`; it
+remains reproducible from the retained signed issue snapshot and fixed Keychain
+trust roots. It re-runs exact-main cleanliness and readiness inspection before
+checking both the owner seal and production seal.
 
 ## Permanent evidence and rollback
 

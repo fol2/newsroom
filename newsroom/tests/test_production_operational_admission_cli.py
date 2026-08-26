@@ -31,29 +31,65 @@ def _git(repo: Path, *arguments: str) -> str:
     return subprocess.check_output(("git", *arguments), cwd=repo, text=True).strip()
 
 
-def _key_env(monkeypatch: pytest.MonkeyPatch, name: str, secret: bytes) -> None:
-    monkeypatch.setenv(name, base64.b64encode(secret).decode("ascii"))
-
-
-def test_key_environment_cannot_self_assert_a_production_key_id(
+def test_keyring_loads_only_the_fixed_keychain_reference(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _key_env(monkeypatch, "EVIDENCE_KEY", _EVIDENCE_KEY.secret)
+    requested: list[str] = []
 
-    keys = command._keyring(
-        ("EVIDENCE_KEY",),
-        key_class=_EVIDENCE_KEY.key_class,
-    )
+    def keychain_secret(key_id: str) -> bytes:
+        requested.append(key_id)
+        return _EVIDENCE_KEY.secret
+
+    monkeypatch.setattr(command, "_keychain_secret", keychain_secret)
+    monkeypatch.setenv("EVIDENCE_KEY", "ignored-caller-secret")
+
+    keys = command._keyring(key_class=_EVIDENCE_KEY.key_class)
 
     assert keys == {_EVIDENCE_KEY.key_id: _EVIDENCE_KEY}
-    with pytest.raises(ProductionAdmissionError, match="environment variable"):
-        command._keyring(
-            (f"{_EVIDENCE_KEY.key_id}=EVIDENCE_KEY",),
-            key_class=_EVIDENCE_KEY.key_class,
+    assert requested == [_EVIDENCE_KEY.key_id]
+
+
+def test_keychain_loader_uses_the_fixed_account_and_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trusted_security = tmp_path / "security"
+    trusted_security.write_text("fixed executable", encoding="utf-8")
+    monkeypatch.setattr(command, "_TRUSTED_SECURITY", trusted_security)
+    seen: dict[str, object] = {}
+
+    def run(
+        arguments: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        seen["arguments"] = arguments
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(
+            arguments,
+            0,
+            stdout=base64.b64encode(_EVIDENCE_KEY.secret).decode("ascii") + "\n",
+            stderr="",
         )
 
+    monkeypatch.setattr(command.subprocess, "run", run)
 
-def test_exact_main_freeze_requires_a_clean_checkout_on_main(tmp_path: Path) -> None:
+    assert command._keychain_secret(_EVIDENCE_KEY.key_id) == _EVIDENCE_KEY.secret
+    assert seen["arguments"] == (
+        str(trusted_security),
+        "find-generic-password",
+        "-a",
+        "newsroom-production-admission",
+        "-s",
+        "newsroom-evidence-v1",
+        "-w",
+    )
+    with pytest.raises(ProductionAdmissionError, match="reference differs"):
+        command._keychain_secret("keychain:caller-selected")
+
+
+def test_exact_main_freeze_requires_a_clean_checkout_on_main(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _git(tmp_path, "init", "-b", "main")
     _git(tmp_path, "config", "user.email", "test@example.invalid")
     _git(tmp_path, "config", "user.name", "Production Admission Test")
@@ -61,6 +97,11 @@ def test_exact_main_freeze_requires_a_clean_checkout_on_main(tmp_path: Path) -> 
     _git(tmp_path, "add", ".")
     _git(tmp_path, "commit", "-m", "exact main")
     _git(tmp_path, "update-ref", "refs/remotes/origin/main", "HEAD")
+    monkeypatch.setattr(
+        command,
+        "_live_main_sha",
+        lambda: _git(tmp_path, "rev-parse", "HEAD"),
+    )
 
     freeze = command.exact_main_freeze(tmp_path)
 
@@ -82,6 +123,58 @@ def test_exact_main_freeze_requires_retained_origin_main_authority(
     _git(tmp_path, "commit", "-m", "exact main")
 
     with pytest.raises(ProductionAdmissionError, match="origin/main is unavailable"):
+        command.exact_main_freeze(tmp_path)
+
+
+def test_live_main_lookup_uses_only_the_canonical_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trusted_git = tmp_path / "git"
+    trusted_git.write_text("fixed executable", encoding="utf-8")
+    monkeypatch.setattr(command, "_TRUSTED_GIT", trusted_git)
+    seen: dict[str, object] = {}
+
+    def run(
+        arguments: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        seen["arguments"] = arguments
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(
+            arguments,
+            0,
+            stdout=f"{'e' * 40}\trefs/heads/main\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(command.subprocess, "run", run)
+
+    assert command._live_main_sha() == "e" * 40
+    assert seen["arguments"] == (
+        str(trusted_git),
+        "ls-remote",
+        "--exit-code",
+        "https://github.com/fol2/newsroom.git",
+        "refs/heads/main",
+    )
+    assert seen["cwd"] == Path("/")
+    assert seen["env"] == command._GIT_ENVIRONMENT
+
+
+def test_exact_main_freeze_rejects_a_stale_retained_origin_main(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _git(tmp_path, "init", "-b", "main")
+    _git(tmp_path, "config", "user.email", "test@example.invalid")
+    _git(tmp_path, "config", "user.name", "Production Admission Test")
+    (tmp_path / "subject.txt").write_text("exact\n", encoding="utf-8")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "retained main")
+    _git(tmp_path, "update-ref", "refs/remotes/origin/main", "HEAD")
+    monkeypatch.setattr(command, "_live_main_sha", lambda: "f" * 40)
+
+    with pytest.raises(ProductionAdmissionError, match="live GitHub main"):
         command.exact_main_freeze(tmp_path)
 
 
@@ -121,6 +214,7 @@ def test_exact_main_freeze_ignores_path_and_git_environment_redirection(
     monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
     monkeypatch.setenv("GIT_DIR", str(redirected / ".git"))
     monkeypatch.setenv("GIT_WORK_TREE", str(redirected))
+    monkeypatch.setattr(command, "_live_main_sha", lambda: expected_sha)
 
     freeze = command.exact_main_freeze(checkout)
 
@@ -140,9 +234,12 @@ def test_cli_inspect_mint_and_verify_are_provider_free_and_exact(
         return _owner_issue_record(issue_number)
 
     monkeypatch.setattr(command, "_current_owner_issue", current_owner_issue)
-    _key_env(monkeypatch, "EVIDENCE_KEY", _EVIDENCE_KEY.secret)
-    _key_env(monkeypatch, "OWNER_KEY", _OWNER_KEY.secret)
-    _key_env(monkeypatch, "PRODUCTION_KEY", _PRODUCTION_KEY.secret)
+    key_secrets = {
+        _EVIDENCE_KEY.key_id: _EVIDENCE_KEY.secret,
+        _OWNER_KEY.key_id: _OWNER_KEY.secret,
+        _PRODUCTION_KEY.key_id: _PRODUCTION_KEY.secret,
+    }
+    monkeypatch.setattr(command, "_keychain_secret", key_secrets.__getitem__)
     manifest, attestations = _complete_evidence()
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_bytes(manifest.canonical_bytes)
@@ -153,7 +250,6 @@ def test_cli_inspect_mint_and_verify_are_provider_free_and_exact(
             item.canonical_bytes
         )
     report_path = tmp_path / "report.json"
-    evidence_key_spec = "EVIDENCE_KEY"
 
     assert (
         command.main(
@@ -165,8 +261,6 @@ def test_cli_inspect_mint_and_verify_are_provider_free_and_exact(
                 str(manifest_path),
                 "--attestation-directory",
                 str(attestation_directory),
-                "--evidence-key-env",
-                evidence_key_spec,
                 "--output",
                 str(report_path),
             )
@@ -189,16 +283,10 @@ def test_cli_inspect_mint_and_verify_are_provider_free_and_exact(
         str(manifest_path),
         "--attestation-directory",
         str(attestation_directory),
-        "--evidence-key-env",
-        evidence_key_spec,
         "--readiness-report",
         str(report_path),
         "--owner-instruction",
         str(instruction_path),
-        "--owner-key-env",
-        "OWNER_KEY",
-        "--production-key-env",
-        "PRODUCTION_KEY",
     )
     assert command.main(("mint", *common, "--output", str(admission_path))) == 0
     assert command.main(("verify", *common, "--admission", str(admission_path))) == 0

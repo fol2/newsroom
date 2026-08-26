@@ -428,6 +428,17 @@ def _normalise_gate_facts(
         restore = _artifact(bound_artifacts, BoundArtifactRole.RESTORE)
         rollback = _artifact(bound_artifacts, BoundArtifactRole.ROLLBACK)
         if (
+            len(
+                {
+                    backup.store_identity_digest,
+                    restore.store_identity_digest,
+                    rollback.store_identity_digest,
+                }
+            )
+            != 1
+        ):
+            blockers.add("BACKUP_RESTORE_ROLLBACK_STORE_IDENTITY_DRIFT")
+        if (
             not facts["protected_storage"]
             or facts["store_identity_digest"] != backup.store_identity_digest
             or facts["backup_digest"] != backup.artifact_digest
