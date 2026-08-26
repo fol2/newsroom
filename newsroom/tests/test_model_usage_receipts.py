@@ -55,6 +55,7 @@ from newsroom.control_plane.model_usage import (
     WorkEnvelope,
     WorkloadClass,
 )
+from newsroom.graphiti_adapter.cli_process import timeout_diagnostic
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
 from newsroom.graphiti_adapter.evaluation_packet import (
     CURSOR_AGENT_MODEL_ID,
@@ -444,23 +445,23 @@ def _issue_790_controller_timeout_report_fixture(
     *,
     configured_timeout_ms: int,
 ) -> dict[str, object]:
-    diagnostic = {
-        "schema_version": "newsroom.graphiti-timeout-diagnostic.v1",
-        "boundary": "CONTROLLER_DEADLINE",
-        "phase": "PRIMARY_TRANSPORT",
-        "cause": "CONFIGURED_TIMEOUT_EXPIRED",
-        "provider_cause": "UNOBSERVED",
-        "configured_timeout_ms": configured_timeout_ms,
-        "elapsed_ms": round(
-            (terminal.completed_at - terminal.dispatch_at).total_seconds() * 1_000
-        ),
-        "deadline_at": (
-            terminal.dispatch_at + timedelta(milliseconds=configured_timeout_ms)
+    assert terminal.dispatch_at is not None
+    diagnostic = timeout_diagnostic(
+        boundary="CONTROLLER_DEADLINE",
+        phase="PRIMARY_TRANSPORT",
+        cause="CONFIGURED_TIMEOUT_EXPIRED",
+        configured_timeout_ms=configured_timeout_ms,
+        elapsed_ms=configured_timeout_ms,
+        deadline_at=(
+            terminal.dispatch_at
+            + timedelta(milliseconds=configured_timeout_ms + 1)
         ).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-        "last_progress": "DISPATCH_STARTED",
-        "termination": "PROCESS_KILLED",
-        "process": "CLI_CHILD",
-    }
+        last_progress="OUTPUT_OBSERVED",
+        termination="PROCESS_KILLED",
+        process="CLI_CHILD",
+        stdout=b"bounded progress",
+        stderr=b"",
+    )
     causal_report: dict[str, object] = {
         "schema_version": "newsroom.issue-790.causal-report.v1",
         "classification": "CONTROLLER_TIMEOUT",
@@ -2967,30 +2968,70 @@ def test_issue_790_successor_plan_consumes_a_new_event_after_failed_predecessor(
         third_terminal,
         configured_timeout_ms=160_000,
     )
-    second_outcome = repository.complete(
-        consumption_digest=str(second_consumption["consumption_digest"]),
-        event_id=second_event_id,
-        ledger_seq=2005,
-        owner_id="issue-790-canary:successor",
-        process_result={
-            "event_id": second_event_id,
-            "ledger_seq": 2005,
-            "state": "RETRY_HELD",
-            "attempt_count": 1,
-        },
-        completed_at=T0 + timedelta(seconds=270),
-        result_class="CONTROLLER_TIMEOUT_NON_SUCCESS",
-        causal_report=second_causal_report,
-    )
-    assert second_outcome["causal_report"] == second_causal_report
-    assert second_outcome["result_class"] == "CONTROLLER_TIMEOUT_NON_SUCCESS"
-
     service.open_route_circuit(
         route=GRAPHITI_CHAT_PRIMARY_ROUTE,
         reason="TIMEOUT",
         invocation_id=third_allocation.invocation_id,
         recorded_at=T0 + timedelta(seconds=275),
     )
+    connection = connect_unpublished_store(str(store))
+    timeout_receipt = {
+        "ingest_id": f"ingest-{second_event_id}",
+        "attempt_number": 1,
+        "outcome": "FAILED",
+        "timeout_diagnostics": [second_causal_report["diagnostic"]],
+        "chat_invocations": [
+            {
+                "provider": "cursor-agent-cli",
+                "transport_diagnostic": second_causal_report["diagnostic"],
+            }
+        ],
+        "receipt_digest": "",
+    }
+    insert_graphiti_attempt_receipt(
+        connection,
+        ingest_id=f"ingest-{second_event_id}",
+        attempt_number=1,
+        outcome="FAILED",
+        receipt=timeout_receipt,
+    )
+    connection.commit()
+    connection.close()
+    proving = tmp_path / "successor-proving.sqlite3"
+    proving_connection = sqlite3.connect(proving)
+    proving_connection.execute("CREATE TABLE fixture(value INTEGER)")
+    proving_connection.commit()
+    proving_connection.close()
+    recovery_observed_at = T0 + timedelta(seconds=276)
+    _patch_issue_790_live_evidence(
+        monkeypatch,
+        store=store,
+        observed_at=recovery_observed_at,
+    )
+    route_before_recovery = service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)
+    recovery_receipt = run_issue_790_canary(
+        store=store,
+        proving_store=proving,
+        backup_path=tmp_path / "successor-recovery.sqlite3",
+        plan=successor_plan,
+        observed_at=recovery_observed_at,
+        repository_root=tmp_path,
+        event_id=second_event_id,
+        ledger_seq=2005,
+        disposition_digest=str(second_disposition["disposition_digest"]),
+    )
+    second_outcome = recovery_receipt["outcome"]
+    retained_second_causal_report = second_outcome["causal_report"]
+    assert retained_second_causal_report["diagnostic"] == (
+        second_causal_report["diagnostic"]
+    )
+    second_causal_report = retained_second_causal_report
+    assert second_outcome["result_class"] == "CONTROLLER_TIMEOUT_NON_SUCCESS"
+    assert recovery_receipt["resumed_zero_io_finalisation"] is True
+    assert recovery_receipt["provider_dispatch_attempted_this_run"] is False
+    assert recovery_receipt["route_before"] == route_before_recovery
+    assert recovery_receipt["route_after"] == route_before_recovery
+
     step_two_approved_at = T0 + timedelta(seconds=280)
     step_two_call_shape_digest = _digest({"call-shape": "issue-790-step-two"})
     step_two_plan = _issue_790_successor_plan(
