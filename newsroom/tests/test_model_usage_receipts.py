@@ -3153,7 +3153,7 @@ def test_issue_790_success_sequence_stops_after_truthful_predecessor_success() -
         )
 
 
-def test_issue_790_sequence_does_not_loosen_after_unclassified_failure() -> None:
+def test_issue_790_sequence_stops_after_misclassified_terminal_success() -> None:
     root = Path(__file__).resolve().parents[2]
     plan = json.loads(
         (
@@ -3180,6 +3180,13 @@ def test_issue_790_sequence_does_not_loosen_after_unclassified_failure() -> None
         "retry_authorised": False,
         "result_class": "UNCLASSIFIED_NON_SUCCESS",
         "causal_report": None,
+        "state_before_seal": "TERMINAL",
+        "attempt_count": 1,
+        "provider_dispatched": True,
+        "process_result": {
+            "state": "TERMINAL",
+            "attempt_count": 1,
+        },
     }
 
     class UnclassifiedPredecessorRepository:
@@ -3195,7 +3202,7 @@ def test_issue_790_sequence_does_not_loosen_after_unclassified_failure() -> None
 
     with pytest.raises(
         Issue790DispositionError,
-        match="predecessor transition differs",
+        match="predecessor retained a terminal success boundary",
     ):
         issue_790_operation._require_sequence_predecessor(
             UnclassifiedPredecessorRepository(),  # type: ignore[arg-type]
@@ -3351,6 +3358,84 @@ def test_issue_790_timeout_report_deduplicates_one_retained_diagnostic(
     assert report["diagnostic_reference"] == (
         "retained:unpublished_graphiti_attempt_receipts:" + receipt_digest
     )
+
+
+def test_issue_790_crash_after_success_recovers_truthful_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_issue_790_canary_usage_evidence",
+        lambda *_args, **_kwargs: {
+            "primary_chat_leaf_count": 1,
+            "qualified_primary_identity_count": 1,
+            "truthful_primary_usage_count": 1,
+            "fallback_chat_leaf_count": 0,
+            "unresolved_terminal_count": 0,
+            "unterminated_leaf_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_issue_790_controller_timeout_report",
+        lambda *_args, **_kwargs: pytest.fail(
+            "truthful success must stop before timeout classification"
+        ),
+    )
+    recovered = issue_790_operation._issue_790_iterative_result(
+        store=tmp_path / "unpublished.sqlite3",
+        plan={"sequence": {"controller_timeout_ms": 160_000}},
+        event_id=_digest({"crash": "after-success"}),
+        process_result={"state": "TERMINAL", "attempt_count": 1},
+        exception_present=False,
+    )
+    assert recovered == {
+        "result_class": "TRUTHFUL_PROVIDER_SUCCESS",
+        "causal_report": None,
+    }
+
+
+def test_issue_790_crash_after_timeout_recovers_causal_non_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_issue_790_canary_usage_evidence",
+        lambda *_args, **_kwargs: {
+            "primary_chat_leaf_count": 1,
+            "qualified_primary_identity_count": 1,
+            "truthful_primary_usage_count": 0,
+            "fallback_chat_leaf_count": 0,
+            "unresolved_terminal_count": 1,
+            "unterminated_leaf_count": 0,
+        },
+    )
+    causal_report = {
+        "schema_version": "newsroom.issue-790.causal-report.v1",
+        "report_digest": _digest({"crash": "after-timeout"}),
+    }
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_issue_790_controller_timeout_report",
+        lambda *_args, **values: (
+            causal_report
+            if values["configured_timeout_ms"] == 160_000
+            else None
+        ),
+    )
+    recovered = issue_790_operation._issue_790_iterative_result(
+        store=tmp_path / "unpublished.sqlite3",
+        plan={"sequence": {"controller_timeout_ms": 160_000}},
+        event_id=_digest({"crash": "after-timeout"}),
+        process_result={"state": "RETRY_HELD", "attempt_count": 1},
+        exception_present=False,
+    )
+    assert recovered == {
+        "result_class": "CONTROLLER_TIMEOUT_NON_SUCCESS",
+        "causal_report": causal_report,
+    }
 
 
 def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
