@@ -100,6 +100,7 @@ from newsroom.control_plane.writer import (
     WriterEvidenceLink,
     GROK_COMMAND_SEMANTIC_VERSION,
     CURSOR_COMMAND_SEMANTIC_VERSION,
+    required_surface_copy,
     validate_writer_copy,
 )
 from newsroom.control_plane.zh_hant import (
@@ -2172,6 +2173,95 @@ def test_json_character_offset_remains_fallback_eligible(offset: int) -> None:
     with pytest.raises(WriterDispatchError) as caught:
         writer.dispatch(candidate, package, route="PRIMARY")
     assert caught.value.failure_class == "FALLBACK_ELIGIBLE"
+
+
+def test_required_surface_copy_passes_and_one_extra_character_fails() -> None:
+    candidate, package = _candidate_package()
+    title, body, links = required_surface_copy(package)
+    copy = WriterCopy(
+        title=title,
+        body=body,
+        writer_id="exact-assembly",
+        evidence_package_digest=package.digest,
+        evidence_links=links,
+    )
+    extra = WriterCopy(
+        title=title,
+        body=body + "。",
+        writer_id="exact-assembly",
+        evidence_package_digest=package.digest,
+        evidence_links=links,
+    )
+
+    exact = validate_writer_copy(copy, package)
+    drifted = validate_writer_copy(extra, package)
+
+    assert all(item.result == "PASS" for item in exact)
+    assert any(
+        item.result == "FAIL"
+        and item.reason_code
+        in {
+            "DUPLICATE_OR_MISPLACED_GOVERNED_CLAIM",
+            "UNSUPPORTED_CLAIM_RESIDUE",
+        }
+        for item in drifted
+    )
+
+
+def test_writer_prompt_is_claim_assembly_not_journalism() -> None:
+    from newsroom.control_plane.writer import _prompt
+
+    candidate, package = _candidate_package()
+    title, body, _links = required_surface_copy(package)
+    prompt = _prompt(candidate, package)
+
+    assert "必須原創改寫" not in prompt
+    assert "原創記者" not in prompt
+    assert "claim 拼裝器" in prompt
+    assert f"必須輸出嘅 title：{title}" in prompt
+    assert f"必須輸出嘅 body：{body}" in prompt
+    assert CONT_WRITER_PROMPT_CONTRACT_VERSION.endswith(".v2")
+
+
+def test_rejected_copy_text_is_retained_on_draft_outcome(tmp_path: Path) -> None:
+    class ExtraCharacterWriter(FixtureWriter):
+        def dispatch(
+            self,
+            candidate: StoryCandidateRecord,
+            package: EvidencePackage,
+            *,
+            route: str,
+        ) -> WriterCopy:
+            del route
+            copy = super().write(candidate, package)
+            return WriterCopy(
+                title=copy.title,
+                body=copy.body + "。",
+                writer_id=copy.writer_id,
+                evidence_package_digest=copy.evidence_package_digest,
+                evidence_links=copy.evidence_links,
+            )
+
+    unpublished = tmp_path / "unpublished_store.sqlite3"
+    report = run_cycle(
+        proving_store=str(_proving(tmp_path)),
+        unpublished_store=str(unpublished),
+        writer=ExtraCharacterWriter(),
+        evidence_package_builder=_qualified_builder(frozenset({"HK-01"})),
+        clock=_CLOCK,
+    )
+    connection = sqlite3.connect(unpublished)
+    retained = json.loads(
+        connection.execute(
+            "SELECT record_json FROM unpublished_draft_outcomes"
+        ).fetchone()[0]
+    )
+    connection.close()
+
+    assert report.minted == 0
+    assert retained["outcome"] == "REJECT"
+    assert retained["rejected_title"]
+    assert retained["rejected_body"].endswith("。")
 
 
 def test_filler_output_is_rejected_and_never_inserted(tmp_path: Path) -> None:

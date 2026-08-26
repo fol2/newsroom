@@ -2057,6 +2057,7 @@ def _run_write_loop(
         reasons: tuple[str, ...],
         payload_digest: str | None = None,
         usage_envelope_id: str | None = None,
+        rejected_copy: WriterCopy | None = None,
     ) -> None:
         terminal_at = clock().astimezone(UTC)
         record = DraftOutcomeRecord.create(
@@ -2070,6 +2071,8 @@ def _run_write_loop(
             payload_digest=payload_digest,
             recorded_at=_utc_text(terminal_at),
             candidate_attempt_id=candidate_attempt_id,
+            rejected_title=None if rejected_copy is None else rejected_copy.title,
+            rejected_body=None if rejected_copy is None else rejected_copy.body,
         )
         retain_draft_outcome(unpublished, record)
         append_ledger(unpublished, "DRAFT_OUTCOME", record.as_record())
@@ -2121,6 +2124,7 @@ def _run_write_loop(
         usage_invocation_ids: list[str] = []
         validators: tuple[WriterValidatorResult, ...] = ()
         accepted_copy: WriterCopy | None = None
+        last_rejected_copy: WriterCopy | None = None
         last_reason = "NO_USEFUL_OUTPUT"
         candidate_hold_reason = ""
         usage_envelope_id: str | None = None
@@ -2449,6 +2453,7 @@ def _run_write_loop(
                     reason_code=failed[0],
                 )
                 last_reason = failed[0]
+                last_rejected_copy = copy
                 if route == "PRIMARY":
                     continue
                 break
@@ -2475,6 +2480,7 @@ def _run_write_loop(
                 validators=validators,
                 reasons=(last_reason,),
                 usage_envelope_id=usage_envelope_id,
+                rejected_copy=last_rejected_copy,
             )
             if not writer_circuit_reason and not candidate_hold_reason:
                 no_useful_reason = last_reason

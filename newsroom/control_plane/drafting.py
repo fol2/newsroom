@@ -24,6 +24,8 @@ class DraftOutcomeRecord:
     payload_digest: str | None
     recorded_at: str
     candidate_attempt_id: str
+    rejected_title: str | None = None
+    rejected_body: str | None = None
 
     def __post_init__(self) -> None:
         identity = {
@@ -55,6 +57,8 @@ class DraftOutcomeRecord:
         payload_digest: str | None,
         recorded_at: str,
         candidate_attempt_id: str,
+        rejected_title: str | None = None,
+        rejected_body: str | None = None,
     ) -> DraftOutcomeRecord:
         identity = {
             "candidate_attempt_id": candidate_attempt_id,
@@ -78,6 +82,8 @@ class DraftOutcomeRecord:
             payload_digest=payload_digest,
             recorded_at=recorded_at,
             candidate_attempt_id=candidate_attempt_id,
+            rejected_title=rejected_title,
+            rejected_body=rejected_body,
         )
 
     def as_record(self) -> dict[str, object]:
@@ -100,4 +106,6 @@ class DraftOutcomeRecord:
             "payload_digest": self.payload_digest,
             "recorded_at": self.recorded_at,
             "candidate_attempt_id": self.candidate_attempt_id,
+            "rejected_title": self.rejected_title,
+            "rejected_body": self.rejected_body,
         }
