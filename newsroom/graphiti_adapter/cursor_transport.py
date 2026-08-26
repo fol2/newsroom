@@ -491,7 +491,7 @@ def _probe_cursor_credentials_locally(
                         deadline_at=deadline_at,
                         last_progress="CREDENTIAL_PROBE_STARTED",
                         termination="UNOBSERVED",
-                        process=security_binary.name,
+                        process="CURSOR_CREDENTIAL_HELPER",
                     ),
                 }
             )

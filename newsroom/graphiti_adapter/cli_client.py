@@ -21,9 +21,11 @@ from newsroom.graphiti_adapter.cli_process import (
     CliOutputBoundExceeded,
     CliOutputDecodeError,
     CliTransportTimeout,
+    retained_cli_qualification,
     run_bounded_process,
     run_bounded_process_async,
     timeout_diagnostic,
+    validated_timeout_diagnostics,
 )
 from newsroom.graphiti_adapter.cursor_transport import (
     CURSOR_AGENT_BIN,
@@ -584,14 +586,31 @@ def _invocation(
     if receipt_binding is not None:
         value.update(receipt_binding)
     if execution is not None and execution.transport_qualification is not None:
-        value["transport_qualification"] = dict(
+        value["transport_qualification"] = retained_cli_qualification(
             execution.transport_qualification
         )
     if failure is not None:
         value["failure"] = failure
     if transport_diagnostic is not None:
-        value["transport_diagnostic"] = dict(transport_diagnostic)
+        value["transport_diagnostic"] = validated_timeout_diagnostics(
+            [dict(transport_diagnostic)]
+        )[0]
     return value
+
+
+def _retained_refusal_qualification(
+    exc: CliPredispatchRefusal,
+) -> dict[str, object] | None:
+    """Retain only a validated causal diagnostic from refusal evidence."""
+
+    diagnostic = exc.qualification_evidence.get("timeout_diagnostic")
+    if diagnostic is None:
+        return None
+    try:
+        retained = validated_timeout_diagnostics([diagnostic])[0]
+    except ValueError:
+        return None
+    return {"timeout_diagnostic": retained}
 
 
 def _retained_timeout_diagnostic(
@@ -602,7 +621,10 @@ def _retained_timeout_diagnostic(
     transport_started: bool,
 ) -> Mapping[str, object]:
     if isinstance(exc, CliTransportTimeout):
-        return exc.evidence
+        try:
+            return validated_timeout_diagnostics([dict(exc.evidence)])[0]
+        except ValueError:
+            pass
     return timeout_diagnostic(
         boundary="UNOBSERVED_TIMEOUT_BOUNDARY",
         phase=phase,
@@ -914,10 +936,10 @@ async def run_cli_chain(
             requested_max_tokens=max_tokens,
             receipt_binding=binding,
         )
-        if isinstance(exc, CliPredispatchRefusal) and exc.qualification_evidence:
-            invocation["transport_qualification"] = dict(
-                exc.qualification_evidence
-            )
+        if isinstance(exc, CliPredispatchRefusal):
+            retained_qualification = _retained_refusal_qualification(exc)
+            if retained_qualification is not None:
+                invocation["transport_qualification"] = retained_qualification
         invocations.append(invocation)
         cursor_outcome = refusal_outcome
         payload = None
@@ -1138,10 +1160,10 @@ async def run_cli_chain(
             requested_max_tokens=max_tokens,
             receipt_binding=binding,
         )
-        if isinstance(exc, CliPredispatchRefusal) and exc.qualification_evidence:
-            invocation["transport_qualification"] = dict(
-                exc.qualification_evidence
-            )
+        if isinstance(exc, CliPredispatchRefusal):
+            retained_qualification = _retained_refusal_qualification(exc)
+            if retained_qualification is not None:
+                invocation["transport_qualification"] = retained_qualification
         invocations.append(invocation)
         raise CliResponseError("Graphiti fallback CLI executable not found") from exc
     except (RuntimeError, OSError) as exc:

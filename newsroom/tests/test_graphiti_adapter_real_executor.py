@@ -447,6 +447,56 @@ def test_grok_predispatch_refusal_retains_timeout_qualification() -> None:
     }
 
 
+def test_successful_qualification_retains_only_fixed_tokens_and_digests() -> None:
+    from newsroom.graphiti_adapter.cli_client import CliExecution, run_cli_chain
+
+    digest = digest_bytes(b"qualified transport")
+    qualification = {
+        "binary": "/secret/path/cursor-agent",
+        "resolved_binary": "/another/secret/path/cursor-agent",
+        "stdout_limit_bytes": 65_536,
+        "version_digest": digest,
+        "help_digest": digest,
+        "command_template_digest": digest,
+        "launcher_digest": digest,
+        "command_surface_digest": digest,
+        "control_semantics_digest": digest,
+        "package_digest": digest,
+        "authentication_bridge_digest": digest,
+        "authentication_probe_digest": digest,
+        "credential_state_digest": digest,
+    }
+
+    async def cursor(_prompt: str, *, max_tokens: int) -> CliExecution:
+        del max_tokens
+        return CliExecution(
+            text="{}",
+            usage={"usage_basis": "UNREPORTED"},
+            transport_qualification=qualification,
+        )
+
+    invocations: list[dict[str, object]] = []
+    asyncio.run(
+        run_cli_chain(
+            prompt="prompt",
+            schema=None,
+            cursor_runner=cursor,
+            grok_runner=lambda *_args, **_values: pytest.fail(
+                "complete primary reached fallback"
+            ),
+            invocations=invocations,
+        )
+    )
+
+    retained = invocations[0]["transport_qualification"]
+    assert isinstance(retained, dict)
+    assert retained["schema_version"] == "newsroom.graphiti-cli-qualification.v1"
+    assert retained["transport"] == "CURSOR_AGENT_CLI"
+    assert "binary" not in retained
+    assert "resolved_binary" not in retained
+    assert "/secret/" not in repr(retained)
+
+
 def test_non_utf8_cursor_is_recorded_before_grok_fallback() -> None:
     from newsroom.graphiti_adapter.cli_client import (
         CliResponseError,
@@ -567,7 +617,7 @@ def test_cursor_timeout_retains_transport_diagnostic_in_invocation() -> None:
         "phase": "PRIMARY_TRANSPORT",
         "cause": "CONFIGURED_TIMEOUT_EXPIRED",
         "provider_cause": "UNOBSERVED",
-        "process": "cursor-agent",
+        "process": "CLI_CHILD",
         "configured_timeout_ms": 160_000,
         "elapsed_ms": 160_000,
         "deadline_at": "2026-08-26T17:06:10.000000Z",
@@ -3610,6 +3660,86 @@ def test_controller_output_bound_terminates_oversized_cursor_output(
         )
 
 
+def test_async_controller_output_bound_drains_both_child_streams(
+    tmp_path: Path,
+) -> None:
+    from newsroom.graphiti_adapter import cursor_transport
+
+    script = (
+        "import sys; "
+        "sys.stdout.buffer.write(b'x' * 200000); sys.stdout.flush(); "
+        "sys.stderr.buffer.write(b'y' * 200000); sys.stderr.flush()"
+    )
+
+    async def invoke() -> None:
+        await cursor_transport._run_bounded_process_async(
+            (sys.executable, "-c", script),
+            timeout=5,
+            max_output_bytes=1_024,
+            cwd=str(tmp_path),
+            environment={},
+        )
+
+    with pytest.raises(cursor_transport.CliOutputBoundExceeded):
+        asyncio.run(asyncio.wait_for(invoke(), timeout=2))
+
+
+@pytest.mark.parametrize("boundary", ("TIMEOUT", "CANCELLATION"))
+def test_async_controller_drains_high_volume_pipes_on_termination(
+    tmp_path: Path,
+    boundary: str,
+) -> None:
+    from newsroom.graphiti_adapter import cursor_transport
+
+    script = (
+        "import sys,time; "
+        "sys.stdout.buffer.write(b'x' * 200000); sys.stdout.flush(); "
+        "sys.stderr.buffer.write(b'y' * 200000); sys.stderr.flush(); "
+        "time.sleep(5)"
+    )
+
+    async def invoke() -> None:
+        task = asyncio.create_task(
+            cursor_transport._run_bounded_process_async(
+                (sys.executable, "-c", script),
+                timeout=0.05 if boundary == "TIMEOUT" else 5,
+                max_output_bytes=1_000_000,
+                cwd=str(tmp_path),
+                environment={},
+            )
+        )
+        if boundary == "CANCELLATION":
+            await asyncio.sleep(0.05)
+            task.cancel()
+        await task
+
+    expected = (
+        cursor_transport.CliTransportTimeout
+        if boundary == "TIMEOUT"
+        else asyncio.CancelledError
+    )
+    with pytest.raises(expected):
+        asyncio.run(asyncio.wait_for(invoke(), timeout=2))
+
+
+def test_transport_modules_import_in_a_fresh_interpreter() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-c",
+            "import newsroom.graphiti_adapter.cli_process; "
+            "import newsroom.graphiti_adapter.cursor_transport",
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=repository,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_controller_timeout_retains_secret_free_transport_diagnostics(
     tmp_path: Path,
 ) -> None:
@@ -3640,7 +3770,7 @@ def test_controller_timeout_retains_secret_free_transport_diagnostics(
         "phase": "PRIMARY_TRANSPORT",
         "cause": "CONFIGURED_TIMEOUT_EXPIRED",
         "provider_cause": "UNOBSERVED",
-        "process": Path(sys.executable).name,
+        "process": "CLI_CHILD",
         "configured_timeout_ms": 50,
         "elapsed_ms": evidence["elapsed_ms"],
         "deadline_at": evidence["deadline_at"],
@@ -3655,6 +3785,22 @@ def test_controller_timeout_retains_secret_free_transport_diagnostics(
     assert "partial stderr" not in repr(evidence)
     assert evidence["elapsed_ms"] >= 50
     assert evidence["deadline_at"].endswith("Z")
+
+
+def test_timeout_diagnostic_rejects_secret_in_causal_token() -> None:
+    from newsroom.graphiti_adapter.cli_process import timeout_diagnostic
+
+    with pytest.raises(ValueError, match="last_progress"):
+        timeout_diagnostic(
+            boundary="CONTROLLER_DEADLINE",
+            phase="PRIMARY_TRANSPORT",
+            cause="CONFIGURED_TIMEOUT_EXPIRED",
+            configured_timeout_ms=160_000,
+            elapsed_ms=160_000,
+            deadline_at="2026-08-26T18:00:20.000000Z",
+            last_progress="TOKEN=secret-provider-credential",
+            termination="PROCESS_KILLED",
+        )
 
 
 def test_async_controller_timeout_retains_transport_diagnostics(
@@ -3731,7 +3877,7 @@ def test_cursor_preflight_timeout_retains_causal_qualification_evidence(
         deadline_at="2026-08-26T18:00:20.000000Z",
         last_progress="NO_OUTPUT_OBSERVED",
         termination="PROCESS_KILLED",
-        process="cursor-agent",
+        process="CLI_CHILD",
         stdout=b"",
         stderr=b"",
     )
@@ -3780,7 +3926,7 @@ def test_grok_preflight_timeout_retains_causal_qualification_evidence(
         deadline_at="2026-08-26T18:00:20.000000Z",
         last_progress="NO_OUTPUT_OBSERVED",
         termination="PROCESS_KILLED",
-        process="grok",
+        process="CLI_CHILD",
         stdout=b"",
         stderr=b"",
     )
