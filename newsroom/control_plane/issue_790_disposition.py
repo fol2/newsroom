@@ -13,7 +13,7 @@ import subprocess
 import uuid
 from collections.abc import Mapping
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import mkstemp
 
@@ -47,6 +47,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_EXTRACTION_TIMEOUT_MS,
     GRAPHITI_MAX_CLEANUP_TIMEOUT_MS,
 )
+from newsroom.graphiti_adapter.cli_process import validated_timeout_diagnostics
 
 ISSUE_790_PLAN_SCHEMA = "newsroom.issue-790.conservative-disposition-plan.v1"
 ISSUE_790_ITERATIVE_PLAN_SCHEMA = "newsroom.issue-790.iterative-canary-plan.v2"
@@ -63,6 +64,15 @@ ISSUE_790_CANARY_RECEIPT_SCHEMA = "newsroom.issue-790.bounded-canary-receipt.v1"
 ISSUE_790_ITERATIVE_CANARY_RECEIPT_SCHEMA = (
     "newsroom.issue-790.iterative-bounded-canary-receipt.v2"
 )
+ISSUE_790_CAUSAL_REPORT_SCHEMA = "newsroom.issue-790.causal-report.v1"
+ISSUE_790_NON_TIMEOUT_CAUSAL_REPORT_SCHEMA = (
+    "newsroom.issue-790.non-timeout-causal-report.v1"
+)
+ISSUE_790_REVIEWED_FIX_SCHEMA = "newsroom.issue-790.reviewed-non-timeout-fix.v1"
+ISSUE_790_ITERATIVE_PREFLIGHT_SCHEMA = (
+    "newsroom.issue-790.iterative-fresh-event-preflight.v2"
+)
+_FALLBACK_MODE = "DISABLED_BEFORE_PROVIDER_DISPATCH"
 _AUTHORITY_SCHEMA = (
     "newsroom.model-usage.conservative-disposition-authority.v2"
 )
@@ -176,6 +186,173 @@ def _utc_text(value: datetime) -> str:
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _issue_790_fixed_constraints_digest(policy: object) -> str:
+    primary_routes = tuple(
+        route
+        for route in policy.qualified_routes  # type: ignore[attr-defined]
+        if route.leaf_class is GraphitiLeafClass.PRIMARY
+    )
+    if len(primary_routes) != 1:
+        raise Issue790DispositionError("issue #790 primary route differs")
+    primary = primary_routes[0]
+    fixed_flags = tuple(
+        flag
+        for flag in primary.command_flags
+        if not flag.startswith("CONTROLLER_TIMEOUT_MS=")
+    )
+    return digest_canonical(
+        {
+            "schema_version": "newsroom.issue-790.fixed-constraints.v1",
+            "fallback_mode": _FALLBACK_MODE,
+            "provider": primary.provider,
+            "route": primary.route,
+            "model": primary.model,
+            "reasoning": primary.reasoning,
+            "command_flags_except_controller_timeout": list(fixed_flags),
+            "disabled_capabilities": list(primary.disabled_capabilities),
+            "max_prompt_bytes": primary.max_prompt_bytes,
+            "max_context_tokens": primary.max_context_tokens,
+            "max_output_tokens": primary.max_output_tokens,
+            "max_total_tokens": primary.max_total_tokens,
+        }
+    )
+
+
+def _validated_timeout_causal_report(value: object) -> dict[str, object]:
+    report = _record(value, field="predecessor causal report")
+    supplied_digest = report.get("report_digest")
+    without_digest = dict(report)
+    without_digest.pop("report_digest", None)
+    if supplied_digest != digest_canonical(without_digest):
+        raise Issue790DispositionError("issue #790 causal report digest differs")
+    if set(report) != {
+        "schema_version",
+        "classification",
+        "causal_constraint",
+        "local_cause",
+        "provider_cause",
+        "diagnostic_reference",
+        "diagnostic",
+        "report_digest",
+    }:
+        raise Issue790DispositionError("issue #790 causal report fields differ")
+    try:
+        diagnostic = validated_timeout_diagnostics([report.get("diagnostic")])[0]
+    except ValueError as exc:
+        raise Issue790DispositionError(
+            "issue #790 causal timeout diagnostic differs"
+        ) from exc
+    if (
+        report.get("schema_version") != ISSUE_790_CAUSAL_REPORT_SCHEMA
+        or report.get("classification") != "CONTROLLER_TIMEOUT"
+        or report.get("causal_constraint") != "CONTROLLER_TIMEOUT_MS"
+        or report.get("local_cause") != diagnostic.get("cause")
+        or report.get("provider_cause") != diagnostic.get("provider_cause")
+        or diagnostic.get("boundary") != "CONTROLLER_DEADLINE"
+        or diagnostic.get("phase") != "PRIMARY_TRANSPORT"
+        or diagnostic.get("cause") != "CONFIGURED_TIMEOUT_EXPIRED"
+        or diagnostic.get("provider_cause") != "UNOBSERVED"
+        or diagnostic.get("process") != "CLI_CHILD"
+        or int(diagnostic["elapsed_ms"])
+        < int(diagnostic["configured_timeout_ms"])
+    ):
+        raise Issue790DispositionError("issue #790 causal report differs")
+    _text(report, "diagnostic_reference")
+    return report
+
+
+def _validated_non_timeout_causal_report(value: object) -> dict[str, object]:
+    report = _record(value, field="predecessor causal report")
+    supplied_digest = report.get("report_digest")
+    unsigned = dict(report)
+    unsigned.pop("report_digest", None)
+    if supplied_digest != digest_canonical(unsigned):
+        raise Issue790DispositionError("issue #790 causal report digest differs")
+    if set(report) != {
+        "schema_version", "classification", "causal_constraint",
+        "predecessor_outcome_digest", "event_id", "boundary",
+        "configured_controller_timeout_ms", "configured_extraction_timeout_ms",
+        "cleanup_reserve_ms", "deadline_at", "elapsed_ms", "last_progress",
+        "termination", "provider_cause", "local_cause",
+        "diagnostic_reference", "report_digest",
+    }:
+        raise Issue790DispositionError("issue #790 non-timeout causal fields differ")
+    timings = tuple(
+        report.get(field)
+        for field in (
+            "configured_controller_timeout_ms",
+            "configured_extraction_timeout_ms",
+            "cleanup_reserve_ms",
+            "elapsed_ms",
+        )
+    )
+    if any(
+        isinstance(item, bool) or not isinstance(item, int) or item < 0
+        for item in timings
+    ):
+        raise Issue790DispositionError("issue #790 non-timeout timing differs")
+    controller_timeout, extraction_timeout, cleanup_reserve, _elapsed = timings
+    if report.get("deadline_at") is not None:
+        _instant(report.get("deadline_at"), field="non-timeout deadline_at")
+    for field in (
+        "predecessor_outcome_digest", "event_id", "boundary", "last_progress",
+        "termination", "provider_cause", "local_cause", "diagnostic_reference",
+    ):
+        _text(report, field)
+    if (
+        report.get("schema_version") != ISSUE_790_NON_TIMEOUT_CAUSAL_REPORT_SCHEMA
+        or report.get("classification") != "NON_TIMEOUT_FAILURE"
+        or report.get("causal_constraint")
+        != "REVIEWED_CODE_OR_CONFIGURATION_FIX"
+        or report.get("boundary") == "CONTROLLER_DEADLINE"
+        or report.get("local_cause") == "CONFIGURED_TIMEOUT_EXPIRED"
+        or controller_timeout != extraction_timeout - cleanup_reserve
+    ):
+        raise Issue790DispositionError("issue #790 non-timeout causal report differs")
+    return report
+
+
+def _validated_causal_report(value: object) -> dict[str, object]:
+    report = _record(value, field="predecessor causal report")
+    if report.get("schema_version") == ISSUE_790_CAUSAL_REPORT_SCHEMA:
+        return _validated_timeout_causal_report(report)
+    if report.get("schema_version") == ISSUE_790_NON_TIMEOUT_CAUSAL_REPORT_SCHEMA:
+        return _validated_non_timeout_causal_report(report)
+    raise Issue790DispositionError("issue #790 causal report schema differs")
+
+
+def _validated_reviewed_fix(value: object) -> dict[str, object]:
+    fix = _record(value, field="reviewed non-timeout fix")
+    supplied_digest = fix.get("record_digest")
+    unsigned = dict(fix)
+    unsigned.pop("record_digest", None)
+    if supplied_digest != digest_canonical(unsigned) or set(fix) != {
+        "schema_version", "predecessor_outcome_digest", "causal_report_digest",
+        "fix_kind", "pull_request_url", "reviewed_fix_revision",
+        "review_receipt_digest", "provider_free_qualification_digest",
+        "record_digest",
+    }:
+        raise Issue790DispositionError("issue #790 reviewed fix fields differ")
+    if (
+        fix.get("schema_version") != ISSUE_790_REVIEWED_FIX_SCHEMA
+        or fix.get("fix_kind") not in {"CODE", "CONFIGURATION", "CODE_AND_CONFIGURATION"}
+        or re.fullmatch(
+            r"https://github\.com/fol2/newsroom/pull/[1-9][0-9]*",
+            _text(fix, "pull_request_url"),
+        ) is None
+        or re.fullmatch(r"[0-9a-f]{40}", _text(fix, "reviewed_fix_revision")) is None
+        or any(
+            not _text(fix, field).startswith("sha256:")
+            for field in (
+                "predecessor_outcome_digest", "causal_report_digest",
+                "review_receipt_digest", "provider_free_qualification_digest",
+            )
+        )
+    ):
+        raise Issue790DispositionError("issue #790 reviewed fix differs")
+    return fix
+
+
 def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
     """Validate the complete, content-addressed and deliberately narrow plan."""
 
@@ -274,17 +451,21 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
         raise Issue790DispositionError("issue #790 release contract differs")
     if plan.get("retry_forbidden_events") != list(_RETRY_FORBIDDEN_EVENTS):
         raise Issue790DispositionError("issue #790 retry exclusions differ")
-    if canary != {
+    expected_canary = {
         "authority_consumption": "APPEND_ONLY_SINGLE_USE_BEFORE_PROVIDER_IO",
         "event_binding": "EXPLICIT_QUEUED_ATTEMPT_ZERO_EVENT",
         "fresh_provider_backed_attempt_count": 1,
         "persistent_worker_state_before_canary": "UNLOADED",
         "requires_exact_main_deployment": True,
-    }:
+    }
+    if iterative:
+        expected_canary["fallback_mode"] = _FALLBACK_MODE
+    if canary != expected_canary:
         raise Issue790DispositionError("issue #790 canary boundary differs")
     if iterative:
         sequence = _record(plan.get("sequence"), field="sequence")
-        if set(sequence) != {
+        constraint_change = sequence.get("constraint_change")
+        expected_sequence_fields = {
             "sequence_ordinal",
             "stop_condition",
             "constraint_change",
@@ -294,8 +475,14 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
             "timeout_increment_ms",
             "call_shape_policy_digest",
             "call_shape_policy_version",
+            "fixed_constraints_digest",
+            "root_plan_digest",
             "predecessor",
-        }:
+            "predecessor_causal_report",
+        }
+        if constraint_change == "REVIEWED_NON_TIMEOUT_FIX":
+            expected_sequence_fields.add("reviewed_fix")
+        if set(sequence) != expected_sequence_fields:
             raise Issue790DispositionError("issue #790 sequence fields differ")
         predecessor = _record(sequence.get("predecessor"), field="predecessor")
         if set(predecessor) != {
@@ -308,12 +495,23 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
             raise Issue790DispositionError("issue #790 predecessor fields differ")
         for field in (
             "call_shape_policy_digest",
+            "fixed_constraints_digest",
+            "root_plan_digest",
             "plan_digest",
             "consumption_digest",
             "outcome_digest",
             "event_id",
         ):
-            source = sequence if field == "call_shape_policy_digest" else predecessor
+            source = (
+                sequence
+                if field
+                in {
+                    "call_shape_policy_digest",
+                    "fixed_constraints_digest",
+                    "root_plan_digest",
+                }
+                else predecessor
+            )
             if not _text(source, field).startswith("sha256:"):
                 raise Issue790DispositionError(
                     f"issue #790 sequence {field} differs"
@@ -352,8 +550,38 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
             != "FIRST_TRUTHFUL_PROVIDER_BACKED_SUCCESS"
         ):
             raise Issue790DispositionError("issue #790 sequence contract differs")
-        _text(sequence, "constraint_change")
+        if constraint_change not in {
+            "INITIAL_QUALIFIED_BASELINE",
+            "CONTROLLER_TIMEOUT_INCREMENT",
+            "REVIEWED_NON_TIMEOUT_FIX",
+        }:
+            raise Issue790DispositionError(
+                "issue #790 sequence constraint change differs"
+            )
         _text(sequence, "call_shape_policy_version")
+        causal_report = _validated_causal_report(
+            sequence.get("predecessor_causal_report")
+        )
+        if constraint_change == "REVIEWED_NON_TIMEOUT_FIX":
+            reviewed_fix = _validated_reviewed_fix(sequence.get("reviewed_fix"))
+            if (
+                causal_report.get("schema_version")
+                != ISSUE_790_NON_TIMEOUT_CAUSAL_REPORT_SCHEMA
+                or reviewed_fix.get("predecessor_outcome_digest")
+                != predecessor.get("outcome_digest")
+                or reviewed_fix.get("causal_report_digest")
+                != causal_report.get("report_digest")
+                or causal_report.get("predecessor_outcome_digest")
+                != predecessor.get("outcome_digest")
+                or causal_report.get("event_id") != predecessor.get("event_id")
+            ):
+                raise Issue790DispositionError(
+                    "issue #790 reviewed fix predecessor binding differs"
+                )
+        elif causal_report.get("schema_version") != ISSUE_790_CAUSAL_REPORT_SCHEMA:
+            raise Issue790DispositionError(
+                "issue #790 timeout transition causal report differs"
+            )
     if plan.get("non_effects") != list(_NON_EFFECTS):
         raise Issue790DispositionError("issue #790 non-effects differ")
     return plan
@@ -394,6 +622,10 @@ def _require_iterative_call_shape(plan: Mapping[str, object]) -> None:
         policy.canonical_digest != sequence.get("call_shape_policy_digest")
         or policy.version != sequence.get("call_shape_policy_version")
         or len(primary_routes) != 1
+        or _issue_790_fixed_constraints_digest(policy)
+        != sequence.get("fixed_constraints_digest")
+        or _record(plan.get("canary"), field="canary").get("fallback_mode")
+        != _FALLBACK_MODE
     ):
         raise Issue790DispositionError("issue #790 call-shape policy differs")
     primary = primary_routes[0]
@@ -433,6 +665,114 @@ def _require_approved_plan(value: Mapping[str, object]) -> dict[str, object]:
         or approval.get("scope") != contract.scope
     ):
         raise Issue790DispositionError("issue #790 approved plan contract differs")
+    if contract.sequence_ordinal > 0:
+        sequence = _record(plan.get("sequence"), field="sequence")
+        predecessor = _record(sequence.get("predecessor"), field="predecessor")
+        causal_report = _validated_causal_report(
+            sequence.get("predecessor_causal_report")
+        )
+        diagnostic = (
+            _record(causal_report.get("diagnostic"), field="diagnostic")
+            if causal_report.get("schema_version") == ISSUE_790_CAUSAL_REPORT_SCHEMA
+            else causal_report
+        )
+        reviewed_fix = (
+            _validated_reviewed_fix(sequence.get("reviewed_fix"))
+            if sequence.get("constraint_change") == "REVIEWED_NON_TIMEOUT_FIX"
+            else None
+        )
+        if (
+            sequence.get("sequence_ordinal") != contract.sequence_ordinal
+            or sequence.get("controller_timeout_ms")
+            != contract.controller_timeout_ms
+            or sequence.get("extraction_timeout_ms")
+            != contract.extraction_timeout_ms
+            or sequence.get("cleanup_reserve_ms") != contract.cleanup_reserve_ms
+            or sequence.get("fixed_constraints_digest")
+            != contract.fixed_constraints_digest
+            or sequence.get("root_plan_digest") != contract.root_plan_digest
+            or predecessor.get("plan_digest")
+            != contract.predecessor_plan_digest
+            or causal_report.get("report_digest")
+            != contract.predecessor_causal_report_digest
+            or sequence.get("constraint_change") != contract.constraint_change
+            or (
+                None if reviewed_fix is None else reviewed_fix.get("record_digest")
+            )
+            != contract.reviewed_fix_digest
+        ):
+            raise Issue790DispositionError(
+                "issue #790 approved sequence contract differs"
+            )
+        if contract.sequence_ordinal == 1:
+            if (
+                sequence.get("constraint_change")
+                != "INITIAL_QUALIFIED_BASELINE"
+                or diagnostic.get("configured_timeout_ms") != 80_000
+                or contract.predecessor_plan_digest
+                != ISSUE_790_APPROVED_PLAN_DIGEST
+            ):
+                raise Issue790DispositionError(
+                    "issue #790 initial sequence contract differs"
+                )
+        else:
+            try:
+                previous_contract = issue_790_approved_plan_contract(
+                    str(contract.predecessor_plan_digest)
+                )
+            except KeyError as exc:
+                raise Issue790DispositionError(
+                    "issue #790 previous sequence contract differs"
+                ) from exc
+            if (
+                previous_contract.sequence_ordinal + 1
+                != contract.sequence_ordinal
+                or previous_contract.root_plan_digest != contract.root_plan_digest
+                or previous_contract.fixed_constraints_digest
+                != contract.fixed_constraints_digest
+                or previous_contract.cleanup_reserve_ms
+                != contract.cleanup_reserve_ms
+            ):
+                raise Issue790DispositionError(
+                    "issue #790 monotonic sequence contract differs"
+                )
+            if sequence.get("constraint_change") == "CONTROLLER_TIMEOUT_INCREMENT":
+                if (
+                    causal_report.get("schema_version")
+                    != ISSUE_790_CAUSAL_REPORT_SCHEMA
+                    or diagnostic.get("configured_timeout_ms")
+                    != previous_contract.controller_timeout_ms
+                    or contract.controller_timeout_ms
+                    != previous_contract.controller_timeout_ms + 10_000
+                    or contract.extraction_timeout_ms
+                    != previous_contract.extraction_timeout_ms + 10_000
+                ):
+                    raise Issue790DispositionError(
+                        "issue #790 timeout increment contract differs"
+                    )
+            elif sequence.get("constraint_change") == "REVIEWED_NON_TIMEOUT_FIX":
+                if (
+                    reviewed_fix is None
+                    or causal_report.get("schema_version")
+                    != ISSUE_790_NON_TIMEOUT_CAUSAL_REPORT_SCHEMA
+                    or diagnostic.get("configured_controller_timeout_ms")
+                    != previous_contract.controller_timeout_ms
+                    or diagnostic.get("configured_extraction_timeout_ms")
+                    != previous_contract.extraction_timeout_ms
+                    or diagnostic.get("cleanup_reserve_ms")
+                    != previous_contract.cleanup_reserve_ms
+                    or contract.controller_timeout_ms
+                    != previous_contract.controller_timeout_ms
+                    or contract.extraction_timeout_ms
+                    != previous_contract.extraction_timeout_ms
+                ):
+                    raise Issue790DispositionError(
+                        "issue #790 reviewed fix contract differs"
+                    )
+            else:
+                raise Issue790DispositionError(
+                    "issue #790 successor transition differs"
+                )
     _require_iterative_call_shape(plan)
     return plan
 
@@ -627,7 +967,6 @@ def _require_retry_exclusions(
     repository: Issue790CanaryRepository,
     *,
     plan: Mapping[str, object],
-    predecessor: Mapping[str, object] | None,
 ) -> list[dict[str, object]]:
     retained = list(repository.retry_exclusions())
     expected_events = plan.get("retry_forbidden_events")
@@ -653,22 +992,28 @@ def _require_retry_exclusions(
     if len(bindings) != 1:
         raise Issue790DispositionError("issue #790 retry exclusion binding differs")
     approved_plan_digest, disposition_digest = next(iter(bindings))
-    if predecessor is None:
-        expected_plan_digest = str(plan["canonical_digest"])
-        expected_disposition_digest = disposition_digest
-    else:
-        consumption = _record(
-            predecessor.get("consumption"),
-            field="predecessor consumption",
+    raw_sequence = plan.get("sequence")
+    expected_plan_digest = str(plan["canonical_digest"])
+    expected_disposition_digest = disposition_digest
+    if raw_sequence is not None:
+        sequence = _record(raw_sequence, field="sequence")
+        expected_plan_digest = str(sequence.get("root_plan_digest"))
+        root_consumption = repository.existing_consumption(
+            approved_plan_digest=expected_plan_digest
         )
-        expected_plan_digest = str(consumption.get("approved_plan_digest"))
-        expected_disposition_digest = str(consumption.get("disposition_digest"))
+        if root_consumption is None:
+            raise Issue790DispositionError(
+                "issue #790 root canary consumption is absent"
+            )
+        expected_disposition_digest = str(
+            root_consumption.get("disposition_digest")
+        )
     if (
         approved_plan_digest != expected_plan_digest
         or disposition_digest != expected_disposition_digest
     ):
         raise Issue790DispositionError(
-            "issue #790 retry exclusions do not bind the predecessor"
+            "issue #790 retry exclusions do not bind the immutable root"
         )
     try:
         exclusion_contract = issue_790_approved_plan_contract(
@@ -678,19 +1023,11 @@ def _require_retry_exclusions(
         raise Issue790DispositionError(
             "issue #790 retry exclusion plan differs"
         ) from exc
-    connection = sqlite3.connect(
-        f"{Path(repository.path).absolute().as_uri()}?mode=ro",
-        uri=True,
+    binding = repository.disposition_invocation(
+        approved_plan_digest=approved_plan_digest,
+        disposition_digest=disposition_digest,
     )
-    try:
-        binding = connection.execute(
-            "SELECT invocation_id FROM model_usage_conservative_dispositions "
-            "WHERE approved_plan_digest=? AND disposition_digest=?",
-            (approved_plan_digest, disposition_digest),
-        ).fetchone()
-    finally:
-        connection.close()
-    if binding is None or str(binding[0]) != exclusion_contract.invocation_id:
+    if binding != exclusion_contract.invocation_id:
         raise Issue790DispositionError("issue #790 retry exclusion authority differs")
     return retained
 
@@ -705,6 +1042,20 @@ def _require_sequence_predecessor(
         return None
     sequence = _record(raw_sequence, field="sequence")
     predecessor = _record(sequence.get("predecessor"), field="predecessor")
+    causal_report = _validated_causal_report(
+        sequence.get("predecessor_causal_report")
+    )
+    diagnostic = (
+        _record(causal_report.get("diagnostic"), field="diagnostic")
+        if causal_report.get("schema_version") == ISSUE_790_CAUSAL_REPORT_SCHEMA
+        else causal_report
+    )
+    transition = str(sequence.get("constraint_change"))
+    reviewed_fix = (
+        _validated_reviewed_fix(sequence.get("reviewed_fix"))
+        if transition == "REVIEWED_NON_TIMEOUT_FIX"
+        else None
+    )
     plan_digest = str(predecessor["plan_digest"])
     try:
         issue_790_approved_plan_contract(plan_digest)
@@ -736,7 +1087,101 @@ def _require_sequence_predecessor(
         or outcome.get("retry_authorised") is not False
     ):
         raise Issue790DispositionError("issue #790 predecessor outcome differs")
-    return {"consumption": consumption, "outcome": outcome}
+    if outcome.get("result_class") == "TRUTHFUL_PROVIDER_SUCCESS":
+        raise Issue790DispositionError(
+            "issue #790 predecessor already reached truthful success"
+        )
+    ordinal = int(sequence["sequence_ordinal"])
+    if ordinal == 1:
+        process_result = outcome.get("process_result")
+        if (
+            outcome.get("schema_version")
+            != "newsroom.issue-790.canary-outcome.v2"
+            or (
+                process_result is not None
+                and (
+                    not isinstance(process_result, dict)
+                    or process_result.get("state") == "TERMINAL"
+                )
+            )
+        ):
+            raise Issue790DispositionError(
+                "issue #790 initial predecessor result differs"
+            )
+    elif transition == "CONTROLLER_TIMEOUT_INCREMENT":
+        if (
+            outcome.get("schema_version")
+            != "newsroom.issue-790.canary-outcome.v3"
+            or outcome.get("result_class") != "CONTROLLER_TIMEOUT_NON_SUCCESS"
+            or outcome.get("causal_report") != causal_report
+        ):
+            raise Issue790DispositionError(
+                "issue #790 predecessor lacks causal timeout evidence"
+            )
+    elif transition == "REVIEWED_NON_TIMEOUT_FIX":
+        if (
+            reviewed_fix is None
+            or outcome.get("schema_version")
+            != "newsroom.issue-790.canary-outcome.v3"
+            or outcome.get("result_class") != "UNCLASSIFIED_NON_SUCCESS"
+            or outcome.get("causal_report") is not None
+            or causal_report.get("predecessor_outcome_digest")
+            != outcome.get("outcome_digest")
+            or causal_report.get("event_id") != outcome.get("event_id")
+            or reviewed_fix.get("predecessor_outcome_digest")
+            != outcome.get("outcome_digest")
+        ):
+            raise Issue790DispositionError(
+                "issue #790 predecessor lacks reviewed non-timeout evidence"
+            )
+    else:
+        raise Issue790DispositionError(
+            "issue #790 predecessor transition differs"
+        )
+
+    if transition != "REVIEWED_NON_TIMEOUT_FIX":
+        target = _record(plan.get("target"), field="target")
+        try:
+            terminal = repository.invocation_terminal(
+                invocation_id=str(target["invocation_id"])
+            )
+        except Issue790CanaryIntegrityError as exc:
+            raise Issue790DispositionError(str(exc)) from exc
+        if terminal is None:
+            raise Issue790DispositionError("issue #790 causal terminal is absent")
+        if (
+            terminal.get("terminal_digest") != target.get("terminal_digest")
+            or terminal.get("outcome") != "TIMEOUT"
+            or terminal.get("usage_status") != "UNREPORTED"
+            or terminal.get("failure_class") != "MISSING_PROVIDER_TELEMETRY"
+        ):
+            raise Issue790DispositionError("issue #790 causal terminal differs")
+        dispatched_at = _instant(terminal.get("dispatch_at"), field="dispatch_at")
+        completed_at = _instant(terminal.get("completed_at"), field="completed_at")
+        configured_timeout_ms = diagnostic.get("configured_timeout_ms")
+        if not isinstance(configured_timeout_ms, int) or isinstance(
+            configured_timeout_ms, bool
+        ):
+            raise Issue790DispositionError("issue #790 causal timeout differs")
+        expected_deadline = dispatched_at + timedelta(
+            milliseconds=configured_timeout_ms
+        )
+        if (
+            diagnostic.get("elapsed_ms")
+            != round((completed_at - dispatched_at).total_seconds() * 1_000)
+            or diagnostic.get("deadline_at") != _utc_text(expected_deadline)
+            or diagnostic.get("last_progress") != "DISPATCH_STARTED"
+            or diagnostic.get("provider_cause") != "UNOBSERVED"
+        ):
+            raise Issue790DispositionError(
+                "issue #790 causal timing evidence differs"
+            )
+    return {
+        "consumption": consumption,
+        "outcome": outcome,
+        "causal_report": causal_report,
+        "reviewed_fix": reviewed_fix,
+    }
 
 
 def _running_code_evidence(
@@ -1270,7 +1715,6 @@ def _execute_issue_790_plan(
         retry_exclusions = _require_retry_exclusions(
             canary_repository,
             plan=retained_plan,
-            predecessor=predecessor,
         )
         route_state_before_release = service.route_state(str(target["route"]))
         expected_closed_reason = (
@@ -1629,6 +2073,97 @@ def _issue_790_canary_usage_evidence(
     }
 
 
+def _issue_790_controller_timeout_report(
+    store: Path,
+    *,
+    event_id: str,
+    configured_timeout_ms: int,
+) -> dict[str, object] | None:
+    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        rows = connection.execute(
+            "SELECT r.receipt_digest,r.receipt_json "
+            "FROM unpublished_graphiti_attempt_receipts r "
+            "JOIN model_work_envelopes e "
+            "ON json_extract(e.record_json,'$.ingest_id')=r.ingest_id "
+            "WHERE e.cycle_id=? ORDER BY r.attempt_number,r.rowid",
+            (event_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+    candidates: dict[
+        tuple[str, str], tuple[dict[str, object], str]
+    ] = {}
+    for row in rows:
+        try:
+            receipt = json.loads(str(row[1]))
+        except json.JSONDecodeError as exc:
+            raise Issue790DispositionError(
+                "bounded canary attempt receipt is malformed"
+            ) from exc
+        if not isinstance(receipt, dict):
+            raise Issue790DispositionError(
+                "bounded canary attempt receipt is malformed"
+            )
+        receipt_digest = str(row[0])
+        unsigned_receipt = dict(receipt)
+        supplied_receipt_digest = unsigned_receipt.pop("receipt_digest", None)
+        if (
+            supplied_receipt_digest != receipt_digest
+            or digest_canonical(unsigned_receipt) != receipt_digest
+        ):
+            raise Issue790DispositionError(
+                "bounded canary attempt receipt digest differs"
+            )
+        raw_diagnostics: list[object] = []
+        attempt_diagnostics = receipt.get("timeout_diagnostics")
+        if isinstance(attempt_diagnostics, list):
+            raw_diagnostics.extend(attempt_diagnostics)
+        invocations = receipt.get("chat_invocations")
+        if isinstance(invocations, list):
+            raw_diagnostics.extend(
+                invocation.get("transport_diagnostic")
+                for invocation in invocations
+                if isinstance(invocation, dict)
+                and invocation.get("provider") == "cursor-agent-cli"
+                and invocation.get("transport_diagnostic") is not None
+            )
+        try:
+            diagnostics = validated_timeout_diagnostics(raw_diagnostics)
+        except ValueError as exc:
+            raise Issue790DispositionError(
+                "bounded canary timeout diagnostics differ"
+            ) from exc
+        for diagnostic in diagnostics:
+            if (
+                diagnostic.get("boundary") == "CONTROLLER_DEADLINE"
+                and diagnostic.get("phase") == "PRIMARY_TRANSPORT"
+                and diagnostic.get("cause") == "CONFIGURED_TIMEOUT_EXPIRED"
+                and diagnostic.get("configured_timeout_ms")
+                == configured_timeout_ms
+            ):
+                key = (digest_canonical(diagnostic), receipt_digest)
+                candidates[key] = (diagnostic, receipt_digest)
+    if len(candidates) != 1:
+        return None
+    diagnostic, receipt_digest = next(iter(candidates.values()))
+    report_without_digest: dict[str, object] = {
+        "schema_version": ISSUE_790_CAUSAL_REPORT_SCHEMA,
+        "classification": "CONTROLLER_TIMEOUT",
+        "causal_constraint": "CONTROLLER_TIMEOUT_MS",
+        "local_cause": diagnostic["cause"],
+        "provider_cause": diagnostic["provider_cause"],
+        "diagnostic_reference": (
+            "retained:unpublished_graphiti_attempt_receipts:" + receipt_digest
+        ),
+        "diagnostic": diagnostic,
+    }
+    return {
+        **report_without_digest,
+        "report_digest": digest_canonical(report_without_digest),
+    }
+
+
 def _consume_issue_790_event(
     *,
     proving_store: Path,
@@ -1644,7 +2179,7 @@ def _consume_issue_790_event(
     return consume_next_graphiti_event(
         proving_store=str(proving_store),
         unpublished_store=str(unpublished_store),
-        graphiti=EvaluationGraphitiRunner(),
+        graphiti=EvaluationGraphitiRunner(fallback_permitted=False),
         owner_id=owner_id,
         model_usage=model_usage,
         event_id=event_id,
@@ -1661,16 +2196,31 @@ def _qualify_issue_790_event(
     event_id: str,
     ledger_seq: int,
     observed_at: datetime,
+    plan: Mapping[str, object],
 ) -> dict[str, object]:
     from newsroom.control_plane.cycle import qualify_fresh_graphiti_event
 
-    return qualify_fresh_graphiti_event(
+    evidence = qualify_fresh_graphiti_event(
         proving_store=str(proving_store),
         unpublished_store=str(unpublished_store),
         event_id=event_id,
         ledger_seq=ledger_seq,
         clock=lambda: observed_at,
     )
+    if plan.get("sequence") is None:
+        return evidence
+    retained = dict(evidence)
+    retained.pop("evidence_digest", None)
+    sequence = _record(plan.get("sequence"), field="sequence")
+    retained.update(
+        {
+            "schema_version": ISSUE_790_ITERATIVE_PREFLIGHT_SCHEMA,
+            "approved_plan_digest": plan["canonical_digest"],
+            "fallback_mode": _FALLBACK_MODE,
+            "fixed_constraints_digest": sequence["fixed_constraints_digest"],
+        }
+    )
+    return {**retained, "evidence_digest": digest_canonical(retained)}
 
 
 def run_issue_790_canary(
@@ -1724,7 +2274,6 @@ def run_issue_790_canary(
     retry_exclusions = _require_retry_exclusions(
         canary_repository,
         plan=retained_plan,
-        predecessor=predecessor,
     )
     event_before = _event_snapshot(
         store,
@@ -1749,6 +2298,7 @@ def run_issue_790_canary(
                 event_id=event_id,
                 ledger_seq=ledger_seq,
                 observed_at=observed_at,
+                plan=retained_plan,
             )
         except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
             raise Issue790DispositionError(
@@ -1851,6 +2401,46 @@ def run_issue_790_canary(
                     ),
                 }
             completed_at = datetime.now(tz=UTC)
+            usage_before_seal = _issue_790_canary_usage_evidence(
+                store,
+                event_id=event_id,
+            )
+            truthful_provider_success = bool(
+                exception is None
+                and process_result is not None
+                and process_result.get("state") == "TERMINAL"
+                and process_result.get("attempt_count") == 1
+                and usage_before_seal["primary_chat_leaf_count"] >= 1
+                and usage_before_seal["qualified_primary_identity_count"]
+                == usage_before_seal["primary_chat_leaf_count"]
+                and usage_before_seal["truthful_primary_usage_count"]
+                == usage_before_seal["primary_chat_leaf_count"]
+                and usage_before_seal["fallback_chat_leaf_count"] == 0
+                and usage_before_seal["unresolved_terminal_count"] == 0
+                and usage_before_seal["unterminated_leaf_count"] == 0
+            )
+            completion_fields: dict[str, object] = {}
+            raw_sequence = retained_plan.get("sequence")
+            if raw_sequence is not None:
+                causal_report = None
+                if truthful_provider_success:
+                    result_class = "TRUTHFUL_PROVIDER_SUCCESS"
+                else:
+                    sequence = _record(raw_sequence, field="sequence")
+                    causal_report = _issue_790_controller_timeout_report(
+                        store,
+                        event_id=event_id,
+                        configured_timeout_ms=int(sequence["controller_timeout_ms"]),
+                    )
+                    result_class = (
+                        "CONTROLLER_TIMEOUT_NON_SUCCESS"
+                        if causal_report is not None
+                        else "UNCLASSIFIED_NON_SUCCESS"
+                    )
+                completion_fields = {
+                    "result_class": result_class,
+                    "causal_report": causal_report,
+                }
             outcome = canary_repository.complete(
                 consumption_digest=str(consumption["consumption_digest"]),
                 event_id=event_id,
@@ -1861,6 +2451,7 @@ def run_issue_790_canary(
                 exception_code=(
                     None if exception is None else str(exception["type"])
                 ),
+                **completion_fields,
             )
     except Issue790CanaryIntegrityError as exc:
         raise Issue790DispositionError(str(exc)) from exc
@@ -1890,6 +2481,10 @@ def run_issue_790_canary(
         and process_result is not None
         and process_result.get("state") == "TERMINAL"
         and process_result.get("attempt_count") == 1
+        and (
+            predecessor is None
+            or outcome.get("result_class") == "TRUTHFUL_PROVIDER_SUCCESS"
+        )
         and event_after_record.get("state") == "TERMINAL"
         and usage_evidence["provider_backed_terminal_count"] >= 1
         and usage_evidence["truthful_nonzero_usage_count"] >= 1

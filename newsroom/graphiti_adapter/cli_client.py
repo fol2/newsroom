@@ -738,9 +738,12 @@ async def run_cli_chain(
     invocation_observer: CliInvocationObserver | None = None,
     semantic_request_class: str = "UNSTRUCTURED",
     max_tokens: int = 16_384,
+    fallback_permitted: bool = True,
 ) -> dict[str, Any]:
     """Execute cursor then Grok fallback while retaining every call outcome."""
 
+    if not isinstance(fallback_permitted, bool):
+        raise TypeError("Graphiti fallback permission must be boolean")
     prompt = _bind_requested_max_tokens(prompt, max_tokens)
     cursor_token = (
         None
@@ -997,6 +1000,8 @@ async def run_cli_chain(
             )
     if payload is not None:
         return payload
+    if not fallback_permitted:
+        raise CliResponseError("Graphiti fallback is disabled before dispatch")
     if (
         classify_graphiti_fallback(cursor_outcome).eligibility
         is not FallbackEligibility.ELIGIBLE
@@ -1224,6 +1229,7 @@ def build_cli_llm_client(
     cursor_runner: CliRunner | None = None,
     grok_runner: GrokRunner | None = None,
     invocation_observer: CliInvocationObserver | None = None,
+    fallback_permitted: bool = True,
 ) -> GraphitiCliClient:
     """Build Graphiti's LLMClient while retaining every attempted CLI call."""
 
@@ -1275,6 +1281,7 @@ def build_cli_llm_client(
                     invocation_observer=invocation_observer,
                     semantic_request_class=semantic_request_class,
                     max_tokens=requested_max_tokens,
+                    fallback_permitted=fallback_permitted,
                 )
             except CliResponseError as exc:
                 raise EmptyResponseError(str(exc)) from exc

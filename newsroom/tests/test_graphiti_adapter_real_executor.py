@@ -384,6 +384,39 @@ def test_cursor_malformed_json_executes_grok_fallback_and_records_both_calls() -
     ]
 
 
+def test_disabled_fallback_fails_before_grok_allocation_or_dispatch() -> None:
+    from newsroom.graphiti_adapter.cli_client import CliResponseError, run_cli_chain
+
+    calls: list[str] = []
+
+    def cursor(_prompt: str, *, max_tokens: int) -> str:
+        del max_tokens
+        calls.append("cursor")
+        return "not-json"
+
+    def grok(_prompt: str, _schema: str | None, *, max_tokens: int) -> str:
+        del max_tokens
+        calls.append("grok")
+        raise AssertionError("disabled fallback reached Grok")
+
+    invocations: list[dict[str, object]] = []
+    with pytest.raises(CliResponseError, match="disabled before dispatch"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="prompt",
+                schema='{"type":"object"}',
+                cursor_runner=cursor,
+                grok_runner=grok,
+                invocations=invocations,
+                fallback_permitted=False,
+            )
+        )
+
+    assert calls == ["cursor"]
+    assert [item["provider"] for item in invocations] == ["cursor-agent-cli"]
+    assert [item["outcome"] for item in invocations] == ["MALFORMED_OUTPUT"]
+
+
 def test_both_cli_malformed_json_results_fail_after_recording_both_calls() -> None:
     from newsroom.graphiti_adapter.cli_client import CliResponseError, run_cli_chain
 
