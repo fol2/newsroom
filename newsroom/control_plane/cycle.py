@@ -921,6 +921,23 @@ def _reconcile_result_spend(
     """Attribute returned provider telemetry without trusting invalid identity fields."""
 
     spend_id = f"{unit.ingest_id}:{attempt_number}"
+    if not binding_validated:
+        accounting = reconcile_graphiti_spend(
+            unpublished,
+            spend_id=spend_id,
+            embedding_usage=None,
+        )
+        accounting.update(
+            {
+                "telemetry_binding": "REJECTED",
+                "reported_embedding_usage_digest": _canonical_digest_or_none(
+                    result.embedding_usage
+                ),
+            }
+        )
+        append_ledger(unpublished, "GRAPHITI_SPEND_RECONCILE", accounting)
+        return accounting
+
     reported_attempt = result.provider_attempt_number
     provider_spend_id = f"{unit.ingest_id}:{reported_attempt}"
     provider_state = unpublished.execute(

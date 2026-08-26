@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -3684,6 +3686,155 @@ def test_async_controller_output_bound_drains_both_child_streams(
         asyncio.run(asyncio.wait_for(invoke(), timeout=2))
 
 
+def _descendant_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    status = subprocess.run(
+        ("ps", "-o", "stat=", "-p", str(pid)),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    state = status.stdout.strip()
+    return status.returncode == 0 and bool(state) and not state.startswith("Z")
+
+
+@pytest.mark.parametrize("boundary", ("OUTPUT_LIMIT", "TIMEOUT"))
+def test_sync_controller_terminates_descendants_that_inherit_pipes(
+    tmp_path: Path,
+    boundary: str,
+) -> None:
+    from newsroom.graphiti_adapter import cursor_transport
+
+    pid_path = tmp_path / f"sync-{boundary.lower()}-descendant.pid"
+    output = (
+        "sys.stdout.buffer.write(b'x' * 200000); sys.stdout.flush(); "
+        if boundary == "OUTPUT_LIMIT"
+        else ""
+    )
+    script = (
+        "import pathlib,subprocess,sys,time; "
+        "descendant=subprocess.Popen((sys.executable,'-c',"
+        "'import time; time.sleep(30)')); "
+        f"pathlib.Path({str(pid_path)!r}).write_text(str(descendant.pid)); "
+        f"{output}"
+        "time.sleep(30)"
+    )
+    expected = (
+        cursor_transport.CliOutputBoundExceeded
+        if boundary == "OUTPUT_LIMIT"
+        else cursor_transport.CliTransportTimeout
+    )
+    descendant_pid: int | None = None
+    try:
+        with pytest.raises(expected):
+            cursor_transport._run_bounded_process(
+                (sys.executable, "-c", script),
+                timeout=0.5,
+                max_output_bytes=(1_024 if boundary == "OUTPUT_LIMIT" else 1_000_000),
+                cwd=str(tmp_path),
+                environment={},
+            )
+        descendant_pid = int(pid_path.read_text())
+        deadline = time.monotonic() + 1
+        while _descendant_is_running(descendant_pid) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not _descendant_is_running(descendant_pid)
+    finally:
+        if descendant_pid is not None and _descendant_is_running(descendant_pid):
+            os.kill(descendant_pid, signal.SIGKILL)
+
+
+@pytest.mark.parametrize("boundary", ("OUTPUT_LIMIT", "TIMEOUT", "CANCELLATION"))
+def test_async_controller_terminates_descendants_that_inherit_pipes(
+    tmp_path: Path,
+    boundary: str,
+) -> None:
+    from newsroom.graphiti_adapter import cursor_transport
+
+    pid_path = tmp_path / f"{boundary.lower()}-descendant.pid"
+    output = (
+        "sys.stdout.buffer.write(b'x' * 200000); sys.stdout.flush(); "
+        if boundary == "OUTPUT_LIMIT"
+        else ""
+    )
+    script = (
+        "import pathlib,subprocess,sys,time; "
+        "descendant=subprocess.Popen((sys.executable,'-c',"
+        "'import time; time.sleep(30)')); "
+        f"pathlib.Path({str(pid_path)!r}).write_text(str(descendant.pid)); "
+        f"{output}"
+        "time.sleep(30)"
+    )
+
+    async def invoke() -> None:
+        task = asyncio.create_task(
+            cursor_transport._run_bounded_process_async(
+                (sys.executable, "-c", script),
+                timeout=0.5 if boundary == "TIMEOUT" else 5,
+                max_output_bytes=(1_024 if boundary == "OUTPUT_LIMIT" else 1_000_000),
+                cwd=str(tmp_path),
+                environment={},
+            )
+        )
+        if boundary == "CANCELLATION":
+            deadline = asyncio.get_running_loop().time() + 1
+            while not pid_path.exists():
+                if asyncio.get_running_loop().time() >= deadline:
+                    pytest.fail("descendant did not start before cancellation")
+                await asyncio.sleep(0.01)
+            task.cancel()
+        await task
+
+    expected = {
+        "OUTPUT_LIMIT": cursor_transport.CliOutputBoundExceeded,
+        "TIMEOUT": cursor_transport.CliTransportTimeout,
+        "CANCELLATION": asyncio.CancelledError,
+    }[boundary]
+    descendant_pid: int | None = None
+    try:
+        with pytest.raises(expected):
+            asyncio.run(asyncio.wait_for(invoke(), timeout=2))
+        descendant_pid = int(pid_path.read_text())
+        deadline = time.monotonic() + 1
+        while _descendant_is_running(descendant_pid) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not _descendant_is_running(descendant_pid)
+    finally:
+        if descendant_pid is not None and _descendant_is_running(descendant_pid):
+            os.kill(descendant_pid, signal.SIGKILL)
+
+
+def test_async_process_cleanup_drain_has_a_hard_deadline() -> None:
+    from newsroom.graphiti_adapter.cli_process import stop_process_async
+
+    killed = False
+
+    class Process:
+        returncode: int | None = None
+
+        def kill(self) -> None:
+            nonlocal killed
+            killed = True
+            self.returncode = -9
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await asyncio.Future()
+            raise AssertionError("cleanup drain resumed")
+
+    async def invoke() -> str:
+        return await stop_process_async(  # type: ignore[arg-type]
+            Process(),
+            cleanup_timeout=0.01,
+        )
+
+    termination = asyncio.run(asyncio.wait_for(invoke(), timeout=0.5))
+    assert killed is True
+    assert termination == "PROCESS_CLEANUP_TIMEOUT"
+
+
 @pytest.mark.parametrize("boundary", ("TIMEOUT", "CANCELLATION"))
 def test_async_controller_drains_high_volume_pipes_on_termination(
     tmp_path: Path,
@@ -3843,13 +3994,13 @@ def test_controller_timeout_survives_process_exit_race(
 ) -> None:
     from newsroom.graphiti_adapter import cursor_transport
 
-    original_kill = subprocess.Popen.kill
+    original_kill = os.killpg
 
-    def exits_during_kill(process: subprocess.Popen[bytes]) -> None:
-        original_kill(process)
+    def exits_during_kill(process_group_id: int, sent_signal: int) -> None:
+        original_kill(process_group_id, sent_signal)
         raise ProcessLookupError
 
-    monkeypatch.setattr(subprocess.Popen, "kill", exits_during_kill)
+    monkeypatch.setattr(os, "killpg", exits_during_kill)
     with pytest.raises(cursor_transport.CliTransportTimeout) as caught:
         cursor_transport._run_bounded_process(
             (sys.executable, "-c", "import time; time.sleep(5)"),
@@ -4034,13 +4185,13 @@ def test_sync_fallback_timeout_survives_process_exit_race(
     from newsroom.graphiti_adapter.cli_client import run_cli
     from newsroom.graphiti_adapter.cli_process import CliTransportTimeout
 
-    original_kill = subprocess.Popen.kill
+    original_kill = os.killpg
 
-    def exits_during_kill(process: subprocess.Popen[bytes]) -> None:
-        original_kill(process)
+    def exits_during_kill(process_group_id: int, sent_signal: int) -> None:
+        original_kill(process_group_id, sent_signal)
         raise ProcessLookupError
 
-    monkeypatch.setattr(subprocess.Popen, "kill", exits_during_kill)
+    monkeypatch.setattr(os, "killpg", exits_during_kill)
     with pytest.raises(CliTransportTimeout) as caught:
         run_cli(
             (sys.executable, "-c", "import time; time.sleep(5)"),
