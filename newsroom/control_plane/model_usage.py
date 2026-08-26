@@ -25,28 +25,33 @@ from newsroom.control_plane.graphiti_requests import (
     GraphitiInternalRequestIdentity,
     load_checked_graphiti_call_shape_policy,
 )
+from newsroom.control_plane.issue_790_contract import (
+    ISSUE_790_APPROVAL_REFERENCE,
+    ISSUE_790_APPROVED_ALLOCATION_DIGEST,
+    ISSUE_790_APPROVED_AT,
+    ISSUE_790_APPROVED_BY,
+    ISSUE_790_APPROVED_INVOCATION_ID,
+    ISSUE_790_APPROVED_PLAN_DIGEST,
+    ISSUE_790_APPROVED_SCOPE,
+    ISSUE_790_APPROVED_TERMINAL_DIGEST,
+)
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.veto import assert_private_store
 
 MODEL_USAGE_SCHEMA_VERSION = "newsroom.model-usage.v3"
-MODEL_USAGE_MIGRATION_ID = "model-usage-v3"
+MODEL_USAGE_INTERFACE_SCHEMA_VERSION = "newsroom.model-usage.v4"
+MODEL_USAGE_MIGRATION_ID = "model-usage-v4-conservative-disposition"
 CONSERVATIVE_DISPOSITION_SCHEMA_VERSION = (
-    "newsroom.model-usage.conservative-disposition.v1"
+    "newsroom.model-usage.conservative-disposition.v2"
 )
 CONSERVATIVE_DISPOSITION_AUTHORITY_SCHEMA_VERSION = (
-    "newsroom.model-usage.conservative-disposition-authority.v1"
-)
-CONSERVATIVE_DISPOSITION_MIGRATION_ID = (
-    "model-usage-v4-conservative-disposition"
+    "newsroom.model-usage.conservative-disposition-authority.v2"
 )
 _MODEL_USAGE_MIGRATIONS = (
     ("model-usage-v1", "newsroom.model-usage.v1"),
     ("model-usage-v2", "newsroom.model-usage.v2"),
-    (MODEL_USAGE_MIGRATION_ID, MODEL_USAGE_SCHEMA_VERSION),
-    (
-        CONSERVATIVE_DISPOSITION_MIGRATION_ID,
-        CONSERVATIVE_DISPOSITION_SCHEMA_VERSION,
-    ),
+    ("model-usage-v3", "newsroom.model-usage.v3"),
+    (MODEL_USAGE_MIGRATION_ID, MODEL_USAGE_INTERFACE_SCHEMA_VERSION),
 )
 _HERMETIC_CONT_CONFIG_IDENTITIES = frozenset(
     {
@@ -252,6 +257,7 @@ CREATE TABLE IF NOT EXISTS model_usage_conservative_dispositions(
     terminal_digest TEXT NOT NULL UNIQUE,
     allocation_digest TEXT NOT NULL,
     policy_digest TEXT NOT NULL,
+    approved_plan_digest TEXT NOT NULL UNIQUE,
     authority_digest TEXT NOT NULL,
     approved_by TEXT NOT NULL,
     approval_reference TEXT NOT NULL,
@@ -267,6 +273,30 @@ CREATE TABLE IF NOT EXISTS model_usage_conservative_dispositions(
         REFERENCES model_invocation_allocations(canonical_digest)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
     FOREIGN KEY(policy_digest) REFERENCES model_invocation_policies(canonical_digest)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+);
+CREATE TABLE IF NOT EXISTS model_usage_bounded_canary_consumptions(
+    consumption_digest TEXT PRIMARY KEY,
+    approved_plan_digest TEXT NOT NULL UNIQUE,
+    disposition_digest TEXT NOT NULL UNIQUE,
+    event_id TEXT NOT NULL UNIQUE,
+    ledger_seq INTEGER NOT NULL UNIQUE CHECK(ledger_seq > 0),
+    owner_id TEXT NOT NULL UNIQUE,
+    consumed_at TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    FOREIGN KEY(disposition_digest)
+        REFERENCES model_usage_conservative_dispositions(disposition_digest)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+);
+CREATE TABLE IF NOT EXISTS model_usage_bounded_canary_outcomes(
+    outcome_digest TEXT PRIMARY KEY,
+    consumption_digest TEXT NOT NULL UNIQUE,
+    event_id TEXT NOT NULL UNIQUE,
+    ledger_seq INTEGER NOT NULL UNIQUE CHECK(ledger_seq > 0),
+    completed_at TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    FOREIGN KEY(consumption_digest)
+        REFERENCES model_usage_bounded_canary_consumptions(consumption_digest)
         ON UPDATE RESTRICT ON DELETE RESTRICT
 );
 CREATE TABLE IF NOT EXISTS model_usage_route_circuit_events(
@@ -361,11 +391,13 @@ def _usage_blocking_routes(connection: sqlite3.Connection) -> set[str]:
         "WHERE r.invocation_id=t.invocation_id) "
         "AND NOT EXISTS (SELECT 1 "
         "FROM model_usage_conservative_dispositions d "
-        "WHERE d.invocation_id=t.invocation_id)) "
+        "WHERE d.invocation_id=t.invocation_id "
+        "AND d.approved_plan_digest=?)) "
         "OR json_extract(t.record_json,'$.policy_breach') IS NOT NULL "
         "OR EXISTS (SELECT 1 FROM model_usage_reconciliations r "
         "WHERE r.invocation_id=t.invocation_id "
-        "AND json_extract(r.record_json,'$.policy_breach') IS NOT NULL)"
+        "AND json_extract(r.record_json,'$.policy_breach') IS NOT NULL)",
+        (ISSUE_790_APPROVED_PLAN_DIGEST,),
     ).fetchall()
     return {_canonical_circuit_route(str(row[0])) for row in rows}
 
@@ -2510,6 +2542,7 @@ class ModelUsageService:
         approved_by: str,
         approval_reference: str,
         approved_at: datetime,
+        approved_plan_digest: str,
         authority_digest: str,
         observed_at: datetime,
     ) -> dict[str, object]:
@@ -2536,8 +2569,36 @@ class ModelUsageService:
             field="approval reference",
         )
         authority_digest = _token(authority_digest, field="authority digest")
+        approved_plan_digest = _token(
+            approved_plan_digest,
+            field="approved plan digest",
+        )
+        if approved_plan_digest != ISSUE_790_APPROVED_PLAN_DIGEST:
+            raise ModelUsageIntegrityError(
+                "conservative disposition approved plan differs"
+            )
+        if invocation_id != ISSUE_790_APPROVED_INVOCATION_ID:
+            raise ModelUsageIntegrityError(
+                "conservative disposition approved invocation differs"
+            )
+        if expected_terminal_digest != ISSUE_790_APPROVED_TERMINAL_DIGEST:
+            raise ModelUsageIntegrityError(
+                "conservative disposition approved terminal differs"
+            )
+        if expected_allocation_digest != ISSUE_790_APPROVED_ALLOCATION_DIGEST:
+            raise ModelUsageIntegrityError(
+                "conservative disposition approved allocation differs"
+            )
         approved_at_text = _utc_text(approved_at)
         observed_at_text = _utc_text(observed_at)
+        if (
+            approved_by != ISSUE_790_APPROVED_BY
+            or approval_reference != ISSUE_790_APPROVAL_REFERENCE
+            or approved_at_text != ISSUE_790_APPROVED_AT
+        ):
+            raise ModelUsageIntegrityError(
+                "conservative disposition approval authority differs"
+            )
         if observed_at < approved_at:
             raise ModelUsageIntegrityError(
                 "conservative disposition observation precedes approval"
@@ -2565,6 +2626,8 @@ class ModelUsageService:
                     or prior.get("approved_by") != approved_by
                     or prior.get("approval_reference") != approval_reference
                     or prior.get("approved_at") != approved_at_text
+                    or prior.get("approved_plan_digest")
+                    != approved_plan_digest
                 ):
                     raise ModelUsageIntegrityError(
                         "conflicting conservative disposition replay"
@@ -2607,13 +2670,14 @@ class ModelUsageService:
                 "schema_version": (
                     CONSERVATIVE_DISPOSITION_AUTHORITY_SCHEMA_VERSION
                 ),
+                "approved_plan_digest": approved_plan_digest,
                 "approved_by": approved_by,
                 "approval_reference": approval_reference,
                 "approved_at": approved_at_text,
                 "invocation_id": invocation_id,
                 "terminal_digest": terminal_digest,
                 "allocation_digest": allocation_digest,
-                "scope": "CONSERVATIVE_SUBSCRIPTION_CLI_USAGE_DISPOSITION",
+                "scope": ISSUE_790_APPROVED_SCOPE,
             }
             if digest_canonical(authority) != authority_digest:
                 raise ModelUsageIntegrityError(
@@ -2688,6 +2752,7 @@ class ModelUsageService:
                 "terminal_digest": terminal_digest,
                 "allocation_digest": allocation_digest,
                 "policy_digest": policy_digest,
+                "approved_plan_digest": approved_plan_digest,
                 "usage_status": UsageStatus.ESTIMATED.value,
                 "components": components.as_record(),
                 "estimate_policy_digest": policy_digest,
@@ -2711,21 +2776,424 @@ class ModelUsageService:
             connection.execute(
                 "INSERT INTO model_usage_conservative_dispositions("
                 "disposition_digest,invocation_id,terminal_digest,"
-                "allocation_digest,policy_digest,authority_digest,approved_by,"
-                "approval_reference,approved_at,observed_at,usage_status,record_json"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "allocation_digest,policy_digest,approved_plan_digest,"
+                "authority_digest,approved_by,approval_reference,approved_at,"
+                "observed_at,usage_status,record_json"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     disposition_digest,
                     invocation_id,
                     terminal_digest,
                     allocation_digest,
                     policy_digest,
+                    approved_plan_digest,
                     authority_digest,
                     approved_by,
                     approval_reference,
                     approved_at_text,
                     observed_at_text,
                     UsageStatus.ESTIMATED.value,
+                    _json(record),
+                ),
+            )
+            connection.commit()
+            return record
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def consume_issue_790_bounded_canary(
+        self,
+        *,
+        approved_plan_digest: str,
+        disposition_digest: str,
+        event_id: str,
+        ledger_seq: int,
+        owner_id: str,
+        consumed_at: datetime,
+    ) -> dict[str, object]:
+        """Consume the approved single canary before its first provider I/O."""
+
+        approved_plan_digest = _token(
+            approved_plan_digest,
+            field="approved plan digest",
+        )
+        disposition_digest = _token(
+            disposition_digest,
+            field="disposition digest",
+        )
+        event_id = _token(event_id, field="canary event id")
+        owner_id = _token(owner_id, field="canary owner id")
+        if approved_plan_digest != ISSUE_790_APPROVED_PLAN_DIGEST:
+            raise ModelUsageIntegrityError("bounded canary approved plan differs")
+        if (
+            isinstance(ledger_seq, bool)
+            or not isinstance(ledger_seq, int)
+            or ledger_seq <= 0
+        ):
+            raise ModelUsageIntegrityError("bounded canary ledger sequence is invalid")
+        if ledger_seq in {1932, 1972}:
+            raise ModelUsageIntegrityError("bounded canary targeted a retained failure")
+        consumed_at_text = _utc_text(consumed_at)
+
+        connection = self._connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute(
+                "SELECT 1 FROM model_usage_bounded_canary_consumptions "
+                "WHERE approved_plan_digest=? LIMIT 1",
+                (approved_plan_digest,),
+            ).fetchone() is not None:
+                raise ModelUsageIntegrityError(
+                    "bounded canary authority is already consumed"
+                )
+            disposition_row = connection.execute(
+                "SELECT invocation_id,record_json "
+                "FROM model_usage_conservative_dispositions "
+                "WHERE disposition_digest=? AND approved_plan_digest=?",
+                (disposition_digest, approved_plan_digest),
+            ).fetchone()
+            if disposition_row is None:
+                raise ModelUsageIntegrityError(
+                    "bounded canary disposition authority is absent"
+                )
+            disposition = _object(disposition_row[1])
+            if (
+                str(disposition_row[0]) != ISSUE_790_APPROVED_INVOCATION_ID
+                or disposition.get("exact_usage_remains_unknown") is not True
+                or disposition.get("unknown_spend_released") is not False
+            ):
+                raise ModelUsageIntegrityError(
+                    "bounded canary disposition authority differs"
+                )
+            route_state = self._route_state(
+                connection,
+                WorkloadClass.GRAPHITI_CHAT_PRIMARY.value,
+            )
+            if route_state.get("state") != "CLOSED" or route_state.get(
+                "reason"
+            ) != f"AUTHORISED_OPERATOR_RESET:{disposition_digest}":
+                raise ModelUsageIntegrityError(
+                    "bounded canary route release authority differs"
+                )
+            try:
+                event_row = connection.execute(
+                    "SELECT state,attempt_count,available_at,claim_owner,"
+                    "claim_expires_at,manifest_json,unit_count,manifest_digest "
+                    "FROM unpublished_graphiti_revision_events "
+                    "WHERE event_id=? AND ledger_seq=?",
+                    (event_id, ledger_seq),
+                ).fetchone()
+            except sqlite3.OperationalError as exc:
+                raise ModelUsageIntegrityError(
+                    "bounded canary event authority is unavailable"
+                ) from exc
+            if (
+                event_row is None
+                or str(event_row[0]) != "QUEUED"
+                or int(event_row[1]) != 0
+                or str(event_row[2]) > consumed_at_text
+                or event_row[3] is not None
+                or event_row[4] is not None
+            ):
+                raise ModelUsageIntegrityError(
+                    "bounded canary event is not fresh and claimable"
+                )
+            event_circuit = connection.execute(
+                "SELECT state,available_at FROM unpublished_graphiti_event_circuit "
+                "WHERE singleton=1"
+            ).fetchone()
+            if (
+                event_circuit is not None
+                and str(event_circuit[0]) == "OPEN"
+                and event_circuit[1] is not None
+                and str(event_circuit[1]) > consumed_at_text
+            ):
+                raise ModelUsageIntegrityError(
+                    "bounded canary event circuit is still open"
+                )
+            try:
+                manifest = _object(event_row[5])
+            except (TypeError, ValueError) as exc:
+                raise ModelUsageIntegrityError(
+                    "bounded canary event manifest is invalid"
+                ) from exc
+            unit_refs = manifest.get("unit_refs")
+            if (
+                int(event_row[6]) <= 0
+                or not isinstance(unit_refs, list)
+                or len(unit_refs) != int(event_row[6])
+                or not all(isinstance(item, dict) for item in unit_refs)
+                or manifest.get("ledger_seq") != ledger_seq
+                or digest_canonical(manifest) != str(event_row[7])
+            ):
+                raise ModelUsageIntegrityError(
+                    "bounded canary event has no retained canonical input"
+                )
+            ingest_ids = tuple(
+                str(item.get("ingest_id"))
+                for item in unit_refs
+                if isinstance(item.get("ingest_id"), str)
+                and item.get("ingest_id")
+            )
+            if len(ingest_ids) != len(unit_refs) or len(set(ingest_ids)) != len(
+                ingest_ids
+            ):
+                raise ModelUsageIntegrityError(
+                    "bounded canary ingest identities are invalid"
+                )
+            placeholders = ",".join("?" for _ in ingest_ids)
+            prior_ingest = connection.execute(
+                f"SELECT 1 FROM unpublished_graphiti_ingest "
+                f"WHERE ingest_id IN ({placeholders}) LIMIT 1",
+                ingest_ids,
+            ).fetchone()
+            prior_failure = connection.execute(
+                f"SELECT 1 FROM unpublished_graphiti_failures "
+                f"WHERE ingest_id IN ({placeholders}) LIMIT 1",
+                ingest_ids,
+            ).fetchone()
+            prior_receipt = connection.execute(
+                f"SELECT 1 FROM unpublished_graphiti_receipts "
+                f"WHERE ingest_id IN ({placeholders}) LIMIT 1",
+                ingest_ids,
+            ).fetchone()
+            prior_attempt_receipt = connection.execute(
+                f"SELECT 1 FROM unpublished_graphiti_attempt_receipts "
+                f"WHERE ingest_id IN ({placeholders}) LIMIT 1",
+                ingest_ids,
+            ).fetchone()
+            prior_spend = connection.execute(
+                f"SELECT 1 FROM unpublished_graphiti_spend "
+                f"WHERE ingest_id IN ({placeholders}) LIMIT 1",
+                ingest_ids,
+            ).fetchone()
+            prior_envelope = connection.execute(
+                f"SELECT 1 FROM model_work_envelopes WHERE cycle_id=? "
+                f"OR json_extract(record_json,'$.ingest_id') "
+                f"IN ({placeholders}) LIMIT 1",
+                (event_id, *ingest_ids),
+            ).fetchone()
+            if (
+                prior_ingest is not None
+                or prior_failure is not None
+                or prior_receipt is not None
+                or prior_attempt_receipt is not None
+                or prior_spend is not None
+                or prior_envelope is not None
+            ):
+                raise ModelUsageIntegrityError(
+                    "bounded canary target has prior execution evidence"
+                )
+            record_without_digest: dict[str, object] = {
+                "schema_version": "newsroom.issue-790.canary-consumption.v1",
+                "approved_plan_digest": approved_plan_digest,
+                "disposition_digest": disposition_digest,
+                "event_id": event_id,
+                "ledger_seq": ledger_seq,
+                "owner_id": owner_id,
+                "event_state_before": "QUEUED",
+                "attempt_count_before": 0,
+                "provider_io_authorised": True,
+                "maximum_event_attempts": 1,
+                "persistent_worker_must_remain_unloaded": True,
+                "public_dispatch_authorised": False,
+                "publication_authorised": False,
+                "consumed_at": consumed_at_text,
+            }
+            consumption_digest = digest_canonical(record_without_digest)
+            record = {
+                **record_without_digest,
+                "consumption_digest": consumption_digest,
+            }
+            connection.execute(
+                "INSERT INTO model_usage_bounded_canary_consumptions("
+                "consumption_digest,approved_plan_digest,disposition_digest,"
+                "event_id,ledger_seq,owner_id,consumed_at,record_json) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    consumption_digest,
+                    approved_plan_digest,
+                    disposition_digest,
+                    event_id,
+                    ledger_seq,
+                    owner_id,
+                    consumed_at_text,
+                    _json(record),
+                ),
+            )
+            connection.commit()
+            return record
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def complete_issue_790_bounded_canary(
+        self,
+        *,
+        consumption_digest: str,
+        event_id: str,
+        ledger_seq: int,
+        owner_id: str,
+        process_result: Mapping[str, object] | None,
+        completed_at: datetime,
+        exception_code: str | None = None,
+    ) -> dict[str, object]:
+        """Retain the single canary outcome and make every non-terminal result inert."""
+
+        consumption_digest = _token(
+            consumption_digest,
+            field="canary consumption digest",
+        )
+        event_id = _token(event_id, field="canary event id")
+        owner_id = _token(owner_id, field="canary owner id")
+        if (
+            isinstance(ledger_seq, bool)
+            or not isinstance(ledger_seq, int)
+            or ledger_seq <= 0
+        ):
+            raise ModelUsageIntegrityError("bounded canary ledger sequence is invalid")
+        if process_result is not None and exception_code is not None:
+            raise ModelUsageIntegrityError(
+                "bounded canary outcome has both a result and an exception"
+            )
+        if exception_code is not None:
+            exception_code = _token(exception_code, field="canary exception code")
+        retained_result = None if process_result is None else dict(process_result)
+        completed_at_text = _utc_text(completed_at)
+        connection = self._connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            consumption_row = connection.execute(
+                "SELECT record_json FROM model_usage_bounded_canary_consumptions "
+                "WHERE consumption_digest=? AND event_id=? AND ledger_seq=?",
+                (consumption_digest, event_id, ledger_seq),
+            ).fetchone()
+            if consumption_row is None:
+                raise ModelUsageIntegrityError(
+                    "bounded canary consumption authority differs"
+                )
+            consumption = _object(consumption_row[0])
+            if consumption.get("owner_id") != owner_id:
+                raise ModelUsageIntegrityError(
+                    "bounded canary consumption owner differs"
+                )
+            prior = connection.execute(
+                "SELECT record_json FROM model_usage_bounded_canary_outcomes "
+                "WHERE consumption_digest=?",
+                (consumption_digest,),
+            ).fetchone()
+            if prior is not None:
+                retained_prior = _object(prior[0])
+                if (
+                    retained_prior.get("event_id") != event_id
+                    or retained_prior.get("ledger_seq") != ledger_seq
+                    or retained_prior.get("owner_id") != owner_id
+                    or retained_prior.get("process_result") != retained_result
+                    or retained_prior.get("exception_code") != exception_code
+                ):
+                    raise ModelUsageIntegrityError(
+                        "conflicting bounded canary outcome replay"
+                    )
+                connection.commit()
+                return retained_prior
+            event_row = connection.execute(
+                "SELECT state,attempt_count,claim_owner,last_failure_code,"
+                "provider_dispatched FROM unpublished_graphiti_revision_events "
+                "WHERE event_id=? AND ledger_seq=?",
+                (event_id, ledger_seq),
+            ).fetchone()
+            if event_row is None:
+                raise ModelUsageIntegrityError("bounded canary event disappeared")
+            state_before_seal = str(event_row[0])
+            attempt_count = int(event_row[1])
+            claim_owner = None if event_row[2] is None else str(event_row[2])
+            failure_code = None if event_row[3] is None else str(event_row[3])
+            provider_dispatched = bool(event_row[4])
+            if retained_result is not None and (
+                retained_result.get("event_id") != event_id
+                or retained_result.get("ledger_seq") != ledger_seq
+                or retained_result.get("attempt_count") != 1
+                or retained_result.get("state") != state_before_seal
+                or attempt_count != 1
+            ):
+                raise ModelUsageIntegrityError(
+                    "bounded canary process result differs from retained event"
+                )
+            if process_result is None and attempt_count not in {0, 1}:
+                raise ModelUsageIntegrityError(
+                    "bounded canary retained more than one attempt"
+                )
+            if state_before_seal in {"CLAIMED", "RUNNING"} and claim_owner != owner_id:
+                raise ModelUsageIntegrityError(
+                    "bounded canary active claim has a different owner"
+                )
+            sealed_state = state_before_seal
+            sealed_failure_code = failure_code
+            if state_before_seal in {
+                "QUEUED",
+                "CLAIMED",
+                "RUNNING",
+                "RETRY_HELD",
+                "RIGHTS_HELD",
+            }:
+                sealed_state = "CONFIGURATION_HELD"
+                detail = exception_code or failure_code or "NO_EVENT_RESULT"
+                sealed_failure_code = f"BOUNDED_CANARY_AUTHORITY_EXHAUSTED:{detail}"
+                cursor = connection.execute(
+                    "UPDATE unpublished_graphiti_revision_events SET "
+                    "state='CONFIGURATION_HELD',claim_owner=NULL,"
+                    "claim_expires_at=NULL,last_failure_code=? "
+                    "WHERE event_id=? AND ledger_seq=? AND state=? "
+                    "AND attempt_count=?",
+                    (
+                        sealed_failure_code,
+                        event_id,
+                        ledger_seq,
+                        state_before_seal,
+                        attempt_count,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ModelUsageIntegrityError(
+                        "bounded canary event seal lost its exact state"
+                    )
+            record_without_digest: dict[str, object] = {
+                "schema_version": "newsroom.issue-790.canary-outcome.v1",
+                "consumption_digest": consumption_digest,
+                "approved_plan_digest": consumption["approved_plan_digest"],
+                "event_id": event_id,
+                "ledger_seq": ledger_seq,
+                "owner_id": owner_id,
+                "process_result": retained_result,
+                "exception_code": exception_code,
+                "state_before_seal": state_before_seal,
+                "state_after_seal": sealed_state,
+                "attempt_count": attempt_count,
+                "provider_dispatched": provider_dispatched,
+                "failure_code_before_seal": failure_code,
+                "failure_code_after_seal": sealed_failure_code,
+                "retry_authorised": False,
+                "completed_at": completed_at_text,
+            }
+            outcome_digest = digest_canonical(record_without_digest)
+            record = {**record_without_digest, "outcome_digest": outcome_digest}
+            connection.execute(
+                "INSERT INTO model_usage_bounded_canary_outcomes("
+                "outcome_digest,consumption_digest,event_id,ledger_seq,"
+                "completed_at,record_json) VALUES(?,?,?,?,?,?)",
+                (
+                    outcome_digest,
+                    consumption_digest,
+                    event_id,
+                    ledger_seq,
+                    completed_at_text,
                     _json(record),
                 ),
             )
@@ -3324,6 +3792,8 @@ class ModelUsageService:
                 components = UsageComponents().as_record()
             row = {
                 **allocation,
+                "schema_version": MODEL_USAGE_INTERFACE_SCHEMA_VERSION,
+                "allocation_schema_version": allocation.get("schema_version"),
                 "admission_decision_id": envelope.get("admission_decision_id"),
                 "candidate_id": envelope.get("candidate_id"),
                 "hypothesis_digest": envelope.get("hypothesis_digest"),
@@ -3391,6 +3861,11 @@ class ModelUsageService:
                     None
                     if disposition is None
                     else disposition.get("approval_reference")
+                ),
+                "disposition_approved_plan_digest": (
+                    None
+                    if disposition is None
+                    else disposition.get("approved_plan_digest")
                 ),
                 "exact_usage_remains_unknown": (
                     None
@@ -3721,7 +4196,7 @@ class ModelUsageService:
             str(row["outcome"]) for row in envelopes if row.get("outcome")
         )
         return {
-            "schema_version": MODEL_USAGE_SCHEMA_VERSION,
+            "schema_version": MODEL_USAGE_INTERFACE_SCHEMA_VERSION,
             "start": _utc_text(start),
             "end": _utc_text(end),
             "bucket_seconds": bucket_seconds,
@@ -4106,6 +4581,7 @@ class ModelUsageService:
             "schema_version",
             "envelope_id",
             "invocation_id",
+            "allocation_schema_version",
             "cycle_id",
             "leaf_ordinal",
             "workload_class",
@@ -4145,6 +4621,7 @@ class ModelUsageService:
             "disposed_at",
             "disposition_authority_digest",
             "disposition_approval_reference",
+            "disposition_approved_plan_digest",
             "exact_usage_remains_unknown",
             "provider_dispatch_preserved",
             "unknown_spend_released",
@@ -4642,6 +5119,7 @@ def _record_string_tuple(
 
 
 __all__ = [
+    "MODEL_USAGE_INTERFACE_SCHEMA_VERSION",
     "MODEL_USAGE_SCHEMA_VERSION",
     "InvocationAllocation",
     "InvocationEfficiencyPolicy",

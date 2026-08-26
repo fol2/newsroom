@@ -6,11 +6,13 @@
     "scope": "CONSERVATIVE_SUBSCRIPTION_CLI_USAGE_DISPOSITION"
   },
   "canary": {
+    "authority_consumption": "APPEND_ONLY_SINGLE_USE_BEFORE_PROVIDER_IO",
+    "event_binding": "EXPLICIT_QUEUED_ATTEMPT_ZERO_EVENT",
     "fresh_provider_backed_attempt_count": 1,
     "persistent_worker_state_before_canary": "UNLOADED",
     "requires_exact_main_deployment": true
   },
-  "canonical_digest": "sha256:e9d06bf838b4895021ddc92c4981068721ccc2b01562846046fbdb99b9816163",
+  "canonical_digest": "sha256:ce7ee7fd56c931b147158dad2a74047ada90b805e5a4c545e53db1f4d2ae7383",
   "issue": 790,
   "non_effects": [
     "NO_PUBLICATION",
@@ -20,15 +22,33 @@
     "NO_PRODUCTION_OPERATIONAL_ADMISSION",
     "NO_WIDER_ACTIVATION",
     "NO_PROVIDER_SUBSTITUTION",
+    "NO_MODEL_SUBSTITUTION",
+    "NO_TOKEN_LIMIT_REMOVAL",
     "NO_UNRELATED_SPEND_DISPOSITION"
   ],
   "release": {
     "evidence": "CONSERVATIVE_DISPOSITION_DIGEST",
     "kind": "AUTHORISED_OPERATOR_RESET"
   },
-  "retry_forbidden_ledger_ids": [
-    1932,
-    1972
+  "retry_forbidden_events": [
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-26T12:25:29.807056Z",
+      "event_id": "sha256:bacb9104c81dd86ca3f62a39f6c386cd4d84ab470e9675e31acf8e2feb50443e",
+      "last_failure_code": "PRODUCER_INTERNAL_ERROR",
+      "ledger_seq": 1932,
+      "provider_dispatched": true,
+      "state": "RETRY_HELD"
+    },
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-26T13:52:15.763233Z",
+      "event_id": "sha256:de7bb58fde4829f4778936e7c5ebd1dd583a63f8658fb6af2fcb4b6fc873b0d5",
+      "last_failure_code": "PRODUCER_INTERNAL_ERROR",
+      "ledger_seq": 1972,
+      "provider_dispatched": false,
+      "state": "RETRY_HELD"
+    }
   ],
   "schema_version": "newsroom.issue-790.conservative-disposition-plan.v1",
   "target": {

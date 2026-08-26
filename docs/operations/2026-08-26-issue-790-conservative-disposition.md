@@ -32,17 +32,35 @@ view instead records the qualified policy's `max_total_tokens` as a
    uv run python scripts/issue_790_conservative_disposition.py apply \
      --store STORE --backup BACKUP \
      --plan docs/operations/2026-08-26-issue-790-conservative-disposition.json \
-     --observed-at OBSERVED_AT --receipt APPLY_RECEIPT
+     --observed-at OBSERVED_AT --receipt APPLY_RECEIPT \
+     --repository-root REPOSITORY_ROOT
    ```
 
 6. Recheck store integrity, the target's effective and historical views, every
    route circuit, queue state and the persistent worker state.
-7. Run exactly one fresh bounded provider-backed canary. Do not retry either
-   retained failed ledger. Stop if another usage, policy, transport or integrity
-   blocker appears.
+7. Select one explicit `QUEUED / attempt_count=0` event with retained canonical
+   input, current rights and no prior ingest, failure or model-usage evidence.
+   Consume its append-only single-use authority before provider I/O, run it once
+   in the foreground, and seal every non-terminal result as
+   `CONFIGURATION_HELD` so it cannot be retried:
+
+   ```sh
+   uv run python scripts/issue_790_conservative_disposition.py canary \
+     --store STORE --proving-store PROVING_STORE --backup CANARY_BACKUP \
+     --plan docs/operations/2026-08-26-issue-790-conservative-disposition.json \
+     --observed-at OBSERVED_AT --receipt CANARY_RECEIPT \
+     --repository-root REPOSITORY_ROOT \
+     --canary-event-id EVENT_ID --canary-ledger-seq LEDGER_SEQ \
+     --disposition-digest DISPOSITION_DIGEST
+   ```
+
+   Do not invoke the canary command a second time, including after a provider,
+   transport, rights or local failure. The retained authority and outcome rows
+   are the proof that the one attempt has been consumed.
 
 The operation grants no publication, public dispatch, backlog drain, bulk
 requeue, Production Operational Admission, wider activation, provider
-substitution or unrelated spend disposition authority. Preserve the backup and
-both receipts. A restore requires a quiescent store and separate reviewed
-authority so that later unrelated ledger writes are not discarded.
+substitution, model substitution, token-limit removal or unrelated spend
+disposition authority. Preserve every backup and all three receipts. A restore
+requires a quiescent store and separate reviewed authority so that later
+unrelated ledger writes are not discarded.

@@ -217,6 +217,79 @@ def test_committed_events_are_immediately_claimable_and_recover_after_restart(
     assert recovered.item_key == "item-1"
 
 
+def test_exact_fresh_claim_never_falls_through_to_another_or_touched_event(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 24, 0, 1, tzinfo=UTC))
+    path = tmp_path / "unpublished.sqlite3"
+    assert (
+        _enqueue_fixture(path, (_unit(1), _unit(2), _unit(3)), available_at=clock.value)
+        == 3
+    )
+    connection = connect(str(path))
+    identities = {
+        str(row[0]): str(row[1])
+        for row in connection.execute(
+            "SELECT item_key,event_id FROM unpublished_graphiti_revision_events"
+        )
+    }
+    connection.execute(
+        "UPDATE unpublished_graphiti_revision_events SET state='RETRY_HELD',"
+        "attempt_count=1 WHERE event_id=?",
+        (identities["item-1"],),
+    )
+    connection.execute(
+        "UPDATE unpublished_graphiti_revision_events SET state='CLAIMED',"
+        "claim_owner='other-worker',claim_expires_at=? WHERE event_id=?",
+        (
+            (clock.value - timedelta(seconds=1)).strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            ),
+            identities["item-2"],
+        ),
+    )
+    connection.commit()
+    connection.close()
+    queue = GraphitiEventQueue(str(path), clock=clock)
+
+    with pytest.raises(ValueError, match="exact event identity"):
+        queue.claim(
+            owner_id="canary",
+            lease_for=timedelta(seconds=30),
+            require_fresh=True,
+        )
+    assert (
+        queue.claim(
+            owner_id="canary",
+            lease_for=timedelta(seconds=30),
+            event_id=identities["item-1"],
+            require_fresh=True,
+        )
+        is None
+    )
+    selected = queue.claim(
+        owner_id="canary",
+        lease_for=timedelta(seconds=30),
+        event_id=identities["item-3"],
+        require_fresh=True,
+    )
+
+    assert selected is not None
+    assert selected.item_key == "item-3"
+    retained = sqlite3.connect(path)
+    states = dict(
+        retained.execute(
+            "SELECT item_key,state FROM unpublished_graphiti_revision_events"
+        )
+    )
+    retained.close()
+    assert states == {
+        "item-1": "RETRY_HELD",
+        "item-2": "CLAIMED",
+        "item-3": "CLAIMED",
+    }
+
+
 def test_landed_record_and_queue_event_roll_back_together(tmp_path: Path) -> None:
     path = tmp_path / "unpublished.sqlite3"
     unit = _unit(1)
