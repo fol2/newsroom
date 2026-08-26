@@ -2311,6 +2311,27 @@ def test_issue_790_success_sequence_fails_closed_on_call_shape_drift(
         )
 
 
+def test_checked_issue_790_step_two_binds_reviewed_non_timeout_fix() -> None:
+    root = Path(__file__).resolve().parents[2]
+    plan = load_issue_790_plan(
+        root
+        / "docs/operations/2026-08-26-issue-790-success-sequence-step-2.json"
+    )
+
+    assert plan["canonical_digest"] == (
+        "sha256:4db4a7d65e6e43739a048a48aa92162966fd386df6310c437a73846139f5ce42"
+    )
+    sequence = dict(plan["sequence"])
+    assert sequence["sequence_ordinal"] == 2
+    assert sequence["constraint_change"] == "REVIEWED_NON_TIMEOUT_FIX"
+    assert sequence["predecessor_causal_report"]["report_digest"] == (
+        "sha256:0f06ffa65fc95a8e3278fccc92eed8dc23cebf5517a722d74bce14c73e2984a8"
+    )
+    assert sequence["reviewed_fix"]["record_digest"] == (
+        "sha256:1bfba70f2f88eec47da9d8329030239c316cdc995b519c929fe074dcb9b14e32"
+    )
+
+
 def test_issue_790_plan_digest_and_bounds_fail_closed(tmp_path: Path) -> None:
     service = _service(tmp_path)
     policy, allocation, terminal = _open_unreported_graphiti_subscription_leaf(
