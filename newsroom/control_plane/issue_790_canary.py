@@ -125,6 +125,23 @@ def _content_addressed_record(
     return record
 
 
+def _bound_row_record(
+    row: sqlite3.Row,
+    *,
+    digest_field: str,
+    identity_fields: tuple[str, ...],
+    field: str,
+) -> dict[str, object]:
+    record = _content_addressed_record(
+        row["record_json"],
+        digest_field=digest_field,
+        field=field,
+    )
+    if any(record.get(name) != row[name] for name in identity_fields):
+        raise Issue790CanaryIntegrityError(f"{field} SQL identity differs")
+    return record
+
+
 def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
     return (
         connection.execute(
@@ -178,16 +195,35 @@ def validate_graphiti_canary_claim(
     event_id: str,
     owner_id: str,
 ) -> None:
-    if (
-        not _table_exists(connection, "issue_790_bounded_canary_consumptions")
-        or connection.execute(
-            "SELECT 1 FROM issue_790_bounded_canary_consumptions "
-            "WHERE consumption_digest=? AND event_id=? AND owner_id=?",
-            (consumption_digest, event_id, owner_id),
-        ).fetchone()
-        is None
-    ):
+    if not _table_exists(connection, "issue_790_bounded_canary_consumptions"):
         raise ValueError("bounded canary claim authority differs")
+    row = connection.execute(
+        "SELECT consumption_digest,approved_plan_digest,disposition_digest,"
+        "event_id,ledger_seq,owner_id,consumed_at,record_json "
+        "FROM issue_790_bounded_canary_consumptions "
+        "WHERE consumption_digest=? AND event_id=? AND owner_id=?",
+        (consumption_digest, event_id, owner_id),
+    ).fetchone()
+    if row is None:
+        raise ValueError("bounded canary claim authority differs")
+    identity_fields = (
+        "consumption_digest",
+        "approved_plan_digest",
+        "disposition_digest",
+        "event_id",
+        "ledger_seq",
+        "owner_id",
+        "consumed_at",
+    )
+    record = _content_addressed_record(
+        row[7],
+        digest_field="consumption_digest",
+        field="canary consumption",
+    )
+    if tuple(record.get(name) for name in identity_fields) != tuple(row[:7]):
+        raise Issue790CanaryIntegrityError(
+            "canary consumption SQL identity differs"
+        )
 
 
 def graphiti_event_has_canary_consumption(
@@ -414,14 +450,23 @@ class Issue790CanaryRepository:
                 exclusion_digest = digest_canonical(without_digest)
                 record = {**without_digest, "exclusion_digest": exclusion_digest}
                 prior = connection.execute(
-                    "SELECT record_json FROM issue_790_graphiti_retry_exclusions "
+                    "SELECT * FROM issue_790_graphiti_retry_exclusions "
                     "WHERE event_id=?",
                     (event_id,),
                 ).fetchone()
                 if prior is not None:
-                    prior_record = _content_addressed_record(
-                        prior[0],
+                    prior_record = _bound_row_record(
+                        prior,
                         digest_field="exclusion_digest",
+                        identity_fields=(
+                            "exclusion_digest",
+                            "approved_plan_digest",
+                            "disposition_digest",
+                            "event_id",
+                            "ledger_seq",
+                            "reason",
+                            "excluded_at",
+                        ),
                         field="retry exclusion",
                     )
                     stable_prior = dict(prior_record)
@@ -466,13 +511,22 @@ class Issue790CanaryRepository:
         connection = self._read_connection()
         try:
             return tuple(
-                _content_addressed_record(
-                    row[0],
+                _bound_row_record(
+                    row,
                     digest_field="exclusion_digest",
+                    identity_fields=(
+                        "exclusion_digest",
+                        "approved_plan_digest",
+                        "disposition_digest",
+                        "event_id",
+                        "ledger_seq",
+                        "reason",
+                        "excluded_at",
+                    ),
                     field="retry exclusion",
                 )
                 for row in connection.execute(
-                    "SELECT record_json FROM issue_790_graphiti_retry_exclusions "
+                    "SELECT * FROM issue_790_graphiti_retry_exclusions "
                     "ORDER BY ledger_seq"
                 )
             )
@@ -485,16 +539,25 @@ class Issue790CanaryRepository:
         connection = self._read_connection()
         try:
             row = connection.execute(
-                "SELECT record_json FROM issue_790_bounded_canary_consumptions "
+                "SELECT * FROM issue_790_bounded_canary_consumptions "
                 "WHERE approved_plan_digest=?",
                 (approved_plan_digest,),
             ).fetchone()
             return (
                 None
                 if row is None
-                else _content_addressed_record(
-                    row[0],
+                else _bound_row_record(
+                    row,
                     digest_field="consumption_digest",
+                    identity_fields=(
+                        "consumption_digest",
+                        "approved_plan_digest",
+                        "disposition_digest",
+                        "event_id",
+                        "ledger_seq",
+                        "owner_id",
+                        "consumed_at",
+                    ),
                     field="canary consumption",
                 )
             )
@@ -505,16 +568,23 @@ class Issue790CanaryRepository:
         connection = self._read_connection()
         try:
             row = connection.execute(
-                "SELECT record_json FROM issue_790_bounded_canary_outcomes "
+                "SELECT * FROM issue_790_bounded_canary_outcomes "
                 "WHERE consumption_digest=?",
                 (consumption_digest,),
             ).fetchone()
             return (
                 None
                 if row is None
-                else _content_addressed_record(
-                    row[0],
+                else _bound_row_record(
+                    row,
                     digest_field="outcome_digest",
+                    identity_fields=(
+                        "outcome_digest",
+                        "consumption_digest",
+                        "event_id",
+                        "ledger_seq",
+                        "completed_at",
+                    ),
                     field="canary outcome",
                 )
             )
@@ -531,7 +601,7 @@ class Issue790CanaryRepository:
         connection = self._read_connection()
         try:
             row = connection.execute(
-                "SELECT record_json FROM issue_790_bounded_canary_consumptions "
+                "SELECT * FROM issue_790_bounded_canary_consumptions "
                 "WHERE consumption_digest=? AND event_id=? AND owner_id=?",
                 (consumption_digest, event_id, owner_id),
             ).fetchone()
@@ -539,9 +609,18 @@ class Issue790CanaryRepository:
                 raise Issue790CanaryIntegrityError(
                     "bounded canary consumption authority differs"
                 )
-            record = _content_addressed_record(
-                row[0],
+            record = _bound_row_record(
+                row,
                 digest_field="consumption_digest",
+                identity_fields=(
+                    "consumption_digest",
+                    "approved_plan_digest",
+                    "disposition_digest",
+                    "event_id",
+                    "ledger_seq",
+                    "owner_id",
+                    "consumed_at",
+                ),
                 field="canary consumption",
             )
             return _content_addressed_record(
@@ -788,7 +867,7 @@ class Issue790CanaryRepository:
         try:
             connection.execute("BEGIN IMMEDIATE")
             consumption_row = connection.execute(
-                "SELECT record_json FROM issue_790_bounded_canary_consumptions "
+                "SELECT * FROM issue_790_bounded_canary_consumptions "
                 "WHERE consumption_digest=? AND event_id=? AND ledger_seq=?",
                 (consumption_digest, event_id, ledger_seq),
             ).fetchone()
@@ -796,9 +875,18 @@ class Issue790CanaryRepository:
                 raise Issue790CanaryIntegrityError(
                     "bounded canary consumption authority differs"
                 )
-            consumption = _content_addressed_record(
-                consumption_row[0],
+            consumption = _bound_row_record(
+                consumption_row,
                 digest_field="consumption_digest",
+                identity_fields=(
+                    "consumption_digest",
+                    "approved_plan_digest",
+                    "disposition_digest",
+                    "event_id",
+                    "ledger_seq",
+                    "owner_id",
+                    "consumed_at",
+                ),
                 field="canary consumption",
             )
             if consumption.get("owner_id") != owner_id:
@@ -806,14 +894,21 @@ class Issue790CanaryRepository:
                     "bounded canary consumption owner differs"
                 )
             prior = connection.execute(
-                "SELECT record_json FROM issue_790_bounded_canary_outcomes "
+                "SELECT * FROM issue_790_bounded_canary_outcomes "
                 "WHERE consumption_digest=?",
                 (consumption_digest,),
             ).fetchone()
             if prior is not None:
-                retained_prior = _content_addressed_record(
-                    prior[0],
+                retained_prior = _bound_row_record(
+                    prior,
                     digest_field="outcome_digest",
+                    identity_fields=(
+                        "outcome_digest",
+                        "consumption_digest",
+                        "event_id",
+                        "ledger_seq",
+                        "completed_at",
+                    ),
                     field="canary outcome",
                 )
                 if (
@@ -838,10 +933,30 @@ class Issue790CanaryRepository:
             attempt_count = int(event_row[1])
             claim_owner = None if event_row[2] is None else str(event_row[2])
             failure_code = None if event_row[3] is None else str(event_row[3])
-            provider_dispatched = bool(event_row[4])
+            event_provider_dispatched_before_seal = bool(event_row[4])
+            marker = connection.execute(
+                "SELECT EXISTS("
+                "SELECT 1 FROM model_invocation_allocations AS allocation "
+                "JOIN model_transport_observations AS observation "
+                "ON observation.invocation_id=allocation.invocation_id "
+                "WHERE allocation.cycle_id=? "
+                "AND allocation.workload_class IN (?,?,?) "
+                "AND observation.state='DISPATCH_STARTED')",
+                (
+                    event_id,
+                    "GRAPHITI_CHAT_PRIMARY",
+                    "GRAPHITI_CHAT_FALLBACK",
+                    "GRAPHITI_EMBEDDING",
+                ),
+            ).fetchone()
+            provider_dispatched = bool(marker and marker[0])
             if attempt_count not in {0, 1}:
                 raise Issue790CanaryIntegrityError(
                     "bounded canary retained more than one attempt"
+                )
+            if state_before_seal == "TERMINAL" and attempt_count != 1:
+                raise Issue790CanaryIntegrityError(
+                    "bounded canary terminal attempt count differs"
                 )
             if retained_result is not None and (
                 retained_result.get("event_id") != event_id
@@ -880,11 +995,13 @@ class Issue790CanaryRepository:
                 cursor = connection.execute(
                     "UPDATE unpublished_graphiti_revision_events SET "
                     "state='CONFIGURATION_HELD',claim_owner=NULL,"
-                    "claim_expires_at=NULL,last_failure_code=? "
+                    "claim_expires_at=NULL,last_failure_code=?,"
+                    "provider_dispatched=? "
                     "WHERE event_id=? AND ledger_seq=? AND state=? "
                     "AND attempt_count=?",
                     (
                         sealed_failure_code,
+                        int(provider_dispatched),
                         event_id,
                         ledger_seq,
                         state_before_seal,
@@ -894,6 +1011,22 @@ class Issue790CanaryRepository:
                 if cursor.rowcount != 1:
                     raise Issue790CanaryIntegrityError(
                         "bounded canary event seal lost its exact state"
+                    )
+            else:
+                cursor = connection.execute(
+                    "UPDATE unpublished_graphiti_revision_events "
+                    "SET provider_dispatched=? WHERE event_id=? AND ledger_seq=? "
+                    "AND state='TERMINAL' AND attempt_count=?",
+                    (
+                        int(provider_dispatched),
+                        event_id,
+                        ledger_seq,
+                        attempt_count,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise Issue790CanaryIntegrityError(
+                        "bounded canary terminal telemetry sync lost its state"
                     )
             without_digest: dict[str, object] = {
                 "schema_version": CANARY_OUTCOME_SCHEMA,
@@ -908,6 +1041,9 @@ class Issue790CanaryRepository:
                 "state_before_seal": state_before_seal,
                 "state_after_seal": sealed_state,
                 "attempt_count": attempt_count,
+                "event_provider_dispatched_before_seal": (
+                    event_provider_dispatched_before_seal
+                ),
                 "provider_dispatched": provider_dispatched,
                 "failure_code_before_seal": failure_code,
                 "failure_code_after_seal": sealed_failure_code,
