@@ -2335,7 +2335,13 @@ def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
     store = tmp_path / "unpublished.sqlite3"
     _seed_issue_790_retry_events(store)
     event_id, ingest_id = _seed_fresh_issue_790_event(store, ledger_seq=2002)
-    Issue790CanaryRepository(str(store))
+    canary_repository = Issue790CanaryRepository(str(store))
+    canary_repository.retain_retry_exclusions(
+        approved_plan_digest=str(plan["canonical_digest"]),
+        disposition_digest=str(disposition["disposition_digest"]),
+        events=RETRY_FORBIDDEN_EVENTS,
+        excluded_at=T0 + timedelta(seconds=12),
+    )
     proving = tmp_path / "proving.sqlite3"
     proving_connection = sqlite3.connect(proving)
     proving_connection.execute("CREATE TABLE fixture(value INTEGER)")
