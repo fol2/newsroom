@@ -77,7 +77,7 @@ WRITER_SCHEMA = {
     "required": ["title", "body", "evidence_links"],
     "additionalProperties": False,
 }
-CONT_WRITER_PROMPT_CONTRACT_VERSION = "newsroom.cont-writer.prompt.v2"
+CONT_WRITER_PROMPT_CONTRACT_VERSION = "newsroom.cont-writer.prompt.v3"
 CONT_WRITER_CONTEXT_IDENTITY = "cont-evidence-package-only-v1"
 CONT_WRITER_OUTPUT_SCHEMA_DIGEST = digest_canonical(WRITER_SCHEMA)
 CONT_PRIMARY_PROVIDER = "grok-build-cli"
@@ -935,6 +935,7 @@ def _prompt(candidate: StoryCandidateRecord, package: EvidencePackage) -> str:
                 f"必須輸出嘅 evidence_links：{links_json}",
             )
         )
+        return "\n".join(parts)
     parts.extend(
         (
             "approved_governed_claims："

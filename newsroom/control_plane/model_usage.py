@@ -993,6 +993,13 @@ def _invalid_reported_components(terminal: InvocationTerminal) -> str | None:
     possible_totals = {sum(known)}
     if input_tokens is not None and output_tokens is not None:
         possible_totals.add(input_tokens + output_tokens)
+        cache_read = components.cached_read_tokens or 0
+        cache_write = components.cached_write_tokens or 0
+        # Grok 1.0.10 headless: total = uncached input + output + cache
+        # buckets; reasoning is nested in output, not additive.
+        possible_totals.add(
+            input_tokens + output_tokens + cache_read + cache_write
+        )
     if components.total_tokens not in possible_totals:
         return "REPORTED_COMPONENT_TOTAL_INVALID"
     return None

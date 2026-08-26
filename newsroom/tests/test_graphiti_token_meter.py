@@ -112,7 +112,28 @@ def test_grok_stream_output_retains_provider_reported_tokens() -> None:
         "cached_write_tokens": 0,
         "reasoning_tokens": 97,
         "total_tokens": 52_419,
+        "context_tokens": 52_012,
     }
+
+
+def test_grok_headless_usage_derives_prompt_occupancy_without_inventing_zero() -> None:
+    from newsroom.graphiti_adapter.usage_meter import grok_cli_usage
+
+    usage = grok_cli_usage(
+        {
+            "input_tokens": 11_831,
+            "output_tokens": 217,
+            "cache_read_input_tokens": 128,
+            "cache_creation_input_tokens": 0,
+            "reasoning_tokens": 30,
+            "total_tokens": 12_176,
+        }
+    )
+
+    assert usage["usage_basis"] == "PROVIDER_REPORTED"
+    assert usage["total_tokens"] == 12_176
+    assert usage["context_tokens"] == 11_959
+    assert usage["reasoning_tokens"] == 30
 
 
 def test_graphiti_usage_summary_combines_chat_and_embeddings() -> None:

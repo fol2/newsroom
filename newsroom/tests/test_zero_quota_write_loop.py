@@ -1979,25 +1979,27 @@ def test_five_ready_candidates_with_valid_primary_results_insert_five(
 
 
 def _valid_cli_json(prompt: str) -> str:
-    raw_claims = next(
-        line.removeprefix("approved_governed_claims：")
-        for line in prompt.splitlines()
-        if line.startswith("approved_governed_claims：")
+    lines = prompt.splitlines()
+    title = next(
+        line.removeprefix("必須輸出嘅 title：")
+        for line in lines
+        if line.startswith("必須輸出嘅 title：")
     )
-    claims = json.loads(raw_claims)
-    headline = claims[0]["rendered_assertion"]
-    body_claims = "；".join(item["rendered_assertion"] for item in claims[1:])
+    body = next(
+        line.removeprefix("必須輸出嘅 body：")
+        for line in lines
+        if line.startswith("必須輸出嘅 body：")
+    )
+    raw_links = next(
+        line.removeprefix("必須輸出嘅 evidence_links：")
+        for line in lines
+        if line.startswith("必須輸出嘅 evidence_links：")
+    )
     return json.dumps(
         {
-            "title": f"【未出版】{headline}",
-            "body": f"本報根據已核實證據報道：{body_claims}",
-            "evidence_links": [
-                {
-                    "governed_claim_id": item["governed_claim_id"],
-                    "rendered_assertion": item["rendered_assertion"],
-                }
-                for item in claims
-            ],
+            "title": title,
+            "body": body,
+            "evidence_links": json.loads(raw_links),
         },
         ensure_ascii=False,
     )
@@ -2220,7 +2222,9 @@ def test_writer_prompt_is_claim_assembly_not_journalism() -> None:
     assert "claim 拼裝器" in prompt
     assert f"必須輸出嘅 title：{title}" in prompt
     assert f"必須輸出嘅 body：{body}" in prompt
-    assert CONT_WRITER_PROMPT_CONTRACT_VERSION.endswith(".v2")
+    assert "來源（禁止入稿）" not in prompt
+    assert all(passage not in prompt for passage in package.passages)
+    assert CONT_WRITER_PROMPT_CONTRACT_VERSION.endswith(".v3")
 
 
 def test_rejected_copy_text_is_retained_on_draft_outcome(tmp_path: Path) -> None:
