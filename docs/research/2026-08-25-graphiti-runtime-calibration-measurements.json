@@ -29,7 +29,7 @@
     "fixture_count": 11,
     "reported_as_provider_tokens": false
   },
-  "evidence_digest": "sha256:2bdcf7c0a15ecf7be5c18dccdda245e4798983e806c4a0c639031df6f83b8a08",
+  "evidence_digest": "sha256:a32a42d4f43a3f0895419e1bacdefaccd0c4a2ce0c3e9e924ed2275cd7d6b76e",
   "fallback_eligible_outcomes": [
     "MALFORMED_OUTPUT"
   ],
@@ -183,9 +183,9 @@
     }
   ],
   "identities": {
-    "call_shape_policy_digest": "sha256:7d942fce0c95f1405c44ac709b9657e45c98072a0911d00259e5a84768e35190",
+    "call_shape_policy_digest": "sha256:a9dca73d609ca9ca1b98783d235e07188d477706bbe079da2b98838d5f61dae9",
     "context_manifest": "graphiti-combined-temporal-hermetic-v1",
-    "fallback_circuit_policy_digest": "sha256:d0ebf854ea832b09d86458243d80c10b91edfbbd653f37597dd34e8f873ca927",
+    "fallback_circuit_policy_digest": "sha256:f30353bd7b83d07ba2ccf9a4ab194b13c7c94adbdce4c12a6f6c1d3c9d13cf7d",
     "prompt": "newsroom.graphiti.proposal-only-prompt:v1",
     "qualified_routes": [
       {
@@ -212,8 +212,13 @@
           "CURSOR_CONFIGURATION=HERMETIC_EMPTY",
           "AUTHENTICATION_BRIDGE=MACOS_LOGIN_KEYCHAIN_FILE_SYMLINK_V1",
           "AUTHENTICATION_BRIDGE_DIGEST=sha256:5bfe59adbf441621ae4c410ddb58e9991cfa7d11961ddd6c280e3e31dc463711",
-          "AUTHENTICATION_STATUS_PREFLIGHT=AUTHENTICATED_ACCESS_REFRESH",
-          "AUTHENTICATION_STATUS_DIGEST=sha256:36ddcd68e46478d8ed4ce2d13a26856cb10693496c2bf0cba0e243d17440fd3e",
+          "AUTHENTICATION_PROBE=MACOS_LOCAL_KEYCHAIN_ITEMS_READABLE_V1",
+          "AUTHENTICATION_PROBE_DIGEST=sha256:83ac1f5eadc66ea1377f136178a47ac5a87a1e12d752acc1f795079f0fe2245e",
+          "LOCAL_CREDENTIAL_PROBE_BIN=/usr/bin/security",
+          "LOCAL_CREDENTIAL_PROBE_SERVICES=cursor-access-token,cursor-refresh-token",
+          "LOCAL_CREDENTIAL_PROBE_OUTPUT=DEVNULL",
+          "CREDENTIAL_STATE=LOCAL_ACCESS_REFRESH_TOKENS_READABLE",
+          "CREDENTIAL_STATE_DIGEST=sha256:cdc30f62a0021fb7f9ab7c6742056493f87f179ee5b83d5fdeacc8a724c004d1",
           "PROMPT_MAX_OUTPUT_TOKENS=REQUEST_MAX_TOKENS",
           "CONTROLLER_STDOUT_CONTRACT=cursor-controller-stdout-v1:65536+64*REQUEST_MAX_TOKENS"
         ],
@@ -229,7 +234,7 @@
           "planning",
           "subagents"
         ],
-        "implementation_revision": "sha256:5aaa3277dbbaa7afea8341bcd60e98f653abb1962986b352be2d7186847befb4",
+        "implementation_revision": "sha256:ded71d4d9117ca27c17d81dedf17208293ac6e68dbc3c2d269a387f08b5a68e1",
         "leaf_class": "PRIMARY",
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
@@ -268,7 +273,7 @@
           "planning",
           "subagents"
         ],
-        "implementation_revision": "sha256:5aaa3277dbbaa7afea8341bcd60e98f653abb1962986b352be2d7186847befb4",
+        "implementation_revision": "sha256:ded71d4d9117ca27c17d81dedf17208293ac6e68dbc3c2d269a387f08b5a68e1",
         "leaf_class": "FALLBACK",
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
@@ -380,8 +385,8 @@
     "immutable_after_restart": true,
     "invocation_efficiency_policies": [
       {
-        "canonical_digest": "sha256:b448d90e3599e3f392e1a02ae52dc82c57c661bb0ae656acf474ead3826562e1",
-        "evidence_digest": "sha256:56c3a104ac45be5afc814dcc11f148ec6414f8e1ec559650a596c4abf7c00652",
+        "canonical_digest": "sha256:2ea9ac8d7cfe83803c02cf9cb92a308734669d952d0cd91b6171e6a8193cbc96",
+        "evidence_digest": "sha256:0fb861e1d46b7b6f86314e15c9bcb901e14644c9ed466d0a0fce8db0a103e67e",
         "hard_estimate_ceiling_tokens": null,
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
@@ -390,8 +395,8 @@
         "route": "GRAPHITI_CHAT_PRIMARY"
       },
       {
-        "canonical_digest": "sha256:92b521cd3258d218072d1706b6f863fd4430567045a2e11203710a92d18696a0",
-        "evidence_digest": "sha256:121a416e4971e6c6c464838ff790a968504277d42d3aacaf628fb4e1f1437c09",
+        "canonical_digest": "sha256:41ba7dada674c46fd0d8d93589fd9e9bdd2e960e4a471e0e2c94f9980e7e3b3b",
+        "evidence_digest": "sha256:dea7ba1b67da19cd26820ad8c46c01438119bd7638e21ed2e7079b6582c145bf",
         "hard_estimate_ceiling_tokens": null,
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
@@ -499,7 +504,7 @@
         "low": 1290
       }
     },
-    "formula": "T_avg_revision = E[Σ_(primary misses) T_primary] + E[Σ_(conditional leaves) T_conditional] + E[Σ_(embedding misses) T_embedding]",
+    "formula": "T_avg_revision = E[\u03a3_(primary misses) T_primary] + E[\u03a3_(conditional leaves) T_conditional] + E[\u03a3_(embedding misses) T_embedding]",
     "grain": "ISSUE_737_EFFECTIVE_REVISION",
     "mandatory_primary_leaves_per_revision": {
       "basis": "MEASURED_EFFECTIVE_REVISION_CASES",
