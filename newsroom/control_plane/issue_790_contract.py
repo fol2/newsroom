@@ -31,7 +31,7 @@ ISSUE_790_SUCCESS_SEQUENCE_PLAN_DIGEST = (
     "sha256:3347669cc57fcc3740f9e7027cf7c9c6936626dfb1932eeec5ea2018fe6f6308"
 )
 ISSUE_790_SUCCESS_SEQUENCE_STEP_2_PLAN_DIGEST = (
-    "sha256:4db4a7d65e6e43739a048a48aa92162966fd386df6310c437a73846139f5ce42"
+    "sha256:f759403c9838ef431cff38126989d8732ed5ba7e03ce92f554760ba0ef2d2c61"
 )
 
 
@@ -112,9 +112,9 @@ _SUCCESS_SEQUENCE_CONTRACTS = (
         ),
         approved_by="github:fol2",
         approval_reference=(
-            "https://github.com/fol2/newsroom/issues/790#issuecomment-5430967545"
+            "https://github.com/fol2/newsroom/issues/790#issuecomment-5432307187"
         ),
-        approved_at="2026-08-26T20:51:55.000000Z",
+        approved_at="2026-08-26T23:29:50.000000Z",
         scope=ISSUE_790_APPROVED_SCOPE,
         terminal_outcome="FAILED",
         route_open_reason="SYSTEMIC_TRANSPORT",

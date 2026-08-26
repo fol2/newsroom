@@ -2319,7 +2319,7 @@ def test_checked_issue_790_step_two_binds_reviewed_non_timeout_fix() -> None:
     )
 
     assert plan["canonical_digest"] == (
-        "sha256:4db4a7d65e6e43739a048a48aa92162966fd386df6310c437a73846139f5ce42"
+        "sha256:f759403c9838ef431cff38126989d8732ed5ba7e03ce92f554760ba0ef2d2c61"
     )
     sequence = dict(plan["sequence"])
     assert sequence["sequence_ordinal"] == 2
