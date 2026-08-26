@@ -26,14 +26,8 @@ from newsroom.control_plane.graphiti_requests import (
     load_checked_graphiti_call_shape_policy,
 )
 from newsroom.control_plane.issue_790_contract import (
-    ISSUE_790_APPROVAL_REFERENCE,
-    ISSUE_790_APPROVED_ALLOCATION_DIGEST,
-    ISSUE_790_APPROVED_AT,
-    ISSUE_790_APPROVED_BY,
-    ISSUE_790_APPROVED_INVOCATION_ID,
-    ISSUE_790_APPROVED_PLAN_DIGEST,
-    ISSUE_790_APPROVED_SCOPE,
-    ISSUE_790_APPROVED_TERMINAL_DIGEST,
+    issue_790_approved_plan_contract,
+    issue_790_approved_plan_contracts,
 )
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.veto import assert_private_store
@@ -357,6 +351,21 @@ def _canonical_circuit_route(route: str) -> str:
 
 
 def _usage_blocking_routes(connection: sqlite3.Connection) -> set[str]:
+    approved_contracts = tuple(
+        sorted(
+            issue_790_approved_plan_contracts(),
+            key=lambda item: item.plan_digest,
+        )
+    )
+    approved_bindings = " OR ".join(
+        "(d.approved_plan_digest=? AND d.invocation_id=?)"
+        for _ in approved_contracts
+    )
+    parameters = tuple(
+        value
+        for contract in approved_contracts
+        for value in (contract.plan_digest, contract.invocation_id)
+    )
     rows = connection.execute(
         "SELECT a.route FROM model_invocation_terminals t "
         "JOIN model_invocation_allocations a "
@@ -368,12 +377,12 @@ def _usage_blocking_routes(connection: sqlite3.Connection) -> set[str]:
         "AND NOT EXISTS (SELECT 1 "
         "FROM model_usage_conservative_dispositions d "
         "WHERE d.invocation_id=t.invocation_id "
-        "AND d.approved_plan_digest=?)) "
+        f"AND ({approved_bindings}))) "
         "OR json_extract(t.record_json,'$.policy_breach') IS NOT NULL "
         "OR EXISTS (SELECT 1 FROM model_usage_reconciliations r "
         "WHERE r.invocation_id=t.invocation_id "
         "AND json_extract(r.record_json,'$.policy_breach') IS NOT NULL)",
-        (ISSUE_790_APPROVED_PLAN_DIGEST,),
+        parameters,
     ).fetchall()
     return {_canonical_circuit_route(str(row[0])) for row in rows}
 
@@ -2549,28 +2558,32 @@ class ModelUsageService:
             approved_plan_digest,
             field="approved plan digest",
         )
-        if approved_plan_digest != ISSUE_790_APPROVED_PLAN_DIGEST:
+        try:
+            approved_contract = issue_790_approved_plan_contract(
+                approved_plan_digest
+            )
+        except KeyError as exc:
             raise ModelUsageIntegrityError(
                 "conservative disposition approved plan differs"
-            )
-        if invocation_id != ISSUE_790_APPROVED_INVOCATION_ID:
+            ) from exc
+        if invocation_id != approved_contract.invocation_id:
             raise ModelUsageIntegrityError(
                 "conservative disposition approved invocation differs"
             )
-        if expected_terminal_digest != ISSUE_790_APPROVED_TERMINAL_DIGEST:
+        if expected_terminal_digest != approved_contract.terminal_digest:
             raise ModelUsageIntegrityError(
                 "conservative disposition approved terminal differs"
             )
-        if expected_allocation_digest != ISSUE_790_APPROVED_ALLOCATION_DIGEST:
+        if expected_allocation_digest != approved_contract.allocation_digest:
             raise ModelUsageIntegrityError(
                 "conservative disposition approved allocation differs"
             )
         approved_at_text = _utc_text(approved_at)
         observed_at_text = _utc_text(observed_at)
         if (
-            approved_by != ISSUE_790_APPROVED_BY
-            or approval_reference != ISSUE_790_APPROVAL_REFERENCE
-            or approved_at_text != ISSUE_790_APPROVED_AT
+            approved_by != approved_contract.approved_by
+            or approval_reference != approved_contract.approval_reference
+            or approved_at_text != approved_contract.approved_at
         ):
             raise ModelUsageIntegrityError(
                 "conservative disposition approval authority differs"
@@ -2653,7 +2666,7 @@ class ModelUsageService:
                 "invocation_id": invocation_id,
                 "terminal_digest": terminal_digest,
                 "allocation_digest": allocation_digest,
-                "scope": ISSUE_790_APPROVED_SCOPE,
+                "scope": approved_contract.scope,
             }
             if digest_canonical(authority) != authority_digest:
                 raise ModelUsageIntegrityError(
@@ -2676,7 +2689,7 @@ class ModelUsageService:
                 )
             if (
                 terminal.get("usage_status") != UsageStatus.UNREPORTED.value
-                or terminal.get("outcome") != "FAILED"
+                or terminal.get("outcome") != approved_contract.terminal_outcome
                 or terminal.get("failure_class")
                 != "MISSING_PROVIDER_TELEMETRY"
                 or terminal.get("subscription_cli_chat_not_cash_debited")

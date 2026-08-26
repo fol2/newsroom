@@ -11,8 +11,7 @@ from pathlib import Path
 
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane.issue_790_contract import (
-    ISSUE_790_APPROVED_INVOCATION_ID,
-    ISSUE_790_APPROVED_PLAN_DIGEST,
+    issue_790_approved_plan_contract,
 )
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.veto import assert_private_store
@@ -392,8 +391,14 @@ class Issue790CanaryRepository:
         events: Sequence[Mapping[str, object]],
         excluded_at: datetime,
     ) -> tuple[dict[str, object], ...]:
-        if approved_plan_digest != ISSUE_790_APPROVED_PLAN_DIGEST:
-            raise Issue790CanaryIntegrityError("retry exclusion plan differs")
+        try:
+            approved_contract = issue_790_approved_plan_contract(
+                approved_plan_digest
+            )
+        except KeyError as exc:
+            raise Issue790CanaryIntegrityError(
+                "retry exclusion plan differs"
+            ) from exc
         disposition_digest = _token(
             disposition_digest, field="retry exclusion disposition digest"
         )
@@ -412,7 +417,10 @@ class Issue790CanaryRepository:
                 "WHERE disposition_digest=? AND approved_plan_digest=?",
                 (disposition_digest, approved_plan_digest),
             ).fetchone()
-            if disposition is None or str(disposition[0]) != ISSUE_790_APPROVED_INVOCATION_ID:
+            if (
+                disposition is None
+                or str(disposition[0]) != approved_contract.invocation_id
+            ):
                 raise Issue790CanaryIntegrityError("retry exclusion authority differs")
             for item in expected:
                 event_id = _token(item.get("event_id"), field="retry exclusion event id")
@@ -648,8 +656,14 @@ class Issue790CanaryRepository:
         disposition_digest = _token(disposition_digest, field="disposition digest")
         event_id = _token(event_id, field="canary event id")
         owner_id = _token(owner_id, field="canary owner id")
-        if approved_plan_digest != ISSUE_790_APPROVED_PLAN_DIGEST:
-            raise Issue790CanaryIntegrityError("bounded canary approved plan differs")
+        try:
+            approved_contract = issue_790_approved_plan_contract(
+                approved_plan_digest
+            )
+        except KeyError as exc:
+            raise Issue790CanaryIntegrityError(
+                "bounded canary approved plan differs"
+            ) from exc
         if isinstance(ledger_seq, bool) or not isinstance(ledger_seq, int) or ledger_seq <= 0:
             raise Issue790CanaryIntegrityError("bounded canary ledger sequence is invalid")
         if ledger_seq in {1932, 1972}:
@@ -679,7 +693,7 @@ class Issue790CanaryRepository:
                 )
             disposition = _object(disposition_row[1], field="canary disposition")
             if (
-                str(disposition_row[0]) != ISSUE_790_APPROVED_INVOCATION_ID
+                str(disposition_row[0]) != approved_contract.invocation_id
                 or disposition.get("exact_usage_remains_unknown") is not True
                 or disposition.get("unknown_spend_released") is not False
             ):
