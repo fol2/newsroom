@@ -772,21 +772,60 @@ def test_cli_cycle_composition_uses_governed_cycle_id_and_circuit_gate(
         hermes._governed_unit(args, cooldown_seconds=300)
 
 
-def test_governed_cli_rejects_zero_max_writes_without_claiming_cycle(
-    tmp_path: Path,
+def test_governed_cli_accepts_explicit_writer_off_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import scripts.hermes_control_plane as hermes
 
+    hermes._validate_max_writes(0)
+    with pytest.raises(ValueError, match="between 0 and 5"):
+        hermes._validate_max_writes(-1)
+    with pytest.raises(ValueError, match="between 0 and 5"):
+        hermes._validate_max_writes(6)
+
+    captured: dict[str, object] = {}
+
+    def fake_run_cycle(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            cycle_id=kwargs["cycle_id"],
+            write_ready=3,
+            admission_hold=0,
+            admission_reject=0,
+            provider_dispatches=0,
+            accepted_payload_count=0,
+            writer_circuit_open=False,
+            writer_circuit_open_reason="",
+        )
+
+    monkeypatch.setattr(hermes, "run_intake", lambda **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(hermes, "run_cycle", fake_run_cycle)
     args = SimpleNamespace(
         proving=str(tmp_path / "proving.sqlite3"),
         unpublished=str(tmp_path / "unpublished.sqlite3"),
         max_writes=0,
     )
 
-    with pytest.raises(ValueError, match="between 1 and 5"):
-        hermes._governed_unit(args, cooldown_seconds=300)
+    _intake, report, terminal = hermes._governed_unit(
+        args, cooldown_seconds=300
+    )
 
-    assert not (tmp_path / "unpublished.sqlite3").exists()
+    assert report.write_ready == 3
+    assert captured["max_writer_provider_dispatches"] == 0
+    assert captured["max_writer_fallback_dispatches"] == 0
+    assert terminal.outcome_class == "IDLE_QUALIFIED_ZERO"
+    assert terminal.admission_counts["WRITE_READY"] == 3
+    assert terminal.writer_dispatch_enabled is False
+    connection = sqlite3.connect(args.unpublished)
+    retained = connection.execute(
+        "SELECT payload_json FROM ledger "
+        "WHERE kind='PRIVATE_GOVERNED_CYCLE_TERMINAL'"
+    ).fetchone()
+    connection.close()
+    assert retained is not None
+    ledger = json.loads(retained[0])
+    assert ledger["admission_counts"]["WRITE_READY"] == 3
+    assert ledger["writer_dispatch_enabled"] is False
 
 
 def test_cli_reports_ambiguous_systemic_terminal_as_structured_json(
