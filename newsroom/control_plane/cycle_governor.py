@@ -82,6 +82,7 @@ class CycleOutcomeInput:
     admission_hold: int | None = 0
     admission_reject: int | None = 0
     systemic_provider_failure_reason: str = ""
+    writer_dispatch_enabled: bool = True
 
     def __post_init__(self) -> None:
         for name in (
@@ -104,6 +105,14 @@ class CycleOutcomeInput:
             raise ValueError("accepted payloads require a retained provider dispatch")
         if self.systemic_provider_failure_reason and self.provider_dispatches == 0:
             raise ValueError("a systemic provider failure requires a provider dispatch")
+        if not isinstance(self.writer_dispatch_enabled, bool):
+            raise ValueError("writer_dispatch_enabled must be boolean")
+        if not self.writer_dispatch_enabled and (
+            self.provider_dispatches != 0
+            or self.accepted_payload_count != 0
+            or self.systemic_provider_failure_reason
+        ):
+            raise ValueError("a disabled writer cannot have provider effects")
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +143,7 @@ class CycleTerminalResult:
     admission_counts: dict[str, int | None]
     accepted_payload_count: int | None
     writer_provider_dispatch_count: int | None
+    writer_dispatch_enabled: bool
     work_started_at: str
     terminal_at: str
     elapsed_seconds: float
@@ -296,6 +306,8 @@ CREATE TABLE IF NOT EXISTS unpublished_governed_cycles(
     admission_reject INTEGER,
     accepted_payload_count INTEGER,
     provider_dispatches INTEGER,
+    writer_dispatch_enabled INTEGER NOT NULL DEFAULT 1
+        CHECK(writer_dispatch_enabled IN (0,1)),
     cooldown_policy_version TEXT NOT NULL,
     cooldown_seconds INTEGER,
     cooldown_started_at TEXT,
@@ -368,6 +380,10 @@ def ensure_cycle_governor_schema(
         for row in connection.execute("PRAGMA table_info(unpublished_governed_cycles)")
     }
     for column, declaration in (
+        (
+            "writer_dispatch_enabled",
+            "INTEGER NOT NULL DEFAULT 1 CHECK(writer_dispatch_enabled IN (0,1))",
+        ),
         ("refused_early_start_reason_before", "TEXT NOT NULL DEFAULT ''"),
         ("refused_early_start_count", "INTEGER"),
         ("refused_early_start_reason", "TEXT"),
@@ -774,6 +790,8 @@ class DurableCycleGovernor:
             )
         if outcome.provider_dispatches > 0:
             return "UNPRODUCTIVE_PROVIDER", ""
+        if not outcome.writer_dispatch_enabled:
+            return "IDLE_QUALIFIED_ZERO", ""
         if outcome.write_ready == 0:
             return "IDLE_QUALIFIED_ZERO", ""
         if lease.writer_circuit_state == "OPEN":
@@ -857,7 +875,8 @@ class DurableCycleGovernor:
                 "UPDATE unpublished_governed_cycles SET lease_state='TERMINAL', "
                 "terminal_at=?, elapsed_seconds=?, terminal_state=?, outcome_class=?, "
                 "write_ready=?, admission_hold=?, admission_reject=?, "
-                "accepted_payload_count=?, provider_dispatches=?, cooldown_seconds=?, "
+                "accepted_payload_count=?, provider_dispatches=?, "
+                "writer_dispatch_enabled=?, cooldown_seconds=?, "
                 "cooldown_started_at=?, next_cycle_eligible_at=?, "
                 "writer_unproductive_streak_after=?, writer_circuit_state=?, "
                 "writer_circuit_open_reason=?, writer_circuit_release_evidence_json=?, "
@@ -873,6 +892,7 @@ class DurableCycleGovernor:
                     outcome.admission_reject,
                     outcome.accepted_payload_count,
                     outcome.provider_dispatches,
+                    int(outcome.writer_dispatch_enabled),
                     cooldown,
                     cooldown_started_at,
                     next_text,
@@ -917,6 +937,7 @@ class DurableCycleGovernor:
                 },
                 "accepted_payload_count": outcome.accepted_payload_count,
                 "writer_provider_dispatch_count": outcome.provider_dispatches,
+                "writer_dispatch_enabled": outcome.writer_dispatch_enabled,
                 "cooldown_policy_version": self._policy.version,
                 "cooldown_seconds": cooldown,
                 "cooldown_started_at": cooldown_started_at,
@@ -956,6 +977,7 @@ class DurableCycleGovernor:
             },
             accepted_payload_count=outcome.accepted_payload_count,
             writer_provider_dispatch_count=outcome.provider_dispatches,
+            writer_dispatch_enabled=outcome.writer_dispatch_enabled,
             work_started_at=lease.work_started_at,
             terminal_at=now_text,
             elapsed_seconds=elapsed,
@@ -1360,7 +1382,8 @@ class DurableCycleGovernor:
                 "SELECT cycle_id, owner_digest, lease_state, terminal_state, outcome_class, "
                 "work_started_at, terminal_at, elapsed_seconds, write_ready, "
                 "admission_hold, admission_reject, accepted_payload_count, "
-                "provider_dispatches, cooldown_policy_version, cooldown_seconds, "
+                "provider_dispatches, writer_dispatch_enabled, "
+                "cooldown_policy_version, cooldown_seconds, "
                 "cooldown_started_at, next_cycle_eligible_at, "
                 "writer_unproductive_streak_before, writer_unproductive_streak_after, "
                 "writer_circuit_state, writer_circuit_open_reason, "
@@ -1386,6 +1409,7 @@ class DurableCycleGovernor:
             "admission_reject",
             "accepted_payload_count",
             "writer_provider_dispatch_count",
+            "writer_dispatch_enabled",
             "cooldown_policy_version",
             "cooldown_seconds",
             "cooldown_started_at",
@@ -1406,6 +1430,10 @@ class DurableCycleGovernor:
         if latest_record is not None and latest_record["restart_observations"]:
             latest_record["restart_observations"] = json.loads(
                 str(latest_record["restart_observations"])
+            )
+        if latest_record is not None:
+            latest_record["writer_dispatch_enabled"] = bool(
+                latest_record["writer_dispatch_enabled"]
             )
         release = json.loads(str(circuit[2])) if circuit[2] is not None else None
         return CycleGovernorStatus(

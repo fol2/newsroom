@@ -87,6 +87,7 @@ def _cycle(
     writer_dispatch_permitted: bool,
     writer_dispatch_fence: Callable[[], None],
 ) -> CycleReport:
+    writer_dispatch_enabled = writer_dispatch_permitted and args.max_writes > 0
     model_usage = ModelUsageService(args.unpublished)
     model_usage.recover_unresolved(observed_at=datetime.now(tz=UTC))
     return run_cycle(
@@ -96,8 +97,8 @@ def _cycle(
         max_writes=args.max_writes,
         graphiti=None,
         max_graphiti=0,
-        max_writer_provider_dispatches=5 if writer_dispatch_permitted else 0,
-        max_writer_fallback_dispatches=1 if writer_dispatch_permitted else 0,
+        max_writer_provider_dispatches=5 if writer_dispatch_enabled else 0,
+        max_writer_fallback_dispatches=1 if writer_dispatch_enabled else 0,
         cycle_id=cycle_id,
         writer_dispatch_fence=writer_dispatch_fence,
         model_usage=model_usage,
@@ -116,8 +117,8 @@ def _resolve_cooldown(*, cooldown: int | None, interval: int | None) -> int:
 
 
 def _validate_max_writes(max_writes: int) -> None:
-    if not 1 <= max_writes <= 5:
-        raise ValueError("--max-writes must be between 1 and 5 inclusive")
+    if not 0 <= max_writes <= 5:
+        raise ValueError("--max-writes must be between 0 and 5 inclusive")
 
 
 def _evaluation_policy(cooldown_seconds: int) -> EvaluationCyclePolicy:
@@ -419,6 +420,7 @@ def _governed_unit(
                 admission_reject=report.admission_reject,
                 provider_dispatches=report.provider_dispatches,
                 accepted_payload_count=report.accepted_payload_count,
+                writer_dispatch_enabled=args.max_writes > 0,
                 systemic_provider_failure_reason=(
                     report.writer_circuit_open_reason
                     if report.writer_circuit_open
@@ -515,7 +517,10 @@ def main(argv: list[str] | None = None) -> int:
         "--max-writes",
         type=int,
         default=5,
-        help="per-cycle accepted unpublished payload ceiling; not a time or token quota",
+        help=(
+            "per-cycle accepted unpublished payload ceiling; zero keeps the "
+            "writer disabled and is not a time or token quota"
+        ),
     )
     parser.add_argument(
         "--usage-window",
