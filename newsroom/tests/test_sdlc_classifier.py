@@ -74,6 +74,25 @@ def test_risk_routing_uses_maximum_triggered_tier() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "path",
+    (
+        "newsroom/production_admission.py",
+        "scripts/production_operational_admission.py",
+        "newsroom/tests/test_production_operational_admission.py",
+        "newsroom/tests/test_production_operational_admission_cli.py",
+    ),
+)
+def test_production_admission_changes_require_owner_and_actual_service_evidence(
+    path: str,
+) -> None:
+    route = _route(path)
+
+    assert route["risk_tier"] == "R4_RELEASE_OPERATIONAL"
+    assert route["owner_authority_required"] is True
+    assert route["service_required"] is True
+
+
 def test_classifier_source_tests_policy_and_workflows_require_service() -> None:
     paths = (
         "scripts/sdlc/classify_change.py",
