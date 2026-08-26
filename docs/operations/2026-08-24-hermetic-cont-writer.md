@@ -19,6 +19,10 @@ must match `grok inspect --json` `grokVersion`). It is not a qualification pin.
 The model is `grok-4.6`, reasoning `low`, one turn. It overrides the
 coding-agent system instruction, passes the Newsroom prompt verbatim and
 disables web search, planning, subagents, tools and MCP.
+Grok 1.0.10 still advertises the stock built-in toolset when `--tools` is
+empty, and those schemas dominate prompt occupancy. The route therefore also
+passes `--disallowed-tools` with the advertised built-in identifiers so the
+schemas leave the model prompt. Execution remains denied by `--deny *`.
 A machine-readable `grok inspect` preflight must prove no repository root,
 project instructions, skills, plugins, MCP servers, hooks, LSP servers or
 configuration layers before the provider command can run.

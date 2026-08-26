@@ -64,7 +64,7 @@ Looked up from `git log origin/main --oneline` and GitHub PR merge commits:
 | Write-admission | `newsroom.write-admission.v3+newsroom.evid-012.v7+newsroom.evidence-approval.v8+newsroom.evidence-gates.v2+newsroom.governed-claim.v7+newsroom.governed-input.v10+newsroom.named-entity.v8+newsroom.cont-originality.v3+newsroom.zh-hant-hk-shape.v13` |
 | Evaluation cycle | `newsroom.evaluation-cycle.v1@sha256:514c0c23c863fa17a2e17490b1b15ad0067ac5a76c669182e5d7e5ae28d55f45` |
 | Model-usage schema | `newsroom.model-usage.v3` |
-| CONT hermetic Grok route | `cont-writer-grok-hermetic-command-v2` |
+| CONT hermetic Grok route | `cont-writer-grok-hermetic-command-v3` |
 | CONT hermetic Cursor route | `cont-writer-cursor-hermetic-command-v2` |
 | Graphiti call-shape `policy_id` | `graphiti-core-0.29.3-newsroom-adapter-v1` |
 | Graphiti call-shape `version` | `issue-771-v1` |

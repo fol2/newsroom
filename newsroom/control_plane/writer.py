@@ -47,7 +47,7 @@ CURSOR_AGENT_BIN = os.environ.get(
 GROK_COMMAND_SEMANTIC_VERSION = "1.0.8"
 CURSOR_COMMAND_SEMANTIC_VERSION = "2026.08.11-e8db854"
 _GROK_COMMAND_SEMANTIC_VERSION_CACHE: str | None = None
-CONT_PRIMARY_CONFIG_IDENTITY = "cont-writer-grok-hermetic-command-v2"
+CONT_PRIMARY_CONFIG_IDENTITY = "cont-writer-grok-hermetic-command-v3"
 CONT_FALLBACK_CONFIG_IDENTITY = "cont-writer-cursor-hermetic-command-v2"
 CONT_WRITER_SYSTEM_INSTRUCTION = (
     "你係一個單次、無工具、無工作區嘅 Newsroom 寫作轉換器。"
@@ -1583,6 +1583,38 @@ def _parse_grok_writer_output(raw: str) -> WriterCliExecution:
     return WriterCliExecution(raw, usage)
 
 
+# Grok 1.0.10 still advertises the stock toolset when `--tools` is empty.
+# `--disallowed-tools` removes those schemas from the model prompt.
+GROK_WRITER_DISALLOWED_TOOLS = (
+    "run_terminal_command",
+    "run_terminal_cmd",
+    "bash",
+    "read_file",
+    "search_replace",
+    "list_dir",
+    "grep",
+    "kill_command_or_subagent",
+    "todo_write",
+    "get_command_or_subagent_output",
+    "spawn_subagent",
+    "scheduler_create",
+    "scheduler_delete",
+    "scheduler_list",
+    "monitor",
+    "search_tool",
+    "use_tool",
+    "workflow",
+    "enter_plan_mode",
+    "exit_plan_mode",
+    "ask_user_question",
+    "image_gen",
+    "image_edit",
+    "image_to_video",
+    "reference_to_video",
+    "write",
+    "Agent",
+)
+GROK_WRITER_DISALLOWED_TOOLS_FLAG = ",".join(GROK_WRITER_DISALLOWED_TOOLS)
 _GROK_WRITER_SEMANTIC_FLAGS = (
     "--prompt-file",
     "REQUEST",
@@ -1597,6 +1629,8 @@ _GROK_WRITER_SEMANTIC_FLAGS = (
     "dontAsk",
     "--tools",
     "",
+    "--disallowed-tools",
+    GROK_WRITER_DISALLOWED_TOOLS_FLAG,
     "--deny",
     "*",
     "--no-plan",
