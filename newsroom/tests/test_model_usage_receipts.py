@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import sqlite3
@@ -16,6 +17,14 @@ from newsroom.control_plane.graphiti import (
     GRAPHITI_CONTEXT_IDENTITY,
     GRAPHITI_EMBEDDING_ROUTE,
     GraphitiModelUsageObserver,
+)
+from newsroom.control_plane.issue_790_disposition import (
+    ISSUE_790_PLAN_SCHEMA,
+    Issue790DispositionError,
+    apply_issue_790_plan,
+    dry_run_issue_790_plan,
+    load_issue_790_plan,
+    validate_issue_790_plan,
 )
 from newsroom.control_plane.model_usage import (
     InvocationAllocation,
@@ -82,11 +91,16 @@ def test_v1_store_replays_v2_context_manifest_migration_idempotently(
         ("model-usage-v1", "newsroom.model-usage.v1"),
         ("model-usage-v2", "newsroom.model-usage.v2"),
         ("model-usage-v3", "newsroom.model-usage.v3"),
+        (
+            "model-usage-v4-conservative-disposition",
+            "newsroom.model-usage.conservative-disposition.v1",
+        ),
     ]
     assert "model_invocation_context_manifests" in tables
     assert "model_invocation_context_observations" in tables
     assert "graphiti_internal_requests" in tables
     assert "graphiti_internal_request_refusals" in tables
+    assert "model_usage_conservative_dispositions" in tables
 
 
 def _policy(
@@ -230,6 +244,139 @@ def _open_and_allocate(
     allocation = _allocation(envelope, policy)
     service.allocate(allocation, owner_emergency_stop=False)
     return envelope, policy, allocation
+
+
+def _open_unreported_graphiti_subscription_leaf(
+    service: ModelUsageService,
+    *,
+    cycle_id: str = "graphiti-cycle-unreported",
+    request: str = "graphiti-unreported-request",
+    failure_class: str = "MISSING_PROVIDER_TELEMETRY",
+    observe_dispatch: bool = True,
+    subscription_not_cash_debited: bool = True,
+) -> tuple[InvocationEfficiencyPolicy, InvocationAllocation, InvocationTerminal]:
+    envelope = _envelope(
+        cycle_id=cycle_id,
+        workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        candidate_id=None,
+        ingest_id=f"ingest-{cycle_id}",
+    )
+    policy = _policy(
+        workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        provider="cursor-agent-cli",
+        route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+        model="composer-2.5",
+        hard_estimate_ceiling_tokens=None,
+    )
+    _envelope_value, _policy_value, allocation = _open_and_allocate(
+        service,
+        envelope=envelope,
+        policy=policy,
+    )
+    dispatch_at = allocation.allocated_at + timedelta(milliseconds=1)
+    if observe_dispatch:
+        service.observe_transport(
+            invocation_id=allocation.invocation_id,
+            observed_at=dispatch_at,
+            state="DISPATCH_STARTED",
+            evidence_digest=_digest({"dispatch": allocation.invocation_id}),
+        )
+    terminal = service.complete(
+        InvocationTerminal.create(
+            invocation_id=allocation.invocation_id,
+            outcome="FAILED",
+            failure_class=failure_class,
+            usage_status=UsageStatus.UNREPORTED,
+            components=UsageComponents(provenance="UNAVAILABLE"),
+            dispatch_at=dispatch_at,
+            completed_at=allocation.allocated_at + timedelta(seconds=1),
+            observed_at=allocation.allocated_at + timedelta(seconds=1),
+            subscription_cli_chat_not_cash_debited=(
+                subscription_not_cash_debited
+            ),
+        )
+    )
+    return policy, allocation, terminal
+
+
+def _conservative_disposition_authority(
+    allocation: InvocationAllocation,
+    terminal: InvocationTerminal,
+    *,
+    approved_at: datetime,
+    approved_by: str = "github:fol2",
+    approval_reference: str = (
+        "https://github.com/fol2/newsroom/issues/790#issuecomment-fixture"
+    ),
+) -> tuple[dict[str, object], str]:
+    record = {
+        "schema_version": (
+            "newsroom.model-usage.conservative-disposition-authority.v1"
+        ),
+        "approved_by": approved_by,
+        "approval_reference": approval_reference,
+        "approved_at": approved_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "invocation_id": allocation.invocation_id,
+        "terminal_digest": terminal.terminal_digest,
+        "allocation_digest": allocation.canonical_digest,
+        "scope": "CONSERVATIVE_SUBSCRIPTION_CLI_USAGE_DISPOSITION",
+    }
+    return record, _digest(record)
+
+
+def _issue_790_plan(
+    policy: InvocationEfficiencyPolicy,
+    allocation: InvocationAllocation,
+    terminal: InvocationTerminal,
+) -> dict[str, object]:
+    plan: dict[str, object] = {
+        "schema_version": ISSUE_790_PLAN_SCHEMA,
+        "issue": 790,
+        "approval": {
+            "approved_by": "github:fol2",
+            "approval_reference": (
+                "https://github.com/fol2/newsroom/issues/790#issuecomment-fixture"
+            ),
+            "approved_at": "2026-08-24T10:00:05.000000Z",
+            "scope": "CONSERVATIVE_SUBSCRIPTION_CLI_USAGE_DISPOSITION",
+        },
+        "target": {
+            "invocation_id": allocation.invocation_id,
+            "terminal_digest": terminal.terminal_digest,
+            "allocation_digest": allocation.canonical_digest,
+            "policy_digest": policy.canonical_digest,
+            "route": GRAPHITI_CHAT_PRIMARY_ROUTE,
+            "provider": "cursor-agent-cli",
+            "workload_class": "GRAPHITI_CHAT_PRIMARY",
+            "terminal_usage_status": "UNREPORTED",
+            "terminal_failure_class": "MISSING_PROVIDER_TELEMETRY",
+            "route_open_reason": "SYSTEMIC_TRANSPORT",
+            "conservative_total_source": "QUALIFIED_POLICY_MAX_TOTAL_TOKENS",
+            "expected_conservative_total_tokens": policy.max_total_tokens,
+        },
+        "release": {
+            "kind": "AUTHORISED_OPERATOR_RESET",
+            "evidence": "CONSERVATIVE_DISPOSITION_DIGEST",
+        },
+        "retry_forbidden_ledger_ids": [1932, 1972],
+        "canary": {
+            "fresh_provider_backed_attempt_count": 1,
+            "persistent_worker_state_before_canary": "UNLOADED",
+            "requires_exact_main_deployment": True,
+        },
+        "non_effects": [
+            "NO_PUBLICATION",
+            "NO_PUBLIC_DISPATCH",
+            "NO_BACKLOG_DRAIN",
+            "NO_BULK_REQUEUE",
+            "NO_PRODUCTION_OPERATIONAL_ADMISSION",
+            "NO_WIDER_ACTIVATION",
+            "NO_PROVIDER_SUBSTITUTION",
+            "NO_UNRELATED_SPEND_DISPOSITION",
+        ],
+    }
+    plan["canonical_digest"] = _digest(plan)
+    return plan
 
 
 def test_hold_or_reject_admission_creates_no_envelope_or_leaf(tmp_path: Path) -> None:
@@ -1058,6 +1205,496 @@ def test_later_provider_telemetry_appends_reconciliation_without_editing_history
         service_row_count(tmp_path / "unpublished.sqlite3", "model_provider_telemetry")
         == 1
     )
+
+
+def test_authorised_conservative_disposition_preserves_unknown_terminal(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    policy, allocation, terminal = _open_unreported_graphiti_subscription_leaf(
+        service
+    )
+    approved_at = T0 + timedelta(seconds=5)
+    authority, authority_digest = _conservative_disposition_authority(
+        allocation,
+        terminal,
+        approved_at=approved_at,
+    )
+
+    disposition = service.disposition_unreported_subscription_usage(
+        invocation_id=allocation.invocation_id,
+        expected_terminal_digest=terminal.terminal_digest,
+        expected_allocation_digest=allocation.canonical_digest,
+        approved_by=str(authority["approved_by"]),
+        approval_reference=str(authority["approval_reference"]),
+        approved_at=approved_at,
+        authority_digest=authority_digest,
+        observed_at=T0 + timedelta(seconds=10),
+    )
+
+    assert disposition["usage_status"] == "ESTIMATED"
+    assert disposition["components"] == UsageComponents(
+        total_tokens=policy.max_total_tokens,
+        provenance="BOUNDED_ESTIMATE",
+    ).as_record()
+    assert disposition["exact_usage_remains_unknown"] is True
+    assert disposition["provider_dispatch_preserved"] is True
+    assert disposition["unknown_spend_released"] is False
+    assert disposition["authority_digest"] == authority_digest
+    assert service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)["state"] == "OPEN"
+
+    historical = service.query(
+        start=T0, end=T0 + timedelta(seconds=9)
+    )["leaves"][0]
+    current = service.query(
+        start=T0, end=T0 + timedelta(seconds=20)
+    )["leaves"][0]
+    assert historical["usage_status"] == "UNREPORTED"
+    assert historical["conservative_disposition_digest"] is None
+    assert current["usage_status"] == "ESTIMATED"
+    assert current["terminal_usage_status"] == "UNREPORTED"
+    assert current["disposition_usage_status"] == "ESTIMATED"
+    assert current["total_tokens"] == policy.max_total_tokens
+    assert current["exact_usage_remains_unknown"] is True
+    assert current["provider_telemetry_digest"] is None
+    assert current["actual_provider_dispatch"] is True
+
+    report = service.report(start=T0, end=T0 + timedelta(seconds=20))
+    assert report["estimated_tokens"] == policy.max_total_tokens
+    assert report["unresolved_invocation_count"] == 0
+    assert report["missing_usage_is_zero"] is False
+    assert service_row_count(
+        tmp_path / "unpublished.sqlite3",
+        "model_usage_conservative_dispositions",
+    ) == 1
+    assert service_row_count(
+        tmp_path / "unpublished.sqlite3", "model_usage_reconciliations"
+    ) == 0
+    assert service_row_count(
+        tmp_path / "unpublished.sqlite3", "model_provider_telemetry"
+    ) == 0
+
+    open_state = service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)
+    service.release_route_circuit(
+        route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+        release_kind="AUTHORISED_OPERATOR_RESET",
+        bound_failure_reason=str(open_state["reason"]),
+        evidence_digest=str(disposition["disposition_digest"]),
+        recorded_at=T0 + timedelta(seconds=11),
+    )
+    assert service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)["state"] == "CLOSED"
+
+
+def test_conservative_disposition_replay_is_idempotent_and_conflicts_fail(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    _policy_value, allocation, terminal = (
+        _open_unreported_graphiti_subscription_leaf(service)
+    )
+    approved_at = T0 + timedelta(seconds=5)
+    authority, authority_digest = _conservative_disposition_authority(
+        allocation,
+        terminal,
+        approved_at=approved_at,
+    )
+    values = {
+        "invocation_id": allocation.invocation_id,
+        "expected_terminal_digest": terminal.terminal_digest,
+        "expected_allocation_digest": allocation.canonical_digest,
+        "approved_by": str(authority["approved_by"]),
+        "approval_reference": str(authority["approval_reference"]),
+        "approved_at": approved_at,
+        "authority_digest": authority_digest,
+    }
+
+    first = service.disposition_unreported_subscription_usage(
+        **values,
+        observed_at=T0 + timedelta(seconds=10),
+    )
+    replay = service.disposition_unreported_subscription_usage(
+        **values,
+        observed_at=T0 + timedelta(seconds=20),
+    )
+    assert replay == first
+
+    with pytest.raises(
+        ModelUsageIntegrityError,
+        match="conservative disposition authority differs",
+    ):
+        service.disposition_unreported_subscription_usage(
+            **{**values, "authority_digest": _digest({"wrong": True})},
+            observed_at=T0 + timedelta(seconds=30),
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("terminal", "terminal identity differs"),
+        ("allocation", "allocation identity differs"),
+        ("authority", "authority differs"),
+    ),
+)
+def test_conservative_disposition_requires_exact_bound_evidence(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+) -> None:
+    service = _service(tmp_path)
+    _policy_value, allocation, terminal = (
+        _open_unreported_graphiti_subscription_leaf(service)
+    )
+    approved_at = T0 + timedelta(seconds=5)
+    authority, authority_digest = _conservative_disposition_authority(
+        allocation,
+        terminal,
+        approved_at=approved_at,
+    )
+    values = {
+        "invocation_id": allocation.invocation_id,
+        "expected_terminal_digest": terminal.terminal_digest,
+        "expected_allocation_digest": allocation.canonical_digest,
+        "approved_by": str(authority["approved_by"]),
+        "approval_reference": str(authority["approval_reference"]),
+        "approved_at": approved_at,
+        "authority_digest": authority_digest,
+        "observed_at": T0 + timedelta(seconds=10),
+    }
+    if mutation == "terminal":
+        values["expected_terminal_digest"] = _digest({"wrong": "terminal"})
+    elif mutation == "allocation":
+        values["expected_allocation_digest"] = _digest({"wrong": "allocation"})
+    else:
+        values["authority_digest"] = _digest({"wrong": "authority"})
+
+    with pytest.raises(ModelUsageIntegrityError, match=message):
+        service.disposition_unreported_subscription_usage(
+            **values  # type: ignore[arg-type]
+        )
+
+
+def test_conservative_disposition_rejects_missing_committed_dispatch(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    _policy_value, allocation, terminal = (
+        _open_unreported_graphiti_subscription_leaf(
+            service,
+            observe_dispatch=False,
+        )
+    )
+    approved_at = T0 + timedelta(seconds=5)
+    authority, authority_digest = _conservative_disposition_authority(
+        allocation,
+        terminal,
+        approved_at=approved_at,
+    )
+
+    with pytest.raises(
+        ModelUsageIntegrityError,
+        match="committed transport dispatch is absent",
+    ):
+        service.disposition_unreported_subscription_usage(
+            invocation_id=allocation.invocation_id,
+            expected_terminal_digest=terminal.terminal_digest,
+            expected_allocation_digest=allocation.canonical_digest,
+            approved_by=str(authority["approved_by"]),
+            approval_reference=str(authority["approval_reference"]),
+            approved_at=approved_at,
+            authority_digest=authority_digest,
+            observed_at=T0 + timedelta(seconds=10),
+        )
+
+
+def test_conservative_disposition_does_not_clear_other_route_uncertainty(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    policy = _policy(
+        workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        provider="cursor-agent-cli",
+        route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+        model="composer-2.5",
+        hard_estimate_ceiling_tokens=None,
+    )
+    service.register_policy(policy)
+    allocations = []
+    for cycle_id, request in (
+        ("graphiti-cycle-first", "graphiti-first"),
+        ("graphiti-cycle-second", "graphiti-second"),
+    ):
+        envelope = _envelope(
+            cycle_id=cycle_id,
+            workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+            candidate_id=None,
+            ingest_id=f"ingest-{cycle_id}",
+        )
+        service.open_envelope(envelope)
+        allocation = _allocation(envelope, policy, request=request)
+        service.allocate(allocation, owner_emergency_stop=False)
+        allocations.append(allocation)
+    terminals = []
+    for allocation in allocations:
+        dispatch_at = allocation.allocated_at + timedelta(milliseconds=1)
+        service.observe_transport(
+            invocation_id=allocation.invocation_id,
+            observed_at=dispatch_at,
+            state="DISPATCH_STARTED",
+            evidence_digest=_digest({"dispatch": allocation.invocation_id}),
+        )
+        terminals.append(
+            service.complete(
+                InvocationTerminal.create(
+                    invocation_id=allocation.invocation_id,
+                    outcome="FAILED",
+                    failure_class="MISSING_PROVIDER_TELEMETRY",
+                    usage_status=UsageStatus.UNREPORTED,
+                    components=UsageComponents(provenance="UNAVAILABLE"),
+                    dispatch_at=dispatch_at,
+                    completed_at=allocation.allocated_at + timedelta(seconds=1),
+                    observed_at=allocation.allocated_at + timedelta(seconds=1),
+                    subscription_cli_chat_not_cash_debited=True,
+                )
+            )
+        )
+    first, _second = allocations
+    first_terminal, _second_terminal = terminals
+    approved_at = T0 + timedelta(seconds=5)
+    authority, authority_digest = _conservative_disposition_authority(
+        first,
+        first_terminal,
+        approved_at=approved_at,
+    )
+    disposition = service.disposition_unreported_subscription_usage(
+        invocation_id=first.invocation_id,
+        expected_terminal_digest=first_terminal.terminal_digest,
+        expected_allocation_digest=first.canonical_digest,
+        approved_by=str(authority["approved_by"]),
+        approval_reference=str(authority["approval_reference"]),
+        approved_at=approved_at,
+        authority_digest=authority_digest,
+        observed_at=T0 + timedelta(seconds=10),
+    )
+
+    open_state = service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)
+    with pytest.raises(
+        ModelUsageAdmissionError,
+        match="unresolved usage or a policy breach",
+    ):
+        service.release_route_circuit(
+            route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+            release_kind="AUTHORISED_OPERATOR_RESET",
+            bound_failure_reason=str(open_state["reason"]),
+            evidence_digest=str(disposition["disposition_digest"]),
+            recorded_at=T0 + timedelta(seconds=11),
+        )
+
+
+def test_late_provider_telemetry_supersedes_conservative_disposition(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    _policy_value, allocation, terminal = (
+        _open_unreported_graphiti_subscription_leaf(service)
+    )
+    approved_at = T0 + timedelta(seconds=5)
+    authority, authority_digest = _conservative_disposition_authority(
+        allocation,
+        terminal,
+        approved_at=approved_at,
+    )
+    service.disposition_unreported_subscription_usage(
+        invocation_id=allocation.invocation_id,
+        expected_terminal_digest=terminal.terminal_digest,
+        expected_allocation_digest=allocation.canonical_digest,
+        approved_by=str(authority["approved_by"]),
+        approval_reference=str(authority["approval_reference"]),
+        approved_at=approved_at,
+        authority_digest=authority_digest,
+        observed_at=T0 + timedelta(seconds=10),
+    )
+    service.reconcile(
+        invocation_id=allocation.invocation_id,
+        components=UsageComponents(
+            input_tokens=100,
+            output_tokens=25,
+            total_tokens=125,
+            provenance="PROVIDER_REPORTED",
+        ),
+        provider_telemetry={"late": "exact"},
+        observed_at=T0 + timedelta(seconds=20),
+        raw_telemetry_pointer="private://late/exact",
+    )
+
+    row = service.query(start=T0, end=T0 + timedelta(seconds=30))["leaves"][0]
+    assert row["usage_status"] == "REPORTED"
+    assert row["total_tokens"] == 125
+    assert row["reconciliation_usage_status"] == "REPORTED"
+    assert row["disposition_usage_status"] == "ESTIMATED"
+    assert row["exact_usage_remains_unknown"] is False
+
+
+def test_checked_issue_790_live_plan_retains_exact_approved_identity() -> None:
+    root = Path(__file__).resolve().parents[2]
+    plan = load_issue_790_plan(
+        root
+        / "docs/operations/2026-08-26-issue-790-conservative-disposition.json"
+    )
+
+    assert plan["canonical_digest"] == (
+        "sha256:e9d06bf838b4895021ddc92c4981068721ccc2b01562846046fbdb99b9816163"
+    )
+    assert plan["target"] == {
+        "allocation_digest": (
+            "sha256:800dd0c6155a34cfafe91c1c240dac2d44730f558be9417d5fe34b5fb23780b2"
+        ),
+        "conservative_total_source": "QUALIFIED_POLICY_MAX_TOTAL_TOKENS",
+        "expected_conservative_total_tokens": 147456,
+        "invocation_id": (
+            "sha256:75f14fd50f54c01c852c557291eb7bb92b05a79c937d10d048bb245863b7a196"
+        ),
+        "policy_digest": (
+            "sha256:c3a876540d2d1d2b3cf4864f649340c4357c8619468841bea5640b8d3567db3c"
+        ),
+        "provider": "cursor-agent-cli",
+        "route": "GRAPHITI_CHAT_PRIMARY",
+        "route_open_reason": "SYSTEMIC_TRANSPORT",
+        "terminal_digest": (
+            "sha256:0c73f6a7ad2255f13bfdb617370f0c935464917e0e80c69b2da216ffca60ee0c"
+        ),
+        "terminal_failure_class": "MISSING_PROVIDER_TELEMETRY",
+        "terminal_usage_status": "UNREPORTED",
+        "workload_class": "GRAPHITI_CHAT_PRIMARY",
+    }
+
+
+def test_issue_790_plan_digest_and_bounds_fail_closed(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    policy, allocation, terminal = _open_unreported_graphiti_subscription_leaf(
+        service
+    )
+    plan = _issue_790_plan(policy, allocation, terminal)
+
+    with pytest.raises(Issue790DispositionError, match="plan digest differs"):
+        validate_issue_790_plan(
+            {
+                **plan,
+                "target": {
+                    **plan["target"],  # type: ignore[dict-item]
+                    "expected_conservative_total_tokens": 1,
+                },
+            }
+        )
+
+
+def test_issue_790_dry_run_mutates_only_isolated_copy(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    policy, allocation, terminal = _open_unreported_graphiti_subscription_leaf(
+        service
+    )
+    service.open_route_circuit(
+        route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+        reason="SYSTEMIC_TRANSPORT",
+        invocation_id=allocation.invocation_id,
+        recorded_at=T0 + timedelta(seconds=3),
+    )
+    source = tmp_path / "unpublished.sqlite3"
+    scratch = tmp_path / "dry-run.sqlite3"
+
+    receipt = dry_run_issue_790_plan(
+        source_store=source,
+        scratch_store=scratch,
+        plan=_issue_790_plan(policy, allocation, terminal),
+        observed_at=T0 + timedelta(seconds=10),
+    )
+
+    assert receipt["mode"] == "dry-run"
+    assert receipt["source_mutated"] is False
+    assert receipt["retry_performed"] is False
+    assert receipt["canary_performed"] is False
+    assert receipt["receipt_digest"] == _digest(
+        {key: value for key, value in receipt.items() if key != "receipt_digest"}
+    )
+    assert service_row_count(
+        source, "model_usage_conservative_dispositions"
+    ) == 0
+    assert service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)["state"] == "OPEN"
+    copied = ModelUsageService(str(scratch))
+    assert service_row_count(
+        scratch, "model_usage_conservative_dispositions"
+    ) == 1
+    assert copied.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)["state"] == "CLOSED"
+    assert service_row_count(scratch, "model_usage_reconciliations") == 0
+    assert service_row_count(scratch, "model_provider_telemetry") == 0
+
+
+def test_issue_790_apply_retains_pre_operation_backup(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    policy, allocation, terminal = _open_unreported_graphiti_subscription_leaf(
+        service
+    )
+    service.open_route_circuit(
+        route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+        reason="SYSTEMIC_TRANSPORT",
+        invocation_id=allocation.invocation_id,
+        recorded_at=T0 + timedelta(seconds=3),
+    )
+    store = tmp_path / "unpublished.sqlite3"
+    backup = tmp_path / "unpublished.pre-790.sqlite3"
+
+    receipt = apply_issue_790_plan(
+        store=store,
+        backup_path=backup,
+        plan=_issue_790_plan(policy, allocation, terminal),
+        observed_at=T0 + timedelta(seconds=10),
+    )
+
+    assert receipt["mode"] == "apply"
+    assert backup.is_file()
+    assert receipt["pre_operation_snapshot_digest"] == (
+        "sha256:" + hashlib.sha256(backup.read_bytes()).hexdigest()
+    )
+    assert receipt["pre_operation_snapshot_retained"] is True
+    assert service_row_count(
+        backup, "model_usage_conservative_dispositions"
+    ) == 0
+    backup_connection = sqlite3.connect(
+        f"{backup.absolute().as_uri()}?mode=ro", uri=True
+    )
+    backup_state = backup_connection.execute(
+        "SELECT state FROM model_usage_route_circuit_events "
+        "WHERE route=? ORDER BY recorded_at DESC,rowid DESC LIMIT 1",
+        (GRAPHITI_CHAT_PRIMARY_ROUTE,),
+    ).fetchone()
+    backup_connection.close()
+    assert backup_state == ("OPEN",)
+    assert service_row_count(store, "model_usage_conservative_dispositions") == 1
+    assert service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)["state"] == "CLOSED"
+
+
+def test_issue_790_route_mismatch_writes_no_disposition(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    policy, allocation, terminal = _open_unreported_graphiti_subscription_leaf(
+        service
+    )
+    store = tmp_path / "unpublished.sqlite3"
+
+    with pytest.raises(
+        Issue790DispositionError,
+        match="current route failure differs",
+    ):
+        apply_issue_790_plan(
+            store=store,
+            backup_path=tmp_path / "unpublished.pre-790.sqlite3",
+            plan=_issue_790_plan(policy, allocation, terminal),
+            observed_at=T0 + timedelta(seconds=10),
+        )
+
+    assert service_row_count(
+        store, "model_usage_conservative_dispositions"
+    ) == 0
+    assert service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)["state"] == "OPEN"
 
 
 def test_reconciled_policy_breach_keeps_the_route_open(tmp_path: Path) -> None:

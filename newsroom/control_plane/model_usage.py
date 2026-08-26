@@ -30,10 +30,23 @@ from newsroom.control_plane.veto import assert_private_store
 
 MODEL_USAGE_SCHEMA_VERSION = "newsroom.model-usage.v3"
 MODEL_USAGE_MIGRATION_ID = "model-usage-v3"
+CONSERVATIVE_DISPOSITION_SCHEMA_VERSION = (
+    "newsroom.model-usage.conservative-disposition.v1"
+)
+CONSERVATIVE_DISPOSITION_AUTHORITY_SCHEMA_VERSION = (
+    "newsroom.model-usage.conservative-disposition-authority.v1"
+)
+CONSERVATIVE_DISPOSITION_MIGRATION_ID = (
+    "model-usage-v4-conservative-disposition"
+)
 _MODEL_USAGE_MIGRATIONS = (
     ("model-usage-v1", "newsroom.model-usage.v1"),
     ("model-usage-v2", "newsroom.model-usage.v2"),
     (MODEL_USAGE_MIGRATION_ID, MODEL_USAGE_SCHEMA_VERSION),
+    (
+        CONSERVATIVE_DISPOSITION_MIGRATION_ID,
+        CONSERVATIVE_DISPOSITION_SCHEMA_VERSION,
+    ),
 )
 _HERMETIC_CONT_CONFIG_IDENTITIES = frozenset(
     {
@@ -233,6 +246,29 @@ CREATE TABLE IF NOT EXISTS model_usage_reconciliations(
     FOREIGN KEY(invocation_id) REFERENCES model_invocation_allocations(invocation_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT
 );
+CREATE TABLE IF NOT EXISTS model_usage_conservative_dispositions(
+    disposition_digest TEXT PRIMARY KEY,
+    invocation_id TEXT NOT NULL UNIQUE,
+    terminal_digest TEXT NOT NULL UNIQUE,
+    allocation_digest TEXT NOT NULL,
+    policy_digest TEXT NOT NULL,
+    authority_digest TEXT NOT NULL,
+    approved_by TEXT NOT NULL,
+    approval_reference TEXT NOT NULL,
+    approved_at TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    usage_status TEXT NOT NULL CHECK(usage_status='ESTIMATED'),
+    record_json TEXT NOT NULL,
+    FOREIGN KEY(invocation_id) REFERENCES model_invocation_allocations(invocation_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY(terminal_digest) REFERENCES model_invocation_terminals(terminal_digest)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY(allocation_digest)
+        REFERENCES model_invocation_allocations(canonical_digest)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY(policy_digest) REFERENCES model_invocation_policies(canonical_digest)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+);
 CREATE TABLE IF NOT EXISTS model_usage_route_circuit_events(
     event_digest TEXT PRIMARY KEY,
     route TEXT NOT NULL,
@@ -322,7 +358,10 @@ def _usage_blocking_routes(connection: sqlite3.Connection) -> set[str]:
         "WHERE (t.usage_status IN "
         "('UNREPORTED','AMBIGUOUS','INVALID') "
         "AND NOT EXISTS (SELECT 1 FROM model_usage_reconciliations r "
-        "WHERE r.invocation_id=t.invocation_id)) "
+        "WHERE r.invocation_id=t.invocation_id) "
+        "AND NOT EXISTS (SELECT 1 "
+        "FROM model_usage_conservative_dispositions d "
+        "WHERE d.invocation_id=t.invocation_id)) "
         "OR json_extract(t.record_json,'$.policy_breach') IS NOT NULL "
         "OR EXISTS (SELECT 1 FROM model_usage_reconciliations r "
         "WHERE r.invocation_id=t.invocation_id "
@@ -2462,6 +2501,243 @@ class ModelUsageService:
         finally:
             connection.close()
 
+    def disposition_unreported_subscription_usage(
+        self,
+        *,
+        invocation_id: str,
+        expected_terminal_digest: str,
+        expected_allocation_digest: str,
+        approved_by: str,
+        approval_reference: str,
+        approved_at: datetime,
+        authority_digest: str,
+        observed_at: datetime,
+    ) -> dict[str, object]:
+        """Retain one authorised upper-bound estimate without rewriting history.
+
+        This deliberately narrow path exists for a dispatched Cursor subscription
+        CLI Graphiti primary leaf whose exact provider telemetry is permanently
+        absent.  It preserves the unresolved terminal and provider dispatch while
+        using the retained qualified policy maximum as the conservative total.
+        """
+
+        invocation_id = _token(invocation_id, field="invocation id")
+        expected_terminal_digest = _token(
+            expected_terminal_digest,
+            field="expected terminal digest",
+        )
+        expected_allocation_digest = _token(
+            expected_allocation_digest,
+            field="expected allocation digest",
+        )
+        approved_by = _token(approved_by, field="approved by")
+        approval_reference = _token(
+            approval_reference,
+            field="approval reference",
+        )
+        authority_digest = _token(authority_digest, field="authority digest")
+        approved_at_text = _utc_text(approved_at)
+        observed_at_text = _utc_text(observed_at)
+        if observed_at < approved_at:
+            raise ModelUsageIntegrityError(
+                "conservative disposition observation precedes approval"
+            )
+
+        connection = self._connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            prior_row = connection.execute(
+                "SELECT authority_digest,record_json "
+                "FROM model_usage_conservative_dispositions "
+                "WHERE invocation_id=?",
+                (invocation_id,),
+            ).fetchone()
+            if prior_row is not None:
+                prior = _object(prior_row[1])
+                if str(prior_row[0]) != authority_digest:
+                    raise ModelUsageIntegrityError(
+                        "conservative disposition authority differs"
+                    )
+                if (
+                    prior.get("terminal_digest") != expected_terminal_digest
+                    or prior.get("allocation_digest")
+                    != expected_allocation_digest
+                    or prior.get("approved_by") != approved_by
+                    or prior.get("approval_reference") != approval_reference
+                    or prior.get("approved_at") != approved_at_text
+                ):
+                    raise ModelUsageIntegrityError(
+                        "conflicting conservative disposition replay"
+                    )
+                connection.rollback()
+                return prior
+
+            retained_row = connection.execute(
+                "SELECT t.terminal_digest,t.record_json,a.canonical_digest,"
+                "a.record_json,p.canonical_digest,p.record_json "
+                "FROM model_invocation_terminals t "
+                "JOIN model_invocation_allocations a "
+                "ON a.invocation_id=t.invocation_id "
+                "JOIN model_invocation_policies p "
+                "ON p.canonical_digest=a.policy_digest "
+                "WHERE t.invocation_id=?",
+                (invocation_id,),
+            ).fetchone()
+            if retained_row is None:
+                raise ModelUsageIntegrityError(
+                    "conservative disposition terminal is absent"
+                )
+            terminal_digest = str(retained_row[0])
+            terminal = _object(retained_row[1])
+            allocation_digest = str(retained_row[2])
+            allocation = _object(retained_row[3])
+            policy_digest = str(retained_row[4])
+            policy = _policy_from_record(_object(retained_row[5]))
+
+            if terminal_digest != expected_terminal_digest:
+                raise ModelUsageIntegrityError(
+                    "conservative disposition terminal identity differs"
+                )
+            if allocation_digest != expected_allocation_digest:
+                raise ModelUsageIntegrityError(
+                    "conservative disposition allocation identity differs"
+                )
+
+            authority = {
+                "schema_version": (
+                    CONSERVATIVE_DISPOSITION_AUTHORITY_SCHEMA_VERSION
+                ),
+                "approved_by": approved_by,
+                "approval_reference": approval_reference,
+                "approved_at": approved_at_text,
+                "invocation_id": invocation_id,
+                "terminal_digest": terminal_digest,
+                "allocation_digest": allocation_digest,
+                "scope": "CONSERVATIVE_SUBSCRIPTION_CLI_USAGE_DISPOSITION",
+            }
+            if digest_canonical(authority) != authority_digest:
+                raise ModelUsageIntegrityError(
+                    "conservative disposition authority differs"
+                )
+            terminal_observed_at = _instant(str(terminal["observed_at"]))
+            if approved_at < terminal_observed_at:
+                raise ModelUsageIntegrityError(
+                    "conservative disposition approval precedes terminal"
+                )
+            if (
+                allocation.get("workload_class")
+                != WorkloadClass.GRAPHITI_CHAT_PRIMARY.value
+                or allocation.get("provider") != "cursor-agent-cli"
+                or allocation.get("route")
+                != WorkloadClass.GRAPHITI_CHAT_PRIMARY.value
+            ):
+                raise ModelUsageIntegrityError(
+                    "conservative disposition target is outside the approved route"
+                )
+            if (
+                terminal.get("usage_status") != UsageStatus.UNREPORTED.value
+                or terminal.get("outcome") != "FAILED"
+                or terminal.get("failure_class")
+                != "MISSING_PROVIDER_TELEMETRY"
+                or terminal.get("subscription_cli_chat_not_cash_debited")
+                is not True
+                or terminal.get("policy_breach") is not None
+            ):
+                raise ModelUsageIntegrityError(
+                    "conservative disposition terminal is ineligible"
+                )
+            if (
+                terminal.get("provider_telemetry_digest") is not None
+                or terminal.get("raw_telemetry_pointer") is not None
+                or connection.execute(
+                    "SELECT 1 FROM model_provider_telemetry "
+                    "WHERE invocation_id=? LIMIT 1",
+                    (invocation_id,),
+                ).fetchone()
+                is not None
+                or connection.execute(
+                    "SELECT 1 FROM model_usage_reconciliations "
+                    "WHERE invocation_id=? LIMIT 1",
+                    (invocation_id,),
+                ).fetchone()
+                is not None
+            ):
+                raise ModelUsageIntegrityError(
+                    "conservative disposition exact telemetry already exists"
+                )
+            if connection.execute(
+                "SELECT 1 FROM model_transport_observations "
+                "WHERE invocation_id=? AND state='DISPATCH_STARTED' LIMIT 1",
+                (invocation_id,),
+            ).fetchone() is None:
+                raise ModelUsageIntegrityError(
+                    "conservative disposition committed transport dispatch is absent"
+                )
+            if not policy.qualified or policy.canonical_digest != policy_digest:
+                raise ModelUsageIntegrityError(
+                    "conservative disposition policy is not qualified"
+                )
+
+            components = UsageComponents(
+                total_tokens=policy.max_total_tokens,
+                provenance="BOUNDED_ESTIMATE",
+            )
+            record_without_digest: dict[str, object] = {
+                "schema_version": CONSERVATIVE_DISPOSITION_SCHEMA_VERSION,
+                "invocation_id": invocation_id,
+                "terminal_digest": terminal_digest,
+                "allocation_digest": allocation_digest,
+                "policy_digest": policy_digest,
+                "usage_status": UsageStatus.ESTIMATED.value,
+                "components": components.as_record(),
+                "estimate_policy_digest": policy_digest,
+                "estimate_calculation": (
+                    "QUALIFIED_POLICY_MAX_TOTAL_TOKENS_CONSERVATIVE_UPPER_BOUND"
+                ),
+                "exact_usage_remains_unknown": True,
+                "provider_dispatch_preserved": True,
+                "unknown_spend_released": False,
+                "authority_digest": authority_digest,
+                "approved_by": approved_by,
+                "approval_reference": approval_reference,
+                "approved_at": approved_at_text,
+                "observed_at": observed_at_text,
+            }
+            disposition_digest = digest_canonical(record_without_digest)
+            record = {
+                **record_without_digest,
+                "disposition_digest": disposition_digest,
+            }
+            connection.execute(
+                "INSERT INTO model_usage_conservative_dispositions("
+                "disposition_digest,invocation_id,terminal_digest,"
+                "allocation_digest,policy_digest,authority_digest,approved_by,"
+                "approval_reference,approved_at,observed_at,usage_status,record_json"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    disposition_digest,
+                    invocation_id,
+                    terminal_digest,
+                    allocation_digest,
+                    policy_digest,
+                    authority_digest,
+                    approved_by,
+                    approval_reference,
+                    approved_at_text,
+                    observed_at_text,
+                    UsageStatus.ESTIMATED.value,
+                    _json(record),
+                ),
+            )
+            connection.commit()
+            return record
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def reconcile(
         self,
         *,
@@ -2818,6 +3094,10 @@ class ModelUsageService:
                 "OR EXISTS (SELECT 1 FROM model_usage_reconciliations r "
                 "WHERE r.invocation_id=a.invocation_id "
                 "AND r.observed_at>=? AND r.observed_at<?) "
+                "OR EXISTS (SELECT 1 "
+                "FROM model_usage_conservative_dispositions d "
+                "WHERE d.invocation_id=a.invocation_id "
+                "AND d.observed_at>=? AND d.observed_at<?) "
                 "OR EXISTS (SELECT 1 FROM model_transport_observations x "
                 "WHERE x.invocation_id=a.invocation_id "
                 "AND x.state='DISPATCH_STARTED' "
@@ -2825,6 +3105,8 @@ class ModelUsageService:
                 "OR (o.terminal_at>=? AND o.terminal_at<?) "
                 "ORDER BY a.allocated_at,a.cycle_id,a.envelope_id,a.leaf_ordinal",
                 (
+                    _utc_text(start),
+                    _utc_text(end),
                     _utc_text(start),
                     _utc_text(end),
                     _utc_text(start),
@@ -2859,6 +3141,15 @@ class ModelUsageService:
                     "SELECT invocation_id,record_json FROM model_usage_reconciliations "
                     "WHERE rowid IN (SELECT MAX(rowid) FROM model_usage_reconciliations "
                     "WHERE observed_at<? GROUP BY invocation_id)",
+                    (_utc_text(end),),
+                )
+            }
+            conservative_dispositions = {
+                str(row[0]): _object(row[1])
+                for row in connection.execute(
+                    "SELECT invocation_id,record_json "
+                    "FROM model_usage_conservative_dispositions "
+                    "WHERE observed_at<?",
                     (_utc_text(end),),
                 )
             }
@@ -2993,8 +3284,25 @@ class ModelUsageService:
             if outcome is not None and _instant(str(outcome["terminal_at"])) >= end:
                 outcome = None
             effective = dict(terminal or {})
-            reconciliation = reconciliations.get(str(allocation["invocation_id"]))
-            provider_attempt = provider_attempts.get(str(allocation["invocation_id"]))
+            invocation_id = str(allocation["invocation_id"])
+            disposition = conservative_dispositions.get(invocation_id)
+            reconciliation = reconciliations.get(invocation_id)
+            provider_attempt = provider_attempts.get(invocation_id)
+            if disposition is not None:
+                effective.update(
+                    {
+                        "usage_status": disposition["usage_status"],
+                        "components": disposition["components"],
+                        "estimate_policy_digest": disposition[
+                            "estimate_policy_digest"
+                        ],
+                        "estimate_calculation": disposition[
+                            "estimate_calculation"
+                        ],
+                        "completed_at": disposition["observed_at"],
+                        "observed_at": disposition["observed_at"],
+                    }
+                )
             if reconciliation is not None:
                 effective.update(
                     {
@@ -3060,6 +3368,45 @@ class ModelUsageService:
                     else reconciliation.get("components")
                 ),
                 "reconciled_at": effective.get("reconciled_at"),
+                "conservative_disposition_digest": (
+                    None
+                    if disposition is None
+                    else disposition.get("disposition_digest")
+                ),
+                "disposition_usage_status": (
+                    None if disposition is None else disposition.get("usage_status")
+                ),
+                "disposition_components": (
+                    None if disposition is None else disposition.get("components")
+                ),
+                "disposed_at": (
+                    None if disposition is None else disposition.get("observed_at")
+                ),
+                "disposition_authority_digest": (
+                    None
+                    if disposition is None
+                    else disposition.get("authority_digest")
+                ),
+                "disposition_approval_reference": (
+                    None
+                    if disposition is None
+                    else disposition.get("approval_reference")
+                ),
+                "exact_usage_remains_unknown": (
+                    None
+                    if disposition is None
+                    else reconciliation is None
+                ),
+                "provider_dispatch_preserved": (
+                    None
+                    if disposition is None
+                    else disposition.get("provider_dispatch_preserved")
+                ),
+                "unknown_spend_released": (
+                    None
+                    if disposition is None
+                    else disposition.get("unknown_spend_released")
+                ),
                 "invocation_outcome": effective.get("outcome"),
                 "failure_class": effective.get("failure_class"),
                 **components,
@@ -3793,6 +4140,14 @@ class ModelUsageService:
             "terminal_usage_status",
             "reconciliation_usage_status",
             "reconciled_at",
+            "conservative_disposition_digest",
+            "disposition_usage_status",
+            "disposed_at",
+            "disposition_authority_digest",
+            "disposition_approval_reference",
+            "exact_usage_remains_unknown",
+            "provider_dispatch_preserved",
+            "unknown_spend_released",
             "input_tokens",
             "output_tokens",
             "cached_read_tokens",

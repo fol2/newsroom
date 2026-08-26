@@ -1,0 +1,48 @@
+{
+  "approval": {
+    "approval_reference": "https://github.com/fol2/newsroom/issues/790#issuecomment-5426599150",
+    "approved_at": "2026-08-26T14:12:57.000000Z",
+    "approved_by": "github:fol2",
+    "scope": "CONSERVATIVE_SUBSCRIPTION_CLI_USAGE_DISPOSITION"
+  },
+  "canary": {
+    "fresh_provider_backed_attempt_count": 1,
+    "persistent_worker_state_before_canary": "UNLOADED",
+    "requires_exact_main_deployment": true
+  },
+  "canonical_digest": "sha256:e9d06bf838b4895021ddc92c4981068721ccc2b01562846046fbdb99b9816163",
+  "issue": 790,
+  "non_effects": [
+    "NO_PUBLICATION",
+    "NO_PUBLIC_DISPATCH",
+    "NO_BACKLOG_DRAIN",
+    "NO_BULK_REQUEUE",
+    "NO_PRODUCTION_OPERATIONAL_ADMISSION",
+    "NO_WIDER_ACTIVATION",
+    "NO_PROVIDER_SUBSTITUTION",
+    "NO_UNRELATED_SPEND_DISPOSITION"
+  ],
+  "release": {
+    "evidence": "CONSERVATIVE_DISPOSITION_DIGEST",
+    "kind": "AUTHORISED_OPERATOR_RESET"
+  },
+  "retry_forbidden_ledger_ids": [
+    1932,
+    1972
+  ],
+  "schema_version": "newsroom.issue-790.conservative-disposition-plan.v1",
+  "target": {
+    "allocation_digest": "sha256:800dd0c6155a34cfafe91c1c240dac2d44730f558be9417d5fe34b5fb23780b2",
+    "conservative_total_source": "QUALIFIED_POLICY_MAX_TOTAL_TOKENS",
+    "expected_conservative_total_tokens": 147456,
+    "invocation_id": "sha256:75f14fd50f54c01c852c557291eb7bb92b05a79c937d10d048bb245863b7a196",
+    "policy_digest": "sha256:c3a876540d2d1d2b3cf4864f649340c4357c8619468841bea5640b8d3567db3c",
+    "provider": "cursor-agent-cli",
+    "route": "GRAPHITI_CHAT_PRIMARY",
+    "route_open_reason": "SYSTEMIC_TRANSPORT",
+    "terminal_digest": "sha256:0c73f6a7ad2255f13bfdb617370f0c935464917e0e80c69b2da216ffca60ee0c",
+    "terminal_failure_class": "MISSING_PROVIDER_TELEMETRY",
+    "terminal_usage_status": "UNREPORTED",
+    "workload_class": "GRAPHITI_CHAT_PRIMARY"
+  }
+}
