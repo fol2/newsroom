@@ -525,6 +525,35 @@ def _transport_timeout(
     )
 
 
+def _cleanup_timeout(
+    *,
+    name: str,
+    phase: str,
+    elapsed: float,
+    deadline_at: str,
+    stdout: bytes,
+    stderr: bytes,
+) -> CliTransportTimeout:
+    return CliTransportTimeout(
+        f"{name} Graphiti LLM cleanup timed out",
+        evidence=timeout_diagnostic(
+            boundary="CLEANUP_DEADLINE",
+            phase=phase,
+            cause="CLEANUP_DEADLINE_EXPIRED",
+            configured_timeout_ms=round(_PROCESS_CLEANUP_TIMEOUT_SECONDS * 1_000),
+            elapsed_ms=round(elapsed * 1_000),
+            deadline_at=deadline_at,
+            last_progress=(
+                "OUTPUT_OBSERVED" if stdout or stderr else "NO_OUTPUT_OBSERVED"
+            ),
+            termination="PROCESS_CLEANUP_TIMEOUT",
+            process="CLI_CHILD",
+            stdout=stdout,
+            stderr=stderr,
+        ),
+    )
+
+
 def run_bounded_process(
     command: tuple[str, ...],
     *,
@@ -631,6 +660,17 @@ def run_bounded_process(
                 stderr=bytes(stderr_output),
                 termination=termination,
             ) from None
+        cleanup_started = time.monotonic()
+        cleanup_deadline_at = timeout_deadline_after(_PROCESS_CLEANUP_TIMEOUT_SECONDS)
+        if stop_cli_group() == "PROCESS_CLEANUP_TIMEOUT":
+            raise _cleanup_timeout(
+                name=name,
+                phase=phase,
+                elapsed=time.monotonic() - cleanup_started,
+                deadline_at=cleanup_deadline_at,
+                stdout=bytes(stdout_output),
+                stderr=bytes(stderr_output),
+            )
     except BaseException:
         # The direct child may have exited while a descendant still owns the
         # inherited pipes or remains alive in the isolated session.
@@ -723,6 +763,19 @@ async def run_bounded_process_async(
         if remaining <= 0:
             raise TimeoutError
         returncode = await asyncio.wait_for(process.wait(), timeout=remaining)
+        cleanup_started = loop.time()
+        cleanup_deadline_at = timeout_deadline_after(_PROCESS_CLEANUP_TIMEOUT_SECONDS)
+        if await stop_collectors_and_process() == "PROCESS_CLEANUP_TIMEOUT":
+            raise _cleanup_timeout(
+                name=name,
+                phase=phase,
+                elapsed=loop.time() - cleanup_started,
+                deadline_at=cleanup_deadline_at,
+                stdout=bytes(outputs["stdout"]),
+                stderr=bytes(outputs["stderr"]),
+            )
+    except CliTransportTimeout:
+        raise
     except TimeoutError:
         termination = await stop_collectors_and_process()
         raise _transport_timeout(

@@ -29,7 +29,7 @@
     "fixture_count": 11,
     "reported_as_provider_tokens": false
   },
-  "evidence_digest": "sha256:3d62ac16992e7d0208c3a1486469b1240dfe9abf302d2c5a89d0f089aa0ecadd",
+  "evidence_digest": "sha256:d9ae985969693226ebbfdef9b9b5dcb73d626308e42003be27069375ac9bb7ed",
   "fallback_eligible_outcomes": [
     "MALFORMED_OUTPUT"
   ],
@@ -183,9 +183,9 @@
     }
   ],
   "identities": {
-    "call_shape_policy_digest": "sha256:80ac79b4c9bb3d085764c6cdf3a7aa110f763a24faee26724e6ac49c6f9de958",
+    "call_shape_policy_digest": "sha256:41072c3eb8a7f96fa11592037b94cc24c458e49d16ab29b72ee387d9ee518ec2",
     "context_manifest": "graphiti-combined-temporal-hermetic-v1",
-    "fallback_circuit_policy_digest": "sha256:e33069333cfd67c69dbaec41625b77f97b5356eed8f8f477ff6779e29cb80ea5",
+    "fallback_circuit_policy_digest": "sha256:0dadadba221f44993f73f03dcfe190513a74dc30d1b7dda26e79c756f5388a27",
     "prompt": "newsroom.graphiti.proposal-only-prompt:v1",
     "qualified_routes": [
       {
@@ -232,7 +232,8 @@
           "ASYNC_PIPE_DRAIN=GROUP_STOP_BEFORE_BOUNDED_REAP_V2",
           "PROCESS_GROUP_SCOPE=ISOLATED_SESSION_V1",
           "ABNORMAL_EXIT_GROUP_TERMINATION=SIGKILL_V1",
-          "PROCESS_CLEANUP_DEADLINE_MS=500"
+          "PROCESS_CLEANUP_DEADLINE_MS=500",
+          "RESIDUAL_GROUP_CLEANUP=BEFORE_RESULT_HANDOFF_V1"
         ],
         "command_semantic_version": "newsroom.graphiti-provider-dispatch.v9",
         "config_identity": "cursor-agent-cli-2026.08.11-e8db854-pinned-package-v8",
@@ -246,7 +247,7 @@
           "planning",
           "subagents"
         ],
-        "implementation_revision": "sha256:57932142d79f3e82771fdd5b8639e929f4b5d18a82c3fccc97eb032e521efab0",
+        "implementation_revision": "sha256:74451dd8df6b5f50c10ee334eeea949903ba941f124459c52b8a38056867823d",
         "leaf_class": "PRIMARY",
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
@@ -282,7 +283,8 @@
           "ASYNC_PIPE_DRAIN=GROUP_STOP_BEFORE_BOUNDED_REAP_V2",
           "PROCESS_GROUP_SCOPE=ISOLATED_SESSION_V1",
           "ABNORMAL_EXIT_GROUP_TERMINATION=SIGKILL_V1",
-          "PROCESS_CLEANUP_DEADLINE_MS=500"
+          "PROCESS_CLEANUP_DEADLINE_MS=500",
+          "RESIDUAL_GROUP_CLEANUP=BEFORE_RESULT_HANDOFF_V1"
         ],
         "command_semantic_version": "newsroom.graphiti-provider-dispatch.v6",
         "config_identity": "graphiti-cli-command-v6",
@@ -296,7 +298,7 @@
           "planning",
           "subagents"
         ],
-        "implementation_revision": "sha256:57932142d79f3e82771fdd5b8639e929f4b5d18a82c3fccc97eb032e521efab0",
+        "implementation_revision": "sha256:74451dd8df6b5f50c10ee334eeea949903ba941f124459c52b8a38056867823d",
         "leaf_class": "FALLBACK",
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
@@ -408,8 +410,8 @@
     "immutable_after_restart": true,
     "invocation_efficiency_policies": [
       {
-        "canonical_digest": "sha256:6660ad70e3aa1556075f556170cde776e7cfc01ff1bafb320a96252a188fa621",
-        "evidence_digest": "sha256:c04ab9f238438b61a7719621f231bd7ad4c7956ab6405cd4cfa72964a2ab8911",
+        "canonical_digest": "sha256:331565456e6eef2647ed66de2e523511fcc2c830513d12f00cba192f58e0a3ea",
+        "evidence_digest": "sha256:eef864fac1001b04641e507df5b95ebdc9d006b3147649cd30684afe6008213d",
         "hard_estimate_ceiling_tokens": null,
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
@@ -418,8 +420,8 @@
         "route": "GRAPHITI_CHAT_PRIMARY"
       },
       {
-        "canonical_digest": "sha256:0003bfc6e3bf862fe7eaed0eafa615ec5d4ebf12b9e6d1c3e5f585d9bddf9c9c",
-        "evidence_digest": "sha256:1d1219712a9fdd043a02afce8ac94c4168a658cc592c00a1b1f766273cbd0cdb",
+        "canonical_digest": "sha256:c1983451308a7f99eaa238caafcd33fa27a2b8c994975a87c91eca6ee82a1b6d",
+        "evidence_digest": "sha256:327b38301997e315033c60c4b27fab697bcb4d6df5edac42c6ead5839022e362",
         "hard_estimate_ceiling_tokens": null,
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,

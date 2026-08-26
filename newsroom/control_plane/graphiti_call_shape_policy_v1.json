@@ -1,6 +1,6 @@
 {
   "schema_version": "newsroom.graphiti-call-shape-policy.v1",
-  "canonical_digest": "sha256:80ac79b4c9bb3d085764c6cdf3a7aa110f763a24faee26724e6ac49c6f9de958",
+  "canonical_digest": "sha256:41072c3eb8a7f96fa11592037b94cc24c458e49d16ab29b72ee387d9ee518ec2",
   "policy_id": "graphiti-core-0.29.3-newsroom-adapter-v1",
   "version": "issue-790-v8",
   "graphiti_core_release": "graphiti-core-0.29.3",
@@ -61,7 +61,8 @@
         "ASYNC_PIPE_DRAIN=GROUP_STOP_BEFORE_BOUNDED_REAP_V2",
         "PROCESS_GROUP_SCOPE=ISOLATED_SESSION_V1",
         "ABNORMAL_EXIT_GROUP_TERMINATION=SIGKILL_V1",
-        "PROCESS_CLEANUP_DEADLINE_MS=500"
+        "PROCESS_CLEANUP_DEADLINE_MS=500",
+        "RESIDUAL_GROUP_CLEANUP=BEFORE_RESULT_HANDOFF_V1"
       ],
       "disabled_capabilities": [
         "repository-discovery",
@@ -73,7 +74,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:57932142d79f3e82771fdd5b8639e929f4b5d18a82c3fccc97eb032e521efab0",
+      "implementation_revision": "sha256:74451dd8df6b5f50c10ee334eeea949903ba941f124459c52b8a38056867823d",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -111,7 +112,8 @@
         "ASYNC_PIPE_DRAIN=GROUP_STOP_BEFORE_BOUNDED_REAP_V2",
         "PROCESS_GROUP_SCOPE=ISOLATED_SESSION_V1",
         "ABNORMAL_EXIT_GROUP_TERMINATION=SIGKILL_V1",
-        "PROCESS_CLEANUP_DEADLINE_MS=500"
+        "PROCESS_CLEANUP_DEADLINE_MS=500",
+        "RESIDUAL_GROUP_CLEANUP=BEFORE_RESULT_HANDOFF_V1"
       ],
       "disabled_capabilities": [
         "repository-discovery",
@@ -123,7 +125,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:57932142d79f3e82771fdd5b8639e929f4b5d18a82c3fccc97eb032e521efab0",
+      "implementation_revision": "sha256:74451dd8df6b5f50c10ee334eeea949903ba941f124459c52b8a38056867823d",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -396,7 +398,7 @@
       "distinct_internal_request_count": 3
     }
   ],
-  "evidence_digest": "sha256:b946449becf8a891dcf8f2ae92ab2853df9a3e15a076d8972a89355fc7bea45b",
+  "evidence_digest": "sha256:a1304c2073a4806e47ebd103968aa9681436c3733bbfe983d0e2ce768f4aae0f",
   "maximum_qualified_fixture_count": 4,
   "headroom": 2,
   "max_distinct_internal_requests": 6
