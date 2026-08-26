@@ -770,7 +770,7 @@ def test_checked_call_shape_policy_headroom_appears_on_report(
     )
     assert telemetry["call_shape_headroom"] == policy.headroom
     assert policy.policy_id == "graphiti-core-0.29.3-newsroom-adapter-v1"
-    assert policy.version == "issue-790-v5"
+    assert policy.version == "issue-790-v6"
 
 
 def test_graphiti_object_repeats_no_daily_hard_cut(tmp_path: Path) -> None:

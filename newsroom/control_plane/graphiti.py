@@ -147,6 +147,7 @@ def _graphiti_transport_implementation_revision(
             (_GRAPHITI_ADAPTER_DIRECTORY / "embedding_meter.py").read_bytes()
         )
     sources = (
+        _GRAPHITI_ADAPTER_DIRECTORY / "cli_process.py",
         _GRAPHITI_ADAPTER_DIRECTORY / "cli_client.py",
         _GRAPHITI_ADAPTER_DIRECTORY / "cursor_transport.py",
     )

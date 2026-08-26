@@ -362,6 +362,8 @@ def _complete(
     relations: tuple[dict[str, object], ...] = (),
     chat_invocations: tuple[dict[str, object], ...] = (),
     embedding_usage: dict[str, object] | None = None,
+    timeout_diagnostics: tuple[dict[str, object], ...] = (),
+    producer_failure: str | None = None,
 ) -> GraphitiCycleResult:
     authority_ids = None
     if unit.authority is not None:
@@ -465,6 +467,10 @@ def _complete(
         "embedding": GRAPHITI_EMBEDDING_MODEL,
         "prompt_version": "v1",
     }
+    if timeout_diagnostics:
+        raw["timeout_diagnostics"] = [dict(item) for item in timeout_diagnostics]
+    if producer_failure is not None:
+        raw["producer_failure"] = producer_failure
     raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
     return GraphitiCycleResult(
         ingest_id=unit.ingest_id,
@@ -3447,12 +3453,29 @@ def test_reused_malformed_no_call_is_receipted_not_retry_held(
         "embedding_tokens": 0,
         "cost_usd_microunits": 0,
     }
+    timeout_diagnostic = {
+        "schema_version": "newsroom.graphiti-timeout-diagnostic.v1",
+        "boundary": "CLEANUP_DEADLINE",
+        "phase": "CONNECTION_CLEANUP",
+        "cause": "CLEANUP_DEADLINE_EXPIRED",
+        "provider_cause": "UNOBSERVED",
+        "configured_timeout_ms": 10_000,
+        "elapsed_ms": 10_000,
+        "deadline_at": "2026-08-21T00:15:59.000000Z",
+        "last_progress": "CONNECTION_CLOSE_INCOMPLETE",
+        "termination": "TASK_CANCELLED",
+    }
 
     class MalformedNoCall:
         def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
             assert unit.attempt_number == 1
             return replace(
-                _complete(unit, embedding_usage=malformed_usage),
+                _complete(
+                    unit,
+                    embedding_usage=malformed_usage,
+                    timeout_diagnostics=(timeout_diagnostic,),
+                    producer_failure="GraphitiCleanupTimeout",
+                ),
                 outcome="TIMEOUT",
                 failure_code="EXECUTION_TIMEOUT",
             )
@@ -3484,9 +3507,9 @@ def test_reused_malformed_no_call_is_receipted_not_retry_held(
         FROM unpublished_graphiti_failures
         """
     ).fetchone()
-    ledger_kinds = [
-        row[0] for row in connection.execute("SELECT kind FROM ledger ORDER BY seq")
-    ]
+    ledger_rows = connection.execute(
+        "SELECT kind, payload_json FROM ledger ORDER BY seq"
+    ).fetchall()
     connection.close()
 
     assert report.graphiti == 1
@@ -3501,12 +3524,23 @@ def test_reused_malformed_no_call_is_receipted_not_retry_held(
     assert receipt_row is not None
     receipt = json.loads(receipt_row[0])
     assert receipt["embedding_usage"] == malformed_usage
+    assert receipt["timeout_diagnostics"] == [timeout_diagnostic]
+    assert receipt["producer_failure"] == "GraphitiCleanupTimeout"
     receipt_accounting = receipt["accounting"]
     assert isinstance(receipt_accounting, dict)
     assert receipt_accounting["status"] == "UNRECONCILED"
     assert failure == (1, "TIMEOUT", "EXECUTION_TIMEOUT")
+    ledger_kinds = [row[0] for row in ledger_rows]
     assert "GRAPHITI_EVALUATION_RETRY_HELD" not in ledger_kinds
     assert ledger_kinds.count("GRAPHITI_EVALUATION_ATTEMPT") == 1
+    attempt_payload = next(
+        json.loads(payload)
+        for kind, payload in ledger_rows
+        if kind == "GRAPHITI_EVALUATION_ATTEMPT"
+    )
+    assert attempt_payload["timeout_diagnostics"] == [timeout_diagnostic]
+    assert attempt_payload["producer_failure"] == "GraphitiCleanupTimeout"
+    assert attempt_payload["receipt_digest"] == receipt["receipt_digest"]
 
 
 def test_reused_malformed_provider_receipt_preserves_ceiling_reservation(
@@ -5327,6 +5361,36 @@ def test_result_binding_rejects_generation_and_receipt_digest_drift() -> None:
                 raw_receipt=tampered,
                 receipt_digest=str(tampered["raw_output_digest"]),
                 proposals=tuple(tampered["proposals"]),
+            ),
+        )
+
+    diagnostic_tampered = json.loads(json.dumps(result.raw_receipt))
+    diagnostic_tampered["timeout_diagnostics"] = [
+        {
+            "schema_version": "newsroom.graphiti-timeout-diagnostic.v1",
+            "boundary": "CONTROLLER_DEADLINE",
+            "phase": "PRIMARY_TRANSPORT",
+            "cause": "CONFIGURED_TIMEOUT_EXPIRED",
+            "provider_cause": "UNOBSERVED",
+            "configured_timeout_ms": 160_000,
+            "elapsed_ms": 160_000,
+            "deadline_at": "2026-08-26T18:00:20.000000Z",
+            "last_progress": "OUTPUT_OBSERVED",
+            "termination": "PROCESS_KILLED",
+            "stdout": "secret provider output",
+        }
+    ]
+    diagnostic_tampered.pop("raw_output_digest")
+    diagnostic_tampered["raw_output_digest"] = digest_bytes(
+        canonical_json_bytes(diagnostic_tampered)
+    )
+    with pytest.raises(ValueError, match="diagnostic fields"):
+        _bind_result(
+            unit,
+            replace(
+                result,
+                raw_receipt=diagnostic_tampered,
+                receipt_digest=str(diagnostic_tampered["raw_output_digest"]),
             ),
         )
 

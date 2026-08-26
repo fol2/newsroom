@@ -35,7 +35,7 @@ from newsroom.extraction.types import (
     ExtractionOutputValidation,
 )
 from newsroom.graphiti_adapter.cli_client import build_cli_llm_client
-from newsroom.graphiti_adapter.cursor_transport import (
+from newsroom.graphiti_adapter.cli_process import (
     timeout_deadline_after,
     timeout_diagnostic,
 )

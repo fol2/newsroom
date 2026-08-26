@@ -21,6 +21,7 @@ from newsroom.authority.canonical import (
     digest_bytes,
     digest_canonical,
 )
+from newsroom.authority.types import require_token
 from newsroom.control_plane.admission import (
     DeterministicWriteAdmission,
     WriteAdmissionDecision,
@@ -125,6 +126,7 @@ from newsroom.effective_revision import (
     backfill_missing_first_seen,
     create_effective_revision_schema,
 )
+from newsroom.graphiti_adapter.cli_process import validated_timeout_diagnostics
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_FALLBACK,
@@ -341,6 +343,15 @@ def _dispatch_valid_until(evaluated_at: datetime) -> str:
     )
 
 
+def _validated_producer_failure(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("graphiti producer failure is invalid")
+    try:
+        return require_token(value, field="graphiti producer failure")
+    except ValueError as exc:
+        raise ValueError("graphiti producer failure is invalid") from exc
+
+
 def _bind_result(
     unit: CorpusIngestUnit,
     result: GraphitiCycleResult,
@@ -379,6 +390,10 @@ def _bind_result(
     calculated_digest = digest_bytes(canonical_json_bytes(raw_value))
     if supplied_digest != calculated_digest or result.receipt_digest != calculated_digest:
         raise ValueError("graphiti raw receipt digest differs from canonical content")
+    if "timeout_diagnostics" in raw:
+        validated_timeout_diagnostics(raw["timeout_diagnostics"])
+    if "producer_failure" in raw:
+        _validated_producer_failure(raw["producer_failure"])
     if (
         raw.get("generation_id") != GRAPHITI_GENERATION_ID
         or raw.get("episode_uuid") != unit.ingest_id
@@ -573,6 +588,14 @@ def _receipt(
         for key in ("dispatch_state", "setup_failure"):
             if key in raw:
                 receipt[key] = raw[key]
+        if "timeout_diagnostics" in raw:
+            receipt["timeout_diagnostics"] = validated_timeout_diagnostics(
+                raw["timeout_diagnostics"]
+            )
+        if "producer_failure" in raw:
+            receipt["producer_failure"] = _validated_producer_failure(
+                raw["producer_failure"]
+            )
     return receipt
 
 

@@ -6,16 +6,23 @@ import asyncio
 import hashlib
 import json
 import os
-import selectors
 import stat
 import subprocess
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from newsroom.control_plane.child_environment import unprivileged_child_environment
+from newsroom.graphiti_adapter.cli_process import (
+    CliOutputBoundExceeded,
+    CliOutputDecodeError,
+    CliProcessOutput,
+    CliTransportTimeout,
+    run_bounded_process,
+    run_bounded_process_async,
+    timeout_deadline_after,
+    timeout_diagnostic,
+)
 from newsroom.graphiti_adapter.evaluation_packet import CURSOR_AGENT_MODEL_ID
 
 QUALIFIED_CURSOR_AGENT_VERSION = "2026.08.11-e8db854"
@@ -57,9 +64,9 @@ CURSOR_STDOUT_LIMIT_IDENTITY = (
     "cursor-controller-stdout-v1:" + CURSOR_STDOUT_LIMIT_FORMULA
 )
 CURSOR_COMMAND_SURFACE_PROOF = "PINNED_PACKAGE_HIDDEN_OPTION_REGISTRATIONS_V1"
-CLI_TIMEOUT_DIAGNOSTIC_SCHEMA_VERSION = (
-    "newsroom.graphiti-timeout-diagnostic.v1"
-)
+_ProcessOutput = CliProcessOutput
+_run_bounded_process = run_bounded_process
+_run_bounded_process_async = run_bounded_process_async
 
 _CURSOR_PUBLIC_CONTROLS = (
     "--print",
@@ -127,22 +134,6 @@ class CliPredispatchRefusal(RuntimeError):
         self.qualification_evidence = dict(qualification_evidence or {})
 
 
-class CliOutputDecodeError(RuntimeError):
-    """A dispatched subscription CLI returned non-UTF-8 output."""
-
-
-class CliOutputBoundExceeded(RuntimeError):
-    """A CLI exceeded its controller-owned output byte ceiling."""
-
-
-class CliTransportTimeout(TimeoutError):
-    """A controller deadline terminated a CLI with secret-free diagnostics."""
-
-    def __init__(self, message: str, *, evidence: Mapping[str, object]) -> None:
-        super().__init__(message)
-        self.evidence = dict(evidence)
-
-
 @dataclass(frozen=True, slots=True)
 class CursorCliQualification:
     binary: str
@@ -196,13 +187,6 @@ class CursorCliQualification:
             "credential_state": self.credential_state,
             "credential_state_digest": self.credential_state_digest,
         }
-
-
-@dataclass(frozen=True, slots=True)
-class _ProcessOutput:
-    returncode: int
-    stdout: str
-    stderr: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -465,6 +449,10 @@ def _probe_cursor_credentials_locally(
         if key in environment
     }
     for service in _CURSOR_CREDENTIAL_SERVICES:
+        started = time.monotonic()
+        deadline_at = timeout_deadline_after(
+            CURSOR_LOCAL_CREDENTIAL_PROBE_TIMEOUT_SECONDS
+        )
         try:
             result = subprocess.run(
                 (
@@ -484,7 +472,34 @@ def _probe_cursor_credentials_locally(
                 cwd="/",
                 env=command_environment,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except subprocess.TimeoutExpired as exc:
+            retained = dict(evidence)
+            retained.update(
+                {
+                    "authentication_probe": CURSOR_AUTHENTICATION_PROBE,
+                    "credential_state": "LOCAL_PROBE_TIMED_OUT",
+                    "timeout_diagnostic": timeout_diagnostic(
+                        boundary="CONTROLLER_DEADLINE",
+                        phase="CREDENTIAL_PROBE",
+                        cause="CONFIGURED_TIMEOUT_EXPIRED",
+                        configured_timeout_ms=(
+                            CURSOR_LOCAL_CREDENTIAL_PROBE_TIMEOUT_SECONDS * 1_000
+                        ),
+                        elapsed_ms=round(
+                            (time.monotonic() - started) * 1_000
+                        ),
+                        deadline_at=deadline_at,
+                        last_progress="CREDENTIAL_PROBE_STARTED",
+                        termination="UNOBSERVED",
+                        process=security_binary.name,
+                    ),
+                }
+            )
+            raise CliPredispatchRefusal(
+                "Cursor CLI local credential probe timed out",
+                qualification_evidence=retained,
+            ) from exc
+        except OSError as exc:
             retained = dict(evidence)
             retained.update(
                 {
@@ -535,15 +550,6 @@ def _probe_cursor_credentials_locally(
             qualification_evidence=retained,
         )
     return proof
-
-
-def _decode_output(value: bytes, *, name: str) -> str:
-    try:
-        return value.decode("utf-8")
-    except UnicodeDecodeError:
-        raise CliOutputDecodeError(
-            f"{name} Graphiti LLM returned malformed UTF-8"
-        ) from None
 
 
 def cursor_stdout_limit(max_tokens: int) -> int:
@@ -664,324 +670,6 @@ def _inspect_cursor_package(binary: str) -> _CursorPackageProof:
         command_surface_digest=command_surface_digest,
         control_semantics_digest=control_semantics_digest,
         package_digest=package_digest,
-    )
-
-
-def _stop_process(process: subprocess.Popen[bytes]) -> str:
-    if process.poll() is not None:
-        process.wait()
-        return "PROCESS_ALREADY_EXITED"
-    try:
-        process.kill()
-    except ProcessLookupError:
-        termination = "PROCESS_EXIT_RACE"
-    else:
-        termination = "PROCESS_KILLED"
-    process.wait()
-    return termination
-
-
-async def stop_process_async(process: asyncio.subprocess.Process) -> str:
-    if process.returncode is not None:
-        await process.wait()
-        return "PROCESS_ALREADY_EXITED"
-    try:
-        process.kill()
-    except ProcessLookupError:
-        termination = "PROCESS_EXIT_RACE"
-    else:
-        termination = "PROCESS_KILLED"
-    await process.wait()
-    return termination
-
-
-def timeout_deadline_after(timeout_seconds: float) -> str:
-    """Return a canonical UTC deadline for secret-free timeout evidence."""
-
-    deadline = datetime.now(tz=UTC) + timedelta(seconds=timeout_seconds)
-    return deadline.isoformat(timespec="microseconds").replace("+00:00", "Z")
-
-
-def timeout_diagnostic(
-    *,
-    boundary: str,
-    phase: str,
-    cause: str,
-    configured_timeout_ms: int,
-    elapsed_ms: int,
-    deadline_at: str | None,
-    last_progress: str,
-    termination: str,
-    process: str | None = None,
-    stdout: bytes | None = None,
-    stderr: bytes | None = None,
-) -> dict[str, object]:
-    """Build one causal timeout record without retaining provider content."""
-
-    evidence: dict[str, object] = {
-        "schema_version": CLI_TIMEOUT_DIAGNOSTIC_SCHEMA_VERSION,
-        "boundary": boundary,
-        "phase": phase,
-        "cause": cause,
-        "provider_cause": "UNOBSERVED",
-        "configured_timeout_ms": configured_timeout_ms,
-        "elapsed_ms": elapsed_ms,
-        "deadline_at": deadline_at,
-        "last_progress": last_progress,
-        "termination": termination,
-    }
-    if process is not None:
-        evidence["process"] = process
-    if stdout is not None and stderr is not None:
-        evidence.update(
-            {
-                "stdout_bytes": len(stdout),
-                "stderr_bytes": len(stderr),
-                "stdout_digest": _sha256_bytes(stdout),
-                "stderr_digest": _sha256_bytes(stderr),
-            }
-        )
-    return evidence
-
-
-def _timeout_evidence(
-    *,
-    name: str,
-    phase: str,
-    timeout: float,
-    elapsed: float,
-    deadline_at: str,
-    stdout: bytes,
-    stderr: bytes,
-    termination: str,
-) -> dict[str, object]:
-    return timeout_diagnostic(
-        boundary="CONTROLLER_DEADLINE",
-        phase=phase,
-        cause="CONFIGURED_TIMEOUT_EXPIRED",
-        configured_timeout_ms=round(timeout * 1_000),
-        elapsed_ms=round(elapsed * 1_000),
-        deadline_at=deadline_at,
-        last_progress=(
-            "OUTPUT_OBSERVED" if stdout or stderr else "NO_OUTPUT_OBSERVED"
-        ),
-        termination=termination,
-        process=name,
-        stdout=stdout,
-        stderr=stderr,
-    )
-
-
-def _transport_timeout(
-    *,
-    name: str,
-    phase: str,
-    timeout: float,
-    elapsed: float,
-    deadline_at: str,
-    stdout: bytes,
-    stderr: bytes,
-    termination: str,
-) -> CliTransportTimeout:
-    return CliTransportTimeout(
-        f"{name} Graphiti LLM timed out",
-        evidence=_timeout_evidence(
-            name=name,
-            phase=phase,
-            timeout=timeout,
-            elapsed=elapsed,
-            deadline_at=deadline_at,
-            stdout=stdout,
-            stderr=stderr,
-            termination=termination,
-        ),
-    )
-
-
-def _run_bounded_process(
-    command: tuple[str, ...],
-    *,
-    timeout: float,
-    max_output_bytes: int,
-    cwd: str,
-    environment: Mapping[str, str],
-    phase: str = "CLI_TRANSPORT",
-) -> _ProcessOutput:
-    if isinstance(max_output_bytes, bool) or max_output_bytes <= 0:
-        raise ValueError("CLI max_output_bytes must be positive")
-    name = os.path.basename(command[0])
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=cwd,
-        env=dict(environment or unprivileged_child_environment()),
-    )
-    assert process.stdout is not None
-    assert process.stderr is not None
-    stdout_fd = process.stdout.fileno()
-    stderr_fd = process.stderr.fileno()
-    stdout_output = bytearray()
-    stderr_output = bytearray()
-    selector = selectors.DefaultSelector()
-    streams = {
-        stdout_fd: (process.stdout, stdout_output),
-        stderr_fd: (process.stderr, stderr_output),
-    }
-    for stream, _output in streams.values():
-        selector.register(stream, selectors.EVENT_READ)
-    started = time.monotonic()
-    deadline = started + timeout
-    deadline_at = timeout_deadline_after(timeout)
-    try:
-        while selector.get_map():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                termination = _stop_process(process)
-                raise _transport_timeout(
-                    name=name,
-                    phase=phase,
-                    timeout=timeout,
-                    elapsed=time.monotonic() - started,
-                    deadline_at=deadline_at,
-                    stdout=bytes(stdout_output),
-                    stderr=bytes(stderr_output),
-                    termination=termination,
-                )
-            events = selector.select(timeout=min(remaining, 0.1))
-            if not events:
-                continue
-            for key, _mask in events:
-                stream, output = streams[key.fd]
-                retained = sum(len(value[1]) for value in streams.values())
-                read_size = min(65_536, max_output_bytes - retained + 1)
-                chunk = os.read(key.fd, max(read_size, 1))
-                if not chunk:
-                    selector.unregister(stream)
-                    continue
-                output.extend(chunk)
-                if sum(len(value[1]) for value in streams.values()) > max_output_bytes:
-                    _stop_process(process)
-                    raise CliOutputBoundExceeded(
-                        f"{name} Graphiti LLM exceeded output byte limit"
-                    )
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            termination = _stop_process(process)
-            raise _transport_timeout(
-                name=name,
-                phase=phase,
-                timeout=timeout,
-                elapsed=time.monotonic() - started,
-                deadline_at=deadline_at,
-                stdout=bytes(stdout_output),
-                stderr=bytes(stderr_output),
-                termination=termination,
-            )
-        try:
-            process.wait(timeout=remaining)
-        except subprocess.TimeoutExpired:
-            termination = _stop_process(process)
-            raise _transport_timeout(
-                name=name,
-                phase=phase,
-                timeout=timeout,
-                elapsed=time.monotonic() - started,
-                deadline_at=deadline_at,
-                stdout=bytes(stdout_output),
-                stderr=bytes(stderr_output),
-                termination=termination,
-            ) from None
-    except BaseException:
-        if process.poll() is None:
-            _stop_process(process)
-        raise
-    finally:
-        selector.close()
-        process.stdout.close()
-        process.stderr.close()
-    return _ProcessOutput(
-        returncode=int(process.returncode),
-        stdout=_decode_output(bytes(stdout_output), name=name),
-        stderr=_decode_output(bytes(stderr_output), name=name),
-    )
-
-
-async def _run_bounded_process_async(
-    command: tuple[str, ...],
-    *,
-    timeout: float,
-    max_output_bytes: int,
-    cwd: str,
-    environment: Mapping[str, str],
-    phase: str = "CLI_TRANSPORT",
-) -> _ProcessOutput:
-    if isinstance(max_output_bytes, bool) or max_output_bytes <= 0:
-        raise ValueError("CLI max_output_bytes must be positive")
-    name = os.path.basename(command[0])
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=cwd,
-        env=dict(environment or unprivileged_child_environment()),
-    )
-    assert process.stdout is not None
-    assert process.stderr is not None
-    outputs = {"stdout": bytearray(), "stderr": bytearray()}
-    retained = 0
-
-    async def collect(stream: asyncio.StreamReader, *, destination: bytearray) -> None:
-        nonlocal retained
-        while True:
-            read_size = min(65_536, max_output_bytes - retained + 1)
-            chunk = await stream.read(max(read_size, 1))
-            if not chunk:
-                return
-            destination.extend(chunk)
-            retained += len(chunk)
-            if retained > max_output_bytes:
-                raise CliOutputBoundExceeded(
-                    f"{name} Graphiti LLM exceeded output byte limit"
-                )
-
-    started = asyncio.get_running_loop().time()
-    deadline = started + timeout
-    deadline_at = timeout_deadline_after(timeout)
-    try:
-        await asyncio.wait_for(
-            asyncio.gather(
-                collect(process.stdout, destination=outputs["stdout"]),
-                collect(process.stderr, destination=outputs["stderr"]),
-            ),
-            timeout=timeout,
-        )
-        remaining = deadline - asyncio.get_running_loop().time()
-        if remaining <= 0:
-            raise TimeoutError
-        returncode = await asyncio.wait_for(process.wait(), timeout=remaining)
-    except TimeoutError:
-        termination = await stop_process_async(process)
-        raise _transport_timeout(
-            name=name,
-            phase=phase,
-            timeout=timeout,
-            elapsed=asyncio.get_running_loop().time() - started,
-            deadline_at=deadline_at,
-            stdout=bytes(outputs["stdout"]),
-            stderr=bytes(outputs["stderr"]),
-            termination=termination,
-        ) from None
-    except asyncio.CancelledError:
-        await stop_process_async(process)
-        raise
-    except BaseException:
-        await stop_process_async(process)
-        raise
-    return _ProcessOutput(
-        returncode=returncode,
-        stdout=_decode_output(bytes(outputs["stdout"]), name=name),
-        stderr=_decode_output(bytes(outputs["stderr"]), name=name),
     )
 
 
@@ -1426,7 +1114,6 @@ async def run_cursor_transport_async(
 
 
 __all__ = [
-    "CLI_TIMEOUT_DIAGNOSTIC_SCHEMA_VERSION",
     "CURSOR_AGENT_BIN",
     "CURSOR_AUTHENTICATION_BRIDGE",
     "CURSOR_AUTHENTICATION_PROBE",
@@ -1445,15 +1132,9 @@ __all__ = [
     "QUALIFIED_CURSOR_AGENT_VERSION",
     "QUALIFIED_CURSOR_LOGIN_KEYCHAIN",
     "QUALIFIED_CURSOR_SECURITY_BIN",
-    "CliOutputBoundExceeded",
-    "CliOutputDecodeError",
     "CliPredispatchRefusal",
-    "CliTransportTimeout",
     "CursorCliQualification",
     "cursor_stdout_limit",
     "run_cursor_transport",
     "run_cursor_transport_async",
-    "stop_process_async",
-    "timeout_deadline_after",
-    "timeout_diagnostic",
 ]

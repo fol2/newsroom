@@ -402,6 +402,51 @@ def test_both_cli_malformed_json_results_fail_after_recording_both_calls() -> No
     ]
 
 
+def test_grok_predispatch_refusal_retains_timeout_qualification() -> None:
+    from newsroom.graphiti_adapter.cli_client import (
+        CliPredispatchRefusal,
+        CliResponseError,
+        run_cli_chain,
+    )
+
+    diagnostic = {
+        "schema_version": "newsroom.graphiti-timeout-diagnostic.v1",
+        "boundary": "CONTROLLER_DEADLINE",
+        "phase": "PREDISPATCH_HELP",
+        "cause": "CONFIGURED_TIMEOUT_EXPIRED",
+        "provider_cause": "UNOBSERVED",
+        "configured_timeout_ms": 20_000,
+        "elapsed_ms": 20_000,
+        "deadline_at": "2026-08-26T18:00:20.000000Z",
+        "last_progress": "NO_OUTPUT_OBSERVED",
+        "termination": "PROCESS_KILLED",
+    }
+
+    def grok(_prompt: str, _schema: str | None, *, max_tokens: int) -> str:
+        del max_tokens
+        raise CliPredispatchRefusal(
+            "Graphiti CLI preflight timed out",
+            qualification_evidence={"timeout_diagnostic": diagnostic},
+        )
+
+    invocations: list[dict[str, object]] = []
+    with pytest.raises(CliResponseError, match="fallback CLI executable not found"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="prompt",
+                schema=None,
+                cursor_runner=lambda _prompt, *, max_tokens: "not-json",
+                grok_runner=grok,
+                invocations=invocations,
+            )
+        )
+
+    assert invocations[-1]["outcome"] == "PREDISPATCH_REFUSED"
+    assert invocations[-1]["transport_qualification"] == {
+        "timeout_diagnostic": diagnostic
+    }
+
+
 def test_non_utf8_cursor_is_recorded_before_grok_fallback() -> None:
     from newsroom.graphiti_adapter.cli_client import (
         CliResponseError,
@@ -514,7 +559,7 @@ def test_cursor_timeout_is_ineligible_for_fallback() -> None:
 
 def test_cursor_timeout_retains_transport_diagnostic_in_invocation() -> None:
     from newsroom.graphiti_adapter.cli_client import CliResponseError, run_cli_chain
-    from newsroom.graphiti_adapter.cursor_transport import CliTransportTimeout
+    from newsroom.graphiti_adapter.cli_process import CliTransportTimeout
 
     diagnostic = {
         "schema_version": "newsroom.graphiti-timeout-diagnostic.v1",
@@ -2476,7 +2521,7 @@ def test_connection_cleanup_timeout_is_durable_in_attempt_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import newsroom.graphiti_adapter.real as real
-    from newsroom.graphiti_adapter.cursor_transport import timeout_diagnostic
+    from newsroom.graphiti_adapter.cli_process import timeout_diagnostic
 
     diagnostic = timeout_diagnostic(
         boundary="CLEANUP_DEADLINE",
@@ -2766,13 +2811,15 @@ def test_cursor_cli_runs_outside_repository_cwd(
         timeout: int,
         cwd: str | None = None,
         environment: dict[str, str] | None = None,
+        max_output_bytes: int = 0,
     ) -> str:
         observed.update(
             command=command,
-            timeout=timeout,
-            cwd=cwd,
-            environment=environment,
-            inventory=([] if cwd is None else list(Path(cwd).iterdir())),
+                timeout=timeout,
+                cwd=cwd,
+                environment=environment,
+                max_output_bytes=max_output_bytes,
+                inventory=([] if cwd is None else list(Path(cwd).iterdir())),
         )
         return "{}"
 
@@ -2809,6 +2856,7 @@ def test_cursor_cli_runs_outside_repository_cwd(
     assert "newsroom-grok-graphiti-" in grok_cwd
     assert observed["timeout"] == cli_client.CLI_CALL_TIMEOUT_SECONDS
     assert "--max-output-tokens" in observed["command"]
+    assert observed["max_output_bytes"] == cli_client.grok_stdout_limit(512)
     assert observed["inventory"] == []
 
 
@@ -2988,6 +3036,47 @@ def test_cursor_local_credential_probe_matches_pinned_cursor_keychain_lookup(
     assert bridge.source not in retained_commands
     assert bridge.destination not in retained_commands
     assert "status" not in retained_commands
+
+
+def test_cursor_credential_probe_timeout_retains_causal_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from newsroom.graphiti_adapter import cursor_transport
+
+    environment = _fixture_cursor_environment(
+        root=tmp_path,
+        monkeypatch=monkeypatch,
+    )
+    bridge = cursor_transport._install_cursor_authentication_bridge(environment)
+
+    def timeout(command: tuple[str, ...], **_values: object) -> object:
+        raise subprocess.TimeoutExpired(
+            command,
+            cursor_transport.CURSOR_LOCAL_CREDENTIAL_PROBE_TIMEOUT_SECONDS,
+        )
+
+    monkeypatch.setattr(cursor_transport.subprocess, "run", timeout)
+    with pytest.raises(
+        cursor_transport.CliPredispatchRefusal,
+        match="credential probe timed out",
+    ) as caught:
+        cursor_transport._probe_cursor_credentials_locally(
+            environment=environment,
+            authentication_bridge=bridge,
+            evidence={"binary": "cursor-agent"},
+        )
+
+    evidence = caught.value.qualification_evidence
+    assert evidence["credential_state"] == "LOCAL_PROBE_TIMED_OUT"
+    diagnostic = evidence["timeout_diagnostic"]
+    assert diagnostic["boundary"] == "CONTROLLER_DEADLINE"
+    assert diagnostic["phase"] == "CREDENTIAL_PROBE"
+    assert diagnostic["cause"] == "CONFIGURED_TIMEOUT_EXPIRED"
+    assert diagnostic["provider_cause"] == "UNOBSERVED"
+    assert diagnostic["termination"] == "UNOBSERVED"
+    assert "cursor-access-token" not in repr(evidence)
+    assert "cursor-refresh-token" not in repr(evidence)
 
 
 def test_cursor_cli_qualifies_pinned_package_and_dispatches_resolved_binary(
@@ -3673,6 +3762,89 @@ def test_cursor_preflight_timeout_retains_causal_qualification_evidence(
     assert caught.value.qualification_evidence["timeout_diagnostic"] == diagnostic
 
 
+def test_grok_preflight_timeout_retains_causal_qualification_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.graphiti_adapter import cli_client
+    from newsroom.graphiti_adapter.cli_process import (
+        CliTransportTimeout,
+        timeout_diagnostic,
+    )
+
+    diagnostic = timeout_diagnostic(
+        boundary="CONTROLLER_DEADLINE",
+        phase="PREDISPATCH_HELP",
+        cause="CONFIGURED_TIMEOUT_EXPIRED",
+        configured_timeout_ms=20_000,
+        elapsed_ms=20_000,
+        deadline_at="2026-08-26T18:00:20.000000Z",
+        last_progress="NO_OUTPUT_OBSERVED",
+        termination="PROCESS_KILLED",
+        process="grok",
+        stdout=b"",
+        stderr=b"",
+    )
+
+    def timeout(*_args: object, **_values: object) -> object:
+        raise CliTransportTimeout("grok Graphiti LLM timed out", evidence=diagnostic)
+
+    monkeypatch.setattr(cli_client, "run_bounded_process", timeout)
+    workspace = cli_client._GraphitiCliWorkspace(
+        cwd=str(tmp_path),
+        request_dir=str(tmp_path),
+        environment={},
+    )
+    with pytest.raises(cli_client.CliPredispatchRefusal) as caught:
+        cli_client._prove_cli_controls(
+            binary="grok",
+            required_controls=("--max-output-tokens",),
+            workspace=workspace,
+        )
+
+    assert caught.value.qualification_evidence["timeout_diagnostic"] == diagnostic
+
+
+def test_async_grok_preflight_timeout_retains_causal_qualification_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.graphiti_adapter import cli_client
+    from newsroom.graphiti_adapter.cli_process import (
+        CliTransportTimeout,
+        timeout_diagnostic,
+    )
+
+    diagnostic = timeout_diagnostic(
+        boundary="CONTROLLER_DEADLINE",
+        phase="PREDISPATCH_HELP",
+        cause="CONFIGURED_TIMEOUT_EXPIRED",
+        configured_timeout_ms=20_000,
+        elapsed_ms=20_000,
+        deadline_at="2026-08-26T18:00:20.000000Z",
+        last_progress="NO_OUTPUT_OBSERVED",
+        termination="PROCESS_KILLED",
+    )
+
+    async def timeout(*_args: object, **_values: object) -> object:
+        raise CliTransportTimeout("grok Graphiti LLM timed out", evidence=diagnostic)
+
+    monkeypatch.setattr(cli_client, "run_bounded_process_async", timeout)
+    workspace = cli_client._GraphitiCliWorkspace(
+        cwd=str(tmp_path),
+        request_dir=str(tmp_path),
+        environment={},
+    )
+    with pytest.raises(cli_client.CliPredispatchRefusal) as caught:
+        asyncio.run(
+            cli_client._prove_cli_controls_async(
+                binary="grok",
+                required_controls=("--max-output-tokens",),
+                workspace=workspace,
+            )
+        )
+
+    assert caught.value.qualification_evidence["timeout_diagnostic"] == diagnostic
+
+
 @pytest.mark.parametrize("asynchronous", (False, True))
 def test_fallback_timeout_retains_causal_diagnostics(
     tmp_path: Path, asynchronous: bool
@@ -3708,3 +3880,26 @@ def test_fallback_timeout_retains_causal_diagnostics(
     assert evidence["stderr_bytes"] == len(stderr)
     assert evidence["stdout_digest"] == digest_bytes(stdout)
     assert evidence["stderr_digest"] == digest_bytes(stderr)
+
+
+def test_sync_fallback_timeout_survives_process_exit_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.graphiti_adapter.cli_client import run_cli
+    from newsroom.graphiti_adapter.cli_process import CliTransportTimeout
+
+    original_kill = subprocess.Popen.kill
+
+    def exits_during_kill(process: subprocess.Popen[bytes]) -> None:
+        original_kill(process)
+        raise ProcessLookupError
+
+    monkeypatch.setattr(subprocess.Popen, "kill", exits_during_kill)
+    with pytest.raises(CliTransportTimeout) as caught:
+        run_cli(
+            (sys.executable, "-c", "import time; time.sleep(5)"),
+            timeout=0.05,
+            cwd=str(tmp_path),
+        )
+
+    assert caught.value.evidence["termination"] == "PROCESS_EXIT_RACE"
