@@ -1,8 +1,8 @@
 {
   "schema_version": "newsroom.graphiti-call-shape-policy.v1",
-  "canonical_digest": "sha256:ffeead37a47f23ab07000691253422ff1bef784fc435333e9cc6c848538fe20e",
+  "canonical_digest": "sha256:80ac79b4c9bb3d085764c6cdf3a7aa110f763a24faee26724e6ac49c6f9de958",
   "policy_id": "graphiti-core-0.29.3-newsroom-adapter-v1",
-  "version": "issue-790-v7",
+  "version": "issue-790-v8",
   "graphiti_core_release": "graphiti-core-0.29.3",
   "framework_identity": "graphiti-core-0.29.3",
   "prompt_identity": "newsroom.graphiti.proposal-only-prompt:v1",
@@ -16,8 +16,8 @@
       "route": "GRAPHITI_CHAT_PRIMARY",
       "model": "composer-2.5",
       "reasoning": "provider-default",
-      "config_identity": "cursor-agent-cli-2026.08.11-e8db854-pinned-package-v7",
-      "command_semantic_version": "newsroom.graphiti-provider-dispatch.v8",
+      "config_identity": "cursor-agent-cli-2026.08.11-e8db854-pinned-package-v8",
+      "command_semantic_version": "newsroom.graphiti-provider-dispatch.v9",
       "command_flags": [
         "binary=/Users/jamesto/.local/bin/cursor-agent",
         "resolved-binary=/Users/jamesto/.local/share/cursor-agent/versions/2026.08.11-e8db854/cursor-agent",
@@ -52,13 +52,16 @@
         "CREDENTIAL_STATE_DIGEST=sha256:c4f5b14be367d9c6639c59ff13375652a957e600a85fbbe6339112b3392cba6a",
         "PROMPT_MAX_OUTPUT_TOKENS=REQUEST_MAX_TOKENS",
         "CONTROLLER_STDOUT_CONTRACT=cursor-controller-stdout-v1:65536+64*REQUEST_MAX_TOKENS",
-        "CONTROLLER_PROCESS_CONTRACT=shared-bounded-cli-process-v1",
+        "CONTROLLER_PROCESS_CONTRACT=shared-bounded-cli-process-v2",
         "PREDISPATCH_TIMEOUT_DIAGNOSTICS=EXACT_BINARY_AND_CREDENTIAL_PROBE",
         "CONTROLLER_TIMEOUT_MS=160000",
         "TIMEOUT_DIAGNOSTIC_SCHEMA=newsroom.graphiti-timeout-diagnostic.v1",
         "TIMEOUT_DIAGNOSTIC_VOCABULARY=FIXED_V1",
         "QUALIFICATION_RETENTION=DIGEST_ONLY_V1",
-        "ASYNC_PIPE_DRAIN=BEFORE_REAP_V1"
+        "ASYNC_PIPE_DRAIN=GROUP_STOP_BEFORE_BOUNDED_REAP_V2",
+        "PROCESS_GROUP_SCOPE=ISOLATED_SESSION_V1",
+        "ABNORMAL_EXIT_GROUP_TERMINATION=SIGKILL_V1",
+        "PROCESS_CLEANUP_DEADLINE_MS=500"
       ],
       "disabled_capabilities": [
         "repository-discovery",
@@ -70,7 +73,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:c323c1f0ec8a5c6d5303e90aef52fafdfb2a487ddb26b7a7ebfcf06a9ed7b989",
+      "implementation_revision": "sha256:57932142d79f3e82771fdd5b8639e929f4b5d18a82c3fccc97eb032e521efab0",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -82,8 +85,8 @@
       "route": "GRAPHITI_CHAT_FALLBACK",
       "model": "grok-4.6",
       "reasoning": "medium",
-      "config_identity": "graphiti-cli-command-v5",
-      "command_semantic_version": "newsroom.graphiti-provider-dispatch.v5",
+      "config_identity": "graphiti-cli-command-v6",
+      "command_semantic_version": "newsroom.graphiti-provider-dispatch.v6",
       "command_flags": [
         "--prompt-file",
         "--model=grok-4.6",
@@ -99,13 +102,16 @@
         "--reasoning-effort=medium",
         "--output-format=streaming-json",
         "CONTROLLER_STDOUT_CONTRACT=grok-controller-stdout-v1:65536+64*REQUEST_MAX_TOKENS",
-        "CONTROLLER_PROCESS_CONTRACT=shared-bounded-cli-process-v1",
+        "CONTROLLER_PROCESS_CONTRACT=shared-bounded-cli-process-v2",
         "PREDISPATCH_TIMEOUT_DIAGNOSTICS=HELP_PROBE",
         "CONTROLLER_TIMEOUT_MS=160000",
         "TIMEOUT_DIAGNOSTIC_SCHEMA=newsroom.graphiti-timeout-diagnostic.v1",
         "TIMEOUT_DIAGNOSTIC_VOCABULARY=FIXED_V1",
         "QUALIFICATION_RETENTION=DIGEST_ONLY_V1",
-        "ASYNC_PIPE_DRAIN=BEFORE_REAP_V1"
+        "ASYNC_PIPE_DRAIN=GROUP_STOP_BEFORE_BOUNDED_REAP_V2",
+        "PROCESS_GROUP_SCOPE=ISOLATED_SESSION_V1",
+        "ABNORMAL_EXIT_GROUP_TERMINATION=SIGKILL_V1",
+        "PROCESS_CLEANUP_DEADLINE_MS=500"
       ],
       "disabled_capabilities": [
         "repository-discovery",
@@ -117,7 +123,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:c323c1f0ec8a5c6d5303e90aef52fafdfb2a487ddb26b7a7ebfcf06a9ed7b989",
+      "implementation_revision": "sha256:57932142d79f3e82771fdd5b8639e929f4b5d18a82c3fccc97eb032e521efab0",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -390,7 +396,7 @@
       "distinct_internal_request_count": 3
     }
   ],
-  "evidence_digest": "sha256:8de3a7f65b9934e6c39cff6f33d904ca85649293d004fe3c9e1e7c8c82f04b79",
+  "evidence_digest": "sha256:b946449becf8a891dcf8f2ae92ab2853df9a3e15a076d8972a89355fc7bea45b",
   "maximum_qualified_fixture_count": 4,
   "headroom": 2,
   "max_distinct_internal_requests": 6

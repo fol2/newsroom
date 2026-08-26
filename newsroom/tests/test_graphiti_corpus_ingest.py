@@ -4535,14 +4535,16 @@ def test_rejected_stale_attempt_telemetry_stays_on_current_reserve(
     connection.close()
     assert spend == [
         (1, "UNRECONCILED", None, "UNREPORTED"),
-        (2, "RECONCILED", 17, "PROVIDER_REPORTED"),
+        (2, "UNRECONCILED", None, "UNREPORTED"),
     ]
     assert [row[0] for row in receipts] == [1, 2]
     assert receipts[1][1] == "FAILED"
     second = json.loads(receipts[1][2])
     assert second["accounting"]["spend_id"].endswith(":2")
-    assert second["accounting"]["reported_provider_attempt_number"] == 1
-    assert second["accounting"]["reconciled_to_current_attempt"] is True
+    assert second["accounting"]["telemetry_binding"] == "REJECTED"
+    assert second["accounting"]["reported_embedding_usage_digest"] == second[
+        "embedding_usage_digest"
+    ]
     assert "provider_attempt" not in second["accounting"]
 
 
@@ -4901,10 +4903,13 @@ def test_unvalidated_recovery_telemetry_does_not_consume_unreceipted_reserve(
     unpublished.close()
     assert spend == [
         (1, "RESERVED", None, "PENDING_PROVIDER_REPORT"),
-        (2, "RECONCILED", 9, "PROVIDER_REPORTED"),
+        (2, "UNRECONCILED", None, "UNREPORTED"),
     ]
     assert accounting["spend_id"].endswith(":2")
-    assert accounting["reconciled_to_current_attempt"] is True
+    assert accounting["telemetry_binding"] == "REJECTED"
+    assert accounting["reported_embedding_usage_digest"] == digest_bytes(
+        canonical_json_bytes(usage)
+    )
 
 
 def test_max_graphiti_counts_failed_attempts(tmp_path: Path) -> None:
@@ -4979,7 +4984,7 @@ def test_cycle_rejects_foreign_graphiti_identity(tmp_path: Path) -> None:
         ).fetchone()[0]
     )
     spend = connection.execute(
-        "SELECT status, actual_usd_microunits, usage_basis "
+        "SELECT status, actual_usd_microunits, usage_basis, provider_usage_json "
         "FROM unpublished_graphiti_spend"
     ).fetchone()
     connection.close()
@@ -4998,8 +5003,77 @@ def test_cycle_rejects_foreign_graphiti_identity(tmp_path: Path) -> None:
     assert attempt["embedding_usage_digest"] == digest_bytes(
         canonical_json_bytes(returned[0].embedding_usage)
     )
-    assert attempt["accounting"]["actual_usd_microunits"] == 17
-    assert spend == ("RECONCILED", 17, "PROVIDER_REPORTED")
+    assert attempt["accounting"]["actual_usd_microunits"] is None
+    assert attempt["accounting"]["telemetry_binding"] == "REJECTED"
+    assert attempt["accounting"]["reported_embedding_usage_digest"] == digest_bytes(
+        canonical_json_bytes(returned[0].embedding_usage)
+    )
+    assert spend == ("UNRECONCILED", None, "UNREPORTED", "{}")
+
+
+def test_rejected_embedding_usage_secret_never_reaches_store_or_ledger(
+    tmp_path: Path,
+) -> None:
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "rejected-usage-secret.sqlite3"
+    secret = "TOKEN=provider-secret-value"
+
+    class Liar:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            result = _complete(
+                unit,
+                embedding_usage={
+                    "usage_basis": secret,
+                    "requests": [],
+                    "request_count": 0,
+                    "embedding_tokens": 0,
+                    "cost_usd_microunits": 0,
+                },
+            )
+            return replace(
+                result,
+                ingest_id="00000000-0000-4000-8000-000000000099",
+            )
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=Liar(),
+        max_graphiti=1,
+    )
+
+    connection = sqlite3.connect(unpublished)
+    spend = connection.execute(
+        "SELECT status, actual_usd_microunits, actual_gbp_microunits, "
+        "usage_basis, provider_usage_json FROM unpublished_graphiti_spend"
+    ).fetchone()
+    receipt_json = str(
+        connection.execute(
+            "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts"
+        ).fetchone()[0]
+    )
+    ledger_json = "\n".join(
+        str(row[0])
+        for row in connection.execute("SELECT payload_json FROM ledger").fetchall()
+    )
+    store_dump = "\n".join(connection.iterdump())
+    connection.close()
+
+    assert report.graphiti == 1
+    assert secret not in store_dump
+    assert secret not in receipt_json
+    assert secret not in ledger_json
+    assert spend == ("UNRECONCILED", None, None, "UNREPORTED", "{}")
+    receipt = json.loads(receipt_json)
+    assert receipt["binding_failure"] == "RESULT_CONTRACT_REJECTED"
+    assert receipt["embedding_usage"] is None
+    assert receipt["embedding_usage_digest"].startswith("sha256:")
+    assert receipt["accounting"]["telemetry_binding"] == "REJECTED"
+    assert receipt["accounting"]["reported_embedding_usage_digest"] == receipt[
+        "embedding_usage_digest"
+    ]
 
 
 def test_rejected_nested_timeout_secret_never_reaches_store_or_ledger(

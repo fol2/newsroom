@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import os
 import selectors
+import signal
 import subprocess
 import time
 from collections.abc import Mapping
@@ -16,6 +17,7 @@ from newsroom.authority.canonical import validate_sha256_digest
 from newsroom.authority.types import UtcTimestamp
 
 CLI_TIMEOUT_DIAGNOSTIC_SCHEMA_VERSION = "newsroom.graphiti-timeout-diagnostic.v1"
+_PROCESS_CLEANUP_TIMEOUT_SECONDS = 0.5
 _TIMEOUT_DIAGNOSTIC_REQUIRED_FIELDS = frozenset(
     {
         "schema_version",
@@ -100,6 +102,7 @@ _TIMEOUT_DIAGNOSTIC_VOCABULARY = {
         {
             "NO_PROVIDER_TASK",
             "PROCESS_ALREADY_EXITED",
+            "PROCESS_CLEANUP_TIMEOUT",
             "PROCESS_EXIT_RACE",
             "PROCESS_KILLED",
             "TASK_CANCELLED",
@@ -190,24 +193,54 @@ def _unprivileged_child_environment() -> dict[str, str]:
     return unprivileged_child_environment()
 
 
-def stop_process(process: subprocess.Popen[bytes]) -> str:
-    """Stop one child and report the observed termination race truthfully."""
+def _signal_process(
+    process: subprocess.Popen[bytes] | asyncio.subprocess.Process,
+    *,
+    process_group_id: int | None,
+    already_exited: bool,
+) -> str:
+    """Signal an isolated CLI process group, with a fallback for test doubles."""
 
-    if process.poll() is not None:
-        process.wait()
+    if already_exited and process_group_id is None:
         return "PROCESS_ALREADY_EXITED"
     try:
-        process.kill()
+        if process_group_id is None:
+            process.kill()
+        else:
+            os.killpg(process_group_id, signal.SIGKILL)
     except ProcessLookupError:
-        termination = "PROCESS_EXIT_RACE"
-    else:
-        termination = "PROCESS_KILLED"
-    process.wait()
+        return "PROCESS_ALREADY_EXITED" if already_exited else "PROCESS_EXIT_RACE"
+    return "PROCESS_KILLED"
+
+
+def stop_process(
+    process: subprocess.Popen[bytes],
+    *,
+    process_group_id: int | None = None,
+    cleanup_timeout: float = _PROCESS_CLEANUP_TIMEOUT_SECONDS,
+) -> str:
+    """Stop and reap one isolated CLI process group within a hard deadline."""
+
+    termination = _signal_process(
+        process,
+        process_group_id=process_group_id,
+        already_exited=process.poll() is not None,
+    )
+    try:
+        process.wait(timeout=cleanup_timeout)
+    except subprocess.TimeoutExpired:
+        return "PROCESS_CLEANUP_TIMEOUT"
     return termination
 
 
-async def stop_process_async(process: asyncio.subprocess.Process) -> str:
-    """Async equivalent of :func:`stop_process`."""
+async def stop_process_async(
+    process: asyncio.subprocess.Process,
+    *,
+    process_group_id: int | None = None,
+    readers: tuple[asyncio.Task[None], ...] = (),
+    cleanup_timeout: float = _PROCESS_CLEANUP_TIMEOUT_SECONDS,
+) -> str:
+    """Stop, drain and reap one isolated CLI process group within a deadline."""
 
     async def drain_and_wait() -> None:
         communicate = getattr(process, "communicate", None)
@@ -217,19 +250,56 @@ async def stop_process_async(process: asyncio.subprocess.Process) -> str:
             # Minimal test doubles and non-pipe process adapters expose wait only.
             await process.wait()
 
-    if process.returncode is not None:
-        await drain_and_wait()
-        return "PROCESS_ALREADY_EXITED"
-    try:
-        process.kill()
-    except ProcessLookupError:
-        termination = "PROCESS_EXIT_RACE"
-    else:
-        termination = "PROCESS_KILLED"
+    loop = asyncio.get_running_loop()
+    cleanup_deadline = loop.time() + cleanup_timeout
+    termination = _signal_process(
+        process,
+        process_group_id=process_group_id,
+        already_exited=process.returncode is not None,
+    )
+    for reader in readers:
+        if not reader.done():
+            reader.cancel()
+    if readers:
+        done, pending = await asyncio.wait(
+            readers,
+            timeout=max(0.0, cleanup_deadline - loop.time()),
+        )
+        for reader in done:
+            try:
+                reader.result()
+            except BaseException:
+                pass
+        if pending:
+            return "PROCESS_CLEANUP_TIMEOUT"
+
     # asyncio subprocesses can withhold wait() completion while unread pipe
-    # buffers remain.  communicate() drains both pipes before reaping.
-    await drain_and_wait()
+    # buffers remain. communicate() drains both pipes before reaping. Use
+    # asyncio.wait rather than wait_for so a cancellation-resistant awaitable
+    # cannot extend the controller-owned cleanup deadline.
+    cleanup_task = asyncio.create_task(drain_and_wait())
+    done, _pending = await asyncio.wait(
+        (cleanup_task,),
+        timeout=max(0.0, cleanup_deadline - loop.time()),
+    )
+    if cleanup_task not in done:
+        cleanup_task.cancel()
+        cleanup_task.add_done_callback(_consume_task_result)
+        return "PROCESS_CLEANUP_TIMEOUT"
+    try:
+        cleanup_task.result()
+    except BaseException:
+        return "PROCESS_CLEANUP_TIMEOUT"
     return termination
+
+
+def _consume_task_result(task: asyncio.Task[object]) -> None:
+    """Consume a late cleanup result without retaining payload or warnings."""
+
+    try:
+        task.result()
+    except BaseException:
+        pass
 
 
 def timeout_deadline_after(timeout_seconds: float) -> str:
@@ -477,6 +547,7 @@ def run_bounded_process(
         stderr=subprocess.PIPE,
         cwd=cwd,
         env=dict(environment or _unprivileged_child_environment()),
+        start_new_session=True,
     )
     assert process.stdout is not None
     assert process.stderr is not None
@@ -494,11 +565,18 @@ def run_bounded_process(
     started = time.monotonic()
     deadline = started + timeout
     deadline_at = timeout_deadline_after(timeout)
+    cleanup_attempted = False
+
+    def stop_cli_group() -> str:
+        nonlocal cleanup_attempted
+        cleanup_attempted = True
+        return stop_process(process, process_group_id=process.pid)
+
     try:
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                termination = stop_process(process)
+                termination = stop_cli_group()
                 raise _transport_timeout(
                     name=name,
                     phase=phase,
@@ -522,13 +600,13 @@ def run_bounded_process(
                     continue
                 output.extend(chunk)
                 if sum(len(value[1]) for value in streams.values()) > max_output_bytes:
-                    stop_process(process)
+                    stop_cli_group()
                     raise CliOutputBoundExceeded(
                         f"{name} Graphiti LLM exceeded output byte limit"
                     )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            termination = stop_process(process)
+            termination = stop_cli_group()
             raise _transport_timeout(
                 name=name,
                 phase=phase,
@@ -542,7 +620,7 @@ def run_bounded_process(
         try:
             process.wait(timeout=remaining)
         except subprocess.TimeoutExpired:
-            termination = stop_process(process)
+            termination = stop_cli_group()
             raise _transport_timeout(
                 name=name,
                 phase=phase,
@@ -554,8 +632,10 @@ def run_bounded_process(
                 termination=termination,
             ) from None
     except BaseException:
-        if process.poll() is None:
-            stop_process(process)
+        # The direct child may have exited while a descendant still owns the
+        # inherited pipes or remains alive in the isolated session.
+        if not cleanup_attempted:
+            stop_cli_group()
         raise
     finally:
         selector.close()
@@ -590,6 +670,7 @@ async def run_bounded_process_async(
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
         env=dict(environment or _unprivileged_child_environment()),
+        start_new_session=True,
     )
     assert process.stdout is not None
     assert process.stderr is not None
@@ -619,13 +700,19 @@ async def run_bounded_process_async(
         asyncio.create_task(collect(process.stdout, destination=outputs["stdout"])),
         asyncio.create_task(collect(process.stderr, destination=outputs["stderr"])),
     )
+    cleanup_attempted = False
 
     async def stop_collectors_and_process() -> str:
-        for collector in collectors:
-            if not collector.done():
-                collector.cancel()
-        await asyncio.gather(*collectors, return_exceptions=True)
-        return await stop_process_async(process)
+        nonlocal cleanup_attempted
+        cleanup_attempted = True
+        process_group_id = getattr(process, "pid", None)
+        return await stop_process_async(
+            process,
+            process_group_id=(
+                process_group_id if isinstance(process_group_id, int) else None
+            ),
+            readers=collectors,
+        )
 
     try:
         await asyncio.wait_for(
@@ -655,10 +742,19 @@ async def run_bounded_process_async(
         await stop_collectors_and_process()
         raise
     finally:
-        for collector in collectors:
-            if not collector.done():
-                collector.cancel()
-        await asyncio.gather(*collectors, return_exceptions=True)
+        if not cleanup_attempted:
+            for collector in collectors:
+                if not collector.done():
+                    collector.cancel()
+            done, _pending = await asyncio.wait(
+                collectors,
+                timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS,
+            )
+            for collector in done:
+                try:
+                    collector.result()
+                except BaseException:
+                    pass
     return CliProcessOutput(
         returncode=returncode,
         stdout=_decode_output(bytes(outputs["stdout"]), name=name),
