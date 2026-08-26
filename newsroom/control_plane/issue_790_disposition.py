@@ -438,6 +438,31 @@ def _require_retry_events_unchanged(
     return retained
 
 
+def _require_retry_exclusions(
+    repository: Issue790CanaryRepository,
+    *,
+    plan: Mapping[str, object],
+    disposition_digest: str,
+) -> list[dict[str, object]]:
+    retained = list(repository.retry_exclusions())
+    expected_events = plan.get("retry_forbidden_events")
+    if (
+        not isinstance(expected_events, list)
+        or len(retained) != len(expected_events) == 2
+        or any(
+            record.get("approved_plan_digest") != plan.get("canonical_digest")
+            or record.get("disposition_digest") != disposition_digest
+            or record.get("reason") != "ISSUE_790_RETRY_FORBIDDEN"
+            or record.get("event_snapshot") != expected
+            for record, expected in zip(retained, expected_events, strict=True)
+        )
+    ):
+        raise Issue790DispositionError(
+            "issue #790 durable retry exclusions differ"
+        )
+    return retained
+
+
 def _running_code_evidence(
     *,
     root: Path,
@@ -1373,6 +1398,11 @@ def run_issue_790_canary(
         canary_repository = Issue790CanaryRepository.open_existing(str(store))
     except Issue790CanaryIntegrityError as exc:
         raise Issue790DispositionError(str(exc)) from exc
+    retry_exclusions = _require_retry_exclusions(
+        canary_repository,
+        plan=retained_plan,
+        disposition_digest=disposition_digest,
+    )
     event_before = _event_snapshot(
         store,
         event_id=event_id,
@@ -1572,6 +1602,7 @@ def run_issue_790_canary(
         "route_after": route_after,
         "retry_forbidden_events_before": retry_before,
         "retry_forbidden_events_after": retry_after,
+        "retry_exclusions": retry_exclusions,
         "retry_forbidden_events_unchanged": retry_unchanged,
         "worker_before": worker_before,
         "worker_after": worker_after,
