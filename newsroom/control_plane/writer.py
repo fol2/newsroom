@@ -1468,10 +1468,18 @@ def _grok_writer_update(value: object) -> dict[str, object] | None:
     return update if isinstance(update, dict) else value
 
 
+def _retain_grok_usage(current: dict[str, object], value: object) -> dict[str, object]:
+    parsed = grok_cli_usage(value)
+    if parsed.get("usage_basis") == "PROVIDER_REPORTED":
+        return parsed
+    return current
+
+
 def _parse_grok_writer_output(raw: str) -> WriterCliExecution:
     chunks: list[str] = []
     usage = unreported_cli_usage()
     recognised = False
+    structured_output: dict[str, object] | None = None
     for line in raw.splitlines():
         try:
             value = json.loads(line)
@@ -1487,13 +1495,37 @@ def _parse_grok_writer_output(raw: str) -> WriterCliExecution:
             if isinstance(text, str):
                 chunks.append(text)
                 recognised = True
-        elif kind in {"turn_completed", "turnEnded"}:
-            usage = grok_cli_usage(update.get("usage"))
+        elif kind == "text":
+            data = update.get("data")
+            if isinstance(data, str):
+                chunks.append(data)
+                recognised = True
+        elif kind in {"turn_completed", "turnEnded", "usage", "end"}:
+            usage = _retain_grok_usage(usage, update.get("usage"))
+            candidate = update.get("structured_output")
+            if isinstance(candidate, dict):
+                structured_output = candidate
             recognised = True
-    return WriterCliExecution(
-        "".join(chunks) if recognised and chunks else raw,
-        usage,
-    )
+    if recognised and structured_output is not None:
+        return WriterCliExecution(
+            json.dumps(structured_output, ensure_ascii=False), usage
+        )
+    if recognised and chunks:
+        return WriterCliExecution("".join(chunks), usage)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return WriterCliExecution(raw, usage)
+    if not isinstance(payload, dict):
+        return WriterCliExecution(raw, usage)
+    usage = _retain_grok_usage(usage, payload.get("usage"))
+    structured = payload.get("structured_output")
+    if isinstance(structured, dict):
+        return WriterCliExecution(json.dumps(structured, ensure_ascii=False), usage)
+    text = payload.get("text")
+    if isinstance(text, str) and text.strip():
+        return WriterCliExecution(text, usage)
+    return WriterCliExecution(raw, usage)
 
 
 _GROK_WRITER_SEMANTIC_FLAGS = (

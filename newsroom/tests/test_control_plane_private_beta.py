@@ -1324,6 +1324,71 @@ def test_grok_cli_uses_hermetic_single_turn_context(
     assert cwd != os.getcwd()
 
 
+def test_grok_writer_parser_reads_1_0_10_streaming_json_text_events() -> None:
+    from newsroom.control_plane.writer import _parse_grok_writer_output
+
+    copy = json.dumps(
+        {
+            "title": "【未出版】官方公布咗最新安排",
+            "body": "本報根據已核實證據報道：相關官方資料確認安排已經更新",
+            "evidence_links": [],
+        },
+        ensure_ascii=False,
+    )
+    raw = "\n".join(
+        (
+            json.dumps({"type": "text", "data": copy}),
+            json.dumps(
+                {
+                    "type": "end",
+                    "stopReason": "end_turn",
+                    "usage": {
+                        "input_tokens": 800,
+                        "output_tokens": 40,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "total_tokens": 840,
+                        "context_tokens": 900,
+                    },
+                }
+            ),
+        )
+    )
+    execution = _parse_grok_writer_output(raw)
+    assert json.loads(execution.text)["title"].startswith("【未出版】")
+    assert execution.usage["usage_basis"] == "PROVIDER_REPORTED"
+    assert execution.usage["input_tokens"] == 800
+    assert execution.usage["context_tokens"] == 900
+
+
+def test_grok_writer_parser_reads_json_schema_wrapper() -> None:
+    from newsroom.control_plane.writer import _parse_grok_writer_output
+
+    raw = json.dumps(
+        {
+            "text": "ignored prose",
+            "structured_output": {
+                "title": "【未出版】官方公布咗最新安排",
+                "body": "本報根據已核實證據報道：相關官方資料確認安排已經更新",
+                "evidence_links": [],
+            },
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            },
+        },
+        ensure_ascii=False,
+    )
+    execution = _parse_grok_writer_output(raw)
+    assert json.loads(execution.text)["title"].startswith("【未出版】")
+    assert execution.usage["usage_basis"] == "PROVIDER_REPORTED"
+    assert execution.usage["total_tokens"] == 120
+
+
 def test_grok_cli_accepts_matching_unpinned_semantic_version(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

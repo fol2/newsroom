@@ -77,13 +77,17 @@ def grok_cli_usage(value: object) -> dict[str, object]:
 
     if not isinstance(value, Mapping):
         return unreported_cli_usage()
-    input_tokens = value.get("inputTokens")
-    output_tokens = value.get("outputTokens")
-    total_tokens = value.get("totalTokens")
-    cached_read = value.get("cachedReadTokens", 0)
-    cached_write = value.get("cacheCreationTokens", 0)
-    reasoning = value.get("reasoningTokens")
-    context_tokens = value.get("contextTokensUsed")
+    input_tokens = value.get("inputTokens", value.get("input_tokens"))
+    output_tokens = value.get("outputTokens", value.get("output_tokens"))
+    total_tokens = value.get("totalTokens", value.get("total_tokens"))
+    cached_read = value.get(
+        "cachedReadTokens", value.get("cache_read_input_tokens", 0)
+    )
+    cached_write = value.get(
+        "cacheCreationTokens", value.get("cache_creation_input_tokens", 0)
+    )
+    reasoning = value.get("reasoningTokens", value.get("reasoning_tokens"))
+    context_tokens = value.get("contextTokensUsed", value.get("context_tokens"))
     required = (input_tokens, output_tokens, total_tokens, cached_read, cached_write)
     if not all(_is_non_negative_int(item) for item in required):
         return unreported_cli_usage()
