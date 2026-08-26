@@ -111,6 +111,20 @@ def _json(value: Mapping[str, object]) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _content_addressed_record(
+    value: object,
+    *,
+    digest_field: str,
+    field: str,
+) -> dict[str, object]:
+    record = _object(value, field=field)
+    without_digest = dict(record)
+    supplied = without_digest.pop(digest_field, None)
+    if supplied != digest_canonical(without_digest):
+        raise Issue790CanaryIntegrityError(f"{field} digest differs")
+    return record
+
+
 def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
     return (
         connection.execute(
@@ -405,7 +419,11 @@ class Issue790CanaryRepository:
                     (event_id,),
                 ).fetchone()
                 if prior is not None:
-                    prior_record = _object(prior[0], field="retry exclusion")
+                    prior_record = _content_addressed_record(
+                        prior[0],
+                        digest_field="exclusion_digest",
+                        field="retry exclusion",
+                    )
                     stable_prior = dict(prior_record)
                     stable_prior.pop("excluded_at", None)
                     stable_record = dict(record)
@@ -448,7 +466,11 @@ class Issue790CanaryRepository:
         connection = self._read_connection()
         try:
             return tuple(
-                _object(row[0], field="retry exclusion")
+                _content_addressed_record(
+                    row[0],
+                    digest_field="exclusion_digest",
+                    field="retry exclusion",
+                )
                 for row in connection.execute(
                     "SELECT record_json FROM issue_790_graphiti_retry_exclusions "
                     "ORDER BY ledger_seq"
@@ -467,7 +489,15 @@ class Issue790CanaryRepository:
                 "WHERE approved_plan_digest=?",
                 (approved_plan_digest,),
             ).fetchone()
-            return None if row is None else _object(row[0], field="canary consumption")
+            return (
+                None
+                if row is None
+                else _content_addressed_record(
+                    row[0],
+                    digest_field="consumption_digest",
+                    field="canary consumption",
+                )
+            )
         finally:
             connection.close()
 
@@ -479,7 +509,15 @@ class Issue790CanaryRepository:
                 "WHERE consumption_digest=?",
                 (consumption_digest,),
             ).fetchone()
-            return None if row is None else _object(row[0], field="canary outcome")
+            return (
+                None
+                if row is None
+                else _content_addressed_record(
+                    row[0],
+                    digest_field="outcome_digest",
+                    field="canary outcome",
+                )
+            )
         finally:
             connection.close()
 
@@ -501,8 +539,16 @@ class Issue790CanaryRepository:
                 raise Issue790CanaryIntegrityError(
                     "bounded canary consumption authority differs"
                 )
-            record = _object(row[0], field="canary consumption")
-            return _object(record.get("preflight_evidence"), field="canary preflight")
+            record = _content_addressed_record(
+                row[0],
+                digest_field="consumption_digest",
+                field="canary consumption",
+            )
+            return _content_addressed_record(
+                record.get("preflight_evidence"),
+                digest_field="evidence_digest",
+                field="canary preflight",
+            )
         finally:
             connection.close()
 
@@ -750,7 +796,11 @@ class Issue790CanaryRepository:
                 raise Issue790CanaryIntegrityError(
                     "bounded canary consumption authority differs"
                 )
-            consumption = _object(consumption_row[0], field="canary consumption")
+            consumption = _content_addressed_record(
+                consumption_row[0],
+                digest_field="consumption_digest",
+                field="canary consumption",
+            )
             if consumption.get("owner_id") != owner_id:
                 raise Issue790CanaryIntegrityError(
                     "bounded canary consumption owner differs"
@@ -761,7 +811,11 @@ class Issue790CanaryRepository:
                 (consumption_digest,),
             ).fetchone()
             if prior is not None:
-                retained_prior = _object(prior[0], field="canary outcome")
+                retained_prior = _content_addressed_record(
+                    prior[0],
+                    digest_field="outcome_digest",
+                    field="canary outcome",
+                )
                 if (
                     retained_prior.get("event_id") != event_id
                     or retained_prior.get("ledger_seq") != ledger_seq

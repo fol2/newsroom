@@ -2895,7 +2895,7 @@ def consume_next_graphiti_event(
     if canary_consumption_digest is not None:
         if event_id is None:
             raise ValueError("bounded canary requires an exact event")
-        canary_preflight = Issue790CanaryRepository(
+        canary_preflight = Issue790CanaryRepository.open_existing(
             unpublished_store
         ).preflight_for_consumption(
             consumption_digest=canary_consumption_digest,
