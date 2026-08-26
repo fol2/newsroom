@@ -1387,6 +1387,7 @@ def test_grok_writer_parser_reads_json_schema_wrapper() -> None:
     assert json.loads(execution.text)["title"].startswith("【未出版】")
     assert execution.usage["usage_basis"] == "PROVIDER_REPORTED"
     assert execution.usage["total_tokens"] == 120
+    assert execution.usage["context_tokens"] == 100
 
 
 def test_grok_cli_accepts_matching_unpinned_semantic_version(

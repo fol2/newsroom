@@ -95,6 +95,11 @@ def grok_cli_usage(value: object) -> dict[str, object]:
         return unreported_cli_usage()
     if context_tokens is not None and not _is_non_negative_int(context_tokens):
         return unreported_cli_usage()
+    if context_tokens is None:
+        # Grok 1.0.10 headless omits contextTokensUsed. Prompt occupancy is
+        # the documented uncached input plus cache buckets, not a silent zero
+        # and not the context-window size.
+        context_tokens = input_tokens + cached_read + cached_write
     result = {
         "usage_basis": CLI_USAGE_BASIS_REPORTED,
         "input_tokens": input_tokens,
@@ -103,9 +108,8 @@ def grok_cli_usage(value: object) -> dict[str, object]:
         "cached_write_tokens": cached_write,
         "reasoning_tokens": reasoning,
         "total_tokens": total_tokens,
+        "context_tokens": context_tokens,
     }
-    if context_tokens is not None:
-        result["context_tokens"] = context_tokens
     return result
 
 

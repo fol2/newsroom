@@ -406,6 +406,42 @@ def test_reported_components_validate_without_context_double_counting(
     )
 
 
+def test_grok_headless_cache_inclusive_total_is_reported(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    _envelope_value, _policy_value, allocation = _open_and_allocate(service)
+    service.complete(
+        InvocationTerminal.create(
+            invocation_id=allocation.invocation_id,
+            outcome="ACCEPTED_OUTPUT",
+            failure_class=None,
+            usage_status=UsageStatus.REPORTED,
+            components=UsageComponents(
+                input_tokens=80,
+                output_tokens=10,
+                cached_read_tokens=5,
+                cached_write_tokens=0,
+                reasoning_tokens=2,
+                context_tokens=85,
+                total_tokens=95,
+                provenance="PROVIDER_REPORTED",
+            ),
+            dispatch_at=T0 + timedelta(seconds=2),
+            completed_at=T0 + timedelta(seconds=3),
+            observed_at=T0 + timedelta(seconds=3),
+            provider_telemetry_digest=_digest({"grok": "1.0.10"}),
+            raw_telemetry_pointer="private://grok-cache-total",
+            subscription_cli_chat_not_cash_debited=True,
+        )
+    )
+    row = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"][0]
+    assert row["usage_status"] == "REPORTED"
+    assert row["failure_class"] is None
+    assert row["total_tokens"] == 95
+    assert row["context_tokens"] == 85
+
+
 def test_estimate_is_explicit_and_unbounded_missing_usage_opens_only_route(
     tmp_path: Path,
 ) -> None:
