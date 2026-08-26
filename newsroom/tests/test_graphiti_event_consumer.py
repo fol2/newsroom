@@ -6,6 +6,8 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
@@ -96,6 +98,39 @@ def _enqueue_fixture(
     connection.commit()
     connection.close()
     return inserted
+
+
+def _insert_legacy_landed(path: Path, unit: CorpusIngestUnit) -> tuple[str, str]:
+    payload = {
+        "source_id": unit.source_id,
+        "item_key": unit.item_key,
+        "revision_digest": unit.revision_digest,
+        "first_observed_at": unit.coverage_first_observed_at,
+    }
+    payload_digest = digest_canonical(payload)
+    connection = connect(str(path))
+    ledger_digest = append_ledger(connection, EFFECTIVE_REVISION_LANDED, payload)
+    connection.execute(
+        """
+        INSERT INTO unpublished_effective_revision_landed(
+            source_id,item_key,revision_digest,published_at,updated_at,
+            first_observed_at,ingest_ids_json,legacy_v10,payload_digest,
+            ledger_digest,at
+        ) VALUES(?,?,?,'','',?,'[]',1,?,?,?)
+        """,
+        (
+            unit.source_id,
+            unit.item_key,
+            unit.revision_digest,
+            unit.coverage_first_observed_at,
+            payload_digest,
+            ledger_digest,
+            unit.coverage_first_observed_at,
+        ),
+    )
+    connection.commit()
+    connection.close()
+    return ledger_digest, payload_digest
 
 
 def test_committed_events_are_immediately_claimable_and_recover_after_restart(
@@ -223,34 +258,7 @@ def test_projection_rejects_landed_payload_not_authorised_by_ledger(
 def test_projection_validates_exact_legacy_v10_landed_payload(tmp_path: Path) -> None:
     path = tmp_path / "unpublished.sqlite3"
     unit = _unit(1)
-    payload = {
-        "source_id": unit.source_id,
-        "item_key": unit.item_key,
-        "revision_digest": unit.revision_digest,
-        "first_observed_at": unit.coverage_first_observed_at,
-    }
-    connection = connect(str(path))
-    ledger_digest = append_ledger(connection, EFFECTIVE_REVISION_LANDED, payload)
-    connection.execute(
-        """
-        INSERT INTO unpublished_effective_revision_landed(
-            source_id,item_key,revision_digest,published_at,updated_at,
-            first_observed_at,ingest_ids_json,legacy_v10,payload_digest,
-            ledger_digest,at
-        ) VALUES(?,?,?,'','',?,'[]',1,?,?,?)
-        """,
-        (
-            unit.source_id,
-            unit.item_key,
-            unit.revision_digest,
-            unit.coverage_first_observed_at,
-            digest_canonical(payload),
-            ledger_digest,
-            unit.coverage_first_observed_at,
-        ),
-    )
-    connection.commit()
-    connection.close()
+    ledger_digest, payload_digest = _insert_legacy_landed(path, unit)
 
     event = GraphitiEventQueue(str(path)).claim(
         owner_id="worker", lease_for=timedelta(seconds=30)
@@ -261,7 +269,50 @@ def test_projection_validates_exact_legacy_v10_landed_payload(tmp_path: Path) ->
     assert event.published_at == ""
     assert event.updated_at == ""
     assert event.landed_ingest_ids == ()
-    assert event.landed_payload_digest == digest_canonical(payload)
+    assert event.landed_payload_digest == payload_digest
+
+
+@pytest.mark.parametrize(
+    ("legacy_v10", "published_at", "updated_at", "ingest_ids_json"),
+    (
+        (1, "2099-01-01T00:00:00Z", "", "[]"),
+        (1, "", "2099-01-01T00:00:00Z", "[]"),
+        (1, "", "", '["forged-ingest"]'),
+        (0.5, "", "", "[]"),
+        (2, "", "", "[]"),
+    ),
+)
+def test_projection_rejects_malformed_legacy_v10_metadata(
+    tmp_path: Path,
+    legacy_v10: object,
+    published_at: str,
+    updated_at: str,
+    ingest_ids_json: str,
+) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    _insert_legacy_landed(path, _unit(1))
+    connection = connect(str(path))
+    connection.execute(
+        "UPDATE unpublished_effective_revision_landed "
+        "SET legacy_v10=?,published_at=?,updated_at=?,ingest_ids_json=?",
+        (legacy_v10, published_at, updated_at, ingest_ids_json),
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(ValueError, match="landed Graphiti .*malformed"):
+        GraphitiEventQueue(str(path)).claim(
+            owner_id="worker", lease_for=timedelta(seconds=30)
+        )
+
+    retained = sqlite3.connect(path)
+    assert (
+        retained.execute(
+            "SELECT COUNT(*) FROM unpublished_graphiti_revision_events"
+        ).fetchone()[0]
+        == 0
+    )
+    retained.close()
 
 
 def test_zero_proposal_result_is_terminal_revision_coverage(tmp_path: Path) -> None:

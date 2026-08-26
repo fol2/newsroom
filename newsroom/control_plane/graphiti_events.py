@@ -184,7 +184,7 @@ class SystemicGraphitiEventFailure(RuntimeError):
 def _landed_rows(
     connection: sqlite3.Connection,
 ) -> list[
-    tuple[int, str, str, str, str, str, str, str, str, str, str, str, int]
+    tuple[int, str, str, str, str, str, str, str, str, str, str, str, object]
 ]:
     raw_rows = connection.execute(
         """
@@ -223,7 +223,7 @@ def _landed_rows(
             str(row[9]),
             str(row[10]),
             str(row[11]),
-            int(row[12]),
+            row[12],
         )
         for row in raw_rows
     ]
@@ -292,7 +292,7 @@ def reconcile_graphiti_events(
         ):
             raise ValueError("landed Graphiti ingest identities are malformed")
         landed_ingest_ids = tuple(landed_ingest_ids_value)
-        if row[12] not in (0, 1):
+        if type(row[12]) is not int or row[12] not in (0, 1):
             raise ValueError("landed Graphiti legacy marker is malformed")
         landed_payload = {
             "source_id": row[2],
@@ -300,7 +300,10 @@ def reconcile_graphiti_events(
             "revision_digest": row[4],
             "first_observed_at": row[7],
         }
-        if not row[12]:
+        if row[12]:
+            if row[5] or row[6] or landed_ingest_ids:
+                raise ValueError("legacy landed Graphiti fields are malformed")
+        else:
             landed_payload.update(
                 {
                     "published_at": row[5],
