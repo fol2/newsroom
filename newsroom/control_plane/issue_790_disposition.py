@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 import json
 import os
 import re
@@ -19,6 +18,11 @@ from pathlib import Path
 from tempfile import mkstemp
 
 from newsroom.authority.canonical import digest_canonical
+from newsroom.control_plane import cycle as cycle_module
+from newsroom.control_plane import graphiti_events as graphiti_events_module
+from newsroom.control_plane import issue_790_canary as issue_790_canary_module
+from newsroom.control_plane import issue_790_contract as issue_790_contract_module
+from newsroom.control_plane import model_usage as model_usage_module
 from newsroom.control_plane.graphiti_events import GraphitiProcessResult
 from newsroom.control_plane.issue_790_canary import (
     Issue790CanaryIntegrityError,
@@ -94,6 +98,14 @@ _RUNNING_CODE_MODULES: tuple[tuple[str, str], ...] = (
     ("newsroom.control_plane.graphiti_events", "newsroom/control_plane/graphiti_events.py"),
     ("newsroom.control_plane.cycle", "newsroom/control_plane/cycle.py"),
 )
+_RUNNING_CODE_PATHS: dict[str, str | None] = {
+    "newsroom.control_plane.issue_790_disposition": __file__,
+    "newsroom.control_plane.issue_790_canary": issue_790_canary_module.__file__,
+    "newsroom.control_plane.issue_790_contract": issue_790_contract_module.__file__,
+    "newsroom.control_plane.model_usage": model_usage_module.__file__,
+    "newsroom.control_plane.graphiti_events": graphiti_events_module.__file__,
+    "newsroom.control_plane.cycle": cycle_module.__file__,
+}
 
 
 class Issue790DispositionError(RuntimeError):
@@ -473,8 +485,7 @@ def _running_code_evidence(
 
     retained: list[dict[str, object]] = []
     for module_name, relative_path in _RUNNING_CODE_MODULES:
-        module = importlib.import_module(module_name)
-        raw_path = getattr(module, "__file__", None)
+        raw_path = _RUNNING_CODE_PATHS.get(module_name)
         if not isinstance(raw_path, str):
             raise Issue790DispositionError("operation module path is absent")
         actual = Path(raw_path).resolve(strict=True)
