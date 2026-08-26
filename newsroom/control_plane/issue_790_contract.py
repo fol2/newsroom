@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 ISSUE_790_APPROVED_PLAN_DIGEST = (
     "sha256:ce7ee7fd56c931b147158dad2a74047ada90b805e5a4c545e53db1f4d2ae7383"
 )
@@ -22,6 +24,98 @@ ISSUE_790_APPROVAL_REFERENCE = (
     "https://github.com/fol2/newsroom/issues/790#issuecomment-5426599150"
 )
 ISSUE_790_APPROVED_AT = "2026-08-26T14:12:57.000000Z"
+ISSUE_790_APPROVED_TERMINAL_OUTCOME = "FAILED"
+ISSUE_790_APPROVED_ROUTE_OPEN_REASON = "SYSTEMIC_TRANSPORT"
+
+ISSUE_790_SUCCESS_SEQUENCE_PLAN_DIGEST = (
+    "sha256:587778ca69b954749b64b0f277e684da69105b8b752324edc089bfd54ae0ad70"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class Issue790ApprovedPlanContract:
+    """Exact identities which reviewed code may turn into one authority row."""
+
+    schema_version: str
+    plan_digest: str
+    invocation_id: str
+    terminal_digest: str
+    allocation_digest: str
+    approved_by: str
+    approval_reference: str
+    approved_at: str
+    scope: str
+    terminal_outcome: str
+    route_open_reason: str
+
+
+_SUCCESS_SEQUENCE_CONTRACTS = (
+    Issue790ApprovedPlanContract(
+        schema_version="newsroom.issue-790.iterative-canary-plan.v2",
+        plan_digest=ISSUE_790_SUCCESS_SEQUENCE_PLAN_DIGEST,
+        invocation_id=(
+            "sha256:8e219f498ee1eff71cd21c5d9dd3d958e5aed62db8f938b0a2bfdba6d4e9de7d"
+        ),
+        terminal_digest=(
+            "sha256:f5e67d327b215c1eda3a320b07e2cee642151880c5fa275686e8d534646ca9b9"
+        ),
+        allocation_digest=(
+            "sha256:468bc90fb8c9114ca8d4fc780d137f676ce69b453fcfda74bef88e0508a15643"
+        ),
+        approved_by="github:fol2",
+        approval_reference=(
+            "https://github.com/fol2/newsroom/issues/790#issuecomment-5430967545"
+        ),
+        approved_at="2026-08-26T20:51:55.000000Z",
+        scope=ISSUE_790_APPROVED_SCOPE,
+        terminal_outcome="TIMEOUT",
+        route_open_reason="TIMEOUT",
+    ),
+)
+
+
+def issue_790_approved_plan_contract(
+    plan_digest: str,
+) -> Issue790ApprovedPlanContract:
+    """Return the exact reviewed contract, including the legacy first plan."""
+
+    if plan_digest == ISSUE_790_APPROVED_PLAN_DIGEST:
+        # Keep these aliases live so fixture tests can bind one exact synthetic plan
+        # without broadening the production registry.
+        return Issue790ApprovedPlanContract(
+            schema_version="newsroom.issue-790.conservative-disposition-plan.v1",
+            plan_digest=ISSUE_790_APPROVED_PLAN_DIGEST,
+            invocation_id=ISSUE_790_APPROVED_INVOCATION_ID,
+            terminal_digest=ISSUE_790_APPROVED_TERMINAL_DIGEST,
+            allocation_digest=ISSUE_790_APPROVED_ALLOCATION_DIGEST,
+            approved_by=ISSUE_790_APPROVED_BY,
+            approval_reference=ISSUE_790_APPROVAL_REFERENCE,
+            approved_at=ISSUE_790_APPROVED_AT,
+            scope=ISSUE_790_APPROVED_SCOPE,
+            terminal_outcome=ISSUE_790_APPROVED_TERMINAL_OUTCOME,
+            route_open_reason=ISSUE_790_APPROVED_ROUTE_OPEN_REASON,
+        )
+    for contract in _SUCCESS_SEQUENCE_CONTRACTS:
+        if contract.plan_digest == plan_digest:
+            return contract
+    raise KeyError(plan_digest)
+
+
+def issue_790_approved_plan_digests() -> frozenset[str]:
+    """Return only content identities embedded by reviewed code."""
+
+    return frozenset(
+        contract.plan_digest for contract in issue_790_approved_plan_contracts()
+    )
+
+
+def issue_790_approved_plan_contracts() -> tuple[Issue790ApprovedPlanContract, ...]:
+    """Return every exact plan-to-target binding embedded by reviewed code."""
+
+    return (
+        issue_790_approved_plan_contract(ISSUE_790_APPROVED_PLAN_DIGEST),
+        *_SUCCESS_SEQUENCE_CONTRACTS,
+    )
 
 __all__ = [
     "ISSUE_790_APPROVAL_REFERENCE",
@@ -32,4 +126,11 @@ __all__ = [
     "ISSUE_790_APPROVED_PLAN_DIGEST",
     "ISSUE_790_APPROVED_SCOPE",
     "ISSUE_790_APPROVED_TERMINAL_DIGEST",
+    "ISSUE_790_APPROVED_TERMINAL_OUTCOME",
+    "ISSUE_790_APPROVED_ROUTE_OPEN_REASON",
+    "ISSUE_790_SUCCESS_SEQUENCE_PLAN_DIGEST",
+    "Issue790ApprovedPlanContract",
+    "issue_790_approved_plan_contract",
+    "issue_790_approved_plan_contracts",
+    "issue_790_approved_plan_digests",
 ]

@@ -20,31 +20,49 @@ from tempfile import mkstemp
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane import cycle as cycle_module
 from newsroom.control_plane import graphiti_events as graphiti_events_module
+from newsroom.control_plane import graphiti_requests as graphiti_requests_module
 from newsroom.control_plane import issue_790_canary as issue_790_canary_module
 from newsroom.control_plane import issue_790_contract as issue_790_contract_module
 from newsroom.control_plane import model_usage as model_usage_module
 from newsroom.control_plane.graphiti_events import GraphitiProcessResult
+from newsroom.control_plane.graphiti_requests import (
+    GraphitiLeafClass,
+    load_checked_graphiti_call_shape_policy,
+)
 from newsroom.control_plane.issue_790_canary import (
     Issue790CanaryIntegrityError,
     Issue790CanaryRepository,
 )
 from newsroom.control_plane.issue_790_contract import (
     ISSUE_790_APPROVED_PLAN_DIGEST,
+    issue_790_approved_plan_contract,
 )
 from newsroom.control_plane.model_usage import (
     ModelUsageAdmissionError,
     ModelUsageIntegrityError,
     ModelUsageService,
 )
+from newsroom.graphiti_adapter import evaluation_packet as evaluation_packet_module
+from newsroom.graphiti_adapter.evaluation_packet import (
+    GRAPHITI_EXTRACTION_TIMEOUT_MS,
+    GRAPHITI_MAX_CLEANUP_TIMEOUT_MS,
+)
 
 ISSUE_790_PLAN_SCHEMA = "newsroom.issue-790.conservative-disposition-plan.v1"
+ISSUE_790_ITERATIVE_PLAN_SCHEMA = "newsroom.issue-790.iterative-canary-plan.v2"
 ISSUE_790_RECEIPT_SCHEMA = (
     "newsroom.issue-790.conservative-disposition-receipt.v1"
+)
+ISSUE_790_ITERATIVE_RECEIPT_SCHEMA = (
+    "newsroom.issue-790.iterative-disposition-receipt.v2"
 )
 ISSUE_790_OPERATIONAL_EVIDENCE_SCHEMA = (
     "newsroom.issue-790.operational-preconditions.v1"
 )
 ISSUE_790_CANARY_RECEIPT_SCHEMA = "newsroom.issue-790.bounded-canary-receipt.v1"
+ISSUE_790_ITERATIVE_CANARY_RECEIPT_SCHEMA = (
+    "newsroom.issue-790.iterative-bounded-canary-receipt.v2"
+)
 _AUTHORITY_SCHEMA = (
     "newsroom.model-usage.conservative-disposition-authority.v2"
 )
@@ -96,7 +114,15 @@ _RUNNING_CODE_MODULES: tuple[tuple[str, str], ...] = (
     ("newsroom.control_plane.issue_790_contract", "newsroom/control_plane/issue_790_contract.py"),
     ("newsroom.control_plane.model_usage", "newsroom/control_plane/model_usage.py"),
     ("newsroom.control_plane.graphiti_events", "newsroom/control_plane/graphiti_events.py"),
+    (
+        "newsroom.control_plane.graphiti_requests",
+        "newsroom/control_plane/graphiti_requests.py",
+    ),
     ("newsroom.control_plane.cycle", "newsroom/control_plane/cycle.py"),
+    (
+        "newsroom.graphiti_adapter.evaluation_packet",
+        "newsroom/graphiti_adapter/evaluation_packet.py",
+    ),
 )
 _RUNNING_CODE_PATHS: dict[str, str | None] = {
     "newsroom.control_plane.issue_790_disposition": __file__,
@@ -104,7 +130,9 @@ _RUNNING_CODE_PATHS: dict[str, str | None] = {
     "newsroom.control_plane.issue_790_contract": issue_790_contract_module.__file__,
     "newsroom.control_plane.model_usage": model_usage_module.__file__,
     "newsroom.control_plane.graphiti_events": graphiti_events_module.__file__,
+    "newsroom.control_plane.graphiti_requests": graphiti_requests_module.__file__,
     "newsroom.control_plane.cycle": cycle_module.__file__,
+    "newsroom.graphiti_adapter.evaluation_packet": evaluation_packet_module.__file__,
 }
 
 
@@ -152,6 +180,8 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
     """Validate the complete, content-addressed and deliberately narrow plan."""
 
     plan = dict(value)
+    schema_version = plan.get("schema_version")
+    iterative = schema_version == ISSUE_790_ITERATIVE_PLAN_SCHEMA
     expected_keys = {
         "schema_version",
         "canonical_digest",
@@ -163,9 +193,14 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
         "canary",
         "non_effects",
     }
+    if iterative:
+        expected_keys.add("sequence")
     if set(plan) != expected_keys:
         raise Issue790DispositionError("issue #790 plan fields differ")
-    if plan.get("schema_version") != ISSUE_790_PLAN_SCHEMA or plan.get("issue") != 790:
+    if schema_version not in {
+        ISSUE_790_PLAN_SCHEMA,
+        ISSUE_790_ITERATIVE_PLAN_SCHEMA,
+    } or plan.get("issue") != 790:
         raise Issue790DispositionError("issue #790 plan identity differs")
     supplied_digest = _text(plan, "canonical_digest")
     calculated_digest = digest_canonical(
@@ -185,7 +220,7 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
     _text(approval, "approved_by")
     _text(approval, "approval_reference")
     _instant(approval.get("approved_at"), field="approved_at")
-    if set(target) != {
+    target_fields = {
         "invocation_id",
         "terminal_digest",
         "allocation_digest",
@@ -198,7 +233,10 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
         "route_open_reason",
         "conservative_total_source",
         "expected_conservative_total_tokens",
-    }:
+    }
+    if iterative:
+        target_fields.add("terminal_outcome")
+    if set(target) != target_fields:
         raise Issue790DispositionError("issue #790 target fields differ")
     for field in (
         "invocation_id",
@@ -214,11 +252,14 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
         or target.get("workload_class") != "GRAPHITI_CHAT_PRIMARY"
         or target.get("terminal_usage_status") != "UNREPORTED"
         or target.get("terminal_failure_class") != "MISSING_PROVIDER_TELEMETRY"
-        or target.get("route_open_reason") != "SYSTEMIC_TRANSPORT"
+        or target.get("route_open_reason")
+        not in {"SYSTEMIC_TRANSPORT", "TIMEOUT"}
         or target.get("conservative_total_source")
         != "QUALIFIED_POLICY_MAX_TOTAL_TOKENS"
     ):
         raise Issue790DispositionError("issue #790 target contract differs")
+    if iterative and target.get("terminal_outcome") not in {"FAILED", "TIMEOUT"}:
+        raise Issue790DispositionError("issue #790 target outcome differs")
     expected_total = target.get("expected_conservative_total_tokens")
     if (
         isinstance(expected_total, bool)
@@ -241,6 +282,78 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
         "requires_exact_main_deployment": True,
     }:
         raise Issue790DispositionError("issue #790 canary boundary differs")
+    if iterative:
+        sequence = _record(plan.get("sequence"), field="sequence")
+        if set(sequence) != {
+            "sequence_ordinal",
+            "stop_condition",
+            "constraint_change",
+            "controller_timeout_ms",
+            "extraction_timeout_ms",
+            "cleanup_reserve_ms",
+            "timeout_increment_ms",
+            "call_shape_policy_digest",
+            "call_shape_policy_version",
+            "predecessor",
+        }:
+            raise Issue790DispositionError("issue #790 sequence fields differ")
+        predecessor = _record(sequence.get("predecessor"), field="predecessor")
+        if set(predecessor) != {
+            "plan_digest",
+            "consumption_digest",
+            "outcome_digest",
+            "event_id",
+            "ledger_seq",
+        }:
+            raise Issue790DispositionError("issue #790 predecessor fields differ")
+        for field in (
+            "call_shape_policy_digest",
+            "plan_digest",
+            "consumption_digest",
+            "outcome_digest",
+            "event_id",
+        ):
+            source = sequence if field == "call_shape_policy_digest" else predecessor
+            if not _text(source, field).startswith("sha256:"):
+                raise Issue790DispositionError(
+                    f"issue #790 sequence {field} differs"
+                )
+        ordinal = sequence.get("sequence_ordinal")
+        ledger_seq = predecessor.get("ledger_seq")
+        timings = tuple(
+            sequence.get(field)
+            for field in (
+                "controller_timeout_ms",
+                "extraction_timeout_ms",
+                "cleanup_reserve_ms",
+                "timeout_increment_ms",
+            )
+        )
+        if (
+            isinstance(ordinal, bool)
+            or not isinstance(ordinal, int)
+            or ordinal <= 0
+            or isinstance(ledger_seq, bool)
+            or not isinstance(ledger_seq, int)
+            or ledger_seq <= 0
+            or any(
+                isinstance(item, bool) or not isinstance(item, int) or item <= 0
+                for item in timings
+            )
+        ):
+            raise Issue790DispositionError("issue #790 sequence bounds differ")
+        controller_timeout, extraction_timeout, cleanup_reserve, timeout_increment = (
+            timings
+        )
+        if (
+            controller_timeout != extraction_timeout - cleanup_reserve
+            or timeout_increment != 10_000
+            or sequence.get("stop_condition")
+            != "FIRST_TRUTHFUL_PROVIDER_BACKED_SUCCESS"
+        ):
+            raise Issue790DispositionError("issue #790 sequence contract differs")
+        _text(sequence, "constraint_change")
+        _text(sequence, "call_shape_policy_version")
     if plan.get("non_effects") != list(_NON_EFFECTS):
         raise Issue790DispositionError("issue #790 non-effects differ")
     return plan
@@ -257,10 +370,70 @@ def load_issue_790_plan(path: Path) -> dict[str, object]:
     return _require_approved_plan(value)
 
 
+def _require_iterative_call_shape(plan: Mapping[str, object]) -> None:
+    raw_sequence = plan.get("sequence")
+    if raw_sequence is None:
+        return
+    sequence = _record(raw_sequence, field="sequence")
+    target = _record(plan.get("target"), field="target")
+    try:
+        policy = load_checked_graphiti_call_shape_policy()
+    except (OSError, TypeError, ValueError) as exc:
+        raise Issue790DispositionError(
+            "issue #790 checked call-shape policy is unavailable"
+        ) from exc
+    primary_routes = tuple(
+        route
+        for route in policy.qualified_routes
+        if route.leaf_class is GraphitiLeafClass.PRIMARY
+    )
+    expected_timeout_flag = (
+        f"CONTROLLER_TIMEOUT_MS={sequence['controller_timeout_ms']}"
+    )
+    if (
+        policy.canonical_digest != sequence.get("call_shape_policy_digest")
+        or policy.version != sequence.get("call_shape_policy_version")
+        or len(primary_routes) != 1
+    ):
+        raise Issue790DispositionError("issue #790 call-shape policy differs")
+    primary = primary_routes[0]
+    if (
+        primary.provider != target.get("provider")
+        or primary.route != target.get("route")
+        or primary.model != "composer-2.5"
+        or primary.max_total_tokens
+        != target.get("expected_conservative_total_tokens")
+        or expected_timeout_flag not in primary.command_flags
+        or GRAPHITI_EXTRACTION_TIMEOUT_MS != sequence.get("extraction_timeout_ms")
+        or GRAPHITI_MAX_CLEANUP_TIMEOUT_MS != sequence.get("cleanup_reserve_ms")
+    ):
+        raise Issue790DispositionError("issue #790 call-shape policy differs")
+
+
 def _require_approved_plan(value: Mapping[str, object]) -> dict[str, object]:
     plan = validate_issue_790_plan(value)
-    if plan["canonical_digest"] != ISSUE_790_APPROVED_PLAN_DIGEST:
+    try:
+        contract = issue_790_approved_plan_contract(
+            str(plan["canonical_digest"])
+        )
+    except KeyError as exc:
         raise Issue790DispositionError("issue #790 approved plan identity differs")
+    approval = _record(plan.get("approval"), field="approval")
+    target = _record(plan.get("target"), field="target")
+    if (
+        plan.get("schema_version") != contract.schema_version
+        or target.get("invocation_id") != contract.invocation_id
+        or target.get("terminal_digest") != contract.terminal_digest
+        or target.get("allocation_digest") != contract.allocation_digest
+        or target.get("terminal_outcome", "FAILED") != contract.terminal_outcome
+        or target.get("route_open_reason") != contract.route_open_reason
+        or approval.get("approved_by") != contract.approved_by
+        or approval.get("approval_reference") != contract.approval_reference
+        or approval.get("approved_at") != contract.approved_at
+        or approval.get("scope") != contract.scope
+    ):
+        raise Issue790DispositionError("issue #790 approved plan contract differs")
+    _require_iterative_call_shape(plan)
     return plan
 
 
@@ -454,7 +627,7 @@ def _require_retry_exclusions(
     repository: Issue790CanaryRepository,
     *,
     plan: Mapping[str, object],
-    disposition_digest: str,
+    predecessor: Mapping[str, object] | None,
 ) -> list[dict[str, object]]:
     retained = list(repository.retry_exclusions())
     expected_events = plan.get("retry_forbidden_events")
@@ -462,9 +635,7 @@ def _require_retry_exclusions(
         not isinstance(expected_events, list)
         or len(retained) != len(expected_events) == 2
         or any(
-            record.get("approved_plan_digest") != plan.get("canonical_digest")
-            or record.get("disposition_digest") != disposition_digest
-            or record.get("reason") != "ISSUE_790_RETRY_FORBIDDEN"
+            record.get("reason") != "ISSUE_790_RETRY_FORBIDDEN"
             or record.get("event_snapshot") != expected
             for record, expected in zip(retained, expected_events, strict=True)
         )
@@ -472,7 +643,100 @@ def _require_retry_exclusions(
         raise Issue790DispositionError(
             "issue #790 durable retry exclusions differ"
         )
+    bindings = {
+        (
+            str(record.get("approved_plan_digest")),
+            str(record.get("disposition_digest")),
+        )
+        for record in retained
+    }
+    if len(bindings) != 1:
+        raise Issue790DispositionError("issue #790 retry exclusion binding differs")
+    approved_plan_digest, disposition_digest = next(iter(bindings))
+    if predecessor is None:
+        expected_plan_digest = str(plan["canonical_digest"])
+        expected_disposition_digest = disposition_digest
+    else:
+        consumption = _record(
+            predecessor.get("consumption"),
+            field="predecessor consumption",
+        )
+        expected_plan_digest = str(consumption.get("approved_plan_digest"))
+        expected_disposition_digest = str(consumption.get("disposition_digest"))
+    if (
+        approved_plan_digest != expected_plan_digest
+        or disposition_digest != expected_disposition_digest
+    ):
+        raise Issue790DispositionError(
+            "issue #790 retry exclusions do not bind the predecessor"
+        )
+    try:
+        exclusion_contract = issue_790_approved_plan_contract(
+            approved_plan_digest
+        )
+    except KeyError as exc:
+        raise Issue790DispositionError(
+            "issue #790 retry exclusion plan differs"
+        ) from exc
+    connection = sqlite3.connect(
+        f"{Path(repository.path).absolute().as_uri()}?mode=ro",
+        uri=True,
+    )
+    try:
+        binding = connection.execute(
+            "SELECT invocation_id FROM model_usage_conservative_dispositions "
+            "WHERE approved_plan_digest=? AND disposition_digest=?",
+            (approved_plan_digest, disposition_digest),
+        ).fetchone()
+    finally:
+        connection.close()
+    if binding is None or str(binding[0]) != exclusion_contract.invocation_id:
+        raise Issue790DispositionError("issue #790 retry exclusion authority differs")
     return retained
+
+
+def _require_sequence_predecessor(
+    repository: Issue790CanaryRepository,
+    *,
+    plan: Mapping[str, object],
+) -> dict[str, object] | None:
+    raw_sequence = plan.get("sequence")
+    if raw_sequence is None:
+        return None
+    sequence = _record(raw_sequence, field="sequence")
+    predecessor = _record(sequence.get("predecessor"), field="predecessor")
+    plan_digest = str(predecessor["plan_digest"])
+    try:
+        issue_790_approved_plan_contract(plan_digest)
+    except KeyError as exc:
+        raise Issue790DispositionError(
+            "issue #790 predecessor plan differs"
+        ) from exc
+    consumption = repository.existing_consumption(
+        approved_plan_digest=plan_digest
+    )
+    if (
+        consumption is None
+        or consumption.get("consumption_digest")
+        != predecessor.get("consumption_digest")
+        or consumption.get("approved_plan_digest") != plan_digest
+        or consumption.get("event_id") != predecessor.get("event_id")
+        or consumption.get("ledger_seq") != predecessor.get("ledger_seq")
+    ):
+        raise Issue790DispositionError("issue #790 predecessor consumption differs")
+    outcome = repository.existing_outcome(
+        consumption_digest=str(consumption["consumption_digest"])
+    )
+    if (
+        outcome is None
+        or outcome.get("outcome_digest") != predecessor.get("outcome_digest")
+        or outcome.get("approved_plan_digest") != plan_digest
+        or outcome.get("event_id") != predecessor.get("event_id")
+        or outcome.get("ledger_seq") != predecessor.get("ledger_seq")
+        or outcome.get("retry_authorised") is not False
+    ):
+        raise Issue790DispositionError("issue #790 predecessor outcome differs")
+    return {"consumption": consumption, "outcome": outcome}
 
 
 def _running_code_evidence(
@@ -941,6 +1205,10 @@ def _execute_issue_790_plan(
     _assert_exact_target(store, retained_plan)
     service = ModelUsageService(str(store))
     canary_repository = Issue790CanaryRepository(str(store))
+    predecessor = _require_sequence_predecessor(
+        canary_repository,
+        plan=retained_plan,
+    )
     authority_digest = _authority_digest(retained_plan)
     try:
         initial_route_state = service.route_state(str(target["route"]))
@@ -985,14 +1253,24 @@ def _execute_issue_790_plan(
             raise Issue790DispositionError(
                 "issue #790 retained conservative total differs"
             )
-        retry_exclusions = canary_repository.retain_retry_exclusions(
-            approved_plan_digest=str(retained_plan["canonical_digest"]),
-            disposition_digest=str(disposition["disposition_digest"]),
-            events=tuple(
-                _record(item, field="retry-forbidden event")
-                for item in retained_plan["retry_forbidden_events"]  # type: ignore[union-attr]
-            ),
-            excluded_at=observed_at,
+        if not canary_repository.retry_exclusions():
+            if predecessor is not None:
+                raise Issue790DispositionError(
+                    "issue #790 predecessor retry exclusions are absent"
+                )
+            canary_repository.retain_retry_exclusions(
+                approved_plan_digest=str(retained_plan["canonical_digest"]),
+                disposition_digest=str(disposition["disposition_digest"]),
+                events=tuple(
+                    _record(item, field="retry-forbidden event")
+                    for item in retained_plan["retry_forbidden_events"]  # type: ignore[union-attr]
+                ),
+                excluded_at=observed_at,
+            )
+        retry_exclusions = _require_retry_exclusions(
+            canary_repository,
+            plan=retained_plan,
+            predecessor=predecessor,
         )
         route_state_before_release = service.route_state(str(target["route"]))
         expected_closed_reason = (
@@ -1043,7 +1321,11 @@ def _execute_issue_790_plan(
 
     operation_source = store if source_store is None else source_store
     receipt_without_digest: dict[str, object] = {
-        "schema_version": ISSUE_790_RECEIPT_SCHEMA,
+        "schema_version": (
+            ISSUE_790_RECEIPT_SCHEMA
+            if predecessor is None
+            else ISSUE_790_ITERATIVE_RECEIPT_SCHEMA
+        ),
         "mode": mode,
         "plan_digest": retained_plan["canonical_digest"],
         "source_store": str(operation_source.absolute()),
@@ -1074,6 +1356,8 @@ def _execute_issue_790_plan(
         "public_dispatch_performed": False,
         "non_effects": list(_NON_EFFECTS),
     }
+    if predecessor is not None:
+        receipt_without_digest["predecessor"] = predecessor
     receipt_digest = digest_canonical(receipt_without_digest)
     return {**receipt_without_digest, "receipt_digest": receipt_digest}
 
@@ -1266,6 +1550,10 @@ def _issue_790_canary_usage_evidence(
     truthful_nonzero_usage_count = 0
     unresolved_terminal_count = 0
     unterminated_leaf_count = 0
+    primary_chat_leaf_count = 0
+    qualified_primary_identity_count = 0
+    truthful_primary_usage_count = 0
+    fallback_chat_leaf_count = 0
     for invocation_id, allocation_json, terminal_json in rows:
         allocation = retained_json(allocation_json, field="canary allocation")
         terminal = (
@@ -1283,6 +1571,20 @@ def _issue_790_canary_usage_evidence(
             components.get("total_tokens") if isinstance(components, dict) else None
         )
         usage_status = None if terminal is None else terminal.get("usage_status")
+        workload_class = allocation.get("workload_class")
+        primary_chat = workload_class == "GRAPHITI_CHAT_PRIMARY"
+        qualified_primary_identity = bool(
+            primary_chat
+            and allocation.get("provider") == "cursor-agent-cli"
+            and allocation.get("route") == "GRAPHITI_CHAT_PRIMARY"
+            and allocation.get("model") == "composer-2.5"
+        )
+        if primary_chat:
+            primary_chat_leaf_count += 1
+        if qualified_primary_identity:
+            qualified_primary_identity_count += 1
+        if workload_class == "GRAPHITI_CHAT_FALLBACK":
+            fallback_chat_leaf_count += 1
         if (
             provider_backed
             and usage_status in {"REPORTED", "ESTIMATED"}
@@ -1291,6 +1593,8 @@ def _issue_790_canary_usage_evidence(
             and total_tokens > 0
         ):
             truthful_nonzero_usage_count += 1
+            if qualified_primary_identity:
+                truthful_primary_usage_count += 1
         if usage_status in {"UNREPORTED", "AMBIGUOUS", "INVALID"}:
             unresolved_terminal_count += 1
         leaves.append(
@@ -1316,6 +1620,10 @@ def _issue_790_canary_usage_evidence(
         "leaf_count": len(leaves),
         "provider_backed_terminal_count": provider_backed_terminal_count,
         "truthful_nonzero_usage_count": truthful_nonzero_usage_count,
+        "primary_chat_leaf_count": primary_chat_leaf_count,
+        "qualified_primary_identity_count": qualified_primary_identity_count,
+        "truthful_primary_usage_count": truthful_primary_usage_count,
+        "fallback_chat_leaf_count": fallback_chat_leaf_count,
         "unresolved_terminal_count": unresolved_terminal_count,
         "unterminated_leaf_count": unterminated_leaf_count,
     }
@@ -1409,10 +1717,14 @@ def run_issue_790_canary(
         canary_repository = Issue790CanaryRepository.open_existing(str(store))
     except Issue790CanaryIntegrityError as exc:
         raise Issue790DispositionError(str(exc)) from exc
+    predecessor = _require_sequence_predecessor(
+        canary_repository,
+        plan=retained_plan,
+    )
     retry_exclusions = _require_retry_exclusions(
         canary_repository,
         plan=retained_plan,
-        disposition_digest=disposition_digest,
+        predecessor=predecessor,
     )
     event_before = _event_snapshot(
         store,
@@ -1581,6 +1893,12 @@ def run_issue_790_canary(
         and event_after_record.get("state") == "TERMINAL"
         and usage_evidence["provider_backed_terminal_count"] >= 1
         and usage_evidence["truthful_nonzero_usage_count"] >= 1
+        and usage_evidence["primary_chat_leaf_count"] >= 1
+        and usage_evidence["qualified_primary_identity_count"]
+        == usage_evidence["primary_chat_leaf_count"]
+        and usage_evidence["truthful_primary_usage_count"]
+        == usage_evidence["primary_chat_leaf_count"]
+        and usage_evidence["fallback_chat_leaf_count"] == 0
         and usage_evidence["unresolved_terminal_count"] == 0
         and usage_evidence["unterminated_leaf_count"] == 0
         and route_after.get("state") == "CLOSED"
@@ -1590,7 +1908,11 @@ def run_issue_790_canary(
         and store_quick_check == "ok"
     )
     receipt_without_digest: dict[str, object] = {
-        "schema_version": ISSUE_790_CANARY_RECEIPT_SCHEMA,
+        "schema_version": (
+            ISSUE_790_CANARY_RECEIPT_SCHEMA
+            if predecessor is None
+            else ISSUE_790_ITERATIVE_CANARY_RECEIPT_SCHEMA
+        ),
         "plan_digest": retained_plan["canonical_digest"],
         "operational_evidence": operational_evidence,
         "source_store": str(store),
@@ -1631,6 +1953,8 @@ def run_issue_790_canary(
         "persistent_worker_loaded": False,
         "non_effects": list(_NON_EFFECTS),
     }
+    if predecessor is not None:
+        receipt_without_digest["predecessor"] = predecessor
     return {
         **receipt_without_digest,
         "receipt_digest": digest_canonical(receipt_without_digest),
@@ -1669,7 +1993,9 @@ def write_issue_790_receipt(path: Path, receipt: Mapping[str, object]) -> None:
 __all__ = [
     "ISSUE_790_PLAN_SCHEMA",
     "ISSUE_790_RECEIPT_SCHEMA",
+    "ISSUE_790_ITERATIVE_RECEIPT_SCHEMA",
     "ISSUE_790_CANARY_RECEIPT_SCHEMA",
+    "ISSUE_790_ITERATIVE_CANARY_RECEIPT_SCHEMA",
     "ISSUE_790_APPROVED_PLAN_DIGEST",
     "Issue790DispositionError",
     "apply_issue_790_plan",
