@@ -3279,10 +3279,9 @@ def test_cursor_cli_keychain_replacement_refuses_before_dispatch(
     monkeypatch.setattr(cursor_transport, "_run_bounded_process", bounded)
     local_probe = cursor_transport._probe_cursor_credentials_locally
 
-    def replace_after_probe(**values: object) -> object:
+    def change_keychain_after_probe(**values: object) -> object:
         proof = local_probe(**values)
         source = Path(cursor_transport.QUALIFIED_CURSOR_LOGIN_KEYCHAIN)
-        source.unlink()
         source.write_bytes(b"replacement keychain")
         source.chmod(0o600)
         return proof
@@ -3290,7 +3289,7 @@ def test_cursor_cli_keychain_replacement_refuses_before_dispatch(
     monkeypatch.setattr(
         cursor_transport,
         "_probe_cursor_credentials_locally",
-        replace_after_probe,
+        change_keychain_after_probe,
     )
 
     with pytest.raises(
