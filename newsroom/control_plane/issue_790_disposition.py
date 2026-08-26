@@ -19,6 +19,7 @@ from tempfile import mkstemp
 
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane import cycle as cycle_module
+from newsroom.control_plane import graphiti as graphiti_module
 from newsroom.control_plane import graphiti_events as graphiti_events_module
 from newsroom.control_plane import graphiti_requests as graphiti_requests_module
 from newsroom.control_plane import issue_790_canary as issue_790_canary_module
@@ -42,7 +43,9 @@ from newsroom.control_plane.model_usage import (
     ModelUsageIntegrityError,
     ModelUsageService,
 )
+from newsroom.graphiti_adapter import cli_client as cli_client_module
 from newsroom.graphiti_adapter import evaluation_packet as evaluation_packet_module
+from newsroom.graphiti_adapter import real as real_graphiti_module
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_EXTRACTION_TIMEOUT_MS,
     GRAPHITI_MAX_CLEANUP_TIMEOUT_MS,
@@ -124,6 +127,7 @@ _RUNNING_CODE_MODULES: tuple[tuple[str, str], ...] = (
     ("newsroom.control_plane.issue_790_contract", "newsroom/control_plane/issue_790_contract.py"),
     ("newsroom.control_plane.model_usage", "newsroom/control_plane/model_usage.py"),
     ("newsroom.control_plane.graphiti_events", "newsroom/control_plane/graphiti_events.py"),
+    ("newsroom.control_plane.graphiti", "newsroom/control_plane/graphiti.py"),
     (
         "newsroom.control_plane.graphiti_requests",
         "newsroom/control_plane/graphiti_requests.py",
@@ -133,6 +137,14 @@ _RUNNING_CODE_MODULES: tuple[tuple[str, str], ...] = (
         "newsroom.graphiti_adapter.evaluation_packet",
         "newsroom/graphiti_adapter/evaluation_packet.py",
     ),
+    (
+        "newsroom.graphiti_adapter.cli_client",
+        "newsroom/graphiti_adapter/cli_client.py",
+    ),
+    (
+        "newsroom.graphiti_adapter.real",
+        "newsroom/graphiti_adapter/real.py",
+    ),
 )
 _RUNNING_CODE_PATHS: dict[str, str | None] = {
     "newsroom.control_plane.issue_790_disposition": __file__,
@@ -140,9 +152,12 @@ _RUNNING_CODE_PATHS: dict[str, str | None] = {
     "newsroom.control_plane.issue_790_contract": issue_790_contract_module.__file__,
     "newsroom.control_plane.model_usage": model_usage_module.__file__,
     "newsroom.control_plane.graphiti_events": graphiti_events_module.__file__,
+    "newsroom.control_plane.graphiti": graphiti_module.__file__,
     "newsroom.control_plane.graphiti_requests": graphiti_requests_module.__file__,
     "newsroom.control_plane.cycle": cycle_module.__file__,
     "newsroom.graphiti_adapter.evaluation_packet": evaluation_packet_module.__file__,
+    "newsroom.graphiti_adapter.cli_client": cli_client_module.__file__,
+    "newsroom.graphiti_adapter.real": real_graphiti_module.__file__,
 }
 
 
