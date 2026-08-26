@@ -1295,6 +1295,8 @@ class Issue790CanaryRepository:
         ledger_seq: int,
         owner_id: str,
         completed_at: datetime,
+        result_class: str | None = None,
+        causal_report: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         """Seal an interrupted authority without starting another provider call."""
 
@@ -1335,6 +1337,10 @@ class Issue790CanaryRepository:
             }
         )
         approved_contract = issue_790_approved_plan_contract(str(row[2]))
+        if approved_contract.sequence_ordinal > 0 and result_class is None:
+            raise Issue790CanaryIntegrityError(
+                "iterative zero-I/O finalisation classification is absent"
+            )
         return self.complete(
             consumption_digest=consumption_digest,
             event_id=event_id,
@@ -1343,11 +1349,8 @@ class Issue790CanaryRepository:
             process_result=process_result,
             completed_at=completed_at,
             completion_mode="ZERO_IO_RECOVERY",
-            result_class=(
-                "UNCLASSIFIED_NON_SUCCESS"
-                if approved_contract.sequence_ordinal > 0
-                else None
-            ),
+            result_class=result_class,
+            causal_report=causal_report,
         )
 
 

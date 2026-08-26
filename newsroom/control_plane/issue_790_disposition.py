@@ -1106,9 +1106,19 @@ def _require_sequence_predecessor(
         raise Issue790DispositionError(
             "issue #790 predecessor already reached truthful success"
         )
+    process_result = outcome.get("process_result")
+    if (
+        outcome.get("state_before_seal") == "TERMINAL"
+        and outcome.get("attempt_count") == 1
+        and outcome.get("provider_dispatched") is True
+        and isinstance(process_result, dict)
+        and process_result.get("state") == "TERMINAL"
+    ):
+        raise Issue790DispositionError(
+            "issue #790 predecessor retained a terminal success boundary"
+        )
     ordinal = int(sequence["sequence_ordinal"])
     if ordinal == 1:
-        process_result = outcome.get("process_result")
         if (
             outcome.get("schema_version")
             != "newsroom.issue-790.canary-outcome.v2"
@@ -2179,6 +2189,55 @@ def _issue_790_controller_timeout_report(
     }
 
 
+def _issue_790_iterative_result(
+    *,
+    store: Path,
+    plan: Mapping[str, object],
+    event_id: str,
+    process_result: Mapping[str, object] | None,
+    exception_present: bool,
+) -> dict[str, object]:
+    """Classify foreground and zero-I/O recovery from the same durable facts."""
+
+    raw_sequence = plan.get("sequence")
+    if raw_sequence is None:
+        return {}
+    usage = _issue_790_canary_usage_evidence(store, event_id=event_id)
+    truthful_success = bool(
+        not exception_present
+        and process_result is not None
+        and process_result.get("state") == "TERMINAL"
+        and process_result.get("attempt_count") == 1
+        and usage["primary_chat_leaf_count"] >= 1
+        and usage["qualified_primary_identity_count"]
+        == usage["primary_chat_leaf_count"]
+        and usage["truthful_primary_usage_count"]
+        == usage["primary_chat_leaf_count"]
+        and usage["fallback_chat_leaf_count"] == 0
+        and usage["unresolved_terminal_count"] == 0
+        and usage["unterminated_leaf_count"] == 0
+    )
+    if truthful_success:
+        return {
+            "result_class": "TRUTHFUL_PROVIDER_SUCCESS",
+            "causal_report": None,
+        }
+    sequence = _record(raw_sequence, field="sequence")
+    causal_report = _issue_790_controller_timeout_report(
+        store,
+        event_id=event_id,
+        configured_timeout_ms=int(sequence["controller_timeout_ms"]),
+    )
+    return {
+        "result_class": (
+            "CONTROLLER_TIMEOUT_NON_SUCCESS"
+            if causal_report is not None
+            else "UNCLASSIFIED_NON_SUCCESS"
+        ),
+        "causal_report": causal_report,
+    }
+
+
 def _consume_issue_790_event(
     *,
     proving_store: Path,
@@ -2370,12 +2429,31 @@ def run_issue_790_canary(
         if prior_consumption is not None:
             consumption = prior_consumption
             owner_id = str(consumption["owner_id"])
+            recovered_attempt_count = int(event_before_record["attempt_count"])
+            process_result = (
+                None
+                if recovered_attempt_count == 0
+                else {
+                    "event_id": event_id,
+                    "ledger_seq": ledger_seq,
+                    "state": event_before_record["state"],
+                    "attempt_count": recovered_attempt_count,
+                }
+            )
+            completion_fields = _issue_790_iterative_result(
+                store=store,
+                plan=retained_plan,
+                event_id=event_id,
+                process_result=process_result,
+                exception_present=False,
+            )
             outcome = canary_repository.finalise_without_dispatch(
                 consumption_digest=str(consumption["consumption_digest"]),
                 event_id=event_id,
                 ledger_seq=ledger_seq,
                 owner_id=owner_id,
                 completed_at=completed_at,
+                **completion_fields,
             )
             retained_result = outcome.get("process_result")
             process_result = (
@@ -2416,46 +2494,13 @@ def run_issue_790_canary(
                     ),
                 }
             completed_at = datetime.now(tz=UTC)
-            usage_before_seal = _issue_790_canary_usage_evidence(
-                store,
+            completion_fields = _issue_790_iterative_result(
+                store=store,
+                plan=retained_plan,
                 event_id=event_id,
+                process_result=process_result,
+                exception_present=exception is not None,
             )
-            truthful_provider_success = bool(
-                exception is None
-                and process_result is not None
-                and process_result.get("state") == "TERMINAL"
-                and process_result.get("attempt_count") == 1
-                and usage_before_seal["primary_chat_leaf_count"] >= 1
-                and usage_before_seal["qualified_primary_identity_count"]
-                == usage_before_seal["primary_chat_leaf_count"]
-                and usage_before_seal["truthful_primary_usage_count"]
-                == usage_before_seal["primary_chat_leaf_count"]
-                and usage_before_seal["fallback_chat_leaf_count"] == 0
-                and usage_before_seal["unresolved_terminal_count"] == 0
-                and usage_before_seal["unterminated_leaf_count"] == 0
-            )
-            completion_fields: dict[str, object] = {}
-            raw_sequence = retained_plan.get("sequence")
-            if raw_sequence is not None:
-                causal_report = None
-                if truthful_provider_success:
-                    result_class = "TRUTHFUL_PROVIDER_SUCCESS"
-                else:
-                    sequence = _record(raw_sequence, field="sequence")
-                    causal_report = _issue_790_controller_timeout_report(
-                        store,
-                        event_id=event_id,
-                        configured_timeout_ms=int(sequence["controller_timeout_ms"]),
-                    )
-                    result_class = (
-                        "CONTROLLER_TIMEOUT_NON_SUCCESS"
-                        if causal_report is not None
-                        else "UNCLASSIFIED_NON_SUCCESS"
-                    )
-                completion_fields = {
-                    "result_class": result_class,
-                    "causal_report": causal_report,
-                }
             outcome = canary_repository.complete(
                 consumption_digest=str(consumption["consumption_digest"]),
                 event_id=event_id,
