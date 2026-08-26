@@ -1,7 +1,7 @@
 # Control Plane token-productivity closeout (#732)
 
 - **Role:** Dated research closeout
-- **Status:** Deterministic exact-main closeout; live CONT calibration pending
+- **Status:** Deterministic exact-main closeout; live known-ready packet passed on `3e770a7`
 - **Owner:** Hermes Control Plane
 - **Canonical language:** English
 - **Issue:** #732
@@ -146,8 +146,8 @@ in `newsroom/tests/test_token_productivity_closeout.py`.
 
 Do not read the third column as a universal tokens-per-article pass number.
 The hard pass on this atom is exact accounting, no waste loops, and
-retained before/after evidence. Live context reduction remains an
-evidence gap.
+retained before/after evidence. Live known-ready context reduction is
+recorded separately below; it is not this deterministic atom.
 
 ## After CSV contract
 
@@ -175,19 +175,20 @@ is the `cont_reported_tokens` / `graphiti_reported_tokens` pair.
 - #730 dry selection against the live proving pool had 0 `WRITE_READY`
   candidates (287 `HOLD`, identical missing-governed-package reasons).
 - Owner-authorised EVALUATION known-ready calibration on 2026-08-26 seeded
-  three `#727` `WRITE_READY` packages in isolated stores and dispatched one
-  hermetic Grok 1.0.10 primary (`grok-4.6`, reasoning `low`). Public effects
-  were 0. The copy failed `ROLE_SPECIFIC_EXACT_ONCE_STRUCTURE` /
-  `DUPLICATE_OR_MISPLACED_GOVERNED_CLAIM`; the no-useful-output circuit then
-  stopped the remaining two candidates. Reported usage on that leaf:
-  `input_tokens=11464`, `output_tokens=351`, `reasoning_tokens=157`,
-  `total_tokens=11815`, `context_tokens` absent. The productive packet did
-  not pass. #732 stays open.
+  three `#727` `WRITE_READY` packages in isolated stores. Early leaves
+  failed exact role-structure or p50 context. The exact-head packet on
+  `3e770a7dc7c46f92492524136e09de20f03fe4d8` (`grok-4.6`, reasoning `low`,
+  Grok 1.0.10, prompt v3, hermetic tool denylist) passed:
+  3 `WRITE_READY`, 3 primary dispatches, 3 accepted unpublished payloads,
+  p50 context 2409, max context 2411, reduction 35070/37479, 0 HOLD/REJECT
+  tokens, 0 public effects. Evidence digest
+  `sha256:157b37d03dfa67e9b430deb3385904e8e50f77e173363db315e7a45d78da9275`.
+  Isolated stores under `/tmp/newsroom-732-calibration-tools/`. Packet JSON:
+  [`2026-08-26-issue-732-known-ready-packet.json`](2026-08-26-issue-732-known-ready-packet.json).
 - The after CSV is a ledger export of a deterministic fixture proving the
   query contract, not a live EVALUATION host scrape.
-- Accepted calibration payloads, p50 context `<= 10,000`, 70% reduction
-  from 37,479, and maximum calibration context `<= 15,000` remain unproved
-  here. 26,693,877 stays a Grok-writer lower bound.
+- 26,693,877 stays a Grok-writer lower bound. This document still grants
+  no live provider authority.
 
 ## Non-effects
 

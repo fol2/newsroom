@@ -1,7 +1,7 @@
 # Hermetic CONT writer route
 
 - **Role:** Operational implementation record
-- **Status:** EVALUATION; productive calibration pending
+- **Status:** EVALUATION; productive known-ready packet passed on `3e770a7`
 - **Owner:** Hermes Control Plane
 - **Canonical language:** English
 - **Issue:** #730
@@ -110,10 +110,15 @@ formed 287 candidates, all `HOLD`, and zero `WRITE_READY` candidates. It made
 zero provider calls and zero public effects.
 
 A later owner-authorised EVALUATION known-ready run seeded three `#727`
-`WRITE_READY` packages and dispatched one hermetic Grok 1.0.10 primary. The
-copy failed the exact role-structure validator; the no-useful-output circuit
-stopped later candidates. No productive packet or invocation-efficiency
-policy has been minted. Continuous CONT writing remains held.
+`WRITE_READY` packages. Early leaves failed exact role structure or p50
+context because Grok 1.0.10 still advertised the stock toolset when
+`--tools` was empty. After `--disallowed-tools` landed on
+`3e770a7dc7c46f92492524136e09de20f03fe4d8`, the same three known-ready
+packages produced three accepted unpublished payloads, p50 context 2409,
+max context 2411, 3/3 primary acceptance and 0 public effects. The
+productive packet passed. Continuous CONT writing remains held; this
+record does not register a live invocation-efficiency policy or activate
+the LaunchAgent.
 
 ## Non-effects
 
