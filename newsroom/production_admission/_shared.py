@@ -192,3 +192,40 @@ class AuthenticationKey:
             raise ProductionAdmissionError("production trust-root key id differs")
         if not isinstance(self.secret, bytes) or len(self.secret) < 32:
             raise ProductionAdmissionError("authentication key is too short")
+
+    def require_production_trust_root(
+        self,
+        expected_class: KeyClass,
+        *,
+        expected_key_id: str | None = None,
+    ) -> None:
+        """Enforce the complete production trust-root invariant in one place."""
+
+        if (
+            not isinstance(expected_class, KeyClass)
+            or self.key_class is not expected_class
+            or self.provenance is not KeyProvenance.PRODUCTION_TRUST_ROOT
+            or self.key_id not in PRODUCTION_KEY_IDS[expected_class]
+            or (expected_key_id is not None and self.key_id != expected_key_id)
+        ):
+            raise ProductionAdmissionError("production trust-root key differs")
+
+    @property
+    def fingerprint(self) -> str:
+        """Return a domain-separated public commitment to this exact key."""
+
+        fingerprint_domain = canonical_json_bytes(
+            {
+                "schema_version": "newsroom.authentication-key-fingerprint.v1",
+                "key_id": self.key_id,
+                "key_class": self.key_class.value,
+            }
+        )
+        return (
+            "sha256:"
+            + hmac.new(
+                self.secret,
+                fingerprint_domain,
+                hashlib.sha256,
+            ).hexdigest()
+        )

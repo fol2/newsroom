@@ -11,7 +11,6 @@ from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from ._shared import (
     AuthenticationKey,
     KeyClass,
-    KeyProvenance,
     ProductionAdmissionError,
     _boolean,
     _canonical_document,
@@ -261,11 +260,7 @@ class GateAttestation:
         sealed_at: str,
         signing_key: AuthenticationKey,
     ) -> GateAttestation:
-        if (
-            signing_key.key_class is not KeyClass.EVIDENCE_AUTHORITY
-            or signing_key.provenance is not KeyProvenance.PRODUCTION_TRUST_ROOT
-        ):
-            raise ProductionAdmissionError("gate attestation key class differs")
+        signing_key.require_production_trust_root(KeyClass.EVIDENCE_AUTHORITY)
         if not isinstance(gate_id, ProductionGateId):
             raise ProductionAdmissionError("gate attestation gate differs")
         if not isinstance(status, ReadinessStatus):
@@ -393,14 +388,12 @@ class GateAttestation:
         if reconstructed != self:
             raise ProductionAdmissionError("gate attestation is forged")
         key = trusted_keys.get(self.signing_key_id)
-        if (
-            key is None
-            or key.key_id != self.signing_key_id
-            or key.key_class is not KeyClass.EVIDENCE_AUTHORITY
-            or key.provenance is not KeyProvenance.PRODUCTION_TRUST_ROOT
-            or self.signing_key_class is not KeyClass.EVIDENCE_AUTHORITY
-        ):
+        if key is None or self.signing_key_class is not KeyClass.EVIDENCE_AUTHORITY:
             raise ProductionAdmissionError("gate attestation key is untrusted")
+        key.require_production_trust_root(
+            KeyClass.EVIDENCE_AUTHORITY,
+            expected_key_id=self.signing_key_id,
+        )
         _verify_seal(_canonical_document(self.canonical_bytes), secret=key.secret)
 
 

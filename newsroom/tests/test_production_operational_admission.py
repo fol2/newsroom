@@ -392,7 +392,7 @@ def _owner_issue_record(
                 + owner_issue_binding_marker(
                     report=report,
                     evidence_manifest=manifest,
-                    production_signing_key_id=_PRODUCTION_KEY.key_id,
+                    production_signing_key=_PRODUCTION_KEY,
                 )
             ),
         }
@@ -415,7 +415,7 @@ def _owner_instruction(
         captured_at="2026-08-26T10:29:00Z",
         report=report,
         evidence_manifest=manifest,
-        production_signing_key_id=_PRODUCTION_KEY.key_id,
+        production_signing_key=_PRODUCTION_KEY,
         owner_signing_key=_OWNER_KEY,
     )
     return OwnerAdmissionInstruction.build(
@@ -423,7 +423,7 @@ def _owner_instruction(
         issued_at=issued_at,
         report=report,
         evidence_manifest=manifest,
-        production_signing_key_id=_PRODUCTION_KEY.key_id,
+        production_signing_key=_PRODUCTION_KEY,
         owner_signing_key=_OWNER_KEY,
     )
 
@@ -674,6 +674,48 @@ def test_canary_restore_and_rollback_must_bind_the_same_bytes_and_store() -> Non
     assert gate.blockers == ("CANARY_ROLLBACK_RESTORE_IDENTITY_DRIFT",)
 
 
+def test_backup_restore_and_rollback_must_bind_the_same_store() -> None:
+    manifest, _ = _complete_evidence()
+    drifted_store = digest_canonical({"store": "backup-only-drift"})
+    artifacts = tuple(
+        (
+            BoundArtifact.build(
+                role=item.role,
+                artifact_digest=item.artifact_digest,
+                freeze=item.freeze,
+                operational_manifest_digest=item.operational_manifest_digest,
+                identity_set_digest=item.identity_set_digest,
+                deployment_bytes_digest=item.deployment_bytes_digest,
+                store_identity_digest=drifted_store,
+                stop_conditions_digest=item.stop_conditions_digest,
+                reconciliation_procedure_digest=(item.reconciliation_procedure_digest),
+                outcome=item.outcome,
+            )
+            if item.role is BoundArtifactRole.BACKUP
+            else item
+        )
+        for item in manifest.bound_artifacts
+    )
+    gate_id = ProductionGateId.STORAGE_BACKUP_RESTORE_ROLLBACK_CURRENT
+    updated_facts = dict(manifest.gate_evidence[gate_id].facts)
+    updated_facts["store_identity_digest"] = drifted_store
+    drifted = _rebuild_manifest(
+        manifest,
+        bound_artifacts=artifacts,
+        gate_fact_overrides={gate_id: updated_facts},
+    )
+
+    report = inspect_readiness(
+        freeze=_FREEZE,
+        evidence_manifest=drifted,
+        attestations=_resign(drifted),
+        trusted_evidence_keys={_EVIDENCE_KEY.key_id: _EVIDENCE_KEY},
+    )
+
+    gate = next(result for result in report.gates if result.gate_id is gate_id)
+    assert gate.blockers == ("BACKUP_RESTORE_ROLLBACK_STORE_IDENTITY_DRIFT",)
+
+
 def test_provider_use_during_readiness_inspection_is_never_a_pass() -> None:
     manifest, _ = _complete_evidence()
     effected = _rebuild_manifest(manifest, readiness_provider_calls=1)
@@ -811,13 +853,13 @@ def test_blocked_gate_cannot_be_hidden_by_a_signed_attestation() -> None:
 
     result = next(item for item in report.gates if item.gate_id is blocked_gate)
     assert result.blockers == ("TERMINAL_COVERAGE_INCOMPLETE",)
-    with pytest.raises(ProductionAdmissionError, match="owner issue evidence"):
+    with pytest.raises(ProductionAdmissionError, match="owner evidence binding"):
         OwnerIssueSnapshot.build(
             owner_issue=_owner_issue_record(),
             captured_at="2026-08-26T10:29:00Z",
             report=report,
             evidence_manifest=manifest,
-            production_signing_key_id=_PRODUCTION_KEY.key_id,
+            production_signing_key=_PRODUCTION_KEY,
             owner_signing_key=_OWNER_KEY,
         )
 
@@ -845,13 +887,13 @@ def test_implementation_issue_is_not_an_owner_production_admission_instruction()
                 body=owner_issue_binding_marker(
                     report=report,
                     evidence_manifest=manifest,
-                    production_signing_key_id=_PRODUCTION_KEY.key_id,
+                    production_signing_key=_PRODUCTION_KEY,
                 ),
             ),
             captured_at="2026-08-26T10:29:00Z",
             report=report,
             evidence_manifest=manifest,
-            production_signing_key_id=_PRODUCTION_KEY.key_id,
+            production_signing_key=_PRODUCTION_KEY,
             owner_signing_key=_OWNER_KEY,
         )
 
@@ -875,7 +917,7 @@ def test_owner_issue_must_retain_the_exact_machine_readable_binding() -> None:
             captured_at="2026-08-26T10:29:00Z",
             report=report,
             evidence_manifest=manifest,
-            production_signing_key_id=_PRODUCTION_KEY.key_id,
+            production_signing_key=_PRODUCTION_KEY,
             owner_signing_key=_OWNER_KEY,
         )
 
@@ -912,7 +954,7 @@ def test_tampered_owner_instruction_and_unlisted_production_key_are_refused() ->
         provenance=KeyProvenance.TEST_FIXTURE,
         secret=b"x" * 32,
     )
-    with pytest.raises(ProductionAdmissionError, match="signing key"):
+    with pytest.raises(ProductionAdmissionError, match="trust-root key"):
         mint_production_operational_admission(
             freeze=_FREEZE,
             report=report,
@@ -931,7 +973,7 @@ def test_tampered_owner_instruction_and_unlisted_production_key_are_refused() ->
         provenance=KeyProvenance.TEST_FIXTURE,
         secret=_PRODUCTION_KEY.secret,
     )
-    with pytest.raises(ProductionAdmissionError, match="provenance"):
+    with pytest.raises(ProductionAdmissionError, match="trust-root key"):
         mint_production_operational_admission(
             freeze=_FREEZE,
             report=report,
@@ -942,6 +984,25 @@ def test_tampered_owner_instruction_and_unlisted_production_key_are_refused() ->
             current_owner_issue=_owner_issue_record(),
             trusted_owner_keys={_OWNER_KEY.key_id: _OWNER_KEY},
             production_signing_key=fixture_key,
+        )
+
+    same_id_different_secret = AuthenticationKey(
+        key_id=_PRODUCTION_KEY.key_id,
+        key_class=KeyClass.PRODUCTION_OPERATIONAL_ADMISSION,
+        provenance=KeyProvenance.PRODUCTION_TRUST_ROOT,
+        secret=b"q" * 32,
+    )
+    with pytest.raises(ProductionAdmissionError, match="fingerprint differs"):
+        mint_production_operational_admission(
+            freeze=_FREEZE,
+            report=report,
+            evidence_manifest=manifest,
+            attestations=attestations,
+            trusted_evidence_keys={_EVIDENCE_KEY.key_id: _EVIDENCE_KEY},
+            owner_instruction=instruction,
+            current_owner_issue=_owner_issue_record(),
+            trusted_owner_keys={_OWNER_KEY.key_id: _OWNER_KEY},
+            production_signing_key=same_id_different_secret,
         )
 
 

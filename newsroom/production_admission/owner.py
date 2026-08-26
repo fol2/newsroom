@@ -9,8 +9,8 @@ from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 
 from ._shared import (
     AuthenticationKey,
+    FreezeIdentity,
     KeyClass,
-    KeyProvenance,
     ProductionAdmissionError,
     _canonical_document,
     _digest,
@@ -29,31 +29,139 @@ _OWNER_BINDING_PREFIX = "<!-- newsroom-production-admission-instruction-v1\n"
 _OWNER_BINDING_SUFFIX = "\n-->"
 
 
-def _owner_issue_binding_value(
-    *,
-    report: ProductionReadinessReport,
-    evidence_manifest: ProductionEvidenceManifest,
-    production_signing_key_id: str,
-) -> dict[str, object]:
-    shadow = _bound_artifact(evidence_manifest, BoundArtifactRole.SHADOW_CLOSEOUT)
-    canary = _bound_artifact(
-        evidence_manifest,
-        BoundArtifactRole.LIVE_EVIDENCE_INTAKE_CANARY_CLOSEOUT,
-    )
+@dataclass(frozen=True, slots=True)
+class _OwnerEvidenceBinding:
+    freeze: FreezeIdentity
+    evidence_manifest_digest: str
+    readiness_report_digest: str
+    operational_manifest_digest: str
+    identity_set_digest: str
+    shadow_closeout_digest: str
+    canary_closeout_digest: str
+    production_signing_key_id: str
+    production_signing_key_fingerprint: str
+
+    @classmethod
+    def from_production_key(
+        cls,
+        *,
+        report: ProductionReadinessReport,
+        evidence_manifest: ProductionEvidenceManifest,
+        production_signing_key: AuthenticationKey,
+    ) -> _OwnerEvidenceBinding:
+        production_signing_key.require_production_trust_root(
+            KeyClass.PRODUCTION_OPERATIONAL_ADMISSION
+        )
+        return cls.from_authority(
+            report=report,
+            evidence_manifest=evidence_manifest,
+            production_signing_key_id=production_signing_key.key_id,
+            production_signing_key_fingerprint=production_signing_key.fingerprint,
+        )
+
+    @classmethod
+    def from_authority(
+        cls,
+        *,
+        report: ProductionReadinessReport,
+        evidence_manifest: ProductionEvidenceManifest,
+        production_signing_key_id: str,
+        production_signing_key_fingerprint: str,
+    ) -> _OwnerEvidenceBinding:
+        if (
+            not report.ready_for_admission
+            or report.evidence_manifest_digest != evidence_manifest.digest
+            or report.identity_set_digest != evidence_manifest.identity_set.digest
+            or report.operational_manifest_digest
+            != evidence_manifest.identity_set.operational_manifest_digest
+            or report.freeze != evidence_manifest.identity_set.freeze
+        ):
+            raise ProductionAdmissionError("owner evidence binding differs")
+        shadow = _bound_artifact(
+            evidence_manifest,
+            BoundArtifactRole.SHADOW_CLOSEOUT,
+        )
+        canary = _bound_artifact(
+            evidence_manifest,
+            BoundArtifactRole.LIVE_EVIDENCE_INTAKE_CANARY_CLOSEOUT,
+        )
+        return cls(
+            freeze=report.freeze,
+            evidence_manifest_digest=evidence_manifest.digest,
+            readiness_report_digest=report.digest,
+            operational_manifest_digest=(
+                evidence_manifest.identity_set.operational_manifest_digest
+            ),
+            identity_set_digest=evidence_manifest.identity_set.digest,
+            shadow_closeout_digest=shadow.artifact_digest,
+            canary_closeout_digest=canary.artifact_digest,
+            production_signing_key_id=_token(
+                production_signing_key_id,
+                "production_signing_key_id",
+            ),
+            production_signing_key_fingerprint=_digest(
+                production_signing_key_fingerprint,
+                "production_signing_key_fingerprint",
+            ),
+        )
+
+    @classmethod
+    def from_record(
+        cls,
+        record: OwnerIssueSnapshot | OwnerAdmissionInstruction,
+    ) -> _OwnerEvidenceBinding:
+        return cls(
+            freeze=FreezeIdentity(record.exact_main_sha, record.exact_main_tree),
+            evidence_manifest_digest=record.evidence_manifest_digest,
+            readiness_report_digest=record.readiness_report_digest,
+            operational_manifest_digest=record.operational_manifest_digest,
+            identity_set_digest=record.identity_set_digest,
+            shadow_closeout_digest=record.shadow_closeout_digest,
+            canary_closeout_digest=record.canary_closeout_digest,
+            production_signing_key_id=record.production_signing_key_id,
+            production_signing_key_fingerprint=(
+                record.production_signing_key_fingerprint
+            ),
+        )
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            **self.freeze.canonical_value(),
+            "evidence_manifest_digest": self.evidence_manifest_digest,
+            "readiness_report_digest": self.readiness_report_digest,
+            "operational_manifest_digest": self.operational_manifest_digest,
+            "identity_set_digest": self.identity_set_digest,
+            "shadow_closeout_digest": self.shadow_closeout_digest,
+            "canary_closeout_digest": self.canary_closeout_digest,
+            "production_signing_key_id": self.production_signing_key_id,
+            "production_signing_key_fingerprint": (
+                self.production_signing_key_fingerprint
+            ),
+        }
+
+    def matches(
+        self,
+        record: OwnerIssueSnapshot | OwnerAdmissionInstruction,
+    ) -> bool:
+        return (
+            record.exact_main_sha == self.freeze.exact_main_sha
+            and record.exact_main_tree == self.freeze.exact_main_tree
+            and record.evidence_manifest_digest == self.evidence_manifest_digest
+            and record.readiness_report_digest == self.readiness_report_digest
+            and record.operational_manifest_digest == self.operational_manifest_digest
+            and record.identity_set_digest == self.identity_set_digest
+            and record.shadow_closeout_digest == self.shadow_closeout_digest
+            and record.canary_closeout_digest == self.canary_closeout_digest
+            and record.production_signing_key_id == self.production_signing_key_id
+            and record.production_signing_key_fingerprint
+            == self.production_signing_key_fingerprint
+        )
+
+
+def _owner_issue_binding_value(binding: _OwnerEvidenceBinding) -> dict[str, object]:
     return {
         "schema_version": "newsroom.owner-production-admission-binding.v1",
-        **report.freeze.canonical_value(),
-        "evidence_manifest_digest": evidence_manifest.digest,
-        "readiness_report_digest": report.digest,
-        "operational_manifest_digest": (
-            evidence_manifest.identity_set.operational_manifest_digest
-        ),
-        "identity_set_digest": evidence_manifest.identity_set.digest,
-        "shadow_closeout_digest": shadow.artifact_digest,
-        "canary_closeout_digest": canary.artifact_digest,
-        "production_signing_key_id": _token(
-            production_signing_key_id, "production_signing_key_id"
-        ),
+        **binding.canonical_value(),
         "maximum_admissions": 1,
         "increment11r_authorised": False,
         "production_activation_authorised": False,
@@ -64,15 +172,16 @@ def owner_issue_binding_marker(
     *,
     report: ProductionReadinessReport,
     evidence_manifest: ProductionEvidenceManifest,
-    production_signing_key_id: str,
+    production_signing_key: AuthenticationKey,
 ) -> str:
     """Render the exact machine-readable binding required in the owner issue."""
 
-    value = _owner_issue_binding_value(
+    binding = _OwnerEvidenceBinding.from_production_key(
         report=report,
         evidence_manifest=evidence_manifest,
-        production_signing_key_id=production_signing_key_id,
+        production_signing_key=production_signing_key,
     )
+    value = _owner_issue_binding_value(binding)
     return (
         _OWNER_BINDING_PREFIX
         + canonical_json_bytes(value).decode("utf-8")
@@ -162,9 +271,7 @@ class OwnerIssueRecord:
     def verify_instruction_binding(
         self,
         *,
-        report: ProductionReadinessReport,
-        evidence_manifest: ProductionEvidenceManifest,
-        production_signing_key_id: str,
+        binding: _OwnerEvidenceBinding,
     ) -> None:
         if self.body.count(_OWNER_BINDING_PREFIX) != 1:
             raise ProductionAdmissionError("owner issue instruction binding is absent")
@@ -173,11 +280,7 @@ class OwnerIssueRecord:
         if end < 0:
             raise ProductionAdmissionError("owner issue instruction binding is absent")
         retained = _canonical_document(self.body[start:end].encode("utf-8"))
-        expected = _owner_issue_binding_value(
-            report=report,
-            evidence_manifest=evidence_manifest,
-            production_signing_key_id=production_signing_key_id,
-        )
+        expected = _owner_issue_binding_value(binding)
         if dict(retained) != expected:
             raise ProductionAdmissionError("owner issue instruction binding differs")
 
@@ -214,6 +317,7 @@ class OwnerIssueSnapshot:
     shadow_closeout_digest: str
     canary_closeout_digest: str
     production_signing_key_id: str
+    production_signing_key_fingerprint: str
     title_digest: str
     body_digest: str
     owner_signing_key_id: str
@@ -234,7 +338,7 @@ class OwnerIssueSnapshot:
         captured_at: str,
         report: ProductionReadinessReport,
         evidence_manifest: ProductionEvidenceManifest,
-        production_signing_key_id: str,
+        production_signing_key: AuthenticationKey,
         owner_signing_key: AuthenticationKey,
     ) -> OwnerIssueSnapshot:
         if (
@@ -244,30 +348,15 @@ class OwnerIssueSnapshot:
             raise ProductionAdmissionError(
                 "production admission requires a dedicated owner instruction issue"
             )
-        if (
-            owner_signing_key.key_class is not KeyClass.HUMAN_ACCOUNTABLE_OWNER
-            or owner_signing_key.provenance is not KeyProvenance.PRODUCTION_TRUST_ROOT
-        ):
-            raise ProductionAdmissionError("owner issue key class differs")
-        if (
-            not report.ready_for_admission
-            or report.evidence_manifest_digest != evidence_manifest.digest
-            or report.identity_set_digest != evidence_manifest.identity_set.digest
-            or report.operational_manifest_digest
-            != evidence_manifest.identity_set.operational_manifest_digest
-            or report.freeze != evidence_manifest.identity_set.freeze
-        ):
-            raise ProductionAdmissionError("owner issue evidence differs")
-        shadow = _bound_artifact(evidence_manifest, BoundArtifactRole.SHADOW_CLOSEOUT)
-        canary = _bound_artifact(
-            evidence_manifest,
-            BoundArtifactRole.LIVE_EVIDENCE_INTAKE_CANARY_CLOSEOUT,
+        owner_signing_key.require_production_trust_root(
+            KeyClass.HUMAN_ACCOUNTABLE_OWNER
         )
-        owner_issue.verify_instruction_binding(
+        binding = _OwnerEvidenceBinding.from_production_key(
             report=report,
             evidence_manifest=evidence_manifest,
-            production_signing_key_id=production_signing_key_id,
+            production_signing_key=production_signing_key,
         )
+        owner_issue.verify_instruction_binding(binding=binding)
         checked_captured_at = _timestamp(captured_at, "captured_at")
         if owner_issue.authority_issue_updated_at > checked_captured_at:
             raise ProductionAdmissionError(
@@ -285,18 +374,7 @@ class OwnerIssueSnapshot:
             "issue_state": "OPEN",
             "purpose": "PRODUCTION_OPERATIONAL_ADMISSION",
             "captured_at": checked_captured_at,
-            **report.freeze.canonical_value(),
-            "evidence_manifest_digest": evidence_manifest.digest,
-            "readiness_report_digest": report.digest,
-            "operational_manifest_digest": (
-                evidence_manifest.identity_set.operational_manifest_digest
-            ),
-            "identity_set_digest": evidence_manifest.identity_set.digest,
-            "shadow_closeout_digest": shadow.artifact_digest,
-            "canary_closeout_digest": canary.artifact_digest,
-            "production_signing_key_id": _token(
-                production_signing_key_id, "production_signing_key_id"
-            ),
+            **binding.canonical_value(),
             "title_digest": owner_issue.title_digest,
             "body_digest": owner_issue.body_digest,
             "owner_signing_key_id": owner_signing_key.key_id,
@@ -311,15 +389,16 @@ class OwnerIssueSnapshot:
             owner_issue.authority_issue_updated_at,
             str(unsigned["owner_identity"]),
             str(unsigned["captured_at"]),
-            report.freeze.exact_main_sha,
-            report.freeze.exact_main_tree,
-            evidence_manifest.digest,
-            report.digest,
-            evidence_manifest.identity_set.operational_manifest_digest,
-            evidence_manifest.identity_set.digest,
-            shadow.artifact_digest,
-            canary.artifact_digest,
-            str(unsigned["production_signing_key_id"]),
+            binding.freeze.exact_main_sha,
+            binding.freeze.exact_main_tree,
+            binding.evidence_manifest_digest,
+            binding.readiness_report_digest,
+            binding.operational_manifest_digest,
+            binding.identity_set_digest,
+            binding.shadow_closeout_digest,
+            binding.canary_closeout_digest,
+            binding.production_signing_key_id,
+            binding.production_signing_key_fingerprint,
             str(unsigned["title_digest"]),
             str(unsigned["body_digest"]),
             owner_signing_key.key_id,
@@ -353,6 +432,7 @@ class OwnerIssueSnapshot:
             "shadow_closeout_digest",
             "canary_closeout_digest",
             "production_signing_key_id",
+            "production_signing_key_fingerprint",
             "title_digest",
             "body_digest",
             "owner_signing_key_id",
@@ -407,6 +487,10 @@ class OwnerIssueSnapshot:
             _digest(value["shadow_closeout_digest"], "shadow_closeout_digest"),
             _digest(value["canary_closeout_digest"], "canary_closeout_digest"),
             _token(value["production_signing_key_id"], "production_signing_key_id"),
+            _digest(
+                value["production_signing_key_fingerprint"],
+                "production_signing_key_fingerprint",
+            ),
             _digest(value["title_digest"], "title_digest"),
             _digest(value["body_digest"], "body_digest"),
             _token(value["owner_signing_key_id"], "owner_signing_key_id"),
@@ -421,13 +505,12 @@ class OwnerIssueSnapshot:
         if reconstructed != self:
             raise ProductionAdmissionError("owner issue snapshot is forged")
         key = trusted_keys.get(self.owner_signing_key_id)
-        if (
-            key is None
-            or key.key_id != self.owner_signing_key_id
-            or key.key_class is not KeyClass.HUMAN_ACCOUNTABLE_OWNER
-            or key.provenance is not KeyProvenance.PRODUCTION_TRUST_ROOT
-        ):
+        if key is None:
             raise ProductionAdmissionError("owner issue snapshot key is untrusted")
+        key.require_production_trust_root(
+            KeyClass.HUMAN_ACCOUNTABLE_OWNER,
+            expected_key_id=self.owner_signing_key_id,
+        )
         _verify_seal(_canonical_document(self.canonical_bytes), secret=key.secret)
 
 
@@ -448,6 +531,7 @@ class OwnerAdmissionInstruction:
     shadow_closeout_digest: str
     canary_closeout_digest: str
     production_signing_key_id: str
+    production_signing_key_fingerprint: str
     owner_signing_key_id: str
     owner_signing_key_class: KeyClass
     seal: str
@@ -466,46 +550,21 @@ class OwnerAdmissionInstruction:
         issued_at: str,
         report: ProductionReadinessReport,
         evidence_manifest: ProductionEvidenceManifest,
-        production_signing_key_id: str,
+        production_signing_key: AuthenticationKey,
         owner_signing_key: AuthenticationKey,
     ) -> OwnerAdmissionInstruction:
-        if (
-            owner_signing_key.key_class is not KeyClass.HUMAN_ACCOUNTABLE_OWNER
-            or owner_signing_key.provenance is not KeyProvenance.PRODUCTION_TRUST_ROOT
-        ):
-            raise ProductionAdmissionError("owner instruction key class differs")
-        authority_issue_snapshot.verify({owner_signing_key.key_id: owner_signing_key})
-        if not report.ready_for_admission:
-            raise ProductionAdmissionError("owner instruction requires ready evidence")
-        if (
-            report.evidence_manifest_digest != evidence_manifest.digest
-            or report.identity_set_digest != evidence_manifest.identity_set.digest
-            or report.operational_manifest_digest
-            != evidence_manifest.identity_set.operational_manifest_digest
-            or report.freeze != evidence_manifest.identity_set.freeze
-        ):
-            raise ProductionAdmissionError("owner instruction evidence differs")
-        shadow = _bound_artifact(evidence_manifest, BoundArtifactRole.SHADOW_CLOSEOUT)
-        canary = _bound_artifact(
-            evidence_manifest,
-            BoundArtifactRole.LIVE_EVIDENCE_INTAKE_CANARY_CLOSEOUT,
+        owner_signing_key.require_production_trust_root(
+            KeyClass.HUMAN_ACCOUNTABLE_OWNER
         )
-        if (
-            authority_issue_snapshot.exact_main_sha != report.freeze.exact_main_sha
-            or authority_issue_snapshot.exact_main_tree != report.freeze.exact_main_tree
-            or authority_issue_snapshot.evidence_manifest_digest
-            != evidence_manifest.digest
-            or authority_issue_snapshot.readiness_report_digest != report.digest
-            or authority_issue_snapshot.operational_manifest_digest
-            != evidence_manifest.identity_set.operational_manifest_digest
-            or authority_issue_snapshot.identity_set_digest
-            != evidence_manifest.identity_set.digest
-            or authority_issue_snapshot.shadow_closeout_digest != shadow.artifact_digest
-            or authority_issue_snapshot.canary_closeout_digest != canary.artifact_digest
-            or authority_issue_snapshot.production_signing_key_id
-            != production_signing_key_id
-            or authority_issue_snapshot.captured_at > _timestamp(issued_at, "issued_at")
-        ):
+        authority_issue_snapshot.verify({owner_signing_key.key_id: owner_signing_key})
+        binding = _OwnerEvidenceBinding.from_production_key(
+            report=report,
+            evidence_manifest=evidence_manifest,
+            production_signing_key=production_signing_key,
+        )
+        if not binding.matches(
+            authority_issue_snapshot
+        ) or authority_issue_snapshot.captured_at > _timestamp(issued_at, "issued_at"):
             raise ProductionAdmissionError("owner issue snapshot binding differs")
         base = {
             "schema_version": "newsroom.owner-production-admission-instruction.v1",
@@ -516,18 +575,7 @@ class OwnerAdmissionInstruction:
             ),
             "owner_identity": authority_issue_snapshot.owner_identity,
             "issued_at": _timestamp(issued_at, "issued_at"),
-            **report.freeze.canonical_value(),
-            "evidence_manifest_digest": evidence_manifest.digest,
-            "readiness_report_digest": report.digest,
-            "operational_manifest_digest": (
-                evidence_manifest.identity_set.operational_manifest_digest
-            ),
-            "identity_set_digest": evidence_manifest.identity_set.digest,
-            "shadow_closeout_digest": shadow.artifact_digest,
-            "canary_closeout_digest": canary.artifact_digest,
-            "production_signing_key_id": _token(
-                production_signing_key_id, "production_signing_key_id"
-            ),
+            **binding.canonical_value(),
             "production_signing_key_class": (
                 KeyClass.PRODUCTION_OPERATIONAL_ADMISSION.value
             ),
@@ -550,15 +598,16 @@ class OwnerAdmissionInstruction:
             authority_issue_snapshot,
             str(base["owner_identity"]),
             str(base["issued_at"]),
-            report.freeze.exact_main_sha,
-            report.freeze.exact_main_tree,
-            evidence_manifest.digest,
-            report.digest,
-            evidence_manifest.identity_set.operational_manifest_digest,
-            evidence_manifest.identity_set.digest,
-            shadow.artifact_digest,
-            canary.artifact_digest,
-            str(base["production_signing_key_id"]),
+            binding.freeze.exact_main_sha,
+            binding.freeze.exact_main_tree,
+            binding.evidence_manifest_digest,
+            binding.readiness_report_digest,
+            binding.operational_manifest_digest,
+            binding.identity_set_digest,
+            binding.shadow_closeout_digest,
+            binding.canary_closeout_digest,
+            binding.production_signing_key_id,
+            binding.production_signing_key_fingerprint,
             owner_signing_key.key_id,
             owner_signing_key.key_class,
             seal,
@@ -586,6 +635,7 @@ class OwnerAdmissionInstruction:
             "shadow_closeout_digest",
             "canary_closeout_digest",
             "production_signing_key_id",
+            "production_signing_key_fingerprint",
             "production_signing_key_class",
             "owner_signing_key_id",
             "owner_signing_key_class",
@@ -622,26 +672,6 @@ class OwnerAdmissionInstruction:
             canonical_json_bytes(issue_snapshot_value)
         )
         issued_at = _timestamp(issued_at_value, "issued_at")
-        if (
-            issue_snapshot.authority_issue_number != issue_number
-            or issue_snapshot.authority_issue_url != value["authority_issue_url"]
-            or issue_snapshot.owner_identity != value["owner_identity"]
-            or issue_snapshot.exact_main_sha != value["exact_main_sha"]
-            or issue_snapshot.exact_main_tree != value["exact_main_tree"]
-            or issue_snapshot.evidence_manifest_digest
-            != value["evidence_manifest_digest"]
-            or issue_snapshot.readiness_report_digest
-            != value["readiness_report_digest"]
-            or issue_snapshot.operational_manifest_digest
-            != value["operational_manifest_digest"]
-            or issue_snapshot.identity_set_digest != value["identity_set_digest"]
-            or issue_snapshot.shadow_closeout_digest != value["shadow_closeout_digest"]
-            or issue_snapshot.canary_closeout_digest != value["canary_closeout_digest"]
-            or issue_snapshot.production_signing_key_id
-            != value["production_signing_key_id"]
-            or issue_snapshot.captured_at > issued_at
-        ):
-            raise ProductionAdmissionError("owner issue snapshot binding differs")
         try:
             owner_key_class = KeyClass(value["owner_signing_key_class"])
         except (TypeError, ValueError) as exc:
@@ -659,7 +689,7 @@ class OwnerAdmissionInstruction:
         seal = value["seal"]
         if not isinstance(seal, str):
             raise ProductionAdmissionError("owner instruction seal differs")
-        return cls(
+        record = cls(
             expected_instruction_id,
             issue_number,
             _token(value["authority_issue_url"], "authority_issue_url"),
@@ -678,12 +708,26 @@ class OwnerAdmissionInstruction:
             _digest(value["shadow_closeout_digest"], "shadow_closeout_digest"),
             _digest(value["canary_closeout_digest"], "canary_closeout_digest"),
             _token(value["production_signing_key_id"], "production_signing_key_id"),
+            _digest(
+                value["production_signing_key_fingerprint"],
+                "production_signing_key_fingerprint",
+            ),
             _token(value["owner_signing_key_id"], "owner_signing_key_id"),
             owner_key_class,
             seal,
             raw,
             digest_bytes(raw),
         )
+        snapshot_binding = _OwnerEvidenceBinding.from_record(issue_snapshot)
+        if (
+            issue_snapshot.authority_issue_number != record.authority_issue_number
+            or issue_snapshot.authority_issue_url != record.authority_issue_url
+            or issue_snapshot.owner_identity != record.owner_identity
+            or issue_snapshot.captured_at > record.issued_at
+            or not snapshot_binding.matches(record)
+        ):
+            raise ProductionAdmissionError("owner issue snapshot binding differs")
+        return record
 
     def verify(self, trusted_keys: Mapping[str, AuthenticationKey]) -> None:
         reconstructed = OwnerAdmissionInstruction.from_canonical_bytes(
@@ -695,12 +739,13 @@ class OwnerAdmissionInstruction:
         key = trusted_keys.get(self.owner_signing_key_id)
         if (
             key is None
-            or key.key_id != self.owner_signing_key_id
-            or key.key_class is not KeyClass.HUMAN_ACCOUNTABLE_OWNER
-            or key.provenance is not KeyProvenance.PRODUCTION_TRUST_ROOT
             or self.owner_signing_key_class is not KeyClass.HUMAN_ACCOUNTABLE_OWNER
         ):
             raise ProductionAdmissionError("owner instruction key is untrusted")
+        key.require_production_trust_root(
+            KeyClass.HUMAN_ACCOUNTABLE_OWNER,
+            expected_key_id=self.owner_signing_key_id,
+        )
         _verify_seal(_canonical_document(self.canonical_bytes), secret=key.secret)
 
 
@@ -715,20 +760,13 @@ def _verify_owner_instruction_binding(
     instruction.verify(trusted_owner_keys)
     if current_owner_issue is not None:
         current_owner_issue.verify_snapshot(instruction.authority_issue_snapshot)
-    shadow = _bound_artifact(evidence_manifest, BoundArtifactRole.SHADOW_CLOSEOUT)
-    canary = _bound_artifact(
-        evidence_manifest,
-        BoundArtifactRole.LIVE_EVIDENCE_INTAKE_CANARY_CLOSEOUT,
+    binding = _OwnerEvidenceBinding.from_authority(
+        report=report,
+        evidence_manifest=evidence_manifest,
+        production_signing_key_id=instruction.production_signing_key_id,
+        production_signing_key_fingerprint=(
+            instruction.production_signing_key_fingerprint
+        ),
     )
-    if (
-        instruction.exact_main_sha != report.freeze.exact_main_sha
-        or instruction.exact_main_tree != report.freeze.exact_main_tree
-        or instruction.evidence_manifest_digest != evidence_manifest.digest
-        or instruction.readiness_report_digest != report.digest
-        or instruction.operational_manifest_digest
-        != evidence_manifest.identity_set.operational_manifest_digest
-        or instruction.identity_set_digest != evidence_manifest.identity_set.digest
-        or instruction.shadow_closeout_digest != shadow.artifact_digest
-        or instruction.canary_closeout_digest != canary.artifact_digest
-    ):
+    if not binding.matches(instruction):
         raise ProductionAdmissionError("owner instruction binding differs")

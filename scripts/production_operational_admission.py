@@ -1,7 +1,7 @@
 """Inspect, mint and verify production Operational Admission records.
 
-The command performs Git and local-file reads only.  It never invokes a
-provider, publication adapter or production writer.
+The command performs read-only GitHub, Git, local-file and Keychain reads.  It
+never invokes a provider, publication adapter or production writer.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import binascii
 import json
 import os
 import pwd
+import re
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -36,6 +37,10 @@ from newsroom.production_admission import (
 )
 
 _TRUSTED_GIT = Path("/usr/bin/git")
+_TRUSTED_SECURITY = Path("/usr/bin/security")
+_CANONICAL_REPOSITORY_URL = "https://github.com/fol2/newsroom.git"
+_CANONICAL_MAIN_REF = "refs/heads/main"
+_KEYCHAIN_ACCOUNT = "newsroom-production-admission"
 _TRUSTED_GH_CANDIDATES = (
     Path("/opt/homebrew/bin/gh"),
     Path("/usr/local/bin/gh"),
@@ -79,6 +84,38 @@ def _git(repo_root: Path, *arguments: str, check: bool = True) -> str:
     return completed.stdout.strip()
 
 
+def _live_main_sha() -> str:
+    """Read the current canonical GitHub main identity without mutating refs."""
+
+    if not _TRUSTED_GIT.is_file():
+        raise ProductionAdmissionError("trusted Git executable is unavailable")
+    completed = subprocess.run(
+        (
+            str(_TRUSTED_GIT),
+            "ls-remote",
+            "--exit-code",
+            _CANONICAL_REPOSITORY_URL,
+            _CANONICAL_MAIN_REF,
+        ),
+        cwd=Path("/"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env=_GIT_ENVIRONMENT,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise ProductionAdmissionError(f"live GitHub main lookup failed: {detail}")
+    match = re.fullmatch(
+        rf"([0-9a-f]{{40}})\t{re.escape(_CANONICAL_MAIN_REF)}",
+        completed.stdout.strip(),
+    )
+    if match is None:
+        raise ProductionAdmissionError("live GitHub main identity differs")
+    return match.group(1)
+
+
 def exact_main_freeze(repo_root: Path) -> FreezeIdentity:
     """Resolve one clean checkout whose HEAD is the exact local/remote main."""
 
@@ -119,6 +156,8 @@ def exact_main_freeze(repo_root: Path) -> FreezeIdentity:
         raise ProductionAdmissionError("clean-checkout inspection failed")
     if status.stdout:
         raise ProductionAdmissionError("production admission requires a clean checkout")
+    if head != _live_main_sha():
+        raise ProductionAdmissionError("checkout HEAD differs from live GitHub main")
     return FreezeIdentity(exact_main_sha=head, exact_main_tree=tree)
 
 
@@ -159,36 +198,62 @@ def _current_owner_issue(issue_number: int) -> OwnerIssueRecord:
     return OwnerIssueRecord.from_github_api(value)
 
 
-def _keyring(
-    environment_variables: Sequence[str], *, key_class: KeyClass
-) -> dict[str, AuthenticationKey]:
-    key_id = production_key_id(key_class)
-    if len(environment_variables) != 1:
+def _keychain_secret(key_id: str) -> bytes:
+    """Load one fixed production trust root from the macOS Keychain."""
+
+    if not _TRUSTED_SECURITY.is_file():
+        raise ProductionAdmissionError("trusted Keychain executable is unavailable")
+    configured_key_ids = frozenset(production_key_id(item) for item in KeyClass)
+    if key_id not in configured_key_ids:
+        raise ProductionAdmissionError("production Keychain reference differs")
+    service = key_id.removeprefix("keychain:")
+    completed = subprocess.run(
+        (
+            str(_TRUSTED_SECURITY),
+            "find-generic-password",
+            "-a",
+            _KEYCHAIN_ACCOUNT,
+            "-s",
+            service,
+            "-w",
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env={
+            "HOME": pwd.getpwuid(os.getuid()).pw_dir,
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PATH": "/usr/bin:/bin",
+        },
+    )
+    if completed.returncode != 0:
+        raise ProductionAdmissionError(f"production Keychain item is absent: {key_id}")
+    encoded = completed.stdout.strip()
+    try:
+        secret = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as exc:
         raise ProductionAdmissionError(
-            f"exactly one {key_class.value} key environment is required"
+            f"production Keychain item is not canonical base64: {key_id}"
+        ) from exc
+    if base64.b64encode(secret).decode("ascii") != encoded:
+        raise ProductionAdmissionError(
+            f"production Keychain item is not canonical base64: {key_id}"
         )
-    keys: dict[str, AuthenticationKey] = {}
-    for variable in environment_variables:
-        if not variable or "=" in variable:
-            raise ProductionAdmissionError(
-                "key option must name one environment variable"
-            )
-        encoded = os.environ.get(variable)
-        if encoded is None:
-            raise ProductionAdmissionError(f"key environment is absent: {variable}")
-        try:
-            secret = base64.b64decode(encoded, validate=True)
-        except (ValueError, binascii.Error) as exc:
-            raise ProductionAdmissionError(
-                f"key environment is not canonical base64: {variable}"
-            ) from exc
-        keys[key_id] = AuthenticationKey(
+    return secret
+
+
+def _keyring(*, key_class: KeyClass) -> dict[str, AuthenticationKey]:
+    key_id = production_key_id(key_class)
+    return {
+        key_id: AuthenticationKey(
             key_id,
             key_class,
             KeyProvenance.PRODUCTION_TRUST_ROOT,
-            secret,
+            _keychain_secret(key_id),
         )
-    return keys
+    }
 
 
 def _manifest(path: Path | None) -> ProductionEvidenceManifest | None:
@@ -221,7 +286,6 @@ def _add_evidence_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--repo-root", required=True, type=Path)
     parser.add_argument("--evidence-manifest", required=True, type=Path)
     parser.add_argument("--attestation-directory", required=True, type=Path)
-    parser.add_argument("--evidence-key-env", action="append", default=[])
 
 
 def _load_current_report(
@@ -238,9 +302,7 @@ def _load_current_report(
     if manifest is None:  # pragma: no cover - required by argparse
         raise ProductionAdmissionError("production evidence manifest is required")
     attestations = _attestations(arguments.attestation_directory)
-    evidence_keys = _keyring(
-        arguments.evidence_key_env, key_class=KeyClass.EVIDENCE_AUTHORITY
-    )
+    evidence_keys = _keyring(key_class=KeyClass.EVIDENCE_AUTHORITY)
     report = ProductionReadinessReport.from_canonical_bytes(
         arguments.readiness_report.read_bytes()
     )
@@ -295,10 +357,7 @@ def _inspect_retained_evidence(
             blocker="INVALID_GATE_ATTESTATION_DOCUMENT",
         )
     try:
-        evidence_keys = _keyring(
-            arguments.evidence_key_env,
-            key_class=KeyClass.EVIDENCE_AUTHORITY,
-        )
+        evidence_keys = _keyring(key_class=KeyClass.EVIDENCE_AUTHORITY)
     except ProductionAdmissionError:
         return blocked_readiness_report(
             freeze=freeze,
@@ -320,13 +379,8 @@ def _mint(arguments: argparse.Namespace) -> int:
         arguments.owner_instruction.read_bytes()
     )
     current_owner_issue = _current_owner_issue(instruction.authority_issue_number)
-    owner_keys = _keyring(
-        arguments.owner_key_env, key_class=KeyClass.HUMAN_ACCOUNTABLE_OWNER
-    )
-    production_keys = _keyring(
-        arguments.production_key_env,
-        key_class=KeyClass.PRODUCTION_OPERATIONAL_ADMISSION,
-    )
+    owner_keys = _keyring(key_class=KeyClass.HUMAN_ACCOUNTABLE_OWNER)
+    production_keys = _keyring(key_class=KeyClass.PRODUCTION_OPERATIONAL_ADMISSION)
     production_key = production_keys.get(instruction.production_signing_key_id)
     if production_key is None:
         raise ProductionAdmissionError("instruction-named production key is absent")
@@ -353,13 +407,8 @@ def _verify(arguments: argparse.Namespace) -> int:
     instruction = OwnerAdmissionInstruction.from_canonical_bytes(
         arguments.owner_instruction.read_bytes()
     )
-    owner_keys = _keyring(
-        arguments.owner_key_env, key_class=KeyClass.HUMAN_ACCOUNTABLE_OWNER
-    )
-    production_keys = _keyring(
-        arguments.production_key_env,
-        key_class=KeyClass.PRODUCTION_OPERATIONAL_ADMISSION,
-    )
+    owner_keys = _keyring(key_class=KeyClass.HUMAN_ACCOUNTABLE_OWNER)
+    production_keys = _keyring(key_class=KeyClass.PRODUCTION_OPERATIONAL_ADMISSION)
     admission = ProductionOperationalAdmission.from_canonical_bytes(
         arguments.admission.read_bytes(),
         report=report,
@@ -380,7 +429,6 @@ def _parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--repo-root", required=True, type=Path)
     inspect_parser.add_argument("--evidence-manifest", type=Path)
     inspect_parser.add_argument("--attestation-directory", type=Path)
-    inspect_parser.add_argument("--evidence-key-env", action="append", default=[])
     inspect_parser.add_argument("--output", required=True, type=Path)
     inspect_parser.set_defaults(handler=_inspect)
 
@@ -388,8 +436,6 @@ def _parser() -> argparse.ArgumentParser:
     _add_evidence_arguments(mint_parser)
     mint_parser.add_argument("--readiness-report", required=True, type=Path)
     mint_parser.add_argument("--owner-instruction", required=True, type=Path)
-    mint_parser.add_argument("--owner-key-env", action="append", default=[])
-    mint_parser.add_argument("--production-key-env", action="append", default=[])
     mint_parser.add_argument("--output", required=True, type=Path)
     mint_parser.set_defaults(handler=_mint)
 
@@ -397,8 +443,6 @@ def _parser() -> argparse.ArgumentParser:
     _add_evidence_arguments(verify_parser)
     verify_parser.add_argument("--readiness-report", required=True, type=Path)
     verify_parser.add_argument("--owner-instruction", required=True, type=Path)
-    verify_parser.add_argument("--owner-key-env", action="append", default=[])
-    verify_parser.add_argument("--production-key-env", action="append", default=[])
     verify_parser.add_argument("--admission", required=True, type=Path)
     verify_parser.set_defaults(handler=_verify)
     return parser
