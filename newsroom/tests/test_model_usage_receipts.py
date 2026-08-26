@@ -2209,6 +2209,55 @@ def test_issue_790_bounded_canary_is_single_use_and_failed_attempt_is_inert(
         preflight_evidence=preflight,
         consumed_at=T0 + timedelta(seconds=20),
     )
+    connection = sqlite3.connect(store)
+    original_record_json = str(
+        connection.execute(
+            "SELECT record_json FROM issue_790_bounded_canary_consumptions "
+            "WHERE consumption_digest=?",
+            (str(consumption["consumption_digest"]),),
+        ).fetchone()[0]
+    )
+    forged = dict(consumption)
+    forged["owner_id"] = "issue-790-canary:forged-owner"
+    forged_without_digest = dict(forged)
+    forged_without_digest.pop("consumption_digest")
+    forged["consumption_digest"] = _digest(forged_without_digest)
+    connection.execute(
+        "UPDATE issue_790_bounded_canary_consumptions SET record_json=? "
+        "WHERE consumption_digest=?",
+        (
+            json.dumps(forged, sort_keys=True, separators=(",", ":")),
+            str(consumption["consumption_digest"]),
+        ),
+    )
+    connection.commit()
+    connection.close()
+    with pytest.raises(Issue790CanaryIntegrityError, match="SQL identity differs"):
+        canary.preflight_for_consumption(
+            consumption_digest=str(consumption["consumption_digest"]),
+            event_id=event_id,
+            owner_id=owner_id,
+        )
+    forged_queue = GraphitiEventQueue(
+        str(store),
+        clock=lambda: T0 + timedelta(seconds=20),
+    )
+    with pytest.raises(Issue790CanaryIntegrityError, match="SQL identity differs"):
+        forged_queue.claim(
+            owner_id=owner_id,
+            lease_for=timedelta(seconds=30),
+            event_id=event_id,
+            require_fresh=True,
+            canary_consumption_digest=str(consumption["consumption_digest"]),
+        )
+    connection = sqlite3.connect(store)
+    connection.execute(
+        "UPDATE issue_790_bounded_canary_consumptions SET record_json=? "
+        "WHERE consumption_digest=?",
+        (original_record_json, str(consumption["consumption_digest"])),
+    )
+    connection.commit()
+    connection.close()
     with pytest.raises(Issue790CanaryIntegrityError, match="already consumed"):
         canary.consume(
             approved_plan_digest=FIXTURE_790_PLAN_DIGEST,
@@ -2272,7 +2321,7 @@ def test_issue_790_bounded_canary_is_single_use_and_failed_attempt_is_inert(
 
     connection = sqlite3.connect(store)
     retained = connection.execute(
-        "SELECT state,attempt_count,last_failure_code "
+        "SELECT state,attempt_count,last_failure_code,provider_dispatched "
         "FROM unpublished_graphiti_revision_events WHERE event_id=?",
         (event_id,),
     ).fetchone()
@@ -2281,11 +2330,14 @@ def test_issue_790_bounded_canary_is_single_use_and_failed_attempt_is_inert(
     assert outcome["state_after_seal"] == "CONFIGURATION_HELD"
     assert outcome["completion_mode"] == "ZERO_IO_RECOVERY"
     assert outcome["process_result"]["state"] == "DEAD_LETTER"
+    assert outcome["event_provider_dispatched_before_seal"] is True
+    assert outcome["provider_dispatched"] is False
     assert outcome["retry_authorised"] is False
     assert retained == (
         "CONFIGURATION_HELD",
         1,
         "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:PRODUCER_INTERNAL_ERROR",
+        0,
     )
     assert service_row_count(store, "issue_790_bounded_canary_consumptions") == 1
     assert service_row_count(store, "issue_790_bounded_canary_outcomes") == 1
@@ -2467,7 +2519,7 @@ def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
     assert dispatch_calls == [event_id]
 
 
-def test_issue_790_consumed_but_unclaimed_canary_finalises_without_dispatch(
+def test_issue_790_crash_after_leaf_marker_syncs_dispatch_during_finalisation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2528,6 +2580,46 @@ def test_issue_790_consumed_but_unclaimed_canary_finalises_without_dispatch(
         ),
         consumed_at=T0 + timedelta(seconds=20),
     )
+    canary_envelope = _envelope(
+        cycle_id=event_id,
+        workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        candidate_id=None,
+        ingest_id=_ingest_id,
+    )
+    canary_policy = _policy(
+        workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        provider="cursor-agent-cli",
+        route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+        model="composer-2.5",
+        hard_estimate_ceiling_tokens=None,
+    )
+    service.register_policy(canary_policy)
+    service.open_envelope(canary_envelope)
+    canary_allocation = _allocation(
+        canary_envelope,
+        canary_policy,
+        request="issue-790-crash-after-marker",
+    )
+    service.allocate(canary_allocation, owner_emergency_stop=False)
+    service.observe_transport(
+        invocation_id=canary_allocation.invocation_id,
+        observed_at=T0 + timedelta(seconds=20, milliseconds=1),
+        state="DISPATCH_STARTED",
+        evidence_digest=_digest({"dispatch": event_id}),
+    )
+    connection = sqlite3.connect(store)
+    connection.execute(
+        "UPDATE unpublished_graphiti_revision_events SET state='RUNNING',"
+        "attempt_count=1,claim_owner=?,claim_expires_at=?,provider_dispatched=0 "
+        "WHERE event_id=?",
+        (
+            owner_id,
+            (T0 + timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            event_id,
+        ),
+    )
+    connection.commit()
+    connection.close()
 
     outcome = repository.finalise_without_dispatch(
         consumption_digest=str(consumption["consumption_digest"]),
@@ -2545,11 +2637,13 @@ def test_issue_790_consumed_but_unclaimed_canary_finalises_without_dispatch(
     ).fetchone()
     connection.close()
     assert outcome["completion_mode"] == "ZERO_IO_RECOVERY"
-    assert outcome["process_result"] is None
+    assert outcome["process_result"]["state"] == "RUNNING"
+    assert outcome["event_provider_dispatched_before_seal"] is False
+    assert outcome["provider_dispatched"] is True
     assert retained == (
         "CONFIGURATION_HELD",
-        0,
-        0,
+        1,
+        1,
         "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:NO_EVENT_RESULT",
     )
 
