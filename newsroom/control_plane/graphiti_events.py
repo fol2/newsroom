@@ -183,7 +183,9 @@ class SystemicGraphitiEventFailure(RuntimeError):
 
 def _landed_rows(
     connection: sqlite3.Connection,
-) -> list[tuple[int, str, str, str, str, str, str, str, str, str, str, str]]:
+) -> list[
+    tuple[int, str, str, str, str, str, str, str, str, str, str, str, int]
+]:
     raw_rows = connection.execute(
         """
         SELECT ledger.seq,ledger.digest,landed.source_id,landed.item_key,
@@ -221,6 +223,7 @@ def _landed_rows(
             str(row[9]),
             str(row[10]),
             str(row[11]),
+            int(row[12]),
         )
         for row in raw_rows
     ]
@@ -289,15 +292,22 @@ def reconcile_graphiti_events(
         ):
             raise ValueError("landed Graphiti ingest identities are malformed")
         landed_ingest_ids = tuple(landed_ingest_ids_value)
+        if row[12] not in (0, 1):
+            raise ValueError("landed Graphiti legacy marker is malformed")
         landed_payload = {
             "source_id": row[2],
             "item_key": row[3],
             "revision_digest": row[4],
-            "published_at": row[5],
-            "updated_at": row[6],
             "first_observed_at": row[7],
-            "ingest_ids": list(landed_ingest_ids),
         }
+        if not row[12]:
+            landed_payload.update(
+                {
+                    "published_at": row[5],
+                    "updated_at": row[6],
+                    "ingest_ids": list(landed_ingest_ids),
+                }
+            )
         reconstructed_payload_digest = digest_canonical(landed_payload)
         if row[10] != EFFECTIVE_REVISION_LANDED:
             raise ValueError("landed Graphiti ledger kind differs")

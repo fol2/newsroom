@@ -6,7 +6,11 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+)
 from newsroom.control_plane.corpus import CorpusIngestUnit
 from newsroom.control_plane.cycle import consume_next_graphiti_event, run_cycle
 from newsroom.control_plane.graphiti import GraphitiCycleResult
@@ -18,7 +22,12 @@ from newsroom.control_plane.graphiti_events import (
     ensure_graphiti_event_schema,
     reconcile_graphiti_events,
 )
-from newsroom.control_plane.store import connect, emit_effective_revision_landed
+from newsroom.control_plane.store import (
+    EFFECTIVE_REVISION_LANDED,
+    append_ledger,
+    connect,
+    emit_effective_revision_landed,
+)
 from newsroom.control_plane.writer import FixtureWriter
 from newsroom.effective_revision import EffectiveRevisionIdentity
 from newsroom.graphiti_adapter.identity import MAX_EPISODE_BYTES, content_digest
@@ -209,6 +218,50 @@ def test_projection_rejects_landed_payload_not_authorised_by_ledger(
         == 0
     )
     retained.close()
+
+
+def test_projection_validates_exact_legacy_v10_landed_payload(tmp_path: Path) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    unit = _unit(1)
+    payload = {
+        "source_id": unit.source_id,
+        "item_key": unit.item_key,
+        "revision_digest": unit.revision_digest,
+        "first_observed_at": unit.coverage_first_observed_at,
+    }
+    connection = connect(str(path))
+    ledger_digest = append_ledger(connection, EFFECTIVE_REVISION_LANDED, payload)
+    connection.execute(
+        """
+        INSERT INTO unpublished_effective_revision_landed(
+            source_id,item_key,revision_digest,published_at,updated_at,
+            first_observed_at,ingest_ids_json,legacy_v10,payload_digest,
+            ledger_digest,at
+        ) VALUES(?,?,?,'','',?,'[]',1,?,?,?)
+        """,
+        (
+            unit.source_id,
+            unit.item_key,
+            unit.revision_digest,
+            unit.coverage_first_observed_at,
+            digest_canonical(payload),
+            ledger_digest,
+            unit.coverage_first_observed_at,
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    event = GraphitiEventQueue(str(path)).claim(
+        owner_id="worker", lease_for=timedelta(seconds=30)
+    )
+
+    assert event is not None
+    assert event.event_id == ledger_digest
+    assert event.published_at == ""
+    assert event.updated_at == ""
+    assert event.landed_ingest_ids == ()
+    assert event.landed_payload_digest == digest_canonical(payload)
 
 
 def test_zero_proposal_result_is_terminal_revision_coverage(tmp_path: Path) -> None:
