@@ -1,0 +1,56 @@
+{
+  "schema_version": "newsroom.cont-hermetic-calibration.v1",
+  "issue": 732,
+  "stage": "KNOWN_READY_LIVE_CALIBRATION",
+  "implementation_revision": "3e770a7dc7c46f92492524136e09de20f03fe4d8",
+  "command_semantic_version": "1.0.10",
+  "version": "issue-732-v1+3e770a7dc7c4",
+  "passed": true,
+  "failure_reasons": [],
+  "public_effects": 0,
+  "stores": {
+    "proving": "/tmp/newsroom-732-calibration-tools/proving_store.sqlite3",
+    "unpublished": "/tmp/newsroom-732-calibration-tools/unpublished_store.sqlite3"
+  },
+  "live": {
+    "write_ready": 3,
+    "selected_write_ready": 3,
+    "provider_dispatches": 3,
+    "primary_dispatches": 3,
+    "fallback_dispatches": 0,
+    "draft_accepted": 3,
+    "draft_hold": 0,
+    "draft_reject": 0,
+    "accepted_payload_count": 3,
+    "public_effects": 0
+  },
+  "metrics": {
+    "admitted_candidate_count": 3,
+    "accepted_unpublished_payload_count": 3,
+    "p50_context_tokens": 2409,
+    "context_reduction_from_incident_baseline": {
+      "numerator": 35070,
+      "denominator": 37479
+    },
+    "maximum_context_tokens": 2411,
+    "maximum_prompt_bytes": 1132,
+    "evidence_package_size_bands": {
+      "short_bytes": 1388,
+      "medium_bytes": 2594,
+      "long_bytes": 4977
+    },
+    "maximum_output_tokens": 219,
+    "maximum_total_tokens": 2628,
+    "total_tokens_for_accepted_payloads": 7876,
+    "median_tokens_per_accepted_payload": 2628,
+    "tokens_on_hold_reject_or_no_result": 0,
+    "primary_acceptance_rate": {
+      "numerator": 3,
+      "denominator": 3
+    },
+    "primary_model_calls_per_attempt": 1,
+    "command_semantic_version": "1.0.10",
+    "public_effect_count": 0
+  },
+  "calibration_evidence_digest": "sha256:157b37d03dfa67e9b430deb3385904e8e50f77e173363db315e7a45d78da9275"
+}
