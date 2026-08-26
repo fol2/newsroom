@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -19,6 +20,10 @@ from tempfile import mkstemp
 
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane.graphiti_events import GraphitiProcessResult
+from newsroom.control_plane.issue_790_canary import (
+    Issue790CanaryIntegrityError,
+    Issue790CanaryRepository,
+)
 from newsroom.control_plane.issue_790_contract import (
     ISSUE_790_APPROVED_PLAN_DIGEST,
 )
@@ -77,6 +82,17 @@ _RETRY_FORBIDDEN_EVENTS: tuple[dict[str, object], ...] = (
         "provider_dispatched": False,
         "state": "RETRY_HELD",
     },
+)
+_RUNNING_CODE_MODULES: tuple[tuple[str, str], ...] = (
+    (
+        "newsroom.control_plane.issue_790_disposition",
+        "newsroom/control_plane/issue_790_disposition.py",
+    ),
+    ("newsroom.control_plane.issue_790_canary", "newsroom/control_plane/issue_790_canary.py"),
+    ("newsroom.control_plane.issue_790_contract", "newsroom/control_plane/issue_790_contract.py"),
+    ("newsroom.control_plane.model_usage", "newsroom/control_plane/model_usage.py"),
+    ("newsroom.control_plane.graphiti_events", "newsroom/control_plane/graphiti_events.py"),
+    ("newsroom.control_plane.cycle", "newsroom/control_plane/cycle.py"),
 )
 
 
@@ -422,6 +438,52 @@ def _require_retry_events_unchanged(
     return retained
 
 
+def _running_code_evidence(
+    *,
+    root: Path,
+    git: str,
+    revision: str,
+) -> list[dict[str, object]]:
+    """Bind the executing modules to blobs in the reviewed repository tree."""
+
+    retained: list[dict[str, object]] = []
+    for module_name, relative_path in _RUNNING_CODE_MODULES:
+        module = importlib.import_module(module_name)
+        raw_path = getattr(module, "__file__", None)
+        if not isinstance(raw_path, str):
+            raise Issue790DispositionError("operation module path is absent")
+        actual = Path(raw_path).resolve(strict=True)
+        expected = (root / relative_path).resolve(strict=True)
+        if actual != expected:
+            raise Issue790DispositionError(
+                "executing operation code is outside exact main"
+            )
+        expected_blob = _run_checked(
+            (git, "rev-parse", f"{revision}:{relative_path}"),
+            cwd=root,
+        )
+        actual_blob = _run_checked(
+            (git, "hash-object", "--no-filters", str(actual)),
+            cwd=root,
+        )
+        if (
+            expected_blob != actual_blob
+            or re.fullmatch(r"[0-9a-f]{40}", expected_blob) is None
+        ):
+            raise Issue790DispositionError(
+                "executing operation code differs from exact main"
+            )
+        retained.append(
+            {
+                "module": module_name,
+                "repository_path": relative_path,
+                "git_blob": expected_blob,
+                "sha256": "sha256:" + hashlib.sha256(actual.read_bytes()).hexdigest(),
+            }
+        )
+    return retained
+
+
 def collect_issue_790_operational_evidence(
     *,
     repository_root: Path,
@@ -468,6 +530,29 @@ def collect_issue_790_operational_evidence(
         raise Issue790DispositionError(
             "operation repository is not clean exact current main"
         )
+    raw_main = _run_checked(
+        (
+            gh,
+            "api",
+            "-H",
+            "Accept: application/vnd.github+json",
+            "repos/fol2/newsroom/git/ref/heads/main",
+        ),
+        cwd=root,
+    )
+    try:
+        main_value = json.loads(raw_main)
+    except json.JSONDecodeError as exc:
+        raise Issue790DispositionError("live GitHub main evidence is malformed") from exc
+    main_object = main_value.get("object") if isinstance(main_value, dict) else None
+    github_main = main_object.get("sha") if isinstance(main_object, dict) else None
+    if github_main != revision:
+        raise Issue790DispositionError("operation revision is not live GitHub main")
+    running_code = _running_code_evidence(
+        root=root,
+        git=git,
+        revision=revision,
+    )
     raw_checks = _run_checked(
         (
             gh,
@@ -524,7 +609,9 @@ def collect_issue_790_operational_evidence(
         "tree": tree,
         "local_main_revision": local_main,
         "origin_main_revision": origin_main,
+        "github_main_revision": github_main,
         "worktree_clean": True,
+        "running_code": running_code,
         "ci_test": {
             "name": "test",
             "status": "completed",
@@ -561,6 +648,7 @@ def _validate_operational_evidence(
         or retained.get("worktree_clean") is not True
         or retained.get("revision") != retained.get("local_main_revision")
         or retained.get("revision") != retained.get("origin_main_revision")
+        or retained.get("revision") != retained.get("github_main_revision")
         or retained.get("store") != str(store.absolute())
         or retained.get("store_quick_check") != "ok"
         or retained.get("retry_forbidden_events")
@@ -570,6 +658,8 @@ def _validate_operational_evidence(
     revision = retained.get("revision")
     tree = retained.get("tree")
     ci_test = retained.get("ci_test")
+    running_code = retained.get("running_code")
+    expected_code_paths = [item[1] for item in _RUNNING_CODE_MODULES]
     if (
         not isinstance(revision, str)
         or re.fullmatch(r"[0-9a-f]{40}", revision) is None
@@ -583,6 +673,27 @@ def _validate_operational_evidence(
         or not isinstance(ci_test.get("url"), str)
         or not str(ci_test["url"]).startswith(
             "https://github.com/fol2/newsroom/actions/runs/"
+        )
+        or not isinstance(running_code, list)
+        or [
+            item.get("repository_path")
+            for item in running_code
+            if isinstance(item, dict)
+        ]
+        != expected_code_paths
+        or any(
+            not isinstance(item, dict)
+            or item.get("module") != module_name
+            or item.get("repository_path") != relative_path
+            or not isinstance(item.get("git_blob"), str)
+            or re.fullmatch(r"[0-9a-f]{40}", str(item["git_blob"])) is None
+            or not isinstance(item.get("sha256"), str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", str(item["sha256"])) is None
+            for item, (module_name, relative_path) in zip(
+                running_code,
+                _RUNNING_CODE_MODULES,
+                strict=True,
+            )
         )
     ):
         raise Issue790DispositionError("issue #790 exact-main evidence differs")
@@ -730,7 +841,7 @@ def _assert_exact_target(store: Path, plan: Mapping[str, object]) -> None:
         connection.close()
 
 
-def execute_issue_790_plan(
+def _execute_issue_790_plan(
     *,
     store: Path,
     plan: Mapping[str, object],
@@ -739,7 +850,7 @@ def execute_issue_790_plan(
     backup_path: Path,
     backup_digest: str,
     source_store: Path | None = None,
-    operational_evidence: Mapping[str, object] | None = None,
+    repository_root: Path | None = None,
 ) -> dict[str, object]:
     """Apply the same exact transition to a dry-run copy or the live store."""
 
@@ -753,10 +864,15 @@ def execute_issue_790_plan(
     retained_operational_evidence: dict[str, object] | None = None
     retry_events_before: list[dict[str, object]] | None = None
     if mode == "apply":
-        if operational_evidence is None:
+        if repository_root is None:
             raise Issue790DispositionError(
-                "issue #790 live operation evidence is absent"
+                "issue #790 live operation repository is absent"
             )
+        operational_evidence = collect_issue_790_operational_evidence(
+            repository_root=repository_root,
+            store=store,
+            observed_at=observed_at,
+        )
         retained_operational_evidence = _validate_operational_evidence(
             operational_evidence,
             store=store,
@@ -768,9 +884,27 @@ def execute_issue_790_plan(
             store,
             retained_plan,
         )
+        retained_backup = _canonical_existing_file(
+            backup_path,
+            field="pre-operation snapshot",
+        )
+        assert_issue_790_paths_disjoint(store, retained_backup)
+        if (
+            "sha256:" + hashlib.sha256(retained_backup.read_bytes()).hexdigest()
+            != backup_digest
+            or _sqlite_quick_check(
+                retained_backup,
+                field="pre-operation snapshot",
+            )
+            != "ok"
+        ):
+            raise Issue790DispositionError(
+                "issue #790 pre-operation snapshot evidence differs"
+            )
 
     _assert_exact_target(store, retained_plan)
     service = ModelUsageService(str(store))
+    canary_repository = Issue790CanaryRepository(str(store))
     authority_digest = _authority_digest(retained_plan)
     try:
         initial_route_state = service.route_state(str(target["route"]))
@@ -815,6 +949,15 @@ def execute_issue_790_plan(
             raise Issue790DispositionError(
                 "issue #790 retained conservative total differs"
             )
+        retry_exclusions = canary_repository.retain_retry_exclusions(
+            approved_plan_digest=str(retained_plan["canonical_digest"]),
+            disposition_digest=str(disposition["disposition_digest"]),
+            events=tuple(
+                _record(item, field="retry-forbidden event")
+                for item in retained_plan["retry_forbidden_events"]  # type: ignore[union-attr]
+            ),
+            excluded_at=observed_at,
+        )
         route_state_before_release = service.route_state(str(target["route"]))
         expected_closed_reason = (
             f"{_RELEASE_KIND}:{disposition['disposition_digest']}"
@@ -855,7 +998,11 @@ def execute_issue_790_plan(
             )
         else:
             retry_events_after = None
-    except (ModelUsageIntegrityError, ModelUsageAdmissionError) as exc:
+    except (
+        Issue790CanaryIntegrityError,
+        ModelUsageIntegrityError,
+        ModelUsageAdmissionError,
+    ) as exc:
         raise Issue790DispositionError(str(exc)) from exc
 
     operation_source = store if source_store is None else source_store
@@ -882,6 +1029,7 @@ def execute_issue_790_plan(
         "operational_evidence": retained_operational_evidence,
         "retry_forbidden_events_before": retry_events_before,
         "retry_forbidden_events_after": retry_events_after,
+        "retry_exclusions": list(retry_exclusions),
         "route_state_before_release": route_state_before_release,
         "route_state_after_release": route_state_after_release,
         "retry_performed": False,
@@ -904,7 +1052,7 @@ def dry_run_issue_790_plan(
     assert_issue_790_paths_disjoint(source_store, scratch_store)
     retained_plan = _require_approved_plan(plan)
     backup_digest = _sqlite_backup(source_store, scratch_store)
-    receipt = execute_issue_790_plan(
+    receipt = _execute_issue_790_plan(
         store=scratch_store,
         plan=retained_plan,
         observed_at=observed_at,
@@ -926,21 +1074,32 @@ def apply_issue_790_plan(
 ) -> dict[str, object]:
     assert_issue_790_paths_disjoint(store, backup_path)
     retained_plan = _require_approved_plan(plan)
-    operational_evidence = collect_issue_790_operational_evidence(
+    pre_backup_evidence = collect_issue_790_operational_evidence(
         repository_root=repository_root,
         store=store,
         observed_at=observed_at,
     )
     backup_digest = _sqlite_backup(store, backup_path)
-    return execute_issue_790_plan(
+    receipt = _execute_issue_790_plan(
         store=store,
         plan=retained_plan,
         observed_at=observed_at,
         mode="apply",
         backup_path=backup_path,
         backup_digest=backup_digest,
-        operational_evidence=operational_evidence,
+        repository_root=repository_root,
     )
+    retained_evidence = _record(
+        receipt["operational_evidence"],
+        field="operational evidence",
+    )
+    if retained_evidence.get("evidence_digest") != pre_backup_evidence.get(
+        "evidence_digest"
+    ):
+        raise Issue790DispositionError(
+            "issue #790 operational evidence changed across backup"
+        )
+    return receipt
 
 
 def _sqlite_quick_check(path: Path, *, field: str) -> str:
@@ -1151,6 +1310,25 @@ def _consume_issue_790_event(
     )
 
 
+def _qualify_issue_790_event(
+    *,
+    proving_store: Path,
+    unpublished_store: Path,
+    event_id: str,
+    ledger_seq: int,
+    observed_at: datetime,
+) -> dict[str, object]:
+    from newsroom.control_plane.cycle import qualify_fresh_graphiti_event
+
+    return qualify_fresh_graphiti_event(
+        proving_store=str(proving_store),
+        unpublished_store=str(unpublished_store),
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        clock=lambda: observed_at,
+    )
+
+
 def run_issue_790_canary(
     *,
     store: Path,
@@ -1191,6 +1369,72 @@ def run_issue_790_canary(
     )
     _assert_exact_target(store, retained_plan)
     target = _record(retained_plan["target"], field="target")
+    try:
+        canary_repository = Issue790CanaryRepository.open_existing(str(store))
+    except Issue790CanaryIntegrityError as exc:
+        raise Issue790DispositionError(str(exc)) from exc
+    event_before = _event_snapshot(
+        store,
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+    )
+    event_before_record = _record(event_before["event"], field="canary event")
+    prior_consumption = canary_repository.existing_consumption(
+        approved_plan_digest=str(retained_plan["canonical_digest"]),
+    )
+    resuming_zero_io_finalisation = prior_consumption is not None
+    if prior_consumption is None:
+        if (
+            event_before_record.get("state") != "QUEUED"
+            or event_before_record.get("attempt_count") != 0
+        ):
+            raise Issue790DispositionError("bounded canary event is not untouched")
+        try:
+            preflight_evidence = _qualify_issue_790_event(
+                proving_store=proving_store,
+                unpublished_store=store,
+                event_id=event_id,
+                ledger_seq=ledger_seq,
+                observed_at=observed_at,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
+            raise Issue790DispositionError(
+                f"bounded canary provider-free preflight failed: {type(exc).__name__}"
+            ) from exc
+    else:
+        if (
+            prior_consumption.get("event_id") != event_id
+            or prior_consumption.get("ledger_seq") != ledger_seq
+            or prior_consumption.get("disposition_digest") != disposition_digest
+        ):
+            raise Issue790DispositionError(
+                "interrupted bounded canary authority differs"
+            )
+        preflight_evidence = _record(
+            prior_consumption.get("preflight_evidence"),
+            field="bounded canary preflight",
+        )
+    retry_before = _require_retry_events_unchanged(store, retained_plan)
+    worker_before = _worker_state()
+    _require_worker_unloaded(worker_before)
+    state_counts_before = _record(
+        event_before["state_counts"],
+        field="canary state counts",
+    )
+    dead_letters_before = int(state_counts_before.get("DEAD_LETTER", 0))
+    backup_digest = _sqlite_backup(store, backup_path)
+    operational_evidence_after_backup = collect_issue_790_operational_evidence(
+        repository_root=repository_root,
+        store=store,
+        observed_at=observed_at,
+    )
+    if operational_evidence_after_backup.get(
+        "evidence_digest"
+    ) != operational_evidence.get("evidence_digest"):
+        raise Issue790DispositionError(
+            "bounded canary operational evidence changed across backup"
+        )
+    operational_evidence = operational_evidence_after_backup
     service = ModelUsageService(str(store))
     route_before = service.route_state(str(target["route"]))
     expected_route_reason = f"{_RELEASE_KIND}:{disposition_digest}"
@@ -1201,72 +1445,71 @@ def run_issue_790_canary(
         raise Issue790DispositionError(
             "bounded canary route release authority differs"
         )
-    event_before = _event_snapshot(
-        store,
-        event_id=event_id,
-        ledger_seq=ledger_seq,
-    )
-    event_before_record = _record(event_before["event"], field="canary event")
-    if (
-        event_before_record.get("state") != "QUEUED"
-        or event_before_record.get("attempt_count") != 0
-    ):
-        raise Issue790DispositionError("bounded canary event is not untouched")
-    retry_before = _require_retry_events_unchanged(store, retained_plan)
-    worker_before = _worker_state()
-    _require_worker_unloaded(worker_before)
-    state_counts_before = _record(
-        event_before["state_counts"],
-        field="canary state counts",
-    )
-    dead_letters_before = int(state_counts_before.get("DEAD_LETTER", 0))
-    backup_digest = _sqlite_backup(store, backup_path)
-    owner_id = f"issue-790-canary:{uuid.uuid4()}"
-    try:
-        consumption = service.consume_issue_790_bounded_canary(
-            approved_plan_digest=str(retained_plan["canonical_digest"]),
-            disposition_digest=disposition_digest,
-            event_id=event_id,
-            ledger_seq=ledger_seq,
-            owner_id=owner_id,
-            consumed_at=observed_at,
-        )
-    except (ModelUsageIntegrityError, ModelUsageAdmissionError) as exc:
-        raise Issue790DispositionError(str(exc)) from exc
-
     process_result: dict[str, object] | None = None
     exception: dict[str, object] | None = None
-    try:
-        _require_worker_unloaded(_worker_state())
-        result = _consume_issue_790_event(
-            proving_store=proving_store,
-            unpublished_store=store,
-            owner_id=owner_id,
-            event_id=event_id,
-            canary_consumption_digest=str(consumption["consumption_digest"]),
-            model_usage=service,
-        )
-        if result is not None:
-            process_result = asdict(result)
-    except Exception as exc:  # the authority is consumed; retain, seal and stop
-        exception = {
-            "type": type(exc).__name__,
-            "detail_digest": digest_canonical(
-                {"type": type(exc).__name__, "detail": str(exc)}
-            ),
-        }
     completed_at = datetime.now(tz=UTC)
     try:
-        outcome = service.complete_issue_790_bounded_canary(
-            consumption_digest=str(consumption["consumption_digest"]),
-            event_id=event_id,
-            ledger_seq=ledger_seq,
-            owner_id=owner_id,
-            process_result=process_result,
-            completed_at=completed_at,
-            exception_code=None if exception is None else str(exception["type"]),
-        )
-    except (ModelUsageIntegrityError, ModelUsageAdmissionError) as exc:
+        if prior_consumption is not None:
+            consumption = prior_consumption
+            owner_id = str(consumption["owner_id"])
+            outcome = canary_repository.finalise_without_dispatch(
+                consumption_digest=str(consumption["consumption_digest"]),
+                event_id=event_id,
+                ledger_seq=ledger_seq,
+                owner_id=owner_id,
+                completed_at=completed_at,
+            )
+            retained_result = outcome.get("process_result")
+            process_result = (
+                None
+                if retained_result is None
+                else _record(retained_result, field="canary process result")
+            )
+        else:
+            owner_id = f"issue-790-canary:{uuid.uuid4()}"
+            consumption = canary_repository.consume(
+                approved_plan_digest=str(retained_plan["canonical_digest"]),
+                disposition_digest=disposition_digest,
+                event_id=event_id,
+                ledger_seq=ledger_seq,
+                owner_id=owner_id,
+                preflight_evidence=preflight_evidence,
+                consumed_at=observed_at,
+            )
+            try:
+                _require_worker_unloaded(_worker_state())
+                result = _consume_issue_790_event(
+                    proving_store=proving_store,
+                    unpublished_store=store,
+                    owner_id=owner_id,
+                    event_id=event_id,
+                    canary_consumption_digest=str(
+                        consumption["consumption_digest"]
+                    ),
+                    model_usage=service,
+                )
+                if result is not None:
+                    process_result = asdict(result)
+            except Exception as exc:  # authority is consumed; seal and stop
+                exception = {
+                    "type": type(exc).__name__,
+                    "detail_digest": digest_canonical(
+                        {"type": type(exc).__name__, "detail": str(exc)}
+                    ),
+                }
+            completed_at = datetime.now(tz=UTC)
+            outcome = canary_repository.complete(
+                consumption_digest=str(consumption["consumption_digest"]),
+                event_id=event_id,
+                ledger_seq=ledger_seq,
+                owner_id=owner_id,
+                process_result=process_result,
+                completed_at=completed_at,
+                exception_code=(
+                    None if exception is None else str(exception["type"])
+                ),
+            )
+    except Issue790CanaryIntegrityError as exc:
         raise Issue790DispositionError(str(exc)) from exc
 
     event_after = _event_snapshot(store, event_id=event_id, ledger_seq=ledger_seq)
@@ -1296,6 +1539,7 @@ def run_issue_790_canary(
         and process_result.get("attempt_count") == 1
         and event_after_record.get("state") == "TERMINAL"
         and usage_evidence["provider_backed_terminal_count"] >= 1
+        and usage_evidence["truthful_nonzero_usage_count"] >= 1
         and usage_evidence["unresolved_terminal_count"] == 0
         and usage_evidence["unterminated_leaf_count"] == 0
         and route_after.get("state") == "CLOSED"
@@ -1316,6 +1560,7 @@ def run_issue_790_canary(
         "observed_at": _utc_text(observed_at),
         "completed_at": _utc_text(completed_at),
         "disposition_digest": disposition_digest,
+        "preflight_evidence": preflight_evidence,
         "consumption": consumption,
         "outcome": outcome,
         "process_result": process_result,
@@ -1335,6 +1580,8 @@ def run_issue_790_canary(
         "dead_letter_count_after": dead_letters_after,
         "store_quick_check": store_quick_check,
         "canary_evidence_passed": canary_evidence_passed,
+        "resumed_zero_io_finalisation": resuming_zero_io_finalisation,
+        "provider_dispatch_attempted_this_run": not resuming_zero_io_finalisation,
         "retry_authorised": False,
         "publication_performed": False,
         "public_dispatch_performed": False,
@@ -1386,7 +1633,6 @@ __all__ = [
     "apply_issue_790_plan",
     "assert_issue_790_paths_disjoint",
     "dry_run_issue_790_plan",
-    "execute_issue_790_plan",
     "load_issue_790_plan",
     "run_issue_790_canary",
     "validate_issue_790_plan",

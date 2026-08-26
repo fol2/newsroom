@@ -11,6 +11,12 @@ from datetime import UTC, datetime, timedelta
 
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane.corpus import CorpusIngestUnit
+from newsroom.control_plane.issue_790_canary import (
+    graphiti_event_has_canary_consumption,
+    graphiti_excluded_event_ids,
+    graphiti_retry_excluded,
+    validate_graphiti_canary_claim,
+)
 from newsroom.control_plane.store import EFFECTIVE_REVISION_LANDED
 from newsroom.control_plane.veto import assert_private_store
 
@@ -42,16 +48,6 @@ def _connect(path: str) -> sqlite3.Connection:
     return connection
 
 
-def _has_bounded_canary_consumptions(connection: sqlite3.Connection) -> bool:
-    return (
-        connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' "
-            "AND name='model_usage_bounded_canary_consumptions'"
-        ).fetchone()
-        is not None
-    )
-
-
 def _recover_expired_claims(connection: sqlite3.Connection, *, now_text: str) -> None:
     statement = """
         UPDATE unpublished_graphiti_revision_events
@@ -59,13 +55,10 @@ def _recover_expired_claims(connection: sqlite3.Connection, *, now_text: str) ->
         WHERE state IN ('CLAIMED','RUNNING')
           AND claim_expires_at IS NOT NULL AND claim_expires_at<=?
         """
-    if _has_bounded_canary_consumptions(connection):
-        statement += (
-            " AND NOT EXISTS (SELECT 1 "
-            "FROM model_usage_bounded_canary_consumptions c "
-            "WHERE c.event_id=unpublished_graphiti_revision_events.event_id)"
-        )
-    connection.execute(statement, (now_text,))
+    excluded = tuple(sorted(graphiti_excluded_event_ids(connection)))
+    if excluded:
+        statement += " AND event_id NOT IN (" + ",".join("?" for _ in excluded) + ")"
+    connection.execute(statement, (now_text, *excluded))
 
 
 def ensure_graphiti_event_schema(connection: sqlite3.Connection) -> None:
@@ -424,25 +417,27 @@ class GraphitiEventQueue:
             connection.execute("BEGIN IMMEDIATE")
             if event_id is None:
                 reconcile_graphiti_events(connection, (), available_at=now)
-            has_canary_consumptions = _has_bounded_canary_consumptions(connection)
             if canary_consumption_digest is not None:
-                if not has_canary_consumptions or connection.execute(
-                    "SELECT 1 FROM model_usage_bounded_canary_consumptions "
-                    "WHERE consumption_digest=? AND event_id=? AND owner_id=?",
-                    (canary_consumption_digest, event_id, owner_id),
-                ).fetchone() is None:
-                    raise ValueError("bounded canary claim authority differs")
+                assert event_id is not None
+                validate_graphiti_canary_claim(
+                    connection,
+                    consumption_digest=canary_consumption_digest,
+                    event_id=event_id,
+                    owner_id=owner_id,
+                )
             elif (
                 event_id is not None
-                and has_canary_consumptions
-                and connection.execute(
-                    "SELECT 1 FROM model_usage_bounded_canary_consumptions "
-                    "WHERE event_id=?",
-                    (event_id,),
-                ).fetchone()
-                is not None
+                and graphiti_event_has_canary_consumption(
+                    connection,
+                    event_id=event_id,
+                )
             ):
                 raise ValueError("bounded canary claim authority is required")
+            if event_id is not None and graphiti_retry_excluded(
+                connection,
+                event_id=event_id,
+            ):
+                raise ValueError("Graphiti event is durably retry-excluded")
             circuit = connection.execute(
                 "SELECT state,available_at FROM unpublished_graphiti_event_circuit WHERE singleton=1"
             ).fetchone()
@@ -469,19 +464,17 @@ class GraphitiEventQueue:
                     FROM unpublished_graphiti_revision_events
                     WHERE """
                 if event_id is None:
+                    excluded = tuple(sorted(graphiti_excluded_event_ids(connection)))
                     query += (
                         "state IN ('QUEUED','RETRY_HELD','RIGHTS_HELD') "
                         "AND available_at<=? "
                     )
-                    if has_canary_consumptions:
-                        query += (
-                            "AND NOT EXISTS (SELECT 1 "
-                            "FROM model_usage_bounded_canary_consumptions c "
-                            "WHERE c.event_id="
-                            "unpublished_graphiti_revision_events.event_id) "
-                        )
+                    if excluded:
+                        query += "AND event_id NOT IN (" + ",".join(
+                            "?" for _ in excluded
+                        ) + ") "
                     query += "ORDER BY ledger_seq LIMIT 1"
-                    parameters: tuple[object, ...] = (now_text,)
+                    parameters: tuple[object, ...] = (now_text, *excluded)
                 else:
                     query += "event_id=? AND available_at<=? "
                     if require_fresh:

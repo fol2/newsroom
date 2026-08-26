@@ -14,7 +14,11 @@ from newsroom.authority.canonical import (
     digest_canonical,
 )
 from newsroom.control_plane.corpus import CorpusIngestUnit
-from newsroom.control_plane.cycle import consume_next_graphiti_event, run_cycle
+from newsroom.control_plane.cycle import (
+    consume_next_graphiti_event,
+    qualify_fresh_graphiti_event,
+    run_cycle,
+)
 from newsroom.control_plane.graphiti import GraphitiCycleResult
 from newsroom.control_plane.graphiti_events import (
     ConfigurationGraphitiEventFailure,
@@ -175,6 +179,71 @@ def _insert_legacy_landed(path: Path, unit: CorpusIngestUnit) -> tuple[str, str]
     connection.commit()
     connection.close()
     return ledger_digest, payload_digest
+
+
+def test_fresh_event_preflight_hydrates_zero_ref_manifest_without_writes(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "unpublished.sqlite3"
+    run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=None,
+        max_graphiti=0,
+        clock=clock,
+    )
+    connection = connect(str(unpublished))
+    connection.execute("BEGIN IMMEDIATE")
+    assert reconcile_graphiti_events(
+        connection,
+        (),
+        available_at=clock.value,
+    ) > 0
+    connection.commit()
+    row = connection.execute(
+        "SELECT event_id,ledger_seq,manifest_json FROM "
+        "unpublished_graphiti_revision_events ORDER BY ledger_seq LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    manifest = json.loads(str(row[2]))
+    assert manifest["unit_refs"] == []
+    before = connection.execute(
+        "SELECT state,attempt_count,unit_count,manifest_digest FROM "
+        "unpublished_graphiti_revision_events WHERE event_id=?",
+        (str(row[0]),),
+    ).fetchone()
+    connection.close()
+
+    evidence = qualify_fresh_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        event_id=str(row[0]),
+        ledger_seq=int(row[1]),
+        clock=clock,
+    )
+
+    retained = sqlite3.connect(unpublished)
+    after = retained.execute(
+        "SELECT state,attempt_count,unit_count,manifest_digest FROM "
+        "unpublished_graphiti_revision_events WHERE event_id=?",
+        (str(row[0]),),
+    ).fetchone()
+    retained.close()
+    assert evidence["provider_calls"] == 0
+    assert evidence["store_mutations"] == 0
+    assert evidence["resolved_units"]
+    assert evidence["evidence_digest"] == digest_canonical(
+        {
+            key: value
+            for key, value in evidence.items()
+            if key != "evidence_digest"
+        }
+    )
+    assert after == before
 
 
 def test_committed_events_are_immediately_claimable_and_recover_after_restart(
