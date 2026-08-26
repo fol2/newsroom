@@ -14,6 +14,7 @@ from types import MappingProxyType
 
 from newsroom.authority.canonical import (
     canonical_json_bytes,
+    digest_bytes,
     validate_sha256_digest,
 )
 
@@ -158,6 +159,19 @@ PRODUCTION_KEY_IDS = {
     ),
 }
 
+_INCREMENT9Q_PROVIDER_TERMS_FIXTURE_KEY_DIGEST = (
+    "sha256:39d90a5bab66a0c7cee30bf1484840d4c30a733ffda2519198576824cd1c1d95"
+)
+_INCREMENT9Q_RIGHTS_FIXTURE_KEY_DIGEST = (
+    "sha256:1db8400c270e066c8a8b78ef6a2f5c39ee9fa1c7f99f9fb79f695261d2ddb135"
+)
+_INCREMENT9Q_FIXTURE_KEY_DIGESTS = frozenset(
+    {
+        _INCREMENT9Q_PROVIDER_TERMS_FIXTURE_KEY_DIGEST,
+        _INCREMENT9Q_RIGHTS_FIXTURE_KEY_DIGEST,
+    }
+)
+
 
 def production_key_id(key_class: KeyClass) -> str:
     """Return the single configured identifier for a production trust root."""
@@ -192,6 +206,13 @@ class AuthenticationKey:
             raise ProductionAdmissionError("production trust-root key id differs")
         if not isinstance(self.secret, bytes) or len(self.secret) < 32:
             raise ProductionAdmissionError("authentication key is too short")
+        if (
+            self.key_class is KeyClass.PRODUCTION_OPERATIONAL_ADMISSION
+            and digest_bytes(self.secret) in _INCREMENT9Q_FIXTURE_KEY_DIGESTS
+        ):
+            raise ProductionAdmissionError(
+                "Increment 9Q fixture key is ineligible for production admission"
+            )
 
     def require_production_trust_root(
         self,
