@@ -20,7 +20,9 @@ Automated AI newsroom: governed ledger, GraphRAG, Hermes Control Plane.
 
 - Python 3.12+, deps in `pyproject.toml` (locked in `uv.lock`)
 - Install (dev): `uv sync --dev`
-- Tests: `uv run pytest newsroom/tests/ -v`
+- Follow the development behaviour in [`AGENTS.md`](AGENTS.md) and the focused
+  test guidance in [`docs/testing.md`](docs/testing.md). The `ponytail` skill
+  stays active in full mode for every coding-related task.
 
 ## Code style
 

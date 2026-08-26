@@ -21,11 +21,16 @@ RSS/Atom remains a Source Definition transport via `newsroom/discovery_adapters/
 
 ## Running tests
 
-All tests must pass before submitting changes:
+Run the smallest relevant files or node IDs during local iteration:
 
 ```bash
-uv run python -m pytest newsroom/tests/ -v
+uv run --no-sync python -m pytest -q \
+  newsroom/tests/test_RELEVANT.py
 ```
+
+Environment setup is described above and should not be repeated before every
+test command. Agent behaviour, complete-suite authority and stop-and-report
+guidance live in [`AGENTS.md`](AGENTS.md) and [`docs/testing.md`](docs/testing.md).
 
 ## Code guidelines
 
@@ -42,4 +47,11 @@ uv run python -m pytest newsroom/tests/ -v
 - Keep PRs small and focused on a single change.
 - Describe what changed and why in the PR description.
 - Include test coverage for new functionality.
-- Ensure all tests still pass.
+- When touching tests or fixtures, remove obvious duplicated setup and avoid
+  sleeps or repeated I/O where a smaller semantics-preserving path already
+  exists. Keep assertions and isolation intact.
+- Prefer the smallest working change; do not add speculative abstractions,
+  scaffolding or dependencies.
+- Record the focused validation performed and anything deliberately not run.
+- Do not add or expand a machine gate whose predicate is compliance with the
+  behavioural guidance in `AGENTS.md`.

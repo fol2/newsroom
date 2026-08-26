@@ -32,11 +32,11 @@ changed files:
 
 ## Verification
 
-List the one decision-validated exact-head SDLC core receipt that supplies
-canonical complete deterministic evidence. Record fast CI and any manually run
-legacy diagnostics as compatibility signals only. For Tier S, add only the
-affected lanes selected by the route. Reserve the signed exact-main closeout
-attestation for Tier M. Record one feature-complete stop and its review state.
+List the focused checks selected for this change, their outcomes, and anything
+not run. If remote automation is already available, record its observed state
+once. Do not wait, poll, or rerun the same check against unchanged code,
+configuration and environment merely to fill this section. Agent handover does
+not override the repository's current merge policy. See `docs/testing.md`.
 
 ## Non-effects
 

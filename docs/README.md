@@ -75,13 +75,21 @@ A link does not make an entire reference or research document normative. A merge
 
 ## Current SDLC v2 documents
 
-- [`specs/sdlc/high-performance-evidence-sdlc.md`](specs/sdlc/high-performance-evidence-sdlc.md) is the adopted `sdlc-v2.2` technical contract for sub-60-second machine gates, risk-routed evidence, exact provenance and scientific quality control.
+- [`testing.md`](testing.md) is behavioural guidance for proportionate local
+  validation, stopping and reporting; it creates no machine gate.
+- [`specs/sdlc/high-performance-evidence-sdlc.md`](specs/sdlc/high-performance-evidence-sdlc.md)
+  is the adopted technical contract for repository automation. It does not
+  instruct agents to wait, poll or rerun automation before handover.
 - [`specs/sdlc/2026-07-22-sdlc-v2-owner-acceptance.md`](specs/sdlc/2026-07-22-sdlc-v2-owner-acceptance.md) is the **Accepted** normative record that supersedes the pre-acceptance status metadata and fixes the five owner-policy values.
 - [`research/2026-07-21-high-performance-sdlc-evidence.md`](research/2026-07-21-high-performance-sdlc-evidence.md) is the Completed dated evidence study of the current five-workflow topology, exact JUnit timings, primary sources and rejected options.
 - [`research/2026-07-21-sdlc-v2-substantive-review.md`](research/2026-07-21-sdlc-v2-substantive-review.md) records the completed design review and corrected P2 findings.
 - [`plans/2026-07-21-007-sdlc-v2-migration.md`](plans/2026-07-21-007-sdlc-v2-migration.md) is the adopted reversible migration plan from historical increment workflows to one always-reporting router, one cached core lane and one conditional actual-service lane.
 - [`../.sdlc/gates.toml`](../.sdlc/gates.toml), [`../.sdlc/route.schema.json`](../.sdlc/route.schema.json), [`../.sdlc/evidence.schema.json`](../.sdlc/evidence.schema.json) and [`../.sdlc/baselines/2026-07-21-b3.json`](../.sdlc/baselines/2026-07-21-b3.json) are the accepted machine-readable contract and exact baseline evidence.
-- One decision-validated exact-head SDLC core receipt is the canonical complete deterministic evidence. Pull-request and merge-queue receipts are content-addressed, transport-verified evidence-only artifacts, not signed attestations; the signed exact-main closeout remains a separate Tier-M requirement. Fast `CI` and manually dispatched legacy Authority/Projection workflows are compatibility signals, not admission evidence. Tier S adds only route-selected affected lanes, with one review at the feature-complete stop.
+- Repository automation produces its own evidence records under the SDLC
+  contract. Those records do not create an agent obligation to wait, poll,
+  rerun the same check against unchanged code, configuration and environment,
+  or withhold a focused handover. Handover does not override the repository's
+  current merge policy.
 - Issue #98 is closed completed. PR #99 accepted the SDLC v2 specification and PR #119 merged the reversible Phase 1/2 **SDLC Evidence Shadow** implementation.
 
 ## Current-system documentation

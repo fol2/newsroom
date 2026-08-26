@@ -1,11 +1,70 @@
 # Newsroom domain language
 
-**Status:** Proposed vocabulary; Increment 9 autonomy terms accepted 2026-08-15; Active Coverage accepted 2026-08-17; Evaluation Threshold Schedule accepted 2026-08-17; Retention Schedule accepted 2026-08-17; Rights Record and Asset Record accepted 2026-08-17
+**Status:** Proposed vocabulary; Increment 9 autonomy terms accepted 2026-08-15; Active Coverage accepted 2026-08-17; Evaluation Threshold Schedule accepted 2026-08-17; Retention Schedule accepted 2026-08-17; Rights Record and Asset Record accepted 2026-08-17; Development Behaviour accepted 2026-08-26
 
-This glossary proposes the canonical meanings of editorial records that connect evidence, decisions, publication and derived newsroom intelligence. The product owner has not accepted this vocabulary yet.
+This glossary proposes the canonical meanings of development practice and the
+editorial records that connect evidence, decisions, publication and derived
+newsroom intelligence. The product owner has not accepted this vocabulary as a
+whole.
 
-The product owner has accepted the Increment 9 terms in the final section. That
-acceptance does not implicitly accept every earlier proposed term.
+The product owner has accepted the Increment 9 terms in the final section and
+the Development Behaviour terms below. Those acceptances do not implicitly
+accept every other proposed term.
+
+## Development behaviour
+
+These terms distinguish agent working practice from machine admission policy.
+
+**Behavioural Instruction**:
+A concise default for how an agent selects work, validation and stopping points.
+It guides judgement and handover; it is not a machine-enforced admission rule.
+_Avoid_: Hidden gate, mandatory workflow
+
+**Evidence Check**:
+A proportionate observation selected to answer a stated question about the
+change. Focused tests, static checks and a single observation of remote status
+can all be evidence checks. An evidence check does not become a blocking gate
+merely because it is recorded in a handover.
+_Avoid_: Proof of everything, implicit merge gate
+
+**Hard Gate**:
+An automated condition that blocks progress until a machine predicate passes.
+Hard gates incur maintenance, queueing and retry costs and are not the default
+way to control agent behaviour. Existing machine configuration does not imply
+that an agent must wait, poll or rerun it. New hard gates are outside this
+behavioural model.
+_Avoid_: Behavioural reminder, review preference
+
+**Stop-and-report**:
+The agent ends its validation loop once focused evidence answers the immediate
+question, then states the commands, outcomes, omissions and uncertainty. A
+pending remote workflow or a failure against unchanged code, configuration and
+environment is reported rather than polled or repeated by default.
+_Avoid_: Wait-until-green, retry-until-green
+
+**Agent Work Budget**:
+The judgement boundary that keeps validation and orchestration proportionate to
+the change. It favours focused evidence and stop-and-report over complete-suite
+runs, repeated reviews or status polling. It is behavioural guidance, not a
+numeric quota or another hard gate.
+_Avoid_: Token-burning loop, fixed machine timeout
+
+**Ponytail Discipline**:
+The persistent practice of choosing the first simple solution that works after
+understanding the real flow. It favours deletion, reuse and standard or native
+facilities over speculative flexibility and over-engineering.
+_Avoid_: Clever framework, scaffolding for later
+
+**Slim-and-trim Ratchet**:
+The best-effort direction in which touched code loses safe nearby duplication,
+obsolete setup and unnecessary indirection without expanding into an unrelated
+rewrite. It is not an acceptance predicate or a demand for speculative work.
+_Avoid_: Opportunistic rewrite, repository-wide tidy-up
+
+**Touched-test Stewardship**:
+The practice of looking for a small, safe opportunity to reduce a touched
+test's runtime, setup or I/O while preserving its assertions and isolation.
+_Avoid_: Weakened test, speculative benchmark system
 
 ## Discovery
 
