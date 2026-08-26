@@ -73,6 +73,11 @@ def test_every_retained_workflow_job_has_a_positive_explicit_timeout() -> None:
 def test_ci_is_an_exact_head_bounded_compatibility_gate() -> None:
     workflow = _load(CI_PATH)
     assert workflow["name"] == "CI"
+    assert workflow["on"] == {
+        "push": "",
+        "pull_request": "",
+        "workflow_dispatch": "",
+    }
     assert set(workflow["jobs"]) == {"test"}
     job = workflow["jobs"]["test"]
     assert job["name"] == "test"
