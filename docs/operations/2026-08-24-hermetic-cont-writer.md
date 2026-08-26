@@ -103,10 +103,13 @@ from each exact writer-facing Evidence Package, not against whole-prompt length.
 
 The no-dispatch dry selection against the retained proving store on 2026-08-24
 formed 287 candidates, all `HOLD`, and zero `WRITE_READY` candidates. It made
-zero provider calls and zero public effects. Consequently no productive live
-packet or invocation-efficiency policy has been minted from that retained set.
-Continuous CONT writing remains held until three qualified retained candidates
-can satisfy the productive and context gates.
+zero provider calls and zero public effects.
+
+A later owner-authorised EVALUATION known-ready run seeded three `#727`
+`WRITE_READY` packages and dispatched one hermetic Grok 1.0.10 primary. The
+copy failed the exact role-structure validator; the no-useful-output circuit
+stopped later candidates. No productive packet or invocation-efficiency
+policy has been minted. Continuous CONT writing remains held.
 
 ## Non-effects
 

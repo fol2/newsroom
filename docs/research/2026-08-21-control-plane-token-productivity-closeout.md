@@ -172,9 +172,17 @@ is the `cont_reported_tokens` / `graphiti_reported_tokens` pair.
 
 ## Limitations
 
-- #730 dry selection had 0 `WRITE_READY` candidates, so there is no live
-  CONT productive calibration packet on this atom.
-- No live provider calls were authorised or executed.
+- #730 dry selection against the live proving pool had 0 `WRITE_READY`
+  candidates (287 `HOLD`, identical missing-governed-package reasons).
+- Owner-authorised EVALUATION known-ready calibration on 2026-08-26 seeded
+  three `#727` `WRITE_READY` packages in isolated stores and dispatched one
+  hermetic Grok 1.0.10 primary (`grok-4.6`, reasoning `low`). Public effects
+  were 0. The copy failed `ROLE_SPECIFIC_EXACT_ONCE_STRUCTURE` /
+  `DUPLICATE_OR_MISPLACED_GOVERNED_CLAIM`; the no-useful-output circuit then
+  stopped the remaining two candidates. Reported usage on that leaf:
+  `input_tokens=11464`, `output_tokens=351`, `reasoning_tokens=157`,
+  `total_tokens=11815`, `context_tokens` absent. The productive packet did
+  not pass. #732 stays open.
 - The after CSV is a ledger export of a deterministic fixture proving the
   query contract, not a live EVALUATION host scrape.
 - Accepted calibration payloads, p50 context `<= 10,000`, 70% reduction
