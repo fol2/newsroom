@@ -3401,6 +3401,55 @@ def test_issue_790_timeout_report_deduplicates_one_retained_diagnostic(
     )
 
 
+def test_issue_790_timeout_report_ignores_non_timeout_receipt(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    event_id = _digest({"issue-790-non-timeout-event": 1})
+    _open_unreported_graphiti_subscription_leaf(
+        service,
+        cycle_id=event_id,
+        request="issue-790-non-timeout-report",
+        outcome="FAILED",
+        elapsed_ms=85_000,
+    )
+    store = tmp_path / "unpublished.sqlite3"
+    connection = connect_unpublished_store(str(store))
+    try:
+        receipt = {
+            "ingest_id": f"ingest-{event_id}",
+            "attempt_number": 1,
+            "outcome": "FAILED",
+            "chat_invocations": [
+                {
+                    "provider": "cursor-agent-cli",
+                    "outcome": "FAILED",
+                    "failure": "RuntimeError",
+                }
+            ],
+            "receipt_digest": "",
+        }
+        insert_graphiti_attempt_receipt(
+            connection,
+            ingest_id=f"ingest-{event_id}",
+            attempt_number=1,
+            outcome="FAILED",
+            receipt=receipt,
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    assert (
+        issue_790_operation._issue_790_controller_timeout_report(
+            store,
+            event_id=event_id,
+            configured_timeout_ms=160_000,
+        )
+        is None
+    )
+
+
 def test_issue_790_crash_after_success_recovers_truthful_stop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
