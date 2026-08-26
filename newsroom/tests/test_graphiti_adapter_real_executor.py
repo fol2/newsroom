@@ -3835,6 +3835,51 @@ def test_async_process_cleanup_drain_has_a_hard_deadline() -> None:
     assert termination == "PROCESS_CLEANUP_TIMEOUT"
 
 
+@pytest.mark.parametrize("asynchronous", (False, True))
+@pytest.mark.parametrize("failure", ("NONZERO", "MALFORMED_UTF8"))
+def test_cli_result_failure_cleans_descendants_that_closed_inherited_pipes(
+    tmp_path: Path,
+    asynchronous: bool,
+    failure: str,
+) -> None:
+    from newsroom.graphiti_adapter.cli_client import (
+        CliOutputDecodeError,
+        run_cli,
+        run_cli_async,
+    )
+
+    pid_path = tmp_path / f"result-{failure.lower()}-{asynchronous}.pid"
+    result = (
+        "sys.stdout.buffer.write(b'{}'); sys.stdout.flush(); sys.exit(7)"
+        if failure == "NONZERO"
+        else "sys.stdout.buffer.write(b'\\xff'); sys.stdout.flush()"
+    )
+    script = (
+        "import pathlib,subprocess,sys; "
+        "descendant=subprocess.Popen((sys.executable,'-c',"
+        "'import os,time; os.close(1); os.close(2); time.sleep(30)')); "
+        f"pathlib.Path({str(pid_path)!r}).write_text(str(descendant.pid)); "
+        f"{result}"
+    )
+    command = (sys.executable, "-c", script)
+    expected = RuntimeError if failure == "NONZERO" else CliOutputDecodeError
+    descendant_pid: int | None = None
+    try:
+        with pytest.raises(expected):
+            if asynchronous:
+                asyncio.run(run_cli_async(command, timeout=5, cwd=str(tmp_path)))
+            else:
+                run_cli(command, timeout=5, cwd=str(tmp_path))
+        descendant_pid = int(pid_path.read_text())
+        deadline = time.monotonic() + 1
+        while _descendant_is_running(descendant_pid) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not _descendant_is_running(descendant_pid)
+    finally:
+        if descendant_pid is not None and _descendant_is_running(descendant_pid):
+            os.kill(descendant_pid, signal.SIGKILL)
+
+
 @pytest.mark.parametrize("boundary", ("TIMEOUT", "CANCELLATION"))
 def test_async_controller_drains_high_volume_pipes_on_termination(
     tmp_path: Path,
