@@ -132,6 +132,14 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
         in primary.command_flags
     )
     assert (
+        f"LOCAL_CREDENTIAL_PROBE_ACCOUNT={cursor_transport.CURSOR_CREDENTIAL_ACCOUNT}"
+        in primary.command_flags
+    )
+    assert (
+        f"LOCAL_CREDENTIAL_PROBE_SEARCH={cursor_transport.CURSOR_CREDENTIAL_SEARCH}"
+        in primary.command_flags
+    )
+    assert (
         f"CREDENTIAL_STATE={cursor_transport.CURSOR_CREDENTIAL_STATE}"
         in primary.command_flags
     )

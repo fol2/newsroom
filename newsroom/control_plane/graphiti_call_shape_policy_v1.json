@@ -1,6 +1,6 @@
 {
   "schema_version": "newsroom.graphiti-call-shape-policy.v1",
-  "canonical_digest": "sha256:a9dca73d609ca9ca1b98783d235e07188d477706bbe079da2b98838d5f61dae9",
+  "canonical_digest": "sha256:e148c797bbefc86ebaf7dba81e12c42b4848be6d0dc92c296eae78de4c47508a",
   "policy_id": "graphiti-core-0.29.3-newsroom-adapter-v1",
   "version": "issue-790-v3",
   "graphiti_core_release": "graphiti-core-0.29.3",
@@ -41,13 +41,15 @@
         "CURSOR_CONFIGURATION=HERMETIC_EMPTY",
         "AUTHENTICATION_BRIDGE=MACOS_LOGIN_KEYCHAIN_FILE_SYMLINK_V1",
         "AUTHENTICATION_BRIDGE_DIGEST=sha256:5bfe59adbf441621ae4c410ddb58e9991cfa7d11961ddd6c280e3e31dc463711",
-        "AUTHENTICATION_PROBE=MACOS_LOCAL_KEYCHAIN_ITEMS_READABLE_V1",
-        "AUTHENTICATION_PROBE_DIGEST=sha256:83ac1f5eadc66ea1377f136178a47ac5a87a1e12d752acc1f795079f0fe2245e",
+        "AUTHENTICATION_PROBE=MACOS_CURSOR_KEYCHAIN_LOOKUP_V1",
+        "AUTHENTICATION_PROBE_DIGEST=sha256:d602f24bdf81d1d3f242977434b32a2d5694d4f749bb4beb87b4b97de8775f4d",
         "LOCAL_CREDENTIAL_PROBE_BIN=/usr/bin/security",
+        "LOCAL_CREDENTIAL_PROBE_ACCOUNT=cursor-user",
         "LOCAL_CREDENTIAL_PROBE_SERVICES=cursor-access-token,cursor-refresh-token",
+        "LOCAL_CREDENTIAL_PROBE_SEARCH=DEFAULT_KEYCHAIN_SEARCH_LIST",
         "LOCAL_CREDENTIAL_PROBE_OUTPUT=DEVNULL",
         "CREDENTIAL_STATE=LOCAL_ACCESS_REFRESH_TOKENS_READABLE",
-        "CREDENTIAL_STATE_DIGEST=sha256:cdc30f62a0021fb7f9ab7c6742056493f87f179ee5b83d5fdeacc8a724c004d1",
+        "CREDENTIAL_STATE_DIGEST=sha256:c4f5b14be367d9c6639c59ff13375652a957e600a85fbbe6339112b3392cba6a",
         "PROMPT_MAX_OUTPUT_TOKENS=REQUEST_MAX_TOKENS",
         "CONTROLLER_STDOUT_CONTRACT=cursor-controller-stdout-v1:65536+64*REQUEST_MAX_TOKENS"
       ],
@@ -61,7 +63,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:ded71d4d9117ca27c17d81dedf17208293ac6e68dbc3c2d269a387f08b5a68e1",
+      "implementation_revision": "sha256:d2bb761a2ea26076deb1642caa9fd679175865b21355fd28dcf00626adbcfb84",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -100,7 +102,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:ded71d4d9117ca27c17d81dedf17208293ac6e68dbc3c2d269a387f08b5a68e1",
+      "implementation_revision": "sha256:d2bb761a2ea26076deb1642caa9fd679175865b21355fd28dcf00626adbcfb84",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -373,7 +375,7 @@
       "distinct_internal_request_count": 3
     }
   ],
-  "evidence_digest": "sha256:9ae0a9fe87a9080e1beb48595c4284716b91a217461fa5249df0b4a8acad4dc9",
+  "evidence_digest": "sha256:fbb0d4bc0de9a477f4367310340a1633336fae4f359a8796ae15e109b27873d2",
   "maximum_qualified_fixture_count": 4,
   "headroom": 2,
   "max_distinct_internal_requests": 6
