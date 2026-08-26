@@ -179,7 +179,7 @@ release_operational = [
   "release/**",
   ".github/workflows/release*.yml",
   ".github/workflows/deploy*.yml",
-  "newsroom/production_admission.py",
+  "newsroom/production_admission/**",
   "scripts/production_operational_admission.py",
   "newsroom/tests/test_production_operational_admission.py",
   "newsroom/tests/test_production_operational_admission_cli.py",

@@ -9,7 +9,9 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import json
 import os
+import pwd
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -20,25 +22,57 @@ from newsroom.production_admission import (
     FreezeIdentity,
     GateAttestation,
     KeyClass,
+    KeyProvenance,
     OwnerAdmissionInstruction,
+    OwnerIssueRecord,
     ProductionAdmissionError,
     ProductionEvidenceManifest,
     ProductionOperationalAdmission,
     ProductionReadinessReport,
+    blocked_readiness_report,
     inspect_readiness,
     mint_production_operational_admission,
+    production_key_id,
 )
 
+_TRUSTED_GIT = Path("/usr/bin/git")
+_TRUSTED_GH_CANDIDATES = (
+    Path("/opt/homebrew/bin/gh"),
+    Path("/usr/local/bin/gh"),
+)
+_GIT_ENVIRONMENT = {
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_NO_REPLACE_OBJECTS": "1",
+    "GIT_OPTIONAL_LOCKS": "0",
+    "GIT_TERMINAL_PROMPT": "0",
+    "LANG": "C",
+    "LC_ALL": "C",
+    "PATH": "/usr/bin:/bin",
+}
 
-def _git(repo_root: Path, *arguments: str, check: bool = True) -> str:
-    completed = subprocess.run(
-        ("git", *arguments),
+
+def _run_git(repo_root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    if not _TRUSTED_GIT.is_file():
+        raise ProductionAdmissionError("trusted Git executable is unavailable")
+    return subprocess.run(
+        (
+            str(_TRUSTED_GIT),
+            "-c",
+            f"core.worktree={repo_root}",
+            *arguments,
+        ),
         cwd=repo_root,
         check=False,
         capture_output=True,
         text=True,
         timeout=10,
+        env=_GIT_ENVIRONMENT,
     )
+
+
+def _git(repo_root: Path, *arguments: str, check: bool = True) -> str:
+    completed = _run_git(repo_root, *arguments)
     if check and completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise ProductionAdmissionError(f"git {' '.join(arguments)} failed: {detail}")
@@ -55,36 +89,31 @@ def exact_main_freeze(repo_root: Path) -> FreezeIdentity:
     if head != main:
         raise ProductionAdmissionError("checkout HEAD is not exact main")
     remote_present = (
-        subprocess.run(
-            ("git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"),
-            cwd=root,
-            check=False,
-            capture_output=True,
-            timeout=10,
+        _run_git(
+            root,
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/remotes/origin/main",
         ).returncode
         == 0
     )
-    if remote_present:
-        remote = _git(
-            root,
-            "rev-parse",
-            "--verify",
-            "refs/remotes/origin/main^{commit}",
-        )
-        if head != remote:
-            raise ProductionAdmissionError("checkout HEAD differs from origin/main")
-    status = subprocess.run(
-        (
-            "git",
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-        ),
-        cwd=root,
-        check=False,
-        capture_output=True,
-        timeout=10,
+    if not remote_present:
+        raise ProductionAdmissionError("origin/main is unavailable")
+    remote = _git(
+        root,
+        "rev-parse",
+        "--verify",
+        "refs/remotes/origin/main^{commit}",
+    )
+    if head != remote:
+        raise ProductionAdmissionError("checkout HEAD differs from origin/main")
+    status = _run_git(
+        root,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
     )
     if status.returncode != 0:
         raise ProductionAdmissionError("clean-checkout inspection failed")
@@ -93,18 +122,57 @@ def exact_main_freeze(repo_root: Path) -> FreezeIdentity:
     return FreezeIdentity(exact_main_sha=head, exact_main_tree=tree)
 
 
+def _current_owner_issue(issue_number: int) -> OwnerIssueRecord:
+    executable = next(
+        (candidate for candidate in _TRUSTED_GH_CANDIDATES if candidate.is_file()),
+        None,
+    )
+    if executable is None:
+        raise ProductionAdmissionError("trusted GitHub CLI is unavailable")
+    environment = {
+        **_GIT_ENVIRONMENT,
+        "GH_HOST": "github.com",
+        "HOME": pwd.getpwuid(os.getuid()).pw_dir,
+    }
+    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        if name in os.environ:
+            environment[name] = os.environ[name]
+    completed = subprocess.run(
+        (
+            str(executable),
+            "api",
+            f"repos/fol2/newsroom/issues/{issue_number}",
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env=environment,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise ProductionAdmissionError(f"owner issue live lookup failed: {detail}")
+    try:
+        value = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ProductionAdmissionError("owner issue live lookup is not JSON") from exc
+    return OwnerIssueRecord.from_github_api(value)
+
+
 def _keyring(
-    specifications: Sequence[str], *, key_class: KeyClass
+    environment_variables: Sequence[str], *, key_class: KeyClass
 ) -> dict[str, AuthenticationKey]:
+    key_id = production_key_id(key_class)
+    if len(environment_variables) != 1:
+        raise ProductionAdmissionError(
+            f"exactly one {key_class.value} key environment is required"
+        )
     keys: dict[str, AuthenticationKey] = {}
-    for specification in specifications:
-        if "=" not in specification:
+    for variable in environment_variables:
+        if not variable or "=" in variable:
             raise ProductionAdmissionError(
-                "key specification must be KEY_ID=ENVIRONMENT_VARIABLE"
+                "key option must name one environment variable"
             )
-        key_id, variable = specification.split("=", 1)
-        if not key_id or not variable or key_id in keys:
-            raise ProductionAdmissionError("key specification differs")
         encoded = os.environ.get(variable)
         if encoded is None:
             raise ProductionAdmissionError(f"key environment is absent: {variable}")
@@ -114,7 +182,12 @@ def _keyring(
             raise ProductionAdmissionError(
                 f"key environment is not canonical base64: {variable}"
             ) from exc
-        keys[key_id] = AuthenticationKey(key_id, key_class, secret)
+        keys[key_id] = AuthenticationKey(
+            key_id,
+            key_class,
+            KeyProvenance.PRODUCTION_TRUST_ROOT,
+            secret,
+        )
     return keys
 
 
@@ -184,21 +257,59 @@ def _load_current_report(
 
 def _inspect(arguments: argparse.Namespace) -> int:
     freeze = exact_main_freeze(arguments.repo_root)
-    manifest = _manifest(arguments.evidence_manifest)
-    attestations = _attestations(arguments.attestation_directory)
-    evidence_keys = _keyring(
-        arguments.evidence_key_env, key_class=KeyClass.EVIDENCE_AUTHORITY
-    )
-    report = inspect_readiness(
+    try:
+        manifest = _manifest(arguments.evidence_manifest)
+    except (OSError, ProductionAdmissionError):
+        report = blocked_readiness_report(
+            freeze=freeze,
+            blocker="INVALID_PRODUCTION_EVIDENCE_MANIFEST",
+        )
+    else:
+        if manifest is None:
+            report = inspect_readiness(
+                freeze=freeze,
+                evidence_manifest=None,
+                attestations=(),
+                trusted_evidence_keys={},
+            )
+        else:
+            report = _inspect_retained_evidence(arguments, freeze, manifest)
+    _write_exclusive(arguments.output, report.canonical_bytes)
+    print(f"readiness_report_digest={report.digest}")
+    print(f"ready_for_admission={str(report.ready_for_admission).lower()}")
+    return 0 if report.ready_for_admission else 2
+
+
+def _inspect_retained_evidence(
+    arguments: argparse.Namespace,
+    freeze: FreezeIdentity,
+    manifest: ProductionEvidenceManifest,
+) -> ProductionReadinessReport:
+    """Inspect one parsed manifest while converting malformed inputs to blockers."""
+
+    try:
+        attestations = _attestations(arguments.attestation_directory)
+    except (OSError, ProductionAdmissionError):
+        return blocked_readiness_report(
+            freeze=freeze,
+            blocker="INVALID_GATE_ATTESTATION_DOCUMENT",
+        )
+    try:
+        evidence_keys = _keyring(
+            arguments.evidence_key_env,
+            key_class=KeyClass.EVIDENCE_AUTHORITY,
+        )
+    except ProductionAdmissionError:
+        return blocked_readiness_report(
+            freeze=freeze,
+            blocker="INVALID_EVIDENCE_TRUST_CONFIGURATION",
+        )
+    return inspect_readiness(
         freeze=freeze,
         evidence_manifest=manifest,
         attestations=attestations,
         trusted_evidence_keys=evidence_keys,
     )
-    _write_exclusive(arguments.output, report.canonical_bytes)
-    print(f"readiness_report_digest={report.digest}")
-    print(f"ready_for_admission={str(report.ready_for_admission).lower()}")
-    return 0 if report.ready_for_admission else 2
 
 
 def _mint(arguments: argparse.Namespace) -> int:
@@ -208,6 +319,7 @@ def _mint(arguments: argparse.Namespace) -> int:
     instruction = OwnerAdmissionInstruction.from_canonical_bytes(
         arguments.owner_instruction.read_bytes()
     )
+    current_owner_issue = _current_owner_issue(instruction.authority_issue_number)
     owner_keys = _keyring(
         arguments.owner_key_env, key_class=KeyClass.HUMAN_ACCOUNTABLE_OWNER
     )
@@ -225,6 +337,7 @@ def _mint(arguments: argparse.Namespace) -> int:
         attestations=attestations,
         trusted_evidence_keys=evidence_keys,
         owner_instruction=instruction,
+        current_owner_issue=current_owner_issue,
         trusted_owner_keys=owner_keys,
         production_signing_key=production_key,
     )
