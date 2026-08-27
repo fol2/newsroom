@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import pytest
 
+from newsroom.control_plane.graphiti import (
+    _graphiti_transport_implementation_revision,
+)
 from newsroom.control_plane.graphiti_fallback_policy import (
     FallbackEligibility,
     GraphitiFallbackClass,
@@ -109,6 +112,10 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
         "GRAPHITI_CHAT_FALLBACK",
         "GRAPHITI_EMBEDDING",
     }
+    for leaf_class in GraphitiLeafClass:
+        assert call_shape.route_for(leaf_class).implementation_revision == (
+            _graphiti_transport_implementation_revision(leaf_class)
+        )
     primary = call_shape.route_for(GraphitiLeafClass.PRIMARY)
     assert (
         f"binary={cursor_transport.QUALIFIED_CURSOR_AGENT_BIN}"

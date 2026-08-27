@@ -2307,7 +2307,7 @@ def test_issue_790_success_sequence_fails_closed_on_call_shape_drift(
     with pytest.raises(Issue790DispositionError, match="call-shape policy differs"):
         load_issue_790_plan(
             root
-            / "docs/operations/2026-08-27-issue-790-success-sequence-step-4.json"
+            / "docs/operations/2026-08-27-issue-790-success-sequence-step-5.json"
         )
 
 
@@ -2374,6 +2374,26 @@ def test_checked_issue_790_step_four_binds_process_exit_diagnostic_fix() -> None
     )
     assert sequence["reviewed_fix"]["reviewed_fix_revision"] == (
         "edc230449cfd31ab846bc95bfaffa16d1d8576a6"
+    )
+
+
+def test_checked_issue_790_step_five_binds_call_shape_alignment() -> None:
+    root = Path(__file__).resolve().parents[2]
+    plan = load_issue_790_plan(
+        root
+        / "docs/operations/2026-08-27-issue-790-success-sequence-step-5.json"
+    )
+
+    assert plan["canonical_digest"] == (
+        "sha256:cca39c56b4c8368fc87b262b501f55b2e754f923eda83f38330c099f1888dacb"
+    )
+    sequence = dict(plan["sequence"])
+    assert sequence["sequence_ordinal"] == 5
+    assert sequence["predecessor_causal_report"]["local_cause"] == (
+        "CALL_SHAPE_IMPLEMENTATION_REVISION_DRIFT"
+    )
+    assert sequence["reviewed_fix"]["reviewed_fix_revision"] == (
+        "d540de3863e21ec1f0ce3c486d471c373bbee903"
     )
 
 
