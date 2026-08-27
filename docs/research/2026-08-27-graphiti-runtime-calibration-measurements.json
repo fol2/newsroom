@@ -1,158 +1,201 @@
 {
-  "schema_version": "newsroom.graphiti-runtime-calibration.v1",
-  "issue": 771,
-  "parent_issue": 731,
-  "provider_calls": 0,
-  "public_effects": 0,
+  "attempt_usage": {
+    "failed_or_rolled_back": [
+      {
+        "attempt_id": "rolled-back-attempt",
+        "usage_basis": "UNRESOLVED"
+      }
+    ],
+    "terminal_success": [
+      {
+        "attempt_id": "calibration-ingest:1",
+        "usage_basis": "ESTIMATED"
+      }
+    ]
+  },
+  "decision_gate_results": {
+    "every primary cache miss uses one #747 primary leaf": true,
+    "fallback improves terminal valid results without increasing unchanged retries": true,
+    "low/base/high average provider tokens strictly below the retained current path": true,
+    "no increase in held ambiguity hidden as token saving": true,
+    "ordinary timestamp, dedupe and summary leaves are zero where #748 qualifies deterministic work": true,
+    "provider usage is reported or explicitly estimated/unresolved under #728 (never silent zero)": true,
+    "public effects remain zero": true,
+    "remaining leaves are distinct, pre-receipted and outcome-linked": true,
+    "source/evidence/temporal/rights/Entity Resolution/proposal-only/journal/rollback gold does not regress": true
+  },
+  "deterministic_local_work": {
+    "basis": "PROVIDER_FREE_LOCAL_VALIDATION",
+    "fixture_count": 11,
+    "reported_as_provider_tokens": false
+  },
+  "evidence_digest": "sha256:ffc5c168b823cf9b99a179ec9a57a8b63ae52b897ed4905e42fe4fd2b4ecc54e",
+  "fallback_eligible_outcomes": [
+    "MALFORMED_OUTPUT"
+  ],
+  "fallback_ineligible_outcomes": [
+    "AMBIGUOUS_DISPATCH",
+    "AUTHENTICATION_FAILED",
+    "AUTHENTICATION_FAILURE",
+    "CANCELLATION",
+    "CANCELLED",
+    "CONFIGURATION_FAILURE",
+    "DISPATCH_FENCE_REFUSED",
+    "EXECUTABLE_NOT_FOUND",
+    "FAILED",
+    "OUTPUT_LIMIT_EXCEEDED",
+    "PREDISPATCH_REFUSED",
+    "PROVIDER_QUOTA_FAILURE",
+    "QUOTA_EXCEEDED",
+    "QUOTA_FAILURE",
+    "SYSTEMIC_PROVIDER_FAILURE",
+    "TIMEOUT",
+    "TRANSPORT_FAILURE"
+  ],
+  "fallback_not_needed_outcomes": [
+    "COMPLETE"
+  ],
   "fixture_slices": [
     {
-      "fixture_id": "pair-current",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "pair-current"
     },
     {
-      "fixture_id": "several-relations",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "several-relations"
     },
     {
-      "fixture_id": "explicit-valid-at",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "explicit-valid-at"
     },
     {
-      "fixture_id": "explicit-invalid-at",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "explicit-invalid-at"
     },
     {
-      "fixture_id": "relative-date",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "relative-date"
     },
     {
-      "fixture_id": "null-temporal",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "null-temporal"
     },
     {
-      "fixture_id": "zero-result",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "zero-result"
     },
     {
-      "fixture_id": "long-8192",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "long-8192"
     },
     {
-      "fixture_id": "correction-revision",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "correction-revision"
     },
     {
-      "fixture_id": "same-name",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 1
+      "expected_embedding_misses": 1,
+      "expected_primary_misses": 1,
+      "fixture_id": "same-name"
     },
     {
-      "fixture_id": "no-implied-relation",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "no-implied-relation"
     },
     {
-      "fixture_id": "existing-entity-resolution",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "existing-entity-resolution"
     },
     {
-      "fixture_id": "new-entity-resolution",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "new-entity-resolution"
     },
     {
-      "fixture_id": "short-summary",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "short-summary"
     },
     {
-      "fixture_id": "overlong-summary",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "overlong-summary"
     },
     {
-      "fixture_id": "malformed-output-single-fallback",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 1,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "malformed-output-single-fallback"
     },
     {
-      "fixture_id": "systemic-failure",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "systemic-failure"
     },
     {
-      "fixture_id": "timeout",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "timeout"
     },
     {
-      "fixture_id": "cancellation",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "cancellation"
     },
     {
-      "fixture_id": "restart-immutable-usage",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "restart-immutable-usage"
     },
     {
-      "fixture_id": "rolled-back-attempt",
-      "expected_primary_misses": 1,
       "expected_conditional_leaves": 0,
-      "expected_embedding_misses": 0
+      "expected_embedding_misses": 0,
+      "expected_primary_misses": 1,
+      "fixture_id": "rolled-back-attempt"
     }
   ],
   "identities": {
+    "call_shape_policy_digest": "sha256:4c95b8ab06a6c9d18b2ede5d196c4d6d876f9949aefa1359f63a89f23e18e7e5",
     "context_manifest": "graphiti-combined-temporal-hermetic-v1",
+    "fallback_circuit_policy_digest": "sha256:8f48e640ac3a3794d9c1355a4e906010b182b4ddb82b8833c76b55f4304149cf",
     "prompt": "newsroom.graphiti.proposal-only-prompt:v1",
-    "schema": "NewsroomCombinedTemporalExtractionV1",
-    "schema_digest": "sha256:439cd662886a4f3d14c12503a505dc0f721eb0083b1e2678f54320678fe12621",
-    "call_shape_policy_digest": "sha256:0bd80a092a4b92c6d443674d3961c32e45b6634201891e7f04a70904123ad0d1",
-    "fallback_circuit_policy_digest": "sha256:a1ced667cc81fd0dce41a408d9ef226e59135cf12be991c350c948691473f768",
     "qualified_routes": [
       {
-        "leaf_class": "PRIMARY",
-        "provider": "cursor-agent-cli",
-        "route": "GRAPHITI_CHAT_PRIMARY",
-        "model": "composer-2.5",
-        "reasoning": "provider-default",
-        "config_identity": "cursor-sdk-api-key-composer-2.5-v1",
-        "command_semantic_version": "newsroom.graphiti-provider-dispatch.v11",
         "command_flags": [
           "TRANSPORT=CURSOR_SDK",
-          "sdk=cursor-sdk==1.0.29",
+          "sdk=cursor-sdk>=1.0.29",
           "auth=CURSOR_API_KEY",
-          "model=composer-2.5",
+          "composer_floor>=2.5",
+          "selected_model=RUNTIME_SELECTED",
           "tools=EMPTY",
           "disallowed_tools=shell,mcp,task",
           "mcp_servers=EMPTY",
@@ -173,6 +216,8 @@
           "TIMEOUT_DIAGNOSTIC_SCHEMA=newsroom.graphiti-timeout-diagnostic.v1",
           "TIMEOUT_DIAGNOSTIC_VOCABULARY=FIXED_V1"
         ],
+        "command_semantic_version": "newsroom.graphiti-provider-dispatch.v12",
+        "config_identity": "cursor-sdk-api-key-composer-floor-v2",
         "disabled_capabilities": [
           "repository-discovery",
           "prior-conversation",
@@ -183,20 +228,18 @@
           "planning",
           "subagents"
         ],
-        "implementation_revision": "sha256:c9c51351005ba7ced314aa37b5b3c15eacb9ed44373ce82328994e4a04548be7",
-        "max_prompt_bytes": 262144,
+        "implementation_revision": "sha256:c86e2dde9f4085b5c01de118b6e4fa59152b21e23c59460bacd78acb0144636c",
+        "leaf_class": "PRIMARY",
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
-        "max_total_tokens": 147456
+        "max_prompt_bytes": 262144,
+        "max_total_tokens": 147456,
+        "model": "composer>=2.5",
+        "provider": "cursor-agent-cli",
+        "reasoning": "provider-default",
+        "route": "GRAPHITI_CHAT_PRIMARY"
       },
       {
-        "leaf_class": "FALLBACK",
-        "provider": "grok-build-cli",
-        "route": "GRAPHITI_CHAT_FALLBACK",
-        "model": "grok-4.6",
-        "reasoning": "medium",
-        "config_identity": "graphiti-cli-command-v6",
-        "command_semantic_version": "newsroom.graphiti-provider-dispatch.v6",
         "command_flags": [
           "--prompt-file",
           "--model=grok-4.6",
@@ -224,6 +267,8 @@
           "PROCESS_CLEANUP_DEADLINE_MS=500",
           "RESIDUAL_GROUP_CLEANUP=BEFORE_RESULT_HANDOFF_V1"
         ],
+        "command_semantic_version": "newsroom.graphiti-provider-dispatch.v6",
+        "config_identity": "graphiti-cli-command-v6",
         "disabled_capabilities": [
           "repository-discovery",
           "prior-conversation",
@@ -234,24 +279,24 @@
           "planning",
           "subagents"
         ],
-        "implementation_revision": "sha256:c9c51351005ba7ced314aa37b5b3c15eacb9ed44373ce82328994e4a04548be7",
-        "max_prompt_bytes": 262144,
+        "implementation_revision": "sha256:c86e2dde9f4085b5c01de118b6e4fa59152b21e23c59460bacd78acb0144636c",
+        "leaf_class": "FALLBACK",
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
-        "max_total_tokens": 147456
+        "max_prompt_bytes": 262144,
+        "max_total_tokens": 147456,
+        "model": "grok-4.6",
+        "provider": "grok-build-cli",
+        "reasoning": "medium",
+        "route": "GRAPHITI_CHAT_FALLBACK"
       },
       {
-        "leaf_class": "EMBEDDING",
-        "provider": "openrouter",
-        "route": "GRAPHITI_EMBEDDING",
-        "model": "openai/text-embedding-3-large",
-        "reasoning": "none",
-        "config_identity": "graphiti-embedding-command-v1",
-        "command_semantic_version": "newsroom.graphiti-provider-dispatch.v1",
         "command_flags": [
           "POST=/embeddings",
           "--model=openai/text-embedding-3-large"
         ],
+        "command_semantic_version": "newsroom.graphiti-provider-dispatch.v1",
+        "config_identity": "graphiti-embedding-command-v1",
         "disabled_capabilities": [
           "repository-discovery",
           "prior-conversation",
@@ -263,319 +308,42 @@
           "subagents"
         ],
         "implementation_revision": "sha256:8e32f8e9cdf4079d461c51a41058383ad82ed5cc2bbd134b5233e773ddbeebf2",
-        "max_prompt_bytes": 262144,
+        "leaf_class": "EMBEDDING",
         "max_context_tokens": 131072,
         "max_output_tokens": 1,
-        "max_total_tokens": 131072
-      }
-    ]
-  },
-  "fallback_eligible_outcomes": [
-    "MALFORMED_OUTPUT"
-  ],
-  "fallback_not_needed_outcomes": [
-    "COMPLETE"
-  ],
-  "fallback_ineligible_outcomes": [
-    "AMBIGUOUS_DISPATCH",
-    "AUTHENTICATION_FAILED",
-    "AUTHENTICATION_FAILURE",
-    "CANCELLATION",
-    "CANCELLED",
-    "CONFIGURATION_FAILURE",
-    "DISPATCH_FENCE_REFUSED",
-    "EXECUTABLE_NOT_FOUND",
-    "FAILED",
-    "OUTPUT_LIMIT_EXCEEDED",
-    "PREDISPATCH_REFUSED",
-    "PROVIDER_QUOTA_FAILURE",
-    "QUOTA_EXCEEDED",
-    "QUOTA_FAILURE",
-    "SYSTEMIC_PROVIDER_FAILURE",
-    "TIMEOUT",
-    "TRANSPORT_FAILURE"
-  ],
-  "stop_conditions": {
-    "max_distinct_internal_requests": 6,
-    "max_fallback_leaves_per_primary": 1,
-    "unchanged_request_redispatch": false,
-    "circuit_release_preference": [
-      "DETERMINISTIC_HEALTH_PROBE",
-      "AUTHORISED_OPERATOR_RESET"
-    ]
-  },
-  "receipt_validation": {
-    "passed": true,
-    "reason_codes": [],
-    "validated_leaf_count": 2,
-    "validated_attempt_count": 1,
-    "immutable_after_restart": true,
-    "leaf_count": 2,
-    "attempt_count": 1,
-    "fallback_recovery_count": 1,
-    "unchanged_retry_count": 0,
-    "invocation_efficiency_policies": [
-      {
-        "route": "GRAPHITI_CHAT_PRIMARY",
-        "canonical_digest": "sha256:91fd4990fa457f60c2abda503543fabc4aa25806d6633c2f9f8ce184ff7cbea0",
-        "evidence_digest": "sha256:f4736ff2bba8914761ea88f61c642660c5b7c00b7e4529adef2851a4974777f9",
         "max_prompt_bytes": 262144,
-        "max_context_tokens": 131072,
-        "max_output_tokens": 16384,
-        "max_total_tokens": 147456,
-        "hard_estimate_ceiling_tokens": null
-      },
-      {
-        "route": "GRAPHITI_CHAT_FALLBACK",
-        "canonical_digest": "sha256:77448632a8cc5276aa18f5511331a034edca6588b5565ca3bad166d0f1fd609b",
-        "evidence_digest": "sha256:9dc0c54cb869283bdfda19c15fd6b7c28e5980193db370dcd2c791c9b68334fc",
-        "max_prompt_bytes": 262144,
-        "max_context_tokens": 131072,
-        "max_output_tokens": 16384,
-        "max_total_tokens": 147456,
-        "hard_estimate_ceiling_tokens": null
-      }
-    ]
-  },
-  "ineligible_runtime": {
-    "systemic-failure": {
-      "outcomes": [
-        "FAILED"
-      ],
-      "fallback_called": false
-    },
-    "timeout": {
-      "outcomes": [
-        "TIMEOUT"
-      ],
-      "fallback_called": false
-    },
-    "cancellation": {
-      "outcomes": [
-        "CANCELLED"
-      ],
-      "fallback_called": false
-    }
-  },
-  "quality_gold": {
-    "all_passed": true,
-    "combined_temporal": {
-      "pair-current": true,
-      "several-relations": true,
-      "explicit-valid-at": true,
-      "explicit-invalid-at": true,
-      "relative-date": true,
-      "null-temporal": true,
-      "zero-result": true,
-      "long-8192": true,
-      "correction-revision": true,
-      "same-name": true,
-      "no-implied-relation": true
-    },
-    "local_deterministic": {
-      "authority_and_rights": true,
-      "entity_resolution": true,
-      "ambiguity_held": true,
-      "deterministic_summary": true,
-      "replay": true
-    },
-    "embedding_transport": {
-      "fake_transport_calls": 1,
-      "outcome": "AMBIGUOUS_HOLD"
-    },
-    "held_ambiguity_outcome": "AMBIGUOUS_HOLD",
-    "proposal_only": true,
-    "public_effects": 0
-  },
-  "terminal_outcomes": {
-    "pair-current": "TERMINAL_SUCCESS_WITH_PROPOSALS",
-    "several-relations": "TERMINAL_SUCCESS_WITH_PROPOSALS",
-    "explicit-valid-at": "TERMINAL_SUCCESS_WITH_PROPOSALS",
-    "explicit-invalid-at": "TERMINAL_SUCCESS_WITH_PROPOSALS",
-    "relative-date": "TERMINAL_SUCCESS_WITH_PROPOSALS",
-    "null-temporal": "TERMINAL_SUCCESS_WITH_PROPOSALS",
-    "zero-result": "TERMINAL_SUCCESS_ZERO_PROPOSALS",
-    "long-8192": "TERMINAL_SUCCESS_WITH_PROPOSALS",
-    "correction-revision": "TERMINAL_SUCCESS_WITH_PROPOSALS",
-    "same-name": "TERMINAL_SUCCESS_WITH_PROPOSALS",
-    "no-implied-relation": "TERMINAL_SUCCESS_WITH_PROPOSALS"
-  },
-  "token_effectiveness": {
-    "schema_version": "newsroom.graphiti-token-effectiveness-report.v2",
-    "effective_revision_count": 11,
-    "mandatory_primary_leaves_per_revision": {
-      "basis": "MEASURED_EFFECTIVE_REVISION_CASES",
-      "expected_count_ppm": 1000000,
-      "revision_count": 11,
-      "total_leaf_count": 11
-    },
-    "conditional_leaf_expected_counts_ppm": {
-      "current": {
-        "timestamp": 90909,
-        "dedupe": 181818,
-        "summary": 0,
-        "fallback": 90909
-      },
-      "target": {
-        "timestamp": 0,
-        "dedupe": 0,
-        "summary": 0,
-        "fallback": 90909
-      }
-    },
-    "conditional_leaf_prevalence_ppm": {
-      "current": {
-        "timestamp": 90909,
-        "dedupe": 181818,
-        "summary": 0,
-        "fallback": 90909
-      },
-      "target": {
-        "timestamp": 0,
-        "dedupe": 0,
-        "summary": 0,
-        "fallback": 90909
-      }
-    },
-    "chat_tokens": {
-      "reported": 0,
-      "estimated_primary": {
-        "low": 12895,
-        "base": 17194,
-        "high": 25785
-      },
-      "unresolved": 0,
-      "unresolved_leaf_count": 0
-    },
-    "embedding_tokens": {
-      "total": 1,
-      "basis": "ESTIMATED_SOURCE_SAFE_WHITESPACE_TOKEN_PROXY"
-    },
-    "terminal_outcomes": {
-      "terminal_success_with_proposals": 9,
-      "terminal_success_zero_proposals": 1,
-      "held_ambiguity": 1
-    },
-    "quality": {
-      "gold_match_count": 11,
-      "regression_count": 0,
-      "unresolved_count": 0
-    },
-    "sensitivity_tokens_per_conditional_leaf": {
-      "timestamp": {
-        "low": 756,
-        "base": 1008,
-        "high": 1511
-      },
-      "dedupe": {
-        "low": 512,
-        "base": 1024,
-        "high": 2048
-      },
-      "summary": {
-        "low": 256,
-        "base": 512,
-        "high": 1024
-      },
-      "fallback": {
-        "low": 1024,
-        "base": 2048,
-        "high": 4096
-      }
-    },
-    "recommendation": "ADOPT_IN_731_IMPLEMENTATION_ATOM",
-    "average_tokens_per_terminal_revision": {
-      "current": {
-        "low": 1724,
-        "base": 3435,
-        "high": 9160
-      },
-      "target": {
-        "low": 1290,
-        "base": 1789,
-        "high": 2785
-      }
-    },
-    "fixture_measured_average_tokens": {
-      "current": {
-        "low": 1468,
-        "base": 2094,
-        "high": 3346
-      },
-      "target": {
-        "low": 1290,
-        "base": 1789,
-        "high": 2785
-      }
-    },
-    "grain": "ISSUE_737_EFFECTIVE_REVISION",
-    "formula": "T_avg_revision = E[\u03a3_(primary misses) T_primary] + E[\u03a3_(conditional leaves) T_conditional] + E[\u03a3_(embedding misses) T_embedding]",
-    "retained_current_path": {
-      "basis": "TWO_RETAINED_ISSUE_737_GRAIN_TERMINAL_OUTCOMES",
-      "terminal_effective_revision_count": 2,
-      "observed_chat_leaf_counts": [
-        3,
-        2
-      ],
-      "observed_additional_chat_leaf_count": 3,
-      "observed_embedding_request_counts": [
-        3,
-        3
-      ],
-      "conditional_leaf_classes": "UNRESOLVED",
-      "chat_tokens": "UNRESOLVED",
-      "unresolved_chat_leaf_count": 5,
-      "embedding_tokens": "ESTIMATED_SOURCE_SAFE_WHITESPACE_PROXY",
-      "sensitivity_tokens_per_unclassified_conditional_leaf": {
-        "low": 256,
-        "base": 1024,
-        "high": 4096
-      },
-      "average_total_token_estimate_per_terminal_effective_revision": {
-        "current": {
-          "low": 1724,
-          "base": 3435,
-          "high": 9160
-        },
-        "target": {
-          "low": 1340,
-          "base": 1899,
-          "high": 3016
-        }
-      },
-      "adoption_gate": "HOLD_UNRESOLVED_CLASSES_AND_QUALITY"
-    }
-  },
-  "deterministic_local_work": {
-    "basis": "PROVIDER_FREE_LOCAL_VALIDATION",
-    "fixture_count": 11,
-    "reported_as_provider_tokens": false
-  },
-  "attempt_usage": {
-    "terminal_success": [
-      {
-        "attempt_id": "calibration-ingest:1",
-        "usage_basis": "ESTIMATED"
+        "max_total_tokens": 131072,
+        "model": "openai/text-embedding-3-large",
+        "provider": "openrouter",
+        "reasoning": "none",
+        "route": "GRAPHITI_EMBEDDING"
       }
     ],
-    "failed_or_rolled_back": [
-      {
-        "attempt_id": "rolled-back-attempt",
-        "usage_basis": "UNRESOLVED"
-      }
-    ]
+    "schema": "NewsroomCombinedTemporalExtractionV1",
+    "schema_digest": "sha256:439cd662886a4f3d14c12503a505dc0f721eb0083b1e2678f54320678fe12621"
   },
-  "decision_gate_results": {
-    "every primary cache miss uses one #747 primary leaf": true,
-    "ordinary timestamp, dedupe and summary leaves are zero where #748 qualifies deterministic work": true,
-    "remaining leaves are distinct, pre-receipted and outcome-linked": true,
-    "source/evidence/temporal/rights/Entity Resolution/proposal-only/journal/rollback gold does not regress": true,
-    "provider usage is reported or explicitly estimated/unresolved under #728 (never silent zero)": true,
-    "low/base/high average provider tokens strictly below the retained current path": true,
-    "no increase in held ambiguity hidden as token saving": true,
-    "fallback improves terminal valid results without increasing unchanged retries": true,
-    "public effects remain zero": true
+  "ineligible_runtime": {
+    "cancellation": {
+      "fallback_called": false,
+      "outcomes": [
+        "CANCELLED"
+      ]
+    },
+    "systemic-failure": {
+      "fallback_called": false,
+      "outcomes": [
+        "FAILED"
+      ]
+    },
+    "timeout": {
+      "fallback_called": false,
+      "outcomes": [
+        "TIMEOUT"
+      ]
+    }
   },
+  "issue": 771,
+  "live_owner_gated_execution_authorised": false,
   "non_effects": [
     "NO_PROVIDER_CALL",
     "NO_PRODUCTION_MUTATION",
@@ -583,8 +351,241 @@
     "NO_BACKLOG_ACTIVATION",
     "NO_GING_010_AMENDMENT"
   ],
-  "recommendation": "ADOPT",
+  "parent_issue": 731,
+  "provider_calls": 0,
+  "public_effects": 0,
+  "quality_gold": {
+    "all_passed": true,
+    "combined_temporal": {
+      "correction-revision": true,
+      "explicit-invalid-at": true,
+      "explicit-valid-at": true,
+      "long-8192": true,
+      "no-implied-relation": true,
+      "null-temporal": true,
+      "pair-current": true,
+      "relative-date": true,
+      "same-name": true,
+      "several-relations": true,
+      "zero-result": true
+    },
+    "embedding_transport": {
+      "fake_transport_calls": 1,
+      "outcome": "AMBIGUOUS_HOLD"
+    },
+    "held_ambiguity_outcome": "AMBIGUOUS_HOLD",
+    "local_deterministic": {
+      "ambiguity_held": true,
+      "authority_and_rights": true,
+      "deterministic_summary": true,
+      "entity_resolution": true,
+      "replay": true
+    },
+    "proposal_only": true,
+    "public_effects": 0
+  },
   "reason_code": null,
-  "live_owner_gated_execution_authorised": false,
-  "evidence_digest": "sha256:efee116c43a00f3d510d287dfc81b90d445bbaf19849f8281de224770a723ec3"
+  "receipt_validation": {
+    "attempt_count": 1,
+    "fallback_recovery_count": 1,
+    "immutable_after_restart": true,
+    "invocation_efficiency_policies": [
+      {
+        "canonical_digest": "sha256:9b17887e36699221edaba70ba51b42644265e15be86966ecc2a59267a5d1d67c",
+        "evidence_digest": "sha256:658c475a6ddd4710e76668b5089a0e244475f636137199980d92b8f77a259ceb",
+        "hard_estimate_ceiling_tokens": null,
+        "max_context_tokens": 131072,
+        "max_output_tokens": 16384,
+        "max_prompt_bytes": 262144,
+        "max_total_tokens": 147456,
+        "route": "GRAPHITI_CHAT_PRIMARY"
+      },
+      {
+        "canonical_digest": "sha256:6414fae503c8efd2ab25cc0fe3dacf9b04403957ccd38e85d5af892a193ad58f",
+        "evidence_digest": "sha256:ef71575a4f778354fb2678a94422cda1e096585474a276e75af47eace57db18f",
+        "hard_estimate_ceiling_tokens": null,
+        "max_context_tokens": 131072,
+        "max_output_tokens": 16384,
+        "max_prompt_bytes": 262144,
+        "max_total_tokens": 147456,
+        "route": "GRAPHITI_CHAT_FALLBACK"
+      }
+    ],
+    "leaf_count": 2,
+    "passed": true,
+    "reason_codes": [],
+    "unchanged_retry_count": 0,
+    "validated_attempt_count": 1,
+    "validated_leaf_count": 2
+  },
+  "recommendation": "ADOPT",
+  "schema_version": "newsroom.graphiti-runtime-calibration.v1",
+  "stop_conditions": {
+    "circuit_release_preference": [
+      "DETERMINISTIC_HEALTH_PROBE",
+      "AUTHORISED_OPERATOR_RESET"
+    ],
+    "max_distinct_internal_requests": 6,
+    "max_fallback_leaves_per_primary": 1,
+    "unchanged_request_redispatch": false
+  },
+  "terminal_outcomes": {
+    "correction-revision": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "explicit-invalid-at": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "explicit-valid-at": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "long-8192": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "no-implied-relation": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "null-temporal": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "pair-current": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "relative-date": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "same-name": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "several-relations": "TERMINAL_SUCCESS_WITH_PROPOSALS",
+    "zero-result": "TERMINAL_SUCCESS_ZERO_PROPOSALS"
+  },
+  "token_effectiveness": {
+    "average_tokens_per_terminal_revision": {
+      "current": {
+        "base": 3435,
+        "high": 9160,
+        "low": 1724
+      },
+      "target": {
+        "base": 1789,
+        "high": 2785,
+        "low": 1290
+      }
+    },
+    "chat_tokens": {
+      "estimated_primary": {
+        "base": 17194,
+        "high": 25785,
+        "low": 12895
+      },
+      "reported": 0,
+      "unresolved": 0,
+      "unresolved_leaf_count": 0
+    },
+    "conditional_leaf_expected_counts_ppm": {
+      "current": {
+        "dedupe": 181818,
+        "fallback": 90909,
+        "summary": 0,
+        "timestamp": 90909
+      },
+      "target": {
+        "dedupe": 0,
+        "fallback": 90909,
+        "summary": 0,
+        "timestamp": 0
+      }
+    },
+    "conditional_leaf_prevalence_ppm": {
+      "current": {
+        "dedupe": 181818,
+        "fallback": 90909,
+        "summary": 0,
+        "timestamp": 90909
+      },
+      "target": {
+        "dedupe": 0,
+        "fallback": 90909,
+        "summary": 0,
+        "timestamp": 0
+      }
+    },
+    "effective_revision_count": 11,
+    "embedding_tokens": {
+      "basis": "ESTIMATED_SOURCE_SAFE_WHITESPACE_TOKEN_PROXY",
+      "total": 1
+    },
+    "fixture_measured_average_tokens": {
+      "current": {
+        "base": 2094,
+        "high": 3346,
+        "low": 1468
+      },
+      "target": {
+        "base": 1789,
+        "high": 2785,
+        "low": 1290
+      }
+    },
+    "formula": "T_avg_revision = E[Σ_(primary misses) T_primary] + E[Σ_(conditional leaves) T_conditional] + E[Σ_(embedding misses) T_embedding]",
+    "grain": "ISSUE_737_EFFECTIVE_REVISION",
+    "mandatory_primary_leaves_per_revision": {
+      "basis": "MEASURED_EFFECTIVE_REVISION_CASES",
+      "expected_count_ppm": 1000000,
+      "revision_count": 11,
+      "total_leaf_count": 11
+    },
+    "quality": {
+      "gold_match_count": 11,
+      "regression_count": 0,
+      "unresolved_count": 0
+    },
+    "recommendation": "ADOPT_IN_731_IMPLEMENTATION_ATOM",
+    "retained_current_path": {
+      "adoption_gate": "HOLD_UNRESOLVED_CLASSES_AND_QUALITY",
+      "average_total_token_estimate_per_terminal_effective_revision": {
+        "current": {
+          "base": 3435,
+          "high": 9160,
+          "low": 1724
+        },
+        "target": {
+          "base": 1899,
+          "high": 3016,
+          "low": 1340
+        }
+      },
+      "basis": "TWO_RETAINED_ISSUE_737_GRAIN_TERMINAL_OUTCOMES",
+      "chat_tokens": "UNRESOLVED",
+      "conditional_leaf_classes": "UNRESOLVED",
+      "embedding_tokens": "ESTIMATED_SOURCE_SAFE_WHITESPACE_PROXY",
+      "observed_additional_chat_leaf_count": 3,
+      "observed_chat_leaf_counts": [
+        3,
+        2
+      ],
+      "observed_embedding_request_counts": [
+        3,
+        3
+      ],
+      "sensitivity_tokens_per_unclassified_conditional_leaf": {
+        "base": 1024,
+        "high": 4096,
+        "low": 256
+      },
+      "terminal_effective_revision_count": 2,
+      "unresolved_chat_leaf_count": 5
+    },
+    "schema_version": "newsroom.graphiti-token-effectiveness-report.v2",
+    "sensitivity_tokens_per_conditional_leaf": {
+      "dedupe": {
+        "base": 1024,
+        "high": 2048,
+        "low": 512
+      },
+      "fallback": {
+        "base": 2048,
+        "high": 4096,
+        "low": 1024
+      },
+      "summary": {
+        "base": 512,
+        "high": 1024,
+        "low": 256
+      },
+      "timestamp": {
+        "base": 1008,
+        "high": 1511,
+        "low": 756
+      }
+    },
+    "terminal_outcomes": {
+      "held_ambiguity": 1,
+      "terminal_success_with_proposals": 9,
+      "terminal_success_zero_proposals": 1
+    }
+  }
 }

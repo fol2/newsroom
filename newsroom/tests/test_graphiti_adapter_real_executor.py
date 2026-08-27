@@ -487,21 +487,27 @@ def test_grok_predispatch_refusal_retains_timeout_qualification() -> None:
 def test_successful_qualification_retains_only_fixed_tokens_and_digests() -> None:
     from newsroom.graphiti_adapter.cli_client import CliExecution, run_cli_chain
     from newsroom.graphiti_adapter.cursor_transport import (
-        PINNED_SDK_LOCK_IDENTITY,
-        PINNED_SDK_VERSION,
+        MIN_COMPOSER_FLOOR,
+        MIN_SDK_REQUIREMENT,
+        MIN_SDK_VERSION,
         cursor_transport_policy_digest,
     )
 
     qualification = {
-        "schema_version": "newsroom.cursor-sdk-qualification.v1",
+        "schema_version": "newsroom.cursor-sdk-qualification.v2",
         "transport": "CURSOR_SDK",
-        "sdk_version": PINNED_SDK_VERSION,
-        "lock_identity": PINNED_SDK_LOCK_IDENTITY,
+        "sdk_floor": MIN_SDK_VERSION,
+        "sdk_version": MIN_SDK_VERSION,
+        "lock_identity": MIN_SDK_REQUIREMENT,
+        "composer_floor": MIN_COMPOSER_FLOOR,
+        "selected_model": "composer-2.5",
         "model": "composer-2.5",
         "unary_timeout_seconds": 160,
         "stream_timeout_seconds": 160,
         "max_retries": 0,
-        "transport_policy_digest": cursor_transport_policy_digest(),
+        "transport_policy_digest": cursor_transport_policy_digest(
+            selected_model="composer-2.5"
+        ),
     }
 
     async def cursor(_prompt: str, *, max_tokens: int) -> CliExecution:
@@ -527,10 +533,11 @@ def test_successful_qualification_retains_only_fixed_tokens_and_digests() -> Non
 
     retained = invocations[0]["transport_qualification"]
     assert isinstance(retained, dict)
-    assert retained["schema_version"] == "newsroom.cursor-sdk-qualification.v1"
+    assert retained["schema_version"] == "newsroom.cursor-sdk-qualification.v2"
     assert retained["transport"] == "CURSOR_SDK"
-    assert retained["sdk_version"] == PINNED_SDK_VERSION
-    assert retained["lock_identity"] == PINNED_SDK_LOCK_IDENTITY
+    assert retained["sdk_version"] == MIN_SDK_VERSION
+    assert retained["lock_identity"] == MIN_SDK_REQUIREMENT
+    assert retained["selected_model"] == "composer-2.5"
     assert "binary" not in retained
     assert "resolved_binary" not in retained
     assert "/secret/" not in repr(retained)
