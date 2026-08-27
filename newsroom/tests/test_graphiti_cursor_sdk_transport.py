@@ -6,12 +6,16 @@ import ast
 import asyncio
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from newsroom.control_plane.graphiti import GraphitiModelUsageObserver
+from newsroom.control_plane.model_usage import ModelUsageService, WorkEnvelope, WorkloadClass
 from newsroom.graphiti_adapter.cli_client import (
+    CliDispatchMarkerError,
     CliResponseError,
     run_cli_chain,
     run_cursor_agent_llm,
@@ -37,6 +41,7 @@ from newsroom.graphiti_adapter.usage_meter import cursor_sdk_usage, unreported_c
 _ADAPTER = Path(__file__).resolve().parents[1] / "graphiti_adapter"
 _GRAPHITI_JSON = '{"entities":[],"entity_resolutions":[],"edges":[]}'
 _TEST_IDEMPOTENCY_KEY = "sha256:" + ("a" * 64)
+_OBSERVER_T0 = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
 
 
 @dataclass
@@ -129,12 +134,19 @@ class FakeRuntime:
         del api_key
         return self.models
 
-    def start_run(self, request: CursorSdkRunRequest) -> FakeRun:
+    def start_run(
+        self,
+        request: CursorSdkRunRequest,
+        *,
+        dispatch_started: Callable[[], None] | None = None,
+    ) -> FakeRun:
         cwd = Path(request.cwd)
         self.empty_non_git_cwds.append(
             cwd.is_dir() and not any(cwd.iterdir()) and not (cwd / ".git").exists()
         )
         self.requests.append(request)
+        if dispatch_started is not None:
+            dispatch_started()
         if self.start_error is not None:
             raise self.start_error
         return self.run
@@ -156,6 +168,56 @@ def _bind(monkeypatch: pytest.MonkeyPatch, runtime: FakeRuntime) -> FakeRuntime:
     )
     del previous
     return runtime
+
+
+def _observer_fixture(
+    tmp_path: Path,
+) -> tuple[ModelUsageService, GraphitiModelUsageObserver, datetime]:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-sdk-807",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=_OBSERVER_T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-sdk-807",
+        graphiti_attempt_id="ingest-sdk-807:1",
+    )
+    service.open_envelope(envelope)
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: _OBSERVER_T0 + timedelta(seconds=10),
+        owner_stop_check=lambda: None,
+    )
+    return service, observer, _OBSERVER_T0
+
+
+def _assert_observed_ambiguous_terminal(
+    *,
+    service: ModelUsageService,
+    runtime: FakeRuntime,
+    invocations: list[dict[str, object]],
+    observed_at: datetime,
+    expected_outcome: str = "AMBIGUOUS_DISPATCH",
+) -> None:
+    assert len(invocations) == 1
+    assert invocations[0]["outcome"] == expected_outcome
+    assert invocations[0]["usage"]["usage_basis"] == "UNREPORTED"
+    assert len(runtime.requests) == 1
+    leaves = service.query(
+        start=observed_at, end=observed_at + timedelta(minutes=1)
+    )["leaves"]
+    assert len(leaves) == 1
+    leaf = leaves[0]
+    assert leaf["transport_dispatch_observed"] is True
+    assert leaf["pre_dispatch_zero_proved"] is False
+    assert leaf["dispatch_at"] is not None
+    assert leaf["usage_status"] == "UNREPORTED"
+    assert leaf["request_digest"] == runtime.requests[0].idempotency_key
+    assert leaf["terminal_digest"] is not None
 
 
 def _streamed_and_terminal() -> tuple[FakeRuntime, FakeUsage]:
@@ -608,6 +670,99 @@ def test_wrong_sdk_version_is_predispatch(monkeypatch: pytest.MonkeyPatch) -> No
     assert runtime.requests == []
 
 
+def test_dispatch_marker_precedes_sdk_send(monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+    runtime = _bind(
+        monkeypatch,
+        FakeRuntime(start_error=RuntimeError("network connect refused")),
+    )
+
+    with pytest.raises(CursorSdkAmbiguousDispatch):
+        run_cursor_transport(
+            prompt="extract",
+            max_tokens=32,
+            timeout=5,
+            idempotency_key=_TEST_IDEMPOTENCY_KEY,
+            dispatch_started=lambda: order.append("marker"),
+        )
+
+    assert order == ["marker"]
+    assert len(runtime.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("runtime_factory", "expected_outcome"),
+    [
+        (
+            lambda: FakeRuntime(
+                start_error=RuntimeError("network connect refused")
+            ),
+            "AMBIGUOUS_DISPATCH",
+        ),
+        (
+            lambda: FakeRuntime(run=FakeRun(id="", agent_id="agent-807")),
+            "AMBIGUOUS_DISPATCH",
+        ),
+        (
+            lambda: FakeRuntime(run=FakeRun(id="run-807", agent_id="")),
+            "AMBIGUOUS_DISPATCH",
+        ),
+    ],
+)
+def test_observed_sdk_ambiguous_terminal_retains_dispatch_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    runtime_factory: object,
+    expected_outcome: str,
+) -> None:
+    service, observer, observed_at = _observer_fixture(tmp_path)
+    runtime = _bind(monkeypatch, runtime_factory())
+    invocations: list[dict[str, object]] = []
+
+    with pytest.raises(CliResponseError, match="fallback is disabled"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="prompt",
+                schema=None,
+                cursor_runner=run_cursor_agent_llm,
+                grok_runner=lambda *_args, **_values: pytest.fail("fallback ran"),
+                invocations=invocations,
+                invocation_observer=observer,
+                fallback_permitted=False,
+            )
+        )
+
+    _assert_observed_ambiguous_terminal(
+        service=service,
+        runtime=runtime,
+        invocations=invocations,
+        observed_at=observed_at,
+        expected_outcome=expected_outcome,
+    )
+
+
+def test_conflicting_caller_idempotency_key_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _bind(monkeypatch, FakeRuntime())
+    _, observer, _ = _observer_fixture(tmp_path)
+
+    with pytest.raises(CliDispatchMarkerError, match="conflicts with caller"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="prompt",
+                schema=None,
+                cursor_runner=run_cursor_agent_llm,
+                grok_runner=lambda *_args, **_values: pytest.fail("fallback ran"),
+                invocations=[],
+                invocation_observer=observer,
+                fallback_permitted=False,
+                idempotency_key=_TEST_IDEMPOTENCY_KEY,
+            )
+        )
+
+
 def test_official_runtime_uses_supported_sdk_api() -> None:
     source = ast.parse(Path(OfficialCursorSdkRuntime.__init__.__code__.co_filename).read_text())
     text = (_ADAPTER / "cursor_transport.py").read_text(encoding="utf-8")
@@ -619,6 +774,7 @@ def test_official_runtime_uses_supported_sdk_api() -> None:
     assert "mcp_servers={}" in text
     assert "agents={}" in text
     assert "idempotency_key=request.idempotency_key" in text
+    assert text.index("dispatch_started()") < text.index("agent.send(")
     assert "setting_sources" not in ast.unparse(
         next(
             node

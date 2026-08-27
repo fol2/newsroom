@@ -816,13 +816,22 @@ async def run_cli_chain(
             max_tokens=max_tokens,
         )
     )
-    cursor_idempotency_key = (
-        _governed_idempotency_key(cursor_token) or idempotency_key
-    )
-    if invocation_observer is not None and cursor_idempotency_key is None:
-        raise CliDispatchMarkerError(
-            "Cursor governed request digest is unavailable before transport"
-        )
+    governed_idempotency_key = _governed_idempotency_key(cursor_token)
+    if invocation_observer is not None:
+        if governed_idempotency_key is None:
+            raise CliDispatchMarkerError(
+                "Cursor governed request digest is unavailable before transport"
+            )
+        if (
+            idempotency_key is not None
+            and idempotency_key != governed_idempotency_key
+        ):
+            raise CliDispatchMarkerError(
+                "Cursor governed request digest conflicts with caller idempotency key"
+            )
+        cursor_idempotency_key = governed_idempotency_key
+    else:
+        cursor_idempotency_key = idempotency_key
     cursor_transport_started = False
     cursor_started = time.monotonic()
 

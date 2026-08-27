@@ -244,7 +244,12 @@ class CursorSdkRuntime(Protocol):
 
     def list_model_ids(self, *, api_key: str) -> tuple[str, ...]: ...
 
-    def start_run(self, request: CursorSdkRunRequest) -> CursorSdkRun: ...
+    def start_run(
+        self,
+        request: CursorSdkRunRequest,
+        *,
+        dispatch_started: Callable[[], None] | None = None,
+    ) -> CursorSdkRun: ...
 
 
 def cursor_output_limit(max_tokens: int) -> int:
@@ -365,8 +370,21 @@ def run_cursor_transport(
             max_output_bytes=cursor_output_limit(max_tokens),
             idempotency_key=idempotency_key,
         )
+        dispatch_marker_written = False
+
+        def mark_dispatch_started() -> None:
+            nonlocal dispatch_marker_written
+            if dispatch_marker_written:
+                raise RuntimeError("Cursor SDK dispatch marker repeated")
+            dispatch_marker_written = True
+            if dispatch_started is not None:
+                dispatch_started()
+
         try:
-            run = runtime.start_run(request)
+            run = runtime.start_run(
+                request,
+                dispatch_started=mark_dispatch_started,
+            )
         except CliPredispatchRefusal:
             raise
         except CursorSdkError:
@@ -374,8 +392,8 @@ def run_cursor_transport(
         except Exception as exc:
             raise _map_sdk_exception(
                 exc,
-                dispatch_confirmed=False,
-                send_attempted=True,
+                dispatch_confirmed=dispatch_marker_written,
+                send_attempted=dispatch_marker_written,
             ) from exc
         if not run.id:
             run.close()
@@ -391,8 +409,6 @@ def run_cursor_transport(
                 error_class="MISSING_AGENT_ID",
                 error_code="MISSING_AGENT_ID",
             )
-        if dispatch_started is not None:
-            dispatch_started()
         consume_error: BaseException | None = None
         try:
             execution = _consume_run(
@@ -509,6 +525,7 @@ def _consume_run(
             exc,
             dispatch_confirmed=True,
             send_attempted=True,
+            durable_run_identity=True,
         )
         mapped.execution = _execution(
             run,
@@ -806,6 +823,7 @@ def _map_sdk_exception(
     *,
     dispatch_confirmed: bool,
     send_attempted: bool,
+    durable_run_identity: bool = False,
 ) -> Exception:
     name = type(exc).__name__
     text = str(exc).lower()
@@ -837,7 +855,7 @@ def _map_sdk_exception(
         error_class = "NETWORK"
     else:
         error_class = "SDK_ERROR"
-    if send_attempted and not dispatch_confirmed:
+    if send_attempted and not durable_run_identity:
         return CursorSdkAmbiguousDispatch(
             "Cursor SDK Graphiti send did not retain a durable run identity",
             error_class=error_class,
@@ -946,7 +964,12 @@ class OfficialCursorSdkRuntime:
                 identities.append(identity)
         return tuple(identities)
 
-    def start_run(self, request: CursorSdkRunRequest) -> CursorSdkRun:
+    def start_run(
+        self,
+        request: CursorSdkRunRequest,
+        *,
+        dispatch_started: Callable[[], None] | None = None,
+    ) -> CursorSdkRun:
         local = self._sdk.LocalAgentOptions(
             cwd=request.cwd,
             custom_tools={},
@@ -973,6 +996,8 @@ class OfficialCursorSdkRuntime:
                 dispatch_confirmed=False,
                 send_attempted=False,
             ) from exc
+        if dispatch_started is not None:
+            dispatch_started()
         try:
             run = agent.send(
                 request.prompt,
@@ -984,7 +1009,7 @@ class OfficialCursorSdkRuntime:
                 closer()
             raise _map_sdk_exception(
                 exc,
-                dispatch_confirmed=False,
+                dispatch_confirmed=True,
                 send_attempted=True,
             ) from exc
         return OfficialCursorSdkRun(agent=agent, run=run)
