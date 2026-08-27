@@ -1,0 +1,38 @@
+{
+  "schema_version": "newsroom.issue-790.iterative-canary-plan-draft.v1",
+  "issue": 790,
+  "plan_status": "DRAFT",
+  "executable": false,
+  "sequence_ordinal": 8,
+  "satisfied_prerequisites": [
+    "ISSUE_816_MERGED",
+    "COMPATIBILITY_FLOOR_PROVIDER_FREE_QUALIFICATION"
+  ],
+  "blocked_until": [
+    "EXACT_MAIN_PROVIDER_FREE_COMPATIBILITY_FLOOR_QUALIFICATION",
+    "FINAL_REVIEW_RECEIPT",
+    "OWNER_AUTHENTICATED_SDK_CANARY_APPROVAL"
+  ],
+  "withdrawal_reference": "docs/operations/2026-08-27-issue-790-step-7-exact-pin-withdrawal.json",
+  "provider_free_qualification_path": "docs/operations/2026-08-27-issue-790-compatibility-floor-provider-free-qualification.json",
+  "retained_predecessor_causal_report_digest": "sha256:98ff94ad66d8c487e70e0ddd50be71493367458c0f7f76d3598b4dcc8d51474e",
+  "retained_predecessor_causal_report_path": "docs/operations/2026-08-27-issue-790-provider-free-sdk-qualification.json",
+  "intended_sequence": {
+    "stop_condition": "FIRST_TRUTHFUL_PROVIDER_BACKED_SUCCESS",
+    "call_shape_policy_version": "issue-816-v2",
+    "call_shape_policy_digest": "sha256:4c95b8ab06a6c9d18b2ede5d196c4d6d876f9949aefa1359f63a89f23e18e7e5",
+    "controller_timeout_ms": 160000,
+    "extraction_timeout_ms": 180000,
+    "cleanup_reserve_ms": 20000,
+    "fallback_mode": "DISABLED_BEFORE_PROVIDER_DISPATCH",
+    "sdk_floor": "cursor-sdk>=1.0.29",
+    "composer_floor": "composer>=2.5"
+  },
+  "intended_reviewed_fix": {
+    "pull_request_url": "https://github.com/fol2/newsroom/pull/816",
+    "issue": 816,
+    "fix_kind": "CODE_AND_CONFIGURATION",
+    "notes": "Mint executable authority only after exact-main compatibility-floor provider-free qualification, zero-finding final review and owner-authenticated approval."
+  },
+  "canonical_digest": "sha256:fb1e28aedee8c7a8989f4d27e2e52a93ee6fa12896033e695932ff34e8c9db62"
+}

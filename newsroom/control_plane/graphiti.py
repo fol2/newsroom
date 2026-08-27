@@ -40,6 +40,7 @@ from newsroom.control_plane.model_usage import (
     WorkloadClass,
 )
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
+from newsroom.graphiti_adapter.cursor_transport import composer_model_meets_floor
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_FALLBACK,
     GRAPHITI_CHAT_MODEL,
@@ -137,6 +138,12 @@ _GRAPHITI_HERMETIC_ENVIRONMENT_KEYS = (
     "XDG_DATA_HOME",
     "XDG_STATE_HOME",
 )
+
+
+def _qualified_route_model_admits(*, observed_model: str, policy_model: str) -> bool:
+    if policy_model == "composer>=2.5":
+        return composer_model_meets_floor(observed_model)
+    return observed_model == policy_model
 
 
 def _graphiti_transport_implementation_revision(
@@ -251,13 +258,14 @@ class GraphitiModelUsageObserver:
         if (
             provider,
             route,
-            model,
             reasoning,
         ) != (
             route_contract.provider,
             route_contract.route,
-            route_contract.model,
             route_contract.reasoning,
+        ) or not _qualified_route_model_admits(
+            observed_model=model,
+            policy_model=route_contract.model,
         ):
             raise ModelUsageAdmissionError(
                 "Graphiti route differs from the checked qualified policy"

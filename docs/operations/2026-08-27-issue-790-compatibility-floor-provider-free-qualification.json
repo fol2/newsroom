@@ -1,0 +1,36 @@
+{
+  "schema_version": "newsroom.issue-790.provider-free-sdk-qualification.v2",
+  "issue": 790,
+  "observed_at": "2026-08-27T13:55:38Z",
+  "exact_main_revision": "PENDING_MERGE",
+  "exact_main_tree": "PENDING_MERGE",
+  "prerequisite_merge": {
+    "issue": 816,
+    "url": "https://github.com/fol2/newsroom/issues/816"
+  },
+  "provider_calls": 0,
+  "public_effects": 0,
+  "model_catalogue_queries": 0,
+  "provider_free_checks": {
+    "sdk_import": "PASS",
+    "sdk_floor": "cursor-sdk>=1.0.29",
+    "composer_floor": "composer>=2.5",
+    "official_runtime_construction": "PASS",
+    "production_path_no_cli_harness": "PASS",
+    "step_seven_withdrawal_unchanged": "PASS",
+    "step_eight_remains_non_executable": "PASS",
+    "call_shape_policy_version": "issue-816-v2",
+    "call_shape_policy_digest": "sha256:4c95b8ab06a6c9d18b2ede5d196c4d6d876f9949aefa1359f63a89f23e18e7e5",
+    "transport_policy_digest": "sha256:06ebe081ebbccd69c00011c54ab2a3e419127107ab258eb1eba230f20c270a8a",
+    "implementation_revision": "sha256:c86e2dde9f4085b5c01de118b6e4fa59152b21e23c59460bacd78acb0144636c",
+    "v1_exact_pin_receipts_preserved": "PASS"
+  },
+  "focused_tests": [
+    "newsroom/tests/test_graphiti_cursor_sdk_transport.py",
+    "newsroom/tests/test_graphiti_fallback_circuit_policy.py",
+    "newsroom/tests/test_model_usage_receipts.py"
+  ],
+  "qualification": "COMPATIBILITY_FLOOR_PROVIDER_FREE_READY",
+  "live_canary_authorised": false,
+  "canonical_digest": "sha256:ef902904e9c47a909aa32c57a313cd9f1f6d9f96862d63acdcb87dca30e0d2c2"
+}

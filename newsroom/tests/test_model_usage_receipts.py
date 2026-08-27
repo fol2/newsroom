@@ -24,6 +24,7 @@ from newsroom.control_plane.graphiti import (
     GRAPHITI_EMBEDDING_ROUTE,
     GraphitiModelUsageObserver,
 )
+from newsroom.control_plane.graphiti_requests import load_checked_graphiti_call_shape_policy
 from newsroom.control_plane.graphiti_events import (
     GraphitiEventQueue,
     GraphitiProcessResult,
@@ -2509,6 +2510,82 @@ def test_checked_issue_790_step_seven_remains_non_executable_draft() -> None:
             root
             / "docs/operations/2026-08-27-issue-790-success-sequence-step-7-draft.json"
         )
+
+
+def test_checked_issue_790_step_eight_remains_non_executable_draft() -> None:
+    root = Path(__file__).resolve().parents[2]
+    draft = json.loads(
+        (
+            root
+            / "docs/operations/2026-08-27-issue-790-success-sequence-step-8-draft.json"
+        ).read_text(encoding="utf-8")
+    )
+    withdrawal = json.loads(
+        (
+            root
+            / "docs/operations/2026-08-27-issue-790-step-7-exact-pin-withdrawal.json"
+        ).read_text(encoding="utf-8")
+    )
+    call_shape = load_checked_graphiti_call_shape_policy()
+
+    assert draft["plan_status"] == "DRAFT"
+    assert draft["executable"] is False
+    assert draft["sequence_ordinal"] == 8
+    assert draft["withdrawal_reference"] == (
+        "docs/operations/2026-08-27-issue-790-step-7-exact-pin-withdrawal.json"
+    )
+    assert draft["intended_sequence"]["call_shape_policy_version"] == "issue-816-v2"
+    assert draft["intended_sequence"]["call_shape_policy_digest"] == (
+        call_shape.canonical_digest
+    )
+    assert draft["intended_sequence"]["sdk_floor"] == "cursor-sdk>=1.0.29"
+    assert draft["intended_sequence"]["composer_floor"] == "composer>=2.5"
+    assert "OWNER_AUTHENTICATED_SDK_CANARY_APPROVAL" in draft["blocked_until"]
+    assert draft["provider_free_qualification_path"] == (
+        "docs/operations/2026-08-27-issue-790-compatibility-floor-provider-free-qualification.json"
+    )
+
+    with pytest.raises(Issue790DispositionError, match="plan fields differ"):
+        load_issue_790_plan(
+            root
+            / "docs/operations/2026-08-27-issue-790-success-sequence-step-8-draft.json"
+        )
+
+
+def test_checked_issue_790_compatibility_floor_provider_free_qualification_receipt() -> (
+    None
+):
+    root = Path(__file__).resolve().parents[2]
+    qualification = json.loads(
+        (
+            root
+            / "docs/operations/2026-08-27-issue-790-compatibility-floor-provider-free-qualification.json"
+        ).read_text(encoding="utf-8")
+    )
+    draft = json.loads(
+        (
+            root
+            / "docs/operations/2026-08-27-issue-790-success-sequence-step-8-draft.json"
+        ).read_text(encoding="utf-8")
+    )
+    unsigned = {
+        key: value
+        for key, value in qualification.items()
+        if key != "canonical_digest"
+    }
+
+    assert qualification["schema_version"] == (
+        "newsroom.issue-790.provider-free-sdk-qualification.v2"
+    )
+    assert qualification["canonical_digest"] == _digest(unsigned)
+    assert qualification["provider_calls"] == 0
+    assert qualification["public_effects"] == 0
+    assert qualification["model_catalogue_queries"] == 0
+    assert qualification["live_canary_authorised"] is False
+    assert qualification["qualification"] == "COMPATIBILITY_FLOOR_PROVIDER_FREE_READY"
+    assert draft["intended_sequence"]["call_shape_policy_digest"] == (
+        qualification["provider_free_checks"]["call_shape_policy_digest"]
+    )
 
 
 def test_checked_issue_790_provider_free_sdk_qualification_receipt() -> None:

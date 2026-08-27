@@ -743,8 +743,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cursor-sdk", marker = "extra == 'cursor-research'", specifier = "==1.0.29" },
-    { name = "cursor-sdk", marker = "extra == 'graphiti'", specifier = "==1.0.29" },
+    { name = "cursor-sdk", marker = "extra == 'cursor-research'", specifier = ">=1.0.29" },
+    { name = "cursor-sdk", marker = "extra == 'graphiti'", specifier = ">=1.0.29" },
     { name = "graphiti-core", marker = "extra == 'graphiti'", specifier = "==0.29.3" },
     { name = "httpx", marker = "extra == 'graphiti'", specifier = ">=0.27" },
     { name = "jsonschema", specifier = ">=4.0" },

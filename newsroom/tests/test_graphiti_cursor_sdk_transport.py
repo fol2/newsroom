@@ -27,8 +27,9 @@ from newsroom.graphiti_adapter.cli_client import (
 )
 from newsroom.graphiti_adapter.cursor_transport import (
     CURSOR_SDK_AUTH_SOURCE,
+    MIN_SDK_REQUIREMENT,
+    MIN_SDK_VERSION,
     PINNED_MODEL,
-    PINNED_SDK_VERSION,
     CliPredispatchRefusal,
     CursorSdkAmbiguousDispatch,
     CursorSdkBoundedFailure,
@@ -40,6 +41,7 @@ from newsroom.graphiti_adapter.cursor_transport import (
     bind_cursor_sdk_runtime,
     qualify_cursor_sdk,
     run_cursor_transport,
+    select_composer_model,
 )
 from newsroom.graphiti_adapter.usage_meter import (
     cursor_sdk_usage,
@@ -132,12 +134,13 @@ class FakeRun:
 
 @dataclass
 class FakeRuntime:
-    sdk_version: str = PINNED_SDK_VERSION
+    sdk_version: str = MIN_SDK_VERSION
     models: tuple[str, ...] = (PINNED_MODEL,)
     run: FakeRun = field(default_factory=FakeRun)
     start_error: Exception | None = None
     requests: list[CursorSdkRunRequest] = field(default_factory=list)
     empty_non_git_cwds: list[bool] = field(default_factory=list)
+    agent_options: list[dict[str, object]] = field(default_factory=list)
 
     def list_model_ids(self, *, api_key: str) -> tuple[str, ...]:
         del api_key
@@ -318,7 +321,7 @@ def test_pre_send_refusal_is_zero_dispatch(monkeypatch: pytest.MonkeyPatch) -> N
     _bind(monkeypatch, runtime)
     started: list[str] = []
 
-    with pytest.raises(CliPredispatchRefusal, match="composer-2.5"):
+    with pytest.raises(CliPredispatchRefusal, match="compatible canonical composer"):
         run_cursor_transport(
             prompt="extract",
             max_tokens=32,
@@ -674,9 +677,108 @@ def test_wrong_sdk_version_is_predispatch(monkeypatch: pytest.MonkeyPatch) -> No
     runtime = FakeRuntime(sdk_version="1.0.28")
     _bind(monkeypatch, runtime)
 
-    with pytest.raises(CliPredispatchRefusal, match="pinned lock"):
+    with pytest.raises(CliPredispatchRefusal, match="compatibility floor"):
         qualify_cursor_sdk(runtime=runtime, api_key="crsr_test_key")
     assert runtime.requests == []
+
+
+def test_higher_stable_sdk_version_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = FakeRuntime(sdk_version="1.0.30")
+    _bind(monkeypatch, runtime)
+
+    qualification = qualify_cursor_sdk(runtime=runtime, api_key="crsr_test_key")
+
+    assert qualification.sdk_version == "1.0.30"
+    assert qualification.selected_model == PINNED_MODEL
+
+
+@pytest.mark.parametrize(
+    "sdk_version",
+    ["1.0.28", "1.0.29-rc1", "not-a-version", "1.0"],
+)
+def test_malformed_or_prerelease_sdk_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, sdk_version: str
+) -> None:
+    runtime = FakeRuntime(sdk_version=sdk_version)
+    _bind(monkeypatch, runtime)
+
+    with pytest.raises(CliPredispatchRefusal, match="compatibility floor"):
+        qualify_cursor_sdk(runtime=runtime, api_key="crsr_test_key")
+
+
+def test_only_composer_25_selects_it() -> None:
+    assert select_composer_model(("composer-2.5",)) == "composer-2.5"
+
+
+def test_highest_compatible_composer_is_selected() -> None:
+    models = (
+        "composer-2.5",
+        "composer-2.6",
+        "composer-2.5.1",
+        "composer-auto",
+        "composer-fast",
+        "composer-2.4",
+        "gpt-4.1",
+        "composer-2.5-fast",
+    )
+    assert select_composer_model(models) == "composer-2.6"
+
+
+def test_selected_model_is_passed_to_sdk_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _bind(
+        monkeypatch,
+        FakeRuntime(
+            models=("composer-2.5", "composer-2.6"),
+            run=FakeRun(
+                messages=(_assistant(_GRAPHITI_JSON),),
+                terminal=FakeTerminal(
+                    result=_GRAPHITI_JSON,
+                    usage=FakeUsage(1, 1),
+                    model=SimpleNamespace(id="composer-2.6"),
+                ),
+            ),
+        ),
+    )
+
+    run_cursor_transport(
+        prompt="extract",
+        max_tokens=32,
+        timeout=5,
+        idempotency_key=_TEST_IDEMPOTENCY_KEY,
+    )
+
+    assert runtime.requests[0].model == "composer-2.6"
+
+
+def test_resolved_model_drift_fails_truthfully(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _bind(
+        monkeypatch,
+        FakeRuntime(
+            models=("composer-2.5", "composer-2.6"),
+            run=FakeRun(
+                messages=(_assistant(_GRAPHITI_JSON),),
+                terminal=FakeTerminal(
+                    result=_GRAPHITI_JSON,
+                    usage=FakeUsage(1, 1),
+                    model=SimpleNamespace(id="composer-2.5"),
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(CursorSdkError, match="different composer model"):
+        run_cursor_transport(
+            prompt="extract",
+            max_tokens=32,
+            timeout=5,
+            idempotency_key=_TEST_IDEMPOTENCY_KEY,
+        )
+
+    assert len(runtime.requests) == 1
 
 
 def test_dispatch_marker_precedes_sdk_send(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -870,6 +972,7 @@ def test_observed_dispatch_fence_refusal_is_proved_zero_provider_call(
                 store=str(tmp_path / "store"),
                 timeout=5,
                 max_output_bytes=65536,
+                model=PINNED_MODEL,
                 idempotency_key=_TEST_IDEMPOTENCY_KEY,
             ),
             dispatch_started=lambda: (_ for _ in ()).throw(
@@ -907,7 +1010,7 @@ def test_official_runtime_constructs_and_closes_without_provider_calls() -> None
     import shutil
 
     pytest.importorskip("cursor_sdk")
-    assert importlib.metadata.version("cursor-sdk") == PINNED_SDK_VERSION
+    assert importlib.metadata.version("cursor-sdk") >= MIN_SDK_VERSION
 
     runtime = OfficialCursorSdkRuntime()
     root = runtime._root

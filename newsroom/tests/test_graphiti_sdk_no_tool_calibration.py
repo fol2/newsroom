@@ -24,12 +24,16 @@ pytest.importorskip("graphiti_core")
 
 from newsroom.control_plane.corpus import chunk_text
 from newsroom.graphiti_adapter.identity import MAX_EPISODE_BYTES
+from newsroom.graphiti_adapter.cursor_transport import (
+    MIN_SDK_VERSION,
+    PINNED_MODEL,
+    PINNED_SDK_VERSION,
+    select_composer_model,
+)
 from newsroom.research.graphiti_sdk_no_tool_calibration import (
     CLI_TINY_INPUT_TOKENS,
     LEAF_LABELS,
     MINIMUM_EFFECT_CEILING,
-    PINNED_MODEL,
-    PINNED_SDK_VERSION,
     TINY_PROMPT,
     VALIDATOR_VERSION,
     CalibrationClosed,
@@ -93,12 +97,12 @@ def test_cursor_sdk_is_locked_in_graphiti_and_research_extras() -> None:
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
 
     extras = project["project"]["optional-dependencies"]
-    pin = f"cursor-sdk=={PINNED_SDK_VERSION}"
-    assert extras["cursor-research"] == [pin]
-    assert pin in extras["graphiti"]
+    requirement = "cursor-sdk>=1.0.29"
+    assert extras["cursor-research"] == [requirement]
+    assert requirement in extras["graphiti"]
     lock = (root / "uv.lock").read_text(encoding="utf-8")
     assert 'name = "cursor-sdk"' in lock
-    assert f'version = "{PINNED_SDK_VERSION}"' in lock
+    assert 'version = "1.0.29"' in lock
 
 
 def _sha256(text: str) -> str:

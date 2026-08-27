@@ -99,7 +99,7 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
     policy = load_checked_graphiti_fallback_circuit_policy()
     call_shape = load_checked_graphiti_call_shape_policy()
 
-    assert policy.version == "issue-807-v1"
+    assert policy.version == "issue-816-v2"
     assert policy.call_shape_policy_digest == call_shape.canonical_digest
     assert policy.eligible_outcomes == ("MALFORMED_OUTPUT",)
     assert policy.max_fallback_leaves_per_primary == 1
@@ -117,13 +117,14 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
             _graphiti_transport_implementation_revision(leaf_class)
         )
     primary = call_shape.route_for(GraphitiLeafClass.PRIMARY)
-    assert primary.config_identity == "cursor-sdk-api-key-composer-2.5-v1"
+    assert primary.config_identity == "cursor-sdk-api-key-composer-floor-v2"
     assert primary.command_semantic_version == (
-        "newsroom.graphiti-provider-dispatch.v11"
+        "newsroom.graphiti-provider-dispatch.v12"
     )
-    assert f"sdk={cursor_transport.PINNED_SDK_LOCK_IDENTITY}" in primary.command_flags
+    assert f"sdk={cursor_transport.MIN_SDK_REQUIREMENT}" in primary.command_flags
     assert "auth=CURSOR_API_KEY" in primary.command_flags
-    assert "model=composer-2.5" in primary.command_flags
+    assert "composer_floor>=2.5" in primary.command_flags
+    assert "selected_model=RUNTIME_SELECTED" in primary.command_flags
     assert "tools=EMPTY" in primary.command_flags
     assert "disallowed_tools=shell,mcp,task" in primary.command_flags
     assert "mcp_servers=EMPTY" in primary.command_flags
