@@ -139,6 +139,23 @@ def test_shared_dependency_change_truthfully_selects_research_and_full_health() 
     assert {"F0", "F1", "F2"} <= set(route["gates"])
 
 
+def test_research_markdown_remains_documentation_only() -> None:
+    route = selector.select_focus(("docs/research/notes.md",))
+
+    assert route["research_required"] is False
+    assert route["gates"] == ["F0"]
+    assert route["bootstrap_required"] is False
+
+
+def test_machine_research_evidence_matches_workflow_trigger() -> None:
+    route = selector.select_focus(("docs/research/result.json",))
+
+    assert route["research_required"] is True
+    assert route["gates"] == ["F0"]
+    assert route["selected_tests"] == []
+    assert route["bootstrap_required"] is False
+
+
 def test_f0_validates_yaml_and_shell_syntax(tmp_path: Path) -> None:
     valid_yaml = tmp_path / "valid.yml"
     invalid_yaml = tmp_path / "invalid.yml"
