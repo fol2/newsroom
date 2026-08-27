@@ -2307,7 +2307,7 @@ def test_issue_790_success_sequence_fails_closed_on_call_shape_drift(
     with pytest.raises(Issue790DispositionError, match="call-shape policy differs"):
         load_issue_790_plan(
             root
-            / "docs/operations/2026-08-26-issue-790-success-sequence-step-3.json"
+            / "docs/operations/2026-08-27-issue-790-success-sequence-step-4.json"
         )
 
 
@@ -2354,6 +2354,26 @@ def test_checked_issue_790_step_three_binds_unpinned_harness_fix() -> None:
     )
     assert sequence["reviewed_fix"]["reviewed_fix_revision"] == (
         "c66eaf698a310413da015fdde7d9d67699ffaafc"
+    )
+
+
+def test_checked_issue_790_step_four_binds_process_exit_diagnostic_fix() -> None:
+    root = Path(__file__).resolve().parents[2]
+    plan = load_issue_790_plan(
+        root
+        / "docs/operations/2026-08-27-issue-790-success-sequence-step-4.json"
+    )
+
+    assert plan["canonical_digest"] == (
+        "sha256:12e2aa639b1d378b48d1a8ae10113720f887e679432b1f8866aaff3576df98fd"
+    )
+    sequence = dict(plan["sequence"])
+    assert sequence["sequence_ordinal"] == 4
+    assert sequence["predecessor_causal_report"]["local_cause"] == (
+        "CURSOR_NONZERO_EXIT_DIAGNOSTIC_DISCARDED"
+    )
+    assert sequence["reviewed_fix"]["reviewed_fix_revision"] == (
+        "edc230449cfd31ab846bc95bfaffa16d1d8576a6"
     )
 
 
