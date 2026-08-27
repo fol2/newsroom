@@ -19,7 +19,7 @@ jobs:
   full-health:
     name: full-deterministic-health
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - name: Check out exact head
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd

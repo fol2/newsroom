@@ -166,6 +166,12 @@ def test_full_health_is_absent_from_ordinary_pull_requests() -> None:
     assert "matrix:" not in rendered
 
 
+def test_full_health_job_timeout_exceeds_the_cancelled_twenty_minute_budget() -> None:
+    job = _load(HEALTH_PATH)["jobs"]["full-health"]
+    timeout = int(job["timeout-minutes"])
+    assert timeout > 20
+
+
 def test_new_sdlc_workflows_use_only_exactly_pinned_actions() -> None:
     observed: set[str] = set()
     for path in (FOCUS_PATH, RESEARCH_PATH, HEALTH_PATH, LIFECYCLE_PATH):
