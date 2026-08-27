@@ -83,7 +83,7 @@ class FakeRun:
     id: str = "run-807"
     agent_id: str = "agent-807"
     status: str = "running"
-    model: object | None = SimpleNamespace(id=PINNED_MODEL)
+    model: object | None = field(default_factory=lambda: SimpleNamespace(id=PINNED_MODEL))
     usage: object | None = None
     duration_ms: int | None = None
     messages: tuple[object, ...] = ()
@@ -121,12 +121,17 @@ class FakeRuntime:
     run: FakeRun = field(default_factory=FakeRun)
     start_error: Exception | None = None
     requests: list[CursorSdkRunRequest] = field(default_factory=list)
+    empty_non_git_cwds: list[bool] = field(default_factory=list)
 
     def list_model_ids(self, *, api_key: str) -> tuple[str, ...]:
         del api_key
         return self.models
 
     def start_run(self, request: CursorSdkRunRequest) -> FakeRun:
+        cwd = Path(request.cwd)
+        self.empty_non_git_cwds.append(
+            cwd.is_dir() and not any(cwd.iterdir()) and not (cwd / ".git").exists()
+        )
         self.requests.append(request)
         if self.start_error is not None:
             raise self.start_error
@@ -187,8 +192,7 @@ def test_streamed_and_terminal_usage_match(monkeypatch: pytest.MonkeyPatch) -> N
     assert execution.run_id == "run-807"
     assert execution.agent_id == "agent-807"
     assert runtime.requests[0].cwd
-    assert not any(Path(runtime.requests[0].cwd).iterdir())
-    assert not (Path(runtime.requests[0].cwd) / ".git").exists()
+    assert runtime.empty_non_git_cwds == [True]
 
 
 def test_terminal_only_usage_is_authoritative(

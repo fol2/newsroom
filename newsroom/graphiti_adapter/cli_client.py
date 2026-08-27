@@ -886,11 +886,11 @@ async def run_cli_chain(
     except (TimeoutError, subprocess.TimeoutExpired, CursorSdkBoundedFailure) as exc:
         sdk_execution = _sdk_failure_execution(exc)
         cursor_usage = (
-            dict(sdk_execution.usage)
+            no_provider_call_cli_usage()
+            if not cursor_transport_started
+            else dict(sdk_execution.usage)
             if sdk_execution is not None
             else unreported_cli_usage()
-            if cursor_transport_started
-            else no_provider_call_cli_usage()
         )
         outcome = (
             exc.outcome
@@ -979,7 +979,11 @@ async def run_cli_chain(
         payload = None
     except CursorSdkError as exc:
         sdk_execution = _sdk_failure_execution(exc)
-        cursor_usage = dict(exc.usage)
+        cursor_usage = (
+            no_provider_call_cli_usage()
+            if not cursor_transport_started
+            else dict(exc.usage)
+        )
         cursor_outcome = _sdk_failure_outcome(exc)
         binding = observe(
             cursor_token, outcome=cursor_outcome, usage=cursor_usage
