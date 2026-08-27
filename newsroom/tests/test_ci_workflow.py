@@ -54,17 +54,22 @@ def test_every_retained_workflow_job_has_a_positive_explicit_timeout() -> None:
 
 def test_sdlc_workflows_check_out_exact_head_without_credentials() -> None:
     checkout = "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd"
-    for path in (FOCUS_PATH, RESEARCH_PATH, HEALTH_PATH):
+    expected_refs = {
+        FOCUS_PATH: "${{ github.event.pull_request.head.sha || github.sha }}",
+        RESEARCH_PATH: "${{ github.event.pull_request.head.sha || github.sha }}",
+        HEALTH_PATH: "${{ github.event.merge_group.head_sha || github.sha }}",
+    }
+    for path, expected_ref in expected_refs.items():
         for job in _load(path)["jobs"].values():
             steps = _steps(job)
             checkouts = [step for step in steps if step.get("uses") == checkout]
             assert len(checkouts) == 1
             assert steps[0] == checkouts[0]
             with_block = checkouts[0]["with"]
+            assert with_block["ref"] == expected_ref
             assert with_block["fetch-depth"] == "0"
             assert with_block["persist-credentials"] == "false"
             assert with_block["show-progress"] == "false"
-            assert with_block["ref"]
             python = [
                 step
                 for step in steps

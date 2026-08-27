@@ -632,28 +632,35 @@ def test_issue_732_behaviour_mapping_names_exist() -> None:
     historical = json.loads(CLOSEOUT_JSON.read_text(encoding="utf-8"))
     current = json.loads(CURRENT_MAPPING_JSON.read_text(encoding="utf-8"))
     defined = _defined_test_names()
-    missing = [
-        name
-        for item in current["behaviour_tests"]
-        for name in item.get("tests", [])
-        if name not in defined
-    ]
 
     assert historical["issue"] == 732
     assert len(historical["behaviour_tests"]) == 16
-    assert historical["behaviour_tests"][15]["tests"] == list(_HISTORICAL_ITEM_16_TESTS)
+    historical_item_16 = historical["behaviour_tests"][15]
+    assert historical_item_16["item"] == 16
+    assert historical_item_16["behaviour"] == "permanent SDLC"
+    assert historical_item_16["tests"] == list(_HISTORICAL_ITEM_16_TESTS)
 
     assert current["issue"] == 732
     assert current["historical_mapping"].endswith(
         "2026-08-21-control-plane-token-productivity-closeout.json"
     )
-    assert len(current["behaviour_tests"]) == 16
-    assert missing == []
+    assert set(current) == {
+        "schema_version",
+        "issue",
+        "historical_mapping",
+        "migration",
+        "item_16_replacements",
+    }
     assert set(current["item_16_replacements"]) == set(_HISTORICAL_ITEM_16_TESTS)
-    assert set(current["item_16_replacements"].values()) == set(
-        current["behaviour_tests"][15]["tests"]
-    )
-    assert current["behaviour_tests"][14]["suites"] == [
+
+    unchanged_missing = [
+        name
+        for item in historical["behaviour_tests"][:15]
+        for name in item.get("tests", [])
+        if name not in defined
+    ]
+    assert unchanged_missing == []
+    assert historical["behaviour_tests"][14]["suites"] == [
         "newsroom/tests/test_zero_quota_write_loop.py",
         "newsroom/tests/test_model_usage_receipts.py",
         "newsroom/tests/test_durable_cycle_governor.py",
@@ -661,6 +668,16 @@ def test_issue_732_behaviour_mapping_names_exist() -> None:
         "newsroom/tests/test_graphiti_adapter_real_executor.py",
         "newsroom/tests/test_graphiti_corpus_ingest.py",
     ]
+
+    replaced_missing = [
+        name
+        for name in current["item_16_replacements"].values()
+        if name not in defined
+    ]
+    assert replaced_missing == []
+    assert [
+        current["item_16_replacements"][name] for name in historical_item_16["tests"]
+    ] == list(current["item_16_replacements"].values())
 
 
 def test_committed_after_csv_matches_deterministic_fixture_export(
