@@ -96,7 +96,7 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
     policy = load_checked_graphiti_fallback_circuit_policy()
     call_shape = load_checked_graphiti_call_shape_policy()
 
-    assert policy.version == "issue-790-v9"
+    assert policy.version == "issue-790-v10"
     assert policy.call_shape_policy_digest == call_shape.canonical_digest
     assert policy.eligible_outcomes == ("MALFORMED_OUTPUT",)
     assert policy.max_fallback_leaves_per_primary == 1
@@ -114,9 +114,10 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
         f"binary={cursor_transport.QUALIFIED_CURSOR_AGENT_BIN}"
         in primary.command_flags
     )
+    assert "resolved-binary=OBSERVED_AT_PREDISPATCH" in primary.command_flags
+    assert "binary-version=UNPINNED" in primary.command_flags
     assert (
-        "resolved-binary="
-        f"{cursor_transport.QUALIFIED_CURSOR_AGENT_RESOLVED_BIN}"
+        "DISPATCH_GENERATION_BINDING=RESOLVE_RECHECK_SAME_GENERATION_V1"
         in primary.command_flags
     )
     assert (
@@ -158,16 +159,13 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
         f"CREDENTIAL_STATE={cursor_transport.CURSOR_CREDENTIAL_STATE}"
         in primary.command_flags
     )
+    assert "package-digest=OBSERVED_AT_PREDISPATCH" in primary.command_flags
     assert (
-        f"package-digest={cursor_transport.QUALIFIED_CURSOR_AGENT_PACKAGE_DIGEST}"
-        in primary.command_flags
-    )
-    assert (
-        "control-semantics-digest="
-        f"{cursor_transport.QUALIFIED_CURSOR_AGENT_CONTROL_SEMANTICS_DIGEST}"
+        "control-semantics-digest=OBSERVED_AT_PREDISPATCH"
         in primary.command_flags
     )
     assert (
         f"hidden-control-proof={cursor_transport.CURSOR_COMMAND_SURFACE_PROOF}"
         in primary.command_flags
     )
+    assert "--disable-auto-update" not in primary.command_flags

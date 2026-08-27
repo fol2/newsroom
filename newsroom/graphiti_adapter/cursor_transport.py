@@ -1,4 +1,4 @@
-"""Exact-binary Cursor transport qualification and bounded execution."""
+"""Runtime-qualified Cursor transport and bounded execution."""
 
 from __future__ import annotations
 
@@ -25,11 +25,9 @@ from newsroom.graphiti_adapter.cli_process import (
 )
 from newsroom.graphiti_adapter.evaluation_packet import CURSOR_AGENT_MODEL_ID
 
-QUALIFIED_CURSOR_AGENT_VERSION = "2026.08.11-e8db854"
 QUALIFIED_CURSOR_AGENT_BIN = "/Users/jamesto/.local/bin/cursor-agent"
-QUALIFIED_CURSOR_AGENT_RESOLVED_BIN = (
-    "/Users/jamesto/.local/share/cursor-agent/versions/"
-    f"{QUALIFIED_CURSOR_AGENT_VERSION}/cursor-agent"
+QUALIFIED_CURSOR_AGENT_VERSION_ROOT = (
+    "/Users/jamesto/.local/share/cursor-agent/versions"
 )
 QUALIFIED_CURSOR_LOGIN_KEYCHAIN = "/Users/jamesto/Library/Keychains/login.keychain-db"
 QUALIFIED_CURSOR_SECURITY_BIN = "/usr/bin/security"
@@ -42,18 +40,6 @@ CURSOR_CREDENTIAL_STATE = "LOCAL_ACCESS_REFRESH_TOKENS_READABLE"
 CURSOR_AGENT_BIN = os.environ.get(
     "NEWSROOM_CURSOR_AGENT_BIN", QUALIFIED_CURSOR_AGENT_BIN
 )
-QUALIFIED_CURSOR_AGENT_PACKAGE_DIGEST = (
-    "sha256:957df7e19a94bcdf3a263f6e2839af1f8c7e8059bc76ae339464df07982848ea"
-)
-QUALIFIED_CURSOR_AGENT_LAUNCHER_DIGEST = (
-    "sha256:eed61c5224668c9236334c4c68936a16aecc37374b592f59e31eb50433817831"
-)
-QUALIFIED_CURSOR_AGENT_COMMAND_SURFACE_DIGEST = (
-    "sha256:6aceb24b7c7ecddb1993946ebb18a7dd4d025842e6efda955eb0c13255b1e5f0"
-)
-QUALIFIED_CURSOR_AGENT_CONTROL_SEMANTICS_DIGEST = (
-    "sha256:285e3f24126b457872064e9661d76ab0e35a0059256ffa4ab44507821efe334e"
-)
 CURSOR_PREFLIGHT_TIMEOUT_SECONDS = 20
 CURSOR_LOCAL_CREDENTIAL_PROBE_TIMEOUT_SECONDS = 5
 CURSOR_PREFLIGHT_MAX_BYTES = 64 * 1024
@@ -63,7 +49,7 @@ CURSOR_STDOUT_LIMIT_FORMULA = "65536+64*REQUEST_MAX_TOKENS"
 CURSOR_STDOUT_LIMIT_IDENTITY = (
     "cursor-controller-stdout-v1:" + CURSOR_STDOUT_LIMIT_FORMULA
 )
-CURSOR_COMMAND_SURFACE_PROOF = "PINNED_PACKAGE_HIDDEN_OPTION_REGISTRATIONS_V1"
+CURSOR_COMMAND_SURFACE_PROOF = "RUNTIME_CAPABILITY_QUALIFICATION_V1"
 _ProcessOutput = CliProcessOutput
 _run_bounded_process = run_bounded_process
 _run_bounded_process_async = run_bounded_process_async
@@ -105,22 +91,13 @@ _CURSOR_CONTROL_ARGUMENTS = (
     "--model",
     CURSOR_AGENT_MODEL_ID,
 )
-_CURSOR_HIDDEN_CONTROL_SOURCE_MARKERS = (
-    'addOption(new f.c$("--single-turn","Finish after the initial user turn',
-    'addOption(new f.c$("--exclude-workspace-context","Strip all workspace-sourced context',
-    'addOption(new f.c$("--allowed-tools <tool>","Allow only proto ToolCall oneof tool(s)',
+_CURSOR_CAPABILITY_PROBE_ARGUMENTS = (
+    "--single-turn",
+    "--exclude-workspace-context",
+    "--allowed-tools",
+    "",
+    "about",
 )
-_CURSOR_CONTROL_SEMANTIC_SOURCE_MARKERS = (
-    'if(void 0!==o.allowedTools)try{return(0,_.nm)(o.allowedTools,"--allowed-tools")',
-    "0!==t.length&&(i(t)?n.add(t):r.push(t))}if(r.length>0)throw new Error",
-    "return[...n]}}",
-    'function i(e,t){return void 0===t?e:Object.assign(Object.assign({},null!=e?e:{}),{[o.iq]:t.join(",")})}',
-    "We=()=>{try{return(0,$.FS)((0,L.S)((0,L.I)(qe,Be),Ye)",
-    "excludeWorkspaceContext:o.excludeWorkspaceContext",
-    "singleTurn:o.singleTurn",
-)
-
-
 class CliPredispatchRefusal(RuntimeError):
     """The installed CLI cannot prove the checked transport contract."""
 
@@ -192,6 +169,8 @@ class CursorCliQualification:
 @dataclass(frozen=True, slots=True)
 class _CursorPackageProof:
     root: str
+    resolved_binary: str
+    version: str
     launcher_digest: str
     command_surface_digest: str
     control_semantics_digest: str
@@ -577,95 +556,44 @@ def _command_template_digest(*, binary: str) -> str:
     return _sha256_text("\x00".join(canonical_command))
 
 
-def _package_manifest_digest(root: Path) -> str:
-    entries: list[tuple[str, int, int, str]] = []
-    for path in sorted(root.rglob("*")):
-        relative = path.relative_to(root)
-        if ".running" in relative.parts:
-            continue
-        if path.is_symlink():
-            raise CliPredispatchRefusal(
-                "Cursor CLI qualified package contains a symbolic link"
-            )
-        if not path.is_file():
-            continue
-        value = path.read_bytes()
-        entries.append(
-            (
-                relative.as_posix(),
-                stat.S_IMODE(path.stat().st_mode),
-                len(value),
-                hashlib.sha256(value).hexdigest(),
-            )
-        )
-    manifest = json.dumps(
-        entries,
-        ensure_ascii=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return _sha256_bytes(manifest)
-
-
 def _inspect_cursor_package(binary: str) -> _CursorPackageProof:
     resolved = Path(os.path.realpath(binary))
     root = resolved.parent
-    if str(resolved) != QUALIFIED_CURSOR_AGENT_RESOLVED_BIN:
-        raise CliPredispatchRefusal(
-            "Cursor CLI installation is outside the qualified deployment paths"
-        )
-    if resolved.name != "cursor-agent" or root.name != QUALIFIED_CURSOR_AGENT_VERSION:
+    version_root = Path(os.path.realpath(QUALIFIED_CURSOR_AGENT_VERSION_ROOT))
+    if (
+        resolved.name != "cursor-agent"
+        or root.parent != version_root
+        or not root.name
+    ):
         raise CliPredispatchRefusal(
             "Cursor CLI resolved installation is outside the qualified version root"
         )
-    command_surface = root / "index.js"
-    control_semantics = root / "6260.index.js"
-    if (
-        not resolved.is_file()
-        or not command_surface.is_file()
-        or not control_semantics.is_file()
-    ):
-        raise CliPredispatchRefusal("Cursor CLI qualified package artifacts are absent")
+    if not resolved.is_file():
+        raise CliPredispatchRefusal("Cursor CLI launcher is absent")
     launcher_digest = _sha256_bytes(resolved.read_bytes())
-    command_surface_bytes = command_surface.read_bytes()
-    command_surface_digest = _sha256_bytes(command_surface_bytes)
-    control_semantics_bytes = control_semantics.read_bytes()
-    control_semantics_digest = _sha256_bytes(control_semantics_bytes)
-    package_digest = _package_manifest_digest(root)
-    try:
-        command_surface_text = command_surface_bytes.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise CliPredispatchRefusal("Cursor CLI command surface is not UTF-8") from exc
-    if not all(
-        marker in command_surface_text
-        for marker in _CURSOR_HIDDEN_CONTROL_SOURCE_MARKERS
-    ):
-        raise CliPredispatchRefusal(
-            "Cursor CLI command surface lacks qualified hidden isolation controls"
+    command_surface = root / "index.js"
+    command_surface_digest = (
+        _sha256_bytes(command_surface.read_bytes())
+        if command_surface.is_file() and not command_surface.is_symlink()
+        else _sha256_text("UNOBSERVED_COMMAND_SURFACE")
+    )
+    control_semantics_digest = _sha256_text("RUNTIME_CAPABILITY_PROBE")
+    package_digest = _sha256_text(
+        json.dumps(
+            {
+                "launcher_digest": launcher_digest,
+                "command_surface_digest": command_surface_digest,
+                "control_semantics_digest": control_semantics_digest,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
         )
-    try:
-        control_semantics_text = control_semantics_bytes.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise CliPredispatchRefusal(
-            "Cursor CLI control semantics are not UTF-8"
-        ) from exc
-    if not all(
-        marker in control_semantics_text
-        for marker in _CURSOR_CONTROL_SEMANTIC_SOURCE_MARKERS
-    ):
-        raise CliPredispatchRefusal(
-            "Cursor CLI does not apply the qualified isolation controls"
-        )
-    if (
-        launcher_digest != QUALIFIED_CURSOR_AGENT_LAUNCHER_DIGEST
-        or command_surface_digest != QUALIFIED_CURSOR_AGENT_COMMAND_SURFACE_DIGEST
-        or control_semantics_digest != QUALIFIED_CURSOR_AGENT_CONTROL_SEMANTICS_DIGEST
-        or package_digest != QUALIFIED_CURSOR_AGENT_PACKAGE_DIGEST
-    ):
-        raise CliPredispatchRefusal(
-            "Cursor CLI package differs from the qualified command surface"
-        )
+    )
     return _CursorPackageProof(
         root=str(root),
+        resolved_binary=str(resolved),
+        version=root.name,
         launcher_digest=launcher_digest,
         command_surface_digest=command_surface_digest,
         control_semantics_digest=control_semantics_digest,
@@ -684,9 +612,11 @@ def _qualification_evidence(
 ) -> dict[str, object]:
     evidence: dict[str, object] = {
         "binary": binary,
-        "resolved_binary": os.path.realpath(binary),
+        "resolved_binary": (
+            os.path.realpath(binary) if package is None else package.resolved_binary
+        ),
         "version": version,
-        "expected_version": QUALIFIED_CURSOR_AGENT_VERSION,
+        "expected_version": "UNPINNED",
         "controls": list(_CURSOR_ISOLATION_CONTROLS),
         "command_surface_proof": CURSOR_COMMAND_SURFACE_PROOF,
         "stdout_limit_bytes": cursor_stdout_limit(max_tokens),
@@ -745,14 +675,25 @@ def _require_qualified_request_path(
 
 def _require_qualified_static_results(
     *,
+    capability_result: _ProcessOutput,
     version_result: _ProcessOutput,
     help_result: _ProcessOutput,
     evidence: Mapping[str, object],
 ) -> None:
     version = version_result.stdout.strip()
-    if version_result.returncode != 0 or version != QUALIFIED_CURSOR_AGENT_VERSION:
+    if capability_result.returncode != 0:
         raise CliPredispatchRefusal(
-            "Cursor CLI version is outside the qualified transport contract",
+            "Cursor CLI cannot prove required runtime capabilities",
+            qualification_evidence=evidence,
+        )
+    if (
+        version not in capability_result.stdout
+        or version_result.returncode != 0
+        or not version
+        or len(version.encode("utf-8")) > 128
+    ):
+        raise CliPredispatchRefusal(
+            "Cursor CLI did not report a runtime version",
             qualification_evidence=evidence,
         )
     if help_result.returncode != 0 or not all(
@@ -771,6 +712,7 @@ def _build_qualification(
     package: _CursorPackageProof,
     authentication_bridge: _CursorAuthenticationBridgeProof,
     credential_probe: _CursorCredentialProbeProof,
+    capability_result: _ProcessOutput,
     version_result: _ProcessOutput,
     help_result: _ProcessOutput,
 ) -> CursorCliQualification:
@@ -784,23 +726,25 @@ def _build_qualification(
         credential_probe=credential_probe,
     )
     _require_qualified_static_results(
+        capability_result=capability_result,
         version_result=version_result,
         help_result=help_result,
         evidence=evidence,
     )
-    resolved_binary = os.path.realpath(binary)
     return CursorCliQualification(
         binary=binary,
-        resolved_binary=resolved_binary,
+        resolved_binary=package.resolved_binary,
         version=version,
-        expected_version=QUALIFIED_CURSOR_AGENT_VERSION,
+        expected_version="UNPINNED",
         controls=_CURSOR_ISOLATION_CONTROLS,
         version_digest=_sha256_text(version_result.stdout),
         help_digest=_sha256_text(help_result.stdout),
-        command_template_digest=_command_template_digest(binary=resolved_binary),
+        command_template_digest=_command_template_digest(
+            binary=package.resolved_binary
+        ),
         launcher_digest=package.launcher_digest,
         command_surface_digest=package.command_surface_digest,
-        control_semantics_digest=package.control_semantics_digest,
+        control_semantics_digest=_sha256_text(capability_result.stdout),
         package_digest=package.package_digest,
         command_surface_proof=CURSOR_COMMAND_SURFACE_PROOF,
         stdout_limit_bytes=cursor_stdout_limit(max_tokens),
@@ -830,7 +774,7 @@ def _prepare_cursor_qualification(
         _authentication_bridge_destination(environment)
         return _CursorQualificationPreparation(
             package=package,
-            resolved_binary=os.path.realpath(binary),
+            resolved_binary=package.resolved_binary,
             evidence=evidence,
         )
     except CliPredispatchRefusal as exc:
@@ -845,6 +789,7 @@ def _complete_cursor_qualification(
     environment: Mapping[str, str],
     max_tokens: int,
     preparation: _CursorQualificationPreparation,
+    capability_result: _ProcessOutput,
     version_result: _ProcessOutput,
     help_result: _ProcessOutput,
 ) -> CursorCliQualification:
@@ -857,6 +802,7 @@ def _complete_cursor_qualification(
     )
     try:
         _require_qualified_static_results(
+            capability_result=capability_result,
             version_result=version_result,
             help_result=help_result,
             evidence=evidence,
@@ -880,13 +826,17 @@ def _complete_cursor_qualification(
             package=package,
             authentication_bridge=authentication_bridge,
             credential_probe=credential_probe,
+            capability_result=capability_result,
             version_result=version_result,
             help_result=help_result,
         )
-        if _inspect_cursor_package(preparation.resolved_binary) != package:
+        if (
+            os.path.realpath(binary) != preparation.resolved_binary
+            or _inspect_cursor_package(preparation.resolved_binary) != package
+        ):
             raise CliPredispatchRefusal(
-                "Cursor CLI package changed during qualification",
-                qualification_evidence=evidence,
+                "Cursor CLI changed during runtime qualification",
+                qualification_evidence=qualification.as_dict(),
             )
         if _inspect_cursor_authentication_bridge(environment) != authentication_bridge:
             raise CliPredispatchRefusal(
@@ -909,6 +859,16 @@ def _qualify_cursor_agent(
 ) -> CursorCliQualification:
     evidence = _qualification_evidence(binary=binary, max_tokens=max_tokens)
     try:
+        _require_qualified_request_path(binary, evidence=evidence)
+        _authentication_bridge_destination(environment)
+        capability_result = _run_bounded_process(
+            (binary, *_CURSOR_CAPABILITY_PROBE_ARGUMENTS),
+            timeout=CURSOR_PREFLIGHT_TIMEOUT_SECONDS,
+            max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
+            cwd=cwd,
+            environment=environment,
+            phase="PREDISPATCH_CAPABILITY",
+        )
         preparation = _prepare_cursor_qualification(
             binary=binary,
             environment=environment,
@@ -936,6 +896,7 @@ def _qualify_cursor_agent(
             environment=environment,
             max_tokens=max_tokens,
             preparation=preparation,
+            capability_result=capability_result,
             version_result=version_result,
             help_result=help_result,
         )
@@ -947,7 +908,7 @@ def _qualify_cursor_agent(
         if isinstance(exc, CliTransportTimeout):
             evidence = {**evidence, "timeout_diagnostic": dict(exc.evidence)}
         raise CliPredispatchRefusal(
-            "Cursor CLI exact-binary preflight failed",
+            "Cursor CLI runtime-capability preflight failed",
             qualification_evidence=evidence,
         ) from exc
 
@@ -961,6 +922,16 @@ async def _qualify_cursor_agent_async(
 ) -> CursorCliQualification:
     evidence = _qualification_evidence(binary=binary, max_tokens=max_tokens)
     try:
+        _require_qualified_request_path(binary, evidence=evidence)
+        await asyncio.to_thread(_authentication_bridge_destination, environment)
+        capability_result = await _run_bounded_process_async(
+            (binary, *_CURSOR_CAPABILITY_PROBE_ARGUMENTS),
+            timeout=CURSOR_PREFLIGHT_TIMEOUT_SECONDS,
+            max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
+            cwd=cwd,
+            environment=environment,
+            phase="PREDISPATCH_CAPABILITY",
+        )
         preparation = await asyncio.to_thread(
             _prepare_cursor_qualification,
             binary=binary,
@@ -990,6 +961,7 @@ async def _qualify_cursor_agent_async(
             environment=environment,
             max_tokens=max_tokens,
             preparation=preparation,
+            capability_result=capability_result,
             version_result=version_result,
             help_result=help_result,
         )
@@ -1001,7 +973,7 @@ async def _qualify_cursor_agent_async(
         if isinstance(exc, CliTransportTimeout):
             evidence = {**evidence, "timeout_diagnostic": dict(exc.evidence)}
         raise CliPredispatchRefusal(
-            "Cursor CLI exact-binary preflight failed",
+            "Cursor CLI runtime-capability preflight failed",
             qualification_evidence=evidence,
         ) from exc
 
@@ -1026,6 +998,30 @@ def _require_retained_cursor_authentication_bridge(
         )
 
 
+def _require_retained_cursor_harness(
+    qualification: CursorCliQualification,
+) -> None:
+    try:
+        retained = _inspect_cursor_package(qualification.resolved_binary)
+    except CliPredispatchRefusal as exc:
+        raise CliPredispatchRefusal(
+            "Cursor CLI runtime-qualified harness was lost before dispatch",
+            qualification_evidence=qualification.as_dict(),
+        ) from exc
+    if (
+        os.path.realpath(qualification.binary) != qualification.resolved_binary
+        or retained.resolved_binary != qualification.resolved_binary
+        or retained.version != qualification.version
+        or retained.launcher_digest != qualification.launcher_digest
+        or retained.command_surface_digest != qualification.command_surface_digest
+        or retained.package_digest != qualification.package_digest
+    ):
+        raise CliPredispatchRefusal(
+            "Cursor CLI runtime-qualified harness changed before dispatch",
+            qualification_evidence=qualification.as_dict(),
+        )
+
+
 def run_cursor_transport(
     *,
     binary: str,
@@ -1036,7 +1032,7 @@ def run_cursor_transport(
     environment: Mapping[str, str],
     dispatch_started: Callable[[], None] | None = None,
 ) -> tuple[str, CursorCliQualification]:
-    """Qualify and invoke one pinned Cursor package under controller bounds."""
+    """Qualify and invoke the current Cursor harness under controller bounds."""
 
     qualification = _qualify_cursor_agent(
         binary=binary,
@@ -1044,6 +1040,7 @@ def run_cursor_transport(
         environment=environment,
         max_tokens=max_tokens,
     )
+    _require_retained_cursor_harness(qualification)
     _require_retained_cursor_authentication_bridge(
         qualification,
         environment=environment,
@@ -1079,7 +1076,7 @@ async def run_cursor_transport_async(
     environment: Mapping[str, str],
     dispatch_started: Callable[[], None] | None = None,
 ) -> tuple[str, CursorCliQualification]:
-    """Async pinned Cursor transport with cancellable bounded children."""
+    """Async current Cursor transport with cancellable bounded children."""
 
     qualification = await _qualify_cursor_agent_async(
         binary=binary,
@@ -1087,6 +1084,7 @@ async def run_cursor_transport_async(
         environment=environment,
         max_tokens=max_tokens,
     )
+    await asyncio.to_thread(_require_retained_cursor_harness, qualification)
     await asyncio.to_thread(
         _require_retained_cursor_authentication_bridge,
         qualification,
@@ -1124,12 +1122,7 @@ __all__ = [
     "CURSOR_STDOUT_LIMIT_FORMULA",
     "CURSOR_STDOUT_LIMIT_IDENTITY",
     "QUALIFIED_CURSOR_AGENT_BIN",
-    "QUALIFIED_CURSOR_AGENT_COMMAND_SURFACE_DIGEST",
-    "QUALIFIED_CURSOR_AGENT_CONTROL_SEMANTICS_DIGEST",
-    "QUALIFIED_CURSOR_AGENT_LAUNCHER_DIGEST",
-    "QUALIFIED_CURSOR_AGENT_PACKAGE_DIGEST",
-    "QUALIFIED_CURSOR_AGENT_RESOLVED_BIN",
-    "QUALIFIED_CURSOR_AGENT_VERSION",
+    "QUALIFIED_CURSOR_AGENT_VERSION_ROOT",
     "QUALIFIED_CURSOR_LOGIN_KEYCHAIN",
     "QUALIFIED_CURSOR_SECURITY_BIN",
     "CliPredispatchRefusal",

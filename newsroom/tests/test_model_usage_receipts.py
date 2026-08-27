@@ -2307,7 +2307,7 @@ def test_issue_790_success_sequence_fails_closed_on_call_shape_drift(
     with pytest.raises(Issue790DispositionError, match="call-shape policy differs"):
         load_issue_790_plan(
             root
-            / "docs/operations/2026-08-26-issue-790-success-sequence-step-1.json"
+            / "docs/operations/2026-08-26-issue-790-success-sequence-step-3.json"
         )
 
 
@@ -2330,6 +2330,77 @@ def test_checked_issue_790_step_two_binds_reviewed_non_timeout_fix() -> None:
     assert sequence["reviewed_fix"]["record_digest"] == (
         "sha256:1bfba70f2f88eec47da9d8329030239c316cdc995b519c929fe074dcb9b14e32"
     )
+
+
+def test_checked_issue_790_step_three_binds_unpinned_harness_fix() -> None:
+    root = Path(__file__).resolve().parents[2]
+    plan = load_issue_790_plan(
+        root
+        / "docs/operations/2026-08-26-issue-790-success-sequence-step-3.json"
+    )
+
+    assert plan["canonical_digest"] == (
+        "sha256:598bc32d1e9c662d19188df6b0d038ac4205641d59810356504ee3da805250d4"
+    )
+    assert plan["target"]["invocation_id"] == (
+        "sha256:e6a0ffed3f985874890cecb49fe39ffac4cda35b0500d15974138afb733deb98"
+    )
+    sequence = dict(plan["sequence"])
+    assert sequence["sequence_ordinal"] == 3
+    assert sequence["constraint_change"] == "REVIEWED_NON_TIMEOUT_FIX"
+    assert sequence["call_shape_policy_version"] == "issue-790-v10"
+    assert sequence["fixed_constraints_digest"] == (
+        "sha256:84400663bfddfef14935cdf9c6a0942d548adeab08a732b023e19876de2b2fc2"
+    )
+    assert sequence["reviewed_fix"]["reviewed_fix_revision"] == (
+        "c66eaf698a310413da015fdde7d9d67699ffaafc"
+    )
+
+
+def test_issue_790_plan_rejects_malformed_sha256_identity() -> None:
+    root = Path(__file__).resolve().parents[2]
+    plan = json.loads(
+        (
+            root
+            / "docs/operations/2026-08-26-issue-790-success-sequence-step-3.json"
+        ).read_text(encoding="utf-8")
+    )
+    plan["target"]["invocation_id"] += "a"
+    plan["canonical_digest"] = _digest(
+        {key: value for key, value in plan.items() if key != "canonical_digest"}
+    )
+
+    with pytest.raises(Issue790DispositionError, match="invocation_id differs"):
+        validate_issue_790_plan(plan)
+
+
+def test_issue_790_exact_main_evidence_binds_cursor_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    binding = (
+        "newsroom.graphiti_adapter.cursor_transport",
+        "newsroom/graphiti_adapter/cursor_transport.py",
+    )
+    assert binding in issue_790_operation._RUNNING_CODE_MODULES
+    wrong_transport = tmp_path / "cursor_transport.py"
+    wrong_transport.write_text("# stale transport\n", encoding="utf-8")
+    monkeypatch.setattr(issue_790_operation, "_RUNNING_CODE_MODULES", (binding,))
+    monkeypatch.setitem(
+        issue_790_operation._RUNNING_CODE_PATHS,
+        binding[0],
+        str(wrong_transport),
+    )
+
+    with pytest.raises(
+        Issue790DispositionError,
+        match="executing operation code is outside exact main",
+    ):
+        issue_790_operation._running_code_evidence(
+            root=Path(__file__).resolve().parents[2],
+            git="git",
+            revision="0" * 40,
+        )
 
 
 def test_issue_790_plan_digest_and_bounds_fail_closed(tmp_path: Path) -> None:

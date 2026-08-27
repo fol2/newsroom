@@ -29,7 +29,6 @@ from newsroom.graphiti_adapter.cli_process import (
 )
 from newsroom.graphiti_adapter.cursor_transport import (
     CURSOR_AGENT_BIN,
-    QUALIFIED_CURSOR_AGENT_VERSION,
     CliPredispatchRefusal,
     CursorCliQualification,
     cursor_stdout_limit,
@@ -1291,7 +1290,6 @@ def build_cli_llm_client(
 
 __all__ = [
     "GROK_STDOUT_LIMIT_IDENTITY",
-    "QUALIFIED_CURSOR_AGENT_VERSION",
     "CliInvocationObserver",
     "CliOutputBoundExceeded",
     "CliOutputDecodeError",
