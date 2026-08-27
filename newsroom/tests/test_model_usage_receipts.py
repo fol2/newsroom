@@ -2342,7 +2342,7 @@ def test_issue_790_success_sequence_fails_closed_on_call_shape_drift(
     with pytest.raises(Issue790DispositionError, match="call-shape policy differs"):
         load_issue_790_plan(
             root
-            / "docs/operations/2026-08-27-issue-790-success-sequence-step-5.json"
+            / "docs/operations/2026-08-27-issue-790-success-sequence-step-6.json"
         )
 
 
@@ -2430,6 +2430,22 @@ def test_checked_issue_790_step_five_binds_call_shape_alignment() -> None:
     assert sequence["reviewed_fix"]["reviewed_fix_revision"] == (
         "d540de3863e21ec1f0ce3c486d471c373bbee903"
     )
+
+
+def test_checked_issue_790_step_six_binds_network_requalification() -> None:
+    root = Path(__file__).resolve().parents[2]
+    plan = load_issue_790_plan(
+        root
+        / "docs/operations/2026-08-27-issue-790-success-sequence-step-6.json"
+    )
+
+    assert plan["canonical_digest"] == (
+        "sha256:be8ccb6cec126cdaffe9801421cfc115d4651b5a305435a7e820290e17099239"
+    )
+    sequence = dict(plan["sequence"])
+    assert sequence["sequence_ordinal"] == 6
+    assert sequence["predecessor_causal_report"]["provider_cause"] == "NETWORK"
+    assert sequence["reviewed_fix"]["fix_kind"] == "CONFIGURATION"
 
 
 def test_issue_790_plan_rejects_malformed_sha256_identity() -> None:
