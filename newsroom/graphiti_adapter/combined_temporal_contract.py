@@ -33,7 +33,8 @@ SCHEMA: dict[str, Any] = {
             "items": {
                 "additionalProperties": False,
                 "properties": {
-                    "entity_type_id": {"type": "integer"},
+                    # Wire Entity Mentions use one governed type id only.
+                    "entity_type_id": {"type": "integer", "enum": [0]},
                     "evidence_segment_ids": {
                         "items": {"type": "integer"},
                         "type": "array",
@@ -61,7 +62,10 @@ SCHEMA: dict[str, Any] = {
                     },
                     "fact": {"type": "string"},
                     "invalid_at": {"type": ["string", "null"]},
-                    "relation_type": {"type": "string"},
+                    "relation_type": {
+                        "type": "string",
+                        "pattern": "^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$",
+                    },
                     "source_local_id": {"type": "integer"},
                     "target_local_id": {"type": "integer"},
                     "valid_at": {"type": ["string", "null"]},
@@ -162,10 +166,12 @@ def build_compact_prompt(revision: SourceRevisionInput) -> CompactPrompt:
         "Retain every supplied segment; do not summarise or truncate.",
         "Extract only named or source-grounded entities that participate in a retained fact.",
         "The wire entities are untrusted Entity Mentions; they are not Canonical Entities.",
+        "Every entity_type_id must be the integer 0.",
         "Zero facts requires zero entities.",
         "Use the source's certainty. Do not add outside knowledge.",
         "The wire facts are untrusted Relation Proposals; they are not governed facts.",
         "Build each relation_type only from relation words present in its fact; entity-name words are not relation evidence.",
+        "Every relation_type must be SCREAMING_SNAKE_CASE.",
         "Put valid_at and invalid_at on each fact. Resolve relative dates against REFERENCE_TIME to ISO-8601 UTC, or null.",
         "Cite evidence with the integer segment IDs below. Do not invent byte offsets.",
         "A valid empty object is terminal success.",

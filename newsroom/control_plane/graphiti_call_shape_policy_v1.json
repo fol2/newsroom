@@ -1,6 +1,6 @@
 {
   "schema_version": "newsroom.graphiti-call-shape-policy.v1",
-  "canonical_digest": "sha256:b3ba9f54e1f2bf539d231ceebe3b1ec2ceaef52f89aa69f1692a9864d57fe604",
+  "canonical_digest": "sha256:ba1cb4267ff78419174b50a0e233545a4bf745168d4f7fdbffa2fb6007ab5abc",
   "policy_id": "graphiti-core-0.29.3-newsroom-adapter-v1",
   "version": "issue-816-v2",
   "graphiti_core_release": "graphiti-core-0.29.3",
@@ -54,7 +54,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:8fbe927e5d6491f179125b51b324e14938942cd9a07265f2f8ad5515eae82bc5",
+      "implementation_revision": "sha256:1cf4e3f26c1d2edac9c52107589f8be34e4635188662224fd5fb9d99e45c0247",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -105,7 +105,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:8fbe927e5d6491f179125b51b324e14938942cd9a07265f2f8ad5515eae82bc5",
+      "implementation_revision": "sha256:1cf4e3f26c1d2edac9c52107589f8be34e4635188662224fd5fb9d99e45c0247",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -259,13 +259,13 @@
       "leaf_class": "PRIMARY",
       "semantic_request_class": "NewsroomCombinedTemporalExtractionV1",
       "response_schema_identity": "NewsroomCombinedTemporalExtractionV1",
-      "response_schema_digest": "sha256:439cd662886a4f3d14c12503a505dc0f721eb0083b1e2678f54320678fe12621"
+      "response_schema_digest": "sha256:4a4d8111fc3480830e740ecbbe2755a9f16e02eb8ced31d8b96e720ae0886f05"
     },
     {
       "leaf_class": "FALLBACK",
       "semantic_request_class": "NewsroomCombinedTemporalExtractionV1",
       "response_schema_identity": "NewsroomCombinedTemporalExtractionV1",
-      "response_schema_digest": "sha256:439cd662886a4f3d14c12503a505dc0f721eb0083b1e2678f54320678fe12621"
+      "response_schema_digest": "sha256:4a4d8111fc3480830e740ecbbe2755a9f16e02eb8ced31d8b96e720ae0886f05"
     }
   ],
   "fixtures": [
@@ -378,7 +378,7 @@
       "distinct_internal_request_count": 3
     }
   ],
-  "evidence_digest": "sha256:7c8b55e66bd9c6377cd98aab6e54071d2afc5cf768c3d18e0a4ed15adbeff7df",
+  "evidence_digest": "sha256:e79920a958d6b6591f6f132de7b47566d7fff29aa4d13d1d60fc57c577cc9830",
   "maximum_qualified_fixture_count": 4,
   "headroom": 2,
   "max_distinct_internal_requests": 6

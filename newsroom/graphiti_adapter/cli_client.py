@@ -579,6 +579,26 @@ def _parsed_object(raw: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _payload_matches_response_schema(
+    payload: Mapping[str, Any], schema: str | None
+) -> bool:
+    """Reject COMPLETE JSON that still fails the allocated response schema."""
+
+    if schema is None:
+        return True
+    try:
+        schema_object = json.loads(schema)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(schema_object, dict):
+        return False
+    try:
+        from jsonschema import Draft202012Validator
+    except ImportError:
+        return True
+    return not any(Draft202012Validator(schema_object).iter_errors(payload))
+
+
 def _execution(value: CliOutput) -> CliExecution:
     if isinstance(value, CliExecution):
         return value
@@ -1137,6 +1157,15 @@ async def run_cli_chain(
     else:
         cursor_execution = _execution(cast(CliOutput, raw))
         payload = _parsed_object(cursor_execution.text)
+        if (
+            payload is not None
+            and fallback_permitted
+            and not _payload_matches_response_schema(payload, schema)
+        ):
+            # Only demote to MALFORMED when Grok fallback can still run.
+            # Canary keeps fallback_permitted=False, so invalid-but-parseable
+            # JSON continues to the combined-temporal validator.
+            payload = None
         output_limit_exceeded = _output_limit_exceeded(
             cursor_execution, max_tokens=max_tokens
         )
@@ -1362,6 +1391,8 @@ async def run_cli_chain(
         raise CliResponseError("Graphiti fallback CLI failed") from exc
     grok_execution = _execution(cast(CliOutput, raw))
     payload = _parsed_object(grok_execution.text)
+    if payload is not None and not _payload_matches_response_schema(payload, schema):
+        payload = None
     output_limit_exceeded = _output_limit_exceeded(
         grok_execution, max_tokens=max_tokens
     )
