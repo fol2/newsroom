@@ -2,8 +2,8 @@
   "schema_version": "newsroom.issue-790.provider-free-sdk-qualification.v2",
   "issue": 790,
   "observed_at": "2026-08-27T13:55:38Z",
-  "exact_main_revision": "PENDING_MERGE",
-  "exact_main_tree": "PENDING_MERGE",
+  "exact_main_revision": "0ca38a0fadd4e08ebfcf61097a7bae6ff53ee79e",
+  "exact_main_tree": "372983c241165e9da3f1170d554bb02db83e19fb",
   "prerequisite_merge": {
     "issue": 816,
     "url": "https://github.com/fol2/newsroom/issues/816"
@@ -20,9 +20,9 @@
     "step_seven_withdrawal_unchanged": "PASS",
     "step_eight_remains_non_executable": "PASS",
     "call_shape_policy_version": "issue-816-v2",
-    "call_shape_policy_digest": "sha256:4c95b8ab06a6c9d18b2ede5d196c4d6d876f9949aefa1359f63a89f23e18e7e5",
+    "call_shape_policy_digest": "sha256:f0b2de282936824b5b1ff5d2d9e37126356e38d62ab7269d4cbfb18e9133d535",
     "transport_policy_digest": "sha256:06ebe081ebbccd69c00011c54ab2a3e419127107ab258eb1eba230f20c270a8a",
-    "implementation_revision": "sha256:c86e2dde9f4085b5c01de118b6e4fa59152b21e23c59460bacd78acb0144636c",
+    "implementation_revision": "sha256:e8e8d5bb8a561bb8171536b21f34011cf2e10ea2ca752b8b708e035ca2521244",
     "v1_exact_pin_receipts_preserved": "PASS"
   },
   "focused_tests": [
@@ -32,5 +32,5 @@
   ],
   "qualification": "COMPATIBILITY_FLOOR_PROVIDER_FREE_READY",
   "live_canary_authorised": false,
-  "canonical_digest": "sha256:ef902904e9c47a909aa32c57a313cd9f1f6d9f96862d63acdcb87dca30e0d2c2"
+  "canonical_digest": "sha256:bf9643fdde101887cf1a554a67aa33be04f7709196d18468c4b9c38d90beb1f0"
 }
