@@ -4,9 +4,9 @@
   "withdrawn_plan_path": "docs/operations/2026-08-27-issue-790-success-sequence-step-6.json",
   "plan_status": "WITHDRAWN",
   "superseded_by": "SUPERSEDED_BY_SDK_ARCHITECTURE",
-  "successor_plan_digest": "sha256:086f1c706228925f3f1f1e5c8d4b9a8d1b8bc53e23795d843e547eabd8f6284e",
+  "successor_plan_digest": "sha256:3d4f4a13253055fe136bb1724c4de91261b01bdc8d304fd510df72ad1e418ae4",
   "successor_plan_path": "docs/operations/2026-08-27-issue-790-success-sequence-step-7-draft.json",
   "successor_executable": false,
   "reason": "CLI network successor authority is obsolete after Cursor SDK transport replacement (#807).",
-  "canonical_digest": "sha256:e6fbff135fe7a6043a6c45635a394e43842693f7b9691b11af552dec40dc8cbd"
+  "canonical_digest": "sha256:def21b8613574db4e3a504ed8dde5cf60e431d1691e8368863846b3460bd4a93"
 }

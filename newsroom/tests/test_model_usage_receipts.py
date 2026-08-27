@@ -2446,9 +2446,13 @@ def test_checked_issue_790_step_six_is_withdrawn_before_sdk_successor() -> None:
     assert withdrawal["withdrawn_plan_digest"] == (
         "sha256:be8ccb6cec126cdaffe9801421cfc115d4651b5a305435a7e820290e17099239"
     )
-    assert withdrawal["successor_plan_digest"] == (
-        "sha256:086f1c706228925f3f1f1e5c8d4b9a8d1b8bc53e23795d843e547eabd8f6284e"
+    draft = json.loads(
+        (
+            root
+            / "docs/operations/2026-08-27-issue-790-success-sequence-step-7-draft.json"
+        ).read_text(encoding="utf-8")
     )
+    assert withdrawal["successor_plan_digest"] == draft["canonical_digest"]
     assert withdrawal["successor_executable"] is False
 
     step_six = validate_issue_790_plan(
@@ -2491,12 +2495,61 @@ def test_checked_issue_790_step_seven_remains_non_executable_draft() -> None:
         "PROCESS_EXITED_NONZERO"
     )
     assert draft["intended_sequence"]["call_shape_policy_version"] == "issue-807-v1"
+    assert draft["satisfied_prerequisites"] == ["PR_810_MERGED"]
+    assert "PR_810_MERGED" not in draft["blocked_until"]
+    assert draft["provider_free_qualification_path"] == (
+        "docs/operations/2026-08-27-issue-790-provider-free-sdk-qualification.json"
+    )
+    assert draft["intended_reviewed_fix"]["merge_sha"] == (
+        "4dbe41c4178d689e41dfaf5497ee157b5b084c1c"
+    )
 
     with pytest.raises(Issue790DispositionError, match="plan fields differ"):
         load_issue_790_plan(
             root
             / "docs/operations/2026-08-27-issue-790-success-sequence-step-7-draft.json"
         )
+
+
+def test_checked_issue_790_provider_free_sdk_qualification_receipt() -> None:
+    root = Path(__file__).resolve().parents[2]
+    qualification = json.loads(
+        (
+            root
+            / "docs/operations/2026-08-27-issue-790-provider-free-sdk-qualification.json"
+        ).read_text(encoding="utf-8")
+    )
+    draft = json.loads(
+        (
+            root
+            / "docs/operations/2026-08-27-issue-790-success-sequence-step-7-draft.json"
+        ).read_text(encoding="utf-8")
+    )
+    unsigned = {
+        key: value
+        for key, value in qualification.items()
+        if key != "canonical_digest"
+    }
+
+    assert qualification["schema_version"] == (
+        "newsroom.issue-790.provider-free-sdk-qualification.v1"
+    )
+    assert qualification["canonical_digest"] == _digest(unsigned)
+    assert qualification["provider_calls"] == 0
+    assert qualification["public_effects"] == 0
+    assert qualification["live_canary_authorised"] is False
+    assert qualification["qualification"] == "EXACT_MAIN_PROVIDER_FREE_SDK_READY"
+    assert qualification["prerequisite_merge"]["pull_request"] == 810
+    assert qualification["exact_main_revision"] == (
+        qualification["prerequisite_merge"]["merge_sha"]
+    )
+    assert draft["intended_sequence"]["call_shape_policy_digest"] == (
+        qualification["provider_free_checks"]["call_shape_policy_digest"]
+    )
+    assert set(qualification["focused_tests"]) == {
+        "newsroom/tests/test_graphiti_cursor_sdk_transport.py",
+        "newsroom/tests/test_model_usage_receipts.py",
+    }
 
 
 def test_issue_790_plan_rejects_malformed_sha256_identity() -> None:
