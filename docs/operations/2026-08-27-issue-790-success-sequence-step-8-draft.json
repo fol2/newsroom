@@ -6,13 +6,13 @@
   "sequence_ordinal": 8,
   "satisfied_prerequisites": [
     "ISSUE_816_MERGED",
-    "COMPATIBILITY_FLOOR_PROVIDER_FREE_QUALIFICATION"
-  ],
-  "blocked_until": [
-    "EXACT_MAIN_PROVIDER_FREE_COMPATIBILITY_FLOOR_QUALIFICATION",
+    "COMPATIBILITY_FLOOR_PROVIDER_FREE_QUALIFICATION",
     "FINAL_REVIEW_RECEIPT",
     "OWNER_AUTHENTICATED_SDK_CANARY_APPROVAL"
   ],
+  "executable_plan_path": "docs/operations/2026-08-27-issue-790-success-sequence-step-8.json",
+  "executable_plan_digest": "sha256:e45fb670577de1b929a4c7cde114e6cc05c589ff7e010abbab9656445a2edb8c",
+  "blocked_until": [],
   "withdrawal_reference": "docs/operations/2026-08-27-issue-790-step-7-exact-pin-withdrawal.json",
   "provider_free_qualification_path": "docs/operations/2026-08-27-issue-790-compatibility-floor-provider-free-qualification.json",
   "retained_predecessor_causal_report_digest": "sha256:98ff94ad66d8c487e70e0ddd50be71493367458c0f7f76d3598b4dcc8d51474e",
@@ -34,5 +34,5 @@
     "fix_kind": "CODE_AND_CONFIGURATION",
     "notes": "Mint executable authority only after exact-main compatibility-floor provider-free qualification, zero-finding final review and owner-authenticated approval."
   },
-  "canonical_digest": "sha256:6ca97bfcde8ef5b73d844815858b26274ffba80f79b31e3dc0fff2696fb69f39"
+  "canonical_digest": "sha256:6db782e5fac169ed56b88b70215af9f50b918655e0549ab63725def6c64de489"
 }
