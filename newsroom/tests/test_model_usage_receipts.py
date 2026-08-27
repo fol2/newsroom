@@ -2611,7 +2611,7 @@ def test_checked_issue_790_step_nine_executable_plan_contract() -> None:
     )
 
     assert plan["canonical_digest"] == (
-        "sha256:ed9ddb506df0cc6572777bd9a91249b474032eb4dea6458d2c3e9b0466cbce77"
+        "sha256:982cfe8cb30f326d3a62939fba38ecc2885af017ef990b1a7ad46dcc985d927c"
     )
     assert plan["sequence"]["sequence_ordinal"] == 9
     assert plan["sequence"]["constraint_change"] == "REVIEWED_NON_TIMEOUT_FIX"

@@ -1023,7 +1023,8 @@ def test_official_runtime_uses_supported_sdk_api() -> None:
     assert "disallowed_tools=list(CURSOR_SDK_DISALLOWED_TOOLS)" in text
     assert "mcp_servers={}" in text
     assert "agents={}" in text
-    assert "idempotency_key=request.idempotency_key" in text
+    assert "idempotency_key=request.idempotency_key" not in text
+    assert "agent.send(request.prompt)" in text
     assert text.index("dispatch_started()") < text.index("agent.send(")
     assert "setting_sources" not in ast.unparse(
         next(
@@ -1032,6 +1033,112 @@ def test_official_runtime_uses_supported_sdk_api() -> None:
             if isinstance(node, ast.ClassDef) and node.name == "OfficialCursorSdkRuntime"
         )
     )
+
+
+def test_official_local_send_omits_sdk_idempotency_key(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    class StubRun:
+        id = "run-local-1"
+        agent_id = "agent-local-1"
+        status = "running"
+        usage = None
+        model = None
+        duration_ms = None
+
+        def close(self) -> None:
+            return None
+
+    class StubAgent:
+        agent_id = "agent-local-1"
+
+        def send(self, prompt: str, **kwargs: object) -> StubRun:
+            captured["prompt"] = prompt
+            captured["kwargs"] = dict(kwargs)
+            return StubRun()
+
+        def close(self) -> None:
+            return None
+
+    class StubAgents:
+        def create(self, _options: object) -> StubAgent:
+            return StubAgent()
+
+    official = OfficialCursorSdkRuntime.__new__(OfficialCursorSdkRuntime)
+    official._sdk = SimpleNamespace(
+        LocalAgentOptions=lambda **values: SimpleNamespace(**values),
+        LocalAgentStoreConfig=lambda **values: SimpleNamespace(**values),
+        AgentOptions=lambda **values: SimpleNamespace(**values),
+    )
+    (tmp_path / "cwd").mkdir()
+    (tmp_path / "store").mkdir()
+    official.__dict__["_client"] = SimpleNamespace(agents=StubAgents())
+
+    run = official.start_run(
+        CursorSdkRunRequest(
+            prompt="extract",
+            api_key="crsr_test_key",
+            cwd=str(tmp_path / "cwd"),
+            store=str(tmp_path / "store"),
+            timeout=5,
+            max_output_bytes=65536,
+            model=PINNED_MODEL,
+            idempotency_key=_TEST_IDEMPOTENCY_KEY,
+        ),
+        dispatch_started=lambda: None,
+    )
+
+    assert captured["prompt"] == "extract"
+    assert "idempotency_key" not in captured["kwargs"]
+    assert run.id == "run-local-1"
+    assert run.agent_id == "agent-local-1"
+
+
+def test_local_idempotency_key_unimplemented_is_not_ambiguous_dispatch(
+    tmp_path: Path,
+) -> None:
+    class StubAgent:
+        agent_id = "agent-local-1"
+
+        def send(self, *_args: object, **_kwargs: object) -> object:
+            raise RuntimeError(
+                "unimplemented: Idempotency-Key is only supported for cloud Send in v1"
+            )
+
+        def close(self) -> None:
+            return None
+
+    class StubAgents:
+        def create(self, _options: object) -> StubAgent:
+            return StubAgent()
+
+    official = OfficialCursorSdkRuntime.__new__(OfficialCursorSdkRuntime)
+    official._sdk = SimpleNamespace(
+        LocalAgentOptions=lambda **values: SimpleNamespace(**values),
+        LocalAgentStoreConfig=lambda **values: SimpleNamespace(**values),
+        AgentOptions=lambda **values: SimpleNamespace(**values),
+    )
+    (tmp_path / "cwd").mkdir()
+    (tmp_path / "store").mkdir()
+    official.__dict__["_client"] = SimpleNamespace(agents=StubAgents())
+
+    with pytest.raises(CursorSdkError) as caught:
+        official.start_run(
+            CursorSdkRunRequest(
+                prompt="extract",
+                api_key="crsr_test_key",
+                cwd=str(tmp_path / "cwd"),
+                store=str(tmp_path / "store"),
+                timeout=5,
+                max_output_bytes=65536,
+                model=PINNED_MODEL,
+                idempotency_key=_TEST_IDEMPOTENCY_KEY,
+            ),
+            dispatch_started=lambda: None,
+        )
+
+    assert not isinstance(caught.value, CursorSdkAmbiguousDispatch)
+    assert caught.value.error_class == "SDK_ERROR"
 
 
 def test_official_runtime_constructs_and_closes_without_provider_calls() -> None:

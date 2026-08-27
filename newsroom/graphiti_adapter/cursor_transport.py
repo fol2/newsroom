@@ -1132,18 +1132,23 @@ class OfficialCursorSdkRuntime:
                         pass
                 raise
         try:
-            run = agent.send(
-                request.prompt,
-                idempotency_key=request.idempotency_key,
-            )
+            # Local Send in cursor-sdk v1 rejects Idempotency-Key (cloud-only).
+            # Retain request.idempotency_key for Newsroom correlation only.
+            run = agent.send(request.prompt)
         except Exception as exc:
             closer = getattr(agent, "close", None)
             if callable(closer):
                 closer()
+            message = str(exc).lower()
+            local_idempotency_unsupported = (
+                "idempotency-key" in message
+                and "only supported for cloud" in message
+            )
             raise _map_sdk_exception(
                 exc,
                 dispatch_confirmed=True,
-                send_attempted=True,
+                # Local Idempotency-Key refusal never accepted a durable Send.
+                send_attempted=not local_idempotency_unsupported,
             ) from exc
         return OfficialCursorSdkRun(agent=agent, run=run)
 
