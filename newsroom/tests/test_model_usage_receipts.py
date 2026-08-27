@@ -104,6 +104,41 @@ def _service(tmp_path: Path) -> ModelUsageService:
     return ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
 
 
+def test_issue_790_migrates_legacy_unique_disposition_constraint(
+    tmp_path: Path,
+) -> None:
+    _service(tmp_path)
+    path = tmp_path / "unpublished.sqlite3"
+    Issue790CanaryRepository(str(path))
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE UNIQUE INDEX issue_790_legacy_disposition_unique ON "
+        "issue_790_bounded_canary_consumptions(disposition_digest)"
+    )
+    connection.commit()
+    connection.close()
+
+    Issue790CanaryRepository(str(path))
+
+    connection = sqlite3.connect(path)
+    unique_columns = {
+        tuple(
+            str(column[2])
+            for column in connection.execute(f'PRAGMA index_info("{index[1]}")')
+        )
+        for index in connection.execute(
+            "PRAGMA index_list(issue_790_bounded_canary_consumptions)"
+        )
+        if index[2]
+    }
+    foreign_key_failure = connection.execute(
+        "PRAGMA foreign_key_check"
+    ).fetchone()
+    connection.close()
+    assert ("disposition_digest",) not in unique_columns
+    assert foreign_key_failure is None
+
+
 def test_v1_store_replays_v2_context_manifest_migration_idempotently(
     tmp_path: Path,
 ) -> None:
