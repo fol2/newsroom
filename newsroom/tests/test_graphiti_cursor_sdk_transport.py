@@ -91,7 +91,7 @@ class FakeTerminal:
     status: str = "finished"
     result: str = ""
     usage: object | None = None
-    model: object | None = None
+    model: object | None = field(default_factory=lambda: SimpleNamespace(id=PINNED_MODEL))
     duration_ms: int | None = 12
     error: object | None = None
 
@@ -750,6 +750,35 @@ def test_selected_model_is_passed_to_sdk_request(
     )
 
     assert runtime.requests[0].model == "composer-2.6"
+
+
+def test_unreported_resolved_model_fails_truthfully(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _bind(
+        monkeypatch,
+        FakeRuntime(
+            run=FakeRun(
+                messages=(_assistant(_GRAPHITI_JSON),),
+                terminal=FakeTerminal(
+                    result=_GRAPHITI_JSON,
+                    usage=FakeUsage(1, 1),
+                    model=None,
+                ),
+                model=None,
+            )
+        ),
+    )
+
+    with pytest.raises(CursorSdkError, match="did not report a resolved composer model"):
+        run_cursor_transport(
+            prompt="extract",
+            max_tokens=32,
+            timeout=5,
+            idempotency_key=_TEST_IDEMPOTENCY_KEY,
+        )
+
+    assert len(runtime.requests) == 1
 
 
 def test_resolved_model_drift_fails_truthfully(

@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 
 from newsroom.authority.canonical import validate_sha256_digest
 from newsroom.authority.types import UtcTimestamp
+from newsroom.graphiti_adapter.cursor_transport import composer_model_meets_floor
 
 CLI_TIMEOUT_DIAGNOSTIC_SCHEMA_VERSION = "newsroom.graphiti-timeout-diagnostic.v1"
 CLI_PROCESS_EXIT_DIAGNOSTIC_SCHEMA_VERSION = "newsroom.cursor-process-exit.v1"
@@ -659,6 +660,8 @@ def validated_transport_qualification(value: object) -> dict[str, object]:
                 or retained["selected_model"] != retained["model"]
                 or retained["max_retries"] != 0
             ):
+                raise ValueError("Graphiti transport qualification identity is invalid")
+            if not composer_model_meets_floor(str(retained["selected_model"])):
                 raise ValueError("Graphiti transport qualification identity is invalid")
             sdk_version = str(retained["sdk_version"])
             parts = sdk_version.split(".")

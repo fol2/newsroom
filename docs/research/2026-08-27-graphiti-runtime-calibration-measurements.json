@@ -29,7 +29,7 @@
     "fixture_count": 11,
     "reported_as_provider_tokens": false
   },
-  "evidence_digest": "sha256:ffc5c168b823cf9b99a179ec9a57a8b63ae52b897ed4905e42fe4fd2b4ecc54e",
+  "evidence_digest": "sha256:d0fa51000cad373dd05c685c8ddfdc6e7a41f6b3f410f6034488c8bcc36c2403",
   "fallback_eligible_outcomes": [
     "MALFORMED_OUTPUT"
   ],
@@ -184,9 +184,9 @@
     }
   ],
   "identities": {
-    "call_shape_policy_digest": "sha256:4c95b8ab06a6c9d18b2ede5d196c4d6d876f9949aefa1359f63a89f23e18e7e5",
+    "call_shape_policy_digest": "sha256:f0b2de282936824b5b1ff5d2d9e37126356e38d62ab7269d4cbfb18e9133d535",
     "context_manifest": "graphiti-combined-temporal-hermetic-v1",
-    "fallback_circuit_policy_digest": "sha256:8f48e640ac3a3794d9c1355a4e906010b182b4ddb82b8833c76b55f4304149cf",
+    "fallback_circuit_policy_digest": "sha256:a7635862da836eb761e64626dd6bfcdda4b557ff981325e4778cdb2474dce07c",
     "prompt": "newsroom.graphiti.proposal-only-prompt:v1",
     "qualified_routes": [
       {
@@ -228,7 +228,7 @@
           "planning",
           "subagents"
         ],
-        "implementation_revision": "sha256:c86e2dde9f4085b5c01de118b6e4fa59152b21e23c59460bacd78acb0144636c",
+        "implementation_revision": "sha256:e8e8d5bb8a561bb8171536b21f34011cf2e10ea2ca752b8b708e035ca2521244",
         "leaf_class": "PRIMARY",
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
@@ -279,7 +279,7 @@
           "planning",
           "subagents"
         ],
-        "implementation_revision": "sha256:c86e2dde9f4085b5c01de118b6e4fa59152b21e23c59460bacd78acb0144636c",
+        "implementation_revision": "sha256:e8e8d5bb8a561bb8171536b21f34011cf2e10ea2ca752b8b708e035ca2521244",
         "leaf_class": "FALLBACK",
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
@@ -391,8 +391,8 @@
     "immutable_after_restart": true,
     "invocation_efficiency_policies": [
       {
-        "canonical_digest": "sha256:9b17887e36699221edaba70ba51b42644265e15be86966ecc2a59267a5d1d67c",
-        "evidence_digest": "sha256:658c475a6ddd4710e76668b5089a0e244475f636137199980d92b8f77a259ceb",
+        "canonical_digest": "sha256:6c2e28b568f2ac900d9113da255ae7e7650f39697d6450828f92f69ff5ea873e",
+        "evidence_digest": "sha256:f8129adb2087e3bc2f672f6345a7cca89448d1d22e1867ad0838a4bea1e2480f",
         "hard_estimate_ceiling_tokens": null,
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,
@@ -401,8 +401,8 @@
         "route": "GRAPHITI_CHAT_PRIMARY"
       },
       {
-        "canonical_digest": "sha256:6414fae503c8efd2ab25cc0fe3dacf9b04403957ccd38e85d5af892a193ad58f",
-        "evidence_digest": "sha256:ef71575a4f778354fb2678a94422cda1e096585474a276e75af47eace57db18f",
+        "canonical_digest": "sha256:5f925b7d674311d4b34985025644286357d8c1edf37c647572588513be72d2b9",
+        "evidence_digest": "sha256:f6fe4c95d572f4c466266392908be19602e9cb2b9eef426b9c199b421f3f4897",
         "hard_estimate_ceiling_tokens": null,
         "max_context_tokens": 131072,
         "max_output_tokens": 16384,

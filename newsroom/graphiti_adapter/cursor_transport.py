@@ -362,6 +362,12 @@ def select_composer_model(model_ids: Sequence[str]) -> str:
 
 
 def _validate_resolved_model(*, selected_model: str, resolved_model: str) -> None:
+    if resolved_model == "UNREPORTED":
+        raise CursorSdkError(
+            "Cursor SDK Graphiti run did not report a resolved composer model",
+            error_class="MODEL_DRIFT",
+            error_code="RESOLVED_MODEL_UNREPORTED",
+        )
     selected_version = _parse_composer_version(selected_model)
     resolved_version = _parse_composer_version(resolved_model)
     if selected_version is None or resolved_version is None:
@@ -720,10 +726,7 @@ def _execution(
     status: str,
 ) -> CursorSdkExecution:
     terminal_usage = _field(terminal, "usage") if terminal is not None else run.usage
-    resolved = _resolved_model(
-        terminal if terminal is not None else run,
-        fallback=qualification.selected_model,
-    )
+    resolved = _resolved_model(terminal if terminal is not None else run)
     duration = _optional_int(
         _field(terminal, "duration_ms") if terminal is not None else run.duration_ms
     )
@@ -867,10 +870,12 @@ def _optional_int(value: object) -> int | None:
     return None
 
 
-def _resolved_model(value: object, *, fallback: str) -> str:
+def _resolved_model(value: object) -> str:
     model = _field(value, "model")
     identity = _field(model, "id") if model is not None else model
-    return identity if isinstance(identity, str) and identity else fallback
+    if isinstance(identity, str) and identity.strip():
+        return identity
+    return "UNREPORTED"
 
 
 def _terminal_text(terminal: object) -> str:
