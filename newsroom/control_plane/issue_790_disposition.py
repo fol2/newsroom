@@ -75,6 +75,9 @@ ISSUE_790_NON_TIMEOUT_CAUSAL_REPORT_SCHEMA = (
     "newsroom.issue-790.non-timeout-causal-report.v1"
 )
 ISSUE_790_REVIEWED_FIX_SCHEMA = "newsroom.issue-790.reviewed-non-timeout-fix.v1"
+_ISSUE_790_REVIEWED_SUCCESSOR_TRANSITIONS = frozenset(
+    {"REVIEWED_NON_TIMEOUT_FIX", "COMPATIBILITY_FLOOR_ARCHITECTURE"}
+)
 ISSUE_790_ITERATIVE_PREFLIGHT_SCHEMA = (
     "newsroom.issue-790.iterative-fresh-event-preflight.v2"
 )
@@ -331,10 +334,19 @@ def _validated_non_timeout_causal_report(value: object) -> dict[str, object]:
         report.get("schema_version") != ISSUE_790_NON_TIMEOUT_CAUSAL_REPORT_SCHEMA
         or report.get("classification") != "NON_TIMEOUT_FAILURE"
         or report.get("causal_constraint")
-        != "REVIEWED_CODE_OR_CONFIGURATION_FIX"
+        not in {
+            "REVIEWED_CODE_OR_CONFIGURATION_FIX",
+            "COMPATIBILITY_FLOOR_ARCHITECTURE",
+        }
         or report.get("boundary") == "CONTROLLER_DEADLINE"
         or report.get("local_cause") == "CONFIGURED_TIMEOUT_EXPIRED"
         or controller_timeout != extraction_timeout - cleanup_reserve
+    ):
+        raise Issue790DispositionError("issue #790 non-timeout causal report differs")
+    if report.get("causal_constraint") == "COMPATIBILITY_FLOOR_ARCHITECTURE" and (
+        report.get("boundary") != "GOVERNANCE"
+        or report.get("local_cause") != "OWNER_COMPATIBILITY_FLOOR_AMENDMENT"
+        or report.get("termination") != "SUCCESSOR_WITHDRAWN_BEFORE_CONSUMPTION"
     ):
         raise Issue790DispositionError("issue #790 non-timeout causal report differs")
     return report
@@ -508,7 +520,7 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
             "predecessor",
             "predecessor_causal_report",
         }
-        if constraint_change == "REVIEWED_NON_TIMEOUT_FIX":
+        if constraint_change in _ISSUE_790_REVIEWED_SUCCESSOR_TRANSITIONS:
             expected_sequence_fields.add("reviewed_fix")
         if set(sequence) != expected_sequence_fields:
             raise Issue790DispositionError("issue #790 sequence fields differ")
@@ -582,6 +594,7 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
             "INITIAL_QUALIFIED_BASELINE",
             "CONTROLLER_TIMEOUT_INCREMENT",
             "REVIEWED_NON_TIMEOUT_FIX",
+            "COMPATIBILITY_FLOOR_ARCHITECTURE",
         }:
             raise Issue790DispositionError(
                 "issue #790 sequence constraint change differs"
@@ -590,7 +603,7 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
         causal_report = _validated_causal_report(
             sequence.get("predecessor_causal_report")
         )
-        if constraint_change == "REVIEWED_NON_TIMEOUT_FIX":
+        if constraint_change in _ISSUE_790_REVIEWED_SUCCESSOR_TRANSITIONS:
             reviewed_fix = _validated_reviewed_fix(sequence.get("reviewed_fix"))
             if (
                 causal_report.get("schema_version")
@@ -657,10 +670,19 @@ def _require_iterative_call_shape(plan: Mapping[str, object]) -> None:
     ):
         raise Issue790DispositionError("issue #790 call-shape policy differs")
     primary = primary_routes[0]
+    if primary.model == "composer>=2.5":
+        model_ok = (
+            "sdk=cursor-sdk>=1.0.29" in primary.command_flags
+            and "composer_floor>=2.5" in primary.command_flags
+        )
+    elif primary.model == "composer-2.5":
+        model_ok = True
+    else:
+        model_ok = False
     if (
         primary.provider != target.get("provider")
         or primary.route != target.get("route")
-        or primary.model != "composer-2.5"
+        or not model_ok
         or primary.max_total_tokens
         != target.get("expected_conservative_total_tokens")
         or expected_timeout_flag not in primary.command_flags
@@ -706,7 +728,8 @@ def _require_approved_plan(value: Mapping[str, object]) -> dict[str, object]:
         )
         reviewed_fix = (
             _validated_reviewed_fix(sequence.get("reviewed_fix"))
-            if sequence.get("constraint_change") == "REVIEWED_NON_TIMEOUT_FIX"
+            if sequence.get("constraint_change")
+            in _ISSUE_790_REVIEWED_SUCCESSOR_TRANSITIONS
             else None
         )
         if (
@@ -752,13 +775,18 @@ def _require_approved_plan(value: Mapping[str, object]) -> dict[str, object]:
                 raise Issue790DispositionError(
                     "issue #790 previous sequence contract differs"
                 ) from exc
+            ordinal_step = contract.sequence_ordinal - previous_contract.sequence_ordinal
             if (
-                previous_contract.sequence_ordinal + 1
-                != contract.sequence_ordinal
+                ordinal_step < 1
+                or (
+                    ordinal_step > 1
+                    and sequence.get("constraint_change")
+                    != "COMPATIBILITY_FLOOR_ARCHITECTURE"
+                )
                 or previous_contract.root_plan_digest != contract.root_plan_digest
                 or (
                     sequence.get("constraint_change")
-                    != "REVIEWED_NON_TIMEOUT_FIX"
+                    not in _ISSUE_790_REVIEWED_SUCCESSOR_TRANSITIONS
                     and previous_contract.fixed_constraints_digest
                     != contract.fixed_constraints_digest
                 )
@@ -782,7 +810,7 @@ def _require_approved_plan(value: Mapping[str, object]) -> dict[str, object]:
                     raise Issue790DispositionError(
                         "issue #790 timeout increment contract differs"
                     )
-            elif sequence.get("constraint_change") == "REVIEWED_NON_TIMEOUT_FIX":
+            elif sequence.get("constraint_change") in _ISSUE_790_REVIEWED_SUCCESSOR_TRANSITIONS:
                 if (
                     reviewed_fix is None
                     or causal_report.get("schema_version")
@@ -800,6 +828,15 @@ def _require_approved_plan(value: Mapping[str, object]) -> dict[str, object]:
                 ):
                     raise Issue790DispositionError(
                         "issue #790 reviewed fix contract differs"
+                    )
+                if (
+                    sequence.get("constraint_change")
+                    == "COMPATIBILITY_FLOOR_ARCHITECTURE"
+                    and causal_report.get("causal_constraint")
+                    != "COMPATIBILITY_FLOOR_ARCHITECTURE"
+                ):
+                    raise Issue790DispositionError(
+                        "issue #790 compatibility-floor contract differs"
                     )
             else:
                 raise Issue790DispositionError(
@@ -1086,7 +1123,7 @@ def _require_sequence_predecessor(
     transition = str(sequence.get("constraint_change"))
     reviewed_fix = (
         _validated_reviewed_fix(sequence.get("reviewed_fix"))
-        if transition == "REVIEWED_NON_TIMEOUT_FIX"
+        if transition in _ISSUE_790_REVIEWED_SUCCESSOR_TRANSITIONS
         else None
     )
     plan_digest = str(predecessor["plan_digest"])
@@ -1161,7 +1198,7 @@ def _require_sequence_predecessor(
             raise Issue790DispositionError(
                 "issue #790 predecessor lacks causal timeout evidence"
             )
-    elif transition == "REVIEWED_NON_TIMEOUT_FIX":
+    elif transition in _ISSUE_790_REVIEWED_SUCCESSOR_TRANSITIONS:
         if (
             reviewed_fix is None
             or outcome.get("schema_version")
@@ -1177,12 +1214,20 @@ def _require_sequence_predecessor(
             raise Issue790DispositionError(
                 "issue #790 predecessor lacks reviewed non-timeout evidence"
             )
+        if (
+            transition == "COMPATIBILITY_FLOOR_ARCHITECTURE"
+            and causal_report.get("causal_constraint")
+            != "COMPATIBILITY_FLOOR_ARCHITECTURE"
+        ):
+            raise Issue790DispositionError(
+                "issue #790 predecessor lacks compatibility-floor evidence"
+            )
     else:
         raise Issue790DispositionError(
             "issue #790 predecessor transition differs"
         )
 
-    if transition != "REVIEWED_NON_TIMEOUT_FIX":
+    if transition not in _ISSUE_790_REVIEWED_SUCCESSOR_TRANSITIONS:
         target = _record(plan.get("target"), field="target")
         try:
             terminal = repository.invocation_terminal(
@@ -2082,7 +2127,12 @@ def _issue_790_canary_usage_evidence(
             primary_chat
             and allocation.get("provider") == "cursor-agent-cli"
             and allocation.get("route") == "GRAPHITI_CHAT_PRIMARY"
-            and allocation.get("model") == "composer-2.5"
+            and (
+                allocation.get("model") == "composer-2.5"
+                or cursor_transport_module.composer_model_meets_floor(
+                    str(allocation.get("model") or "")
+                )
+            )
         )
         if primary_chat:
             primary_chat_leaf_count += 1

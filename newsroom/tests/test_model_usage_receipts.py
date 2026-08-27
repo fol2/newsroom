@@ -2343,7 +2343,7 @@ def test_issue_790_success_sequence_fails_closed_on_call_shape_drift(
     with pytest.raises(Issue790DispositionError, match="call-shape policy differs"):
         load_issue_790_plan(
             root
-            / "docs/operations/2026-08-27-issue-790-success-sequence-step-6.json"
+            / "docs/operations/2026-08-27-issue-790-success-sequence-step-8.json"
         )
 
 
@@ -2520,12 +2520,6 @@ def test_checked_issue_790_step_eight_remains_non_executable_draft() -> None:
             / "docs/operations/2026-08-27-issue-790-success-sequence-step-8-draft.json"
         ).read_text(encoding="utf-8")
     )
-    withdrawal = json.loads(
-        (
-            root
-            / "docs/operations/2026-08-27-issue-790-step-7-exact-pin-withdrawal.json"
-        ).read_text(encoding="utf-8")
-    )
     call_shape = load_checked_graphiti_call_shape_policy()
 
     assert draft["plan_status"] == "DRAFT"
@@ -2540,7 +2534,11 @@ def test_checked_issue_790_step_eight_remains_non_executable_draft() -> None:
     )
     assert draft["intended_sequence"]["sdk_floor"] == "cursor-sdk>=1.0.29"
     assert draft["intended_sequence"]["composer_floor"] == "composer>=2.5"
-    assert "OWNER_AUTHENTICATED_SDK_CANARY_APPROVAL" in draft["blocked_until"]
+    assert "OWNER_AUTHENTICATED_SDK_CANARY_APPROVAL" in draft["satisfied_prerequisites"]
+    assert draft["blocked_until"] == []
+    assert draft["executable_plan_digest"] == (
+        "sha256:e45fb670577de1b929a4c7cde114e6cc05c589ff7e010abbab9656445a2edb8c"
+    )
     assert draft["provider_free_qualification_path"] == (
         "docs/operations/2026-08-27-issue-790-compatibility-floor-provider-free-qualification.json"
     )
@@ -2550,6 +2548,25 @@ def test_checked_issue_790_step_eight_remains_non_executable_draft() -> None:
             root
             / "docs/operations/2026-08-27-issue-790-success-sequence-step-8-draft.json"
         )
+
+
+def test_checked_issue_790_step_eight_executable_plan_contract() -> None:
+    root = Path(__file__).resolve().parents[2]
+    plan = load_issue_790_plan(
+        root / "docs/operations/2026-08-27-issue-790-success-sequence-step-8.json"
+    )
+    contract = issue_790_contract_module.issue_790_approved_plan_contract(
+        plan["canonical_digest"]
+    )
+
+    assert plan["sequence"]["constraint_change"] == "COMPATIBILITY_FLOOR_ARCHITECTURE"
+    assert plan["sequence"]["call_shape_policy_version"] == "issue-816-v2"
+    assert contract.sequence_ordinal == 8
+    assert contract.constraint_change == "COMPATIBILITY_FLOOR_ARCHITECTURE"
+    assert (
+        contract.predecessor_plan_digest
+        == issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_5_PLAN_DIGEST
+    )
 
 
 def test_checked_issue_790_compatibility_floor_provider_free_qualification_receipt() -> (
