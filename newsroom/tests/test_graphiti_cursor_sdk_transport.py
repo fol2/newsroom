@@ -852,28 +852,30 @@ def test_observed_dispatch_fence_refusal_is_proved_zero_provider_call(
         def create(self, _options: object) -> StubAgent:
             return StubAgent()
 
-    official = OfficialCursorSdkRuntime()
+    official = OfficialCursorSdkRuntime.__new__(OfficialCursorSdkRuntime)
+    official._sdk = SimpleNamespace(
+        LocalAgentOptions=lambda **values: SimpleNamespace(**values),
+        LocalAgentStoreConfig=lambda **values: SimpleNamespace(**values),
+        AgentOptions=lambda **values: SimpleNamespace(**values),
+    )
     (tmp_path / "cwd").mkdir()
     (tmp_path / "store").mkdir()
-    monkeypatch.setattr(official, "_client", SimpleNamespace(agents=StubAgents()))
-    try:
-        with pytest.raises(CliDispatchMarkerError, match="durable dispatch observation"):
-            official.start_run(
-                CursorSdkRunRequest(
-                    prompt="extract",
-                    api_key="crsr_test_key",
-                    cwd=str(tmp_path / "cwd"),
-                    store=str(tmp_path / "store"),
-                    timeout=5,
-                    max_output_bytes=65536,
-                    idempotency_key=_TEST_IDEMPOTENCY_KEY,
-                ),
-                dispatch_started=lambda: (_ for _ in ()).throw(
-                    CliDispatchMarkerError("durable dispatch observation failed")
-                ),
-            )
-    finally:
-        official.close()
+    official.__dict__["_client"] = SimpleNamespace(agents=StubAgents())
+    with pytest.raises(CliDispatchMarkerError, match="durable dispatch observation"):
+        official.start_run(
+            CursorSdkRunRequest(
+                prompt="extract",
+                api_key="crsr_test_key",
+                cwd=str(tmp_path / "cwd"),
+                store=str(tmp_path / "store"),
+                timeout=5,
+                max_output_bytes=65536,
+                idempotency_key=_TEST_IDEMPOTENCY_KEY,
+            ),
+            dispatch_started=lambda: (_ for _ in ()).throw(
+                CliDispatchMarkerError("durable dispatch observation failed")
+            ),
+        )
 
     assert close_count == 1
     assert send_called is False
