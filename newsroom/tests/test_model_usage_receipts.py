@@ -2569,6 +2569,28 @@ def test_checked_issue_790_step_eight_executable_plan_contract() -> None:
     )
 
 
+def test_issue_790_invocation_plan_digests_cover_shared_successor_chain() -> None:
+    invocation_id = (
+        "sha256:d0712807fd025520d0a94e5a28c532d4cb8684c936387290fe7eeb49d0b2336c"
+    )
+    digests = issue_790_contract_module.issue_790_invocation_plan_digests(
+        invocation_id
+    )
+
+    assert (
+        issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_4_PLAN_DIGEST
+        in digests
+    )
+    assert (
+        issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_5_PLAN_DIGEST
+        in digests
+    )
+    assert (
+        issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_8_PLAN_DIGEST
+        in digests
+    )
+
+
 def test_checked_issue_790_compatibility_floor_provider_free_qualification_receipt() -> (
     None
 ):

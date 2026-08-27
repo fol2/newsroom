@@ -12,6 +12,7 @@ from pathlib import Path
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane.issue_790_contract import (
     issue_790_approved_plan_contract,
+    issue_790_invocation_plan_digests,
 )
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.veto import assert_private_store
@@ -876,11 +877,9 @@ class Issue790CanaryRepository:
                 "WHERE disposition_digest=?",
                 (disposition_digest,),
             ).fetchone()
-            disposition_plan_digests = {approved_plan_digest}
-            if approved_contract.predecessor_plan_digest is not None:
-                disposition_plan_digests.add(
-                    approved_contract.predecessor_plan_digest
-                )
+            disposition_plan_digests = issue_790_invocation_plan_digests(
+                approved_contract.invocation_id
+            )
             if disposition_row is None:
                 raise Issue790CanaryIntegrityError(
                     "bounded canary disposition authority is absent"

@@ -383,6 +383,17 @@ def issue_790_approved_plan_contracts() -> tuple[Issue790ApprovedPlanContract, .
         *_SUCCESS_SEQUENCE_CONTRACTS,
     )
 
+
+def issue_790_invocation_plan_digests(invocation_id: str) -> frozenset[str]:
+    """Return every reviewed plan digest bound to one retained invocation."""
+
+    return frozenset(
+        contract.plan_digest
+        for contract in issue_790_approved_plan_contracts()
+        if contract.invocation_id == invocation_id
+    )
+
+
 __all__ = [
     "ISSUE_790_APPROVAL_REFERENCE",
     "ISSUE_790_APPROVED_ALLOCATION_DIGEST",
@@ -404,4 +415,5 @@ __all__ = [
     "Issue790ApprovedPlanContract",
     "issue_790_approved_plan_contract",
     "issue_790_approved_plan_contracts",
+    "issue_790_invocation_plan_digests",
 ]
