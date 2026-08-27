@@ -812,18 +812,24 @@ class Issue790CanaryRepository:
                     "bounded canary authority is already consumed"
                 )
             disposition_row = connection.execute(
-                "SELECT invocation_id,record_json "
+                "SELECT invocation_id,approved_plan_digest,record_json "
                 "FROM model_usage_conservative_dispositions "
-                "WHERE disposition_digest=? AND approved_plan_digest=?",
-                (disposition_digest, approved_plan_digest),
+                "WHERE disposition_digest=?",
+                (disposition_digest,),
             ).fetchone()
+            disposition_plan_digests = {approved_plan_digest}
+            if approved_contract.predecessor_plan_digest is not None:
+                disposition_plan_digests.add(
+                    approved_contract.predecessor_plan_digest
+                )
             if disposition_row is None:
                 raise Issue790CanaryIntegrityError(
                     "bounded canary disposition authority is absent"
                 )
-            disposition = _object(disposition_row[1], field="canary disposition")
+            disposition = _object(disposition_row[2], field="canary disposition")
             if (
                 str(disposition_row[0]) != approved_contract.invocation_id
+                or str(disposition_row[1]) not in disposition_plan_digests
                 or disposition.get("exact_usage_remains_unknown") is not True
                 or disposition.get("unknown_spend_released") is not False
             ):
