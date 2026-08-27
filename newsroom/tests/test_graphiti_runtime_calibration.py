@@ -213,7 +213,7 @@ def test_checked_measurements_match_the_provider_free_packet() -> None:
         Path(__file__).resolve().parents[2]
         / "docs"
         / "research"
-        / "2026-08-25-graphiti-runtime-calibration-measurements.json"
+        / "2026-08-27-graphiti-runtime-calibration-measurements.json"
     )
 
     assert json.loads(path.read_text(encoding="utf-8")) == (

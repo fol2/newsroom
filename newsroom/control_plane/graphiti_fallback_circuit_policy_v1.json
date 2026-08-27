@@ -2,7 +2,7 @@
   "schema_version": "newsroom.graphiti-fallback-circuit-policy.v1",
   "policy_id": "newsroom.graphiti-fallback-circuit-policy",
   "version": "issue-807-v1",
-  "call_shape_policy_digest": "sha256:c00afc9ded4c7b5045762f277a20129b48c1e9d7d5c894273c53d64fb92552f0",
+  "call_shape_policy_digest": "sha256:0bd80a092a4b92c6d443674d3961c32e45b6634201891e7f04a70904123ad0d1",
   "eligible_outcomes": [
     "MALFORMED_OUTPUT"
   ],
@@ -27,7 +27,8 @@
     "PROVIDER_QUOTA_FAILURE": "QUOTA",
     "SYSTEMIC_PROVIDER_FAILURE": "SYSTEMIC_TRANSPORT",
     "TRANSPORT_FAILURE": "SYSTEMIC_TRANSPORT",
-    "CANCELLATION": "CANCELLATION"
+    "CANCELLATION": "CANCELLATION",
+    "AMBIGUOUS_DISPATCH": "SYSTEMIC_TRANSPORT"
   },
   "circuit_open_classes": [
     "SYSTEMIC_TRANSPORT",
@@ -41,5 +42,5 @@
     "DETERMINISTIC_HEALTH_PROBE",
     "AUTHORISED_OPERATOR_RESET"
   ],
-  "canonical_digest": "sha256:1d0571b8e4c88e5d3ce017e4a61b42b60111fa56c3f16015acb9c51c8a2809cd"
+  "canonical_digest": "sha256:a1ced667cc81fd0dce41a408d9ef226e59135cf12be991c350c948691473f768"
 }

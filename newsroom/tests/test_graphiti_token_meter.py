@@ -21,6 +21,17 @@ def _reported_usage() -> dict[str, object]:
     }
 
 
+_GOVERNED_CLI_DIGEST = "sha256:" + ("c" * 64)
+
+
+class _GovernedCliToken(SimpleNamespace):
+    def __init__(self, *, provider: str) -> None:
+        super().__init__(request_digest=_GOVERNED_CLI_DIGEST, provider=provider)
+
+    def __str__(self) -> str:
+        return str(self.provider)
+
+
 @pytest.mark.parametrize("invalid_zero", [False, 0.0])
 def test_predispatch_no_call_proof_requires_integer_zero(
     invalid_zero: object,
@@ -266,7 +277,7 @@ def test_cli_chain_allocates_each_hidden_leaf_before_provider_runner() -> None:
         ) -> object:
             del model, prompt, schema
             events.append(("ALLOCATE", provider))
-            return provider
+            return _GovernedCliToken(provider=provider)
 
         def after_cli_invocation(
             self,
@@ -332,7 +343,7 @@ def test_cli_chain_retains_exact_zero_for_missing_executable_before_dispatch() -
             self, *, provider: str, model: str, prompt: str, schema: str | None
         ) -> object:
             del model, prompt, schema
-            return provider
+            return _GovernedCliToken(provider=provider)
 
         def after_cli_invocation(
             self,
@@ -348,8 +359,9 @@ def test_cli_chain_retains_exact_zero_for_missing_executable_before_dispatch() -
         *,
         max_tokens: int,
         dispatch_started: object = None,
+        idempotency_key: str | None = None,
     ) -> CliExecution:
-        del max_tokens, dispatch_started
+        del max_tokens, dispatch_started, idempotency_key
         raise FileNotFoundError("cursor-agent")
 
     grok_called = False

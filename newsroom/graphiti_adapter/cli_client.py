@@ -31,6 +31,7 @@ from newsroom.graphiti_adapter.cli_process import (
 )
 from newsroom.graphiti_adapter.cursor_transport import (
     CliPredispatchRefusal,
+    CursorSdkAmbiguousDispatch,
     CursorSdkBoundedFailure,
     CursorSdkCleanupError,
     CursorSdkError,
@@ -88,6 +89,7 @@ class CliRunner(Protocol):
         *,
         max_tokens: int,
         dispatch_started: Callable[[], None] | None = None,
+        idempotency_key: str | None = None,
     ) -> CliOutput: ...
 
 
@@ -109,6 +111,7 @@ class AsyncCliRunner(Protocol):
         *,
         max_tokens: int,
         dispatch_started: Callable[[], None] | None = None,
+        idempotency_key: str | None = None,
     ) -> CliOutput: ...
 
 
@@ -433,6 +436,7 @@ def run_cursor_agent_llm(
     *,
     max_tokens: int,
     dispatch_started: Callable[[], None] | None = None,
+    idempotency_key: str | None = None,
 ) -> CliExecution:
     _require_positive_max_tokens(max_tokens)
     return _sdk_execution(
@@ -441,6 +445,7 @@ def run_cursor_agent_llm(
             max_tokens=max_tokens,
             timeout=CLI_CALL_TIMEOUT_SECONDS,
             dispatch_started=dispatch_started,
+            idempotency_key=idempotency_key,
         )
     )
 
@@ -450,6 +455,7 @@ async def run_cursor_agent_llm_async(
     *,
     max_tokens: int,
     dispatch_started: Callable[[], None] | None = None,
+    idempotency_key: str | None = None,
 ) -> CliExecution:
     _require_positive_max_tokens(max_tokens)
     return _sdk_execution(
@@ -458,6 +464,7 @@ async def run_cursor_agent_llm_async(
             max_tokens=max_tokens,
             timeout=CLI_CALL_TIMEOUT_SECONDS,
             dispatch_started=dispatch_started,
+            idempotency_key=idempotency_key,
         )
     )
 
@@ -556,7 +563,26 @@ def _sdk_failure_execution(exc: BaseException) -> CliExecution | None:
     return None
 
 
+def _cursor_usage_for_failure(
+    exc: BaseException | None,
+    *,
+    transport_started: bool,
+    sdk_execution: CliExecution | None = None,
+) -> dict[str, object]:
+    if isinstance(exc, CursorSdkAmbiguousDispatch):
+        return unreported_cli_usage()
+    if transport_started:
+        if sdk_execution is not None:
+            return dict(sdk_execution.usage)
+        if isinstance(exc, CursorSdkError):
+            return dict(exc.usage)
+        return unreported_cli_usage()
+    return no_provider_call_cli_usage()
+
+
 def _sdk_failure_outcome(exc: CursorSdkError) -> str:
+    if isinstance(exc, CursorSdkAmbiguousDispatch):
+        return "AMBIGUOUS_DISPATCH"
     if isinstance(exc, CursorSdkBoundedFailure):
         return exc.outcome
     if exc.error_class == "RATE_LIMIT":
@@ -734,6 +760,21 @@ def _runner_accepts_dispatch_marker(runner: Callable[..., object]) -> bool:
     return "dispatch_started" in parameters
 
 
+def _runner_accepts_idempotency_key(runner: Callable[..., object]) -> bool:
+    try:
+        parameters = inspect.signature(runner).parameters
+    except (TypeError, ValueError):
+        return False
+    return "idempotency_key" in parameters
+
+
+def _governed_idempotency_key(token: object | None) -> str | None:
+    request_digest = getattr(token, "request_digest", None)
+    if isinstance(request_digest, str) and request_digest.startswith("sha256:"):
+        return request_digest
+    return None
+
+
 def _mark_observed_transport_dispatch(
     observer: CliInvocationObserver | None, token: object
 ) -> None:
@@ -755,6 +796,7 @@ async def run_cli_chain(
     semantic_request_class: str = "UNSTRUCTURED",
     max_tokens: int = 16_384,
     fallback_permitted: bool = True,
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     """Execute cursor then Grok fallback while retaining every call outcome."""
 
@@ -774,6 +816,22 @@ async def run_cli_chain(
             max_tokens=max_tokens,
         )
     )
+    governed_idempotency_key = _governed_idempotency_key(cursor_token)
+    if invocation_observer is not None:
+        if governed_idempotency_key is None:
+            raise CliDispatchMarkerError(
+                "Cursor governed request digest is unavailable before transport"
+            )
+        if (
+            idempotency_key is not None
+            and idempotency_key != governed_idempotency_key
+        ):
+            raise CliDispatchMarkerError(
+                "Cursor governed request digest conflicts with caller idempotency key"
+            )
+        cursor_idempotency_key = governed_idempotency_key
+    else:
+        cursor_idempotency_key = idempotency_key
     cursor_transport_started = False
     cursor_started = time.monotonic()
 
@@ -806,21 +864,28 @@ async def run_cli_chain(
     try:
         if inspect.iscoroutinefunction(cursor_runner):
             if _runner_accepts_dispatch_marker(cursor_runner):
-                raw = await cursor_runner(
-                    prompt,
-                    max_tokens=max_tokens,
-                    dispatch_started=mark_cursor_transport_started,
-                )
+                cursor_kwargs: dict[str, object] = {
+                    "max_tokens": max_tokens,
+                    "dispatch_started": mark_cursor_transport_started,
+                }
+                if _runner_accepts_idempotency_key(cursor_runner):
+                    cursor_kwargs["idempotency_key"] = cursor_idempotency_key
+                raw = await cursor_runner(prompt, **cursor_kwargs)
             else:
                 mark_cursor_transport_started()
                 raw = await cursor_runner(prompt, max_tokens=max_tokens)
         else:
             if _runner_accepts_dispatch_marker(cursor_runner):
+                cursor_kwargs = {
+                    "max_tokens": max_tokens,
+                    "dispatch_started": mark_cursor_transport_started,
+                }
+                if _runner_accepts_idempotency_key(cursor_runner):
+                    cursor_kwargs["idempotency_key"] = cursor_idempotency_key
                 raw = await asyncio.to_thread(
                     cursor_runner,
                     prompt,
-                    max_tokens=max_tokens,
-                    dispatch_started=mark_cursor_transport_started,
+                    **cursor_kwargs,
                 )
             else:
                 mark_cursor_transport_started()
@@ -885,12 +950,10 @@ async def run_cli_chain(
         raise
     except (TimeoutError, subprocess.TimeoutExpired, CursorSdkBoundedFailure) as exc:
         sdk_execution = _sdk_failure_execution(exc)
-        cursor_usage = (
-            no_provider_call_cli_usage()
-            if not cursor_transport_started
-            else dict(sdk_execution.usage)
-            if sdk_execution is not None
-            else unreported_cli_usage()
+        cursor_usage = _cursor_usage_for_failure(
+            exc,
+            transport_started=cursor_transport_started,
+            sdk_execution=sdk_execution,
         )
         outcome = (
             exc.outcome
@@ -979,21 +1042,28 @@ async def run_cli_chain(
         payload = None
     except CursorSdkError as exc:
         sdk_execution = _sdk_failure_execution(exc)
-        cursor_usage = (
-            no_provider_call_cli_usage()
-            if not cursor_transport_started
-            else dict(exc.usage)
+        cursor_usage = _cursor_usage_for_failure(
+            exc,
+            transport_started=cursor_transport_started,
+            sdk_execution=sdk_execution,
         )
         cursor_outcome = _sdk_failure_outcome(exc)
         binding = observe(
             cursor_token, outcome=cursor_outcome, usage=cursor_usage
         )
+        ambiguous_execution = sdk_execution
+        if ambiguous_execution is None and isinstance(exc, CursorSdkAmbiguousDispatch):
+            ambiguous_execution = CliExecution(
+                text="",
+                usage=cursor_usage,
+                sdk_request_id=exc.request_id,
+            )
         invocations.append(
             _invocation(
                 provider="cursor-agent-cli",
                 model=CURSOR_AGENT_MODEL_ID,
                 outcome=cursor_outcome,
-                execution=sdk_execution
+                execution=ambiguous_execution
                 or CliExecution(text="", usage=cursor_usage),
                 failure=type(exc).__name__,
                 requested_max_tokens=max_tokens,
