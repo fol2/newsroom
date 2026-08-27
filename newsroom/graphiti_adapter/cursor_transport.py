@@ -376,9 +376,9 @@ def run_cursor_transport(
             nonlocal dispatch_marker_written
             if dispatch_marker_written:
                 raise RuntimeError("Cursor SDK dispatch marker repeated")
-            dispatch_marker_written = True
             if dispatch_started is not None:
                 dispatch_started()
+            dispatch_marker_written = True
 
         try:
             run = runtime.start_run(
@@ -390,6 +390,10 @@ def run_cursor_transport(
         except CursorSdkError:
             raise
         except Exception as exc:
+            from newsroom.graphiti_adapter.cli_client import CliDispatchMarkerError
+
+            if isinstance(exc, CliDispatchMarkerError):
+                raise
             raise _map_sdk_exception(
                 exc,
                 dispatch_confirmed=dispatch_marker_written,
@@ -997,7 +1001,16 @@ class OfficialCursorSdkRuntime:
                 send_attempted=False,
             ) from exc
         if dispatch_started is not None:
-            dispatch_started()
+            try:
+                dispatch_started()
+            except BaseException:
+                closer = getattr(agent, "close", None)
+                if callable(closer):
+                    try:
+                        closer()
+                    except Exception:
+                        pass
+                raise
         try:
             run = agent.send(
                 request.prompt,

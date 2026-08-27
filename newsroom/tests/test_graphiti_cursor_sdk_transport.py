@@ -13,7 +13,12 @@ from types import SimpleNamespace
 import pytest
 
 from newsroom.control_plane.graphiti import GraphitiModelUsageObserver
-from newsroom.control_plane.model_usage import ModelUsageService, WorkEnvelope, WorkloadClass
+from newsroom.control_plane.model_usage import (
+    ModelUsageAdmissionError,
+    ModelUsageService,
+    WorkEnvelope,
+    WorkloadClass,
+)
 from newsroom.graphiti_adapter.cli_client import (
     CliDispatchMarkerError,
     CliResponseError,
@@ -36,7 +41,11 @@ from newsroom.graphiti_adapter.cursor_transport import (
     qualify_cursor_sdk,
     run_cursor_transport,
 )
-from newsroom.graphiti_adapter.usage_meter import cursor_sdk_usage, unreported_cli_usage
+from newsroom.graphiti_adapter.usage_meter import (
+    cursor_sdk_usage,
+    no_provider_call_cli_usage,
+    unreported_cli_usage,
+)
 
 _ADAPTER = Path(__file__).resolve().parents[1] / "graphiti_adapter"
 _GRAPHITI_JSON = '{"entities":[],"entity_resolutions":[],"edges":[]}'
@@ -144,9 +153,9 @@ class FakeRuntime:
         self.empty_non_git_cwds.append(
             cwd.is_dir() and not any(cwd.iterdir()) and not (cwd / ".git").exists()
         )
-        self.requests.append(request)
         if dispatch_started is not None:
             dispatch_started()
+        self.requests.append(request)
         if self.start_error is not None:
             raise self.start_error
         return self.run
@@ -761,6 +770,113 @@ def test_conflicting_caller_idempotency_key_fails_closed(
                 idempotency_key=_TEST_IDEMPOTENCY_KEY,
             )
         )
+
+
+def test_observed_dispatch_fence_refusal_is_proved_zero_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    service = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    envelope = WorkEnvelope.create(
+        cycle_id="cycle-sdk-fence-refusal",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=_OBSERVER_T0,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-sdk-fence-refusal",
+        graphiti_attempt_id="ingest-sdk-fence-refusal:1",
+    )
+    service.open_envelope(envelope)
+
+    stop_calls = 0
+
+    def refuse_dispatch() -> None:
+        nonlocal stop_calls
+        stop_calls += 1
+        if stop_calls > 1:
+            raise ModelUsageAdmissionError("owner stop during dispatch")
+
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=envelope,
+        clock=lambda: _OBSERVER_T0 + timedelta(seconds=10),
+        owner_stop_check=refuse_dispatch,
+    )
+    runtime = _bind(monkeypatch, FakeRuntime())
+    invocations: list[dict[str, object]] = []
+
+    with pytest.raises(ModelUsageAdmissionError, match="owner stop during dispatch"):
+        asyncio.run(
+            run_cli_chain(
+                prompt="prompt",
+                schema=None,
+                cursor_runner=run_cursor_agent_llm,
+                grok_runner=lambda *_args, **_values: pytest.fail("fallback ran"),
+                invocations=invocations,
+                invocation_observer=observer,
+                fallback_permitted=True,
+            )
+        )
+
+    assert len(invocations) == 1
+    assert invocations[0]["outcome"] == "DISPATCH_FENCE_REFUSED"
+    assert invocations[0]["usage"] == no_provider_call_cli_usage()
+    assert runtime.requests == []
+    leaves = service.query(
+        start=_OBSERVER_T0, end=_OBSERVER_T0 + timedelta(minutes=1)
+    )["leaves"]
+    assert len(leaves) == 1
+    leaf = leaves[0]
+    assert leaf["invocation_outcome"] == "DISPATCH_FENCE_REFUSED"
+    assert leaf["transport_dispatch_observed"] is False
+    assert leaf["pre_dispatch_zero_proved"] is True
+    assert leaf["dispatch_at"] is None
+    assert invocations[0]["usage"]["usage_basis"] == "NO_PROVIDER_CALL"
+
+    close_count = 0
+    send_called = False
+
+    class StubAgent:
+        def close(self) -> None:
+            nonlocal close_count
+            close_count += 1
+
+        def send(self, *_args: object, **_kwargs: object) -> object:
+            nonlocal send_called
+            send_called = True
+            raise AssertionError("agent.send must not run after dispatch fence refusal")
+
+    class StubAgents:
+        def create(self, _options: object) -> StubAgent:
+            return StubAgent()
+
+    official = OfficialCursorSdkRuntime()
+    (tmp_path / "cwd").mkdir()
+    (tmp_path / "store").mkdir()
+    monkeypatch.setattr(official, "_client", SimpleNamespace(agents=StubAgents()))
+    try:
+        with pytest.raises(CliDispatchMarkerError, match="durable dispatch observation"):
+            official.start_run(
+                CursorSdkRunRequest(
+                    prompt="extract",
+                    api_key="crsr_test_key",
+                    cwd=str(tmp_path / "cwd"),
+                    store=str(tmp_path / "store"),
+                    timeout=5,
+                    max_output_bytes=65536,
+                    idempotency_key=_TEST_IDEMPOTENCY_KEY,
+                ),
+                dispatch_started=lambda: (_ for _ in ()).throw(
+                    CliDispatchMarkerError("durable dispatch observation failed")
+                ),
+            )
+    finally:
+        official.close()
+
+    assert close_count == 1
+    assert send_called is False
 
 
 def test_official_runtime_uses_supported_sdk_api() -> None:
