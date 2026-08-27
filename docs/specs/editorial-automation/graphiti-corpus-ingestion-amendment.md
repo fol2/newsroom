@@ -7,6 +7,7 @@
 **Canonical language:** English
 **Issue:** [#722](https://github.com/fol2/newsroom/issues/722)
 **Transport amendment:** [#807](https://github.com/fol2/newsroom/issues/807) replaces the production Graphiti `cursor-agent` CLI path with the current official `cursor-sdk`.
+**Compatibility-floor amendment:** [`../../decisions/2026-08-27-cursor-sdk-composer-compatibility-floor.md`](../../decisions/2026-08-27-cursor-sdk-composer-compatibility-floor.md) and [#816](https://github.com/fol2/newsroom/issues/816) supersede exact SDK/model pins for active and future execution.
 **Single source of truth:** [`../../decisions/2026-08-20-graphiti.md`](../../decisions/2026-08-20-graphiti.md)
 **Amends:** [`governed-graphrag-and-knowledge-projection.md`](governed-graphrag-and-knowledge-projection.md)
 **Does not rewrite:** `GRAG-*`, the core sentence of `CONT-001`, or [#707](https://github.com/fol2/newsroom/issues/707)
@@ -18,9 +19,13 @@
 
 Lock Graphiti as a corpus-owned temporal proposal engine with exact ingest identity, versioned source time, durable entity and relation receipts, and a governed drafting-context boundary.
 
-## Model pin
+## Compatibility floor
 
-**GING-010 — Graphiti chat models.** Graphiti chat MUST use the current official `cursor-sdk` with a purpose-provisioned `CURSOR_API_KEY` and exact `composer-2.5` first, then Grok Build CLI `grok-4.6` with reasoning effort `medium`. The production Cursor path MUST NOT use `cursor-agent` CLI, browser login, IDE login state, Keychain credentials or an ambient Cursor home. It MUST pass no tools, MCP servers, custom tools, subagents or project/user/team/MDM/plugin setting sources, MUST use a fresh isolated run with typed stream/run/usage receipts, and MUST NOT automatically retry or fall back after a Cursor provider or network failure. It MUST NOT use OpenRouter `openai/gpt-5-mini` for chat. Embeddings MAY remain OpenRouter `openai/text-embedding-3-large` and remain inside OD-011. Cursor SDK chat and Grok fallback chat are subscription usage: they MUST be ledgered and MUST NOT be debited from OD-011. [#746](https://github.com/fol2/newsroom/issues/746) remains a rejection of that issue's compact prompt/output experiment and old SDK surface; it is not a rejection of API-key SDK transport.
+**GING-010 — Graphiti chat models.** Graphiti chat MUST use an official stable `cursor-sdk` release at or above `1.0.29`, authenticated only by a purpose-provisioned `CURSOR_API_KEY`. The controller MUST query the catalogue once, accept only canonical numeric Composer IDs matching `composer-<major>.<minor>[.<patch>]` at or above semantic version `2.5`, and deterministically select the highest compatible candidate. It MUST reject Auto, Fast, aliases, prerelease/non-numeric identities and non-Composer models. It MUST retain the actual installed SDK version, the selected catalogue model and the actual resolved run model. A dependency lock MAY retain one exact resolved SDK artifact for reproducibility, but that lock MUST NOT become an upper compatibility ceiling.
+
+The production Cursor path MUST NOT use `cursor-agent` CLI, browser login, IDE login state, Keychain credentials or an ambient Cursor home. It MUST pass no tools, MCP servers, custom tools, subagents or project/user/team/MDM/plugin setting sources, MUST use a fresh isolated run with typed stream/run/usage receipts, and MUST NOT automatically retry or fall back after a Cursor provider or network failure. A newer SDK/model MUST still pass the same provider-free supported-surface, isolation and receipt qualification; incompatible drift fails closed before dispatch.
+
+After a typed Cursor-eligible failure, the separately governed fallback remains Grok Build CLI `grok-4.6` with reasoning effort `medium` only where an active authority explicitly permits it. #790's bounded canary keeps fallback disabled. Graphiti chat MUST NOT use OpenRouter `openai/gpt-5-mini`. Embeddings MAY remain OpenRouter `openai/text-embedding-3-large` and remain inside OD-011. Cursor SDK chat and Grok fallback chat are subscription usage: they MUST be ledgered and MUST NOT be debited from OD-011. [#746](https://github.com/fol2/newsroom/issues/746) remains a rejection of that issue's compact prompt/output experiment and old SDK surface; it is not a rejection of API-key SDK transport.
 
 ## Requirements
 

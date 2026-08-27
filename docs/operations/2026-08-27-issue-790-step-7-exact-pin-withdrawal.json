@@ -1,0 +1,17 @@
+{
+  "schema_version": "newsroom.issue-790.owner-authority-withdrawal.v1",
+  "issue": 790,
+  "withdrawn_sequence_ordinal": 7,
+  "withdrawn_plan_path": "docs/operations/2026-08-27-issue-790-success-sequence-step-7-draft.json",
+  "withdrawn_plan_digest": "sha256:3d4f4a13253055fe136bb1724c4de91261b01bdc8d304fd510df72ad1e418ae4",
+  "withdrawn_owner_approval_comment": "https://github.com/fol2/newsroom/issues/790#issuecomment-5439674691",
+  "withdrawal_owner_amendment_comment": "https://github.com/fol2/newsroom/issues/790#issuecomment-5439864947",
+  "status": "WITHDRAWN_BEFORE_CONSUMPTION",
+  "reason": "OWNER_REPLACED_EXACT_PINS_WITH_COMPATIBILITY_FLOORS",
+  "superseded_by_issue": 816,
+  "successor_sequence_ordinal": 8,
+  "execution_authorised": false,
+  "provider_effects_authorised": false,
+  "notes": "Retain the exact-pin packet and approval as historical evidence. Mint no successor authority until #816 merges, exact-main provider-free qualification passes, final review has zero unresolved findings and a new owner-authenticated approval is recorded.",
+  "canonical_digest": "sha256:e9a4f4df6820b24b7531a9f059c5ccf3ccd71e612c572f92c17fa799f2b4a776"
+}

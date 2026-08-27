@@ -1,7 +1,7 @@
 {
   "schema_version": "newsroom.graphiti-call-shape-policy.v1",
   "policy_id": "graphiti-core-0.29.3-newsroom-adapter-v1",
-  "version": "issue-807-v1",
+  "version": "issue-816-v2",
   "graphiti_core_release": "graphiti-core-0.29.3",
   "framework_identity": "graphiti-core-0.29.3",
   "prompt_identity": "newsroom.graphiti.proposal-only-prompt:v1",
@@ -13,15 +13,16 @@
       "leaf_class": "PRIMARY",
       "provider": "cursor-agent-cli",
       "route": "GRAPHITI_CHAT_PRIMARY",
-      "model": "composer-2.5",
+      "model": "composer>=2.5",
       "reasoning": "provider-default",
-      "config_identity": "cursor-sdk-api-key-composer-2.5-v1",
-      "command_semantic_version": "newsroom.graphiti-provider-dispatch.v11",
+      "config_identity": "cursor-sdk-api-key-composer-floor-v2",
+      "command_semantic_version": "newsroom.graphiti-provider-dispatch.v12",
       "command_flags": [
         "TRANSPORT=CURSOR_SDK",
-        "sdk=cursor-sdk==1.0.29",
+        "sdk=cursor-sdk>=1.0.29",
         "auth=CURSOR_API_KEY",
-        "model=composer-2.5",
+        "composer_floor>=2.5",
+        "selected_model=RUNTIME_SELECTED",
         "tools=EMPTY",
         "disallowed_tools=shell,mcp,task",
         "mcp_servers=EMPTY",
@@ -52,7 +53,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:c9c51351005ba7ced314aa37b5b3c15eacb9ed44373ce82328994e4a04548be7",
+      "implementation_revision": "sha256:e8e8d5bb8a561bb8171536b21f34011cf2e10ea2ca752b8b708e035ca2521244",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -103,7 +104,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:c9c51351005ba7ced314aa37b5b3c15eacb9ed44373ce82328994e4a04548be7",
+      "implementation_revision": "sha256:e8e8d5bb8a561bb8171536b21f34011cf2e10ea2ca752b8b708e035ca2521244",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -379,6 +380,6 @@
   "maximum_qualified_fixture_count": 4,
   "headroom": 2,
   "max_distinct_internal_requests": 6,
-  "evidence_digest": "sha256:12f3dc032f7a7ba862ca8116e66b5e0cfd8a81d97c8db4a5f057c45b99f9d8a2",
-  "canonical_digest": "sha256:0bd80a092a4b92c6d443674d3961c32e45b6634201891e7f04a70904123ad0d1"
+  "evidence_digest": "sha256:1f09d006b576bddbf60f6e86d0397630e43d935f5c38e06392868861775cd91d",
+  "canonical_digest": "sha256:f0b2de282936824b5b1ff5d2d9e37126356e38d62ab7269d4cbfb18e9133d535"
 }

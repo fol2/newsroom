@@ -15,10 +15,12 @@ from datetime import UTC, datetime, timedelta
 
 from newsroom.authority.canonical import validate_sha256_digest
 from newsroom.authority.types import UtcTimestamp
+from newsroom.graphiti_adapter.cursor_transport import composer_model_meets_floor
 
 CLI_TIMEOUT_DIAGNOSTIC_SCHEMA_VERSION = "newsroom.graphiti-timeout-diagnostic.v1"
 CLI_PROCESS_EXIT_DIAGNOSTIC_SCHEMA_VERSION = "newsroom.cursor-process-exit.v1"
 SDK_QUALIFICATION_SCHEMA_VERSION = "newsroom.cursor-sdk-qualification.v1"
+SDK_QUALIFICATION_SCHEMA_VERSION_V2 = "newsroom.cursor-sdk-qualification.v2"
 SDK_TERMINAL_SCHEMA_VERSION = "newsroom.cursor-sdk-terminal.v1"
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 0.5
 _TIMEOUT_DIAGNOSTIC_REQUIRED_FIELDS = frozenset(
@@ -163,6 +165,22 @@ _SDK_QUALIFICATION_FIELDS = frozenset(
         "transport",
         "sdk_version",
         "lock_identity",
+        "model",
+        "unary_timeout_seconds",
+        "stream_timeout_seconds",
+        "max_retries",
+        "transport_policy_digest",
+    }
+)
+_SDK_QUALIFICATION_FIELDS_V2 = frozenset(
+    {
+        "schema_version",
+        "transport",
+        "sdk_floor",
+        "sdk_version",
+        "lock_identity",
+        "composer_floor",
+        "selected_model",
         "model",
         "unary_timeout_seconds",
         "stream_timeout_seconds",
@@ -621,15 +639,44 @@ def validated_transport_qualification(value: object) -> dict[str, object]:
             )[0]
         }
     if retained.get("transport") == "CURSOR_SDK":
-        if frozenset(retained) != _SDK_QUALIFICATION_FIELDS:
-            raise ValueError("Graphiti transport qualification fields are invalid")
-        if (
-            retained["schema_version"] != SDK_QUALIFICATION_SCHEMA_VERSION
-            or retained["sdk_version"] != "1.0.29"
-            or retained["lock_identity"] != "cursor-sdk==1.0.29"
-            or retained["model"] != "composer-2.5"
-            or retained["max_retries"] != 0
-        ):
+        schema_version = retained.get("schema_version")
+        if schema_version == SDK_QUALIFICATION_SCHEMA_VERSION:
+            if frozenset(retained) != _SDK_QUALIFICATION_FIELDS:
+                raise ValueError("Graphiti transport qualification fields are invalid")
+            if (
+                retained["sdk_version"] != "1.0.29"
+                or retained["lock_identity"] != "cursor-sdk==1.0.29"
+                or retained["model"] != "composer-2.5"
+                or retained["max_retries"] != 0
+            ):
+                raise ValueError("Graphiti transport qualification identity is invalid")
+        elif schema_version == SDK_QUALIFICATION_SCHEMA_VERSION_V2:
+            if frozenset(retained) != _SDK_QUALIFICATION_FIELDS_V2:
+                raise ValueError("Graphiti transport qualification fields are invalid")
+            if (
+                retained["sdk_floor"] != "1.0.29"
+                or retained["composer_floor"] != "2.5"
+                or retained["lock_identity"] != "cursor-sdk>=1.0.29"
+                or retained["selected_model"] != retained["model"]
+                or retained["max_retries"] != 0
+            ):
+                raise ValueError("Graphiti transport qualification identity is invalid")
+            if not composer_model_meets_floor(str(retained["selected_model"])):
+                raise ValueError("Graphiti transport qualification identity is invalid")
+            sdk_version = str(retained["sdk_version"])
+            parts = sdk_version.split(".")
+            if len(parts) not in {2, 3}:
+                raise ValueError("Graphiti transport qualification identity is invalid")
+            try:
+                version_tuple = tuple(int(part) for part in parts)
+            except ValueError as exc:
+                raise ValueError(
+                    "Graphiti transport qualification identity is invalid"
+                ) from exc
+            padded = version_tuple + (0,) * (3 - len(version_tuple))
+            if padded < (1, 0, 29):
+                raise ValueError("Graphiti transport qualification identity is invalid")
+        else:
             raise ValueError("Graphiti transport qualification identity is invalid")
         for field in (
             "unary_timeout_seconds",

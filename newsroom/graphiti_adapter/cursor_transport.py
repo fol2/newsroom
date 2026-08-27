@@ -6,6 +6,7 @@ import atexit
 import importlib
 import importlib.metadata
 import os
+import re
 import tempfile
 import threading
 import time
@@ -21,11 +22,19 @@ from newsroom.graphiti_adapter.usage_meter import (
     unreported_cli_usage,
 )
 
-PINNED_SDK_VERSION = "1.0.29"
-PINNED_SDK_LOCK_IDENTITY = "cursor-sdk==1.0.29"
+MIN_SDK_VERSION = "1.0.29"
+MIN_SDK_REQUIREMENT = "cursor-sdk>=1.0.29"
+MIN_COMPOSER_FLOOR = "2.5"
+MIN_SDK_VERSION_TUPLE = (1, 0, 29)
+MIN_COMPOSER_VERSION_TUPLE = (2, 5, 0)
+_COMPOSER_ID_PATTERN = re.compile(r"^composer-(\d+)\.(\d+)(?:\.(\d+))?$")
+# Backward-compatible floor-default aliases; must not enforce exact admission.
+PINNED_SDK_VERSION = MIN_SDK_VERSION
+PINNED_SDK_LOCK_IDENTITY = MIN_SDK_REQUIREMENT
 PINNED_MODEL = CURSOR_AGENT_MODEL_ID
 CURSOR_SDK_TRANSPORT = "CURSOR_SDK"
-CURSOR_SDK_QUALIFICATION_SCHEMA_VERSION = "newsroom.cursor-sdk-qualification.v1"
+CURSOR_SDK_QUALIFICATION_SCHEMA_VERSION = "newsroom.cursor-sdk-qualification.v2"
+CURSOR_SDK_QUALIFICATION_SCHEMA_VERSION_V1 = "newsroom.cursor-sdk-qualification.v1"
 CURSOR_SDK_TERMINAL_SCHEMA_VERSION = "newsroom.cursor-sdk-terminal.v1"
 CURSOR_SDK_AUTH_SOURCE = "CURSOR_API_KEY"
 CURSOR_SDK_DISALLOWED_TOOLS = ("shell", "mcp", "task")
@@ -154,7 +163,10 @@ class CursorSdkCleanupError(CursorSdkError):
 @dataclass(frozen=True, slots=True)
 class CursorSdkQualification:
     sdk_version: str
+    sdk_floor: str
     lock_identity: str
+    composer_floor: str
+    selected_model: str
     model: str
     unary_timeout_seconds: int
     stream_timeout_seconds: int
@@ -165,9 +177,12 @@ class CursorSdkQualification:
         return {
             "schema_version": CURSOR_SDK_QUALIFICATION_SCHEMA_VERSION,
             "transport": CURSOR_SDK_TRANSPORT,
+            "sdk_floor": self.sdk_floor,
             "sdk_version": self.sdk_version,
             "lock_identity": self.lock_identity,
-            "model": self.model,
+            "composer_floor": self.composer_floor,
+            "selected_model": self.selected_model,
+            "model": self.selected_model,
             "unary_timeout_seconds": self.unary_timeout_seconds,
             "stream_timeout_seconds": self.stream_timeout_seconds,
             "max_retries": self.max_retries,
@@ -219,6 +234,7 @@ class CursorSdkRunRequest:
     store: str
     timeout: int
     max_output_bytes: int
+    model: str
     idempotency_key: str | None = None
 
 
@@ -258,11 +274,12 @@ def cursor_output_limit(max_tokens: int) -> int:
     return CURSOR_OUTPUT_BASE_BYTES + CURSOR_OUTPUT_BYTES_PER_TOKEN * max_tokens
 
 
-def cursor_transport_policy() -> dict[str, object]:
+def cursor_transport_policy(*, selected_model: str | None = None) -> dict[str, object]:
     return {
-        "sdk": PINNED_SDK_LOCK_IDENTITY,
+        "sdk": MIN_SDK_REQUIREMENT,
         "auth": CURSOR_SDK_AUTH_SOURCE,
-        "model": PINNED_MODEL,
+        "composer_floor": MIN_COMPOSER_FLOOR,
+        "model": selected_model or PINNED_MODEL,
         "tools": [],
         "disallowed_tools": list(CURSOR_SDK_DISALLOWED_TOOLS),
         "mcp_servers": {},
@@ -279,8 +296,98 @@ def cursor_transport_policy() -> dict[str, object]:
     }
 
 
-def cursor_transport_policy_digest() -> str:
-    return digest_canonical(cursor_transport_policy())
+def cursor_transport_policy_digest(*, selected_model: str | None = None) -> str:
+    return digest_canonical(cursor_transport_policy(selected_model=selected_model))
+
+
+def _parse_stable_version(version: str) -> tuple[int, int, int]:
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError("malformed SDK version")
+    lowered = version.strip().lower()
+    if any(token in lowered for token in ("a", "b", "rc", "alpha", "beta", "dev")):
+        raise ValueError("prerelease SDK version")
+    if "-" in version or "+" in version:
+        raise ValueError("prerelease SDK version")
+    parts = version.strip().split(".")
+    if len(parts) not in {2, 3}:
+        raise ValueError("malformed SDK version")
+    try:
+        major, minor = int(parts[0]), int(parts[1])
+        patch = int(parts[2]) if len(parts) == 3 else 0
+    except ValueError as exc:
+        raise ValueError("malformed SDK version") from exc
+    if major < 0 or minor < 0 or patch < 0:
+        raise ValueError("malformed SDK version")
+    return (major, minor, patch)
+
+
+def composer_model_meets_floor(model_id: str) -> bool:
+    version = _parse_composer_version(model_id)
+    return version is not None and version >= MIN_COMPOSER_VERSION_TUPLE
+
+
+def sdk_version_meets_floor(version: str) -> bool:
+    return _sdk_version_meets_floor(version)
+
+
+def _sdk_version_meets_floor(version: str) -> bool:
+    try:
+        return _parse_stable_version(version) >= MIN_SDK_VERSION_TUPLE
+    except ValueError:
+        return False
+
+
+def _parse_composer_version(model_id: str) -> tuple[int, int, int] | None:
+    if not isinstance(model_id, str):
+        return None
+    match = _COMPOSER_ID_PATTERN.match(model_id.strip())
+    if match is None:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
+
+
+def select_composer_model(model_ids: Sequence[str]) -> str:
+    candidates: list[tuple[tuple[int, int, int], str]] = []
+    for model_id in model_ids:
+        version = _parse_composer_version(model_id)
+        if version is None or version < MIN_COMPOSER_VERSION_TUPLE:
+            continue
+        candidates.append((version, model_id))
+    if not candidates:
+        raise CliPredispatchRefusal(
+            "no compatible canonical composer model at or above composer-2.5"
+        )
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _validate_resolved_model(*, selected_model: str, resolved_model: str) -> None:
+    if resolved_model == "UNREPORTED":
+        raise CursorSdkError(
+            "Cursor SDK Graphiti run did not report a resolved composer model",
+            error_class="MODEL_DRIFT",
+            error_code="RESOLVED_MODEL_UNREPORTED",
+        )
+    selected_version = _parse_composer_version(selected_model)
+    resolved_version = _parse_composer_version(resolved_model)
+    if selected_version is None or resolved_version is None:
+        raise CursorSdkError(
+            "Cursor SDK Graphiti run resolved a non-canonical composer model",
+            error_class="MODEL_DRIFT",
+            error_code="NON_CANONICAL_RESOLVED_MODEL",
+        )
+    if resolved_version < MIN_COMPOSER_VERSION_TUPLE:
+        raise CursorSdkError(
+            "Cursor SDK Graphiti run resolved a composer model below the floor",
+            error_class="MODEL_DRIFT",
+            error_code="RESOLVED_MODEL_BELOW_FLOOR",
+        )
+    if resolved_version != selected_version:
+        raise CursorSdkError(
+            "Cursor SDK Graphiti run resolved a different composer model than selected",
+            error_class="MODEL_DRIFT",
+            error_code="RESOLVED_MODEL_DRIFT",
+        )
 
 
 def bind_cursor_sdk_runtime(runtime: CursorSdkRuntime | None) -> CursorSdkRuntime | None:
@@ -307,26 +414,27 @@ def qualify_cursor_sdk(
     runtime: CursorSdkRuntime,
     api_key: str | None,
 ) -> CursorSdkQualification:
-    if runtime.sdk_version != PINNED_SDK_VERSION:
+    if not _sdk_version_meets_floor(runtime.sdk_version):
         raise CliPredispatchRefusal(
-            "Cursor SDK version differs from the pinned lock",
+            "Cursor SDK version is below the compatibility floor",
             qualification_evidence={"sdk_version": runtime.sdk_version},
         )
     if not api_key or not api_key.strip():
         raise CliPredispatchRefusal("purpose-provisioned CURSOR_API_KEY is required")
-    models = runtime.list_model_ids(api_key=api_key)
-    if PINNED_MODEL not in models:
-        raise CliPredispatchRefusal(
-            "exact composer-2.5 is absent from the model catalogue"
-        )
+    selected_model = select_composer_model(runtime.list_model_ids(api_key=api_key))
     return CursorSdkQualification(
         sdk_version=runtime.sdk_version,
-        lock_identity=PINNED_SDK_LOCK_IDENTITY,
-        model=PINNED_MODEL,
+        sdk_floor=MIN_SDK_VERSION,
+        lock_identity=MIN_SDK_REQUIREMENT,
+        composer_floor=MIN_COMPOSER_FLOOR,
+        selected_model=selected_model,
+        model=selected_model,
         unary_timeout_seconds=int(_PROCESS_CLIENT_UNARY_TIMEOUT_SECONDS),
         stream_timeout_seconds=int(_PROCESS_CLIENT_STREAM_TIMEOUT_SECONDS),
         max_retries=_PROCESS_CLIENT_MAX_RETRIES,
-        transport_policy_digest=cursor_transport_policy_digest(),
+        transport_policy_digest=cursor_transport_policy_digest(
+            selected_model=selected_model
+        ),
     )
 
 
@@ -368,6 +476,7 @@ def run_cursor_transport(
             store=str(store),
             timeout=timeout,
             max_output_bytes=cursor_output_limit(max_tokens),
+            model=qualification.selected_model,
             idempotency_key=idempotency_key,
         )
         dispatch_marker_written = False
@@ -562,6 +671,10 @@ def _consume_run(
         error_code=cancel_class or _terminal_error_code(terminal),
         status=_terminal_status(terminal) or run.status or "error",
     )
+    _validate_resolved_model(
+        selected_model=qualification.selected_model,
+        resolved_model=execution.resolved_model,
+    )
     if cancel_class == "TOOL_CALL" or tool_call_count:
         raise CursorToolCallViolation(execution)
     if cancel_class == "OUTPUT_BOUND":
@@ -699,7 +812,7 @@ def _cleanup_execution(
         agent_id=agent_id,
         run_id=run_id,
         request_id="UNOBSERVED",
-        resolved_model=PINNED_MODEL,
+        resolved_model=qualification.selected_model,
         status="error",
         error_class="CLEANUP",
         error_code="CLEANUP",
@@ -760,7 +873,9 @@ def _optional_int(value: object) -> int | None:
 def _resolved_model(value: object) -> str:
     model = _field(value, "model")
     identity = _field(model, "id") if model is not None else model
-    return identity if isinstance(identity, str) and identity else PINNED_MODEL
+    if isinstance(identity, str) and identity.strip():
+        return identity
+    return "UNREPORTED"
 
 
 def _terminal_text(terminal: object) -> str:
@@ -847,7 +962,7 @@ def _map_sdk_exception(
         error_class = "MODEL_UNAVAILABLE"
         if not send_attempted:
             return CliPredispatchRefusal(
-                "exact composer-2.5 is absent from the model catalogue"
+                "no compatible canonical composer model at or above composer-2.5"
             )
     elif "timeout" in text or "deadline" in text or name in {"APITimeoutError"}:
         error_class = "TIMEOUT"
@@ -874,13 +989,18 @@ def _map_sdk_exception(
                 text="",
                 usage=unreported_cli_usage(),
                 qualification=CursorSdkQualification(
-                    sdk_version=PINNED_SDK_VERSION,
-                    lock_identity=PINNED_SDK_LOCK_IDENTITY,
+                    sdk_version=MIN_SDK_VERSION,
+                    sdk_floor=MIN_SDK_VERSION,
+                    lock_identity=MIN_SDK_REQUIREMENT,
+                    composer_floor=MIN_COMPOSER_FLOOR,
+                    selected_model=PINNED_MODEL,
                     model=PINNED_MODEL,
                     unary_timeout_seconds=int(_PROCESS_CLIENT_UNARY_TIMEOUT_SECONDS),
                     stream_timeout_seconds=int(_PROCESS_CLIENT_STREAM_TIMEOUT_SECONDS),
                     max_retries=_PROCESS_CLIENT_MAX_RETRIES,
-                    transport_policy_digest=cursor_transport_policy_digest(),
+                    transport_policy_digest=cursor_transport_policy_digest(
+                        selected_model=PINNED_MODEL
+                    ),
                 ),
                 agent_id="UNOBSERVED",
                 run_id="UNOBSERVED",
@@ -919,9 +1039,9 @@ class OfficialCursorSdkRuntime:
         except ImportError as exc:
             raise CliPredispatchRefusal("cursor-sdk is not installed") from exc
         version = importlib.metadata.version("cursor-sdk")
-        if version != PINNED_SDK_VERSION:
+        if not _sdk_version_meets_floor(version):
             raise CliPredispatchRefusal(
-                "Cursor SDK version differs from the pinned lock",
+                "Cursor SDK version is below the compatibility floor",
                 qualification_evidence={"sdk_version": version},
             )
         self.sdk_version = version
@@ -985,7 +1105,7 @@ class OfficialCursorSdkRuntime:
         try:
             agent = self._client.agents.create(
                 self._sdk.AgentOptions(
-                    model=PINNED_MODEL,
+                    model=request.model,
                     api_key=request.api_key,
                     tools=[],
                     disallowed_tools=list(CURSOR_SDK_DISALLOWED_TOOLS),
@@ -1087,8 +1207,12 @@ __all__ = [
     "CURSOR_SDK_AUTH_SOURCE",
     "CURSOR_SDK_DISALLOWED_TOOLS",
     "CURSOR_SDK_QUALIFICATION_SCHEMA_VERSION",
+    "CURSOR_SDK_QUALIFICATION_SCHEMA_VERSION_V1",
     "CURSOR_SDK_TERMINAL_SCHEMA_VERSION",
     "CURSOR_SDK_TRANSPORT",
+    "MIN_COMPOSER_FLOOR",
+    "MIN_SDK_REQUIREMENT",
+    "MIN_SDK_VERSION",
     "PINNED_MODEL",
     "PINNED_SDK_LOCK_IDENTITY",
     "PINNED_SDK_VERSION",
@@ -1111,4 +1235,7 @@ __all__ = [
     "qualify_cursor_sdk",
     "run_cursor_transport",
     "run_cursor_transport_async",
+    "select_composer_model",
+    "composer_model_meets_floor",
+    "sdk_version_meets_floor",
 ]

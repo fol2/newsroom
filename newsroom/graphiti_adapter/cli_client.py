@@ -37,7 +37,10 @@ from newsroom.graphiti_adapter.cursor_transport import (
     CursorSdkError,
     CursorSdkExecution,
     CursorToolCallViolation,
+    CURSOR_SDK_AUTH_SOURCE,
     cursor_stdout_limit,
+    process_cursor_sdk_runtime,
+    qualify_cursor_sdk,
     run_cursor_transport,
     run_cursor_transport_async,
 )
@@ -375,6 +378,32 @@ async def _prove_cli_controls_async(
         raise CliPredispatchRefusal(
             "Graphiti CLI cannot prove tool isolation and max_tokens enforcement"
         )
+
+
+def _cursor_invocation_model(
+    execution: CliExecution | None = None,
+    *,
+    selected_model: str | None = None,
+) -> str:
+    if execution is not None and execution.transport_qualification is not None:
+        retained = execution.transport_qualification.get("selected_model")
+        if isinstance(retained, str) and retained:
+            return retained
+        model = execution.transport_qualification.get("model")
+        if isinstance(model, str) and model:
+            return model
+    if selected_model:
+        return selected_model
+    return CURSOR_AGENT_MODEL_ID
+
+
+def _cursor_selected_model_for_chain() -> str:
+    api_key = os.environ.get(CURSOR_SDK_AUTH_SOURCE)
+    qualification = qualify_cursor_sdk(
+        runtime=process_cursor_sdk_runtime(),
+        api_key=api_key,
+    )
+    return qualification.selected_model
 
 
 def _sdk_execution(value: CursorSdkExecution) -> CliExecution:
@@ -803,13 +832,19 @@ async def run_cli_chain(
     if not isinstance(fallback_permitted, bool):
         raise TypeError("Graphiti fallback permission must be boolean")
     prompt = _bind_requested_max_tokens(prompt, max_tokens)
+    cursor_selected_model = CURSOR_AGENT_MODEL_ID
+    if invocation_observer is not None:
+        try:
+            cursor_selected_model = _cursor_selected_model_for_chain()
+        except CliPredispatchRefusal:
+            cursor_selected_model = CURSOR_AGENT_MODEL_ID
     cursor_token = (
         None
         if invocation_observer is None
         else _before_observed_cli_invocation(
             invocation_observer,
             provider="cursor-agent-cli",
-            model=CURSOR_AGENT_MODEL_ID,
+            model=cursor_selected_model,
             prompt=prompt,
             schema=schema,
             semantic_request_class=semantic_request_class,
@@ -902,7 +937,7 @@ async def run_cli_chain(
         invocations.append(
             _invocation(
                 provider="cursor-agent-cli",
-                model=CURSOR_AGENT_MODEL_ID,
+                model=_cursor_invocation_model(selected_model=cursor_selected_model),
                 outcome="DISPATCH_FENCE_REFUSED",
                 execution=CliExecution(text="", usage=cursor_usage),
                 failure=type(exc.__cause__ or exc).__name__,
@@ -923,7 +958,7 @@ async def run_cli_chain(
         invocations.append(
             _invocation(
                 provider="cursor-agent-cli",
-                model=CURSOR_AGENT_MODEL_ID,
+                model=_cursor_invocation_model(selected_model=cursor_selected_model),
                 outcome="CANCELLED",
                 execution=CliExecution(text="", usage=cursor_usage),
                 failure=type(exc).__name__,
@@ -964,7 +999,9 @@ async def run_cli_chain(
         invocations.append(
             _invocation(
                 provider="cursor-agent-cli",
-                model=CURSOR_AGENT_MODEL_ID,
+                model=_cursor_invocation_model(
+                    sdk_execution, selected_model=cursor_selected_model
+                ),
                 outcome=outcome,
                 execution=sdk_execution
                 or CliExecution(text="", usage=cursor_usage),
@@ -999,7 +1036,7 @@ async def run_cli_chain(
         invocations.append(
             _invocation(
                 provider="cursor-agent-cli",
-                model=CURSOR_AGENT_MODEL_ID,
+                model=_cursor_invocation_model(selected_model=cursor_selected_model),
                 outcome="OUTPUT_LIMIT_EXCEEDED",
                 execution=CliExecution(text="", usage=cursor_usage),
                 failure=type(exc).__name__,
@@ -1026,7 +1063,7 @@ async def run_cli_chain(
         )
         invocation = _invocation(
             provider="cursor-agent-cli",
-            model=CURSOR_AGENT_MODEL_ID,
+            model=_cursor_invocation_model(selected_model=cursor_selected_model),
             outcome=refusal_outcome,
             execution=CliExecution(text="", usage=cursor_usage),
             failure=type(exc).__name__,
@@ -1061,7 +1098,9 @@ async def run_cli_chain(
         invocations.append(
             _invocation(
                 provider="cursor-agent-cli",
-                model=CURSOR_AGENT_MODEL_ID,
+                model=_cursor_invocation_model(
+                    ambiguous_execution, selected_model=cursor_selected_model
+                ),
                 outcome=cursor_outcome,
                 execution=ambiguous_execution
                 or CliExecution(text="", usage=cursor_usage),
@@ -1085,7 +1124,7 @@ async def run_cli_chain(
         invocations.append(
             _invocation(
                 provider="cursor-agent-cli",
-                model=CURSOR_AGENT_MODEL_ID,
+                model=_cursor_invocation_model(selected_model=cursor_selected_model),
                 outcome="FAILED",
                 execution=CliExecution(text="", usage=cursor_usage),
                 failure=type(exc).__name__,
@@ -1116,7 +1155,9 @@ async def run_cli_chain(
         invocations.append(
             _invocation(
                 provider="cursor-agent-cli",
-                model=CURSOR_AGENT_MODEL_ID,
+                model=_cursor_invocation_model(
+                    cursor_execution, selected_model=cursor_selected_model
+                ),
                 outcome=cursor_outcome,
                 execution=cursor_execution,
                 requested_max_tokens=max_tokens,
@@ -1374,7 +1415,7 @@ def build_cli_llm_client(
         def __init__(self) -> None:
             super().__init__(
                 LLMConfig(
-                    model=CURSOR_AGENT_MODEL_ID, small_model=CURSOR_AGENT_MODEL_ID
+                    model=_cursor_invocation_model(selected_model=cursor_selected_model), small_model=CURSOR_AGENT_MODEL_ID
                 ),
                 cache=False,
             )

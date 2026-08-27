@@ -27,11 +27,15 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_EXTRACTION_INSTRUCTIONS,
 )
 from newsroom.graphiti_adapter.identity import MAX_EPISODE_BYTES
+from newsroom.graphiti_adapter.cursor_transport import (
+    PINNED_MODEL,
+    PINNED_SDK_VERSION,
+    select_composer_model,
+    sdk_version_meets_floor,
+)
 from newsroom.graphiti_adapter.usage_meter import unreported_cli_usage
 
-PINNED_SDK_VERSION = "1.0.29"
 PINNED_BRIDGE_PROTOCOL = "sdk.v1"
-PINNED_MODEL = "composer-2.5"
 CLI_TINY_INPUT_TOKENS = 20_103
 MINIMUM_EFFECT_CEILING = 10_051
 PREFERRED_REDUCTION_FRACTION = 0.75
@@ -784,9 +788,9 @@ def live_dispatcher(request: DispatchRequest) -> object:
     except ImportError as exc:
         raise CalibrationClosed("cursor-sdk is not installed") from exc
     version = importlib.metadata.version("cursor-sdk")
-    if version != PINNED_SDK_VERSION:
+    if not sdk_version_meets_floor(version):
         raise CalibrationClosed(
-            f"cursor-sdk {version} is not the pinned {PINNED_SDK_VERSION}"
+            f"cursor-sdk {version} is below the compatibility floor {PINNED_SDK_VERSION}"
         )
     api_key = request.environ.get("CURSOR_API_KEY")
     if not api_key:
@@ -820,13 +824,16 @@ def live_dispatcher(request: DispatchRequest) -> object:
             allow_api_key_env_fallback=False,
         ) as client:
             models = client.models.list(api_key=api_key)
-            identities = {getattr(model, "id", None) for model in models}
-            if PINNED_MODEL not in identities:
-                raise CalibrationClosed(
-                    "exact composer-2.5 is absent from the model catalogue"
+            identities = [
+                model_id
+                for model_id in (
+                    getattr(model, "id", None) for model in models
                 )
+                if isinstance(model_id, str)
+            ]
+            selected_model = select_composer_model(identities)
             options = AgentOptions(
-                model=PINNED_MODEL,
+                model=selected_model,
                 api_key=api_key,
                 tools=[],
                 mcp_servers={},
