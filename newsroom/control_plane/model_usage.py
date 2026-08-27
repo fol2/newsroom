@@ -366,6 +366,25 @@ def _usage_blocking_routes(connection: sqlite3.Connection) -> set[str]:
         for contract in approved_contracts
         for value in (contract.plan_digest, contract.invocation_id)
     )
+    canary_runtime_leaf_exclusion = ""
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type='table' AND name='issue_790_bounded_canary_consumptions'"
+    ).fetchone() and connection.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type='table' AND name='issue_790_bounded_canary_outcomes'"
+    ).fetchone():
+        canary_runtime_leaf_exclusion = (
+            "AND NOT EXISTS (SELECT 1 "
+            "FROM model_invocation_allocations a_canary "
+            "JOIN issue_790_bounded_canary_consumptions c "
+            "ON c.event_id=json_extract(a_canary.record_json,'$.cycle_id') "
+            "JOIN issue_790_bounded_canary_outcomes o "
+            "ON o.consumption_digest=c.consumption_digest "
+            "WHERE a_canary.invocation_id=t.invocation_id "
+            "AND json_extract(o.record_json,'$.result_class') "
+            "!= 'TRUTHFUL_PROVIDER_SUCCESS') "
+        )
     rows = connection.execute(
         "SELECT a.route FROM model_invocation_terminals t "
         "JOIN model_invocation_allocations a "
@@ -377,7 +396,9 @@ def _usage_blocking_routes(connection: sqlite3.Connection) -> set[str]:
         "AND NOT EXISTS (SELECT 1 "
         "FROM model_usage_conservative_dispositions d "
         "WHERE d.invocation_id=t.invocation_id "
-        f"AND ({approved_bindings}))) "
+        f"AND ({approved_bindings})) "
+        f"{canary_runtime_leaf_exclusion}"
+        ") "
         "OR json_extract(t.record_json,'$.policy_breach') IS NOT NULL "
         "OR EXISTS (SELECT 1 FROM model_usage_reconciliations r "
         "WHERE r.invocation_id=t.invocation_id "

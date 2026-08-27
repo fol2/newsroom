@@ -1655,6 +1655,43 @@ def _authority_digest(plan: Mapping[str, object]) -> str:
     )
 
 
+def _existing_target_disposition(
+    store: Path,
+    target: Mapping[str, object],
+) -> dict[str, object] | None:
+    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        row = connection.execute(
+            "SELECT disposition_digest,record_json "
+            "FROM model_usage_conservative_dispositions "
+            "WHERE invocation_id=?",
+            (target["invocation_id"],),
+        ).fetchone()
+    finally:
+        connection.close()
+    if row is None:
+        return None
+    disposition = json.loads(str(row[1]))
+    if (
+        str(row[0]) != disposition.get("disposition_digest")
+        or disposition.get("terminal_digest") != target.get("terminal_digest")
+        or disposition.get("allocation_digest") != target.get("allocation_digest")
+        or disposition.get("exact_usage_remains_unknown") is not True
+        or disposition.get("unknown_spend_released") is not False
+    ):
+        raise Issue790DispositionError(
+            "issue #790 retained disposition authority differs"
+        )
+    components = disposition.get("components")
+    if not isinstance(components, dict) or components.get("total_tokens") != target.get(
+        "expected_conservative_total_tokens"
+    ):
+        raise Issue790DispositionError(
+            "issue #790 retained conservative total differs"
+        )
+    return disposition
+
+
 def _assert_exact_target(store: Path, plan: Mapping[str, object]) -> None:
     target = _record(plan["target"], field="target")
     connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
@@ -1801,17 +1838,23 @@ def _execute_issue_790_plan(
                 )
         else:
             raise Issue790DispositionError("issue #790 route state is invalid")
-        disposition = service.disposition_unreported_subscription_usage(
-            invocation_id=str(target["invocation_id"]),
-            expected_terminal_digest=str(target["terminal_digest"]),
-            expected_allocation_digest=str(target["allocation_digest"]),
-            approved_by=str(approval["approved_by"]),
-            approval_reference=str(approval["approval_reference"]),
-            approved_at=_instant(approval["approved_at"], field="approved_at"),
-            approved_plan_digest=str(retained_plan["canonical_digest"]),
-            authority_digest=authority_digest,
-            observed_at=observed_at,
+        disposition = (
+            _existing_target_disposition(store, target)
+            if predecessor is not None
+            else None
         )
+        if disposition is None:
+            disposition = service.disposition_unreported_subscription_usage(
+                invocation_id=str(target["invocation_id"]),
+                expected_terminal_digest=str(target["terminal_digest"]),
+                expected_allocation_digest=str(target["allocation_digest"]),
+                approved_by=str(approval["approved_by"]),
+                approval_reference=str(approval["approval_reference"]),
+                approved_at=_instant(approval["approved_at"], field="approved_at"),
+                approved_plan_digest=str(retained_plan["canonical_digest"]),
+                authority_digest=authority_digest,
+                observed_at=observed_at,
+            )
         components = _record(disposition.get("components"), field="components")
         if components.get("total_tokens") != target[
             "expected_conservative_total_tokens"
