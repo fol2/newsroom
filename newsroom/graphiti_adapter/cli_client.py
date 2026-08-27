@@ -26,13 +26,16 @@ from newsroom.graphiti_adapter.cli_process import (
     run_bounded_process_async,
     timeout_diagnostic,
     validated_process_exit_diagnostic,
+    validated_sdk_terminal,
     validated_timeout_diagnostics,
 )
 from newsroom.graphiti_adapter.cursor_transport import (
-    CURSOR_AGENT_BIN,
     CliPredispatchRefusal,
-    CursorProcessExitError,
-    CursorCliQualification,
+    CursorSdkBoundedFailure,
+    CursorSdkCleanupError,
+    CursorSdkError,
+    CursorSdkExecution,
+    CursorToolCallViolation,
     cursor_stdout_limit,
     run_cursor_transport,
     run_cursor_transport_async,
@@ -45,7 +48,6 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_MAX_CLEANUP_TIMEOUT_MS,
 )
 from newsroom.graphiti_adapter.usage_meter import (
-    cursor_cli_usage,
     grok_cli_usage,
     no_provider_call_cli_usage,
     unreported_cli_usage,
@@ -70,6 +72,10 @@ class CliExecution:
     text: str
     usage: dict[str, object]
     transport_qualification: dict[str, object] | None = None
+    sdk_agent_id: str | None = None
+    sdk_run_id: str | None = None
+    sdk_request_id: str | None = None
+    sdk_terminal: dict[str, object] | None = None
 
 
 CliOutput = str | CliExecution
@@ -368,18 +374,15 @@ async def _prove_cli_controls_async(
         )
 
 
-def parse_cursor_output(raw: str) -> CliExecution:
-    """Extract Cursor's model result and final provider-reported token usage."""
-
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        return CliExecution(text=raw, usage=unreported_cli_usage())
-    if not isinstance(payload, dict) or not isinstance(payload.get("result"), str):
-        return CliExecution(text=raw, usage=unreported_cli_usage())
+def _sdk_execution(value: CursorSdkExecution) -> CliExecution:
     return CliExecution(
-        text=str(payload["result"]),
-        usage=cursor_cli_usage(payload.get("usage")),
+        text=value.text,
+        usage=dict(value.usage),
+        transport_qualification=value.qualification.as_dict(),
+        sdk_agent_id=value.agent_id,
+        sdk_run_id=value.run_id,
+        sdk_request_id=value.request_id,
+        sdk_terminal=value.terminal_record(),
     )
 
 
@@ -432,23 +435,14 @@ def run_cursor_agent_llm(
     dispatch_started: Callable[[], None] | None = None,
 ) -> CliExecution:
     _require_positive_max_tokens(max_tokens)
-    with tempfile.TemporaryDirectory(prefix="newsroom-cursor-graphiti-") as root:
-        workspace = _hermetic_cli_workspace(root, binary=CURSOR_AGENT_BIN)
-        raw, qualification = run_cursor_transport(
-            binary=CURSOR_AGENT_BIN,
+    return _sdk_execution(
+        run_cursor_transport(
             prompt=prompt,
             max_tokens=max_tokens,
             timeout=CLI_CALL_TIMEOUT_SECONDS,
-            cwd=workspace.cwd,
-            environment=workspace.environment,
             dispatch_started=dispatch_started,
         )
-        execution = parse_cursor_output(raw)
-        return CliExecution(
-            text=execution.text,
-            usage=execution.usage,
-            transport_qualification=qualification.as_dict(),
-        )
+    )
 
 
 async def run_cursor_agent_llm_async(
@@ -458,23 +452,14 @@ async def run_cursor_agent_llm_async(
     dispatch_started: Callable[[], None] | None = None,
 ) -> CliExecution:
     _require_positive_max_tokens(max_tokens)
-    with tempfile.TemporaryDirectory(prefix="newsroom-cursor-graphiti-") as root:
-        workspace = _hermetic_cli_workspace(root, binary=CURSOR_AGENT_BIN)
-        raw, qualification = await run_cursor_transport_async(
-            binary=CURSOR_AGENT_BIN,
+    return _sdk_execution(
+        await run_cursor_transport_async(
             prompt=prompt,
             max_tokens=max_tokens,
             timeout=CLI_CALL_TIMEOUT_SECONDS,
-            cwd=workspace.cwd,
-            environment=workspace.environment,
             dispatch_started=dispatch_started,
         )
-        execution = parse_cursor_output(raw)
-        return CliExecution(
-            text=execution.text,
-            usage=execution.usage,
-            transport_qualification=qualification.as_dict(),
-        )
+    )
 
 
 def run_grok_llm(
@@ -564,6 +549,23 @@ def _execution(value: CliOutput) -> CliExecution:
     return CliExecution(text=value, usage=unreported_cli_usage())
 
 
+def _sdk_failure_execution(exc: BaseException) -> CliExecution | None:
+    execution = getattr(exc, "execution", None)
+    if isinstance(execution, CursorSdkExecution):
+        return _sdk_execution(execution)
+    return None
+
+
+def _sdk_failure_outcome(exc: CursorSdkError) -> str:
+    if isinstance(exc, CursorSdkBoundedFailure):
+        return exc.outcome
+    if exc.error_class == "RATE_LIMIT":
+        return "QUOTA_EXCEEDED"
+    if exc.error_class == "AUTHENTICATION":
+        return "AUTHENTICATION_FAILED"
+    return "FAILED"
+
+
 def _invocation(
     *,
     provider: str,
@@ -591,6 +593,14 @@ def _invocation(
         value["transport_qualification"] = retained_cli_qualification(
             execution.transport_qualification
         )
+    if execution is not None and execution.sdk_agent_id:
+        value["sdk_agent_id"] = execution.sdk_agent_id
+    if execution is not None and execution.sdk_run_id:
+        value["sdk_run_id"] = execution.sdk_run_id
+    if execution is not None and execution.sdk_request_id:
+        value["sdk_request_id"] = execution.sdk_request_id
+    if execution is not None and execution.sdk_terminal is not None:
+        value["sdk_terminal"] = validated_sdk_terminal(execution.sdk_terminal)
     if failure is not None:
         value["failure"] = failure
     if transport_diagnostic is not None:
@@ -873,19 +883,28 @@ async def run_cli_chain(
             )
         )
         raise
-    except (TimeoutError, subprocess.TimeoutExpired) as exc:
+    except (TimeoutError, subprocess.TimeoutExpired, CursorSdkBoundedFailure) as exc:
+        sdk_execution = _sdk_failure_execution(exc)
         cursor_usage = (
-            unreported_cli_usage()
+            dict(sdk_execution.usage)
+            if sdk_execution is not None
+            else unreported_cli_usage()
             if cursor_transport_started
             else no_provider_call_cli_usage()
         )
-        binding = observe(cursor_token, outcome="TIMEOUT", usage=cursor_usage)
+        outcome = (
+            exc.outcome
+            if isinstance(exc, CursorSdkBoundedFailure)
+            else "TIMEOUT"
+        )
+        binding = observe(cursor_token, outcome=outcome, usage=cursor_usage)
         invocations.append(
             _invocation(
                 provider="cursor-agent-cli",
                 model=CURSOR_AGENT_MODEL_ID,
-                outcome="TIMEOUT",
-                execution=CliExecution(text="", usage=cursor_usage),
+                outcome=outcome,
+                execution=sdk_execution
+                or CliExecution(text="", usage=cursor_usage),
                 failure=type(exc).__name__,
                 requested_max_tokens=max_tokens,
                 receipt_binding=binding,
@@ -894,9 +913,15 @@ async def run_cli_chain(
                     phase="PRIMARY_TRANSPORT",
                     started=cursor_started,
                     transport_started=cursor_transport_started,
-                ),
+                )
+                if outcome == "TIMEOUT"
+                else None,
             )
         )
+        if outcome == "OUTPUT_LIMIT_EXCEEDED":
+            raise CliResponseError(
+                "Cursor Graphiti response exceeded requested max_tokens"
+            ) from exc
         cursor_outcome = "TIMEOUT"
         payload = None
     except CliOutputBoundExceeded as exc:
@@ -952,6 +977,30 @@ async def run_cli_chain(
         invocations.append(invocation)
         cursor_outcome = refusal_outcome
         payload = None
+    except CursorSdkError as exc:
+        sdk_execution = _sdk_failure_execution(exc)
+        cursor_usage = dict(exc.usage)
+        cursor_outcome = _sdk_failure_outcome(exc)
+        binding = observe(
+            cursor_token, outcome=cursor_outcome, usage=cursor_usage
+        )
+        invocations.append(
+            _invocation(
+                provider="cursor-agent-cli",
+                model=CURSOR_AGENT_MODEL_ID,
+                outcome=cursor_outcome,
+                execution=sdk_execution
+                or CliExecution(text="", usage=cursor_usage),
+                failure=type(exc).__name__,
+                requested_max_tokens=max_tokens,
+                receipt_binding=binding,
+            )
+        )
+        payload = None
+        if cursor_outcome == "OUTPUT_LIMIT_EXCEEDED":
+            raise CliResponseError(
+                "Cursor Graphiti response exceeded requested max_tokens"
+            ) from exc
     except (RuntimeError, OSError) as exc:
         cursor_usage = (
             unreported_cli_usage()
@@ -968,9 +1017,6 @@ async def run_cli_chain(
                 failure=type(exc).__name__,
                 requested_max_tokens=max_tokens,
                 receipt_binding=binding,
-                process_exit_diagnostic=(
-                    exc.evidence if isinstance(exc, CursorProcessExitError) else None
-                ),
             )
         )
         cursor_outcome = "FAILED"
@@ -1305,7 +1351,6 @@ __all__ = [
     "CliOutputDecodeError",
     "CliPredispatchRefusal",
     "CliResponseError",
-    "CursorCliQualification",
     "build_cli_llm_client",
     "cursor_stdout_limit",
     "extract_json",

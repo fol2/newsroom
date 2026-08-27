@@ -18,6 +18,8 @@ from newsroom.authority.types import UtcTimestamp
 
 CLI_TIMEOUT_DIAGNOSTIC_SCHEMA_VERSION = "newsroom.graphiti-timeout-diagnostic.v1"
 CLI_PROCESS_EXIT_DIAGNOSTIC_SCHEMA_VERSION = "newsroom.cursor-process-exit.v1"
+SDK_QUALIFICATION_SCHEMA_VERSION = "newsroom.cursor-sdk-qualification.v1"
+SDK_TERMINAL_SCHEMA_VERSION = "newsroom.cursor-sdk-terminal.v1"
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 0.5
 _TIMEOUT_DIAGNOSTIC_REQUIRED_FIELDS = frozenset(
     {
@@ -154,6 +156,36 @@ _CLI_QUALIFICATION_DIGEST_FIELDS = frozenset(
 _CLI_QUALIFICATION_FIELDS = (
     frozenset({"schema_version", "transport", "stdout_limit_bytes"})
     | _CLI_QUALIFICATION_DIGEST_FIELDS
+)
+_SDK_QUALIFICATION_FIELDS = frozenset(
+    {
+        "schema_version",
+        "transport",
+        "sdk_version",
+        "lock_identity",
+        "model",
+        "unary_timeout_seconds",
+        "stream_timeout_seconds",
+        "max_retries",
+        "transport_policy_digest",
+    }
+)
+_SDK_TERMINAL_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "error_class",
+        "error_code",
+        "agent_id",
+        "run_id",
+        "request_id",
+        "resolved_model",
+        "tool_call_count",
+        "cancelled",
+        "duration_ms",
+        "stream_message_classes",
+        "diagnostic_digest",
+    }
 )
 
 
@@ -512,10 +544,12 @@ def validated_process_exit_diagnostic(value: object) -> dict[str, object]:
 
 
 def retained_cli_qualification(value: object) -> dict[str, object]:
-    """Reduce a successful qualification to fixed tokens and digests."""
+    """Reduce a successful qualification to the checked receipt form."""
 
     if not isinstance(value, Mapping):
-        raise ValueError("Graphiti CLI qualification must be an object")
+        raise ValueError("Graphiti transport qualification must be an object")
+    if value.get("transport") == "CURSOR_SDK":
+        return validated_transport_qualification(dict(value))
     retained: dict[str, object] = {
         "schema_version": CLI_QUALIFICATION_SCHEMA_VERSION,
         "transport": "CURSOR_AGENT_CLI",
@@ -525,6 +559,53 @@ def retained_cli_qualification(value: object) -> dict[str, object]:
         {field: value.get(field) for field in _CLI_QUALIFICATION_DIGEST_FIELDS}
     )
     return validated_transport_qualification(retained)
+
+
+def validated_sdk_terminal(value: object) -> dict[str, object]:
+    """Validate the source-safe SDK terminal retained on a leaf."""
+
+    if not isinstance(value, dict):
+        raise ValueError("Graphiti SDK terminal must be an object")
+    retained = dict(value)
+    if frozenset(retained) != _SDK_TERMINAL_FIELDS:
+        raise ValueError("Graphiti SDK terminal fields are invalid")
+    if retained["schema_version"] != SDK_TERMINAL_SCHEMA_VERSION:
+        raise ValueError("Graphiti SDK terminal identity is invalid")
+    if not isinstance(retained["cancelled"], bool):
+        raise ValueError("Graphiti SDK terminal cancellation is invalid")
+    if (
+        isinstance(retained["tool_call_count"], bool)
+        or not isinstance(retained["tool_call_count"], int)
+        or retained["tool_call_count"] < 0
+    ):
+        raise ValueError("Graphiti SDK terminal tool-call count is invalid")
+    duration = retained["duration_ms"]
+    if duration is not None and (
+        isinstance(duration, bool)
+        or not isinstance(duration, int)
+        or duration < 0
+    ):
+        raise ValueError("Graphiti SDK terminal duration is invalid")
+    classes = retained["stream_message_classes"]
+    if not isinstance(classes, list) or not all(
+        isinstance(item, str) and item for item in classes
+    ):
+        raise ValueError("Graphiti SDK terminal message classes are invalid")
+    for field in (
+        "status",
+        "error_class",
+        "error_code",
+        "agent_id",
+        "run_id",
+        "request_id",
+        "resolved_model",
+        "diagnostic_digest",
+    ):
+        token = retained[field]
+        if not isinstance(token, str) or not token or token != token.strip():
+            raise ValueError(f"Graphiti SDK terminal {field} is invalid")
+    validate_sha256_digest(str(retained["diagnostic_digest"]), field="diagnostic_digest")
+    return retained
 
 
 def validated_transport_qualification(value: object) -> dict[str, object]:
@@ -539,6 +620,35 @@ def validated_transport_qualification(value: object) -> dict[str, object]:
                 [retained["timeout_diagnostic"]]
             )[0]
         }
+    if retained.get("transport") == "CURSOR_SDK":
+        if frozenset(retained) != _SDK_QUALIFICATION_FIELDS:
+            raise ValueError("Graphiti transport qualification fields are invalid")
+        if (
+            retained["schema_version"] != SDK_QUALIFICATION_SCHEMA_VERSION
+            or retained["sdk_version"] != "1.0.29"
+            or retained["lock_identity"] != "cursor-sdk==1.0.29"
+            or retained["model"] != "composer-2.5"
+            or retained["max_retries"] != 0
+        ):
+            raise ValueError("Graphiti transport qualification identity is invalid")
+        for field in (
+            "unary_timeout_seconds",
+            "stream_timeout_seconds",
+        ):
+            timeout = retained[field]
+            if (
+                isinstance(timeout, bool)
+                or not isinstance(timeout, int)
+                or timeout <= 0
+            ):
+                raise ValueError(
+                    f"Graphiti transport qualification {field} is invalid"
+                )
+        validate_sha256_digest(
+            str(retained["transport_policy_digest"]),
+            field="transport_policy_digest",
+        )
+        return retained
     if frozenset(retained) != _CLI_QUALIFICATION_FIELDS:
         raise ValueError("Graphiti transport qualification fields are invalid")
     if (
@@ -897,6 +1007,8 @@ __all__ = [
     "CLI_PROCESS_EXIT_DIAGNOSTIC_SCHEMA_VERSION",
     "CLI_QUALIFICATION_SCHEMA_VERSION",
     "CLI_TIMEOUT_DIAGNOSTIC_SCHEMA_VERSION",
+    "SDK_QUALIFICATION_SCHEMA_VERSION",
+    "SDK_TERMINAL_SCHEMA_VERSION",
     "CliOutputBoundExceeded",
     "CliOutputDecodeError",
     "CliProcessOutput",
@@ -904,6 +1016,7 @@ __all__ = [
     "run_bounded_process",
     "run_bounded_process_async",
     "retained_cli_qualification",
+    "validated_sdk_terminal",
     "process_exit_diagnostic",
     "stop_process",
     "stop_process_async",

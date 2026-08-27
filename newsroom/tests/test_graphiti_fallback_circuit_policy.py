@@ -99,7 +99,7 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
     policy = load_checked_graphiti_fallback_circuit_policy()
     call_shape = load_checked_graphiti_call_shape_policy()
 
-    assert policy.version == "issue-790-v10"
+    assert policy.version == "issue-807-v1"
     assert policy.call_shape_policy_digest == call_shape.canonical_digest
     assert policy.eligible_outcomes == ("MALFORMED_OUTPUT",)
     assert policy.max_fallback_leaves_per_primary == 1
@@ -117,25 +117,36 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
             _graphiti_transport_implementation_revision(leaf_class)
         )
     primary = call_shape.route_for(GraphitiLeafClass.PRIMARY)
-    assert (
-        f"binary={cursor_transport.QUALIFIED_CURSOR_AGENT_BIN}"
-        in primary.command_flags
+    assert primary.config_identity == "cursor-sdk-api-key-composer-2.5-v1"
+    assert primary.command_semantic_version == (
+        "newsroom.graphiti-provider-dispatch.v11"
     )
-    assert "resolved-binary=OBSERVED_AT_PREDISPATCH" in primary.command_flags
-    assert "binary-version=UNPINNED" in primary.command_flags
-    assert (
-        "DISPATCH_GENERATION_BINDING=RESOLVE_RECHECK_SAME_GENERATION_V1"
-        in primary.command_flags
-    )
-    assert (
-        f"CONTROLLER_STDOUT_CONTRACT={cursor_transport.CURSOR_STDOUT_LIMIT_IDENTITY}"
-        in primary.command_flags
-    )
+    assert f"sdk={cursor_transport.PINNED_SDK_LOCK_IDENTITY}" in primary.command_flags
+    assert "auth=CURSOR_API_KEY" in primary.command_flags
+    assert "model=composer-2.5" in primary.command_flags
+    assert "tools=EMPTY" in primary.command_flags
+    assert "disallowed_tools=shell,mcp,task" in primary.command_flags
+    assert "mcp_servers=EMPTY" in primary.command_flags
+    assert "custom_tools=EMPTY" in primary.command_flags
+    assert "subagents=EMPTY" in primary.command_flags
+    assert "setting_sources=OMITTED" in primary.command_flags
+    assert "cwd=EMPTY_NON_GIT" in primary.command_flags
+    assert "store=EPHEMERAL_LOCAL_ISOLATED" in primary.command_flags
+    assert "fresh_run=TRUE" in primary.command_flags
+    assert "resume=FALSE" in primary.command_flags
+    assert "max_retries=0" in primary.command_flags
     assert "CONTROLLER_TIMEOUT_MS=160000" in primary.command_flags
     assert (
         "TIMEOUT_DIAGNOSTIC_SCHEMA=newsroom.graphiti-timeout-diagnostic.v1"
         in primary.command_flags
     )
+    assert (
+        f"CONTROLLER_OUTPUT_CONTRACT={cursor_transport.CURSOR_OUTPUT_LIMIT_IDENTITY}"
+        in primary.command_flags
+    )
+    assert "binary=" not in " ".join(primary.command_flags)
+    assert "AUTHENTICATION_BRIDGE=" not in " ".join(primary.command_flags)
+    assert "cursor-agent" not in " ".join(primary.command_flags)
     fallback = call_shape.route_for(GraphitiLeafClass.FALLBACK)
     assert "CONTROLLER_TIMEOUT_MS=160000" in fallback.command_flags
     assert (
@@ -146,33 +157,3 @@ def test_checked_fallback_policy_is_bound_to_call_shape_and_729_release_order() 
         f"CONTROLLER_STDOUT_CONTRACT={cli_client.GROK_STDOUT_LIMIT_IDENTITY}"
         in fallback.command_flags
     )
-    assert (
-        f"AUTHENTICATION_BRIDGE={cursor_transport.CURSOR_AUTHENTICATION_BRIDGE}"
-        in primary.command_flags
-    )
-    assert (
-        f"AUTHENTICATION_PROBE={cursor_transport.CURSOR_AUTHENTICATION_PROBE}"
-        in primary.command_flags
-    )
-    assert (
-        f"LOCAL_CREDENTIAL_PROBE_ACCOUNT={cursor_transport.CURSOR_CREDENTIAL_ACCOUNT}"
-        in primary.command_flags
-    )
-    assert (
-        f"LOCAL_CREDENTIAL_PROBE_SEARCH={cursor_transport.CURSOR_CREDENTIAL_SEARCH}"
-        in primary.command_flags
-    )
-    assert (
-        f"CREDENTIAL_STATE={cursor_transport.CURSOR_CREDENTIAL_STATE}"
-        in primary.command_flags
-    )
-    assert "package-digest=OBSERVED_AT_PREDISPATCH" in primary.command_flags
-    assert (
-        "control-semantics-digest=OBSERVED_AT_PREDISPATCH"
-        in primary.command_flags
-    )
-    assert (
-        f"hidden-control-proof={cursor_transport.CURSOR_COMMAND_SURFACE_PROOF}"
-        in primary.command_flags
-    )
-    assert "--disable-auto-update" not in primary.command_flags

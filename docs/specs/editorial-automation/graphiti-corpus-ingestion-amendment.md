@@ -2,10 +2,11 @@
 
 **Status:** Accepted
 **Owner:** Product owner
-**Last updated:** 2026-08-20
+**Last updated:** 2026-08-27
 **Accepted by owner:** 2026-08-20
 **Canonical language:** English
 **Issue:** [#722](https://github.com/fol2/newsroom/issues/722)
+**Transport amendment:** [#807](https://github.com/fol2/newsroom/issues/807) replaces the production Graphiti `cursor-agent` CLI path with the current official `cursor-sdk`.
 **Single source of truth:** [`../../decisions/2026-08-20-graphiti.md`](../../decisions/2026-08-20-graphiti.md)
 **Amends:** [`governed-graphrag-and-knowledge-projection.md`](governed-graphrag-and-knowledge-projection.md)
 **Does not rewrite:** `GRAG-*`, the core sentence of `CONT-001`, or [#707](https://github.com/fol2/newsroom/issues/707)
@@ -19,7 +20,7 @@ Lock Graphiti as a corpus-owned temporal proposal engine with exact ingest ident
 
 ## Model pin
 
-**GING-010 — Graphiti chat models.** Graphiti chat MUST use cursor-agent CLI `composer-2.5` first, then Grok Build CLI `grok-4.6` with reasoning effort `medium`. It MUST NOT use OpenRouter `openai/gpt-5-mini` for chat. Embeddings MAY remain OpenRouter `openai/text-embedding-3-large` and remain inside OD-011. CLI chat is subscription usage: it MUST be ledgered and MUST NOT be debited from OD-011.
+**GING-010 — Graphiti chat models.** Graphiti chat MUST use the current official `cursor-sdk` with a purpose-provisioned `CURSOR_API_KEY` and exact `composer-2.5` first, then Grok Build CLI `grok-4.6` with reasoning effort `medium`. The production Cursor path MUST NOT use `cursor-agent` CLI, browser login, IDE login state, Keychain credentials or an ambient Cursor home. It MUST pass no tools, MCP servers, custom tools, subagents or project/user/team/MDM/plugin setting sources, MUST use a fresh isolated run with typed stream/run/usage receipts, and MUST NOT automatically retry or fall back after a Cursor provider or network failure. It MUST NOT use OpenRouter `openai/gpt-5-mini` for chat. Embeddings MAY remain OpenRouter `openai/text-embedding-3-large` and remain inside OD-011. Cursor SDK chat and Grok fallback chat are subscription usage: they MUST be ledgered and MUST NOT be debited from OD-011. [#746](https://github.com/fol2/newsroom/issues/746) remains a rejection of that issue's compact prompt/output experiment and old SDK surface; it is not a rejection of API-key SDK transport.
 
 ## Requirements
 
