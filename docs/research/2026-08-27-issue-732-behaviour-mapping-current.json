@@ -1,0 +1,152 @@
+{
+  "schema_version": "newsroom.issue-732-behaviour-mapping.v2",
+  "issue": 732,
+  "historical_mapping": "docs/research/2026-08-21-control-plane-token-productivity-closeout.json",
+  "migration": {
+    "issue": 799,
+    "repair_issue": 812,
+    "specification": "docs/specs/sdlc/ai-native-focus-gated-sdlc.md"
+  },
+  "item_16_replacements": {
+    "test_ci_is_an_exact_head_bounded_compatibility_gate": "test_focus_gate_is_one_job_and_one_conditional_bootstrap",
+    "test_sdlc_workflow_retains_dynamic_complete_evidence_topology": "test_complete_inventory_remains_independently_runnable",
+    "test_execution_jobs_check_out_the_exact_evaluated_head_without_credentials": "test_sdlc_workflows_check_out_exact_head_without_credentials"
+  },
+  "behaviour_tests": [
+    {
+      "item": 1,
+      "behaviour": "zero-quota quality",
+      "tests": [
+        "test_zero_qualifying_candidates_succeed_without_writer_or_filler",
+        "test_hold_and_reject_candidates_never_reach_injected_writer",
+        "test_zero_quota_run_cycle_retains_zero_call_admissions_without_provider_tokens"
+      ]
+    },
+    {
+      "item": 2,
+      "behaviour": "at-most semantics",
+      "tests": [
+        "test_two_write_ready_candidates_never_trigger_three_replacements",
+        "test_five_ready_candidates_with_valid_primary_results_insert_five",
+        "test_two_write_ready_run_cycle_attempts_two_not_three_with_usage_join"
+      ]
+    },
+    {
+      "item": 3,
+      "behaviour": "no filler",
+      "tests": [
+        "test_filler_output_is_rejected_and_never_inserted"
+      ]
+    },
+    {
+      "item": 4,
+      "behaviour": "bounded provider leaves",
+      "tests": [
+        "test_malformed_primary_then_one_valid_fallback_consumes_two_leaf_calls",
+        "test_second_candidate_cannot_consume_second_cycle_fallback"
+      ]
+    },
+    {
+      "item": 5,
+      "behaviour": "useful-output circuit",
+      "tests": [
+        "test_exhausted_candidate_routes_open_no_useful_output_circuit",
+        "test_systemic_authentication_failure_opens_route_circuit_immediately"
+      ]
+    },
+    {
+      "item": 6,
+      "behaviour": "outcome-aware backoff",
+      "tests": [
+        "test_idle_cycle_keeps_normal_cooldown_and_streak",
+        "test_first_unproductive_provider_cycle_uses_900_second_backoff",
+        "test_second_unproductive_cycle_opens_cont_route_and_suppresses_dispatch"
+      ]
+    },
+    {
+      "item": 7,
+      "behaviour": "durable cooldown",
+      "tests": [
+        "test_restart_reuses_retained_normal_and_longer_cooldowns",
+        "test_productive_cooldown_starts_after_complete_work",
+        "test_governed_cli_cycle_identities_are_visible_on_export_bucket_csv"
+      ]
+    },
+    {
+      "item": 8,
+      "behaviour": "exact receipts",
+      "tests": [
+        "test_controller_allocates_every_primary_and_fallback_leaf_before_dispatch",
+        "test_graphiti_chat_and_embedding_are_distinct_and_terminal_ingests_are_valid",
+        "test_provider_health_probe_reservation_is_durable_before_dispatch"
+      ]
+    },
+    {
+      "item": 9,
+      "behaviour": "no silent zero",
+      "tests": [
+        "test_estimate_is_explicit_and_unbounded_missing_usage_opens_only_route",
+        "test_missing_usage_is_not_inferred_as_zero"
+      ]
+    },
+    {
+      "item": 10,
+      "behaviour": "no parent/child double count",
+      "tests": [
+        "test_parent_and_child_totals_are_not_double_counted"
+      ]
+    },
+    {
+      "item": 11,
+      "behaviour": "no generic daily cut",
+      "tests": [
+        "test_more_than_daily_500k_is_alerted_but_not_an_admission_gate"
+      ]
+    },
+    {
+      "item": 12,
+      "behaviour": "per-invocation control",
+      "tests": [
+        "test_policy_preflight_and_post_dispatch_breach_are_route_local"
+      ]
+    },
+    {
+      "item": 13,
+      "behaviour": "Graphiti call shape",
+      "tests": [
+        "test_checked_call_shape_policy_derives_headroom_from_qualified_fixtures",
+        "test_atomic_graphiti_allocation_refuses_duplicate_and_call_shape_drift"
+      ]
+    },
+    {
+      "item": 14,
+      "behaviour": "Graphiti valid zero result",
+      "tests": [
+        "test_true_empty_graphiti_extraction_is_a_valid_zero_proposal_success",
+        "test_zero_proposal_result_is_terminal_revision_coverage"
+      ]
+    },
+    {
+      "item": 15,
+      "behaviour": "regression suites remain green",
+      "suites": [
+        "newsroom/tests/test_zero_quota_write_loop.py",
+        "newsroom/tests/test_model_usage_receipts.py",
+        "newsroom/tests/test_durable_cycle_governor.py",
+        "newsroom/tests/test_cont_calibration.py",
+        "newsroom/tests/test_graphiti_adapter_real_executor.py",
+        "newsroom/tests/test_graphiti_corpus_ingest.py"
+      ],
+      "tests": []
+    },
+    {
+      "item": 16,
+      "behaviour": "permanent SDLC",
+      "tests": [
+        "test_focus_gate_is_one_job_and_one_conditional_bootstrap",
+        "test_complete_inventory_remains_independently_runnable",
+        "test_sdlc_workflows_check_out_exact_head_without_credentials"
+      ]
+    }
+  ]
+}

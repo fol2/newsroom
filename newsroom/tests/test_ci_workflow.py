@@ -52,6 +52,29 @@ def test_every_retained_workflow_job_has_a_positive_explicit_timeout() -> None:
             assert int(timeout) > 0, (path.name, job_id, timeout)
 
 
+def test_sdlc_workflows_check_out_exact_head_without_credentials() -> None:
+    checkout = "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd"
+    for path in (FOCUS_PATH, RESEARCH_PATH, HEALTH_PATH):
+        for job in _load(path)["jobs"].values():
+            steps = _steps(job)
+            checkouts = [step for step in steps if step.get("uses") == checkout]
+            assert len(checkouts) == 1
+            assert steps[0] == checkouts[0]
+            with_block = checkouts[0]["with"]
+            assert with_block["fetch-depth"] == "0"
+            assert with_block["persist-credentials"] == "false"
+            assert with_block["show-progress"] == "false"
+            assert with_block["ref"]
+            python = [
+                step
+                for step in steps
+                if step.get("uses")
+                == "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
+            ]
+            assert len(python) == 1
+            assert python[0]["with"] == {"python-version": "3.12"}
+
+
 def test_focus_gate_is_one_job_and_one_conditional_bootstrap() -> None:
     workflow = _load(FOCUS_PATH)
     assert workflow["name"] == "Focus Gates"
