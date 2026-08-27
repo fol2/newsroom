@@ -96,6 +96,8 @@ jobs:
           --plan-output pr-lifecycle-plan.json
 
       - name: Preserve exact plan for review
+        # actions/upload-artifact@v4 is the accepted major family; the
+        # executable reference remains pinned to its reviewed commit.
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: pr-lifecycle-plan-${{ github.run_id }}

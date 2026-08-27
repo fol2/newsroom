@@ -93,6 +93,14 @@ def test_focus_gate_is_one_job_and_one_conditional_bootstrap() -> None:
         "steps.route.outputs.service_required" in value
         for value in execute["env"].values()
     )
+    upload = next(
+        step
+        for step in steps
+        if step.get("name") == "Upload canonical Focus Gate evidence"
+    )
+    assert upload["if"] == "always()"
+    assert upload["with"]["path"] == ".focus"
+    assert upload["with"]["include-hidden-files"] == "true"
 
 
 def test_graphiti_research_is_path_scoped_and_provider_free() -> None:
