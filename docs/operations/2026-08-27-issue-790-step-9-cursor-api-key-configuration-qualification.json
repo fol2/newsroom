@@ -1,0 +1,32 @@
+{
+  "canonical_digest": "sha256:2288ae8e8f49459d086fd851d412e9ca38d4dee0ea4555dc84fc7a4efec5abef",
+  "failure": {
+    "boundary": "PRIMARY_TRANSPORT",
+    "elapsed_ms": 183679,
+    "failure_code": "CLI_PREDISPATCH_CONFIGURATION_REFUSED",
+    "local_cause": "MISSING_CURSOR_API_KEY",
+    "provider_cause": "NOT_CALLED",
+    "termination": "PREDISPATCH_REFUSED"
+  },
+  "issue": 790,
+  "live_canary_authorised": false,
+  "model_catalogue_queries": 0,
+  "observed_at": "2026-08-27T20:28:00.000000Z",
+  "predecessor_outcome_digest": "sha256:abf80ec45b8a44c4fb30525ad5fc98d88af6faba8f4b2b11ca652bc5c6e699d9",
+  "provider_calls": 0,
+  "provider_free_checks": {
+    "call_shape_policy_digest": "sha256:00e094297b2423272ade50b52a3ce8a75392128b6d60c70ea24b07f0ff8e89a2",
+    "call_shape_policy_version": "issue-816-v2",
+    "composer_floor": "composer>=2.5",
+    "cursor_api_key_env": "PRESENT",
+    "cursor_api_key_source": "OPERATIONAL_DOTENV_SOURCED",
+    "persistent_worker": "UNLOADED",
+    "route_state": "CLOSED",
+    "sdk_floor": "cursor-sdk>=1.0.29",
+    "sdk_import": "PASS",
+    "store_quick_check": "ok"
+  },
+  "public_effects": 0,
+  "qualification": "CURSOR_API_KEY_CONFIGURATION_RECOVERED",
+  "schema_version": "newsroom.issue-790.provider-free-configuration-qualification.v1"
+}

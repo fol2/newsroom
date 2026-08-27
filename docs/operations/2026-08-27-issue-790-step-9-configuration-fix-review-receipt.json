@@ -1,0 +1,12 @@
+{
+  "canonical_digest": "sha256:08adb250aa5d9abcfb290f6ca619add4edf34dfff5bb69727140ed61927cfd31",
+  "fix_kind": "CONFIGURATION",
+  "fix_summary": "Purpose-provisioned CURSOR_API_KEY restored to operational process environment via sourced .env",
+  "issue": 790,
+  "observed_at": "2026-08-27T20:28:00.000000Z",
+  "predecessor_outcome_digest": "sha256:abf80ec45b8a44c4fb30525ad5fc98d88af6faba8f4b2b11ca652bc5c6e699d9",
+  "provider_calls": 0,
+  "qualification_digest": "sha256:2288ae8e8f49459d086fd851d412e9ca38d4dee0ea4555dc84fc7a4efec5abef",
+  "schema_version": "newsroom.issue-790.configuration-fix-review-receipt.v1",
+  "secret_material_committed": false
+}
