@@ -1,0 +1,26 @@
+{
+  "canonical_digest": "sha256:da4bb2606bedd1c9e2ff1e7c4005f6bf127b6d682c93f97a3b4bc535143e1dc7",
+  "constraint_change": "NONE",
+  "failure": {
+    "boundary": "PRIMARY_TRANSPORT",
+    "cause": "NETWORK",
+    "elapsed_ms": 84359,
+    "returncode": 1,
+    "stderr_bytes": 429,
+    "stderr_digest": "sha256:861f1713148ae2c28d0ee21a90096bc450fa25c39135634270429b7c6ce064b0",
+    "stdout_bytes": 0,
+    "stdout_digest": "sha256:e3b0c44298fc1c149afbf4f8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "observed_at": "2026-08-27T01:14:35.000000Z",
+  "predecessor_outcome_digest": "sha256:022fc74aabfda21132c079b2228738ea0376455853a5d5c3b3a21868d65307d8",
+  "provider_call_performed": false,
+  "provider_free_checks": {
+    "api2_cursor_sh": "DNS_TLS_HTTP_200",
+    "api_cursor_com": "DNS_TLS_HTTP_200",
+    "cli_authentication": "AUTHENTICATED",
+    "persistent_worker": "UNLOADED",
+    "store_quick_check": "ok"
+  },
+  "qualification": "TRANSIENT_NETWORK_RECOVERED",
+  "schema_version": "newsroom.issue-790.provider-free-network-requalification.v1"
+}
