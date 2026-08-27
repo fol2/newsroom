@@ -82,6 +82,18 @@ ISSUE_790_ITERATIVE_PREFLIGHT_SCHEMA = (
     "newsroom.issue-790.iterative-fresh-event-preflight.v2"
 )
 _FALLBACK_MODE = "DISABLED_BEFORE_PROVIDER_DISPATCH"
+_ISSUE_790_ACCEPTED_CI_CHECK_NAMES = frozenset(
+    {
+        "focus-gates",
+        "test",
+        "full-deterministic-health",
+    }
+)
+_ISSUE_790_CI_CHECK_PREFERENCE = {
+    "focus-gates": 0,
+    "test": 1,
+    "full-deterministic-health": 2,
+}
 _AUTHORITY_SCHEMA = (
     "newsroom.model-usage.conservative-disposition-authority.v2"
 )
@@ -1426,7 +1438,7 @@ def collect_issue_790_operational_evidence(
         item
         for item in checks_value["check_runs"]
         if isinstance(item, dict)
-        and item.get("name") == "test"
+        and item.get("name") in _ISSUE_790_ACCEPTED_CI_CHECK_NAMES
         and item.get("status") == "completed"
         and item.get("conclusion") == "success"
         and item.get("head_sha") == revision
@@ -1434,9 +1446,12 @@ def collect_issue_790_operational_evidence(
     ]
     if not successful_tests:
         raise Issue790DispositionError("exact-main CI test is not successful")
-    successful_test = max(
+    successful_test = min(
         successful_tests,
-        key=lambda item: int(item.get("id", 0)),
+        key=lambda item: (
+            _ISSUE_790_CI_CHECK_PREFERENCE[str(item.get("name"))],
+            -int(item.get("id", 0)),
+        ),
     )
     connection = sqlite3.connect(f"{store.as_uri()}?mode=ro", uri=True)
     try:
@@ -1464,7 +1479,7 @@ def collect_issue_790_operational_evidence(
         "worktree_clean": True,
         "running_code": running_code,
         "ci_test": {
-            "name": "test",
+            "name": successful_test["name"],
             "status": "completed",
             "conclusion": "success",
             "head_sha": revision,
@@ -1517,7 +1532,7 @@ def _validate_operational_evidence(
         or not isinstance(tree, str)
         or re.fullmatch(r"[0-9a-f]{40}", tree) is None
         or not isinstance(ci_test, dict)
-        or ci_test.get("name") != "test"
+        or ci_test.get("name") not in _ISSUE_790_ACCEPTED_CI_CHECK_NAMES
         or ci_test.get("status") != "completed"
         or ci_test.get("conclusion") != "success"
         or ci_test.get("head_sha") != revision
