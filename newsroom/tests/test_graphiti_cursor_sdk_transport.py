@@ -429,6 +429,162 @@ def test_malformed_graphiti_output_remains_rejected(
     assert len(runtime.requests) == 1
 
 
+def test_schema_invalid_complete_json_falls_back_to_grok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cursor may return JSON that still fails the allocated response schema."""
+
+    import json
+
+    from newsroom.graphiti_adapter.cli_client import CliExecution
+
+    invalid = (
+        '{"entities":[{"local_id":1,"name":"Ofgem","entity_type_id":2,'
+        '"evidence_segment_ids":[0]}],"facts":[]}'
+    )
+    valid = '{"entities":[],"facts":[]}'
+    schema = json.dumps(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["entities", "facts"],
+            "properties": {
+                "entities": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [
+                            "local_id",
+                            "name",
+                            "entity_type_id",
+                            "evidence_segment_ids",
+                        ],
+                        "properties": {
+                            "local_id": {"type": "integer"},
+                            "name": {"type": "string"},
+                            "entity_type_id": {"type": "integer", "enum": [0]},
+                            "evidence_segment_ids": {
+                                "type": "array",
+                                "items": {"type": "integer"},
+                            },
+                        },
+                    },
+                },
+                "facts": {"type": "array"},
+            },
+        }
+    )
+    runtime = _bind(
+        monkeypatch,
+        FakeRuntime(
+            run=FakeRun(
+                messages=(_assistant(invalid),),
+                terminal=FakeTerminal(result=invalid, usage=FakeUsage(4, 2)),
+            )
+        ),
+    )
+    invocations: list[dict[str, object]] = []
+    grok_calls: list[str] = []
+
+    def grok_runner(
+        prompt: str, grok_schema: str | None, *, max_tokens: int, **_values: object
+    ) -> CliExecution:
+        del prompt, grok_schema, max_tokens, _values
+        grok_calls.append("ran")
+        return CliExecution(text=valid, usage=unreported_cli_usage())
+
+    payload = asyncio.run(
+        run_cli_chain(
+            prompt="prompt",
+            schema=schema,
+            cursor_runner=run_cursor_agent_llm,
+            grok_runner=grok_runner,
+            invocations=invocations,
+            fallback_permitted=True,
+            idempotency_key=_TEST_IDEMPOTENCY_KEY,
+        )
+    )
+
+    assert payload == {"entities": [], "facts": []}
+    assert [item["outcome"] for item in invocations] == [
+        "MALFORMED_OUTPUT",
+        "COMPLETE",
+    ]
+    assert grok_calls == ["ran"]
+    assert len(runtime.requests) == 1
+
+
+def test_schema_invalid_complete_json_kept_when_fallback_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Canary disables fallback; parseable JSON must still reach validators."""
+
+    import json
+
+    invalid = (
+        '{"entities":[{"local_id":1,"name":"Ofgem","entity_type_id":2,'
+        '"evidence_segment_ids":[0]}],"facts":[]}'
+    )
+    schema = json.dumps(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["entities", "facts"],
+            "properties": {
+                "entities": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [
+                            "local_id",
+                            "name",
+                            "entity_type_id",
+                            "evidence_segment_ids",
+                        ],
+                        "properties": {
+                            "local_id": {"type": "integer"},
+                            "name": {"type": "string"},
+                            "entity_type_id": {"type": "integer", "enum": [0]},
+                            "evidence_segment_ids": {
+                                "type": "array",
+                                "items": {"type": "integer"},
+                            },
+                        },
+                    },
+                },
+                "facts": {"type": "array"},
+            },
+        }
+    )
+    _bind(
+        monkeypatch,
+        FakeRuntime(
+            run=FakeRun(
+                messages=(_assistant(invalid),),
+                terminal=FakeTerminal(result=invalid, usage=FakeUsage(4, 2)),
+            )
+        ),
+    )
+    invocations: list[dict[str, object]] = []
+
+    payload = asyncio.run(
+        run_cli_chain(
+            prompt="prompt",
+            schema=schema,
+            cursor_runner=run_cursor_agent_llm,
+            grok_runner=lambda *_args, **_values: pytest.fail("fallback ran"),
+            invocations=invocations,
+            fallback_permitted=False,
+            idempotency_key=_TEST_IDEMPOTENCY_KEY,
+        )
+    )
+
+    assert payload["entities"][0]["entity_type_id"] == 2
+    assert invocations[0]["outcome"] == "COMPLETE"
+
+
 @pytest.mark.parametrize(
     ("error", "error_class"),
     [

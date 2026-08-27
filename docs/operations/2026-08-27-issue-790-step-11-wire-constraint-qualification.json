@@ -1,0 +1,35 @@
+{
+  "schema_version": "newsroom.issue-790.provider-free-code-fix-qualification.v1",
+  "issue": 790,
+  "observed_at": "2026-08-27T22:45:00.000000Z",
+  "predecessor_outcome_digest": "sha256:6f284b6e42b93bb9628bdd674ec2e9730f9f0212a7d773f1d1ae81bf5d15c66d",
+  "provider_calls": 0,
+  "public_effects": 0,
+  "model_catalogue_queries": 0,
+  "live_canary_authorised": false,
+  "failure": {
+    "boundary": "COMBINED_TEMPORAL_VALIDATION",
+    "elapsed_ms": 19735,
+    "failure_code": "OUTPUT_SCHEMA_INVALID",
+    "local_cause": "IDENTITY_INVALID_ENTITY_TYPE_ID_OUTSIDE_GOVERNED_ONTOLOGY",
+    "provider_cause": "COMPOSER_WIRE_ENTITY_TYPE_AND_RELATION_TYPE_DRIFT",
+    "termination": "TERMINAL_ATTEMPT_FAILURE"
+  },
+  "provider_free_checks": {
+    "call_shape_policy_version": "issue-816-v2",
+    "call_shape_policy_digest": "sha256:ba1cb4267ff78419174b50a0e233545a4bf745168d4f7fdbffa2fb6007ab5abc",
+    "sdk_floor": "cursor-sdk>=1.0.29",
+    "composer_floor": "composer>=2.5",
+    "schema_entity_type_id_enum_zero": "PASS",
+    "schema_relation_type_screaming_snake": "PASS",
+    "prompt_states_entity_type_id_zero": "PASS",
+    "prompt_states_screaming_snake_relation_type": "PASS",
+    "schema_invalid_demote_only_when_fallback_permitted": "PASS",
+    "canary_fallback_remains_disabled": "PASS",
+    "fix_pr": "https://github.com/fol2/newsroom/pull/832",
+    "fix_revision": "16382f8b111e300c8e27f32a879dcddafde27230",
+    "persistent_worker": "UNLOADED"
+  },
+  "qualification": "COMBINED_TEMPORAL_WIRE_CONSTRAINT_PROVIDER_FREE_READY",
+  "canonical_digest": "sha256:49d7eef58161533d1690e1a6559c1c701ece1f8e68053bee9f827165160fb19f"
+}
