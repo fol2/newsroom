@@ -17,6 +17,7 @@ from newsroom.authority.canonical import validate_sha256_digest
 from newsroom.authority.types import UtcTimestamp
 
 CLI_TIMEOUT_DIAGNOSTIC_SCHEMA_VERSION = "newsroom.graphiti-timeout-diagnostic.v1"
+CLI_PROCESS_EXIT_DIAGNOSTIC_SCHEMA_VERSION = "newsroom.cursor-process-exit.v1"
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 0.5
 _TIMEOUT_DIAGNOSTIC_REQUIRED_FIELDS = frozenset(
     {
@@ -112,6 +113,30 @@ _TIMEOUT_DIAGNOSTIC_VOCABULARY = {
     "process": frozenset({"CLI_CHILD", "CURSOR_CREDENTIAL_HELPER"}),
 }
 CLI_QUALIFICATION_SCHEMA_VERSION = "newsroom.graphiti-cli-qualification.v1"
+_PROCESS_EXIT_DIAGNOSTIC_FIELDS = frozenset(
+    {
+        "schema_version",
+        "phase",
+        "cause",
+        "returncode",
+        "stdout_bytes",
+        "stderr_bytes",
+        "stdout_digest",
+        "stderr_digest",
+    }
+)
+_PROCESS_EXIT_CAUSES = frozenset(
+    {
+        "AUTHENTICATION",
+        "MODEL_UNAVAILABLE",
+        "NETWORK",
+        "PROCESS_SIGNAL",
+        "RATE_LIMITED",
+        "UNCLASSIFIED_NONZERO_EXIT",
+        "UPSTREAM_SERVER",
+        "UPSTREAM_TIMEOUT",
+    }
+)
 _CLI_QUALIFICATION_DIGEST_FIELDS = frozenset(
     {
         "authentication_bridge_digest",
@@ -431,6 +456,59 @@ def validated_timeout_diagnostics(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list) or not value:
         raise ValueError("Graphiti timeout diagnostics must be a non-empty list")
     return [_validated_timeout_diagnostic(item) for item in value]
+
+
+def process_exit_diagnostic(
+    *, returncode: int, cause: str, stdout: str, stderr: str
+) -> dict[str, object]:
+    """Build bounded non-zero exit evidence without provider content."""
+
+    stdout_bytes = stdout.encode("utf-8")
+    stderr_bytes = stderr.encode("utf-8")
+    return validated_process_exit_diagnostic(
+        {
+            "schema_version": CLI_PROCESS_EXIT_DIAGNOSTIC_SCHEMA_VERSION,
+            "phase": "PRIMARY_TRANSPORT",
+            "cause": cause,
+            "returncode": returncode,
+            "stdout_bytes": len(stdout_bytes),
+            "stderr_bytes": len(stderr_bytes),
+            "stdout_digest": _sha256_bytes(stdout_bytes),
+            "stderr_digest": _sha256_bytes(stderr_bytes),
+        }
+    )
+
+
+def validated_process_exit_diagnostic(value: object) -> dict[str, object]:
+    """Reject raw or malformed process-exit evidence before persistence."""
+
+    if not isinstance(value, dict) or frozenset(value) != _PROCESS_EXIT_DIAGNOSTIC_FIELDS:
+        raise ValueError("Graphiti process-exit diagnostic fields are invalid")
+    retained = dict(value)
+    if (
+        retained["schema_version"] != CLI_PROCESS_EXIT_DIAGNOSTIC_SCHEMA_VERSION
+        or retained["phase"] != "PRIMARY_TRANSPORT"
+        or retained["cause"] not in _PROCESS_EXIT_CAUSES
+        or isinstance(retained["returncode"], bool)
+        or not isinstance(retained["returncode"], int)
+        or retained["returncode"] == 0
+    ):
+        raise ValueError("Graphiti process-exit diagnostic identity is invalid")
+    for field in ("stdout_bytes", "stderr_bytes"):
+        field_value = retained[field]
+        if isinstance(field_value, bool) or not isinstance(field_value, int) or field_value < 0:
+            raise ValueError(f"Graphiti process-exit diagnostic {field} is invalid")
+    for field in ("stdout_digest", "stderr_digest"):
+        digest = retained[field]
+        if not isinstance(digest, str):
+            raise ValueError(f"Graphiti process-exit diagnostic {field} is invalid")
+        try:
+            validate_sha256_digest(digest, field=field)
+        except ValueError as exc:
+            raise ValueError(
+                f"Graphiti process-exit diagnostic {field} is invalid"
+            ) from exc
+    return retained
 
 
 def retained_cli_qualification(value: object) -> dict[str, object]:
@@ -816,6 +894,7 @@ async def run_bounded_process_async(
 
 
 __all__ = [
+    "CLI_PROCESS_EXIT_DIAGNOSTIC_SCHEMA_VERSION",
     "CLI_QUALIFICATION_SCHEMA_VERSION",
     "CLI_TIMEOUT_DIAGNOSTIC_SCHEMA_VERSION",
     "CliOutputBoundExceeded",
@@ -825,10 +904,12 @@ __all__ = [
     "run_bounded_process",
     "run_bounded_process_async",
     "retained_cli_qualification",
+    "process_exit_diagnostic",
     "stop_process",
     "stop_process_async",
     "timeout_deadline_after",
     "timeout_diagnostic",
     "validated_timeout_diagnostics",
+    "validated_process_exit_diagnostic",
     "validated_transport_qualification",
 ]

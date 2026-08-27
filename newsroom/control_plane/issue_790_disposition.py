@@ -45,6 +45,7 @@ from newsroom.control_plane.model_usage import (
     ModelUsageService,
 )
 from newsroom.graphiti_adapter import cli_client as cli_client_module
+from newsroom.graphiti_adapter import cli_process as cli_process_module
 from newsroom.graphiti_adapter import cursor_transport as cursor_transport_module
 from newsroom.graphiti_adapter import evaluation_packet as evaluation_packet_module
 from newsroom.graphiti_adapter import real as real_graphiti_module
@@ -144,6 +145,10 @@ _RUNNING_CODE_MODULES: tuple[tuple[str, str], ...] = (
         "newsroom/graphiti_adapter/cli_client.py",
     ),
     (
+        "newsroom.graphiti_adapter.cli_process",
+        "newsroom/graphiti_adapter/cli_process.py",
+    ),
+    (
         "newsroom.graphiti_adapter.cursor_transport",
         "newsroom/graphiti_adapter/cursor_transport.py",
     ),
@@ -163,6 +168,7 @@ _RUNNING_CODE_PATHS: dict[str, str | None] = {
     "newsroom.control_plane.cycle": cycle_module.__file__,
     "newsroom.graphiti_adapter.evaluation_packet": evaluation_packet_module.__file__,
     "newsroom.graphiti_adapter.cli_client": cli_client_module.__file__,
+    "newsroom.graphiti_adapter.cli_process": cli_process_module.__file__,
     "newsroom.graphiti_adapter.cursor_transport": cursor_transport_module.__file__,
     "newsroom.graphiti_adapter.real": real_graphiti_module.__file__,
 }

@@ -17,6 +17,7 @@ from newsroom.extraction.types import (
     ProposalPredicateHint,
 )
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
+from newsroom.graphiti_adapter.cli_process import validated_process_exit_diagnostic
 from newsroom.graphiti_adapter.combined_temporal_types import (
     CombinedTemporalFailureCode,
 )
@@ -194,6 +195,16 @@ def restore_validated_snapshot(
         or recovered_raw.get("chat_invocation_count") != len(invocations)
     ):
         raise GraphitiAdapterContractError("retained Graphiti result is malformed")
+    try:
+        for invocation in invocations:
+            if "process_exit_diagnostic" in invocation:
+                validated_process_exit_diagnostic(
+                    invocation["process_exit_diagnostic"]
+                )
+    except ValueError as exc:
+        raise GraphitiAdapterContractError(
+            "retained Graphiti process-exit diagnostic is malformed"
+        ) from exc
     proposals = tuple(
         sorted(
             (_proposal_from_value(item) for item in proposals_value),

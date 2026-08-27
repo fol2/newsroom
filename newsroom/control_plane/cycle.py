@@ -128,6 +128,7 @@ from newsroom.effective_revision import (
     create_effective_revision_schema,
 )
 from newsroom.graphiti_adapter.cli_process import (
+    validated_process_exit_diagnostic,
     validated_timeout_diagnostics,
     validated_transport_qualification,
 )
@@ -368,6 +369,8 @@ def _validate_chat_invocation_diagnostics(
             validated_timeout_diagnostics([invocation["transport_diagnostic"]])
         if "transport_qualification" in invocation:
             validated_transport_qualification(invocation["transport_qualification"])
+        if "process_exit_diagnostic" in invocation:
+            validated_process_exit_diagnostic(invocation["process_exit_diagnostic"])
 
 
 def _canonical_digest_or_none(value: object) -> str | None:

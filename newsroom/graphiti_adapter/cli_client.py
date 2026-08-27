@@ -25,11 +25,13 @@ from newsroom.graphiti_adapter.cli_process import (
     run_bounded_process,
     run_bounded_process_async,
     timeout_diagnostic,
+    validated_process_exit_diagnostic,
     validated_timeout_diagnostics,
 )
 from newsroom.graphiti_adapter.cursor_transport import (
     CURSOR_AGENT_BIN,
     CliPredispatchRefusal,
+    CursorProcessExitError,
     CursorCliQualification,
     cursor_stdout_limit,
     run_cursor_transport,
@@ -572,6 +574,7 @@ def _invocation(
     requested_max_tokens: int = 0,
     receipt_binding: Mapping[str, str] | None = None,
     transport_diagnostic: Mapping[str, object] | None = None,
+    process_exit_diagnostic: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     value: dict[str, object] = {
         "provider": provider,
@@ -594,6 +597,10 @@ def _invocation(
         value["transport_diagnostic"] = validated_timeout_diagnostics(
             [dict(transport_diagnostic)]
         )[0]
+    if process_exit_diagnostic is not None:
+        value["process_exit_diagnostic"] = validated_process_exit_diagnostic(
+            dict(process_exit_diagnostic)
+        )
     return value
 
 
@@ -961,6 +968,9 @@ async def run_cli_chain(
                 failure=type(exc).__name__,
                 requested_max_tokens=max_tokens,
                 receipt_binding=binding,
+                process_exit_diagnostic=(
+                    exc.evidence if isinstance(exc, CursorProcessExitError) else None
+                ),
             )
         )
         cursor_outcome = "FAILED"

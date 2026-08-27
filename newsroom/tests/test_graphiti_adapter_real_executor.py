@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import os
 import signal
@@ -2088,6 +2089,7 @@ def test_immutable_completion_snapshot_restores_without_graph_rehydration(
 def test_completed_pipeline_failure_snapshot_restores_as_retryable(
     tmp_path: Path,
 ) -> None:
+    from newsroom.graphiti_adapter.cli_process import process_exit_diagnostic
     from newsroom.graphiti_adapter.real import _EpisodeTelemetry, _raw_receipt
     from newsroom.graphiti_adapter.result_snapshot import restore_validated_snapshot
 
@@ -2097,10 +2099,19 @@ def test_completed_pipeline_failure_snapshot_restores_as_retryable(
         reference_time=instant,
         temporal_basis=TemporalBasis.SOURCE_PUBLISHED,
     )
+    diagnostic = process_exit_diagnostic(
+        returncode=1,
+        cause="UPSTREAM_SERVER",
+        stdout="",
+        stderr="fixture provider content",
+    )
     raw = _raw_receipt(
         attempt,
         started_at=instant,
-        telemetry=_EpisodeTelemetry(provider_attempt_number=1),
+        telemetry=_EpisodeTelemetry(
+            provider_attempt_number=1,
+            chat_invocations=[{"process_exit_diagnostic": diagnostic}],
+        ),
         result=None,
         proposals=(),
     )
@@ -2119,6 +2130,19 @@ def test_completed_pipeline_failure_snapshot_restores_as_retryable(
     assert restored.produced.validation is None
     assert restored.produced.raw_output_value is None
     assert restored.produced.attempt_receipt_value == raw
+    assert restored.chat_invocations[0]["process_exit_diagnostic"] == diagnostic
+
+    malformed = copy.deepcopy(raw)
+    malformed["chat_invocations"][0]["process_exit_diagnostic"]["stderr"] = (
+        "SECRET"
+    )
+    malformed.pop("raw_output_digest")
+    malformed["raw_output_digest"] = digest_bytes(canonical_json_bytes(malformed))
+    with pytest.raises(
+        GraphitiAdapterContractError,
+        match="process-exit diagnostic is malformed",
+    ):
+        restore_validated_snapshot(raw=malformed, attempt=attempt)
 
 
 def test_immutable_completion_preserves_original_access_after_rights_renewal(
@@ -3397,6 +3421,69 @@ def test_cursor_cli_runtime_capability_probe_must_succeed() -> None:
             ),
             evidence={},
         )
+
+
+def test_cursor_cli_nonzero_exit_keeps_only_bounded_diagnostics() -> None:
+    from newsroom.control_plane import cycle
+    from newsroom.graphiti_adapter import cli_client, cli_process, cursor_transport
+
+    error = cursor_transport.CursorProcessExitError(
+        cursor_transport._ProcessOutput(
+            returncode=1,
+            stdout="",
+            stderr="authentication failed for SECRET",
+        )
+    )
+    invocations: list[dict[str, object]] = []
+
+    def cursor_runner(
+        _prompt: str,
+        *,
+        max_tokens: int,
+        dispatch_started: object,
+    ) -> object:
+        del max_tokens
+        assert callable(dispatch_started)
+        dispatch_started()
+        raise error
+
+    with pytest.raises(cli_client.CliResponseError, match="fallback is disabled"):
+        asyncio.run(
+            cli_client.run_cli_chain(
+                prompt="fixture",
+                schema=None,
+                cursor_runner=cursor_runner,
+                grok_runner=lambda *_args, **_values: pytest.fail("fallback ran"),
+                invocations=invocations,
+                fallback_permitted=False,
+            )
+        )
+
+    assert error.evidence["cause"] == "AUTHENTICATION"
+    assert error.evidence["returncode"] == 1
+    assert error.evidence["stderr_bytes"] == 32
+    assert invocations[0]["process_exit_diagnostic"] == error.evidence
+    cycle._validate_chat_invocation_diagnostics(tuple(invocations))
+    assert cli_process.validated_process_exit_diagnostic(error.evidence) == (
+        error.evidence
+    )
+    with pytest.raises(ValueError, match="fields are invalid"):
+        cli_process.validated_process_exit_diagnostic(
+            {**error.evidence, "stderr": "SECRET"}
+        )
+    with pytest.raises(ValueError, match="fields are invalid"):
+        cycle._validate_chat_invocation_diagnostics(
+            (
+                {
+                    **invocations[0],
+                    "process_exit_diagnostic": {
+                        **error.evidence,
+                        "stderr": "SECRET",
+                    },
+                },
+            )
+        )
+    assert "SECRET" not in repr(error.evidence)
 
 
 def test_cursor_cli_request_path_must_match_the_checked_policy(

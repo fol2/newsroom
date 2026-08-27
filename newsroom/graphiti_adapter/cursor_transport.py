@@ -18,6 +18,7 @@ from newsroom.graphiti_adapter.cli_process import (
     CliOutputDecodeError,
     CliProcessOutput,
     CliTransportTimeout,
+    process_exit_diagnostic,
     run_bounded_process,
     run_bounded_process_async,
     timeout_deadline_after,
@@ -98,6 +99,8 @@ _CURSOR_CAPABILITY_PROBE_ARGUMENTS = (
     "",
     "about",
 )
+
+
 class CliPredispatchRefusal(RuntimeError):
     """The installed CLI cannot prove the checked transport contract."""
 
@@ -109,6 +112,19 @@ class CliPredispatchRefusal(RuntimeError):
     ) -> None:
         super().__init__(message)
         self.qualification_evidence = dict(qualification_evidence or {})
+
+
+class CursorProcessExitError(RuntimeError):
+    """A non-zero Cursor exit with bounded, content-free diagnostics."""
+
+    def __init__(self, result: _ProcessOutput) -> None:
+        super().__init__("cursor-agent Graphiti LLM failed")
+        self.evidence = process_exit_diagnostic(
+            returncode=result.returncode,
+            cause=_cursor_exit_cause(result),
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,6 +282,46 @@ def _sha256_bytes(value: bytes) -> str:
 
 def _sha256_text(value: str) -> str:
     return _sha256_bytes(value.encode("utf-8"))
+
+
+def _cursor_exit_cause(result: _ProcessOutput) -> str:
+    if result.returncode < 0:
+        return "PROCESS_SIGNAL"
+    output = f"{result.stderr}\n{result.stdout}".lower()
+    for cause, markers in (
+        (
+            "AUTHENTICATION",
+            (
+                "unauthenticated",
+                "unauthorized",
+                "authentication",
+                "login required",
+                "token expired",
+            ),
+        ),
+        (
+            "RATE_LIMITED",
+            ("rate limit", "resource_exhausted", "too many requests"),
+        ),
+        (
+            "MODEL_UNAVAILABLE",
+            (
+                "model not found",
+                "model unavailable",
+                "unsupported model",
+                "invalid model",
+            ),
+        ),
+        ("UPSTREAM_TIMEOUT", ("deadline exceeded", "timed out", "timeout")),
+        ("NETWORK", ("connection", "network", "econn", "socket", "dns")),
+        (
+            "UPSTREAM_SERVER",
+            ("internal server", "service unavailable", "bad gateway"),
+        ),
+    ):
+        if any(marker in output for marker in markers):
+            return cause
+    return "UNCLASSIFIED_NONZERO_EXIT"
 
 
 def _owned_private_directory(path: Path, *, description: str) -> os.stat_result:
@@ -1060,7 +1116,7 @@ def run_cursor_transport(
         phase="PRIMARY_TRANSPORT",
     )
     if result.returncode != 0:
-        raise RuntimeError("cursor-agent Graphiti LLM failed")
+        raise CursorProcessExitError(result)
     if not result.stdout.strip():
         raise RuntimeError("Graphiti LLM returned empty stdout")
     return result.stdout, qualification
@@ -1105,7 +1161,7 @@ async def run_cursor_transport_async(
         phase="PRIMARY_TRANSPORT",
     )
     if result.returncode != 0:
-        raise RuntimeError("cursor-agent Graphiti LLM failed")
+        raise CursorProcessExitError(result)
     if not result.stdout.strip():
         raise RuntimeError("Graphiti LLM returned empty stdout")
     return result.stdout, qualification
@@ -1126,6 +1182,7 @@ __all__ = [
     "QUALIFIED_CURSOR_LOGIN_KEYCHAIN",
     "QUALIFIED_CURSOR_SECURITY_BIN",
     "CliPredispatchRefusal",
+    "CursorProcessExitError",
     "CursorCliQualification",
     "cursor_stdout_limit",
     "run_cursor_transport",
