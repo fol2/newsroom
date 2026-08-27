@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pickle
 import sqlite3
 import uuid
 from collections.abc import Callable
@@ -140,10 +141,19 @@ class _LocationSnapshot:
         database = root / "feedback-authority.sqlite3"
         database.write_bytes(self.database_bytes)
         database.chmod(0o600)
-        seed = (self.seed_tail[0], database, *self.seed_tail[1:])
+        collaborators = pickle.loads(
+            pickle.dumps(self.seed_tail[0], protocol=pickle.HIGHEST_PROTOCOL)
+        )
+        retrieval = collaborators[1]
+        retrieval_path = root / "retrieval-context.sqlite3"
+        retrieval_path.write_bytes(Path(retrieval._path).read_bytes())
+        retrieval_path.chmod(0o600)
+        retrieval._path = retrieval_path
+        seed = (collaborators, database, *self.seed_tail[1:])
         candidate = candidate_fixture._Location(seed, root / "candidate-collisions")
         args = dict(self.args)
         args["database"] = database
+        args["retrieval_authority"] = retrieval
         return _Location(
             candidate,
             args,
