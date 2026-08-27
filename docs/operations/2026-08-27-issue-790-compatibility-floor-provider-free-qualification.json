@@ -20,7 +20,7 @@
     "step_seven_withdrawal_unchanged": "PASS",
     "step_eight_remains_non_executable": "PASS",
     "call_shape_policy_version": "issue-816-v2",
-    "call_shape_policy_digest": "sha256:f0b2de282936824b5b1ff5d2d9e37126356e38d62ab7269d4cbfb18e9133d535",
+    "call_shape_policy_digest": "sha256:00e094297b2423272ade50b52a3ce8a75392128b6d60c70ea24b07f0ff8e89a2",
     "transport_policy_digest": "sha256:06ebe081ebbccd69c00011c54ab2a3e419127107ab258eb1eba230f20c270a8a",
     "implementation_revision": "sha256:447ae2fa9b9be0e1f37a05b02cdd592ffc05ef20e4409a0681681da83a8346a8",
     "v1_exact_pin_receipts_preserved": "PASS"
@@ -32,5 +32,5 @@
   ],
   "qualification": "COMPATIBILITY_FLOOR_PROVIDER_FREE_READY",
   "live_canary_authorised": false,
-  "canonical_digest": "sha256:bf9643fdde101887cf1a554a67aa33be04f7709196d18468c4b9c38d90beb1f0"
+  "canonical_digest": "sha256:7b9434fe54880122bf8ab844e343fed2a6741674dd09f0170bdd3957a2153cd4"
 }
