@@ -112,11 +112,11 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "ordinary_jobs",
+        "focus_gate_jobs",
         "dependency_bootstraps"
       ],
       "properties": {
-        "ordinary_jobs": {
+        "focus_gate_jobs": {
           "const": 1
         },
         "dependency_bootstraps": {

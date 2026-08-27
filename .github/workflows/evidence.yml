@@ -57,15 +57,11 @@ jobs:
             git diff --check HEAD^ HEAD --
           fi
 
-      - name: Run complete deterministic inventory
+      - name: Run complete deterministic product inventory
         run: |
-          uv run --no-sync python -m pytest -q \
-            -p no:cacheprovider \
-            -n 4 \
-            --dist worksteal \
-            --max-worker-restart=0 \
-            newsroom/tests \
-            --junitxml=full-health.xml
+          uv run --no-sync python -m scripts.sdlc.focus_gate \
+            --repo-root . full-health \
+            --junit full-health.xml
 
       - name: Upload full-health evidence
         if: always()

@@ -1,10 +1,15 @@
 # Focused test behaviour
 
-**Role:** Detailed agent and contributor guidance  
-**Status:** Accepted  
-**Owner:** Product owner  
-**Canonical language:** English (UK)  
-**Accepted:** 2026-08-27  
+**Role:** Detailed agent and contributor guidance
+
+**Status:** Accepted
+
+**Owner:** Product owner
+
+**Canonical language:** English (UK)
+
+**Accepted:** 2026-08-27
+
 **Issue:** #799
 
 `AGENTS.md` is the authority. This document explains how to collect enough evidence without turning every change into a repository-wide campaign.
@@ -27,7 +32,7 @@ python -m scripts.sdlc.focus_gate execute \
   --route .focus/route.json --junit .focus/pytest.xml
 ```
 
-The manifest is deterministic and content-addressed. It records the exact change, reasons, gates, tests, service/research/full-health decisions and expected bootstrap count.
+The manifest is deterministic and content-addressed. It records the exact change, reasons, gates, tests, service/research/full-health decisions and the Focus Gate job/bootstrap budget. The separate trusted PR Lifecycle metadata check installs no project dependencies.
 
 ## What each gate proves
 
@@ -57,7 +62,7 @@ An unknown executable path with no defensible focused selection escalates visibl
 
 Graphiti research fixtures run in `.github/workflows/ci.yml` only when research inputs change, on schedule, or by manual dispatch. They are not product regressions and do not run on unrelated pull requests.
 
-`.github/workflows/evidence.yml` retains the full deterministic inventory for schedule, manual diagnosis and merge queue health. It is intentionally absent from the ordinary pull-request event surface.
+`.github/workflows/evidence.yml` retains the full deterministic product inventory for schedule, manual diagnosis and merge queue health. It excludes the Graphiti research fixtures owned by the research workflow and is intentionally absent from the ordinary pull-request event surface.
 
 ## Avoid waste
 

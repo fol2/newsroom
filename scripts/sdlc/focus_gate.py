@@ -53,6 +53,9 @@ _RESEARCH_PATTERNS = (
     "newsroom/tests/test_graphiti_donor_identities.py",
     "newsroom/tests/test_graphiti_deterministic_work.py",
 )
+_RESEARCH_TEST_GLOBS = tuple(
+    pattern for pattern in _RESEARCH_PATTERNS if pattern.startswith("newsroom/tests/")
+)
 _SERVICE_PATTERNS = (
     "newsroom/projection/neo4j/**",
     "newsroom/*neo4j*.py",
@@ -237,6 +240,7 @@ def _discover_tests(repo_root: Path, source_paths: Sequence[str]) -> tuple[set[s
 
     selected: set[str] = set()
     reexport_smoke: dict[str, str] = {}
+    satisfied_reexports: set[str] = set()
     for path in _test_files(repo_root):
         relative = path.relative_to(repo_root).as_posix()
         if _is_research(relative):
@@ -258,19 +262,23 @@ def _discover_tests(repo_root: Path, source_paths: Sequence[str]) -> tuple[set[s
             for imported in imports
             for module in dependents
         )
-        name_hit = any(name in text for name in names)
         imported_reexports = {
             module
             for module in reexports
             if any(_imports_module(imported, module) for imported in imports)
         }
-        for module in imported_reexports:
+        name_hit = bool(imported_reexports) and any(name in text for name in names)
+        for module in imported_reexports - satisfied_reexports:
             reexport_smoke.setdefault(module, relative)
         if direct_hit or dependent_hit or name_hit:
             selected.add(relative)
+            if name_hit:
+                satisfied_reexports.update(imported_reexports)
+                for module in imported_reexports:
+                    reexport_smoke.pop(module, None)
 
-    # One deterministic package-import smoke catches broken re-export wiring without
-    # selecting every test that happens to import the package.
+    # Keep one deterministic package-import smoke only when no changed-symbol
+    # consumer already proves the re-export boundary.
     selected.update(reexport_smoke.values())
     return selected, unresolved
 
@@ -303,7 +311,7 @@ def validate_focus_contract_data(data: object) -> Mapping[str, object]:
         "ordinary_pr_workflow": ".github/workflows/focus-gates.yml",
         "full_health_workflow": ".github/workflows/evidence.yml",
         "research_workflow": ".github/workflows/ci.yml",
-        "ordinary_job_count": 1,
+        "ordinary_evidence_job_count": 1,
         "documentation_dependency_bootstraps": 0,
         "executable_dependency_bootstraps": 1,
         "default_gates": ["F0"],
@@ -375,7 +383,7 @@ def _manifest_without_digest(
         "bootstrap_required": bootstrap_required,
         "reasons": list(reasons),
         "execution_budget": {
-            "ordinary_jobs": 1,
+            "focus_gate_jobs": 1,
             "dependency_bootstraps": 1 if bootstrap_required else 0,
         },
     }
@@ -605,7 +613,7 @@ def validate_manifest(value: object) -> dict[str, object]:
             raise FocusGateError("isolated research cannot select ordinary tests")
     budget = value["execution_budget"]
     expected_budget = {
-        "ordinary_jobs": 1,
+        "focus_gate_jobs": 1,
         "dependency_bootstraps": 1 if value["bootstrap_required"] else 0,
     }
     if budget != expected_budget:
@@ -724,6 +732,42 @@ def verify_route(repo_root: str | Path, route_path: str | Path) -> dict[str, obj
     return route
 
 
+def _junit_path(root: Path, junit: str | Path) -> Path:
+    report = Path(junit)
+    if not report.is_absolute():
+        report = root / report
+    report.parent.mkdir(parents=True, exist_ok=True)
+    return report
+
+
+def execute_full_health(
+    repo_root: str | Path,
+    *,
+    junit: str | Path,
+) -> int:
+    root = Path(repo_root).resolve()
+    load_focus_contract(root)
+    report = _junit_path(root, junit)
+    command = (
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "--assert=plain",
+        "-p",
+        "no:cacheprovider",
+        "-n",
+        "4",
+        "--dist",
+        "worksteal",
+        "--max-worker-restart=0",
+        "newsroom/tests",
+        *(f"--ignore-glob={pattern}" for pattern in _RESEARCH_TEST_GLOBS),
+        f"--junitxml={report}",
+    )
+    return subprocess.run(command, cwd=root, env=os.environ.copy(), check=False).returncode
+
+
 def execute_route(
     repo_root: str | Path,
     route_path: str | Path,
@@ -734,21 +778,14 @@ def execute_route(
     route = verify_route(root, route_path)
     if route["research_required"] and not route["bootstrap_required"]:
         return 0
-    selectors = (
-        ("newsroom/tests",)
-        if route["full_health_required"]
-        else tuple(
-            sorted(
-                set(route["selected_tests"]) | set(route["selected_service_tests"])
-            )
-        )
+    if route["full_health_required"]:
+        return execute_full_health(root, junit=junit)
+    selectors = tuple(
+        sorted(set(route["selected_tests"]) | set(route["selected_service_tests"]))
     )
     if not selectors:
         return 0
-    report = Path(junit)
-    if not report.is_absolute():
-        report = root / report
-    report.parent.mkdir(parents=True, exist_ok=True)
+    report = _junit_path(root, junit)
     command = (
         sys.executable,
         "-m",
@@ -780,6 +817,9 @@ def _parser() -> argparse.ArgumentParser:
     execute.add_argument("--route", required=True)
     execute.add_argument("--junit", required=True)
 
+    full_health = commands.add_parser("full-health")
+    full_health.add_argument("--junit", required=True)
+
     summary = commands.add_parser("summary")
     summary.add_argument("--route", required=True)
     return parser
@@ -801,6 +841,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return execute_route(
                 arguments.repo_root,
                 arguments.route,
+                junit=arguments.junit,
+            )
+        elif arguments.command == "full-health":
+            return execute_full_health(
+                arguments.repo_root,
                 junit=arguments.junit,
             )
         else:

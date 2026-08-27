@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tomllib
 from typing import Any, Mapping
 
 import yaml
@@ -11,6 +12,14 @@ WORKFLOW_ROOT = REPO_ROOT / ".github" / "workflows"
 FOCUS_PATH = WORKFLOW_ROOT / "focus-gates.yml"
 RESEARCH_PATH = WORKFLOW_ROOT / "ci.yml"
 HEALTH_PATH = WORKFLOW_ROOT / "evidence.yml"
+LIFECYCLE_PATH = WORKFLOW_ROOT / "pr-lifecycle.yml"
+GATES_PATH = REPO_ROOT / ".sdlc" / "gates.toml"
+LEGACY_DIAGNOSTICS = (
+    "authority-a2a.yml",
+    "authority-a2b.yml",
+    "projection-b1.yml",
+    "projection-b2-neo4j.yml",
+)
 PINNED_ACTIONS = {
     "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
     "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
@@ -91,7 +100,11 @@ def test_graphiti_research_is_path_scoped_and_provider_free() -> None:
     assert workflow["name"] == "Graphiti Research"
     assert set(workflow["on"]) == {"pull_request", "schedule", "workflow_dispatch"}
     assert "push" not in workflow["on"]
-    assert workflow["on"]["pull_request"]["paths"]
+    paths = workflow["on"]["pull_request"]["paths"]
+    assert paths
+    assert "docs/research/**" not in paths
+    assert "docs/research/**/*.json" in paths
+    assert "docs/research/**/*.csv" in paths
     rendered = RESEARCH_PATH.read_text(encoding="utf-8")
     assert "uv sync --dev --extra graphiti --locked" in rendered
     assert "graphiti-core" in rendered
@@ -111,14 +124,15 @@ def test_full_health_is_absent_from_ordinary_pull_requests() -> None:
     rendered = HEALTH_PATH.read_text(encoding="utf-8")
     assert rendered.count("astral-sh/setup-uv@") == 1
     assert rendered.count("uv sync --dev --locked") == 1
-    assert "newsroom/tests" in rendered
-    assert "-n 4" in rendered
+    assert "scripts.sdlc.focus_gate" in rendered
+    assert "--repo-root . full-health" in rendered
+    assert "python -m pytest" not in rendered
     assert "matrix:" not in rendered
 
 
 def test_new_sdlc_workflows_use_only_exactly_pinned_actions() -> None:
     observed: set[str] = set()
-    for path in (FOCUS_PATH, RESEARCH_PATH, HEALTH_PATH):
+    for path in (FOCUS_PATH, RESEARCH_PATH, HEALTH_PATH, LIFECYCLE_PATH):
         jobs = _load(path)["jobs"]
         for job in jobs.values():
             for step in _steps(job):
@@ -127,3 +141,30 @@ def test_new_sdlc_workflows_use_only_exactly_pinned_actions() -> None:
                     observed.add(selected)
                     assert selected in PINNED_ACTIONS
     assert observed == PINNED_ACTIONS
+
+
+def test_pr_lifecycle_is_separate_trusted_policy_without_project_bootstrap() -> None:
+    workflow = _load(LIFECYCLE_PATH)
+    assert "pull_request_target" in workflow["on"]
+    validate = workflow["jobs"]["validate"]
+    assert validate["if"] == "github.event_name == 'pull_request_target'"
+    rendered = LIFECYCLE_PATH.read_text(encoding="utf-8")
+    assert "uv sync" not in rendered
+    assert "pip install" not in rendered
+    assert "scripts.sdlc.pr_lifecycle validate-event" in rendered
+    assert "pull-requests: read" in rendered
+
+
+def test_legacy_authority_and_projection_workflows_remain_manual_only() -> None:
+    for filename in LEGACY_DIAGNOSTICS:
+        workflow = _load(WORKFLOW_ROOT / filename)
+        assert workflow["on"] == {"workflow_dispatch": ""}
+        assert "push" not in workflow["on"]
+        assert "pull_request" not in workflow["on"]
+
+
+def test_retired_clustering_path_group_selects_no_evaluator_dependencies() -> None:
+    contract = tomllib.loads(GATES_PATH.read_text(encoding="utf-8"))
+    clustering_paths = set(contract["classification"]["paths"]["clustering"])
+
+    assert clustering_paths == {"newsroom/legacy_operational_stack_retired.py"}

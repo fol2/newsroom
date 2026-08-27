@@ -32,9 +32,10 @@ def test_complete_inventory_remains_independently_runnable() -> None:
     health = _load("evidence.yml")
     assert set(health["on"]) == {"merge_group", "schedule", "workflow_dispatch"}
     rendered = (WORKFLOW_ROOT / "evidence.yml").read_text(encoding="utf-8")
-    assert "Run complete deterministic inventory" in rendered
-    assert "newsroom/tests" in rendered
-    assert "--junitxml=full-health.xml" in rendered
+    assert "Run complete deterministic product inventory" in rendered
+    assert "scripts.sdlc.focus_gate" in rendered
+    assert "--repo-root . full-health" in rendered
+    assert "--junit full-health.xml" in rendered
     assert "pull_request:" not in rendered
 
 

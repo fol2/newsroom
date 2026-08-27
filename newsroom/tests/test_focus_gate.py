@@ -31,7 +31,7 @@ def test_documentation_route_stops_at_f0_without_bootstrap() -> None:
     assert route["bootstrap_required"] is False
     assert route["full_health_required"] is False
     assert route["execution_budget"] == {
-        "ordinary_jobs": 1,
+        "focus_gate_jobs": 1,
         "dependency_bootstraps": 0,
     }
     validate_manifest(route)
@@ -54,7 +54,7 @@ def test_local_source_selects_direct_importing_test(tmp_path: Path) -> None:
     assert route["full_health_required"] is False
 
 
-def test_package_reexport_selects_changed_symbol_and_one_smoke_not_every_import(
+def test_package_reexport_selects_changed_symbol_without_unrelated_package_imports(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -102,7 +102,6 @@ def test_package_reexport_selects_changed_symbol_and_one_smoke_not_every_import(
     )
 
     assert route["selected_tests"] == [
-        "newsroom/tests/test_00_package_smoke.py",
         "newsroom/tests/test_10_changed_receipt.py",
     ]
 
@@ -214,6 +213,48 @@ def test_sdlc_control_change_selects_only_contract_tests() -> None:
     assert "newsroom/tests/test_ci_workflow.py" in route["selected_tests"]
     assert route["full_health_required"] is False
     assert route["selected_service_tests"] == []
+
+
+def test_full_health_excludes_research_fixtures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+    from types import SimpleNamespace
+
+    import scripts.sdlc.focus_gate as focus_gate
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(focus_gate, "load_focus_contract", lambda _root: {})
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: (
+            captured.update(command=command, kwargs=kwargs)
+            or SimpleNamespace(returncode=0)
+        ),
+    )
+
+    assert focus_gate.execute_full_health(
+        tmp_path,
+        junit="reports/full-health.xml",
+    ) == 0
+
+    command = captured["command"]
+    assert isinstance(command, tuple)
+    assert "newsroom/tests" in command
+    assert "-n" in command
+    assert "4" in command
+    assert any(
+        item == "--ignore-glob=newsroom/tests/test_graphiti_combined_temporal_*.py"
+        for item in command
+    )
+    assert any(
+        item == "--ignore-glob=newsroom/tests/test_graphiti_core_0293_*.py"
+        for item in command
+    )
+    assert captured["kwargs"]["cwd"] == tmp_path.resolve()
 
 
 def test_manifest_identity_is_canonical_and_tamper_evident() -> None:

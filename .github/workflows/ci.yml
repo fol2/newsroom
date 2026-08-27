@@ -5,7 +5,8 @@ on:
     paths:
       - "pyproject.toml"
       - "uv.lock"
-      - "docs/research/**"
+      - "docs/research/**/*.json"
+      - "docs/research/**/*.csv"
       - "scripts/graphiti_combined_temporal_extraction.py"
       - "scripts/graphiti_deterministic_work.py"
       - "scripts/graphiti_runtime_calibration.py"
