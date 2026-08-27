@@ -1,17 +1,51 @@
 # Newsroom Agent Guide
 
-## 0. Development workflow
+## 0. Development DNA
 
-When asked to create PRs (especially when using multiple sub-agents), prefer **real GitHub PRs** by default:
+Optimise for **maximum relevant evidence with minimum wall time, model context and compute**. This is not permission to do less. Every demonstrated failure mode and affected boundary must remain covered; irrelevant work must not enter the critical path.
 
-- Each sub-agent should work on its own branch (and worktree if helpful).
-- Push the branch to the remote.
-- Open a GitHub PR (e.g. via `gh pr create`) and share the PR link/number in the handoff.
-- Merge via GitHub after review.
+Use one coherent issue, one branch and one ordinary pull request by default. A sub-agent may investigate or implement inside that delivery context. Create another issue or PR only when the work has an independent merge, rollback, owner, dependency or release boundary. Parallel machines are not themselves a decomposition reason.
 
-If GitHub access is unavailable (no remote, no auth, or network restrictions), fall back to local branches and clearly state that the workflow is local-only.
+The normal AI-native loop is:
 
-## 1. Operational Newsroom
+`intent -> implementation and tests -> focus manifest -> focused evidence -> one feature-complete review -> merge -> independent health signals`
+
+Agents own that loop. Human input is an exception for unresolved ambiguity, credentials, regulated or irreversible effects, and explicit owner decisions.
+
+## 1. Focus Gates
+
+Every ordinary change is routed deterministically:
+
+- **F0 — change integrity:** exact diff identity, syntax and contract consistency. Documentation-only changes stop here.
+- **F1 — direct behaviour:** the smallest positive, negative and boundary matrix for the changed behaviour, including the exact reproduction for a defect.
+- **F2 — affected contract boundary:** direct callers and consumers selected from paths, imports and explicit repository contracts. Persistence, replay, migration and authority evidence appears only when that boundary is touched.
+- **F3 — actual service or runtime effect:** a bounded real service only when local evidence cannot establish the changed service semantics. Ordinary code and research receive no provider call.
+- **F4 — irreversible or externally visible effect:** credentials, security, deletion, migration, publication, deployment, admission, activation and release controls remain exact and fail-closed.
+
+Broaden after a concrete failure, unresolved dependency or newly discovered risk. Do not broaden merely because a larger suite exists.
+
+## 2. Work and evidence discipline
+
+- Read the issue, touched code, direct contracts and nearest tests. Do not preload broad history or unrelated design documents.
+- Default to the deterministic manifest produced by `scripts.sdlc.focus_gate`.
+- Prepare the locked environment once after checkout or a dependency change, not before each command.
+- Run a check once per unchanged code, configuration and environment state.
+- Do not poll remote workflows, increase a timeout merely to keep a run alive, or repeat review after all current findings are addressed.
+- One feature-complete review is the default. Review again only after a material follow-up change or unresolved high-risk finding.
+- Report the exact selected checks, outcomes, omissions and remaining uncertainty. Never convert an unobserved workflow into a claimed pass.
+- Keep touched code slim: delete duplication, reuse existing contracts and avoid speculative abstractions, runners, caches and compatibility layers.
+- Keep the existing `ponytail` coding skill active where available; use it to find the simplest complete solution, not to add ceremony.
+- Conditional future machinery stays dormant until its trigger is observed or owner-authorised.
+
+Full repository health, research qualification and release evidence are independent lanes. Their existence does not make them ordinary-PR prerequisites.
+
+## 3. Research isolation
+
+Research answers an explicit uncertainty and produces a compact promoted output: a contract, fixture, policy, benchmark result or implementation decision. Normal development consumes that output; it does not replay the research campaign.
+
+Graphiti research remains provider-free unless a separate owner-authorised experiment explicitly permits a live provider. Research fixtures run only in the research workflow or by explicit diagnosis.
+
+## 4. Operational Newsroom
 
 The operational Newsroom is the **Hermes Control Plane**: a distinct daemon LaunchAgent with veto, ledger, broker, signed stop, Newsroom schedule and live dispatcher. `newsroom-hub` is private Control Plane UI, not the Control Plane. Canonical terms live in `CONTEXT.md`. Hard-to-reverse decisions live in `docs/adr/`.
 
@@ -19,44 +53,11 @@ This repository does not run OpenClaw cron planners, the OpenClaw runner, Discor
 
 Increment 11B is a Hermes fresh start. This file grants no live source, credential, spend, publication or activation authority.
 
-## 2. Agent documentation
+## 5. Development references
 
-- [Issue tracker](docs/agents/issue-tracker.md)
-- [Triage labels](docs/agents/triage-labels.md)
-- [Domain docs](docs/agents/domain.md)
-- [Documentation map](docs/README.md)
-
-## 3. Development
-
-- Python 3.12+, deps in `pyproject.toml` (locked in `uv.lock`)
-- Install (dev): `uv sync --dev`
-- Default to the smallest focused test files or node IDs that exercise the
-  changed behaviour. Broaden only when a dependency or a concrete failure
-  identifies another affected surface. See [`docs/testing.md`](docs/testing.md).
-- Do not autonomously start the complete test suite. Only an explicit user
-  request authorises it; state the diagnostic question before starting.
-- Do not wait or poll for remote workflows, or rerun the same check against
-  unchanged code, configuration and environment. If a run stops being
-  proportionate to its question, terminate it and report the partial evidence.
-- Stop after collecting a coherent set of focused evidence and report what was
-  run, what was not run, and any remaining uncertainty. Pending or failed
-  automation is evidence to report, not a reason for an agent retry loop.
-- Change agent behaviour through concise instructions and review feedback. Do
-  not add or expand a machine gate whose predicate is compliance with this
-  behavioural guidance. Existing product, security and repository-lifecycle
-  controls are separate concerns.
-- Existing CI and SDLC automation may report independently, but agents do not
-  treat waiting for it as a prerequisite for a handover. Merge eligibility
-  remains a separate observation of the repository's current merge policy.
-- The `ponytail` skill stays active in full mode for every coding-related task,
-  including design, implementation, refactoring, tests and review. Understand
-  the real flow, then choose the first simple solution that works. Do not
-  over-engineer.
-- Keep a slim-and-trim ratchet on touched code: prefer deletion, reuse and the
-  standard library; remove nearby duplication or obsolete scaffolding when it
-  is safe, but do not expand into unrelated cleanup.
-- When touching a test or fixture, look for a simple semantics-preserving way
-  to make that focused path faster. Remove duplicate setup, sleeps and repeated
-  I/O before adding runners, caches, abstractions or performance gates. Do not
-  weaken assertions or isolation for speed.
+- Python 3.12+, dependencies in `pyproject.toml`, lock in `uv.lock`
+- Detailed test behaviour: [`docs/testing.md`](docs/testing.md)
+- Accepted Focus Gate contract: [`docs/specs/sdlc/ai-native-focus-gated-sdlc.md`](docs/specs/sdlc/ai-native-focus-gated-sdlc.md)
+- Issue tracker: [`docs/agents/issue-tracker.md`](docs/agents/issue-tracker.md)
+- Documentation map: [`docs/README.md`](docs/README.md)
 - Repository documents and code use UK English

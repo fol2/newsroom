@@ -3,9 +3,9 @@ contract_version = "sdlc-v2.6"
 status = "accepted"
 owner = "fol2"
 canonical_language = "English"
-specification = "docs/specs/sdlc/high-performance-evidence-sdlc.md"
-acceptance_record = "docs/specs/sdlc/2026-08-11-sdlc-v2.6-measured-core-budget-amendment.md"
-issue = 415
+specification = "docs/specs/sdlc/ai-native-focus-gated-sdlc.md"
+acceptance_record = "docs/specs/sdlc/ai-native-focus-gated-sdlc.md"
+issue = 799
 
 [global]
 gate_command_timeout_seconds = 220
@@ -19,9 +19,29 @@ cold_bootstrap_migration_p95_target_seconds = 30
 obsolete_head_cancellation_target_seconds = 5
 unknown_path_risk = "R3_EXTERNAL_SERVICE_SECURITY"
 classifier_error_risk = "R3_EXTERNAL_SERVICE_SECURITY"
-full_suite_is_default = true
+full_suite_is_default = false
 required_decision_always_reports = true
 rerun_can_overwrite_required_result = false
+
+[focus]
+schema_version = "newsroom.sdlc.focus-gates.v1"
+contract_version = "focus-gates-v1"
+status = "accepted"
+issue = 799
+route_schema = ".sdlc/focus-route.schema.json"
+ordinary_pr_workflow = ".github/workflows/focus-gates.yml"
+full_health_workflow = ".github/workflows/evidence.yml"
+research_workflow = ".github/workflows/ci.yml"
+ordinary_job_count = 1
+documentation_dependency_bootstraps = 0
+executable_dependency_bootstraps = 1
+default_gates = ["F0"]
+full_health_events = ["merge_group", "schedule", "workflow_dispatch"]
+research_events = ["pull_request_paths", "schedule", "workflow_dispatch"]
+blocking_selector = "deterministic"
+provider_calls_implicit = false
+human_default_required = false
+human_exception_gates = ["F4"]
 
 [gate.route]
 id = "route"
@@ -139,6 +159,8 @@ contract_control = [
   ".github/workflows/**",
   "scripts/sdlc/**",
   "newsroom/tests/test_sdlc_*.py",
+  "newsroom/tests/test_focus_gate.py",
+  "newsroom/tests/test_ci_workflow.py",
   "newsroom/tests/test_integrated_c1_sdlc_contract.py",
   "newsroom/tests/test_integrated_c1_workflow_contract.py",
 ]
@@ -227,13 +249,13 @@ always_reports = true
 hard_timeout_seconds = 20
 
 [test_strategy]
-full_suite_blocking_default = true
+full_suite_blocking_default = false
 individual_testcase_hard_timeout_seconds = 90
 individual_testcase_warning_seconds = 75
 full_suite_p95_threshold_seconds = 35
 warm_bootstrap_p95_threshold_seconds = 10
-selector_initial_mode = "observe"
-selector_blocking_earliest_mode = "after_shadow_acceptance"
+selector_initial_mode = "focus_enforced"
+selector_blocking_earliest_mode = "accepted"
 selector_shadow_calendar_days = 30
 selector_shadow_minimum_changes = 500
 selector_known_failure_miss_limit = 0
@@ -340,6 +362,7 @@ allowed = [
 [owner_decisions]
 accepted_at = "2026-07-22"
 budget_amended_at = "2026-08-02"
+focus_gate_accepted_at = "2026-08-27"
 predecessor_contract_version = "sdlc-v2.3"
 hard_budget_multiplier = 2
 review_net_executable_lines_trigger = 400

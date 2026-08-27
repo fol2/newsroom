@@ -1,47 +1,24 @@
 # Newsroom
 
-Automated AI newsroom: governed ledger, GraphRAG, Hermes Control Plane.
+Automated AI newsroom: governed ledger, GraphRAG and Hermes Control Plane.
 
-## Key documentation
+## Working contract
 
-- [README.md](README.md) -- Project overview, installation, configuration
-- [ARCHITECTURE.md](ARCHITECTURE.md) -- Architecture and the dead legacy stack
-- [AGENTS.md](AGENTS.md) -- Agent workflow and operational Newsroom
-- [docs/README.md](docs/README.md) -- Documentation map
+Follow [`AGENTS.md`](AGENTS.md). It is the concise always-loaded authority for the AI-native development loop, Focus Gates, research isolation, review discipline and stop conditions.
 
-## Project structure
+Use the deterministic ordinary-PR router in `scripts/sdlc/focus_gate.py`. Detailed test guidance is in [`docs/testing.md`](docs/testing.md); the accepted machine and workflow contract is in [`docs/specs/sdlc/ai-native-focus-gated-sdlc.md`](docs/specs/sdlc/ai-native-focus-gated-sdlc.md).
 
-- `newsroom/` -- Core Python package (authority, projection, discovery adapters, increments)
-- `newsroom/tests/` -- Test suite
-- `scripts/` -- Increment and SDLC entry points
-- `docs/adr/` -- Accepted architecture decisions
+## Repository map
 
-## Development
+- `newsroom/` — product and authority code
+- `newsroom/tests/` — deterministic and service tests
+- `scripts/` — bounded operational and SDLC entry points
+- `.github/workflows/focus-gates.yml` — ordinary pull-request gate
+- `.github/workflows/evidence.yml` — scheduled, manual and merge full health
+- `.github/workflows/ci.yml` — isolated Graphiti research
+- `docs/adr/` — hard-to-reverse decisions
+- `docs/README.md` — documentation map
 
-- Python 3.12+, deps in `pyproject.toml` (locked in `uv.lock`)
-- Install (dev): `uv sync --dev`
-- Follow the development behaviour in [`AGENTS.md`](AGENTS.md) and the focused
-  test guidance in [`docs/testing.md`](docs/testing.md). The `ponytail` skill
-  stays active in full mode for every coding-related task.
+Python 3.12+ is required. Dependencies are locked in `uv.lock`. Repository documents and code use UK English.
 
-## Code style
-
-- No auto-formatting enforced; follow existing patterns
-- Repository documents and code use UK English
-
-## Agent skills
-
-### Issue tracker
-
-Engineering work is tracked in GitHub Issues. External pull requests are not a triage request surface. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Use the five canonical triage labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-This is a single-context repository, using a root `CONTEXT.md` and system-wide ADRs under `docs/adr/`. See `docs/agents/domain.md`.
-
-The OpenClaw / Discord / Brave / GDELT / `news_pool` operational stack is dead.
-See [ADR 0009](docs/adr/0009-legacy-operational-newsroom-dead.md).
+The OpenClaw / Discord / Brave / GDELT / `news_pool` operational stack is dead; see [ADR 0009](docs/adr/0009-legacy-operational-newsroom-dead.md).
