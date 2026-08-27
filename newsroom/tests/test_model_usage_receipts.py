@@ -2343,7 +2343,7 @@ def test_issue_790_success_sequence_fails_closed_on_call_shape_drift(
     with pytest.raises(Issue790DispositionError, match="call-shape policy differs"):
         load_issue_790_plan(
             root
-            / "docs/operations/2026-08-27-issue-790-success-sequence-step-8.json"
+            / "docs/operations/2026-08-27-issue-790-success-sequence-step-9.json"
         )
 
 
