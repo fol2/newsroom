@@ -49,7 +49,10 @@ ISSUE_790_SUCCESS_SEQUENCE_STEP_8_PLAN_DIGEST = (
     "sha256:e45fb670577de1b929a4c7cde114e6cc05c589ff7e010abbab9656445a2edb8c"
 )
 ISSUE_790_SUCCESS_SEQUENCE_STEP_9_PLAN_DIGEST = (
-    "sha256:982cfe8cb30f326d3a62939fba38ecc2885af017ef990b1a7ad46dcc985d927c"
+    "sha256:ed9ddb506df0cc6572777bd9a91249b474032eb4dea6458d2c3e9b0466cbce77"
+)
+ISSUE_790_SUCCESS_SEQUENCE_STEP_10_PLAN_DIGEST = (
+    "sha256:a4f9549afec46d57edeedd1fc478b6732b55a80e80f7d0690f08e58c9396c2af"
 )
 
 
@@ -375,6 +378,43 @@ _SUCCESS_SEQUENCE_CONTRACTS = (
             "sha256:b2c07a4303c5449a4bf09017c4a06496c1df9e66ed215305d6cff616a9b4fc0e"
         ),
     ),
+    Issue790ApprovedPlanContract(
+        schema_version="newsroom.issue-790.iterative-canary-plan.v2",
+        plan_digest=ISSUE_790_SUCCESS_SEQUENCE_STEP_10_PLAN_DIGEST,
+        invocation_id=(
+            "sha256:d0712807fd025520d0a94e5a28c532d4cb8684c936387290fe7eeb49d0b2336c"
+        ),
+        terminal_digest=(
+            "sha256:d48e844404516bd41b17038b42a834c6e54bf5da520ef046f3baf81ea7a8cbbe"
+        ),
+        allocation_digest=(
+            "sha256:c789330ca7151d097e6d366dd65481ff21d55f93891ff61e368d7369b12c7120"
+        ),
+        approved_by="github:fol2",
+        approval_reference=(
+            "https://github.com/fol2/newsroom/issues/790#issuecomment-5445612635"
+        ),
+        approved_at="2026-08-27T21:47:43.000000Z",
+        scope=ISSUE_790_APPROVED_SCOPE,
+        terminal_outcome="FAILED",
+        route_open_reason="SYSTEMIC_TRANSPORT",
+        root_plan_digest=ISSUE_790_APPROVED_PLAN_DIGEST,
+        predecessor_plan_digest=ISSUE_790_SUCCESS_SEQUENCE_STEP_9_PLAN_DIGEST,
+        sequence_ordinal=10,
+        controller_timeout_ms=160_000,
+        extraction_timeout_ms=180_000,
+        cleanup_reserve_ms=20_000,
+        fixed_constraints_digest=(
+            "sha256:accd35045a4bc3c8d20c50c272755e7d4e6980dc6d7e1a4f029b36b3cd2a20c1"
+        ),
+        predecessor_causal_report_digest=(
+            "sha256:27859022a5040914dad6a721195697b98c42926e2188f046790a4fcff234c9a3"
+        ),
+        constraint_change="REVIEWED_NON_TIMEOUT_FIX",
+        reviewed_fix_digest=(
+            "sha256:0d2f621bdea9b83bdd672749dbcc49555cdbbf4ca8738e51e3db10782cab1c89"
+        ),
+    ),
 )
 
 
@@ -453,6 +493,7 @@ __all__ = [
     "ISSUE_790_SUCCESS_SEQUENCE_STEP_6_PLAN_DIGEST",
     "ISSUE_790_SUCCESS_SEQUENCE_STEP_8_PLAN_DIGEST",
     "ISSUE_790_SUCCESS_SEQUENCE_STEP_9_PLAN_DIGEST",
+    "ISSUE_790_SUCCESS_SEQUENCE_STEP_10_PLAN_DIGEST",
     "Issue790ApprovedPlanContract",
     "issue_790_approved_plan_contract",
     "issue_790_approved_plan_contracts",

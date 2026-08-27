@@ -2343,7 +2343,7 @@ def test_issue_790_success_sequence_fails_closed_on_call_shape_drift(
     with pytest.raises(Issue790DispositionError, match="call-shape policy differs"):
         load_issue_790_plan(
             root
-            / "docs/operations/2026-08-27-issue-790-success-sequence-step-9.json"
+            / "docs/operations/2026-08-27-issue-790-success-sequence-step-10.json"
         )
 
 
@@ -2593,6 +2593,10 @@ def test_issue_790_invocation_plan_digests_cover_shared_successor_chain() -> Non
         issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_9_PLAN_DIGEST
         in digests
     )
+    assert (
+        issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_10_PLAN_DIGEST
+        in digests
+    )
 
 
 def test_checked_issue_790_step_nine_executable_plan_contract() -> None:
@@ -2611,7 +2615,7 @@ def test_checked_issue_790_step_nine_executable_plan_contract() -> None:
     )
 
     assert plan["canonical_digest"] == (
-        "sha256:982cfe8cb30f326d3a62939fba38ecc2885af017ef990b1a7ad46dcc985d927c"
+        "sha256:ed9ddb506df0cc6572777bd9a91249b474032eb4dea6458d2c3e9b0466cbce77"
     )
     assert plan["sequence"]["sequence_ordinal"] == 9
     assert plan["sequence"]["constraint_change"] == "REVIEWED_NON_TIMEOUT_FIX"
@@ -2627,6 +2631,45 @@ def test_checked_issue_790_step_nine_executable_plan_contract() -> None:
     )
     assert qualification["qualification"] == (
         "CURSOR_API_KEY_CONFIGURATION_RECOVERED"
+    )
+    assert qualification["provider_calls"] == 0
+
+
+def test_checked_issue_790_step_ten_executable_plan_contract() -> None:
+    root = Path(__file__).resolve().parents[2]
+    plan = load_issue_790_plan(
+        root / "docs/operations/2026-08-27-issue-790-success-sequence-step-10.json"
+    )
+    contract = issue_790_contract_module.issue_790_approved_plan_contract(
+        plan["canonical_digest"]
+    )
+    qualification = json.loads(
+        (
+            root
+            / "docs/operations/2026-08-27-issue-790-step-10-local-sdk-idempotency-qualification.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert plan["canonical_digest"] == (
+        issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_10_PLAN_DIGEST
+    )
+    assert plan["sequence"]["sequence_ordinal"] == 10
+    assert plan["sequence"]["constraint_change"] == "REVIEWED_NON_TIMEOUT_FIX"
+    assert plan["sequence"]["predecessor"]["plan_digest"] == (
+        issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_9_PLAN_DIGEST
+    )
+    assert plan["sequence"]["reviewed_fix"]["fix_kind"] == "CODE"
+    assert plan["sequence"]["predecessor_causal_report"]["local_cause"] == (
+        "LOCAL_SDK_IDEMPOTENCY_KEY_UNSUPPORTED"
+    )
+    assert contract.sequence_ordinal == 10
+    assert contract.constraint_change == "REVIEWED_NON_TIMEOUT_FIX"
+    assert (
+        contract.predecessor_plan_digest
+        == issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_9_PLAN_DIGEST
+    )
+    assert qualification["qualification"] == (
+        "LOCAL_SDK_IDEMPOTENCY_KEY_OMIT_PROVIDER_FREE_READY"
     )
     assert qualification["provider_calls"] == 0
 
