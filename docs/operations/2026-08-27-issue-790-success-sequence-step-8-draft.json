@@ -20,7 +20,7 @@
   "intended_sequence": {
     "stop_condition": "FIRST_TRUTHFUL_PROVIDER_BACKED_SUCCESS",
     "call_shape_policy_version": "issue-816-v2",
-    "call_shape_policy_digest": "sha256:4c95b8ab06a6c9d18b2ede5d196c4d6d876f9949aefa1359f63a89f23e18e7e5",
+    "call_shape_policy_digest": "sha256:f0b2de282936824b5b1ff5d2d9e37126356e38d62ab7269d4cbfb18e9133d535",
     "controller_timeout_ms": 160000,
     "extraction_timeout_ms": 180000,
     "cleanup_reserve_ms": 20000,
@@ -34,5 +34,5 @@
     "fix_kind": "CODE_AND_CONFIGURATION",
     "notes": "Mint executable authority only after exact-main compatibility-floor provider-free qualification, zero-finding final review and owner-authenticated approval."
   },
-  "canonical_digest": "sha256:fb1e28aedee8c7a8989f4d27e2e52a93ee6fa12896033e695932ff34e8c9db62"
+  "canonical_digest": "sha256:808bffaa2bdae288142859e2383def50f0416876e600a0551205ed6fd3a261a8"
 }
