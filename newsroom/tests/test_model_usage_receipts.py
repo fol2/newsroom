@@ -2589,6 +2589,46 @@ def test_issue_790_invocation_plan_digests_cover_shared_successor_chain() -> Non
         issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_8_PLAN_DIGEST
         in digests
     )
+    assert (
+        issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_9_PLAN_DIGEST
+        in digests
+    )
+
+
+def test_checked_issue_790_step_nine_executable_plan_contract() -> None:
+    root = Path(__file__).resolve().parents[2]
+    plan = load_issue_790_plan(
+        root / "docs/operations/2026-08-27-issue-790-success-sequence-step-9.json"
+    )
+    contract = issue_790_contract_module.issue_790_approved_plan_contract(
+        plan["canonical_digest"]
+    )
+    qualification = json.loads(
+        (
+            root
+            / "docs/operations/2026-08-27-issue-790-step-9-cursor-api-key-configuration-qualification.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert plan["canonical_digest"] == (
+        "sha256:ed9ddb506df0cc6572777bd9a91249b474032eb4dea6458d2c3e9b0466cbce77"
+    )
+    assert plan["sequence"]["sequence_ordinal"] == 9
+    assert plan["sequence"]["constraint_change"] == "REVIEWED_NON_TIMEOUT_FIX"
+    assert plan["sequence"]["predecessor"]["plan_digest"] == (
+        issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_8_PLAN_DIGEST
+    )
+    assert plan["sequence"]["reviewed_fix"]["fix_kind"] == "CONFIGURATION"
+    assert contract.sequence_ordinal == 9
+    assert contract.constraint_change == "REVIEWED_NON_TIMEOUT_FIX"
+    assert (
+        contract.predecessor_plan_digest
+        == issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_8_PLAN_DIGEST
+    )
+    assert qualification["qualification"] == (
+        "CURSOR_API_KEY_CONFIGURATION_RECOVERED"
+    )
+    assert qualification["provider_calls"] == 0
 
 
 def test_checked_issue_790_compatibility_floor_provider_free_qualification_receipt() -> (
