@@ -447,9 +447,10 @@ def test_no_sdk_controller_or_fallback_retry(monkeypatch: pytest.MonkeyPatch) ->
             )
         )
 
-    assert invocations[0]["outcome"] == "FAILED"
-    assert invocations[0]["usage"]["usage_basis"] == "NO_PROVIDER_CALL"
+    assert invocations[0]["outcome"] == "AMBIGUOUS_DISPATCH"
+    assert invocations[0]["usage"]["usage_basis"] == "UNREPORTED"
     assert len(runtime.requests) == 1
+    assert runtime.requests[0].idempotency_key is not None
 
 
 def test_wrong_sdk_version_is_predispatch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -471,6 +472,7 @@ def test_official_runtime_uses_supported_sdk_api() -> None:
     assert "disallowed_tools=list(CURSOR_SDK_DISALLOWED_TOOLS)" in text
     assert "mcp_servers={}" in text
     assert "agents={}" in text
+    assert "idempotency_key=request.idempotency_key" in text
     assert "setting_sources" not in ast.unparse(
         next(
             node
@@ -478,6 +480,27 @@ def test_official_runtime_uses_supported_sdk_api() -> None:
             if isinstance(node, ast.ClassDef) and node.name == "OfficialCursorSdkRuntime"
         )
     )
+
+
+def test_official_runtime_constructs_and_closes_without_provider_calls() -> None:
+    import importlib.metadata
+    import shutil
+
+    pytest.importorskip("cursor_sdk")
+    assert importlib.metadata.version("cursor-sdk") == PINNED_SDK_VERSION
+
+    runtime = OfficialCursorSdkRuntime()
+    root = runtime._root
+    try:
+        assert root.is_dir()
+        assert (root / "workspace").is_dir()
+        assert (root / "store").is_dir()
+        assert (root / "bridge-state").is_dir()
+    finally:
+        runtime.close()
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
+        assert not root.exists()
 
 
 def test_production_graphiti_cursor_path_has_no_cli_harness() -> None:

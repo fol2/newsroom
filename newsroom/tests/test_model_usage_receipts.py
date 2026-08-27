@@ -2432,20 +2432,61 @@ def test_checked_issue_790_step_five_binds_call_shape_alignment() -> None:
     )
 
 
-def test_checked_issue_790_step_six_binds_network_requalification() -> None:
+def test_checked_issue_790_step_six_is_withdrawn_before_sdk_successor() -> None:
+    root = Path(__file__).resolve().parents[2]
+    withdrawal = json.loads(
+        (
+            root
+            / "docs/operations/2026-08-27-issue-790-success-sequence-step-6-withdrawal.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert withdrawal["plan_status"] == "WITHDRAWN"
+    assert withdrawal["superseded_by"] == "SUPERSEDED_BY_SDK_ARCHITECTURE"
+    assert withdrawal["withdrawn_plan_digest"] == (
+        "sha256:be8ccb6cec126cdaffe9801421cfc115d4651b5a305435a7e820290e17099239"
+    )
+    assert withdrawal["successor_plan_digest"] == (
+        "sha256:9860271441a1aab71356cd78071068b8b447210d5afa403c57554c30ab54826c"
+    )
+
+    step_six = validate_issue_790_plan(
+        json.loads(
+            (
+                root
+                / "docs/operations/2026-08-27-issue-790-success-sequence-step-6.json"
+            ).read_text(encoding="utf-8")
+        )
+    )
+    with pytest.raises(Issue790DispositionError, match="call-shape policy differs"):
+        issue_790_operation._require_iterative_call_shape(step_six)
+
+
+def test_checked_issue_790_step_seven_binds_sdk_transport_replacement() -> None:
     root = Path(__file__).resolve().parents[2]
     plan = load_issue_790_plan(
         root
-        / "docs/operations/2026-08-27-issue-790-success-sequence-step-6.json"
+        / "docs/operations/2026-08-27-issue-790-success-sequence-step-7.json"
     )
 
     assert plan["canonical_digest"] == (
-        "sha256:be8ccb6cec126cdaffe9801421cfc115d4651b5a305435a7e820290e17099239"
+        "sha256:9860271441a1aab71356cd78071068b8b447210d5afa403c57554c30ab54826c"
     )
     sequence = dict(plan["sequence"])
-    assert sequence["sequence_ordinal"] == 6
-    assert sequence["predecessor_causal_report"]["provider_cause"] == "NETWORK"
-    assert sequence["reviewed_fix"]["fix_kind"] == "CONFIGURATION"
+    assert sequence["sequence_ordinal"] == 7
+    assert sequence["call_shape_policy_version"] == "issue-807-v1"
+    assert sequence["call_shape_policy_digest"] == (
+        "sha256:2f84a0e7679482a5b74ccd093dc95a912a8b65d107d35a09f6a8cec92e8555d4"
+    )
+    assert sequence["fixed_constraints_digest"] == (
+        "sha256:41b20ba0bf9c52832206b8054568b25d72294bef37d773794a3bcca826d4d604"
+    )
+    assert sequence["predecessor_causal_report"]["local_cause"] == (
+        "CLI_TRANSPORT_SUPERSEDED_BY_SDK"
+    )
+    assert sequence["reviewed_fix"]["reviewed_fix_revision"] == (
+        "94d8421325a93702dc729662e0586885d49a0812"
+    )
 
 
 def test_issue_790_plan_rejects_malformed_sha256_identity() -> None:

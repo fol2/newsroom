@@ -45,6 +45,9 @@ ISSUE_790_SUCCESS_SEQUENCE_STEP_5_PLAN_DIGEST = (
 ISSUE_790_SUCCESS_SEQUENCE_STEP_6_PLAN_DIGEST = (
     "sha256:be8ccb6cec126cdaffe9801421cfc115d4651b5a305435a7e820290e17099239"
 )
+ISSUE_790_SUCCESS_SEQUENCE_STEP_7_PLAN_DIGEST = (
+    "sha256:9860271441a1aab71356cd78071068b8b447210d5afa403c57554c30ab54826c"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +296,41 @@ _SUCCESS_SEQUENCE_CONTRACTS = (
         constraint_change="REVIEWED_NON_TIMEOUT_FIX",
         reviewed_fix_digest=(
             "sha256:433886545558d316b483e760282fae71b996a3dd95ca31234f8900f4153c2df4"
+        ),
+    ),
+    Issue790ApprovedPlanContract(
+        schema_version="newsroom.issue-790.iterative-canary-plan.v2",
+        plan_digest=ISSUE_790_SUCCESS_SEQUENCE_STEP_7_PLAN_DIGEST,
+        invocation_id=(
+            "sha256:d0712807fd025520d0a94e5a28c532d4cb8684c936387290fe7eeb49d0b2336c"
+        ),
+        terminal_digest=(
+            "sha256:d48e844404516bd41b17038b42a834c6e54bf5da520ef046f3baf81ea7a8cbbe"
+        ),
+        allocation_digest=(
+            "sha256:c789330ca7151d097e6d366dd65481ff21d55f93891ff61e368d7369b12c7120"
+        ),
+        approved_by="github:fol2",
+        approval_reference="https://github.com/fol2/newsroom/issues/807",
+        approved_at="2026-08-27T10:00:00.000000Z",
+        scope=ISSUE_790_APPROVED_SCOPE,
+        terminal_outcome="FAILED",
+        route_open_reason="SYSTEMIC_TRANSPORT",
+        root_plan_digest=ISSUE_790_APPROVED_PLAN_DIGEST,
+        predecessor_plan_digest=ISSUE_790_SUCCESS_SEQUENCE_STEP_6_PLAN_DIGEST,
+        sequence_ordinal=7,
+        controller_timeout_ms=160_000,
+        extraction_timeout_ms=180_000,
+        cleanup_reserve_ms=20_000,
+        fixed_constraints_digest=(
+            "sha256:41b20ba0bf9c52832206b8054568b25d72294bef37d773794a3bcca826d4d604"
+        ),
+        predecessor_causal_report_digest=(
+            "sha256:a704ada3b5031352319585c29246161fd4e241ad7cdfffe93fb8c37b4af23499"
+        ),
+        constraint_change="REVIEWED_NON_TIMEOUT_FIX",
+        reviewed_fix_digest=(
+            "sha256:6f27d5c6055fc88fbee676378eeee2db8f329921476a3c10dd8b6abf44a6d2d6"
         ),
     ),
 )

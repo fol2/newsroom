@@ -6,7 +6,9 @@ The provider-free packet recommends **ADOPT** for the runtime policy. This is
 not live execution authority: owner-gated packets remain unauthorised, public
 effects are zero, and provider calls are zero.
 
-The canonical measurement is
+The canonical **current** measurement is
+[`2026-08-27-graphiti-runtime-calibration-measurements.json`](2026-08-27-graphiti-runtime-calibration-measurements.json).
+The 2026-08-25 packet remains an immutable CLI-era research record in
 [`2026-08-25-graphiti-runtime-calibration-measurements.json`](2026-08-25-graphiti-runtime-calibration-measurements.json).
 It binds the existing combined-temporal prompt/schema/context identities, the
 three qualified Graphiti routes, the checked call-shape policy and the sibling

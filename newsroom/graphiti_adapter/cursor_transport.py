@@ -78,6 +78,26 @@ class CursorSdkError(RuntimeError):
         self.execution = execution
 
 
+class CursorSdkAmbiguousDispatch(CursorSdkError):
+    """send() started but no durable run identity was retained."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_class: str,
+        error_code: str = "UNOBSERVED",
+        request_id: str = "UNOBSERVED",
+    ) -> None:
+        super().__init__(
+            message,
+            error_class=error_class,
+            error_code=error_code,
+            usage=unreported_cli_usage(),
+        )
+        self.request_id = request_id
+
+
 class CursorToolCallViolation(CursorSdkError):
     """A tool-call event violated the no-tool Graphiti contract."""
 
@@ -199,6 +219,7 @@ class CursorSdkRunRequest:
     store: str
     timeout: int
     max_output_bytes: int
+    idempotency_key: str | None = None
 
 
 class CursorSdkRun(Protocol):
@@ -310,6 +331,7 @@ def run_cursor_transport(
     max_tokens: int,
     timeout: int,
     dispatch_started: Callable[[], None] | None = None,
+    idempotency_key: str | None = None,
 ) -> CursorSdkExecution:
     """Qualify, send one fresh no-context run, and retain the typed terminal."""
 
@@ -339,6 +361,14 @@ def run_cursor_transport(
             store=str(store),
             timeout=timeout,
             max_output_bytes=cursor_output_limit(max_tokens),
+            idempotency_key=idempotency_key
+            or digest_canonical(
+                {
+                    "model": PINNED_MODEL,
+                    "max_tokens": max_tokens,
+                    "prompt": prompt,
+                }
+            ),
         )
         try:
             run = runtime.start_run(request)
@@ -347,7 +377,11 @@ def run_cursor_transport(
         except CursorSdkError:
             raise
         except Exception as exc:
-            raise _map_sdk_exception(exc, dispatched=False) from exc
+            raise _map_sdk_exception(
+                exc,
+                dispatch_confirmed=False,
+                send_attempted=True,
+            ) from exc
         if not run.id or not run.agent_id:
             run.close()
             raise CliPredispatchRefusal(
@@ -403,6 +437,7 @@ async def run_cursor_transport_async(
     max_tokens: int,
     timeout: int,
     dispatch_started: Callable[[], None] | None = None,
+    idempotency_key: str | None = None,
 ) -> CursorSdkExecution:
     import asyncio
 
@@ -412,6 +447,7 @@ async def run_cursor_transport_async(
         max_tokens=max_tokens,
         timeout=timeout,
         dispatch_started=dispatch_started,
+        idempotency_key=idempotency_key,
     )
 
 
@@ -465,7 +501,11 @@ def _consume_run(
     except CursorSdkError:
         raise
     except Exception as exc:
-        mapped = _map_sdk_exception(exc, dispatched=True)
+        mapped = _map_sdk_exception(
+            exc,
+            dispatch_confirmed=True,
+            send_attempted=True,
+        )
         mapped.execution = _execution(
             run,
             qualification=qualification,
@@ -750,35 +790,56 @@ def _diagnostic_digest(
     )
 
 
-def _map_sdk_exception(exc: Exception, *, dispatched: bool) -> Exception:
+def _sdk_request_id(exc: Exception) -> str:
+    observed = getattr(exc, "request_id", None)
+    if isinstance(observed, str) and observed.strip():
+        return observed
+    return "UNOBSERVED"
+
+
+def _map_sdk_exception(
+    exc: Exception,
+    *,
+    dispatch_confirmed: bool,
+    send_attempted: bool,
+) -> Exception:
     name = type(exc).__name__
     text = str(exc).lower()
     code = str(getattr(exc, "code", "") or getattr(exc, "type", "") or name)
+    request_id = _sdk_request_id(exc)
     if name in {"RateLimitError"} or "rate limit" in text or "resource_exhausted" in text:
         error_class = "RATE_LIMIT"
     elif name in {"AuthenticationError", "PermissionDeniedError"} or (
         "unauthor" in text or "unauthenticated" in text or "api key" in text
     ):
         error_class = "AUTHENTICATION"
-        if not dispatched:
+        if not send_attempted:
             return CliPredispatchRefusal("Cursor SDK authentication was refused")
     elif "model" in text and (
         "not found" in text or "unavailable" in text or "unsupported" in text
     ):
         error_class = "MODEL_UNAVAILABLE"
-        if not dispatched:
+        if not send_attempted:
             return CliPredispatchRefusal(
                 "exact composer-2.5 is absent from the model catalogue"
             )
     elif "timeout" in text or "deadline" in text or name in {"APITimeoutError"}:
         error_class = "TIMEOUT"
-    elif "network" in text or "connect" in text or name in {
+    elif "network" in text or name in {
         "APIConnectionError",
         "ConnectError",
-    }:
+        "NetworkError",
+    } or "connect" in text:
         error_class = "NETWORK"
     else:
         error_class = "SDK_ERROR"
+    if send_attempted and not dispatch_confirmed:
+        return CursorSdkAmbiguousDispatch(
+            "Cursor SDK Graphiti send did not retain a durable run identity",
+            error_class=error_class,
+            error_code=code,
+            request_id=request_id,
+        )
     if error_class == "TIMEOUT":
         return CursorSdkBoundedFailure(
             "Cursor SDK Graphiti run reached the controller deadline",
@@ -890,24 +951,38 @@ class OfficialCursorSdkRuntime:
                 root_dir=request.store,
             ),
         )
-        agent = self._client.agents.create(
-            self._sdk.AgentOptions(
-                model=PINNED_MODEL,
-                api_key=request.api_key,
-                tools=[],
-                disallowed_tools=list(CURSOR_SDK_DISALLOWED_TOOLS),
-                mcp_servers={},
-                agents={},
-                local=local,
-            )
-        )
         try:
-            run = agent.send(request.prompt)
-        except Exception:
+            agent = self._client.agents.create(
+                self._sdk.AgentOptions(
+                    model=PINNED_MODEL,
+                    api_key=request.api_key,
+                    tools=[],
+                    disallowed_tools=list(CURSOR_SDK_DISALLOWED_TOOLS),
+                    mcp_servers={},
+                    agents={},
+                    local=local,
+                )
+            )
+        except Exception as exc:
+            raise _map_sdk_exception(
+                exc,
+                dispatch_confirmed=False,
+                send_attempted=False,
+            ) from exc
+        try:
+            run = agent.send(
+                request.prompt,
+                idempotency_key=request.idempotency_key,
+            )
+        except Exception as exc:
             closer = getattr(agent, "close", None)
             if callable(closer):
                 closer()
-            raise
+            raise _map_sdk_exception(
+                exc,
+                dispatch_confirmed=False,
+                send_attempted=True,
+            ) from exc
         return OfficialCursorSdkRun(agent=agent, run=run)
 
 
@@ -976,6 +1051,7 @@ __all__ = [
     "PINNED_SDK_LOCK_IDENTITY",
     "PINNED_SDK_VERSION",
     "CliPredispatchRefusal",
+    "CursorSdkAmbiguousDispatch",
     "CursorSdkBoundedFailure",
     "CursorSdkCleanupError",
     "CursorSdkError",

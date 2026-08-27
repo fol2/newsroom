@@ -1,0 +1,120 @@
+{
+  "schema_version": "newsroom.issue-790.iterative-canary-plan.v2",
+  "issue": 790,
+  "approval": {
+    "approval_reference": "https://github.com/fol2/newsroom/issues/807",
+    "approved_at": "2026-08-27T10:00:00.000000Z",
+    "approved_by": "github:fol2",
+    "scope": "CONSERVATIVE_SUBSCRIPTION_CLI_USAGE_DISPOSITION"
+  },
+  "canary": {
+    "authority_consumption": "APPEND_ONLY_SINGLE_USE_BEFORE_PROVIDER_IO",
+    "event_binding": "EXPLICIT_QUEUED_ATTEMPT_ZERO_EVENT",
+    "fallback_mode": "DISABLED_BEFORE_PROVIDER_DISPATCH",
+    "fresh_provider_backed_attempt_count": 1,
+    "persistent_worker_state_before_canary": "UNLOADED",
+    "requires_exact_main_deployment": true
+  },
+  "non_effects": [
+    "NO_PUBLICATION",
+    "NO_PUBLIC_DISPATCH",
+    "NO_BACKLOG_DRAIN",
+    "NO_BULK_REQUEUE",
+    "NO_PRODUCTION_OPERATIONAL_ADMISSION",
+    "NO_WIDER_ACTIVATION",
+    "NO_PROVIDER_SUBSTITUTION",
+    "NO_MODEL_SUBSTITUTION",
+    "NO_TOKEN_LIMIT_REMOVAL",
+    "NO_UNRELATED_SPEND_DISPOSITION"
+  ],
+  "release": {
+    "evidence": "CONSERVATIVE_DISPOSITION_DIGEST",
+    "kind": "AUTHORISED_OPERATOR_RESET"
+  },
+  "retry_forbidden_events": [
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-26T12:25:29.807056Z",
+      "event_id": "sha256:bacb9104c81dd86ca3f62a39f6c386cd4d84ab470e9675e31acf8e2feb50443e",
+      "last_failure_code": "PRODUCER_INTERNAL_ERROR",
+      "ledger_seq": 1932,
+      "provider_dispatched": true,
+      "state": "RETRY_HELD"
+    },
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-26T13:52:15.763233Z",
+      "event_id": "sha256:de7bb58fde4829f4778936e7c5ebd1dd583a63f8658fb6af2fcb4b6fc873b0d5",
+      "last_failure_code": "PRODUCER_INTERNAL_ERROR",
+      "ledger_seq": 1972,
+      "provider_dispatched": false,
+      "state": "RETRY_HELD"
+    }
+  ],
+  "sequence": {
+    "sequence_ordinal": 7,
+    "stop_condition": "FIRST_TRUTHFUL_PROVIDER_BACKED_SUCCESS",
+    "constraint_change": "REVIEWED_NON_TIMEOUT_FIX",
+    "controller_timeout_ms": 160000,
+    "extraction_timeout_ms": 180000,
+    "cleanup_reserve_ms": 20000,
+    "timeout_increment_ms": 10000,
+    "call_shape_policy_digest": "sha256:2f84a0e7679482a5b74ccd093dc95a912a8b65d107d35a09f6a8cec92e8555d4",
+    "call_shape_policy_version": "issue-807-v1",
+    "fixed_constraints_digest": "sha256:41b20ba0bf9c52832206b8054568b25d72294bef37d773794a3bcca826d4d604",
+    "root_plan_digest": "sha256:ce7ee7fd56c931b147158dad2a74047ada90b805e5a4c545e53db1f4d2ae7383",
+    "predecessor": {
+      "plan_digest": "sha256:be8ccb6cec126cdaffe9801421cfc115d4651b5a305435a7e820290e17099239",
+      "consumption_digest": "sha256:c0e20ccc4a1bf724b699530688716bfe64b88fa17fba8b3c1acf44f042a8c3a9",
+      "outcome_digest": "sha256:022fc74aabfda21132c079b2228738ea0376455853a5d5c3b3a21868d65307d8",
+      "event_id": "sha256:0e2a7db9aeb2bddd32da2a62c812a19323ed22958e94b8cb0050b1c872a20d96",
+      "ledger_seq": 8879
+    },
+    "predecessor_causal_report": {
+      "schema_version": "newsroom.issue-790.non-timeout-causal-report.v1",
+      "classification": "NON_TIMEOUT_FAILURE",
+      "causal_constraint": "REVIEWED_CODE_OR_CONFIGURATION_FIX",
+      "boundary": "PRIMARY_TRANSPORT",
+      "local_cause": "CLI_TRANSPORT_SUPERSEDED_BY_SDK",
+      "provider_cause": "NOT_CALLED",
+      "termination": "PLAN_WITHDRAWN_BEFORE_EXECUTION",
+      "last_progress": "CHECKED_AUTHORITY_FAIL_CLOSED",
+      "event_id": "sha256:0e2a7db9aeb2bddd32da2a62c812a19323ed22958e94b8cb0050b1c872a20d96",
+      "predecessor_outcome_digest": "sha256:022fc74aabfda21132c079b2228738ea0376455853a5d5c3b3a21868d65307d8",
+      "configured_controller_timeout_ms": 160000,
+      "configured_extraction_timeout_ms": 180000,
+      "cleanup_reserve_ms": 20000,
+      "elapsed_ms": 0,
+      "deadline_at": null,
+      "diagnostic_reference": "https://github.com/fol2/newsroom/issues/807",
+      "report_digest": "sha256:a704ada3b5031352319585c29246161fd4e241ad7cdfffe93fb8c37b4af23499"
+    },
+    "reviewed_fix": {
+      "schema_version": "newsroom.issue-790.reviewed-non-timeout-fix.v1",
+      "predecessor_outcome_digest": "sha256:022fc74aabfda21132c079b2228738ea0376455853a5d5c3b3a21868d65307d8",
+      "causal_report_digest": "sha256:a704ada3b5031352319585c29246161fd4e241ad7cdfffe93fb8c37b4af23499",
+      "fix_kind": "CODE_AND_CONFIGURATION",
+      "pull_request_url": "https://github.com/fol2/newsroom/pull/808",
+      "reviewed_fix_revision": "94d8421325a93702dc729662e0586885d49a0812",
+      "review_receipt_digest": "sha256:75cd02a6ccddc7e0fa995bf5f3cca8c9552a4fbf91a7e58751ecaaa6299b4bc4",
+      "provider_free_qualification_digest": "sha256:f3a7bf00c607ac947067c9f90dbd88ecf76207865ac3b6063c16de2136ddef81",
+      "record_digest": "sha256:6f27d5c6055fc88fbee676378eeee2db8f329921476a3c10dd8b6abf44a6d2d6"
+    }
+  },
+  "target": {
+    "allocation_digest": "sha256:c789330ca7151d097e6d366dd65481ff21d55f93891ff61e368d7369b12c7120",
+    "conservative_total_source": "QUALIFIED_POLICY_MAX_TOTAL_TOKENS",
+    "expected_conservative_total_tokens": 147456,
+    "invocation_id": "sha256:d0712807fd025520d0a94e5a28c532d4cb8684c936387290fe7eeb49d0b2336c",
+    "policy_digest": "sha256:2f84a0e7679482a5b74ccd093dc95a912a8b65d107d35a09f6a8cec92e8555d4",
+    "provider": "cursor-agent-cli",
+    "route": "GRAPHITI_CHAT_PRIMARY",
+    "route_open_reason": "SYSTEMIC_TRANSPORT",
+    "terminal_digest": "sha256:d48e844404516bd41b17038b42a834c6e54bf5da520ef046f3baf81ea7a8cbbe",
+    "terminal_failure_class": "MISSING_PROVIDER_TELEMETRY",
+    "terminal_outcome": "FAILED",
+    "terminal_usage_status": "UNREPORTED",
+    "workload_class": "GRAPHITI_CHAT_PRIMARY"
+  },
+  "canonical_digest": "sha256:9860271441a1aab71356cd78071068b8b447210d5afa403c57554c30ab54826c"
+}

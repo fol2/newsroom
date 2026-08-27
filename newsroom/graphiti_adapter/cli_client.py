@@ -31,6 +31,7 @@ from newsroom.graphiti_adapter.cli_process import (
 )
 from newsroom.graphiti_adapter.cursor_transport import (
     CliPredispatchRefusal,
+    CursorSdkAmbiguousDispatch,
     CursorSdkBoundedFailure,
     CursorSdkCleanupError,
     CursorSdkError,
@@ -556,7 +557,26 @@ def _sdk_failure_execution(exc: BaseException) -> CliExecution | None:
     return None
 
 
+def _cursor_usage_for_failure(
+    exc: BaseException | None,
+    *,
+    transport_started: bool,
+    sdk_execution: CliExecution | None = None,
+) -> dict[str, object]:
+    if isinstance(exc, CursorSdkAmbiguousDispatch):
+        return unreported_cli_usage()
+    if transport_started:
+        if sdk_execution is not None:
+            return dict(sdk_execution.usage)
+        if isinstance(exc, CursorSdkError):
+            return dict(exc.usage)
+        return unreported_cli_usage()
+    return no_provider_call_cli_usage()
+
+
 def _sdk_failure_outcome(exc: CursorSdkError) -> str:
+    if isinstance(exc, CursorSdkAmbiguousDispatch):
+        return "AMBIGUOUS_DISPATCH"
     if isinstance(exc, CursorSdkBoundedFailure):
         return exc.outcome
     if exc.error_class == "RATE_LIMIT":
@@ -885,12 +905,10 @@ async def run_cli_chain(
         raise
     except (TimeoutError, subprocess.TimeoutExpired, CursorSdkBoundedFailure) as exc:
         sdk_execution = _sdk_failure_execution(exc)
-        cursor_usage = (
-            no_provider_call_cli_usage()
-            if not cursor_transport_started
-            else dict(sdk_execution.usage)
-            if sdk_execution is not None
-            else unreported_cli_usage()
+        cursor_usage = _cursor_usage_for_failure(
+            exc,
+            transport_started=cursor_transport_started,
+            sdk_execution=sdk_execution,
         )
         outcome = (
             exc.outcome
@@ -979,21 +997,28 @@ async def run_cli_chain(
         payload = None
     except CursorSdkError as exc:
         sdk_execution = _sdk_failure_execution(exc)
-        cursor_usage = (
-            no_provider_call_cli_usage()
-            if not cursor_transport_started
-            else dict(exc.usage)
+        cursor_usage = _cursor_usage_for_failure(
+            exc,
+            transport_started=cursor_transport_started,
+            sdk_execution=sdk_execution,
         )
         cursor_outcome = _sdk_failure_outcome(exc)
         binding = observe(
             cursor_token, outcome=cursor_outcome, usage=cursor_usage
         )
+        ambiguous_execution = sdk_execution
+        if ambiguous_execution is None and isinstance(exc, CursorSdkAmbiguousDispatch):
+            ambiguous_execution = CliExecution(
+                text="",
+                usage=cursor_usage,
+                sdk_request_id=exc.request_id,
+            )
         invocations.append(
             _invocation(
                 provider="cursor-agent-cli",
                 model=CURSOR_AGENT_MODEL_ID,
                 outcome=cursor_outcome,
-                execution=sdk_execution
+                execution=ambiguous_execution
                 or CliExecution(text="", usage=cursor_usage),
                 failure=type(exc).__name__,
                 requested_max_tokens=max_tokens,

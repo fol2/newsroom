@@ -1,0 +1,11 @@
+{
+  "schema_version": "newsroom.issue-790.plan-withdrawal.v1",
+  "withdrawn_plan_digest": "sha256:be8ccb6cec126cdaffe9801421cfc115d4651b5a305435a7e820290e17099239",
+  "withdrawn_plan_path": "docs/operations/2026-08-27-issue-790-success-sequence-step-6.json",
+  "plan_status": "WITHDRAWN",
+  "superseded_by": "SUPERSEDED_BY_SDK_ARCHITECTURE",
+  "successor_plan_digest": "sha256:9860271441a1aab71356cd78071068b8b447210d5afa403c57554c30ab54826c",
+  "successor_plan_path": "docs/operations/2026-08-27-issue-790-success-sequence-step-7.json",
+  "reason": "CLI network successor authority is obsolete after Cursor SDK transport replacement (#807).",
+  "canonical_digest": "sha256:223a8db8b233543683c0fcdc103c2a5aa421ef58842a2c268f59de644dda0a25"
+}
