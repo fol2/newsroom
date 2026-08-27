@@ -13,7 +13,7 @@
     "persistent_worker_state_before_canary": "UNLOADED",
     "requires_exact_main_deployment": true
   },
-  "canonical_digest": "sha256:ed9ddb506df0cc6572777bd9a91249b474032eb4dea6458d2c3e9b0466cbce77",
+  "canonical_digest": "sha256:982cfe8cb30f326d3a62939fba38ecc2885af017ef990b1a7ad46dcc985d927c",
   "issue": 790,
   "non_effects": [
     "NO_PUBLICATION",
@@ -53,7 +53,7 @@
   ],
   "schema_version": "newsroom.issue-790.iterative-canary-plan.v2",
   "sequence": {
-    "call_shape_policy_digest": "sha256:00e094297b2423272ade50b52a3ce8a75392128b6d60c70ea24b07f0ff8e89a2",
+    "call_shape_policy_digest": "sha256:b3ba9f54e1f2bf539d231ceebe3b1ec2ceaef52f89aa69f1692a9864d57fe604",
     "call_shape_policy_version": "issue-816-v2",
     "cleanup_reserve_ms": 20000,
     "constraint_change": "REVIEWED_NON_TIMEOUT_FIX",
