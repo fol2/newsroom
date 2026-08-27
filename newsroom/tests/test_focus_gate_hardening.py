@@ -97,7 +97,33 @@ def test_stateful_route_uses_direct_tests_and_two_bounded_sentinels(
         "newsroom/tests/test_authority_store_conformance.py",
     }
     assert not any("unrelated" in path for path in route["selected_tests"])
+    assert route["full_health_required"] is False
     assert "bounded_stateful_sentinels:F2" in route["reasons"]
+
+
+def test_stateful_route_without_direct_evidence_escalates_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write(tmp_path, "newsroom/authority/uncovered.py", "VALUE = 1\n")
+    _write(tmp_path, "newsroom/tests/test_authority_migration_compatibility.py")
+    _write(tmp_path, "newsroom/tests/test_authority_store_conformance.py")
+    for index in range(5):
+        _write(tmp_path, f"newsroom/tests/test_authority_unrelated_{index}.py")
+    monkeypatch.setattr(selector, "build_dependency_graph", lambda _root: _Graph())
+
+    route = selector.select_focus(
+        ("newsroom/authority/uncovered.py",),
+        repo_root=tmp_path,
+    )
+
+    assert route["full_health_required"] is True
+    assert set(route["selected_tests"]) == {
+        "newsroom/tests/test_authority_migration_compatibility.py",
+        "newsroom/tests/test_authority_store_conformance.py",
+    }
+    assert not any("unrelated" in path for path in route["selected_tests"])
+    assert "stateful_without_direct_evidence:full_health" in route["reasons"]
 
 
 def test_discovered_actual_service_consumer_promotes_route_to_f3(

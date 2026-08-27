@@ -330,6 +330,9 @@ def select_focus(
             reasons.add("unresolved_dependency_analysis:full_health")
 
     if stateful_required:
+        if not (tests or service_tests):
+            full_health_required = True
+            reasons.add("stateful_without_direct_evidence:full_health")
         tests.update(legacy._existing(root, STATEFUL_SENTINELS))
         reasons.add("bounded_stateful_sentinels:F2")
     if service_tests:
