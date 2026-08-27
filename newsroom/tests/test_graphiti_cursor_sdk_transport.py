@@ -21,6 +21,7 @@ from newsroom.graphiti_adapter.cursor_transport import (
     PINNED_MODEL,
     PINNED_SDK_VERSION,
     CliPredispatchRefusal,
+    CursorSdkAmbiguousDispatch,
     CursorSdkBoundedFailure,
     CursorSdkCleanupError,
     CursorSdkError,
@@ -35,6 +36,7 @@ from newsroom.graphiti_adapter.usage_meter import cursor_sdk_usage, unreported_c
 
 _ADAPTER = Path(__file__).resolve().parents[1] / "graphiti_adapter"
 _GRAPHITI_JSON = '{"entities":[],"entity_resolutions":[],"edges":[]}'
+_TEST_IDEMPOTENCY_KEY = "sha256:" + ("a" * 64)
 
 
 @dataclass
@@ -183,6 +185,7 @@ def test_streamed_and_terminal_usage_match(monkeypatch: pytest.MonkeyPatch) -> N
         prompt="extract",
         max_tokens=64,
         timeout=5,
+        idempotency_key=_TEST_IDEMPOTENCY_KEY,
     )
 
     assert execution.text == _GRAPHITI_JSON
@@ -210,7 +213,9 @@ def test_terminal_only_usage_is_authoritative(
         ),
     )
 
-    execution = run_cursor_transport(prompt="extract", max_tokens=32, timeout=5)
+    execution = run_cursor_transport(
+        prompt="extract", max_tokens=32, timeout=5, idempotency_key=_TEST_IDEMPOTENCY_KEY
+    )
 
     assert execution.usage == cursor_sdk_usage(terminal)
     assert execution.usage["input_tokens"] == 4
@@ -228,7 +233,9 @@ def test_missing_usage_stays_unreported(monkeypatch: pytest.MonkeyPatch) -> None
         ),
     )
 
-    execution = run_cursor_transport(prompt="extract", max_tokens=32, timeout=5)
+    execution = run_cursor_transport(
+        prompt="extract", max_tokens=32, timeout=5, idempotency_key=_TEST_IDEMPOTENCY_KEY
+    )
 
     assert execution.usage == unreported_cli_usage()
     assert execution.usage["input_tokens"] is None
@@ -245,6 +252,7 @@ def test_pre_send_refusal_is_zero_dispatch(monkeypatch: pytest.MonkeyPatch) -> N
             prompt="extract",
             max_tokens=32,
             timeout=5,
+            idempotency_key=_TEST_IDEMPOTENCY_KEY,
             dispatch_started=lambda: started.append("sent"),
         )
 
@@ -263,6 +271,7 @@ def test_missing_api_key_is_zero_dispatch(monkeypatch: pytest.MonkeyPatch) -> No
             prompt="extract",
             max_tokens=32,
             timeout=5,
+            idempotency_key=_TEST_IDEMPOTENCY_KEY,
             dispatch_started=lambda: started.append("sent"),
         )
 
@@ -282,6 +291,7 @@ def test_run_identity_commits_dispatch_exactly_once(
         "extract",
         max_tokens=32,
         dispatch_started=lambda: started.append(runtime.run.id),
+        idempotency_key=_TEST_IDEMPOTENCY_KEY,
     )
 
     assert started == ["run-807"]
@@ -305,7 +315,9 @@ def test_tool_call_cancels_once_and_fails_closed(
     runtime = _bind(monkeypatch, FakeRuntime(run=run))
 
     with pytest.raises(CursorToolCallViolation):
-        run_cursor_transport(prompt="extract", max_tokens=32, timeout=5)
+        run_cursor_transport(
+            prompt="extract", max_tokens=32, timeout=5, idempotency_key=_TEST_IDEMPOTENCY_KEY
+        )
 
     assert run.cancel_count == 1
     assert len(runtime.requests) == 1
@@ -334,6 +346,7 @@ def test_malformed_graphiti_output_remains_rejected(
                 grok_runner=lambda *_args, **_values: pytest.fail("fallback ran"),
                 invocations=invocations,
                 fallback_permitted=False,
+                idempotency_key=_TEST_IDEMPOTENCY_KEY,
             )
         )
 
@@ -359,7 +372,9 @@ def test_typed_sdk_errors_map_without_retry(
     runtime = _bind(monkeypatch, FakeRuntime(start_error=error))
 
     with pytest.raises((CursorSdkError, CliPredispatchRefusal)) as caught:
-        run_cursor_transport(prompt="extract", max_tokens=32, timeout=5)
+        run_cursor_transport(
+            prompt="extract", max_tokens=32, timeout=5, idempotency_key=_TEST_IDEMPOTENCY_KEY
+        )
 
     if isinstance(caught.value, CursorSdkError):
         assert caught.value.error_class == error_class
@@ -383,7 +398,9 @@ def test_timeout_retains_partial_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     with pytest.raises(CursorSdkBoundedFailure) as caught:
-        run_cursor_transport(prompt="extract", max_tokens=32, timeout=1)
+        run_cursor_transport(
+            prompt="extract", max_tokens=32, timeout=1, idempotency_key=_TEST_IDEMPOTENCY_KEY
+        )
 
     assert caught.value.error_class == "TIMEOUT"
     assert caught.value.usage == cursor_sdk_usage(partial)
@@ -404,7 +421,9 @@ def test_output_bound_retains_partial_usage(monkeypatch: pytest.MonkeyPatch) -> 
     runtime = _bind(monkeypatch, FakeRuntime(run=run))
 
     with pytest.raises(CursorSdkBoundedFailure) as caught:
-        run_cursor_transport(prompt="extract", max_tokens=1, timeout=5)
+        run_cursor_transport(
+            prompt="extract", max_tokens=1, timeout=5, idempotency_key=_TEST_IDEMPOTENCY_KEY
+        )
 
     assert caught.value.error_class == "OUTPUT_BOUND"
     assert caught.value.usage == cursor_sdk_usage(partial)
@@ -421,7 +440,9 @@ def test_cleanup_failure_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
     _bind(monkeypatch, FakeRuntime(run=run))
 
     with pytest.raises(CursorSdkCleanupError) as caught:
-        run_cursor_transport(prompt="extract", max_tokens=32, timeout=5)
+        run_cursor_transport(
+            prompt="extract", max_tokens=32, timeout=5, idempotency_key=_TEST_IDEMPOTENCY_KEY
+        )
 
     assert caught.value.error_class == "CLEANUP"
     assert caught.value.execution is not None
@@ -444,13 +465,138 @@ def test_no_sdk_controller_or_fallback_retry(monkeypatch: pytest.MonkeyPatch) ->
                 grok_runner=lambda *_args, **_values: pytest.fail("fallback ran"),
                 invocations=invocations,
                 fallback_permitted=True,
+                idempotency_key=_TEST_IDEMPOTENCY_KEY,
             )
         )
 
     assert invocations[0]["outcome"] == "AMBIGUOUS_DISPATCH"
     assert invocations[0]["usage"]["usage_basis"] == "UNREPORTED"
     assert len(runtime.requests) == 1
-    assert runtime.requests[0].idempotency_key is not None
+    assert runtime.requests[0].idempotency_key == _TEST_IDEMPOTENCY_KEY
+
+
+def test_governed_request_digest_reaches_sdk_idempotency_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_digest = "sha256:" + ("b" * 64)
+    runtime = _bind(
+        monkeypatch,
+        FakeRuntime(
+            run=FakeRun(
+                messages=(_assistant(_GRAPHITI_JSON),),
+                terminal=FakeTerminal(result=_GRAPHITI_JSON, usage=FakeUsage(1, 1)),
+            )
+        ),
+    )
+
+    class Observer:
+        def before_cli_invocation(self, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(request_digest=request_digest)
+
+        def transport_dispatch_started(self, _token: object) -> None:
+            return None
+
+        def after_cli_invocation(
+            self, _token: object, *, outcome: str, usage: dict[str, object]
+        ) -> dict[str, str]:
+            return {}
+
+    asyncio.run(
+        run_cli_chain(
+            prompt="prompt",
+            schema=None,
+            cursor_runner=run_cursor_agent_llm,
+            grok_runner=lambda *_args, **_values: pytest.fail("fallback ran"),
+            invocations=[],
+            invocation_observer=Observer(),
+            fallback_permitted=False,
+        )
+    )
+
+    assert runtime.requests[0].idempotency_key == request_digest
+
+
+def test_same_prompt_different_governed_digests_use_distinct_idempotency_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _bind(
+        monkeypatch,
+        FakeRuntime(
+            run=FakeRun(
+                messages=(_assistant(_GRAPHITI_JSON),),
+                terminal=FakeTerminal(result=_GRAPHITI_JSON, usage=FakeUsage(1, 1)),
+            )
+        ),
+    )
+    digests = ("sha256:" + ("c" * 64), "sha256:" + ("d" * 64))
+
+    class Observer:
+        def __init__(self, request_digest: str) -> None:
+            self._request_digest = request_digest
+
+        def before_cli_invocation(self, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(request_digest=self._request_digest)
+
+        def transport_dispatch_started(self, _token: object) -> None:
+            return None
+
+        def after_cli_invocation(
+            self, _token: object, *, outcome: str, usage: dict[str, object]
+        ) -> dict[str, str]:
+            return {}
+
+    for request_digest in digests:
+        asyncio.run(
+            run_cli_chain(
+                prompt="same prompt",
+                schema=None,
+                cursor_runner=run_cursor_agent_llm,
+                grok_runner=lambda *_args, **_values: _GRAPHITI_JSON,
+                invocations=[],
+                invocation_observer=Observer(request_digest),
+                fallback_permitted=False,
+            )
+        )
+
+    assert [item.idempotency_key for item in runtime.requests] == list(digests)
+
+
+def test_missing_run_id_after_send_is_ambiguous(monkeypatch: pytest.MonkeyPatch) -> None:
+    _bind(
+        monkeypatch,
+        FakeRuntime(run=FakeRun(id="", agent_id="agent-807")),
+    )
+
+    with pytest.raises(CursorSdkAmbiguousDispatch) as caught:
+        run_cursor_transport(
+            prompt="extract",
+            max_tokens=32,
+            timeout=5,
+            idempotency_key=_TEST_IDEMPOTENCY_KEY,
+        )
+
+    assert caught.value.error_class == "MISSING_RUN_ID"
+    assert caught.value.usage["usage_basis"] == "UNREPORTED"
+
+
+def test_missing_agent_id_after_send_is_ambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _bind(
+        monkeypatch,
+        FakeRuntime(run=FakeRun(id="run-807", agent_id="")),
+    )
+
+    with pytest.raises(CursorSdkAmbiguousDispatch) as caught:
+        run_cursor_transport(
+            prompt="extract",
+            max_tokens=32,
+            timeout=5,
+            idempotency_key=_TEST_IDEMPOTENCY_KEY,
+        )
+
+    assert caught.value.error_class == "MISSING_AGENT_ID"
+    assert caught.value.usage["usage_basis"] == "UNREPORTED"
 
 
 def test_wrong_sdk_version_is_predispatch(monkeypatch: pytest.MonkeyPatch) -> None:

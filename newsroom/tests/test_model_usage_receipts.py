@@ -2447,8 +2447,9 @@ def test_checked_issue_790_step_six_is_withdrawn_before_sdk_successor() -> None:
         "sha256:be8ccb6cec126cdaffe9801421cfc115d4651b5a305435a7e820290e17099239"
     )
     assert withdrawal["successor_plan_digest"] == (
-        "sha256:9860271441a1aab71356cd78071068b8b447210d5afa403c57554c30ab54826c"
+        "sha256:086f1c706228925f3f1f1e5c8d4b9a8d1b8bc53e23795d843e547eabd8f6284e"
     )
+    assert withdrawal["successor_executable"] is False
 
     step_six = validate_issue_790_plan(
         json.loads(
@@ -2462,31 +2463,40 @@ def test_checked_issue_790_step_six_is_withdrawn_before_sdk_successor() -> None:
         issue_790_operation._require_iterative_call_shape(step_six)
 
 
-def test_checked_issue_790_step_seven_binds_sdk_transport_replacement() -> None:
+def test_checked_issue_790_step_seven_remains_non_executable_draft() -> None:
     root = Path(__file__).resolve().parents[2]
-    plan = load_issue_790_plan(
-        root
-        / "docs/operations/2026-08-27-issue-790-success-sequence-step-7.json"
+    draft = json.loads(
+        (
+            root
+            / "docs/operations/2026-08-27-issue-790-success-sequence-step-7-draft.json"
+        ).read_text(encoding="utf-8")
+    )
+    step_six = json.loads(
+        (
+            root
+            / "docs/operations/2026-08-27-issue-790-success-sequence-step-6.json"
+        ).read_text(encoding="utf-8")
     )
 
-    assert plan["canonical_digest"] == (
-        "sha256:9860271441a1aab71356cd78071068b8b447210d5afa403c57554c30ab54826c"
+    assert draft["plan_status"] == "DRAFT"
+    assert draft["executable"] is False
+    assert draft["sequence_ordinal"] == 7
+    assert draft["retained_predecessor_causal_report_digest"] == (
+        step_six["sequence"]["predecessor_causal_report"]["report_digest"]
     )
-    sequence = dict(plan["sequence"])
-    assert sequence["sequence_ordinal"] == 7
-    assert sequence["call_shape_policy_version"] == "issue-807-v1"
-    assert sequence["call_shape_policy_digest"] == (
-        "sha256:2f84a0e7679482a5b74ccd093dc95a912a8b65d107d35a09f6a8cec92e8555d4"
+    assert step_six["sequence"]["predecessor_causal_report"]["provider_cause"] == (
+        "NETWORK"
     )
-    assert sequence["fixed_constraints_digest"] == (
-        "sha256:41b20ba0bf9c52832206b8054568b25d72294bef37d773794a3bcca826d4d604"
+    assert step_six["sequence"]["predecessor_causal_report"]["termination"] == (
+        "PROCESS_EXITED_NONZERO"
     )
-    assert sequence["predecessor_causal_report"]["local_cause"] == (
-        "CLI_TRANSPORT_SUPERSEDED_BY_SDK"
-    )
-    assert sequence["reviewed_fix"]["reviewed_fix_revision"] == (
-        "94d8421325a93702dc729662e0586885d49a0812"
-    )
+    assert draft["intended_sequence"]["call_shape_policy_version"] == "issue-807-v1"
+
+    with pytest.raises(Issue790DispositionError, match="plan fields differ"):
+        load_issue_790_plan(
+            root
+            / "docs/operations/2026-08-27-issue-790-success-sequence-step-7-draft.json"
+        )
 
 
 def test_issue_790_plan_rejects_malformed_sha256_identity() -> None:

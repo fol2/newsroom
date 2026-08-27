@@ -339,6 +339,8 @@ def run_cursor_transport(
         raise ValueError("Graphiti requested max_tokens must be positive")
     if isinstance(timeout, bool) or timeout <= 0:
         raise ValueError("Graphiti Cursor SDK timeout must be positive")
+    if idempotency_key is None or not idempotency_key.strip():
+        raise ValueError("Graphiti Cursor SDK idempotency_key is required")
     api_key = os.environ.get(CURSOR_SDK_AUTH_SOURCE)
     runtime = process_cursor_sdk_runtime()
     qualification = qualify_cursor_sdk(runtime=runtime, api_key=api_key)
@@ -361,14 +363,7 @@ def run_cursor_transport(
             store=str(store),
             timeout=timeout,
             max_output_bytes=cursor_output_limit(max_tokens),
-            idempotency_key=idempotency_key
-            or digest_canonical(
-                {
-                    "model": PINNED_MODEL,
-                    "max_tokens": max_tokens,
-                    "prompt": prompt,
-                }
-            ),
+            idempotency_key=idempotency_key,
         )
         try:
             run = runtime.start_run(request)
@@ -382,10 +377,19 @@ def run_cursor_transport(
                 dispatch_confirmed=False,
                 send_attempted=True,
             ) from exc
-        if not run.id or not run.agent_id:
+        if not run.id:
             run.close()
-            raise CliPredispatchRefusal(
-                "Cursor SDK run did not expose a durable run identity"
+            raise CursorSdkAmbiguousDispatch(
+                "Cursor SDK run did not expose a durable run id after send()",
+                error_class="MISSING_RUN_ID",
+                error_code="MISSING_RUN_ID",
+            )
+        if not run.agent_id:
+            run.close()
+            raise CursorSdkAmbiguousDispatch(
+                "Cursor SDK run did not expose a durable agent id after send()",
+                error_class="MISSING_AGENT_ID",
+                error_code="MISSING_AGENT_ID",
             )
         if dispatch_started is not None:
             dispatch_started()

@@ -89,6 +89,7 @@ class CliRunner(Protocol):
         *,
         max_tokens: int,
         dispatch_started: Callable[[], None] | None = None,
+        idempotency_key: str | None = None,
     ) -> CliOutput: ...
 
 
@@ -110,6 +111,7 @@ class AsyncCliRunner(Protocol):
         *,
         max_tokens: int,
         dispatch_started: Callable[[], None] | None = None,
+        idempotency_key: str | None = None,
     ) -> CliOutput: ...
 
 
@@ -434,6 +436,7 @@ def run_cursor_agent_llm(
     *,
     max_tokens: int,
     dispatch_started: Callable[[], None] | None = None,
+    idempotency_key: str | None = None,
 ) -> CliExecution:
     _require_positive_max_tokens(max_tokens)
     return _sdk_execution(
@@ -442,6 +445,7 @@ def run_cursor_agent_llm(
             max_tokens=max_tokens,
             timeout=CLI_CALL_TIMEOUT_SECONDS,
             dispatch_started=dispatch_started,
+            idempotency_key=idempotency_key,
         )
     )
 
@@ -451,6 +455,7 @@ async def run_cursor_agent_llm_async(
     *,
     max_tokens: int,
     dispatch_started: Callable[[], None] | None = None,
+    idempotency_key: str | None = None,
 ) -> CliExecution:
     _require_positive_max_tokens(max_tokens)
     return _sdk_execution(
@@ -459,6 +464,7 @@ async def run_cursor_agent_llm_async(
             max_tokens=max_tokens,
             timeout=CLI_CALL_TIMEOUT_SECONDS,
             dispatch_started=dispatch_started,
+            idempotency_key=idempotency_key,
         )
     )
 
@@ -754,6 +760,21 @@ def _runner_accepts_dispatch_marker(runner: Callable[..., object]) -> bool:
     return "dispatch_started" in parameters
 
 
+def _runner_accepts_idempotency_key(runner: Callable[..., object]) -> bool:
+    try:
+        parameters = inspect.signature(runner).parameters
+    except (TypeError, ValueError):
+        return False
+    return "idempotency_key" in parameters
+
+
+def _governed_idempotency_key(token: object | None) -> str | None:
+    request_digest = getattr(token, "request_digest", None)
+    if isinstance(request_digest, str) and request_digest.startswith("sha256:"):
+        return request_digest
+    return None
+
+
 def _mark_observed_transport_dispatch(
     observer: CliInvocationObserver | None, token: object
 ) -> None:
@@ -775,6 +796,7 @@ async def run_cli_chain(
     semantic_request_class: str = "UNSTRUCTURED",
     max_tokens: int = 16_384,
     fallback_permitted: bool = True,
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     """Execute cursor then Grok fallback while retaining every call outcome."""
 
@@ -794,6 +816,13 @@ async def run_cli_chain(
             max_tokens=max_tokens,
         )
     )
+    cursor_idempotency_key = (
+        _governed_idempotency_key(cursor_token) or idempotency_key
+    )
+    if invocation_observer is not None and cursor_idempotency_key is None:
+        raise CliDispatchMarkerError(
+            "Cursor governed request digest is unavailable before transport"
+        )
     cursor_transport_started = False
     cursor_started = time.monotonic()
 
@@ -830,6 +859,7 @@ async def run_cli_chain(
                     prompt,
                     max_tokens=max_tokens,
                     dispatch_started=mark_cursor_transport_started,
+                    idempotency_key=cursor_idempotency_key,
                 )
             else:
                 mark_cursor_transport_started()
@@ -841,6 +871,7 @@ async def run_cli_chain(
                     prompt,
                     max_tokens=max_tokens,
                     dispatch_started=mark_cursor_transport_started,
+                    idempotency_key=cursor_idempotency_key,
                 )
             else:
                 mark_cursor_transport_started()

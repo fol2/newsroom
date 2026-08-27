@@ -1,0 +1,31 @@
+{
+  "schema_version": "newsroom.issue-790.iterative-canary-plan-draft.v1",
+  "issue": 790,
+  "plan_status": "DRAFT",
+  "executable": false,
+  "sequence_ordinal": 7,
+  "blocked_until": [
+    "PR_810_MERGED",
+    "EXACT_MAIN_PROVIDER_FREE_SDK_QUALIFICATION",
+    "FINAL_REVIEW_RECEIPT",
+    "OWNER_AUTHENTICATED_SDK_CANARY_APPROVAL"
+  ],
+  "withdrawal_reference": "docs/operations/2026-08-27-issue-790-success-sequence-step-6-withdrawal.json",
+  "retained_predecessor_causal_report_digest": "sha256:0addaad5a37b05a47f4701cd2a0b201664176ca49901cf66acb1df904af76771",
+  "retained_predecessor_causal_report_path": "docs/operations/2026-08-27-issue-790-success-sequence-step-6.json",
+  "intended_sequence": {
+    "stop_condition": "FIRST_TRUTHFUL_PROVIDER_BACKED_SUCCESS",
+    "call_shape_policy_version": "issue-807-v1",
+    "call_shape_policy_digest": "sha256:2f84a0e7679482a5b74ccd093dc95a912a8b65d107d35a09f6a8cec92e8555d4",
+    "controller_timeout_ms": 160000,
+    "extraction_timeout_ms": 180000,
+    "cleanup_reserve_ms": 20000,
+    "fallback_mode": "DISABLED_BEFORE_PROVIDER_DISPATCH"
+  },
+  "intended_reviewed_fix": {
+    "pull_request_url": "https://github.com/fol2/newsroom/pull/810",
+    "fix_kind": "CODE_AND_CONFIGURATION",
+    "notes": "Mint executable authority only after merge and owner approval."
+  },
+  "canonical_digest": "sha256:086f1c706228925f3f1f1e5c8d4b9a8d1b8bc53e23795d843e547eabd8f6284e"
+}
