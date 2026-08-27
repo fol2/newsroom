@@ -1,5 +1,5 @@
 {
-  "canonical_digest": "sha256:83b11afe10fc8444ece8b382b721b82a000d4772619bdd6dbb13d88a7e1bf4e4",
+  "canonical_digest": "sha256:2288ae8e8f49459d086fd851d412e9ca38d4dee0ea4555dc84fc7a4efec5abef",
   "failure": {
     "boundary": "PRIMARY_TRANSPORT",
     "elapsed_ms": 183679,
@@ -15,7 +15,7 @@
   "predecessor_outcome_digest": "sha256:abf80ec45b8a44c4fb30525ad5fc98d88af6faba8f4b2b11ca652bc5c6e699d9",
   "provider_calls": 0,
   "provider_free_checks": {
-    "call_shape_policy_digest": "sha256:b3ba9f54e1f2bf539d231ceebe3b1ec2ceaef52f89aa69f1692a9864d57fe604",
+    "call_shape_policy_digest": "sha256:00e094297b2423272ade50b52a3ce8a75392128b6d60c70ea24b07f0ff8e89a2",
     "call_shape_policy_version": "issue-816-v2",
     "composer_floor": "composer>=2.5",
     "cursor_api_key_env": "PRESENT",
