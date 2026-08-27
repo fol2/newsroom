@@ -1,0 +1,33 @@
+{
+  "schema_version": "newsroom.issue-790.provider-free-code-fix-qualification.v1",
+  "issue": 790,
+  "observed_at": "2026-08-27T21:40:00.000000Z",
+  "predecessor_outcome_digest": "sha256:7045092996b16040e696764d756b2f18a30bfad865be01b4ef0c2cdc36064acd",
+  "provider_calls": 0,
+  "public_effects": 0,
+  "model_catalogue_queries": 0,
+  "live_canary_authorised": false,
+  "failure": {
+    "boundary": "PRIMARY_TRANSPORT",
+    "elapsed_ms": 8,
+    "failure_code": "AMBIGUOUS_DISPATCH",
+    "local_cause": "LOCAL_SDK_IDEMPOTENCY_KEY_UNSUPPORTED",
+    "provider_cause": "UNOBSERVED",
+    "termination": "AMBIGUOUS_DISPATCH"
+  },
+  "provider_free_checks": {
+    "call_shape_policy_version": "issue-816-v2",
+    "call_shape_policy_digest": "sha256:b3ba9f54e1f2bf539d231ceebe3b1ec2ceaef52f89aa69f1692a9864d57fe604",
+    "sdk_floor": "cursor-sdk>=1.0.29",
+    "composer_floor": "composer>=2.5",
+    "local_send_omits_idempotency_key": "PASS",
+    "idempotency_unimplemented_not_ambiguous": "PASS",
+    "usage_path": "stream_plus_wait",
+    "get_usage_not_required": "PASS",
+    "fix_pr": "https://github.com/fol2/newsroom/pull/830",
+    "fix_revision": "54eb5f6f4216faee8d1a4c35b99bccda5e322524",
+    "persistent_worker": "UNLOADED"
+  },
+  "qualification": "LOCAL_SDK_IDEMPOTENCY_KEY_OMIT_PROVIDER_FREE_READY",
+  "canonical_digest": "sha256:ea5855f789ce5ba75b4a1a772066257846bff4b374ae2597e674bd031d4c8951"
+}

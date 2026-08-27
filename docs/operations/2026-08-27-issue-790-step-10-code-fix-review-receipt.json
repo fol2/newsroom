@@ -1,0 +1,14 @@
+{
+  "schema_version": "newsroom.issue-790.code-fix-review-receipt.v1",
+  "issue": 790,
+  "observed_at": "2026-08-27T21:40:00.000000Z",
+  "fix_kind": "CODE",
+  "fix_summary": "Omit Idempotency-Key on local cursor-sdk Send; classify cloud-only unimplemented as non-ambiguous",
+  "predecessor_outcome_digest": "sha256:7045092996b16040e696764d756b2f18a30bfad865be01b4ef0c2cdc36064acd",
+  "qualification_digest": "sha256:ea5855f789ce5ba75b4a1a772066257846bff4b374ae2597e674bd031d4c8951",
+  "pull_request_url": "https://github.com/fol2/newsroom/pull/830",
+  "reviewed_fix_revision": "54eb5f6f4216faee8d1a4c35b99bccda5e322524",
+  "provider_calls": 0,
+  "secret_material_committed": false,
+  "canonical_digest": "sha256:33cf648d0672f4c80c9a1a282619724d9add0cb99fc0ded73fbf31decccc87d8"
+}
