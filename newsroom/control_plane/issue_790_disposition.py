@@ -37,6 +37,7 @@ from newsroom.control_plane.issue_790_canary import (
 from newsroom.control_plane.issue_790_contract import (
     ISSUE_790_APPROVED_PLAN_DIGEST,
     issue_790_approved_plan_contract,
+    issue_790_approved_plan_contracts,
 )
 from newsroom.control_plane.model_usage import (
     ModelUsageAdmissionError,
@@ -44,6 +45,7 @@ from newsroom.control_plane.model_usage import (
     ModelUsageService,
 )
 from newsroom.graphiti_adapter import cli_client as cli_client_module
+from newsroom.graphiti_adapter import cursor_transport as cursor_transport_module
 from newsroom.graphiti_adapter import evaluation_packet as evaluation_packet_module
 from newsroom.graphiti_adapter import real as real_graphiti_module
 from newsroom.graphiti_adapter.evaluation_packet import (
@@ -142,6 +144,10 @@ _RUNNING_CODE_MODULES: tuple[tuple[str, str], ...] = (
         "newsroom/graphiti_adapter/cli_client.py",
     ),
     (
+        "newsroom.graphiti_adapter.cursor_transport",
+        "newsroom/graphiti_adapter/cursor_transport.py",
+    ),
+    (
         "newsroom.graphiti_adapter.real",
         "newsroom/graphiti_adapter/real.py",
     ),
@@ -157,6 +163,7 @@ _RUNNING_CODE_PATHS: dict[str, str | None] = {
     "newsroom.control_plane.cycle": cycle_module.__file__,
     "newsroom.graphiti_adapter.evaluation_packet": evaluation_packet_module.__file__,
     "newsroom.graphiti_adapter.cli_client": cli_client_module.__file__,
+    "newsroom.graphiti_adapter.cursor_transport": cursor_transport_module.__file__,
     "newsroom.graphiti_adapter.real": real_graphiti_module.__file__,
 }
 
@@ -357,7 +364,7 @@ def _validated_reviewed_fix(value: object) -> dict[str, object]:
         ) is None
         or re.fullmatch(r"[0-9a-f]{40}", _text(fix, "reviewed_fix_revision")) is None
         or any(
-            not _text(fix, field).startswith("sha256:")
+            re.fullmatch(r"sha256:[0-9a-f]{64}", _text(fix, field)) is None
             for field in (
                 "predecessor_outcome_digest", "causal_report_digest",
                 "review_receipt_digest", "provider_free_qualification_digest",
@@ -436,7 +443,7 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
         "allocation_digest",
         "policy_digest",
     ):
-        if not _text(target, field).startswith("sha256:"):
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", _text(target, field)) is None:
             raise Issue790DispositionError(f"issue #790 {field} differs")
     if (
         target.get("route") != "GRAPHITI_CHAT_PRIMARY"
@@ -527,7 +534,7 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
                 }
                 else predecessor
             )
-            if not _text(source, field).startswith("sha256:"):
+            if re.fullmatch(r"sha256:[0-9a-f]{64}", _text(source, field)) is None:
                 raise Issue790DispositionError(
                     f"issue #790 sequence {field} differs"
                 )
@@ -743,8 +750,12 @@ def _require_approved_plan(value: Mapping[str, object]) -> dict[str, object]:
                 previous_contract.sequence_ordinal + 1
                 != contract.sequence_ordinal
                 or previous_contract.root_plan_digest != contract.root_plan_digest
-                or previous_contract.fixed_constraints_digest
-                != contract.fixed_constraints_digest
+                or (
+                    sequence.get("constraint_change")
+                    != "REVIEWED_NON_TIMEOUT_FIX"
+                    and previous_contract.fixed_constraints_digest
+                    != contract.fixed_constraints_digest
+                )
                 or previous_contract.cleanup_reserve_ms
                 != contract.cleanup_reserve_ms
             ):
@@ -788,7 +799,8 @@ def _require_approved_plan(value: Mapping[str, object]) -> dict[str, object]:
                 raise Issue790DispositionError(
                     "issue #790 successor transition differs"
                 )
-    _require_iterative_call_shape(plan)
+    if contract.plan_digest == issue_790_approved_plan_contracts()[-1].plan_digest:
+        _require_iterative_call_shape(plan)
     return plan
 
 
