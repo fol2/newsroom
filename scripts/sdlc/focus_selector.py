@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import ast
-import fnmatch
 from pathlib import Path
 from typing import Iterable, Sequence
 
 from . import focus_gate as legacy
+from .classify_change import matches_repository_glob
 from .dependencies import DependencyError, build_dependency_graph, module_name_for_path
 
 CONTROL_PATTERNS = (
@@ -79,7 +79,7 @@ IGNORED_IMPORT_ROOTS = frozenset({"newsroom", "scripts"})
 
 
 def _matches(path: str, patterns: Iterable[str]) -> bool:
-    return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
+    return any(matches_repository_glob(path, pattern) for pattern in patterns)
 
 
 def _matches_any(paths: Iterable[str], patterns: Iterable[str]) -> bool:
