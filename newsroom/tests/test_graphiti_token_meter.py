@@ -58,28 +58,19 @@ def test_predispatch_no_call_proof_rejects_extra_usage_fields() -> None:
     )
 
 
-def test_cursor_json_output_retains_provider_reported_tokens() -> None:
-    from newsroom.graphiti_adapter.cli_client import parse_cursor_output
+def test_cursor_sdk_usage_retains_provider_reported_tokens() -> None:
+    from newsroom.graphiti_adapter.usage_meter import cursor_sdk_usage
 
-    execution = parse_cursor_output(
-        json.dumps(
-            {
-                "type": "result",
-                "subtype": "success",
-                "is_error": False,
-                "result": '{"value":"primary"}',
-                "usage": {
-                    "inputTokens": 20_685,
-                    "outputTokens": 140,
-                    "cacheReadTokens": 576,
-                    "cacheWriteTokens": 0,
-                },
-            }
-        )
+    usage = cursor_sdk_usage(
+        {
+            "input_tokens": 20_685,
+            "output_tokens": 140,
+            "cache_read_tokens": 576,
+            "cache_write_tokens": 0,
+        }
     )
 
-    assert execution.text == '{"value":"primary"}'
-    assert execution.usage == {
+    assert usage == {
         "usage_basis": "PROVIDER_REPORTED",
         "input_tokens": 20_685,
         "output_tokens": 140,

@@ -30,9 +30,10 @@ dev = [
 graphiti = [
     "graphiti-core==0.29.3",
     "httpx>=0.27",
+    "cursor-sdk==1.0.29",
 ]
 cursor-research = [
-    "cursor-sdk==1.0.28",
+    "cursor-sdk==1.0.29",
 ]
 
 [dependency-groups]

@@ -1,108 +1,51 @@
-"""Runtime-qualified Cursor transport and bounded execution."""
+"""Process-owned Cursor SDK transport for Graphiti chat."""
 
 from __future__ import annotations
 
-import asyncio
-import hashlib
-import json
+import atexit
+import importlib
+import importlib.metadata
 import os
-import stat
-import subprocess
+import tempfile
+import threading
 import time
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
-from newsroom.graphiti_adapter.cli_process import (
-    CliOutputBoundExceeded,
-    CliOutputDecodeError,
-    CliProcessOutput,
-    CliTransportTimeout,
-    process_exit_diagnostic,
-    run_bounded_process,
-    run_bounded_process_async,
-    timeout_deadline_after,
-    timeout_diagnostic,
-)
+from newsroom.authority.canonical import digest_canonical
 from newsroom.graphiti_adapter.evaluation_packet import CURSOR_AGENT_MODEL_ID
+from newsroom.graphiti_adapter.usage_meter import (
+    cursor_sdk_usage,
+    unreported_cli_usage,
+)
 
-QUALIFIED_CURSOR_AGENT_BIN = "/Users/jamesto/.local/bin/cursor-agent"
-QUALIFIED_CURSOR_AGENT_VERSION_ROOT = (
-    "/Users/jamesto/.local/share/cursor-agent/versions"
+PINNED_SDK_VERSION = "1.0.29"
+PINNED_SDK_LOCK_IDENTITY = "cursor-sdk==1.0.29"
+PINNED_MODEL = CURSOR_AGENT_MODEL_ID
+CURSOR_SDK_TRANSPORT = "CURSOR_SDK"
+CURSOR_SDK_QUALIFICATION_SCHEMA_VERSION = "newsroom.cursor-sdk-qualification.v1"
+CURSOR_SDK_TERMINAL_SCHEMA_VERSION = "newsroom.cursor-sdk-terminal.v1"
+CURSOR_SDK_AUTH_SOURCE = "CURSOR_API_KEY"
+CURSOR_SDK_DISALLOWED_TOOLS = ("shell", "mcp", "task")
+CURSOR_OUTPUT_BASE_BYTES = 64 * 1024
+CURSOR_OUTPUT_BYTES_PER_TOKEN = 64
+CURSOR_OUTPUT_LIMIT_FORMULA = "65536+64*REQUEST_MAX_TOKENS"
+CURSOR_OUTPUT_LIMIT_IDENTITY = (
+    "cursor-sdk-controller-output-v1:" + CURSOR_OUTPUT_LIMIT_FORMULA
 )
-QUALIFIED_CURSOR_LOGIN_KEYCHAIN = "/Users/jamesto/Library/Keychains/login.keychain-db"
-QUALIFIED_CURSOR_SECURITY_BIN = "/usr/bin/security"
-QUALIFIED_CURSOR_SECURITY_OWNER_UID = 0
-CURSOR_AUTHENTICATION_BRIDGE = "MACOS_LOGIN_KEYCHAIN_FILE_SYMLINK_V1"
-CURSOR_AUTHENTICATION_PROBE = "MACOS_CURSOR_KEYCHAIN_LOOKUP_V1"
-CURSOR_CREDENTIAL_ACCOUNT = "cursor-user"
-CURSOR_CREDENTIAL_SEARCH = "DEFAULT_KEYCHAIN_SEARCH_LIST"
-CURSOR_CREDENTIAL_STATE = "LOCAL_ACCESS_REFRESH_TOKENS_READABLE"
-CURSOR_AGENT_BIN = os.environ.get(
-    "NEWSROOM_CURSOR_AGENT_BIN", QUALIFIED_CURSOR_AGENT_BIN
-)
-CURSOR_PREFLIGHT_TIMEOUT_SECONDS = 20
-CURSOR_LOCAL_CREDENTIAL_PROBE_TIMEOUT_SECONDS = 5
-CURSOR_PREFLIGHT_MAX_BYTES = 64 * 1024
-CURSOR_STDOUT_BASE_BYTES = 64 * 1024
-CURSOR_STDOUT_BYTES_PER_TOKEN = 64
-CURSOR_STDOUT_LIMIT_FORMULA = "65536+64*REQUEST_MAX_TOKENS"
-CURSOR_STDOUT_LIMIT_IDENTITY = (
-    "cursor-controller-stdout-v1:" + CURSOR_STDOUT_LIMIT_FORMULA
-)
-CURSOR_COMMAND_SURFACE_PROOF = "RUNTIME_CAPABILITY_QUALIFICATION_V1"
-_ProcessOutput = CliProcessOutput
-_run_bounded_process = run_bounded_process
-_run_bounded_process_async = run_bounded_process_async
-
-_CURSOR_PUBLIC_CONTROLS = (
-    "--print",
-    "--mode",
-    "--output-format",
-    "--sandbox",
-    "--workspace",
-    "--trust",
-    "--model",
-)
-_CURSOR_ISOLATION_CONTROLS = (
-    "--single-turn",
-    "--exclude-workspace-context",
-    "--allowed-tools=EMPTY",
-    "HERMETIC_HOME_XDG",
-    CURSOR_AUTHENTICATION_BRIDGE,
-    CURSOR_AUTHENTICATION_PROBE,
-)
-_CURSOR_CREDENTIAL_SERVICES = (
-    "cursor-access-token",
-    "cursor-refresh-token",
-)
-_CURSOR_CONTROL_ARGUMENTS = (
-    "--print",
-    "--single-turn",
-    "--mode",
-    "ask",
-    "--output-format",
-    "json",
-    "--sandbox",
-    "enabled",
-    "--exclude-workspace-context",
-    "--allowed-tools",
-    "",
-    "--trust",
-    "--model",
-    CURSOR_AGENT_MODEL_ID,
-)
-_CURSOR_CAPABILITY_PROBE_ARGUMENTS = (
-    "--single-turn",
-    "--exclude-workspace-context",
-    "--allowed-tools",
-    "",
-    "about",
-)
+CURSOR_STDOUT_LIMIT_IDENTITY = CURSOR_OUTPUT_LIMIT_IDENTITY
+_PROCESS_CLIENT_UNARY_TIMEOUT_SECONDS = 160.0
+_PROCESS_CLIENT_STREAM_TIMEOUT_SECONDS = 160.0
+_PROCESS_CLIENT_MAX_RETRIES = 0
+_bound_runtime: "CursorSdkRuntime | None" = None
+_official_runtime: "OfficialCursorSdkRuntime | None" = None
+_official_lock = threading.Lock()
 
 
 class CliPredispatchRefusal(RuntimeError):
-    """The installed CLI cannot prove the checked transport contract."""
+    """Configuration, authentication or catalogue refused before send()."""
 
     def __init__(
         self,
@@ -114,1077 +57,940 @@ class CliPredispatchRefusal(RuntimeError):
         self.qualification_evidence = dict(qualification_evidence or {})
 
 
-class CursorProcessExitError(RuntimeError):
-    """A non-zero Cursor exit with bounded, content-free diagnostics."""
+class CursorSdkError(RuntimeError):
+    """A typed SDK, network or model failure after or during send()."""
 
-    def __init__(self, result: _ProcessOutput) -> None:
-        super().__init__("cursor-agent Graphiti LLM failed")
-        self.evidence = process_exit_diagnostic(
-            returncode=result.returncode,
-            cause=_cursor_exit_cause(result),
-            stdout=result.stdout,
-            stderr=result.stderr,
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_class: str,
+        status: str = "error",
+        error_code: str = "UNOBSERVED",
+        usage: Mapping[str, object] | None = None,
+        execution: "CursorSdkExecution | None" = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_class = error_class
+        self.status = status
+        self.error_code = error_code
+        self.usage = dict(usage or unreported_cli_usage())
+        self.execution = execution
+
+
+class CursorToolCallViolation(CursorSdkError):
+    """A tool-call event violated the no-tool Graphiti contract."""
+
+    def __init__(self, execution: "CursorSdkExecution") -> None:
+        super().__init__(
+            "Cursor SDK Graphiti run emitted a tool call",
+            error_class="TOOL_CALL",
+            status=execution.status,
+            error_code="TOOL_CALL",
+            usage=execution.usage,
+            execution=execution,
+        )
+
+
+class CursorSdkBoundedFailure(CursorSdkError):
+    """Timeout or output-bound cancellation with any retained usage."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_class: str,
+        execution: "CursorSdkExecution",
+    ) -> None:
+        super().__init__(
+            message,
+            error_class=error_class,
+            status=execution.status,
+            error_code=error_class,
+            usage=execution.usage,
+            execution=execution,
+        )
+        self.outcome = (
+            "OUTPUT_LIMIT_EXCEEDED"
+            if error_class == "OUTPUT_BOUND"
+            else "TIMEOUT"
+        )
+
+
+class CursorSdkCleanupError(CursorSdkError):
+    """Agent or workspace cleanup failed after the terminal was retained."""
+
+    def __init__(self, execution: "CursorSdkExecution") -> None:
+        super().__init__(
+            "Cursor SDK Graphiti cleanup failed",
+            error_class="CLEANUP",
+            status=execution.status,
+            error_code="CLEANUP",
+            usage=execution.usage,
+            execution=execution,
         )
 
 
 @dataclass(frozen=True, slots=True)
-class CursorCliQualification:
-    binary: str
-    resolved_binary: str
-    version: str
-    expected_version: str
-    controls: tuple[str, ...]
-    version_digest: str
-    help_digest: str
-    command_template_digest: str
-    launcher_digest: str
-    command_surface_digest: str
-    control_semantics_digest: str
-    package_digest: str
-    command_surface_proof: str
-    stdout_limit_bytes: int
-    authentication_bridge: str = "UNOBSERVED"
-    authentication_bridge_digest: str = "UNOBSERVED"
-    authentication_probe: str = "UNOBSERVED"
-    authentication_probe_digest: str = "UNOBSERVED"
-    credential_state: str = "UNOBSERVED"
-    credential_state_digest: str = "UNOBSERVED"
-    _authentication_bridge_proof: _CursorAuthenticationBridgeProof | None = field(
-        default=None,
-        repr=False,
-        compare=False,
-    )
+class CursorSdkQualification:
+    sdk_version: str
+    lock_identity: str
+    model: str
+    unary_timeout_seconds: int
+    stream_timeout_seconds: int
+    max_retries: int
+    transport_policy_digest: str
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "binary": self.binary,
-            "resolved_binary": self.resolved_binary,
-            "version": self.version,
-            "expected_version": self.expected_version,
-            "controls": list(self.controls),
-            "version_digest": self.version_digest,
-            "help_digest": self.help_digest,
-            "command_template_digest": self.command_template_digest,
-            "launcher_digest": self.launcher_digest,
-            "command_surface_digest": self.command_surface_digest,
-            "control_semantics_digest": self.control_semantics_digest,
-            "package_digest": self.package_digest,
-            "command_surface_proof": self.command_surface_proof,
-            "stdout_limit_bytes": self.stdout_limit_bytes,
-            "stdout_limit_formula": CURSOR_STDOUT_LIMIT_FORMULA,
-            "stdout_limit_identity": CURSOR_STDOUT_LIMIT_IDENTITY,
-            "authentication_bridge": self.authentication_bridge,
-            "authentication_bridge_digest": self.authentication_bridge_digest,
-            "authentication_probe": self.authentication_probe,
-            "authentication_probe_digest": self.authentication_probe_digest,
-            "credential_state": self.credential_state,
-            "credential_state_digest": self.credential_state_digest,
+            "schema_version": CURSOR_SDK_QUALIFICATION_SCHEMA_VERSION,
+            "transport": CURSOR_SDK_TRANSPORT,
+            "sdk_version": self.sdk_version,
+            "lock_identity": self.lock_identity,
+            "model": self.model,
+            "unary_timeout_seconds": self.unary_timeout_seconds,
+            "stream_timeout_seconds": self.stream_timeout_seconds,
+            "max_retries": self.max_retries,
+            "transport_policy_digest": self.transport_policy_digest,
         }
 
 
 @dataclass(frozen=True, slots=True)
-class _CursorPackageProof:
-    root: str
-    resolved_binary: str
-    version: str
-    launcher_digest: str
-    command_surface_digest: str
-    control_semantics_digest: str
-    package_digest: str
+class CursorSdkExecution:
+    text: str
+    usage: dict[str, object]
+    qualification: CursorSdkQualification
+    agent_id: str
+    run_id: str
+    request_id: str
+    resolved_model: str
+    status: str
+    error_class: str
+    error_code: str
+    tool_call_count: int
+    cancelled: bool
+    duration_ms: int | None
+    stream_message_classes: tuple[str, ...]
+    diagnostic_digest: str
+
+    def terminal_record(self) -> dict[str, object]:
+        return {
+            "schema_version": CURSOR_SDK_TERMINAL_SCHEMA_VERSION,
+            "status": self.status,
+            "error_class": self.error_class,
+            "error_code": self.error_code,
+            "agent_id": self.agent_id,
+            "run_id": self.run_id,
+            "request_id": self.request_id,
+            "resolved_model": self.resolved_model,
+            "tool_call_count": self.tool_call_count,
+            "cancelled": self.cancelled,
+            "duration_ms": self.duration_ms,
+            "stream_message_classes": list(self.stream_message_classes),
+            "diagnostic_digest": self.diagnostic_digest,
+        }
 
 
 @dataclass(frozen=True, slots=True)
-class _CursorQualificationPreparation:
-    package: _CursorPackageProof
-    resolved_binary: str
-    evidence: dict[str, object]
+class CursorSdkRunRequest:
+    prompt: str
+    api_key: str
+    cwd: str
+    store: str
+    timeout: int
+    max_output_bytes: int
 
 
-@dataclass(frozen=True, slots=True)
-class _CursorAuthenticationBridgeProof:
-    method: str
-    source: str
-    source_device: int
-    source_inode: int
-    source_uid: int
-    source_mode: int
-    source_size: int
-    source_mtime_ns: int
-    source_ctime_ns: int
-    destination: str
+class CursorSdkRun(Protocol):
+    id: str
+    agent_id: str
+    status: str
+    model: object | None
+    usage: object | None
+    duration_ms: int | None
 
-    @property
-    def policy_digest(self) -> str:
-        return _sha256_bytes(
-            json.dumps(
-                {
-                    "method": self.method,
-                    "source": self.source,
-                },
-                ensure_ascii=True,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-        )
+    def stream(self) -> Iterator[object]: ...
+
+    def wait(self) -> object: ...
+
+    def cancel(self) -> None: ...
+
+    def close(self) -> None: ...
 
 
-@dataclass(frozen=True, slots=True)
-class _CursorCredentialProbeProof:
-    security_binary: str
-    account: str
-    search: str
-    access_token_readable: bool
-    refresh_token_readable: bool
+class CursorSdkRuntime(Protocol):
+    sdk_version: str
 
-    @property
-    def probe_policy_digest(self) -> str:
-        return _sha256_bytes(
-            json.dumps(
-                {
-                    "method": CURSOR_AUTHENTICATION_PROBE,
-                    "security_binary": self.security_binary,
-                    "account": self.account,
-                    "search": self.search,
-                    "services": list(_CURSOR_CREDENTIAL_SERVICES),
-                },
-                ensure_ascii=True,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-        )
+    def list_model_ids(self, *, api_key: str) -> tuple[str, ...]: ...
 
-    @property
-    def credential_state(self) -> str:
-        if self.access_token_readable and self.refresh_token_readable:
-            return CURSOR_CREDENTIAL_STATE
-        return "LOCAL_CREDENTIALS_UNAVAILABLE"
-
-    @property
-    def credential_state_digest(self) -> str:
-        return _sha256_bytes(
-            json.dumps(
-                {
-                    "account": self.account,
-                    "access_token_readable": self.access_token_readable,
-                    "refresh_token_readable": self.refresh_token_readable,
-                    "search": self.search,
-                },
-                ensure_ascii=True,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-        )
+    def start_run(self, request: CursorSdkRunRequest) -> CursorSdkRun: ...
 
 
-def _sha256_bytes(value: bytes) -> str:
-    return f"sha256:{hashlib.sha256(value).hexdigest()}"
-
-
-def _sha256_text(value: str) -> str:
-    return _sha256_bytes(value.encode("utf-8"))
-
-
-def _cursor_exit_cause(result: _ProcessOutput) -> str:
-    if result.returncode < 0:
-        return "PROCESS_SIGNAL"
-    output = f"{result.stderr}\n{result.stdout}".lower()
-    for cause, markers in (
-        (
-            "AUTHENTICATION",
-            (
-                "unauthenticated",
-                "unauthorized",
-                "authentication",
-                "login required",
-                "token expired",
-            ),
-        ),
-        (
-            "RATE_LIMITED",
-            ("rate limit", "resource_exhausted", "too many requests"),
-        ),
-        (
-            "MODEL_UNAVAILABLE",
-            (
-                "model not found",
-                "model unavailable",
-                "unsupported model",
-                "invalid model",
-            ),
-        ),
-        ("UPSTREAM_TIMEOUT", ("deadline exceeded", "timed out", "timeout")),
-        ("NETWORK", ("connection", "network", "econn", "socket", "dns")),
-        (
-            "UPSTREAM_SERVER",
-            ("internal server", "service unavailable", "bad gateway"),
-        ),
-    ):
-        if any(marker in output for marker in markers):
-            return cause
-    return "UNCLASSIFIED_NONZERO_EXIT"
-
-
-def _owned_private_directory(path: Path, *, description: str) -> os.stat_result:
-    try:
-        observed = path.lstat()
-    except OSError as exc:
-        raise CliPredispatchRefusal(f"Cursor CLI {description} is absent") from exc
-    if (
-        not stat.S_ISDIR(observed.st_mode)
-        or path.is_symlink()
-        or observed.st_uid != os.getuid()
-        or stat.S_IMODE(observed.st_mode) != 0o700
-    ):
-        raise CliPredispatchRefusal(
-            f"Cursor CLI {description} is not an owner-private directory"
-        )
-    return observed
-
-
-def _qualified_login_keychain() -> tuple[Path, os.stat_result]:
-    source = Path(QUALIFIED_CURSOR_LOGIN_KEYCHAIN)
-    try:
-        observed = source.lstat()
-    except OSError as exc:
-        raise CliPredispatchRefusal(
-            "Cursor CLI qualified login keychain source is absent"
-        ) from exc
-    if (
-        not source.is_absolute()
-        or source.is_symlink()
-        or not stat.S_ISREG(observed.st_mode)
-        or os.path.realpath(source) != str(source)
-        or observed.st_uid != os.getuid()
-        or stat.S_IMODE(observed.st_mode) & 0o022
-    ):
-        raise CliPredispatchRefusal(
-            "Cursor CLI login keychain source is not a fixed regular file"
-        )
-    return source, observed
-
-
-def _authentication_bridge_destination(
-    environment: Mapping[str, str],
-) -> Path:
-    home_value = environment.get("HOME", "")
-    if not home_value or not os.path.isabs(home_value):
-        raise CliPredispatchRefusal(
-            "Cursor CLI authentication bridge requires an absolute hermetic HOME"
-        )
-    home = Path(home_value)
-    _owned_private_directory(home, description="hermetic HOME")
-    library = home / "Library"
-    keychains = library / "Keychains"
-    for path, description in (
-        (library, "hermetic Library"),
-        (keychains, "hermetic Keychains"),
-    ):
-        try:
-            path.mkdir(mode=0o700)
-        except FileExistsError:
-            pass
-        except OSError as exc:
-            raise CliPredispatchRefusal(
-                f"Cursor CLI {description} could not be created"
-            ) from exc
-        _owned_private_directory(path, description=description)
-    return keychains / "login.keychain-db"
-
-
-def _inspect_cursor_authentication_bridge(
-    environment: Mapping[str, str],
-) -> _CursorAuthenticationBridgeProof:
-    source, source_stat = _qualified_login_keychain()
-    destination = _authentication_bridge_destination(environment)
-    try:
-        destination_stat = destination.lstat()
-    except OSError as exc:
-        raise CliPredispatchRefusal(
-            "Cursor CLI authentication bridge is absent"
-        ) from exc
-    if (
-        not stat.S_ISLNK(destination_stat.st_mode)
-        or os.readlink(destination) != str(source)
-        or os.path.realpath(destination) != str(source)
-    ):
-        raise CliPredispatchRefusal(
-            "Cursor CLI authentication bridge differs from the fixed login keychain"
-        )
-    return _CursorAuthenticationBridgeProof(
-        method=CURSOR_AUTHENTICATION_BRIDGE,
-        source=str(source),
-        source_device=source_stat.st_dev,
-        source_inode=source_stat.st_ino,
-        source_uid=source_stat.st_uid,
-        source_mode=stat.S_IMODE(source_stat.st_mode),
-        source_size=source_stat.st_size,
-        source_mtime_ns=source_stat.st_mtime_ns,
-        source_ctime_ns=source_stat.st_ctime_ns,
-        destination=str(destination),
-    )
-
-
-def _install_cursor_authentication_bridge(
-    environment: Mapping[str, str],
-) -> _CursorAuthenticationBridgeProof:
-    source, _source_stat = _qualified_login_keychain()
-    destination = _authentication_bridge_destination(environment)
-    if os.path.lexists(destination):
-        raise CliPredispatchRefusal(
-            "Cursor CLI authentication bridge destination is not empty"
-        )
-    try:
-        destination.symlink_to(source)
-    except OSError as exc:
-        raise CliPredispatchRefusal(
-            "Cursor CLI authentication bridge could not be installed"
-        ) from exc
-    return _inspect_cursor_authentication_bridge(environment)
-
-
-def _qualified_cursor_security_binary() -> tuple[Path, os.stat_result]:
-    binary = Path(QUALIFIED_CURSOR_SECURITY_BIN)
-    try:
-        observed = binary.lstat()
-    except OSError as exc:
-        raise CliPredispatchRefusal(
-            "Cursor CLI local credential probe executable is absent"
-        ) from exc
-    if (
-        not binary.is_absolute()
-        or binary.is_symlink()
-        or not stat.S_ISREG(observed.st_mode)
-        or os.path.realpath(binary) != str(binary)
-        or observed.st_uid != QUALIFIED_CURSOR_SECURITY_OWNER_UID
-        or stat.S_IMODE(observed.st_mode) & 0o022
-        or not observed.st_mode & stat.S_IXUSR
-    ):
-        raise CliPredispatchRefusal(
-            "Cursor CLI local credential probe executable is not fixed"
-        )
-    return binary, observed
-
-
-def _probe_cursor_credentials_locally(
-    *,
-    environment: Mapping[str, str],
-    authentication_bridge: _CursorAuthenticationBridgeProof,
-    evidence: Mapping[str, object],
-) -> _CursorCredentialProbeProof:
-    security_binary, security_before = _qualified_cursor_security_binary()
-    if _inspect_cursor_authentication_bridge(environment) != authentication_bridge:
-        raise CliPredispatchRefusal(
-            "Cursor CLI authentication bridge changed before credential lookup",
-            qualification_evidence=evidence,
-        )
-    returncodes: list[int] = []
-    command_environment = {
-        key: environment[key]
-        for key in ("HOME", "LANG", "LC_ALL", "PATH", "TMPDIR")
-        if key in environment
-    }
-    for service in _CURSOR_CREDENTIAL_SERVICES:
-        started = time.monotonic()
-        deadline_at = timeout_deadline_after(
-            CURSOR_LOCAL_CREDENTIAL_PROBE_TIMEOUT_SECONDS
-        )
-        try:
-            result = subprocess.run(
-                (
-                    str(security_binary),
-                    "find-generic-password",
-                    "-a",
-                    CURSOR_CREDENTIAL_ACCOUNT,
-                    "-s",
-                    service,
-                    "-w",
-                ),
-                check=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=CURSOR_LOCAL_CREDENTIAL_PROBE_TIMEOUT_SECONDS,
-                cwd="/",
-                env=command_environment,
-            )
-        except subprocess.TimeoutExpired as exc:
-            retained = dict(evidence)
-            retained.update(
-                {
-                    "authentication_probe": CURSOR_AUTHENTICATION_PROBE,
-                    "credential_state": "LOCAL_PROBE_TIMED_OUT",
-                    "timeout_diagnostic": timeout_diagnostic(
-                        boundary="CONTROLLER_DEADLINE",
-                        phase="CREDENTIAL_PROBE",
-                        cause="CONFIGURED_TIMEOUT_EXPIRED",
-                        configured_timeout_ms=(
-                            CURSOR_LOCAL_CREDENTIAL_PROBE_TIMEOUT_SECONDS * 1_000
-                        ),
-                        elapsed_ms=round(
-                            (time.monotonic() - started) * 1_000
-                        ),
-                        deadline_at=deadline_at,
-                        last_progress="CREDENTIAL_PROBE_STARTED",
-                        termination="UNOBSERVED",
-                        process="CURSOR_CREDENTIAL_HELPER",
-                    ),
-                }
-            )
-            raise CliPredispatchRefusal(
-                "Cursor CLI local credential probe timed out",
-                qualification_evidence=retained,
-            ) from exc
-        except OSError as exc:
-            retained = dict(evidence)
-            retained.update(
-                {
-                    "authentication_probe": CURSOR_AUTHENTICATION_PROBE,
-                    "credential_state": "LOCAL_PROBE_FAILED",
-                }
-            )
-            raise CliPredispatchRefusal(
-                "Cursor CLI local credential probe failed",
-                qualification_evidence=retained,
-            ) from exc
-        returncodes.append(result.returncode)
-    _security_after, security_after = _qualified_cursor_security_binary()
-    if (
-        security_before.st_dev,
-        security_before.st_ino,
-        security_before.st_uid,
-        stat.S_IMODE(security_before.st_mode),
-    ) != (
-        security_after.st_dev,
-        security_after.st_ino,
-        security_after.st_uid,
-        stat.S_IMODE(security_after.st_mode),
-    ):
-        raise CliPredispatchRefusal(
-            "Cursor CLI local credential probe executable changed",
-            qualification_evidence=evidence,
-        )
-    proof = _CursorCredentialProbeProof(
-        security_binary=str(security_binary),
-        account=CURSOR_CREDENTIAL_ACCOUNT,
-        search=CURSOR_CREDENTIAL_SEARCH,
-        access_token_readable=returncodes[0] == 0,
-        refresh_token_readable=returncodes[1] == 0,
-    )
-    if proof.credential_state != CURSOR_CREDENTIAL_STATE:
-        retained = dict(evidence)
-        retained.update(
-            {
-                "authentication_probe": CURSOR_AUTHENTICATION_PROBE,
-                "authentication_probe_digest": proof.probe_policy_digest,
-                "credential_state": proof.credential_state,
-                "credential_state_digest": proof.credential_state_digest,
-            }
-        )
-        raise CliPredispatchRefusal(
-            "Cursor CLI local credentials are not readable",
-            qualification_evidence=retained,
-        )
-    return proof
-
-
-def cursor_stdout_limit(max_tokens: int) -> int:
+def cursor_output_limit(max_tokens: int) -> int:
     if isinstance(max_tokens, bool) or max_tokens <= 0:
         raise ValueError("Graphiti requested max_tokens must be positive")
-    return CURSOR_STDOUT_BASE_BYTES + CURSOR_STDOUT_BYTES_PER_TOKEN * max_tokens
+    return CURSOR_OUTPUT_BASE_BYTES + CURSOR_OUTPUT_BYTES_PER_TOKEN * max_tokens
 
 
-def _cursor_command(*, binary: str, prompt: str, workspace: str) -> tuple[str, ...]:
-    return (
-        binary,
-        *_CURSOR_CONTROL_ARGUMENTS,
-        "--workspace",
-        workspace,
-        prompt,
-    )
-
-
-def _command_template_digest(*, binary: str) -> str:
-    canonical_command = _cursor_command(
-        binary=binary,
-        prompt="PROMPT",
-        workspace="HERMETIC_EMPTY",
-    )
-    return _sha256_text("\x00".join(canonical_command))
-
-
-def _inspect_cursor_package(binary: str) -> _CursorPackageProof:
-    resolved = Path(os.path.realpath(binary))
-    root = resolved.parent
-    version_root = Path(os.path.realpath(QUALIFIED_CURSOR_AGENT_VERSION_ROOT))
-    if (
-        resolved.name != "cursor-agent"
-        or root.parent != version_root
-        or not root.name
-    ):
-        raise CliPredispatchRefusal(
-            "Cursor CLI resolved installation is outside the qualified version root"
-        )
-    if not resolved.is_file():
-        raise CliPredispatchRefusal("Cursor CLI launcher is absent")
-    launcher_digest = _sha256_bytes(resolved.read_bytes())
-    command_surface = root / "index.js"
-    command_surface_digest = (
-        _sha256_bytes(command_surface.read_bytes())
-        if command_surface.is_file() and not command_surface.is_symlink()
-        else _sha256_text("UNOBSERVED_COMMAND_SURFACE")
-    )
-    control_semantics_digest = _sha256_text("RUNTIME_CAPABILITY_PROBE")
-    package_digest = _sha256_text(
-        json.dumps(
-            {
-                "launcher_digest": launcher_digest,
-                "command_surface_digest": command_surface_digest,
-                "control_semantics_digest": control_semantics_digest,
-            },
-            ensure_ascii=True,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-    )
-    return _CursorPackageProof(
-        root=str(root),
-        resolved_binary=str(resolved),
-        version=root.name,
-        launcher_digest=launcher_digest,
-        command_surface_digest=command_surface_digest,
-        control_semantics_digest=control_semantics_digest,
-        package_digest=package_digest,
-    )
-
-
-def _qualification_evidence(
-    *,
-    binary: str,
-    max_tokens: int,
-    version: str = "UNOBSERVED",
-    package: _CursorPackageProof | None = None,
-    authentication_bridge: _CursorAuthenticationBridgeProof | None = None,
-    credential_probe: _CursorCredentialProbeProof | None = None,
-) -> dict[str, object]:
-    evidence: dict[str, object] = {
-        "binary": binary,
-        "resolved_binary": (
-            os.path.realpath(binary) if package is None else package.resolved_binary
-        ),
-        "version": version,
-        "expected_version": "UNPINNED",
-        "controls": list(_CURSOR_ISOLATION_CONTROLS),
-        "command_surface_proof": CURSOR_COMMAND_SURFACE_PROOF,
-        "stdout_limit_bytes": cursor_stdout_limit(max_tokens),
-        "stdout_limit_formula": CURSOR_STDOUT_LIMIT_FORMULA,
-        "stdout_limit_identity": CURSOR_STDOUT_LIMIT_IDENTITY,
-        "authentication_bridge": (
-            "UNOBSERVED"
-            if authentication_bridge is None
-            else authentication_bridge.method
-        ),
-        "authentication_bridge_digest": (
-            "UNOBSERVED"
-            if authentication_bridge is None
-            else authentication_bridge.policy_digest
-        ),
-        "authentication_probe": (
-            "UNOBSERVED" if credential_probe is None else CURSOR_AUTHENTICATION_PROBE
-        ),
-        "authentication_probe_digest": (
-            "UNOBSERVED"
-            if credential_probe is None
-            else credential_probe.probe_policy_digest
-        ),
-        "credential_state": (
-            "UNOBSERVED"
-            if credential_probe is None
-            else credential_probe.credential_state
-        ),
-        "credential_state_digest": (
-            "UNOBSERVED"
-            if credential_probe is None
-            else credential_probe.credential_state_digest
-        ),
+def cursor_transport_policy() -> dict[str, object]:
+    return {
+        "sdk": PINNED_SDK_LOCK_IDENTITY,
+        "auth": CURSOR_SDK_AUTH_SOURCE,
+        "model": PINNED_MODEL,
+        "tools": [],
+        "disallowed_tools": list(CURSOR_SDK_DISALLOWED_TOOLS),
+        "mcp_servers": {},
+        "custom_tools": {},
+        "subagents": {},
+        "setting_sources": "OMITTED",
+        "cwd": "EMPTY_NON_GIT",
+        "store": "EPHEMERAL_LOCAL_ISOLATED",
+        "fresh_run": True,
+        "resume": False,
+        "max_retries": _PROCESS_CLIENT_MAX_RETRIES,
+        "unary_timeout_seconds": int(_PROCESS_CLIENT_UNARY_TIMEOUT_SECONDS),
+        "stream_timeout_seconds": int(_PROCESS_CLIENT_STREAM_TIMEOUT_SECONDS),
     }
-    if package is not None:
-        evidence.update(
-            {
-                "launcher_digest": package.launcher_digest,
-                "command_surface_digest": package.command_surface_digest,
-                "control_semantics_digest": package.control_semantics_digest,
-                "package_digest": package.package_digest,
-            }
-        )
-    return evidence
 
 
-def _require_qualified_request_path(
-    binary: str, *, evidence: Mapping[str, object]
-) -> None:
-    if os.path.abspath(binary) != QUALIFIED_CURSOR_AGENT_BIN:
-        raise CliPredispatchRefusal(
-            "Cursor CLI request path differs from the checked policy",
-            qualification_evidence=evidence,
-        )
+def cursor_transport_policy_digest() -> str:
+    return digest_canonical(cursor_transport_policy())
 
 
-def _require_qualified_static_results(
+def bind_cursor_sdk_runtime(runtime: CursorSdkRuntime | None) -> CursorSdkRuntime | None:
+    """Replace the process runtime. Tests inject a narrow fake here."""
+
+    global _bound_runtime
+    previous = _bound_runtime
+    _bound_runtime = runtime
+    return previous
+
+
+def process_cursor_sdk_runtime() -> CursorSdkRuntime:
+    if _bound_runtime is not None:
+        return _bound_runtime
+    global _official_runtime
+    with _official_lock:
+        if _official_runtime is None:
+            _official_runtime = OfficialCursorSdkRuntime()
+        return _official_runtime
+
+
+def qualify_cursor_sdk(
     *,
-    capability_result: _ProcessOutput,
-    version_result: _ProcessOutput,
-    help_result: _ProcessOutput,
-    evidence: Mapping[str, object],
-) -> None:
-    version = version_result.stdout.strip()
-    if capability_result.returncode != 0:
+    runtime: CursorSdkRuntime,
+    api_key: str | None,
+) -> CursorSdkQualification:
+    if runtime.sdk_version != PINNED_SDK_VERSION:
         raise CliPredispatchRefusal(
-            "Cursor CLI cannot prove required runtime capabilities",
-            qualification_evidence=evidence,
+            "Cursor SDK version differs from the pinned lock",
+            qualification_evidence={"sdk_version": runtime.sdk_version},
         )
-    if (
-        version not in capability_result.stdout
-        or version_result.returncode != 0
-        or not version
-        or len(version.encode("utf-8")) > 128
-    ):
+    if not api_key or not api_key.strip():
+        raise CliPredispatchRefusal("purpose-provisioned CURSOR_API_KEY is required")
+    models = runtime.list_model_ids(api_key=api_key)
+    if PINNED_MODEL not in models:
         raise CliPredispatchRefusal(
-            "Cursor CLI did not report a runtime version",
-            qualification_evidence=evidence,
+            "exact composer-2.5 is absent from the model catalogue"
         )
-    if help_result.returncode != 0 or not all(
-        control in help_result.stdout for control in _CURSOR_PUBLIC_CONTROLS
-    ):
-        raise CliPredispatchRefusal(
-            "Cursor CLI cannot prove the qualified public command surface",
-            qualification_evidence=evidence,
-        )
-
-
-def _build_qualification(
-    *,
-    binary: str,
-    max_tokens: int,
-    package: _CursorPackageProof,
-    authentication_bridge: _CursorAuthenticationBridgeProof,
-    credential_probe: _CursorCredentialProbeProof,
-    capability_result: _ProcessOutput,
-    version_result: _ProcessOutput,
-    help_result: _ProcessOutput,
-) -> CursorCliQualification:
-    version = version_result.stdout.strip()
-    evidence = _qualification_evidence(
-        binary=binary,
-        max_tokens=max_tokens,
-        version=version or "UNOBSERVED",
-        package=package,
-        authentication_bridge=authentication_bridge,
-        credential_probe=credential_probe,
+    return CursorSdkQualification(
+        sdk_version=runtime.sdk_version,
+        lock_identity=PINNED_SDK_LOCK_IDENTITY,
+        model=PINNED_MODEL,
+        unary_timeout_seconds=int(_PROCESS_CLIENT_UNARY_TIMEOUT_SECONDS),
+        stream_timeout_seconds=int(_PROCESS_CLIENT_STREAM_TIMEOUT_SECONDS),
+        max_retries=_PROCESS_CLIENT_MAX_RETRIES,
+        transport_policy_digest=cursor_transport_policy_digest(),
     )
-    _require_qualified_static_results(
-        capability_result=capability_result,
-        version_result=version_result,
-        help_result=help_result,
-        evidence=evidence,
-    )
-    return CursorCliQualification(
-        binary=binary,
-        resolved_binary=package.resolved_binary,
-        version=version,
-        expected_version="UNPINNED",
-        controls=_CURSOR_ISOLATION_CONTROLS,
-        version_digest=_sha256_text(version_result.stdout),
-        help_digest=_sha256_text(help_result.stdout),
-        command_template_digest=_command_template_digest(
-            binary=package.resolved_binary
-        ),
-        launcher_digest=package.launcher_digest,
-        command_surface_digest=package.command_surface_digest,
-        control_semantics_digest=_sha256_text(capability_result.stdout),
-        package_digest=package.package_digest,
-        command_surface_proof=CURSOR_COMMAND_SURFACE_PROOF,
-        stdout_limit_bytes=cursor_stdout_limit(max_tokens),
-        authentication_bridge=authentication_bridge.method,
-        authentication_bridge_digest=authentication_bridge.policy_digest,
-        authentication_probe=CURSOR_AUTHENTICATION_PROBE,
-        authentication_probe_digest=credential_probe.probe_policy_digest,
-        credential_state=credential_probe.credential_state,
-        credential_state_digest=credential_probe.credential_state_digest,
-        _authentication_bridge_proof=authentication_bridge,
-    )
-
-
-def _prepare_cursor_qualification(
-    *,
-    binary: str,
-    environment: Mapping[str, str],
-    max_tokens: int,
-) -> _CursorQualificationPreparation:
-    evidence = _qualification_evidence(binary=binary, max_tokens=max_tokens)
-    try:
-        _require_qualified_request_path(binary, evidence=evidence)
-        package = _inspect_cursor_package(binary)
-        evidence = _qualification_evidence(
-            binary=binary, max_tokens=max_tokens, package=package
-        )
-        _authentication_bridge_destination(environment)
-        return _CursorQualificationPreparation(
-            package=package,
-            resolved_binary=package.resolved_binary,
-            evidence=evidence,
-        )
-    except CliPredispatchRefusal as exc:
-        if exc.qualification_evidence:
-            raise
-        raise CliPredispatchRefusal(str(exc), qualification_evidence=evidence) from exc
-
-
-def _complete_cursor_qualification(
-    *,
-    binary: str,
-    environment: Mapping[str, str],
-    max_tokens: int,
-    preparation: _CursorQualificationPreparation,
-    capability_result: _ProcessOutput,
-    version_result: _ProcessOutput,
-    help_result: _ProcessOutput,
-) -> CursorCliQualification:
-    package = preparation.package
-    evidence = _qualification_evidence(
-        binary=binary,
-        max_tokens=max_tokens,
-        version=version_result.stdout.strip() or "UNOBSERVED",
-        package=package,
-    )
-    try:
-        _require_qualified_static_results(
-            capability_result=capability_result,
-            version_result=version_result,
-            help_result=help_result,
-            evidence=evidence,
-        )
-        authentication_bridge = _install_cursor_authentication_bridge(environment)
-        evidence = _qualification_evidence(
-            binary=binary,
-            max_tokens=max_tokens,
-            version=version_result.stdout.strip() or "UNOBSERVED",
-            package=package,
-            authentication_bridge=authentication_bridge,
-        )
-        credential_probe = _probe_cursor_credentials_locally(
-            environment=environment,
-            authentication_bridge=authentication_bridge,
-            evidence=evidence,
-        )
-        qualification = _build_qualification(
-            binary=binary,
-            max_tokens=max_tokens,
-            package=package,
-            authentication_bridge=authentication_bridge,
-            credential_probe=credential_probe,
-            capability_result=capability_result,
-            version_result=version_result,
-            help_result=help_result,
-        )
-        if (
-            os.path.realpath(binary) != preparation.resolved_binary
-            or _inspect_cursor_package(preparation.resolved_binary) != package
-        ):
-            raise CliPredispatchRefusal(
-                "Cursor CLI changed during runtime qualification",
-                qualification_evidence=qualification.as_dict(),
-            )
-        if _inspect_cursor_authentication_bridge(environment) != authentication_bridge:
-            raise CliPredispatchRefusal(
-                "Cursor CLI authentication bridge changed during qualification",
-                qualification_evidence=qualification.as_dict(),
-            )
-        return qualification
-    except CliPredispatchRefusal as exc:
-        if exc.qualification_evidence:
-            raise
-        raise CliPredispatchRefusal(str(exc), qualification_evidence=evidence) from exc
-
-
-def _qualify_cursor_agent(
-    *,
-    binary: str,
-    cwd: str,
-    environment: Mapping[str, str],
-    max_tokens: int,
-) -> CursorCliQualification:
-    evidence = _qualification_evidence(binary=binary, max_tokens=max_tokens)
-    try:
-        _require_qualified_request_path(binary, evidence=evidence)
-        _authentication_bridge_destination(environment)
-        capability_result = _run_bounded_process(
-            (binary, *_CURSOR_CAPABILITY_PROBE_ARGUMENTS),
-            timeout=CURSOR_PREFLIGHT_TIMEOUT_SECONDS,
-            max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
-            cwd=cwd,
-            environment=environment,
-            phase="PREDISPATCH_CAPABILITY",
-        )
-        preparation = _prepare_cursor_qualification(
-            binary=binary,
-            environment=environment,
-            max_tokens=max_tokens,
-        )
-        evidence = preparation.evidence
-        version_result = _run_bounded_process(
-            (preparation.resolved_binary, "--version"),
-            timeout=CURSOR_PREFLIGHT_TIMEOUT_SECONDS,
-            max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
-            cwd=cwd,
-            environment=environment,
-            phase="PREDISPATCH_VERSION",
-        )
-        help_result = _run_bounded_process(
-            (preparation.resolved_binary, "--help"),
-            timeout=CURSOR_PREFLIGHT_TIMEOUT_SECONDS,
-            max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
-            cwd=cwd,
-            environment=environment,
-            phase="PREDISPATCH_HELP",
-        )
-        return _complete_cursor_qualification(
-            binary=binary,
-            environment=environment,
-            max_tokens=max_tokens,
-            preparation=preparation,
-            capability_result=capability_result,
-            version_result=version_result,
-            help_result=help_result,
-        )
-    except CliPredispatchRefusal as exc:
-        if exc.qualification_evidence:
-            raise
-        raise CliPredispatchRefusal(str(exc), qualification_evidence=evidence) from exc
-    except (CliOutputBoundExceeded, CliOutputDecodeError, OSError, TimeoutError) as exc:
-        if isinstance(exc, CliTransportTimeout):
-            evidence = {**evidence, "timeout_diagnostic": dict(exc.evidence)}
-        raise CliPredispatchRefusal(
-            "Cursor CLI runtime-capability preflight failed",
-            qualification_evidence=evidence,
-        ) from exc
-
-
-async def _qualify_cursor_agent_async(
-    *,
-    binary: str,
-    cwd: str,
-    environment: Mapping[str, str],
-    max_tokens: int,
-) -> CursorCliQualification:
-    evidence = _qualification_evidence(binary=binary, max_tokens=max_tokens)
-    try:
-        _require_qualified_request_path(binary, evidence=evidence)
-        await asyncio.to_thread(_authentication_bridge_destination, environment)
-        capability_result = await _run_bounded_process_async(
-            (binary, *_CURSOR_CAPABILITY_PROBE_ARGUMENTS),
-            timeout=CURSOR_PREFLIGHT_TIMEOUT_SECONDS,
-            max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
-            cwd=cwd,
-            environment=environment,
-            phase="PREDISPATCH_CAPABILITY",
-        )
-        preparation = await asyncio.to_thread(
-            _prepare_cursor_qualification,
-            binary=binary,
-            environment=environment,
-            max_tokens=max_tokens,
-        )
-        evidence = preparation.evidence
-        version_result = await _run_bounded_process_async(
-            (preparation.resolved_binary, "--version"),
-            timeout=CURSOR_PREFLIGHT_TIMEOUT_SECONDS,
-            max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
-            cwd=cwd,
-            environment=environment,
-            phase="PREDISPATCH_VERSION",
-        )
-        help_result = await _run_bounded_process_async(
-            (preparation.resolved_binary, "--help"),
-            timeout=CURSOR_PREFLIGHT_TIMEOUT_SECONDS,
-            max_output_bytes=CURSOR_PREFLIGHT_MAX_BYTES,
-            cwd=cwd,
-            environment=environment,
-            phase="PREDISPATCH_HELP",
-        )
-        return await asyncio.to_thread(
-            _complete_cursor_qualification,
-            binary=binary,
-            environment=environment,
-            max_tokens=max_tokens,
-            preparation=preparation,
-            capability_result=capability_result,
-            version_result=version_result,
-            help_result=help_result,
-        )
-    except CliPredispatchRefusal as exc:
-        if exc.qualification_evidence:
-            raise
-        raise CliPredispatchRefusal(str(exc), qualification_evidence=evidence) from exc
-    except (CliOutputBoundExceeded, CliOutputDecodeError, OSError, TimeoutError) as exc:
-        if isinstance(exc, CliTransportTimeout):
-            evidence = {**evidence, "timeout_diagnostic": dict(exc.evidence)}
-        raise CliPredispatchRefusal(
-            "Cursor CLI runtime-capability preflight failed",
-            qualification_evidence=evidence,
-        ) from exc
-
-
-def _require_retained_cursor_authentication_bridge(
-    qualification: CursorCliQualification,
-    *,
-    environment: Mapping[str, str],
-) -> None:
-    expected = qualification._authentication_bridge_proof
-    try:
-        retained = _inspect_cursor_authentication_bridge(environment)
-    except CliPredispatchRefusal as exc:
-        raise CliPredispatchRefusal(
-            "Cursor CLI authentication bridge was lost before dispatch",
-            qualification_evidence=qualification.as_dict(),
-        ) from exc
-    if expected is None or retained != expected:
-        raise CliPredispatchRefusal(
-            "Cursor CLI authentication bridge changed before dispatch",
-            qualification_evidence=qualification.as_dict(),
-        )
-
-
-def _require_retained_cursor_harness(
-    qualification: CursorCliQualification,
-) -> None:
-    try:
-        retained = _inspect_cursor_package(qualification.resolved_binary)
-    except CliPredispatchRefusal as exc:
-        raise CliPredispatchRefusal(
-            "Cursor CLI runtime-qualified harness was lost before dispatch",
-            qualification_evidence=qualification.as_dict(),
-        ) from exc
-    if (
-        os.path.realpath(qualification.binary) != qualification.resolved_binary
-        or retained.resolved_binary != qualification.resolved_binary
-        or retained.version != qualification.version
-        or retained.launcher_digest != qualification.launcher_digest
-        or retained.command_surface_digest != qualification.command_surface_digest
-        or retained.package_digest != qualification.package_digest
-    ):
-        raise CliPredispatchRefusal(
-            "Cursor CLI runtime-qualified harness changed before dispatch",
-            qualification_evidence=qualification.as_dict(),
-        )
 
 
 def run_cursor_transport(
     *,
-    binary: str,
     prompt: str,
     max_tokens: int,
     timeout: int,
-    cwd: str,
-    environment: Mapping[str, str],
     dispatch_started: Callable[[], None] | None = None,
-) -> tuple[str, CursorCliQualification]:
-    """Qualify and invoke the current Cursor harness under controller bounds."""
+) -> CursorSdkExecution:
+    """Qualify, send one fresh no-context run, and retain the typed terminal."""
 
-    qualification = _qualify_cursor_agent(
-        binary=binary,
-        cwd=cwd,
-        environment=environment,
-        max_tokens=max_tokens,
-    )
-    _require_retained_cursor_harness(qualification)
-    _require_retained_cursor_authentication_bridge(
-        qualification,
-        environment=environment,
-    )
-    if dispatch_started is not None:
-        dispatch_started()
-    result = _run_bounded_process(
-        _cursor_command(
-            binary=qualification.resolved_binary,
+    if isinstance(max_tokens, bool) or max_tokens <= 0:
+        raise ValueError("Graphiti requested max_tokens must be positive")
+    if isinstance(timeout, bool) or timeout <= 0:
+        raise ValueError("Graphiti Cursor SDK timeout must be positive")
+    api_key = os.environ.get(CURSOR_SDK_AUTH_SOURCE)
+    runtime = process_cursor_sdk_runtime()
+    qualification = qualify_cursor_sdk(runtime=runtime, api_key=api_key)
+    assert api_key is not None
+    workspace = tempfile.TemporaryDirectory(prefix="newsroom-cursor-sdk-")
+    execution: CursorSdkExecution | None = None
+    workspace_ok = True
+    try:
+        root = Path(workspace.name)
+        cwd = root / "cwd"
+        store = root / "store"
+        cwd.mkdir(mode=0o700)
+        store.mkdir(mode=0o700)
+        if any(cwd.iterdir()) or (cwd / ".git").exists():
+            raise CliPredispatchRefusal("Cursor SDK working directory is not empty")
+        request = CursorSdkRunRequest(
             prompt=prompt,
-            workspace=cwd,
-        ),
-        timeout=timeout,
-        max_output_bytes=qualification.stdout_limit_bytes,
-        cwd=cwd,
-        environment=environment,
-        phase="PRIMARY_TRANSPORT",
-    )
-    if result.returncode != 0:
-        raise CursorProcessExitError(result)
-    if not result.stdout.strip():
-        raise RuntimeError("Graphiti LLM returned empty stdout")
-    return result.stdout, qualification
+            api_key=api_key,
+            cwd=str(cwd),
+            store=str(store),
+            timeout=timeout,
+            max_output_bytes=cursor_output_limit(max_tokens),
+        )
+        try:
+            run = runtime.start_run(request)
+        except CliPredispatchRefusal:
+            raise
+        except CursorSdkError:
+            raise
+        except Exception as exc:
+            raise _map_sdk_exception(exc, dispatched=False) from exc
+        if not run.id or not run.agent_id:
+            run.close()
+            raise CliPredispatchRefusal(
+                "Cursor SDK run did not expose a durable run identity"
+            )
+        if dispatch_started is not None:
+            dispatch_started()
+        consume_error: BaseException | None = None
+        try:
+            execution = _consume_run(
+                run,
+                qualification=qualification,
+                timeout=timeout,
+                max_output_bytes=request.max_output_bytes,
+            )
+        except BaseException as exc:
+            consume_error = exc
+            observed = getattr(exc, "execution", None)
+            if isinstance(observed, CursorSdkExecution):
+                execution = observed
+        try:
+            run.close()
+        except Exception as exc:
+            if consume_error is None:
+                raise CursorSdkCleanupError(
+                    execution
+                    or _cleanup_execution(
+                        qualification,
+                        agent_id=run.agent_id,
+                        run_id=run.id,
+                    )
+                ) from exc
+        if consume_error is not None:
+            raise consume_error
+        assert execution is not None
+        return execution
+    except BaseException:
+        workspace_ok = False
+        raise
+    finally:
+        try:
+            workspace.cleanup()
+        except Exception as exc:
+            if workspace_ok:
+                raise CursorSdkCleanupError(
+                    execution or _cleanup_execution(qualification)
+                ) from exc
 
 
 async def run_cursor_transport_async(
     *,
-    binary: str,
     prompt: str,
     max_tokens: int,
     timeout: int,
-    cwd: str,
-    environment: Mapping[str, str],
     dispatch_started: Callable[[], None] | None = None,
-) -> tuple[str, CursorCliQualification]:
-    """Async current Cursor transport with cancellable bounded children."""
+) -> CursorSdkExecution:
+    import asyncio
 
-    qualification = await _qualify_cursor_agent_async(
-        binary=binary,
-        cwd=cwd,
-        environment=environment,
+    return await asyncio.to_thread(
+        run_cursor_transport,
+        prompt=prompt,
         max_tokens=max_tokens,
-    )
-    await asyncio.to_thread(_require_retained_cursor_harness, qualification)
-    await asyncio.to_thread(
-        _require_retained_cursor_authentication_bridge,
-        qualification,
-        environment=environment,
-    )
-    if dispatch_started is not None:
-        dispatch_started()
-    result = await _run_bounded_process_async(
-        _cursor_command(
-            binary=qualification.resolved_binary,
-            prompt=prompt,
-            workspace=cwd,
-        ),
         timeout=timeout,
-        max_output_bytes=qualification.stdout_limit_bytes,
-        cwd=cwd,
-        environment=environment,
-        phase="PRIMARY_TRANSPORT",
+        dispatch_started=dispatch_started,
     )
-    if result.returncode != 0:
-        raise CursorProcessExitError(result)
-    if not result.stdout.strip():
-        raise RuntimeError("Graphiti LLM returned empty stdout")
-    return result.stdout, qualification
 
+
+def _consume_run(
+    run: CursorSdkRun,
+    *,
+    qualification: CursorSdkQualification,
+    timeout: int,
+    max_output_bytes: int,
+) -> CursorSdkExecution:
+    started = time.monotonic()
+    chunks: list[str] = []
+    streamed_usage: list[object] = []
+    classes: list[str] = []
+    request_id = "UNOBSERVED"
+    tool_call_count = 0
+    cancel_class = ""
+    seen_ids: set[str] = set()
+
+    try:
+        for message in run.stream():
+            kind = _message_type(message)
+            if kind:
+                classes.append(kind)
+            if kind == "request":
+                observed = _field(message, "request_id")
+                if isinstance(observed, str) and observed:
+                    request_id = observed
+            elif kind == "usage":
+                streamed_usage.append(_field(message, "usage"))
+            elif kind == "assistant":
+                chunks.append(_assistant_text(message))
+            elif kind == "tool_call":
+                call_id = _field(message, "call_id")
+                identity = str(call_id) if call_id else f"anon:{len(seen_ids)}"
+                if identity not in seen_ids:
+                    seen_ids.add(identity)
+                    tool_call_count += 1
+                cancel_class = "TOOL_CALL"
+                _cancel_once(run)
+                break
+            if len("".join(chunks).encode("utf-8")) > max_output_bytes:
+                cancel_class = "OUTPUT_BOUND"
+                _cancel_once(run)
+                break
+            if time.monotonic() - started >= timeout:
+                cancel_class = "TIMEOUT"
+                _cancel_once(run)
+                break
+        terminal = run.wait()
+    except CursorSdkError:
+        raise
+    except Exception as exc:
+        mapped = _map_sdk_exception(exc, dispatched=True)
+        mapped.execution = _execution(
+            run,
+            qualification=qualification,
+            text="".join(chunks),
+            streamed_usage=streamed_usage,
+            terminal=None,
+            request_id=request_id,
+            tool_call_count=tool_call_count,
+            cancelled=bool(cancel_class),
+            classes=classes,
+            error_class=mapped.error_class,
+            error_code=mapped.error_code,
+            status=mapped.status,
+        )
+        mapped.usage = mapped.execution.usage
+        raise mapped from exc
+
+    execution = _execution(
+        run,
+        qualification=qualification,
+        text="".join(chunks) or _terminal_text(terminal),
+        streamed_usage=streamed_usage,
+        terminal=terminal,
+        request_id=request_id,
+        tool_call_count=tool_call_count,
+        cancelled=bool(cancel_class) or _terminal_status(terminal) == "cancelled",
+        classes=classes,
+        error_class=cancel_class or _terminal_error_class(terminal),
+        error_code=cancel_class or _terminal_error_code(terminal),
+        status=_terminal_status(terminal) or run.status or "error",
+    )
+    if cancel_class == "TOOL_CALL" or tool_call_count:
+        raise CursorToolCallViolation(execution)
+    if cancel_class == "OUTPUT_BOUND":
+        raise CursorSdkBoundedFailure(
+            "Cursor SDK Graphiti run exceeded the output bound",
+            error_class="OUTPUT_BOUND",
+            execution=execution,
+        )
+    if cancel_class == "TIMEOUT" or execution.status in {"expired"}:
+        raise CursorSdkBoundedFailure(
+            "Cursor SDK Graphiti run reached the controller deadline",
+            error_class="TIMEOUT",
+            execution=execution,
+        )
+    if execution.status in {"error", "expired"}:
+        raise CursorSdkError(
+            "Cursor SDK Graphiti run ended in a typed error",
+            error_class=execution.error_class or "SDK_ERROR",
+            status=execution.status,
+            error_code=execution.error_code,
+            usage=execution.usage,
+            execution=execution,
+        )
+    if not execution.text.strip():
+        raise CursorSdkError(
+            "Cursor SDK Graphiti run returned empty assistant text",
+            error_class="EMPTY_OUTPUT",
+            status=execution.status,
+            error_code="EMPTY_OUTPUT",
+            usage=execution.usage,
+            execution=execution,
+        )
+    return execution
+
+
+def _execution(
+    run: CursorSdkRun,
+    *,
+    qualification: CursorSdkQualification,
+    text: str,
+    streamed_usage: Sequence[object],
+    terminal: object | None,
+    request_id: str,
+    tool_call_count: int,
+    cancelled: bool,
+    classes: Sequence[str],
+    error_class: str,
+    error_code: str,
+    status: str,
+) -> CursorSdkExecution:
+    terminal_usage = _field(terminal, "usage") if terminal is not None else run.usage
+    resolved = _resolved_model(terminal if terminal is not None else run)
+    duration = _optional_int(
+        _field(terminal, "duration_ms") if terminal is not None else run.duration_ms
+    )
+    usage = _reconcile_usage(streamed=streamed_usage, terminal=terminal_usage)
+    return CursorSdkExecution(
+        text=text,
+        usage=usage,
+        qualification=qualification,
+        agent_id=run.agent_id,
+        run_id=run.id,
+        request_id=request_id,
+        resolved_model=resolved,
+        status=status,
+        error_class=error_class or "NONE",
+        error_code=error_code or "NONE",
+        tool_call_count=tool_call_count,
+        cancelled=cancelled,
+        duration_ms=duration,
+        stream_message_classes=tuple(classes),
+        diagnostic_digest=_diagnostic_digest(
+            status=status,
+            error_class=error_class or "NONE",
+            error_code=error_code or "NONE",
+            tool_call_count=tool_call_count,
+            cancelled=cancelled,
+            duration_ms=duration,
+        ),
+    )
+
+
+def _reconcile_usage(
+    *, streamed: Sequence[object], terminal: object
+) -> dict[str, object]:
+    terminal_usage = cursor_sdk_usage(terminal)
+    if terminal_usage["usage_basis"] == "PROVIDER_REPORTED":
+        return terminal_usage
+    reported = [
+        item
+        for item in (cursor_sdk_usage(value) for value in streamed)
+        if item["usage_basis"] == "PROVIDER_REPORTED"
+    ]
+    if not reported:
+        return unreported_cli_usage()
+    total = {
+        "usage_basis": "PROVIDER_REPORTED",
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_read_tokens": 0,
+        "cached_write_tokens": 0,
+        "reasoning_tokens": None,
+        "total_tokens": 0,
+    }
+    reasoning = 0
+    have_reasoning = False
+    for item in reported:
+        for field in (
+            "input_tokens",
+            "output_tokens",
+            "cached_read_tokens",
+            "cached_write_tokens",
+            "total_tokens",
+        ):
+            total[field] = int(total[field]) + int(item[field])  # type: ignore[arg-type]
+        value = item.get("reasoning_tokens")
+        if isinstance(value, int) and not isinstance(value, bool):
+            reasoning += value
+            have_reasoning = True
+    if have_reasoning:
+        total["reasoning_tokens"] = reasoning
+    return total
+
+
+def _cleanup_execution(
+    qualification: CursorSdkQualification,
+    *,
+    agent_id: str = "UNOBSERVED",
+    run_id: str = "UNOBSERVED",
+) -> CursorSdkExecution:
+    return CursorSdkExecution(
+        text="",
+        usage=unreported_cli_usage(),
+        qualification=qualification,
+        agent_id=agent_id,
+        run_id=run_id,
+        request_id="UNOBSERVED",
+        resolved_model=PINNED_MODEL,
+        status="error",
+        error_class="CLEANUP",
+        error_code="CLEANUP",
+        tool_call_count=0,
+        cancelled=False,
+        duration_ms=None,
+        stream_message_classes=(),
+        diagnostic_digest=_diagnostic_digest(
+            status="error",
+            error_class="CLEANUP",
+            error_code="CLEANUP",
+            tool_call_count=0,
+            cancelled=False,
+            duration_ms=None,
+        ),
+    )
+
+
+def _cancel_once(run: CursorSdkRun) -> None:
+    if str(getattr(run, "status", "")) == "running":
+        run.cancel()
+
+
+def _message_type(message: object) -> str:
+    value = _field(message, "type")
+    return str(value) if isinstance(value, str) else ""
+
+
+def _assistant_text(message: object) -> str:
+    payload = _field(message, "message")
+    content = _field(payload, "content") if payload is not None else None
+    if isinstance(content, Sequence) and not isinstance(content, (str, bytes)):
+        parts: list[str] = []
+        for block in content:
+            if _field(block, "type") == "text":
+                text = _field(block, "text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    text = _field(message, "text")
+    return text if isinstance(text, str) else ""
+
+
+def _field(value: object, name: str) -> object:
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _resolved_model(value: object) -> str:
+    model = _field(value, "model")
+    identity = _field(model, "id") if model is not None else model
+    return identity if isinstance(identity, str) and identity else PINNED_MODEL
+
+
+def _terminal_text(terminal: object) -> str:
+    text = _field(terminal, "result")
+    return text if isinstance(text, str) else ""
+
+
+def _terminal_status(terminal: object) -> str:
+    status = _field(terminal, "status")
+    return status if isinstance(status, str) else ""
+
+
+def _terminal_error_class(terminal: object) -> str:
+    status = _terminal_status(terminal)
+    if status == "cancelled":
+        return "CANCELLED"
+    if status == "error":
+        return "SDK_ERROR"
+    if status == "expired":
+        return "TIMEOUT"
+    return "NONE"
+
+
+def _terminal_error_code(terminal: object) -> str:
+    code = _field(terminal, "error")
+    if isinstance(code, Mapping):
+        value = code.get("code") or code.get("type")
+        return str(value) if value else _terminal_error_class(terminal)
+    if code is None:
+        return _terminal_error_class(terminal)
+    return str(getattr(code, "code", None) or code)
+
+
+def _diagnostic_digest(
+    *,
+    status: str,
+    error_class: str,
+    error_code: str,
+    tool_call_count: int,
+    cancelled: bool,
+    duration_ms: int | None,
+) -> str:
+    return digest_canonical(
+        {
+            "status": status,
+            "error_class": error_class,
+            "error_code": error_code,
+            "tool_call_count": tool_call_count,
+            "cancelled": cancelled,
+            "duration_ms": duration_ms,
+        }
+    )
+
+
+def _map_sdk_exception(exc: Exception, *, dispatched: bool) -> Exception:
+    name = type(exc).__name__
+    text = str(exc).lower()
+    code = str(getattr(exc, "code", "") or getattr(exc, "type", "") or name)
+    if name in {"RateLimitError"} or "rate limit" in text or "resource_exhausted" in text:
+        error_class = "RATE_LIMIT"
+    elif name in {"AuthenticationError", "PermissionDeniedError"} or (
+        "unauthor" in text or "unauthenticated" in text or "api key" in text
+    ):
+        error_class = "AUTHENTICATION"
+        if not dispatched:
+            return CliPredispatchRefusal("Cursor SDK authentication was refused")
+    elif "model" in text and (
+        "not found" in text or "unavailable" in text or "unsupported" in text
+    ):
+        error_class = "MODEL_UNAVAILABLE"
+        if not dispatched:
+            return CliPredispatchRefusal(
+                "exact composer-2.5 is absent from the model catalogue"
+            )
+    elif "timeout" in text or "deadline" in text or name in {"APITimeoutError"}:
+        error_class = "TIMEOUT"
+    elif "network" in text or "connect" in text or name in {
+        "APIConnectionError",
+        "ConnectError",
+    }:
+        error_class = "NETWORK"
+    else:
+        error_class = "SDK_ERROR"
+    if error_class == "TIMEOUT":
+        return CursorSdkBoundedFailure(
+            "Cursor SDK Graphiti run reached the controller deadline",
+            error_class="TIMEOUT",
+            execution=CursorSdkExecution(
+                text="",
+                usage=unreported_cli_usage(),
+                qualification=CursorSdkQualification(
+                    sdk_version=PINNED_SDK_VERSION,
+                    lock_identity=PINNED_SDK_LOCK_IDENTITY,
+                    model=PINNED_MODEL,
+                    unary_timeout_seconds=int(_PROCESS_CLIENT_UNARY_TIMEOUT_SECONDS),
+                    stream_timeout_seconds=int(_PROCESS_CLIENT_STREAM_TIMEOUT_SECONDS),
+                    max_retries=_PROCESS_CLIENT_MAX_RETRIES,
+                    transport_policy_digest=cursor_transport_policy_digest(),
+                ),
+                agent_id="UNOBSERVED",
+                run_id="UNOBSERVED",
+                request_id="UNOBSERVED",
+                resolved_model=PINNED_MODEL,
+                status="error",
+                error_class="TIMEOUT",
+                error_code=code,
+                tool_call_count=0,
+                cancelled=True,
+                duration_ms=None,
+                stream_message_classes=(),
+                diagnostic_digest=_diagnostic_digest(
+                    status="error",
+                    error_class="TIMEOUT",
+                    error_code=code,
+                    tool_call_count=0,
+                    cancelled=True,
+                    duration_ms=None,
+                ),
+            ),
+        )
+    return CursorSdkError(
+        "Cursor SDK Graphiti run failed",
+        error_class=error_class,
+        error_code=code,
+    )
+
+
+class OfficialCursorSdkRuntime:
+    """One process-owned official SDK client. Fresh agent/run per request."""
+
+    def __init__(self) -> None:
+        try:
+            sdk = importlib.import_module("cursor_sdk")
+        except ImportError as exc:
+            raise CliPredispatchRefusal("cursor-sdk is not installed") from exc
+        version = importlib.metadata.version("cursor-sdk")
+        if version != PINNED_SDK_VERSION:
+            raise CliPredispatchRefusal(
+                "Cursor SDK version differs from the pinned lock",
+                qualification_evidence={"sdk_version": version},
+            )
+        self.sdk_version = version
+        self._sdk = sdk
+        self._root = Path(tempfile.mkdtemp(prefix="newsroom-cursor-sdk-client-"))
+        workspace = self._root / "workspace"
+        store = self._root / "store"
+        state = self._root / "bridge-state"
+        workspace.mkdir(mode=0o700)
+        store.mkdir(mode=0o700)
+        state.mkdir(mode=0o700)
+        client_cls = getattr(sdk, "CursorClient", None) or getattr(sdk, "Client")
+        owned = client_cls.launch_bridge(
+            workspace=str(workspace),
+            state_root=str(state),
+            local=sdk.LocalAgentOptions(
+                cwd=str(workspace),
+                custom_tools={},
+                store=sdk.LocalAgentStoreConfig(type="jsonl", root_dir=str(store)),
+            ),
+            max_retries=_PROCESS_CLIENT_MAX_RETRIES,
+            allow_api_key_env_fallback=False,
+            client_timeout=_PROCESS_CLIENT_UNARY_TIMEOUT_SECONDS,
+        )
+        self._owned_client = owned
+        self._client = owned.with_options(
+            unary_timeout=_PROCESS_CLIENT_UNARY_TIMEOUT_SECONDS,
+            stream_timeout=_PROCESS_CLIENT_STREAM_TIMEOUT_SECONDS,
+            max_retries=_PROCESS_CLIENT_MAX_RETRIES,
+        )
+        atexit.register(self.close)
+
+    def close(self) -> None:
+        closer = getattr(self._owned_client, "close", None)
+        if callable(closer):
+            closer()
+
+    def list_model_ids(self, *, api_key: str) -> tuple[str, ...]:
+        models = self._client.models.list(api_key=api_key)
+        identities: list[str] = []
+        for model in models:
+            identity = getattr(model, "id", None)
+            if isinstance(identity, str):
+                identities.append(identity)
+        return tuple(identities)
+
+    def start_run(self, request: CursorSdkRunRequest) -> CursorSdkRun:
+        local = self._sdk.LocalAgentOptions(
+            cwd=request.cwd,
+            custom_tools={},
+            store=self._sdk.LocalAgentStoreConfig(
+                type="jsonl",
+                root_dir=request.store,
+            ),
+        )
+        agent = self._client.agents.create(
+            self._sdk.AgentOptions(
+                model=PINNED_MODEL,
+                api_key=request.api_key,
+                tools=[],
+                disallowed_tools=list(CURSOR_SDK_DISALLOWED_TOOLS),
+                mcp_servers={},
+                agents={},
+                local=local,
+            )
+        )
+        try:
+            run = agent.send(request.prompt)
+        except Exception:
+            closer = getattr(agent, "close", None)
+            if callable(closer):
+                closer()
+            raise
+        return OfficialCursorSdkRun(agent=agent, run=run)
+
+
+class OfficialCursorSdkRun:
+    def __init__(self, *, agent: object, run: object) -> None:
+        self._agent = agent
+        self._run = run
+
+    @property
+    def id(self) -> str:
+        return str(getattr(self._run, "id", "") or "")
+
+    @property
+    def agent_id(self) -> str:
+        return str(
+            getattr(self._run, "agent_id", None)
+            or getattr(self._agent, "agent_id", "")
+            or ""
+        )
+
+    @property
+    def status(self) -> str:
+        return str(getattr(self._run, "status", "") or "")
+
+    @property
+    def model(self) -> object | None:
+        return getattr(self._run, "model", None)
+
+    @property
+    def usage(self) -> object | None:
+        return getattr(self._run, "usage", None)
+
+    @property
+    def duration_ms(self) -> int | None:
+        return _optional_int(getattr(self._run, "duration_ms", None))
+
+    def stream(self) -> Iterator[object]:
+        stream = getattr(self._run, "stream", None) or getattr(self._run, "messages")
+        return stream()
+
+    def wait(self) -> object:
+        return self._run.wait()
+
+    def cancel(self) -> None:
+        if self.status == "running":
+            self._run.cancel()
+
+    def close(self) -> None:
+        closer = getattr(self._agent, "close", None)
+        if callable(closer):
+            closer()
+
+
+# Historical alias used by Grok preflight and existing observer imports.
+cursor_stdout_limit = cursor_output_limit
 
 __all__ = [
-    "CURSOR_AGENT_BIN",
-    "CURSOR_AUTHENTICATION_BRIDGE",
-    "CURSOR_AUTHENTICATION_PROBE",
-    "CURSOR_COMMAND_SURFACE_PROOF",
-    "CURSOR_CREDENTIAL_ACCOUNT",
-    "CURSOR_CREDENTIAL_SEARCH",
-    "CURSOR_CREDENTIAL_STATE",
-    "CURSOR_STDOUT_LIMIT_FORMULA",
+    "CURSOR_OUTPUT_LIMIT_IDENTITY",
     "CURSOR_STDOUT_LIMIT_IDENTITY",
-    "QUALIFIED_CURSOR_AGENT_BIN",
-    "QUALIFIED_CURSOR_AGENT_VERSION_ROOT",
-    "QUALIFIED_CURSOR_LOGIN_KEYCHAIN",
-    "QUALIFIED_CURSOR_SECURITY_BIN",
+    "CURSOR_SDK_AUTH_SOURCE",
+    "CURSOR_SDK_DISALLOWED_TOOLS",
+    "CURSOR_SDK_QUALIFICATION_SCHEMA_VERSION",
+    "CURSOR_SDK_TERMINAL_SCHEMA_VERSION",
+    "CURSOR_SDK_TRANSPORT",
+    "PINNED_MODEL",
+    "PINNED_SDK_LOCK_IDENTITY",
+    "PINNED_SDK_VERSION",
     "CliPredispatchRefusal",
-    "CursorProcessExitError",
-    "CursorCliQualification",
+    "CursorSdkBoundedFailure",
+    "CursorSdkCleanupError",
+    "CursorSdkError",
+    "CursorSdkExecution",
+    "CursorSdkQualification",
+    "CursorSdkRunRequest",
+    "CursorToolCallViolation",
+    "OfficialCursorSdkRuntime",
+    "bind_cursor_sdk_runtime",
+    "cursor_output_limit",
     "cursor_stdout_limit",
+    "cursor_transport_policy",
+    "cursor_transport_policy_digest",
+    "process_cursor_sdk_runtime",
+    "qualify_cursor_sdk",
     "run_cursor_transport",
     "run_cursor_transport_async",
 ]

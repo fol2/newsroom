@@ -69,6 +69,61 @@ def is_exact_predispatch_no_provider_call(value: object) -> bool:
     )
 
 
+def cursor_sdk_usage(value: object) -> dict[str, object]:
+    """Normalise typed SDK TokenUsage into the retained receipt contract."""
+
+    if value is None:
+        return unreported_cli_usage()
+    if isinstance(value, Mapping):
+        fields = {
+            "input_tokens": value.get("input_tokens", value.get("inputTokens")),
+            "output_tokens": value.get("output_tokens", value.get("outputTokens")),
+            "cached_read_tokens": value.get(
+                "cached_read_tokens",
+                value.get("cache_read_tokens", value.get("cacheReadTokens")),
+            ),
+            "cached_write_tokens": value.get(
+                "cached_write_tokens",
+                value.get("cache_write_tokens", value.get("cacheWriteTokens")),
+            ),
+        }
+        reasoning = value.get(
+            "reasoning_tokens", value.get("reasoningTokens")
+        )
+        total = value.get("total_tokens", value.get("totalTokens"))
+    else:
+        fields = {
+            "input_tokens": getattr(value, "input_tokens", None),
+            "output_tokens": getattr(value, "output_tokens", None),
+            "cached_read_tokens": getattr(
+                value,
+                "cached_read_tokens",
+                getattr(value, "cache_read_tokens", None),
+            ),
+            "cached_write_tokens": getattr(
+                value,
+                "cached_write_tokens",
+                getattr(value, "cache_write_tokens", None),
+            ),
+        }
+        reasoning = getattr(value, "reasoning_tokens", None)
+        total = getattr(value, "total_tokens", None)
+    if not all(_is_non_negative_int(item) for item in fields.values()):
+        return unreported_cli_usage()
+    if total is None:
+        total = sum(item for item in fields.values() if _is_non_negative_int(item))
+    if not _is_non_negative_int(total):
+        return unreported_cli_usage()
+    if reasoning is not None and not _is_non_negative_int(reasoning):
+        return unreported_cli_usage()
+    return {
+        "usage_basis": CLI_USAGE_BASIS_REPORTED,
+        **fields,
+        "reasoning_tokens": reasoning,
+        "total_tokens": total,
+    }
+
+
 def cursor_cli_usage(value: object) -> dict[str, object]:
     """Normalise Cursor's final JSON usage into the retained receipt contract."""
 
@@ -272,6 +327,7 @@ def summarise_graphiti_usage(
 
 __all__ = [
     "cursor_cli_usage",
+    "cursor_sdk_usage",
     "grok_cli_usage",
     "is_exact_predispatch_no_provider_call",
     "no_provider_call_cli_usage",

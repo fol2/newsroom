@@ -29,7 +29,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
 from newsroom.graphiti_adapter.identity import MAX_EPISODE_BYTES
 from newsroom.graphiti_adapter.usage_meter import unreported_cli_usage
 
-PINNED_SDK_VERSION = "1.0.28"
+PINNED_SDK_VERSION = "1.0.29"
 PINNED_BRIDGE_PROTOCOL = "sdk.v1"
 PINNED_MODEL = "composer-2.5"
 CLI_TINY_INPUT_TOKENS = 20_103

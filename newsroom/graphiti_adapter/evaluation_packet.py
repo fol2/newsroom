@@ -1,8 +1,9 @@
 """EVALUATION packet for the private unpublished GraphRAG beta.
 
-Graphiti chat uses cursor-agent CLI `composer-2.5`, then Grok Build CLI
-`grok-4.6` medium. Embeddings remain OpenRouter `text-embedding-3-large`.
-CLI chat is subscription: ledgered, not OD-011 debit. PRODUCTION stays closed.
+Graphiti chat uses official cursor-sdk `composer-2.5` with CURSOR_API_KEY,
+then Grok Build CLI `grok-4.6` medium. Embeddings remain OpenRouter
+`text-embedding-3-large`. Chat is subscription: ledgered, not OD-011 debit.
+PRODUCTION stays closed.
 Increment 9P proving still must not call OpenRouter (`OPENROUTER_UNUSED`).
 """
 

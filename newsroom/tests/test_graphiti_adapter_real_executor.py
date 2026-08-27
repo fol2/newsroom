@@ -76,6 +76,7 @@ from newsroom.graphiti_adapter.recovery_vocabulary import (
 )
 from newsroom.graphiti_adapter.neo4j_guard import GuardMarker, GuardState
 from newsroom.graphiti_adapter.temporal_vocabulary import TemporalBasis
+from newsroom.graphiti_adapter import cli_process
 
 from .extraction_4a_helpers import contract_request, run_request, seed_extraction_fixture
 from .graphiti_adapter_4d_helpers import FAKE_CONFIGURATION_ID
@@ -485,22 +486,22 @@ def test_grok_predispatch_refusal_retains_timeout_qualification() -> None:
 
 def test_successful_qualification_retains_only_fixed_tokens_and_digests() -> None:
     from newsroom.graphiti_adapter.cli_client import CliExecution, run_cli_chain
+    from newsroom.graphiti_adapter.cursor_transport import (
+        PINNED_SDK_LOCK_IDENTITY,
+        PINNED_SDK_VERSION,
+        cursor_transport_policy_digest,
+    )
 
-    digest = digest_bytes(b"qualified transport")
     qualification = {
-        "binary": "/secret/path/cursor-agent",
-        "resolved_binary": "/another/secret/path/cursor-agent",
-        "stdout_limit_bytes": 65_536,
-        "version_digest": digest,
-        "help_digest": digest,
-        "command_template_digest": digest,
-        "launcher_digest": digest,
-        "command_surface_digest": digest,
-        "control_semantics_digest": digest,
-        "package_digest": digest,
-        "authentication_bridge_digest": digest,
-        "authentication_probe_digest": digest,
-        "credential_state_digest": digest,
+        "schema_version": "newsroom.cursor-sdk-qualification.v1",
+        "transport": "CURSOR_SDK",
+        "sdk_version": PINNED_SDK_VERSION,
+        "lock_identity": PINNED_SDK_LOCK_IDENTITY,
+        "model": "composer-2.5",
+        "unary_timeout_seconds": 160,
+        "stream_timeout_seconds": 160,
+        "max_retries": 0,
+        "transport_policy_digest": cursor_transport_policy_digest(),
     }
 
     async def cursor(_prompt: str, *, max_tokens: int) -> CliExecution:
@@ -526,11 +527,14 @@ def test_successful_qualification_retains_only_fixed_tokens_and_digests() -> Non
 
     retained = invocations[0]["transport_qualification"]
     assert isinstance(retained, dict)
-    assert retained["schema_version"] == "newsroom.graphiti-cli-qualification.v1"
-    assert retained["transport"] == "CURSOR_AGENT_CLI"
+    assert retained["schema_version"] == "newsroom.cursor-sdk-qualification.v1"
+    assert retained["transport"] == "CURSOR_SDK"
+    assert retained["sdk_version"] == PINNED_SDK_VERSION
+    assert retained["lock_identity"] == PINNED_SDK_LOCK_IDENTITY
     assert "binary" not in retained
     assert "resolved_binary" not in retained
     assert "/secret/" not in repr(retained)
+    assert "crsr_" not in repr(retained)
 
 
 def test_non_utf8_cursor_is_recorded_before_grok_fallback() -> None:
@@ -2862,60 +2866,19 @@ def test_real_adapter_retains_truthful_predispatch_refusal_state(
     assert produced.attempt_receipt_value["producer_failure"] == "RuntimeError"
 
 
-_CURSOR_FIXTURE_VERSION = "fixture-version"
 
 
-def _fixture_cursor_qualification(
-    *, binary: str, max_tokens: int
-) -> object:
-    from newsroom.graphiti_adapter import cursor_transport
-
-    return cursor_transport.CursorCliQualification(
-        binary=binary,
-        resolved_binary=binary,
-        version=_CURSOR_FIXTURE_VERSION,
-        expected_version="UNPINNED",
-        controls=("--allowed-tools=EMPTY",),
-        version_digest="sha256:version",
-        help_digest="sha256:help",
-        command_template_digest="sha256:template",
-        launcher_digest="sha256:launcher",
-        command_surface_digest="sha256:surface",
-        control_semantics_digest="sha256:semantics",
-        package_digest="sha256:package",
-        command_surface_proof=cursor_transport.CURSOR_COMMAND_SURFACE_PROOF,
-        stdout_limit_bytes=cursor_transport.cursor_stdout_limit(max_tokens),
-    )
 
 
-def test_cursor_cli_runs_outside_repository_cwd(
+
+
+
+def test_grok_cli_runs_outside_repository_cwd(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from newsroom.graphiti_adapter import cli_client, cursor_transport
+    from newsroom.graphiti_adapter import cli_client
 
     observed: dict[str, object] = {}
-    qualification = _fixture_cursor_qualification(
-        binary=cli_client.CURSOR_AGENT_BIN,
-        max_tokens=512,
-    )
-    assert isinstance(qualification, cursor_transport.CursorCliQualification)
-
-    def capture_cursor(**values: object) -> tuple[str, object]:
-        cwd = values["cwd"]
-        assert isinstance(cwd, str)
-        observed.update(
-            command=cursor_transport._cursor_command(
-                binary=str(values["binary"]),
-                prompt=str(values["prompt"]),
-                workspace=cwd,
-            ),
-            timeout=values["timeout"],
-            max_output_bytes=cursor_transport.cursor_stdout_limit(512),
-            cwd=cwd,
-            environment=values["environment"],
-            inventory=list(Path(cwd).iterdir()),
-        )
-        return "{}", qualification
 
     def capture_grok(
         command: tuple[str, ...],
@@ -2927,38 +2890,16 @@ def test_cursor_cli_runs_outside_repository_cwd(
     ) -> str:
         observed.update(
             command=command,
-                timeout=timeout,
-                cwd=cwd,
-                environment=environment,
-                max_output_bytes=max_output_bytes,
-                inventory=([] if cwd is None else list(Path(cwd).iterdir())),
+            timeout=timeout,
+            cwd=cwd,
+            environment=environment,
+            max_output_bytes=max_output_bytes,
+            inventory=([] if cwd is None else list(Path(cwd).iterdir())),
         )
         return "{}"
 
-    monkeypatch.setattr(cli_client, "run_cursor_transport", capture_cursor)
     monkeypatch.setattr(cli_client, "run_cli", capture_grok)
     monkeypatch.setattr(cli_client, "_prove_cli_controls", lambda **_values: None)
-    cursor_execution = cli_client.run_cursor_agent_llm(
-        "untrusted source", max_tokens=512
-    )
-    assert cursor_execution.text == "{}"
-    assert cursor_execution.usage["usage_basis"] == "UNREPORTED"
-    cwd = observed["cwd"]
-    assert isinstance(cwd, str)
-    assert Path(cwd) != _REPOSITORY_ROOT
-    assert "newsroom-cursor-graphiti-" in cwd
-    assert observed["timeout"] == cli_client.CLI_CALL_TIMEOUT_SECONDS
-    assert "--single-turn" in observed["command"]
-    assert "--exclude-workspace-context" in observed["command"]
-    assert "--allowed-tools" in observed["command"]
-    assert "--max-output-tokens" not in observed["command"]
-    assert observed["max_output_bytes"] == cursor_transport.cursor_stdout_limit(512)
-    environment = observed["environment"]
-    assert isinstance(environment, dict)
-    assert Path(environment["HOME"]).parent == Path(cwd).parent
-    assert observed["inventory"] == []
-
-    observed.clear()
     grok_execution = cli_client.run_grok_llm("untrusted source", None, max_tokens=512)
     assert grok_execution.text == "{}"
     assert grok_execution.usage["usage_basis"] == "UNREPORTED"
@@ -3004,734 +2945,43 @@ def test_async_cli_child_is_terminated_when_attempt_deadline_cancels() -> None:
         asyncio.run(cancelled_call())
 
 
-def _fixture_cursor_package(
-    *, root: Path, version: str | None = None
-) -> object:
-    from newsroom.graphiti_adapter import cursor_transport
 
-    return cursor_transport._CursorPackageProof(
-        root=str(root),
-        resolved_binary=str(root / "cursor-agent"),
-        version=version or root.name,
-        launcher_digest="sha256:launcher",
-        command_surface_digest="sha256:surface",
-        control_semantics_digest="sha256:semantics",
-        package_digest="sha256:package",
-    )
 
 
-def _fixture_cursor_environment(
-    *,
-    root: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> dict[str, str]:
-    from newsroom.graphiti_adapter import cursor_transport
 
-    home = root / "home"
-    home.mkdir(parents=True, mode=0o700)
-    keychain = root / "login.keychain-db"
-    keychain.write_bytes(b"fixture keychain")
-    keychain.chmod(0o600)
-    monkeypatch.setattr(
-        cursor_transport,
-        "QUALIFIED_CURSOR_LOGIN_KEYCHAIN",
-        str(keychain),
-    )
-    security_binary = root / "security"
-    security_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    security_binary.chmod(0o700)
-    monkeypatch.setattr(
-        cursor_transport,
-        "QUALIFIED_CURSOR_SECURITY_BIN",
-        str(security_binary),
-    )
-    monkeypatch.setattr(
-        cursor_transport,
-        "QUALIFIED_CURSOR_SECURITY_OWNER_UID",
-        security_binary.stat().st_uid,
-    )
-    return {"HOME": str(home)}
 
 
-def test_cursor_authentication_bridge_exposes_only_the_fixed_login_keychain(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
 
-    environment = _fixture_cursor_environment(
-        root=tmp_path,
-        monkeypatch=monkeypatch,
-    )
 
-    proof = cursor_transport._install_cursor_authentication_bridge(environment)
 
-    home = Path(environment["HOME"])
-    destination = home / "Library" / "Keychains" / "login.keychain-db"
-    assert destination.is_symlink()
-    assert destination.readlink() == Path(
-        cursor_transport.QUALIFIED_CURSOR_LOGIN_KEYCHAIN
-    )
-    assert sorted(path.relative_to(home) for path in home.rglob("*")) == [
-        Path("Library"),
-        Path("Library/Keychains"),
-        Path("Library/Keychains/login.keychain-db"),
-    ]
-    assert proof.method == cursor_transport.CURSOR_AUTHENTICATION_BRIDGE
-    assert cursor_transport._inspect_cursor_authentication_bridge(
-        environment
-    ) == proof
 
 
-def test_cursor_authentication_bridge_rejects_a_symlinked_source(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
 
-    home = tmp_path / "home"
-    home.mkdir()
-    keychain = tmp_path / "real-login.keychain-db"
-    keychain.write_bytes(b"fixture keychain")
-    linked_keychain = tmp_path / "login.keychain-db"
-    linked_keychain.symlink_to(keychain)
-    monkeypatch.setattr(
-        cursor_transport,
-        "QUALIFIED_CURSOR_LOGIN_KEYCHAIN",
-        str(linked_keychain),
-    )
 
-    with pytest.raises(
-        cursor_transport.CliPredispatchRefusal,
-        match="login keychain source is not a fixed regular file",
-    ):
-        cursor_transport._install_cursor_authentication_bridge(
-            {"HOME": str(home)}
-        )
 
 
-def test_cursor_local_credential_probe_matches_pinned_cursor_keychain_lookup(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
 
-    environment = _fixture_cursor_environment(
-        root=tmp_path,
-        monkeypatch=monkeypatch,
-    )
-    bridge = cursor_transport._install_cursor_authentication_bridge(environment)
-    command_log = tmp_path / "security-commands.log"
-    security_binary = Path(cursor_transport.QUALIFIED_CURSOR_SECURITY_BIN)
-    security_binary.write_text(
-        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{command_log}"\nexit 0\n',
-        encoding="utf-8",
-    )
-    security_binary.chmod(0o700)
 
-    proof = cursor_transport._probe_cursor_credentials_locally(
-        environment=environment,
-        authentication_bridge=bridge,
-        evidence={},
-    )
 
-    assert proof.credential_state == cursor_transport.CURSOR_CREDENTIAL_STATE
-    assert command_log.read_text(encoding="utf-8").splitlines() == [
-        "find-generic-password -a cursor-user -s cursor-access-token -w",
-        "find-generic-password -a cursor-user -s cursor-refresh-token -w",
-    ]
-    assert proof.account == cursor_transport.CURSOR_CREDENTIAL_ACCOUNT
-    assert proof.search == cursor_transport.CURSOR_CREDENTIAL_SEARCH
-    retained_commands = command_log.read_text(encoding="utf-8")
-    assert bridge.source not in retained_commands
-    assert bridge.destination not in retained_commands
-    assert "status" not in retained_commands
 
 
-def test_cursor_credential_probe_timeout_retains_causal_evidence(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
 
-    environment = _fixture_cursor_environment(
-        root=tmp_path,
-        monkeypatch=monkeypatch,
-    )
-    bridge = cursor_transport._install_cursor_authentication_bridge(environment)
 
-    def timeout(command: tuple[str, ...], **_values: object) -> object:
-        raise subprocess.TimeoutExpired(
-            command,
-            cursor_transport.CURSOR_LOCAL_CREDENTIAL_PROBE_TIMEOUT_SECONDS,
-        )
 
-    monkeypatch.setattr(cursor_transport.subprocess, "run", timeout)
-    with pytest.raises(
-        cursor_transport.CliPredispatchRefusal,
-        match="credential probe timed out",
-    ) as caught:
-        cursor_transport._probe_cursor_credentials_locally(
-            environment=environment,
-            authentication_bridge=bridge,
-            evidence={"binary": "cursor-agent"},
-        )
 
-    evidence = caught.value.qualification_evidence
-    assert evidence["credential_state"] == "LOCAL_PROBE_TIMED_OUT"
-    diagnostic = evidence["timeout_diagnostic"]
-    assert diagnostic["boundary"] == "CONTROLLER_DEADLINE"
-    assert diagnostic["phase"] == "CREDENTIAL_PROBE"
-    assert diagnostic["cause"] == "CONFIGURED_TIMEOUT_EXPIRED"
-    assert diagnostic["provider_cause"] == "UNOBSERVED"
-    assert diagnostic["termination"] == "UNOBSERVED"
-    assert "cursor-access-token" not in repr(evidence)
-    assert "cursor-refresh-token" not in repr(evidence)
 
 
-def test_cursor_cli_runtime_qualifies_and_dispatches_one_resolved_generation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
 
-    install = tmp_path / _CURSOR_FIXTURE_VERSION
-    install.mkdir()
-    resolved_binary = install / "cursor-agent"
-    resolved_binary.write_text("fixture", encoding="utf-8")
-    requested = tmp_path / "cursor-agent"
-    requested.symlink_to(resolved_binary)
-    monkeypatch.setattr(
-        cursor_transport, "QUALIFIED_CURSOR_AGENT_BIN", str(requested)
-    )
-    package = _fixture_cursor_package(root=install)
-    environment = _fixture_cursor_environment(
-        root=tmp_path / "credential-fixture",
-        monkeypatch=monkeypatch,
-    )
-    preflight_commands: list[tuple[str, ...]] = []
-    provider_commands: list[tuple[str, ...]] = []
-    dispatches: list[str] = []
 
-    def inspect(_binary: str) -> object:
-        return package
-
-    def bounded(
-        command: tuple[str, ...],
-        *,
-        timeout: int,
-        max_output_bytes: int,
-        cwd: str,
-        environment: object,
-        phase: str,
-    ) -> object:
-        del timeout, cwd, environment, phase
-        if command[-1] == "about":
-            preflight_commands.append(command)
-            return cursor_transport._ProcessOutput(
-                returncode=0,
-                stdout=f"CLI Version  {_CURSOR_FIXTURE_VERSION}\n",
-                stderr="",
-            )
-        if command[-1] == "--version":
-            preflight_commands.append(command)
-            return cursor_transport._ProcessOutput(
-                returncode=0,
-                stdout=f"{_CURSOR_FIXTURE_VERSION}\n",
-                stderr="",
-            )
-        if command[-1] == "--help":
-            preflight_commands.append(command)
-            return cursor_transport._ProcessOutput(
-                returncode=0,
-                stdout=(
-                    "--print --mode --output-format --sandbox "
-                    "--workspace --trust --model"
-                ),
-                stderr="",
-            )
-        provider_commands.append(command)
-        assert max_output_bytes == cursor_transport.cursor_stdout_limit(512)
-        return cursor_transport._ProcessOutput(
-            returncode=0,
-            stdout='{"result":"{}","usage":{}}',
-            stderr="",
-        )
-
-    monkeypatch.setattr(cursor_transport, "_inspect_cursor_package", inspect)
-    monkeypatch.setattr(cursor_transport, "_run_bounded_process", bounded)
-    raw, qualification = cursor_transport.run_cursor_transport(
-        binary=str(requested),
-        prompt="untrusted source",
-        max_tokens=512,
-        timeout=80,
-        cwd=str(tmp_path),
-        environment=environment,
-        dispatch_started=lambda: dispatches.append("started"),
-    )
-
-    assert raw.startswith('{"result"')
-    assert dispatches == ["started"]
-    assert [command[1:] for command in preflight_commands] == [
-        cursor_transport._CURSOR_CAPABILITY_PROBE_ARGUMENTS,
-        ("--version",),
-        ("--help",),
-    ]
-    assert preflight_commands[0][0] == str(requested)
-    assert all(
-        command[0] == str(resolved_binary)
-        for command in preflight_commands[1:]
-    )
-    command = provider_commands[0]
-    assert command[0] == str(resolved_binary)
-    for control in (
-        "--single-turn",
-        "--exclude-workspace-context",
-        "--allowed-tools",
-    ):
-        assert control in command
-    assert command[command.index("--allowed-tools") + 1] == ""
-    for unsupported in ("--disable-tools", "--disable-mcp", "--max-output-tokens"):
-        assert unsupported not in command
-    retained = qualification.as_dict()
-    assert retained["version"] == _CURSOR_FIXTURE_VERSION
-    assert retained["package_digest"] == "sha256:package"
-    assert retained["expected_version"] == "UNPINNED"
-    assert retained["command_surface_proof"] == (
-        cursor_transport.CURSOR_COMMAND_SURFACE_PROOF
-    )
-    assert retained["stdout_limit_identity"] == (
-        cursor_transport.CURSOR_STDOUT_LIMIT_IDENTITY
-    )
-    assert retained["authentication_bridge"] == (
-        cursor_transport.CURSOR_AUTHENTICATION_BRIDGE
-    )
-    assert retained["authentication_probe"] == (
-        cursor_transport.CURSOR_AUTHENTICATION_PROBE
-    )
-    assert retained["authentication_probe_digest"].startswith("sha256:")
-    assert retained["credential_state"] == cursor_transport.CURSOR_CREDENTIAL_STATE
-    assert retained["credential_state_digest"].startswith("sha256:")
-
-
-def test_async_cursor_cli_uses_the_same_runtime_capability_qualification(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
-
-    install = tmp_path / _CURSOR_FIXTURE_VERSION
-    install.mkdir()
-    resolved_binary = install / "cursor-agent"
-    resolved_binary.write_text("fixture", encoding="utf-8")
-    requested = tmp_path / "cursor-agent"
-    requested.symlink_to(resolved_binary)
-    monkeypatch.setattr(
-        cursor_transport, "QUALIFIED_CURSOR_AGENT_BIN", str(requested)
-    )
-    package = _fixture_cursor_package(root=install)
-    environment = _fixture_cursor_environment(
-        root=tmp_path / "credential-fixture",
-        monkeypatch=monkeypatch,
-    )
-    commands: list[tuple[str, ...]] = []
-    dispatches: list[str] = []
-
-    async def bounded(
-        command: tuple[str, ...], **_values: object
-    ) -> object:
-        commands.append(command)
-        stdout = (
-            f"CLI Version  {_CURSOR_FIXTURE_VERSION}\n"
-            if command[-1] == "about"
-            else f"{_CURSOR_FIXTURE_VERSION}\n"
-            if command[-1] == "--version"
-            else "--print --mode --output-format --sandbox --workspace --trust --model"
-            if command[-1] == "--help"
-            else '{"result":"{}","usage":{}}'
-        )
-        return cursor_transport._ProcessOutput(
-            returncode=0,
-            stdout=stdout,
-            stderr="",
-        )
-
-    monkeypatch.setattr(
-        cursor_transport, "_inspect_cursor_package", lambda _binary: package
-    )
-    monkeypatch.setattr(cursor_transport, "_run_bounded_process_async", bounded)
-    raw, qualification = asyncio.run(
-        cursor_transport.run_cursor_transport_async(
-            binary=str(requested),
-            prompt="untrusted source",
-            max_tokens=512,
-            timeout=80,
-            cwd=str(tmp_path),
-            environment=environment,
-            dispatch_started=lambda: dispatches.append("started"),
-        )
-    )
-
-    assert raw.startswith('{"result"')
-    assert qualification.package_digest == "sha256:package"
-    assert dispatches == ["started"]
-    assert len(commands) == 4
-    assert commands[0][0] == str(requested)
-    assert all(command[0] == str(resolved_binary) for command in commands[1:])
-
-
-def test_cursor_cli_rejects_unqualified_path_before_package_inspection(
-    tmp_path: Path,
-) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
-
-    clone = tmp_path / _CURSOR_FIXTURE_VERSION / "cursor-agent"
-    clone.parent.mkdir()
-    clone.write_text("fixture launcher", encoding="utf-8")
-
-    with pytest.raises(
-        cursor_transport.CliPredispatchRefusal,
-        match="outside the qualified version root",
-    ):
-        cursor_transport._inspect_cursor_package(str(clone))
-
-
-def test_cursor_cli_runtime_capability_probe_must_succeed() -> None:
-    from newsroom.graphiti_adapter import cursor_transport
-
-    with pytest.raises(
-        cursor_transport.CliPredispatchRefusal,
-        match="cannot prove required runtime capabilities",
-    ):
-        cursor_transport._require_qualified_static_results(
-            capability_result=cursor_transport._ProcessOutput(
-                returncode=2,
-                stdout="",
-                stderr="unknown option",
-            ),
-            version_result=cursor_transport._ProcessOutput(
-                returncode=0,
-                stdout="runtime-version\n",
-                stderr="",
-            ),
-            help_result=cursor_transport._ProcessOutput(
-                returncode=0,
-                stdout=" ".join(cursor_transport._CURSOR_PUBLIC_CONTROLS),
-                stderr="",
-            ),
-            evidence={},
-        )
-
-
-def test_cursor_cli_nonzero_exit_keeps_only_bounded_diagnostics() -> None:
-    from newsroom.control_plane import cycle
-    from newsroom.graphiti_adapter import cli_client, cli_process, cursor_transport
-
-    error = cursor_transport.CursorProcessExitError(
-        cursor_transport._ProcessOutput(
-            returncode=1,
-            stdout="",
-            stderr="authentication failed for SECRET",
-        )
-    )
-    invocations: list[dict[str, object]] = []
-
-    def cursor_runner(
-        _prompt: str,
-        *,
-        max_tokens: int,
-        dispatch_started: object,
-    ) -> object:
-        del max_tokens
-        assert callable(dispatch_started)
-        dispatch_started()
-        raise error
-
-    with pytest.raises(cli_client.CliResponseError, match="fallback is disabled"):
-        asyncio.run(
-            cli_client.run_cli_chain(
-                prompt="fixture",
-                schema=None,
-                cursor_runner=cursor_runner,
-                grok_runner=lambda *_args, **_values: pytest.fail("fallback ran"),
-                invocations=invocations,
-                fallback_permitted=False,
-            )
-        )
-
-    assert error.evidence["cause"] == "AUTHENTICATION"
-    assert error.evidence["returncode"] == 1
-    assert error.evidence["stderr_bytes"] == 32
-    assert invocations[0]["process_exit_diagnostic"] == error.evidence
-    cycle._validate_chat_invocation_diagnostics(tuple(invocations))
-    assert cli_process.validated_process_exit_diagnostic(error.evidence) == (
-        error.evidence
-    )
-    with pytest.raises(ValueError, match="fields are invalid"):
-        cli_process.validated_process_exit_diagnostic(
-            {**error.evidence, "stderr": "SECRET"}
-        )
-    with pytest.raises(ValueError, match="fields are invalid"):
-        cycle._validate_chat_invocation_diagnostics(
-            (
-                {
-                    **invocations[0],
-                    "process_exit_diagnostic": {
-                        **error.evidence,
-                        "stderr": "SECRET",
-                    },
-                },
-            )
-        )
-    assert "SECRET" not in repr(error.evidence)
-
-
-def test_cursor_cli_request_path_must_match_the_checked_policy(
-    tmp_path: Path,
-) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
-
-    with pytest.raises(
-        cursor_transport.CliPredispatchRefusal,
-        match="request path differs from the checked policy",
-    ):
-        cursor_transport._qualify_cursor_agent(
-            binary=str(tmp_path / "not-the-policy-launcher"),
-            cwd=str(tmp_path),
-            environment={},
-            max_tokens=512,
-        )
-
-
-def test_cursor_cli_accepts_the_runtime_reported_harness_version(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
-
-    binary = tmp_path / "cursor-agent"
-    binary.write_text("fixture", encoding="utf-8")
-    monkeypatch.setattr(
-        cursor_transport, "QUALIFIED_CURSOR_AGENT_BIN", str(binary)
-    )
-    package = _fixture_cursor_package(root=tmp_path, version="future-version")
-    environment = _fixture_cursor_environment(
-        root=tmp_path / "credential-fixture",
-        monkeypatch=monkeypatch,
-    )
-    calls = 0
-    dispatched = False
-
-    def bounded(*_args: object, **_values: object) -> object:
-        nonlocal calls
-        calls += 1
-        return cursor_transport._ProcessOutput(
-            returncode=0,
-                stdout=(
-                    "CLI Version  future-version\n"
-                    if calls == 1
-                    else "future-version\n"
-                    if calls == 2
-                    else "--print --mode --output-format --sandbox --workspace --trust --model"
-                    if calls == 3
-                    else '{"result":"{}","usage":{}}'
-            ),
-            stderr="",
-        )
-
-    monkeypatch.setattr(
-        cursor_transport, "_inspect_cursor_package", lambda _binary: package
-    )
-    monkeypatch.setattr(cursor_transport, "_run_bounded_process", bounded)
-
-    def marker() -> None:
-        nonlocal dispatched
-        dispatched = True
-
-    _raw, qualification = cursor_transport.run_cursor_transport(
-        binary=str(binary),
-        prompt="untrusted source",
-        max_tokens=512,
-        timeout=80,
-        cwd=str(tmp_path),
-        environment=environment,
-        dispatch_started=marker,
-    )
-
-    assert calls == 4
-    assert dispatched is True
-    assert qualification.version == "future-version"
-    assert qualification.expected_version == "UNPINNED"
-
-
-def test_cursor_cli_missing_local_credential_refuses_before_dispatch(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
-
-    install = tmp_path / _CURSOR_FIXTURE_VERSION
-    install.mkdir()
-    binary = install / "cursor-agent"
-    binary.write_text("fixture", encoding="utf-8")
-    requested = tmp_path / "cursor-agent"
-    requested.symlink_to(binary)
-    monkeypatch.setattr(cursor_transport, "QUALIFIED_CURSOR_AGENT_BIN", str(requested))
-    monkeypatch.setattr(
-        cursor_transport, "QUALIFIED_CURSOR_AGENT_VERSION_ROOT", str(tmp_path)
-    )
-    environment = _fixture_cursor_environment(
-        root=tmp_path / "credential-fixture",
-        monkeypatch=monkeypatch,
-    )
-    Path(cursor_transport.QUALIFIED_CURSOR_SECURITY_BIN).write_text(
-        (
-            "#!/bin/sh\n"
-            'if [ "$5" = "cursor-refresh-token" ]; then exit 1; fi\n'
-            "exit 0\n"
-        ),
-        encoding="utf-8",
-    )
-    package = _fixture_cursor_package(root=install)
-    commands: list[tuple[str, ...]] = []
-    dispatches: list[str] = []
-
-    def bounded(command: tuple[str, ...], **_values: object) -> object:
-        commands.append(command)
-        if command[-1] == "about":
-            stdout = f"CLI Version  {_CURSOR_FIXTURE_VERSION}\n"
-        elif command[-1] == "--version":
-            stdout = f"{_CURSOR_FIXTURE_VERSION}\n"
-        elif command[-1] == "--help":
-            stdout = "--print --mode --output-format --sandbox --workspace --trust --model"
-        else:
-            pytest.fail("provider command reached dispatch")
-        return cursor_transport._ProcessOutput(
-            returncode=0,
-            stdout=stdout,
-            stderr="",
-        )
-
-    monkeypatch.setattr(
-        cursor_transport,
-        "_inspect_cursor_package",
-        lambda _binary: package,
-    )
-    monkeypatch.setattr(cursor_transport, "_run_bounded_process", bounded)
-
-    with pytest.raises(
-        cursor_transport.CliPredispatchRefusal,
-        match="local credentials are not readable",
-    ) as caught:
-        cursor_transport.run_cursor_transport(
-            binary=str(requested),
-            prompt="untrusted source",
-            max_tokens=512,
-            timeout=80,
-            cwd=str(tmp_path),
-            environment=environment,
-            dispatch_started=lambda: dispatches.append("started"),
-        )
-
-    assert dispatches == []
-    assert [command[1:] for command in commands] == [
-        cursor_transport._CURSOR_CAPABILITY_PROBE_ARGUMENTS,
-        ("--version",),
-        ("--help",),
-    ]
-    evidence = caught.value.qualification_evidence
-    assert evidence["authentication_probe"] == (
-        cursor_transport.CURSOR_AUTHENTICATION_PROBE
-    )
-    assert evidence["credential_state"] == "LOCAL_CREDENTIALS_UNAVAILABLE"
-    assert evidence["credential_state_digest"].startswith("sha256:")
-
-
-def test_cursor_cli_keychain_replacement_refuses_before_dispatch(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
-
-    install = tmp_path / _CURSOR_FIXTURE_VERSION
-    install.mkdir()
-    binary = install / "cursor-agent"
-    binary.write_text("fixture", encoding="utf-8")
-    requested = tmp_path / "cursor-agent"
-    requested.symlink_to(binary)
-    monkeypatch.setattr(cursor_transport, "QUALIFIED_CURSOR_AGENT_BIN", str(requested))
-    monkeypatch.setattr(
-        cursor_transport, "QUALIFIED_CURSOR_AGENT_VERSION_ROOT", str(tmp_path)
-    )
-    environment = _fixture_cursor_environment(
-        root=tmp_path / "credential-fixture",
-        monkeypatch=monkeypatch,
-    )
-    package = _fixture_cursor_package(root=install)
-    dispatches: list[str] = []
-
-    def bounded(command: tuple[str, ...], **_values: object) -> object:
-        if command[-1] == "about":
-            stdout = f"CLI Version  {_CURSOR_FIXTURE_VERSION}\n"
-        elif command[-1] == "--version":
-            stdout = f"{_CURSOR_FIXTURE_VERSION}\n"
-        elif command[-1] == "--help":
-            stdout = "--print --mode --output-format --sandbox --workspace --trust --model"
-        else:
-            pytest.fail("provider command reached dispatch")
-        return cursor_transport._ProcessOutput(
-            returncode=0,
-            stdout=stdout,
-            stderr="",
-        )
-
-    monkeypatch.setattr(
-        cursor_transport,
-        "_inspect_cursor_package",
-        lambda _binary: package,
-    )
-    monkeypatch.setattr(cursor_transport, "_run_bounded_process", bounded)
-    local_probe = cursor_transport._probe_cursor_credentials_locally
-
-    def change_keychain_after_probe(**values: object) -> object:
-        proof = local_probe(**values)
-        source = Path(cursor_transport.QUALIFIED_CURSOR_LOGIN_KEYCHAIN)
-        source.write_bytes(b"replacement keychain")
-        source.chmod(0o600)
-        return proof
-
-    monkeypatch.setattr(
-        cursor_transport,
-        "_probe_cursor_credentials_locally",
-        change_keychain_after_probe,
-    )
-
-    with pytest.raises(
-        cursor_transport.CliPredispatchRefusal,
-        match="authentication bridge changed during qualification",
-    ):
-        cursor_transport.run_cursor_transport(
-            binary=str(requested),
-            prompt="untrusted source",
-            max_tokens=512,
-            timeout=80,
-            cwd=str(tmp_path),
-            environment=environment,
-            dispatch_started=lambda: dispatches.append("started"),
-        )
-
-    assert dispatches == []
 
 
 def test_controller_output_bound_terminates_oversized_cursor_output(
     tmp_path: Path,
 ) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
-
     with pytest.raises(
-        cursor_transport.CliOutputBoundExceeded, match="output byte limit"
+        cli_process.CliOutputBoundExceeded, match="output byte limit"
     ):
-        cursor_transport._run_bounded_process(
+        cli_process.run_bounded_process(
             (
                 sys.executable,
                 "-c",
@@ -3747,8 +2997,6 @@ def test_controller_output_bound_terminates_oversized_cursor_output(
 def test_async_controller_output_bound_drains_both_child_streams(
     tmp_path: Path,
 ) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
-
     script = (
         "import sys; "
         "sys.stdout.buffer.write(b'x' * 200000); sys.stdout.flush(); "
@@ -3756,7 +3004,7 @@ def test_async_controller_output_bound_drains_both_child_streams(
     )
 
     async def invoke() -> None:
-        await cursor_transport._run_bounded_process_async(
+        await cli_process.run_bounded_process_async(
             (sys.executable, "-c", script),
             timeout=5,
             max_output_bytes=1_024,
@@ -3764,7 +3012,7 @@ def test_async_controller_output_bound_drains_both_child_streams(
             environment={},
         )
 
-    with pytest.raises(cursor_transport.CliOutputBoundExceeded):
+    with pytest.raises(cli_process.CliOutputBoundExceeded):
         asyncio.run(asyncio.wait_for(invoke(), timeout=2))
 
 
@@ -3788,8 +3036,6 @@ def test_sync_controller_terminates_descendants_that_inherit_pipes(
     tmp_path: Path,
     boundary: str,
 ) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
-
     pid_path = tmp_path / f"sync-{boundary.lower()}-descendant.pid"
     output = (
         "sys.stdout.buffer.write(b'x' * 200000); sys.stdout.flush(); "
@@ -3805,14 +3051,14 @@ def test_sync_controller_terminates_descendants_that_inherit_pipes(
         "time.sleep(30)"
     )
     expected = (
-        cursor_transport.CliOutputBoundExceeded
+        cli_process.CliOutputBoundExceeded
         if boundary == "OUTPUT_LIMIT"
-        else cursor_transport.CliTransportTimeout
+        else cli_process.CliTransportTimeout
     )
     descendant_pid: int | None = None
     try:
         with pytest.raises(expected):
-            cursor_transport._run_bounded_process(
+            cli_process.run_bounded_process(
                 (sys.executable, "-c", script),
                 timeout=0.5,
                 max_output_bytes=(1_024 if boundary == "OUTPUT_LIMIT" else 1_000_000),
@@ -3834,8 +3080,6 @@ def test_async_controller_terminates_descendants_that_inherit_pipes(
     tmp_path: Path,
     boundary: str,
 ) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
-
     pid_path = tmp_path / f"{boundary.lower()}-descendant.pid"
     output = (
         "sys.stdout.buffer.write(b'x' * 200000); sys.stdout.flush(); "
@@ -3853,7 +3097,7 @@ def test_async_controller_terminates_descendants_that_inherit_pipes(
 
     async def invoke() -> None:
         task = asyncio.create_task(
-            cursor_transport._run_bounded_process_async(
+            cli_process.run_bounded_process_async(
                 (sys.executable, "-c", script),
                 timeout=0.5 if boundary == "TIMEOUT" else 5,
                 max_output_bytes=(1_024 if boundary == "OUTPUT_LIMIT" else 1_000_000),
@@ -3871,8 +3115,8 @@ def test_async_controller_terminates_descendants_that_inherit_pipes(
         await task
 
     expected = {
-        "OUTPUT_LIMIT": cursor_transport.CliOutputBoundExceeded,
-        "TIMEOUT": cursor_transport.CliTransportTimeout,
+        "OUTPUT_LIMIT": cli_process.CliOutputBoundExceeded,
+        "TIMEOUT": cli_process.CliTransportTimeout,
         "CANCELLATION": asyncio.CancelledError,
     }[boundary]
     descendant_pid: int | None = None
@@ -3967,8 +3211,6 @@ def test_async_controller_drains_high_volume_pipes_on_termination(
     tmp_path: Path,
     boundary: str,
 ) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
-
     script = (
         "import sys,time; "
         "sys.stdout.buffer.write(b'x' * 200000); sys.stdout.flush(); "
@@ -3978,7 +3220,7 @@ def test_async_controller_drains_high_volume_pipes_on_termination(
 
     async def invoke() -> None:
         task = asyncio.create_task(
-            cursor_transport._run_bounded_process_async(
+            cli_process.run_bounded_process_async(
                 (sys.executable, "-c", script),
                 timeout=0.05 if boundary == "TIMEOUT" else 5,
                 max_output_bytes=1_000_000,
@@ -3992,7 +3234,7 @@ def test_async_controller_drains_high_volume_pipes_on_termination(
         await task
 
     expected = (
-        cursor_transport.CliTransportTimeout
+        cli_process.CliTransportTimeout
         if boundary == "TIMEOUT"
         else asyncio.CancelledError
     )
@@ -4021,8 +3263,6 @@ def test_transport_modules_import_in_a_fresh_interpreter() -> None:
 def test_controller_timeout_retains_secret_free_transport_diagnostics(
     tmp_path: Path,
 ) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
-
     stdout = b"partial stdout\n"
     stderr = b"partial stderr\n"
     script = (
@@ -4031,8 +3271,8 @@ def test_controller_timeout_retains_secret_free_transport_diagnostics(
         f"sys.stderr.buffer.write({stderr!r}); sys.stderr.flush(); "
         "time.sleep(5)"
     )
-    with pytest.raises(cursor_transport.CliTransportTimeout) as caught:
-        cursor_transport._run_bounded_process(
+    with pytest.raises(cli_process.CliTransportTimeout) as caught:
+        cli_process.run_bounded_process(
             (sys.executable, "-c", script),
             timeout=0.05,
             max_output_bytes=1_024,
@@ -4084,8 +3324,6 @@ def test_timeout_diagnostic_rejects_secret_in_causal_token() -> None:
 def test_async_controller_timeout_retains_transport_diagnostics(
     tmp_path: Path,
 ) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
-
     stdout = b"async stdout\n"
     stderr = b"async stderr\n"
     script = (
@@ -4096,7 +3334,7 @@ def test_async_controller_timeout_retains_transport_diagnostics(
     )
 
     async def invoke() -> None:
-        await cursor_transport._run_bounded_process_async(
+        await cli_process.run_bounded_process_async(
             (sys.executable, "-c", script),
             timeout=0.05,
             max_output_bytes=1_024,
@@ -4105,7 +3343,7 @@ def test_async_controller_timeout_retains_transport_diagnostics(
             phase="PRIMARY_TRANSPORT",
         )
 
-    with pytest.raises(cursor_transport.CliTransportTimeout) as caught:
+    with pytest.raises(cli_process.CliTransportTimeout) as caught:
         asyncio.run(invoke())
 
     evidence = caught.value.evidence
@@ -4119,8 +3357,6 @@ def test_async_controller_timeout_retains_transport_diagnostics(
 def test_controller_timeout_survives_process_exit_race(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
-
     original_kill = os.killpg
 
     def exits_during_kill(process_group_id: int, sent_signal: int) -> None:
@@ -4128,8 +3364,8 @@ def test_controller_timeout_survives_process_exit_race(
         raise ProcessLookupError
 
     monkeypatch.setattr(os, "killpg", exits_during_kill)
-    with pytest.raises(cursor_transport.CliTransportTimeout) as caught:
-        cursor_transport._run_bounded_process(
+    with pytest.raises(cli_process.CliTransportTimeout) as caught:
+        cli_process.run_bounded_process(
             (sys.executable, "-c", "import time; time.sleep(5)"),
             timeout=0.05,
             max_output_bytes=1_024,
@@ -4141,49 +3377,6 @@ def test_controller_timeout_survives_process_exit_race(
     assert caught.value.evidence["termination"] == "PROCESS_EXIT_RACE"
 
 
-def test_cursor_preflight_timeout_retains_causal_qualification_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from newsroom.graphiti_adapter import cursor_transport
-
-    diagnostic = cursor_transport.timeout_diagnostic(
-        boundary="CONTROLLER_DEADLINE",
-        phase="PREDISPATCH_VERSION",
-        cause="CONFIGURED_TIMEOUT_EXPIRED",
-        configured_timeout_ms=20_000,
-        elapsed_ms=20_000,
-        deadline_at="2026-08-26T18:00:20.000000Z",
-        last_progress="NO_OUTPUT_OBSERVED",
-        termination="PROCESS_KILLED",
-        process="CLI_CHILD",
-        stdout=b"",
-        stderr=b"",
-    )
-    monkeypatch.setattr(
-        cursor_transport,
-        "_prepare_cursor_qualification",
-        lambda **_values: SimpleNamespace(
-            resolved_binary=sys.executable,
-            evidence={"binary": "cursor-agent"},
-        ),
-    )
-
-    def timeout(*_args: object, **_values: object) -> object:
-        raise cursor_transport.CliTransportTimeout(
-            "cursor-agent Graphiti LLM timed out",
-            evidence=diagnostic,
-        )
-
-    monkeypatch.setattr(cursor_transport, "_run_bounded_process", timeout)
-    with pytest.raises(cursor_transport.CliPredispatchRefusal) as caught:
-        cursor_transport._qualify_cursor_agent(
-            binary="cursor-agent",
-            cwd=str(tmp_path),
-            environment={},
-            max_tokens=512,
-        )
-
-    assert caught.value.qualification_evidence["timeout_diagnostic"] == diagnostic
 
 
 def test_grok_preflight_timeout_retains_causal_qualification_evidence(

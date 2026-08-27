@@ -88,14 +88,17 @@ _COMBINED_ZERO_SHA256 = (
 _TINY_SHA256 = "32e612e97c74afda5f116d596361e1a174eabaa758d8966b146c7ba98df92ca7"
 
 
-def test_cursor_sdk_is_locked_in_a_research_only_optional_extra() -> None:
+def test_cursor_sdk_is_locked_in_graphiti_and_research_extras() -> None:
     root = Path(__file__).resolve().parents[2]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
 
     extras = project["project"]["optional-dependencies"]
-    assert extras["cursor-research"] == [f"cursor-sdk=={PINNED_SDK_VERSION}"]
-    assert "cursor-sdk" not in " ".join(extras["graphiti"])
-    assert f'name = "cursor-sdk"' in (root / "uv.lock").read_text(encoding="utf-8")
+    pin = f"cursor-sdk=={PINNED_SDK_VERSION}"
+    assert extras["cursor-research"] == [pin]
+    assert pin in extras["graphiti"]
+    lock = (root / "uv.lock").read_text(encoding="utf-8")
+    assert 'name = "cursor-sdk"' in lock
+    assert f'version = "{PINNED_SDK_VERSION}"' in lock
 
 
 def _sha256(text: str) -> str:
@@ -846,7 +849,7 @@ def test_owner_gated_packet_remains_unauthorised_in_git() -> None:
         "newsroom.graphiti-sdk-no-tool-calibration-packet.v1"
     )
     assert payload["issue"] == 746
-    assert payload["sdk_version"] == PINNED_SDK_VERSION
+    assert payload["sdk_version"] == "1.0.28"
     assert payload["model"] == PINNED_MODEL
     assert payload["live_authority"]["authorised"] is False
     assert payload["live_authority"]["maximum_cursor_sdk_model_leaves"] == 8

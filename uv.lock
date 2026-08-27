@@ -277,18 +277,18 @@ wheels = [
 
 [[package]]
 name = "cursor-sdk"
-version = "1.0.28"
+version = "1.0.29"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2d/58/6b8ac6a13c6b2c621a02da646e773dff4225af48892b77294f1e3ca0e914/cursor_sdk-1.0.28.tar.gz", hash = "sha256:e7782527e0a62816abc0610df3abda893ff27b5ea7b8d470668e31d08892a604", size = 1177, upload-time = "2026-08-13T19:40:35.854Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f8/89/7e9214f6b6e42c7cdb3457d5ffaef799ffe4c8b1fcd49fab470f2351cca9/cursor_sdk-1.0.29.tar.gz", hash = "sha256:c3e93dfbec7bc5e9c2155b4a193f8605c8b8d790d06f27ca93d1601b7ac6ede1", size = 1176, upload-time = "2026-08-27T00:40:17.663Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c8/c7/6b3e67d2ad66031ed2eff69565926967d45f4b2e1baa053d4d27c1814208/cursor_sdk-1.0.28-py3-none-macosx_11_0_arm64.whl", hash = "sha256:7a469b3e0c7492d8f5d51e60fc76e16374eabf25575e5f45eb47c43387ca422d", size = 49728133, upload-time = "2026-08-13T19:40:21.17Z" },
-    { url = "https://files.pythonhosted.org/packages/c4/7d/29f80425242322a159a75c955e963b4c774cda694b25bc54c03f8cdeec36/cursor_sdk-1.0.28-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:2973f8b1642faea47e7bc98d4eefffcd0896bfc0d050203dd5a17b1cfe8d18c2", size = 51234000, upload-time = "2026-08-13T19:40:24.08Z" },
-    { url = "https://files.pythonhosted.org/packages/71/c0/a5948407f9146b1104bc70649fe39b17d63f31ef0f3d6887348ca00a83ee/cursor_sdk-1.0.28-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:602766b01f684c3bcbefaeb35d84c8f67ea36348e7320a8fa73fbd84f0ab567f", size = 58823722, upload-time = "2026-08-13T19:40:27.049Z" },
-    { url = "https://files.pythonhosted.org/packages/fd/69/a0f81e92a8b22637a0e2f9662eb7fdd2ed3902026a3856cba6dc1af1b337/cursor_sdk-1.0.28-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:a76f884ea91c21f75cb9391e65fe23bc626c4cb64b7fa32f63bac3d03f5df3da", size = 59520896, upload-time = "2026-08-13T19:40:30.033Z" },
-    { url = "https://files.pythonhosted.org/packages/64/c2/9af88511f7fe136b15d08cbece6c9191e16c9c988e66440dfdac6acc139c/cursor_sdk-1.0.28-py3-none-win_amd64.whl", hash = "sha256:436a588f7d1433eae844d3959fd2bacbd73d6a0fee7859addc1b09e620f42ba6", size = 45825448, upload-time = "2026-08-13T19:40:33.185Z" },
+    { url = "https://files.pythonhosted.org/packages/a2/ba/e6c8583234a7d96f0c71b35221a67415030d552863aad120c0a7dae83e27/cursor_sdk-1.0.29-py3-none-macosx_11_0_arm64.whl", hash = "sha256:c37ba605eb1d5b9f1d6425c779516d985400c503ee3f489e3ace86ad2c9f1e58", size = 49447466, upload-time = "2026-08-27T00:40:03.541Z" },
+    { url = "https://files.pythonhosted.org/packages/65/e2/e6dae2a945a91fbd194fc6dcaa88c83b51907c6ba7298cf193d6b0762d51/cursor_sdk-1.0.29-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:ec242b327df32f672f0cd214c0d377ac27373d516d085dc8b7bba04f308423e9", size = 50957912, upload-time = "2026-08-27T00:40:06.441Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/c4/1be2cdddc4d78d358e2e1f330a9bd0dba3a960fdc176e5d776b09b53c1bf/cursor_sdk-1.0.29-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:2bb351916dd8eb163699b2523b4c91f985adbfbe7374e2bcf8268a2db281d864", size = 58554080, upload-time = "2026-08-27T00:40:09.82Z" },
+    { url = "https://files.pythonhosted.org/packages/2a/2a/0c8e051408b550530d552a89fc4705fa234b9ba68cedecc176ec0c4599e2/cursor_sdk-1.0.29-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:e3623cf5f4f1ad5d42311a846ebe0a900558a7489604fde9a402f1018dcf2bac", size = 59244926, upload-time = "2026-08-27T00:40:12.791Z" },
+    { url = "https://files.pythonhosted.org/packages/ea/33/f10cc524089aa06d6643ca2ba9323509538b3f98ebd5c335d13776110f99/cursor_sdk-1.0.29-py3-none-win_amd64.whl", hash = "sha256:0e324493854901a13ffe9f58ac08449b332ede6e1f616f8905704f3aaac47b18", size = 45541273, upload-time = "2026-08-27T00:40:15.461Z" },
 ]
 
 [[package]]
@@ -729,6 +729,7 @@ dev = [
     { name = "pytest-xdist" },
 ]
 graphiti = [
+    { name = "cursor-sdk" },
     { name = "graphiti-core" },
     { name = "httpx" },
 ]
@@ -742,7 +743,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cursor-sdk", marker = "extra == 'cursor-research'", specifier = "==1.0.28" },
+    { name = "cursor-sdk", marker = "extra == 'cursor-research'", specifier = "==1.0.29" },
+    { name = "cursor-sdk", marker = "extra == 'graphiti'", specifier = "==1.0.29" },
     { name = "graphiti-core", marker = "extra == 'graphiti'", specifier = "==0.29.3" },
     { name = "httpx", marker = "extra == 'graphiti'", specifier = ">=0.27" },
     { name = "jsonschema", specifier = ">=4.0" },
