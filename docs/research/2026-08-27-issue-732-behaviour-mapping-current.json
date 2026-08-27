@@ -1,0 +1,15 @@
+{
+  "schema_version": "newsroom.issue-732-behaviour-mapping.v2",
+  "issue": 732,
+  "historical_mapping": "docs/research/2026-08-21-control-plane-token-productivity-closeout.json",
+  "migration": {
+    "issue": 799,
+    "repair_issue": 812,
+    "specification": "docs/specs/sdlc/ai-native-focus-gated-sdlc.md"
+  },
+  "item_16_replacements": {
+    "test_ci_is_an_exact_head_bounded_compatibility_gate": "test_focus_gate_is_one_job_and_one_conditional_bootstrap",
+    "test_sdlc_workflow_retains_dynamic_complete_evidence_topology": "test_complete_inventory_remains_independently_runnable",
+    "test_execution_jobs_check_out_the_exact_evaluated_head_without_credentials": "test_sdlc_workflows_check_out_exact_head_without_credentials"
+  }
+}

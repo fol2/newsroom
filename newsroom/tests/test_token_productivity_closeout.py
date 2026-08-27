@@ -72,6 +72,14 @@ AFTER_CSV = (
 CLOSEOUT_MD = (
     _REPO_ROOT / "docs/research/2026-08-21-control-plane-token-productivity-closeout.md"
 )
+CURRENT_MAPPING_JSON = (
+    _REPO_ROOT / "docs/research/2026-08-27-issue-732-behaviour-mapping-current.json"
+)
+_HISTORICAL_ITEM_16_TESTS = (
+    "test_ci_is_an_exact_head_bounded_compatibility_gate",
+    "test_sdlc_workflow_retains_dynamic_complete_evidence_topology",
+    "test_execution_jobs_check_out_the_exact_evaluated_head_without_credentials",
+)
 _NEW_BUCKET_COLUMNS = (
     "unreported_invocations",
     "ambiguous_invocations",
@@ -611,23 +619,48 @@ def test_governed_cli_cycle_identities_are_visible_on_export_bucket_csv(
     )
 
 
-def test_issue_732_behaviour_mapping_names_exist() -> None:
-    mapping = json.loads(CLOSEOUT_JSON.read_text(encoding="utf-8"))
+def _defined_test_names() -> set[str]:
     defined: set[str] = set()
     for path in (_REPO_ROOT / "newsroom/tests").rglob("test_*.py"):
         defined.update(
             re.findall(r"^def (test_[A-Za-z0-9_]+)\(", path.read_text(), re.M)
         )
-    missing = [
+    return defined
+
+
+def test_issue_732_behaviour_mapping_names_exist() -> None:
+    historical = json.loads(CLOSEOUT_JSON.read_text(encoding="utf-8"))
+    current = json.loads(CURRENT_MAPPING_JSON.read_text(encoding="utf-8"))
+    defined = _defined_test_names()
+
+    assert historical["issue"] == 732
+    assert len(historical["behaviour_tests"]) == 16
+    historical_item_16 = historical["behaviour_tests"][15]
+    assert historical_item_16["item"] == 16
+    assert historical_item_16["behaviour"] == "permanent SDLC"
+    assert historical_item_16["tests"] == list(_HISTORICAL_ITEM_16_TESTS)
+
+    assert current["issue"] == 732
+    assert current["historical_mapping"].endswith(
+        "2026-08-21-control-plane-token-productivity-closeout.json"
+    )
+    assert set(current) == {
+        "schema_version",
+        "issue",
+        "historical_mapping",
+        "migration",
+        "item_16_replacements",
+    }
+    assert set(current["item_16_replacements"]) == set(_HISTORICAL_ITEM_16_TESTS)
+
+    unchanged_missing = [
         name
-        for item in mapping["behaviour_tests"]
+        for item in historical["behaviour_tests"][:15]
         for name in item.get("tests", [])
         if name not in defined
     ]
-    assert mapping["issue"] == 732
-    assert len(mapping["behaviour_tests"]) == 16
-    assert missing == []
-    assert mapping["behaviour_tests"][14]["suites"] == [
+    assert unchanged_missing == []
+    assert historical["behaviour_tests"][14]["suites"] == [
         "newsroom/tests/test_zero_quota_write_loop.py",
         "newsroom/tests/test_model_usage_receipts.py",
         "newsroom/tests/test_durable_cycle_governor.py",
@@ -635,6 +668,16 @@ def test_issue_732_behaviour_mapping_names_exist() -> None:
         "newsroom/tests/test_graphiti_adapter_real_executor.py",
         "newsroom/tests/test_graphiti_corpus_ingest.py",
     ]
+
+    replaced_missing = [
+        name
+        for name in current["item_16_replacements"].values()
+        if name not in defined
+    ]
+    assert replaced_missing == []
+    assert [
+        current["item_16_replacements"][name] for name in historical_item_16["tests"]
+    ] == list(current["item_16_replacements"].values())
 
 
 def test_committed_after_csv_matches_deterministic_fixture_export(
