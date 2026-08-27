@@ -35,16 +35,19 @@ is the archive. See [ADR 0009](docs/adr/0009-legacy-operational-newsroom-dead.md
 
 Start with these records:
 
+- [AI-native Focus Gate SDLC](docs/specs/sdlc/ai-native-focus-gated-sdlc.md)
+- [Repository automation contract](.sdlc/gates.toml)
+- [Focused test behaviour](docs/testing.md)
 - [Increment 1C operating and rollback guide](docs/operations/increment-1c-integrated-foundation.md)
 - [Neo4j B2 qualification guide](docs/operations/neo4j-b2-qualification.md)
 - [Neo4j B3 rebuild and promotion guide](docs/operations/neo4j-b3-rebuild-promotion.md)
-- [SDLC v2 specification](docs/specs/sdlc/high-performance-evidence-sdlc.md)
-- [SDLC v2 owner acceptance record](docs/specs/sdlc/2026-07-22-sdlc-v2-owner-acceptance.md)
-- [Repository automation contract](.sdlc/gates.toml)
 - [Architecture](ARCHITECTURE.md)
 - [Agent guide](AGENTS.md)
 - [Contributing](CONTRIBUTING.md)
 - [Documentation map](docs/README.md)
+
+The earlier SDLC v2 design and acceptance records remain historical provenance.
+They do not override the accepted Focus Gate contract.
 
 ## Prerequisites
 
@@ -61,16 +64,26 @@ uv sync --dev --locked
 
 ## Testing and evidence
 
-For local iteration, run the smallest relevant files or node IDs:
+Ordinary pull requests are routed by one deterministic Focus Gate evidence job. A separate trusted PR Lifecycle check validates metadata without installing project dependencies:
 
 ```bash
-uv run --no-sync python -m pytest -q \
-  newsroom/tests/test_RELEVANT.py
+python -m scripts.sdlc.focus_gate route \
+  --base <base-sha> --head <head-sha> --output .focus/route.json
+python -m scripts.sdlc.focus_gate verify --route .focus/route.json
 ```
 
-Agent validation follows [`AGENTS.md`](AGENTS.md) and
-[`docs/testing.md`](docs/testing.md). Repository automation reports separately;
-agent handover and merge eligibility are distinct decisions.
+When the manifest requires a dependency bootstrap:
+
+```bash
+uv sync --dev --locked
+python -m scripts.sdlc.focus_gate execute \
+  --route .focus/route.json --junit .focus/pytest.xml
+```
+
+Documentation-only changes stop at F0 and install no dependencies. Full
+repository health, actual-service qualification, research and irreversible
+operational controls remain independent conditional lanes. See
+[`AGENTS.md`](AGENTS.md) and [`docs/testing.md`](docs/testing.md).
 
 ## Key areas
 
@@ -80,8 +93,10 @@ agent handover and merge eligibility are distinct decisions.
 | `newsroom/projection/` | Structural ontology, mappings, projection contracts, and Neo4j adapter. |
 | `newsroom/discovery_adapters/` | Source Registry RSS/Atom, JSON and document parsers. |
 | `newsroom/integrated/` | Synthetic authority-to-GraphRAG-to-Candidate foundation proof. |
-| `scripts/sdlc/` | Exact-tree routing, watchdog, evidence, transport, telemetry, and decision tooling. |
-| `.github/workflows/evidence.yml` | Permanent always-reporting SDLC evidence shadow. |
+| `scripts/sdlc/focus_gate.py` | Deterministic ordinary-change routing and manifest execution. |
+| `.github/workflows/focus-gates.yml` | One-job ordinary pull-request evidence. |
+| `.github/workflows/evidence.yml` | Scheduled, manual and merge-queue full deterministic health. |
+| `.github/workflows/ci.yml` | Isolated provider-free Graphiti research. |
 
 ## License
 

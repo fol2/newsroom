@@ -1,57 +1,50 @@
 # Contributing to Newsroom
 
-## Getting started
-
-1. Fork and clone the repository:
+## Set up
 
 ```bash
 git clone <your-fork-url> newsroom
 cd newsroom
+uv sync --dev --locked
 ```
 
-2. Install dependencies with uv:
+Do not add OpenClaw, Discord, Brave, GDELT or `news_pool` credentials. That stack is dead; see [ADR 0009](docs/adr/0009-legacy-operational-newsroom-dead.md).
+
+## Delivery shape
+
+Keep one coherent change in one issue, branch and PR. Split only at an independent merge, rollback, owner, dependency or release boundary. Prefer deletion and reuse over new scaffolding.
+
+The repository's ordinary PR workflow generates a deterministic Focus Gate manifest. It selects the smallest relevant evidence set and escalates on unresolved or cross-cutting risk.
+
+## Local validation
 
 ```bash
-uv sync --dev
+python -m scripts.sdlc.focus_gate route \
+  --base <base-sha> --head <head-sha> --output .focus/route.json
+python -m scripts.sdlc.focus_gate verify --route .focus/route.json
 ```
 
-Do not add OpenClaw, Discord, Brave, GDELT or `news_pool` credentials. That
-stack is dead ([ADR 0009](docs/adr/0009-legacy-operational-newsroom-dead.md)).
-RSS/Atom remains a Source Definition transport via `newsroom/discovery_adapters/`.
-
-## Running tests
-
-Run the smallest relevant files or node IDs during local iteration:
+When the manifest says `bootstrap_required: true`:
 
 ```bash
-uv run --no-sync python -m pytest -q \
-  newsroom/tests/test_RELEVANT.py
+uv sync --dev --locked
+python -m scripts.sdlc.focus_gate execute \
+  --route .focus/route.json --junit .focus/pytest.xml
 ```
 
-Environment setup is described above and should not be repeated before every
-test command. Agent behaviour, complete-suite authority and stop-and-report
-guidance live in [`AGENTS.md`](AGENTS.md) and [`docs/testing.md`](docs/testing.md).
+Do not substitute the complete repository for a missing direct regression. Do not add Neo4j, provider, research or full-health work unless the route selects it. Detailed guidance is in [`docs/testing.md`](docs/testing.md).
 
-## Code guidelines
+## Code
 
-- Follow existing code patterns and module structure.
-- Keep modules focused on a single responsibility.
-- The project intentionally avoids heavy dependencies like pandas and numpy. Do not introduce them.
+- Follow existing module boundaries and patterns.
 - Use `from __future__ import annotations` in new modules.
-- Type hints are used throughout; maintain them in new code.
-- Test new functionality with unit tests in `newsroom/tests/`.
-- Use UK English in code and documentation.
+- Maintain type hints.
+- Avoid heavy dependencies such as pandas and numpy.
+- Preserve deterministic, isolated tests.
+- Use UK English.
 
 ## Pull requests
 
-- Keep PRs small and focused on a single change.
-- Describe what changed and why in the PR description.
-- Include test coverage for new functionality.
-- When touching tests or fixtures, remove obvious duplicated setup and avoid
-  sleeps or repeated I/O where a smaller semantics-preserving path already
-  exists. Keep assertions and isolation intact.
-- Prefer the smallest working change; do not add speculative abstractions,
-  scaffolding or dependencies.
-- Record the focused validation performed and anything deliberately not run.
-- Do not add or expand a machine gate whose predicate is compliance with the
-  behavioural guidance in `AGENTS.md`.
+Describe the intent, exact state, Focus Gate manifest, focused evidence, review findings and non-effects. One feature-complete review is the default. Repeat only after a material change or unresolved relevant finding.
+
+Do not wait or poll merely to fill the PR template. Report an independently running workflow once if its state is already available.

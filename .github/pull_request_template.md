@@ -5,20 +5,22 @@ Checkpoint-Ref: NONE
 Close-When: merged
 Branch-Retention: delete-after-merge
 
+Focus-Gates: AUTO
+Manifest-Digest: AUTO
+Selected-Tests: AUTO
+Research-Lane: no
+Full-Health: no
+
 <!--
-Required lifecycle metadata:
-- the six visible metadata lines above must remain the first six body lines
-- hidden comments, fenced examples and later fields are never authoritative
-- canonical: Canonical-PR self, Close-When merged, Branch-Retention delete-after-merge
-- support: draft, support/ branch, reference canonical #, never merge, Branch-Retention keep
-- preflight: draft, preflight/ branch, reference canonical #, never merge, Branch-Retention keep
-- GitHub deletes canonical heads on merge; housekeeping never DELETE git refs.
-See docs/operations/pr-lifecycle.md.
+The first six lifecycle lines remain authoritative for PR lifecycle handling.
+The Focus Gate fields record the deterministic ordinary-PR route; they do not
+authorise service, research, release, deployment or activation effects.
+See docs/operations/pr-lifecycle.md and docs/testing.md.
 -->
 
-## Scope
+## Intent
 
-Describe the independently attributable delivery atom.
+State the single coherent problem and the user or repository outcome.
 
 ## Exact state
 
@@ -30,14 +32,17 @@ commits over base:
 changed files:
 ```
 
-## Verification
+## Focus Gate evidence
 
-List the focused checks selected for this change, their outcomes, and anything
-not run. If remote automation is already available, record its observed state
-once. Do not wait, poll, or rerun the same check against unchanged code,
-configuration and environment merely to fill this section. Agent handover does
-not override the repository's current merge policy. See `docs/testing.md`.
+Record the manifest digest, F0-F4 gates, selected tests, outcomes, elapsed time,
+anything deliberately not run and remaining uncertainty. Observe remote state
+once; do not poll or rerun unchanged evidence.
+
+## Review
+
+Record the one feature-complete review and any relevant fixes. A second review
+requires a material follow-up change or unresolved high-risk finding.
 
 ## Non-effects
 
-State explicitly what this PR does not activate, mutate or authorize.
+State what this PR does not activate, mutate, publish, deploy or authorise.

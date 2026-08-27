@@ -1,0 +1,237 @@
+name: Focus Gates
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        description: Exact non-head base commit for manual diagnosis
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: focus-gates-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  focus:
+    name: focus-gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      NEO4J_IMAGE: neo4j:2026.06.0-community-trixie
+      NEO4J_URI: bolt://localhost:7687
+      NEO4J_ADMIN_USERNAME: neo4j
+      NEWSROOM_NEO4J_DATABASE: neo4j
+      NEWSROOM_NEO4J_PROJECTOR_USERNAME: newsroom_projector
+
+    steps:
+      - name: Check out exact head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          show-progress: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12"
+
+      - name: Route exact change
+        id: route
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || inputs.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test -n "${BASE_SHA}"
+          test -n "${HEAD_SHA}"
+          mkdir -p .focus
+          python -m scripts.sdlc.focus_gate \
+            --repo-root . route \
+            --base "${BASE_SHA}" \
+            --head "${HEAD_SHA}" \
+            --output .focus/route.json
+          python - <<'PY' >> "${GITHUB_OUTPUT}"
+          import json
+          from pathlib import Path
+
+          route = json.loads(Path(".focus/route.json").read_text(encoding="utf-8"))
+          outputs = {
+              "bootstrap_required": route["bootstrap_required"],
+              "service_required": bool(route["selected_service_tests"]),
+              "research_required": route["research_required"],
+              "full_health_required": route["full_health_required"],
+              "owner_authority_required": route["owner_authority_required"],
+              "manifest_digest": route["manifest_digest"],
+          }
+          for name, value in outputs.items():
+              rendered = str(value).lower() if isinstance(value, bool) else value
+              print(f"{name}={rendered}")
+          PY
+
+      - name: F0 exact change integrity
+        run: |
+          python -m scripts.sdlc.focus_gate \
+            --repo-root . verify --route .focus/route.json
+
+      - name: Require owner exception for F4
+        if: >-
+          steps.route.outputs.owner_authority_required == 'true' &&
+          github.event_name == 'pull_request' &&
+          !contains(github.event.pull_request.labels.*.name, 'owner-authorised')
+        run: |
+          echo "F4 requires the owner-authorised pull-request label." >&2
+          exit 1
+
+      - name: Set up uv once
+        if: steps.route.outputs.bootstrap_required == 'true'
+        id: setup_uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: "0.8.0"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: newsroom-focus-py312
+          save-cache: false
+
+      - name: Prepare locked environment once
+        if: steps.route.outputs.bootstrap_required == 'true'
+        run: |
+          uv lock --check
+          uv sync --dev --locked
+
+      - name: Start bounded Neo4j service
+        if: steps.route.outputs.service_required == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          NEO4J_ADMIN_PASSWORD="$(python - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(32))
+          PY
+          )"
+          NEWSROOM_NEO4J_PROJECTOR_PASSWORD="$(python - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(32))
+          PY
+          )"
+          echo "::add-mask::${NEO4J_ADMIN_PASSWORD}"
+          echo "::add-mask::${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"
+          admin_file="${RUNNER_TEMP}/focus-neo4j-admin.env"
+          projector_file="${RUNNER_TEMP}/focus-neo4j-projector.env"
+          umask 077
+          printf 'NEO4J_ADMIN_PASSWORD=%s\n' "${NEO4J_ADMIN_PASSWORD}" > "${admin_file}"
+          printf 'NEWSROOM_NEO4J_PROJECTOR_PASSWORD=%s\n' \
+            "${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}" > "${projector_file}"
+          chmod 600 "${admin_file}" "${projector_file}"
+          docker run --detach \
+            --name newsroom-focus-neo4j \
+            --publish 127.0.0.1:7687:7687 \
+            --env "NEO4J_AUTH=neo4j/${NEO4J_ADMIN_PASSWORD}" \
+            "${NEO4J_IMAGE}"
+
+      - name: Qualify projector identity
+        if: steps.route.outputs.service_required == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a
+          source "${RUNNER_TEMP}/focus-neo4j-admin.env"
+          source "${RUNNER_TEMP}/focus-neo4j-projector.env"
+          set +a
+          uv run --no-sync python - <<'PY'
+          import os
+          import time
+
+          from neo4j import GraphDatabase
+
+          uri = os.environ["NEO4J_URI"]
+          admin_auth = (
+              os.environ["NEO4J_ADMIN_USERNAME"],
+              os.environ["NEO4J_ADMIN_PASSWORD"],
+          )
+          last_error = None
+          driver = None
+          for _ in range(120):
+              try:
+                  driver = GraphDatabase.driver(uri, auth=admin_auth)
+                  driver.verify_connectivity()
+                  break
+              except Exception as exc:
+                  last_error = exc
+                  if driver is not None:
+                      driver.close()
+                  driver = None
+                  time.sleep(2)
+          else:
+              raise RuntimeError("authenticated Neo4j readiness timed out") from last_error
+
+          assert driver is not None
+          try:
+              with driver.session(database="system") as session:
+                  session.run(
+                      "CREATE USER newsroom_projector IF NOT EXISTS "
+                      "SET PLAINTEXT PASSWORD $password CHANGE NOT REQUIRED",
+                      password=os.environ["NEWSROOM_NEO4J_PROJECTOR_PASSWORD"],
+                  ).consume()
+          finally:
+              driver.close()
+
+          projector = GraphDatabase.driver(
+              uri,
+              auth=(
+                  os.environ["NEWSROOM_NEO4J_PROJECTOR_USERNAME"],
+                  os.environ["NEWSROOM_NEO4J_PROJECTOR_PASSWORD"],
+              ),
+          )
+          try:
+              projector.verify_connectivity()
+          finally:
+              projector.close()
+          PY
+          {
+            echo "NEWSROOM_NEO4J_USER=${NEWSROOM_NEO4J_PROJECTOR_USERNAME}"
+            echo "NEWSROOM_NEO4J_PASSWORD=${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"
+            echo "NEWSROOM_NEO4J_PROJECTOR_PASSWORD=${NEWSROOM_NEO4J_PROJECTOR_PASSWORD}"
+          } >> "${GITHUB_ENV}"
+          rm -f "${RUNNER_TEMP}/focus-neo4j-admin.env"
+
+      - name: Execute selected evidence
+        if: steps.route.outputs.bootstrap_required == 'true'
+        env:
+          NEWSROOM_NEO4J_COMPLETE_SERVICE_REQUIRED: ${{ steps.route.outputs.service_required == 'true' && '1' || '' }}
+          NEWSROOM_NEO4J_INCREMENT_2D_SERVICE_REQUIRED: ${{ steps.route.outputs.service_required == 'true' && '1' || '' }}
+          NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED: ${{ steps.route.outputs.service_required == 'true' && '1' || '' }}
+          NEWSROOM_NEO4J_SERVICE_REQUIRED: ${{ steps.route.outputs.service_required == 'true' && '1' || '' }}
+        run: |
+          uv run --no-sync python -m scripts.sdlc.focus_gate \
+            --repo-root . execute \
+            --route .focus/route.json \
+            --junit .focus/pytest.xml
+
+      - name: Remove disposable service state
+        if: always() && steps.route.outputs.service_required == 'true'
+        run: |
+          rm -f \
+            "${RUNNER_TEMP}/focus-neo4j-admin.env" \
+            "${RUNNER_TEMP}/focus-neo4j-projector.env"
+          docker rm --force newsroom-focus-neo4j >/dev/null 2>&1 || true
+
+      - name: Upload canonical Focus Gate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: focus-gates-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: .focus
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: true

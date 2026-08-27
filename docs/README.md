@@ -73,24 +73,17 @@ A link does not make an entire reference or research document normative. A merge
 - Dated database, GraphRAG and discovery research remains non-normative evidence.
 - [`reference/editorial/product-editorial-charter.zh-HK.md`](reference/editorial/product-editorial-charter.zh-HK.md) is the canonical human charter; the English file is a development translation.
 
-## Current SDLC v2 documents
+## Current AI-native SDLC documents
 
-- [`testing.md`](testing.md) is behavioural guidance for proportionate local
-  validation, stopping and reporting; it creates no machine gate.
-- [`specs/sdlc/high-performance-evidence-sdlc.md`](specs/sdlc/high-performance-evidence-sdlc.md)
-  is the adopted technical contract for repository automation. It does not
-  instruct agents to wait, poll or rerun automation before handover.
-- [`specs/sdlc/2026-07-22-sdlc-v2-owner-acceptance.md`](specs/sdlc/2026-07-22-sdlc-v2-owner-acceptance.md) is the **Accepted** normative record that supersedes the pre-acceptance status metadata and fixes the five owner-policy values.
-- [`research/2026-07-21-high-performance-sdlc-evidence.md`](research/2026-07-21-high-performance-sdlc-evidence.md) is the Completed dated evidence study of the current five-workflow topology, exact JUnit timings, primary sources and rejected options.
-- [`research/2026-07-21-sdlc-v2-substantive-review.md`](research/2026-07-21-sdlc-v2-substantive-review.md) records the completed design review and corrected P2 findings.
-- [`plans/2026-07-21-007-sdlc-v2-migration.md`](plans/2026-07-21-007-sdlc-v2-migration.md) is the adopted reversible migration plan from historical increment workflows to one always-reporting router, one cached core lane and one conditional actual-service lane.
-- [`../.sdlc/gates.toml`](../.sdlc/gates.toml), [`../.sdlc/route.schema.json`](../.sdlc/route.schema.json), [`../.sdlc/evidence.schema.json`](../.sdlc/evidence.schema.json) and [`../.sdlc/baselines/2026-07-21-b3.json`](../.sdlc/baselines/2026-07-21-b3.json) are the accepted machine-readable contract and exact baseline evidence.
-- Repository automation produces its own evidence records under the SDLC
-  contract. Those records do not create an agent obligation to wait, poll,
-  rerun the same check against unchanged code, configuration and environment,
-  or withhold a focused handover. Handover does not override the repository's
-  current merge policy.
-- Issue #98 is closed completed. PR #99 accepted the SDLC v2 specification and PR #119 merged the reversible Phase 1/2 **SDLC Evidence Shadow** implementation.
+- [`specs/sdlc/ai-native-focus-gated-sdlc.md`](specs/sdlc/ai-native-focus-gated-sdlc.md) is the **Accepted** execution SSOT for ordinary development, F0–F4 Focus Gates, research isolation and human-exception boundaries.
+- [`testing.md`](testing.md) explains focused selection, broadening, stopping and truthful handover.
+- [`../.sdlc/gates.toml`](../.sdlc/gates.toml) and [`../.sdlc/focus-route.schema.json`](../.sdlc/focus-route.schema.json) are the accepted machine contract for the deterministic content-addressed route.
+- [`../.github/workflows/focus-gates.yml`](../.github/workflows/focus-gates.yml) is the one-job ordinary product-evidence lane with zero project-dependency bootstraps for documentation and at most one for executable work.
+- [`../.github/workflows/evidence.yml`](../.github/workflows/evidence.yml) retains scheduled, manual and merge-queue full deterministic product health outside the ordinary pull-request critical path. It excludes Graphiti research fixtures.
+- [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) is the isolated, provider-free Graphiti research lane.
+- [`../.github/workflows/pr-lifecycle.yml`](../.github/workflows/pr-lifecycle.yml) is a separate trusted metadata-policy check. It installs no project dependencies and is not part of the product-test budget.
+- The earlier [`specs/sdlc/high-performance-evidence-sdlc.md`](specs/sdlc/high-performance-evidence-sdlc.md), [`specs/sdlc/2026-07-22-sdlc-v2-owner-acceptance.md`](specs/sdlc/2026-07-22-sdlc-v2-owner-acceptance.md), dated SDLC research and migration plan remain historical provenance for retained receipt and timing compatibility. They do not define the current ordinary pull-request topology.
+- Repository automation creates evidence records; it does not require an agent to wait, poll, rerun unchanged work or replay research before a focused handover.
 
 ## Current-system documentation
 
