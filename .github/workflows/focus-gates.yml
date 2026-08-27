@@ -103,9 +103,18 @@ jobs:
           uv sync --dev --locked
 
       - name: F0 exact change integrity
+        shell: bash
+        env:
+          BOOTSTRAP_REQUIRED: ${{ steps.route.outputs.bootstrap_required }}
         run: |
-          python -m scripts.sdlc.focus_gate_v2 \
-            --repo-root . verify --route .focus/route.json
+          set -euo pipefail
+          if [[ "${BOOTSTRAP_REQUIRED}" == "true" ]]; then
+            uv run --no-sync python -m scripts.sdlc.focus_gate_v2 \
+              --repo-root . verify --route .focus/route.json
+          else
+            python -m scripts.sdlc.focus_gate_v2 \
+              --repo-root . verify --route .focus/route.json
+          fi
 
       - name: Start bounded Neo4j service
         if: steps.route.outputs.service_required == 'true'

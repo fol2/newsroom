@@ -156,6 +156,17 @@ def test_machine_research_evidence_matches_workflow_trigger() -> None:
     assert route["bootstrap_required"] is False
 
 
+def test_f0_uses_locked_interpreter_only_when_bootstrap_is_required() -> None:
+    workflow = (
+        Path(__file__).parents[2] / ".github/workflows/focus-gates.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "BOOTSTRAP_REQUIRED: ${{ steps.route.outputs.bootstrap_required }}" in workflow
+    assert 'if [[ "${BOOTSTRAP_REQUIRED}" == "true" ]]' in workflow
+    assert "uv run --no-sync python -m scripts.sdlc.focus_gate_v2" in workflow
+    assert "python -m scripts.sdlc.focus_gate_v2" in workflow
+
+
 def test_f0_validates_yaml_and_shell_syntax(tmp_path: Path) -> None:
     valid_yaml = tmp_path / "valid.yml"
     invalid_yaml = tmp_path / "invalid.yml"
