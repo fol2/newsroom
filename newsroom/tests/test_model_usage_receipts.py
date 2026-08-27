@@ -2520,7 +2520,6 @@ def test_checked_issue_790_step_eight_remains_non_executable_draft() -> None:
             / "docs/operations/2026-08-27-issue-790-success-sequence-step-8-draft.json"
         ).read_text(encoding="utf-8")
     )
-    call_shape = load_checked_graphiti_call_shape_policy()
 
     assert draft["plan_status"] == "DRAFT"
     assert draft["executable"] is False
@@ -2529,8 +2528,9 @@ def test_checked_issue_790_step_eight_remains_non_executable_draft() -> None:
         "docs/operations/2026-08-27-issue-790-step-7-exact-pin-withdrawal.json"
     )
     assert draft["intended_sequence"]["call_shape_policy_version"] == "issue-816-v2"
+    # Historical draft stays pinned to the Step 8 call-shape; tip enforcement is Step 9.
     assert draft["intended_sequence"]["call_shape_policy_digest"] == (
-        call_shape.canonical_digest
+        "sha256:00e094297b2423272ade50b52a3ce8a75392128b6d60c70ea24b07f0ff8e89a2"
     )
     assert draft["intended_sequence"]["sdk_floor"] == "cursor-sdk>=1.0.29"
     assert draft["intended_sequence"]["composer_floor"] == "composer>=2.5"
