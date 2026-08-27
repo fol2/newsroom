@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS issue_790_graphiti_retry_exclusions(
 CREATE TABLE IF NOT EXISTS issue_790_bounded_canary_consumptions(
     consumption_digest TEXT PRIMARY KEY,
     approved_plan_digest TEXT NOT NULL UNIQUE,
-    disposition_digest TEXT NOT NULL UNIQUE,
+    disposition_digest TEXT NOT NULL,
     event_id TEXT NOT NULL UNIQUE,
     ledger_seq INTEGER NOT NULL UNIQUE CHECK(ledger_seq > 0),
     owner_id TEXT NOT NULL UNIQUE,
@@ -65,6 +65,64 @@ CREATE TABLE IF NOT EXISTS issue_790_bounded_canary_outcomes(
         ON UPDATE RESTRICT ON DELETE RESTRICT
 );
 """
+
+
+def _allow_reused_dispositions(connection: sqlite3.Connection) -> None:
+    indexes = connection.execute(
+        "PRAGMA index_list(issue_790_bounded_canary_consumptions)"
+    ).fetchall()
+    disposition_is_unique = False
+    for index in indexes:
+        if not index[2]:
+            continue
+        name = str(index[1]).replace('"', '""')
+        columns = tuple(
+            str(column[2])
+            for column in connection.execute(f'PRAGMA index_info("{name}")')
+        )
+        disposition_is_unique = columns == ("disposition_digest",)
+        if disposition_is_unique:
+            break
+    if not disposition_is_unique:
+        return
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys=OFF")
+    connection.execute("PRAGMA legacy_alter_table=ON")
+    try:
+        connection.executescript(
+            """
+            BEGIN IMMEDIATE;
+            ALTER TABLE issue_790_bounded_canary_consumptions
+                RENAME TO issue_790_bounded_canary_consumptions_legacy;
+            CREATE TABLE issue_790_bounded_canary_consumptions(
+                consumption_digest TEXT PRIMARY KEY,
+                approved_plan_digest TEXT NOT NULL UNIQUE,
+                disposition_digest TEXT NOT NULL,
+                event_id TEXT NOT NULL UNIQUE,
+                ledger_seq INTEGER NOT NULL UNIQUE CHECK(ledger_seq > 0),
+                owner_id TEXT NOT NULL UNIQUE,
+                consumed_at TEXT NOT NULL,
+                record_json TEXT NOT NULL,
+                FOREIGN KEY(disposition_digest)
+                    REFERENCES model_usage_conservative_dispositions(
+                        disposition_digest
+                    ) ON UPDATE RESTRICT ON DELETE RESTRICT
+            );
+            INSERT INTO issue_790_bounded_canary_consumptions
+                SELECT * FROM issue_790_bounded_canary_consumptions_legacy;
+            DROP TABLE issue_790_bounded_canary_consumptions_legacy;
+            COMMIT;
+            """
+        )
+    finally:
+        if connection.in_transaction:
+            connection.rollback()
+        connection.execute("PRAGMA legacy_alter_table=OFF")
+        connection.execute("PRAGMA foreign_keys=ON")
+    if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+        raise Issue790CanaryIntegrityError(
+            "bounded canary disposition migration differs"
+        )
 
 
 class Issue790CanaryIntegrityError(ValueError):
@@ -406,6 +464,7 @@ class Issue790CanaryRepository:
         self.path = path
         connection = self._connection()
         try:
+            _allow_reused_dispositions(connection)
             connection.executescript(_SCHEMA)
             connection.commit()
         finally:
