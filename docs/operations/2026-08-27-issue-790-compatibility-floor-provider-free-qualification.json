@@ -22,7 +22,7 @@
     "call_shape_policy_version": "issue-816-v2",
     "call_shape_policy_digest": "sha256:f0b2de282936824b5b1ff5d2d9e37126356e38d62ab7269d4cbfb18e9133d535",
     "transport_policy_digest": "sha256:06ebe081ebbccd69c00011c54ab2a3e419127107ab258eb1eba230f20c270a8a",
-    "implementation_revision": "sha256:e8e8d5bb8a561bb8171536b21f34011cf2e10ea2ca752b8b708e035ca2521244",
+    "implementation_revision": "sha256:447ae2fa9b9be0e1f37a05b02cdd592ffc05ef20e4409a0681681da83a8346a8",
     "v1_exact_pin_receipts_preserved": "PASS"
   },
   "focused_tests": [
