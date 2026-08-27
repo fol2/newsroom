@@ -1,0 +1,14 @@
+{
+  "schema_version": "newsroom.issue-790.code-fix-review-receipt.v1",
+  "issue": 790,
+  "observed_at": "2026-08-27T22:45:00.000000Z",
+  "fix_kind": "CODE",
+  "fix_summary": "Pin NewsroomCombinedTemporalExtractionV1 entity_type_id=0 and SCREAMING_SNAKE_CASE relation_type in SCHEMA/prompt; demote schema-invalid Cursor JSON to MALFORMED only when fallback is permitted",
+  "predecessor_outcome_digest": "sha256:6f284b6e42b93bb9628bdd674ec2e9730f9f0212a7d773f1d1ae81bf5d15c66d",
+  "qualification_digest": "sha256:49d7eef58161533d1690e1a6559c1c701ece1f8e68053bee9f827165160fb19f",
+  "pull_request_url": "https://github.com/fol2/newsroom/pull/832",
+  "reviewed_fix_revision": "16382f8b111e300c8e27f32a879dcddafde27230",
+  "provider_calls": 0,
+  "secret_material_committed": false,
+  "canonical_digest": "sha256:dd69b72c4da4aacf35df0b6787e06acfb7e7d2de4088a007da4863ca4b3d3421"
+}

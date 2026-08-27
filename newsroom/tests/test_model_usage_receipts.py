@@ -2597,6 +2597,10 @@ def test_issue_790_invocation_plan_digests_cover_shared_successor_chain() -> Non
         issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_10_PLAN_DIGEST
         in digests
     )
+    assert (
+        issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_11_PLAN_DIGEST
+        in digests
+    )
 
 
 def test_checked_issue_790_step_nine_executable_plan_contract() -> None:
@@ -2670,6 +2674,45 @@ def test_checked_issue_790_step_ten_executable_plan_contract() -> None:
     )
     assert qualification["qualification"] == (
         "LOCAL_SDK_IDEMPOTENCY_KEY_OMIT_PROVIDER_FREE_READY"
+    )
+    assert qualification["provider_calls"] == 0
+
+
+def test_checked_issue_790_step_eleven_executable_plan_contract() -> None:
+    root = Path(__file__).resolve().parents[2]
+    plan = load_issue_790_plan(
+        root / "docs/operations/2026-08-27-issue-790-success-sequence-step-11.json"
+    )
+    contract = issue_790_contract_module.issue_790_approved_plan_contract(
+        plan["canonical_digest"]
+    )
+    qualification = json.loads(
+        (
+            root
+            / "docs/operations/2026-08-27-issue-790-step-11-wire-constraint-qualification.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert plan["canonical_digest"] == (
+        issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_11_PLAN_DIGEST
+    )
+    assert plan["sequence"]["sequence_ordinal"] == 11
+    assert plan["sequence"]["constraint_change"] == "REVIEWED_NON_TIMEOUT_FIX"
+    assert plan["sequence"]["predecessor"]["plan_digest"] == (
+        issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_10_PLAN_DIGEST
+    )
+    assert plan["sequence"]["reviewed_fix"]["fix_kind"] == "CODE"
+    assert plan["sequence"]["predecessor_causal_report"]["local_cause"] == (
+        "IDENTITY_INVALID_ENTITY_TYPE_ID_OUTSIDE_GOVERNED_ONTOLOGY"
+    )
+    assert contract.sequence_ordinal == 11
+    assert contract.constraint_change == "REVIEWED_NON_TIMEOUT_FIX"
+    assert (
+        contract.predecessor_plan_digest
+        == issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_10_PLAN_DIGEST
+    )
+    assert qualification["qualification"] == (
+        "COMBINED_TEMPORAL_WIRE_CONSTRAINT_PROVIDER_FREE_READY"
     )
     assert qualification["provider_calls"] == 0
 
