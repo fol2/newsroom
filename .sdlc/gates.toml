@@ -43,6 +43,19 @@ provider_calls_implicit = false
 human_default_required = false
 human_exception_gates = ["F4"]
 
+[focus_hardening]
+schema_version = "newsroom.sdlc.focus-gates-hardening.v1"
+contract_version = "focus-gates-hardening-v1"
+status = "accepted"
+issue = 811
+ordinary_router = "scripts/sdlc/focus_gate_v2.py"
+selector = "scripts/sdlc/focus_selector.py"
+full_health_events = ["push_main", "schedule", "workflow_dispatch"]
+merge_model = "agent_exact_head_focus_review"
+platform_required_status_checks = false
+stateful_sentinel_count = 2
+f0_syntax = ["python", "json", "toml", "yaml", "shell"]
+
 [gate.route]
 id = "route"
 p50_target_seconds = 1
@@ -160,6 +173,7 @@ contract_control = [
   "scripts/sdlc/**",
   "newsroom/tests/test_sdlc_*.py",
   "newsroom/tests/test_focus_gate.py",
+  "newsroom/tests/test_focus_gate_hardening.py",
   "newsroom/tests/test_ci_workflow.py",
   "newsroom/tests/test_integrated_c1_sdlc_contract.py",
   "newsroom/tests/test_integrated_c1_workflow_contract.py",
@@ -363,6 +377,7 @@ allowed = [
 accepted_at = "2026-07-22"
 budget_amended_at = "2026-08-02"
 focus_gate_accepted_at = "2026-08-27"
+focus_gate_hardened_at = "2026-08-27"
 predecessor_contract_version = "sdlc-v2.3"
 hard_budget_multiplier = 2
 review_net_executable_lines_trigger = 400

@@ -53,7 +53,7 @@ jobs:
           test -n "${BASE_SHA}"
           test -n "${HEAD_SHA}"
           mkdir -p .focus
-          python -m scripts.sdlc.focus_gate \
+          python -m scripts.sdlc.focus_gate_v2 \
             --repo-root . route \
             --base "${BASE_SHA}" \
             --head "${HEAD_SHA}" \
@@ -75,11 +75,6 @@ jobs:
               rendered = str(value).lower() if isinstance(value, bool) else value
               print(f"{name}={rendered}")
           PY
-
-      - name: F0 exact change integrity
-        run: |
-          python -m scripts.sdlc.focus_gate \
-            --repo-root . verify --route .focus/route.json
 
       - name: Require owner exception for F4
         if: >-
@@ -106,6 +101,20 @@ jobs:
         run: |
           uv lock --check
           uv sync --dev --locked
+
+      - name: F0 exact change integrity
+        shell: bash
+        env:
+          BOOTSTRAP_REQUIRED: ${{ steps.route.outputs.bootstrap_required }}
+        run: |
+          set -euo pipefail
+          if [[ "${BOOTSTRAP_REQUIRED}" == "true" ]]; then
+            uv run --no-sync python -m scripts.sdlc.focus_gate_v2 \
+              --repo-root . verify --route .focus/route.json
+          else
+            python -m scripts.sdlc.focus_gate_v2 \
+              --repo-root . verify --route .focus/route.json
+          fi
 
       - name: Start bounded Neo4j service
         if: steps.route.outputs.service_required == 'true'
@@ -211,7 +220,7 @@ jobs:
           NEWSROOM_NEO4J_RETRIEVAL_SERVICE_REQUIRED: ${{ steps.route.outputs.service_required == 'true' && '1' || '' }}
           NEWSROOM_NEO4J_SERVICE_REQUIRED: ${{ steps.route.outputs.service_required == 'true' && '1' || '' }}
         run: |
-          uv run --no-sync python -m scripts.sdlc.focus_gate \
+          uv run --no-sync python -m scripts.sdlc.focus_gate_v2 \
             --repo-root . execute \
             --route .focus/route.json \
             --junit .focus/pytest.xml

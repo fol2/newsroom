@@ -1,9 +1,9 @@
 name: Full Repository Health
 
 on:
-  merge_group:
-    types:
-      - checks_requested
+  push:
+    branches:
+      - main
   schedule:
     - cron: "23 3 * * *"
   workflow_dispatch:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: full-health-${{ github.event.merge_group.head_sha || github.ref }}
+  group: full-health-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -21,10 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - name: Check out exact head
+      - name: Check out exact main head
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
-          ref: ${{ github.event.merge_group.head_sha || github.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
           show-progress: false
@@ -59,7 +59,7 @@ jobs:
 
       - name: Run complete deterministic product inventory
         run: |
-          uv run --no-sync python -m scripts.sdlc.focus_gate \
+          uv run --no-sync python -m scripts.sdlc.focus_gate_v2 \
             --repo-root . full-health \
             --junit full-health.xml
 
@@ -67,7 +67,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: full-health-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.merge_group.head_sha || github.sha }}
+          name: full-health-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
           path: full-health.xml
           if-no-files-found: error
           retention-days: 180

@@ -1,96 +1,67 @@
 # Documentation map
 
-This repository is an automated, agentic newsroom system. Documentation authority depends on document type and status.
+Newsroom documentation is loaded by authority and by need. Do not preload the
+whole tree for an ordinary change.
 
-## Document authority
+## Authority order
 
-| Path | Purpose | Implementation authority | Canonical language |
-|---|---|---|---|
-| [`specs/`](specs/) | Target behaviour, workflow, policy and testable requirements | Normative only when the individual document is `Accepted` or the owner explicitly authorises implementation | English |
-| [`plans/`](plans/) | Sequencing, milestones, migration, rollout and validation | Organises accepted requirements; does not create them or activate runtime behaviour | English |
-| [`reference/`](reference/) | Charter, editorial principles, legal and retained context | Non-normative unless an Accepted specification adopts a requirement | Usually Hong Kong Traditional Chinese |
-| [`research/`](research/) | Dated investigations and option studies | Non-normative evidence | Declared by each document |
-| [`adr/`](adr/) | Durable architecture decisions | Normative only when status is `accepted` | English |
-| [`decisions/`](decisions/) | Dated product decisions that pin a slice without rewriting an ADR | Normative only when the individual record is `Accepted` | English |
+1. The current GitHub issue defines the ordinary change intent.
+2. Accepted specifications and ADRs define durable behaviour and architecture.
+3. `.sdlc/gates.toml` and current workflows define machine execution.
+4. Operations/evaluation records define bounded run or admission authority.
+5. Research is evidence only unless promoted by an accepted decision.
+6. Plans sequence accepted work; they do not independently authorise it.
 
-A link does not make an entire reference or research document normative. A merged pull request, passing test, committed Draft, Proposed plan or Proposed ADR does not imply owner acceptance. Proposed readiness plans may be merged for traceability while implementation remains blocked until a separate owner-authorised boundary exists.
+A merged draft, passing test, historical review or linked research file does not
+create implementation, provider, deployment or activation authority.
 
-## Development-agent rules
+## Development
 
-1. Identify document type, status and canonical language before acting.
-2. Implement only an Accepted specification or explicit owner instruction.
-3. Use plans to sequence accepted requirements, not invent them.
-4. Use reference and research as evidence unless a specification adopts a constraint.
-5. Apply only Accepted ADRs and surface conflicts.
-6. Keep target behaviour separate from current code and tests.
-7. Preserve provenance, versions, review status, supersession and explicit deferrals.
-8. Treat specification acceptance, implementation authority, Evaluation Plan, Operational Admission, canary and production activation as separate authorities.
-9. Keep committed documentation `git diff --check` clean; use blank lines or ordinary paragraphs instead of trailing-space Markdown hard breaks.
+- [`../AGENTS.md`](../AGENTS.md) — concise always-loaded agent authority
+- [`../REVIEW.md`](../REVIEW.md) — current feature-review policy
+- [`testing.md`](testing.md) — Focus Gate execution and stopping behaviour
+- [`agents/issue-tracker.md`](agents/issue-tracker.md) — proportional issue/PR use
+- [`specs/sdlc/ai-native-focus-gated-sdlc.md`](specs/sdlc/ai-native-focus-gated-sdlc.md) — accepted AI-native SDLC
+- [`../.sdlc/gates.toml`](../.sdlc/gates.toml) — current hardening and retained compatibility contract
 
-## Current discovery and GraphRAG documents
+The GitHub issue is the ordinary intent SSOT. Do not duplicate it into another
+intent/specification/plan artefact without a concrete ambiguity or independent
+durable decision boundary.
 
-- [`plans/2026-07-15-002-discovery-specification-review.md`](plans/2026-07-15-002-discovery-specification-review.md) is the completed owner-led decision record for Topics 0–13 and ADR 0004.
-- Topic 1–11 focused discovery specifications under [`specs/editorial-automation/`](specs/editorial-automation/) are Accepted and authorise no runtime action.
-- [`specs/editorial-automation/governed-graphrag-and-knowledge-projection.md`](specs/editorial-automation/governed-graphrag-and-knowledge-projection.md) and [`specs/editorial-automation/graphrag-native-production-deployment.md`](specs/editorial-automation/graphrag-native-production-deployment.md) are the Accepted governed and native-production GraphRAG contracts.
-- [`decisions/2026-08-20-graphiti.md`](decisions/2026-08-20-graphiti.md) is the Accepted Graphiti SSOT for corpus ingest, temporal currency and drafting-context boundary. [`specs/editorial-automation/graphiti-corpus-ingestion-amendment.md`](specs/editorial-automation/graphiti-corpus-ingestion-amendment.md) is the numbered `GING-*` extract. It authorises Slice A only. It does not rewrite `GRAG-*` or `CONT-001`.
-- [`research/2026-08-21-graphiti-cursor-subscription-bootstrap.md`](research/2026-08-21-graphiti-cursor-subscription-bootstrap.md) and its second-stage addendum are the consolidated #739 Graphiti token-effectiveness research, including the retained six-call CLI calibration, the #746 eight-leaf SDK result and the merged #747 provider-free contract qualification. They authorise no further live call.
-- [`research/2026-08-22-graphiti-combined-temporal-extraction.md`](research/2026-08-22-graphiti-combined-temporal-extraction.md) is the dated #747 provider-free qualification of `NewsroomCombinedTemporalExtractionV1`. It does not amend `GING-010` or authorise a live call.
-- [`research/2026-08-25-graphiti-provider-free-donor-identities.md`](research/2026-08-25-graphiti-provider-free-donor-identities.md) records #772's provider-free donor identity decision and non-serving evidence. It does not amend `GING-010` or authorise cache serving.
-- [`research/2026-08-21-graphiti-sdk-no-tool-calibration.md`](research/2026-08-21-graphiti-sdk-no-tool-calibration.md) is the dated #746 Cursor SDK `tools=[]` harness and retained owner-authorised eight-leaf result. Its recommendation is `REJECT`; it authorises no further live call.
-- [`research/2026-08-24-graphiti-deterministic-work.md`](research/2026-08-24-graphiti-deterministic-work.md) is the dated #748 provider-free qualification of deterministic sidecar, local Entity Resolution Proposal, duplicate-collapse, summary and average-token contracts for later adoption in #731. It does not authorise runtime activation.
-- [`adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md`](adr/0001-authoritative-editorial-ledger-and-rebuildable-projections.md), [`adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md`](adr/0002-sqlite-ledger-in-the-integrated-target-architecture.md), [`adr/0004-source-registry-first-change-driven-discovery.md`](adr/0004-source-registry-first-change-driven-discovery.md) and [`adr/0005-native-graphrag-production-deployment.md`](adr/0005-native-graphrag-production-deployment.md) are Accepted.
-- [`plans/2026-07-16-005-native-graphrag-production-implementation.md`](plans/2026-07-16-005-native-graphrag-production-implementation.md) is the Accepted Topic 13 implementation plan. Acceptance authorises no code or run.
-- [`plans/2026-07-16-006-increment-1-implementation-readiness.md`](plans/2026-07-16-006-increment-1-implementation-readiness.md) is the Completed owner-authorised post-merge audit, traceability matrix, Increment 1 technical design, PR #75 donor map and three-PR implementation-epic boundary. It is documentation-only and authorises no runtime action.
-- [`plans/2026-07-24-010-increments-2-11-owner-acceptance.md`](plans/2026-07-24-010-increments-2-11-owner-acceptance.md) is the **Accepted** owner decision for PR #140. It supersedes the two readiness documents’ pre-acceptance metadata, authorises only Increment 2 issue #142 after PR #140 merges and records the fixed exclusions and later-increment stop gates.
-- [`plans/2026-07-24-008-increment-2-complete-fixture-readiness.md`](plans/2026-07-24-008-increment-2-complete-fixture-readiness.md) is the accepted technical readiness package for the first complete structural/full-text/vector/graph fixture slice. Implementation authority is limited by the owner-acceptance record and issue #142.
-- [`plans/2026-07-24-009-increments-3-11-readiness-ladder.md`](plans/2026-07-24-009-increments-3-11-readiness-ladder.md) is the accepted dependency and decision map for Increments 3–11. It creates no present implementation or activation authority for those blocked increments.
-- [`operations/neo4j-b2-qualification.md`](operations/neo4j-b2-qualification.md) records the Increment 1B2 Neo4j Community target, fixed-query adapter, credential separation and actual-service qualification boundary.
-- [`operations/neo4j-b3-rebuild-promotion.md`](operations/neo4j-b3-rebuild-promotion.md) records the Increment 1B3 rebuild, reconciliation, active-generation serving, recovery and rollback procedure. It authorises no runtime activation.
-- [`operations/increment-2a-governed-relation-authority.md`](operations/increment-2a-governed-relation-authority.md) records the draft Increment 2A SQLite relation authority, checked fixture, admitted-only projection seam, lifecycle handling and rollback boundary. It creates no Neo4j, source, model, shadow or production authority.
-- [`operations/increment-2b-complete-projection.md`](operations/increment-2b-complete-projection.md) records the draft Increment 2B complete structural/admitted-relation/full-text/vector generation authority, actual-Neo4j qualification, source-watermark guard, lifecycle handling and rollback boundary. It creates no Increment 2C retrieval or runtime activation authority.
-- [`operations/increment-2c-bounded-hybrid-retrieval.md`](operations/increment-2c-bounded-hybrid-retrieval.md) records the draft Increment 2C fixed named retrieval tool, four bounded branches, deterministic fusion, authoritative hydration, retained Retrieval Context v2, explicit failure outcomes and rollback boundary. It creates no Candidate admission or Increment 2D authority.
-- [`operations/increment-2d-complete-actual-neo4j-proof.md`](operations/increment-2d-complete-actual-neo4j-proof.md) records the Increment 2D complete fixture-to-Candidate proof, schema-v9 Candidate authority, lifecycle recovery, actual-Neo4j evidence and rollback boundary. It creates no Increment 3 or runtime activation authority.
-- [`plans/2026-08-14-014-increment-8-exact-qualification-readiness.md`](plans/2026-08-14-014-increment-8-exact-qualification-readiness.md) freezes the Increment 8 fixture qualification Plan, Operational Profile values, 110-row ownership map and no-activation boundary before any qualification result is collected.
-- [`evaluation/2026-08-14-increment-8a-evaluation-authority.md`](evaluation/2026-08-14-increment-8a-evaluation-authority.md) records the immutable Plan/Epoch/Run/Case/review/adjudication and release-evidence authority, v30 backup gate and calibration-separation boundary.
-- [`evaluation/2026-08-14-increment-8b-prospective-metrics.md`](evaluation/2026-08-14-increment-8b-prospective-metrics.md) records bounded prospective counts, required slices, source contribution, performance and non-rescuing ablation evidence.
-- [`operations/2026-08-14-increment-8c-operational-authority.md`](operations/2026-08-14-increment-8c-operational-authority.md) records the v31 Operational Profile, bounded queue/lease/retry/quarantine authority and honest Handoff registration-anchor transition.
-- [`operations/2026-08-14-increment-8d-observability-security.md`](operations/2026-08-14-increment-8d-observability-security.md) records multidimensional health, obligation/path coverage, safe versioned observability, incident lifecycle and fail-closed security evidence.
-- [`operations/2026-08-14-increment-8e-recovery-authority.md`](operations/2026-08-14-increment-8e-recovery-authority.md) records exact-backup-gated v32 reconciliation, backup/restore, replay, purge and fixture fault-injection authority.
-- [`operations/2026-08-14-increment-8f-operational-admission.md`](operations/2026-08-14-increment-8f-operational-admission.md) records intended hardware, capacity, cost, licence, exact Handoff and non-activating Operational Admission/Tier-M closeout evidence.
-- [`operations/2026-08-24-graphiti-admission-consumer.md`](operations/2026-08-24-graphiti-admission-consumer.md) records the provider-free durable Graphiti proposal admission queue, governed authority/projector ports, rights tombstones and contiguous projection watermark for #758.
-- [`operations/2026-08-24-governed-graphiti-context.md`](operations/2026-08-24-governed-graphiti-context.md) records the admitted-only, bounded and trust-labelled context hydrator plus its Hypothesis, Candidate, Evidence and CONT integration seam for #759.
-- [`operations/2026-08-24-hermetic-cont-writer.md`](operations/2026-08-24-hermetic-cont-writer.md) records the #730 isolated Grok route, fail-closed Cursor boundary, durable context manifests and productive calibration gate. Its retained exact-head dry selection had no `WRITE_READY` candidates, so it creates no continuous-writing activation authority.
-- [`operations/2026-08-26-production-operational-admission.md`](operations/2026-08-26-production-operational-admission.md) records #760's exact-main, provider-free readiness report and owner-authenticated production Operational Admission minter. The mechanism mints nothing without a separate dedicated owner instruction and grants no Increment 11R or activation authority.
-- [`operations/2026-08-26-issue-790-conservative-disposition.md`](operations/2026-08-26-issue-790-conservative-disposition.md) binds one owner-approved, upper-bound usage disposition and route release to the exact unresolved Cursor subscription CLI invocation. It preserves the unknown terminal and spend, forbids retries of the retained failed ledgers, and permits only one later bounded canary.
-- [`research/2026-08-21-control-plane-token-consumption-investigation.md`](research/2026-08-21-control-plane-token-consumption-investigation.md) retains the historical Grok-writer lower bound; the exact-main closeout and after CSV are [`research/2026-08-21-control-plane-token-productivity-closeout.md`](research/2026-08-21-control-plane-token-productivity-closeout.md) and [`research/2026-08-21-control-plane-token-consumption-after-300s.csv`](research/2026-08-21-control-plane-token-consumption-after-300s.csv). Research remains non-normative evidence.
-- [`research/2026-07-27-increment-2d-substantive-review.md`](research/2026-07-27-increment-2d-substantive-review.md) records the current-head Increment 2D substantive review and remaining exact-head merge gates.
-- [`research/2026-07-26-increment-2c-substantive-review.md`](research/2026-07-26-increment-2c-substantive-review.md) records the current-head Increment 2C substantive review, corrected P1/P2 findings and remaining exact-head merge gates.
-- [`research/2026-07-25-increment-2b-substantive-review.md`](research/2026-07-25-increment-2b-substantive-review.md) records the current-head Increment 2B substantive review, corrected P1/P2 findings and remaining exact-head merge gates.
-- [`research/2026-07-25-increment-2a-substantive-review.md`](research/2026-07-25-increment-2a-substantive-review.md) records the completed Increment 2A substantive review, eight corrected P2 findings and its exact-head merge gates.
-- [`plans/2026-07-16-003-discovery-implementation-and-migration.md`](plans/2026-07-16-003-discovery-implementation-and-migration.md) and [`plans/2026-07-16-004-integrated-discovery-graphrag-implementation.md`](plans/2026-07-16-004-integrated-discovery-graphrag-implementation.md) are superseded tombstones retained for decision history.
-- [`specs/editorial-automation/news-discovery.md`](specs/editorial-automation/news-discovery.md) is a non-normative consolidated Draft used only as a navigation and canonical-source map; it defines no independent `DISC-*` requirements.
-- [`plans/2026-07-15-001-integrated-newsroom-architecture.md`](plans/2026-07-15-001-integrated-newsroom-architecture.md) remains Proposed. Its earlier discovery wording, old ADR-status references and statement that discovery RAG was deferred are superseded by the completed review, Accepted ADRs and Accepted Topic 13 plan.
-- Dated database, GraphRAG and discovery research remains non-normative evidence.
-- [`reference/editorial/product-editorial-charter.zh-HK.md`](reference/editorial/product-editorial-charter.zh-HK.md) is the canonical human charter; the English file is a development translation.
+## Durable product authority
 
-## Current AI-native SDLC documents
+- [`adr/`](adr/) — accepted architecture decisions
+- [`specs/editorial-automation/`](specs/editorial-automation/) — accepted and
+  draft product contracts; inspect each document's status
+- [`decisions/`](decisions/) — focused accepted product decisions
+- [`reference/editorial/`](reference/editorial/) — retained charter and context
 
-- [`specs/sdlc/ai-native-focus-gated-sdlc.md`](specs/sdlc/ai-native-focus-gated-sdlc.md) is the **Accepted** execution SSOT for ordinary development, F0–F4 Focus Gates, research isolation and human-exception boundaries.
-- [`testing.md`](testing.md) explains focused selection, broadening, stopping and truthful handover.
-- [`../.sdlc/gates.toml`](../.sdlc/gates.toml) and [`../.sdlc/focus-route.schema.json`](../.sdlc/focus-route.schema.json) are the accepted machine contract for the deterministic content-addressed route.
-- [`../.github/workflows/focus-gates.yml`](../.github/workflows/focus-gates.yml) is the one-job ordinary product-evidence lane with zero project-dependency bootstraps for documentation and at most one for executable work.
-- [`../.github/workflows/evidence.yml`](../.github/workflows/evidence.yml) retains scheduled, manual and merge-queue full deterministic product health outside the ordinary pull-request critical path. It excludes Graphiti research fixtures.
-- [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) is the isolated, provider-free Graphiti research lane.
-- [`../.github/workflows/pr-lifecycle.yml`](../.github/workflows/pr-lifecycle.yml) is a separate trusted metadata-policy check. It installs no project dependencies and is not part of the product-test budget.
-- The earlier [`specs/sdlc/high-performance-evidence-sdlc.md`](specs/sdlc/high-performance-evidence-sdlc.md), [`specs/sdlc/2026-07-22-sdlc-v2-owner-acceptance.md`](specs/sdlc/2026-07-22-sdlc-v2-owner-acceptance.md), dated SDLC research and migration plan remain historical provenance for retained receipt and timing compatibility. They do not define the current ordinary pull-request topology.
-- Repository automation creates evidence records; it does not require an agent to wait, poll, rerun unchanged work or replay research before a focused handover.
+## Execution records
 
-## Current-system documentation
+- [`operations/`](operations/) — bounded operational contracts, rollback and
+  exact run records
+- [`evaluation/`](evaluation/) — immutable evaluation/admission evidence
+- [`traceability/`](traceability/) — retained closeout and requirement mapping
+- [`plans/`](plans/) — sequencing and readiness records
 
-`ARCHITECTURE.md` and `AGENTS.md` describe the Hermes Control Plane as the operational Newsroom and record that the OpenClaw / Discord / Brave / GDELT / `news_pool` stack is dead ([ADR 0009](adr/0009-legacy-operational-newsroom-dead.md)). `CONTRIBUTING.md` describes contribution procedures. `docs/cleanup_runs/` retains dated historical run evidence only.
+## Research and history
 
-Future requirements normally belong under `docs/specs/`; implementation programmes under `docs/plans/`; dated investigations under `docs/research/`; and broader retained background under `docs/reference/`.
+- [`research/`](research/) — dated non-normative investigations and historical
+  snapshots
+- The 2026-02-09 OpenClaw architecture review is retained as
+  [`research/2026-02-09-openclaw-architecture-review.md`](research/2026-02-09-openclaw-architecture-review.md).
+- Earlier SDLC v2 specifications, research and migration records are historical
+  provenance for retained receipt compatibility. They do not define the current
+  ordinary pull-request topology.
 
-## Recommended metadata
+## Current workflow surfaces
 
-Every new document should state its role, status, owner, canonical language and relevant dates. Replaced documents should be marked Superseded or Historical and linked to successors rather than silently rewritten.
+| Workflow | Purpose |
+|---|---|
+| `focus-gates.yml` | ordinary PR F0-F4 selected evidence |
+| `evidence.yml` | post-merge main, scheduled and manual full product health |
+| `ci.yml` | isolated provider-free Graphiti research |
+| `pr-lifecycle.yml` | lightweight trusted PR metadata policy |
+
+Repository documents and code use UK English. Git history is the archive for
+superseded content.

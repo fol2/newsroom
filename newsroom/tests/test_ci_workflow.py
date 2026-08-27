@@ -57,7 +57,7 @@ def test_sdlc_workflows_check_out_exact_head_without_credentials() -> None:
     expected_refs = {
         FOCUS_PATH: "${{ github.event.pull_request.head.sha || github.sha }}",
         RESEARCH_PATH: "${{ github.event.pull_request.head.sha || github.sha }}",
-        HEALTH_PATH: "${{ github.event.merge_group.head_sha || github.sha }}",
+        HEALTH_PATH: "${{ github.sha }}",
     }
     for path, expected_ref in expected_refs.items():
         for job in _load(path)["jobs"].values():
@@ -93,7 +93,7 @@ def test_focus_gate_is_one_job_and_one_conditional_bootstrap() -> None:
     rendered = FOCUS_PATH.read_text(encoding="utf-8")
     assert rendered.count("astral-sh/setup-uv@") == 1
     assert rendered.count("uv sync --dev --locked") == 1
-    assert "scripts.sdlc.focus_gate" in rendered
+    assert "scripts.sdlc.focus_gate_v2" in rendered
     assert "--output .focus/route.json" in rendered
     assert "owner-authorised" in rendered
     assert "graphiti-core" not in rendered
@@ -101,6 +101,10 @@ def test_focus_gate_is_one_job_and_one_conditional_bootstrap() -> None:
     assert "matrix:" not in rendered
     assert "poll" not in rendered.casefold()
 
+    names = [str(step.get("name", "")) for step in steps]
+    assert names.index("Prepare locked environment once") < names.index(
+        "F0 exact change integrity"
+    )
     setup_uv = next(step for step in steps if step.get("name") == "Set up uv once")
     assert setup_uv["if"] == "steps.route.outputs.bootstrap_required == 'true'"
     service = next(
@@ -137,7 +141,8 @@ def test_graphiti_research_is_path_scoped_and_provider_free() -> None:
     assert set(workflow["on"]) == {"pull_request", "schedule", "workflow_dispatch"}
     assert "push" not in workflow["on"]
     paths = workflow["on"]["pull_request"]["paths"]
-    assert paths
+    assert "pyproject.toml" in paths
+    assert "uv.lock" in paths
     assert "docs/research/**" not in paths
     assert "docs/research/**/*.json" in paths
     assert "docs/research/**/*.csv" in paths
@@ -151,16 +156,22 @@ def test_graphiti_research_is_path_scoped_and_provider_free() -> None:
     assert "provider-free" in rendered
 
 
-def test_full_health_is_absent_from_ordinary_pull_requests() -> None:
+def test_full_health_runs_after_main_merge_not_on_pull_request() -> None:
     workflow = _load(HEALTH_PATH)
     assert workflow["name"] == "Full Repository Health"
-    assert set(workflow["on"]) == {"merge_group", "schedule", "workflow_dispatch"}
+    assert set(workflow["on"]) == {"push", "schedule", "workflow_dispatch"}
+    assert workflow["on"]["push"]["branches"] == ["main"]
     assert "pull_request" not in workflow["on"]
+    assert "merge_group" not in workflow["on"]
     assert set(workflow["jobs"]) == {"full-health"}
+    assert workflow["concurrency"] == {
+        "group": "full-health-${{ github.ref }}",
+        "cancel-in-progress": "true",
+    }
     rendered = HEALTH_PATH.read_text(encoding="utf-8")
     assert rendered.count("astral-sh/setup-uv@") == 1
     assert rendered.count("uv sync --dev --locked") == 1
-    assert "scripts.sdlc.focus_gate" in rendered
+    assert "scripts.sdlc.focus_gate_v2" in rendered
     assert "--repo-root . full-health" in rendered
     assert "python -m pytest" not in rendered
     assert "matrix:" not in rendered
