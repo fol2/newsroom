@@ -1,6 +1,6 @@
 {
   "schema_version": "newsroom.graphiti-call-shape-policy.v1",
-  "canonical_digest": "sha256:4e4b92ecebc3a1a64265e058e4f53e13249fa5881e1b0bbe1fc11bee1d3d05b1",
+  "canonical_digest": "sha256:c00afc9ded4c7b5045762f277a20129b48c1e9d7d5c894273c53d64fb92552f0",
   "policy_id": "graphiti-core-0.29.3-newsroom-adapter-v1",
   "version": "issue-807-v1",
   "graphiti_core_release": "graphiti-core-0.29.3",
@@ -53,7 +53,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:8a92035d7a83df6a3b787aa5a90e449abfc8e82c422809e1ca945343d753052d",
+      "implementation_revision": "sha256:ad93947a24ac72bbc391e6e359e312ea98505f73ab75dec4b0f38fd27e52c4a8",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -104,7 +104,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:8a92035d7a83df6a3b787aa5a90e449abfc8e82c422809e1ca945343d753052d",
+      "implementation_revision": "sha256:ad93947a24ac72bbc391e6e359e312ea98505f73ab75dec4b0f38fd27e52c4a8",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -377,7 +377,7 @@
       "distinct_internal_request_count": 3
     }
   ],
-  "evidence_digest": "sha256:e4533678a3ac4cf658b4da9f340dcc0603d7a7c88819cf67a04e2a1232de8a76",
+  "evidence_digest": "sha256:5908bbb93642fe3b36461948409999cfc685eb9c60b74049f9285694182ca8e0",
   "maximum_qualified_fixture_count": 4,
   "headroom": 2,
   "max_distinct_internal_requests": 6

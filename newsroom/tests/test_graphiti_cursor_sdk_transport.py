@@ -448,6 +448,7 @@ def test_no_sdk_controller_or_fallback_retry(monkeypatch: pytest.MonkeyPatch) ->
         )
 
     assert invocations[0]["outcome"] == "FAILED"
+    assert invocations[0]["usage"]["usage_basis"] == "NO_PROVIDER_CALL"
     assert len(runtime.requests) == 1
 
 
