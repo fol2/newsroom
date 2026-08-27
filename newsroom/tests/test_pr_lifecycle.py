@@ -96,6 +96,18 @@ def test_parser_rejects_reserved_delivery_atom_placeholder() -> None:
         parse_pr_lifecycle(body(atom="replace-me"))
 
 
+def test_parser_rejects_hash_prefixed_issue_number_delivery_atom() -> None:
+    with pytest.raises(
+        PrLifecycleError,
+        match="Delivery-Atom must be a bounded lowercase identifier",
+    ):
+        parse_pr_lifecycle(body(atom="#790"))
+
+
+def test_parser_accepts_issue_prefixed_delivery_atom() -> None:
+    assert parse_pr_lifecycle(body(atom="issue-790")).delivery_atom == "issue-790"
+
+
 def test_pull_request_template_requires_a_real_delivery_atom() -> None:
     repository_root = Path(__file__).resolve().parents[2]
     template = (
@@ -278,6 +290,61 @@ def test_workflow_module_entrypoint_runs_without_installed_package(
 
     assert result.returncode == 0, result.stderr
     assert "validated PR lifecycle: canonical / increment-5b2" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("atom", "returncode", "needle"),
+    (
+        (
+            "#790",
+            2,
+            "PR lifecycle error: Delivery-Atom must be a bounded lowercase identifier",
+        ),
+        ("issue-790", 0, "validated PR lifecycle: canonical / issue-790"),
+    ),
+)
+def test_validate_event_delivery_atom_matches_ci_entry_point(
+    tmp_path: Path,
+    atom: str,
+    returncode: int,
+    needle: str,
+) -> None:
+    event_path = tmp_path / "pull-request-event.json"
+    event_path.write_text(
+        json.dumps(
+            {
+                "pull_request": {
+                    "number": 813,
+                    "draft": False,
+                    "body": body(atom=atom),
+                    "head": {"ref": "jamesto/issue-790-sdk-qualification"},
+                }
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    environment["GITHUB_EVENT_PATH"] = str(event_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            "-m",
+            "scripts.sdlc.pr_lifecycle",
+            "validate-event",
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    output = result.stderr if returncode else result.stdout
+    assert result.returncode == returncode, result.stderr
+    assert needle in output
 
 
 def test_apply_requires_exact_confirmation_before_api_access() -> None:
