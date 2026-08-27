@@ -52,7 +52,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:7c06c6a525ac0a4e814b7b736732a87dd9b8457f024ebbfa470af591c49030fc",
+      "implementation_revision": "sha256:c9c51351005ba7ced314aa37b5b3c15eacb9ed44373ce82328994e4a04548be7",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -103,7 +103,7 @@
         "planning",
         "subagents"
       ],
-      "implementation_revision": "sha256:7c06c6a525ac0a4e814b7b736732a87dd9b8457f024ebbfa470af591c49030fc",
+      "implementation_revision": "sha256:c9c51351005ba7ced314aa37b5b3c15eacb9ed44373ce82328994e4a04548be7",
       "max_prompt_bytes": 262144,
       "max_context_tokens": 131072,
       "max_output_tokens": 16384,
@@ -376,9 +376,9 @@
       "distinct_internal_request_count": 3
     }
   ],
-  "evidence_digest": "sha256:a224926d01430ba409f1866459f1b76bccb10285b5c2753e9cd37180546ad8ea",
   "maximum_qualified_fixture_count": 4,
   "headroom": 2,
   "max_distinct_internal_requests": 6,
-  "canonical_digest": "sha256:71620b88ee9cdeeadc73bceaff3b2da3ae588706492526bac1d8daccb205fa2a"
+  "evidence_digest": "sha256:12f3dc032f7a7ba862ca8116e66b5e0cfd8a81d97c8db4a5f057c45b99f9d8a2",
+  "canonical_digest": "sha256:0bd80a092a4b92c6d443674d3961c32e45b6634201891e7f04a70904123ad0d1"
 }

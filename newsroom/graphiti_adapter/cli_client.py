@@ -864,23 +864,28 @@ async def run_cli_chain(
     try:
         if inspect.iscoroutinefunction(cursor_runner):
             if _runner_accepts_dispatch_marker(cursor_runner):
-                raw = await cursor_runner(
-                    prompt,
-                    max_tokens=max_tokens,
-                    dispatch_started=mark_cursor_transport_started,
-                    idempotency_key=cursor_idempotency_key,
-                )
+                cursor_kwargs: dict[str, object] = {
+                    "max_tokens": max_tokens,
+                    "dispatch_started": mark_cursor_transport_started,
+                }
+                if _runner_accepts_idempotency_key(cursor_runner):
+                    cursor_kwargs["idempotency_key"] = cursor_idempotency_key
+                raw = await cursor_runner(prompt, **cursor_kwargs)
             else:
                 mark_cursor_transport_started()
                 raw = await cursor_runner(prompt, max_tokens=max_tokens)
         else:
             if _runner_accepts_dispatch_marker(cursor_runner):
+                cursor_kwargs = {
+                    "max_tokens": max_tokens,
+                    "dispatch_started": mark_cursor_transport_started,
+                }
+                if _runner_accepts_idempotency_key(cursor_runner):
+                    cursor_kwargs["idempotency_key"] = cursor_idempotency_key
                 raw = await asyncio.to_thread(
                     cursor_runner,
                     prompt,
-                    max_tokens=max_tokens,
-                    dispatch_started=mark_cursor_transport_started,
-                    idempotency_key=cursor_idempotency_key,
+                    **cursor_kwargs,
                 )
             else:
                 mark_cursor_transport_started()
