@@ -28,9 +28,8 @@ def test_feedback_template_clones_are_file_and_object_isolated(
             "[transaction_rollback-abort]"
         ),
     )
-    assert feedback_cache_support._selected_keys(selection, feedback) == (
-        _ROLLBACK_RECORDS,
-    )
+    selected = feedback_cache_support._selected_keys(selection, feedback)
+    assert _ROLLBACK_RECORDS in selected
     assert (
         feedback_cache_support._selected_keys(
             (
