@@ -1415,7 +1415,8 @@ def build_cli_llm_client(
         def __init__(self) -> None:
             super().__init__(
                 LLMConfig(
-                    model=_cursor_invocation_model(selected_model=cursor_selected_model), small_model=CURSOR_AGENT_MODEL_ID
+                    model=_cursor_invocation_model(),
+                    small_model=CURSOR_AGENT_MODEL_ID,
                 ),
                 cache=False,
             )
