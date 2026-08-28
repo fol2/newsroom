@@ -1,15 +1,33 @@
 {
-  "schema_version": "newsroom.graphiti-deterministic-work-qualification.v2",
-  "issue": 748,
-  "parent_issue": 739,
-  "implementation_atom": 731,
-  "graphiti_core_version": "graphiti-core-0.29.3",
-  "qualification_basis": "PROVIDER_FREE_SOURCE_SAFE_FIXTURES",
-  "provider_leaf_count": 0,
-  "live_graph_mutation_count": 0,
+  "acceptance": {
+    "ambiguity_held_not_guessed": true,
+    "authority_bytes_and_digests_verified": true,
+    "combined_temporal_gold_quality": "EXTERNAL_RUN_REQUIRED",
+    "common_entity_resolution_zero_provider_leaves": true,
+    "conditional_leaf_expected_counts": "UNRESOLVED",
+    "conditional_leaf_prevalence": "UNRESOLVED",
+    "existing_regression_suites": "EXTERNAL_RUN_REQUIRED",
+    "overlong_summary_explicitly_held": true,
+    "replay_identities_identical": true,
+    "semantic_duplicate_collapsed_with_attribution": true,
+    "short_summary_zero_provider_leaves": true,
+    "sidecar_exact_and_no_loss": true,
+    "similar_distinct_entities_separate": true
+  },
+  "deterministic_summary": {
+    "evidence_and_temporal_links_outside_summary": true,
+    "overlong_digest": "sha256:5b1add898653d0ada9f57edaa7b19458464a01800444c5f00f2f9a5d7b12fe96",
+    "overlong_outcome": "OVERLONG_HOLD",
+    "short_digest": "sha256:e96ac376c8db3496450c73a84e4f684d1f81fdeb598a5898040084d4728d4345",
+    "short_outcome": "DETERMINISTIC_SUMMARY"
+  },
+  "duplicate_collapse": {
+    "collapse_count": 1,
+    "collapse_digest": "sha256:92aa469a230e299a7acb1f7189b9bf3274243237d3da714a790683c53d668311",
+    "semantic_relation_proposal_count_after_collapse": 0,
+    "sidecar_relation_proposal_count_after_collapse": 6
+  },
   "effective_revision_distribution": {
-    "grain": "ISSUE_737_EFFECTIVE_REVISION",
-    "distribution_basis": "UNRESOLVED_NO_EXECUTED_TRACE",
     "case_count": 11,
     "case_ids": [
       "pair-current",
@@ -23,15 +41,109 @@
       "correction-revision",
       "same-name",
       "no-implied-relation"
-    ]
+    ],
+    "distribution_basis": "UNRESOLVED_NO_EXECUTED_TRACE",
+    "grain": "ISSUE_737_EFFECTIVE_REVISION"
   },
+  "fallback_and_retry_policy": {
+    "authority": "INHERIT_ISSUE_731_DISTINCT_REQUEST_POLICY",
+    "fallback_eligible_outcomes": [
+      "MALFORMED_OUTPUT"
+    ],
+    "fallback_ineligible_outcomes": [
+      "AUTHENTICATION_FAILURE",
+      "CONFIGURATION_FAILURE",
+      "TIMEOUT",
+      "CANCELLATION",
+      "SYSTEMIC_PROVIDER_FAILURE"
+    ],
+    "maximum_typed_fallbacks_per_distinct_request": 1,
+    "new_fallback_authority_created": false,
+    "route_circuit_after_systemic_or_repeated_no_result": true,
+    "unchanged_prompt_schema_redispatch_permitted": false
+  },
+  "graphiti_core_version": "graphiti-core-0.29.3",
+  "implementation_atom": 731,
+  "issue": 748,
+  "live_evidence_context": {
+    "chat_leaves": [
+      3,
+      2
+    ],
+    "chat_tokens": "UNRESOLVED",
+    "embedding_requests": [
+      3,
+      3
+    ],
+    "semantic_leaf_classes": "UNRESOLVED",
+    "terminal_effective_revision_count": 2,
+    "unresolved_chat_leaf_count": 5
+  },
+  "live_graph_mutation_count": 0,
+  "local_entity_resolution": {
+    "exact_name_type": {
+      "basis": "EXACT_NAME_AND_TYPE",
+      "digest": "sha256:ea4cfcfd2b826307f9a651821fc1b1738f25a290172cde884b5aad30c9249a15",
+      "outcome": "DETERMINISTIC_EXISTING_NODE",
+      "provider_leaf_count": 0,
+      "selected_canonical_entity_id": "canonical-entity:edb"
+    },
+    "governed_alias": {
+      "basis": "GOVERNED_ALIAS_OR_IDENTIFIER",
+      "digest": "sha256:fbbcdb957e60f015ee59a33d332b29dddd990c622be126986a452642b9c9b6d1",
+      "outcome": "DETERMINISTIC_EXISTING_NODE",
+      "provider_leaf_count": 0,
+      "selected_canonical_entity_id": "canonical-entity:edb"
+    },
+    "governed_identifier": {
+      "basis": "GOVERNED_ALIAS_OR_IDENTIFIER",
+      "digest": "sha256:fbbcdb957e60f015ee59a33d332b29dddd990c622be126986a452642b9c9b6d1",
+      "outcome": "DETERMINISTIC_EXISTING_NODE",
+      "provider_leaf_count": 0,
+      "selected_canonical_entity_id": "canonical-entity:edb"
+    },
+    "low_margin": {
+      "basis": "LOW_CONFIDENCE_OR_MARGIN",
+      "digest": "sha256:4aff481e17cd39d30eaecc3f54cbd5689f13ad512958438e0bfdbee539d52b04",
+      "outcome": "AMBIGUOUS_HOLD",
+      "provider_leaf_count": 0,
+      "selected_canonical_entity_id": null
+    },
+    "normalised_name": {
+      "basis": "NORMALISED_NAME_AND_TYPE",
+      "digest": "sha256:e90a7b2908a982d49553e3f2cb973e12008b772931a40b5c40ed9f3b3419b221",
+      "outcome": "DETERMINISTIC_EXISTING_NODE",
+      "provider_leaf_count": 0,
+      "selected_canonical_entity_id": "canonical-entity:edb"
+    },
+    "similar_distinct": {
+      "basis": "BELOW_NEW_CANONICAL_ENTITY_CEILING",
+      "digest": "sha256:e11f8417c8d674a584e06a6dbc95f7fe9519627897446b72117cf848d3718641",
+      "outcome": "DETERMINISTIC_NEW_NODE",
+      "provider_leaf_count": 0,
+      "selected_canonical_entity_id": null
+    }
+  },
+  "non_effects": [
+    "NO_PROVIDER_CALL",
+    "NO_MODEL_DOWNLOAD_OR_LOAD",
+    "NO_PRODUCTION_GRAPHITI_MUTATION",
+    "NO_ADD_TRIPLET",
+    "NO_GING_010_AMENDMENT",
+    "NO_PUBLICATION",
+    "NO_BACKLOG_ACTIVATION"
+  ],
+  "parent_issue": 739,
+  "provider_leaf_count": 0,
+  "qualification_basis": "PROVIDER_FREE_SOURCE_SAFE_FIXTURES",
+  "recommendation": {
+    "decision": "HOLD_FOR_731_RUNTIME_MEASUREMENT",
+    "remaining_exceptional_leaves": "DISTINCT_QUALIFIED_RECEIPTED_ONLY",
+    "runtime_activation_authorised": false
+  },
+  "schema_version": "newsroom.graphiti-deterministic-work-qualification.v2",
   "sidecar": {
-    "schema_version": "newsroom.graphiti-deterministic-sidecar.v1",
     "authority": "SQLITE_GOVERNED_RECORDS",
-    "proposal_only": true,
-    "relation_proposal_count": 67,
-    "semantic_prompt_bytes_removed": 0,
-    "semantic_output_bytes_avoided": 0,
     "projection_digests": [
       "sha256:39520bf152aa8f60de0e96547a450704030ecf2a118be27b9a841c0aba6f1396",
       "sha256:ae202f2db9b7f04204d9fa633d93d834ec7232a8bfb845a136d2087e8de0f556",
@@ -44,69 +156,28 @@
       "sha256:e078ce7e6a6cadfeb9ced0903a27902aa2c7596dc733e6039426a3a74c0781a4",
       "sha256:be25a9dc894cf2c97cebcd3be427976870ef40fcc9b894d86c952c2647658597",
       "sha256:4546d72dcceca3d85b7aebeb4f56077f49e1e49df5ef531f5b0763d12920f20f"
-    ]
-  },
-  "duplicate_collapse": {
-    "collapse_count": 1,
-    "semantic_relation_proposal_count_after_collapse": 0,
-    "sidecar_relation_proposal_count_after_collapse": 6,
-    "collapse_digest": "sha256:92aa469a230e299a7acb1f7189b9bf3274243237d3da714a790683c53d668311"
-  },
-  "local_entity_resolution": {
-    "exact_name_type": {
-      "outcome": "DETERMINISTIC_EXISTING_NODE",
-      "selected_canonical_entity_id": "canonical-entity:edb",
-      "basis": "EXACT_NAME_AND_TYPE",
-      "provider_leaf_count": 0,
-      "digest": "sha256:ea4cfcfd2b826307f9a651821fc1b1738f25a290172cde884b5aad30c9249a15"
-    },
-    "governed_alias": {
-      "outcome": "DETERMINISTIC_EXISTING_NODE",
-      "selected_canonical_entity_id": "canonical-entity:edb",
-      "basis": "GOVERNED_ALIAS_OR_IDENTIFIER",
-      "provider_leaf_count": 0,
-      "digest": "sha256:fbbcdb957e60f015ee59a33d332b29dddd990c622be126986a452642b9c9b6d1"
-    },
-    "normalised_name": {
-      "outcome": "DETERMINISTIC_EXISTING_NODE",
-      "selected_canonical_entity_id": "canonical-entity:edb",
-      "basis": "NORMALISED_NAME_AND_TYPE",
-      "provider_leaf_count": 0,
-      "digest": "sha256:e90a7b2908a982d49553e3f2cb973e12008b772931a40b5c40ed9f3b3419b221"
-    },
-    "governed_identifier": {
-      "outcome": "DETERMINISTIC_EXISTING_NODE",
-      "selected_canonical_entity_id": "canonical-entity:edb",
-      "basis": "GOVERNED_ALIAS_OR_IDENTIFIER",
-      "provider_leaf_count": 0,
-      "digest": "sha256:fbbcdb957e60f015ee59a33d332b29dddd990c622be126986a452642b9c9b6d1"
-    },
-    "similar_distinct": {
-      "outcome": "DETERMINISTIC_NEW_NODE",
-      "selected_canonical_entity_id": null,
-      "basis": "BELOW_NEW_CANONICAL_ENTITY_CEILING",
-      "provider_leaf_count": 0,
-      "digest": "sha256:e11f8417c8d674a584e06a6dbc95f7fe9519627897446b72117cf848d3718641"
-    },
-    "low_margin": {
-      "outcome": "AMBIGUOUS_HOLD",
-      "selected_canonical_entity_id": null,
-      "basis": "LOW_CONFIDENCE_OR_MARGIN",
-      "provider_leaf_count": 0,
-      "digest": "sha256:4aff481e17cd39d30eaecc3f54cbd5689f13ad512958438e0bfdbee539d52b04"
-    }
-  },
-  "deterministic_summary": {
-    "short_outcome": "DETERMINISTIC_SUMMARY",
-    "short_digest": "sha256:e96ac376c8db3496450c73a84e4f684d1f81fdeb598a5898040084d4728d4345",
-    "overlong_outcome": "OVERLONG_HOLD",
-    "overlong_digest": "sha256:5b1add898653d0ada9f57edaa7b19458464a01800444c5f00f2f9a5d7b12fe96",
-    "evidence_and_temporal_links_outside_summary": true
+    ],
+    "proposal_only": true,
+    "relation_proposal_count": 67,
+    "schema_version": "newsroom.graphiti-deterministic-sidecar.v1",
+    "semantic_output_bytes_avoided": 0,
+    "semantic_prompt_bytes_removed": 0
   },
   "token_effectiveness": {
-    "schema_version": "newsroom.graphiti-token-effectiveness-report.v2",
-    "effective_revision_count": 11,
-    "mandatory_primary_leaves_per_revision": "UNRESOLVED",
+    "average_token_basis": "UNRESOLVED_PENDING_ISSUE_731_RUNTIME_MEASUREMENT",
+    "average_total_tokens_per_terminal_effective_revision": "UNRESOLVED",
+    "chat_tokens": {
+      "estimated_primary": {
+        "base": 19022,
+        "high": 28532,
+        "low": 14268
+      },
+      "reported": 0,
+      "reported_basis": "NO_PROVIDER_CALLS_IN_FIXTURE",
+      "unresolved": 0,
+      "unresolved_leaf_count": 0
+    },
+    "conditional_leaf_distribution_basis": "UNRESOLVED_NO_EXECUTED_EFFECTIVE_REVISION_TRACE",
     "conditional_leaf_expected_counts_ppm": {
       "current": "UNRESOLVED",
       "target": "UNRESOLVED"
@@ -115,152 +186,81 @@
       "current": "UNRESOLVED",
       "target": "UNRESOLVED"
     },
-    "chat_tokens": {
-      "reported": 0,
-      "estimated_primary": {
-        "low": 13445,
-        "base": 17925,
-        "high": 26885
-      },
-      "unresolved": 0,
-      "unresolved_leaf_count": 0,
-      "reported_basis": "NO_PROVIDER_CALLS_IN_FIXTURE"
-    },
+    "effective_revision_count": 11,
     "embedding_tokens": {
-      "total": 1240,
-      "basis": "ESTIMATED_SOURCE_SAFE_WHITESPACE_TOKEN_PROXY"
+      "basis": "ESTIMATED_SOURCE_SAFE_WHITESPACE_TOKEN_PROXY",
+      "total": 1240
     },
-    "terminal_outcomes": {
-      "terminal_success_with_proposals": 9,
-      "terminal_success_zero_proposals": 1,
-      "held_ambiguity": 1
-    },
+    "mandatory_primary_leaves_per_revision": "UNRESOLVED",
     "quality": {
       "gold_match_count": 0,
       "regression_count": 0,
       "unresolved_count": 11
     },
-    "sensitivity_tokens_per_conditional_leaf": {
-      "timestamp": {
-        "low": 756,
-        "base": 1008,
-        "high": 1511
-      },
-      "dedupe": {
-        "low": 512,
-        "base": 1024,
-        "high": 2048
-      },
-      "summary": {
-        "low": 256,
-        "base": 512,
-        "high": 1024
-      },
-      "fallback": {
-        "low": 1024,
-        "base": 2048,
-        "high": 4096
-      }
-    },
-    "average_total_tokens_per_terminal_effective_revision": "UNRESOLVED",
     "recommendation": "HOLD_UNMEASURED_EFFECTIVE_REVISION_DISTRIBUTION",
-    "conditional_leaf_distribution_basis": "UNRESOLVED_NO_EXECUTED_EFFECTIVE_REVISION_TRACE",
-    "average_token_basis": "UNRESOLVED_PENDING_ISSUE_731_RUNTIME_MEASUREMENT",
-    "scope": "PROVIDER_FREE_ISSUE_747_FIXTURE_SAMPLE",
     "retained_effective_revision_sensitivity": {
+      "adoption_gate": "HOLD_UNRESOLVED_CLASSES_AND_QUALITY",
+      "average_total_token_estimate_per_terminal_effective_revision": {
+        "current": {
+          "base": 3601,
+          "high": 9409,
+          "low": 1849
+        },
+        "target": {
+          "base": 2065,
+          "high": 3265,
+          "low": 1465
+        }
+      },
       "basis": "TWO_RETAINED_ISSUE_737_GRAIN_TERMINAL_OUTCOMES",
-      "terminal_effective_revision_count": 2,
+      "chat_tokens": "UNRESOLVED",
+      "conditional_leaf_classes": "UNRESOLVED",
+      "embedding_tokens": "ESTIMATED_SOURCE_SAFE_WHITESPACE_PROXY",
+      "observed_additional_chat_leaf_count": 3,
       "observed_chat_leaf_counts": [
         3,
         2
       ],
-      "observed_additional_chat_leaf_count": 3,
       "observed_embedding_request_counts": [
         3,
         3
       ],
-      "conditional_leaf_classes": "UNRESOLVED",
-      "chat_tokens": "UNRESOLVED",
-      "unresolved_chat_leaf_count": 5,
-      "embedding_tokens": "ESTIMATED_SOURCE_SAFE_WHITESPACE_PROXY",
       "sensitivity_tokens_per_unclassified_conditional_leaf": {
-        "low": 256,
         "base": 1024,
-        "high": 4096
+        "high": 4096,
+        "low": 256
       },
-      "average_total_token_estimate_per_terminal_effective_revision": {
-        "current": {
-          "low": 1774,
-          "base": 3501,
-          "high": 9260
-        },
-        "target": {
-          "low": 1390,
-          "base": 1965,
-          "high": 3116
-        }
+      "terminal_effective_revision_count": 2,
+      "unresolved_chat_leaf_count": 5
+    },
+    "schema_version": "newsroom.graphiti-token-effectiveness-report.v2",
+    "scope": "PROVIDER_FREE_ISSUE_747_FIXTURE_SAMPLE",
+    "sensitivity_tokens_per_conditional_leaf": {
+      "dedupe": {
+        "base": 1024,
+        "high": 2048,
+        "low": 512
       },
-      "adoption_gate": "HOLD_UNRESOLVED_CLASSES_AND_QUALITY"
+      "fallback": {
+        "base": 2048,
+        "high": 4096,
+        "low": 1024
+      },
+      "summary": {
+        "base": 512,
+        "high": 1024,
+        "low": 256
+      },
+      "timestamp": {
+        "base": 1008,
+        "high": 1511,
+        "low": 756
+      }
+    },
+    "terminal_outcomes": {
+      "held_ambiguity": 1,
+      "terminal_success_with_proposals": 9,
+      "terminal_success_zero_proposals": 1
     }
-  },
-  "live_evidence_context": {
-    "terminal_effective_revision_count": 2,
-    "chat_leaves": [
-      3,
-      2
-    ],
-    "embedding_requests": [
-      3,
-      3
-    ],
-    "semantic_leaf_classes": "UNRESOLVED",
-    "chat_tokens": "UNRESOLVED",
-    "unresolved_chat_leaf_count": 5
-  },
-  "fallback_and_retry_policy": {
-    "authority": "INHERIT_ISSUE_731_DISTINCT_REQUEST_POLICY",
-    "unchanged_prompt_schema_redispatch_permitted": false,
-    "maximum_typed_fallbacks_per_distinct_request": 1,
-    "fallback_eligible_outcomes": [
-      "MALFORMED_OUTPUT"
-    ],
-    "fallback_ineligible_outcomes": [
-      "AUTHENTICATION_FAILURE",
-      "CONFIGURATION_FAILURE",
-      "TIMEOUT",
-      "CANCELLATION",
-      "SYSTEMIC_PROVIDER_FAILURE"
-    ],
-    "route_circuit_after_systemic_or_repeated_no_result": true,
-    "new_fallback_authority_created": false
-  },
-  "acceptance": {
-    "sidecar_exact_and_no_loss": true,
-    "authority_bytes_and_digests_verified": true,
-    "semantic_duplicate_collapsed_with_attribution": true,
-    "common_entity_resolution_zero_provider_leaves": true,
-    "similar_distinct_entities_separate": true,
-    "ambiguity_held_not_guessed": true,
-    "short_summary_zero_provider_leaves": true,
-    "overlong_summary_explicitly_held": true,
-    "replay_identities_identical": true,
-    "combined_temporal_gold_quality": "EXTERNAL_RUN_REQUIRED",
-    "existing_regression_suites": "EXTERNAL_RUN_REQUIRED",
-    "conditional_leaf_expected_counts": "UNRESOLVED",
-    "conditional_leaf_prevalence": "UNRESOLVED"
-  },
-  "recommendation": {
-    "decision": "HOLD_FOR_731_RUNTIME_MEASUREMENT",
-    "runtime_activation_authorised": false,
-    "remaining_exceptional_leaves": "DISTINCT_QUALIFIED_RECEIPTED_ONLY"
-  },
-  "non_effects": [
-    "NO_PROVIDER_CALL",
-    "NO_MODEL_DOWNLOAD_OR_LOAD",
-    "NO_PRODUCTION_GRAPHITI_MUTATION",
-    "NO_ADD_TRIPLET",
-    "NO_GING_010_AMENDMENT",
-    "NO_PUBLICATION",
-    "NO_BACKLOG_ACTIVATION"
-  ]
+  }
 }
