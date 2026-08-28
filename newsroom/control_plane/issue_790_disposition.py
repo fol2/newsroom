@@ -1822,7 +1822,12 @@ def _execute_issue_790_plan(
     try:
         initial_route_state = service.route_state(str(target["route"]))
         if initial_route_state.get("state") == "OPEN":
-            if initial_route_state.get("reason") != target["route_open_reason"]:
+            # Root apply binds the original open reason. Successor steps may
+            # release whatever OPEN reason the prior bounded canary left.
+            if (
+                predecessor is None
+                and initial_route_state.get("reason") != target["route_open_reason"]
+            ):
                 raise Issue790DispositionError(
                     "issue #790 current route failure differs"
                 )
@@ -1891,9 +1896,14 @@ def _execute_issue_790_plan(
             f"{_RELEASE_KIND}:{disposition['disposition_digest']}"
         )
         if route_state_before_release.get("state") == "OPEN":
+            bound_failure_reason = (
+                str(route_state_before_release["reason"])
+                if predecessor is not None
+                else str(target["route_open_reason"])
+            )
             if (
-                route_state_before_release.get("reason")
-                != target["route_open_reason"]
+                predecessor is None
+                and route_state_before_release.get("reason") != bound_failure_reason
             ):
                 raise Issue790DispositionError(
                     "issue #790 current route failure differs"
@@ -1901,7 +1911,7 @@ def _execute_issue_790_plan(
             service.release_route_circuit(
                 route=str(target["route"]),
                 release_kind=_RELEASE_KIND,
-                bound_failure_reason=str(target["route_open_reason"]),
+                bound_failure_reason=bound_failure_reason,
                 evidence_digest=str(disposition["disposition_digest"]),
                 recorded_at=observed_at,
             )

@@ -366,7 +366,7 @@ def _usage_blocking_routes(connection: sqlite3.Connection) -> set[str]:
         for contract in approved_contracts
         for value in (contract.plan_digest, contract.invocation_id)
     )
-    canary_runtime_leaf_exclusion = ""
+    canary_non_success_leaf = ""
     if connection.execute(
         "SELECT 1 FROM sqlite_master "
         "WHERE type='table' AND name='issue_790_bounded_canary_consumptions'"
@@ -374,8 +374,10 @@ def _usage_blocking_routes(connection: sqlite3.Connection) -> set[str]:
         "SELECT 1 FROM sqlite_master "
         "WHERE type='table' AND name='issue_790_bounded_canary_outcomes'"
     ).fetchone():
-        canary_runtime_leaf_exclusion = (
-            "AND NOT EXISTS (SELECT 1 "
+        # Failed #790 canary leaves must not permanently block the next
+        # AUTHORISED_OPERATOR_RESET on the same route (wall-time / sequence).
+        canary_non_success_leaf = (
+            "EXISTS (SELECT 1 "
             "FROM model_invocation_allocations a_canary "
             "JOIN issue_790_bounded_canary_consumptions c "
             "ON c.event_id=json_extract(a_canary.record_json,'$.cycle_id') "
@@ -384,6 +386,14 @@ def _usage_blocking_routes(connection: sqlite3.Connection) -> set[str]:
             "WHERE a_canary.invocation_id=t.invocation_id "
             "AND json_extract(o.record_json,'$.result_class') "
             "!= 'TRUTHFUL_PROVIDER_SUCCESS') "
+        )
+    canary_runtime_leaf_exclusion = (
+        f"AND NOT {canary_non_success_leaf}" if canary_non_success_leaf else ""
+    )
+    policy_breach_clause = "json_extract(t.record_json,'$.policy_breach') IS NOT NULL"
+    if canary_non_success_leaf:
+        policy_breach_clause = (
+            f"({policy_breach_clause} AND NOT ({canary_non_success_leaf}))"
         )
     rows = connection.execute(
         "SELECT a.route FROM model_invocation_terminals t "
@@ -399,7 +409,7 @@ def _usage_blocking_routes(connection: sqlite3.Connection) -> set[str]:
         f"AND ({approved_bindings})) "
         f"{canary_runtime_leaf_exclusion}"
         ") "
-        "OR json_extract(t.record_json,'$.policy_breach') IS NOT NULL "
+        f"OR {policy_breach_clause} "
         "OR EXISTS (SELECT 1 FROM model_usage_reconciliations r "
         "WHERE r.invocation_id=t.invocation_id "
         "AND json_extract(r.record_json,'$.policy_breach') IS NOT NULL)",
