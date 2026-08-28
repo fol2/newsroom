@@ -1,0 +1,59 @@
+{
+  "schema_version": "newsroom.issue-790.iterative-canary-plan-draft.v1",
+  "issue": 790,
+  "plan_status": "DRAFT",
+  "executable": false,
+  "sequence_ordinal": 16,
+  "satisfied_prerequisites": [
+    "STEP_15_EXHAUSTED",
+    "GOVERNED_PROPOSAL_PROJECTION_MERGED",
+    "PROVIDER_FREE_STEP_13_15_REPRODUCTIONS",
+    "FINAL_REVIEW_RECEIPT",
+    "OWNER_AUTHENTICATED_STEP_16_CANARY_APPROVAL"
+  ],
+  "executable_plan_path": null,
+  "executable_plan_digest": null,
+  "blocked_until": [
+    "OWNER_AUTHENTICATED_STEP_16_CANARY_APPROVAL"
+  ],
+  "exhausted_predecessor": {
+    "sequence_ordinal": 15,
+    "plan_digest": "sha256:58220d3a2b389ca25bf86f71b4d7974c6186ee26ab705af351091a20228e1db8",
+    "event_id": "sha256:f9a60f617dd5b36aaa6e0ba4c8739373ab80cbeef41460803e013abffe7cbef9",
+    "ledger_seq": 8843,
+    "consumption_digest": "sha256:f3b0ede81ffe6ad6ee05ffc4d5541db29fdb569cf57d0d05d95e61d8e6cab523",
+    "outcome_digest": "sha256:e4eb6e3f22cc74b0ad3f9d95fa448fe160d48b15336388667a1cfa632785e32e",
+    "fine_failure": "TEMPORAL_INVALID",
+    "outer_failure": "OUTPUT_SCHEMA_INVALID",
+    "state": "CONFIGURATION_HELD"
+  },
+  "governed_projection": {
+    "projection_policy_version": "NewsroomGovernedProposalProjectionV1",
+    "projection_policy_digest": "sha256:c68a9c5bf81a8d052ba9b05f286b0d1cf664e86e2e00ee3c39684f7809b16a7c",
+    "temporal_policy_version": "graphiti-source-reference-time-v2",
+    "validator_contract_version": "NewsroomCombinedTemporalNormaliseV2",
+    "call_shape_policy_version": "issue-816-v2",
+    "call_shape_policy_digest": "sha256:ba1cb4267ff78419174b50a0e233545a4bf745168d4f7fdbffa2fb6007ab5abc",
+    "authority_comment": "5455732888"
+  },
+  "intended_sequence": {
+    "stop_condition": "FIRST_TRUTHFUL_PROVIDER_BACKED_SUCCESS",
+    "call_shape_policy_version": "issue-816-v2",
+    "call_shape_policy_digest": "sha256:ba1cb4267ff78419174b50a0e233545a4bf745168d4f7fdbffa2fb6007ab5abc",
+    "controller_timeout_ms": 160000,
+    "extraction_timeout_ms": 180000,
+    "cleanup_reserve_ms": 20000,
+    "fallback_mode": "DISABLED_BEFORE_PROVIDER_DISPATCH",
+    "sdk_floor": "cursor-sdk>=1.0.29",
+    "composer_floor": "composer>=2.5",
+    "fresh_provider_backed_attempt_count": 1,
+    "notes": "Mint executable Step 16 only after this draft's reviewed fix is on exact main, owner names the merged commit and projection/receipt identities, and authorises at most one catalogue query if required, one untouched fresh event, one provider dispatch, zero retries and zero fallback."
+  },
+  "intended_reviewed_fix": {
+    "pull_request_url": null,
+    "issue": 790,
+    "fix_kind": "CODE",
+    "notes": "Governed proposal projection seam. Placeholder until the ordinary Step 16 implementation PR merges; this draft does not authorise itself or any live effect."
+  },
+  "canonical_digest": "sha256:64f0cf694f81c5ed7f1dc5492cd550a88916b047e9914c22830eb0e29e09a607"
+}

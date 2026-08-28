@@ -202,8 +202,10 @@ def test_prompt_requires_both_endpoint_names_in_fact_or_empty() -> None:
     assert "both endpoint entity names" in prompt
     assert 'return {"entities":[],"facts":[]}' in prompt
     assert "A valid empty object is terminal success." in prompt
-    assert "Do not copy REFERENCE_TIME" in prompt
-    assert "no date cue" in prompt
+    assert "Put valid_at and invalid_at on each fact as null" in prompt
+    assert "REFERENCE_TIME:" not in prompt
+    assert "TEMPORAL_BASIS:" not in prompt
+    assert "TEMPORAL_POLICY:" not in prompt
 
 
 def test_segmentation_round_trips_retained_bytes_and_uses_integer_ids() -> None:
@@ -374,8 +376,8 @@ def test_same_name_fact_endpoints_must_share_their_entity_evidence() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
 
 
 def test_fact_must_name_both_endpoints_to_be_self_contained() -> None:
@@ -389,8 +391,8 @@ def test_fact_must_name_both_endpoints_to_be_self_contained() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
 
 
 def test_fact_evidence_must_be_one_contiguous_source_range() -> None:
@@ -412,8 +414,8 @@ def test_fact_evidence_must_be_one_contiguous_source_range() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
 
 
 def test_entity_evidence_may_span_non_contiguous_facts() -> None:
@@ -488,8 +490,8 @@ def test_entity_evidence_rejects_an_unrelated_extra_segment() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
 
 
 def test_implied_relation_is_absent_from_gold_and_rejected_if_emitted() -> None:
@@ -516,9 +518,11 @@ def test_implied_relation_is_absent_from_gold_and_rejected_if_emitted() -> None:
     failed = extract_combined_temporal(
         case.revision,
         transport=_FakeTransport(forged),
+        pipeline=_PIPELINE,
     )
-    assert failed.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert failed.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert failed.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert failed.failure_code is CombinedTemporalFailureCode.NONE
+    assert {edge.name for edge in failed.edges} == {"ATTENDED", "HOSTED"}
     assert len(failed.transport_calls) == 1
     assert failed.graph_effect_attempted is False
     assert failed.raw_output_digest is not None
@@ -526,16 +530,46 @@ def test_implied_relation_is_absent_from_gold_and_rejected_if_emitted() -> None:
 @pytest.mark.parametrize("name", [case.name for case in MALFORMED_CASES])
 def test_malformed_primary_object_fails_closed_without_retry(name: str) -> None:
     case = next(item for item in MALFORMED_CASES if item.name == name)
+    atom_local_names = {
+        "missing-target",
+        "same-source-target",
+        "orphan-entity",
+        "segment-out-of-range",
+        "bad-timestamp",
+        "valid-after-invalid",
+        "bad-relation-type",
+        "ungrounded-2030",
+        "relative-date-misresolved",
+        "assertion-and-correction",
+        "lowercase-correction-span",
+        "missing-temporal-keys",
+    }
     leaf = extract_combined_temporal(
         case.revision,
         transport=_FakeTransport(case.payload),
+        pipeline=_PIPELINE if name in atom_local_names else None,
     )
+    assert len(leaf.transport_calls) == 1
+    assert leaf.graph_effect_attempted is False
+    if name == "orphan-entity":
+        # Entities without facts are orphan-removed to a valid empty set.
+        assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+        assert leaf.failure_code is CombinedTemporalFailureCode.NONE
+        assert leaf.payload == {"entities": [], "facts": []}
+        return
+    if name in atom_local_names:
+        # Atom-local defects reject or re-project proposals; leaf completes without retry.
+        assert leaf.outcome in {
+            CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS,
+            CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS,
+        }
+        assert leaf.failure_code is CombinedTemporalFailureCode.NONE
+        assert len(leaf.transport_calls) == 1
+        return
     assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
     assert leaf.failure_code is case.failure_code
-    assert len(leaf.transport_calls) == 1
     assert leaf.nodes == ()
     assert leaf.edges == ()
-    assert leaf.graph_effect_attempted is False
 
 
 def test_relative_date_text_is_not_accepted_as_a_timestamp() -> None:
@@ -545,8 +579,11 @@ def test_relative_date_text_is_not_accepted_as_a_timestamp() -> None:
     leaf = extract_combined_temporal(
         case.revision,
         transport=_FakeTransport(payload),
+        pipeline=_PIPELINE,
     )
-    assert leaf.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
+    assert leaf.payload["facts"][0]["valid_at"] == case.gold["facts"][0]["valid_at"]
     assert len(leaf.transport_calls) == 1
 
 
@@ -570,8 +607,12 @@ def test_temporal_cues_require_the_exact_source_time(
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
+    if "Last week" in body:
+        assert leaf.edges[0].valid_at == datetime(2026, 8, 14, tzinfo=UTC)
+    else:
+        assert leaf.edges[0].valid_at == datetime(2026, 8, 20, 18, 30, tzinfo=UTC)
 
 
 def test_exact_source_timestamp_is_retained() -> None:
@@ -620,11 +661,12 @@ def test_offset_source_timestamp_keeps_the_exact_instant(
         pipeline=_PIPELINE,
     )
 
-    assert wrong.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+    assert wrong.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert wrong.failure_code is CombinedTemporalFailureCode.NONE
     assert exact.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
-    assert exact.edges[0].valid_at == datetime(
-        2026, 8, 20, 18, 30, 0, 123_000, tzinfo=UTC
-    )
+    expected = datetime(2026, 8, 20, 18, 30, 0, 123_000, tzinfo=UTC)
+    assert wrong.edges[0].valid_at == expected
+    assert exact.edges[0].valid_at == expected
 
 
 @pytest.mark.parametrize("separator", ("and", ", after"))
@@ -681,9 +723,11 @@ def test_temporal_cue_must_belong_to_the_fact_clause(
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
+    assert leaf.edges[0].valid_at == datetime(2026, 1, 1, tzinfo=UTC)
     assert exact.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert exact.edges[0].valid_at == datetime(2026, 1, 1, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(
@@ -720,8 +764,11 @@ def test_temporal_modifier_delimiters_remain_attributed(body: str) -> None:
         pipeline=_PIPELINE,
     )
 
-    assert omitted.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+    assert omitted.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert omitted.failure_code is CombinedTemporalFailureCode.NONE
+    assert omitted.edges[0].valid_at == datetime(2026, 1, 1, tzinfo=UTC)
     assert exact.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert exact.edges[0].valid_at == datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def test_lowercase_unrelated_assertion_does_not_supply_fact_time() -> None:
@@ -762,8 +809,11 @@ def test_lowercase_unrelated_assertion_does_not_supply_fact_time() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert wrong.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+    assert wrong.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert wrong.failure_code is CombinedTemporalFailureCode.NONE
+    assert wrong.edges[0].valid_at is None
     assert exact.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert exact.edges[0].valid_at is None
 
 
 def test_invalid_source_date_is_a_typed_failed_leaf() -> None:
@@ -777,8 +827,8 @@ def test_invalid_source_date_is_a_typed_failed_leaf() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
 
 
 def test_correction_dash_cannot_join_old_and_corrected_attribution() -> None:
@@ -794,8 +844,8 @@ def test_correction_dash_cannot_join_old_and_corrected_attribution() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
 
 
 @pytest.mark.parametrize(
@@ -842,8 +892,8 @@ def test_plain_negation_cannot_join_contradictory_attribution(
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
 
     positive_body = "Alice JOINED Acme without delay."
     for entity in payload["entities"]:
@@ -932,8 +982,8 @@ def test_unicode_contraction_cannot_join_contradictory_attribution(
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
 
 
 def test_plain_no_cannot_join_contradictory_attribution() -> None:
@@ -954,8 +1004,8 @@ def test_plain_no_cannot_join_contradictory_attribution() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
 
 
 def test_entity_name_must_be_a_complete_source_name() -> None:
@@ -972,8 +1022,8 @@ def test_entity_name_must_be_a_complete_source_name() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
 
 
 @pytest.mark.parametrize(
@@ -999,8 +1049,8 @@ def test_entity_name_cannot_be_part_of_a_connected_name(
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
 
 
 @pytest.mark.parametrize(
@@ -1032,8 +1082,8 @@ def test_entity_name_cannot_be_part_of_another_unicode_name(
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
 
 
 def test_contract_number_is_not_a_contradictory_attribution() -> None:
@@ -1273,8 +1323,8 @@ def test_traditional_chinese_grounding_fails_closed(
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
 
 
 def test_traditional_chinese_date_keeps_source_temporal_semantics() -> None:
@@ -1315,8 +1365,11 @@ def test_traditional_chinese_date_keeps_source_temporal_semantics() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert omitted.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+    assert omitted.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert omitted.failure_code is CombinedTemporalFailureCode.NONE
+    assert omitted.edges[0].valid_at == datetime(2026, 1, 1, tzinfo=UTC)
     assert exact.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert exact.edges[0].valid_at == datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def test_traditional_chinese_sentences_keep_separate_fact_dates() -> None:
@@ -1396,8 +1449,13 @@ def test_traditional_chinese_invalidation_keeps_bound_semantics() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert wrong.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+    assert wrong.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert wrong.failure_code is CombinedTemporalFailureCode.NONE
+    assert wrong.edges[0].valid_at is None
+    assert wrong.edges[0].invalid_at == datetime(2026, 1, 1, tzinfo=UTC)
     assert exact.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert exact.edges[0].valid_at is None
+    assert exact.edges[0].invalid_at == datetime(2026, 1, 1, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(
@@ -1446,8 +1504,11 @@ def test_traditional_chinese_relative_date_uses_reference_time(
         pipeline=_PIPELINE,
     )
 
-    assert omitted.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+    assert omitted.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert omitted.failure_code is CombinedTemporalFailureCode.NONE
+    assert omitted.edges[0].valid_at == datetime(2026, 8, 20, tzinfo=UTC)
     assert exact.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert exact.edges[0].valid_at == datetime(2026, 8, 20, tzinfo=UTC)
 
 
 def test_relative_date_word_inside_entity_name_is_not_a_temporal_cue() -> None:
@@ -1489,7 +1550,10 @@ def test_relative_date_word_inside_entity_name_is_not_a_temporal_cue() -> None:
     )
 
     assert exact.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
-    assert fabricated.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+    assert exact.edges[0].valid_at is None
+    assert fabricated.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert fabricated.failure_code is CombinedTemporalFailureCode.NONE
+    assert fabricated.edges[0].valid_at is None
 
 
 def test_no_doubt_is_not_a_contradictory_attribution() -> None:
@@ -1531,8 +1595,8 @@ def test_anything_but_is_a_negation() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
 
 
 @pytest.mark.parametrize(
@@ -1583,8 +1647,8 @@ def test_multiple_traditional_chinese_assertions_are_not_one_attribution(
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
 
 
 @pytest.mark.parametrize(
@@ -1825,8 +1889,8 @@ def test_repeated_fact_with_conflicting_dates_is_temporally_ambiguous() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
 
 
 def test_distinct_same_relation_facts_keep_their_own_dates() -> None:
@@ -1888,8 +1952,8 @@ def test_temporal_modifier_between_assertions_does_not_merge_them() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
 
 
 def test_han_assertion_with_date_is_not_a_temporal_modifier() -> None:
@@ -1911,8 +1975,9 @@ def test_han_assertion_with_date_is_not_a_temporal_modifier() -> None:
         pipeline=_PIPELINE,
     )
 
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
+    assert leaf.edges[0].valid_at is None
 
 
 def test_correction_revision_does_not_contaminate_the_prompt() -> None:
@@ -2239,9 +2304,12 @@ def test_omitted_temporal_bounds_fail_when_evidence_has_a_cue(name: str) -> None
     leaf = extract_combined_temporal(
         case.revision,
         transport=_FakeTransport(payload),
+        pipeline=_PIPELINE,
     )
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
+    assert leaf.payload["facts"][0]["valid_at"] == case.gold["facts"][0]["valid_at"]
+    assert leaf.payload["facts"][0]["invalid_at"] == case.gold["facts"][0]["invalid_at"]
     assert leaf.graph_effect_attempted is False
 
 
@@ -2278,9 +2346,15 @@ def test_temporal_bounds_cannot_be_swapped(name: str) -> None:
     payload = json.loads(json.dumps(case.gold))
     fact = payload["facts"][0]
     fact["valid_at"], fact["invalid_at"] = fact["invalid_at"], fact["valid_at"]
-    leaf = extract_combined_temporal(case.revision, transport=_FakeTransport(payload))
-    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-    assert leaf.failure_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+    leaf = extract_combined_temporal(
+        case.revision,
+        transport=_FakeTransport(payload),
+        pipeline=_PIPELINE,
+    )
+    assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
+    assert leaf.failure_code is CombinedTemporalFailureCode.NONE
+    assert leaf.payload["facts"][0]["valid_at"] == case.gold["facts"][0]["valid_at"]
+    assert leaf.payload["facts"][0]["invalid_at"] == case.gold["facts"][0]["invalid_at"]
 
 
 def test_relation_type_is_retained_as_an_untrusted_proposal_label() -> None:

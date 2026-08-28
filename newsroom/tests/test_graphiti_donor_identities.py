@@ -272,29 +272,34 @@ def test_invalid_held_and_pre_validator_results_never_create_donor_artefacts() -
             pipeline=_ProviderFreePipeline(),
             donor_store=store,
         )
-        assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE
-        assert leaf.donor_artifact_digest is None
+        if leaf.outcome is CombinedTemporalOutcome.TERMINAL_ATTEMPT_FAILURE:
+            # Payload-fatal leaves must not retain a validated artefact.
+            assert leaf.donor_artifact_digest is None
+        else:
+            # Atom-local rejection or governed projection is a successful leaf.
+            assert leaf.failure_code is CombinedTemporalFailureCode.NONE
 
+    failure_store = InMemoryDonorStore()
     revision = fixture("pair-current").revision
     transport_failure = extract_combined_temporal(
         revision,
         transport=_FailedTransport(),
         pipeline=_ProviderFreePipeline(),
-        donor_store=store,
+        donor_store=failure_store,
     )
     held = extract_combined_temporal(
         revision,
         transport=_FakeTransport(fixture("pair-current").gold),
         pipeline=_FailedPipeline(),
-        donor_store=store,
+        donor_store=failure_store,
     )
 
     assert transport_failure.failure_code is CombinedTemporalFailureCode.PIPELINE_FAILED
     assert held.failure_code is CombinedTemporalFailureCode.PIPELINE_FAILED
-    assert store.validated_artifact_count() == 0
-    assert store.semantic_request_count() >= 1
+    assert failure_store.validated_artifact_count() == 0
+    assert failure_store.semantic_request_count() >= 1
     ineligible_manifest = b'{"contract":"ValidatedSemanticExtractionArtifactV1"}'
-    assert store.retain_validated_artifact(
+    assert failure_store.retain_validated_artifact(
         ValidatedSemanticExtractionArtifactV1(
             artifact_digest=digest_canonical(
                 {"contract": "ValidatedSemanticExtractionArtifactV1"}
@@ -397,7 +402,7 @@ def test_semantic_identity_changes_on_every_bound_semantic_drift(
     monkeypatch.setattr(identities, "VALIDATOR_CONTRACT_VERSION", "validator-drift")
     assert build_semantic_request_identity(revision, prompt).identity_digest != baseline
     monkeypatch.setattr(
-        identities, "VALIDATOR_CONTRACT_VERSION", "NewsroomCombinedTemporalNormaliseV1"
+        identities, "VALIDATOR_CONTRACT_VERSION", "NewsroomCombinedTemporalNormaliseV2"
     )
     monkeypatch.setattr(identities, "GRAPHITI_CHAT_MODEL", "model-drift")
     assert build_semantic_request_identity(revision, prompt).identity_digest != baseline

@@ -1,0 +1,96 @@
+{
+  "step": 14,
+  "provider_raw_digest": "sha256:b2b750bd9fe17a5ddf5ff325939a0cfad0147e6c19195afe4dd5916a9492365c",
+  "attempt_envelope_digest": "sha256:58183c56578d00492e66eeb08bd31b4f208f9d46bf7396c9b1141f0aecf9cdd0",
+  "ingest_id": "16f2eff1-67cb-4d6b-ab3f-9ca3a443b0ff",
+  "reference_time": "2026-08-26T07:29:33.000000Z",
+  "source_body": "李家超探訪元州邨居民 試踏健身單車籲街坊多做運動 行政長官李家超下午落區，先到元州邨探訪居民。 李家超到元盛樓逗留約20分鐘，之後落樓與其他街坊傾談，他說，明白長者在社區居住多年，與街坊鄰里有感情，又提到地區康健中心提供全面基層醫療服務。李家超與街坊傾談時，又叮囑他們多做運動。 有市民就上前與特首合照，有街坊希望李家超為民請命。 有機構正舉辦社區活動，元州邨平台放置了智能健身單車，李家超與參加者傾談，又親身參與踏健身單車，他期間表示，平時也想做運動但礙於時間較少，又說當局有推動香港體育普及化及多元化。 編輯：鍾慧儀 https://news.rthk.hk/rthk/ch/component/k2/1867612-20260826.htm",
+  "raw": {
+    "entities": [
+      {
+        "local_id": 0,
+        "name": "李家超",
+        "entity_type_id": 0,
+        "evidence_segment_ids": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      {
+        "local_id": 1,
+        "name": "元州邨",
+        "entity_type_id": 0,
+        "evidence_segment_ids": [
+          0,
+          4
+        ]
+      },
+      {
+        "local_id": 2,
+        "name": "元盛樓",
+        "entity_type_id": 0,
+        "evidence_segment_ids": [
+          1
+        ]
+      },
+      {
+        "local_id": 3,
+        "name": "香港",
+        "entity_type_id": 0,
+        "evidence_segment_ids": [
+          4
+        ]
+      },
+      {
+        "local_id": 4,
+        "name": "當局",
+        "entity_type_id": 0,
+        "evidence_segment_ids": [
+          4
+        ]
+      }
+    ],
+    "facts": [
+      {
+        "source_local_id": 0,
+        "target_local_id": 1,
+        "relation_type": "VISITED",
+        "fact": "李家超探訪元州邨居民",
+        "valid_at": "2026-08-26T07:29:33.000000Z",
+        "invalid_at": null,
+        "evidence_segment_ids": [
+          0
+        ]
+      },
+      {
+        "source_local_id": 0,
+        "target_local_id": 2,
+        "relation_type": "ARRIVED_AT",
+        "fact": "李家超到元盛樓逗留約20分鐘",
+        "valid_at": "2026-08-26T07:29:33.000000Z",
+        "invalid_at": null,
+        "evidence_segment_ids": [
+          1
+        ]
+      },
+      {
+        "source_local_id": 4,
+        "target_local_id": 3,
+        "relation_type": "PROMOTES",
+        "fact": "又說當局有推動香港體育普及化及多元化",
+        "valid_at": "2026-08-26T07:29:33.000000Z",
+        "invalid_at": null,
+        "evidence_segment_ids": [
+          4
+        ]
+      }
+    ]
+  },
+  "provenance": {
+    "sdk_transcript": "/Users/jamesto/.cursor/projects/Volumes-CursorRuntime-cursor-portable-data-tmp-newsroom-cursor-sdk-pv0gtv1y-cwd/agent-transcripts/agent-a9446ae9-a345-44c9-862f-33a4d421ba0f/agent-a9446ae9-a345-44c9-862f-33a4d421ba0f.jsonl",
+    "note": "attempt receipt raw_output_digest is diagnostic-envelope digest; provider object digest is raw_digest(raw)"
+  }
+}

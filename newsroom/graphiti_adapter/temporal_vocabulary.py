@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-TEMPORAL_POLICY_VERSION = "graphiti-source-reference-time-v1"
+TEMPORAL_POLICY_VERSION = "graphiti-source-reference-time-v2"
 
 
 class TemporalBasis(StrEnum):

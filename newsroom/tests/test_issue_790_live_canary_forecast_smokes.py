@@ -14,8 +14,5 @@ def test_issue_790_forecast_blocker_smokes_all_pass() -> None:
     assert not failed, failed
     assert len(rows) >= 20
     names = {name for name, _, _ in rows}
-    assert "B10 TEMPORAL: REFERENCE_TIME stuffing rejected; null bounds OK" in names
-    assert (
-        "B14 dry-replay Step 14 REFERENCE_TIME valid_at → TEMPORAL_INVALID; null OK"
-        in names
-    )
+    assert "B10 TEMPORAL: REFERENCE_TIME stuffing ignored; projected null/cues OK" in names
+    assert "B14 dry-replay Step 14 stuffing ignored → projected null success" in names

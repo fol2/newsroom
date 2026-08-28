@@ -267,6 +267,9 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
         CombinedTemporalError,
         CombinedTemporalFailureCode,
     )
+    from newsroom.graphiti_adapter.combined_temporal_projection import (
+        project_governed_proposals,
+    )
     from newsroom.graphiti_adapter.combined_temporal_validation import normalise
     from newsroom.graphiti_adapter.evaluation_attempt import evaluation_attempt_for
     from newsroom.graphiti_adapter.real import RealGraphitiAdapter
@@ -275,6 +278,10 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
     segs = segment_source(gold.revision.body)
     ref = datetime.fromisoformat(gold.revision.published_at.replace("Z", "+00:00"))
     prompt = build_compact_prompt(gold.revision).text
+
+    def project(payload: dict[str, Any], segments=segs, reference=ref):
+        return project_governed_proposals(payload, segments, reference)
+
     expect = lambda payload: _expect_code(
         payload,
         segs,
@@ -321,8 +328,7 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
             "unique contiguous verbatim span",
             "must be distinct",
             "both endpoint entity names",
-            "Do not copy REFERENCE_TIME",
-            "no date cue",
+            "Put valid_at and invalid_at on each fact as null",
             'return {"entities":[],"facts":[]}',
         )
     )
@@ -450,16 +456,19 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
         f"block_bytes={len(canary_block)} no embedding gate",
     )
 
-    # --- expanded forecast coverage (post Step 14 surprise) ---
+    # --- expanded forecast coverage (governed projection) ---
     stuffed = json.loads(json.dumps(gold.gold))
     stuffed["facts"][0]["valid_at"] = gold.revision.reference_time
-    stuffed_code = expect(stuffed)
-    null_ok = expect(gold.gold) is None
+    stuffed_proj = project(stuffed)
+    gold_proj = project(gold.gold)
     _check(
         rows,
-        "B10 TEMPORAL: REFERENCE_TIME stuffing rejected; null bounds OK",
-        stuffed_code is CombinedTemporalFailureCode.TEMPORAL_INVALID and null_ok,
-        f"stuffed={stuffed_code} null_gold={null_ok}",
+        "B10 TEMPORAL: REFERENCE_TIME stuffing ignored; projected null/cues OK",
+        stuffed_proj.receipt["accepted_count"] >= 1
+        and stuffed_proj.payload["facts"][0]["valid_at"]
+        == gold_proj.payload["facts"][0]["valid_at"]
+        and gold_proj.receipt["rejected_count"] == 0,
+        f"stuffed_valid_at={stuffed_proj.payload['facts'][0]['valid_at']}",
     )
 
     cue_body = "Alice asked Bob about the curriculum on 2026-08-21."
@@ -482,18 +491,13 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
             }
         ],
     }
-    cue_null_code = _expect_code(
-        cue_null,
-        cue_segs,
-        cue_ref,
-        normalise=normalise,
-        CombinedTemporalError=CombinedTemporalError,
-    )
+    cue_proj = project(cue_null, cue_segs, cue_ref)
     _check(
         rows,
-        "B11 TEMPORAL: date cue with both nulls rejected",
-        cue_null_code is CombinedTemporalFailureCode.TEMPORAL_INVALID,
-        f"code={cue_null_code}",
+        "B11 TEMPORAL: date cue projects ISO bound from evidence",
+        cue_proj.receipt["accepted_count"] == 1
+        and cue_proj.payload["facts"][0]["valid_at"] == "2026-08-21T00:00:00Z",
+        f"valid_at={cue_proj.payload['facts'][0]['valid_at']}",
     )
 
     bad_relation = json.loads(json.dumps(gold.gold))
@@ -510,7 +514,7 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
         f"relation={malformed} type_id={identity_type}",
     )
 
-    # Step 13 live shape: fact missing an endpoint name
+    # Step 13 live shape: fact missing an endpoint name → atom reject → zero proposals
     step13 = {
         "entities": [
             {"local_id": 0, "name": "Police officer", "entity_type_id": 0, "evidence_segment_ids": [0]},
@@ -531,21 +535,17 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
     step13_segs = segment_source(
         "Police officer sacked after starting sexual relationship with woman."
     )
-    step13_code = _expect_code(
-        step13,
-        step13_segs,
-        cue_ref,
-        normalise=normalise,
-        CombinedTemporalError=CombinedTemporalError,
-    )
+    step13_proj = project(step13, step13_segs, cue_ref)
     _check(
         rows,
-        "B13 dry-replay Step 13 missing-endpoint → EVIDENCE_UNRESOLVED",
-        step13_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
-        f"code={step13_code}",
+        "B13 dry-replay Step 13 missing-endpoint → zero-proposal success",
+        step13_proj.receipt["rejected_count"] == 1
+        and step13_proj.receipt["accepted_count"] == 0
+        and step13_proj.payload == {"entities": [], "facts": []},
+        f"rejected={step13_proj.receipt['rejected_count']}",
     )
 
-    # Step 14 live shape: grounded endpoints but REFERENCE_TIME stuffed
+    # Step 14 live shape: grounded endpoints but REFERENCE_TIME stuffed → project null
     step14_body = "李家超探訪元州邨居民 試踏健身單車。"
     step14_segs = segment_source(step14_body)
     step14_ref = datetime(2026, 8, 26, 7, 29, 33, tzinfo=UTC)
@@ -566,28 +566,14 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
             }
         ],
     }
-    step14_code = _expect_code(
-        step14,
-        step14_segs,
-        step14_ref,
-        normalise=normalise,
-        CombinedTemporalError=CombinedTemporalError,
-    )
-    step14_null = json.loads(json.dumps(step14))
-    step14_null["facts"][0]["valid_at"] = None
-    step14_null_code = _expect_code(
-        step14_null,
-        step14_segs,
-        step14_ref,
-        normalise=normalise,
-        CombinedTemporalError=CombinedTemporalError,
-    )
+    step14_proj = project(step14, step14_segs, step14_ref)
     _check(
         rows,
-        "B14 dry-replay Step 14 REFERENCE_TIME valid_at → TEMPORAL_INVALID; null OK",
-        step14_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
-        and step14_null_code is None,
-        f"stuffed={step14_code} null={step14_null_code}",
+        "B14 dry-replay Step 14 stuffing ignored → projected null success",
+        step14_proj.receipt["accepted_count"] == 1
+        and step14_proj.payload["facts"][0]["valid_at"] is None
+        and step14_proj.payload["facts"][0]["invalid_at"] is None,
+        f"valid_at={step14_proj.payload['facts'][0]['valid_at']}",
     )
 
     attempt = evaluation_attempt_for(("A retained source passage.",))
@@ -655,6 +641,36 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
         ),
         "fallback_permitted=False + plan fallback_mode",
     )
+    # Ambiguous multi-cue → atom-local TEMPORAL_INVALID under projection
+    multi_cue_body = (
+        "Alice asked Bob about the curriculum on 2026-08-21 and again on 2026-08-22."
+    )
+    multi_segs = segment_source(multi_cue_body)
+    multi_payload = {
+        "entities": [
+            {"local_id": 0, "name": "Alice", "entity_type_id": 0, "evidence_segment_ids": [0]},
+            {"local_id": 1, "name": "Bob", "entity_type_id": 0, "evidence_segment_ids": [0]},
+        ],
+        "facts": [
+            {
+                "source_local_id": 0,
+                "target_local_id": 1,
+                "relation_type": "ASKED",
+                "fact": (
+                    "Alice asked Bob about the curriculum on 2026-08-21 "
+                    "and again on 2026-08-22"
+                ),
+                "valid_at": None,
+                "invalid_at": None,
+                "evidence_segment_ids": [0],
+            }
+        ],
+    }
+    multi_proj = project(multi_payload, multi_segs, cue_ref)
+    temporal_reject = CombinedTemporalFailureCode(
+        multi_proj.receipt["atom_actions"][0]["reason_code"]
+    )
+
     _check(
         rows,
         "B20 all CombinedTemporalFailureCode failure values are exercised above",
@@ -669,12 +685,12 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
                 amb_code,
                 self_code,
                 orphan_code,
-                stuffed_code,
-                cue_null_code,
+                CombinedTemporalFailureCode(
+                    step13_proj.receipt["atom_actions"][0]["reason_code"]
+                ),
+                temporal_reject,
                 malformed,
                 identity_type,
-                step13_code,
-                step14_code,
             }
         )
         and CombinedTemporalFailureCode.PIPELINE_FAILED.value == "PIPELINE_FAILED",
@@ -682,9 +698,8 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
     )
 
     print(
-        "RESIDUAL (cannot preflight provider-free): model still ignoring "
-        "prefer-empty / temporal-null; provider outage; Neo4j pipeline after "
-        "a schema-valid extract; novel attribution edge cases."
+        "RESIDUAL (cannot preflight provider-free): provider outage; Neo4j "
+        "pipeline after a schema-valid extract; novel attribution edge cases."
     )
     _ = canary_src  # retained for future source gates; silence lint
     return rows

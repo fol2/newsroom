@@ -377,11 +377,12 @@ async def extract_combined_temporal_async(
             failure_code=CombinedTemporalFailureCode.PIPELINE_FAILED,
         )
     try:
-        normalised, ranges, nodes, edges = _validate_and_expand(
+        normalised, ranges, nodes, edges, projection_receipt = _validate_and_expand(
             revision=revision,
             prompt=prompt,
             raw=raw,
         )
+        receipt["projection_receipt"] = projection_receipt
         receipt["proposal_receipt"] = _proposal_receipt(
             revision=revision,
             payload=normalised,

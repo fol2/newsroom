@@ -22,7 +22,6 @@ from newsroom.graphiti_adapter.identity import (
     ingest_key,
 )
 from newsroom.graphiti_adapter.temporal import map_reference_time
-from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_VERSION
 
 CONTRACT_NAME = "NewsroomCombinedTemporalExtractionV1"
 GROUP_ID = GRAPHITI_WORKSPACE_GROUP
@@ -172,9 +171,7 @@ def build_compact_prompt(revision: SourceRevisionInput) -> CompactPrompt:
         "The wire facts are untrusted Relation Proposals; they are not governed facts.",
         "Build each relation_type only from relation words present in its fact; entity-name words are not relation evidence.",
         "Every relation_type must be SCREAMING_SNAKE_CASE.",
-        "Put valid_at and invalid_at on each fact. Resolve relative dates against REFERENCE_TIME to ISO-8601 UTC, or null.",
-        "Do not copy REFERENCE_TIME into valid_at or invalid_at unless that exact timestamp or its calendar date appears in the cited segments.",
-        "If cited evidence has no date cue, set both valid_at and invalid_at to null.",
+        "Put valid_at and invalid_at on each fact as null. The repository derives temporal bounds.",
         "Cite evidence with the integer segment IDs below. Do not invent byte offsets.",
         "Each fact string must be a unique contiguous verbatim span from its cited segments; never reuse one fact string across facts.",
         "source_local_id and target_local_id must be distinct.",
@@ -183,9 +180,6 @@ def build_compact_prompt(revision: SourceRevisionInput) -> CompactPrompt:
         "A valid empty object is terminal success.",
         SEMANTIC_SIDECAR_EXCLUSION_INSTRUCTION,
         GRAPHITI_EXTRACTION_INSTRUCTIONS,
-        f"REFERENCE_TIME: {revision.reference_time}",
-        f"TEMPORAL_BASIS: {revision.temporal_basis}",
-        f"TEMPORAL_POLICY: {TEMPORAL_POLICY_VERSION}",
         "SCHEMA:",
         schema_text,
         "SEGMENTS:",
