@@ -2069,12 +2069,16 @@ def test_complete_marker_blocks_cancellation_rollback_deletion() -> None:
 def test_immutable_completion_snapshot_restores_without_graph_rehydration(
     tmp_path: Path,
 ) -> None:
+    from newsroom.graphiti_adapter.combined_temporal_contract import SourceRevisionInput
     from newsroom.graphiti_adapter.combined_temporal_evidence import segment_source
-    from newsroom.graphiti_adapter.combined_temporal_projection import (
-        project_governed_proposals,
+    from newsroom.graphiti_adapter.combined_temporal_extraction import (
+        CombinedTemporalTransportResult,
+        extract_combined_temporal,
     )
+    from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_CORE_RELEASE
     from newsroom.graphiti_adapter.real import _EpisodeTelemetry, _raw_receipt
     from newsroom.graphiti_adapter.result_snapshot import restore_validated_snapshot
+    from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_DIGEST_V2
 
     instant = UtcTimestamp(datetime(2026, 8, 20, tzinfo=UTC))
     attempt = replace(
@@ -2082,6 +2086,55 @@ def test_immutable_completion_snapshot_restores_without_graph_rehydration(
         reference_time=instant,
         temporal_basis=TemporalBasis.SOURCE_PUBLISHED,
     )
+    captured: dict[str, object] = {}
+
+    class Transport:
+        def generate_response(self, **kwargs: object) -> CombinedTemporalTransportResult:
+            del kwargs
+            return CombinedTemporalTransportResult(
+                raw={"entities": [], "facts": []},
+                framework_version=GRAPHITI_CORE_RELEASE,
+                model_version="composer-2.5",
+                token_usage={"basis": "PROVIDER_REPORTED", "output_tokens": 1},
+                provider_cost=None,
+            )
+
+    class Pipeline:
+        def prepare_attempt(self) -> None:
+            return None
+
+        def complete_failure(self, terminal: dict[str, object]) -> dict[str, object]:
+            return dict(terminal)
+
+        def execute(self, **kwargs: object) -> SimpleNamespace:
+            receipt = dict(kwargs["receipt"])
+            captured["combined"] = receipt
+            return SimpleNamespace(
+                nodes=(),
+                edges=(),
+                guarded_edges=(),
+                node_resolutions=(),
+                graph_effect_attempted=False,
+                embedding_skipped=True,
+                journal_skipped=True,
+                rollback_skipped=True,
+                completed_receipt=receipt,
+            )
+
+    revision = SourceRevisionInput(
+        body="Alice met Bob on 2026-08-20.",
+        revision_id="rev",
+        source_id="src",
+        item_key="item",
+        representation_digest="sha256:" + "ab" * 32,
+        published_at=instant.to_text(),
+        updated_at=None,
+        observed_at=instant.to_text(),
+        ingested_at=instant.to_text(),
+    )
+    extract_combined_temporal(revision, transport=Transport(), pipeline=Pipeline())
+    combined = dict(captured["combined"])  # type: ignore[arg-type]
+    assert combined.get("temporal_policy_digest") == TEMPORAL_POLICY_DIGEST_V2
     raw = _raw_receipt(
         attempt,
         started_at=instant,
@@ -2089,13 +2142,8 @@ def test_immutable_completion_snapshot_restores_without_graph_rehydration(
         result=None,
         proposals=(),
     )
-    projection = project_governed_proposals(
-        {"entities": [], "facts": []},
-        segment_source("Alice met Bob on 2026-08-20."),
-        instant.value,
-    ).receipt
     raw.pop("raw_output_digest", None)
-    raw["combined_temporal_receipt"] = {"projection_receipt": projection}
+    raw["combined_temporal_receipt"] = combined
     raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
     restored = restore_validated_snapshot(raw=raw, attempt=attempt)
     assert restored.produced.raw_output_value == raw
@@ -2176,10 +2224,12 @@ def test_completed_pipeline_failure_snapshot_restores_as_retryable(
 def test_immutable_completion_preserves_original_access_after_rights_renewal(
     tmp_path: Path,
 ) -> None:
-    from newsroom.graphiti_adapter.combined_temporal_evidence import segment_source
-    from newsroom.graphiti_adapter.combined_temporal_projection import (
-        project_governed_proposals,
+    from newsroom.graphiti_adapter.combined_temporal_contract import SourceRevisionInput
+    from newsroom.graphiti_adapter.combined_temporal_extraction import (
+        CombinedTemporalTransportResult,
+        extract_combined_temporal,
     )
+    from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_CORE_RELEASE
     from newsroom.graphiti_adapter.real import _EpisodeTelemetry, _raw_receipt
     from newsroom.graphiti_adapter.result_snapshot import restore_validated_snapshot
 
@@ -2189,6 +2239,53 @@ def test_immutable_completion_preserves_original_access_after_rights_renewal(
         reference_time=instant,
         temporal_basis=TemporalBasis.SOURCE_PUBLISHED,
     )
+    captured: dict[str, object] = {}
+
+    class Transport:
+        def generate_response(self, **kwargs: object) -> CombinedTemporalTransportResult:
+            del kwargs
+            return CombinedTemporalTransportResult(
+                raw={"entities": [], "facts": []},
+                framework_version=GRAPHITI_CORE_RELEASE,
+                model_version="composer-2.5",
+                token_usage={"basis": "PROVIDER_REPORTED", "output_tokens": 1},
+                provider_cost=None,
+            )
+
+    class Pipeline:
+        def prepare_attempt(self) -> None:
+            return None
+
+        def complete_failure(self, terminal: dict[str, object]) -> dict[str, object]:
+            return dict(terminal)
+
+        def execute(self, **kwargs: object) -> SimpleNamespace:
+            receipt = dict(kwargs["receipt"])
+            captured["combined"] = receipt
+            return SimpleNamespace(
+                nodes=(),
+                edges=(),
+                guarded_edges=(),
+                node_resolutions=(),
+                graph_effect_attempted=False,
+                embedding_skipped=True,
+                journal_skipped=True,
+                rollback_skipped=True,
+                completed_receipt=receipt,
+            )
+
+    revision = SourceRevisionInput(
+        body="Alice met Bob on 2026-08-20.",
+        revision_id="rev",
+        source_id="src",
+        item_key="item",
+        representation_digest="sha256:" + "ab" * 32,
+        published_at=instant.to_text(),
+        updated_at=None,
+        observed_at=instant.to_text(),
+        ingested_at=instant.to_text(),
+    )
+    extract_combined_temporal(revision, transport=Transport(), pipeline=Pipeline())
     raw = _raw_receipt(
         original,
         started_at=instant,
@@ -2196,13 +2293,8 @@ def test_immutable_completion_preserves_original_access_after_rights_renewal(
         result=None,
         proposals=(),
     )
-    projection = project_governed_proposals(
-        {"entities": [], "facts": []},
-        segment_source("Alice met Bob on 2026-08-20."),
-        instant.value,
-    ).receipt
     raw.pop("raw_output_digest", None)
-    raw["combined_temporal_receipt"] = {"projection_receipt": projection}
+    raw["combined_temporal_receipt"] = dict(captured["combined"])  # type: ignore[arg-type]
     raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
     old_access = raw["passages"][0]["access_decision_id"]
     current_passages = tuple(

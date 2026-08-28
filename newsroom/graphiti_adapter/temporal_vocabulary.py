@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from enum import StrEnum
 
+from newsroom.authority.canonical import digest_canonical
+
 TEMPORAL_POLICY_VERSION = "graphiti-source-reference-time-v2"
+TEMPORAL_POLICY_VERSION_V1 = "graphiti-source-reference-time-v1"
+TEMPORAL_POLICY_DIGEST_V1 = digest_canonical(TEMPORAL_POLICY_VERSION_V1)
+TEMPORAL_POLICY_DIGEST_V2 = digest_canonical(TEMPORAL_POLICY_VERSION)
 
 
 class TemporalBasis(StrEnum):
@@ -25,4 +30,11 @@ def parse_temporal_basis(value: object) -> TemporalBasis:
     raise ValueError("temporal_basis must be a labelled mapping")
 
 
-__all__ = ["TEMPORAL_POLICY_VERSION", "TemporalBasis", "parse_temporal_basis"]
+__all__ = [
+    "TEMPORAL_POLICY_DIGEST_V1",
+    "TEMPORAL_POLICY_DIGEST_V2",
+    "TEMPORAL_POLICY_VERSION",
+    "TEMPORAL_POLICY_VERSION_V1",
+    "TemporalBasis",
+    "parse_temporal_basis",
+]

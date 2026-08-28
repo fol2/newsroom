@@ -34,6 +34,7 @@ from newsroom.graphiti_adapter.combined_temporal_validation import (
     _resolve_segments,
     normalise,
 )
+from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_DIGEST_V2
 
 PROJECTION_POLICY_VERSION = "NewsroomGovernedProposalProjectionV1"
 PROJECTION_POLICY_DIGEST = digest_canonical(PROJECTION_POLICY_VERSION)
@@ -266,6 +267,9 @@ def project_governed_proposals(
                     "action": "accept",
                     "reason_code": "PROJECTED",
                     "raw_proposal_digest": raw_proposal_digest,
+                    "source_local_id": source,
+                    "target_local_id": target,
+                    "relation_type": fact["relation_type"],
                     "fact": fact["fact"],
                     "evidence_segment_ids": list(fact["evidence_segment_ids"]),
                     "raw_temporal": raw_temporal,
@@ -285,18 +289,16 @@ def project_governed_proposals(
                 != "atom_local"
             ):
                 raise
-            raw_proposal_digest = digest_canonical(
-                {
-                    "raw_fact": (
-                        dict(raw_fact) if isinstance(raw_fact, Mapping) else raw_fact
-                    ),
-                }
+            retained_raw_fact = (
+                dict(raw_fact) if isinstance(raw_fact, Mapping) else raw_fact
             )
+            raw_proposal_digest = digest_canonical({"raw_fact": retained_raw_fact})
             atom_actions.append(
                 {
                     "action": "reject",
                     "reason_code": exc.code.value,
                     "raw_proposal_digest": raw_proposal_digest,
+                    "raw_fact": retained_raw_fact,
                     "fact": (
                         raw_fact.get("fact") if isinstance(raw_fact, Mapping) else None
                     ),
@@ -375,6 +377,7 @@ def validate_projection_receipt(receipt: object) -> dict[str, object]:
         "schema_version",
         "projection_policy_version",
         "projection_policy_digest",
+        "validator_contract_version",
         "raw_provider_output_digest",
         "reference_time",
         "reference_time_digest",
@@ -405,6 +408,11 @@ def validate_projection_receipt(receipt: object) -> dict[str, object]:
         raise CombinedTemporalError(
             CombinedTemporalFailureCode.PIPELINE_FAILED,
             "projection_policy_digest contradicts projection_policy_version",
+        )
+    if receipt.get("validator_contract_version") != VALIDATOR_CONTRACT_VERSION:
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "validator_contract_version is invalid",
         )
     reference_time = receipt.get("reference_time")
     if not isinstance(reference_time, str) or not reference_time:
@@ -443,6 +451,12 @@ def validate_projection_receipt(receipt: object) -> dict[str, object]:
                 f"atom_actions[{index}] must be an object",
             )
         kind = action.get("action")
+        raw_digest = action.get("raw_proposal_digest")
+        if not isinstance(raw_digest, str) or not raw_digest.startswith("sha256:"):
+            raise CombinedTemporalError(
+                CombinedTemporalFailureCode.PIPELINE_FAILED,
+                f"atom_actions[{index}] raw_proposal_digest is invalid",
+            )
         if kind == "accept":
             accepted += 1
             digest = action.get("accepted_object_digest")
@@ -451,18 +465,76 @@ def validate_projection_receipt(receipt: object) -> dict[str, object]:
                     CombinedTemporalFailureCode.PIPELINE_FAILED,
                     f"atom_actions[{index}] accepted_object_digest is invalid",
                 )
+            source = action.get("source_local_id")
+            target = action.get("target_local_id")
+            relation = action.get("relation_type")
+            fact_text = action.get("fact")
+            evidence = action.get("evidence_segment_ids")
+            raw_temporal = action.get("raw_temporal")
+            projected_temporal = action.get("projected_temporal")
+            if (
+                not isinstance(source, int)
+                or isinstance(source, bool)
+                or not isinstance(target, int)
+                or isinstance(target, bool)
+                or not isinstance(relation, str)
+                or not isinstance(fact_text, str)
+                or not isinstance(evidence, list)
+                or not isinstance(raw_temporal, Mapping)
+                or not isinstance(projected_temporal, Mapping)
+            ):
+                raise CombinedTemporalError(
+                    CombinedTemporalFailureCode.PIPELINE_FAILED,
+                    f"atom_actions[{index}] accepted atom fields are incomplete",
+                )
+            expected_raw = digest_canonical(
+                {
+                    "evidence_segment_ids": evidence,
+                    "fact": fact_text,
+                    "raw_temporal": dict(raw_temporal),
+                    "relation_type": relation,
+                    "source_local_id": source,
+                    "target_local_id": target,
+                }
+            )
+            if raw_digest != expected_raw:
+                raise CombinedTemporalError(
+                    CombinedTemporalFailureCode.PIPELINE_FAILED,
+                    f"atom_actions[{index}] raw_proposal_digest contradicts retained atom",
+                )
+            expected_accepted = digest_canonical(
+                {
+                    "source_local_id": source,
+                    "target_local_id": target,
+                    "relation_type": relation,
+                    "fact": fact_text,
+                    "evidence_segment_ids": evidence,
+                    "valid_at": projected_temporal.get("valid_at"),
+                    "invalid_at": projected_temporal.get("invalid_at"),
+                }
+            )
+            if digest != expected_accepted:
+                raise CombinedTemporalError(
+                    CombinedTemporalFailureCode.PIPELINE_FAILED,
+                    f"atom_actions[{index}] accepted_object_digest contradicts retained atom",
+                )
         elif kind == "reject":
             rejected += 1
+            if action.get("accepted_object_digest") is not None:
+                raise CombinedTemporalError(
+                    CombinedTemporalFailureCode.PIPELINE_FAILED,
+                    f"atom_actions[{index}] reject must not carry accepted_object_digest",
+                )
+            raw_fact = action.get("raw_fact")
+            if raw_digest != digest_canonical({"raw_fact": raw_fact}):
+                raise CombinedTemporalError(
+                    CombinedTemporalFailureCode.PIPELINE_FAILED,
+                    f"atom_actions[{index}] raw_proposal_digest contradicts retained raw_fact",
+                )
         else:
             raise CombinedTemporalError(
                 CombinedTemporalFailureCode.PIPELINE_FAILED,
                 f"atom_actions[{index}] action is invalid",
-            )
-        raw_digest = action.get("raw_proposal_digest")
-        if not isinstance(raw_digest, str) or not raw_digest.startswith("sha256:"):
-            raise CombinedTemporalError(
-                CombinedTemporalFailureCode.PIPELINE_FAILED,
-                f"atom_actions[{index}] raw_proposal_digest is invalid",
             )
     for key, expected in (
         ("accepted_count", accepted),
@@ -489,6 +561,126 @@ def validate_projection_receipt(receipt: object) -> dict[str, object]:
     return dict(receipt)
 
 
+def validate_replay_receipt_binding(outer: object) -> dict[str, object]:
+    """Bind outer Graphiti raw, combined-temporal, proposal and projection receipts."""
+
+    if not isinstance(outer, Mapping):
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "outer Graphiti receipt must be an object",
+        )
+    combined = outer.get("combined_temporal_receipt")
+    if not isinstance(combined, Mapping):
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "combined_temporal_receipt is required for replay binding",
+        )
+    proposal = combined.get("proposal_receipt")
+    if not isinstance(proposal, Mapping):
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "proposal_receipt is required for replay binding",
+        )
+    projection = validate_projection_receipt(combined.get("projection_receipt"))
+    if combined.get("temporal_policy_digest") != TEMPORAL_POLICY_DIGEST_V2:
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "combined temporal_policy_digest is not retained v2",
+        )
+    if projection["raw_provider_output_digest"] != combined.get("raw_output_digest"):
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "projection raw_provider_output_digest contradicts combined raw_output_digest",
+        )
+    try:
+        outer_ref = UtcTimestamp.parse(str(outer.get("reference_time"))).value
+        projection_ref = UtcTimestamp.parse(str(projection["reference_time"])).value
+        proposal_ref = UtcTimestamp.parse(str(proposal.get("reference_time"))).value
+    except (TypeError, ValueError) as exc:
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "replay reference_time identity is malformed",
+        ) from exc
+    if not (outer_ref == projection_ref == proposal_ref):
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "reference_time is not cross-bound across receipts",
+        )
+    wire = proposal.get("wire_payload")
+    if not isinstance(wire, Mapping):
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "proposal_receipt.wire_payload is required",
+        )
+    entities = wire.get("entities")
+    facts = wire.get("facts")
+    if not isinstance(entities, list) or not isinstance(facts, list):
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "proposal wire_payload entities/facts must be lists",
+        )
+    wire_digest = digest_canonical(
+        {
+            "entities": [dict(item) for item in entities],
+            "facts": [dict(item) for item in facts],
+        }
+    )
+    if proposal.get("payload_digest") != wire_digest:
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "proposal payload_digest contradicts wire_payload",
+        )
+    if projection["accepted_payload_digest"] != proposal.get("payload_digest"):
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "accepted_payload_digest contradicts proposal_receipt",
+        )
+    if projection["accepted_count"] != len(facts):
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "accepted_count contradicts proposal wire facts",
+        )
+    accepted_digests = sorted(
+        str(item["accepted_object_digest"])
+        for item in projection["atom_actions"]  # type: ignore[index]
+        if isinstance(item, Mapping) and item.get("action") == "accept"
+    )
+    wire_digests = sorted(digest_canonical(dict(item)) for item in facts)
+    if accepted_digests != wire_digests:
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "accepted object digests contradict proposal wire facts",
+        )
+    proposals = outer.get("proposals")
+    if (
+        not isinstance(proposals, list)
+        or outer.get("proposal_count") != len(proposals)
+        or outer.get("entity_count") != len(entities)
+        or outer.get("relation_count") != len(facts)
+        or outer.get("proposal_count")
+        != int(outer.get("entity_count", -1)) + int(outer.get("relation_count", -1))
+    ):
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "outer proposal/entity/relation counts contradict governed payload",
+        )
+    if projection.get("projection_policy_version") != PROJECTION_POLICY_VERSION:
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "projection policy identity is invalid",
+        )
+    if projection.get("validator_contract_version") != VALIDATOR_CONTRACT_VERSION:
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "validator contract identity is invalid",
+        )
+    return {
+        "combined_temporal_receipt": dict(combined),
+        "proposal_receipt": dict(proposal),
+        "projection_receipt": projection,
+    }
+
+
 __all__ = [
     "ATOM_LOCAL_FAILURE_CODES",
     "FACT_LOOP_ATOM_LOCAL_CODES",
@@ -501,4 +693,5 @@ __all__ = [
     "project_governed_proposals",
     "project_temporal_bounds",
     "validate_projection_receipt",
+    "validate_replay_receipt_binding",
 ]
