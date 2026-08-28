@@ -1,0 +1,34 @@
+{
+  "schema_version": "newsroom.issue-790.provider-free-code-fix-qualification.v1",
+  "issue": 790,
+  "observed_at": "2026-08-28T09:50:00.000000Z",
+  "predecessor_outcome_digest": "sha256:277437b861e298d7da2254104f6e8596b20370d61ea5c9bbe5821ac43d8baf2b",
+  "provider_calls": 0,
+  "public_effects": 0,
+  "model_catalogue_queries": 0,
+  "live_canary_authorised": false,
+  "failure": {
+    "boundary": "MODEL_USAGE_REQUESTED_MAX_OUTPUT",
+    "elapsed_ms": 39901,
+    "failure_code": "OUTPUT_LIMIT_EXCEEDED",
+    "local_cause": "EXTRACTION_MAX_RESPONSE_TOKENS_BELOW_CALL_SHAPE",
+    "provider_cause": "COMPOSER_OUTPUT_EXCEEDED_REQUESTED_MAX_TOKENS",
+    "termination": "PRODUCER_INTERNAL_ERROR"
+  },
+  "provider_free_checks": {
+    "call_shape_policy_version": "issue-816-v2",
+    "call_shape_policy_digest": "sha256:ba1cb4267ff78419174b50a0e233545a4bf745168d4f7fdbffa2fb6007ab5abc",
+    "sdk_floor": "cursor-sdk>=1.0.29",
+    "composer_floor": "composer>=2.5",
+    "evaluation_max_response_tokens": 16384,
+    "call_shape_primary_max_output_tokens": 16384,
+    "budget_matches_call_shape": "PASS",
+    "canary_fallback_remains_disabled": "PASS",
+    "focused_tests": "newsroom/tests/test_graphiti_adapter_real_executor.py::test_evaluation_attempt_response_budget_matches_call_shape_ceiling",
+    "focused_tests_result": "1 passed",
+    "fix_revision": "0ed21ffb0c2c6feaaafe85b0ce9f0fda7153f3c8",
+    "persistent_worker": "UNLOADED"
+  },
+  "qualification": "EXTRACTION_RESPONSE_BUDGET_CALL_SHAPE_ALIGNED_PROVIDER_FREE_READY",
+  "canonical_digest": "sha256:67c9d44df6555a36fcd2e306485aa3f4d98d3356453a8ba8baf1f6630f4e3d3a"
+}

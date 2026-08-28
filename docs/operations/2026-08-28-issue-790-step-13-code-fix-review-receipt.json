@@ -1,0 +1,13 @@
+{
+  "schema_version": "newsroom.issue-790.code-fix-review-receipt.v1",
+  "issue": 790,
+  "reviewed_at": "2026-08-28T09:55:00.000000Z",
+  "reviewed_fix_revision": "0ed21ffb0c2c6feaaafe85b0ce9f0fda7153f3c8",
+  "qualification_digest": "sha256:67c9d44df6555a36fcd2e306485aa3f4d98d3356453a8ba8baf1f6630f4e3d3a",
+  "reviewer": "cursor-agent",
+  "finding_count": 0,
+  "unresolved_high_risk_findings": 0,
+  "verdict": "FEATURE_COMPLETE_NO_UNRESOLVED_FINDINGS",
+  "scope": "align evaluation max_response_tokens to call-shape PRIMARY 16384",
+  "canonical_digest": "sha256:527a0d79a4191347a6cdcfe0762886b862ec757b21db631ebb87a12806c6fe10"
+}

@@ -2343,7 +2343,7 @@ def test_issue_790_success_sequence_fails_closed_on_call_shape_drift(
     with pytest.raises(Issue790DispositionError, match="call-shape policy differs"):
         load_issue_790_plan(
             root
-            / "docs/operations/2026-08-28-issue-790-success-sequence-step-12.json"
+            / "docs/operations/2026-08-28-issue-790-success-sequence-step-13.json"
         )
 
 
@@ -2753,6 +2753,45 @@ def test_checked_issue_790_step_twelve_executable_plan_contract() -> None:
     )
     assert qualification["qualification"] == (
         "COMBINED_TEMPORAL_FACT_ATTRIBUTION_PROVIDER_FREE_READY"
+    )
+    assert qualification["provider_calls"] == 0
+
+
+def test_checked_issue_790_step_thirteen_executable_plan_contract() -> None:
+    root = Path(__file__).resolve().parents[2]
+    plan = load_issue_790_plan(
+        root / "docs/operations/2026-08-28-issue-790-success-sequence-step-13.json"
+    )
+    contract = issue_790_contract_module.issue_790_approved_plan_contract(
+        plan["canonical_digest"]
+    )
+    qualification = json.loads(
+        (
+            root
+            / "docs/operations/2026-08-28-issue-790-step-13-output-limit-qualification.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert plan["canonical_digest"] == (
+        issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_13_PLAN_DIGEST
+    )
+    assert plan["sequence"]["sequence_ordinal"] == 13
+    assert plan["sequence"]["constraint_change"] == "REVIEWED_NON_TIMEOUT_FIX"
+    assert plan["sequence"]["predecessor"]["plan_digest"] == (
+        issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_12_PLAN_DIGEST
+    )
+    assert plan["sequence"]["reviewed_fix"]["fix_kind"] == "CODE"
+    assert plan["sequence"]["predecessor_causal_report"]["local_cause"] == (
+        "EXTRACTION_MAX_RESPONSE_TOKENS_BELOW_CALL_SHAPE"
+    )
+    assert contract.sequence_ordinal == 13
+    assert contract.constraint_change == "REVIEWED_NON_TIMEOUT_FIX"
+    assert (
+        contract.predecessor_plan_digest
+        == issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_12_PLAN_DIGEST
+    )
+    assert qualification["qualification"] == (
+        "EXTRACTION_RESPONSE_BUDGET_CALL_SHAPE_ALIGNED_PROVIDER_FREE_READY"
     )
     assert qualification["provider_calls"] == 0
 

@@ -2377,6 +2377,24 @@ def test_authorised_evaluation_attempt_does_not_import_graphiti_core() -> None:
     assert REAL_GRAPHITI_RUNTIME_ENABLED is True
 
 
+def test_evaluation_attempt_response_budget_matches_call_shape_ceiling() -> None:
+    from newsroom.control_plane.graphiti_requests import (
+        GraphitiLeafClass,
+        load_checked_graphiti_call_shape_policy,
+    )
+    from newsroom.graphiti_adapter.evaluation_attempt import evaluation_attempt_for
+
+    primary = load_checked_graphiti_call_shape_policy().route_for(
+        GraphitiLeafClass.PRIMARY
+    )
+    attempt = evaluation_attempt_for(("A retained source passage.",))
+    assert (
+        attempt.extraction_request.budget.max_response_tokens
+        == primary.max_output_tokens
+        == 16_384
+    )
+
+
 def test_retryable_failure_returns_diagnostic_receipt_without_structured_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
