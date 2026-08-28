@@ -1,0 +1,42 @@
+{
+  "schema_version": "newsroom.issue-790.pre-dispatch-operational-requirements.v1",
+  "executable": false,
+  "requires_exact_main_deployment": true,
+  "exact_main_commit": "9cc0f5f274056bdeac33ca8f8abe4d8dfd7a5323",
+  "exact_main_tree": "6ae1114a5dede6a0b18d1519ac4aed148c772403",
+  "persistent_worker_state_before_provider_io": "UNLOADED",
+  "route": "GRAPHITI_CHAT_PRIMARY",
+  "route_open_reason_permitted": [
+    "SYSTEMIC_TRANSPORT",
+    "TIMEOUT"
+  ],
+  "fallback_mode": "DISABLED_BEFORE_PROVIDER_DISPATCH",
+  "public_effects": "DISABLED",
+  "stores_required_healthy": true,
+  "fresh_provider_backed_attempt_count": 1,
+  "event_binding": "EXPLICIT_QUEUED_ATTEMPT_ZERO_EVENT",
+  "untouched_attempt_zero_events_only": 1,
+  "retry_forbidden_events": [
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-26T12:25:29.807056Z",
+      "event_id": "sha256:bacb9104c81dd86ca3f62a39f6c386cd4d84ab470e9675e31acf8e2feb50443e",
+      "last_failure_code": "PRODUCER_INTERNAL_ERROR",
+      "ledger_seq": 1932,
+      "provider_dispatched": true,
+      "state": "RETRY_HELD"
+    },
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-26T13:52:15.763233Z",
+      "event_id": "sha256:de7bb58fde4829f4778936e7c5ebd1dd583a63f8658fb6af2fcb4b6fc873b0d5",
+      "last_failure_code": "PRODUCER_INTERNAL_ERROR",
+      "ledger_seq": 1972,
+      "provider_dispatched": false,
+      "state": "RETRY_HELD"
+    }
+  ],
+  "not_observed_is_not_satisfied": true,
+  "notes": "NOT_OBSERVED may feed provider-free preflight only; it does not satisfy canary preconditions. Observe UNLOADED worker, healthy stores, exact tip deployment, route/circuit fail-closed state and one untouched attempt-0 event before any provider I/O.",
+  "requirements_digest": "sha256:968d0875cbed3a37cca56c2aa696598c3996e10d3a0ad6edc5978c21965d587b"
+}

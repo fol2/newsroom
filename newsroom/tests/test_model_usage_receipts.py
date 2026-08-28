@@ -2601,6 +2601,10 @@ def test_issue_790_invocation_plan_digests_cover_shared_successor_chain() -> Non
         issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_11_PLAN_DIGEST
         in digests
     )
+    assert (
+        issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_16_PLAN_DIGEST
+        in digests
+    )
 
 
 def test_checked_issue_790_step_nine_executable_plan_contract() -> None:

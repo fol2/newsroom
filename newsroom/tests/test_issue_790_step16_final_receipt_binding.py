@@ -517,6 +517,19 @@ def test_historical_v1_success_replay_preserves_reader(tmp_path: Path) -> None:
         restore_validated_snapshot(raw=contradictory, attempt=attempt)
 
 
+def test_stripped_v2_combined_receipt_does_not_downgrade_to_historical_v1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw, attempt = _coherent_v2_outer(monkeypatch, step=14)
+    assert "combined_temporal_receipt" in raw
+    stripped = copy.deepcopy(raw)
+    stripped.pop("combined_temporal_receipt")
+    stripped.pop("raw_output_digest")
+    stripped["raw_output_digest"] = digest_bytes(canonical_json_bytes(stripped))
+    with pytest.raises(GraphitiAdapterContractError, match="missing"):
+        restore_validated_snapshot(raw=stripped, attempt=attempt)
+
+
 def test_evaluation_runner_raw_receipt_binds_identical_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

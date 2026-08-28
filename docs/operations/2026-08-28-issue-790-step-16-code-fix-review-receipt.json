@@ -1,0 +1,17 @@
+{
+  "schema_version": "newsroom.issue-790.code-fix-review-receipt.v1",
+  "issue": 790,
+  "pull_request_url": "https://github.com/fol2/newsroom/pull/842",
+  "reviewed_fix_revision": "9cc0f5f274056bdeac33ca8f8abe4d8dfd7a5323",
+  "verdict": "SHIP_ALLOWED",
+  "scope": "replay-cross-binding",
+  "findings": [
+    "validate_replay_receipt_binding covers outer/combined/proposal/projection",
+    "restore_validated_snapshot uses retained temporal identity",
+    "re-signed contradiction tests present",
+    "historical v1 replay preserved",
+    "owner packet remains post-merge executable:false work"
+  ],
+  "blocking_findings": [],
+  "review_receipt_digest": "sha256:47d0dc9548dd65d1fbe6952087e72b06147896607822a2f59024898bf90237c9"
+}
