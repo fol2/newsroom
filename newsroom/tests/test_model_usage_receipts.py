@@ -2745,6 +2745,7 @@ def test_checked_issue_790_step_twelve_executable_plan_contract() -> None:
     assert plan["sequence"]["predecessor_causal_report"]["local_cause"] == (
         "EVIDENCE_UNRESOLVED_CONTRADICTORY_FACT_ATTRIBUTION"
     )
+    assert contract.sequence_ordinal == 12
     assert contract.constraint_change == "REVIEWED_NON_TIMEOUT_FIX"
     assert (
         contract.predecessor_plan_digest
