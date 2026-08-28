@@ -781,8 +781,8 @@ def test_provider_free_packet_covers_issue_748_acceptance() -> None:
     assert retained_sensitivity[
         "average_total_token_estimate_per_terminal_effective_revision"
         ] == {
-            "current": {"low": 1_894, "base": 3_661, "high": 9_499},
-            "target": {"low": 1_510, "base": 2_125, "high": 3_355},
+            "current": {"low": 1_947, "base": 3_732, "high": 9_605},
+            "target": {"low": 1_563, "base": 2_196, "high": 3_461},
         }
     assert retained_sensitivity["adoption_gate"] == (
         "HOLD_UNRESOLVED_CLASSES_AND_QUALITY"

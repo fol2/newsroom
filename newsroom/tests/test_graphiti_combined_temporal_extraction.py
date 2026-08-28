@@ -202,6 +202,8 @@ def test_prompt_requires_both_endpoint_names_in_fact_or_empty() -> None:
     assert "both endpoint entity names" in prompt
     assert 'return {"entities":[],"facts":[]}' in prompt
     assert "A valid empty object is terminal success." in prompt
+    assert "Do not copy REFERENCE_TIME" in prompt
+    assert "no date cue" in prompt
 
 
 def test_segmentation_round_trips_retained_bytes_and_uses_integer_ids() -> None:
