@@ -247,7 +247,8 @@ def evaluation_attempt_for_body(
             max_proposals=100,
             max_evidence_ranges=500,
             max_request_tokens=8_000,
-            max_response_tokens=4_000,
+            # Align to GRAPHITI_CHAT_PRIMARY call-shape max_output_tokens.
+            max_response_tokens=16_384,
             max_cost_microunits=500_000,
         ),
         idempotency_key="evaluation-graphiti-run-v2",
