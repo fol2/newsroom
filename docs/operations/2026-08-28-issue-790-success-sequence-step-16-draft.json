@@ -33,13 +33,13 @@
     "temporal_policy_version": "graphiti-source-reference-time-v2",
     "validator_contract_version": "NewsroomCombinedTemporalNormaliseV2",
     "call_shape_policy_version": "issue-816-v2",
-    "call_shape_policy_digest": "sha256:ca14aaa620702a9a16306b1289f92d08e26b429368034968a31df92a4f6622cf",
+    "call_shape_policy_digest": "sha256:ba1cb4267ff78419174b50a0e233545a4bf745168d4f7fdbffa2fb6007ab5abc",
     "authority_comment": "5455732888"
   },
   "intended_sequence": {
     "stop_condition": "FIRST_TRUTHFUL_PROVIDER_BACKED_SUCCESS",
     "call_shape_policy_version": "issue-816-v2",
-    "call_shape_policy_digest": "sha256:ca14aaa620702a9a16306b1289f92d08e26b429368034968a31df92a4f6622cf",
+    "call_shape_policy_digest": "sha256:ba1cb4267ff78419174b50a0e233545a4bf745168d4f7fdbffa2fb6007ab5abc",
     "controller_timeout_ms": 160000,
     "extraction_timeout_ms": 180000,
     "cleanup_reserve_ms": 20000,
@@ -55,5 +55,5 @@
     "fix_kind": "CODE",
     "notes": "Governed proposal projection seam. Placeholder until the ordinary Step 16 implementation PR merges; this draft does not authorise itself or any live effect."
   },
-  "canonical_digest": "sha256:c4ca602e6383c8119cf217f19621116dbcbce3ab7e05d1bc47b44834fc79f02d"
+  "canonical_digest": "sha256:64f0cf694f81c5ed7f1dc5492cd550a88916b047e9914c22830eb0e29e09a607"
 }
