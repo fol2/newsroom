@@ -31,12 +31,16 @@ from newsroom.control_plane.graphiti_events import (
 )
 from newsroom.control_plane.issue_790_disposition import (
     ISSUE_790_PLAN_SCHEMA,
+    ISSUE_790_STEP16_PENDING_PLAN_PATH,
+    ISSUE_790_STEP16_PRE_DISPATCH_PATH,
     Issue790DispositionError,
     apply_issue_790_plan,
     assert_issue_790_paths_disjoint,
     dry_run_issue_790_plan,
+    issue_790_step16_checked_approval,
     load_issue_790_plan,
     run_issue_790_canary,
+    seal_issue_790_step16_plan,
     validate_issue_790_plan,
     write_issue_790_receipt,
 )
@@ -2329,6 +2333,13 @@ def test_issue_790_success_sequence_fails_closed_on_call_shape_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = Path(__file__).resolve().parents[2]
+    pending = json.loads((root / ISSUE_790_STEP16_PENDING_PLAN_PATH).read_text())
+    pre_dispatch = json.loads((root / ISSUE_790_STEP16_PRE_DISPATCH_PATH).read_text())
+    sealed = seal_issue_790_step16_plan(
+        pending,
+        issue_790_step16_checked_approval(str(pending["canonical_digest"])),
+        pre_dispatch=pre_dispatch,
+    )
     monkeypatch.setattr(
         issue_790_operation,
         "load_checked_graphiti_call_shape_policy",
@@ -2341,10 +2352,7 @@ def test_issue_790_success_sequence_fails_closed_on_call_shape_drift(
     )
 
     with pytest.raises(Issue790DispositionError, match="call-shape policy differs"):
-        load_issue_790_plan(
-            root
-            / "docs/operations/2026-08-28-issue-790-success-sequence-step-15.json"
-        )
+        issue_790_operation._require_approved_plan(sealed)
 
 
 def test_checked_issue_790_step_two_binds_reviewed_non_timeout_fix() -> None:
