@@ -85,6 +85,14 @@ Full repository health, research qualification and release evidence are
 independent lanes. Their existence does not make them ordinary-PR
 prerequisites.
 
+When a post-merge tip needs **exact-head CI** for a bounded live or
+provider-backed step (for example issue #790 canary), obtain it by
+`workflow_dispatch` of Focus Gates on that tip SHA. Do **not** wait for
+Full Repository Health: that lane remains independent main inventory and
+must not enter the live-canary wall-time critical path. Full Health may
+remain an accepted fallback check name only when Focus Gates cannot be
+observed on the tip.
+
 ## 4. Research isolation
 
 Research answers an explicit uncertainty and produces a compact promoted

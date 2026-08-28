@@ -2,6 +2,9 @@
 """#790 live canary preflight: ops gates + forecast-blocker smokes.
 
 Exit 0 only when every line is PASS. Provider-free; no live Cursor call.
+
+O07 exact-head CI prefers Focus Gates on the tip SHA. After merge, dispatch
+Focus Gates on tip — do not wait for Full Repository Health.
 """
 
 from __future__ import annotations

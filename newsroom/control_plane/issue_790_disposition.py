@@ -86,6 +86,8 @@ _ISSUE_790_ACCEPTED_CI_CHECK_NAMES = frozenset(
     {
         "focus-gates",
         "test",
+        # Fallback only: never the preferred wait for live canary wall time.
+        # Prefer workflow_dispatch Focus Gates on the exact tip SHA.
         "full-deterministic-health",
     }
 )
@@ -1353,7 +1355,11 @@ def collect_issue_790_operational_evidence(
     store: Path,
     observed_at: datetime,
 ) -> dict[str, object]:
-    """Collect exact-main, CI, worker, store and retry-exclusion evidence."""
+    """Collect exact-main, CI, worker, store and retry-exclusion evidence.
+
+    Exact-head CI prefers Focus Gates on the deployed tip SHA. Dispatch
+    Focus Gates on tip after merge rather than waiting for Full Health.
+    """
 
     root = repository_root.expanduser().absolute()
     try:

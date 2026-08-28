@@ -125,6 +125,23 @@ metadata check remains lightweight and installs no project dependencies.
 Obsolete heads are cancelled. Post-merge/scheduled/manual full health and
 research remain outside the ordinary critical path.
 
+### Exact-head evidence after merge
+
+Merge commits on `main` do not automatically re-run Focus Gates. When an
+operation needs observed CI on the **exact tip SHA** (bounded live canary,
+provider-backed proof, or other fail-closed exact-main gates):
+
+1. Prefer `workflow_dispatch` of `focus-gates.yml` on that tip (with the
+   correct non-head `base_sha` for routing).
+2. Treat Full Repository Health as an independent inventory lane — not the
+   default wait for that evidence.
+3. Do not block live-canary wall time on full-health completion when Focus
+   Gates can be obtained on the tip.
+
+This preserves the wall-time objective: complete relevant evidence without
+pulling the full-inventory lane into the ordinary or bounded-live critical
+path.
+
 ## Non-effects
 
 This contract grants no publication, provider call, production admission,
