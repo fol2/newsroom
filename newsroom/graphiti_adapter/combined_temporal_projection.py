@@ -53,6 +53,13 @@ PAYLOAD_FATAL_FAILURE_CODES = frozenset(
     }
 )
 
+# Fact-loop MALFORMED is proposal rejection; top-level parse MALFORMED stays
+# payload-fatal. Entity-parse and post-accept normalise() raises stay leaf-fatal
+# even when the failure code is also listed as atom-local above.
+FACT_LOOP_ATOM_LOCAL_CODES = ATOM_LOCAL_FAILURE_CODES | {
+    CombinedTemporalFailureCode.MALFORMED_OBJECT
+}
+
 
 @dataclass(frozen=True, slots=True)
 class GovernedProjectionResult:
@@ -63,13 +70,31 @@ class GovernedProjectionResult:
 
 def classify_combined_temporal_failure(
     code: CombinedTemporalFailureCode,
+    *,
+    grain: str = "payload",
 ) -> str:
-    """Return ``atom_local`` or ``payload_fatal`` for an explicit failure code."""
+    """Classify a failure code for the named grain.
 
-    if code in ATOM_LOCAL_FAILURE_CODES:
-        return "atom_local"
+    ``grain`` is one of ``payload`` (top-level parse / entity table / final
+    normalise) or ``fact_loop`` (independently attributable proposal atoms).
+    """
+
+    if grain == "fact_loop":
+        if code in FACT_LOOP_ATOM_LOCAL_CODES:
+            return "atom_local"
+        if code in PAYLOAD_FATAL_FAILURE_CODES - {
+            CombinedTemporalFailureCode.MALFORMED_OBJECT
+        }:
+            return "payload_fatal"
+        raise ValueError(f"unclassified fact-loop failure code: {code}")
+    if grain != "payload":
+        raise ValueError(f"unknown classification grain: {grain}")
     if code in PAYLOAD_FATAL_FAILURE_CODES:
         return "payload_fatal"
+    if code in ATOM_LOCAL_FAILURE_CODES:
+        # Same code may still be leaf-fatal when raised outside the fact loop
+        # (entity evidence table or post-accept normalise).
+        return "atom_local"
     raise ValueError(f"unclassified combined-temporal failure code: {code}")
 
 
@@ -256,10 +281,9 @@ def project_governed_proposals(
             ranges[projected["fact"]] = cited
             connected.update((source, target))
         except CombinedTemporalError as exc:
-            # Fact-loop MALFORMED is atom-local; top-level parse stays payload-fatal.
             if (
-                exc.code is not CombinedTemporalFailureCode.MALFORMED_OBJECT
-                and classify_combined_temporal_failure(exc.code) != "atom_local"
+                classify_combined_temporal_failure(exc.code, grain="fact_loop")
+                != "atom_local"
             ):
                 raise
             raw_proposal_digest = digest_canonical(
@@ -342,6 +366,7 @@ def project_governed_proposals(
 
 __all__ = [
     "ATOM_LOCAL_FAILURE_CODES",
+    "FACT_LOOP_ATOM_LOCAL_CODES",
     "PAYLOAD_FATAL_FAILURE_CODES",
     "PROJECTION_POLICY_DIGEST",
     "PROJECTION_POLICY_VERSION",

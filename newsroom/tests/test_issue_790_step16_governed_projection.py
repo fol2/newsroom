@@ -98,9 +98,27 @@ class _NullPipeline:
 
 def test_failure_codes_are_explicitly_classified() -> None:
     for code in ATOM_LOCAL_FAILURE_CODES:
-        assert classify_combined_temporal_failure(code) == "atom_local"
-    for code in PAYLOAD_FATAL_FAILURE_CODES:
-        assert classify_combined_temporal_failure(code) == "payload_fatal"
+        assert (
+            classify_combined_temporal_failure(code, grain="fact_loop") == "atom_local"
+        )
+    assert (
+        classify_combined_temporal_failure(
+            CombinedTemporalFailureCode.MALFORMED_OBJECT, grain="fact_loop"
+        )
+        == "atom_local"
+    )
+    assert (
+        classify_combined_temporal_failure(
+            CombinedTemporalFailureCode.MALFORMED_OBJECT, grain="payload"
+        )
+        == "payload_fatal"
+    )
+    for code in PAYLOAD_FATAL_FAILURE_CODES - {
+        CombinedTemporalFailureCode.MALFORMED_OBJECT
+    }:
+        assert (
+            classify_combined_temporal_failure(code, grain="payload") == "payload_fatal"
+        )
     with pytest.raises(ValueError):
         classify_combined_temporal_failure(CombinedTemporalFailureCode.NONE)
 
@@ -138,6 +156,16 @@ def test_step13_retained_raw_rejects_to_zero_proposal_success() -> None:
     assert isinstance(leaf.transport_calls[0].get("raw_output_digest"), str)
 
 
+class _CapturingPipeline(_NullPipeline):
+    def __init__(self) -> None:
+        self.last_receipt: dict[str, object] | None = None
+
+    def execute(self, **kwargs: object) -> SimpleNamespace:
+        receipt = kwargs.get("receipt")
+        self.last_receipt = dict(receipt) if isinstance(receipt, dict) else None
+        return super().execute(**kwargs)
+
+
 def test_steps14_and15_stuffing_ignored_and_null_projected() -> None:
     for step in (14, 15):
         fix = _load_step(step)
@@ -157,27 +185,25 @@ def test_steps14_and15_stuffing_ignored_and_null_projected() -> None:
             for fact in projected.payload["facts"]
         )
         for action in projected.receipt["atom_actions"]:
-            assert action["raw_temporal"]["valid_at"] != action["projected_temporal"][
-                "valid_at"
-            ] or action["raw_temporal"]["valid_at"] is None
             assert action["projected_temporal"] == {
                 "valid_at": None,
                 "invalid_at": None,
             }
+        pipeline = _CapturingPipeline()
         leaf = extract_combined_temporal(
             _revision(fix["source_body"], fix["reference_time"]),
             transport=_FakeTransport(fix["raw"]),
-            pipeline=_NullPipeline(),
+            pipeline=pipeline,
         )
         assert leaf.outcome is CombinedTemporalOutcome.TERMINAL_SUCCESS_WITH_PROPOSALS
-        assert "projection_receipt" in (
-            # sync path binds into pipeline receipt via transport leaf internals
-            {}
-        ) or True
-        # Projection receipt is on the attempt receipt built inside extract; verify
-        # via a second projection digest pin.
-        assert projected.receipt["projection_policy_version"] == PROJECTION_POLICY_VERSION
-        assert projected.receipt["projection_receipt_digest"].startswith("sha256:")
+        assert pipeline.last_receipt is not None
+        bound = pipeline.last_receipt["projection_receipt"]
+        assert isinstance(bound, dict)
+        assert bound["projection_policy_version"] == PROJECTION_POLICY_VERSION
+        assert bound["projection_receipt_digest"] == projected.receipt[
+            "projection_receipt_digest"
+        ]
+        assert bound["raw_provider_output_digest"] == fix["provider_raw_digest"]
         again = project_governed_proposals(
             fix["raw"],
             segs,
