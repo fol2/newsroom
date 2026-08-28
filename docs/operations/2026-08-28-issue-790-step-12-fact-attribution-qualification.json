@@ -1,0 +1,35 @@
+{
+  "schema_version": "newsroom.issue-790.provider-free-code-fix-qualification.v1",
+  "issue": 790,
+  "observed_at": "2026-08-28T00:40:00.000000Z",
+  "predecessor_outcome_digest": "sha256:bd2cc9bed9ce1d9bd30c30d1db8dae0f4b2d7421dbcf0dabbb624b8e3a57d12d",
+  "provider_calls": 0,
+  "public_effects": 0,
+  "model_catalogue_queries": 0,
+  "live_canary_authorised": false,
+  "failure": {
+    "boundary": "COMBINED_TEMPORAL_VALIDATION",
+    "elapsed_ms": 23010,
+    "failure_code": "OUTPUT_SCHEMA_INVALID",
+    "local_cause": "EVIDENCE_UNRESOLVED_CONTRADICTORY_FACT_ATTRIBUTION",
+    "provider_cause": "COMPOSER_REUSED_FACT_STRING_ACROSS_RELATIONS",
+    "termination": "TERMINAL_ATTEMPT_FAILURE"
+  },
+  "provider_free_checks": {
+    "call_shape_policy_version": "issue-816-v2",
+    "call_shape_policy_digest": "sha256:ba1cb4267ff78419174b50a0e233545a4bf745168d4f7fdbffa2fb6007ab5abc",
+    "sdk_floor": "cursor-sdk>=1.0.29",
+    "composer_floor": "composer>=2.5",
+    "prompt_states_unique_fact_spans": "PASS",
+    "prompt_states_distinct_endpoints": "PASS",
+    "prompt_prefers_empty_when_ambiguous": "PASS",
+    "wire_entity_type_id_enum_zero_retained": "PASS",
+    "canary_fallback_remains_disabled": "PASS",
+    "focused_tests": "newsroom/tests/test_graphiti_combined_temporal_extraction.py",
+    "focused_tests_result": "172 passed",
+    "fix_revision": "f7a4068afae4618b9ce42ccbe33857fdba3f146d",
+    "persistent_worker": "UNLOADED"
+  },
+  "qualification": "COMBINED_TEMPORAL_FACT_ATTRIBUTION_PROVIDER_FREE_READY",
+  "canonical_digest": "sha256:3918d040921219450d3b86617dd5ca49e0b344338b2e179bc32b3c8dcf5be917"
+}
