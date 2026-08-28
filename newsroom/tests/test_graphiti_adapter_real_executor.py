@@ -978,9 +978,14 @@ def test_episode_uses_default_database_and_validates_before_complete(
     telemetry = real._EpisodeTelemetry()
     validation_states: list[str] = []
 
-    def validate(_result: object, _telemetry: object) -> dict[str, object]:
+    def validate(
+        _result: object, _telemetry: object, combined_receipt=None
+    ) -> dict[str, object]:
         validation_states.append(guard_events[-1])
-        return {"provider_attempt_number": 1}
+        raw: dict[str, object] = {"provider_attempt_number": 1}
+        if combined_receipt is not None:
+            raw["combined_temporal_receipt"] = dict(combined_receipt)
+        return raw
 
     configuration, revision = _combined_runtime_inputs("Body", "episode-id")
     result = asyncio.run(
@@ -1090,7 +1095,7 @@ def test_process_recovery_uses_durable_guard_before_provider_dispatch(
         reference_time=datetime(2026, 8, 20, tzinfo=UTC),
         telemetry=real._EpisodeTelemetry(),
         attempt_number=1,
-        validate_result=lambda _result, _telemetry: {},
+        validate_result=lambda _result, _telemetry, _combined=None: {},
         restore_result=restore,
         configuration=configuration,
         revision=revision,
@@ -1186,7 +1191,7 @@ def test_rolled_back_pipeline_failure_is_not_rolled_back_twice(
                 reference_time=datetime(2026, 8, 20, tzinfo=UTC),
                 telemetry=real._EpisodeTelemetry(),
                 attempt_number=1,
-                validate_result=lambda _result, _telemetry: {},
+                validate_result=lambda _result, _telemetry, _combined=None: {},
                 restore_result=lambda _raw, _telemetry: None,
                 configuration=configuration,
                 revision=revision,
@@ -1287,7 +1292,7 @@ def test_cancelled_episode_cleanup_is_ordered_and_bounded(
                     reference_time=datetime(2026, 8, 20, tzinfo=UTC),
                     telemetry=telemetry,
                     attempt_number=1,
-                    validate_result=lambda _result, _telemetry: {},
+                    validate_result=lambda _result, _telemetry, _combined=None: {},
                     restore_result=lambda _raw, _telemetry: None,
                     configuration=configuration,
                     revision=revision,

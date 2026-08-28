@@ -206,7 +206,7 @@ class _EpisodeTelemetry:
     timeout_diagnostics: list[dict[str, object]] = field(default_factory=list)
 
 
-ResultValidator = Callable[[Any, _EpisodeTelemetry], dict[str, object]]
+ResultValidator = Callable[..., dict[str, object]]
 SnapshotRestorer = Callable[[dict[str, object], _EpisodeTelemetry], None]
 FailureValidator = Callable[
     [dict[str, object], _EpisodeTelemetry], dict[str, object]
@@ -663,15 +663,17 @@ async def _add_episode(
             )
             telemetry.embedding_usage = embedder.receipt()
             telemetry.provider_attempt_number = attempt_number
-            raw = validate_result(
+            # Seal once after attaching the combined-temporal/projection receipt so
+            # Neo4j guard completion and ProducedExtraction share one raw object.
+            return validate_result(
                 SimpleNamespace(
                     episode=episode,
                     nodes=tuple(nodes),
                     edges=tuple(edges),
                 ),
                 telemetry,
+                combined_receipt,
             )
-            return {**raw, "combined_temporal_receipt": dict(combined_receipt)}
 
         pipeline.complete_receipt = complete_receipt
         if validate_failure is not None:
@@ -1149,7 +1151,9 @@ class RealGraphitiAdapter:
             )
 
         def validate_result(
-            result: Any, current_telemetry: _EpisodeTelemetry
+            result: Any,
+            current_telemetry: _EpisodeTelemetry,
+            combined_receipt: Mapping[str, object] | None = None,
         ) -> dict[str, object]:
             proposals = tuple(
                 sorted(
@@ -1167,6 +1171,10 @@ class RealGraphitiAdapter:
                 result=result,
                 proposals=proposals,
             )
+            raw.pop("raw_output_digest", None)
+            if combined_receipt is not None:
+                raw["combined_temporal_receipt"] = dict(combined_receipt)
+            raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
             produced = produced_extraction(
                 attempt,
                 outcome=ExtractionOutcome.SUCCESS,

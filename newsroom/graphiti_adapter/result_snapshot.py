@@ -18,8 +18,12 @@ from newsroom.extraction.types import (
 )
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
 from newsroom.graphiti_adapter.cli_process import validated_process_exit_diagnostic
+from newsroom.graphiti_adapter.combined_temporal_projection import (
+    validate_projection_receipt,
+)
 from newsroom.graphiti_adapter.combined_temporal_types import (
     CombinedTemporalFailureCode,
+    CombinedTemporalError,
 )
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CHAT_FALLBACK,
@@ -34,6 +38,7 @@ from newsroom.graphiti_adapter.recovery_vocabulary import (
     GraphitiRecoveryClassification,
 )
 from newsroom.graphiti_adapter.result_mapping import produced_extraction
+from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_VERSION
 from newsroom.graphiti_adapter.types import GraphitiAdapterContractError
 
 
@@ -216,6 +221,24 @@ def restore_validated_snapshot(
     pipeline_failed = (
         combined_failure == CombinedTemporalFailureCode.PIPELINE_FAILED.value
     )
+    if (
+        TEMPORAL_POLICY_VERSION.endswith("-v2")
+        and not isinstance(combined_failure, str)
+        and isinstance(recovered_raw.get("combined_temporal_receipt"), dict)
+    ):
+        combined = recovered_raw["combined_temporal_receipt"]
+        assert isinstance(combined, dict)
+        projection = combined.get("projection_receipt")
+        if projection is None:
+            raise GraphitiAdapterContractError(
+                "retained Graphiti success receipt lacks projection_receipt"
+            )
+        try:
+            validate_projection_receipt(projection)
+        except CombinedTemporalError as exc:
+            raise GraphitiAdapterContractError(
+                f"retained projection receipt is invalid: {exc}"
+            ) from exc
     produced = produced_extraction(
         attempt,
         outcome=(

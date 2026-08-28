@@ -8,8 +8,7 @@
     "STEP_15_EXHAUSTED",
     "GOVERNED_PROPOSAL_PROJECTION_MERGED",
     "PROVIDER_FREE_STEP_13_15_REPRODUCTIONS",
-    "FINAL_REVIEW_RECEIPT",
-    "OWNER_AUTHENTICATED_STEP_16_CANARY_APPROVAL"
+    "FINAL_REVIEW_RECEIPT"
   ],
   "executable_plan_path": null,
   "executable_plan_digest": null,
@@ -55,5 +54,5 @@
     "fix_kind": "CODE",
     "notes": "Governed proposal projection seam. Placeholder until the ordinary Step 16 implementation PR merges; this draft does not authorise itself or any live effect."
   },
-  "canonical_digest": "sha256:64f0cf694f81c5ed7f1dc5492cd550a88916b047e9914c22830eb0e29e09a607"
+  "canonical_digest": "sha256:8bfbd0d0448e51a1f827c5da59b2e01a8b7b489db1991f8fc4adec1bc395d38d"
 }
