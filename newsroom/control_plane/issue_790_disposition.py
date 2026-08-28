@@ -95,8 +95,19 @@ _STEP16_SEQUENCE_IDENTITY_FIELDS = frozenset(
         "pre_dispatch_operational_requirements_digest",
     }
 )
+_STEP16_ACTIVATION_FIELDS = frozenset(
+    {
+        "reviewed_correction_revision",
+        "reviewed_correction_tree",
+        "pre_dispatch_operational_requirements",
+    }
+)
 _PENDING_PLAN_ONLY_KEYS = ("plan_status", "executable", "live_canary_authorised")
 _PENDING_SEQUENCE_ONLY_KEYS = ("hold_comment",)
+_CANDIDATE_PLAN_STATUS = "CHECKED_CANDIDATE"
+_OWNER_APPROVAL_REFERENCE = re.compile(
+    r"https://github\.com/fol2/newsroom/issues/790#issuecomment-[1-9][0-9]*"
+)
 ISSUE_790_STEP16_PENDING_PLAN_PATH = Path(
     "docs/operations/2026-08-28-issue-790-success-sequence-step-16.pending-owner-review.json"
 )
@@ -565,6 +576,7 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
             expected_sequence_fields.add("reviewed_fix")
         if sequence.get("sequence_ordinal") == 16:
             expected_sequence_fields.update(_STEP16_SEQUENCE_IDENTITY_FIELDS)
+            expected_sequence_fields.update(_STEP16_ACTIVATION_FIELDS)
         if set(sequence) != expected_sequence_fields:
             raise Issue790DispositionError("issue #790 sequence fields differ")
         predecessor = _record(sequence.get("predecessor"), field="predecessor")
@@ -668,6 +680,31 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
                 raise Issue790DispositionError(
                     "issue #790 predecessor identity differs"
                 )
+            _reject_checked_live_approval(approval)
+            pre_dispatch = _record(
+                sequence.get("pre_dispatch_operational_requirements"),
+                field="pre-dispatch operational requirements",
+            )
+            pre_unsigned = {
+                key: item
+                for key, item in pre_dispatch.items()
+                if key != "requirements_digest"
+            }
+            revision = _text(sequence, "reviewed_correction_revision")
+            tree = _text(sequence, "reviewed_correction_tree")
+            if (
+                re.fullmatch(r"[0-9a-f]{40}", revision) is None
+                or re.fullmatch(r"[0-9a-f]{40}", tree) is None
+                or pre_dispatch.get("requirements_digest")
+                != digest_canonical(pre_unsigned)
+                or sequence.get("pre_dispatch_operational_requirements_digest")
+                != pre_dispatch.get("requirements_digest")
+                or pre_dispatch.get("exact_main_commit") != revision
+                or pre_dispatch.get("exact_main_tree") != tree
+            ):
+                raise Issue790DispositionError(
+                    "issue #790 reviewed correction identity differs"
+                )
         causal_report = _validated_causal_report(
             sequence.get("predecessor_causal_report")
         )
@@ -760,7 +797,169 @@ def _require_iterative_call_shape(plan: Mapping[str, object]) -> None:
         raise Issue790DispositionError("issue #790 call-shape policy differs")
 
 
+def _reject_checked_live_approval(approval: Mapping[str, object]) -> None:
+    approved_by = approval.get("approved_by")
+    reference = approval.get("approval_reference")
+    if (
+        isinstance(approved_by, str) and approved_by.startswith("checked:")
+    ) or (isinstance(reference, str) and reference.startswith("checked:")):
+        raise Issue790DispositionError(
+            "issue #790 checked approval is not live authority"
+        )
+
+
+def _require_owner_approval_tuple(value: Mapping[str, object]) -> dict[str, str]:
+    approval = dict(value)
+    _reject_checked_live_approval(approval)
+    if set(approval) != {
+        "approved_by",
+        "approval_reference",
+        "approved_at",
+        "scope",
+        "reviewed_correction_revision",
+        "reviewed_correction_tree",
+    }:
+        raise Issue790DispositionError("issue #790 owner approval fields differ")
+    if (
+        approval.get("approved_by") != issue_790_contract_module.ISSUE_790_APPROVED_BY
+        or _OWNER_APPROVAL_REFERENCE.fullmatch(
+            _text(approval, "approval_reference")
+        )
+        is None
+        or approval.get("scope") != _SCOPE
+        or re.fullmatch(
+            r"[0-9a-f]{40}", _text(approval, "reviewed_correction_revision")
+        )
+        is None
+        or re.fullmatch(
+            r"[0-9a-f]{40}", _text(approval, "reviewed_correction_tree")
+        )
+        is None
+    ):
+        raise Issue790DispositionError("issue #790 owner approval differs")
+    _instant(approval.get("approved_at"), field="approved_at")
+    return {
+        "approved_by": str(approval["approved_by"]),
+        "approval_reference": str(approval["approval_reference"]),
+        "approved_at": str(approval["approved_at"]),
+        "scope": str(approval["scope"]),
+        "reviewed_correction_revision": str(
+            approval["reviewed_correction_revision"]
+        ),
+        "reviewed_correction_tree": str(approval["reviewed_correction_tree"]),
+    }
+
+
+def _require_step16_code_identity(
+    plan: Mapping[str, object],
+    *,
+    evidence: Mapping[str, object],
+) -> None:
+    sequence = plan.get("sequence")
+    if not isinstance(sequence, dict) or sequence.get("sequence_ordinal") != 16:
+        return
+    sequence = _record(sequence, field="sequence")
+    pre = _record(
+        sequence.get("pre_dispatch_operational_requirements"),
+        field="pre-dispatch operational requirements",
+    )
+    revision = sequence.get("reviewed_correction_revision")
+    tree = sequence.get("reviewed_correction_tree")
+    if (
+        revision != evidence.get("revision")
+        or tree != evidence.get("tree")
+        or evidence.get("github_main_revision") != revision
+        or pre.get("exact_main_commit") != revision
+        or pre.get("exact_main_tree") != tree
+    ):
+        raise Issue790DispositionError(
+            "issue #790 reviewed correction identity differs"
+        )
+
+
+def _circuit_state(store: Path) -> dict[str, object] | None:
+    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        circuit = connection.execute(
+            "SELECT state,opened_at,available_at,failure_code "
+            "FROM unpublished_graphiti_event_circuit WHERE singleton=1"
+        ).fetchone()
+    finally:
+        connection.close()
+    if circuit is None:
+        return None
+    return {
+        "state": str(circuit[0]),
+        "opened_at": None if circuit[1] is None else str(circuit[1]),
+        "available_at": None if circuit[2] is None else str(circuit[2]),
+        "failure_code": None if circuit[3] is None else str(circuit[3]),
+    }
+
+
+def _require_step16_runtime_semantics(
+    plan: Mapping[str, object],
+    *,
+    evidence: Mapping[str, object],
+    route_state: Mapping[str, object],
+    circuit_state: Mapping[str, object] | None,
+    canary_event: Mapping[str, object] | None = None,
+) -> None:
+    sequence = plan.get("sequence")
+    if not isinstance(sequence, dict) or sequence.get("sequence_ordinal") != 16:
+        return
+    sequence = _record(sequence, field="sequence")
+    pre = _record(
+        sequence.get("pre_dispatch_operational_requirements"),
+        field="pre-dispatch operational requirements",
+    )
+    worker = evidence.get("worker")
+    if not isinstance(worker, dict):
+        raise Issue790DispositionError("issue #790 worker evidence differs")
+    _require_worker_unloaded(worker)
+    target = _record(plan.get("target"), field="target")
+    canary = _record(plan.get("canary"), field="canary")
+    permitted = pre.get("route_open_reason_permitted")
+    if (
+        pre.get("persistent_worker_state_before_provider_io") != "UNLOADED"
+        or pre.get("fallback_mode") != _FALLBACK_MODE
+        or canary.get("fallback_mode") != _FALLBACK_MODE
+        or (
+            pre.get("stores_required_healthy") is True
+            and evidence.get("store_quick_check") != "ok"
+        )
+        or not isinstance(permitted, list)
+        or target.get("route") != pre.get("route")
+    ):
+        raise Issue790DispositionError(
+            "issue #790 pre-dispatch runtime semantics differ"
+        )
+    route_status = route_state.get("state")
+    if route_status == "OPEN":
+        if route_state.get("reason") not in permitted:
+            raise Issue790DispositionError(
+                "issue #790 pre-dispatch route state differs"
+            )
+    elif route_status != "CLOSED":
+        raise Issue790DispositionError("issue #790 pre-dispatch route state differs")
+    if pre.get("not_observed_is_not_satisfied") is True and circuit_state is None:
+        raise Issue790DispositionError(
+            "issue #790 pre-dispatch circuit is not observed"
+        )
+    if canary_event is not None and (
+        pre.get("untouched_attempt_zero_events_only") != 1
+        or pre.get("fresh_provider_backed_attempt_count") != 1
+        or canary_event.get("state") != "QUEUED"
+        or canary_event.get("attempt_count") != 0
+    ):
+        raise Issue790DispositionError(
+            "issue #790 pre-dispatch event is not untouched"
+        )
+
+
 def _require_approved_plan(value: Mapping[str, object]) -> dict[str, object]:
+    approval_value = value.get("approval")
+    if isinstance(approval_value, dict):
+        _reject_checked_live_approval(approval_value)
     plan = validate_issue_790_plan(value)
     try:
         contract = issue_790_approved_plan_contract(
@@ -1639,7 +1838,9 @@ def _validate_operational_evidence(
     _require_worker_unloaded(worker)
     if _instant(retained.get("observed_at"), field="observed_at") > observed_at:
         raise Issue790DispositionError("operational evidence follows operation")
-    return {**retained, "evidence_digest": digest}
+    bound = {**retained, "evidence_digest": digest}
+    _require_step16_code_identity(plan, evidence=bound)
+    return bound
 
 
 def _sqlite_backup(source: Path, destination: Path) -> str:
@@ -1913,6 +2114,18 @@ def _execute_issue_790_plan(
                 )
         else:
             raise Issue790DispositionError("issue #790 route state is invalid")
+        sequence = retained_plan.get("sequence")
+        if (
+            retained_operational_evidence is not None
+            and isinstance(sequence, dict)
+            and sequence.get("sequence_ordinal") == 16
+        ):
+            _require_step16_runtime_semantics(
+                retained_plan,
+                evidence=retained_operational_evidence,
+                route_state=initial_route_state,
+                circuit_state=_circuit_state(store),
+            )
         disposition = (
             _existing_target_disposition(store, target)
             if predecessor is not None
@@ -2689,6 +2902,17 @@ def run_issue_790_canary(
         expected_closed_reason=expected_route_reason,
         recovery_usage=recovery_usage,
     )
+    _require_step16_runtime_semantics(
+        retained_plan,
+        evidence=operational_evidence,
+        route_state=route_before,
+        circuit_state=(
+            None
+            if event_before.get("circuit") is None
+            else _record(event_before.get("circuit"), field="canary circuit")
+        ),
+        canary_event=event_before_record,
+    )
     process_result: dict[str, object] | None = None
     exception: dict[str, object] | None = None
     completed_at = datetime.now(tz=UTC)
@@ -2929,18 +3153,11 @@ def issue_790_step16_checked_approval(pending_digest: str) -> dict[str, str]:
     }
 
 
-def seal_issue_790_step16_plan(
+def _bind_step16_pending_family(
     pending: Mapping[str, object],
-    approval: Mapping[str, object],
     *,
     pre_dispatch: Mapping[str, object],
-) -> dict[str, object]:
-    """Seal the exact pending family plus approval into one validator-passing plan.
-
-    The result is structurally executable-shaped and remains unauthorised for
-    live effect until a later owner-authenticated apply.
-    """
-
+) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
     pending_plan = dict(pending)
     supplied = pending_plan.get("canonical_digest")
     unsigned = {
@@ -2980,22 +3197,197 @@ def seal_issue_790_step16_plan(
         raise Issue790DispositionError("issue #790 projection identity differs")
     _validated_reviewed_fix(sequence.get("reviewed_fix"))
     _validated_non_timeout_causal_report(sequence.get("predecessor_causal_report"))
-    for key in _PENDING_PLAN_ONLY_KEYS:
-        pending_plan.pop(key, None)
+    return pending_plan, sequence, pre
+
+
+def validate_issue_790_step16_candidate(
+    value: Mapping[str, object],
+) -> dict[str, object]:
+    """Validate the Step 16 seal-proof candidate. This is not live authority."""
+
+    candidate = dict(value)
+    expected_keys = {
+        "schema_version",
+        "canonical_digest",
+        "issue",
+        "approval",
+        "target",
+        "release",
+        "retry_forbidden_events",
+        "canary",
+        "non_effects",
+        "sequence",
+        "plan_status",
+        "executable",
+        "live_canary_authorised",
+    }
+    if set(candidate) != expected_keys:
+        raise Issue790DispositionError("issue #790 candidate fields differ")
+    if (
+        candidate.get("schema_version")
+        != issue_790_contract_module.ISSUE_790_STEP16_CANDIDATE_SCHEMA
+        or candidate.get("issue") != 790
+        or candidate.get("plan_status") != _CANDIDATE_PLAN_STATUS
+        or candidate.get("executable") is not False
+        or candidate.get("live_canary_authorised") is not False
+    ):
+        raise Issue790DispositionError("issue #790 candidate identity differs")
+    supplied = _text(candidate, "canonical_digest")
+    calculated = digest_canonical(
+        {key: item for key, item in candidate.items() if key != "canonical_digest"}
+    )
+    if supplied != calculated:
+        raise Issue790DispositionError("issue #790 candidate digest differs")
+    approval = _record(candidate.get("approval"), field="approval")
+    if (
+        not str(approval.get("approved_by", "")).startswith("checked:")
+        or not str(approval.get("approval_reference", "")).startswith("checked:")
+    ):
+        raise Issue790DispositionError("issue #790 candidate approval differs")
+    if "NO_LIVE_CANARY_WITHOUT_OWNER_APPROVAL" not in list(
+        candidate.get("non_effects") or ()
+    ):
+        raise Issue790DispositionError("issue #790 candidate non-effects differ")
+    release = _record(candidate.get("release"), field="release")
+    if release.get("kind") != "PENDING_OWNER_APPROVAL":
+        raise Issue790DispositionError("issue #790 candidate release differs")
+    sequence = _record(candidate.get("sequence"), field="sequence")
+    target = _record(candidate.get("target"), field="target")
+    reviewed_fix = _validated_reviewed_fix(sequence.get("reviewed_fix"))
+    causal_report = _validated_non_timeout_causal_report(
+        sequence.get("predecessor_causal_report")
+    )
+    predecessor = _record(sequence.get("predecessor"), field="predecessor")
+    try:
+        contract = issue_790_contract_module.issue_790_checked_candidate_contract(
+            supplied
+        )
+    except KeyError as exc:
+        raise Issue790DispositionError(
+            "issue #790 candidate identity differs"
+        ) from exc
+    if (
+        target.get("invocation_id") != contract.invocation_id
+        or target.get("terminal_digest") != contract.terminal_digest
+        or target.get("allocation_digest") != contract.allocation_digest
+        or predecessor.get("plan_digest") != contract.predecessor_plan_digest
+        or sequence.get("sequence_ordinal") != contract.sequence_ordinal
+        or sequence.get("projection_policy_version")
+        != contract.projection_policy_version
+        or sequence.get("projection_policy_digest")
+        != contract.projection_policy_digest
+        or sequence.get("temporal_policy_version")
+        != contract.temporal_policy_version
+        or sequence.get("validator_contract_version")
+        != contract.validator_contract_version
+        or sequence.get("pre_dispatch_operational_requirements_digest")
+        != contract.pre_dispatch_operational_requirements_digest
+        or reviewed_fix.get("record_digest") != contract.reviewed_fix_digest
+        or causal_report.get("report_digest")
+        != contract.predecessor_causal_report_digest
+        or approval.get("approved_by") != contract.checked_approved_by
+        or approval.get("approval_reference") != contract.checked_approval_reference
+    ):
+        raise Issue790DispositionError("issue #790 candidate contract differs")
+    return candidate
+
+
+def seal_issue_790_step16_plan(
+    pending: Mapping[str, object],
+    approval: Mapping[str, object],
+    *,
+    pre_dispatch: Mapping[str, object],
+) -> dict[str, object]:
+    """Seal the pending family into a checked candidate. Not live authority."""
+
+    pending_plan, sequence, _pre = _bind_step16_pending_family(
+        pending, pre_dispatch=pre_dispatch
+    )
+    checked = dict(approval)
+    if (
+        checked.get("approved_by") != ISSUE_790_STEP16_CHECKED_APPROVED_BY
+        or checked.get("approval_reference")
+        != f"checked:{pending_plan['canonical_digest']}"
+        or checked.get("approved_at") != ISSUE_790_STEP16_CHECKED_APPROVED_AT
+        or checked.get("scope") != _SCOPE
+    ):
+        raise Issue790DispositionError("issue #790 checked approval differs")
     for key in _PENDING_SEQUENCE_ONLY_KEYS:
         sequence.pop(key, None)
     pending_plan["sequence"] = sequence
-    pending_plan["approval"] = dict(approval)
-    pending_plan["release"] = {
-        "kind": _RELEASE_KIND,
-        "evidence": "CONSERVATIVE_DISPOSITION_DIGEST",
-    }
-    pending_plan["non_effects"] = list(_NON_EFFECTS)
+    pending_plan["schema_version"] = (
+        issue_790_contract_module.ISSUE_790_STEP16_CANDIDATE_SCHEMA
+    )
+    pending_plan["plan_status"] = _CANDIDATE_PLAN_STATUS
+    pending_plan["executable"] = False
+    pending_plan["live_canary_authorised"] = False
+    pending_plan["approval"] = checked
     pending_plan.pop("canonical_digest", None)
     pending_plan["canonical_digest"] = digest_canonical(
         {key: item for key, item in pending_plan.items() if key != "canonical_digest"}
     )
-    return validate_issue_790_plan(pending_plan)
+    return validate_issue_790_step16_candidate(pending_plan)
+
+
+def finalise_issue_790_step16_plan(
+    candidate: Mapping[str, object],
+    owner_approval: Mapping[str, object],
+    *,
+    pre_dispatch: Mapping[str, object],
+) -> dict[str, object]:
+    """Bind owner approval onto a checked candidate. Still not live-registered."""
+
+    retained = validate_issue_790_step16_candidate(candidate)
+    if retained["canonical_digest"] != (
+        issue_790_contract_module.ISSUE_790_STEP16_CHECKED_CANDIDATE_DIGEST
+    ):
+        raise Issue790DispositionError("issue #790 candidate identity differs")
+    owner = _require_owner_approval_tuple(owner_approval)
+    sequence = dict(_record(retained.get("sequence"), field="sequence"))
+    pre = dict(pre_dispatch)
+    pre_unsigned = {
+        key: item for key, item in pre.items() if key != "requirements_digest"
+    }
+    if pre.get("requirements_digest") != digest_canonical(pre_unsigned):
+        raise Issue790DispositionError("issue #790 pre-dispatch digest differs")
+    if sequence.get("pre_dispatch_operational_requirements_digest") != pre.get(
+        "requirements_digest"
+    ):
+        raise Issue790DispositionError("issue #790 pre-dispatch identity differs")
+    pre["exact_main_commit"] = owner["reviewed_correction_revision"]
+    pre["exact_main_tree"] = owner["reviewed_correction_tree"]
+    pre["requirements_digest"] = digest_canonical(
+        {key: item for key, item in pre.items() if key != "requirements_digest"}
+    )
+    sequence["pre_dispatch_operational_requirements"] = pre
+    sequence["pre_dispatch_operational_requirements_digest"] = pre[
+        "requirements_digest"
+    ]
+    sequence["reviewed_correction_revision"] = owner["reviewed_correction_revision"]
+    sequence["reviewed_correction_tree"] = owner["reviewed_correction_tree"]
+    plan = {
+        key: item
+        for key, item in retained.items()
+        if key not in _PENDING_PLAN_ONLY_KEYS
+    }
+    plan["schema_version"] = ISSUE_790_ITERATIVE_PLAN_SCHEMA
+    plan["sequence"] = sequence
+    plan["approval"] = {
+        "approved_by": owner["approved_by"],
+        "approval_reference": owner["approval_reference"],
+        "approved_at": owner["approved_at"],
+        "scope": owner["scope"],
+    }
+    plan["release"] = {
+        "kind": _RELEASE_KIND,
+        "evidence": "CONSERVATIVE_DISPOSITION_DIGEST",
+    }
+    plan["non_effects"] = list(_NON_EFFECTS)
+    plan.pop("canonical_digest", None)
+    plan["canonical_digest"] = digest_canonical(
+        {key: item for key, item in plan.items() if key != "canonical_digest"}
+    )
+    return validate_issue_790_plan(plan)
 
 
 __all__ = [
@@ -3009,9 +3401,11 @@ __all__ = [
     "apply_issue_790_plan",
     "assert_issue_790_paths_disjoint",
     "dry_run_issue_790_plan",
+    "finalise_issue_790_step16_plan",
     "load_issue_790_plan",
     "run_issue_790_canary",
     "validate_issue_790_plan",
+    "validate_issue_790_step16_candidate",
     "issue_790_step16_checked_approval",
     "seal_issue_790_step16_plan",
     "write_issue_790_receipt",
