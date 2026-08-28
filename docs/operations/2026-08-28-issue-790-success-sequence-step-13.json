@@ -109,12 +109,12 @@
       "predecessor_outcome_digest": "sha256:277437b861e298d7da2254104f6e8596b20370d61ea5c9bbe5821ac43d8baf2b",
       "causal_report_digest": "sha256:922a5e20c4045ba49f675bf1a8375548a01a4cdb03326c97f4c9650886e98743",
       "fix_kind": "CODE",
-      "pull_request_url": "https://github.com/fol2/newsroom/pull/PENDING",
+      "pull_request_url": "https://github.com/fol2/newsroom/pull/834",
       "reviewed_fix_revision": "0ed21ffb0c2c6feaaafe85b0ce9f0fda7153f3c8",
-      "review_receipt_digest": "sha256:1e69e5949771de9642396bb4c96549193063f570b8d3df96d9b4aec508c3a8f8",
+      "review_receipt_digest": "sha256:527a0d79a4191347a6cdcfe0762886b862ec757b21db631ebb87a12806c6fe10",
       "provider_free_qualification_digest": "sha256:67c9d44df6555a36fcd2e306485aa3f4d98d3356453a8ba8baf1f6630f4e3d3a",
-      "record_digest": "sha256:ab71bd333a50abf3020829cb6ed80cb4192816dbd034b87f7d3f460a952eba17"
+      "record_digest": "sha256:eee0d5cb17c37c48354d9cc87e695c62bf6c615f8d29833fc9209bdb2ece76e8"
     }
   },
-  "canonical_digest": "sha256:3ad295ccabaf02f61938f8ffbbf1df805d0617f92fd7f9c56d923107a5e2c9c7"
+  "canonical_digest": "sha256:44b7f2ab1a36232b458d0d604c010f155f65e57cb6aed25d00d5577bb4d83bc8"
 }

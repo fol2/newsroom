@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT_DEFAULT = Path("/Users/jamesto/Coding/newsroom")
 TIP_PLAN_DEFAULT = (
-    "sha256:3ad295ccabaf02f61938f8ffbbf1df805d0617f92fd7f9c56d923107a5e2c9c7"
+    "sha256:44b7f2ab1a36232b458d0d604c010f155f65e57cb6aed25d00d5577bb4d83bc8"
 )
 PLAN_REL_DEFAULT = "docs/operations/2026-08-28-issue-790-success-sequence-step-13.json"
 DISP = "sha256:020f5b5669020da8e0bd4fb74cf2d9c5051533fa3b09dbed54824ccec456638c"
