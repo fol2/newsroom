@@ -1,0 +1,34 @@
+{
+  "schema_version": "newsroom.issue-790.provider-free-code-fix-qualification.v1",
+  "issue": 790,
+  "observed_at": "2026-08-28T14:40:00.000000Z",
+  "predecessor_outcome_digest": "sha256:eb06ecad591359e48ca819fd5a138e2e25c9cf4ea791dedb06fadadc020c727f",
+  "provider_calls": 0,
+  "public_effects": 0,
+  "model_catalogue_queries": 0,
+  "live_canary_authorised": false,
+  "failure": {
+    "boundary": "COMBINED_TEMPORAL_VALIDATION",
+    "elapsed_ms": 18139,
+    "failure_code": "OUTPUT_SCHEMA_INVALID",
+    "local_cause": "EVIDENCE_UNRESOLVED_ENDPOINT_NAMES_ABSENT_FROM_FACT",
+    "provider_cause": "COMPOSER_EMITTED_WEAK_FACT_WITHOUT_BOTH_ENDPOINTS",
+    "termination": "TERMINAL_ATTEMPT_FAILURE"
+  },
+  "provider_free_checks": {
+    "call_shape_policy_version": "issue-816-v2",
+    "call_shape_policy_digest": "sha256:ba1cb4267ff78419174b50a0e233545a4bf745168d4f7fdbffa2fb6007ab5abc",
+    "sdk_floor": "cursor-sdk>=1.0.29",
+    "composer_floor": "composer>=2.5",
+    "prompt_requires_both_endpoint_names_in_fact": "PASS",
+    "prompt_prefers_empty_when_no_grounded_span": "PASS",
+    "attempt_receipt_retains_combined_temporal_failure_code": "PASS",
+    "canary_fallback_remains_disabled": "PASS",
+    "focused_tests": "newsroom/tests/test_graphiti_combined_temporal_extraction.py::test_prompt_requires_both_endpoint_names_in_fact_or_empty,newsroom/tests/test_graphiti_combined_temporal_extraction.py::test_fact_must_name_both_endpoints_to_be_self_contained,newsroom/tests/test_graphiti_corpus_ingest.py::test_attempt_receipt_retains_combined_temporal_failure_code",
+    "focused_tests_result": "3 passed",
+    "fix_revision": "a18d6ccff824ebb15028fd9c1bcdee3b958edeec",
+    "persistent_worker": "UNLOADED"
+  },
+  "qualification": "ENDPOINT_IN_FACT_PREFER_EMPTY_PROVIDER_FREE_READY",
+  "canonical_digest": "sha256:e92c426a8eec06ef2895254e986c40c44d8e6b3cc53f8a135607f0ad69c947fe"
+}

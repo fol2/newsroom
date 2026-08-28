@@ -197,6 +197,13 @@ def test_wire_vocabulary_is_confined_to_untrusted_proposal_terms() -> None:
     assert "EntityNode` / `EntityEdge.fact` remain confined" in note
 
 
+def test_prompt_requires_both_endpoint_names_in_fact_or_empty() -> None:
+    prompt = build_compact_prompt(fixture("pair-current").revision).text
+    assert "both endpoint entity names" in prompt
+    assert 'return {"entities":[],"facts":[]}' in prompt
+    assert "A valid empty object is terminal success." in prompt
+
+
 def test_segmentation_round_trips_retained_bytes_and_uses_integer_ids() -> None:
     body = fixture("pair-current").revision.body
     segments = segment_source(body)
