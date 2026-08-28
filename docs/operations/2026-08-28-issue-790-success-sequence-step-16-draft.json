@@ -9,6 +9,9 @@
     "GOVERNED_PROPOSAL_PROJECTION_MERGED",
     "FINAL_RECEIPT_BINDING_MERGED",
     "REPLAY_CROSS_BINDING_MERGED",
+    "MISSING_IDENTITY_FAIL_CLOSED_MERGED",
+    "CHECKED_CANDIDATE_NOT_LIVE_MERGED",
+    "OWNER_FINALISE_PATH_MERGED",
     "PROVIDER_FREE_STEP_13_15_REPRODUCTIONS",
     "FINAL_REVIEW_RECEIPT"
   ],
@@ -43,7 +46,13 @@
     "replay_cross_binding_hold_comment": "5457138518",
     "replay_cross_binding_pr": "https://github.com/fol2/newsroom/pull/842",
     "replay_cross_binding_merged_commit": "9cc0f5f274056bdeac33ca8f8abe4d8dfd7a5323",
-    "replay_cross_binding_merged_tree": "6ae1114a5dede6a0b18d1519ac4aed148c772403"
+    "replay_cross_binding_merged_tree": "6ae1114a5dede6a0b18d1519ac4aed148c772403",
+    "authority_boundary_hold_comment": "5458287374",
+    "authority_boundary_pr": "https://github.com/fol2/newsroom/pull/844",
+    "authority_boundary_merged_commit": "f44121cfaeef3dbf09c16dd26e2636e7e63b2c78",
+    "authority_boundary_merged_tree": "9b4533603636ccaa8c5ad210a0ed6d3f73a11193",
+    "checked_candidate_digest": "sha256:601d0cfe63775d5205de6c672b344ab8b0055521fe6f191eb526e25c72a48d9e",
+    "revoked_checked_live_plan_digest": "sha256:72723b72b71f12fee2a9ec31c2b4145e5cbac4ac55f8ddbc51319248e94c21f9"
   },
   "intended_sequence": {
     "stop_condition": "FIRST_TRUTHFUL_PROVIDER_BACKED_SUCCESS",
@@ -56,14 +65,14 @@
     "sdk_floor": "cursor-sdk>=1.0.29",
     "composer_floor": "composer>=2.5",
     "fresh_provider_backed_attempt_count": 1,
-    "notes": "Mint executable Step 16 only after this draft's reviewed fix is on exact main, owner names the merged commit and projection/receipt identities, and authorises at most one catalogue query if required, one untouched fresh event, one provider dispatch, zero retries and zero fallback."
+    "notes": "Owner finalise consumes the checked candidate digest plus an owner tuple that names exact commit/tree. Apply compares those identities with operational evidence before authority consumption. No live Step 16 plan is registered. Mint an apply-able file only after owner authenticates approval on this issue."
   },
   "intended_reviewed_fix": {
-    "pull_request_url": "https://github.com/fol2/newsroom/pull/842",
+    "pull_request_url": "https://github.com/fol2/newsroom/pull/844",
     "issue": 790,
     "fix_kind": "CODE",
-    "reviewed_fix_revision": "9cc0f5f274056bdeac33ca8f8abe4d8dfd7a5323",
-    "notes": "Replay cross-binding + historical v1 reader. Draft remains executable:false; does not authorise live canary."
+    "reviewed_fix_revision": "f44121cfaeef3dbf09c16dd26e2636e7e63b2c78",
+    "notes": "Checked candidate is not live authority; owner-finalise path binds named commit/tree. Draft remains executable:false; does not authorise live canary."
   },
-  "canonical_digest": "sha256:c49a3a2016e7b7bd10a05cccb878d4673e9fbfe1342490a8740db4f474fb44a2"
+  "canonical_digest": "sha256:6c912ebd853b09a969f1f920988258711bbc9c260dfc73f763b9e4f22f96ed81"
 }
