@@ -11,7 +11,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+)
 from newsroom.authority.types import UtcTimestamp
 from newsroom.effective_revision import EffectiveRevisionIdentity
 from newsroom.extraction.types import ExtractionOutcome
@@ -28,13 +32,18 @@ from newsroom.graphiti_adapter.combined_temporal_projection import (
     PROJECTION_RECEIPT_SCHEMA_VERSION,
     project_governed_proposals,
     validate_projection_receipt,
+    validate_replay_receipt_binding,
 )
 from newsroom.graphiti_adapter.combined_temporal_types import CombinedTemporalError
 from newsroom.graphiti_adapter.evaluation_attempt import evaluation_attempt_for_body
 from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_CORE_RELEASE
 from newsroom.graphiti_adapter.real import RealGraphitiAdapter
 from newsroom.graphiti_adapter.result_snapshot import restore_validated_snapshot
-from newsroom.graphiti_adapter.temporal_vocabulary import TemporalBasis
+from newsroom.graphiti_adapter.temporal_vocabulary import (
+    TEMPORAL_POLICY_DIGEST_V1,
+    TEMPORAL_POLICY_VERSION_V1,
+    TemporalBasis,
+)
 from newsroom.graphiti_adapter.types import GraphitiAdapterContractError
 from newsroom.tests.test_graphiti_adapter_real_executor import (
     _provider_free_pipeline,
@@ -187,6 +196,28 @@ def _install_provider_free_runtime(
     monkeypatch.setattr(real, "neo4j_community_password", lambda: "password")
 
 
+def _coherent_v2_outer(
+    monkeypatch: pytest.MonkeyPatch, *, step: int
+) -> tuple[dict[str, object], object]:
+    """Seal a real success receipt, then restore against its attempt."""
+
+    fix = _load_step(step)
+    guard_completed: dict[str, object] = {}
+    _install_provider_free_runtime(
+        monkeypatch, fixture_raw=fix["raw"], guard_completed=guard_completed
+    )
+    attempt = _attempt_for_step(fix)
+    produced = RealGraphitiAdapter()._produce(
+        attempt,
+        UtcTimestamp.parse(fix["reference_time"]),
+    )
+    assert produced.outcome is ExtractionOutcome.SUCCESS
+    raw = produced.raw_output_value
+    assert isinstance(raw, dict)
+    validate_replay_receipt_binding(raw)
+    return raw, attempt
+
+
 def test_validate_projection_receipt_accepts_exact_step13_receipt() -> None:
     receipt = _projection_for_step(13).receipt
     assert validate_projection_receipt(receipt)["projection_receipt_digest"] == (
@@ -198,6 +229,7 @@ def test_validate_projection_receipt_accepts_exact_step13_receipt() -> None:
     "mutator",
     [
         lambda r: r.pop("schema_version", None) or r,
+        lambda r: r.pop("validator_contract_version", None) or r,
         lambda r: r.pop("projection_receipt_digest", None) or r,
         lambda r: r.__setitem__(
             "projection_receipt_digest", "sha256:" + "0" * 64
@@ -251,6 +283,7 @@ def test_real_success_seals_one_canonical_receipt_with_projection(
     assert isinstance(combined, dict)
     assert combined["projection_receipt"] == projected.receipt
     validate_projection_receipt(combined["projection_receipt"])
+    validate_replay_receipt_binding(raw)
     unsigned = dict(raw)
     unsigned.pop("raw_output_digest")
     assert raw["raw_output_digest"] == digest_bytes(canonical_json_bytes(unsigned))
@@ -289,19 +322,16 @@ def test_zero_proposal_terminal_retains_projection_and_no_redispatch(
         _attempt_for_step(fix),
         UtcTimestamp.parse(fix["reference_time"]),
     )
-
-    assert llm_calls["n"] == 1
     assert produced.outcome is ExtractionOutcome.SUCCESS
     raw = produced.raw_output_value
     assert isinstance(raw, dict)
     assert guard_completed["_raw"] is raw
     combined = raw["combined_temporal_receipt"]
-    assert isinstance(combined, dict)
     assert combined["projection_receipt"] == projected.receipt
+    validate_replay_receipt_binding(raw)
     embedding = raw.get("embedding_usage")
     assert isinstance(embedding, dict)
     assert embedding.get("request_count", 0) in {0, None}
-    # No second provider dispatch after terminal zero-proposal success.
     assert llm_calls["n"] == 1
 
 
@@ -365,18 +395,95 @@ def test_leaf_zero_proposal_also_retains_rejection_evidence() -> None:
 
 
 def test_guard_completed_immutable_replay_restores_projection(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    raw, attempt = _coherent_v2_outer(monkeypatch, step=14)
+    assert raw["combined_temporal_receipt"]["projection_receipt"]["accepted_count"] > 0
+    assert raw["proposal_count"] > 0
+
+    restored = restore_validated_snapshot(raw=raw, attempt=attempt)
+    assert restored.produced.outcome is ExtractionOutcome.SUCCESS
+    assert restored.produced.raw_output_value == raw
+
+    # Step 14 must no longer accept accepted_count > 0 with outer proposals = [].
+    contradicted = copy.deepcopy(raw)
+    contradicted["proposals"] = []
+    contradicted["proposal_count"] = 0
+    contradicted["entities"] = []
+    contradicted["relations"] = []
+    contradicted["entity_count"] = 0
+    contradicted["relation_count"] = 0
+    contradicted.pop("raw_output_digest")
+    contradicted["raw_output_digest"] = digest_bytes(canonical_json_bytes(contradicted))
+    with pytest.raises(GraphitiAdapterContractError, match="binding"):
+        restore_validated_snapshot(raw=contradicted, attempt=attempt)
+
+    missing = copy.deepcopy(raw)
+    missing["combined_temporal_receipt"] = {
+        "temporal_policy_digest": missing["combined_temporal_receipt"][
+            "temporal_policy_digest"
+        ],
+        "raw_output_digest": missing["combined_temporal_receipt"]["raw_output_digest"],
+    }
+    missing.pop("raw_output_digest")
+    missing["raw_output_digest"] = digest_bytes(canonical_json_bytes(missing))
+    with pytest.raises(GraphitiAdapterContractError, match="binding"):
+        restore_validated_snapshot(raw=missing, attempt=attempt)
+
+
+def test_coherent_resigned_cross_record_contradictions_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw, attempt = _coherent_v2_outer(monkeypatch, step=14)
+    projection = dict(raw["combined_temporal_receipt"]["projection_receipt"])
+
+    resigned = dict(projection)
+    resigned["atom_actions"] = []
+    resigned["accepted_count"] = 0
+    resigned["rejected_count"] = 0
+    body = {key: resigned[key] for key in resigned if key != "projection_receipt_digest"}
+    resigned["projection_receipt_digest"] = digest_canonical(body)
+    tampered = copy.deepcopy(raw)
+    tampered["combined_temporal_receipt"]["projection_receipt"] = resigned
+    tampered.pop("raw_output_digest")
+    tampered["raw_output_digest"] = digest_bytes(canonical_json_bytes(tampered))
+    with pytest.raises(GraphitiAdapterContractError, match="binding"):
+        restore_validated_snapshot(raw=tampered, attempt=attempt)
+
+    provider_flip = dict(projection)
+    provider_flip["raw_provider_output_digest"] = "sha256:" + "ab" * 32
+    body = {
+        key: provider_flip[key]
+        for key in provider_flip
+        if key != "projection_receipt_digest"
+    }
+    provider_flip["projection_receipt_digest"] = digest_canonical(body)
+    flipped = copy.deepcopy(raw)
+    flipped["combined_temporal_receipt"]["projection_receipt"] = provider_flip
+    flipped.pop("raw_output_digest")
+    flipped["raw_output_digest"] = digest_bytes(canonical_json_bytes(flipped))
+    with pytest.raises(GraphitiAdapterContractError, match="binding"):
+        restore_validated_snapshot(raw=flipped, attempt=attempt)
+
+    payload_flip = copy.deepcopy(raw)
+    proposal = dict(payload_flip["combined_temporal_receipt"]["proposal_receipt"])
+    proposal["payload_digest"] = "sha256:" + "cd" * 32
+    payload_flip["combined_temporal_receipt"]["proposal_receipt"] = proposal
+    payload_flip.pop("raw_output_digest")
+    payload_flip["raw_output_digest"] = digest_bytes(canonical_json_bytes(payload_flip))
+    with pytest.raises(GraphitiAdapterContractError, match="binding"):
+        restore_validated_snapshot(raw=payload_flip, attempt=attempt)
+
+
+def test_historical_v1_success_replay_preserves_reader(tmp_path: Path) -> None:
     from newsroom.graphiti_adapter.real import _EpisodeTelemetry, _raw_receipt
 
-    fix = _load_step(14)
-    projected = _projection_for_step(14)
-    instant = UtcTimestamp.parse(fix["reference_time"])
+    instant = UtcTimestamp.parse("2026-08-20T00:00:00.000000Z")
     attempt = replace(
         _real_attempt(tmp_path),
         reference_time=instant,
         temporal_basis=TemporalBasis.SOURCE_PUBLISHED,
-        episode_uuid="episode-replay",
+        episode_uuid="episode-v1",
     )
     raw = _raw_receipt(
         attempt,
@@ -387,48 +494,27 @@ def test_guard_completed_immutable_replay_restores_projection(
     )
     raw.pop("raw_output_digest", None)
     raw["combined_temporal_receipt"] = {
-        "projection_receipt": projected.receipt,
-        "raw_output_digest": fix["provider_raw_digest"],
+        "temporal_policy_digest": TEMPORAL_POLICY_DIGEST_V1,
+        "temporal_policy_version": TEMPORAL_POLICY_VERSION_V1,
+        "raw_output_digest": "sha256:" + "11" * 32,
     }
     raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
-
     restored = restore_validated_snapshot(raw=raw, attempt=attempt)
     assert restored.produced.outcome is ExtractionOutcome.SUCCESS
-    assert restored.produced.raw_output_value == raw
-    combined = restored.produced.raw_output_value["combined_temporal_receipt"]
-    assert combined["projection_receipt"] == projected.receipt
+    assert "projection_receipt" not in restored.produced.raw_output_value[
+        "combined_temporal_receipt"
+    ]
 
-    absent_combined = copy.deepcopy(raw)
-    absent_combined.pop("combined_temporal_receipt")
-    absent_combined.pop("raw_output_digest")
-    absent_combined["raw_output_digest"] = digest_bytes(
-        canonical_json_bytes(absent_combined)
+    contradictory = copy.deepcopy(raw)
+    contradictory["combined_temporal_receipt"]["temporal_policy_digest"] = (
+        "sha256:" + "ff" * 32
     )
-    with pytest.raises(
-        GraphitiAdapterContractError, match="lacks combined_temporal_receipt"
-    ):
-        restore_validated_snapshot(raw=absent_combined, attempt=attempt)
-
-    missing = copy.deepcopy(raw)
-    missing["combined_temporal_receipt"] = {
-        "raw_output_digest": fix["provider_raw_digest"]
-    }
-    missing.pop("raw_output_digest")
-    missing["raw_output_digest"] = digest_bytes(canonical_json_bytes(missing))
-    with pytest.raises(GraphitiAdapterContractError, match="lacks projection_receipt"):
-        restore_validated_snapshot(raw=missing, attempt=attempt)
-
-    tampered = copy.deepcopy(raw)
-    tampered["combined_temporal_receipt"]["projection_receipt"] = dict(
-        projected.receipt
+    contradictory.pop("raw_output_digest")
+    contradictory["raw_output_digest"] = digest_bytes(
+        canonical_json_bytes(contradictory)
     )
-    tampered["combined_temporal_receipt"]["projection_receipt"][
-        "projection_receipt_digest"
-    ] = "sha256:" + "a" * 64
-    tampered.pop("raw_output_digest")
-    tampered["raw_output_digest"] = digest_bytes(canonical_json_bytes(tampered))
-    with pytest.raises(GraphitiAdapterContractError, match="projection receipt"):
-        restore_validated_snapshot(raw=tampered, attempt=attempt)
+    with pytest.raises(GraphitiAdapterContractError, match="unknown"):
+        restore_validated_snapshot(raw=contradictory, attempt=attempt)
 
 
 def test_evaluation_runner_raw_receipt_binds_identical_projection(
@@ -470,6 +556,7 @@ def test_evaluation_runner_raw_receipt_binds_identical_projection(
     assert result.raw_receipt["combined_temporal_receipt"]["projection_receipt"] == (
         projected.receipt
     )
+    validate_replay_receipt_binding(result.raw_receipt)
     unsigned = dict(result.raw_receipt)
     supplied = unsigned.pop("raw_output_digest")
     assert supplied == digest_bytes(canonical_json_bytes(unsigned))

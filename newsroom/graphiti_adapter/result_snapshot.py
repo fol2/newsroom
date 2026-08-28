@@ -19,7 +19,7 @@ from newsroom.extraction.types import (
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
 from newsroom.graphiti_adapter.cli_process import validated_process_exit_diagnostic
 from newsroom.graphiti_adapter.combined_temporal_projection import (
-    validate_projection_receipt,
+    validate_replay_receipt_binding,
 )
 from newsroom.graphiti_adapter.combined_temporal_types import (
     CombinedTemporalFailureCode,
@@ -38,8 +38,64 @@ from newsroom.graphiti_adapter.recovery_vocabulary import (
     GraphitiRecoveryClassification,
 )
 from newsroom.graphiti_adapter.result_mapping import produced_extraction
-from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_VERSION
+from newsroom.graphiti_adapter.temporal_vocabulary import (
+    TEMPORAL_POLICY_DIGEST_V1,
+    TEMPORAL_POLICY_DIGEST_V2,
+    TEMPORAL_POLICY_VERSION_V1,
+    TEMPORAL_POLICY_VERSION,
+)
 from newsroom.graphiti_adapter.types import GraphitiAdapterContractError
+
+
+def _retained_temporal_success_mode(
+    recovered_raw: dict[str, object],
+) -> str:
+    """Select historical v1 vs v2 replay from the retained receipt identity."""
+
+    combined = recovered_raw.get("combined_temporal_receipt")
+    if combined is None:
+        return "v1"
+    if not isinstance(combined, dict):
+        raise GraphitiAdapterContractError(
+            "retained combined_temporal_receipt is malformed"
+        )
+    digest = combined.get("temporal_policy_digest")
+    version = combined.get("temporal_policy_version") or combined.get("temporal_policy")
+    if version is not None and version not in {
+        TEMPORAL_POLICY_VERSION_V1,
+        TEMPORAL_POLICY_VERSION,
+    }:
+        raise GraphitiAdapterContractError(
+            "retained temporal policy identity is unknown"
+        )
+    if digest is not None and digest not in {
+        TEMPORAL_POLICY_DIGEST_V1,
+        TEMPORAL_POLICY_DIGEST_V2,
+    }:
+        raise GraphitiAdapterContractError(
+            "retained temporal policy digest is unknown"
+        )
+    if version == TEMPORAL_POLICY_VERSION or digest == TEMPORAL_POLICY_DIGEST_V2:
+        if (
+            (version is not None and version != TEMPORAL_POLICY_VERSION)
+            or (digest is not None and digest != TEMPORAL_POLICY_DIGEST_V2)
+        ):
+            raise GraphitiAdapterContractError(
+                "retained temporal policy identity is contradictory"
+            )
+        return "v2"
+    if version == TEMPORAL_POLICY_VERSION_V1 or digest == TEMPORAL_POLICY_DIGEST_V1:
+        if (
+            (version is not None and version != TEMPORAL_POLICY_VERSION_V1)
+            or (digest is not None and digest != TEMPORAL_POLICY_DIGEST_V1)
+        ):
+            raise GraphitiAdapterContractError(
+                "retained temporal policy identity is contradictory"
+            )
+        return "v1"
+    raise GraphitiAdapterContractError(
+        "retained temporal policy identity is unknown"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,25 +277,15 @@ def restore_validated_snapshot(
     pipeline_failed = (
         combined_failure == CombinedTemporalFailureCode.PIPELINE_FAILED.value
     )
-    if TEMPORAL_POLICY_VERSION.endswith("-v2") and not isinstance(
-        combined_failure, str
-    ):
-        combined = recovered_raw.get("combined_temporal_receipt")
-        if not isinstance(combined, dict):
-            raise GraphitiAdapterContractError(
-                "retained Graphiti success receipt lacks combined_temporal_receipt"
-            )
-        projection = combined.get("projection_receipt")
-        if projection is None:
-            raise GraphitiAdapterContractError(
-                "retained Graphiti success receipt lacks projection_receipt"
-            )
-        try:
-            validate_projection_receipt(projection)
-        except CombinedTemporalError as exc:
-            raise GraphitiAdapterContractError(
-                f"retained projection receipt is invalid: {exc}"
-            ) from exc
+    if not isinstance(combined_failure, str):
+        mode = _retained_temporal_success_mode(recovered_raw)
+        if mode == "v2":
+            try:
+                validate_replay_receipt_binding(recovered_raw)
+            except CombinedTemporalError as exc:
+                raise GraphitiAdapterContractError(
+                    f"retained replay receipt binding is invalid: {exc}"
+                ) from exc
     produced = produced_extraction(
         attempt,
         outcome=(
