@@ -9,6 +9,8 @@
     "GOVERNED_PROPOSAL_PROJECTION_MERGED",
     "FINAL_RECEIPT_BINDING_MERGED",
     "REPLAY_CROSS_BINDING_MERGED",
+    "MISSING_IDENTITY_FAIL_CLOSED_MERGED",
+    "CHECKED_STEP16_SEAL_MERGED",
     "PROVIDER_FREE_STEP_13_15_REPRODUCTIONS",
     "FINAL_REVIEW_RECEIPT"
   ],
@@ -43,7 +45,12 @@
     "replay_cross_binding_hold_comment": "5457138518",
     "replay_cross_binding_pr": "https://github.com/fol2/newsroom/pull/842",
     "replay_cross_binding_merged_commit": "9cc0f5f274056bdeac33ca8f8abe4d8dfd7a5323",
-    "replay_cross_binding_merged_tree": "6ae1114a5dede6a0b18d1519ac4aed148c772403"
+    "replay_cross_binding_merged_tree": "6ae1114a5dede6a0b18d1519ac4aed148c772403",
+    "seal_and_replay_hold_comment": "5457868385",
+    "seal_and_replay_pr": "https://github.com/fol2/newsroom/pull/843",
+    "seal_and_replay_merged_commit": "456a4063efd60a6ffefd6c0c625409162d852a6f",
+    "seal_and_replay_merged_tree": "8214e95414133ddf585455f1b2e75356df0c59f9",
+    "checked_sealed_plan_digest": "sha256:72723b72b71f12fee2a9ec31c2b4145e5cbac4ac55f8ddbc51319248e94c21f9"
   },
   "intended_sequence": {
     "stop_condition": "FIRST_TRUTHFUL_PROVIDER_BACKED_SUCCESS",
@@ -56,14 +63,14 @@
     "sdk_floor": "cursor-sdk>=1.0.29",
     "composer_floor": "composer>=2.5",
     "fresh_provider_backed_attempt_count": 1,
-    "notes": "Mint executable Step 16 only after this draft's reviewed fix is on exact main, owner names the merged commit and projection/receipt identities, and authorises at most one catalogue query if required, one untouched fresh event, one provider dispatch, zero retries and zero fallback."
+    "notes": "Checked sealer proves pending family plus checked approval into validate_issue_790_plan. Checked approval is not live owner authority. Mint an apply-able Step 16 file only after owner names the exact merged commit and authorises at most one catalogue query if required, one untouched fresh event, one provider dispatch, zero retries and zero fallback."
   },
   "intended_reviewed_fix": {
-    "pull_request_url": "https://github.com/fol2/newsroom/pull/842",
+    "pull_request_url": "https://github.com/fol2/newsroom/pull/843",
     "issue": 790,
     "fix_kind": "CODE",
-    "reviewed_fix_revision": "9cc0f5f274056bdeac33ca8f8abe4d8dfd7a5323",
-    "notes": "Replay cross-binding + historical v1 reader. Draft remains executable:false; does not authorise live canary."
+    "reviewed_fix_revision": "456a4063efd60a6ffefd6c0c625409162d852a6f",
+    "notes": "Missing-identity replay fail-closed + checked Step 16 sealer. Draft remains executable:false; does not authorise live canary. Frozen pending family still names PR #842 identities as sealer input."
   },
-  "canonical_digest": "sha256:c49a3a2016e7b7bd10a05cccb878d4673e9fbfe1342490a8740db4f474fb44a2"
+  "canonical_digest": "sha256:f84e3e056d65a6ad61ba24bc1d7f50af9d7579cd9b664108a9cb6368a2839d58"
 }
