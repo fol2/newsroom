@@ -7,11 +7,12 @@
   "satisfied_prerequisites": [
     "STEP_15_EXHAUSTED",
     "GOVERNED_PROPOSAL_PROJECTION_MERGED",
+    "FINAL_RECEIPT_BINDING_MERGED",
     "PROVIDER_FREE_STEP_13_15_REPRODUCTIONS",
     "FINAL_REVIEW_RECEIPT"
   ],
-  "executable_plan_path": null,
-  "executable_plan_digest": null,
+  "executable_plan_path": "docs/operations/2026-08-28-issue-790-success-sequence-step-16.pending-owner-review.json",
+  "executable_plan_digest": "sha256:f0a05a07fe3d65cbaed792987ce6885fd1f5d6f70f201a67cdaece408a8b264c",
   "blocked_until": [
     "OWNER_AUTHENTICATED_STEP_16_CANARY_APPROVAL"
   ],
@@ -33,7 +34,11 @@
     "validator_contract_version": "NewsroomCombinedTemporalNormaliseV2",
     "call_shape_policy_version": "issue-816-v2",
     "call_shape_policy_digest": "sha256:ba1cb4267ff78419174b50a0e233545a4bf745168d4f7fdbffa2fb6007ab5abc",
-    "authority_comment": "5455732888"
+    "authority_comment": "5455732888",
+    "receipt_binding_hold_comment": "5456734459",
+    "receipt_binding_pr": "https://github.com/fol2/newsroom/pull/840",
+    "receipt_binding_merged_commit": "7b6c3423bf4b46b80a930826c00383097105a14d",
+    "receipt_binding_merged_tree": "d77ba3b4a73161b9b1b3171e1d8b7aab31f60d47"
   },
   "intended_sequence": {
     "stop_condition": "FIRST_TRUTHFUL_PROVIDER_BACKED_SUCCESS",
@@ -46,13 +51,21 @@
     "sdk_floor": "cursor-sdk>=1.0.29",
     "composer_floor": "composer>=2.5",
     "fresh_provider_backed_attempt_count": 1,
-    "notes": "Mint executable Step 16 only after this draft's reviewed fix is on exact main, owner names the merged commit and projection/receipt identities, and authorises at most one catalogue query if required, one untouched fresh event, one provider dispatch, zero retries and zero fallback."
+    "notes": "Mint executable Step 16 only after owner names the merged commit/tree and projection/receipt identities, and authorises at most one catalogue query if required, one untouched fresh event, one provider dispatch, zero retries and zero fallback."
   },
   "intended_reviewed_fix": {
-    "pull_request_url": null,
+    "pull_request_url": "https://github.com/fol2/newsroom/pull/840",
     "issue": 790,
     "fix_kind": "CODE",
-    "notes": "Governed proposal projection seam. Placeholder until the ordinary Step 16 implementation PR merges; this draft does not authorise itself or any live effect."
+    "reviewed_fix_revision": "7b6c3423bf4b46b80a930826c00383097105a14d",
+    "reviewed_fix_tree": "d77ba3b4a73161b9b1b3171e1d8b7aab31f60d47",
+    "reviewed_tip_before_squash": "88c61c8d551bbfc2503c9bcd31bdf55ad5e448e6",
+    "review_receipt_digest": "sha256:94c335c5e9762b2d20b6c4a273de0f58712f88f086b9b9feb3fafa85b2b802f6",
+    "provider_free_qualification_digest": "sha256:cc69d2b2d9a0050be38bf681326b5d4a953fdb33858772fa3fd2acf8f4e7104b",
+    "reviewed_fix_record_digest": "sha256:821dfaeaf6e502f8a06c1ae2276e902b90c152e1a3f56c8168f3a4bc28e39dba",
+    "causal_report_digest": "sha256:d020e4418ba4fe5b684d04857fa39ff459b1a287b5d03ae2a7b0c390c3f30f66",
+    "pending_owner_review_plan_digest": "sha256:f0a05a07fe3d65cbaed792987ce6885fd1f5d6f70f201a67cdaece408a8b264c",
+    "notes": "Filled for owner review after receipt-binding merge. Draft remains non-executable until OWNER_AUTHENTICATED_STEP_16_CANARY_APPROVAL."
   },
-  "canonical_digest": "sha256:8bfbd0d0448e51a1f827c5da59b2e01a8b7b489db1991f8fc4adec1bc395d38d"
+  "canonical_digest": "sha256:188d83f22183e13e083193eca0f8d71ad541df8a1ca2f32c081af17c5829df79"
 }

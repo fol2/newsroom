@@ -1,0 +1,17 @@
+{
+  "schema_version": "newsroom.issue-790.code-fix-review-receipt.v1",
+  "issue": 790,
+  "reviewed_at": "2026-08-28T19:38:00.000000Z",
+  "reviewed_fix_revision": "88c61c8d551bbfc2503c9bcd31bdf55ad5e448e6",
+  "qualification_digest": "sha256:cc69d2b2d9a0050be38bf681326b5d4a953fdb33858772fa3fd2acf8f4e7104b",
+  "reviewer": "cursor-agent",
+  "finding_count": 2,
+  "unresolved_high_risk_findings": 0,
+  "verdict": "FEATURE_COMPLETE_NO_UNRESOLVED_FINDINGS",
+  "scope": "bind Step 16 projection_receipt into one sealed final attempt receipt; fail-closed v2 restore; EvaluationGraphitiRunner proof",
+  "resolved_findings": [
+    "restore required combined_temporal_receipt and projection_receipt on temporal-v2 success",
+    "EvaluationGraphitiRunner.raw_receipt proved identical to sealed ProducedExtraction/guard receipt"
+  ],
+  "canonical_digest": "sha256:94c335c5e9762b2d20b6c4a273de0f58712f88f086b9b9feb3fafa85b2b802f6"
+}

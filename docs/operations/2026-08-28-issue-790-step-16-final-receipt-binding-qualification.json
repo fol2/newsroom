@@ -1,0 +1,42 @@
+{
+  "schema_version": "newsroom.issue-790.provider-free-code-fix-qualification.v1",
+  "issue": 790,
+  "observed_at": "2026-08-28T19:40:00.000000Z",
+  "predecessor_outcome_digest": "sha256:e4eb6e3f22cc74b0ad3f9d95fa448fe160d48b15336388667a1cfa632785e32e",
+  "provider_calls": 0,
+  "public_effects": 0,
+  "model_catalogue_queries": 0,
+  "live_canary_authorised": false,
+  "failure": {
+    "boundary": "FINAL_ATTEMPT_RECEIPT_BINDING",
+    "elapsed_ms": null,
+    "failure_code": "OWNER_HOLD",
+    "local_cause": "PROJECTION_RECEIPT_NOT_BOUND_INTO_RETURNED_FINAL_RECEIPT",
+    "provider_cause": "UNOBSERVED",
+    "termination": "OWNER_HOLD_BEFORE_LIVE_CANARY"
+  },
+  "provider_free_checks": {
+    "call_shape_policy_version": "issue-816-v2",
+    "call_shape_policy_digest": "sha256:ba1cb4267ff78419174b50a0e233545a4bf745168d4f7fdbffa2fb6007ab5abc",
+    "projection_policy_version": "NewsroomGovernedProposalProjectionV1",
+    "projection_policy_digest": "sha256:c68a9c5bf81a8d052ba9b05f286b0d1cf664e86e2e00ee3c39684f7809b16a7c",
+    "temporal_policy_version": "graphiti-source-reference-time-v2",
+    "validator_contract_version": "NewsroomCombinedTemporalNormaliseV2",
+    "canonical_receipt_seals_after_projection_attach": "PASS",
+    "guard_and_produced_share_one_raw_object": "PASS",
+    "evaluation_runner_raw_receipt_binds_projection": "PASS",
+    "restore_requires_v2_projection_receipt": "PASS",
+    "projection_receipt_tamper_matrix": "PASS",
+    "step13_15_fixtures_still_project": "PASS",
+    "zero_proposal_terminal_no_redispatch": "PASS",
+    "focused_tests": "newsroom/tests/test_issue_790_step16_final_receipt_binding.py",
+    "focused_tests_result": "18 passed (module) / Focus Gates 1535 passed",
+    "focus_gate_manifest_digest": "sha256:e69bda0fb23814321c49683f73a1f159b8dad9ddd00d08226958b86168d95564",
+    "fix_revision": "7b6c3423bf4b46b80a930826c00383097105a14d",
+    "persistent_worker": "NOT_OBSERVED",
+    "route_circuit": "NOT_OBSERVED",
+    "operational_deployment": "NOT_OBSERVED"
+  },
+  "qualification": "STEP16_FINAL_RECEIPT_BINDING_PROVIDER_FREE_READY",
+  "canonical_digest": "sha256:cc69d2b2d9a0050be38bf681326b5d4a953fdb33858772fa3fd2acf8f4e7104b"
+}

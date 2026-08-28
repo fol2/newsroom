@@ -1,0 +1,69 @@
+{
+  "schema_version": "newsroom.issue-790.iterative-canary-plan.v2",
+  "issue": 790,
+  "plan_status": "PENDING_OWNER_REVIEW",
+  "executable": false,
+  "live_canary_authorised": false,
+  "approval": null,
+  "target": {
+    "notes": "Pending owner naming of exact merged commit/tree and projection/receipt identities before any live canary.",
+    "provider": "cursor-agent-cli",
+    "route": "GRAPHITI_CHAT_PRIMARY",
+    "workload_class": "GRAPHITI_CHAT_PRIMARY"
+  },
+  "release": {
+    "evidence": "REVIEWED_FIX_RECORD",
+    "kind": "PENDING_OWNER_APPROVAL",
+    "reviewed_fix_record_digest": "sha256:821dfaeaf6e502f8a06c1ae2276e902b90c152e1a3f56c8168f3a4bc28e39dba",
+    "merged_commit": "7b6c3423bf4b46b80a930826c00383097105a14d",
+    "merged_tree": "d77ba3b4a73161b9b1b3171e1d8b7aab31f60d47"
+  },
+  "canary": {
+    "authority_consumption": "APPEND_ONLY_SINGLE_USE_BEFORE_PROVIDER_IO",
+    "event_binding": "EXPLICIT_QUEUED_ATTEMPT_ZERO_EVENT",
+    "fallback_mode": "DISABLED_BEFORE_PROVIDER_DISPATCH",
+    "fresh_provider_backed_attempt_count": 1,
+    "persistent_worker_state_before_canary": "NOT_OBSERVED",
+    "requires_exact_main_deployment": true
+  },
+  "non_effects": [
+    "NO_PUBLICATION",
+    "NO_PUBLIC_DISPATCH",
+    "NO_BACKLOG_DRAIN",
+    "NO_BULK_REQUEUE",
+    "NO_PRODUCTION_OPERATIONAL_ADMISSION",
+    "NO_WIDER_ACTIVATION",
+    "NO_PROVIDER_SUBSTITUTION",
+    "NO_MODEL_SUBSTITUTION",
+    "NO_TOKEN_LIMIT_REMOVAL",
+    "NO_UNRELATED_SPEND_DISPOSITION",
+    "NO_LIVE_CANARY_WITHOUT_OWNER_APPROVAL"
+  ],
+  "sequence": {
+    "root_plan_digest": "sha256:ce7ee7fd56c931b147158dad2a74047ada90b805e5a4c545e53db1f4d2ae7383",
+    "sequence_ordinal": 16,
+    "constraint_change": "REVIEWED_NON_TIMEOUT_FIX",
+    "controller_timeout_ms": 160000,
+    "extraction_timeout_ms": 180000,
+    "cleanup_reserve_ms": 20000,
+    "timeout_increment_ms": 10000,
+    "call_shape_policy_version": "issue-816-v2",
+    "call_shape_policy_digest": "sha256:ba1cb4267ff78419174b50a0e233545a4bf745168d4f7fdbffa2fb6007ab5abc",
+    "projection_policy_version": "NewsroomGovernedProposalProjectionV1",
+    "projection_policy_digest": "sha256:c68a9c5bf81a8d052ba9b05f286b0d1cf664e86e2e00ee3c39684f7809b16a7c",
+    "temporal_policy_version": "graphiti-source-reference-time-v2",
+    "validator_contract_version": "NewsroomCombinedTemporalNormaliseV2",
+    "stop_condition": "FIRST_TRUTHFUL_PROVIDER_BACKED_SUCCESS",
+    "predecessor": {
+      "plan_digest": "sha256:58220d3a2b389ca25bf86f71b4d7974c6186ee26ab705af351091a20228e1db8",
+      "event_id": "sha256:f9a60f617dd5b36aaa6e0ba4c8739373ab80cbeef41460803e013abffe7cbef9",
+      "ledger_seq": 8843,
+      "outcome_digest": "sha256:e4eb6e3f22cc74b0ad3f9d95fa448fe160d48b15336388667a1cfa632785e32e",
+      "fine_failure": "TEMPORAL_INVALID",
+      "outer_failure": "OUTPUT_SCHEMA_INVALID",
+      "state": "CONFIGURATION_HELD"
+    },
+    "hold_comment": "5456734459"
+  },
+  "canonical_digest": "sha256:f0a05a07fe3d65cbaed792987ce6885fd1f5d6f70f201a67cdaece408a8b264c"
+}
