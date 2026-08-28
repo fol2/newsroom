@@ -677,6 +677,9 @@ def _receipt(
         for key in ("dispatch_state", "setup_failure"):
             if key in raw:
                 receipt[key] = raw[key]
+        fine = raw.get("combined_temporal_failure_code")
+        if isinstance(fine, str) and fine:
+            receipt["combined_temporal_failure_code"] = fine
         if "timeout_diagnostics" in raw:
             receipt["timeout_diagnostics"] = validated_timeout_diagnostics(
                 raw["timeout_diagnostics"]

@@ -295,6 +295,7 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
         for token in (
             "unique contiguous verbatim span",
             "must be distinct",
+            "both endpoint entity names",
             'return {"entities":[],"facts":[]}',
         )
     )

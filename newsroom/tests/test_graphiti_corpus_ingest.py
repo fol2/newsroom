@@ -364,6 +364,7 @@ def _complete(
     embedding_usage: dict[str, object] | None = None,
     timeout_diagnostics: tuple[dict[str, object], ...] = (),
     producer_failure: str | None = None,
+    combined_temporal_failure_code: str | None = None,
 ) -> GraphitiCycleResult:
     authority_ids = None
     if unit.authority is not None:
@@ -471,6 +472,8 @@ def _complete(
         raw["timeout_diagnostics"] = [dict(item) for item in timeout_diagnostics]
     if producer_failure is not None:
         raw["producer_failure"] = producer_failure
+    if combined_temporal_failure_code is not None:
+        raw["combined_temporal_failure_code"] = combined_temporal_failure_code
     raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
     return GraphitiCycleResult(
         ingest_id=unit.ingest_id,
@@ -3541,6 +3544,50 @@ def test_reused_malformed_no_call_is_receipted_not_retry_held(
     assert attempt_payload["timeout_diagnostics"] == [timeout_diagnostic]
     assert attempt_payload["producer_failure"] == "GraphitiCleanupTimeout"
     assert attempt_payload["receipt_digest"] == receipt["receipt_digest"]
+
+
+def test_attempt_receipt_retains_combined_temporal_failure_code() -> None:
+    from newsroom.control_plane.cycle import _receipt
+
+    unit = CorpusIngestUnit(
+        source_id="HK-04",
+        item_key="q7",
+        headline="立法會質詢",
+        body="科技與生活科課程",
+        canonical_url="https://www.edb.gov.hk/example",
+        observation_digest="sha256:obs",
+        observed_at="2026-08-16T21:41:34.000000Z",
+        proving_run_id="run-1",
+        effective_revision=_effective_revision(
+            source_id="HK-04",
+            item_key="q7",
+            headline="立法會質詢",
+            body="科技與生活科課程",
+            canonical_url="https://www.edb.gov.hk/example",
+            first_observed_at="2026-08-16T21:41:34.000000Z",
+        ),
+    )
+    result = replace(
+        _complete(
+            unit,
+            proposal_count=0,
+            entity_count=0,
+            relation_count=0,
+            combined_temporal_failure_code="EVIDENCE_UNRESOLVED",
+        ),
+        outcome="MALFORMED_OUTPUT",
+        failure_code="OUTPUT_SCHEMA_INVALID",
+    )
+    receipt = _receipt(unit, result, accounting={"status": "RECONCILED"})
+    assert receipt["combined_temporal_failure_code"] == "EVIDENCE_UNRESOLVED"
+    assert receipt["failure_code"] == "OUTPUT_SCHEMA_INVALID"
+    blank = dict(result.raw_receipt or {})
+    blank["combined_temporal_failure_code"] = ""
+    assert "combined_temporal_failure_code" not in _receipt(
+        unit,
+        replace(result, raw_receipt=blank),
+        accounting={"status": "RECONCILED"},
+    )
 
 
 def test_reused_malformed_provider_receipt_preserves_ceiling_reservation(
