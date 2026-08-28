@@ -1,0 +1,36 @@
+{
+  "schema_version": "newsroom.issue-790.provider-free-code-fix-qualification.v1",
+  "issue": 790,
+  "observed_at": "2026-08-28T16:10:00.000000Z",
+  "predecessor_outcome_digest": "sha256:bbb8be195d910c8d97db7f6a6601235fed8da3c63089c79b6926cdb5428a9a5b",
+  "provider_calls": 0,
+  "public_effects": 0,
+  "model_catalogue_queries": 0,
+  "live_canary_authorised": false,
+  "failure": {
+    "boundary": "COMBINED_TEMPORAL_VALIDATION",
+    "elapsed_ms": 225337,
+    "failure_code": "OUTPUT_SCHEMA_INVALID",
+    "local_cause": "TEMPORAL_INVALID_VALID_AT_NOT_GROUNDED_IN_EVIDENCE",
+    "provider_cause": "COMPOSER_COPIED_REFERENCE_TIME_INTO_VALID_AT",
+    "termination": "TERMINAL_ATTEMPT_FAILURE"
+  },
+  "provider_free_checks": {
+    "call_shape_policy_version": "issue-816-v2",
+    "call_shape_policy_digest": "sha256:ba1cb4267ff78419174b50a0e233545a4bf745168d4f7fdbffa2fb6007ab5abc",
+    "sdk_floor": "cursor-sdk>=1.0.29",
+    "composer_floor": "composer>=2.5",
+    "prompt_forbids_reference_time_stuffing": "PASS",
+    "prompt_null_bounds_when_no_date_cue": "PASS",
+    "preflight_b10_temporal_stuffing": "PASS",
+    "preflight_b14_step14_dry_replay": "PASS",
+    "forecast_smokes_b01_b20": "PASS",
+    "canary_fallback_remains_disabled": "PASS",
+    "focused_tests": "newsroom/tests/test_issue_790_live_canary_forecast_smokes.py,newsroom/tests/test_graphiti_combined_temporal_extraction.py::test_prompt_requires_both_endpoint_names_in_fact_or_empty",
+    "focused_tests_result": "2 passed",
+    "fix_revision": "dd68f071674df39bb9d7364b2fe1255d5618a937",
+    "persistent_worker": "UNLOADED"
+  },
+  "qualification": "TEMPORAL_REFERENCE_TIME_STUFFING_PROVIDER_FREE_READY",
+  "canonical_digest": "sha256:3c5e6a06b236929055b3db55609b4d541e41a2bcb79aade3bbf712b89f063667"
+}

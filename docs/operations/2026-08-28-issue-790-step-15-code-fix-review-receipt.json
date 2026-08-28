@@ -1,0 +1,13 @@
+{
+  "schema_version": "newsroom.issue-790.code-fix-review-receipt.v1",
+  "issue": 790,
+  "reviewed_at": "2026-08-28T16:12:00.000000Z",
+  "reviewed_fix_revision": "dd68f071674df39bb9d7364b2fe1255d5618a937",
+  "qualification_digest": "sha256:3c5e6a06b236929055b3db55609b4d541e41a2bcb79aade3bbf712b89f063667",
+  "reviewer": "cursor-agent",
+  "finding_count": 0,
+  "unresolved_high_risk_findings": 0,
+  "verdict": "FEATURE_COMPLETE_NO_UNRESOLVED_FINDINGS",
+  "scope": "forbid REFERENCE_TIME stuffing; expand preflight B10-B20 dry live-shape gates",
+  "canonical_digest": "sha256:f3f94d5afbd4c3bd2dc8ed78f390ec5e22d70e824178fd4f7b367bd6078a2868"
+}

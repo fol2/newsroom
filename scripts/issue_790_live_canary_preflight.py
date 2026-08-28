@@ -27,14 +27,14 @@ from typing import Any
 
 ROOT_DEFAULT = Path("/Users/jamesto/Coding/newsroom")
 TIP_PLAN_DEFAULT = (
-    "sha256:3878757b1a20c1a45439d849020dc7e9df1c19f81895db671d796c4dcecf73ac"
+    "sha256:58220d3a2b389ca25bf86f71b4d7974c6186ee26ab705af351091a20228e1db8"
 )
-PLAN_REL_DEFAULT = "docs/operations/2026-08-28-issue-790-success-sequence-step-14.json"
+PLAN_REL_DEFAULT = "docs/operations/2026-08-28-issue-790-success-sequence-step-15.json"
 DISP = "sha256:020f5b5669020da8e0bd4fb74cf2d9c5051533fa3b09dbed54824ccec456638c"
 PRED_EVENT = (
-    "sha256:efda5ff3fd85ff0f8f809350bc16578b31bfda674db898f9f5de247efeee1483"
+    "sha256:3706d21a68b548a0fd5be56c5409a577c24fa265f7270887ac4cf8fce9a74d35"
 )
-PRED_LEDGER = 8866
+PRED_LEDGER = 8865
 WORKER = "com.jamesto.newsroom-graphiti-worker"
 ACCEPTED_CI = ("focus-gates", "test", "full-deterministic-health")
 CALL_SHAPE_PRIMARY_MAX_OUTPUT = 16_384
@@ -649,6 +649,8 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
         and "DISABLED_BEFORE_PROVIDER_DISPATCH" in (
             (repo_for_imports / PLAN_REL_DEFAULT).read_text(encoding="utf-8")
             if (repo_for_imports / PLAN_REL_DEFAULT).is_file()
+            else (repo_for_imports / "docs/operations/2026-08-28-issue-790-success-sequence-step-14.json").read_text(encoding="utf-8")
+            if (repo_for_imports / "docs/operations/2026-08-28-issue-790-success-sequence-step-14.json").is_file()
             else ""
         ),
         "fallback_permitted=False + plan fallback_mode",
