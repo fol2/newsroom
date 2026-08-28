@@ -49,11 +49,19 @@ from newsroom.graphiti_adapter import cli_process as cli_process_module
 from newsroom.graphiti_adapter import cursor_transport as cursor_transport_module
 from newsroom.graphiti_adapter import evaluation_packet as evaluation_packet_module
 from newsroom.graphiti_adapter import real as real_graphiti_module
+from newsroom.graphiti_adapter.combined_temporal_projection import (
+    PROJECTION_POLICY_DIGEST,
+    PROJECTION_POLICY_VERSION,
+)
+from newsroom.graphiti_adapter.combined_temporal_validation import (
+    VALIDATOR_CONTRACT_VERSION,
+)
 from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_EXTRACTION_TIMEOUT_MS,
     GRAPHITI_MAX_CLEANUP_TIMEOUT_MS,
 )
 from newsroom.graphiti_adapter.cli_process import validated_timeout_diagnostics
+from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_VERSION
 
 ISSUE_790_PLAN_SCHEMA = "newsroom.issue-790.conservative-disposition-plan.v1"
 ISSUE_790_ITERATIVE_PLAN_SCHEMA = "newsroom.issue-790.iterative-canary-plan.v2"
@@ -78,6 +86,25 @@ ISSUE_790_REVIEWED_FIX_SCHEMA = "newsroom.issue-790.reviewed-non-timeout-fix.v1"
 _ISSUE_790_REVIEWED_SUCCESSOR_TRANSITIONS = frozenset(
     {"REVIEWED_NON_TIMEOUT_FIX", "COMPATIBILITY_FLOOR_ARCHITECTURE"}
 )
+_STEP16_SEQUENCE_IDENTITY_FIELDS = frozenset(
+    {
+        "projection_policy_version",
+        "projection_policy_digest",
+        "temporal_policy_version",
+        "validator_contract_version",
+        "pre_dispatch_operational_requirements_digest",
+    }
+)
+_PENDING_PLAN_ONLY_KEYS = ("plan_status", "executable", "live_canary_authorised")
+_PENDING_SEQUENCE_ONLY_KEYS = ("hold_comment",)
+ISSUE_790_STEP16_PENDING_PLAN_PATH = Path(
+    "docs/operations/2026-08-28-issue-790-success-sequence-step-16.pending-owner-review.json"
+)
+ISSUE_790_STEP16_PRE_DISPATCH_PATH = Path(
+    "docs/operations/2026-08-28-issue-790-step-16-pre-dispatch-operational-requirements.json"
+)
+ISSUE_790_STEP16_CHECKED_APPROVED_BY = "checked:issue-790-step16-sealer"
+ISSUE_790_STEP16_CHECKED_APPROVED_AT = "2026-08-28T21:00:00.000000Z"
 ISSUE_790_ITERATIVE_PREFLIGHT_SCHEMA = (
     "newsroom.issue-790.iterative-fresh-event-preflight.v2"
 )
@@ -536,6 +563,8 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
         }
         if constraint_change in _ISSUE_790_REVIEWED_SUCCESSOR_TRANSITIONS:
             expected_sequence_fields.add("reviewed_fix")
+        if sequence.get("sequence_ordinal") == 16:
+            expected_sequence_fields.update(_STEP16_SEQUENCE_IDENTITY_FIELDS)
         if set(sequence) != expected_sequence_fields:
             raise Issue790DispositionError("issue #790 sequence fields differ")
         predecessor = _record(sequence.get("predecessor"), field="predecessor")
@@ -614,6 +643,31 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
                 "issue #790 sequence constraint change differs"
             )
         _text(sequence, "call_shape_policy_version")
+        if sequence.get("sequence_ordinal") == 16:
+            if (
+                sequence.get("projection_policy_version") != PROJECTION_POLICY_VERSION
+                or sequence.get("projection_policy_digest") != PROJECTION_POLICY_DIGEST
+                or sequence.get("temporal_policy_version") != TEMPORAL_POLICY_VERSION
+                or sequence.get("validator_contract_version")
+                != VALIDATOR_CONTRACT_VERSION
+                or re.fullmatch(
+                    r"sha256:[0-9a-f]{64}",
+                    _text(
+                        sequence,
+                        "pre_dispatch_operational_requirements_digest",
+                    ),
+                )
+                is None
+            ):
+                raise Issue790DispositionError(
+                    "issue #790 step 16 identity fields differ"
+                )
+            if predecessor.get("plan_digest") != (
+                issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_15_PLAN_DIGEST
+            ):
+                raise Issue790DispositionError(
+                    "issue #790 predecessor identity differs"
+                )
         causal_report = _validated_causal_report(
             sequence.get("predecessor_causal_report")
         )
@@ -765,6 +819,16 @@ def _require_approved_plan(value: Mapping[str, object]) -> dict[str, object]:
                 None if reviewed_fix is None else reviewed_fix.get("record_digest")
             )
             != contract.reviewed_fix_digest
+            or sequence.get("projection_policy_digest")
+            != contract.projection_policy_digest
+            or sequence.get("projection_policy_version")
+            != contract.projection_policy_version
+            or sequence.get("temporal_policy_version")
+            != contract.temporal_policy_version
+            or sequence.get("validator_contract_version")
+            != contract.validator_contract_version
+            or sequence.get("pre_dispatch_operational_requirements_digest")
+            != contract.pre_dispatch_operational_requirements_digest
         ):
             raise Issue790DispositionError(
                 "issue #790 approved sequence contract differs"
@@ -2852,6 +2916,88 @@ def write_issue_790_receipt(path: Path, receipt: Mapping[str, object]) -> None:
         _unlink_temporary(temporary)
 
 
+def issue_790_step16_checked_approval(pending_digest: str) -> dict[str, str]:
+    """Return the checked, non-live approval tuple bound to one pending digest."""
+
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", pending_digest) is None:
+        raise Issue790DispositionError("issue #790 pending digest differs")
+    return {
+        "approved_by": ISSUE_790_STEP16_CHECKED_APPROVED_BY,
+        "approval_reference": f"checked:{pending_digest}",
+        "approved_at": ISSUE_790_STEP16_CHECKED_APPROVED_AT,
+        "scope": _SCOPE,
+    }
+
+
+def seal_issue_790_step16_plan(
+    pending: Mapping[str, object],
+    approval: Mapping[str, object],
+    *,
+    pre_dispatch: Mapping[str, object],
+) -> dict[str, object]:
+    """Seal the exact pending family plus approval into one validator-passing plan.
+
+    The result is structurally executable-shaped and remains unauthorised for
+    live effect until a later owner-authenticated apply.
+    """
+
+    pending_plan = dict(pending)
+    supplied = pending_plan.get("canonical_digest")
+    unsigned = {
+        key: item for key, item in pending_plan.items() if key != "canonical_digest"
+    }
+    if supplied != digest_canonical(unsigned):
+        raise Issue790DispositionError("issue #790 pending plan digest differs")
+    if pending_plan.get("executable") is not False:
+        raise Issue790DispositionError(
+            "issue #790 pending plan must remain non-executable"
+        )
+    sequence = dict(_record(pending_plan.get("sequence"), field="sequence"))
+    if sequence.get("sequence_ordinal") != 16:
+        raise Issue790DispositionError("issue #790 pending plan ordinal differs")
+    predecessor = _record(sequence.get("predecessor"), field="predecessor")
+    if (
+        predecessor.get("plan_digest")
+        != issue_790_contract_module.ISSUE_790_SUCCESS_SEQUENCE_STEP_15_PLAN_DIGEST
+    ):
+        raise Issue790DispositionError("issue #790 predecessor identity differs")
+    pre = dict(pre_dispatch)
+    pre_unsigned = {
+        key: item for key, item in pre.items() if key != "requirements_digest"
+    }
+    if pre.get("requirements_digest") != digest_canonical(pre_unsigned):
+        raise Issue790DispositionError("issue #790 pre-dispatch digest differs")
+    if sequence.get("pre_dispatch_operational_requirements_digest") != pre.get(
+        "requirements_digest"
+    ):
+        raise Issue790DispositionError("issue #790 pre-dispatch identity differs")
+    if (
+        sequence.get("projection_policy_version") != PROJECTION_POLICY_VERSION
+        or sequence.get("projection_policy_digest") != PROJECTION_POLICY_DIGEST
+        or sequence.get("temporal_policy_version") != TEMPORAL_POLICY_VERSION
+        or sequence.get("validator_contract_version") != VALIDATOR_CONTRACT_VERSION
+    ):
+        raise Issue790DispositionError("issue #790 projection identity differs")
+    _validated_reviewed_fix(sequence.get("reviewed_fix"))
+    _validated_non_timeout_causal_report(sequence.get("predecessor_causal_report"))
+    for key in _PENDING_PLAN_ONLY_KEYS:
+        pending_plan.pop(key, None)
+    for key in _PENDING_SEQUENCE_ONLY_KEYS:
+        sequence.pop(key, None)
+    pending_plan["sequence"] = sequence
+    pending_plan["approval"] = dict(approval)
+    pending_plan["release"] = {
+        "kind": _RELEASE_KIND,
+        "evidence": "CONSERVATIVE_DISPOSITION_DIGEST",
+    }
+    pending_plan["non_effects"] = list(_NON_EFFECTS)
+    pending_plan.pop("canonical_digest", None)
+    pending_plan["canonical_digest"] = digest_canonical(
+        {key: item for key, item in pending_plan.items() if key != "canonical_digest"}
+    )
+    return validate_issue_790_plan(pending_plan)
+
+
 __all__ = [
     "ISSUE_790_PLAN_SCHEMA",
     "ISSUE_790_RECEIPT_SCHEMA",
@@ -2866,5 +3012,7 @@ __all__ = [
     "load_issue_790_plan",
     "run_issue_790_canary",
     "validate_issue_790_plan",
+    "issue_790_step16_checked_approval",
+    "seal_issue_790_step16_plan",
     "write_issue_790_receipt",
 ]

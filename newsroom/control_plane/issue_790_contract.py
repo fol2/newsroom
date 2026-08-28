@@ -69,6 +69,9 @@ ISSUE_790_SUCCESS_SEQUENCE_STEP_14_PLAN_DIGEST = (
 ISSUE_790_SUCCESS_SEQUENCE_STEP_15_PLAN_DIGEST = (
     "sha256:58220d3a2b389ca25bf86f71b4d7974c6186ee26ab705af351091a20228e1db8"
 )
+ISSUE_790_SUCCESS_SEQUENCE_STEP_16_PLAN_DIGEST = (
+    "sha256:72723b72b71f12fee2a9ec31c2b4145e5cbac4ac55f8ddbc51319248e94c21f9"
+)
 
 
 
@@ -97,6 +100,11 @@ class Issue790ApprovedPlanContract:
     predecessor_causal_report_digest: str | None
     constraint_change: str | None
     reviewed_fix_digest: str | None
+    projection_policy_version: str | None = None
+    projection_policy_digest: str | None = None
+    temporal_policy_version: str | None = None
+    validator_contract_version: str | None = None
+    pre_dispatch_operational_requirements_digest: str | None = None
 
 
 _SUCCESS_SEQUENCE_CONTRACTS = (
@@ -616,6 +624,52 @@ _SUCCESS_SEQUENCE_CONTRACTS = (
             "sha256:2294e17e08ad9a287e52450152b7f4c7e019b9300e36f5efba04397b1b83a42d"
         ),
     ),
+    Issue790ApprovedPlanContract(
+        schema_version="newsroom.issue-790.iterative-canary-plan.v2",
+        plan_digest=ISSUE_790_SUCCESS_SEQUENCE_STEP_16_PLAN_DIGEST,
+        invocation_id=(
+            "sha256:d0712807fd025520d0a94e5a28c532d4cb8684c936387290fe7eeb49d0b2336c"
+        ),
+        terminal_digest=(
+            "sha256:d48e844404516bd41b17038b42a834c6e54bf5da520ef046f3baf81ea7a8cbbe"
+        ),
+        allocation_digest=(
+            "sha256:c789330ca7151d097e6d366dd65481ff21d55f93891ff61e368d7369b12c7120"
+        ),
+        approved_by="checked:issue-790-step16-sealer",
+        approval_reference=(
+            "checked:sha256:8651368768f8ead04d2d96c0d0bbcf387b3baefedaaa5b5a07fb2e4d169fe271"
+        ),
+        approved_at="2026-08-28T21:00:00.000000Z",
+        scope=ISSUE_790_APPROVED_SCOPE,
+        terminal_outcome="FAILED",
+        route_open_reason="SYSTEMIC_TRANSPORT",
+        root_plan_digest=ISSUE_790_APPROVED_PLAN_DIGEST,
+        predecessor_plan_digest=ISSUE_790_SUCCESS_SEQUENCE_STEP_15_PLAN_DIGEST,
+        sequence_ordinal=16,
+        controller_timeout_ms=160_000,
+        extraction_timeout_ms=180_000,
+        cleanup_reserve_ms=20_000,
+        fixed_constraints_digest=(
+            "sha256:accd35045a4bc3c8d20c50c272755e7d4e6980dc6d7e1a4f029b36b3cd2a20c1"
+        ),
+        predecessor_causal_report_digest=(
+            "sha256:c10f71ef35bbbd7e4bcc3eac005d3f4959d03dcca699fb447d4f8eeaddaa4ca5"
+        ),
+        constraint_change="REVIEWED_NON_TIMEOUT_FIX",
+        reviewed_fix_digest=(
+            "sha256:bfb44a10ec9441c9a2c05761650bad0bd6e289910bbb58885241420ede0aaa5c"
+        ),
+        projection_policy_version="NewsroomGovernedProposalProjectionV1",
+        projection_policy_digest=(
+            "sha256:c68a9c5bf81a8d052ba9b05f286b0d1cf664e86e2e00ee3c39684f7809b16a7c"
+        ),
+        temporal_policy_version="graphiti-source-reference-time-v2",
+        validator_contract_version="NewsroomCombinedTemporalNormaliseV2",
+        pre_dispatch_operational_requirements_digest=(
+            "sha256:968d0875cbed3a37cca56c2aa696598c3996e10d3a0ad6edc5978c21965d587b"
+        ),
+    ),
 )
 
 
@@ -700,6 +754,7 @@ __all__ = [
     "ISSUE_790_SUCCESS_SEQUENCE_STEP_13_PLAN_DIGEST",
     "ISSUE_790_SUCCESS_SEQUENCE_STEP_14_PLAN_DIGEST",
     "ISSUE_790_SUCCESS_SEQUENCE_STEP_15_PLAN_DIGEST",
+    "ISSUE_790_SUCCESS_SEQUENCE_STEP_16_PLAN_DIGEST",
     "Issue790ApprovedPlanContract",
     "issue_790_approved_plan_contract",
     "issue_790_approved_plan_contracts",

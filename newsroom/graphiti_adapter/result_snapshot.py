@@ -50,11 +50,17 @@ from newsroom.graphiti_adapter.types import GraphitiAdapterContractError
 def _retained_temporal_success_mode(
     recovered_raw: dict[str, object],
 ) -> str:
-    """Select historical v1 vs v2 replay from the retained receipt identity."""
+    """Select historical v1 vs v2 replay from the retained receipt identity.
+
+    v1 requires an explicit retained v1 version or digest. Absence is not a
+    historical identity and must not downgrade a stripped v2 success.
+    """
 
     combined = recovered_raw.get("combined_temporal_receipt")
     if combined is None:
-        return "v1"
+        raise GraphitiAdapterContractError(
+            "retained temporal policy identity is missing"
+        )
     if not isinstance(combined, dict):
         raise GraphitiAdapterContractError(
             "retained combined_temporal_receipt is malformed"

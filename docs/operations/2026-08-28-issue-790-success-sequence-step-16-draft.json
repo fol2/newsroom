@@ -7,6 +7,8 @@
   "satisfied_prerequisites": [
     "STEP_15_EXHAUSTED",
     "GOVERNED_PROPOSAL_PROJECTION_MERGED",
+    "FINAL_RECEIPT_BINDING_MERGED",
+    "REPLAY_CROSS_BINDING_MERGED",
     "PROVIDER_FREE_STEP_13_15_REPRODUCTIONS",
     "FINAL_REVIEW_RECEIPT"
   ],
@@ -33,7 +35,15 @@
     "validator_contract_version": "NewsroomCombinedTemporalNormaliseV2",
     "call_shape_policy_version": "issue-816-v2",
     "call_shape_policy_digest": "sha256:ba1cb4267ff78419174b50a0e233545a4bf745168d4f7fdbffa2fb6007ab5abc",
-    "authority_comment": "5455732888"
+    "authority_comment": "5455732888",
+    "receipt_binding_hold_comment": "5456734459",
+    "receipt_binding_pr": "https://github.com/fol2/newsroom/pull/840",
+    "receipt_binding_merged_commit": "7b6c3423bf4b46b80a930826c00383097105a14d",
+    "receipt_binding_merged_tree": "d77ba3b4a73161b9b1b3171e1d8b7aab31f60d47",
+    "replay_cross_binding_hold_comment": "5457138518",
+    "replay_cross_binding_pr": "https://github.com/fol2/newsroom/pull/842",
+    "replay_cross_binding_merged_commit": "9cc0f5f274056bdeac33ca8f8abe4d8dfd7a5323",
+    "replay_cross_binding_merged_tree": "6ae1114a5dede6a0b18d1519ac4aed148c772403"
   },
   "intended_sequence": {
     "stop_condition": "FIRST_TRUTHFUL_PROVIDER_BACKED_SUCCESS",
@@ -49,10 +59,11 @@
     "notes": "Mint executable Step 16 only after this draft's reviewed fix is on exact main, owner names the merged commit and projection/receipt identities, and authorises at most one catalogue query if required, one untouched fresh event, one provider dispatch, zero retries and zero fallback."
   },
   "intended_reviewed_fix": {
-    "pull_request_url": null,
+    "pull_request_url": "https://github.com/fol2/newsroom/pull/842",
     "issue": 790,
     "fix_kind": "CODE",
-    "notes": "Governed proposal projection seam. Placeholder until the ordinary Step 16 implementation PR merges; this draft does not authorise itself or any live effect."
+    "reviewed_fix_revision": "9cc0f5f274056bdeac33ca8f8abe4d8dfd7a5323",
+    "notes": "Replay cross-binding + historical v1 reader. Draft remains executable:false; does not authorise live canary."
   },
-  "canonical_digest": "sha256:8bfbd0d0448e51a1f827c5da59b2e01a8b7b489db1991f8fc4adec1bc395d38d"
+  "canonical_digest": "sha256:c49a3a2016e7b7bd10a05cccb878d4673e9fbfe1342490a8740db4f474fb44a2"
 }
