@@ -1,0 +1,22 @@
+{
+  "schema_version": "newsroom.issue-790.provider-free-qualification.v1",
+  "issue": 790,
+  "sequence_ordinal": 16,
+  "executable": false,
+  "merged_commit": "9cc0f5f274056bdeac33ca8f8abe4d8dfd7a5323",
+  "merged_tree": "6ae1114a5dede6a0b18d1519ac4aed148c772403",
+  "hold_comment": "5457138518",
+  "focus": [
+    "validate_replay_receipt_binding cross-equality",
+    "retained temporal-policy identity selects v1/v2/unknown",
+    "coherent re-signed contradiction tests",
+    "historical v1 success replay",
+    "Step 14 accepted_count>0 with empty outer proposals fails closed"
+  ],
+  "temporal_policy_version": "graphiti-source-reference-time-v2",
+  "projection_policy_version": "NewsroomGovernedProposalProjectionV1",
+  "validator_contract_version": "NewsroomCombinedTemporalNormaliseV2",
+  "local_focus_gates_manifest_digest": "sha256:0fd809b45cd70a11a5bb603795789954e6c072104004eabc87b4c134c9fe76a8",
+  "local_focus_gates_result": "1538_PASSED",
+  "qualification_digest": "sha256:a3beda40768154c125c85c4d1f84039fd46b1bdc37c6a48ad4ba53efb2570072"
+}
