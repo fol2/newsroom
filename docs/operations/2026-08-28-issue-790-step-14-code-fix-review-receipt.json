@@ -1,0 +1,13 @@
+{
+  "schema_version": "newsroom.issue-790.code-fix-review-receipt.v1",
+  "issue": 790,
+  "reviewed_at": "2026-08-28T14:45:00.000000Z",
+  "reviewed_fix_revision": "a18d6ccff824ebb15028fd9c1bcdee3b958edeec",
+  "qualification_digest": "sha256:e92c426a8eec06ef2895254e986c40c44d8e6b3cc53f8a135607f0ad69c947fe",
+  "reviewer": "cursor-agent",
+  "finding_count": 0,
+  "unresolved_high_risk_findings": 0,
+  "verdict": "FEATURE_COMPLETE_NO_UNRESOLVED_FINDINGS",
+  "scope": "prefer-empty when fact lacks both endpoint names; retain fine failure code on receipts",
+  "canonical_digest": "sha256:f685e48b8ca9ac98a1ad8d331379befe4d3d8a1f2659ef541ea7a6ecf8f45534"
+}

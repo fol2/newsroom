@@ -22,14 +22,14 @@ from pathlib import Path
 
 ROOT_DEFAULT = Path("/Users/jamesto/Coding/newsroom")
 TIP_PLAN_DEFAULT = (
-    "sha256:44b7f2ab1a36232b458d0d604c010f155f65e57cb6aed25d00d5577bb4d83bc8"
+    "sha256:3878757b1a20c1a45439d849020dc7e9df1c19f81895db671d796c4dcecf73ac"
 )
-PLAN_REL_DEFAULT = "docs/operations/2026-08-28-issue-790-success-sequence-step-13.json"
+PLAN_REL_DEFAULT = "docs/operations/2026-08-28-issue-790-success-sequence-step-14.json"
 DISP = "sha256:020f5b5669020da8e0bd4fb74cf2d9c5051533fa3b09dbed54824ccec456638c"
 PRED_EVENT = (
-    "sha256:32a612bf85399379bc80ccf955b3a99af0c8fd6de2cf47d9ee9e0672d85c5437"
+    "sha256:efda5ff3fd85ff0f8f809350bc16578b31bfda674db898f9f5de247efeee1483"
 )
-PRED_LEDGER = 8867
+PRED_LEDGER = 8866
 WORKER = "com.jamesto.newsroom-graphiti-worker"
 ACCEPTED_CI = ("focus-gates", "test", "full-deterministic-health")
 
