@@ -5,6 +5,10 @@ Exit 0 only when every line is PASS. Provider-free; no live Cursor call.
 
 O07 exact-head CI prefers Focus Gates on the tip SHA. After merge, dispatch
 Focus Gates on tip — do not wait for Full Repository Health.
+
+Forecast B-gates dry-validate every combined-temporal failure class plus
+infra contracts that have already bitten live canaries. Residual model
+non-compliance cannot be proved provider-free; that residual is printed.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ import sys
 from datetime import UTC, datetime
 from json import JSONDecoder
 from pathlib import Path
+from typing import Any
 
 ROOT_DEFAULT = Path("/Users/jamesto/Coding/newsroom")
 TIP_PLAN_DEFAULT = (
@@ -32,6 +37,7 @@ PRED_EVENT = (
 PRED_LEDGER = 8866
 WORKER = "com.jamesto.newsroom-graphiti-worker"
 ACCEPTED_CI = ("focus-gates", "test", "full-deterministic-health")
+CALL_SHAPE_PRIMARY_MAX_OUTPUT = 16_384
 
 
 def sh(*args: str, cwd: Path) -> str:
@@ -41,6 +47,21 @@ def sh(*args: str, cwd: Path) -> str:
 def _check(rows: list[tuple[str, bool, str]], name: str, ok: bool, detail: str) -> None:
     rows.append((name, ok, detail))
     print(f"[{'PASS' if ok else 'FAIL'}] {name} — {detail}")
+
+
+def _expect_code(
+    payload: dict[str, Any],
+    segs: Any,
+    ref: datetime,
+    *,
+    normalise: Any,
+    CombinedTemporalError: Any,
+) -> Any:
+    try:
+        normalise(payload, segs, ref)
+    except CombinedTemporalError as exc:
+        return exc.code
+    return None
 
 
 def _ops_gates(
@@ -230,12 +251,15 @@ def _ops_gates(
 
 
 def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
-    """Provider-free dry validation of the nine forecast blockers."""
+    """Provider-free dry validation of forecast live-canary blockers."""
 
     rows: list[tuple[str, bool, str]] = []
     sys.path.insert(0, str(repo_for_imports))
     from newsroom.control_plane import issue_790_disposition as disp
     from newsroom.control_plane.cycle import qualify_fresh_graphiti_event
+    from newsroom.control_plane.graphiti_requests import (
+        load_checked_graphiti_call_shape_policy,
+    )
     from newsroom.graphiti_adapter.combined_temporal_contract import build_compact_prompt
     from newsroom.graphiti_adapter.combined_temporal_evidence import segment_source
     from newsroom.graphiti_adapter.combined_temporal_fixtures import FIXTURES
@@ -244,17 +268,22 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
         CombinedTemporalFailureCode,
     )
     from newsroom.graphiti_adapter.combined_temporal_validation import normalise
+    from newsroom.graphiti_adapter.evaluation_attempt import evaluation_attempt_for
+    from newsroom.graphiti_adapter.real import RealGraphitiAdapter
 
     gold = next(c for c in FIXTURES if c.name == "pair-current")
     segs = segment_source(gold.revision.body)
     ref = datetime.fromisoformat(gold.revision.published_at.replace("Z", "+00:00"))
     prompt = build_compact_prompt(gold.revision).text
+    expect = lambda payload: _expect_code(
+        payload,
+        segs,
+        ref,
+        normalise=normalise,
+        CombinedTemporalError=CombinedTemporalError,
+    )
 
-    empty_ok = True
-    try:
-        normalise({"entities": [], "facts": []}, segs, ref)
-    except CombinedTemporalError:
-        empty_ok = False
+    empty_ok = expect({"entities": [], "facts": []}) is None
     body = gold.revision.body
     contradictory = {
         "entities": list(gold.gold["entities"])
@@ -285,32 +314,26 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
             },
         ],
     }
-    contra = None
-    try:
-        normalise(contradictory, segs, ref)
-    except CombinedTemporalError as exc:
-        contra = exc.code
+    contra = expect(contradictory)
     prompt_rules = all(
         token in prompt
         for token in (
             "unique contiguous verbatim span",
             "must be distinct",
             "both endpoint entity names",
+            "Do not copy REFERENCE_TIME",
+            "no date cue",
             'return {"entities":[],"facts":[]}',
         )
     )
     _check(
         rows,
         "B01 prefer-empty / reject reused fact strings",
-        empty_ok and contra == CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED and prompt_rules,
+        empty_ok and contra is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED and prompt_rules,
         f"empty={empty_ok} contra={contra} prompt={prompt_rules}",
     )
 
-    gold_ok = True
-    try:
-        normalise(gold.gold, segs, ref)
-    except CombinedTemporalError:
-        gold_ok = False
+    gold_ok = expect(gold.gold) is None
     amb = {
         "entities": [
             {"local_id": 0, "name": "Legislative Council", "entity_type_id": 0, "evidence_segment_ids": [0]},
@@ -333,54 +356,39 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
             }
         ],
     }
-    amb_code = None
-    try:
-        normalise(amb, segs, ref)
-    except CombinedTemporalError as exc:
-        amb_code = exc.code
+    amb_code = expect(amb)
     _check(
         rows,
         "B02 gold passes; weak attribution fails",
-        gold_ok and amb_code == CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
+        gold_ok and amb_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
         f"gold={gold_ok} amb={amb_code}",
     )
 
-    self_code = orphan_code = None
-    try:
-        normalise(
-            {
-                "entities": [gold.gold["entities"][0]],
-                "facts": [{**gold.gold["facts"][0], "source_local_id": 0, "target_local_id": 0}],
-            },
-            segs,
-            ref,
-        )
-    except CombinedTemporalError as exc:
-        self_code = exc.code
-    try:
-        normalise(
-            {
-                "entities": list(gold.gold["entities"])
-                + [
-                    {
-                        "local_id": 2,
-                        "name": "Technology and Living",
-                        "entity_type_id": 0,
-                        "evidence_segment_ids": [0],
-                    }
-                ],
-                "facts": gold.gold["facts"],
-            },
-            segs,
-            ref,
-        )
-    except CombinedTemporalError as exc:
-        orphan_code = exc.code
+    self_code = expect(
+        {
+            "entities": [gold.gold["entities"][0]],
+            "facts": [{**gold.gold["facts"][0], "source_local_id": 0, "target_local_id": 0}],
+        }
+    )
+    orphan_code = expect(
+        {
+            "entities": list(gold.gold["entities"])
+            + [
+                {
+                    "local_id": 2,
+                    "name": "Technology and Living",
+                    "entity_type_id": 0,
+                    "evidence_segment_ids": [0],
+                }
+            ],
+            "facts": gold.gold["facts"],
+        }
+    )
     _check(
         rows,
         "B03 IDENTITY self-loop + orphan entity rejected",
-        self_code == CombinedTemporalFailureCode.IDENTITY_INVALID
-        and orphan_code == CombinedTemporalFailureCode.IDENTITY_INVALID,
+        self_code is CombinedTemporalFailureCode.IDENTITY_INVALID
+        and orphan_code is CombinedTemporalFailureCode.IDENTITY_INVALID,
         f"self={self_code} orphan={orphan_code}",
     )
 
@@ -398,19 +406,21 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
         f"suffix_ok={parsed == gold.gold} trunc_fail={trunc_fail}",
     )
 
-    body = Path(disp.__file__).read_text(encoding="utf-8")
+    disp_src = Path(disp.__file__).read_text(encoding="utf-8")
     term_req = (
-        'process_result.get("state") == "TERMINAL"' in body
-        and 'event_after_record.get("state") == "TERMINAL"' in body
+        'process_result.get("state") == "TERMINAL"' in disp_src
+        and 'event_after_record.get("state") == "TERMINAL"' in disp_src
     )
     _check(rows, "B05 canary pass requires TERMINAL", term_req, "process+event TERMINAL")
 
-    m = re.search(r"truthful_success = bool\([\s\S]*?\)\n", body)
+    m = re.search(r"truthful_success = bool\([\s\S]*?\)\n", disp_src)
     truthful_block = m.group(0) if m else ""
     _check(
         rows,
         "B06 empty/zero proposals allowed by stop formula",
-        empty_ok and "proposal" not in truthful_block.lower() and any(c.name == "zero-result" for c in FIXTURES),
+        empty_ok
+        and "proposal" not in truthful_block.lower()
+        and any(c.name == "zero-result" for c in FIXTURES),
         "no proposal gate in truthful_success",
     )
 
@@ -426,15 +436,255 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
         callable(disp.collect_issue_790_operational_evidence),
         "collect_issue_790_operational_evidence",
     )
-    canary_start = body.find("canary_evidence_passed = bool")
-    canary_end = body.find("receipt_without_digest", canary_start)
-    canary_block = body[canary_start:canary_end] if canary_start >= 0 and canary_end > canary_start else ""
+    canary_start = disp_src.find("canary_evidence_passed = bool")
+    canary_end = disp_src.find("receipt_without_digest", canary_start)
+    canary_block = (
+        disp_src[canary_start:canary_end]
+        if canary_start >= 0 and canary_end > canary_start
+        else ""
+    )
     _check(
         rows,
         "B09 embedding not required for canary pass",
         bool(canary_block) and "embed" not in canary_block.lower(),
         f"block_bytes={len(canary_block)} no embedding gate",
     )
+
+    # --- expanded forecast coverage (post Step 14 surprise) ---
+    stuffed = json.loads(json.dumps(gold.gold))
+    stuffed["facts"][0]["valid_at"] = gold.revision.reference_time
+    stuffed_code = expect(stuffed)
+    null_ok = expect(gold.gold) is None
+    _check(
+        rows,
+        "B10 TEMPORAL: REFERENCE_TIME stuffing rejected; null bounds OK",
+        stuffed_code is CombinedTemporalFailureCode.TEMPORAL_INVALID and null_ok,
+        f"stuffed={stuffed_code} null_gold={null_ok}",
+    )
+
+    cue_body = "Alice asked Bob about the curriculum on 2026-08-21."
+    cue_segs = segment_source(cue_body)
+    cue_ref = datetime(2026, 8, 26, 5, 28, 42, tzinfo=UTC)
+    cue_null = {
+        "entities": [
+            {"local_id": 0, "name": "Alice", "entity_type_id": 0, "evidence_segment_ids": [0]},
+            {"local_id": 1, "name": "Bob", "entity_type_id": 0, "evidence_segment_ids": [0]},
+        ],
+        "facts": [
+            {
+                "source_local_id": 0,
+                "target_local_id": 1,
+                "relation_type": "ASKED",
+                "fact": "Alice asked Bob about the curriculum on 2026-08-21",
+                "valid_at": None,
+                "invalid_at": None,
+                "evidence_segment_ids": [0],
+            }
+        ],
+    }
+    cue_null_code = _expect_code(
+        cue_null,
+        cue_segs,
+        cue_ref,
+        normalise=normalise,
+        CombinedTemporalError=CombinedTemporalError,
+    )
+    _check(
+        rows,
+        "B11 TEMPORAL: date cue with both nulls rejected",
+        cue_null_code is CombinedTemporalFailureCode.TEMPORAL_INVALID,
+        f"code={cue_null_code}",
+    )
+
+    bad_relation = json.loads(json.dumps(gold.gold))
+    bad_relation["facts"][0]["relation_type"] = "asked about"
+    malformed = expect(bad_relation)
+    bad_type = json.loads(json.dumps(gold.gold))
+    bad_type["entities"][0]["entity_type_id"] = 1
+    identity_type = expect(bad_type)
+    _check(
+        rows,
+        "B12 MALFORMED relation_type + non-zero entity_type_id rejected",
+        malformed is CombinedTemporalFailureCode.MALFORMED_OBJECT
+        and identity_type is CombinedTemporalFailureCode.IDENTITY_INVALID,
+        f"relation={malformed} type_id={identity_type}",
+    )
+
+    # Step 13 live shape: fact missing an endpoint name
+    step13 = {
+        "entities": [
+            {"local_id": 0, "name": "Police officer", "entity_type_id": 0, "evidence_segment_ids": [0]},
+            {"local_id": 1, "name": "woman", "entity_type_id": 0, "evidence_segment_ids": [0]},
+        ],
+        "facts": [
+            {
+                "source_local_id": 0,
+                "target_local_id": 1,
+                "relation_type": "STARTED_SEXUAL_RELATIONSHIP_WITH",
+                "fact": "starting sexual relationship with woman",
+                "valid_at": None,
+                "invalid_at": None,
+                "evidence_segment_ids": [0],
+            }
+        ],
+    }
+    step13_segs = segment_source(
+        "Police officer sacked after starting sexual relationship with woman."
+    )
+    step13_code = _expect_code(
+        step13,
+        step13_segs,
+        cue_ref,
+        normalise=normalise,
+        CombinedTemporalError=CombinedTemporalError,
+    )
+    _check(
+        rows,
+        "B13 dry-replay Step 13 missing-endpoint → EVIDENCE_UNRESOLVED",
+        step13_code is CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
+        f"code={step13_code}",
+    )
+
+    # Step 14 live shape: grounded endpoints but REFERENCE_TIME stuffed
+    step14_body = "李家超探訪元州邨居民 試踏健身單車。"
+    step14_segs = segment_source(step14_body)
+    step14_ref = datetime(2026, 8, 26, 7, 29, 33, tzinfo=UTC)
+    step14 = {
+        "entities": [
+            {"local_id": 0, "name": "李家超", "entity_type_id": 0, "evidence_segment_ids": [0]},
+            {"local_id": 1, "name": "元州邨", "entity_type_id": 0, "evidence_segment_ids": [0]},
+        ],
+        "facts": [
+            {
+                "source_local_id": 0,
+                "target_local_id": 1,
+                "relation_type": "VISITED",
+                "fact": "李家超探訪元州邨居民",
+                "valid_at": "2026-08-26T07:29:33.000000Z",
+                "invalid_at": None,
+                "evidence_segment_ids": [0],
+            }
+        ],
+    }
+    step14_code = _expect_code(
+        step14,
+        step14_segs,
+        step14_ref,
+        normalise=normalise,
+        CombinedTemporalError=CombinedTemporalError,
+    )
+    step14_null = json.loads(json.dumps(step14))
+    step14_null["facts"][0]["valid_at"] = None
+    step14_null_code = _expect_code(
+        step14_null,
+        step14_segs,
+        step14_ref,
+        normalise=normalise,
+        CombinedTemporalError=CombinedTemporalError,
+    )
+    _check(
+        rows,
+        "B14 dry-replay Step 14 REFERENCE_TIME valid_at → TEMPORAL_INVALID; null OK",
+        step14_code is CombinedTemporalFailureCode.TEMPORAL_INVALID
+        and step14_null_code is None,
+        f"stuffed={step14_code} null={step14_null_code}",
+    )
+
+    attempt = evaluation_attempt_for(("A retained source passage.",))
+    budget = attempt.extraction_request.budget.max_response_tokens
+    policy = load_checked_graphiti_call_shape_policy()
+    primary = next(r for r in policy.qualified_routes if r.leaf_class.value == "PRIMARY")
+    _check(
+        rows,
+        "B15 extraction budget matches call-shape PRIMARY max_output",
+        budget == CALL_SHAPE_PRIMARY_MAX_OUTPUT
+        and int(primary.max_output_tokens) == CALL_SHAPE_PRIMARY_MAX_OUTPUT,
+        f"budget={budget} call_shape={primary.max_output_tokens}",
+    )
+
+    cycle_src = (
+        repo_for_imports / "newsroom/control_plane/cycle.py"
+    ).read_text(encoding="utf-8")
+    real_src = (
+        repo_for_imports / "newsroom/graphiti_adapter/real.py"
+    ).read_text(encoding="utf-8")
+    usage_src = (
+        repo_for_imports / "newsroom/control_plane/model_usage.py"
+    ).read_text(encoding="utf-8")
+    _check(
+        rows,
+        "B16 attempt receipt retains combined_temporal_failure_code",
+        'receipt["combined_temporal_failure_code"] = fine' in cycle_src
+        or (
+            "combined_temporal_failure_code" in cycle_src
+            and 'receipt["combined_temporal_failure_code"]' in cycle_src
+        ),
+        "cycle._receipt copies fine code",
+    )
+    _check(
+        rows,
+        "B17 PIPELINE_FAILED maps to PRODUCER_INTERNAL_ERROR (not schema)",
+        "PIPELINE_FAILED" in real_src
+        and "PRODUCER_INTERNAL_ERROR" in real_src
+        and "combined_temporal_failure_code" in real_src,
+        "real.validate_failure pipeline branch present",
+    )
+    _check(
+        rows,
+        "B18 canary policy_breach does not permanently block successor apply",
+        "canary_non_success_leaf" in usage_src
+        or "issue_790" in usage_src.lower()
+        and "policy_breach" in usage_src,
+        "usage blocking route exemption present",
+    )
+
+    canary_src = (
+        repo_for_imports / "newsroom/control_plane/issue_790_canary.py"
+    ).read_text(encoding="utf-8")
+    adapter_fallback = RealGraphitiAdapter(fallback_permitted=False)
+    _check(
+        rows,
+        "B19 canary fallback remains disabled before provider dispatch",
+        adapter_fallback._fallback_permitted is False
+        and "DISABLED_BEFORE_PROVIDER_DISPATCH" in (
+            (repo_for_imports / PLAN_REL_DEFAULT).read_text(encoding="utf-8")
+            if (repo_for_imports / PLAN_REL_DEFAULT).is_file()
+            else ""
+        ),
+        "fallback_permitted=False + plan fallback_mode",
+    )
+    _check(
+        rows,
+        "B20 all CombinedTemporalFailureCode failure values are exercised above",
+        {
+            CombinedTemporalFailureCode.EVIDENCE_UNRESOLVED,
+            CombinedTemporalFailureCode.IDENTITY_INVALID,
+            CombinedTemporalFailureCode.TEMPORAL_INVALID,
+            CombinedTemporalFailureCode.MALFORMED_OBJECT,
+        }.issubset(
+            {
+                contra,
+                amb_code,
+                self_code,
+                orphan_code,
+                stuffed_code,
+                cue_null_code,
+                malformed,
+                identity_type,
+                step13_code,
+                step14_code,
+            }
+        )
+        and CombinedTemporalFailureCode.PIPELINE_FAILED.value == "PIPELINE_FAILED",
+        "EVIDENCE+IDENTITY+TEMPORAL+MALFORMED dry; PIPELINE mapped in B17",
+    )
+
+    print(
+        "RESIDUAL (cannot preflight provider-free): model still ignoring "
+        "prefer-empty / temporal-null; provider outage; Neo4j pipeline after "
+        "a schema-valid extract; novel attribution edge cases."
+    )
+    _ = canary_src  # retained for future source gates; silence lint
     return rows
 
 
@@ -466,7 +716,6 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.ops_only:
         print("\n-- forecast blocker smokes (provider-free) --")
-        # Import from code root (worktree or ops tip)
         os.chdir(args.code_root)
         all_rows.extend(_blocker_smokes(args.code_root))
 

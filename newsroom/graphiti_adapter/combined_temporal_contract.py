@@ -173,6 +173,8 @@ def build_compact_prompt(revision: SourceRevisionInput) -> CompactPrompt:
         "Build each relation_type only from relation words present in its fact; entity-name words are not relation evidence.",
         "Every relation_type must be SCREAMING_SNAKE_CASE.",
         "Put valid_at and invalid_at on each fact. Resolve relative dates against REFERENCE_TIME to ISO-8601 UTC, or null.",
+        "Do not copy REFERENCE_TIME into valid_at or invalid_at unless that exact timestamp or its calendar date appears in the cited segments.",
+        "If cited evidence has no date cue, set both valid_at and invalid_at to null.",
         "Cite evidence with the integer segment IDs below. Do not invent byte offsets.",
         "Each fact string must be a unique contiguous verbatim span from its cited segments; never reuse one fact string across facts.",
         "source_local_id and target_local_id must be distinct.",
