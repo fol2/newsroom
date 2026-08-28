@@ -168,9 +168,9 @@
     "average_total_tokens_per_terminal_effective_revision": "UNRESOLVED",
     "chat_tokens": {
       "estimated_primary": {
-        "base": 19022,
-        "high": 28532,
-        "low": 14268
+        "base": 19682,
+        "high": 29522,
+        "low": 14763
       },
       "reported": 0,
       "reported_basis": "NO_PROVIDER_CALLS_IN_FIXTURE",
@@ -202,14 +202,14 @@
       "adoption_gate": "HOLD_UNRESOLVED_CLASSES_AND_QUALITY",
       "average_total_token_estimate_per_terminal_effective_revision": {
         "current": {
-          "base": 3601,
-          "high": 9409,
-          "low": 1849
+          "base": 3661,
+          "high": 9499,
+          "low": 1894
         },
         "target": {
-          "base": 2065,
-          "high": 3265,
-          "low": 1465
+          "base": 2125,
+          "high": 3355,
+          "low": 1510
         }
       },
       "basis": "TWO_RETAINED_ISSUE_737_GRAIN_TERMINAL_OUTCOMES",

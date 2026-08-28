@@ -1,6 +1,1 @@
-{
-  "graphiti_core_version": "0.29.3",
-  "nonzero_edge": ["CombinedExtraction", "BatchEdgeTimestamps"],
-  "schema_version": "newsroom.graphiti-combined-temporal-call-shapes.v1",
-  "zero_edge": ["CombinedExtraction"]
-}
+{"graphiti_core_version":"0.29.3","nonzero_edge":["CombinedExtraction","BatchEdgeTimestamps"],"schema_version":"newsroom.graphiti-combined-temporal-call-shapes.v1","zero_edge":["CombinedExtraction"]}
