@@ -53,11 +53,11 @@ PAYLOAD_FATAL_FAILURE_CODES = frozenset(
     }
 )
 
-# Fact-loop MALFORMED is proposal rejection; top-level parse MALFORMED stays
-# payload-fatal. Entity-parse and post-accept normalise() raises stay leaf-fatal
-# even when the failure code is also listed as atom-local above.
+# Fact-loop MALFORMED / IDENTITY_INVALID are proposal rejection; top-level parse,
+# entity-table and post-accept normalise() raises of those codes stay leaf-fatal.
 FACT_LOOP_ATOM_LOCAL_CODES = ATOM_LOCAL_FAILURE_CODES | {
-    CombinedTemporalFailureCode.MALFORMED_OBJECT
+    CombinedTemporalFailureCode.MALFORMED_OBJECT,
+    CombinedTemporalFailureCode.IDENTITY_INVALID,
 }
 
 
@@ -82,9 +82,7 @@ def classify_combined_temporal_failure(
     if grain == "fact_loop":
         if code in FACT_LOOP_ATOM_LOCAL_CODES:
             return "atom_local"
-        if code in PAYLOAD_FATAL_FAILURE_CODES - {
-            CombinedTemporalFailureCode.MALFORMED_OBJECT
-        }:
+        if code in PAYLOAD_FATAL_FAILURE_CODES - FACT_LOOP_ATOM_LOCAL_CODES:
             return "payload_fatal"
         raise ValueError(f"unclassified fact-loop failure code: {code}")
     if grain != "payload":

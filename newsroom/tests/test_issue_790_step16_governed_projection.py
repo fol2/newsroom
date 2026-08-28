@@ -22,6 +22,7 @@ from newsroom.graphiti_adapter.combined_temporal_extraction import (
 )
 from newsroom.graphiti_adapter.combined_temporal_projection import (
     ATOM_LOCAL_FAILURE_CODES,
+    FACT_LOOP_ATOM_LOCAL_CODES,
     PAYLOAD_FATAL_FAILURE_CODES,
     PROJECTION_POLICY_VERSION,
     classify_combined_temporal_failure,
@@ -101,23 +102,23 @@ def test_failure_codes_are_explicitly_classified() -> None:
         assert (
             classify_combined_temporal_failure(code, grain="fact_loop") == "atom_local"
         )
-    assert (
-        classify_combined_temporal_failure(
-            CombinedTemporalFailureCode.MALFORMED_OBJECT, grain="fact_loop"
+    for code in (
+        CombinedTemporalFailureCode.MALFORMED_OBJECT,
+        CombinedTemporalFailureCode.IDENTITY_INVALID,
+    ):
+        assert (
+            classify_combined_temporal_failure(code, grain="fact_loop") == "atom_local"
         )
-        == "atom_local"
-    )
-    assert (
-        classify_combined_temporal_failure(
-            CombinedTemporalFailureCode.MALFORMED_OBJECT, grain="payload"
+        assert classify_combined_temporal_failure(code, grain="payload") == (
+            "payload_fatal"
         )
-        == "payload_fatal"
-    )
-    for code in PAYLOAD_FATAL_FAILURE_CODES - {
-        CombinedTemporalFailureCode.MALFORMED_OBJECT
-    }:
+    for code in PAYLOAD_FATAL_FAILURE_CODES - FACT_LOOP_ATOM_LOCAL_CODES:
         assert (
             classify_combined_temporal_failure(code, grain="payload") == "payload_fatal"
+        )
+        assert (
+            classify_combined_temporal_failure(code, grain="fact_loop")
+            == "payload_fatal"
         )
     with pytest.raises(ValueError):
         classify_combined_temporal_failure(CombinedTemporalFailureCode.NONE)
@@ -325,6 +326,61 @@ def test_mixed_candidate_set_keeps_valid_and_rejects_invalid() -> None:
     assert projected.payload["facts"][0]["fact"] == good_fact
     assert {item["local_id"] for item in projected.payload["entities"]} == {0, 1}
     assert projected.receipt["orphan_removed_count"] == 2
+
+
+def test_mixed_fact_local_identity_defect_keeps_valid_sibling() -> None:
+    body = "Alice asked Bob about the curriculum on 2026-08-21."
+    segs = segment_source(body)
+    good_fact = "Alice asked Bob about the curriculum on 2026-08-21"
+    payload = {
+        "entities": [
+            {
+                "local_id": 0,
+                "name": "Alice",
+                "entity_type_id": 0,
+                "evidence_segment_ids": [0],
+            },
+            {
+                "local_id": 1,
+                "name": "Bob",
+                "entity_type_id": 0,
+                "evidence_segment_ids": [0],
+            },
+        ],
+        "facts": [
+            {
+                "source_local_id": 0,
+                "target_local_id": 1,
+                "relation_type": "ASKED",
+                "fact": good_fact,
+                "valid_at": None,
+                "invalid_at": None,
+                "evidence_segment_ids": [0],
+            },
+            {
+                "source_local_id": "1",
+                "target_local_id": 0,
+                "relation_type": "ASKED",
+                "fact": "Bob asked Alice about the curriculum on 2026-08-21",
+                "valid_at": None,
+                "invalid_at": None,
+                "evidence_segment_ids": [0],
+            },
+        ],
+    }
+    projected = project_governed_proposals(
+        payload, segs, datetime(2026, 8, 26, 5, 28, 42, tzinfo=UTC)
+    )
+    assert projected.receipt["accepted_count"] == 1
+    assert projected.receipt["rejected_count"] == 1
+    assert projected.payload["facts"][0]["fact"] == good_fact
+    rejected = [
+        item
+        for item in projected.receipt["atom_actions"]
+        if item["action"] == "reject"
+    ]
+    assert len(rejected) == 1
+    assert rejected[0]["reason_code"] == "IDENTITY_INVALID"
 
 
 def test_payload_fatal_corruption_still_fails_closed() -> None:
