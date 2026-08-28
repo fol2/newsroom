@@ -1,0 +1,9 @@
+{
+  "schema_version": "newsroom.issue-790.code-fix-review-receipt.v1",
+  "issue": 790,
+  "outcome": "PASS",
+  "reviewed_fix_revision": "0ed21ffb0c2c6feaaafe85b0ce9f0fda7153f3c8",
+  "unresolved_relevant_findings": 0,
+  "summary": "Align evaluation ExtractionBudget.max_response_tokens to call-shape PRIMARY 16384; CI asserts equality.",
+  "record_digest": "sha256:1e69e5949771de9642396bb4c96549193063f570b8d3df96d9b4aec508c3a8f8"
+}

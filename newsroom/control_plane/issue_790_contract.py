@@ -60,6 +60,9 @@ ISSUE_790_SUCCESS_SEQUENCE_STEP_11_PLAN_DIGEST = (
 ISSUE_790_SUCCESS_SEQUENCE_STEP_12_PLAN_DIGEST = (
     "sha256:2e95f49445ec600ccd8ec152348ffc40a338c86f6d597f62b894dd213ed201c4"
 )
+ISSUE_790_SUCCESS_SEQUENCE_STEP_13_PLAN_DIGEST = (
+    "sha256:3ad295ccabaf02f61938f8ffbbf1df805d0617f92fd7f9c56d923107a5e2c9c7"
+)
 
 
 
@@ -496,6 +499,43 @@ _SUCCESS_SEQUENCE_CONTRACTS = (
             "sha256:174569dfc24edcf9258d9daf4bbbd85647426bc002b97837291e118ff5122513"
         ),
     ),
+    Issue790ApprovedPlanContract(
+        schema_version="newsroom.issue-790.iterative-canary-plan.v2",
+        plan_digest=ISSUE_790_SUCCESS_SEQUENCE_STEP_13_PLAN_DIGEST,
+        invocation_id=(
+            "sha256:d0712807fd025520d0a94e5a28c532d4cb8684c936387290fe7eeb49d0b2336c"
+        ),
+        terminal_digest=(
+            "sha256:d48e844404516bd41b17038b42a834c6e54bf5da520ef046f3baf81ea7a8cbbe"
+        ),
+        allocation_digest=(
+            "sha256:c789330ca7151d097e6d366dd65481ff21d55f93891ff61e368d7369b12c7120"
+        ),
+        approved_by="github:fol2",
+        approval_reference=(
+            "https://github.com/fol2/newsroom/issues/790#issuecomment-5450562651"
+        ),
+        approved_at="2026-08-28T10:00:00.000000Z",
+        scope=ISSUE_790_APPROVED_SCOPE,
+        terminal_outcome="FAILED",
+        route_open_reason="SYSTEMIC_TRANSPORT",
+        root_plan_digest=ISSUE_790_APPROVED_PLAN_DIGEST,
+        predecessor_plan_digest=ISSUE_790_SUCCESS_SEQUENCE_STEP_12_PLAN_DIGEST,
+        sequence_ordinal=13,
+        controller_timeout_ms=160_000,
+        extraction_timeout_ms=180_000,
+        cleanup_reserve_ms=20_000,
+        fixed_constraints_digest=(
+            "sha256:accd35045a4bc3c8d20c50c272755e7d4e6980dc6d7e1a4f029b36b3cd2a20c1"
+        ),
+        predecessor_causal_report_digest=(
+            "sha256:922a5e20c4045ba49f675bf1a8375548a01a4cdb03326c97f4c9650886e98743"
+        ),
+        constraint_change="REVIEWED_NON_TIMEOUT_FIX",
+        reviewed_fix_digest=(
+            "sha256:ab71bd333a50abf3020829cb6ed80cb4192816dbd034b87f7d3f460a952eba17"
+        ),
+    ),
 )
 
 
@@ -577,6 +617,7 @@ __all__ = [
     "ISSUE_790_SUCCESS_SEQUENCE_STEP_10_PLAN_DIGEST",
     "ISSUE_790_SUCCESS_SEQUENCE_STEP_11_PLAN_DIGEST",
     "ISSUE_790_SUCCESS_SEQUENCE_STEP_12_PLAN_DIGEST",
+    "ISSUE_790_SUCCESS_SEQUENCE_STEP_13_PLAN_DIGEST",
     "Issue790ApprovedPlanContract",
     "issue_790_approved_plan_contract",
     "issue_790_approved_plan_contracts",
