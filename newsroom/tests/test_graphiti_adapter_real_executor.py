@@ -2069,6 +2069,10 @@ def test_complete_marker_blocks_cancellation_rollback_deletion() -> None:
 def test_immutable_completion_snapshot_restores_without_graph_rehydration(
     tmp_path: Path,
 ) -> None:
+    from newsroom.graphiti_adapter.combined_temporal_evidence import segment_source
+    from newsroom.graphiti_adapter.combined_temporal_projection import (
+        project_governed_proposals,
+    )
     from newsroom.graphiti_adapter.real import _EpisodeTelemetry, _raw_receipt
     from newsroom.graphiti_adapter.result_snapshot import restore_validated_snapshot
 
@@ -2085,6 +2089,14 @@ def test_immutable_completion_snapshot_restores_without_graph_rehydration(
         result=None,
         proposals=(),
     )
+    projection = project_governed_proposals(
+        {"entities": [], "facts": []},
+        segment_source("Alice met Bob on 2026-08-20."),
+        instant.value,
+    ).receipt
+    raw.pop("raw_output_digest", None)
+    raw["combined_temporal_receipt"] = {"projection_receipt": projection}
+    raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
     restored = restore_validated_snapshot(raw=raw, attempt=attempt)
     assert restored.produced.raw_output_value == raw
     assert restored.provider_attempt_number == 1
@@ -2164,6 +2176,10 @@ def test_completed_pipeline_failure_snapshot_restores_as_retryable(
 def test_immutable_completion_preserves_original_access_after_rights_renewal(
     tmp_path: Path,
 ) -> None:
+    from newsroom.graphiti_adapter.combined_temporal_evidence import segment_source
+    from newsroom.graphiti_adapter.combined_temporal_projection import (
+        project_governed_proposals,
+    )
     from newsroom.graphiti_adapter.real import _EpisodeTelemetry, _raw_receipt
     from newsroom.graphiti_adapter.result_snapshot import restore_validated_snapshot
 
@@ -2180,6 +2196,14 @@ def test_immutable_completion_preserves_original_access_after_rights_renewal(
         result=None,
         proposals=(),
     )
+    projection = project_governed_proposals(
+        {"entities": [], "facts": []},
+        segment_source("Alice met Bob on 2026-08-20."),
+        instant.value,
+    ).receipt
+    raw.pop("raw_output_digest", None)
+    raw["combined_temporal_receipt"] = {"projection_receipt": projection}
+    raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
     old_access = raw["passages"][0]["access_decision_id"]
     current_passages = tuple(
         replace(

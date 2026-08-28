@@ -398,6 +398,17 @@ def test_guard_completed_immutable_replay_restores_projection(
     combined = restored.produced.raw_output_value["combined_temporal_receipt"]
     assert combined["projection_receipt"] == projected.receipt
 
+    absent_combined = copy.deepcopy(raw)
+    absent_combined.pop("combined_temporal_receipt")
+    absent_combined.pop("raw_output_digest")
+    absent_combined["raw_output_digest"] = digest_bytes(
+        canonical_json_bytes(absent_combined)
+    )
+    with pytest.raises(
+        GraphitiAdapterContractError, match="lacks combined_temporal_receipt"
+    ):
+        restore_validated_snapshot(raw=absent_combined, attempt=attempt)
+
     missing = copy.deepcopy(raw)
     missing["combined_temporal_receipt"] = {
         "raw_output_digest": fix["provider_raw_digest"]
@@ -418,6 +429,51 @@ def test_guard_completed_immutable_replay_restores_projection(
     tampered["raw_output_digest"] = digest_bytes(canonical_json_bytes(tampered))
     with pytest.raises(GraphitiAdapterContractError, match="projection receipt"):
         restore_validated_snapshot(raw=tampered, attempt=attempt)
+
+
+def test_evaluation_runner_raw_receipt_binds_identical_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Control Plane EvaluationGraphitiRunner retains the sealed projection receipt."""
+    from newsroom.control_plane.corpus import CorpusIngestUnit
+    from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
+
+    fix = _load_step(14)
+    projected = _projection_for_step(14)
+    guard_completed: dict[str, object] = {}
+    _install_provider_free_runtime(
+        monkeypatch, fixture_raw=fix["raw"], guard_completed=guard_completed
+    )
+    unit = CorpusIngestUnit(
+        source_id="issue-790-step16",
+        item_key="step-14",
+        headline="",
+        body=fix["source_body"],
+        canonical_url="",
+        observation_digest=fix["provider_raw_digest"],
+        observed_at=fix["reference_time"],
+        proving_run_id="issue-790-step16-receipt-binding",
+        effective_revision=EffectiveRevisionIdentity(
+            source_id="issue-790-step16",
+            item_key="step-14",
+            revision_digest=fix["provider_raw_digest"],
+            first_observed_at=fix["reference_time"],
+        ),
+        published_at=fix["reference_time"],
+    )
+    result = EvaluationGraphitiRunner(
+        clock=lambda: UtcTimestamp.parse(fix["reference_time"]).value
+    ).ingest(unit)
+    assert result.outcome == "COMPLETE"
+    assert result.raw_receipt is guard_completed["_raw"]
+    assert result.raw_receipt is not None
+    assert result.raw_receipt["combined_temporal_receipt"]["projection_receipt"] == (
+        projected.receipt
+    )
+    unsigned = dict(result.raw_receipt)
+    supplied = unsigned.pop("raw_output_digest")
+    assert supplied == digest_bytes(canonical_json_bytes(unsigned))
+    assert result.receipt_digest == supplied
 
 
 def test_step13_15_fixtures_still_project() -> None:

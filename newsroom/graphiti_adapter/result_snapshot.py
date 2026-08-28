@@ -221,13 +221,14 @@ def restore_validated_snapshot(
     pipeline_failed = (
         combined_failure == CombinedTemporalFailureCode.PIPELINE_FAILED.value
     )
-    if (
-        TEMPORAL_POLICY_VERSION.endswith("-v2")
-        and not isinstance(combined_failure, str)
-        and isinstance(recovered_raw.get("combined_temporal_receipt"), dict)
+    if TEMPORAL_POLICY_VERSION.endswith("-v2") and not isinstance(
+        combined_failure, str
     ):
-        combined = recovered_raw["combined_temporal_receipt"]
-        assert isinstance(combined, dict)
+        combined = recovered_raw.get("combined_temporal_receipt")
+        if not isinstance(combined, dict):
+            raise GraphitiAdapterContractError(
+                "retained Graphiti success receipt lacks combined_temporal_receipt"
+            )
         projection = combined.get("projection_receipt")
         if projection is None:
             raise GraphitiAdapterContractError(
