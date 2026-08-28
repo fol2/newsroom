@@ -1,13 +1,13 @@
 {
   "schema_version": "newsroom.graphiti-call-shape-policy.v1",
-  "canonical_digest": "sha256:ba1cb4267ff78419174b50a0e233545a4bf745168d4f7fdbffa2fb6007ab5abc",
+  "canonical_digest": "sha256:ca14aaa620702a9a16306b1289f92d08e26b429368034968a31df92a4f6622cf",
   "policy_id": "graphiti-core-0.29.3-newsroom-adapter-v1",
   "version": "issue-816-v2",
   "graphiti_core_release": "graphiti-core-0.29.3",
   "framework_identity": "graphiti-core-0.29.3",
   "prompt_identity": "newsroom.graphiti.proposal-only-prompt:v1",
   "ontology_identity": "newsroom.graphiti.adapter-result-schema:v1",
-  "temporal_identity": "graphiti-source-reference-time-v1",
+  "temporal_identity": "graphiti-source-reference-time-v2",
   "generation_policy_identity": "newsroom-evaluation-graphiti-generation-v1",
   "qualified_routes": [
     {

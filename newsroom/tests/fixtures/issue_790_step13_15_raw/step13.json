@@ -1,0 +1,64 @@
+{
+  "step": 13,
+  "provider_raw_digest": "sha256:743294249963f63bc2e70f87a333e59d97f1045969fe93d93e42f64cd0740b7b",
+  "attempt_envelope_digest": "sha256:e61d6b12d06edf900196ee17bed174ef584b1d9222666352f440546a1044772f",
+  "ingest_id": "80a80e3a-c55c-4407-8189-d38362904d29",
+  "reference_time": "2026-08-26T05:28:42.000000Z",
+  "source_body": "Police officer sacked after starting sexual relationship with woman Police Ombudsman Jacqui Durkin said the behaviour was a \"catalogue of corruption\" which had \"the potential to do serious damage to public trust and confidence in policing\". https://www.bbc.co.uk/news/articles/cm27324jgg1o?at_medium=RSS&at_campaign=rss",
+  "raw": {
+    "entities": [
+      {
+        "local_id": 0,
+        "name": "Police officer",
+        "entity_type_id": 0,
+        "evidence_segment_ids": [
+          0
+        ]
+      },
+      {
+        "local_id": 1,
+        "name": "Jacqui Durkin",
+        "entity_type_id": 0,
+        "evidence_segment_ids": [
+          0
+        ]
+      },
+      {
+        "local_id": 2,
+        "name": "woman",
+        "entity_type_id": 0,
+        "evidence_segment_ids": [
+          0
+        ]
+      }
+    ],
+    "facts": [
+      {
+        "source_local_id": 0,
+        "target_local_id": 2,
+        "relation_type": "STARTED_SEXUAL_RELATIONSHIP_WITH",
+        "fact": "starting sexual relationship with woman",
+        "valid_at": null,
+        "invalid_at": null,
+        "evidence_segment_ids": [
+          0
+        ]
+      },
+      {
+        "source_local_id": 1,
+        "target_local_id": 0,
+        "relation_type": "SAID",
+        "fact": "Jacqui Durkin said the behaviour was a \"catalogue of corruption\"",
+        "valid_at": null,
+        "invalid_at": null,
+        "evidence_segment_ids": [
+          0
+        ]
+      }
+    ]
+  },
+  "provenance": {
+    "sdk_transcript": "/Users/jamesto/.cursor/projects/Volumes-CursorRuntime-cursor-portable-data-tmp-newsroom-cursor-sdk-dsdgx30g-cwd/agent-transcripts/agent-a006d6f2-a914-43be-b219-0d8189bb2e72/agent-a006d6f2-a914-43be-b219-0d8189bb2e72.jsonl",
+    "note": "attempt receipt raw_output_digest is diagnostic-envelope digest; provider object digest is raw_digest(raw)"
+  }
+}

@@ -121,7 +121,7 @@ GRAPHITI_ADAPTER_TEMPORAL_COMPONENT = _component(
         "reference_time_from_source": True,
         "started_at_forbidden": True,
         "observed_fallback_labelled": True,
-        "policy": "graphiti-source-reference-time-v1",
+        "policy": "graphiti-source-reference-time-v2",
     },
 )
 GRAPHITI_ADAPTER_POLICY_COMPONENT = _component(

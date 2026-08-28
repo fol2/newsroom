@@ -1,0 +1,64 @@
+{
+  "step": 15,
+  "provider_raw_digest": "sha256:012b06d8b4cd8b1c8c6c894caa0057055706af0d6f2d5b2800d5e62b7ef44b76",
+  "attempt_envelope_digest": "sha256:f7bc3a7aa51a51edaf5c0ea3cc809f9a0b835d8bea5c5a48c3bca161b49ade31",
+  "ingest_id": "b3b832c7-3afd-4055-b0b1-7a8f127801c1",
+  "reference_time": "2026-08-26T07:00:53.000000Z",
+  "source_body": "Major gangland figure Steven Daniel arrested in organised crime raid Steven 'Bonzo' Daniel was arrested on Wednesday at his home in the north of Glasgow. https://www.bbc.co.uk/news/articles/c17jl59zg2ko?at_medium=RSS&at_campaign=rss",
+  "raw": {
+    "entities": [
+      {
+        "local_id": 0,
+        "name": "Steven Daniel",
+        "entity_type_id": 0,
+        "evidence_segment_ids": [
+          0
+        ]
+      },
+      {
+        "local_id": 1,
+        "name": "organised crime raid",
+        "entity_type_id": 0,
+        "evidence_segment_ids": [
+          0
+        ]
+      },
+      {
+        "local_id": 2,
+        "name": "Glasgow",
+        "entity_type_id": 0,
+        "evidence_segment_ids": [
+          0
+        ]
+      }
+    ],
+    "facts": [
+      {
+        "source_local_id": 0,
+        "target_local_id": 1,
+        "relation_type": "ARRESTED_IN",
+        "fact": "Steven Daniel arrested in organised crime raid",
+        "valid_at": null,
+        "invalid_at": null,
+        "evidence_segment_ids": [
+          0
+        ]
+      },
+      {
+        "source_local_id": 0,
+        "target_local_id": 2,
+        "relation_type": "ARRESTED_AT",
+        "fact": "Steven Daniel arrested in organised crime raid Steven 'Bonzo' Daniel was arrested on Wednesday at his home in the north of Glasgow.",
+        "valid_at": "2026-08-26T00:00:00.000000Z",
+        "invalid_at": null,
+        "evidence_segment_ids": [
+          0
+        ]
+      }
+    ]
+  },
+  "provenance": {
+    "sdk_transcript": "/Users/jamesto/.cursor/projects/Volumes-CursorRuntime-cursor-portable-data-tmp-newsroom-cursor-sdk-vr28vpy0-cwd/agent-transcripts/agent-bf49f40a-fa99-408a-97e3-ebbc3b50f2c2/agent-bf49f40a-fa99-408a-97e3-ebbc3b50f2c2.jsonl",
+    "note": "attempt receipt raw_output_digest is diagnostic-envelope digest; provider object digest is raw_digest(raw)"
+  }
+}

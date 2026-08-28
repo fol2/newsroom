@@ -44,6 +44,9 @@ from newsroom.graphiti_adapter.combined_temporal_types import (
     CombinedTemporalFailureCode,
     EvidenceSegment,
 )
+from newsroom.graphiti_adapter.combined_temporal_projection import (
+    project_governed_proposals,
+)
 from newsroom.graphiti_adapter.combined_temporal_validation import (
     GOVERNED_ENTITY_TYPE_IDS,
     normalise,
@@ -227,11 +230,12 @@ def extract_combined_temporal(
             failure_code=CombinedTemporalFailureCode.PIPELINE_FAILED,
         )
     try:
-        normalised, ranges, nodes, edges = _validate_and_expand(
+        normalised, ranges, nodes, edges, projection_receipt = _validate_and_expand(
             revision=revision,
             prompt=prompt,
             raw=raw,
         )
+        receipt["projection_receipt"] = projection_receipt
         receipt["proposal_receipt"] = _proposal_receipt(
             revision=revision,
             payload=normalised,
@@ -537,15 +541,17 @@ def _validate_and_expand(
     dict[str, tuple[EvidenceSegment, ...]],
     tuple[Any, ...],
     tuple[Any, ...],
+    dict[str, object],
 ]:
     payload = parse_payload(raw)
-    normalised, ranges = normalise(
+    projected = project_governed_proposals(
         payload,
         prompt.segments,
         UtcTimestamp.parse(revision.reference_time).value,
+        raw_provider_digest=raw_digest(raw),
     )
-    nodes, edges = _expand(revision, normalised)
-    return normalised, ranges, nodes, edges
+    nodes, edges = _expand(revision, projected.payload)
+    return projected.payload, projected.ranges, nodes, edges, projected.receipt
 
 
 def _leaf_from_completed(
