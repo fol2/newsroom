@@ -302,11 +302,15 @@ class ExistingGraphitiPipeline:
                 chat_invocations=chat_invocations,
                 embedding_usage=embedding_usage,
             )
-            completed_receipt = (
-                durable_receipt
-                if self.complete_receipt is None
-                else dict(self.complete_receipt([], [], durable_receipt))
-            )
+            if self.complete_receipt is None:
+                completed_receipt = durable_receipt
+            else:
+                sealed = self.complete_receipt([], [], durable_receipt)
+                # Prefer the sealed object itself so guard completion and
+                # ProducedExtraction share one canonical receipt.
+                completed_receipt = (
+                    sealed if isinstance(sealed, dict) else dict(sealed)
+                )
             await self.guard.complete(completed_receipt)
             self._attempt_started = False
             return CombinedTemporalPipelineResult(
@@ -398,15 +402,15 @@ class ExistingGraphitiPipeline:
                 chat_invocations=chat_invocations,
                 embedding_usage=embedding_usage,
             )
-            completed_receipt = (
-                durable_receipt
-                if self.complete_receipt is None
-                else dict(
-                    self.complete_receipt(
-                        resolved_nodes, output_edges, durable_receipt
-                    )
+            if self.complete_receipt is None:
+                completed_receipt = durable_receipt
+            else:
+                sealed = self.complete_receipt(
+                    resolved_nodes, output_edges, durable_receipt
                 )
-            )
+                completed_receipt = (
+                    sealed if isinstance(sealed, dict) else dict(sealed)
+                )
             await self.guard.complete(completed_receipt)
         except Exception as exc:
             rollback_completed = False

@@ -978,9 +978,14 @@ def test_episode_uses_default_database_and_validates_before_complete(
     telemetry = real._EpisodeTelemetry()
     validation_states: list[str] = []
 
-    def validate(_result: object, _telemetry: object) -> dict[str, object]:
+    def validate(
+        _result: object, _telemetry: object, combined_receipt=None
+    ) -> dict[str, object]:
         validation_states.append(guard_events[-1])
-        return {"provider_attempt_number": 1}
+        raw: dict[str, object] = {"provider_attempt_number": 1}
+        if combined_receipt is not None:
+            raw["combined_temporal_receipt"] = dict(combined_receipt)
+        return raw
 
     configuration, revision = _combined_runtime_inputs("Body", "episode-id")
     result = asyncio.run(
@@ -1090,7 +1095,7 @@ def test_process_recovery_uses_durable_guard_before_provider_dispatch(
         reference_time=datetime(2026, 8, 20, tzinfo=UTC),
         telemetry=real._EpisodeTelemetry(),
         attempt_number=1,
-        validate_result=lambda _result, _telemetry: {},
+        validate_result=lambda _result, _telemetry, _combined=None: {},
         restore_result=restore,
         configuration=configuration,
         revision=revision,
@@ -1186,7 +1191,7 @@ def test_rolled_back_pipeline_failure_is_not_rolled_back_twice(
                 reference_time=datetime(2026, 8, 20, tzinfo=UTC),
                 telemetry=real._EpisodeTelemetry(),
                 attempt_number=1,
-                validate_result=lambda _result, _telemetry: {},
+                validate_result=lambda _result, _telemetry, _combined=None: {},
                 restore_result=lambda _raw, _telemetry: None,
                 configuration=configuration,
                 revision=revision,
@@ -1287,7 +1292,7 @@ def test_cancelled_episode_cleanup_is_ordered_and_bounded(
                     reference_time=datetime(2026, 8, 20, tzinfo=UTC),
                     telemetry=telemetry,
                     attempt_number=1,
-                    validate_result=lambda _result, _telemetry: {},
+                    validate_result=lambda _result, _telemetry, _combined=None: {},
                     restore_result=lambda _raw, _telemetry: None,
                     configuration=configuration,
                     revision=revision,
@@ -2064,6 +2069,10 @@ def test_complete_marker_blocks_cancellation_rollback_deletion() -> None:
 def test_immutable_completion_snapshot_restores_without_graph_rehydration(
     tmp_path: Path,
 ) -> None:
+    from newsroom.graphiti_adapter.combined_temporal_evidence import segment_source
+    from newsroom.graphiti_adapter.combined_temporal_projection import (
+        project_governed_proposals,
+    )
     from newsroom.graphiti_adapter.real import _EpisodeTelemetry, _raw_receipt
     from newsroom.graphiti_adapter.result_snapshot import restore_validated_snapshot
 
@@ -2080,6 +2089,14 @@ def test_immutable_completion_snapshot_restores_without_graph_rehydration(
         result=None,
         proposals=(),
     )
+    projection = project_governed_proposals(
+        {"entities": [], "facts": []},
+        segment_source("Alice met Bob on 2026-08-20."),
+        instant.value,
+    ).receipt
+    raw.pop("raw_output_digest", None)
+    raw["combined_temporal_receipt"] = {"projection_receipt": projection}
+    raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
     restored = restore_validated_snapshot(raw=raw, attempt=attempt)
     assert restored.produced.raw_output_value == raw
     assert restored.provider_attempt_number == 1
@@ -2159,6 +2176,10 @@ def test_completed_pipeline_failure_snapshot_restores_as_retryable(
 def test_immutable_completion_preserves_original_access_after_rights_renewal(
     tmp_path: Path,
 ) -> None:
+    from newsroom.graphiti_adapter.combined_temporal_evidence import segment_source
+    from newsroom.graphiti_adapter.combined_temporal_projection import (
+        project_governed_proposals,
+    )
     from newsroom.graphiti_adapter.real import _EpisodeTelemetry, _raw_receipt
     from newsroom.graphiti_adapter.result_snapshot import restore_validated_snapshot
 
@@ -2175,6 +2196,14 @@ def test_immutable_completion_preserves_original_access_after_rights_renewal(
         result=None,
         proposals=(),
     )
+    projection = project_governed_proposals(
+        {"entities": [], "facts": []},
+        segment_source("Alice met Bob on 2026-08-20."),
+        instant.value,
+    ).receipt
+    raw.pop("raw_output_digest", None)
+    raw["combined_temporal_receipt"] = {"projection_receipt": projection}
+    raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
     old_access = raw["passages"][0]["access_decision_id"]
     current_passages = tuple(
         replace(

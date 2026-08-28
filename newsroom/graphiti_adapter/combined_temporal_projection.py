@@ -37,6 +37,7 @@ from newsroom.graphiti_adapter.combined_temporal_validation import (
 
 PROJECTION_POLICY_VERSION = "NewsroomGovernedProposalProjectionV1"
 PROJECTION_POLICY_DIGEST = digest_canonical(PROJECTION_POLICY_VERSION)
+PROJECTION_RECEIPT_SCHEMA_VERSION = "newsroom.combined-temporal.projection-receipt.v1"
 
 ATOM_LOCAL_FAILURE_CODES = frozenset(
     {
@@ -334,7 +335,7 @@ def project_governed_proposals(
     normalised, ranges = normalise(projected_payload, segments, reference_time)
 
     receipt_body = {
-        "schema_version": "newsroom.combined-temporal.projection-receipt.v1",
+        "schema_version": PROJECTION_RECEIPT_SCHEMA_VERSION,
         "projection_policy_version": PROJECTION_POLICY_VERSION,
         "projection_policy_digest": PROJECTION_POLICY_DIGEST,
         "validator_contract_version": VALIDATOR_CONTRACT_VERSION,
@@ -362,14 +363,142 @@ def project_governed_proposals(
     )
 
 
+def validate_projection_receipt(receipt: object) -> dict[str, object]:
+    """Fail closed unless the Step 16 projection receipt is exact and consistent."""
+
+    if not isinstance(receipt, Mapping):
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "projection receipt must be an object",
+        )
+    required = (
+        "schema_version",
+        "projection_policy_version",
+        "projection_policy_digest",
+        "raw_provider_output_digest",
+        "reference_time",
+        "reference_time_digest",
+        "atom_actions",
+        "accepted_count",
+        "rejected_count",
+        "orphan_removed_count",
+        "accepted_payload_digest",
+        "projection_receipt_digest",
+    )
+    missing = [key for key in required if key not in receipt]
+    if missing:
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            f"projection receipt missing fields: {', '.join(missing)}",
+        )
+    if receipt.get("schema_version") != PROJECTION_RECEIPT_SCHEMA_VERSION:
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "projection receipt schema_version is invalid",
+        )
+    if receipt.get("projection_policy_version") != PROJECTION_POLICY_VERSION:
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "projection_policy_version is invalid",
+        )
+    if receipt.get("projection_policy_digest") != PROJECTION_POLICY_DIGEST:
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "projection_policy_digest contradicts projection_policy_version",
+        )
+    reference_time = receipt.get("reference_time")
+    if not isinstance(reference_time, str) or not reference_time:
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "projection receipt reference_time is invalid",
+        )
+    if receipt.get("reference_time_digest") != digest_canonical(reference_time):
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "reference_time_digest contradicts reference_time",
+        )
+    for key in (
+        "raw_provider_output_digest",
+        "accepted_payload_digest",
+        "projection_receipt_digest",
+    ):
+        value = receipt.get(key)
+        if not isinstance(value, str) or not value.startswith("sha256:"):
+            raise CombinedTemporalError(
+                CombinedTemporalFailureCode.PIPELINE_FAILED,
+                f"{key} must be a sha256 digest",
+            )
+    atom_actions = receipt.get("atom_actions")
+    if not isinstance(atom_actions, list):
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "atom_actions must be a list",
+        )
+    accepted = 0
+    rejected = 0
+    for index, action in enumerate(atom_actions):
+        if not isinstance(action, Mapping):
+            raise CombinedTemporalError(
+                CombinedTemporalFailureCode.PIPELINE_FAILED,
+                f"atom_actions[{index}] must be an object",
+            )
+        kind = action.get("action")
+        if kind == "accept":
+            accepted += 1
+            digest = action.get("accepted_object_digest")
+            if not isinstance(digest, str) or not digest.startswith("sha256:"):
+                raise CombinedTemporalError(
+                    CombinedTemporalFailureCode.PIPELINE_FAILED,
+                    f"atom_actions[{index}] accepted_object_digest is invalid",
+                )
+        elif kind == "reject":
+            rejected += 1
+        else:
+            raise CombinedTemporalError(
+                CombinedTemporalFailureCode.PIPELINE_FAILED,
+                f"atom_actions[{index}] action is invalid",
+            )
+        raw_digest = action.get("raw_proposal_digest")
+        if not isinstance(raw_digest, str) or not raw_digest.startswith("sha256:"):
+            raise CombinedTemporalError(
+                CombinedTemporalFailureCode.PIPELINE_FAILED,
+                f"atom_actions[{index}] raw_proposal_digest is invalid",
+            )
+    for key, expected in (
+        ("accepted_count", accepted),
+        ("rejected_count", rejected),
+    ):
+        value = receipt.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value != expected:
+            raise CombinedTemporalError(
+                CombinedTemporalFailureCode.PIPELINE_FAILED,
+                f"{key} is inconsistent with atom_actions",
+            )
+    orphan = receipt.get("orphan_removed_count")
+    if not isinstance(orphan, int) or isinstance(orphan, bool) or orphan < 0:
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "orphan_removed_count must be a non-negative integer",
+        )
+    body = {key: receipt[key] for key in receipt if key != "projection_receipt_digest"}
+    if receipt.get("projection_receipt_digest") != digest_canonical(body):
+        raise CombinedTemporalError(
+            CombinedTemporalFailureCode.PIPELINE_FAILED,
+            "projection_receipt_digest contradicts receipt body",
+        )
+    return dict(receipt)
+
+
 __all__ = [
     "ATOM_LOCAL_FAILURE_CODES",
     "FACT_LOOP_ATOM_LOCAL_CODES",
     "PAYLOAD_FATAL_FAILURE_CODES",
     "PROJECTION_POLICY_DIGEST",
     "PROJECTION_POLICY_VERSION",
+    "PROJECTION_RECEIPT_SCHEMA_VERSION",
     "GovernedProjectionResult",
     "classify_combined_temporal_failure",
     "project_governed_proposals",
     "project_temporal_bounds",
+    "validate_projection_receipt",
 ]
