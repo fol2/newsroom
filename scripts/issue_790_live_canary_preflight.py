@@ -422,12 +422,14 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
         callable(disp.collect_issue_790_operational_evidence),
         "collect_issue_790_operational_evidence",
     )
-    canary_block = body[body.find("canary_evidence_passed = bool") : body.find("receipt_without_digest")]
+    canary_start = body.find("canary_evidence_passed = bool")
+    canary_end = body.find("receipt_without_digest", canary_start)
+    canary_block = body[canary_start:canary_end] if canary_start >= 0 and canary_end > canary_start else ""
     _check(
         rows,
         "B09 embedding not required for canary pass",
-        "embed" not in canary_block.lower(),
-        "no embedding gate in canary_evidence_passed",
+        bool(canary_block) and "embed" not in canary_block.lower(),
+        f"block_bytes={len(canary_block)} no embedding gate",
     )
     return rows
 
