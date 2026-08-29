@@ -159,6 +159,9 @@ def _workflow_run(**overrides: object) -> dict[str, object]:
         "id": _RUN_ID,
         "html_url": f"https://github.com/fol2/newsroom/actions/runs/{_RUN_ID}",
         "head_sha": _REVISION,
+        "path": ".github/workflows/focus-gates.yml",
+        "name": "Focus Gates",
+        "event": "workflow_dispatch",
         "status": "completed",
         "conclusion": "success",
         "updated_at": "2026-08-29T11:00:00Z",
@@ -357,6 +360,33 @@ def test_unavailable_github_comment_is_hold(tmp_path: Path) -> None:
             pre_dispatch=pre_dispatch,
             store=store,
             github_api=_missing,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("path", ".github/workflows/evidence.yml"),
+        ("name", "Full Repository Health"),
+        ("event", "push"),
+    ],
+)
+def test_focus_gate_workflow_identity_fails_closed(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    candidate = _seal()
+    _, pre_dispatch = _pending_family()
+    payload = _payload(candidate)
+    store = tmp_path / "authority.sqlite"
+    with pytest.raises(Issue790DispositionError, match="focus gate"):
+        activate_issue_790_step16_plan(
+            candidate,
+            comment_id=_COMMENT_ID,
+            pre_dispatch=pre_dispatch,
+            store=store,
+            github_api=_FakeGitHub(_comment(payload), _workflow_run(**{field: value})),
         )
 
 
@@ -808,3 +838,41 @@ def test_historical_static_plans_and_revoked_digest_remain() -> None:
             "sha256:d0712807fd025520d0a94e5a28c532d4cb8684c936387290fe7eeb49d0b2336c"
         )
     )
+
+
+def test_cli_passes_activation_store_into_plan_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import issue_790_conservative_disposition as cli
+
+    captured: dict[str, object] = {}
+
+    def _fake_load(path, *, store=None, github_api=None):
+        captured["path"] = path
+        captured["store"] = store
+        raise Issue790DispositionError("stop after load wiring")
+
+    monkeypatch.setattr(cli, "load_issue_790_plan", _fake_load)
+    plan = tmp_path / "plan.json"
+    plan.write_text("{}", encoding="utf-8")
+    store = tmp_path / "store.sqlite"
+    store.write_bytes(b"")
+    rc = cli.main(
+        [
+            "dry-run",
+            "--store",
+            str(store),
+            "--plan",
+            str(plan),
+            "--observed-at",
+            "2026-08-29T12:00:00+00:00",
+            "--receipt",
+            str(tmp_path / "receipt.json"),
+            "--scratch-store",
+            str(tmp_path / "scratch.sqlite"),
+        ]
+    )
+    assert rc == 2
+    assert captured["path"] == plan
+    assert captured["store"] == store

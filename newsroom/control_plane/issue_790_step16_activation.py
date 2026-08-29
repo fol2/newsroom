@@ -382,6 +382,9 @@ def authenticate_step16_owner_comment(
         workflow_run.get("id") != run_id
         or workflow_run.get("html_url") != retained_payload["focus_gate_run_url"]
         or workflow_run.get("head_sha") != retained_payload["final_main_commit"]
+        or workflow_run.get("path") != ".github/workflows/focus-gates.yml"
+        or workflow_run.get("name") != "Focus Gates"
+        or workflow_run.get("event") != "workflow_dispatch"
         or workflow_run.get("status") != "completed"
         or workflow_run.get("conclusion") != "success"
     ):
