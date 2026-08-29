@@ -59,6 +59,7 @@ from newsroom.control_plane.graphiti_events import (
     GraphitiRevisionEvent,
     SystemicGraphitiEventFailure,
     ensure_graphiti_event_schema,
+    graphiti_unit_binding_reason,
 )
 from newsroom.control_plane.items import parse_observation
 from newsroom.control_plane.issue_790_canary import Issue790CanaryRepository
@@ -2951,6 +2952,9 @@ def qualify_fresh_graphiti_event(
     rights_decisions = tuple(rights_check(unit) for unit in units)
     if any(decision is None for decision in rights_decisions):
         raise ValueError("bounded Graphiti event lacks current dispatch rights")
+    binding_reason = graphiti_unit_binding_reason(event, units)
+    if binding_reason is not None:
+        raise ValueError(binding_reason)
     evidence_without_digest: dict[str, object] = {
         "schema_version": "newsroom.graphiti-fresh-event-preflight.v1",
         "event_id": event.event_id,
@@ -3056,6 +3060,9 @@ def consume_next_graphiti_event(
         for unit in units:
             if rights_check(unit) is None:
                 return GraphitiDispatchGate.hold("NO_CURRENT_DISPATCH_RIGHTS")
+        binding_reason = graphiti_unit_binding_reason(event, units)
+        if binding_reason is not None:
+            return GraphitiDispatchGate.hold(binding_reason)
         queue.bind_resolved_units(event, owner_id=owner_id, units=units)
         return GraphitiDispatchGate.allow()
 

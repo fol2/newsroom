@@ -3131,7 +3131,7 @@ def run_issue_790_canary(
             )
         except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
             raise Issue790DispositionError(
-                f"bounded canary provider-free preflight failed: {type(exc).__name__}"
+                f"bounded canary provider-free preflight failed: {type(exc).__name__}: {exc}"
             ) from exc
     else:
         if (
