@@ -1,0 +1,15 @@
+{
+  "schema_version": "newsroom.issue-790.step17-gate-parity-qualification.v1",
+  "issue": 790,
+  "pull_request_url": "https://github.com/fol2/newsroom/pull/848",
+  "merged_commit": "99abf7ebad1ef9d13805354d954d044cc81133c0",
+  "merged_tree": "69577c2a72b82e5625357b973283a765514780d6",
+  "unit_binding_reason": "RESOLVED_INGEST_IDS_DIFFER_FROM_LANDED",
+  "exhausted_event_id": "sha256:2c6941748dce73271a0d4aae2e94766384d0dd16bc29707524f74b8026d7c3b9",
+  "exhausted_ledger_seq": 8835,
+  "landed_ingest_id": "9d565951-bbd1-4a3f-8acc-59419a8352c0",
+  "resolved_ingest_id": "c5d9587d-4188-4358-a41a-05d585d2db6d",
+  "provider_calls": 0,
+  "store_mutations": 0,
+  "qualification_digest": "sha256:49330e4ff63ae5b117f70a77ff67fe084252c0fe35e0d30365b450322ef2ba1d"
+}

@@ -91,6 +91,19 @@ ISSUE_790_STEP16_APPROVAL_MARKER = "NEWSROOM_ISSUE_790_STEP16_OWNER_APPROVAL_V1"
 ISSUE_790_STEP16_REVOKED_CHECKED_LIVE_PLAN_DIGEST = (
     "sha256:72723b72b71f12fee2a9ec31c2b4145e5cbac4ac55f8ddbc51319248e94c21f9"
 )
+ISSUE_790_STEP16_ACTIVATED_PLAN_DIGEST = (
+    "sha256:68142ca2d7dc343bfba579271f619c8d00c1e7f32ebda584f70eb8871f756b5e"
+)
+ISSUE_790_STEP16_ACTIVATION_DIGEST = (
+    "sha256:c2518592533bf09886e7457d05e41be41eb0605f47941230d750931e192b68c3"
+)
+ISSUE_790_STEP17_PENDING_DIGEST = (
+    "sha256:af592f9b3a8cebe30f8b189ca6cc6b823be3a2724db6f66ec84adb1fe6895882"
+)
+ISSUE_790_STEP17_CHECKED_CANDIDATE_DIGEST = (
+    "sha256:eaecb49ac999309faaa82981e6a512a1220ce81e0b2236fba9d5fe9d39c6be23"
+)
+ISSUE_790_OWNER_ACTIVATED_SEQUENCE_ORDINALS = frozenset({16, 17})
 
 
 @dataclass(frozen=True, slots=True)
@@ -701,15 +714,76 @@ _STEP16_CHECKED_CANDIDATE = Issue790CheckedCandidateContract(
     checked_approval_reference=f"checked:{ISSUE_790_STEP16_PENDING_DIGEST}",
 )
 
+_STEP17_CHECKED_CANDIDATE = Issue790CheckedCandidateContract(
+    schema_version=ISSUE_790_STEP16_CANDIDATE_SCHEMA,
+    candidate_digest=ISSUE_790_STEP17_CHECKED_CANDIDATE_DIGEST,
+    pending_digest=ISSUE_790_STEP17_PENDING_DIGEST,
+    invocation_id=(
+        "sha256:d0712807fd025520d0a94e5a28c532d4cb8684c936387290fe7eeb49d0b2336c"
+    ),
+    terminal_digest=(
+        "sha256:d48e844404516bd41b17038b42a834c6e54bf5da520ef046f3baf81ea7a8cbbe"
+    ),
+    allocation_digest=(
+        "sha256:c789330ca7151d097e6d366dd65481ff21d55f93891ff61e368d7369b12c7120"
+    ),
+    predecessor_plan_digest=ISSUE_790_STEP16_ACTIVATED_PLAN_DIGEST,
+    sequence_ordinal=17,
+    projection_policy_version="NewsroomGovernedProposalProjectionV1",
+    projection_policy_digest=(
+        "sha256:c68a9c5bf81a8d052ba9b05f286b0d1cf664e86e2e00ee3c39684f7809b16a7c"
+    ),
+    temporal_policy_version="graphiti-source-reference-time-v2",
+    validator_contract_version="NewsroomCombinedTemporalNormaliseV2",
+    pre_dispatch_operational_requirements_digest=(
+        "sha256:968d0875cbed3a37cca56c2aa696598c3996e10d3a0ad6edc5978c21965d587b"
+    ),
+    reviewed_fix_digest=(
+        "sha256:0eb14558caad4d87cfd87ac508df2c74883f9fc0eebbe4c19f558ec00584f5a9"
+    ),
+    predecessor_causal_report_digest=(
+        "sha256:cbbbae379cb55cd23503152de4b982dde99873a670c78dec1b23e5789556023d"
+    ),
+    checked_approved_by="checked:issue-790-step17-sealer",
+    checked_approval_reference=f"checked:{ISSUE_790_STEP17_PENDING_DIGEST}",
+)
+
+_CHECKED_CANDIDATES = {
+    _STEP16_CHECKED_CANDIDATE.candidate_digest: _STEP16_CHECKED_CANDIDATE,
+    _STEP17_CHECKED_CANDIDATE.candidate_digest: _STEP17_CHECKED_CANDIDATE,
+}
+_CHECKED_CANDIDATES_BY_PENDING = {
+    contract.pending_digest: contract
+    for contract in _CHECKED_CANDIDATES.values()
+}
+
+
+def issue_790_owner_activated_sequence(ordinal: object) -> bool:
+    """True for one-shot owner-activated sequence ordinals."""
+
+    return type(ordinal) is int and ordinal in ISSUE_790_OWNER_ACTIVATED_SEQUENCE_ORDINALS
+
 
 def issue_790_checked_candidate_contract(
     candidate_digest: str,
 ) -> Issue790CheckedCandidateContract:
-    """Return the Step 16 seal-proof candidate. This is not live authority."""
+    """Return a seal-proof candidate. This is not live authority."""
 
-    if candidate_digest != _STEP16_CHECKED_CANDIDATE.candidate_digest:
-        raise KeyError(candidate_digest)
-    return _STEP16_CHECKED_CANDIDATE
+    try:
+        return _CHECKED_CANDIDATES[candidate_digest]
+    except KeyError:
+        raise KeyError(candidate_digest) from None
+
+
+def issue_790_checked_candidate_contract_for_pending(
+    pending_digest: str,
+) -> Issue790CheckedCandidateContract:
+    """Return the seal-proof candidate bound to one pending digest."""
+
+    try:
+        return _CHECKED_CANDIDATES_BY_PENDING[pending_digest]
+    except KeyError:
+        raise KeyError(pending_digest) from None
 
 
 def issue_790_approved_plan_contract(
@@ -803,10 +877,17 @@ __all__ = [
     "ISSUE_790_STEP16_ACTIVATION_POLICY_VERSION",
     "ISSUE_790_STEP16_APPROVAL_MARKER",
     "ISSUE_790_STEP16_REVOKED_CHECKED_LIVE_PLAN_DIGEST",
+    "ISSUE_790_STEP16_ACTIVATED_PLAN_DIGEST",
+    "ISSUE_790_STEP16_ACTIVATION_DIGEST",
+    "ISSUE_790_STEP17_PENDING_DIGEST",
+    "ISSUE_790_STEP17_CHECKED_CANDIDATE_DIGEST",
+    "ISSUE_790_OWNER_ACTIVATED_SEQUENCE_ORDINALS",
     "Issue790ApprovedPlanContract",
     "Issue790CheckedCandidateContract",
     "issue_790_approved_plan_contract",
     "issue_790_approved_plan_contracts",
     "issue_790_checked_candidate_contract",
+    "issue_790_checked_candidate_contract_for_pending",
+    "issue_790_owner_activated_sequence",
     "issue_790_invocation_plan_digests",
 ]
