@@ -131,8 +131,9 @@
       "record_digest": "sha256:0eb14558caad4d87cfd87ac508df2c74883f9fc0eebbe4c19f558ec00584f5a9"
     },
     "predecessor_canary_receipt_digest": "sha256:a4604b0414226c893852b148dc43fe38862e29d8ec8ae5adcce1c089398bac60",
+    "predecessor_activation_digest": "sha256:c2518592533bf09886e7457d05e41be41eb0605f47941230d750931e192b68c3",
     "hold_comment": "5464921823",
     "pre_dispatch_operational_requirements_digest": "sha256:968d0875cbed3a37cca56c2aa696598c3996e10d3a0ad6edc5978c21965d587b"
   },
-  "canonical_digest": "sha256:af592f9b3a8cebe30f8b189ca6cc6b823be3a2724db6f66ec84adb1fe6895882"
+  "canonical_digest": "sha256:1a25b92b9959db9862726b4f40489996796ef20ddf8d09c5d811b9aa8f875a43"
 }

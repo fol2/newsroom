@@ -633,7 +633,12 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
             expected_sequence_fields.update(_STEP16_SEQUENCE_IDENTITY_FIELDS)
             expected_sequence_fields.update(_STEP16_ACTIVATION_FIELDS)
         if sequence.get("sequence_ordinal") == 17:
-            expected_sequence_fields.add("predecessor_canary_receipt_digest")
+            expected_sequence_fields.update(
+                {
+                    "predecessor_canary_receipt_digest",
+                    "predecessor_activation_digest",
+                }
+            )
         if set(sequence) != expected_sequence_fields:
             raise Issue790DispositionError("issue #790 sequence fields differ")
         predecessor = _record(sequence.get("predecessor"), field="predecessor")
@@ -740,13 +745,16 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
                 raise Issue790DispositionError(
                     "issue #790 predecessor identity differs"
                 )
-            if sequence.get("sequence_ordinal") == 17 and sequence.get(
-                "predecessor_canary_receipt_digest"
-            ) != (
-                "sha256:a4604b0414226c893852b148dc43fe38862e29d8ec8ae5adcce1c089398bac60"
+            if sequence.get("sequence_ordinal") == 17 and (
+                sequence.get("predecessor_canary_receipt_digest")
+                != (
+                    "sha256:a4604b0414226c893852b148dc43fe38862e29d8ec8ae5adcce1c089398bac60"
+                )
+                or sequence.get("predecessor_activation_digest")
+                != issue_790_contract_module.ISSUE_790_STEP16_ACTIVATION_DIGEST
             ):
                 raise Issue790DispositionError(
-                    "issue #790 predecessor canary receipt differs"
+                    "issue #790 predecessor activation identity differs"
                 )
             _reject_checked_live_approval(approval)
             pre_dispatch = _record(
@@ -1366,102 +1374,108 @@ def _require_approved_plan(
                     contract.sequence_ordinal != 17
                     or contract.predecessor_plan_digest
                     != ISSUE_790_STEP16_ACTIVATED_PLAN_DIGEST
+                    or sequence.get("predecessor_activation_digest")
+                    != issue_790_contract_module.ISSUE_790_STEP16_ACTIVATION_DIGEST
+                    or contract.root_plan_digest
+                    != sequence.get("root_plan_digest")
+                    or contract.controller_timeout_ms
+                    != _STEP16_PREDECESSOR_TIMEOUTS[0]
+                    or contract.extraction_timeout_ms
+                    != _STEP16_PREDECESSOR_TIMEOUTS[1]
+                    or contract.cleanup_reserve_ms
+                    != _STEP16_PREDECESSOR_TIMEOUTS[2]
+                    or contract.fixed_constraints_digest
+                    != sequence.get("fixed_constraints_digest")
                 ):
                     raise Issue790DispositionError(
                         "issue #790 previous sequence contract differs"
                     ) from exc
-                previous_contract = issue_790_contract_module.Issue790ApprovedPlanContract(
-                    schema_version=ISSUE_790_ITERATIVE_PLAN_SCHEMA,
-                    plan_digest=ISSUE_790_STEP16_ACTIVATED_PLAN_DIGEST,
-                    invocation_id=str(contract.invocation_id),
-                    terminal_digest=str(contract.terminal_digest),
-                    allocation_digest=str(contract.allocation_digest),
-                    approved_by=str(contract.approved_by),
-                    approval_reference=str(contract.approval_reference),
-                    approved_at=str(contract.approved_at),
-                    scope=str(contract.scope),
-                    terminal_outcome=str(contract.terminal_outcome),
-                    route_open_reason=str(contract.route_open_reason),
-                    root_plan_digest=str(contract.root_plan_digest),
-                    predecessor_plan_digest=(
-                        ISSUE_790_SUCCESS_SEQUENCE_STEP_15_PLAN_DIGEST
-                    ),
-                    sequence_ordinal=16,
-                    controller_timeout_ms=_STEP16_PREDECESSOR_TIMEOUTS[0],
-                    extraction_timeout_ms=_STEP16_PREDECESSOR_TIMEOUTS[1],
-                    cleanup_reserve_ms=_STEP16_PREDECESSOR_TIMEOUTS[2],
-                    fixed_constraints_digest=str(contract.fixed_constraints_digest),
-                    predecessor_causal_report_digest=None,
-                    constraint_change="REVIEWED_NON_TIMEOUT_FIX",
-                    reviewed_fix_digest=None,
-                )
-            ordinal_step = contract.sequence_ordinal - previous_contract.sequence_ordinal
-            if (
-                ordinal_step < 1
-                or (
-                    ordinal_step > 1
-                    and sequence.get("constraint_change")
-                    != "COMPATIBILITY_FLOOR_ARCHITECTURE"
-                )
-                or previous_contract.root_plan_digest != contract.root_plan_digest
-                or (
-                    sequence.get("constraint_change")
-                    not in _ISSUE_790_REVIEWED_SUCCESSOR_TRANSITIONS
-                    and previous_contract.fixed_constraints_digest
-                    != contract.fixed_constraints_digest
-                )
-                or previous_contract.cleanup_reserve_ms
-                != contract.cleanup_reserve_ms
-            ):
-                raise Issue790DispositionError(
-                    "issue #790 monotonic sequence contract differs"
-                )
-            if sequence.get("constraint_change") == "CONTROLLER_TIMEOUT_INCREMENT":
-                if (
-                    causal_report.get("schema_version")
-                    != ISSUE_790_CAUSAL_REPORT_SCHEMA
-                    or diagnostic.get("configured_timeout_ms")
-                    != previous_contract.controller_timeout_ms
-                    or contract.controller_timeout_ms
-                    != previous_contract.controller_timeout_ms + 10_000
-                    or contract.extraction_timeout_ms
-                    != previous_contract.extraction_timeout_ms + 10_000
-                ):
-                    raise Issue790DispositionError(
-                        "issue #790 timeout increment contract differs"
-                    )
-            elif sequence.get("constraint_change") in _ISSUE_790_REVIEWED_SUCCESSOR_TRANSITIONS:
+                previous_contract = None
+            if previous_contract is None:
                 if (
                     reviewed_fix is None
                     or causal_report.get("schema_version")
                     != ISSUE_790_NON_TIMEOUT_CAUSAL_REPORT_SCHEMA
                     or diagnostic.get("configured_controller_timeout_ms")
-                    != previous_contract.controller_timeout_ms
+                    != _STEP16_PREDECESSOR_TIMEOUTS[0]
                     or diagnostic.get("configured_extraction_timeout_ms")
-                    != previous_contract.extraction_timeout_ms
+                    != _STEP16_PREDECESSOR_TIMEOUTS[1]
                     or diagnostic.get("cleanup_reserve_ms")
-                    != previous_contract.cleanup_reserve_ms
-                    or contract.controller_timeout_ms
-                    != previous_contract.controller_timeout_ms
-                    or contract.extraction_timeout_ms
-                    != previous_contract.extraction_timeout_ms
+                    != _STEP16_PREDECESSOR_TIMEOUTS[2]
                 ):
                     raise Issue790DispositionError(
                         "issue #790 reviewed fix contract differs"
                     )
+            else:
+                ordinal_step = (
+                    contract.sequence_ordinal - previous_contract.sequence_ordinal
+                )
                 if (
-                    sequence.get("constraint_change")
-                    == "COMPATIBILITY_FLOOR_ARCHITECTURE"
-                    and causal_report.get("causal_constraint")
-                    != "COMPATIBILITY_FLOOR_ARCHITECTURE"
+                    ordinal_step < 1
+                    or (
+                        ordinal_step > 1
+                        and sequence.get("constraint_change")
+                        != "COMPATIBILITY_FLOOR_ARCHITECTURE"
+                    )
+                    or previous_contract.root_plan_digest != contract.root_plan_digest
+                    or (
+                        sequence.get("constraint_change")
+                        not in _ISSUE_790_REVIEWED_SUCCESSOR_TRANSITIONS
+                        and previous_contract.fixed_constraints_digest
+                        != contract.fixed_constraints_digest
+                    )
+                    or previous_contract.cleanup_reserve_ms
+                    != contract.cleanup_reserve_ms
                 ):
                     raise Issue790DispositionError(
-                        "issue #790 compatibility-floor contract differs"
+                        "issue #790 monotonic sequence contract differs"
                     )
-            else:
-                raise Issue790DispositionError(
-                    "issue #790 successor transition differs"
-                )
+                if sequence.get("constraint_change") == "CONTROLLER_TIMEOUT_INCREMENT":
+                    if (
+                        causal_report.get("schema_version")
+                        != ISSUE_790_CAUSAL_REPORT_SCHEMA
+                        or diagnostic.get("configured_timeout_ms")
+                        != previous_contract.controller_timeout_ms
+                        or contract.controller_timeout_ms
+                        != previous_contract.controller_timeout_ms + 10_000
+                        or contract.extraction_timeout_ms
+                        != previous_contract.extraction_timeout_ms + 10_000
+                    ):
+                        raise Issue790DispositionError(
+                            "issue #790 timeout increment contract differs"
+                        )
+                elif sequence.get("constraint_change") in _ISSUE_790_REVIEWED_SUCCESSOR_TRANSITIONS:
+                    if (
+                        reviewed_fix is None
+                        or causal_report.get("schema_version")
+                        != ISSUE_790_NON_TIMEOUT_CAUSAL_REPORT_SCHEMA
+                        or diagnostic.get("configured_controller_timeout_ms")
+                        != previous_contract.controller_timeout_ms
+                        or diagnostic.get("configured_extraction_timeout_ms")
+                        != previous_contract.extraction_timeout_ms
+                        or diagnostic.get("cleanup_reserve_ms")
+                        != previous_contract.cleanup_reserve_ms
+                        or contract.controller_timeout_ms
+                        != previous_contract.controller_timeout_ms
+                        or contract.extraction_timeout_ms
+                        != previous_contract.extraction_timeout_ms
+                    ):
+                        raise Issue790DispositionError(
+                            "issue #790 reviewed fix contract differs"
+                        )
+                    if (
+                        sequence.get("constraint_change")
+                        == "COMPATIBILITY_FLOOR_ARCHITECTURE"
+                        and causal_report.get("causal_constraint")
+                        != "COMPATIBILITY_FLOOR_ARCHITECTURE"
+                    ):
+                        raise Issue790DispositionError(
+                            "issue #790 compatibility-floor contract differs"
+                        )
+                else:
+                    raise Issue790DispositionError(
+                        "issue #790 successor transition differs"
+                    )
     if step16 or contract.plan_digest == issue_790_approved_plan_contracts()[-1].plan_digest:
         _require_iterative_call_shape(plan)
     return plan

@@ -9,6 +9,12 @@ from pathlib import Path
 import pytest
 
 from newsroom.control_plane import issue_790_contract as issue_790_contract_module
+from newsroom.control_plane.cycle import (
+    consume_next_graphiti_event,
+    qualify_fresh_graphiti_event,
+)
+from newsroom.control_plane.corpus import CorpusIngestUnit
+from newsroom.control_plane.graphiti import GraphitiCycleResult
 from newsroom.control_plane.graphiti_events import graphiti_unit_binding_reason
 from newsroom.control_plane.issue_790_canary import (
     Issue790CanaryIntegrityError,
@@ -27,9 +33,13 @@ from newsroom.control_plane.issue_790_disposition import (
     validate_issue_790_plan,
     validate_issue_790_step16_candidate,
 )
+from newsroom.tests.test_graphiti_corpus_ingest import _complete
 from newsroom.tests.test_graphiti_event_consumer import (
+    MutableClock,
     _EVENT_8835_LANDED_INGEST_ID,
     _binding_event,
+    _projected_zero_ref_event,
+    _rewrite_landed_ingest_ids,
     _unit,
 )
 from newsroom.tests.test_issue_790_step16_activation import (
@@ -104,6 +114,9 @@ def test_successor_checked_candidate_is_a_new_identity() -> None:
     assert candidate17["sequence"]["sequence_ordinal"] == 17
     assert candidate17["sequence"]["predecessor"]["plan_digest"] == (
         issue_790_contract_module.ISSUE_790_STEP16_ACTIVATED_PLAN_DIGEST
+    )
+    assert candidate17["sequence"]["predecessor_activation_digest"] == (
+        issue_790_contract_module.ISSUE_790_STEP16_ACTIVATION_DIGEST
     )
     assert [item["ledger_seq"] for item in candidate17["retry_forbidden_events"]] == [
         1932,
@@ -213,6 +226,71 @@ def test_landed_resolved_mismatch_holds_before_ready() -> None:
         graphiti_unit_binding_reason(event, (unit,))
         == "RESOLVED_INGEST_IDS_DIFFER_FROM_LANDED"
     )
+
+
+def test_successor_qualify_and_live_gate_share_binding_policy(tmp_path: Path) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, unpublished, event_id, ledger_seq = _projected_zero_ref_event(
+        tmp_path, clock
+    )
+    evidence = qualify_fresh_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        clock=clock,
+    )
+    assert evidence["provider_calls"] == 0
+    assert evidence["resolved_units"]
+
+    class FixtureGraphiti:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            return _complete(unit)
+
+    ready = consume_next_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        graphiti=FixtureGraphiti(),
+        owner_id="worker",
+        clock=clock,
+        event_id=event_id,
+        require_fresh=True,
+        recover_model_usage=False,
+    )
+    assert ready is not None and ready.state == "TERMINAL"
+
+    mismatch_root = tmp_path / "mismatch"
+    mismatch_root.mkdir()
+    proving2, unpublished2, event_id2, ledger_seq2 = _projected_zero_ref_event(
+        mismatch_root, clock
+    )
+    _rewrite_landed_ingest_ids(
+        unpublished2, event_id2, (_EVENT_8835_LANDED_INGEST_ID,)
+    )
+    with pytest.raises(ValueError, match="RESOLVED_INGEST_IDS_DIFFER_FROM_LANDED"):
+        qualify_fresh_graphiti_event(
+            proving_store=str(proving2),
+            unpublished_store=str(unpublished2),
+            event_id=event_id2,
+            ledger_seq=ledger_seq2,
+            clock=clock,
+        )
+
+    class MustNotDispatch:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            raise AssertionError(f"provider boundary reached for {unit.ingest_id}")
+
+    held = consume_next_graphiti_event(
+        proving_store=str(proving2),
+        unpublished_store=str(unpublished2),
+        graphiti=MustNotDispatch(),
+        owner_id="worker",
+        clock=clock,
+        event_id=event_id2,
+        require_fresh=True,
+        recover_model_usage=False,
+    )
+    assert held is not None and held.state == "RIGHTS_HELD"
 
 
 def test_historical_step16_and_step15_remain_replayable() -> None:
