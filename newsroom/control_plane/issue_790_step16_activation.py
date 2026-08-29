@@ -162,6 +162,20 @@ CREATE TABLE IF NOT EXISTS issue_790_step16_circuit_releases(
     UNIQUE(plan_digest,event_id,ledger_seq)
 );
 """
+_CIRCUIT_RELEASE_KEYS = (
+    "schema_version",
+    "policy_version",
+    "plan_digest",
+    "activation_digest",
+    "event_id",
+    "ledger_seq",
+    "prior_state",
+    "released_at",
+    "effect",
+    "provider_calls",
+    "cas_result",
+    "release_digest",
+)
 STEP16_ACTIVATION_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS issue_790_step16_activations(
     activation_digest TEXT PRIMARY KEY,
@@ -1052,6 +1066,61 @@ def require_step16_plan_matches_activation(
     return contract
 
 
+def validate_step16_circuit_release_receipt(
+    record: Mapping[str, object],
+    *,
+    sql_identity: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Validate one content-addressed expired-open circuit-release receipt."""
+
+    retained = dict(record)
+    if tuple(sorted(retained)) != tuple(sorted(_CIRCUIT_RELEASE_KEYS)):
+        _fail("issue #790 event circuit release differs")
+    unsigned = {key: item for key, item in retained.items() if key != "release_digest"}
+    prior = retained.get("prior_state")
+    cas = retained.get("cas_result")
+    if (
+        retained.get("schema_version") != ISSUE_790_STEP16_CIRCUIT_RELEASE_SCHEMA
+        or retained.get("policy_version")
+        != ISSUE_790_STEP16_CIRCUIT_RELEASE_POLICY_VERSION
+        or retained.get("release_digest") != digest_canonical(unsigned)
+        or retained.get("effect") != "IMMEDIATE_CLOSE_EXPIRED_OPEN"
+        or retained.get("provider_calls") != 0
+        or not isinstance(prior, dict)
+        or prior.get("state") != "OPEN"
+        or not isinstance(cas, dict)
+        or cas.get("singleton") != 1
+        or cas.get("state") != "OPEN"
+        or cas.get("rowcount") != 1
+        or cas.get("opened_at") != prior.get("opened_at")
+        or cas.get("available_at") != prior.get("available_at")
+        or cas.get("failure_code") != prior.get("failure_code")
+    ):
+        _fail("issue #790 event circuit release differs")
+    _sha256(retained.get("plan_digest"), field="plan digest")
+    _sha256(retained.get("activation_digest"), field="activation digest")
+    _sha256(retained.get("event_id"), field="canary event id")
+    _natural(retained.get("ledger_seq"), field="canary ledger sequence")
+    _instant(retained.get("released_at"), field="circuit released_at")
+    _instant(prior.get("opened_at"), field="circuit opened_at")
+    _instant(prior.get("available_at"), field="circuit available_at")
+    failure = prior.get("failure_code")
+    if not isinstance(failure, str) or not failure or failure != failure.strip():
+        _fail("issue #790 event circuit is malformed")
+    if sql_identity is not None:
+        if (
+            sql_identity.get("release_digest") != retained.get("release_digest")
+            or sql_identity.get("activation_digest")
+            != retained.get("activation_digest")
+            or sql_identity.get("plan_digest") != retained.get("plan_digest")
+            or sql_identity.get("event_id") != retained.get("event_id")
+            or sql_identity.get("ledger_seq") != retained.get("ledger_seq")
+            or sql_identity.get("released_at") != retained.get("released_at")
+        ):
+            _fail("issue #790 event circuit release differs")
+    return retained
+
+
 __all__ = [
     "ISSUE_790_STEP16_CIRCUIT_RELEASE_POLICY_VERSION",
     "ISSUE_790_STEP16_CIRCUIT_RELEASE_SCHEMA",
@@ -1079,6 +1148,7 @@ __all__ = [
     "step16_activation_contract_from_connection",
     "step16_owner_activation_binding",
     "validate_step16_activation_receipt",
+    "validate_step16_circuit_release_receipt",
     "validate_step16_owner_activation_binding",
     "validate_step16_owner_approval_payload",
 ]
