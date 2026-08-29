@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,11 +12,15 @@ import pytest
 
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane import issue_790_contract as issue_790_contract_module
-from newsroom.control_plane.issue_790_canary import Issue790CanaryRepository
+from newsroom.control_plane.issue_790_canary import (
+    Issue790CanaryIntegrityError,
+    Issue790CanaryRepository,
+)
 from newsroom.control_plane.issue_790_disposition import (
     ISSUE_790_STEP16_PENDING_PLAN_PATH,
     ISSUE_790_STEP16_PRE_DISPATCH_PATH,
     Issue790DispositionError,
+    _release_step16_expired_open_circuit,
     _require_approved_plan,
     _require_step16_event_circuit,
     _require_step16_runtime_semantics,
@@ -35,6 +40,9 @@ from newsroom.control_plane.issue_790_step16_activation import (
     ISSUE_790_STEP16_READINESS_STATUS,
     canonical_step16_owner_approval_comment_body,
     effective_issue_790_plan_contract,
+    load_step16_activation_record,
+    parse_step16_owner_approval_payload,
+    validate_step16_activation_receipt,
 )
 from newsroom.graphiti_adapter.combined_temporal_projection import (
     PROJECTION_POLICY_DIGEST,
@@ -86,6 +94,44 @@ def _seal() -> dict[str, object]:
     )
 
 
+def _focus_gate_manifest(payload: dict[str, object]) -> dict[str, object]:
+    unsigned = {
+        "schema_version": "newsroom.sdlc.focus-route.v1",
+        "contract_version": "focus-gates-v1",
+        "base_sha": "0" * 40,
+        "head_sha": payload["final_main_commit"],
+        "base_tree_sha": "1" * 40,
+        "head_tree_sha": payload["final_main_tree"],
+        "changed_paths": ["newsroom/control_plane/issue_790_step16_activation.py"],
+        "gates": ["F0", "F1", "F2"],
+        "selected_tests": ["newsroom/tests/test_issue_790_step16_activation.py"],
+        "selected_service_tests": [],
+        "research_required": False,
+        "full_health_required": False,
+        "owner_authority_required": False,
+        "bootstrap_required": False,
+        "reasons": ["issue-790-step16-activation"],
+        "execution_budget": {"focus_gate_jobs": 1, "dependency_bootstraps": 0},
+    }
+    return {**unsigned, "manifest_digest": digest_canonical(unsigned)}
+
+
+def _review_receipt(payload: dict[str, object]) -> dict[str, object]:
+    unsigned = {
+        "schema_version": "newsroom.issue-790.code-fix-review-receipt.v1",
+        "issue": 790,
+        "pull_request_url": (
+            f"https://github.com/fol2/newsroom/pull/{payload['final_correction_pr']}"
+        ),
+        "reviewed_fix_revision": payload["reviewed_head_commit"],
+        "verdict": "SHIP_ALLOWED",
+        "scope": "step16-owner-activation",
+        "findings": ["activation-boundary"],
+        "blocking_findings": [],
+    }
+    return {**unsigned, "review_receipt_digest": digest_canonical(unsigned)}
+
+
 def _payload(candidate: dict[str, object], **overrides: object) -> dict[str, object]:
     sequence = candidate["sequence"]
     payload: dict[str, object] = {
@@ -128,6 +174,14 @@ def _payload(candidate: dict[str, object], **overrides: object) -> dict[str, obj
         ),
     }
     payload.update(overrides)
+    if "focus_gate_manifest_digest" not in overrides:
+        payload["focus_gate_manifest_digest"] = _focus_gate_manifest(payload)[
+            "manifest_digest"
+        ]
+    if "feature_complete_review_receipt" not in overrides:
+        payload["feature_complete_review_receipt"] = _review_receipt(payload)[
+            "review_receipt_digest"
+        ]
     return payload
 
 
@@ -175,10 +229,29 @@ class _FakeGitHub:
         self,
         comment: dict[str, object],
         workflow_run: dict[str, object] | None = None,
+        *,
+        focus_gate_manifest: dict[str, object] | None = None,
+        review_receipt: dict[str, object] | None = None,
     ) -> None:
         self.comment = comment
         self.workflow_run = workflow_run if workflow_run is not None else _workflow_run()
         self.calls: list[str] = []
+        self.focus_gate_manifest = focus_gate_manifest
+        self.review_receipt = review_receipt
+        body = comment.get("body")
+        if (
+            self.focus_gate_manifest is None
+            or self.review_receipt is None
+        ) and isinstance(body, str):
+            try:
+                payload = parse_step16_owner_approval_payload(body)
+            except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                if self.focus_gate_manifest is None:
+                    self.focus_gate_manifest = _focus_gate_manifest(payload)
+                if self.review_receipt is None:
+                    self.review_receipt = _review_receipt(payload)
 
     def __call__(self, resource: str) -> dict[str, object]:
         self.calls.append(resource)
@@ -488,7 +561,10 @@ def test_contradictory_activation_fails_closed(tmp_path: Path) -> None:
     unsigned = {key: item for key, item in forged.items() if key != "activation_digest"}
     forged["activation_digest"] = digest_canonical(unsigned)
     repository = Issue790CanaryRepository(str(first["store"]))
-    with pytest.raises(Exception, match="contradicts retained evidence"):
+    with pytest.raises(
+        (Issue790CanaryIntegrityError, Issue790DispositionError),
+        match="activation differs|contradicts retained evidence",
+    ):
         repository.retain_step16_activation(forged)
 
 
@@ -563,7 +639,7 @@ def test_changed_comment_body_fails_at_live_gate(tmp_path: Path) -> None:
     drifted = dict(activated["github"].comment)
     drifted["body"] = drifted["body"] + "\nextra\n"
     github = _FakeGitHub(drifted, activated["github"].workflow_run)
-    with pytest.raises(Issue790DispositionError, match="owner comment evidence"):
+    with pytest.raises(Issue790DispositionError, match="payload|owner comment"):
         _require_approved_plan(
             activated["plan"],
             store=activated["store"],
@@ -876,3 +952,559 @@ def test_cli_passes_activation_store_into_plan_load(
     assert rc == 2
     assert captured["path"] == plan
     assert captured["store"] == store
+
+
+_UNSAFE_PACKET = (
+    _ROOT / "newsroom/tests/fixtures/issue_790_comment_5459306524.txt"
+)
+
+
+def _activation_counts(store: Path) -> tuple[int, int, int]:
+    if not store.exists():
+        return (0, 0, 0)
+    connection = sqlite3.connect(str(store))
+    try:
+        def _count(table: str) -> int:
+            present = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if present is None:
+                return 0
+            row = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+            return int(row[0])
+
+        return (
+            _count("issue_790_step16_activations"),
+            _count("issue_790_bounded_canary_consumptions"),
+            _count("issue_790_step16_circuit_releases"),
+        )
+    finally:
+        connection.close()
+
+
+def _install_event_circuit(
+    store: Path,
+    *,
+    state: str,
+    opened_at: str | None = None,
+    available_at: str | None = None,
+    failure_code: str | None = None,
+) -> None:
+    connection = sqlite3.connect(str(store))
+    try:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS unpublished_graphiti_event_circuit("
+            "singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
+            "state TEXT NOT NULL CHECK(state IN ('CLOSED','OPEN')),"
+            "opened_at TEXT,available_at TEXT,failure_code TEXT)"
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO unpublished_graphiti_event_circuit("
+            "singleton,state,opened_at,available_at,failure_code) VALUES (1,?,?,?,?)",
+            (state, opened_at, available_at, failure_code),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _re_sign(record: dict[str, object]) -> dict[str, object]:
+    from newsroom.authority.canonical import digest_bytes
+
+    forged = dict(record)
+    payload = dict(forged["approval_payload"])
+    forged["approval_payload"] = payload
+    forged["canonical_approval_payload_digest"] = digest_canonical(payload)
+    forged["canonical_body_digest"] = digest_bytes(
+        canonical_step16_owner_approval_comment_body(payload).encode("utf-8")
+    )
+    unsigned = {key: item for key, item in forged.items() if key != "activation_digest"}
+    forged["activation_digest"] = digest_canonical(unsigned)
+    return forged
+
+
+def test_unsafe_packet_comment_5459306524_never_authenticates(tmp_path: Path) -> None:
+    import re
+
+    from newsroom.authority.canonical import canonical_json_bytes
+
+    body = _UNSAFE_PACKET.read_text(encoding="utf-8")
+    assert "NEWSROOM_ISSUE_790_STEP16_OWNER_APPROVAL_V1" in body
+    fences = re.findall(r"```json\n(.*)\n```", body, re.DOTALL)
+    assert len(fences) == 1
+    parsed_json = json.loads(fences[0])
+    assert fences[0] == canonical_json_bytes(parsed_json).decode("utf-8")
+    assert "not owner approval" in body.lower()
+    with pytest.raises(Issue790DispositionError, match="payload"):
+        parse_step16_owner_approval_payload(body)
+    candidate = _seal()
+    _, pre_dispatch = _pending_family()
+    payload = _payload(candidate)
+    comment = _comment(payload, body=body, id=5459306524)
+    comment["html_url"] = (
+        "https://github.com/fol2/newsroom/issues/790#issuecomment-5459306524"
+    )
+    comment["url"] = (
+        "https://api.github.com/repos/fol2/newsroom/issues/comments/5459306524"
+    )
+    store = tmp_path / "authority.sqlite"
+    with pytest.raises(Issue790DispositionError, match="payload"):
+        activate_issue_790_step16_plan(
+            candidate,
+            comment_id=5459306524,
+            pre_dispatch=pre_dispatch,
+            store=store,
+            github_api=_FakeGitHub(comment),
+        )
+    activations, consumptions, releases = _activation_counts(store)
+    assert (activations, consumptions, releases) == (0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda body: "x" + body,
+        lambda body: "# Heading\n" + body,
+        lambda body: body + "\n",
+        lambda body: body[:-1],
+        lambda body: body + "Extra sentence.\n",
+        lambda body: body.replace(
+            "NEWSROOM_ISSUE_790_STEP16_OWNER_APPROVAL_V1",
+            "NEWSROOM_ISSUE_790_STEP16_OWNER_APPROVAL_V1\n\n"
+            "NEWSROOM_ISSUE_790_STEP16_OWNER_APPROVAL_V1",
+            1,
+        ),
+        lambda body: body + body,
+        lambda body: body.replace("```json\n{", "```json\n{ ", 1),
+    ],
+)
+def test_non_canonical_approval_bodies_fail(mutator) -> None:
+    candidate = _seal()
+    body = canonical_step16_owner_approval_comment_body(_payload(candidate))
+    mutated = mutator(body)
+    assert mutated != body
+    with pytest.raises(Issue790DispositionError, match="payload"):
+        parse_step16_owner_approval_payload(mutated)
+
+
+def test_exact_canonical_body_authenticates_with_fake_github(tmp_path: Path) -> None:
+    activated = _activate(tmp_path)
+    body = activated["github"].comment["body"]
+    parsed = parse_step16_owner_approval_payload(body)
+    assert body == canonical_step16_owner_approval_comment_body(parsed)
+    assert activated["activation"]["approval_payload"] == parsed
+    _require_approved_plan(
+        activated["plan"],
+        store=activated["store"],
+        github_api=activated["github"],
+    )
+
+
+def test_coherent_forged_activation_records_fail_closed(tmp_path: Path) -> None:
+    activated = _activate(tmp_path)
+    legitimate = dict(activated["activation"])
+    cases: list[dict[str, object]] = []
+
+    def _rebind(record: dict[str, object]) -> dict[str, object]:
+        payload = dict(record["approval_payload"])
+        record = dict(record)
+        record["approval_payload"] = payload
+        manifest = _focus_gate_manifest(payload)
+        review = _review_receipt(payload)
+        record["focus_gate_evidence"] = manifest
+        record["review_evidence"] = review
+        payload["focus_gate_manifest_digest"] = manifest["manifest_digest"]
+        payload["feature_complete_review_receipt"] = review["review_receipt_digest"]
+        record["final_main_commit"] = payload["final_main_commit"]
+        record["final_main_tree"] = payload["final_main_tree"]
+        record["checked_candidate_digest"] = payload["checked_candidate_digest"]
+        return _re_sign(record)
+
+    commit = dict(legitimate)
+    commit["approval_payload"] = dict(commit["approval_payload"])
+    commit["approval_payload"]["final_main_commit"] = "e" * 40
+    cases.append(_rebind(commit))
+
+    tree = dict(legitimate)
+    tree["approval_payload"] = dict(tree["approval_payload"])
+    tree["approval_payload"]["final_main_tree"] = "f" * 40
+    cases.append(_rebind(tree))
+
+    run = dict(legitimate)
+    run["approval_payload"] = dict(run["approval_payload"])
+    run["approval_payload"]["focus_gate_run_id"] = 1
+    run["approval_payload"]["focus_gate_run_url"] = (
+        "https://github.com/fol2/newsroom/actions/runs/1"
+    )
+    cases.append(_rebind(run))
+
+    manifest = dict(legitimate)
+    manifest["approval_payload"] = dict(manifest["approval_payload"])
+    manifest["approval_payload"]["focus_gate_manifest_digest"] = "sha256:" + "aa" * 32
+    cases.append(_re_sign(manifest))
+
+    review = dict(legitimate)
+    review["approval_payload"] = dict(review["approval_payload"])
+    review["approval_payload"]["feature_complete_review_receipt"] = (
+        "sha256:" + "bb" * 32
+    )
+    cases.append(_re_sign(review))
+
+    candidate = dict(legitimate)
+    candidate["approval_payload"] = dict(candidate["approval_payload"])
+    candidate["approval_payload"]["checked_candidate_digest"] = "sha256:" + "cc" * 32
+    cases.append(_rebind(candidate))
+
+    non_effects = dict(legitimate)
+    non_effects["approval_payload"] = dict(non_effects["approval_payload"])
+    non_effects["approval_payload"]["non_effects"] = ["NO_PUBLICATION"]
+    cases.append(_re_sign(non_effects))
+
+    stop = dict(legitimate)
+    stop["approval_payload"] = dict(stop["approval_payload"])
+    stop["approval_payload"]["stop_condition"] = "KEEP_GOING"
+    cases.append(_re_sign(stop))
+
+    caps = dict(legitimate)
+    caps["approval_payload"] = dict(caps["approval_payload"])
+    caps["approval_payload"]["retry_cap"] = 1
+    cases.append(_re_sign(caps))
+
+    pre = dict(legitimate)
+    pre["approval_payload"] = dict(pre["approval_payload"])
+    pre["approval_payload"]["pre_dispatch_policy_digest"] = "sha256:" + "dd" * 32
+    pre["pre_dispatch_template_digest"] = "sha256:" + "dd" * 32
+    cases.append(_re_sign(pre))
+
+    binding_run = dict(legitimate)
+    binding_run["approval_payload"] = dict(binding_run["approval_payload"])
+    binding_run["approval_payload"]["event_circuit_policy"] = "ALWAYS_CLOSED"
+    cases.append(_re_sign(binding_run))
+
+    contract = dict(legitimate)
+    contract["contract"] = dict(contract["contract"])
+    contract["contract"]["invocation_id"] = "sha256:" + "ee" * 32
+    cases.append(_re_sign(contract))
+
+    comment = dict(legitimate)
+    comment["comment_id"] = 1
+    comment["comment_url"] = (
+        "https://github.com/fol2/newsroom/issues/790#issuecomment-1"
+    )
+    cases.append(_re_sign(comment))
+
+    empty = tmp_path / "empty.sqlite"
+    repository = Issue790CanaryRepository(str(empty))
+    for forged in cases:
+        try:
+            repository.retain_step16_activation(forged)
+        except (Issue790CanaryIntegrityError, Issue790DispositionError):
+            assert _activation_counts(empty)[0] == 0
+            continue
+        with pytest.raises(Issue790DispositionError):
+            _require_approved_plan(
+                activated["plan"],
+                store=empty,
+                github_api=activated["github"],
+            )
+        connection = sqlite3.connect(str(empty))
+        try:
+            connection.execute("DELETE FROM issue_790_step16_activations")
+            connection.commit()
+        finally:
+            connection.close()
+
+    connection = sqlite3.connect(str(empty))
+    try:
+        connection.execute(
+            "INSERT INTO issue_790_step16_activations("
+            "activation_digest,checked_candidate_digest,plan_digest,comment_id,"
+            "payload_digest,created_at,record_json) VALUES (?,?,?,?,?,?,?)",
+            (
+                legitimate["activation_digest"],
+                "sha256:" + "99" * 32,
+                legitimate["plan_digest"],
+                legitimate["comment_id"],
+                legitimate["canonical_approval_payload_digest"],
+                legitimate["created_at"],
+                json.dumps(legitimate),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    with pytest.raises(Issue790DispositionError, match="activation differs"):
+        load_step16_activation_record(
+            sqlite3.connect(str(empty)),
+            plan_digest=str(legitimate["plan_digest"]),
+        )
+
+
+def test_legitimate_activation_replay_matches_refetched_payload(tmp_path: Path) -> None:
+    first = _activate(tmp_path)
+    second = activate_issue_790_step16_plan(
+        first["candidate"],
+        comment_id=_COMMENT_ID,
+        pre_dispatch=json.loads(
+            (_ROOT / ISSUE_790_STEP16_PRE_DISPATCH_PATH).read_text()
+        ),
+        store=first["store"],
+        github_api=first["github"],
+    )
+    assert second["activation"] == first["activation"]
+    connection = sqlite3.connect(str(first["store"]))
+    try:
+        loaded = load_step16_activation_record(
+            connection,
+            plan_digest=str(first["plan"]["canonical_digest"]),
+        )
+    finally:
+        connection.close()
+    validated = validate_step16_activation_receipt(
+        loaded,
+        authenticated=first["activation"] | {
+            "payload": first["activation"]["approval_payload"],
+            "comment_id": first["activation"]["comment_id"],
+            "comment_node_id": first["activation"]["comment_node_id"],
+            "comment_url": first["activation"]["comment_url"],
+            "created_at": first["activation"]["created_at"],
+            "updated_at": first["activation"]["updated_at"],
+            "canonical_body_digest": first["activation"]["canonical_body_digest"],
+            "canonical_approval_payload_digest": first["activation"][
+                "canonical_approval_payload_digest"
+            ],
+            "checked_candidate_digest": first["activation"]["checked_candidate_digest"],
+        },
+        plan=first["plan"],
+    )
+    assert validated["approval_payload"] == parse_step16_owner_approval_payload(
+        first["github"].comment["body"]
+    )
+
+
+def _open_circuit() -> dict[str, object]:
+    return {
+        "state": "OPEN",
+        "opened_at": "2026-08-29T10:00:00.000000Z",
+        "available_at": "2026-08-29T11:00:00.000000Z",
+        "failure_code": "TIMEOUT",
+    }
+
+
+def test_expired_open_circuit_cas_and_receipt(tmp_path: Path) -> None:
+    activated = _activate(tmp_path)
+    store = activated["store"]
+    _install_event_circuit(store, **_open_circuit())
+    repository = Issue790CanaryRepository(str(store))
+    first = repository.release_step16_expired_open_circuit(
+        plan_digest=str(activated["plan"]["canonical_digest"]),
+        activation_digest=str(activated["activation"]["activation_digest"]),
+        event_id="sha256:" + "aa" * 32,
+        ledger_seq=2000,
+        prior_state=_open_circuit(),
+        observed_at=_OBSERVED,
+        policy=ISSUE_790_STEP16_EVENT_CIRCUIT_POLICY,
+    )
+    assert first["provider_calls"] == 0
+    assert first["cas_result"]["rowcount"] == 1
+    second = repository.release_step16_expired_open_circuit(
+        plan_digest=str(activated["plan"]["canonical_digest"]),
+        activation_digest=str(activated["activation"]["activation_digest"]),
+        event_id="sha256:" + "aa" * 32,
+        ledger_seq=2000,
+        prior_state=_open_circuit(),
+        observed_at=_OBSERVED,
+        policy=ISSUE_790_STEP16_EVENT_CIRCUIT_POLICY,
+    )
+    assert second["release_digest"] == first["release_digest"]
+    assert _activation_counts(store)[2] == 1
+    connection = sqlite3.connect(str(store))
+    try:
+        state = connection.execute(
+            "SELECT state,opened_at,available_at,failure_code "
+            "FROM unpublished_graphiti_event_circuit WHERE singleton=1"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert tuple(state) == ("CLOSED", None, None, None)
+
+
+def test_circuit_cas_rowcount_zero_and_contradiction_fail(tmp_path: Path) -> None:
+    activated = _activate(tmp_path)
+    store = activated["store"]
+    _install_event_circuit(store, **_open_circuit())
+    repository = Issue790CanaryRepository(str(store))
+    wrong = _open_circuit()
+    wrong["opened_at"] = "2026-08-29T09:00:00.000000Z"
+    with pytest.raises(Issue790CanaryIntegrityError, match="circuit release differs"):
+        repository.release_step16_expired_open_circuit(
+            plan_digest=str(activated["plan"]["canonical_digest"]),
+            activation_digest=str(activated["activation"]["activation_digest"]),
+            event_id="sha256:" + "aa" * 32,
+            ledger_seq=2000,
+            prior_state=wrong,
+            observed_at=_OBSERVED,
+            policy=ISSUE_790_STEP16_EVENT_CIRCUIT_POLICY,
+        )
+    connection = sqlite3.connect(str(store))
+    try:
+        state = connection.execute(
+            "SELECT state FROM unpublished_graphiti_event_circuit WHERE singleton=1"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert state[0] == "OPEN"
+    repository.release_step16_expired_open_circuit(
+        plan_digest=str(activated["plan"]["canonical_digest"]),
+        activation_digest=str(activated["activation"]["activation_digest"]),
+        event_id="sha256:" + "aa" * 32,
+        ledger_seq=2000,
+        prior_state=_open_circuit(),
+        observed_at=_OBSERVED,
+        policy=ISSUE_790_STEP16_EVENT_CIRCUIT_POLICY,
+    )
+    with pytest.raises(Issue790CanaryIntegrityError, match="circuit release differs"):
+        repository.release_step16_expired_open_circuit(
+            plan_digest=str(activated["plan"]["canonical_digest"]),
+            activation_digest=str(activated["activation"]["activation_digest"]),
+            event_id="sha256:" + "aa" * 32,
+            ledger_seq=2000,
+            prior_state={
+                **_open_circuit(),
+                "failure_code": "OTHER",
+            },
+            observed_at=_OBSERVED,
+            policy=ISSUE_790_STEP16_EVENT_CIRCUIT_POLICY,
+        )
+
+
+def test_circuit_release_persistence_failure_rolls_back(tmp_path: Path) -> None:
+    from newsroom.control_plane.issue_790_step16_activation import (
+        STEP16_CIRCUIT_RELEASE_TABLE_SQL,
+    )
+
+    activated = _activate(tmp_path)
+    store = activated["store"]
+    _install_event_circuit(store, **_open_circuit())
+    connection = sqlite3.connect(str(store))
+    try:
+        connection.executescript(STEP16_CIRCUIT_RELEASE_TABLE_SQL)
+        connection.execute(
+            "CREATE TRIGGER fail_release_insert "
+            "BEFORE INSERT ON issue_790_step16_circuit_releases "
+            "BEGIN SELECT RAISE(ABORT, 'disk full'); END"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    repository = Issue790CanaryRepository(str(store))
+    with pytest.raises(sqlite3.IntegrityError, match="disk full"):
+        repository.release_step16_expired_open_circuit(
+            plan_digest=str(activated["plan"]["canonical_digest"]),
+            activation_digest=str(activated["activation"]["activation_digest"]),
+            event_id="sha256:" + "aa" * 32,
+            ledger_seq=2000,
+            prior_state=_open_circuit(),
+            observed_at=_OBSERVED,
+            policy=ISSUE_790_STEP16_EVENT_CIRCUIT_POLICY,
+        )
+    connection = sqlite3.connect(str(store))
+    try:
+        state = connection.execute(
+            "SELECT state FROM unpublished_graphiti_event_circuit WHERE singleton=1"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert state[0] == "OPEN"
+    assert _activation_counts(store)[2] == 0
+
+
+def test_exception_after_release_leaves_durable_receipt(tmp_path: Path) -> None:
+    activated = _activate(tmp_path)
+    store = activated["store"]
+    _install_event_circuit(store, **_open_circuit())
+    repository = Issue790CanaryRepository(str(store))
+    released = _release_step16_expired_open_circuit(
+        store=store,
+        plan=activated["plan"],
+        circuit_state=_open_circuit(),
+        observed_at=_OBSERVED,
+        event_id="sha256:" + "aa" * 32,
+        ledger_seq=2000,
+        repository=repository,
+    )
+    assert released["provider_calls"] == 0
+    resumed = repository.release_step16_expired_open_circuit(
+        plan_digest=str(activated["plan"]["canonical_digest"]),
+        activation_digest=str(activated["activation"]["activation_digest"]),
+        event_id="sha256:" + "aa" * 32,
+        ledger_seq=2000,
+        prior_state=_open_circuit(),
+        observed_at=_OBSERVED,
+        policy=ISSUE_790_STEP16_EVENT_CIRCUIT_POLICY,
+    )
+    assert resumed["release_digest"] == released["release_digest"]
+    assert _activation_counts(store)[2] == 1
+
+
+def test_coherent_closed_circuit_needs_no_release() -> None:
+    assert (
+        _require_step16_event_circuit(
+            _closed_circuit(),
+            observed_at=_OBSERVED,
+            policy=ISSUE_790_STEP16_EVENT_CIRCUIT_POLICY,
+        )
+        == "CLOSED"
+    )
+
+
+def test_missing_or_mismatched_activation_evidence_fails(tmp_path: Path) -> None:
+    candidate = _seal()
+    _, pre_dispatch = _pending_family()
+    payload = _payload(candidate)
+    comment = _comment(payload)
+    store = tmp_path / "authority.sqlite"
+    github = _FakeGitHub(comment)
+    github.focus_gate_manifest = None
+    with pytest.raises(Issue790DispositionError, match="focus gate evidence"):
+        activate_issue_790_step16_plan(
+            candidate,
+            comment_id=_COMMENT_ID,
+            pre_dispatch=pre_dispatch,
+            store=store,
+            github_api=github,
+        )
+    github = _FakeGitHub(comment)
+    github.review_receipt = dict(github.review_receipt)
+    github.review_receipt["reviewed_fix_revision"] = "f" * 40
+    unsigned = {
+        key: item
+        for key, item in github.review_receipt.items()
+        if key != "review_receipt_digest"
+    }
+    github.review_receipt["review_receipt_digest"] = digest_canonical(unsigned)
+    with pytest.raises(
+        Issue790DispositionError, match="feature-complete review receipt"
+    ):
+        activate_issue_790_step16_plan(
+            candidate,
+            comment_id=_COMMENT_ID,
+            pre_dispatch=pre_dispatch,
+            store=store,
+            github_api=github,
+        )
+
+
+def test_opened_after_available_is_malformed() -> None:
+    with pytest.raises(Issue790DispositionError, match="malformed"):
+        _require_step16_event_circuit(
+            {
+                "state": "OPEN",
+                "opened_at": "2026-08-29T12:00:00.000000Z",
+                "available_at": "2026-08-29T11:00:00.000000Z",
+                "failure_code": "TIMEOUT",
+            },
+            observed_at=_OBSERVED,
+            policy=ISSUE_790_STEP16_EVENT_CIRCUIT_POLICY,
+        )

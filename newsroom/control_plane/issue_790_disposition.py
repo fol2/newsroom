@@ -989,16 +989,19 @@ def _require_step16_event_circuit(
             not isinstance(available_raw, str)
             or not isinstance(opened_raw, str)
             or not isinstance(failure, str)
-            or not failure.strip()
+            or not failure
+            or failure != failure.strip()
         ):
             raise Issue790DispositionError("issue #790 event circuit is malformed")
         try:
             available_at = _instant(available_raw, field="circuit available_at")
-            _instant(opened_raw, field="circuit opened_at")
+            opened_at = _instant(opened_raw, field="circuit opened_at")
         except Issue790DispositionError as exc:
             raise Issue790DispositionError(
                 "issue #790 event circuit is malformed"
             ) from exc
+        if opened_at > available_at:
+            raise Issue790DispositionError("issue #790 event circuit is malformed")
         if available_at > observed_at:
             raise Issue790DispositionError("issue #790 event circuit is future-open")
         return "EXPIRED_OPEN"
@@ -1011,6 +1014,9 @@ def _release_step16_expired_open_circuit(
     plan: Mapping[str, object],
     circuit_state: Mapping[str, object],
     observed_at: datetime,
+    event_id: str,
+    ledger_seq: int,
+    repository: Issue790CanaryRepository,
 ) -> dict[str, object]:
     eligibility = _require_step16_event_circuit(
         circuit_state,
@@ -1022,25 +1028,33 @@ def _release_step16_expired_open_circuit(
     )
     if eligibility != "EXPIRED_OPEN":
         raise Issue790DispositionError("issue #790 event circuit release differs")
-    connection = sqlite3.connect(str(store))
+    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
     try:
-        connection.execute("BEGIN IMMEDIATE")
-        connection.execute(
-            "UPDATE unpublished_graphiti_event_circuit SET state='CLOSED',"
-            "opened_at=NULL,available_at=NULL,failure_code=NULL WHERE singleton=1"
+        record = step16_activation_module.load_step16_activation_record(
+            connection,
+            plan_digest=str(plan["canonical_digest"]),
         )
-        connection.commit()
     finally:
         connection.close()
-    unsigned = {
-        "schema_version": "newsroom.issue-790.step16-event-circuit-release.v1",
-        "plan_digest": plan["canonical_digest"],
-        "released_at": _utc_text(observed_at),
-        "prior_state": dict(circuit_state),
-        "effect": "IMMEDIATE_CLOSE_EXPIRED_OPEN",
-        "provider_calls": 0,
-    }
-    return {**unsigned, "release_digest": digest_canonical(unsigned)}
+    try:
+        return repository.release_step16_expired_open_circuit(
+            plan_digest=str(plan["canonical_digest"]),
+            activation_digest=str(record["activation_digest"]),
+            event_id=event_id,
+            ledger_seq=ledger_seq,
+            prior_state=circuit_state,
+            observed_at=observed_at,
+            policy=str(
+                _record(
+                    _record(plan.get("sequence"), field="sequence").get(
+                        "owner_activation"
+                    ),
+                    field="owner activation",
+                ).get("event_circuit_policy")
+            ),
+        )
+    except Issue790CanaryIntegrityError as exc:
+        raise Issue790DispositionError(str(exc)) from exc
 
 
 def _require_step16_runtime_semantics(
@@ -1171,28 +1185,18 @@ def _step16_live_contract(
         )
     finally:
         connection.close()
-    contract = step16_activation_module.require_step16_plan_matches_activation(
-        plan,
-        record,
-    )
     authenticated = step16_activation_module.fetch_authenticated_step16_owner_comment(
         comment_id=int(record["comment_id"]),
         github_api=github_api,
         default_github_api=_default_github_api,
+        require_bound_evidence=False,
     )
-    if (
-        authenticated["canonical_body_digest"] != record["canonical_body_digest"]
-        or authenticated["canonical_approval_payload_digest"]
-        != record["canonical_approval_payload_digest"]
-        or authenticated["created_at"] != record["created_at"]
-        or authenticated["updated_at"] != record["updated_at"]
-        or authenticated["comment_node_id"] != record["comment_node_id"]
-        or authenticated["checked_candidate_digest"]
-        != record["checked_candidate_digest"]
-        or authenticated["comment_url"] != record["comment_url"]
-    ):
-        raise Issue790DispositionError("issue #790 owner comment evidence differs")
-    return contract
+    record = step16_activation_module.validate_step16_activation_receipt(
+        record,
+        authenticated=authenticated,
+        plan=plan,
+    )
+    return step16_activation_module.activation_record_to_contract(record)
 
 
 def _require_approved_plan(
@@ -3192,6 +3196,7 @@ def run_issue_790_canary(
         canary_event=event_before_record,
     )
     sequence = retained_plan.get("sequence")
+    circuit_release = None
     if isinstance(sequence, dict) and sequence.get("sequence_ordinal") == 16:
         circuit = (
             None
@@ -3208,12 +3213,29 @@ def run_issue_790_canary(
         )
         if eligibility == "EXPIRED_OPEN":
             assert circuit is not None
-            _release_step16_expired_open_circuit(
+            circuit_release = _release_step16_expired_open_circuit(
                 store=store,
                 plan=retained_plan,
                 circuit_state=circuit,
                 observed_at=observed_at,
+                event_id=event_id,
+                ledger_seq=ledger_seq,
+                repository=canary_repository,
             )
+        else:
+            circuit_release = canary_repository.existing_step16_circuit_release(
+                plan_digest=str(retained_plan["canonical_digest"]),
+                event_id=event_id,
+                ledger_seq=ledger_seq,
+            )
+        if prior_consumption is None and circuit_release is not None:
+            unsigned_preflight = dict(preflight_evidence)
+            unsigned_preflight.pop("evidence_digest", None)
+            unsigned_preflight["circuit_release"] = circuit_release
+            preflight_evidence = {
+                **unsigned_preflight,
+                "evidence_digest": digest_canonical(unsigned_preflight),
+            }
     process_result: dict[str, object] | None = None
     exception: dict[str, object] | None = None
     completed_at = datetime.now(tz=UTC)
@@ -3404,6 +3426,20 @@ def run_issue_790_canary(
         "persistent_worker_loaded": False,
         "non_effects": list(_NON_EFFECTS),
     }
+    if isinstance(sequence, dict) and sequence.get("sequence_ordinal") == 16:
+        receipt_without_digest["circuit_release"] = circuit_release
+        consumption_release = (
+            None
+            if not isinstance(consumption, dict)
+            else consumption.get("circuit_release")
+        )
+        if consumption_release is not None:
+            receipt_without_digest["circuit_release"] = consumption_release
+        outcome_release = (
+            None if not isinstance(outcome, dict) else outcome.get("circuit_release")
+        )
+        if outcome_release is not None:
+            receipt_without_digest["circuit_release"] = outcome_release
     if predecessor is not None:
         receipt_without_digest["predecessor"] = predecessor
     return {
@@ -3827,6 +3863,8 @@ def activate_issue_790_step16_plan(
         owner_activation=binding,
     )
     contract = _step16_contract_from_plan(plan)
+    fetcher = github_api if github_api is not None else _default_github_api
+    manifest, review = step16_activation_module.evidence_from_github_api(fetcher)
     receipt = step16_activation_module.mint_step16_activation_receipt(
         authenticated=authenticated,
         plan=plan,
@@ -3837,6 +3875,8 @@ def activate_issue_790_step16_plan(
                 "pre_dispatch_operational_requirements_digest"
             ]
         ),
+        focus_gate_evidence=None if not isinstance(manifest, dict) else manifest,
+        review_evidence=None if not isinstance(review, dict) else review,
     )
     repository = Issue790CanaryRepository(str(store))
     stored = repository.retain_step16_activation(receipt)

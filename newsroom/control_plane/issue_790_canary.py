@@ -11,9 +11,13 @@ from pathlib import Path
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_canonical
 from newsroom.control_plane.issue_790_step16_activation import (
+    ISSUE_790_STEP16_CIRCUIT_RELEASE_POLICY_VERSION,
+    ISSUE_790_STEP16_CIRCUIT_RELEASE_SCHEMA,
     STEP16_ACTIVATION_TABLE_SQL,
+    STEP16_CIRCUIT_RELEASE_TABLE_SQL,
     effective_issue_790_invocation_plan_digests,
     effective_issue_790_plan_contract,
+    validate_step16_activation_receipt,
 )
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.veto import assert_private_store
@@ -66,7 +70,7 @@ CREATE TABLE IF NOT EXISTS issue_790_bounded_canary_outcomes(
         REFERENCES issue_790_bounded_canary_consumptions(consumption_digest)
         ON UPDATE RESTRICT ON DELETE RESTRICT
 );
-""" + STEP16_ACTIVATION_TABLE_SQL
+""" + STEP16_ACTIVATION_TABLE_SQL + STEP16_CIRCUIT_RELEASE_TABLE_SQL
 
 
 def _allow_reused_dispositions(connection: sqlite3.Connection) -> None:
@@ -533,13 +537,11 @@ class Issue790CanaryRepository:
         self,
         record: Mapping[str, object],
     ) -> dict[str, object]:
-        retained = dict(record)
+        try:
+            retained = validate_step16_activation_receipt(record)
+        except Exception as exc:
+            raise Issue790CanaryIntegrityError(str(exc)) from exc
         digest = retained.get("activation_digest")
-        unsigned = {
-            key: item for key, item in retained.items() if key != "activation_digest"
-        }
-        if digest != digest_canonical(unsigned):
-            raise Issue790CanaryIntegrityError("step 16 activation digest differs")
         checked = str(retained.get("checked_candidate_digest"))
         plan_digest = str(retained.get("plan_digest"))
         comment_id = retained.get("comment_id")
@@ -591,6 +593,160 @@ class Issue790CanaryRepository:
         finally:
             connection.close()
         return retained
+
+    def existing_step16_circuit_release(
+        self,
+        *,
+        plan_digest: str,
+        event_id: str,
+        ledger_seq: int,
+    ) -> dict[str, object] | None:
+        connection = self._read_connection()
+        try:
+            if not _table_exists(connection, "issue_790_step16_circuit_releases"):
+                return None
+            row = connection.execute(
+                "SELECT record_json FROM issue_790_step16_circuit_releases "
+                "WHERE plan_digest=? AND event_id=? AND ledger_seq=?",
+                (plan_digest, event_id, ledger_seq),
+            ).fetchone()
+            if row is None:
+                return None
+            return _content_addressed_record(
+                row[0],
+                digest_field="release_digest",
+                field="step 16 circuit release",
+            )
+        finally:
+            connection.close()
+
+    def release_step16_expired_open_circuit(
+        self,
+        *,
+        plan_digest: str,
+        activation_digest: str,
+        event_id: str,
+        ledger_seq: int,
+        prior_state: Mapping[str, object],
+        observed_at: datetime,
+        policy: str,
+    ) -> dict[str, object]:
+        plan_digest = _token(plan_digest, field="plan digest")
+        activation_digest = _token(activation_digest, field="activation digest")
+        event_id = _token(event_id, field="canary event id")
+        if isinstance(ledger_seq, bool) or not isinstance(ledger_seq, int) or ledger_seq <= 0:
+            raise Issue790CanaryIntegrityError("bounded canary ledger sequence is invalid")
+        if policy != "CLOSED_COHERENT_OR_EXPIRED_OPEN_IMMEDIATE_CLOSE":
+            raise Issue790CanaryIntegrityError("issue #790 event circuit policy differs")
+        opened_at = prior_state.get("opened_at")
+        available_at = prior_state.get("available_at")
+        failure_code = prior_state.get("failure_code")
+        if (
+            prior_state.get("state") != "OPEN"
+            or not isinstance(opened_at, str)
+            or not isinstance(available_at, str)
+            or not isinstance(failure_code, str)
+            or not failure_code
+            or failure_code != failure_code.strip()
+        ):
+            raise Issue790CanaryIntegrityError("issue #790 event circuit is malformed")
+        opened = _instant(opened_at, field="circuit opened_at")
+        available = _instant(available_at, field="circuit available_at")
+        observed = observed_at.astimezone(UTC)
+        if opened > available or available > observed:
+            raise Issue790CanaryIntegrityError("issue #790 event circuit is malformed")
+        released_at = _utc_text(observed)
+        unsigned = {
+            "schema_version": ISSUE_790_STEP16_CIRCUIT_RELEASE_SCHEMA,
+            "policy_version": ISSUE_790_STEP16_CIRCUIT_RELEASE_POLICY_VERSION,
+            "plan_digest": plan_digest,
+            "activation_digest": activation_digest,
+            "event_id": event_id,
+            "ledger_seq": ledger_seq,
+            "prior_state": {
+                "state": "OPEN",
+                "opened_at": opened_at,
+                "available_at": available_at,
+                "failure_code": failure_code,
+            },
+            "released_at": released_at,
+            "effect": "IMMEDIATE_CLOSE_EXPIRED_OPEN",
+            "provider_calls": 0,
+            "cas_result": {
+                "singleton": 1,
+                "state": "OPEN",
+                "opened_at": opened_at,
+                "available_at": available_at,
+                "failure_code": failure_code,
+                "rowcount": 1,
+            },
+        }
+        receipt = {**unsigned, "release_digest": digest_canonical(unsigned)}
+        encoded = canonical_json_bytes(receipt).decode("utf-8")
+        connection = self._connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(STEP16_CIRCUIT_RELEASE_TABLE_SQL)
+            prior = connection.execute(
+                "SELECT record_json FROM issue_790_step16_circuit_releases "
+                "WHERE plan_digest=? AND event_id=? AND ledger_seq=?",
+                (plan_digest, event_id, ledger_seq),
+            ).fetchone()
+            if prior is not None:
+                retained = _content_addressed_record(
+                    prior[0],
+                    digest_field="release_digest",
+                    field="step 16 circuit release",
+                )
+                if (
+                    retained.get("plan_digest") != plan_digest
+                    or retained.get("activation_digest") != activation_digest
+                    or retained.get("event_id") != event_id
+                    or retained.get("ledger_seq") != ledger_seq
+                    or retained.get("prior_state") != unsigned["prior_state"]
+                    or retained.get("effect") != "IMMEDIATE_CLOSE_EXPIRED_OPEN"
+                    or retained.get("provider_calls") != 0
+                    or retained.get("schema_version")
+                    != ISSUE_790_STEP16_CIRCUIT_RELEASE_SCHEMA
+                ):
+                    raise Issue790CanaryIntegrityError(
+                        "issue #790 event circuit release differs"
+                    )
+                connection.commit()
+                return retained
+            cursor = connection.execute(
+                "UPDATE unpublished_graphiti_event_circuit SET state='CLOSED',"
+                "opened_at=NULL,available_at=NULL,failure_code=NULL "
+                "WHERE singleton=1 AND state='OPEN' AND opened_at IS ? "
+                "AND available_at IS ? AND failure_code IS ?",
+                (opened_at, available_at, failure_code),
+            )
+            if cursor.rowcount != 1:
+                raise Issue790CanaryIntegrityError(
+                    "issue #790 event circuit release differs"
+                )
+            connection.execute(
+                "INSERT INTO issue_790_step16_circuit_releases("
+                "release_digest,activation_digest,plan_digest,event_id,ledger_seq,"
+                "released_at,record_json) VALUES (?,?,?,?,?,?,?)",
+                (
+                    receipt["release_digest"],
+                    activation_digest,
+                    plan_digest,
+                    event_id,
+                    ledger_seq,
+                    released_at,
+                    encoded,
+                ),
+            )
+            connection.commit()
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return receipt
 
     def retain_retry_exclusions(
         self,
@@ -1013,6 +1169,25 @@ class Issue790CanaryRepository:
                 raise Issue790CanaryIntegrityError(
                     "bounded canary event circuit is still open"
                 )
+            circuit_release = None
+            if approved_contract.sequence_ordinal == 16:
+                if event_circuit is not None and str(event_circuit[0]) == "OPEN":
+                    raise Issue790CanaryIntegrityError(
+                        "bounded canary event circuit is still open"
+                    )
+                release_row = None
+                if _table_exists(connection, "issue_790_step16_circuit_releases"):
+                    release_row = connection.execute(
+                        "SELECT record_json FROM issue_790_step16_circuit_releases "
+                        "WHERE plan_digest=? AND event_id=? AND ledger_seq=?",
+                        (approved_plan_digest, event_id, ledger_seq),
+                    ).fetchone()
+                if release_row is not None:
+                    circuit_release = _content_addressed_record(
+                        release_row[0],
+                        digest_field="release_digest",
+                        field="step 16 circuit release",
+                    )
             manifest = _object(event_row[5], field="canary event manifest")
             unit_refs = manifest.get("unit_refs")
             if (
@@ -1089,6 +1264,8 @@ class Issue790CanaryRepository:
                 "publication_authorised": False,
                 "consumed_at": consumed_at_text,
             }
+            if approved_contract.sequence_ordinal == 16:
+                without_digest["circuit_release"] = circuit_release
             consumption_digest = digest_canonical(without_digest)
             record = {**without_digest, "consumption_digest": consumption_digest}
             connection.execute(
@@ -1397,6 +1574,8 @@ class Issue790CanaryRepository:
             if iterative:
                 without_digest["result_class"] = result_class
                 without_digest["causal_report"] = retained_causal_report
+            if approved_contract.sequence_ordinal == 16:
+                without_digest["circuit_release"] = consumption.get("circuit_release")
             outcome_digest = digest_canonical(without_digest)
             record = {**without_digest, "outcome_digest": outcome_digest}
             connection.execute(
