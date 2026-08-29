@@ -24,6 +24,7 @@ from newsroom.control_plane import graphiti_events as graphiti_events_module
 from newsroom.control_plane import graphiti_requests as graphiti_requests_module
 from newsroom.control_plane import issue_790_canary as issue_790_canary_module
 from newsroom.control_plane import issue_790_contract as issue_790_contract_module
+from newsroom.control_plane import issue_790_step16_activation as step16_activation_module
 from newsroom.control_plane import model_usage as model_usage_module
 from newsroom.control_plane.graphiti_events import GraphitiProcessResult
 from newsroom.control_plane.graphiti_requests import (
@@ -100,8 +101,19 @@ _STEP16_ACTIVATION_FIELDS = frozenset(
         "reviewed_correction_revision",
         "reviewed_correction_tree",
         "pre_dispatch_operational_requirements",
+        "owner_activation",
     }
 )
+_STEP16_OWNER_CAPS = {
+    "catalogue_query_cap": 1,
+    "fresh_event_cap": 1,
+    "provider_dispatch_cap": 1,
+    "retry_cap": 0,
+    "fallback_cap": 0,
+    "backlog_drain_cap": 0,
+    "bulk_requeue_cap": 0,
+    "publication_cap": 0,
+}
 _PENDING_PLAN_ONLY_KEYS = ("plan_status", "executable", "live_canary_authorised")
 _PENDING_SEQUENCE_ONLY_KEYS = ("hold_comment",)
 _CANDIDATE_PLAN_STATUS = "CHECKED_CANDIDATE"
@@ -183,6 +195,10 @@ _RUNNING_CODE_MODULES: tuple[tuple[str, str], ...] = (
     ),
     ("newsroom.control_plane.issue_790_canary", "newsroom/control_plane/issue_790_canary.py"),
     ("newsroom.control_plane.issue_790_contract", "newsroom/control_plane/issue_790_contract.py"),
+    (
+        "newsroom.control_plane.issue_790_step16_activation",
+        "newsroom/control_plane/issue_790_step16_activation.py",
+    ),
     ("newsroom.control_plane.model_usage", "newsroom/control_plane/model_usage.py"),
     ("newsroom.control_plane.graphiti_events", "newsroom/control_plane/graphiti_events.py"),
     ("newsroom.control_plane.graphiti", "newsroom/control_plane/graphiti.py"),
@@ -216,6 +232,9 @@ _RUNNING_CODE_PATHS: dict[str, str | None] = {
     "newsroom.control_plane.issue_790_disposition": __file__,
     "newsroom.control_plane.issue_790_canary": issue_790_canary_module.__file__,
     "newsroom.control_plane.issue_790_contract": issue_790_contract_module.__file__,
+    "newsroom.control_plane.issue_790_step16_activation": (
+        step16_activation_module.__file__
+    ),
     "newsroom.control_plane.model_usage": model_usage_module.__file__,
     "newsroom.control_plane.graphiti_events": graphiti_events_module.__file__,
     "newsroom.control_plane.graphiti": graphiti_module.__file__,
@@ -705,6 +724,25 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
                 raise Issue790DispositionError(
                     "issue #790 reviewed correction identity differs"
                 )
+            owner_activation = (
+                step16_activation_module.validate_step16_owner_activation_binding(
+                    _record(
+                        sequence.get("owner_activation"),
+                        field="owner activation",
+                    )
+                )
+            )
+            if (
+                owner_activation["checked_candidate_digest"]
+                != issue_790_contract_module.ISSUE_790_STEP16_CHECKED_CANDIDATE_DIGEST
+                or owner_activation["caps"] != _STEP16_OWNER_CAPS
+                or pre_dispatch.get("public_effects") != "DISABLED"
+                or pre_dispatch.get("event_binding")
+                != "EXPLICIT_QUEUED_ATTEMPT_ZERO_EVENT"
+            ):
+                raise Issue790DispositionError(
+                    "issue #790 owner activation binding differs"
+                )
         causal_report = _validated_causal_report(
             sequence.get("predecessor_causal_report")
         )
@@ -733,7 +771,12 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
     return plan
 
 
-def load_issue_790_plan(path: Path) -> dict[str, object]:
+def load_issue_790_plan(
+    path: Path,
+    *,
+    store: Path | None = None,
+    github_api: step16_activation_module.GitHubApi | None = None,
+) -> dict[str, object]:
     path = _canonical_existing_file(path, field="issue #790 plan")
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -741,7 +784,7 @@ def load_issue_790_plan(path: Path) -> dict[str, object]:
         raise Issue790DispositionError("issue #790 plan is not readable JSON") from exc
     if not isinstance(value, dict):
         raise Issue790DispositionError("issue #790 plan must be an object")
-    return _require_approved_plan(value)
+    return _require_approved_plan(value, store=store, github_api=github_api)
 
 
 def _require_iterative_call_shape(plan: Mapping[str, object]) -> None:
@@ -863,6 +906,7 @@ def _require_step16_code_identity(
         sequence.get("pre_dispatch_operational_requirements"),
         field="pre-dispatch operational requirements",
     )
+    binding = _record(sequence.get("owner_activation"), field="owner activation")
     revision = sequence.get("reviewed_correction_revision")
     tree = sequence.get("reviewed_correction_tree")
     if (
@@ -875,17 +919,37 @@ def _require_step16_code_identity(
         raise Issue790DispositionError(
             "issue #790 reviewed correction identity differs"
         )
+    ci_test = evidence.get("ci_test")
+    run_url = binding.get("focus_gate_run_url")
+    run_id = binding.get("focus_gate_run_id")
+    url = ci_test.get("url") if isinstance(ci_test, dict) else None
+    expected_run = f"https://github.com/fol2/newsroom/actions/runs/{run_id}"
+    if (
+        not isinstance(ci_test, dict)
+        or not isinstance(run_url, str)
+        or run_url != expected_run
+        or not isinstance(url, str)
+        or (url != expected_run and not url.startswith(f"{expected_run}/"))
+        or ci_test.get("name") != "focus-gates"
+        or ci_test.get("status") != "completed"
+        or ci_test.get("conclusion") != "success"
+        or ci_test.get("head_sha") != revision
+    ):
+        raise Issue790DispositionError("issue #790 focus gate evidence differs")
 
 
 def _circuit_state(store: Path) -> dict[str, object] | None:
-    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
     try:
-        circuit = connection.execute(
-            "SELECT state,opened_at,available_at,failure_code "
-            "FROM unpublished_graphiti_event_circuit WHERE singleton=1"
-        ).fetchone()
-    finally:
-        connection.close()
+        connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
+        try:
+            circuit = connection.execute(
+                "SELECT state,opened_at,available_at,failure_code "
+                "FROM unpublished_graphiti_event_circuit WHERE singleton=1"
+            ).fetchone()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return None
     if circuit is None:
         return None
     return {
@@ -896,12 +960,96 @@ def _circuit_state(store: Path) -> dict[str, object] | None:
     }
 
 
+def _require_step16_event_circuit(
+    circuit_state: Mapping[str, object] | None,
+    *,
+    observed_at: datetime,
+    policy: object,
+) -> str:
+    if policy != step16_activation_module.ISSUE_790_STEP16_EVENT_CIRCUIT_POLICY:
+        raise Issue790DispositionError("issue #790 event circuit policy differs")
+    if circuit_state is None:
+        raise Issue790DispositionError(
+            "issue #790 pre-dispatch circuit is not observed"
+        )
+    state = circuit_state.get("state")
+    if state == "CLOSED":
+        if (
+            circuit_state.get("opened_at") is not None
+            or circuit_state.get("available_at") is not None
+            or circuit_state.get("failure_code") is not None
+        ):
+            raise Issue790DispositionError("issue #790 event circuit is malformed")
+        return "CLOSED"
+    if state == "OPEN":
+        available_raw = circuit_state.get("available_at")
+        opened_raw = circuit_state.get("opened_at")
+        failure = circuit_state.get("failure_code")
+        if (
+            not isinstance(available_raw, str)
+            or not isinstance(opened_raw, str)
+            or not isinstance(failure, str)
+            or not failure.strip()
+        ):
+            raise Issue790DispositionError("issue #790 event circuit is malformed")
+        try:
+            available_at = _instant(available_raw, field="circuit available_at")
+            _instant(opened_raw, field="circuit opened_at")
+        except Issue790DispositionError as exc:
+            raise Issue790DispositionError(
+                "issue #790 event circuit is malformed"
+            ) from exc
+        if available_at > observed_at:
+            raise Issue790DispositionError("issue #790 event circuit is future-open")
+        return "EXPIRED_OPEN"
+    raise Issue790DispositionError("issue #790 event circuit is unknown")
+
+
+def _release_step16_expired_open_circuit(
+    *,
+    store: Path,
+    plan: Mapping[str, object],
+    circuit_state: Mapping[str, object],
+    observed_at: datetime,
+) -> dict[str, object]:
+    eligibility = _require_step16_event_circuit(
+        circuit_state,
+        observed_at=observed_at,
+        policy=_record(
+            _record(plan.get("sequence"), field="sequence").get("owner_activation"),
+            field="owner activation",
+        ).get("event_circuit_policy"),
+    )
+    if eligibility != "EXPIRED_OPEN":
+        raise Issue790DispositionError("issue #790 event circuit release differs")
+    connection = sqlite3.connect(str(store))
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE unpublished_graphiti_event_circuit SET state='CLOSED',"
+            "opened_at=NULL,available_at=NULL,failure_code=NULL WHERE singleton=1"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    unsigned = {
+        "schema_version": "newsroom.issue-790.step16-event-circuit-release.v1",
+        "plan_digest": plan["canonical_digest"],
+        "released_at": _utc_text(observed_at),
+        "prior_state": dict(circuit_state),
+        "effect": "IMMEDIATE_CLOSE_EXPIRED_OPEN",
+        "provider_calls": 0,
+    }
+    return {**unsigned, "release_digest": digest_canonical(unsigned)}
+
+
 def _require_step16_runtime_semantics(
     plan: Mapping[str, object],
     *,
     evidence: Mapping[str, object],
     route_state: Mapping[str, object],
     circuit_state: Mapping[str, object] | None,
+    observed_at: datetime,
     canary_event: Mapping[str, object] | None = None,
 ) -> None:
     sequence = plan.get("sequence")
@@ -912,6 +1060,7 @@ def _require_step16_runtime_semantics(
         sequence.get("pre_dispatch_operational_requirements"),
         field="pre-dispatch operational requirements",
     )
+    binding = _record(sequence.get("owner_activation"), field="owner activation")
     worker = evidence.get("worker")
     if not isinstance(worker, dict):
         raise Issue790DispositionError("issue #790 worker evidence differs")
@@ -923,6 +1072,10 @@ def _require_step16_runtime_semantics(
         pre.get("persistent_worker_state_before_provider_io") != "UNLOADED"
         or pre.get("fallback_mode") != _FALLBACK_MODE
         or canary.get("fallback_mode") != _FALLBACK_MODE
+        or pre.get("public_effects") != "DISABLED"
+        or canary.get("event_binding") != "EXPLICIT_QUEUED_ATTEMPT_ZERO_EVENT"
+        or pre.get("event_binding") != "EXPLICIT_QUEUED_ATTEMPT_ZERO_EVENT"
+        or binding.get("caps") != _STEP16_OWNER_CAPS
         or (
             pre.get("stores_required_healthy") is True
             and evidence.get("store_quick_check") != "ok"
@@ -941,32 +1094,130 @@ def _require_step16_runtime_semantics(
             )
     elif route_status != "CLOSED":
         raise Issue790DispositionError("issue #790 pre-dispatch route state differs")
-    if pre.get("not_observed_is_not_satisfied") is True and circuit_state is None:
-        raise Issue790DispositionError(
-            "issue #790 pre-dispatch circuit is not observed"
+    _require_step16_event_circuit(
+        circuit_state,
+        observed_at=observed_at,
+        policy=binding.get("event_circuit_policy"),
+    )
+    if canary_event is None:
+        return
+    try:
+        event_available = _instant(
+            canary_event.get("available_at"),
+            field="event available_at",
         )
-    if canary_event is not None and (
+    except Issue790DispositionError as exc:
+        raise Issue790DispositionError(
+            "issue #790 pre-dispatch event is not untouched"
+        ) from exc
+    ledger_seq = canary_event.get("ledger_seq")
+    event_id = canary_event.get("event_id")
+    if (
         pre.get("untouched_attempt_zero_events_only") != 1
         or pre.get("fresh_provider_backed_attempt_count") != 1
         or canary_event.get("state") != "QUEUED"
         or canary_event.get("attempt_count") != 0
+        or canary_event.get("provider_dispatched") is not False
+        or canary_event.get("claim_owner") is not None
+        or canary_event.get("claim_expires_at") is not None
+        or canary_event.get("terminal_at") is not None
+        or not isinstance(event_id, str)
+        or not event_id.startswith("sha256:")
+        or isinstance(ledger_seq, bool)
+        or not isinstance(ledger_seq, int)
+        or ledger_seq <= 0
+        or ledger_seq in {1932, 1972}
+        or event_available > observed_at
     ):
         raise Issue790DispositionError(
             "issue #790 pre-dispatch event is not untouched"
         )
 
 
-def _require_approved_plan(value: Mapping[str, object]) -> dict[str, object]:
+def _default_github_api(resource: str) -> dict[str, object]:
+    gh = shutil.which("gh")
+    if gh is None:
+        raise Issue790DispositionError("issue #790 GitHub evidence is unavailable")
+    raw = _run_checked(
+        (gh, "api", "-H", "Accept: application/vnd.github+json", resource)
+    )
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise Issue790DispositionError(
+            "issue #790 GitHub evidence is unavailable"
+        ) from exc
+    if not isinstance(value, dict):
+        raise Issue790DispositionError("issue #790 GitHub evidence is unavailable")
+    return value
+
+
+def _step16_live_contract(
+    plan: Mapping[str, object],
+    *,
+    store: Path | None,
+    github_api: step16_activation_module.GitHubApi | None,
+) -> issue_790_contract_module.Issue790ApprovedPlanContract:
+    if store is None:
+        raise Issue790DispositionError(
+            "issue #790 step 16 activation store is absent"
+        )
+    store = _canonical_existing_file(store, field="issue #790 activation store")
+    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        record = step16_activation_module.load_step16_activation_record(
+            connection,
+            plan_digest=str(plan["canonical_digest"]),
+        )
+    finally:
+        connection.close()
+    contract = step16_activation_module.require_step16_plan_matches_activation(
+        plan,
+        record,
+    )
+    authenticated = step16_activation_module.fetch_authenticated_step16_owner_comment(
+        comment_id=int(record["comment_id"]),
+        github_api=github_api,
+        default_github_api=_default_github_api,
+    )
+    if (
+        authenticated["canonical_body_digest"] != record["canonical_body_digest"]
+        or authenticated["canonical_approval_payload_digest"]
+        != record["canonical_approval_payload_digest"]
+        or authenticated["created_at"] != record["created_at"]
+        or authenticated["updated_at"] != record["updated_at"]
+        or authenticated["comment_node_id"] != record["comment_node_id"]
+        or authenticated["checked_candidate_digest"]
+        != record["checked_candidate_digest"]
+        or authenticated["comment_url"] != record["comment_url"]
+    ):
+        raise Issue790DispositionError("issue #790 owner comment evidence differs")
+    return contract
+
+
+def _require_approved_plan(
+    value: Mapping[str, object],
+    *,
+    store: Path | None = None,
+    github_api: step16_activation_module.GitHubApi | None = None,
+) -> dict[str, object]:
     approval_value = value.get("approval")
     if isinstance(approval_value, dict):
         _reject_checked_live_approval(approval_value)
     plan = validate_issue_790_plan(value)
-    try:
-        contract = issue_790_approved_plan_contract(
-            str(plan["canonical_digest"])
-        )
-    except KeyError as exc:
-        raise Issue790DispositionError("issue #790 approved plan identity differs")
+    sequence = plan.get("sequence")
+    step16 = isinstance(sequence, dict) and sequence.get("sequence_ordinal") == 16
+    if step16:
+        contract = _step16_live_contract(plan, store=store, github_api=github_api)
+    else:
+        try:
+            contract = issue_790_approved_plan_contract(
+                str(plan["canonical_digest"])
+            )
+        except KeyError as exc:
+            raise Issue790DispositionError(
+                "issue #790 approved plan identity differs"
+            ) from exc
     approval = _record(plan.get("approval"), field="approval")
     target = _record(plan.get("target"), field="target")
     if (
@@ -1119,7 +1370,7 @@ def _require_approved_plan(value: Mapping[str, object]) -> dict[str, object]:
                 raise Issue790DispositionError(
                     "issue #790 successor transition differs"
                 )
-    if contract.plan_digest == issue_790_approved_plan_contracts()[-1].plan_digest:
+    if step16 or contract.plan_digest == issue_790_approved_plan_contracts()[-1].plan_digest:
         _require_iterative_call_shape(plan)
     return plan
 
@@ -2025,10 +2276,15 @@ def _execute_issue_790_plan(
     backup_digest: str,
     source_store: Path | None = None,
     repository_root: Path | None = None,
+    github_api: step16_activation_module.GitHubApi | None = None,
 ) -> dict[str, object]:
     """Apply the same exact transition to a dry-run copy or the live store."""
 
-    retained_plan = _require_approved_plan(plan)
+    retained_plan = _require_approved_plan(
+        plan,
+        store=source_store if source_store is not None else store,
+        github_api=github_api,
+    )
     approval = _record(retained_plan["approval"], field="approval")
     target = _record(retained_plan["target"], field="target")
     if mode not in {"dry-run", "apply"}:
@@ -2125,6 +2381,7 @@ def _execute_issue_790_plan(
                 evidence=retained_operational_evidence,
                 route_state=initial_route_state,
                 circuit_state=_circuit_state(store),
+                observed_at=observed_at,
             )
         disposition = (
             _existing_target_disposition(store, target)
@@ -2269,9 +2526,14 @@ def dry_run_issue_790_plan(
     scratch_store: Path,
     plan: Mapping[str, object],
     observed_at: datetime,
+    github_api: step16_activation_module.GitHubApi | None = None,
 ) -> dict[str, object]:
     assert_issue_790_paths_disjoint(source_store, scratch_store)
-    retained_plan = _require_approved_plan(plan)
+    retained_plan = _require_approved_plan(
+        plan,
+        store=source_store,
+        github_api=github_api,
+    )
     backup_digest = _sqlite_backup(source_store, scratch_store)
     receipt = _execute_issue_790_plan(
         store=scratch_store,
@@ -2281,6 +2543,7 @@ def dry_run_issue_790_plan(
         backup_path=scratch_store,
         backup_digest=backup_digest,
         source_store=source_store,
+        github_api=github_api,
     )
     return receipt
 
@@ -2292,9 +2555,14 @@ def apply_issue_790_plan(
     plan: Mapping[str, object],
     observed_at: datetime,
     repository_root: Path,
+    github_api: step16_activation_module.GitHubApi | None = None,
 ) -> dict[str, object]:
     assert_issue_790_paths_disjoint(store, backup_path)
-    retained_plan = _require_approved_plan(plan)
+    retained_plan = _require_approved_plan(
+        plan,
+        store=store,
+        github_api=github_api,
+    )
     pre_backup_evidence = collect_issue_790_operational_evidence(
         repository_root=repository_root,
         store=store,
@@ -2309,6 +2577,7 @@ def apply_issue_790_plan(
         backup_path=backup_path,
         backup_digest=backup_digest,
         repository_root=repository_root,
+        github_api=github_api,
     )
     retained_evidence = _record(
         receipt["operational_evidence"],
@@ -2355,10 +2624,13 @@ def _event_snapshot(
             "SELECT state,COUNT(*) FROM unpublished_graphiti_revision_events "
             "GROUP BY state ORDER BY state"
         ).fetchall()
-        circuit = connection.execute(
-            "SELECT state,opened_at,available_at,failure_code "
-            "FROM unpublished_graphiti_event_circuit WHERE singleton=1"
-        ).fetchone()
+        try:
+            circuit = connection.execute(
+                "SELECT state,opened_at,available_at,failure_code "
+                "FROM unpublished_graphiti_event_circuit WHERE singleton=1"
+            ).fetchone()
+        except sqlite3.Error:
+            circuit = None
     finally:
         connection.close()
     if row is None:
@@ -2785,10 +3057,15 @@ def run_issue_790_canary(
     event_id: str,
     ledger_seq: int,
     disposition_digest: str,
+    github_api: step16_activation_module.GitHubApi | None = None,
 ) -> dict[str, object]:
     """Consume and seal exactly one fresh event under the approved #790 authority."""
 
-    retained_plan = _require_approved_plan(plan)
+    retained_plan = _require_approved_plan(
+        plan,
+        store=store,
+        github_api=github_api,
+    )
     store = _canonical_existing_file(store, field="source unpublished store")
     proving_store = _canonical_existing_file(
         proving_store,
@@ -2911,8 +3188,32 @@ def run_issue_790_canary(
             if event_before.get("circuit") is None
             else _record(event_before.get("circuit"), field="canary circuit")
         ),
+        observed_at=observed_at,
         canary_event=event_before_record,
     )
+    sequence = retained_plan.get("sequence")
+    if isinstance(sequence, dict) and sequence.get("sequence_ordinal") == 16:
+        circuit = (
+            None
+            if event_before.get("circuit") is None
+            else _record(event_before.get("circuit"), field="canary circuit")
+        )
+        eligibility = _require_step16_event_circuit(
+            circuit,
+            observed_at=observed_at,
+            policy=_record(
+                sequence.get("owner_activation"),
+                field="owner activation",
+            ).get("event_circuit_policy"),
+        )
+        if eligibility == "EXPIRED_OPEN":
+            assert circuit is not None
+            _release_step16_expired_open_circuit(
+                store=store,
+                plan=retained_plan,
+                circuit_state=circuit,
+                observed_at=observed_at,
+            )
     process_result: dict[str, object] | None = None
     exception: dict[str, object] | None = None
     completed_at = datetime.now(tz=UTC)
@@ -3329,20 +3630,20 @@ def seal_issue_790_step16_plan(
     return validate_issue_790_step16_candidate(pending_plan)
 
 
-def finalise_issue_790_step16_plan(
+def _assemble_step16_owner_plan(
     candidate: Mapping[str, object],
-    owner_approval: Mapping[str, object],
     *,
+    approval: Mapping[str, object],
     pre_dispatch: Mapping[str, object],
+    revision: str,
+    tree: str,
+    owner_activation: Mapping[str, object],
 ) -> dict[str, object]:
-    """Bind owner approval onto a checked candidate. Still not live-registered."""
-
     retained = validate_issue_790_step16_candidate(candidate)
     if retained["canonical_digest"] != (
         issue_790_contract_module.ISSUE_790_STEP16_CHECKED_CANDIDATE_DIGEST
     ):
         raise Issue790DispositionError("issue #790 candidate identity differs")
-    owner = _require_owner_approval_tuple(owner_approval)
     sequence = dict(_record(retained.get("sequence"), field="sequence"))
     pre = dict(pre_dispatch)
     pre_unsigned = {
@@ -3354,8 +3655,17 @@ def finalise_issue_790_step16_plan(
         "requirements_digest"
     ):
         raise Issue790DispositionError("issue #790 pre-dispatch identity differs")
-    pre["exact_main_commit"] = owner["reviewed_correction_revision"]
-    pre["exact_main_tree"] = owner["reviewed_correction_tree"]
+    template_digest = str(pre["requirements_digest"])
+    binding = step16_activation_module.validate_step16_owner_activation_binding(
+        owner_activation
+    )
+    if (
+        binding["checked_candidate_digest"] != retained["canonical_digest"]
+        or binding["pre_dispatch_template_digest"] != template_digest
+    ):
+        raise Issue790DispositionError("issue #790 owner activation binding differs")
+    pre["exact_main_commit"] = revision
+    pre["exact_main_tree"] = tree
     pre["requirements_digest"] = digest_canonical(
         {key: item for key, item in pre.items() if key != "requirements_digest"}
     )
@@ -3363,8 +3673,9 @@ def finalise_issue_790_step16_plan(
     sequence["pre_dispatch_operational_requirements_digest"] = pre[
         "requirements_digest"
     ]
-    sequence["reviewed_correction_revision"] = owner["reviewed_correction_revision"]
-    sequence["reviewed_correction_tree"] = owner["reviewed_correction_tree"]
+    sequence["reviewed_correction_revision"] = revision
+    sequence["reviewed_correction_tree"] = tree
+    sequence["owner_activation"] = binding
     plan = {
         key: item
         for key, item in retained.items()
@@ -3373,10 +3684,10 @@ def finalise_issue_790_step16_plan(
     plan["schema_version"] = ISSUE_790_ITERATIVE_PLAN_SCHEMA
     plan["sequence"] = sequence
     plan["approval"] = {
-        "approved_by": owner["approved_by"],
-        "approval_reference": owner["approval_reference"],
-        "approved_at": owner["approved_at"],
-        "scope": owner["scope"],
+        "approved_by": approval["approved_by"],
+        "approval_reference": approval["approval_reference"],
+        "approved_at": approval["approved_at"],
+        "scope": approval["scope"],
     }
     plan["release"] = {
         "kind": _RELEASE_KIND,
@@ -3390,6 +3701,194 @@ def finalise_issue_790_step16_plan(
     return validate_issue_790_plan(plan)
 
 
+def _step16_contract_from_plan(
+    plan: Mapping[str, object],
+) -> issue_790_contract_module.Issue790ApprovedPlanContract:
+    sequence = _record(plan.get("sequence"), field="sequence")
+    target = _record(plan.get("target"), field="target")
+    approval = _record(plan.get("approval"), field="approval")
+    predecessor = _record(sequence.get("predecessor"), field="predecessor")
+    reviewed_fix = _validated_reviewed_fix(sequence.get("reviewed_fix"))
+    causal = _validated_causal_report(sequence.get("predecessor_causal_report"))
+    return issue_790_contract_module.Issue790ApprovedPlanContract(
+        schema_version=ISSUE_790_ITERATIVE_PLAN_SCHEMA,
+        plan_digest=str(plan["canonical_digest"]),
+        invocation_id=str(target["invocation_id"]),
+        terminal_digest=str(target["terminal_digest"]),
+        allocation_digest=str(target["allocation_digest"]),
+        approved_by=str(approval["approved_by"]),
+        approval_reference=str(approval["approval_reference"]),
+        approved_at=str(approval["approved_at"]),
+        scope=str(approval["scope"]),
+        terminal_outcome=str(target["terminal_outcome"]),
+        route_open_reason=str(target["route_open_reason"]),
+        root_plan_digest=str(sequence["root_plan_digest"]),
+        predecessor_plan_digest=str(predecessor["plan_digest"]),
+        sequence_ordinal=16,
+        controller_timeout_ms=int(sequence["controller_timeout_ms"]),
+        extraction_timeout_ms=int(sequence["extraction_timeout_ms"]),
+        cleanup_reserve_ms=int(sequence["cleanup_reserve_ms"]),
+        fixed_constraints_digest=str(sequence["fixed_constraints_digest"]),
+        predecessor_causal_report_digest=str(causal["report_digest"]),
+        constraint_change=str(sequence["constraint_change"]),
+        reviewed_fix_digest=str(reviewed_fix["record_digest"]),
+        projection_policy_version=str(sequence["projection_policy_version"]),
+        projection_policy_digest=str(sequence["projection_policy_digest"]),
+        temporal_policy_version=str(sequence["temporal_policy_version"]),
+        validator_contract_version=str(sequence["validator_contract_version"]),
+        pre_dispatch_operational_requirements_digest=str(
+            sequence["pre_dispatch_operational_requirements_digest"]
+        ),
+    )
+
+
+def finalise_issue_790_step16_plan(
+    candidate: Mapping[str, object],
+    owner_approval: Mapping[str, object],
+    *,
+    pre_dispatch: Mapping[str, object],
+) -> dict[str, object]:
+    """Bind a syntactic owner tuple. Still not live authority."""
+
+    retained = validate_issue_790_step16_candidate(candidate)
+    owner = _require_owner_approval_tuple(owner_approval)
+    sequence = _record(retained.get("sequence"), field="sequence")
+    binding = {
+        "checked_candidate_digest": retained["canonical_digest"],
+        "pre_dispatch_template_digest": sequence[
+            "pre_dispatch_operational_requirements_digest"
+        ],
+        "final_correction_pr": 1,
+        "reviewed_head_commit": owner["reviewed_correction_revision"],
+        "reviewed_head_tree": owner["reviewed_correction_tree"],
+        "focus_gate_run_url": "https://github.com/fol2/newsroom/actions/runs/1",
+        "focus_gate_run_id": 1,
+        "focus_gate_manifest_digest": "sha256:" + "00" * 32,
+        "feature_complete_review_receipt": "sha256:" + "11" * 32,
+        "event_circuit_policy": (
+            step16_activation_module.ISSUE_790_STEP16_EVENT_CIRCUIT_POLICY
+        ),
+        "caps": dict(_STEP16_OWNER_CAPS),
+        "activation_policy_version": (
+            issue_790_contract_module.ISSUE_790_STEP16_ACTIVATION_POLICY_VERSION
+        ),
+    }
+    return _assemble_step16_owner_plan(
+        retained,
+        approval=owner,
+        pre_dispatch=pre_dispatch,
+        revision=owner["reviewed_correction_revision"],
+        tree=owner["reviewed_correction_tree"],
+        owner_activation=binding,
+    )
+
+
+def activate_issue_790_step16_plan(
+    candidate: Mapping[str, object],
+    *,
+    comment_id: int,
+    pre_dispatch: Mapping[str, object],
+    store: Path,
+    github_api: step16_activation_module.GitHubApi | None = None,
+) -> dict[str, object]:
+    """Mint one activation receipt and one dynamically validated Step 16 plan."""
+
+    retained = validate_issue_790_step16_candidate(candidate)
+    authenticated = step16_activation_module.fetch_authenticated_step16_owner_comment(
+        comment_id=comment_id,
+        github_api=github_api,
+        default_github_api=_default_github_api,
+    )
+    payload = authenticated["payload"]
+    if not isinstance(payload, dict):
+        raise Issue790DispositionError("issue #790 owner approval payload differs")
+    step16_activation_module.require_step16_candidate_matches_payload(
+        candidate=retained,
+        payload=payload,
+    )
+    if payload.get("non_effects") != list(_NON_EFFECTS):
+        raise Issue790DispositionError("issue #790 owner approval payload differs")
+    sequence = _record(retained.get("sequence"), field="sequence")
+    binding = step16_activation_module.step16_owner_activation_binding(
+        payload,
+        template_digest=str(sequence["pre_dispatch_operational_requirements_digest"]),
+    )
+    plan = _assemble_step16_owner_plan(
+        retained,
+        approval={
+            "approved_by": authenticated["approved_by"],
+            "approval_reference": authenticated["approval_reference"],
+            "approved_at": authenticated["approved_at"],
+            "scope": authenticated["scope"],
+        },
+        pre_dispatch=pre_dispatch,
+        revision=str(payload["final_main_commit"]),
+        tree=str(payload["final_main_tree"]),
+        owner_activation=binding,
+    )
+    contract = _step16_contract_from_plan(plan)
+    receipt = step16_activation_module.mint_step16_activation_receipt(
+        authenticated=authenticated,
+        plan=plan,
+        contract=contract,
+        template_digest=str(sequence["pre_dispatch_operational_requirements_digest"]),
+        effective_digest=str(
+            _record(plan.get("sequence"), field="sequence")[
+                "pre_dispatch_operational_requirements_digest"
+            ]
+        ),
+    )
+    repository = Issue790CanaryRepository(str(store))
+    stored = repository.retain_step16_activation(receipt)
+    return {"activation": stored, "plan": plan}
+
+
+def qualify_issue_790_step16_readiness(
+    *,
+    plan: Mapping[str, object],
+    store: Path,
+    evidence: Mapping[str, object],
+    route_state: Mapping[str, object],
+    circuit_state: Mapping[str, object] | None,
+    canary_event: Mapping[str, object],
+    observed_at: datetime,
+    github_api: step16_activation_module.GitHubApi | None = None,
+) -> dict[str, object]:
+    """Provider-free readiness bound. Stops before credential, catalogue or provider I/O."""
+
+    retained = _require_approved_plan(plan, store=store, github_api=github_api)
+    _require_step16_code_identity(retained, evidence=evidence)
+    _require_step16_runtime_semantics(
+        retained,
+        evidence=evidence,
+        route_state=route_state,
+        circuit_state=circuit_state,
+        observed_at=observed_at,
+        canary_event=canary_event,
+    )
+    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        record = step16_activation_module.load_step16_activation_record(
+            connection,
+            plan_digest=str(retained["canonical_digest"]),
+        )
+    finally:
+        connection.close()
+    unsigned = {
+        "schema_version": "newsroom.issue-790.step16-provider-free-readiness.v1",
+        "status": step16_activation_module.ISSUE_790_STEP16_READINESS_STATUS,
+        "plan_digest": retained["canonical_digest"],
+        "checked_candidate_digest": record["checked_candidate_digest"],
+        "activation_digest": record["activation_digest"],
+        "provider_calls": 0,
+        "catalogue_queries": 0,
+        "credential_resolution": False,
+        "canary_consumed": False,
+        "public_effects": "DISABLED",
+    }
+    return {**unsigned, "readiness_digest": digest_canonical(unsigned)}
+
+
 __all__ = [
     "ISSUE_790_PLAN_SCHEMA",
     "ISSUE_790_RECEIPT_SCHEMA",
@@ -3398,11 +3897,13 @@ __all__ = [
     "ISSUE_790_ITERATIVE_CANARY_RECEIPT_SCHEMA",
     "ISSUE_790_APPROVED_PLAN_DIGEST",
     "Issue790DispositionError",
+    "activate_issue_790_step16_plan",
     "apply_issue_790_plan",
     "assert_issue_790_paths_disjoint",
     "dry_run_issue_790_plan",
     "finalise_issue_790_step16_plan",
     "load_issue_790_plan",
+    "qualify_issue_790_step16_readiness",
     "run_issue_790_canary",
     "validate_issue_790_plan",
     "validate_issue_790_step16_candidate",

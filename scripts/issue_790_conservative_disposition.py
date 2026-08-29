@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.proving_store is not None:
             operation_paths.append(args.proving_store)
         assert_issue_790_paths_disjoint(*operation_paths)
-        plan = load_issue_790_plan(args.plan)
+        plan = load_issue_790_plan(args.plan, store=args.store)
         if args.mode == "dry-run":
             assert args.scratch_store is not None
             receipt = dry_run_issue_790_plan(

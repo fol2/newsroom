@@ -78,7 +78,19 @@ ISSUE_790_STEP16_CHECKED_CANDIDATE_DIGEST = (
 ISSUE_790_STEP16_PENDING_DIGEST = (
     "sha256:8651368768f8ead04d2d96c0d0bbcf387b3baefedaaa5b5a07fb2e4d169fe271"
 )
-
+ISSUE_790_STEP16_OWNER_APPROVAL_SCHEMA = (
+    "newsroom.issue-790.step16-owner-approval.v1"
+)
+ISSUE_790_STEP16_ACTIVATION_SCHEMA = (
+    "newsroom.issue-790.step16-activation-receipt.v1"
+)
+ISSUE_790_STEP16_ACTIVATION_POLICY_VERSION = (
+    "issue-790-step16-owner-activation.v1"
+)
+ISSUE_790_STEP16_APPROVAL_MARKER = "NEWSROOM_ISSUE_790_STEP16_OWNER_APPROVAL_V1"
+ISSUE_790_STEP16_REVOKED_CHECKED_LIVE_PLAN_DIGEST = (
+    "sha256:72723b72b71f12fee2a9ec31c2b4145e5cbac4ac55f8ddbc51319248e94c21f9"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -705,6 +717,8 @@ def issue_790_approved_plan_contract(
 ) -> Issue790ApprovedPlanContract:
     """Return the exact reviewed contract, including the legacy first plan."""
 
+    if plan_digest == ISSUE_790_STEP16_REVOKED_CHECKED_LIVE_PLAN_DIGEST:
+        raise KeyError(plan_digest)
     if plan_digest == ISSUE_790_APPROVED_PLAN_DIGEST:
         # Keep these aliases live so fixture tests can bind one exact synthetic plan
         # without broadening the production registry.
@@ -784,6 +798,11 @@ __all__ = [
     "ISSUE_790_STEP16_CANDIDATE_SCHEMA",
     "ISSUE_790_STEP16_CHECKED_CANDIDATE_DIGEST",
     "ISSUE_790_STEP16_PENDING_DIGEST",
+    "ISSUE_790_STEP16_OWNER_APPROVAL_SCHEMA",
+    "ISSUE_790_STEP16_ACTIVATION_SCHEMA",
+    "ISSUE_790_STEP16_ACTIVATION_POLICY_VERSION",
+    "ISSUE_790_STEP16_APPROVAL_MARKER",
+    "ISSUE_790_STEP16_REVOKED_CHECKED_LIVE_PLAN_DIGEST",
     "Issue790ApprovedPlanContract",
     "Issue790CheckedCandidateContract",
     "issue_790_approved_plan_contract",
