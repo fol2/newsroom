@@ -1018,13 +1018,14 @@ def _release_step16_expired_open_circuit(
     ledger_seq: int,
     repository: Issue790CanaryRepository,
 ) -> dict[str, object]:
+    policy = _record(
+        _record(plan.get("sequence"), field="sequence").get("owner_activation"),
+        field="owner activation",
+    ).get("event_circuit_policy")
     eligibility = _require_step16_event_circuit(
         circuit_state,
         observed_at=observed_at,
-        policy=_record(
-            _record(plan.get("sequence"), field="sequence").get("owner_activation"),
-            field="owner activation",
-        ).get("event_circuit_policy"),
+        policy=policy,
     )
     if eligibility != "EXPIRED_OPEN":
         raise Issue790DispositionError("issue #790 event circuit release differs")
@@ -1044,14 +1045,7 @@ def _release_step16_expired_open_circuit(
             ledger_seq=ledger_seq,
             prior_state=circuit_state,
             observed_at=observed_at,
-            policy=str(
-                _record(
-                    _record(plan.get("sequence"), field="sequence").get(
-                        "owner_activation"
-                    ),
-                    field="owner activation",
-                ).get("event_circuit_policy")
-            ),
+            policy=str(policy),
         )
     except Issue790CanaryIntegrityError as exc:
         raise Issue790DispositionError(str(exc)) from exc
@@ -3826,6 +3820,8 @@ def activate_issue_790_step16_plan(
     pre_dispatch: Mapping[str, object],
     store: Path,
     github_api: step16_activation_module.GitHubApi | None = None,
+    focus_gate_manifest: Mapping[str, object] | None = None,
+    review_receipt: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Mint one activation receipt and one dynamically validated Step 16 plan."""
 
@@ -3834,6 +3830,8 @@ def activate_issue_790_step16_plan(
         comment_id=comment_id,
         github_api=github_api,
         default_github_api=_default_github_api,
+        focus_gate_manifest=focus_gate_manifest,
+        review_receipt=review_receipt,
     )
     payload = authenticated["payload"]
     if not isinstance(payload, dict):
@@ -3864,7 +3862,13 @@ def activate_issue_790_step16_plan(
     )
     contract = _step16_contract_from_plan(plan)
     fetcher = github_api if github_api is not None else _default_github_api
-    manifest, review = step16_activation_module.evidence_from_github_api(fetcher)
+    api_manifest, api_review = step16_activation_module.evidence_from_github_api(
+        fetcher
+    )
+    manifest = (
+        focus_gate_manifest if focus_gate_manifest is not None else api_manifest
+    )
+    review = review_receipt if review_receipt is not None else api_review
     receipt = step16_activation_module.mint_step16_activation_receipt(
         authenticated=authenticated,
         plan=plan,

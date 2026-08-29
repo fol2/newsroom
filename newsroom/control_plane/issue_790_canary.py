@@ -13,6 +13,7 @@ from newsroom.authority.canonical import canonical_json_bytes, digest_canonical
 from newsroom.control_plane.issue_790_step16_activation import (
     ISSUE_790_STEP16_CIRCUIT_RELEASE_POLICY_VERSION,
     ISSUE_790_STEP16_CIRCUIT_RELEASE_SCHEMA,
+    ISSUE_790_STEP16_EVENT_CIRCUIT_POLICY,
     STEP16_ACTIVATION_TABLE_SQL,
     STEP16_CIRCUIT_RELEASE_TABLE_SQL,
     effective_issue_790_invocation_plan_digests,
@@ -636,7 +637,7 @@ class Issue790CanaryRepository:
         event_id = _token(event_id, field="canary event id")
         if isinstance(ledger_seq, bool) or not isinstance(ledger_seq, int) or ledger_seq <= 0:
             raise Issue790CanaryIntegrityError("bounded canary ledger sequence is invalid")
-        if policy != "CLOSED_COHERENT_OR_EXPIRED_OPEN_IMMEDIATE_CLOSE":
+        if policy != ISSUE_790_STEP16_EVENT_CIRCUIT_POLICY:
             raise Issue790CanaryIntegrityError("issue #790 event circuit policy differs")
         opened_at = prior_state.get("opened_at")
         available_at = prior_state.get("available_at")

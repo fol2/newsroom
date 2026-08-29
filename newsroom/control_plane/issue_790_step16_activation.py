@@ -132,25 +132,6 @@ _ACTIVATION_RECORD_KEYS = (
     "contract",
     "activation_digest",
 )
-_FOCUS_GATE_MANIFEST_KEYS = (
-    "schema_version",
-    "contract_version",
-    "base_sha",
-    "head_sha",
-    "base_tree_sha",
-    "head_tree_sha",
-    "changed_paths",
-    "gates",
-    "selected_tests",
-    "selected_service_tests",
-    "research_required",
-    "full_health_required",
-    "owner_authority_required",
-    "bootstrap_required",
-    "reasons",
-    "execution_budget",
-    "manifest_digest",
-)
 _REVIEW_RECEIPT_KEYS = (
     "schema_version",
     "issue",
@@ -440,17 +421,15 @@ def require_step16_focus_gate_evidence(
 
     if manifest is None:
         _fail("issue #790 focus gate evidence differs")
-    retained = _digest_record(
-        manifest,
-        digest_field="manifest_digest",
-        field="focus gate evidence",
-    )
-    if tuple(sorted(retained)) != tuple(sorted(_FOCUS_GATE_MANIFEST_KEYS)):
+    from scripts.sdlc.focus_gate import FocusGateError, validate_manifest
+
+    try:
+        retained = validate_manifest(dict(manifest))
+    except FocusGateError:
         _fail("issue #790 focus gate evidence differs")
+        raise
     if (
-        retained.get("schema_version") != "newsroom.sdlc.focus-route.v1"
-        or retained.get("contract_version") != "focus-gates-v1"
-        or retained.get("manifest_digest") != payload.get("focus_gate_manifest_digest")
+        retained.get("manifest_digest") != payload.get("focus_gate_manifest_digest")
         or retained.get("head_sha") != payload.get("final_main_commit")
         or retained.get("head_tree_sha") != payload.get("final_main_tree")
         or retained.get("head_sha") != workflow_run.get("head_sha")
@@ -627,6 +606,8 @@ def fetch_authenticated_step16_owner_comment(
     github_api: GitHubApi | None,
     default_github_api: GitHubApi,
     require_bound_evidence: bool = True,
+    focus_gate_manifest: Mapping[str, object] | None = None,
+    review_receipt: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     raw_comment = fetch_step16_github_json(
         f"repos/fol2/newsroom/issues/comments/{comment_id}",
@@ -640,7 +621,9 @@ def fetch_authenticated_step16_owner_comment(
         default_github_api=default_github_api,
     )
     fetcher = default_github_api if github_api is None else github_api
-    manifest, review = evidence_from_github_api(fetcher)
+    api_manifest, api_review = evidence_from_github_api(fetcher)
+    manifest = focus_gate_manifest if focus_gate_manifest is not None else api_manifest
+    review = review_receipt if review_receipt is not None else api_review
     return authenticate_step16_owner_comment(
         raw_comment,
         comment_id=comment_id,
