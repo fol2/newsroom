@@ -107,7 +107,61 @@ _OWNER_ACTIVATION_KEYS = (
     "caps",
     "activation_policy_version",
 )
+_ACTIVATION_RECORD_KEYS = (
+    "schema_version",
+    "activation_policy_version",
+    "issue",
+    "checked_candidate_digest",
+    "plan_digest",
+    "comment_id",
+    "comment_node_id",
+    "comment_url",
+    "author_login",
+    "author_association",
+    "created_at",
+    "updated_at",
+    "canonical_body_digest",
+    "canonical_approval_payload_digest",
+    "approval_payload",
+    "pre_dispatch_template_digest",
+    "pre_dispatch_effective_digest",
+    "final_main_commit",
+    "final_main_tree",
+    "focus_gate_evidence",
+    "review_evidence",
+    "contract",
+    "activation_digest",
+)
+_REVIEW_RECEIPT_KEYS = (
+    "schema_version",
+    "issue",
+    "pull_request_url",
+    "reviewed_fix_revision",
+    "verdict",
+    "scope",
+    "findings",
+    "blocking_findings",
+    "review_receipt_digest",
+)
+ISSUE_790_STEP16_CIRCUIT_RELEASE_SCHEMA = (
+    "newsroom.issue-790.step16-event-circuit-release.v1"
+)
+ISSUE_790_STEP16_CIRCUIT_RELEASE_POLICY_VERSION = (
+    ISSUE_790_STEP16_ACTIVATION_POLICY_VERSION
+)
 _ACTIVATION_TABLE = "issue_790_step16_activations"
+STEP16_CIRCUIT_RELEASE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS issue_790_step16_circuit_releases(
+    release_digest TEXT PRIMARY KEY,
+    activation_digest TEXT NOT NULL,
+    plan_digest TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    ledger_seq INTEGER NOT NULL,
+    released_at TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    UNIQUE(plan_digest,event_id,ledger_seq)
+);
+"""
 STEP16_ACTIVATION_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS issue_790_step16_activations(
     activation_digest TEXT PRIMARY KEY,
@@ -196,7 +250,10 @@ def parse_step16_owner_approval_payload(body: object) -> dict[str, object]:
         _fail("issue #790 owner approval payload differs")
     if fences[0] != canonical_json_bytes(parsed).decode("utf-8"):
         _fail("issue #790 owner approval payload differs")
-    return validate_step16_owner_approval_payload(parsed)
+    payload = validate_step16_owner_approval_payload(parsed)
+    if body != canonical_step16_owner_approval_comment_body(payload):
+        _fail("issue #790 owner approval payload differs")
+    return payload
 
 
 def validate_step16_owner_approval_payload(
@@ -339,12 +396,113 @@ def validate_step16_owner_activation_binding(
     return binding
 
 
+def _digest_record(
+    value: object,
+    *,
+    digest_field: str,
+    field: str,
+) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        _fail(f"issue #790 {field} differs")
+    record = dict(value)
+    unsigned = {key: item for key, item in record.items() if key != digest_field}
+    if record.get(digest_field) != digest_canonical(unsigned):
+        _fail(f"issue #790 {field} differs")
+    return record
+
+
+def require_step16_focus_gate_evidence(
+    payload: Mapping[str, object],
+    *,
+    workflow_run: Mapping[str, object],
+    manifest: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Bind the retained Focus Gate manifest digest to the authenticated run."""
+
+    if manifest is None:
+        _fail("issue #790 focus gate evidence differs")
+    from scripts.sdlc.focus_gate import FocusGateError, validate_manifest
+
+    try:
+        retained = validate_manifest(dict(manifest))
+    except FocusGateError:
+        _fail("issue #790 focus gate evidence differs")
+        raise
+    if (
+        retained.get("manifest_digest") != payload.get("focus_gate_manifest_digest")
+        or retained.get("head_sha") != payload.get("final_main_commit")
+        or retained.get("head_tree_sha") != payload.get("final_main_tree")
+        or retained.get("head_sha") != workflow_run.get("head_sha")
+        or workflow_run.get("id") != payload.get("focus_gate_run_id")
+        or workflow_run.get("html_url") != payload.get("focus_gate_run_url")
+        or workflow_run.get("path") != ".github/workflows/focus-gates.yml"
+        or workflow_run.get("name") != "Focus Gates"
+        or workflow_run.get("event") != "workflow_dispatch"
+        or workflow_run.get("status") != "completed"
+        or workflow_run.get("conclusion") != "success"
+    ):
+        _fail("issue #790 focus gate evidence differs")
+    return retained
+
+
+def require_step16_review_evidence(
+    payload: Mapping[str, object],
+    *,
+    receipt: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Bind the retained review receipt to the reviewed head and correction PR."""
+
+    if receipt is None:
+        _fail("issue #790 feature-complete review receipt differs")
+    retained = _digest_record(
+        receipt,
+        digest_field="review_receipt_digest",
+        field="feature-complete review receipt",
+    )
+    if tuple(sorted(retained)) != tuple(sorted(_REVIEW_RECEIPT_KEYS)):
+        _fail("issue #790 feature-complete review receipt differs")
+    pull = retained.get("pull_request_url")
+    expected_pull = (
+        f"https://github.com/fol2/newsroom/pull/{payload.get('final_correction_pr')}"
+    )
+    findings = retained.get("findings")
+    blocking = retained.get("blocking_findings")
+    if (
+        retained.get("schema_version") != "newsroom.issue-790.code-fix-review-receipt.v1"
+        or retained.get("issue") != 790
+        or retained.get("review_receipt_digest")
+        != payload.get("feature_complete_review_receipt")
+        or retained.get("reviewed_fix_revision") != payload.get("reviewed_head_commit")
+        or pull != expected_pull
+        or retained.get("verdict") != "SHIP_ALLOWED"
+        or not isinstance(retained.get("scope"), str)
+        or not retained.get("scope")
+        or not isinstance(findings, list)
+        or not isinstance(blocking, list)
+        or blocking
+        or any(not isinstance(item, str) or not item for item in findings)
+        or any(not isinstance(item, str) or not item for item in blocking)
+    ):
+        _fail("issue #790 feature-complete review receipt differs")
+    return retained
+
+
+def evidence_from_github_api(github_api: object) -> tuple[object, object]:
+    return (
+        getattr(github_api, "focus_gate_manifest", None),
+        getattr(github_api, "review_receipt", None),
+    )
+
+
 def authenticate_step16_owner_comment(
     comment: Mapping[str, object],
     *,
     comment_id: int,
     payload: Mapping[str, object],
     workflow_run: Mapping[str, object],
+    focus_gate_manifest: Mapping[str, object] | None = None,
+    review_receipt: Mapping[str, object] | None = None,
+    require_bound_evidence: bool = True,
 ) -> dict[str, object]:
     """Fail-closed GitHub owner-comment authentication. Time comes from GitHub."""
 
@@ -395,6 +553,13 @@ def authenticate_step16_owner_comment(
     )
     if created_at <= completed_at:
         _fail("issue #790 owner approval precedes reviewed evidence")
+    if require_bound_evidence:
+        require_step16_focus_gate_evidence(
+            retained_payload,
+            workflow_run=workflow_run,
+            manifest=focus_gate_manifest,
+        )
+        require_step16_review_evidence(retained_payload, receipt=review_receipt)
     created_text = _utc_text(created_at)
     updated_text = _utc_text(updated_at)
     body = comment.get("body")
@@ -440,6 +605,9 @@ def fetch_authenticated_step16_owner_comment(
     comment_id: int,
     github_api: GitHubApi | None,
     default_github_api: GitHubApi,
+    require_bound_evidence: bool = True,
+    focus_gate_manifest: Mapping[str, object] | None = None,
+    review_receipt: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     raw_comment = fetch_step16_github_json(
         f"repos/fol2/newsroom/issues/comments/{comment_id}",
@@ -452,12 +620,32 @@ def fetch_authenticated_step16_owner_comment(
         github_api=github_api,
         default_github_api=default_github_api,
     )
+    fetcher = default_github_api if github_api is None else github_api
+    api_manifest, api_review = evidence_from_github_api(fetcher)
+    manifest = focus_gate_manifest if focus_gate_manifest is not None else api_manifest
+    review = review_receipt if review_receipt is not None else api_review
     return authenticate_step16_owner_comment(
         raw_comment,
         comment_id=comment_id,
         payload=payload,
         workflow_run=raw_run,
+        focus_gate_manifest=None if not isinstance(manifest, Mapping) else dict(manifest),
+        review_receipt=None if not isinstance(review, Mapping) else dict(review),
+        require_bound_evidence=require_bound_evidence,
     )
+
+
+def _payload_workflow_run(payload: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "id": payload["focus_gate_run_id"],
+        "html_url": payload["focus_gate_run_url"],
+        "head_sha": payload["final_main_commit"],
+        "path": ".github/workflows/focus-gates.yml",
+        "name": "Focus Gates",
+        "event": "workflow_dispatch",
+        "status": "completed",
+        "conclusion": "success",
+    }
 
 
 def mint_step16_activation_receipt(
@@ -467,8 +655,16 @@ def mint_step16_activation_receipt(
     contract: Issue790ApprovedPlanContract,
     template_digest: str,
     effective_digest: str,
+    focus_gate_evidence: Mapping[str, object] | None,
+    review_evidence: Mapping[str, object] | None,
 ) -> dict[str, object]:
     payload = dict(authenticated["payload"])
+    focus_gate = require_step16_focus_gate_evidence(
+        payload,
+        workflow_run=_payload_workflow_run(payload),
+        manifest=focus_gate_evidence,
+    )
+    review = require_step16_review_evidence(payload, receipt=review_evidence)
     unsigned = {
         "schema_version": ISSUE_790_STEP16_ACTIVATION_SCHEMA,
         "activation_policy_version": ISSUE_790_STEP16_ACTIVATION_POLICY_VERSION,
@@ -491,9 +687,189 @@ def mint_step16_activation_receipt(
         "pre_dispatch_effective_digest": effective_digest,
         "final_main_commit": payload["final_main_commit"],
         "final_main_tree": payload["final_main_tree"],
+        "focus_gate_evidence": focus_gate,
+        "review_evidence": review,
         "contract": asdict(contract),
     }
     return {**unsigned, "activation_digest": digest_canonical(unsigned)}
+
+
+def expected_step16_contract_from_plan(
+    plan: Mapping[str, object],
+) -> Issue790ApprovedPlanContract:
+    sequence = plan.get("sequence")
+    target = plan.get("target")
+    approval = plan.get("approval")
+    if not isinstance(sequence, dict) or not isinstance(target, dict) or not isinstance(
+        approval, dict
+    ):
+        _fail("issue #790 step 16 activation contract differs")
+    predecessor = sequence.get("predecessor")
+    reviewed_fix = sequence.get("reviewed_fix")
+    causal = sequence.get("predecessor_causal_report")
+    if not isinstance(predecessor, dict) or not isinstance(reviewed_fix, dict) or not isinstance(
+        causal, dict
+    ):
+        _fail("issue #790 step 16 activation contract differs")
+    return Issue790ApprovedPlanContract(
+        schema_version=str(plan.get("schema_version")),
+        plan_digest=str(plan.get("canonical_digest")),
+        invocation_id=str(target.get("invocation_id")),
+        terminal_digest=str(target.get("terminal_digest")),
+        allocation_digest=str(target.get("allocation_digest")),
+        approved_by=str(approval.get("approved_by")),
+        approval_reference=str(approval.get("approval_reference")),
+        approved_at=str(approval.get("approved_at")),
+        scope=str(approval.get("scope")),
+        terminal_outcome=str(target.get("terminal_outcome")),
+        route_open_reason=str(target.get("route_open_reason")),
+        root_plan_digest=str(sequence.get("root_plan_digest")),
+        predecessor_plan_digest=str(predecessor.get("plan_digest")),
+        sequence_ordinal=16,
+        controller_timeout_ms=int(sequence["controller_timeout_ms"]),
+        extraction_timeout_ms=int(sequence["extraction_timeout_ms"]),
+        cleanup_reserve_ms=int(sequence["cleanup_reserve_ms"]),
+        fixed_constraints_digest=str(sequence.get("fixed_constraints_digest")),
+        predecessor_causal_report_digest=str(causal.get("report_digest")),
+        constraint_change=str(sequence.get("constraint_change")),
+        reviewed_fix_digest=str(reviewed_fix.get("record_digest")),
+        projection_policy_version=str(sequence.get("projection_policy_version")),
+        projection_policy_digest=str(sequence.get("projection_policy_digest")),
+        temporal_policy_version=str(sequence.get("temporal_policy_version")),
+        validator_contract_version=str(sequence.get("validator_contract_version")),
+        pre_dispatch_operational_requirements_digest=str(
+            sequence.get("pre_dispatch_operational_requirements_digest")
+        ),
+    )
+
+
+def validate_step16_activation_receipt(
+    record: Mapping[str, object],
+    *,
+    sql_identity: Mapping[str, object] | None = None,
+    authenticated: Mapping[str, object] | None = None,
+    plan: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Validate one content-addressed Step 16 activation receipt."""
+
+    retained = dict(record)
+    if tuple(sorted(retained)) != tuple(sorted(_ACTIVATION_RECORD_KEYS)):
+        _fail("issue #790 step 16 activation differs")
+    unsigned = {
+        key: item for key, item in retained.items() if key != "activation_digest"
+    }
+    payload = retained.get("approval_payload")
+    if not isinstance(payload, dict):
+        _fail("issue #790 step 16 activation differs")
+    payload = validate_step16_owner_approval_payload(payload)
+    recomputed_payload_digest = digest_canonical(payload)
+    expected_body = canonical_step16_owner_approval_comment_body(payload)
+    contract = activation_record_to_contract(retained)
+    if (
+        retained.get("schema_version") != ISSUE_790_STEP16_ACTIVATION_SCHEMA
+        or retained.get("activation_policy_version")
+        != ISSUE_790_STEP16_ACTIVATION_POLICY_VERSION
+        or retained.get("issue") != 790
+        or retained.get("activation_digest") != digest_canonical(unsigned)
+        or retained.get("canonical_approval_payload_digest")
+        != recomputed_payload_digest
+        or retained.get("canonical_body_digest")
+        != digest_bytes(expected_body.encode("utf-8"))
+        or retained.get("checked_candidate_digest")
+        != payload.get("checked_candidate_digest")
+        or retained.get("final_main_commit") != payload.get("final_main_commit")
+        or retained.get("final_main_tree") != payload.get("final_main_tree")
+        or retained.get("pre_dispatch_template_digest")
+        != payload.get("pre_dispatch_policy_digest")
+        or retained.get("focus_gate_evidence")
+        != require_step16_focus_gate_evidence(
+            payload,
+            workflow_run=_payload_workflow_run(payload),
+            manifest=(
+                retained.get("focus_gate_evidence")
+                if isinstance(retained.get("focus_gate_evidence"), dict)
+                else None
+            ),
+        )
+        or retained.get("review_evidence")
+        != require_step16_review_evidence(
+            payload,
+            receipt=(
+                retained.get("review_evidence")
+                if isinstance(retained.get("review_evidence"), dict)
+                else None
+            ),
+        )
+        or retained.get("author_login") != "fol2"
+        or retained.get("author_association") != "OWNER"
+        or contract.plan_digest != retained.get("plan_digest")
+        or contract.approval_reference != retained.get("comment_url")
+        or contract.approved_at != retained.get("created_at")
+        or contract.approved_by != ISSUE_790_APPROVED_BY
+        or contract.sequence_ordinal != 16
+        or contract.pre_dispatch_operational_requirements_digest
+        != retained.get("pre_dispatch_effective_digest")
+    ):
+        _fail("issue #790 step 16 activation differs")
+    _natural(retained.get("comment_id"), field="owner comment identity")
+    _sha256(retained.get("plan_digest"), field="plan digest")
+    _sha256(
+        retained.get("pre_dispatch_effective_digest"),
+        field="pre-dispatch effective digest",
+    )
+    _hex40(retained.get("final_main_commit"), field="final main commit")
+    _hex40(retained.get("final_main_tree"), field="final main tree")
+    _instant(retained.get("created_at"), field="owner comment created_at")
+    _instant(retained.get("updated_at"), field="owner comment updated_at")
+    if sql_identity is not None:
+        if (
+            sql_identity.get("activation_digest") != retained.get("activation_digest")
+            or sql_identity.get("checked_candidate_digest")
+            != retained.get("checked_candidate_digest")
+            or sql_identity.get("plan_digest") != retained.get("plan_digest")
+            or sql_identity.get("comment_id") != retained.get("comment_id")
+            or sql_identity.get("payload_digest")
+            != retained.get("canonical_approval_payload_digest")
+            or sql_identity.get("created_at") != retained.get("created_at")
+        ):
+            _fail("issue #790 step 16 activation differs")
+    if authenticated is not None:
+        authenticated_payload = authenticated.get("payload")
+        if (
+            not isinstance(authenticated_payload, dict)
+            or payload != authenticated_payload
+            or retained.get("comment_id") != authenticated.get("comment_id")
+            or retained.get("comment_node_id") != authenticated.get("comment_node_id")
+            or retained.get("comment_url") != authenticated.get("comment_url")
+            or retained.get("created_at") != authenticated.get("created_at")
+            or retained.get("updated_at") != authenticated.get("updated_at")
+            or retained.get("canonical_body_digest")
+            != authenticated.get("canonical_body_digest")
+            or retained.get("canonical_approval_payload_digest")
+            != authenticated.get("canonical_approval_payload_digest")
+            or retained.get("checked_candidate_digest")
+            != authenticated.get("checked_candidate_digest")
+        ):
+            _fail("issue #790 owner comment evidence differs")
+    if plan is not None:
+        require_step16_plan_matches_activation(plan, retained)
+        sequence = plan.get("sequence")
+        binding = (
+            sequence.get("owner_activation") if isinstance(sequence, dict) else None
+        )
+        expected_binding = step16_owner_activation_binding(
+            payload,
+            template_digest=str(retained["pre_dispatch_template_digest"]),
+        )
+        expected_contract = expected_step16_contract_from_plan(plan)
+        if (
+            not isinstance(binding, dict)
+            or binding != expected_binding
+            or asdict(expected_contract) != retained.get("contract")
+            or asdict(expected_contract) != asdict(contract)
+        ):
+            _fail("issue #790 step 16 activation differs")
+    return retained
 
 
 def activation_record_to_contract(
@@ -522,24 +898,31 @@ def load_step16_activation_record(
     ):
         _fail("issue #790 step 16 activation is absent")
     row = connection.execute(
-        "SELECT activation_digest,record_json FROM issue_790_step16_activations "
+        "SELECT activation_digest,checked_candidate_digest,plan_digest,comment_id,"
+        "payload_digest,created_at,record_json FROM issue_790_step16_activations "
         "WHERE plan_digest=?",
         (plan_digest,),
     ).fetchone()
     if row is None:
         _fail("issue #790 step 16 activation is absent")
     try:
-        record = json.loads(str(row[1]))
+        record = json.loads(str(row[6]))
     except json.JSONDecodeError:
         _fail("issue #790 step 16 activation differs")
         raise
     if not isinstance(record, dict):
         _fail("issue #790 step 16 activation differs")
-    supplied = record.get("activation_digest")
-    unsigned = {key: item for key, item in record.items() if key != "activation_digest"}
-    if supplied != digest_canonical(unsigned) or supplied != str(row[0]):
-        _fail("issue #790 step 16 activation differs")
-    return record
+    return validate_step16_activation_receipt(
+        record,
+        sql_identity={
+            "activation_digest": str(row[0]),
+            "checked_candidate_digest": str(row[1]),
+            "plan_digest": str(row[2]),
+            "comment_id": int(row[3]),
+            "payload_digest": str(row[4]),
+            "created_at": str(row[5]),
+        },
+    )
 
 
 def step16_activation_contract_from_connection(
@@ -663,39 +1046,39 @@ def require_step16_plan_matches_activation(
     ):
         _fail("issue #790 step 16 activation differs")
     validate_step16_owner_activation_binding(binding)
-    if (
-        contract.plan_digest != plan.get("canonical_digest")
-        or contract.invocation_id != target.get("invocation_id")
-        or contract.terminal_digest != target.get("terminal_digest")
-        or contract.allocation_digest != target.get("allocation_digest")
-        or contract.approved_by != approval.get("approved_by")
-        or contract.approval_reference != approval.get("approval_reference")
-        or contract.approved_at != approval.get("approved_at")
-        or contract.sequence_ordinal != 16
-    ):
+    expected = expected_step16_contract_from_plan(plan)
+    if asdict(contract) != asdict(expected) or asdict(contract) != record.get("contract"):
         _fail("issue #790 step 16 activation contract differs")
     return contract
 
 
 __all__ = [
+    "ISSUE_790_STEP16_CIRCUIT_RELEASE_POLICY_VERSION",
+    "ISSUE_790_STEP16_CIRCUIT_RELEASE_SCHEMA",
     "ISSUE_790_STEP16_EVENT_CIRCUIT_POLICY",
     "ISSUE_790_STEP16_READINESS_STATUS",
     "STEP16_ACTIVATION_TABLE_SQL",
+    "STEP16_CIRCUIT_RELEASE_TABLE_SQL",
     "GitHubApi",
     "activation_record_to_contract",
     "authenticate_step16_owner_comment",
     "canonical_step16_owner_approval_comment_body",
     "effective_issue_790_invocation_plan_digests",
     "effective_issue_790_plan_contract",
+    "evidence_from_github_api",
+    "expected_step16_contract_from_plan",
     "fetch_authenticated_step16_owner_comment",
     "fetch_step16_github_json",
     "load_step16_activation_record",
     "mint_step16_activation_receipt",
     "parse_step16_owner_approval_payload",
     "require_step16_candidate_matches_payload",
+    "require_step16_focus_gate_evidence",
     "require_step16_plan_matches_activation",
+    "require_step16_review_evidence",
     "step16_activation_contract_from_connection",
     "step16_owner_activation_binding",
+    "validate_step16_activation_receipt",
     "validate_step16_owner_activation_binding",
     "validate_step16_owner_approval_payload",
 ]
