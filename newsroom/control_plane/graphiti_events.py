@@ -264,6 +264,60 @@ def _unit_refs(units: tuple[CorpusIngestUnit, ...]) -> list[dict[str, object]]:
     ]
 
 
+def _stable_unit_ref(ref: object) -> tuple[object, ...]:
+    if not isinstance(ref, dict):
+        return (None,)
+    return (
+        ref.get("ingest_id"),
+        ref.get("revision_id"),
+        ref.get("representation_digest"),
+        ref.get("chunk_digest"),
+        ref.get("chunk_ordinal"),
+        ref.get("predecessor_ingest_id"),
+    )
+
+
+def graphiti_unit_binding_reason(
+    event: GraphitiRevisionEvent,
+    units: tuple[CorpusIngestUnit, ...],
+) -> str | None:
+    """Return the live-gate hold reason if resolved units cannot bind."""
+
+    ordered = tuple(sorted(units, key=lambda item: item.chunk_ordinal))
+    if not ordered or tuple(item.chunk_ordinal for item in ordered) != tuple(
+        range(1, ordered[0].chunk_count + 1)
+    ):
+        return "RESOLVED_CHUNKS_INCOMPLETE"
+    if any(
+        (
+            item.source_id,
+            item.item_key,
+            item.revision_digest,
+            item.published_at or "",
+            item.updated_at or "",
+        )
+        != (
+            event.source_id,
+            event.item_key,
+            event.revision_digest,
+            event.published_at,
+            event.updated_at,
+        )
+        for item in ordered
+    ):
+        return "RESOLVED_CHUNKS_DIFFER_FROM_LEDGER_EVENT"
+    resolved_ingest_ids = tuple(item.ingest_id for item in ordered)
+    if event.landed_ingest_ids and resolved_ingest_ids != event.landed_ingest_ids:
+        return "RESOLVED_INGEST_IDS_DIFFER_FROM_LANDED"
+    if event.expected_unit_count > 0:
+        resolved_refs = _unit_refs(ordered)
+        if tuple(
+            _stable_unit_ref(ref) for ref in event.unit_refs if isinstance(ref, dict)
+        ) != tuple(_stable_unit_ref(ref) for ref in resolved_refs):
+            return "RESOLVED_CHUNKS_DIFFER_FROM_RETAINED_REFS"
+    return None
+
+
 def _manifest_json(manifest: dict[str, object]) -> str:
     value = json.dumps(
         manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -698,33 +752,11 @@ class GraphitiEventQueue:
     ) -> None:
         """Durably bind hydrated chunk identities before provider dispatch."""
 
+        reason = graphiti_unit_binding_reason(event, units)
+        if reason is not None:
+            raise ValueError(reason)
         ordered = tuple(sorted(units, key=lambda item: item.chunk_ordinal))
-        if not ordered or tuple(item.chunk_ordinal for item in ordered) != tuple(
-            range(1, ordered[0].chunk_count + 1)
-        ):
-            raise ValueError("resolved Graphiti chunks are incomplete")
-        if any(
-            (
-                item.source_id,
-                item.item_key,
-                item.revision_digest,
-                item.published_at or "",
-                item.updated_at or "",
-            )
-            != (
-                event.source_id,
-                event.item_key,
-                event.revision_digest,
-                event.published_at,
-                event.updated_at,
-            )
-            for item in ordered
-        ):
-            raise ValueError("resolved Graphiti chunks differ from the ledger event")
         resolved_refs = _unit_refs(ordered)
-        resolved_ingest_ids = tuple(item.ingest_id for item in ordered)
-        if event.landed_ingest_ids and (resolved_ingest_ids != event.landed_ingest_ids):
-            raise ValueError("resolved Graphiti ingest IDs differ from landed IDs")
         manifest: dict[str, object] = {
             "event_type": "EFFECTIVE_SOURCE_REVISION_LANDED",
             "ledger_seq": event.ledger_seq,
@@ -752,20 +784,12 @@ class GraphitiEventQueue:
                 retained_refs = (
                     retained.get("unit_refs") if isinstance(retained, dict) else None
                 )
-                stable = lambda ref: (
-                    ref.get("ingest_id"),
-                    ref.get("revision_id"),
-                    ref.get("representation_digest"),
-                    ref.get("chunk_digest"),
-                    ref.get("chunk_ordinal"),
-                    ref.get("predecessor_ingest_id"),
-                )
                 if not isinstance(retained_refs, list) or tuple(
-                    stable(ref) for ref in retained_refs if isinstance(ref, dict)
-                ) != tuple(stable(ref) for ref in resolved_refs):
-                    raise ValueError(
-                        "resolved Graphiti chunks differ from retained refs"
-                    )
+                    _stable_unit_ref(ref)
+                    for ref in retained_refs
+                    if isinstance(ref, dict)
+                ) != tuple(_stable_unit_ref(ref) for ref in resolved_refs):
+                    raise ValueError("RESOLVED_CHUNKS_DIFFER_FROM_RETAINED_REFS")
             else:
                 connection.execute(
                     """
@@ -1002,5 +1026,6 @@ __all__ = [
     "GraphitiRevisionEvent",
     "SystemicGraphitiEventFailure",
     "ensure_graphiti_event_schema",
+    "graphiti_unit_binding_reason",
     "reconcile_graphiti_events",
 ]

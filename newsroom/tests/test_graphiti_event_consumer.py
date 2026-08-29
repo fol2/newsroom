@@ -25,8 +25,10 @@ from newsroom.control_plane.graphiti_events import (
     GraphitiDispatchGate,
     GraphitiDispatchResult,
     GraphitiEventQueue,
+    GraphitiRevisionEvent,
     SystemicGraphitiEventFailure,
     ensure_graphiti_event_schema,
+    graphiti_unit_binding_reason,
     reconcile_graphiti_events,
 )
 from newsroom.control_plane.issue_790_canary import Issue790CanaryIntegrityError
@@ -182,10 +184,41 @@ def _insert_legacy_landed(path: Path, unit: CorpusIngestUnit) -> tuple[str, str]
     return ledger_digest, payload_digest
 
 
-def test_fresh_event_preflight_hydrates_zero_ref_manifest_without_writes(
-    tmp_path: Path,
-) -> None:
-    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+_EVENT_8835_LANDED_INGEST_ID = "9d565951-bbd1-4a3f-8acc-59419a8352c0"
+
+
+def _binding_event(
+    unit: CorpusIngestUnit,
+    *,
+    source_id: str | None = None,
+    expected_unit_count: int = 0,
+    landed_ingest_ids: tuple[str, ...] | None = None,
+    unit_refs: tuple[dict[str, object], ...] = (),
+    ledger_seq: int = 8835,
+) -> GraphitiRevisionEvent:
+    return GraphitiRevisionEvent(
+        event_id="sha256:" + "a" * 64,
+        ledger_seq=ledger_seq,
+        source_id=unit.source_id if source_id is None else source_id,
+        item_key=unit.item_key,
+        revision_digest=unit.revision_digest,
+        published_at=unit.published_at or "",
+        updated_at=unit.updated_at or "",
+        expected_unit_count=expected_unit_count,
+        landed_ingest_ids=(
+            (unit.ingest_id,) if landed_ingest_ids is None else landed_ingest_ids
+        ),
+        landed_payload_digest="sha256:" + "b" * 64,
+        unit_refs=unit_refs,
+        state="RUNNING",
+        attempt_count=1,
+        units=(),
+    )
+
+
+def _projected_zero_ref_event(
+    tmp_path: Path, clock: MutableClock
+) -> tuple[Path, Path, str, int]:
     proving = _proving(tmp_path)
     unpublished = tmp_path / "unpublished.sqlite3"
     run_cycle(
@@ -199,31 +232,75 @@ def test_fresh_event_preflight_hydrates_zero_ref_manifest_without_writes(
     )
     connection = connect(str(unpublished))
     connection.execute("BEGIN IMMEDIATE")
-    assert reconcile_graphiti_events(
-        connection,
-        (),
-        available_at=clock.value,
-    ) > 0
+    assert (
+        reconcile_graphiti_events(
+            connection,
+            (),
+            available_at=clock.value,
+        )
+        > 0
+    )
     connection.commit()
     row = connection.execute(
         "SELECT event_id,ledger_seq,manifest_json FROM "
         "unpublished_graphiti_revision_events ORDER BY ledger_seq LIMIT 1"
     ).fetchone()
+    connection.close()
     assert row is not None
-    manifest = json.loads(str(row[2]))
-    assert manifest["unit_refs"] == []
+    assert json.loads(str(row[2]))["unit_refs"] == []
+    return proving, unpublished, str(row[0]), int(row[1])
+
+
+def _rewrite_landed_ingest_ids(
+    path: Path, event_id: str, ingest_ids: tuple[str, ...]
+) -> None:
+    connection = sqlite3.connect(path)
+    row = connection.execute(
+        "SELECT manifest_json FROM unpublished_graphiti_revision_events "
+        "WHERE event_id=?",
+        (event_id,),
+    ).fetchone()
+    assert row is not None
+    manifest = json.loads(str(row[0]))
+    manifest["landed_ingest_ids"] = list(ingest_ids)
+    connection.execute(
+        """
+        UPDATE unpublished_graphiti_revision_events
+        SET manifest_json=?,manifest_digest=?
+        WHERE event_id=?
+        """,
+        (
+            json.dumps(
+                manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ),
+            digest_canonical(manifest),
+            event_id,
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+
+def test_fresh_event_preflight_hydrates_zero_ref_manifest_without_writes(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, unpublished, event_id, ledger_seq = _projected_zero_ref_event(
+        tmp_path, clock
+    )
+    connection = sqlite3.connect(unpublished)
     before = connection.execute(
         "SELECT state,attempt_count,unit_count,manifest_digest FROM "
         "unpublished_graphiti_revision_events WHERE event_id=?",
-        (str(row[0]),),
+        (event_id,),
     ).fetchone()
     connection.close()
 
     evidence = qualify_fresh_graphiti_event(
         proving_store=str(proving),
         unpublished_store=str(unpublished),
-        event_id=str(row[0]),
-        ledger_seq=int(row[1]),
+        event_id=event_id,
+        ledger_seq=ledger_seq,
         clock=clock,
     )
 
@@ -231,7 +308,7 @@ def test_fresh_event_preflight_hydrates_zero_ref_manifest_without_writes(
     after = retained.execute(
         "SELECT state,attempt_count,unit_count,manifest_digest FROM "
         "unpublished_graphiti_revision_events WHERE event_id=?",
-        (str(row[0]),),
+        (event_id,),
     ).fetchone()
     retained.close()
     assert evidence["provider_calls"] == 0
@@ -245,6 +322,158 @@ def test_fresh_event_preflight_hydrates_zero_ref_manifest_without_writes(
         }
     )
     assert after == before
+
+
+def test_ready_qualification_cannot_fail_the_unchanged_live_gate(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, unpublished, event_id, ledger_seq = _projected_zero_ref_event(
+        tmp_path, clock
+    )
+    evidence = qualify_fresh_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        clock=clock,
+    )
+    assert evidence["resolved_units"]
+
+    class FixtureGraphiti:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            return _complete(unit)
+
+    result = consume_next_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        graphiti=FixtureGraphiti(),
+        owner_id="worker",
+        clock=clock,
+        event_id=event_id,
+        require_fresh=True,
+        recover_model_usage=False,
+    )
+    assert result is not None and result.state == "TERMINAL"
+
+
+def test_unit_binding_reason_matches_event_8835_landed_ingest_mismatch() -> None:
+    unit = _unit(1)
+    event = _binding_event(
+        unit,
+        landed_ingest_ids=(_EVENT_8835_LANDED_INGEST_ID,),
+        unit_refs=(),
+        expected_unit_count=0,
+    )
+
+    assert unit.ingest_id != _EVENT_8835_LANDED_INGEST_ID
+    assert (
+        graphiti_unit_binding_reason(event, (unit,))
+        == "RESOLVED_INGEST_IDS_DIFFER_FROM_LANDED"
+    )
+
+
+def test_unit_binding_reason_covers_chunk_identity_and_retained_ref_holds() -> None:
+    unit = _unit(1)
+    matching = _binding_event(unit)
+    incomplete = replace(unit, chunk_count=2)
+    identity = _binding_event(unit, source_id="RAD-01")
+    retained = _binding_event(
+        unit,
+        expected_unit_count=1,
+        unit_refs=(
+            {
+                "ingest_id": "other",
+                "revision_id": unit.revision_id,
+                "representation_digest": unit.representation_digest,
+                "chunk_digest": unit.digest,
+                "chunk_ordinal": 1,
+                "predecessor_ingest_id": None,
+            },
+        ),
+    )
+
+    assert graphiti_unit_binding_reason(matching, (unit,)) is None
+    assert (
+        graphiti_unit_binding_reason(matching, (incomplete,))
+        == "RESOLVED_CHUNKS_INCOMPLETE"
+    )
+    assert (
+        graphiti_unit_binding_reason(identity, (unit,))
+        == "RESOLVED_CHUNKS_DIFFER_FROM_LEDGER_EVENT"
+    )
+    assert (
+        graphiti_unit_binding_reason(retained, (unit,))
+        == "RESOLVED_CHUNKS_DIFFER_FROM_RETAINED_REFS"
+    )
+
+
+def test_mismatched_landed_ingest_ids_hold_before_qualify_ready_or_dispatch(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, unpublished, event_id, ledger_seq = _projected_zero_ref_event(
+        tmp_path, clock
+    )
+    connection = sqlite3.connect(unpublished)
+    before = connection.execute(
+        "SELECT state,attempt_count,unit_count,manifest_digest "
+        "FROM unpublished_graphiti_revision_events WHERE event_id=?",
+        (event_id,),
+    ).fetchone()
+    connection.close()
+    assert before is not None
+    _rewrite_landed_ingest_ids(
+        unpublished, event_id, (_EVENT_8835_LANDED_INGEST_ID,)
+    )
+
+    with pytest.raises(ValueError, match="RESOLVED_INGEST_IDS_DIFFER_FROM_LANDED"):
+        qualify_fresh_graphiti_event(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            event_id=event_id,
+            ledger_seq=ledger_seq,
+            clock=clock,
+        )
+    retained = sqlite3.connect(unpublished)
+    after_qualify = retained.execute(
+        "SELECT state,attempt_count,unit_count,manifest_digest "
+        "FROM unpublished_graphiti_revision_events WHERE event_id=?",
+        (event_id,),
+    ).fetchone()
+    retained.close()
+    assert after_qualify is not None
+    assert after_qualify[:3] == before[:3]
+    assert after_qualify[3] != before[3]
+
+    class MustNotDispatch:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            raise AssertionError(f"provider boundary reached for {unit.ingest_id}")
+
+    result = consume_next_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        graphiti=MustNotDispatch(),
+        owner_id="worker",
+        clock=clock,
+        event_id=event_id,
+        require_fresh=True,
+        recover_model_usage=False,
+    )
+    held = sqlite3.connect(unpublished)
+    row_after = held.execute(
+        "SELECT state,attempt_count,provider_dispatched,last_failure_code "
+        "FROM unpublished_graphiti_revision_events WHERE event_id=?",
+        (event_id,),
+    ).fetchone()
+    held.close()
+    assert result is not None and result.state == "RIGHTS_HELD"
+    assert row_after == (
+        "RIGHTS_HELD",
+        1,
+        0,
+        "RESOLVED_INGEST_IDS_DIFFER_FROM_LANDED",
+    )
 
 
 def test_invalid_canary_authority_does_not_install_coordinator_schema(
@@ -937,9 +1166,16 @@ def test_resolved_ingest_identity_must_match_landed_obligation(
         gate=gate,
         dispatch=dispatch,
     )
+    retained = sqlite3.connect(path)
+    held = retained.execute(
+        "SELECT state,provider_dispatched,last_failure_code "
+        "FROM unpublished_graphiti_revision_events"
+    ).fetchone()
+    retained.close()
 
     assert result is not None and result.state == "RETRY_HELD"
     assert dispatched is False
+    assert held == ("RETRY_HELD", 0, "GATE_ValueError")
 
 
 def test_independent_consumer_drains_four_ordered_chunks_in_one_event_attempt(
