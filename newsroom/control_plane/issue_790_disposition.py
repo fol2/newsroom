@@ -1059,6 +1059,7 @@ def _require_step16_runtime_semantics(
     circuit_state: Mapping[str, object] | None,
     observed_at: datetime,
     canary_event: Mapping[str, object] | None = None,
+    fresh_event: bool = True,
 ) -> None:
     sequence = plan.get("sequence")
     if not isinstance(sequence, dict) or sequence.get("sequence_ordinal") != 16:
@@ -1102,6 +1103,8 @@ def _require_step16_runtime_semantics(
             )
     elif route_status != "CLOSED":
         raise Issue790DispositionError("issue #790 pre-dispatch route state differs")
+    if not fresh_event:
+        return
     _require_step16_event_circuit(
         circuit_state,
         observed_at=observed_at,
@@ -3177,6 +3180,7 @@ def run_issue_790_canary(
         expected_closed_reason=expected_route_reason,
         recovery_usage=recovery_usage,
     )
+    recovering = prior_consumption is not None
     _require_step16_runtime_semantics(
         retained_plan,
         evidence=operational_evidence,
@@ -3187,53 +3191,81 @@ def run_issue_790_canary(
             else _record(event_before.get("circuit"), field="canary circuit")
         ),
         observed_at=observed_at,
-        canary_event=event_before_record,
+        canary_event=None if recovering else event_before_record,
+        fresh_event=not recovering,
     )
     sequence = retained_plan.get("sequence")
     circuit_release = None
-    if isinstance(sequence, dict) and sequence.get("sequence_ordinal") == 16:
-        circuit = (
-            None
-            if event_before.get("circuit") is None
-            else _record(event_before.get("circuit"), field="canary circuit")
-        )
-        eligibility = _require_step16_event_circuit(
-            circuit,
-            observed_at=observed_at,
-            policy=_record(
-                sequence.get("owner_activation"),
-                field="owner activation",
-            ).get("event_circuit_policy"),
-        )
-        if eligibility == "EXPIRED_OPEN":
-            assert circuit is not None
-            circuit_release = _release_step16_expired_open_circuit(
-                store=store,
-                plan=retained_plan,
-                circuit_state=circuit,
-                observed_at=observed_at,
-                event_id=event_id,
-                ledger_seq=ledger_seq,
-                repository=canary_repository,
-            )
-        else:
-            circuit_release = canary_repository.existing_step16_circuit_release(
-                plan_digest=str(retained_plan["canonical_digest"]),
-                event_id=event_id,
-                ledger_seq=ledger_seq,
-            )
-        if prior_consumption is None and circuit_release is not None:
-            unsigned_preflight = dict(preflight_evidence)
-            unsigned_preflight.pop("evidence_digest", None)
-            unsigned_preflight["circuit_release"] = circuit_release
-            preflight_evidence = {
-                **unsigned_preflight,
-                "evidence_digest": digest_canonical(unsigned_preflight),
-            }
+    circuit_before = (
+        None
+        if event_before.get("circuit") is None
+        else _record(event_before.get("circuit"), field="canary circuit")
+    )
     process_result: dict[str, object] | None = None
     exception: dict[str, object] | None = None
     completed_at = datetime.now(tz=UTC)
     try:
+        if isinstance(sequence, dict) and sequence.get("sequence_ordinal") == 16:
+            if recovering:
+                attempt_count = event_before_record.get("attempt_count")
+                if attempt_count not in {0, 1}:
+                    raise Issue790DispositionError(
+                        "interrupted bounded canary retained more than one attempt"
+                    )
+                if event_before_record.get("state") not in {
+                    "QUEUED",
+                    "CLAIMED",
+                    "RUNNING",
+                    "RETRY_HELD",
+                    "RIGHTS_HELD",
+                    "CONFIGURATION_HELD",
+                    "DEAD_LETTER",
+                    "TERMINAL",
+                }:
+                    raise Issue790DispositionError(
+                        "interrupted bounded canary event state differs"
+                    )
+                circuit_release = canary_repository.existing_step16_circuit_release(
+                    plan_digest=str(retained_plan["canonical_digest"]),
+                    event_id=event_id,
+                    ledger_seq=ledger_seq,
+                )
+            else:
+                eligibility = _require_step16_event_circuit(
+                    circuit_before,
+                    observed_at=observed_at,
+                    policy=_record(
+                        sequence.get("owner_activation"),
+                        field="owner activation",
+                    ).get("event_circuit_policy"),
+                )
+                if eligibility == "EXPIRED_OPEN":
+                    assert circuit_before is not None
+                    circuit_release = _release_step16_expired_open_circuit(
+                        store=store,
+                        plan=retained_plan,
+                        circuit_state=circuit_before,
+                        observed_at=observed_at,
+                        event_id=event_id,
+                        ledger_seq=ledger_seq,
+                        repository=canary_repository,
+                    )
+                else:
+                    circuit_release = (
+                        canary_repository.existing_step16_circuit_release(
+                            plan_digest=str(retained_plan["canonical_digest"]),
+                            event_id=event_id,
+                            ledger_seq=ledger_seq,
+                        )
+                    )
+                if circuit_release is not None:
+                    unsigned_preflight = dict(preflight_evidence)
+                    unsigned_preflight.pop("evidence_digest", None)
+                    unsigned_preflight["circuit_release"] = circuit_release
+                    preflight_evidence = {
+                        **unsigned_preflight,
+                        "evidence_digest": digest_canonical(unsigned_preflight),
+                    }
         if prior_consumption is not None:
             consumption = prior_consumption
             owner_id = str(consumption["owner_id"])
@@ -3334,6 +3366,12 @@ def run_issue_790_canary(
         raise Issue790DispositionError(
             "interrupted bounded canary route changed during recovery"
         )
+    if resuming_zero_io_finalisation:
+        circuit_after = _circuit_state(store)
+        if circuit_after != circuit_before:
+            raise Issue790DispositionError(
+                "interrupted bounded canary event circuit changed during recovery"
+            )
     state_counts_after = _record(
         event_after["state_counts"],
         field="canary state counts",
@@ -3421,19 +3459,20 @@ def run_issue_790_canary(
         "non_effects": list(_NON_EFFECTS),
     }
     if isinstance(sequence, dict) and sequence.get("sequence_ordinal") == 16:
-        receipt_without_digest["circuit_release"] = circuit_release
-        consumption_release = (
+        circuit_release = _optional_step16_circuit_release(circuit_release)
+        consumption_release = _optional_step16_circuit_release(
             None
             if not isinstance(consumption, dict)
             else consumption.get("circuit_release")
         )
-        if consumption_release is not None:
-            receipt_without_digest["circuit_release"] = consumption_release
-        outcome_release = (
+        outcome_release = _optional_step16_circuit_release(
             None if not isinstance(outcome, dict) else outcome.get("circuit_release")
         )
+        if consumption_release is not None:
+            circuit_release = consumption_release
         if outcome_release is not None:
-            receipt_without_digest["circuit_release"] = outcome_release
+            circuit_release = outcome_release
+        receipt_without_digest["circuit_release"] = circuit_release
     if predecessor is not None:
         receipt_without_digest["predecessor"] = predecessor
     return {
@@ -3469,6 +3508,62 @@ def write_issue_790_receipt(path: Path, receipt: Mapping[str, object]) -> None:
         if descriptor >= 0:
             os.close(descriptor)
         _unlink_temporary(temporary)
+
+
+def require_issue_790_path_outside_git(path: Path, *, field: str) -> Path:
+    """Reject destinations inside a Git worktree."""
+
+    absolute = path.expanduser().absolute()
+    for parent in (absolute, *absolute.parents):
+        if (parent / ".git").exists():
+            raise Issue790DispositionError(f"{field} is inside a Git worktree")
+    return absolute
+
+
+def write_issue_790_canonical_json(
+    path: Path,
+    value: Mapping[str, object],
+    *,
+    field: str,
+) -> dict[str, object]:
+    """Write one canonical JSON object. Identical bytes are idempotent."""
+
+    retained = dict(value)
+    encoded = json.dumps(
+        retained, ensure_ascii=False, indent=2, sort_keys=True
+    ) + "\n"
+    destination = require_issue_790_path_outside_git(path, field=field)
+    if os.path.lexists(destination):
+        try:
+            existing = destination.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise Issue790DispositionError(f"{field} is not readable") from exc
+        if existing != encoded:
+            raise Issue790DispositionError(f"{field} differs")
+        return json.loads(existing)
+    written_path = _canonical_new_file(destination, field=field)
+    descriptor, temporary_text = mkstemp(
+        prefix=f".{written_path.name}.",
+        dir=written_path.parent,
+    )
+    temporary = Path(temporary_text)
+    try:
+        os.fchmod(descriptor, 0o600)
+        stream = os.fdopen(descriptor, "w", encoding="utf-8")
+        descriptor = -1
+        with stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _publish_file_no_replace(temporary, written_path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        _unlink_temporary(temporary)
+    reread = written_path.read_text(encoding="utf-8")
+    if reread != encoded:
+        raise Issue790DispositionError(f"{field} read-back differs")
+    return json.loads(reread)
 
 
 def issue_790_step16_checked_approval(pending_digest: str) -> dict[str, str]:
@@ -3887,6 +3982,21 @@ def activate_issue_790_step16_plan(
     return {"activation": stored, "plan": plan}
 
 
+def _optional_step16_circuit_release(value: object) -> dict[str, object] | None:
+    if value is None:
+        return None
+    try:
+        return step16_activation_module.validate_step16_circuit_release_receipt(
+            _record(value, field="circuit release")
+        )
+    except Issue790DispositionError:
+        raise
+    except Exception as exc:
+        raise Issue790DispositionError(
+            "issue #790 event circuit release differs"
+        ) from exc
+
+
 def qualify_issue_790_step16_readiness(
     *,
     plan: Mapping[str, object],
@@ -3909,6 +4019,7 @@ def qualify_issue_790_step16_readiness(
         circuit_state=circuit_state,
         observed_at=observed_at,
         canary_event=canary_event,
+        fresh_event=True,
     )
     connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
     try:
@@ -3952,6 +4063,8 @@ __all__ = [
     "validate_issue_790_plan",
     "validate_issue_790_step16_candidate",
     "issue_790_step16_checked_approval",
+    "require_issue_790_path_outside_git",
     "seal_issue_790_step16_plan",
+    "write_issue_790_canonical_json",
     "write_issue_790_receipt",
 ]

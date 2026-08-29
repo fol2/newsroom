@@ -19,6 +19,7 @@ from newsroom.control_plane.issue_790_step16_activation import (
     effective_issue_790_invocation_plan_digests,
     effective_issue_790_plan_contract,
     validate_step16_activation_receipt,
+    validate_step16_circuit_release_receipt,
 )
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.veto import assert_private_store
@@ -607,17 +608,38 @@ class Issue790CanaryRepository:
             if not _table_exists(connection, "issue_790_step16_circuit_releases"):
                 return None
             row = connection.execute(
-                "SELECT record_json FROM issue_790_step16_circuit_releases "
+                "SELECT release_digest,activation_digest,plan_digest,event_id,"
+                "ledger_seq,released_at,record_json "
+                "FROM issue_790_step16_circuit_releases "
                 "WHERE plan_digest=? AND event_id=? AND ledger_seq=?",
                 (plan_digest, event_id, ledger_seq),
             ).fetchone()
             if row is None:
                 return None
-            return _content_addressed_record(
-                row[0],
-                digest_field="release_digest",
-                field="step 16 circuit release",
-            )
+            try:
+                record = json.loads(str(row[6]))
+            except json.JSONDecodeError as exc:
+                raise Issue790CanaryIntegrityError(
+                    "issue #790 event circuit release differs"
+                ) from exc
+            if not isinstance(record, dict):
+                raise Issue790CanaryIntegrityError(
+                    "issue #790 event circuit release differs"
+                )
+            try:
+                return validate_step16_circuit_release_receipt(
+                    record,
+                    sql_identity={
+                        "release_digest": str(row[0]),
+                        "activation_digest": str(row[1]),
+                        "plan_digest": str(row[2]),
+                        "event_id": str(row[3]),
+                        "ledger_seq": int(row[4]),
+                        "released_at": str(row[5]),
+                    },
+                )
+            except Exception as exc:
+                raise Issue790CanaryIntegrityError(str(exc)) from exc
         finally:
             connection.close()
 
@@ -683,6 +705,10 @@ class Issue790CanaryRepository:
             },
         }
         receipt = {**unsigned, "release_digest": digest_canonical(unsigned)}
+        try:
+            receipt = validate_step16_circuit_release_receipt(receipt)
+        except Exception as exc:
+            raise Issue790CanaryIntegrityError(str(exc)) from exc
         encoded = canonical_json_bytes(receipt).decode("utf-8")
         connection = self._connection()
         try:
@@ -1179,16 +1205,37 @@ class Issue790CanaryRepository:
                 release_row = None
                 if _table_exists(connection, "issue_790_step16_circuit_releases"):
                     release_row = connection.execute(
-                        "SELECT record_json FROM issue_790_step16_circuit_releases "
+                        "SELECT release_digest,activation_digest,plan_digest,event_id,"
+                        "ledger_seq,released_at,record_json "
+                        "FROM issue_790_step16_circuit_releases "
                         "WHERE plan_digest=? AND event_id=? AND ledger_seq=?",
                         (approved_plan_digest, event_id, ledger_seq),
                     ).fetchone()
                 if release_row is not None:
-                    circuit_release = _content_addressed_record(
-                        release_row[0],
-                        digest_field="release_digest",
-                        field="step 16 circuit release",
-                    )
+                    try:
+                        loaded = json.loads(str(release_row[6]))
+                    except json.JSONDecodeError as exc:
+                        raise Issue790CanaryIntegrityError(
+                            "issue #790 event circuit release differs"
+                        ) from exc
+                    if not isinstance(loaded, dict):
+                        raise Issue790CanaryIntegrityError(
+                            "issue #790 event circuit release differs"
+                        )
+                    try:
+                        circuit_release = validate_step16_circuit_release_receipt(
+                            loaded,
+                            sql_identity={
+                                "release_digest": str(release_row[0]),
+                                "activation_digest": str(release_row[1]),
+                                "plan_digest": str(release_row[2]),
+                                "event_id": str(release_row[3]),
+                                "ledger_seq": int(release_row[4]),
+                                "released_at": str(release_row[5]),
+                            },
+                        )
+                    except Exception as exc:
+                        raise Issue790CanaryIntegrityError(str(exc)) from exc
             manifest = _object(event_row[5], field="canary event manifest")
             unit_refs = manifest.get("unit_refs")
             if (

@@ -13,9 +13,11 @@ import pytest
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane import issue_790_contract as issue_790_contract_module
 from newsroom.control_plane.issue_790_canary import (
+    CANARY_CONSUMPTION_SCHEMA,
     Issue790CanaryIntegrityError,
     Issue790CanaryRepository,
 )
+from newsroom.control_plane import issue_790_disposition as issue_790_operation
 from newsroom.control_plane.issue_790_disposition import (
     ISSUE_790_STEP16_PENDING_PLAN_PATH,
     ISSUE_790_STEP16_PRE_DISPATCH_PATH,
@@ -30,12 +32,16 @@ from newsroom.control_plane.issue_790_disposition import (
     issue_790_step16_checked_approval,
     load_issue_790_plan,
     qualify_issue_790_step16_readiness,
+    require_issue_790_path_outside_git,
     run_issue_790_canary,
     seal_issue_790_step16_plan,
     validate_issue_790_plan,
     validate_issue_790_step16_candidate,
+    write_issue_790_canonical_json,
 )
 from newsroom.control_plane.issue_790_step16_activation import (
+    ISSUE_790_STEP16_CIRCUIT_RELEASE_POLICY_VERSION,
+    ISSUE_790_STEP16_CIRCUIT_RELEASE_SCHEMA,
     ISSUE_790_STEP16_EVENT_CIRCUIT_POLICY,
     ISSUE_790_STEP16_READINESS_STATUS,
     canonical_step16_owner_approval_comment_body,
@@ -43,7 +49,10 @@ from newsroom.control_plane.issue_790_step16_activation import (
     load_step16_activation_record,
     parse_step16_owner_approval_payload,
     validate_step16_activation_receipt,
+    validate_step16_circuit_release_receipt,
 )
+from newsroom.control_plane.model_usage import ModelUsageService
+from newsroom.control_plane.store import connect as connect_unpublished_store
 from newsroom.graphiti_adapter.combined_temporal_projection import (
     PROJECTION_POLICY_DIGEST,
     PROJECTION_POLICY_VERSION,
@@ -264,12 +273,16 @@ class _FakeGitHub:
         raise Issue790DispositionError("issue #790 GitHub evidence is unavailable")
 
 
-def _activate(tmp_path: Path, **comment_overrides: object) -> dict[str, object]:
+def _activate(
+    tmp_path: Path,
+    store: Path | None = None,
+    **comment_overrides: object,
+) -> dict[str, object]:
     candidate = _seal()
     _, pre_dispatch = _pending_family()
     payload = _payload(candidate)
     github = _FakeGitHub(_comment(payload, **comment_overrides))
-    store = tmp_path / "authority.sqlite"
+    store = tmp_path / "authority.sqlite" if store is None else store
     return activate_issue_790_step16_plan(
         candidate,
         comment_id=_COMMENT_ID,
@@ -957,6 +970,9 @@ def test_cli_passes_activation_store_into_plan_load(
 _UNSAFE_PACKET = (
     _ROOT / "newsroom/tests/fixtures/issue_790_comment_5459306524.txt"
 )
+_CURRENT_PACKET = (
+    _ROOT / "newsroom/tests/fixtures/issue_790_comment_5459706010.txt"
+)
 
 
 def _activation_counts(store: Path) -> tuple[int, int, int]:
@@ -1508,3 +1524,1073 @@ def test_opened_after_available_is_malformed() -> None:
             observed_at=_OBSERVED,
             policy=ISSUE_790_STEP16_EVENT_CIRCUIT_POLICY,
         )
+
+
+_OWNER = "issue-790-canary:step16-recovery"
+_DISPOSITION = "sha256:" + "bb" * 32
+_EVENT_ID = "sha256:" + "aa" * 32
+_LEDGER = 2000
+
+
+def _write_json(path: Path, value: object) -> Path:
+    path.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _seed_canary_event(
+    store: Path,
+    *,
+    state: str = "QUEUED",
+    attempt_count: int = 0,
+    provider_dispatched: bool = False,
+    claim_owner: str | None = None,
+    last_failure_code: str | None = None,
+    terminal_at: str | None = None,
+    event_id: str = _EVENT_ID,
+    ledger_seq: int = _LEDGER,
+) -> None:
+    connection = connect_unpublished_store(str(store))
+    try:
+        present = connection.execute(
+            "SELECT 1 FROM unpublished_graphiti_revision_events "
+            "WHERE event_id=? AND ledger_seq=?",
+            (event_id, ledger_seq),
+        ).fetchone()
+        if present is None:
+            manifest = {
+                "event_type": "EFFECTIVE_SOURCE_REVISION_LANDED",
+                "ledger_seq": ledger_seq,
+                "ledger_digest": event_id,
+                "unit_refs": [],
+            }
+            connection.execute(
+                "INSERT INTO unpublished_graphiti_revision_events("
+                "event_id,ledger_seq,ledger_digest,source_id,item_key,"
+                "revision_digest,landed_at,manifest_json,manifest_digest,"
+                "unit_count,projector_version,projection_generation,state,"
+                "attempt_count,available_at,claim_owner,claim_expires_at,"
+                "last_failure_code,provider_dispatched,terminal_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    event_id,
+                    ledger_seq,
+                    event_id,
+                    f"source-{ledger_seq}",
+                    f"item-{ledger_seq}",
+                    "sha256:" + "99" * 32,
+                    "2026-08-28T00:00:00.000000Z",
+                    _json(manifest),
+                    digest_canonical(manifest),
+                    0,
+                    "test-projector",
+                    "test-projection",
+                    state,
+                    attempt_count,
+                    "2026-08-28T00:00:00.000000Z",
+                    claim_owner,
+                    None,
+                    last_failure_code,
+                    int(provider_dispatched),
+                    terminal_at,
+                ),
+            )
+        else:
+            connection.execute(
+                "UPDATE unpublished_graphiti_revision_events SET "
+                "state=?,attempt_count=?,provider_dispatched=?,claim_owner=?,"
+                "last_failure_code=?,terminal_at=? "
+                "WHERE event_id=? AND ledger_seq=?",
+                (
+                    state,
+                    attempt_count,
+                    int(provider_dispatched),
+                    claim_owner,
+                    last_failure_code,
+                    terminal_at,
+                    event_id,
+                    ledger_seq,
+                ),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _insert_consumption(
+    store: Path,
+    *,
+    plan_digest: str,
+    circuit_release: dict[str, object] | None = None,
+) -> dict[str, object]:
+    consumed_at = "2026-08-29T11:00:00.000000Z"
+    preflight_unsigned = {
+        "schema_version": "newsroom.issue-790.iterative-fresh-event-preflight.v2",
+        "event_id": _EVENT_ID,
+        "ledger_seq": _LEDGER,
+        "provider_calls": 0,
+    }
+    preflight = {
+        **preflight_unsigned,
+        "evidence_digest": digest_canonical(preflight_unsigned),
+    }
+    without_digest: dict[str, object] = {
+        "schema_version": CANARY_CONSUMPTION_SCHEMA,
+        "approved_plan_digest": plan_digest,
+        "disposition_digest": _DISPOSITION,
+        "event_id": _EVENT_ID,
+        "ledger_seq": _LEDGER,
+        "owner_id": _OWNER,
+        "preflight_evidence": preflight,
+        "preflight_evidence_digest": preflight["evidence_digest"],
+        "event_state_before": "QUEUED",
+        "attempt_count_before": 0,
+        "provider_io_authorised": True,
+        "maximum_event_attempts": 1,
+        "persistent_worker_must_remain_unloaded": True,
+        "public_dispatch_authorised": False,
+        "publication_authorised": False,
+        "consumed_at": consumed_at,
+        "circuit_release": circuit_release,
+    }
+    record = {
+        **without_digest,
+        "consumption_digest": digest_canonical(without_digest),
+    }
+    connection = sqlite3.connect(str(store))
+    try:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute(
+            "INSERT INTO issue_790_bounded_canary_consumptions("
+            "consumption_digest,approved_plan_digest,disposition_digest,"
+            "event_id,ledger_seq,owner_id,consumed_at,record_json) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (
+                record["consumption_digest"],
+                plan_digest,
+                _DISPOSITION,
+                _EVENT_ID,
+                _LEDGER,
+                _OWNER,
+                consumed_at,
+                _json(record),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return record
+
+
+def _seed_primary_leaf(store: Path, *, terminal: bool) -> None:
+    invocation_id = "sha256:" + "ab" * 32
+    envelope_id = "sha256:" + "cd" * 32
+    allocation = {
+        "workload_class": "GRAPHITI_CHAT_PRIMARY",
+        "provider": "cursor-agent-cli",
+        "route": "GRAPHITI_CHAT_PRIMARY",
+        "model": "composer-2.5",
+    }
+    connection = sqlite3.connect(str(store))
+    try:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute(
+            "INSERT INTO model_work_envelopes("
+            "envelope_id,cycle_id,workload_class,admitted_at,canonical_digest,"
+            "record_json) VALUES(?,?,?,?,?,?)",
+            (
+                envelope_id,
+                _EVENT_ID,
+                "GRAPHITI_CHAT_PRIMARY",
+                "2026-08-29T11:00:00.000000Z",
+                "sha256:" + "11" * 32,
+                "{}",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO model_invocation_allocations("
+            "invocation_id,envelope_id,cycle_id,leaf_ordinal,workload_class,"
+            "policy_digest,provider,route,model,request_digest,allocated_at,"
+            "canonical_digest,record_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                invocation_id,
+                envelope_id,
+                _EVENT_ID,
+                1,
+                "GRAPHITI_CHAT_PRIMARY",
+                "sha256:" + "22" * 32,
+                "cursor-agent-cli",
+                "GRAPHITI_CHAT_PRIMARY",
+                "composer-2.5",
+                "sha256:" + "33" * 32,
+                "2026-08-29T11:00:01.000000Z",
+                "sha256:" + "44" * 32,
+                _json(allocation),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO model_transport_observations("
+            "observation_digest,invocation_id,observed_at,state,evidence_digest,"
+            "record_json) VALUES(?,?,?,?,?,?)",
+            (
+                "sha256:" + "55" * 32,
+                invocation_id,
+                "2026-08-29T11:00:02.000000Z",
+                "DISPATCH_STARTED",
+                "sha256:" + "66" * 32,
+                _json({"state": "DISPATCH_STARTED"}),
+            ),
+        )
+        if terminal:
+            connection.execute(
+                "INSERT INTO model_invocation_terminals("
+                "terminal_digest,invocation_id,usage_status,outcome,"
+                "failure_class,completed_at,record_json) VALUES(?,?,?,?,?,?,?)",
+                (
+                    "sha256:" + "77" * 32,
+                    invocation_id,
+                    "REPORTED",
+                    "ACCEPTED",
+                    None,
+                    "2026-08-29T11:00:03.000000Z",
+                    _json(
+                        {
+                            "usage_status": "REPORTED",
+                            "components": {"total_tokens": 12},
+                            "outcome": "ACCEPTED",
+                        }
+                    ),
+                ),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _table_count(store: Path, table: str) -> int:
+    connection = sqlite3.connect(str(store))
+    try:
+        present = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        if present is None:
+            return 0
+        row = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+        return int(row[0])
+    finally:
+        connection.close()
+
+
+def _patch_recovery_bindings(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    plan: dict[str, object],
+    consume_calls: list[object],
+    qualify_calls: list[object],
+    route_after: dict[str, object] | None = None,
+) -> None:
+    retry = plan["retry_forbidden_events"]
+    monkeypatch.setattr(issue_790_operation, "_assert_exact_target", lambda *a, **k: None)
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_require_sequence_predecessor",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_require_retry_exclusions",
+        lambda *a, **k: [],
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_require_retry_events_unchanged",
+        lambda *a, **k: retry,
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_retry_event_snapshots",
+        lambda *a, **k: retry,
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "collect_issue_790_operational_evidence",
+        lambda **kwargs: _evidence(),
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_validate_operational_evidence",
+        lambda evidence, **kwargs: evidence,
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_worker_state",
+        lambda: {
+            "label": "com.jamesto.newsroom-graphiti-worker",
+            "launchctl_loaded": False,
+            "process_ids": [],
+        },
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_require_issue_790_canary_route",
+        lambda **kwargs: None,
+    )
+    closed = {
+        "state": "CLOSED",
+        "reason": f"AUTHORISED_OPERATOR_RESET:{_DISPOSITION}",
+    }
+    calls = {"n": 0}
+
+    def _route(self: object, route: str) -> dict[str, object]:
+        calls["n"] += 1
+        if route_after is not None and calls["n"] > 1:
+            return route_after
+        return closed
+
+    monkeypatch.setattr(issue_790_operation.ModelUsageService, "route_state", _route)
+
+    def _no_consume(**kwargs: object) -> None:
+        consume_calls.append(kwargs)
+        raise AssertionError("recovery dispatched a provider call")
+
+    def _no_qualify(**kwargs: object) -> None:
+        qualify_calls.append(kwargs)
+        raise AssertionError("recovery qualified a fresh event")
+
+    monkeypatch.setattr(issue_790_operation, "_consume_issue_790_event", _no_consume)
+    monkeypatch.setattr(issue_790_operation, "_qualify_issue_790_event", _no_qualify)
+
+
+def _prepare_recovery_store(tmp_path: Path) -> tuple[Path, dict[str, object]]:
+    store = tmp_path / "unpublished.sqlite3"
+    ModelUsageService(str(store))
+    connection = connect_unpublished_store(str(store))
+    connection.close()
+    Issue790CanaryRepository(str(store))
+    activated = _activate(tmp_path, store=store)
+    proving = tmp_path / "proving.sqlite3"
+    sqlite3.connect(str(proving)).close()
+    activated["proving"] = proving
+    return store, activated
+
+
+def _run_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    store: Path,
+    activated: dict[str, object],
+    consume_calls: list[object],
+    qualify_calls: list[object],
+    route_after: dict[str, object] | None = None,
+) -> dict[str, object]:
+    _patch_recovery_bindings(
+        monkeypatch,
+        plan=activated["plan"],
+        consume_calls=consume_calls,
+        qualify_calls=qualify_calls,
+        route_after=route_after,
+    )
+    return run_issue_790_canary(
+        store=store,
+        proving_store=activated["proving"],
+        backup_path=tmp_path
+        / f"backup-{len(list(tmp_path.glob('backup-*.sqlite3')))}.sqlite3",
+        plan=activated["plan"],
+        observed_at=_OBSERVED,
+        repository_root=tmp_path,
+        event_id=_EVENT_ID,
+        ledger_seq=_LEDGER,
+        disposition_digest=_DISPOSITION,
+        github_api=activated["github"],
+    )
+
+
+def _assert_zero_recovery_io(
+    receipt: dict[str, object],
+    store: Path,
+    *,
+    consume_calls: list[object],
+    qualify_calls: list[object],
+) -> None:
+    assert receipt["resumed_zero_io_finalisation"] is True
+    assert receipt["provider_dispatch_attempted_this_run"] is False
+    assert receipt["retry_authorised"] is False
+    assert receipt["publication_performed"] is False
+    assert receipt["public_dispatch_performed"] is False
+    assert receipt["backlog_drain_performed"] is False
+    assert consume_calls == []
+    assert qualify_calls == []
+    assert _table_count(store, "issue_790_bounded_canary_consumptions") == 1
+    outcome = receipt["outcome"]
+    assert outcome["completion_mode"] == "ZERO_IO_RECOVERY"
+    assert outcome["retry_authorised"] is False
+
+
+def test_fresh_event_gate_blocks_recovery_states(tmp_path: Path) -> None:
+    activated = _activate(tmp_path)
+    ready = _ready_event()
+    _require_step16_runtime_semantics(
+        activated["plan"],
+        evidence=_evidence(),
+        route_state={"state": "OPEN", "reason": "SYSTEMIC_TRANSPORT"},
+        circuit_state=_closed_circuit(),
+        observed_at=_OBSERVED,
+        canary_event=ready,
+        fresh_event=True,
+    )
+    for state in (
+        "RUNNING",
+        "RETRY_HELD",
+        "CONFIGURATION_HELD",
+        "DEAD_LETTER",
+        "TERMINAL",
+    ):
+        event = dict(ready)
+        event["state"] = state
+        event["attempt_count"] = 1
+        event["provider_dispatched"] = True
+        with pytest.raises(Issue790DispositionError, match="not untouched"):
+            _require_step16_runtime_semantics(
+                activated["plan"],
+                evidence=_evidence(),
+                route_state={"state": "OPEN", "reason": "SYSTEMIC_TRANSPORT"},
+                circuit_state=_closed_circuit(),
+                observed_at=_OBSERVED,
+                canary_event=event,
+                fresh_event=True,
+            )
+        _require_step16_runtime_semantics(
+            activated["plan"],
+            evidence=_evidence(),
+            route_state={"state": "OPEN", "reason": "SYSTEMIC_TRANSPORT"},
+            circuit_state=_closed_circuit(),
+            observed_at=_OBSERVED,
+            canary_event=None,
+            fresh_event=False,
+        )
+
+
+def test_recovery_after_consumption_before_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, activated = _prepare_recovery_store(tmp_path)
+    _seed_canary_event(store)
+    _insert_consumption(
+        store, plan_digest=str(activated["plan"]["canonical_digest"])
+    )
+    consume_calls: list[object] = []
+    qualify_calls: list[object] = []
+    receipt = _run_recovery(
+        tmp_path,
+        monkeypatch,
+        store=store,
+        activated=activated,
+        consume_calls=consume_calls,
+        qualify_calls=qualify_calls,
+    )
+    _assert_zero_recovery_io(
+        receipt, store, consume_calls=consume_calls, qualify_calls=qualify_calls
+    )
+    assert receipt["outcome"]["attempt_count"] == 0
+    assert receipt["outcome"]["process_result"] is None
+    assert receipt["event_after"]["event"]["state"] == "CONFIGURATION_HELD"
+    assert _table_count(store, "issue_790_bounded_canary_outcomes") == 1
+
+
+def test_recovery_after_dispatch_started_before_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, activated = _prepare_recovery_store(tmp_path)
+    _seed_canary_event(
+        store,
+        state="RUNNING",
+        attempt_count=1,
+        provider_dispatched=False,
+        claim_owner=_OWNER,
+    )
+    _insert_consumption(
+        store, plan_digest=str(activated["plan"]["canonical_digest"])
+    )
+    _seed_primary_leaf(store, terminal=False)
+    consume_calls: list[object] = []
+    qualify_calls: list[object] = []
+    receipt = _run_recovery(
+        tmp_path,
+        monkeypatch,
+        store=store,
+        activated=activated,
+        consume_calls=consume_calls,
+        qualify_calls=qualify_calls,
+    )
+    _assert_zero_recovery_io(
+        receipt, store, consume_calls=consume_calls, qualify_calls=qualify_calls
+    )
+    assert receipt["outcome"]["result_class"] == "UNCLASSIFIED_NON_SUCCESS"
+    assert receipt["outcome"]["process_result"]["state"] == "RUNNING"
+    assert receipt["outcome"]["provider_dispatched"] is True
+    assert receipt["event_after"]["event"]["state"] == "CONFIGURATION_HELD"
+    assert receipt["retry_authorised"] is False
+
+
+def test_recovery_after_terminal_before_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, activated = _prepare_recovery_store(tmp_path)
+    _seed_canary_event(
+        store,
+        state="TERMINAL",
+        attempt_count=1,
+        provider_dispatched=True,
+        terminal_at="2026-08-29T11:00:03.000000Z",
+    )
+    _insert_consumption(
+        store, plan_digest=str(activated["plan"]["canonical_digest"])
+    )
+    _seed_primary_leaf(store, terminal=True)
+    consume_calls: list[object] = []
+    qualify_calls: list[object] = []
+    receipt = _run_recovery(
+        tmp_path,
+        monkeypatch,
+        store=store,
+        activated=activated,
+        consume_calls=consume_calls,
+        qualify_calls=qualify_calls,
+    )
+    _assert_zero_recovery_io(
+        receipt, store, consume_calls=consume_calls, qualify_calls=qualify_calls
+    )
+    assert receipt["outcome"]["result_class"] == "TRUTHFUL_PROVIDER_SUCCESS"
+    assert receipt["event_after"]["event"]["state"] == "TERMINAL"
+    assert receipt["outcome"]["attempt_count"] == 1
+
+
+def test_recovery_after_provider_non_success_before_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, activated = _prepare_recovery_store(tmp_path)
+    _seed_canary_event(
+        store,
+        state="RETRY_HELD",
+        attempt_count=1,
+        provider_dispatched=True,
+        last_failure_code="TIMEOUT",
+    )
+    _insert_consumption(
+        store, plan_digest=str(activated["plan"]["canonical_digest"])
+    )
+    _seed_primary_leaf(store, terminal=False)
+    consume_calls: list[object] = []
+    qualify_calls: list[object] = []
+    receipt = _run_recovery(
+        tmp_path,
+        monkeypatch,
+        store=store,
+        activated=activated,
+        consume_calls=consume_calls,
+        qualify_calls=qualify_calls,
+    )
+    _assert_zero_recovery_io(
+        receipt, store, consume_calls=consume_calls, qualify_calls=qualify_calls
+    )
+    assert receipt["outcome"]["result_class"] == "UNCLASSIFIED_NON_SUCCESS"
+    assert receipt["outcome"]["retry_authorised"] is False
+    assert receipt["event_after"]["event"]["state"] == "CONFIGURATION_HELD"
+
+
+def test_recovery_replays_existing_outcome_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, activated = _prepare_recovery_store(tmp_path)
+    _seed_canary_event(store)
+    _insert_consumption(
+        store, plan_digest=str(activated["plan"]["canonical_digest"])
+    )
+    consume_calls: list[object] = []
+    qualify_calls: list[object] = []
+    first = _run_recovery(
+        tmp_path,
+        monkeypatch,
+        store=store,
+        activated=activated,
+        consume_calls=consume_calls,
+        qualify_calls=qualify_calls,
+    )
+    second = _run_recovery(
+        tmp_path,
+        monkeypatch,
+        store=store,
+        activated=activated,
+        consume_calls=consume_calls,
+        qualify_calls=qualify_calls,
+    )
+    _assert_zero_recovery_io(
+        second, store, consume_calls=consume_calls, qualify_calls=qualify_calls
+    )
+    assert second["outcome"] == first["outcome"]
+    assert _table_count(store, "issue_790_bounded_canary_outcomes") == 1
+    assert _table_count(store, "issue_790_bounded_canary_consumptions") == 1
+
+
+def test_recovery_fails_closed_if_route_or_circuit_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route_dir = tmp_path / "route-change"
+    route_dir.mkdir()
+    store, activated = _prepare_recovery_store(route_dir)
+    _seed_canary_event(store)
+    _insert_consumption(
+        store, plan_digest=str(activated["plan"]["canonical_digest"])
+    )
+    consume_calls: list[object] = []
+    qualify_calls: list[object] = []
+    with pytest.raises(Issue790DispositionError, match="route changed"):
+        _run_recovery(
+            route_dir,
+            monkeypatch,
+            store=store,
+            activated=activated,
+            consume_calls=consume_calls,
+            qualify_calls=qualify_calls,
+            route_after={"state": "OPEN", "reason": "TIMEOUT"},
+        )
+    assert consume_calls == []
+    assert _table_count(store, "issue_790_bounded_canary_consumptions") == 1
+
+    circuit_dir = tmp_path / "circuit-change"
+    circuit_dir.mkdir()
+    store, activated = _prepare_recovery_store(circuit_dir)
+    _install_event_circuit(store, **_closed_circuit())
+    _seed_canary_event(store)
+    _insert_consumption(
+        store, plan_digest=str(activated["plan"]["canonical_digest"])
+    )
+    original = Issue790CanaryRepository.finalise_without_dispatch
+
+    def _mutate(self: Issue790CanaryRepository, **kwargs: object) -> dict[str, object]:
+        _install_event_circuit(store, **_open_circuit())
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(
+        Issue790CanaryRepository, "finalise_without_dispatch", _mutate
+    )
+    consume_calls = []
+    qualify_calls = []
+    with pytest.raises(Issue790DispositionError, match="event circuit changed"):
+        _run_recovery(
+            circuit_dir,
+            monkeypatch,
+            store=store,
+            activated=activated,
+            consume_calls=consume_calls,
+            qualify_calls=qualify_calls,
+        )
+    assert consume_calls == []
+    assert _table_count(store, "issue_790_bounded_canary_consumptions") == 1
+
+
+def test_recovery_does_not_repair_an_open_circuit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, activated = _prepare_recovery_store(tmp_path)
+    _install_event_circuit(store, **_open_circuit())
+    _seed_canary_event(store)
+    _insert_consumption(
+        store, plan_digest=str(activated["plan"]["canonical_digest"])
+    )
+    consume_calls: list[object] = []
+    qualify_calls: list[object] = []
+    receipt = _run_recovery(
+        tmp_path,
+        monkeypatch,
+        store=store,
+        activated=activated,
+        consume_calls=consume_calls,
+        qualify_calls=qualify_calls,
+    )
+    _assert_zero_recovery_io(
+        receipt, store, consume_calls=consume_calls, qualify_calls=qualify_calls
+    )
+    assert receipt["event_after"]["circuit"] == _open_circuit()
+    assert _table_count(store, "issue_790_step16_circuit_releases") == 0
+
+
+def test_current_and_historical_packets_cannot_activate(tmp_path: Path) -> None:
+    candidate = _seal()
+    _, pre_dispatch = _pending_family()
+    for comment_id, body in (
+        (5459706010, _CURRENT_PACKET.read_text(encoding="utf-8")),
+        (5459306524, _UNSAFE_PACKET.read_text(encoding="utf-8")),
+    ):
+        store = tmp_path / f"authority-{comment_id}.sqlite"
+        github = _FakeGitHub(
+            {
+                "id": comment_id,
+                "node_id": "IC_packet",
+                "html_url": (
+                    "https://github.com/fol2/newsroom/issues/790"
+                    f"#issuecomment-{comment_id}"
+                ),
+                "url": (
+                    "https://api.github.com/repos/fol2/newsroom/issues/comments/"
+                    f"{comment_id}"
+                ),
+                "issue_url": "https://api.github.com/repos/fol2/newsroom/issues/790",
+                "user": {"login": "fol2"},
+                "author_association": "OWNER",
+                "created_at": "2026-08-29T12:00:00Z",
+                "updated_at": "2026-08-29T12:00:00Z",
+                "body": body,
+            }
+        )
+        with pytest.raises(Issue790DispositionError):
+            activate_issue_790_step16_plan(
+                candidate,
+                comment_id=comment_id,
+                pre_dispatch=pre_dispatch,
+                store=store,
+                github_api=github,
+            )
+        assert _activation_counts(store)[0] == 0
+
+
+def _operator_files(tmp_path: Path) -> tuple[dict[str, Path], dict[str, object]]:
+    candidate = _seal()
+    _, pre_dispatch = _pending_family()
+    payload = _payload(candidate)
+    files = {
+        "candidate": _write_json(tmp_path / "candidate.json", candidate),
+        "pre_dispatch": _write_json(tmp_path / "pre-dispatch.json", pre_dispatch),
+        "manifest": _write_json(
+            tmp_path / "manifest.json", _focus_gate_manifest(payload)
+        ),
+        "review": _write_json(tmp_path / "review.json", _review_receipt(payload)),
+        "store": tmp_path / "authority.sqlite",
+        "plan": tmp_path / "activated-plan.json",
+        "receipt": tmp_path / "activation-receipt.json",
+    }
+    return files, payload
+
+
+def test_operator_activate_and_qualify(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import issue_790_conservative_disposition as cli
+
+    files, payload = _operator_files(tmp_path)
+    github = _FakeGitHub(_comment(payload))
+    monkeypatch.setattr(issue_790_operation, "_default_github_api", github)
+    rc = cli.main(
+        [
+            "activate-step16",
+            "--store",
+            str(files["store"]),
+            "--candidate",
+            str(files["candidate"]),
+            "--pre-dispatch",
+            str(files["pre_dispatch"]),
+            "--comment-id",
+            str(_COMMENT_ID),
+            "--focus-gate-manifest",
+            str(files["manifest"]),
+            "--review-receipt",
+            str(files["review"]),
+            "--activated-plan",
+            str(files["plan"]),
+            "--activation-receipt",
+            str(files["receipt"]),
+        ]
+    )
+    assert rc == 0
+    assert files["plan"].is_file()
+    assert files["receipt"].is_file()
+    assert _activation_counts(files["store"])[0] == 1
+    repeated = cli.main(
+        [
+            "activate-step16",
+            "--store",
+            str(files["store"]),
+            "--candidate",
+            str(files["candidate"]),
+            "--pre-dispatch",
+            str(files["pre_dispatch"]),
+            "--comment-id",
+            str(_COMMENT_ID),
+            "--focus-gate-manifest",
+            str(files["manifest"]),
+            "--review-receipt",
+            str(files["review"]),
+            "--activated-plan",
+            str(files["plan"]),
+            "--activation-receipt",
+            str(files["receipt"]),
+        ]
+    )
+    assert repeated == 0
+    evidence = tmp_path / "evidence.json"
+    route = tmp_path / "route.json"
+    event = tmp_path / "event.json"
+    ready = tmp_path / "ready.json"
+    _write_json(evidence, _evidence())
+    _write_json(route, {"state": "OPEN", "reason": "SYSTEMIC_TRANSPORT"})
+    _write_json(event, _ready_event())
+    rc = cli.main(
+        [
+            "qualify-step16",
+            "--store",
+            str(files["store"]),
+            "--plan",
+            str(files["plan"]),
+            "--evidence",
+            str(evidence),
+            "--route-state",
+            str(route),
+            "--canary-event",
+            str(event),
+            "--circuit-state",
+            str(_write_json(tmp_path / "circuit.json", _closed_circuit())),
+            "--observed-at",
+            "2026-08-29T12:00:00+00:00",
+            "--receipt",
+            str(ready),
+        ]
+    )
+    assert rc == 0
+    receipt = json.loads(ready.read_text(encoding="utf-8"))
+    assert receipt["status"] == ISSUE_790_STEP16_READINESS_STATUS
+    assert receipt["provider_calls"] == 0
+    assert receipt["catalogue_queries"] == 0
+    assert receipt["credential_resolution"] is False
+    assert receipt["canary_consumed"] is False
+    assert _activation_counts(files["store"])[1] == 0
+
+
+def test_operator_activate_rejects_git_output_and_missing_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import issue_790_conservative_disposition as cli
+
+    files, payload = _operator_files(tmp_path)
+    github = _FakeGitHub(_comment(payload))
+    monkeypatch.setattr(issue_790_operation, "_default_github_api", github)
+    git_plan = _ROOT / "activated-plan.json"
+    rc = cli.main(
+        [
+            "activate-step16",
+            "--store",
+            str(files["store"]),
+            "--candidate",
+            str(files["candidate"]),
+            "--pre-dispatch",
+            str(files["pre_dispatch"]),
+            "--comment-id",
+            str(_COMMENT_ID),
+            "--focus-gate-manifest",
+            str(files["manifest"]),
+            "--review-receipt",
+            str(files["review"]),
+            "--activated-plan",
+            str(git_plan),
+            "--activation-receipt",
+            str(files["receipt"]),
+        ]
+    )
+    assert rc == 2
+    assert _activation_counts(files["store"])[0] == 0
+    assert not git_plan.exists()
+
+    rc = cli.main(
+        [
+            "activate-step16",
+            "--store",
+            str(files["store"]),
+            "--candidate",
+            str(files["candidate"]),
+            "--pre-dispatch",
+            str(files["pre_dispatch"]),
+            "--comment-id",
+            str(_COMMENT_ID),
+            "--review-receipt",
+            str(files["review"]),
+            "--activated-plan",
+            str(files["plan"]),
+            "--activation-receipt",
+            str(files["receipt"]),
+        ]
+    )
+    assert rc == 2
+    assert _activation_counts(files["store"])[0] == 0
+
+    rc = cli.main(
+        [
+            "activate-step16",
+            "--store",
+            str(files["store"]),
+            "--candidate",
+            str(files["candidate"]),
+            "--pre-dispatch",
+            str(files["pre_dispatch"]),
+            "--comment-id",
+            str(_COMMENT_ID),
+            "--focus-gate-manifest",
+            str(files["manifest"]),
+            "--activated-plan",
+            str(files["plan"]),
+            "--activation-receipt",
+            str(files["receipt"]),
+        ]
+    )
+    assert rc == 2
+    assert _activation_counts(files["store"])[0] == 0
+
+    _write_json(files["plan"], {"unexpected": True})
+    rc = cli.main(
+        [
+            "activate-step16",
+            "--store",
+            str(files["store"]),
+            "--candidate",
+            str(files["candidate"]),
+            "--pre-dispatch",
+            str(files["pre_dispatch"]),
+            "--comment-id",
+            str(_COMMENT_ID),
+            "--focus-gate-manifest",
+            str(files["manifest"]),
+            "--review-receipt",
+            str(files["review"]),
+            "--activated-plan",
+            str(files["plan"]),
+            "--activation-receipt",
+            str(files["receipt"]),
+        ]
+    )
+    assert rc == 2
+    assert json.loads(files["plan"].read_text(encoding="utf-8")) == {"unexpected": True}
+
+
+def test_operator_activate_rejects_wrong_identities_and_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import issue_790_conservative_disposition as cli
+
+    files, payload = _operator_files(tmp_path)
+    github = _FakeGitHub(_comment(payload))
+    monkeypatch.setattr(issue_790_operation, "_default_github_api", github)
+    rc = cli.main(
+        [
+            "activate-step16",
+            "--store",
+            str(files["store"]),
+            "--candidate",
+            str(files["candidate"]),
+            "--pre-dispatch",
+            str(files["pre_dispatch"]),
+            "--comment-id",
+            str(_COMMENT_ID + 1),
+            "--focus-gate-manifest",
+            str(files["manifest"]),
+            "--review-receipt",
+            str(files["review"]),
+            "--activated-plan",
+            str(files["plan"]),
+            "--activation-receipt",
+            str(files["receipt"]),
+        ]
+    )
+    assert rc == 2
+    assert _activation_counts(files["store"])[0] == 0
+
+    drifted = json.loads(files["manifest"].read_text(encoding="utf-8"))
+    drifted["head_sha"] = "f" * 40
+    unsigned = {key: item for key, item in drifted.items() if key != "manifest_digest"}
+    drifted["manifest_digest"] = digest_canonical(unsigned)
+    _write_json(files["manifest"], drifted)
+    rc = cli.main(
+        [
+            "activate-step16",
+            "--store",
+            str(files["store"]),
+            "--candidate",
+            str(files["candidate"]),
+            "--pre-dispatch",
+            str(files["pre_dispatch"]),
+            "--comment-id",
+            str(_COMMENT_ID),
+            "--focus-gate-manifest",
+            str(files["manifest"]),
+            "--review-receipt",
+            str(files["review"]),
+            "--activated-plan",
+            str(files["plan"]),
+            "--activation-receipt",
+            str(files["receipt"]),
+        ]
+    )
+    assert rc == 2
+    assert _activation_counts(files["store"])[0] == 0
+
+
+def test_circuit_release_validator_rejects_sql_drift() -> None:
+    prior = {
+        "state": "OPEN",
+        "opened_at": "2026-08-29T10:00:00.000000Z",
+        "available_at": "2026-08-29T11:00:00.000000Z",
+        "failure_code": "TIMEOUT",
+    }
+    unsigned = {
+        "schema_version": ISSUE_790_STEP16_CIRCUIT_RELEASE_SCHEMA,
+        "policy_version": ISSUE_790_STEP16_CIRCUIT_RELEASE_POLICY_VERSION,
+        "plan_digest": "sha256:" + "11" * 32,
+        "activation_digest": "sha256:" + "22" * 32,
+        "event_id": _EVENT_ID,
+        "ledger_seq": _LEDGER,
+        "prior_state": prior,
+        "released_at": "2026-08-29T12:00:00.000000Z",
+        "effect": "IMMEDIATE_CLOSE_EXPIRED_OPEN",
+        "provider_calls": 0,
+        "cas_result": {
+            "singleton": 1,
+            "state": "OPEN",
+            "rowcount": 1,
+            "opened_at": prior["opened_at"],
+            "available_at": prior["available_at"],
+            "failure_code": prior["failure_code"],
+        },
+    }
+    record = {**unsigned, "release_digest": digest_canonical(unsigned)}
+    assert validate_step16_circuit_release_receipt(record) == record
+    with pytest.raises(Issue790DispositionError, match="circuit release differs"):
+        validate_step16_circuit_release_receipt(
+            record,
+            sql_identity={
+                "release_digest": "sha256:" + "00" * 32,
+                "activation_digest": record["activation_digest"],
+                "plan_digest": record["plan_digest"],
+                "event_id": record["event_id"],
+                "ledger_seq": record["ledger_seq"],
+                "released_at": record["released_at"],
+            },
+        )
+    drifted = dict(record)
+    drifted["provider_calls"] = 1
+    with pytest.raises(Issue790DispositionError, match="circuit release differs"):
+        validate_step16_circuit_release_receipt(drifted)
