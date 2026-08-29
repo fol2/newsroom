@@ -1346,6 +1346,41 @@ def test_expired_open_circuit_cas_and_receipt(tmp_path: Path) -> None:
     assert tuple(state) == ("CLOSED", None, None, None)
 
 
+def test_circuit_cas_prior_row_sql_identity_fails(tmp_path: Path) -> None:
+    activated = _activate(tmp_path)
+    store = activated["store"]
+    _install_event_circuit(store, **_open_circuit())
+    repository = Issue790CanaryRepository(str(store))
+    repository.release_step16_expired_open_circuit(
+        plan_digest=str(activated["plan"]["canonical_digest"]),
+        activation_digest=str(activated["activation"]["activation_digest"]),
+        event_id="sha256:" + "aa" * 32,
+        ledger_seq=2000,
+        prior_state=_open_circuit(),
+        observed_at=_OBSERVED,
+        policy=ISSUE_790_STEP16_EVENT_CIRCUIT_POLICY,
+    )
+    connection = sqlite3.connect(str(store))
+    try:
+        connection.execute(
+            "UPDATE issue_790_step16_circuit_releases SET activation_digest=?",
+            ("sha256:" + "00" * 32,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    with pytest.raises(Issue790CanaryIntegrityError, match="circuit release differs"):
+        repository.release_step16_expired_open_circuit(
+            plan_digest=str(activated["plan"]["canonical_digest"]),
+            activation_digest=str(activated["activation"]["activation_digest"]),
+            event_id="sha256:" + "aa" * 32,
+            ledger_seq=2000,
+            prior_state=_open_circuit(),
+            observed_at=_OBSERVED,
+            policy=ISSUE_790_STEP16_EVENT_CIRCUIT_POLICY,
+        )
+
+
 def test_circuit_cas_rowcount_zero_and_contradiction_fail(tmp_path: Path) -> None:
     activated = _activate(tmp_path)
     store = activated["store"]

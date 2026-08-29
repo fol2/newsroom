@@ -254,6 +254,53 @@ def _bound_row_record(
     return record
 
 
+_CIRCUIT_RELEASE_SELECT = (
+    "SELECT release_digest,activation_digest,plan_digest,event_id,"
+    "ledger_seq,released_at,record_json "
+    "FROM issue_790_step16_circuit_releases "
+)
+
+
+def _validated_circuit_release_row(row: sqlite3.Row) -> dict[str, object]:
+    try:
+        record = json.loads(str(row[6]))
+    except json.JSONDecodeError as exc:
+        raise Issue790CanaryIntegrityError(
+            "issue #790 event circuit release differs"
+        ) from exc
+    if not isinstance(record, dict):
+        raise Issue790CanaryIntegrityError(
+            "issue #790 event circuit release differs"
+        )
+    try:
+        return validate_step16_circuit_release_receipt(
+            record,
+            sql_identity={
+                "release_digest": str(row[0]),
+                "activation_digest": str(row[1]),
+                "plan_digest": str(row[2]),
+                "event_id": str(row[3]),
+                "ledger_seq": int(row[4]),
+                "released_at": str(row[5]),
+            },
+        )
+    except Exception as exc:
+        raise Issue790CanaryIntegrityError(str(exc)) from exc
+
+
+def _validated_nested_circuit_release(value: object) -> dict[str, object] | None:
+    if value is None:
+        return None
+    try:
+        return validate_step16_circuit_release_receipt(
+            _object(value, field="circuit release")
+        )
+    except Issue790CanaryIntegrityError:
+        raise
+    except Exception as exc:
+        raise Issue790CanaryIntegrityError(str(exc)) from exc
+
+
 def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
     return (
         connection.execute(
@@ -608,38 +655,13 @@ class Issue790CanaryRepository:
             if not _table_exists(connection, "issue_790_step16_circuit_releases"):
                 return None
             row = connection.execute(
-                "SELECT release_digest,activation_digest,plan_digest,event_id,"
-                "ledger_seq,released_at,record_json "
-                "FROM issue_790_step16_circuit_releases "
-                "WHERE plan_digest=? AND event_id=? AND ledger_seq=?",
+                _CIRCUIT_RELEASE_SELECT
+                + "WHERE plan_digest=? AND event_id=? AND ledger_seq=?",
                 (plan_digest, event_id, ledger_seq),
             ).fetchone()
             if row is None:
                 return None
-            try:
-                record = json.loads(str(row[6]))
-            except json.JSONDecodeError as exc:
-                raise Issue790CanaryIntegrityError(
-                    "issue #790 event circuit release differs"
-                ) from exc
-            if not isinstance(record, dict):
-                raise Issue790CanaryIntegrityError(
-                    "issue #790 event circuit release differs"
-                )
-            try:
-                return validate_step16_circuit_release_receipt(
-                    record,
-                    sql_identity={
-                        "release_digest": str(row[0]),
-                        "activation_digest": str(row[1]),
-                        "plan_digest": str(row[2]),
-                        "event_id": str(row[3]),
-                        "ledger_seq": int(row[4]),
-                        "released_at": str(row[5]),
-                    },
-                )
-            except Exception as exc:
-                raise Issue790CanaryIntegrityError(str(exc)) from exc
+            return _validated_circuit_release_row(row)
         finally:
             connection.close()
 
@@ -715,16 +737,12 @@ class Issue790CanaryRepository:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(STEP16_CIRCUIT_RELEASE_TABLE_SQL)
             prior = connection.execute(
-                "SELECT record_json FROM issue_790_step16_circuit_releases "
-                "WHERE plan_digest=? AND event_id=? AND ledger_seq=?",
+                _CIRCUIT_RELEASE_SELECT
+                + "WHERE plan_digest=? AND event_id=? AND ledger_seq=?",
                 (plan_digest, event_id, ledger_seq),
             ).fetchone()
             if prior is not None:
-                retained = _content_addressed_record(
-                    prior[0],
-                    digest_field="release_digest",
-                    field="step 16 circuit release",
-                )
+                retained = _validated_circuit_release_row(prior)
                 if (
                     retained.get("plan_digest") != plan_digest
                     or retained.get("activation_digest") != activation_digest
@@ -969,22 +987,23 @@ class Issue790CanaryRepository:
                 "WHERE consumption_digest=?",
                 (consumption_digest,),
             ).fetchone()
-            return (
-                None
-                if row is None
-                else _bound_row_record(
-                    row,
-                    digest_field="outcome_digest",
-                    identity_fields=(
-                        "outcome_digest",
-                        "consumption_digest",
-                        "event_id",
-                        "ledger_seq",
-                        "completed_at",
-                    ),
-                    field="canary outcome",
-                )
+            if row is None:
+                return None
+            record = _bound_row_record(
+                row,
+                digest_field="outcome_digest",
+                identity_fields=(
+                    "outcome_digest",
+                    "consumption_digest",
+                    "event_id",
+                    "ledger_seq",
+                    "completed_at",
+                ),
+                field="canary outcome",
             )
+            if "circuit_release" in record:
+                _validated_nested_circuit_release(record.get("circuit_release"))
+            return record
         finally:
             connection.close()
 
@@ -1205,37 +1224,12 @@ class Issue790CanaryRepository:
                 release_row = None
                 if _table_exists(connection, "issue_790_step16_circuit_releases"):
                     release_row = connection.execute(
-                        "SELECT release_digest,activation_digest,plan_digest,event_id,"
-                        "ledger_seq,released_at,record_json "
-                        "FROM issue_790_step16_circuit_releases "
-                        "WHERE plan_digest=? AND event_id=? AND ledger_seq=?",
+                        _CIRCUIT_RELEASE_SELECT
+                        + "WHERE plan_digest=? AND event_id=? AND ledger_seq=?",
                         (approved_plan_digest, event_id, ledger_seq),
                     ).fetchone()
                 if release_row is not None:
-                    try:
-                        loaded = json.loads(str(release_row[6]))
-                    except json.JSONDecodeError as exc:
-                        raise Issue790CanaryIntegrityError(
-                            "issue #790 event circuit release differs"
-                        ) from exc
-                    if not isinstance(loaded, dict):
-                        raise Issue790CanaryIntegrityError(
-                            "issue #790 event circuit release differs"
-                        )
-                    try:
-                        circuit_release = validate_step16_circuit_release_receipt(
-                            loaded,
-                            sql_identity={
-                                "release_digest": str(release_row[0]),
-                                "activation_digest": str(release_row[1]),
-                                "plan_digest": str(release_row[2]),
-                                "event_id": str(release_row[3]),
-                                "ledger_seq": int(release_row[4]),
-                                "released_at": str(release_row[5]),
-                            },
-                        )
-                    except Exception as exc:
-                        raise Issue790CanaryIntegrityError(str(exc)) from exc
+                    circuit_release = _validated_circuit_release_row(release_row)
             manifest = _object(event_row[5], field="canary event manifest")
             unit_refs = manifest.get("unit_refs")
             if (
@@ -1623,7 +1617,9 @@ class Issue790CanaryRepository:
                 without_digest["result_class"] = result_class
                 without_digest["causal_report"] = retained_causal_report
             if approved_contract.sequence_ordinal == 16:
-                without_digest["circuit_release"] = consumption.get("circuit_release")
+                without_digest["circuit_release"] = _validated_nested_circuit_release(
+                    consumption.get("circuit_release")
+                )
             outcome_digest = digest_canonical(without_digest)
             record = {**without_digest, "outcome_digest": outcome_digest}
             connection.execute(

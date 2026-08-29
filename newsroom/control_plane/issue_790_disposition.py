@@ -3459,7 +3459,7 @@ def run_issue_790_canary(
         "non_effects": list(_NON_EFFECTS),
     }
     if isinstance(sequence, dict) and sequence.get("sequence_ordinal") == 16:
-        circuit_release = _optional_step16_circuit_release(circuit_release)
+        looked_up = _optional_step16_circuit_release(circuit_release)
         consumption_release = _optional_step16_circuit_release(
             None
             if not isinstance(consumption, dict)
@@ -3468,11 +3468,16 @@ def run_issue_790_canary(
         outcome_release = _optional_step16_circuit_release(
             None if not isinstance(outcome, dict) else outcome.get("circuit_release")
         )
-        if consumption_release is not None:
-            circuit_release = consumption_release
-        if outcome_release is not None:
-            circuit_release = outcome_release
-        receipt_without_digest["circuit_release"] = circuit_release
+        bound = [
+            item
+            for item in (looked_up, consumption_release, outcome_release)
+            if item is not None
+        ]
+        if bound and any(item != bound[0] for item in bound):
+            raise Issue790DispositionError(
+                "issue #790 event circuit release differs"
+            )
+        receipt_without_digest["circuit_release"] = None if not bound else bound[0]
     if predecessor is not None:
         receipt_without_digest["predecessor"] = predecessor
     return {
