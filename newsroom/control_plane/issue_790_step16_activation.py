@@ -16,11 +16,11 @@ from newsroom.control_plane.issue_790_contract import (
     ISSUE_790_STEP16_ACTIVATION_POLICY_VERSION,
     ISSUE_790_STEP16_ACTIVATION_SCHEMA,
     ISSUE_790_STEP16_APPROVAL_MARKER,
-    ISSUE_790_STEP16_CHECKED_CANDIDATE_DIGEST,
     ISSUE_790_STEP16_OWNER_APPROVAL_SCHEMA,
     Issue790ApprovedPlanContract,
     issue_790_approved_plan_contract,
     issue_790_checked_candidate_contract,
+    issue_790_owner_activated_sequence,
 )
 from newsroom.graphiti_adapter.combined_temporal_projection import (
     PROJECTION_POLICY_DIGEST,
@@ -739,7 +739,7 @@ def expected_step16_contract_from_plan(
         route_open_reason=str(target.get("route_open_reason")),
         root_plan_digest=str(sequence.get("root_plan_digest")),
         predecessor_plan_digest=str(predecessor.get("plan_digest")),
-        sequence_ordinal=16,
+        sequence_ordinal=int(sequence["sequence_ordinal"]),
         controller_timeout_ms=int(sequence["controller_timeout_ms"]),
         extraction_timeout_ms=int(sequence["extraction_timeout_ms"]),
         cleanup_reserve_ms=int(sequence["cleanup_reserve_ms"]),
@@ -820,7 +820,7 @@ def validate_step16_activation_receipt(
         or contract.approval_reference != retained.get("comment_url")
         or contract.approved_at != retained.get("created_at")
         or contract.approved_by != ISSUE_790_APPROVED_BY
-        or contract.sequence_ordinal != 16
+        or not issue_790_owner_activated_sequence(contract.sequence_ordinal)
         or contract.pre_dispatch_operational_requirements_digest
         != retained.get("pre_dispatch_effective_digest")
     ):
@@ -1002,8 +1002,6 @@ def require_step16_candidate_matches_payload(
     candidate_digest = candidate.get("canonical_digest")
     if candidate_digest != payload.get("checked_candidate_digest"):
         _fail("issue #790 owner approval payload differs")
-    if candidate_digest != ISSUE_790_STEP16_CHECKED_CANDIDATE_DIGEST:
-        _fail("issue #790 candidate identity differs")
     try:
         contract = issue_790_checked_candidate_contract(str(candidate_digest))
     except KeyError:

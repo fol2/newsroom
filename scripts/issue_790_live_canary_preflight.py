@@ -155,7 +155,7 @@ def _ops_gates(
     fresh: list[tuple[str, int]] = []
     clean_event: tuple[str, int] | None = None
     for e, s in cands:
-        if e in forbidden or s in {1932, 1972}:
+        if e in forbidden or s in {1932, 1972, 8835}:
             continue
         fresh.append((e, s))
     if fresh:

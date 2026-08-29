@@ -10,6 +10,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_canonical
+from newsroom.control_plane.issue_790_contract import (
+    issue_790_owner_activated_sequence,
+)
 from newsroom.control_plane.issue_790_step16_activation import (
     ISSUE_790_STEP16_CIRCUIT_RELEASE_POLICY_VERSION,
     ISSUE_790_STEP16_CIRCUIT_RELEASE_SCHEMA,
@@ -806,9 +809,13 @@ class Issue790CanaryRepository:
         )
         excluded_at_text = _utc_text(excluded_at)
         expected = tuple(events)
-        if len(expected) != 2 or tuple(
-            int(item.get("ledger_seq", 0)) for item in expected
-        ) != (1932, 1972):
+        seqs = tuple(int(item.get("ledger_seq", 0)) for item in expected)
+        extra = seqs[2:]
+        if (
+            seqs[:2] != (1932, 1972)
+            or any(seq not in {8835} for seq in extra)
+            or len(set(seqs)) != len(seqs)
+        ):
             raise Issue790CanaryIntegrityError("retry exclusion targets differ")
         connection = self._connection()
         retained: list[dict[str, object]] = []
@@ -1124,7 +1131,7 @@ class Issue790CanaryRepository:
         owner_id = _token(owner_id, field="canary owner id")
         if isinstance(ledger_seq, bool) or not isinstance(ledger_seq, int) or ledger_seq <= 0:
             raise Issue790CanaryIntegrityError("bounded canary ledger sequence is invalid")
-        if ledger_seq in {1932, 1972}:
+        if ledger_seq in {1932, 1972, 8835}:
             raise Issue790CanaryIntegrityError("bounded canary targeted a retained failure")
         consumed_at_text = _utc_text(consumed_at)
 
@@ -1216,7 +1223,7 @@ class Issue790CanaryRepository:
                     "bounded canary event circuit is still open"
                 )
             circuit_release = None
-            if approved_contract.sequence_ordinal == 16:
+            if issue_790_owner_activated_sequence(approved_contract.sequence_ordinal):
                 if event_circuit is not None and str(event_circuit[0]) == "OPEN":
                     raise Issue790CanaryIntegrityError(
                         "bounded canary event circuit is still open"
@@ -1306,7 +1313,7 @@ class Issue790CanaryRepository:
                 "publication_authorised": False,
                 "consumed_at": consumed_at_text,
             }
-            if approved_contract.sequence_ordinal == 16:
+            if issue_790_owner_activated_sequence(approved_contract.sequence_ordinal):
                 without_digest["circuit_release"] = circuit_release
             consumption_digest = digest_canonical(without_digest)
             record = {**without_digest, "consumption_digest": consumption_digest}
@@ -1616,7 +1623,7 @@ class Issue790CanaryRepository:
             if iterative:
                 without_digest["result_class"] = result_class
                 without_digest["causal_report"] = retained_causal_report
-            if approved_contract.sequence_ordinal == 16:
+            if issue_790_owner_activated_sequence(approved_contract.sequence_ordinal):
                 without_digest["circuit_release"] = _validated_nested_circuit_release(
                     consumption.get("circuit_release")
                 )
