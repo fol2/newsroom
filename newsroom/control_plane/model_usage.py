@@ -26,8 +26,10 @@ from newsroom.control_plane.graphiti_requests import (
     load_checked_graphiti_call_shape_policy,
 )
 from newsroom.control_plane.issue_790_contract import (
-    issue_790_approved_plan_contract,
     issue_790_approved_plan_contracts,
+)
+from newsroom.control_plane.issue_790_step16_activation import (
+    effective_issue_790_plan_contract,
 )
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.veto import assert_private_store
@@ -350,13 +352,31 @@ def _canonical_circuit_route(route: str) -> str:
     )
 
 
+def _approved_plan_contracts_for_store(
+    connection: sqlite3.Connection,
+) -> tuple:
+    contracts = list(issue_790_approved_plan_contracts())
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type='table' AND name='issue_790_step16_activations'"
+    ).fetchone():
+        for row in connection.execute(
+            "SELECT plan_digest FROM issue_790_step16_activations"
+        ):
+            try:
+                contracts.append(
+                    effective_issue_790_plan_contract(
+                        str(row[0]),
+                        connection=connection,
+                    )
+                )
+            except KeyError:
+                continue
+    return tuple(sorted(contracts, key=lambda item: item.plan_digest))
+
+
 def _usage_blocking_routes(connection: sqlite3.Connection) -> set[str]:
-    approved_contracts = tuple(
-        sorted(
-            issue_790_approved_plan_contracts(),
-            key=lambda item: item.plan_digest,
-        )
-    )
+    approved_contracts = _approved_plan_contracts_for_store(connection)
     approved_bindings = " OR ".join(
         "(d.approved_plan_digest=? AND d.invocation_id=?)"
         for _ in approved_contracts
@@ -2590,9 +2610,14 @@ class ModelUsageService:
             field="approved plan digest",
         )
         try:
-            approved_contract = issue_790_approved_plan_contract(
-                approved_plan_digest
-            )
+            preview = sqlite3.connect(self.path)
+            try:
+                approved_contract = effective_issue_790_plan_contract(
+                    approved_plan_digest,
+                    connection=preview,
+                )
+            finally:
+                preview.close()
         except KeyError as exc:
             raise ModelUsageIntegrityError(
                 "conservative disposition approved plan differs"

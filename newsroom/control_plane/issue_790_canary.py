@@ -9,10 +9,11 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-from newsroom.authority.canonical import digest_canonical
-from newsroom.control_plane.issue_790_contract import (
-    issue_790_approved_plan_contract,
-    issue_790_invocation_plan_digests,
+from newsroom.authority.canonical import canonical_json_bytes, digest_canonical
+from newsroom.control_plane.issue_790_step16_activation import (
+    STEP16_ACTIVATION_TABLE_SQL,
+    effective_issue_790_invocation_plan_digests,
+    effective_issue_790_plan_contract,
 )
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.veto import assert_private_store
@@ -65,7 +66,7 @@ CREATE TABLE IF NOT EXISTS issue_790_bounded_canary_outcomes(
         REFERENCES issue_790_bounded_canary_consumptions(consumption_digest)
         ON UPDATE RESTRICT ON DELETE RESTRICT
 );
-"""
+""" + STEP16_ACTIVATION_TABLE_SQL
 
 
 def _allow_reused_dispositions(connection: sqlite3.Connection) -> None:
@@ -357,6 +358,21 @@ def _stable_unit_ref(value: Mapping[str, object]) -> tuple[object, ...]:
     )
 
 
+def _require_effective_plan_contract(
+    plan_digest: str,
+    connection: sqlite3.Connection,
+    *,
+    message: str,
+):
+    try:
+        return effective_issue_790_plan_contract(
+            plan_digest,
+            connection=connection,
+        )
+    except KeyError as exc:
+        raise Issue790CanaryIntegrityError(message) from exc
+
+
 def _validated_preflight(
     value: Mapping[str, object],
     *,
@@ -365,19 +381,17 @@ def _validated_preflight(
     manifest_digest: str,
     consumed_at: datetime,
     approved_plan_digest: str,
+    connection: sqlite3.Connection,
 ) -> dict[str, object]:
     retained = dict(value)
     supplied_digest = retained.pop("evidence_digest", None)
     if supplied_digest != digest_canonical(retained):
         raise Issue790CanaryIntegrityError("bounded canary preflight digest differs")
-    try:
-        approved_contract = issue_790_approved_plan_contract(
-            approved_plan_digest
-        )
-    except KeyError as exc:
-        raise Issue790CanaryIntegrityError(
-            "bounded canary preflight plan differs"
-        ) from exc
+    approved_contract = _require_effective_plan_contract(
+        approved_plan_digest,
+        connection,
+        message="bounded canary preflight plan differs",
+    )
     iterative = approved_contract.sequence_ordinal > 0
     expected_schema = (
         ITERATIVE_CANARY_PREFLIGHT_SCHEMA
@@ -515,6 +529,69 @@ class Issue790CanaryRepository:
         apply_control_plane_sqlite_profile(connection, query_only=True)
         return connection
 
+    def retain_step16_activation(
+        self,
+        record: Mapping[str, object],
+    ) -> dict[str, object]:
+        retained = dict(record)
+        digest = retained.get("activation_digest")
+        unsigned = {
+            key: item for key, item in retained.items() if key != "activation_digest"
+        }
+        if digest != digest_canonical(unsigned):
+            raise Issue790CanaryIntegrityError("step 16 activation digest differs")
+        checked = str(retained.get("checked_candidate_digest"))
+        plan_digest = str(retained.get("plan_digest"))
+        comment_id = retained.get("comment_id")
+        payload_digest = str(retained.get("canonical_approval_payload_digest"))
+        created_at = str(retained.get("created_at"))
+        encoded = canonical_json_bytes(retained).decode("utf-8")
+        connection = self._connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT record_json FROM issue_790_step16_activations "
+                "WHERE activation_digest=? OR checked_candidate_digest=? "
+                "OR plan_digest=? OR comment_id=?",
+                (digest, checked, plan_digest, comment_id),
+            ).fetchall()
+            if rows:
+                for row in rows:
+                    try:
+                        prior = json.loads(str(row[0]))
+                    except json.JSONDecodeError as exc:
+                        raise Issue790CanaryIntegrityError(
+                            "step 16 activation contradicts retained evidence"
+                        ) from exc
+                    if prior != retained:
+                        raise Issue790CanaryIntegrityError(
+                            "step 16 activation contradicts retained evidence"
+                        )
+                connection.commit()
+                return retained
+            connection.execute(
+                "INSERT INTO issue_790_step16_activations("
+                "activation_digest,checked_candidate_digest,plan_digest,comment_id,"
+                "payload_digest,created_at,record_json) VALUES (?,?,?,?,?,?,?)",
+                (
+                    digest,
+                    checked,
+                    plan_digest,
+                    comment_id,
+                    payload_digest,
+                    created_at,
+                    encoded,
+                ),
+            )
+            connection.commit()
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return retained
+
     def retain_retry_exclusions(
         self,
         *,
@@ -523,14 +600,6 @@ class Issue790CanaryRepository:
         events: Sequence[Mapping[str, object]],
         excluded_at: datetime,
     ) -> tuple[dict[str, object], ...]:
-        try:
-            approved_contract = issue_790_approved_plan_contract(
-                approved_plan_digest
-            )
-        except KeyError as exc:
-            raise Issue790CanaryIntegrityError(
-                "retry exclusion plan differs"
-            ) from exc
         disposition_digest = _token(
             disposition_digest, field="retry exclusion disposition digest"
         )
@@ -544,6 +613,11 @@ class Issue790CanaryRepository:
         retained: list[dict[str, object]] = []
         try:
             connection.execute("BEGIN IMMEDIATE")
+            approved_contract = _require_effective_plan_contract(
+                approved_plan_digest,
+                connection,
+                message="retry exclusion plan differs",
+            )
             disposition = connection.execute(
                 "SELECT invocation_id FROM model_usage_conservative_dispositions "
                 "WHERE disposition_digest=? AND approved_plan_digest=?",
@@ -846,14 +920,6 @@ class Issue790CanaryRepository:
         disposition_digest = _token(disposition_digest, field="disposition digest")
         event_id = _token(event_id, field="canary event id")
         owner_id = _token(owner_id, field="canary owner id")
-        try:
-            approved_contract = issue_790_approved_plan_contract(
-                approved_plan_digest
-            )
-        except KeyError as exc:
-            raise Issue790CanaryIntegrityError(
-                "bounded canary approved plan differs"
-            ) from exc
         if isinstance(ledger_seq, bool) or not isinstance(ledger_seq, int) or ledger_seq <= 0:
             raise Issue790CanaryIntegrityError("bounded canary ledger sequence is invalid")
         if ledger_seq in {1932, 1972}:
@@ -863,6 +929,11 @@ class Issue790CanaryRepository:
         connection = self._connection()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            approved_contract = _require_effective_plan_contract(
+                approved_plan_digest,
+                connection,
+                message="bounded canary approved plan differs",
+            )
             if connection.execute(
                 "SELECT 1 FROM issue_790_bounded_canary_consumptions "
                 "WHERE approved_plan_digest=? LIMIT 1",
@@ -877,8 +948,9 @@ class Issue790CanaryRepository:
                 "WHERE disposition_digest=?",
                 (disposition_digest,),
             ).fetchone()
-            disposition_plan_digests = issue_790_invocation_plan_digests(
-                approved_contract.invocation_id
+            disposition_plan_digests = effective_issue_790_invocation_plan_digests(
+                approved_contract.invocation_id,
+                connection=connection,
             )
             if disposition_row is None:
                 raise Issue790CanaryIntegrityError(
@@ -960,6 +1032,7 @@ class Issue790CanaryRepository:
                 manifest_digest=str(event_row[7]),
                 consumed_at=consumed_at,
                 approved_plan_digest=approved_plan_digest,
+                connection=connection,
             )
             resolved_units = preflight["resolved_units"]
             assert isinstance(resolved_units, list)
@@ -1100,14 +1173,11 @@ class Issue790CanaryRepository:
                 ),
                 field="canary consumption",
             )
-            try:
-                approved_contract = issue_790_approved_plan_contract(
-                    str(consumption["approved_plan_digest"])
-                )
-            except KeyError as exc:
-                raise Issue790CanaryIntegrityError(
-                    "bounded canary outcome plan differs"
-                ) from exc
+            approved_contract = _require_effective_plan_contract(
+                str(consumption["approved_plan_digest"]),
+                connection,
+                message="bounded canary outcome plan differs",
+            )
             iterative = approved_contract.sequence_ordinal > 0
             retained_causal_report: dict[str, object] | None = None
             if iterative:
@@ -1385,22 +1455,26 @@ class Issue790CanaryRepository:
                 "WHERE e.event_id=? AND e.ledger_seq=?",
                 (consumption_digest, event_id, ledger_seq),
             ).fetchone()
+            if row is None:
+                raise Issue790CanaryIntegrityError("bounded canary event disappeared")
+            attempt_count = int(row[1])
+            process_result = (
+                None
+                if attempt_count == 0
+                else {
+                    "event_id": event_id,
+                    "ledger_seq": ledger_seq,
+                    "state": str(row[0]),
+                    "attempt_count": attempt_count,
+                }
+            )
+            approved_contract = _require_effective_plan_contract(
+                str(row[2]),
+                connection,
+                message="bounded canary approved plan differs",
+            )
         finally:
             connection.close()
-        if row is None:
-            raise Issue790CanaryIntegrityError("bounded canary event disappeared")
-        attempt_count = int(row[1])
-        process_result = (
-            None
-            if attempt_count == 0
-            else {
-                "event_id": event_id,
-                "ledger_seq": ledger_seq,
-                "state": str(row[0]),
-                "attempt_count": attempt_count,
-            }
-        )
-        approved_contract = issue_790_approved_plan_contract(str(row[2]))
         if approved_contract.sequence_ordinal > 0 and result_class is None:
             raise Issue790CanaryIntegrityError(
                 "iterative zero-I/O finalisation classification is absent"

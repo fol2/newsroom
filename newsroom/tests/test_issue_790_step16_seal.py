@@ -216,7 +216,7 @@ def test_owner_finalise_is_not_live_registered_and_binds_named_main() -> None:
     assert plan["sequence"]["pre_dispatch_operational_requirements"][
         "exact_main_commit"
     ] == revision
-    with pytest.raises(Issue790DispositionError, match="approved plan identity"):
+    with pytest.raises(Issue790DispositionError, match="activation store is absent"):
         _require_approved_plan(plan)
     evidence = {
         "revision": revision,
@@ -228,14 +228,38 @@ def test_owner_finalise_is_not_live_registered_and_binds_named_main() -> None:
             "process_ids": [],
         },
         "store_quick_check": "ok",
+        "ci_test": {
+            "name": "focus-gates",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": revision,
+            "url": "https://github.com/fol2/newsroom/actions/runs/1/job/1",
+        },
     }
     _require_step16_code_identity(plan, evidence=evidence)
+    observed_at = datetime(2026, 8, 29, tzinfo=UTC)
     _require_step16_runtime_semantics(
         plan,
         evidence=evidence,
         route_state={"state": "OPEN", "reason": "SYSTEMIC_TRANSPORT"},
-        circuit_state={"state": "CLOSED"},
-        canary_event={"state": "QUEUED", "attempt_count": 0},
+        circuit_state={
+            "state": "CLOSED",
+            "opened_at": None,
+            "available_at": None,
+            "failure_code": None,
+        },
+        observed_at=observed_at,
+        canary_event={
+            "event_id": "sha256:" + "aa" * 32,
+            "ledger_seq": 2000,
+            "state": "QUEUED",
+            "attempt_count": 0,
+            "provider_dispatched": False,
+            "claim_owner": None,
+            "claim_expires_at": None,
+            "terminal_at": None,
+            "available_at": "2026-08-28T00:00:00.000000Z",
+        },
     )
     drifted = dict(evidence)
     drifted["revision"] = "c" * 40
