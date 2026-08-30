@@ -61,6 +61,7 @@ from newsroom.graphiti_adapter.combined_temporal_validation import (
     VALIDATOR_CONTRACT_VERSION,
 )
 from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_VERSION
+from newsroom.graphiti_adapter.types import GraphitiAdapterContractError
 
 _ROOT = Path(__file__).resolve().parents[2]
 _REVOKED = (
@@ -86,6 +87,23 @@ _TREE = "b" * 40
 _HEAD = "c" * 40
 _HEAD_TREE = "d" * 40
 _OBSERVED = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+_REAL_RUNTIME_QUALIFIER = issue_790_operation._qualify_real_graphiti_runtime
+
+
+@pytest.fixture(autouse=True)
+def _real_graphiti_runtime_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    unsigned = {
+        "schema_version": "newsroom.issue-790.graphiti-runtime-readiness.v1",
+        "framework": "graphiti-core",
+        "framework_version": "0.29.3",
+        "provider_calls": 0,
+        "credential_resolution": False,
+    }
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_qualify_real_graphiti_runtime",
+        lambda: {**unsigned, "runtime_digest": digest_canonical(unsigned)},
+    )
 
 
 def _pending_family() -> tuple[dict[str, object], dict[str, object]]:
@@ -924,6 +942,8 @@ def test_positive_readiness_stops_before_provider_io(
     assert receipt["candidate_event_qualification_digest"] == (
         _provider_free_event_preflight()["qualification_digest"]
     )
+    assert receipt["runtime_readiness"]["framework_version"] == "0.29.3"
+    assert receipt["runtime_readiness"]["provider_calls"] == 0
     path = tmp_path / "activated-plan.json"
     path.write_text(json.dumps(activated["plan"]), encoding="utf-8")
     loaded = load_issue_790_plan(
@@ -932,6 +952,49 @@ def test_positive_readiness_stops_before_provider_io(
         github_api=activated["github"],
     )
     assert loaded["canonical_digest"] == activated["plan"]["canonical_digest"]
+
+
+def test_missing_real_runtime_blocks_readiness_before_event_qualification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    activated = _activate(tmp_path)
+    monkeypatch.setattr(
+        issue_790_operation.real_graphiti_module,
+        "_load_graphiti",
+        lambda: (_ for _ in ()).throw(
+            GraphitiAdapterContractError(
+                "graphiti extra (graphiti-core 0.29.3) is required"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_qualify_real_graphiti_runtime",
+        _REAL_RUNTIME_QUALIFIER,
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "qualify_issue_790_candidate_event",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("event qualification ran without its real runtime")
+        ),
+    )
+    with pytest.raises(
+        Issue790DispositionError,
+        match="real Graphiti runtime is unavailable",
+    ):
+        qualify_issue_790_step16_readiness(
+            plan=activated["plan"],
+            store=activated["store"],
+            proving_store=_empty_proving_store(tmp_path),
+            evidence=_evidence(),
+            route_state={"state": "OPEN", "reason": "SYSTEMIC_TRANSPORT"},
+            circuit_state=_closed_circuit(),
+            canary_event=_ready_event(),
+            observed_at=_OBSERVED,
+            github_api=activated["github"],
+        )
 
 
 def test_selected_event_mismatch_cannot_receive_readiness(
