@@ -332,6 +332,7 @@ def reconcile_graphiti_events(
     units: tuple[CorpusIngestUnit, ...],
     *,
     available_at: datetime,
+    event_id: str | None = None,
 ) -> int:
     """Project committed landed ledger obligations in a consumer transaction."""
 
@@ -348,8 +349,13 @@ def reconcile_graphiti_events(
             coverage.updated_at,
         )
         grouped.setdefault(key, []).append(unit)
+    rows = _landed_rows(connection)
+    if event_id is not None:
+        rows = [row for row in rows if row[1] == event_id]
+        if len(rows) != 1:
+            raise ValueError("exact landed Graphiti event identity differs")
     inserted = 0
-    for row in _landed_rows(connection):
+    for row in rows:
         ledger_seq, ledger_digest = int(row[0]), str(row[1])
         key = (row[2], row[3], row[4], row[5], row[6])
         landed_ingest_ids_value = json.loads(row[8])

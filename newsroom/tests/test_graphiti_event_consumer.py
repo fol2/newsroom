@@ -109,6 +109,48 @@ def _enqueue_fixture(
     return inserted
 
 
+def test_reconcile_can_project_one_exact_landed_event(tmp_path: Path) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    units = (_unit(1), _unit(2))
+    connection = connect(str(path))
+    connection.execute("BEGIN IMMEDIATE")
+    event_ids: list[str] = []
+    for unit in units:
+        assert emit_effective_revision_landed(
+            connection,
+            unit.effective_revision,
+            ingest_ids=(unit.ingest_id,),
+            landed_at=unit.coverage_first_observed_at,
+        )
+        event_ids.append(
+            str(
+                connection.execute(
+                    "SELECT ledger_digest FROM unpublished_effective_revision_landed "
+                    "WHERE source_id=? AND item_key=? AND revision_digest=?",
+                    (unit.source_id, unit.item_key, unit.revision_digest),
+                ).fetchone()[0]
+            )
+        )
+    connection.commit()
+
+    connection.execute("BEGIN IMMEDIATE")
+    assert (
+        reconcile_graphiti_events(
+            connection,
+            (units[1],),
+            available_at=datetime(2026, 8, 30, tzinfo=UTC),
+            event_id=event_ids[1],
+        )
+        == 1
+    )
+    connection.commit()
+    rows = connection.execute(
+        "SELECT event_id,unit_count FROM unpublished_graphiti_revision_events"
+    ).fetchall()
+    connection.close()
+    assert rows == [(event_ids[1], 1)]
+
+
 def _predispatch_refusal(unit: CorpusIngestUnit) -> GraphitiCycleResult:
     result = replace(
         _complete(unit),
