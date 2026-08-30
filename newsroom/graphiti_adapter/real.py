@@ -1397,18 +1397,19 @@ class RealGraphitiAdapter:
         except AmbiguousEpisodeEffect:
             produced = validated.get("produced")
             if (
-                telemetry.recovery_classification
-                is GraphitiRecoveryClassification.ROLLED_BACK_AMBIGUOUS_EFFECT
-                and produced is not None
+                produced is not None
                 and produced.outcome is ExtractionOutcome.SUCCESS
                 and not produced.proposals
             ):
-                # The rollback proves that no graph mutation remains, while the
-                # validated empty result proves that there was no ingest effect
-                # to lose. Provider and embedding usage remain on that success.
+                # The validated empty result proves there is no governed ingest
+                # effect to classify. A recovery marker remains evidence when
+                # present, but is not a precondition for terminal empty success.
                 raw = dict(produced.raw_output_value or {})
                 raw.pop("raw_output_digest", None)
-                raw["recovery_classification"] = telemetry.recovery_classification
+                if telemetry.recovery_classification is not None:
+                    raw["recovery_classification"] = (
+                        telemetry.recovery_classification
+                    )
                 raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
                 return produced_extraction(
                     attempt,
