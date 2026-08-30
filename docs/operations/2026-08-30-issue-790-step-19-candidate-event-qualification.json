@@ -1,0 +1,13 @@
+{
+  "event_id": "sha256:e4ef6fd0af91d5d525af3f37f5cfb422733a1640c84c16cdc162f0e6d8bb0b5b",
+  "event_manifest_digest": "sha256:34e5a002b331f34ced889b965816e310d744db2d60815c3ea142d9ef3849149d",
+  "event_preflight_digest": "sha256:6d8ddde566cf2dccb93395fb7c68fa7dabb62aed6933dba1ef410378ce1b33ac",
+  "ledger_seq": 13337,
+  "observed_at": "2026-08-30T12:34:51.361556Z",
+  "provider_calls": 0,
+  "qualification_digest": "sha256:d2a672ee9069d76f263adb18d02e177242feb834875552b0c1c7dca00cf9cc59",
+  "resolved_unit_count": 1,
+  "schema_version": "newsroom.issue-790.candidate-event-qualification.v1",
+  "status": "READY_FOR_OWNER_PACKET",
+  "store_mutations": 0
+}
