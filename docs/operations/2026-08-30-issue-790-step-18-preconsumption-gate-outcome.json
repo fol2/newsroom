@@ -1,0 +1,21 @@
+{
+  "schema_version": "newsroom.issue-790.preconsumption-gate-outcome.v1",
+  "issue": 790,
+  "plan_digest": "sha256:bbdae8cb9aa5c8581180d453bc4388f1cd02796aa62375637c5bb3be1957ad2c",
+  "activation_digest": "sha256:0cb24bce4a82b8520651f818c42516db37e1356bb950ade8b3ca1b4e21bb2acb",
+  "checked_candidate_digest": "sha256:c88fdc3b1316a0e4a8c9ff09db0f923927664bb24536ec076a799f7f3054b3d2",
+  "event_id": "sha256:cac05a3829b4283a12330c38b7ea3e4d1e998024e4b3ed2e73508c476996a04b",
+  "ledger_seq": 8834,
+  "result_class": "PRECONSUMPTION_GATE_NON_SUCCESS",
+  "failure_code": "RESOLVED_INGEST_IDS_DIFFER_FROM_LANDED",
+  "authority_consumed": false,
+  "consumption_rows": 0,
+  "provider_dispatched": false,
+  "provider_calls": 0,
+  "catalogue_queries": 0,
+  "retry_count": 0,
+  "fallback_count": 0,
+  "evidence_reference": "https://github.com/fol2/newsroom/issues/790#issuecomment-5465418528",
+  "observed_at": "2026-08-29T23:09:27.000000Z",
+  "outcome_digest": "sha256:83da516b8d3a8699e7eee234c684e1317ad78ea0d254bc2dd763970c6f95116d"
+}

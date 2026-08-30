@@ -103,7 +103,22 @@ ISSUE_790_STEP17_PENDING_DIGEST = (
 ISSUE_790_STEP17_CHECKED_CANDIDATE_DIGEST = (
     "sha256:c88fdc3b1316a0e4a8c9ff09db0f923927664bb24536ec076a799f7f3054b3d2"
 )
-ISSUE_790_OWNER_ACTIVATED_SEQUENCE_ORDINALS = frozenset({16, 17})
+ISSUE_790_STEP17_ACTIVATED_PLAN_DIGEST = (
+    "sha256:bbdae8cb9aa5c8581180d453bc4388f1cd02796aa62375637c5bb3be1957ad2c"
+)
+ISSUE_790_STEP17_ACTIVATION_DIGEST = (
+    "sha256:0cb24bce4a82b8520651f818c42516db37e1356bb950ade8b3ca1b4e21bb2acb"
+)
+ISSUE_790_STEP17_GATE_OUTCOME_DIGEST = (
+    "sha256:83da516b8d3a8699e7eee234c684e1317ad78ea0d254bc2dd763970c6f95116d"
+)
+ISSUE_790_STEP18_PENDING_DIGEST = (
+    "sha256:130d963a787089435b11a63ef5de9aa9cbbee146ba1c9b2ef259ede1776fb488"
+)
+ISSUE_790_STEP18_CHECKED_CANDIDATE_DIGEST = (
+    "sha256:fd823fa6a6375803948c443c7a0b690a6b0b638861b9fa8e0772586744dce68d"
+)
+ISSUE_790_OWNER_ACTIVATED_SEQUENCE_ORDINALS = frozenset({16, 17, 18})
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +174,10 @@ class Issue790CheckedCandidateContract:
     predecessor_causal_report_digest: str
     checked_approved_by: str
     checked_approval_reference: str
+    candidate_event_qualification_digest: str | None = None
+    candidate_event_id: str | None = None
+    candidate_ledger_seq: int | None = None
+    candidate_event_manifest_digest: str | None = None
 
 
 _SUCCESS_SEQUENCE_CONTRACTS = (
@@ -748,9 +767,54 @@ _STEP17_CHECKED_CANDIDATE = Issue790CheckedCandidateContract(
     checked_approval_reference=f"checked:{ISSUE_790_STEP17_PENDING_DIGEST}",
 )
 
+_STEP18_CHECKED_CANDIDATE = Issue790CheckedCandidateContract(
+    schema_version=ISSUE_790_STEP16_CANDIDATE_SCHEMA,
+    candidate_digest=ISSUE_790_STEP18_CHECKED_CANDIDATE_DIGEST,
+    pending_digest=ISSUE_790_STEP18_PENDING_DIGEST,
+    invocation_id=(
+        "sha256:d0712807fd025520d0a94e5a28c532d4cb8684c936387290fe7eeb49d0b2336c"
+    ),
+    terminal_digest=(
+        "sha256:d48e844404516bd41b17038b42a834c6e54bf5da520ef046f3baf81ea7a8cbbe"
+    ),
+    allocation_digest=(
+        "sha256:c789330ca7151d097e6d366dd65481ff21d55f93891ff61e368d7369b12c7120"
+    ),
+    predecessor_plan_digest=ISSUE_790_STEP17_ACTIVATED_PLAN_DIGEST,
+    sequence_ordinal=18,
+    projection_policy_version="NewsroomGovernedProposalProjectionV1",
+    projection_policy_digest=(
+        "sha256:c68a9c5bf81a8d052ba9b05f286b0d1cf664e86e2e00ee3c39684f7809b16a7c"
+    ),
+    temporal_policy_version="graphiti-source-reference-time-v2",
+    validator_contract_version="NewsroomCombinedTemporalNormaliseV2",
+    pre_dispatch_operational_requirements_digest=(
+        "sha256:968d0875cbed3a37cca56c2aa696598c3996e10d3a0ad6edc5978c21965d587b"
+    ),
+    reviewed_fix_digest=(
+        "sha256:05c15f64c43aeba82e8046394fedfbae89f93e5cc24240398f6b45878aa03ac4"
+    ),
+    predecessor_causal_report_digest=(
+        "sha256:caa65939801e85ecaa1abe6fa091c434f802e14ff4312a5a1ac9545a716adf17"
+    ),
+    checked_approved_by="checked:issue-790-step18-sealer",
+    checked_approval_reference=f"checked:{ISSUE_790_STEP18_PENDING_DIGEST}",
+    candidate_event_qualification_digest=(
+        "sha256:598445df7fadc3a33336608da40df103b2d952f9422ea22055b19d7c55342c78"
+    ),
+    candidate_event_id=(
+        "sha256:fb49a59d1c421c261bab4586873680e50e8181acfd0d6ebc03a14f889147d896"
+    ),
+    candidate_ledger_seq=13284,
+    candidate_event_manifest_digest=(
+        "sha256:317f51b6ad0ed41ce61682913ed5b71285130a9727aa710c278afcc12c091f38"
+    ),
+)
+
 _CHECKED_CANDIDATES = {
     _STEP16_CHECKED_CANDIDATE.candidate_digest: _STEP16_CHECKED_CANDIDATE,
     _STEP17_CHECKED_CANDIDATE.candidate_digest: _STEP17_CHECKED_CANDIDATE,
+    _STEP18_CHECKED_CANDIDATE.candidate_digest: _STEP18_CHECKED_CANDIDATE,
 }
 _CHECKED_CANDIDATES_BY_PENDING = {
     contract.pending_digest: contract
@@ -881,6 +945,11 @@ __all__ = [
     "ISSUE_790_STEP16_ACTIVATION_DIGEST",
     "ISSUE_790_STEP17_PENDING_DIGEST",
     "ISSUE_790_STEP17_CHECKED_CANDIDATE_DIGEST",
+    "ISSUE_790_STEP17_ACTIVATED_PLAN_DIGEST",
+    "ISSUE_790_STEP17_ACTIVATION_DIGEST",
+    "ISSUE_790_STEP17_GATE_OUTCOME_DIGEST",
+    "ISSUE_790_STEP18_PENDING_DIGEST",
+    "ISSUE_790_STEP18_CHECKED_CANDIDATE_DIGEST",
     "ISSUE_790_OWNER_ACTIVATED_SEQUENCE_ORDINALS",
     "Issue790ApprovedPlanContract",
     "Issue790CheckedCandidateContract",
