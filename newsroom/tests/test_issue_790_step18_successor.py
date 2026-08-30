@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from newsroom.authority.canonical import digest_canonical
+from newsroom.control_plane import issue_790_canary as canary_module
 from newsroom.control_plane import issue_790_contract as contract_module
 from newsroom.control_plane.issue_790_canary import (
     Issue790CanaryIntegrityError,
@@ -18,6 +21,7 @@ from newsroom.control_plane.issue_790_disposition import (
     ISSUE_790_STEP18_PENDING_PLAN_PATH,
     Issue790DispositionError,
     _require_sequence_predecessor,
+    _retry_event_snapshots,
     activate_issue_790_step16_plan,
     issue_790_checked_approval,
     run_issue_790_canary,
@@ -99,6 +103,12 @@ def test_step18_is_a_new_non_executable_candidate_bound_to_exact_event() -> None
     assert qualification["ledger_seq"] == 13284
     assert qualification["provider_calls"] == 0
     assert qualification["store_mutations"] == 0
+    assert [item["ledger_seq"] for item in candidate["retry_forbidden_events"]] == [
+        1932,
+        1972,
+        8834,
+        8835,
+    ]
     assert candidate["executable"] is False
     assert candidate["live_canary_authorised"] is False
 
@@ -178,3 +188,60 @@ def test_step17_target_is_now_durably_retry_forbidden(tmp_path: Path) -> None:
             preflight_evidence={},
             consumed_at=datetime(2026, 8, 30, tzinfo=UTC),
         )
+
+
+def test_step18_can_retain_queued_step17_target_as_retry_excluded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = tmp_path / "canary.sqlite"
+    repository = Issue790CanaryRepository(str(store))
+    events = _seal18()["retry_forbidden_events"]
+    connection = sqlite3.connect(store)
+    try:
+        connection.execute(
+            "CREATE TABLE model_usage_conservative_dispositions("
+            "invocation_id TEXT,approved_plan_digest TEXT,"
+            "disposition_digest TEXT PRIMARY KEY)"
+        )
+        connection.execute(
+            "INSERT INTO model_usage_conservative_dispositions VALUES(?,?,?)",
+            ("invocation", "sha256:" + "11" * 32, "sha256:" + "22" * 32),
+        )
+        connection.execute(
+            "CREATE TABLE unpublished_graphiti_revision_events("
+            "event_id TEXT,ledger_seq INTEGER,state TEXT,attempt_count INTEGER,"
+            "available_at TEXT,last_failure_code TEXT,provider_dispatched INTEGER)"
+        )
+        connection.executemany(
+            "INSERT INTO unpublished_graphiti_revision_events VALUES(?,?,?,?,?,?,?)",
+            [
+                (
+                    item["event_id"],
+                    item["ledger_seq"],
+                    item["state"],
+                    item["attempt_count"],
+                    item["available_at"],
+                    item["last_failure_code"],
+                    int(item["provider_dispatched"]),
+                )
+                for item in events
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    monkeypatch.setattr(
+        canary_module,
+        "_require_effective_plan_contract",
+        lambda *_args, **_kwargs: SimpleNamespace(invocation_id="invocation"),
+    )
+    retained = repository.retain_retry_exclusions(
+        approved_plan_digest="sha256:" + "11" * 32,
+        disposition_digest="sha256:" + "22" * 32,
+        events=events,
+        excluded_at=datetime(2026, 8, 30, tzinfo=UTC),
+    )
+    assert [item["ledger_seq"] for item in retained] == [1932, 1972, 8834, 8835]
+    assert retained[2]["event_snapshot"]["last_failure_code"] is None
+    assert _retry_event_snapshots(store, tuple(events)) == events

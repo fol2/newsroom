@@ -228,8 +228,9 @@ _RETRY_FORBIDDEN_EVENTS_STEP17: tuple[dict[str, object], ...] = (
     _EXHAUSTED_EVENT_8835,
 )
 _RETRY_FORBIDDEN_EVENTS_STEP18: tuple[dict[str, object], ...] = (
-    *_RETRY_FORBIDDEN_EVENTS_STEP17,
+    *_RETRY_FORBIDDEN_EVENTS,
     _EXHAUSTED_EVENT_8834,
+    _EXHAUSTED_EVENT_8835,
 )
 _RETRY_FORBIDDEN_LEDGER_SEQS = frozenset(
     int(item["ledger_seq"]) for item in _RETRY_FORBIDDEN_EVENTS_STEP18
@@ -1819,7 +1820,7 @@ def _retry_event_snapshots(
             "attempt_count": int(row[3]),
             "available_at": str(row[4]),
             "event_id": str(row[0]),
-            "last_failure_code": str(row[5]),
+            "last_failure_code": None if row[5] is None else str(row[5]),
             "ledger_seq": int(row[1]),
             "provider_dispatched": bool(row[6]),
             "state": str(row[2]),

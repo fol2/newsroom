@@ -47,15 +47,6 @@
       "state": "RETRY_HELD"
     },
     {
-      "attempt_count": 1,
-      "available_at": "2026-08-29T19:51:59.301612Z",
-      "event_id": "sha256:2c6941748dce73271a0d4aae2e94766384d0dd16bc29707524f74b8026d7c3b9",
-      "last_failure_code": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:GATE_ValueError",
-      "ledger_seq": 8835,
-      "provider_dispatched": false,
-      "state": "CONFIGURATION_HELD"
-    },
-    {
       "attempt_count": 0,
       "available_at": "2026-08-26T08:41:34.385400Z",
       "event_id": "sha256:cac05a3829b4283a12330c38b7ea3e4d1e998024e4b3ed2e73508c476996a04b",
@@ -63,6 +54,15 @@
       "ledger_seq": 8834,
       "provider_dispatched": false,
       "state": "QUEUED"
+    },
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-29T19:51:59.301612Z",
+      "event_id": "sha256:2c6941748dce73271a0d4aae2e94766384d0dd16bc29707524f74b8026d7c3b9",
+      "last_failure_code": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:GATE_ValueError",
+      "ledger_seq": 8835,
+      "provider_dispatched": false,
+      "state": "CONFIGURATION_HELD"
     }
   ],
   "canary": {
@@ -178,5 +178,5 @@
     },
     "candidate_event_preparation_digest": "sha256:744092a31f395cd17bb3cd6c92a08de519c137212b6b02ea23f256f07e2c016f"
   },
-  "canonical_digest": "sha256:130d963a787089435b11a63ef5de9aa9cbbee146ba1c9b2ef259ede1776fb488"
+  "canonical_digest": "sha256:798e0f39e2c618f5d56aa68d4def18ccd2cadc273fc9da4474e8f832c5cbd3ec"
 }
