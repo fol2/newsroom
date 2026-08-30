@@ -861,7 +861,7 @@ class Issue790CanaryRepository:
         extra = seqs[2:]
         if (
             seqs[:2] != (1932, 1972)
-            or any(seq not in {8835} for seq in extra)
+            or any(seq not in {8834, 8835} for seq in extra)
             or len(set(seqs)) != len(seqs)
         ):
             raise Issue790CanaryIntegrityError("retry exclusion targets differ")
@@ -894,15 +894,21 @@ class Issue790CanaryRepository:
                     "WHERE event_id=? AND ledger_seq=?",
                     (event_id, ledger_seq),
                 ).fetchone()
-                snapshot = {
-                    "event_id": str(row[0]),
-                    "ledger_seq": int(row[1]),
-                    "state": str(row[2]),
-                    "attempt_count": int(row[3]),
-                    "available_at": str(row[4]),
-                    "last_failure_code": str(row[5]),
-                    "provider_dispatched": bool(row[6]),
-                } if row is not None else None
+                snapshot = (
+                    {
+                        "event_id": str(row[0]),
+                        "ledger_seq": int(row[1]),
+                        "state": str(row[2]),
+                        "attempt_count": int(row[3]),
+                        "available_at": str(row[4]),
+                        "last_failure_code": (
+                            None if row[5] is None else str(row[5])
+                        ),
+                        "provider_dispatched": bool(row[6]),
+                    }
+                    if row is not None
+                    else None
+                )
                 if snapshot != dict(item):
                     raise Issue790CanaryIntegrityError(
                         "retry exclusion event state differs"
@@ -1179,7 +1185,7 @@ class Issue790CanaryRepository:
         owner_id = _token(owner_id, field="canary owner id")
         if isinstance(ledger_seq, bool) or not isinstance(ledger_seq, int) or ledger_seq <= 0:
             raise Issue790CanaryIntegrityError("bounded canary ledger sequence is invalid")
-        if ledger_seq in {1932, 1972, 8835}:
+        if ledger_seq in {1932, 1972, 8834, 8835}:
             raise Issue790CanaryIntegrityError("bounded canary targeted a retained failure")
         consumed_at_text = _utc_text(consumed_at)
 
