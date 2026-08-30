@@ -315,6 +315,29 @@ def _ready_event() -> dict[str, object]:
     }
 
 
+def _provider_free_event_preflight() -> dict[str, object]:
+    event = _ready_event()
+    unsigned: dict[str, object] = {
+        "schema_version": "newsroom.issue-790.candidate-event-qualification.v1",
+        "status": "READY_FOR_OWNER_PACKET",
+        "event_id": event["event_id"],
+        "ledger_seq": event["ledger_seq"],
+        "event_manifest_digest": "sha256:" + "12" * 32,
+        "event_preflight_digest": "sha256:" + "34" * 32,
+        "resolved_unit_count": 1,
+        "provider_calls": 0,
+        "store_mutations": 0,
+        "observed_at": "2026-08-29T12:00:00.000000Z",
+    }
+    return {**unsigned, "qualification_digest": digest_canonical(unsigned)}
+
+
+def _empty_proving_store(tmp_path: Path) -> Path:
+    path = tmp_path / "proving.sqlite"
+    sqlite3.connect(path).close()
+    return path
+
+
 def _evidence() -> dict[str, object]:
     return {
         "revision": _REVISION,
@@ -728,6 +751,7 @@ def test_runtime_preflight_fails_before_provider(tmp_path: Path, mutator, match:
         qualify_issue_790_step16_readiness(
             plan=activated["plan"],
             store=activated["store"],
+            proving_store=tmp_path / "unused-proving.sqlite",
             evidence=evidence,
             route_state={"state": "OPEN", "reason": "SYSTEMIC_TRANSPORT"},
             circuit_state=_closed_circuit(),
@@ -809,6 +833,7 @@ def test_focus_gate_identity_and_duplicate_approval_blocks_fail(
         qualify_issue_790_step16_readiness(
             plan=activated["plan"],
             store=activated["store"],
+            proving_store=tmp_path / "unused-proving.sqlite",
             evidence=missing,
             route_state={"state": "OPEN", "reason": "SYSTEMIC_TRANSPORT"},
             circuit_state=_closed_circuit(),
@@ -824,6 +849,7 @@ def test_focus_gate_identity_and_duplicate_approval_blocks_fail(
         qualify_issue_790_step16_readiness(
             plan=activated["plan"],
             store=activated["store"],
+            proving_store=tmp_path / "unused-proving.sqlite",
             evidence=wrong_run,
             route_state={"state": "OPEN", "reason": "SYSTEMIC_TRANSPORT"},
             circuit_state=_closed_circuit(),
@@ -862,11 +888,20 @@ def test_changed_created_at_fails_at_live_gate(tmp_path: Path) -> None:
         )
 
 
-def test_positive_readiness_stops_before_provider_io(tmp_path: Path) -> None:
+def test_positive_readiness_stops_before_provider_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     activated = _activate(tmp_path)
+    monkeypatch.setattr(
+        issue_790_operation,
+        "qualify_issue_790_candidate_event",
+        lambda **_kwargs: _provider_free_event_preflight(),
+    )
     receipt = qualify_issue_790_step16_readiness(
         plan=activated["plan"],
         store=activated["store"],
+        proving_store=_empty_proving_store(tmp_path),
         evidence=_evidence(),
         route_state={"state": "OPEN", "reason": "SYSTEMIC_TRANSPORT"},
         circuit_state=_closed_circuit(),
@@ -879,6 +914,16 @@ def test_positive_readiness_stops_before_provider_io(tmp_path: Path) -> None:
     assert receipt["catalogue_queries"] == 0
     assert receipt["credential_resolution"] is False
     assert receipt["canary_consumed"] is False
+    assert receipt["schema_version"].endswith("readiness.v2")
+    assert receipt["event_id"] == _ready_event()["event_id"]
+    assert receipt["ledger_seq"] == _ready_event()["ledger_seq"]
+    assert receipt["resolved_unit_count"] == 1
+    assert receipt["event_preflight_digest"] == (
+        _provider_free_event_preflight()["event_preflight_digest"]
+    )
+    assert receipt["candidate_event_qualification_digest"] == (
+        _provider_free_event_preflight()["qualification_digest"]
+    )
     path = tmp_path / "activated-plan.json"
     path.write_text(json.dumps(activated["plan"]), encoding="utf-8")
     loaded = load_issue_790_plan(
@@ -887,6 +932,41 @@ def test_positive_readiness_stops_before_provider_io(tmp_path: Path) -> None:
         github_api=activated["github"],
     )
     assert loaded["canonical_digest"] == activated["plan"]["canonical_digest"]
+
+
+def test_selected_event_mismatch_cannot_receive_readiness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    activated = _activate(tmp_path)
+
+    def mismatch(**_kwargs: object) -> dict[str, object]:
+        raise Issue790DispositionError(
+            "issue #790 selected event is not provider-free ready: "
+            "RESOLVED_INGEST_IDS_DIFFER_FROM_LANDED"
+        )
+
+    monkeypatch.setattr(
+        issue_790_operation,
+        "qualify_issue_790_candidate_event",
+        mismatch,
+    )
+    with pytest.raises(
+        Issue790DispositionError,
+        match="selected event is not provider-free ready: "
+        "RESOLVED_INGEST_IDS_DIFFER_FROM_LANDED",
+    ):
+        qualify_issue_790_step16_readiness(
+            plan=activated["plan"],
+            store=activated["store"],
+            proving_store=_empty_proving_store(tmp_path),
+            evidence=_evidence(),
+            route_state={"state": "OPEN", "reason": "SYSTEMIC_TRANSPORT"},
+            circuit_state=_closed_circuit(),
+            canary_event=_ready_event(),
+            observed_at=_OBSERVED,
+            github_api=activated["github"],
+        )
 
 
 def test_step16_call_shape_drift_still_fails_closed(
@@ -2331,6 +2411,11 @@ def test_operator_activate_and_qualify(
     files, payload = _operator_files(tmp_path)
     github = _FakeGitHub(_comment(payload))
     monkeypatch.setattr(issue_790_operation, "_default_github_api", github)
+    monkeypatch.setattr(
+        issue_790_operation,
+        "qualify_issue_790_candidate_event",
+        lambda **_kwargs: _provider_free_event_preflight(),
+    )
     rc = cli.main(
         [
             "activate-step16",
@@ -2385,6 +2470,7 @@ def test_operator_activate_and_qualify(
     _write_json(evidence, _evidence())
     _write_json(route, {"state": "OPEN", "reason": "SYSTEMIC_TRANSPORT"})
     _write_json(event, _ready_event())
+    proving = _empty_proving_store(tmp_path)
     rc = cli.main(
         [
             "qualify-step16",
@@ -2392,6 +2478,8 @@ def test_operator_activate_and_qualify(
             str(files["store"]),
             "--plan",
             str(files["plan"]),
+            "--proving-store",
+            str(proving),
             "--evidence",
             str(evidence),
             "--route-state",

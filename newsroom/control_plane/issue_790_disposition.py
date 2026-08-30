@@ -3205,6 +3205,7 @@ def run_issue_790_canary(
         proving_store,
         field="source proving store",
     )
+    assert_issue_790_paths_disjoint(store, proving_store)
     backup_path = _canonical_new_file(backup_path, field="canary backup destination")
     assert_issue_790_paths_disjoint(store, proving_store, backup_path)
     if ledger_seq in _RETRY_FORBIDDEN_LEDGER_SEQS:
@@ -4186,10 +4187,99 @@ def _optional_step16_circuit_release(value: object) -> dict[str, object] | None:
         ) from exc
 
 
+def qualify_issue_790_candidate_event(
+    *,
+    store: Path,
+    proving_store: Path,
+    event_id: str,
+    ledger_seq: int,
+    observed_at: datetime,
+) -> dict[str, object]:
+    """Qualify one untouched event before an owner packet is prepared."""
+
+    if (
+        not event_id.startswith("sha256:")
+        or isinstance(ledger_seq, bool)
+        or not isinstance(ledger_seq, int)
+        or ledger_seq <= 0
+        or ledger_seq in _RETRY_FORBIDDEN_LEDGER_SEQS
+    ):
+        raise Issue790DispositionError("issue #790 candidate event is forbidden")
+    store = _canonical_existing_file(store, field="source unpublished store")
+    proving_store = _canonical_existing_file(
+        proving_store,
+        field="source proving store",
+    )
+    _sqlite_quick_check(store, field="source unpublished store")
+    _sqlite_quick_check(proving_store, field="source proving store")
+    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        excluded = connection.execute(
+            "SELECT 1 FROM issue_790_graphiti_retry_exclusions "
+            "WHERE event_id=? OR ledger_seq=? LIMIT 1",
+            (event_id, ledger_seq),
+        ).fetchone()
+    finally:
+        connection.close()
+    if excluded is not None:
+        raise Issue790DispositionError("issue #790 candidate event is forbidden")
+    from newsroom.control_plane.cycle import qualify_fresh_graphiti_event
+
+    try:
+        event_preflight = qualify_fresh_graphiti_event(
+            proving_store=str(proving_store),
+            unpublished_store=str(store),
+            event_id=event_id,
+            ledger_seq=ledger_seq,
+            clock=lambda: observed_at,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
+        raise Issue790DispositionError(
+            f"issue #790 selected event is not provider-free ready: {exc}"
+        ) from exc
+    resolved_units = event_preflight.get("resolved_units")
+    evidence_digest = event_preflight.get("evidence_digest")
+    if (
+        event_preflight.get("event_id") != event_id
+        or event_preflight.get("ledger_seq") != ledger_seq
+        or event_preflight.get("provider_calls") != 0
+        or event_preflight.get("store_mutations") != 0
+        or not isinstance(resolved_units, list)
+        or not resolved_units
+        or not isinstance(event_preflight.get("event_manifest_digest"), str)
+        or not isinstance(evidence_digest, str)
+        or evidence_digest
+        != digest_canonical(
+            {
+                key: value
+                for key, value in event_preflight.items()
+                if key != "evidence_digest"
+            }
+        )
+    ):
+        raise Issue790DispositionError(
+            "issue #790 selected event provider-free evidence differs"
+        )
+    unsigned: dict[str, object] = {
+        "schema_version": "newsroom.issue-790.candidate-event-qualification.v1",
+        "status": "READY_FOR_OWNER_PACKET",
+        "event_id": event_id,
+        "ledger_seq": ledger_seq,
+        "event_manifest_digest": event_preflight["event_manifest_digest"],
+        "event_preflight_digest": evidence_digest,
+        "resolved_unit_count": len(resolved_units),
+        "provider_calls": 0,
+        "store_mutations": 0,
+        "observed_at": _utc_text(observed_at),
+    }
+    return {**unsigned, "qualification_digest": digest_canonical(unsigned)}
+
+
 def qualify_issue_790_step16_readiness(
     *,
     plan: Mapping[str, object],
     store: Path,
+    proving_store: Path,
     evidence: Mapping[str, object],
     route_state: Mapping[str, object],
     circuit_state: Mapping[str, object] | None,
@@ -4197,7 +4287,7 @@ def qualify_issue_790_step16_readiness(
     observed_at: datetime,
     github_api: step16_activation_module.GitHubApi | None = None,
 ) -> dict[str, object]:
-    """Provider-free readiness bound. Stops before credential, catalogue or provider I/O."""
+    """Provider-free readiness bound for the exact selected event."""
 
     retained = _require_approved_plan(plan, store=store, github_api=github_api)
     _require_step16_code_identity(retained, evidence=evidence)
@@ -4210,6 +4300,21 @@ def qualify_issue_790_step16_readiness(
         canary_event=canary_event,
         fresh_event=True,
     )
+    event_id = canary_event.get("event_id")
+    ledger_seq = canary_event.get("ledger_seq")
+    if not isinstance(event_id, str) or isinstance(ledger_seq, bool) or not isinstance(
+        ledger_seq, int
+    ):
+        raise Issue790DispositionError(
+            "issue #790 pre-dispatch event is not untouched"
+        )
+    candidate = qualify_issue_790_candidate_event(
+        store=store,
+        proving_store=proving_store,
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        observed_at=observed_at,
+    )
     connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
     try:
         record = step16_activation_module.load_step16_activation_record(
@@ -4219,11 +4324,17 @@ def qualify_issue_790_step16_readiness(
     finally:
         connection.close()
     unsigned = {
-        "schema_version": "newsroom.issue-790.step16-provider-free-readiness.v1",
+        "schema_version": "newsroom.issue-790.step16-provider-free-readiness.v2",
         "status": step16_activation_module.ISSUE_790_STEP16_READINESS_STATUS,
         "plan_digest": retained["canonical_digest"],
         "checked_candidate_digest": record["checked_candidate_digest"],
         "activation_digest": record["activation_digest"],
+        "event_id": event_id,
+        "ledger_seq": ledger_seq,
+        "event_manifest_digest": candidate["event_manifest_digest"],
+        "event_preflight_digest": candidate["event_preflight_digest"],
+        "candidate_event_qualification_digest": candidate["qualification_digest"],
+        "resolved_unit_count": candidate["resolved_unit_count"],
         "provider_calls": 0,
         "catalogue_queries": 0,
         "credential_resolution": False,
@@ -4247,6 +4358,7 @@ __all__ = [
     "dry_run_issue_790_plan",
     "finalise_issue_790_step16_plan",
     "load_issue_790_plan",
+    "qualify_issue_790_candidate_event",
     "qualify_issue_790_step16_readiness",
     "run_issue_790_canary",
     "validate_issue_790_plan",
