@@ -4210,6 +4210,7 @@ def qualify_issue_790_candidate_event(
         proving_store,
         field="source proving store",
     )
+    assert_issue_790_paths_disjoint(store, proving_store)
     _sqlite_quick_check(store, field="source unpublished store")
     _sqlite_quick_check(proving_store, field="source proving store")
     connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
@@ -4260,6 +4261,22 @@ def qualify_issue_790_candidate_event(
         raise Issue790DispositionError(
             "issue #790 selected event provider-free evidence differs"
         )
+    try:
+        connection = sqlite3.connect(
+            f"{store.absolute().as_uri()}?mode=ro", uri=True
+        )
+        try:
+            issue_790_canary_module.validate_graphiti_canary_target_unused(
+                connection,
+                event_id=event_id,
+                ingest_ids=tuple(str(item["ingest_id"]) for item in resolved_units),
+            )
+        finally:
+            connection.close()
+    except (Issue790CanaryIntegrityError, sqlite3.Error) as exc:
+        raise Issue790DispositionError(
+            f"issue #790 selected event is not unused: {exc}"
+        ) from exc
     unsigned: dict[str, object] = {
         "schema_version": "newsroom.issue-790.candidate-event-qualification.v1",
         "status": "READY_FOR_OWNER_PACKET",

@@ -403,6 +403,54 @@ def graphiti_event_has_canary_consumption(
     )
 
 
+def validate_graphiti_canary_target_unused(
+    connection: sqlite3.Connection,
+    *,
+    event_id: str,
+    ingest_ids: tuple[str, ...],
+) -> None:
+    """Reject a canary target with consumption or execution evidence."""
+
+    if graphiti_event_has_canary_consumption(connection, event_id=event_id):
+        raise Issue790CanaryIntegrityError(
+            "bounded canary target is already consumed"
+        )
+    if not ingest_ids:
+        raise Issue790CanaryIntegrityError(
+            "bounded canary target has no resolved ingest identities"
+        )
+    placeholders = ",".join("?" for _ in ingest_ids)
+    prior_tables = (
+        "unpublished_graphiti_ingest",
+        "unpublished_graphiti_failures",
+        "unpublished_graphiti_receipts",
+        "unpublished_graphiti_attempt_receipts",
+        "unpublished_graphiti_spend",
+    )
+    prior_ingest_evidence = any(
+        _table_exists(connection, table)
+        and connection.execute(
+            f"SELECT 1 FROM {table} WHERE ingest_id IN ({placeholders}) LIMIT 1",
+            ingest_ids,
+        ).fetchone()
+        is not None
+        for table in prior_tables
+    )
+    if prior_ingest_evidence or (
+        _table_exists(connection, "model_work_envelopes")
+        and connection.execute(
+            f"SELECT 1 FROM model_work_envelopes WHERE cycle_id=? "
+            f"OR json_extract(record_json,'$.ingest_id') "
+            f"IN ({placeholders}) LIMIT 1",
+            (event_id, *ingest_ids),
+        ).fetchone()
+        is not None
+    ):
+        raise Issue790CanaryIntegrityError(
+            "bounded canary target has prior execution evidence"
+        )
+
+
 def _stable_unit_ref(value: Mapping[str, object]) -> tuple[object, ...]:
     return (
         value.get("ingest_id"),
@@ -1271,30 +1319,11 @@ class Issue790CanaryRepository:
                     "bounded canary retained and preflight units differ"
                 )
             ingest_ids = tuple(str(item["ingest_id"]) for item in resolved_units)
-            placeholders = ",".join("?" for _ in ingest_ids)
-            prior_tables = (
-                "unpublished_graphiti_ingest",
-                "unpublished_graphiti_failures",
-                "unpublished_graphiti_receipts",
-                "unpublished_graphiti_attempt_receipts",
-                "unpublished_graphiti_spend",
+            validate_graphiti_canary_target_unused(
+                connection,
+                event_id=event_id,
+                ingest_ids=ingest_ids,
             )
-            if any(
-                connection.execute(
-                    f"SELECT 1 FROM {table} WHERE ingest_id IN ({placeholders}) LIMIT 1",
-                    ingest_ids,
-                ).fetchone()
-                is not None
-                for table in prior_tables
-            ) or connection.execute(
-                f"SELECT 1 FROM model_work_envelopes WHERE cycle_id=? "
-                f"OR json_extract(record_json,'$.ingest_id') "
-                f"IN ({placeholders}) LIMIT 1",
-                (event_id, *ingest_ids),
-            ).fetchone() is not None:
-                raise Issue790CanaryIntegrityError(
-                    "bounded canary target has prior execution evidence"
-                )
             without_digest: dict[str, object] = {
                 "schema_version": CANARY_CONSUMPTION_SCHEMA,
                 "approved_plan_digest": approved_plan_digest,
@@ -1728,6 +1757,7 @@ __all__ = [
     "Issue790CanaryIntegrityError",
     "Issue790CanaryRepository",
     "graphiti_event_has_canary_consumption",
+    "validate_graphiti_canary_target_unused",
     "graphiti_excluded_event_ids",
     "graphiti_retry_excluded",
     "validate_graphiti_canary_claim",
