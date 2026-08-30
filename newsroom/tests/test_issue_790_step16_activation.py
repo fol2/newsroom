@@ -2252,6 +2252,12 @@ def test_recovery_after_terminal_before_outcome(
     assert receipt["outcome"]["result_class"] == "TRUTHFUL_PROVIDER_SUCCESS"
     assert receipt["event_after"]["event"]["state"] == "TERMINAL"
     assert receipt["outcome"]["attempt_count"] == 1
+    assert receipt["canary_evidence_passed"] is True
+    assert receipt["publication_performed"] is False
+    assert receipt["public_dispatch_performed"] is False
+    assert receipt["backlog_drain_performed"] is False
+    assert receipt["worker_remained_unloaded"] is True
+    assert _table_count(store, "issue_790_bounded_canary_outcomes") == 1
 
 
 def test_recovery_after_provider_non_success_before_outcome(

@@ -51,6 +51,31 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GROK_CHAT_REASONING,
 )
 from newsroom.graphiti_adapter.temporal_vocabulary import TemporalBasis
+from newsroom.graphiti_adapter.types import GraphitiAdapterContractError
+
+
+GRAPHITI_RESULT_STAGE_ADAPTER_EXECUTION = "ADAPTER_EXECUTION"
+GRAPHITI_RESULT_STAGE_CYCLE_RESULT_CONSTRUCTION = "CYCLE_RESULT_CONSTRUCTION"
+GRAPHITI_RESULT_STAGE_CYCLE_RESULT_BINDING = "CYCLE_RESULT_BINDING"
+GRAPHITI_RESULT_STAGE_UNCLASSIFIED = "UNCLASSIFIED_RESULT_BOUNDARY"
+GRAPHITI_RESULT_FAILURE_STAGES = frozenset(
+    {
+        GRAPHITI_RESULT_STAGE_ADAPTER_EXECUTION,
+        GRAPHITI_RESULT_STAGE_CYCLE_RESULT_CONSTRUCTION,
+        GRAPHITI_RESULT_STAGE_CYCLE_RESULT_BINDING,
+        GRAPHITI_RESULT_STAGE_UNCLASSIFIED,
+    }
+)
+
+
+class GraphitiResultStageError(ValueError):
+    """Safe result-boundary classification without provider response content."""
+
+    def __init__(self, stage: str) -> None:
+        if stage not in GRAPHITI_RESULT_FAILURE_STAGES:
+            raise ValueError("Graphiti result failure stage is not allow-listed")
+        self.stage = stage
+        super().__init__(f"Graphiti result boundary failed at {stage}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -996,83 +1021,105 @@ class EvaluationGraphitiRunner:
             if not self._fallback_permitted:
                 adapter_options["fallback_permitted"] = False
             adapter = RealGraphitiAdapter(**adapter_options)
-            execution = adapter.execute(
-                attempt=attempt,
-                workspace_root=Path(root),
+            try:
+                execution = adapter.execute(
+                    attempt=attempt,
+                    workspace_root=Path(root),
+                )
+            except GraphitiAdapterContractError as exc:
+                raise GraphitiResultStageError(
+                    GRAPHITI_RESULT_STAGE_ADAPTER_EXECUTION
+                ) from exc
+        try:
+            raw = (
+                execution.produced.raw_output_value
+                or execution.produced.attempt_receipt_value
             )
-        raw = (
-            execution.produced.raw_output_value
-            or execution.produced.attempt_receipt_value
-        )
-        payload = raw if isinstance(raw, dict) else {}
-        relations = (
-            tuple(payload["relations"])
-            if isinstance(payload.get("relations"), list)
-            else ()
-        )
-        entities = (
-            tuple(payload["entities"])
-            if isinstance(payload.get("entities"), list)
-            else ()
-        )
-        invocations = payload.get("chat_invocations")
-        proposal_receipts = payload.get("proposals")
-        passage_receipts = payload.get("passages")
-        embedding_usage = payload.get("embedding_usage")
-        token_usage = payload.get("token_usage")
-        usage = execution.produced.usage
-        usage_basis = payload.get("usage_basis")
-        return GraphitiCycleResult(
-            ingest_id=unit.ingest_id,
-            source_id=unit.source_id,
-            item_key=unit.item_key,
-            outcome=execution.outcome.value,
-            proposal_count=len(execution.produced.proposals),
-            entity_count=len(entities),
-            relation_count=len(relations),
-            failure_code=execution.failure_code,
-            temporal_basis=temporal.basis,
-            reference_time=temporal.reference_time.to_text(),
-            generation_id=GRAPHITI_GENERATION_ID,
-            receipt_digest=str(payload.get("raw_output_digest") or ""),
-            episode_uuid=str(payload.get("episode_uuid") or ""),
-            entities=entities,
-            relations=relations,
-            proposals=(
-                tuple(proposal_receipts)
-                if isinstance(proposal_receipts, list)
+            payload = raw if isinstance(raw, dict) else {}
+            relations = (
+                tuple(payload["relations"])
+                if isinstance(payload.get("relations"), list)
                 else ()
-            ),
-            passages=(
-                tuple(passage_receipts)
-                if isinstance(passage_receipts, list)
+            )
+            entities = (
+                tuple(payload["entities"])
+                if isinstance(payload.get("entities"), list)
                 else ()
-            ),
-            chat_invocations=tuple(invocations) if isinstance(invocations, list) else (),
-            embedding_usage=(
-                embedding_usage if isinstance(embedding_usage, dict) else None
-            ),
-            token_usage=token_usage if isinstance(token_usage, dict) else None,
-            request_tokens=usage.request_tokens,
-            response_tokens=usage.response_tokens,
-            cost_microunits=usage.cost_microunits,
-            usage_basis=str(usage_basis) if isinstance(usage_basis, str) else "UNOBSERVED",
-            prompt_version=GRAPHITI_PROMPT_COMPONENT.component_version,
-            attempt_number=unit.attempt_number,
-            provider_attempt_number=(
-                int(payload["provider_attempt_number"])
-                if isinstance(payload.get("provider_attempt_number"), int)
-                and not isinstance(payload.get("provider_attempt_number"), bool)
-                else unit.attempt_number
-            ),
-            predecessor_episode_uuid=unit.predecessor_ingest_id,
-            raw_receipt=payload,
-        )
+            )
+            invocations = payload.get("chat_invocations")
+            proposal_receipts = payload.get("proposals")
+            passage_receipts = payload.get("passages")
+            embedding_usage = payload.get("embedding_usage")
+            token_usage = payload.get("token_usage")
+            usage = execution.produced.usage
+            usage_basis = payload.get("usage_basis")
+            return GraphitiCycleResult(
+                ingest_id=unit.ingest_id,
+                source_id=unit.source_id,
+                item_key=unit.item_key,
+                outcome=execution.outcome.value,
+                proposal_count=len(execution.produced.proposals),
+                entity_count=len(entities),
+                relation_count=len(relations),
+                failure_code=execution.failure_code,
+                temporal_basis=temporal.basis,
+                reference_time=temporal.reference_time.to_text(),
+                generation_id=GRAPHITI_GENERATION_ID,
+                receipt_digest=str(payload.get("raw_output_digest") or ""),
+                episode_uuid=str(payload.get("episode_uuid") or ""),
+                entities=entities,
+                relations=relations,
+                proposals=(
+                    tuple(proposal_receipts)
+                    if isinstance(proposal_receipts, list)
+                    else ()
+                ),
+                passages=(
+                    tuple(passage_receipts)
+                    if isinstance(passage_receipts, list)
+                    else ()
+                ),
+                chat_invocations=(
+                    tuple(invocations) if isinstance(invocations, list) else ()
+                ),
+                embedding_usage=(
+                    embedding_usage if isinstance(embedding_usage, dict) else None
+                ),
+                token_usage=token_usage if isinstance(token_usage, dict) else None,
+                request_tokens=usage.request_tokens,
+                response_tokens=usage.response_tokens,
+                cost_microunits=usage.cost_microunits,
+                usage_basis=(
+                    str(usage_basis)
+                    if isinstance(usage_basis, str)
+                    else "UNOBSERVED"
+                ),
+                prompt_version=GRAPHITI_PROMPT_COMPONENT.component_version,
+                attempt_number=unit.attempt_number,
+                provider_attempt_number=(
+                    int(payload["provider_attempt_number"])
+                    if isinstance(payload.get("provider_attempt_number"), int)
+                    and not isinstance(payload.get("provider_attempt_number"), bool)
+                    else unit.attempt_number
+                ),
+                predecessor_episode_uuid=unit.predecessor_ingest_id,
+                raw_receipt=payload,
+            )
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise GraphitiResultStageError(
+                GRAPHITI_RESULT_STAGE_CYCLE_RESULT_CONSTRUCTION
+            ) from exc
 
 
 __all__ = [
     "EvaluationGraphitiRunner",
     "GraphitiCycleResult",
+    "GraphitiResultStageError",
+    "GRAPHITI_RESULT_FAILURE_STAGES",
+    "GRAPHITI_RESULT_STAGE_ADAPTER_EXECUTION",
+    "GRAPHITI_RESULT_STAGE_CYCLE_RESULT_BINDING",
+    "GRAPHITI_RESULT_STAGE_CYCLE_RESULT_CONSTRUCTION",
+    "GRAPHITI_RESULT_STAGE_UNCLASSIFIED",
     "GraphitiModelUsageObserver",
     "GraphitiPort",
 ]

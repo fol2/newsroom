@@ -1349,13 +1349,10 @@ class GraphitiAdapterExecution:
             raise GraphitiAdapterContractError(
                 "adapter execution cannot end before it starts"
             )
-        if self.outcome.may_reference_proposals != bool(self.produced.proposals):
-            if self.outcome is GraphitiAdapterOutcome.PARTIAL and not self.produced.proposals:
-                pass
-            else:
-                raise GraphitiAdapterContractError(
-                    "adapter outcome proposal authority differs from produced extraction"
-                )
+        if self.produced.proposals and not self.outcome.may_reference_proposals:
+            raise GraphitiAdapterContractError(
+                "adapter outcome proposal authority differs from produced extraction"
+            )
         expected = adapter_outcome_for(self.produced)
         if expected is not self.outcome:
             raise GraphitiAdapterContractError(

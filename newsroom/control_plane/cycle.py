@@ -46,9 +46,12 @@ from newsroom.control_plane.editorial import (
 from newsroom.control_plane.evidence import EvidencePackage, retained_package_for
 from newsroom.control_plane.governed_context import GovernedContext
 from newsroom.control_plane.graphiti import (
+    GRAPHITI_RESULT_STAGE_CYCLE_RESULT_BINDING,
+    GRAPHITI_RESULT_STAGE_UNCLASSIFIED,
     GovernedRealGraphitiPort,
     GraphitiCycleResult,
     GraphitiPort,
+    GraphitiResultStageError,
 )
 from newsroom.control_plane.graphiti_events import (
     ConfigurationGraphitiEventFailure,
@@ -1197,6 +1200,7 @@ def _ingest(
             )
         unpublished.commit()
         returned_result: GraphitiCycleResult | None = None
+        result_failure_stage = GRAPHITI_RESULT_STAGE_UNCLASSIFIED
         owner_id: str | None = None
         try:
             # Re-read under a proving-writer fence after all local commits, then
@@ -1289,6 +1293,7 @@ def _ingest(
                     )
                 else:
                     returned_result = graphiti.ingest(unit)
+            result_failure_stage = GRAPHITI_RESULT_STAGE_CYCLE_RESULT_BINDING
             result = _bind_result(
                 unit,
                 returned_result,
@@ -1382,6 +1387,11 @@ def _ingest(
                 "failure_code": "PRODUCER_INTERNAL_ERROR",
                 "binding_failure": "RESULT_CONTRACT_REJECTED",
                 "binding_failure_type": type(exc).__name__,
+                "binding_failure_stage": (
+                    exc.stage
+                    if isinstance(exc, GraphitiResultStageError)
+                    else result_failure_stage
+                ),
                 **_rejected_result_metadata(returned_result),
                 "provider_attempt_number": (
                     _rejected_provider_attempt_number(returned_result)

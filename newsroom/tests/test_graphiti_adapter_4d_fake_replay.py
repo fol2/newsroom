@@ -6,6 +6,7 @@ import pytest
 
 from newsroom.authority.canonical import digest_canonical
 from newsroom.extraction.types import FixtureExtractionCase
+from newsroom.extraction import ExtractionContractError
 from newsroom.graphiti_adapter import (
     ApprovedReplayBundle,
     ApprovedReplayGraphitiAdapter,
@@ -93,6 +94,66 @@ def test_deterministic_fake_uses_final_interface_and_always_cleans(
     assert "private-node" not in rendered
     assert "private-relation" not in rendered
     assert "cypher" not in rendered.lower()
+
+
+def test_result_contract_allows_empty_terminal_success_but_not_failure_proposals(
+    tmp_path,
+) -> None:
+    state = seed_extraction_fixture(tmp_path / "authority")
+
+    def execute(fixture_case: FixtureExtractionCase, suffix: str):
+        attempt = fake_attempt(state, fixture_case=fixture_case)
+        return DeterministicFakeGraphitiAdapter(
+            clock=lambda: ADAPTER_NOW
+        ).execute(
+            attempt=attempt,
+            workspace_root=(tmp_path / f"workspace-{suffix}").resolve(),
+        )
+
+    complete = execute(FixtureExtractionCase.BILINGUAL_COMPLETE, "complete")
+    partial = execute(FixtureExtractionCase.BILINGUAL_PARTIAL, "partial")
+    failed = execute(FixtureExtractionCase.RETRYABLE_FAILURE, "failed")
+    blocked = execute(FixtureExtractionCase.BLOCKING_FAILURE, "blocked")
+
+    assert complete.outcome is GraphitiAdapterOutcome.COMPLETE
+    assert complete.produced.proposals
+    assert replace(
+        complete,
+        produced=replace(
+            complete.produced,
+            proposals=(),
+            usage=replace(
+                complete.produced.usage,
+                proposal_count=0,
+                evidence_range_count=0,
+            ),
+        ),
+    ).outcome is GraphitiAdapterOutcome.COMPLETE
+    assert replace(
+        partial,
+        produced=replace(
+            partial.produced,
+            proposals=(),
+            usage=replace(
+                partial.produced.usage,
+                proposal_count=0,
+                evidence_range_count=0,
+            ),
+        ),
+    ).outcome is GraphitiAdapterOutcome.PARTIAL
+
+    proposal = complete.produced.proposals[0]
+    for execution in (failed, blocked):
+        with pytest.raises(ExtractionContractError):
+            replace(
+                execution.produced,
+                proposals=(proposal,),
+                usage=replace(
+                    execution.produced.usage,
+                    proposal_count=1,
+                    evidence_range_count=len(proposal.evidence),
+                ),
+            )
 
 
 def test_homonym_fixture_runs_through_same_adapter_contract(tmp_path) -> None:
