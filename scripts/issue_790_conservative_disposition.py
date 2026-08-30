@@ -17,6 +17,7 @@ from newsroom.control_plane.issue_790_disposition import (
     assert_issue_790_paths_disjoint,
     dry_run_issue_790_plan,
     load_issue_790_plan,
+    qualify_issue_790_candidate_event,
     qualify_issue_790_step16_readiness,
     require_issue_790_path_outside_git,
     run_issue_790_canary,
@@ -62,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
             "apply",
             "canary",
             "activate-step16",
+            "qualify-event",
             "qualify-step16",
         ),
     )
@@ -92,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.mode == "activate-step16":
             return _activate_step16(args)
+        if args.mode == "qualify-event":
+            return _qualify_event(args)
         if args.mode == "qualify-step16":
             return _qualify_step16(args)
         return _legacy_mode(parser, args)
@@ -260,6 +264,7 @@ def _activate_step16(args: argparse.Namespace) -> int:
 def _qualify_step16(args: argparse.Namespace) -> int:
     required = (
         args.plan,
+        args.proving_store,
         args.evidence,
         args.route_state,
         args.canary_event,
@@ -268,10 +273,11 @@ def _qualify_step16(args: argparse.Namespace) -> int:
     )
     if any(value is None for value in required):
         raise Issue790DispositionError(
-            "qualify-step16 requires --plan, --evidence, --route-state, "
-            "--canary-event, --observed-at and --receipt"
+            "qualify-step16 requires --plan, --proving-store, --evidence, "
+            "--route-state, --canary-event, --observed-at and --receipt"
         )
     assert args.plan is not None
+    assert args.proving_store is not None
     assert args.evidence is not None
     assert args.route_state is not None
     assert args.canary_event is not None
@@ -280,6 +286,7 @@ def _qualify_step16(args: argparse.Namespace) -> int:
     require_issue_790_path_outside_git(args.receipt, field="readiness receipt")
     paths = [
         args.store,
+        args.proving_store,
         args.plan,
         args.evidence,
         args.route_state,
@@ -301,6 +308,7 @@ def _qualify_step16(args: argparse.Namespace) -> int:
     receipt = qualify_issue_790_step16_readiness(
         plan=plan,
         store=args.store,
+        proving_store=args.proving_store,
         evidence=evidence,
         route_state=route_state,
         circuit_state=circuit_state,
@@ -309,6 +317,47 @@ def _qualify_step16(args: argparse.Namespace) -> int:
     )
     write_issue_790_canonical_json(
         args.receipt, receipt, field="readiness receipt"
+    )
+    sys.stdout.write(
+        json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    )
+    return 0
+
+
+def _qualify_event(args: argparse.Namespace) -> int:
+    required = (
+        args.proving_store,
+        args.canary_event_id,
+        args.canary_ledger_seq,
+        args.observed_at,
+        args.receipt,
+    )
+    if any(value is None for value in required):
+        raise Issue790DispositionError(
+            "qualify-event requires --proving-store, --canary-event-id, "
+            "--canary-ledger-seq, --observed-at and --receipt"
+        )
+    assert args.proving_store is not None
+    assert args.canary_event_id is not None
+    assert args.canary_ledger_seq is not None
+    assert args.observed_at is not None
+    assert args.receipt is not None
+    require_issue_790_path_outside_git(
+        args.receipt,
+        field="candidate event qualification",
+    )
+    assert_issue_790_paths_disjoint(args.store, args.proving_store, args.receipt)
+    receipt = qualify_issue_790_candidate_event(
+        store=args.store,
+        proving_store=args.proving_store,
+        event_id=args.canary_event_id,
+        ledger_seq=args.canary_ledger_seq,
+        observed_at=args.observed_at,
+    )
+    write_issue_790_canonical_json(
+        args.receipt,
+        receipt,
+        field="candidate event qualification",
     )
     sys.stdout.write(
         json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"

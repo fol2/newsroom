@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from newsroom.control_plane.issue_790_disposition import (
     activate_issue_790_step16_plan,
     issue_790_checked_approval,
     issue_790_step16_checked_approval,
+    qualify_issue_790_candidate_event,
     seal_issue_790_step16_plan,
     validate_issue_790_plan,
     validate_issue_790_step16_candidate,
@@ -291,6 +293,178 @@ def test_successor_qualify_and_live_gate_share_binding_policy(tmp_path: Path) ->
         recover_model_usage=False,
     )
     assert held is not None and held.state == "RIGHTS_HELD"
+
+
+def test_candidate_qualification_precedes_owner_packet_and_rejects_step17_shape(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, unpublished, event_id, ledger_seq = _projected_zero_ref_event(
+        tmp_path, clock
+    )
+    Issue790CanaryRepository(str(unpublished))
+    receipt = qualify_issue_790_candidate_event(
+        store=unpublished,
+        proving_store=proving,
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        observed_at=clock.value,
+    )
+    assert receipt["status"] == "READY_FOR_OWNER_PACKET"
+    assert receipt["event_id"] == event_id
+    assert receipt["ledger_seq"] == ledger_seq
+    assert receipt["resolved_unit_count"] > 0
+    assert receipt["provider_calls"] == 0
+    assert receipt["store_mutations"] == 0
+
+    _rewrite_landed_ingest_ids(
+        unpublished,
+        event_id,
+        (_EVENT_8835_LANDED_INGEST_ID,),
+    )
+    with pytest.raises(
+        Issue790DispositionError,
+        match="selected event is not provider-free ready: "
+        "RESOLVED_INGEST_IDS_DIFFER_FROM_LANDED",
+    ):
+        qualify_issue_790_candidate_event(
+            store=unpublished,
+            proving_store=proving,
+            event_id=event_id,
+            ledger_seq=ledger_seq,
+            observed_at=clock.value,
+        )
+
+
+def test_candidate_qualification_rejects_consumed_event_which_still_looks_fresh(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, unpublished, event_id, ledger_seq = _projected_zero_ref_event(
+        tmp_path, clock
+    )
+    repository = Issue790CanaryRepository(str(unpublished))
+    connection = repository._connection()
+    try:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute(
+            "INSERT INTO issue_790_bounded_canary_consumptions("
+            "consumption_digest,approved_plan_digest,disposition_digest,event_id,"
+            "ledger_seq,owner_id,consumed_at,record_json) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                "sha256:" + "11" * 32,
+                "sha256:" + "22" * 32,
+                "sha256:" + "33" * 32,
+                event_id,
+                ledger_seq,
+                "issue-790-canary:test",
+                "2026-08-20T00:00:00.000000Z",
+                "{}",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(Issue790DispositionError, match="already consumed"):
+        qualify_issue_790_candidate_event(
+            store=unpublished,
+            proving_store=proving,
+            event_id=event_id,
+            ledger_seq=ledger_seq,
+            observed_at=clock.value,
+        )
+
+
+def test_candidate_qualification_rejects_prior_execution_evidence(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, unpublished, event_id, ledger_seq = _projected_zero_ref_event(
+        tmp_path, clock
+    )
+    Issue790CanaryRepository(str(unpublished))
+    connection = sqlite3.connect(str(unpublished))
+    try:
+        connection.execute(
+            "CREATE TABLE model_work_envelopes("
+            "envelope_id TEXT,cycle_id TEXT,workload_class TEXT,"
+            "reservation_id TEXT,record_json TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO model_work_envelopes("
+            "envelope_id,cycle_id,workload_class,reservation_id,record_json) "
+            "VALUES(?,?,?,?,?)",
+            (
+                "sha256:" + "44" * 32,
+                event_id,
+                "GRAPHITI_CHAT_PRIMARY",
+                "sha256:" + "55" * 32,
+                "{}",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(Issue790DispositionError, match="prior execution evidence"):
+        qualify_issue_790_candidate_event(
+            store=unpublished,
+            proving_store=proving,
+            event_id=event_id,
+            ledger_seq=ledger_seq,
+            observed_at=clock.value,
+        )
+
+
+def test_candidate_qualification_requires_disjoint_store_files(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, _, event_id, ledger_seq = _projected_zero_ref_event(tmp_path, clock)
+    with pytest.raises(Issue790DispositionError, match="operation paths alias"):
+        qualify_issue_790_candidate_event(
+            store=proving,
+            proving_store=proving,
+            event_id=event_id,
+            ledger_seq=ledger_seq,
+            observed_at=clock.value,
+        )
+
+
+def test_operator_can_qualify_candidate_before_activation(tmp_path: Path) -> None:
+    from scripts import issue_790_conservative_disposition as cli
+
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, unpublished, event_id, ledger_seq = _projected_zero_ref_event(
+        tmp_path, clock
+    )
+    Issue790CanaryRepository(str(unpublished))
+    receipt_path = tmp_path / "candidate-event-qualification.json"
+    assert (
+        cli.main(
+            [
+                "qualify-event",
+                "--store",
+                str(unpublished),
+                "--proving-store",
+                str(proving),
+                "--canary-event-id",
+                event_id,
+                "--canary-ledger-seq",
+                str(ledger_seq),
+                "--observed-at",
+                clock.value.isoformat(),
+                "--receipt",
+                str(receipt_path),
+            ]
+        )
+        == 0
+    )
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["status"] == "READY_FOR_OWNER_PACKET"
+    assert receipt["event_id"] == event_id
+    assert receipt["provider_calls"] == 0
 
 
 def test_historical_step16_and_step15_remain_replayable() -> None:
