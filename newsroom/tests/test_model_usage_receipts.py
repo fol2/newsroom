@@ -935,6 +935,18 @@ def _patch_issue_790_live_evidence(
             "process_ids": [],
         },
     )
+    runtime = {
+        "schema_version": "newsroom.issue-790.graphiti-runtime-readiness.v1",
+        "framework": "graphiti-core",
+        "framework_version": "0.29.3",
+        "provider_calls": 0,
+        "credential_resolution": False,
+    }
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_qualify_real_graphiti_runtime",
+        lambda: {**runtime, "runtime_digest": _digest(runtime)},
+    )
 
 
 def test_hold_or_reject_admission_creates_no_envelope_or_leaf(tmp_path: Path) -> None:
@@ -4275,6 +4287,71 @@ def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
         store=store,
         observed_at=observed_at,
     )
+    ready_runtime_check = issue_790_operation._qualify_real_graphiti_runtime
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_qualify_real_graphiti_runtime",
+        lambda: (_ for _ in ()).throw(
+            Issue790DispositionError("issue #790 real Graphiti runtime is unavailable")
+        ),
+    )
+    missing_runtime_backup = tmp_path / "missing-runtime.sqlite3"
+    with pytest.raises(
+        Issue790DispositionError,
+        match="real Graphiti runtime is unavailable",
+    ):
+        run_issue_790_canary(
+            store=store,
+            proving_store=proving,
+            backup_path=missing_runtime_backup,
+            plan=plan,
+            observed_at=observed_at,
+            repository_root=tmp_path,
+            event_id=event_id,
+            ledger_seq=2002,
+            disposition_digest=str(disposition["disposition_digest"]),
+        )
+    assert missing_runtime_backup.exists() is False
+    assert canary_repository.existing_consumption(
+        approved_plan_digest=str(plan["canonical_digest"])
+    ) is None
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_qualify_real_graphiti_runtime",
+        ready_runtime_check,
+    )
+    runtime_checks: list[str] = []
+    runtime_check = issue_790_operation._qualify_real_graphiti_runtime
+
+    def tracked_runtime_check() -> dict[str, object]:
+        runtime_checks.append("checked-before-consumption")
+        return runtime_check()
+
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_qualify_real_graphiti_runtime",
+        tracked_runtime_check,
+    )
+    retry_snapshot_calls: list[list[int]] = []
+    original_retry_check = issue_790_operation._require_retry_events_unchanged
+
+    def tracked_retry_check(
+        checked_store: Path,
+        checked_plan: Mapping[str, object],
+    ) -> list[dict[str, object]]:
+        retry_snapshot_calls.append(
+            [
+                int(item["ledger_seq"])
+                for item in checked_plan["retry_forbidden_events"]  # type: ignore[index]
+            ]
+        )
+        return original_retry_check(checked_store, checked_plan)
+
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_require_retry_events_unchanged",
+        tracked_retry_check,
+    )
     preflight = _issue_790_canary_preflight(
         store,
         event_id=event_id,
@@ -4371,6 +4448,9 @@ def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
     assert receipt["usage_evidence"]["truthful_primary_usage_count"] == 1  # type: ignore[index]
     assert receipt["usage_evidence"]["fallback_chat_leaf_count"] == 0  # type: ignore[index]
     assert receipt["retry_forbidden_events_unchanged"] is True
+    assert retry_snapshot_calls == [[1932, 1972], [1932, 1972]]
+    assert receipt["runtime_readiness"]["framework_version"] == "0.29.3"
+    assert runtime_checks == ["checked-before-consumption"]
     assert receipt["worker_remained_unloaded"] is True
     assert dispatch_calls == [event_id]
     assert receipt["receipt_digest"] == _digest(
@@ -4390,6 +4470,14 @@ def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
     assert resumed["canary_evidence_passed"] is True
     assert resumed["resumed_zero_io_finalisation"] is True
     assert resumed["provider_dispatch_attempted_this_run"] is False
+    assert retry_snapshot_calls == [
+        [1932, 1972],
+        [1932, 1972],
+        [1932, 1972],
+        [1932, 1972],
+    ]
+    assert resumed["runtime_readiness"] is None
+    assert runtime_checks == ["checked-before-consumption"]
     assert dispatch_calls == [event_id]
 
 

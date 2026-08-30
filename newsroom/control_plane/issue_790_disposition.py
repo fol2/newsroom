@@ -68,6 +68,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
 )
 from newsroom.graphiti_adapter.cli_process import validated_timeout_diagnostics
 from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_VERSION
+from newsroom.graphiti_adapter.types import GraphitiAdapterContractError
 
 ISSUE_790_PLAN_SCHEMA = "newsroom.issue-790.conservative-disposition-plan.v1"
 ISSUE_790_ITERATIVE_PLAN_SCHEMA = "newsroom.issue-790.iterative-canary-plan.v2"
@@ -3379,6 +3380,25 @@ def _qualify_issue_790_event(
     return {**retained, "evidence_digest": digest_canonical(retained)}
 
 
+def _qualify_real_graphiti_runtime() -> dict[str, object]:
+    """Prove the pinned real runtime loads without credentials or provider I/O."""
+
+    try:
+        real_graphiti_module._load_graphiti()
+    except GraphitiAdapterContractError as exc:
+        raise Issue790DispositionError(
+            f"issue #790 real Graphiti runtime is unavailable: {exc}"
+        ) from exc
+    unsigned: dict[str, object] = {
+        "schema_version": "newsroom.issue-790.graphiti-runtime-readiness.v1",
+        "framework": "graphiti-core",
+        "framework_version": real_graphiti_module._GRAPHITI_CORE_VERSION,
+        "provider_calls": 0,
+        "credential_resolution": False,
+    }
+    return {**unsigned, "runtime_digest": digest_canonical(unsigned)}
+
+
 def run_issue_790_canary(
     *,
     store: Path,
@@ -3457,6 +3477,11 @@ def run_issue_790_canary(
         approved_plan_digest=str(retained_plan["canonical_digest"]),
     )
     resuming_zero_io_finalisation = prior_consumption is not None
+    runtime_readiness = (
+        None
+        if resuming_zero_io_finalisation
+        else _qualify_real_graphiti_runtime()
+    )
     if prior_consumption is None:
         if (
             event_before_record.get("state") != "QUEUED"
@@ -3711,7 +3736,7 @@ def run_issue_790_canary(
 
     event_after = _event_snapshot(store, event_id=event_id, ledger_seq=ledger_seq)
     usage_evidence = _issue_790_canary_usage_evidence(store, event_id=event_id)
-    retry_after = _retry_event_snapshots(store)
+    retry_after = _require_retry_events_unchanged(store, retained_plan)
     worker_after = _worker_state()
     store_quick_check = _sqlite_quick_check(store, field="source unpublished store")
     route_after = service.route_state(str(target["route"]))
@@ -3782,6 +3807,7 @@ def run_issue_790_canary(
         "completed_at": _utc_text(completed_at),
         "disposition_digest": disposition_digest,
         "preflight_evidence": preflight_evidence,
+        "runtime_readiness": runtime_readiness,
         "consumption": consumption,
         "outcome": outcome,
         "process_result": process_result,
@@ -4544,6 +4570,7 @@ def qualify_issue_790_step16_readiness(
         canary_event=canary_event,
         fresh_event=True,
     )
+    runtime_readiness = _qualify_real_graphiti_runtime()
     event_id = canary_event.get("event_id")
     ledger_seq = canary_event.get("ledger_seq")
     if not isinstance(event_id, str) or isinstance(ledger_seq, bool) or not isinstance(
@@ -4587,6 +4614,7 @@ def qualify_issue_790_step16_readiness(
         "event_preflight_digest": candidate["event_preflight_digest"],
         "candidate_event_qualification_digest": candidate["qualification_digest"],
         "resolved_unit_count": candidate["resolved_unit_count"],
+        "runtime_readiness": runtime_readiness,
         "provider_calls": 0,
         "catalogue_queries": 0,
         "credential_resolution": False,
