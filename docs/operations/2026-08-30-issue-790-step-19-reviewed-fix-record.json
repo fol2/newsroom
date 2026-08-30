@@ -1,0 +1,11 @@
+{
+  "schema_version": "newsroom.issue-790.reviewed-non-timeout-fix.v1",
+  "predecessor_outcome_digest": "sha256:113ce6a212beb5d2e8c0d9ae12449d830260ad1115e89cea75f527fcddab0688",
+  "causal_report_digest": "sha256:eafcfb63a2e458c0b6661f0119cfb1a82ded9fb6cf47fabb7403c9561a5225c6",
+  "fix_kind": "CODE_AND_CONFIGURATION",
+  "pull_request_url": "https://github.com/fol2/newsroom/pull/853",
+  "reviewed_fix_revision": "895ece4b62ab554e51d6c19b915b36f7a49e0eef",
+  "review_receipt_digest": "sha256:6806459a4ba5f1c21c1831aa6c2cd00be009122db4cb4a94e1eec82246f4029a",
+  "provider_free_qualification_digest": "sha256:d2a672ee9069d76f263adb18d02e177242feb834875552b0c1c7dca00cf9cc59",
+  "record_digest": "sha256:2c58862fe7a06556812efea88e7b98ef1487daa8ac7e81c3305ccf0b65f9e997"
+}
