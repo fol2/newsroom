@@ -1516,6 +1516,9 @@ def _ingest(
             result=result,
             accounting=accounting,
             dispatch_rights=dispatch_rights,
+            recovery_classification=(
+                recovery_classification if terminal_outcome else marker_recovery
+            ),
         )
         if terminal_outcome:
             insert_graphiti_ingest(

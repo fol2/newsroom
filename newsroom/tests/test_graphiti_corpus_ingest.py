@@ -5407,6 +5407,120 @@ def test_zero_proposal_success_survives_full_evaluation_cycle(
     assert report.graphiti == 1
 
 
+def test_step20_rolled_back_zero_proposal_completion_survives_full_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rolled-back no-proposal result is a terminal no-ingest-effect success."""
+
+    from newsroom.control_plane import paths as control_paths
+    from newsroom.graphiti_adapter import real
+
+    embedding_requests = [
+        {
+            "provider": "openrouter",
+            "model": OPENROUTER_EMBEDDING_SLUG,
+            "request_id": f"step20-embedding-{index}",
+            "prompt_tokens": tokens,
+            "total_tokens": tokens,
+            "cost_usd_microunits": cost,
+            "cost_reported": True,
+            "outcome": "COMPLETE",
+        }
+        for index, (tokens, cost) in enumerate(((36, 5), (4, 1), (2, 0), (2, 0)))
+    ]
+
+    async def rolled_back_zero_effect(**values: object) -> object:
+        telemetry = values["telemetry"]
+        telemetry.chat_invocations = [
+            {
+                "provider": "cursor-agent-cli",
+                "model": "composer-2.5",
+                "outcome": "COMPLETE",
+                "usage": {
+                    "usage_basis": "PROVIDER_REPORTED",
+                    "input_tokens": 4_119,
+                    "cached_read_tokens": 416,
+                    "output_tokens": 1_630,
+                    "total_tokens": 6_165,
+                },
+            }
+        ]
+        telemetry.embedding_usage = {
+            "usage_basis": "PROVIDER_REPORTED",
+            "request_count": 4,
+            "embedding_tokens": 44,
+            "cost_usd_microunits": 6,
+            "requests": embedding_requests,
+        }
+        values["validate_result"](
+            SimpleNamespace(episode=None, nodes=(), edges=()),
+            telemetry,
+        )
+        telemetry.recovery_classification = (
+            GraphitiRecoveryClassification.ROLLED_BACK_AMBIGUOUS_EFFECT
+        )
+        raise real.AmbiguousEpisodeEffect(
+            "Graphiti write failed after provider dispatch and was rolled back"
+        )
+
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(real, "openrouter_api_key", lambda: "fixture-key")
+    monkeypatch.setattr(real, "neo4j_community_password", lambda: "fixture-password")
+    monkeypatch.setattr(real, "_add_episode", rolled_back_zero_effect)
+
+    observed_at = datetime(2026, 8, 20, tzinfo=UTC)
+    clock = lambda: observed_at
+    adapter_clock = lambda: UtcTimestamp(observed_at)
+    adapter_type = real.RealGraphitiAdapter
+    monkeypatch.setattr(
+        real,
+        "RealGraphitiAdapter",
+        lambda **values: adapter_type(clock=adapter_clock, **values),
+    )
+
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "step20-zero-effect-full-cycle.sqlite3"
+    monkeypatch.setattr(control_paths, "CANONICAL_PROVING_STORE", proving)
+    monkeypatch.setattr(control_paths, "CANONICAL_UNPUBLISHED_STORE", unpublished)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=EvaluationGraphitiRunner(clock=clock, fallback_permitted=False),
+        max_graphiti=1,
+        model_usage=ModelUsageService(str(unpublished)),
+        clock=clock,
+    )
+
+    connection = sqlite3.connect(unpublished)
+    receipt = json.loads(
+        connection.execute(
+            "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts"
+        ).fetchone()[0]
+    )
+    ingest = connection.execute(
+        "SELECT outcome,proposal_count FROM unpublished_graphiti_ingest"
+    ).fetchone()
+    failure = connection.execute(
+        "SELECT last_outcome,last_failure_code FROM unpublished_graphiti_failures"
+    ).fetchone()
+    connection.close()
+
+    assert report.graphiti == 1
+    assert ingest == ("COMPLETE", 0)
+    assert failure is None
+    assert receipt["outcome"] == "COMPLETE"
+    assert receipt["proposal_count"] == 0
+    assert receipt["embedding_usage"]["request_count"] == 4
+    assert receipt["embedding_usage"]["embedding_tokens"] == 44
+    assert receipt["chat_invocations"][0]["usage"]["total_tokens"] == 6_165
+    assert receipt["recovery_classification"] == (
+        GraphitiRecoveryClassification.ROLLED_BACK_AMBIGUOUS_EFFECT
+    )
+
+
 def test_adapter_contract_failure_receipt_retains_only_allow_listed_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
