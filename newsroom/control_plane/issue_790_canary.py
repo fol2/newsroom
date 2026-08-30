@@ -861,7 +861,10 @@ class Issue790CanaryRepository:
         extra = seqs[2:]
         if (
             seqs[:2] != (1932, 1972)
-            or any(seq not in {8834, 8835, 13284, 13337, 13362} for seq in extra)
+            or any(
+                seq not in {8834, 8835, 13284, 13337, 13361, 13362}
+                for seq in extra
+            )
             or len(set(seqs)) != len(seqs)
         ):
             raise Issue790CanaryIntegrityError("retry exclusion targets differ")
