@@ -26,6 +26,7 @@ from newsroom.authority.types import UtcTimestamp
 from newsroom.extraction.types import (
     ExtractionFailureCode,
     ExtractionOutcome,
+    ExtractionOutputValidation,
     VersionedExtractionComponent,
 )
 from newsroom.extraction.models import ExtractorContractRequest
@@ -2628,7 +2629,7 @@ def test_completed_pipeline_failure_is_retryable_not_schema_invalid(
     )
 
 
-def test_rollback_after_a_success_receipt_does_not_return_that_success(
+def test_unmarked_ambiguity_after_empty_success_returns_validated_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import newsroom.graphiti_adapter.real as real
@@ -2659,14 +2660,17 @@ def test_rollback_after_a_success_receipt_does_not_return_that_success(
         UtcTimestamp.parse("2026-08-20T00:00:00.000000Z"),
     )
 
-    assert produced.outcome is ExtractionOutcome.RETRYABLE_FAILURE
-    assert produced.failure_code is ExtractionFailureCode.AMBIGUOUS_EFFECT
-    assert produced.validation is None
-    assert produced.raw_output_value is None
+    assert produced.outcome is ExtractionOutcome.SUCCESS
+    assert produced.failure_code is ExtractionFailureCode.NONE
+    assert produced.validation is ExtractionOutputValidation.VALID
+    assert produced.proposals == ()
+    assert produced.raw_output_value is not None
+    assert "recovery_classification" not in produced.raw_output_value
 
 
-def test_rollback_with_proposals_remains_ambiguous_after_validation(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("with_recovery_marker", (False, True))
+def test_ambiguity_with_proposals_remains_fail_closed_after_validation(
+    monkeypatch: pytest.MonkeyPatch, with_recovery_marker: bool
 ) -> None:
     import newsroom.graphiti_adapter.real as real
 
@@ -2703,9 +2707,10 @@ def test_rollback_with_proposals_remains_ambiguous_after_validation(
             ),
             values["telemetry"],
         )
-        values["telemetry"].recovery_classification = (
-            GraphitiRecoveryClassification.ROLLED_BACK_AMBIGUOUS_EFFECT
-        )
+        if with_recovery_marker:
+            values["telemetry"].recovery_classification = (
+                GraphitiRecoveryClassification.ROLLED_BACK_AMBIGUOUS_EFFECT
+            )
         raise real.AmbiguousEpisodeEffect(
             "Graphiti write failed after provider dispatch and was rolled back"
         )
