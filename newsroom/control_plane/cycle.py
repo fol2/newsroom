@@ -2806,33 +2806,13 @@ def _resolve_graphiti_event_units(
     event: GraphitiRevisionEvent,
     evaluated_at: datetime,
 ) -> tuple[CorpusIngestUnit, ...]:
-    proving = sqlite3.connect(proving_store)
-    apply_control_plane_sqlite_profile(proving, query_only=True)
-    collected: list[CorpusIngestUnit] = []
-    try:
-        _run_id, _latest, corpus_rows = _permitted_rows(
-            proving,
-            evaluated_at=_utc_text(evaluated_at),
-            required_valid_until=_dispatch_valid_until(evaluated_at),
-        )
-        resolver = EffectiveRevisionIdentityResolver(proving)
-        for row in corpus_rows:
-            collected.extend(
-                units_from(
-                    _parsed_observations((row,)),
-                    proving_run_id=row.run_id,
-                    rights_authority_run_id=row.rights_authority_run_id,
-                    rights_gate_id=row.rights_gate_id,
-                    rights_gate_reason=row.rights_gate_reason,
-                    source_definition_url=row.url,
-                    effective_revision_resolver=resolver,
-                )
-            )
-    finally:
-        proving.close()
+    units = load_graphiti_units(
+        proving_store=proving_store,
+        evaluated_at=evaluated_at,
+    )
     selected = tuple(
         unit
-        for unit in unique_chunk_units(tuple(collected))
+        for unit in units
         if (
             unit.source_id,
             unit.item_key,
@@ -2870,6 +2850,40 @@ def _resolve_graphiti_event_units(
         if actual_refs != expected_refs:
             return ()
     return selected
+
+
+def load_graphiti_units(
+    *,
+    proving_store: str,
+    evaluated_at: datetime,
+) -> tuple[CorpusIngestUnit, ...]:
+    """Resolve current rights-permitted Graphiti units without queue effects."""
+
+    proving = sqlite3.connect(proving_store)
+    apply_control_plane_sqlite_profile(proving, query_only=True)
+    collected: list[CorpusIngestUnit] = []
+    try:
+        _run_id, _latest, corpus_rows = _permitted_rows(
+            proving,
+            evaluated_at=_utc_text(evaluated_at),
+            required_valid_until=_dispatch_valid_until(evaluated_at),
+        )
+        resolver = EffectiveRevisionIdentityResolver(proving)
+        for row in corpus_rows:
+            collected.extend(
+                units_from(
+                    _parsed_observations((row,)),
+                    proving_run_id=row.run_id,
+                    rights_authority_run_id=row.rights_authority_run_id,
+                    rights_gate_id=row.rights_gate_id,
+                    rights_gate_reason=row.rights_gate_reason,
+                    source_definition_url=row.url,
+                    effective_revision_resolver=resolver,
+                )
+            )
+    finally:
+        proving.close()
+    return unique_chunk_units(tuple(collected))
 
 
 def qualify_fresh_graphiti_event(

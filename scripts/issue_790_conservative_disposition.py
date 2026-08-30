@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dry-run, apply, canary, or Step 16 activate/qualify the issue #790 plan."""
+"""Operate the issue #790 plan or its bounded event-supply path."""
 
 from __future__ import annotations
 
@@ -25,6 +25,11 @@ from newsroom.control_plane.issue_790_disposition import (
     write_issue_790_canonical_json,
     write_issue_790_receipt,
 )
+from newsroom.control_plane.issue_790_event_supply import (
+    BoundedEventSupplyError,
+    supply_one_graphiti_event,
+)
+from newsroom.control_plane.veto import VetoError
 
 
 def _instant(value: str) -> datetime:
@@ -52,8 +57,8 @@ def _load_object(path: Path, *, field: str) -> dict[str, object]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Execute the content-addressed issue #790 disposition against an "
-            "isolated copy or its explicitly backed-up target store."
+            "Execute an issue #790 disposition or its bounded one-event supply "
+            "path against an explicit store. Mini application remains F4."
         )
     )
     parser.add_argument(
@@ -65,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
             "activate-step16",
             "qualify-event",
             "qualify-step16",
+            "supply-event",
         ),
     )
     parser.add_argument("--store", type=Path, required=True)
@@ -89,9 +95,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--route-state", type=Path)
     parser.add_argument("--circuit-state", type=Path)
     parser.add_argument("--canary-event", type=Path)
+    parser.add_argument("--expected-frontier-ledger-seq", type=int)
     args = parser.parse_args(argv)
 
     try:
+        if args.mode == "supply-event":
+            return _supply_event(parser, args)
         if args.mode == "activate-step16":
             return _activate_step16(args)
         if args.mode == "qualify-event":
@@ -99,12 +108,42 @@ def main(argv: list[str] | None = None) -> int:
         if args.mode == "qualify-step16":
             return _qualify_step16(args)
         return _legacy_mode(parser, args)
-    except (Issue790DispositionError, OSError, sqlite3.Error) as exc:
+    except (
+        BoundedEventSupplyError,
+        Issue790DispositionError,
+        OSError,
+        sqlite3.Error,
+        VetoError,
+    ) as exc:
         sys.stderr.write(f"{exc}\n")
         return 2
 
 
+def _supply_event(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> int:
+    if (
+        args.proving_store is None
+        or args.observed_at is None
+        or args.expected_frontier_ledger_seq is None
+    ):
+        parser.error(
+            "supply-event requires --proving-store, --observed-at and "
+            "--expected-frontier-ledger-seq"
+        )
+    result = supply_one_graphiti_event(
+        proving_store=str(args.proving_store),
+        unpublished_store=str(args.store),
+        expected_frontier_ledger_seq=args.expected_frontier_ledger_seq,
+        clock=lambda: args.observed_at,
+    )
+    sys.stdout.write(json.dumps(result.as_dict(), sort_keys=True) + "\n")
+    return 0
+
+
 def _legacy_mode(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    if args.expected_frontier_ledger_seq is not None:
+        parser.error("--expected-frontier-ledger-seq is supply-event only")
     if args.plan is None or args.observed_at is None or args.receipt is None:
         parser.error(f"{args.mode} requires --plan, --observed-at and --receipt")
     if args.mode == "dry-run" and args.scratch_store is None:
