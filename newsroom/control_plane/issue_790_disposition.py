@@ -3243,24 +3243,32 @@ def _require_issue_790_canary_route(
         )
 
 
+def _issue_790_attempt_receipt_rows_for_event(
+    store: Path, *, event_id: str
+) -> list[tuple[object, object]]:
+    """Resolve event to ingest receipts through retained work envelopes."""
+
+    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        return connection.execute(
+            "SELECT DISTINCT r.receipt_digest,r.receipt_json "
+            "FROM model_work_envelopes e "
+            "JOIN unpublished_graphiti_attempt_receipts r "
+            "ON r.ingest_id=json_extract(e.record_json,'$.ingest_id') "
+            "WHERE e.cycle_id=? ORDER BY r.attempt_number,r.rowid",
+            (event_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+
 def _issue_790_controller_timeout_report(
     store: Path,
     *,
     event_id: str,
     configured_timeout_ms: int,
 ) -> dict[str, object] | None:
-    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
-    try:
-        rows = connection.execute(
-            "SELECT r.receipt_digest,r.receipt_json "
-            "FROM unpublished_graphiti_attempt_receipts r "
-            "JOIN model_work_envelopes e "
-            "ON json_extract(e.record_json,'$.ingest_id')=r.ingest_id "
-            "WHERE e.cycle_id=? ORDER BY r.attempt_number,r.rowid",
-            (event_id,),
-        ).fetchall()
-    finally:
-        connection.close()
+    rows = _issue_790_attempt_receipt_rows_for_event(store, event_id=event_id)
     candidates: dict[
         tuple[str, str], tuple[dict[str, object], str]
     ] = {}

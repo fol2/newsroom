@@ -42,6 +42,7 @@ from newsroom.control_plane.evidence import EvidencePackage, package_for
 from newsroom.control_plane.graphiti import (
     EvaluationGraphitiRunner,
     GraphitiCycleResult,
+    GraphitiResultStageError,
 )
 from newsroom.control_plane.items import (
     SourceItem,
@@ -5037,6 +5038,7 @@ def test_cycle_rejects_foreign_graphiti_identity(tmp_path: Path) -> None:
     connection.close()
     assert stored == 0
     assert failed == 1
+    assert attempt["binding_failure_stage"] == "CYCLE_RESULT_BINDING"
     assert attempt["returned_raw_receipt_digest"] == digest_bytes(
         canonical_json_bytes(returned[0].raw_receipt)
     )
@@ -5301,6 +5303,221 @@ def test_pre_dispatch_failure_releases_graphiti_reservation(
     assert receipt["dispatch_state"] == "NOT_DISPATCHED"
     assert receipt["embedding_usage"]["request_count"] == 0
     assert receipt["accounting"]["unused_reservation_released"] is True
+
+
+def test_zero_proposal_success_survives_full_evaluation_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A valid empty result must cross execute, runner conversion and binding."""
+
+    from newsroom.control_plane import paths as control_paths
+    from newsroom.graphiti_adapter import real
+
+    async def empty_graph(**values: object) -> object:
+        telemetry = values["telemetry"]
+        telemetry.chat_invocations = [
+            {
+                "provider": "cursor-agent-cli",
+                "model": "composer-2.5",
+                "outcome": "COMPLETE",
+                "usage": {
+                    "usage_basis": "PROVIDER_REPORTED",
+                    "input_tokens": 4_240,
+                    "output_tokens": 2_435,
+                    "total_tokens": 7_091,
+                },
+            }
+        ]
+        telemetry.embedding_usage = {
+            "usage_basis": "NO_EMBEDDING_CALL",
+            "request_count": 0,
+            "embedding_tokens": 0,
+            "cost_usd_microunits": 0,
+            "requests": [],
+        }
+        result = SimpleNamespace(
+            episode=SimpleNamespace(uuid=values["episode_id"]),
+            nodes=(),
+            edges=(),
+        )
+        values["validate_result"](result, telemetry)
+        return result
+
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(real, "openrouter_api_key", lambda: "fixture-key")
+    monkeypatch.setattr(real, "neo4j_community_password", lambda: "fixture-password")
+    monkeypatch.setattr(real, "_add_episode", empty_graph)
+
+    observed_at = datetime(2026, 8, 20, tzinfo=UTC)
+    clock = lambda: observed_at
+    adapter_clock = lambda: UtcTimestamp(observed_at)
+    adapter_type = real.RealGraphitiAdapter
+    monkeypatch.setattr(
+        real,
+        "RealGraphitiAdapter",
+        lambda **values: adapter_type(clock=adapter_clock, **values),
+    )
+
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "zero-proposal-full-cycle.sqlite3"
+    monkeypatch.setattr(control_paths, "CANONICAL_PROVING_STORE", proving)
+    monkeypatch.setattr(control_paths, "CANONICAL_UNPUBLISHED_STORE", unpublished)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=EvaluationGraphitiRunner(
+            clock=clock,
+            fallback_permitted=False,
+        ),
+        max_graphiti=1,
+        model_usage=ModelUsageService(str(unpublished)),
+        clock=clock,
+    )
+
+    connection = sqlite3.connect(unpublished)
+    receipt = json.loads(
+        connection.execute(
+            "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts"
+        ).fetchone()[0]
+    )
+    failure = connection.execute(
+        "SELECT last_outcome,last_failure_code FROM unpublished_graphiti_failures"
+    ).fetchone()
+    connection.close()
+
+    observed = {
+        "binding_failure": receipt.get("binding_failure"),
+        "outcome": receipt["outcome"],
+        "proposal_count": receipt.get("proposal_count"),
+        "returned_raw_receipt_digest": receipt.get("returned_raw_receipt_digest"),
+        "failure": failure,
+        "chat_invocation_count": len(receipt.get("chat_invocations", [])),
+    }
+    assert observed == {
+        "binding_failure": None,
+        "outcome": "COMPLETE",
+        "proposal_count": 0,
+        "returned_raw_receipt_digest": None,
+        "failure": None,
+        "chat_invocation_count": 1,
+    }
+    assert report.graphiti == 1
+
+
+def test_adapter_contract_failure_receipt_retains_only_allow_listed_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.control_plane import paths as control_paths
+    from newsroom.graphiti_adapter import real
+
+    secret = "TOKEN=must-not-reach-the-store"
+
+    class RejectingAdapter:
+        def __init__(self, **_values: object) -> None:
+            pass
+
+        def execute(self, **_values: object) -> object:
+            raise GraphitiAdapterContractError(secret)
+
+    monkeypatch.setattr(real, "RealGraphitiAdapter", RejectingAdapter)
+    observed_at = datetime(2026, 8, 20, tzinfo=UTC)
+    clock = lambda: observed_at
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "adapter-stage.sqlite3"
+    monkeypatch.setattr(control_paths, "CANONICAL_PROVING_STORE", proving)
+    monkeypatch.setattr(control_paths, "CANONICAL_UNPUBLISHED_STORE", unpublished)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=EvaluationGraphitiRunner(
+            clock=clock,
+            fallback_permitted=False,
+        ),
+        max_graphiti=1,
+        model_usage=ModelUsageService(str(unpublished)),
+        clock=clock,
+    )
+
+    connection = sqlite3.connect(unpublished)
+    receipt_json = str(
+        connection.execute(
+            "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts"
+        ).fetchone()[0]
+    )
+    store_dump = "\n".join(connection.iterdump())
+    connection.close()
+    receipt = json.loads(receipt_json)
+
+    assert report.graphiti == 1
+    assert receipt["binding_failure"] == "RESULT_CONTRACT_REJECTED"
+    assert receipt["binding_failure_type"] == "GraphitiResultStageError"
+    assert receipt["binding_failure_stage"] == "ADAPTER_EXECUTION"
+    assert receipt["returned_raw_receipt_digest"] is None
+    assert secret not in receipt_json
+    assert secret not in store_dump
+
+
+def test_cycle_result_construction_failure_receipt_retains_allow_listed_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.control_plane import paths as control_paths
+    from newsroom.graphiti_adapter import real
+
+    class BrokenExecutionAdapter:
+        def __init__(self, **_values: object) -> None:
+            pass
+
+        def execute(self, **_values: object) -> object:
+            return SimpleNamespace(
+                outcome=SimpleNamespace(value="COMPLETE"),
+                failure_code="NONE",
+                produced=SimpleNamespace(
+                    raw_output_value={},
+                    attempt_receipt_value=None,
+                    proposals=(),
+                    usage=SimpleNamespace(),
+                ),
+            )
+
+    monkeypatch.setattr(real, "RealGraphitiAdapter", BrokenExecutionAdapter)
+    observed_at = datetime(2026, 8, 20, tzinfo=UTC)
+    clock = lambda: observed_at
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "construction-stage.sqlite3"
+    monkeypatch.setattr(control_paths, "CANONICAL_PROVING_STORE", proving)
+    monkeypatch.setattr(control_paths, "CANONICAL_UNPUBLISHED_STORE", unpublished)
+
+    run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=EvaluationGraphitiRunner(
+            clock=clock,
+            fallback_permitted=False,
+        ),
+        max_graphiti=1,
+        model_usage=ModelUsageService(str(unpublished)),
+        clock=clock,
+    )
+
+    connection = sqlite3.connect(unpublished)
+    receipt = json.loads(
+        connection.execute(
+            "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts"
+        ).fetchone()[0]
+    )
+    connection.close()
+    assert receipt["binding_failure"] == "RESULT_CONTRACT_REJECTED"
+    assert receipt["binding_failure_type"] == "GraphitiResultStageError"
+    assert receipt["binding_failure_stage"] == "CYCLE_RESULT_CONSTRUCTION"
+    assert receipt["returned_raw_receipt_digest"] is None
 
 
 def test_ingest_commits_when_writer_fails(tmp_path: Path) -> None:
@@ -5768,3 +5985,50 @@ def test_evaluation_runner_reads_provider_attempt_after_adapter_execution(
     assert calls == [deadline]
     assert result.attempt_number == 2
     assert result.provider_attempt_number == 1
+
+
+def test_evaluation_runner_labels_cycle_result_construction_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    class Adapter:
+        def __init__(self, **_values: object) -> None:
+            pass
+
+        def execute(self, **_values: object) -> object:
+            return SimpleNamespace(
+                outcome=SimpleNamespace(value="COMPLETE"),
+                failure_code="NONE",
+                produced=SimpleNamespace(
+                    raw_output_value={},
+                    attempt_receipt_value=None,
+                    proposals=(),
+                    usage=SimpleNamespace(),
+                ),
+            )
+
+    monkeypatch.setattr(real, "RealGraphitiAdapter", Adapter)
+    unit = CorpusIngestUnit(
+        source_id="UK-01",
+        item_key="item",
+        headline="Headline",
+        body="Body",
+        canonical_url="https://item",
+        observation_digest="sha256:observation",
+        observed_at="2026-08-20T00:00:00.000000Z",
+        proving_run_id="run-1",
+        effective_revision=_effective_revision(
+            source_id="UK-01",
+            item_key="item",
+            headline="Headline",
+            body="Body",
+            canonical_url="https://item",
+            first_observed_at="2026-08-20T00:00:00.000000Z",
+        ),
+        published_at="2026-08-19T00:00:00.000000Z",
+    )
+
+    with pytest.raises(GraphitiResultStageError) as raised:
+        EvaluationGraphitiRunner().ingest(unit)
+    assert raised.value.stage == "CYCLE_RESULT_CONSTRUCTION"
