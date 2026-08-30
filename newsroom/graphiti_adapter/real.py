@@ -783,7 +783,8 @@ async def _add_episode(
                 )
             raise
         except CombinedTemporalPipelineError as exc:
-            if not exc.rollback_completed:
+            rollback_completed = exc.rollback_completed
+            if not rollback_completed:
                 await _record_guard_telemetry(
                     guard=guard,
                     llm_client=llm_client,
@@ -791,14 +792,15 @@ async def _add_episode(
                     telemetry=telemetry,
                     attempt_number=attempt_number,
                 )
-                await guard.rollback_pending(
+                rollback_completed = await guard.rollback_pending(
                     chat_invocations=telemetry.chat_invocations,
                     embedding_usage=telemetry.embedding_usage,
                     reason=type(exc).__name__,
                 )
-            telemetry.recovery_classification = (
-                GraphitiRecoveryClassification.ROLLED_BACK_AMBIGUOUS_EFFECT
-            )
+            if rollback_completed:
+                telemetry.recovery_classification = (
+                    GraphitiRecoveryClassification.ROLLED_BACK_AMBIGUOUS_EFFECT
+                )
             raise AmbiguousEpisodeEffect(
                 "Graphiti write failed after provider dispatch and was rolled back"
             ) from exc
@@ -812,14 +814,15 @@ async def _add_episode(
                 telemetry=telemetry,
                 attempt_number=attempt_number,
             )
-            await guard.rollback_pending(
+            rollback_completed = await guard.rollback_pending(
                 chat_invocations=telemetry.chat_invocations,
                 embedding_usage=telemetry.embedding_usage,
                 reason=type(exc).__name__,
             )
-            telemetry.recovery_classification = (
-                GraphitiRecoveryClassification.ROLLED_BACK_AMBIGUOUS_EFFECT
-            )
+            if rollback_completed:
+                telemetry.recovery_classification = (
+                    GraphitiRecoveryClassification.ROLLED_BACK_AMBIGUOUS_EFFECT
+                )
             raise AmbiguousEpisodeEffect(
                 "Graphiti write failed after provider dispatch and was rolled back"
             ) from exc
@@ -1392,6 +1395,30 @@ class RealGraphitiAdapter:
                 raise
             return produced
         except AmbiguousEpisodeEffect:
+            produced = validated.get("produced")
+            if (
+                telemetry.recovery_classification
+                is GraphitiRecoveryClassification.ROLLED_BACK_AMBIGUOUS_EFFECT
+                and produced is not None
+                and produced.outcome is ExtractionOutcome.SUCCESS
+                and not produced.proposals
+            ):
+                # The rollback proves that no graph mutation remains, while the
+                # validated empty result proves that there was no ingest effect
+                # to lose. Provider and embedding usage remain on that success.
+                raw = dict(produced.raw_output_value or {})
+                raw.pop("raw_output_digest", None)
+                raw["recovery_classification"] = telemetry.recovery_classification
+                raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
+                return produced_extraction(
+                    attempt,
+                    outcome=produced.outcome,
+                    failure_code=produced.failure_code,
+                    validation=produced.validation,
+                    raw=raw,
+                    proposals=produced.proposals,
+                    embedding_usage=telemetry.embedding_usage,
+                )
             raw = _raw_receipt(
                 attempt,
                 started_at=started_at,
