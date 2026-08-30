@@ -1,0 +1,19 @@
+{
+  "schema_version": "newsroom.issue-790.non-timeout-causal-report.v1",
+  "classification": "NON_TIMEOUT_FAILURE",
+  "causal_constraint": "REVIEWED_CODE_OR_CONFIGURATION_FIX",
+  "predecessor_outcome_digest": "sha256:218db31c59f6cbd6ef3734b5b359db1185b12cb2b158c65eb793f079612f66ed",
+  "event_id": "sha256:e4ef6fd0af91d5d525af3f37f5cfb422733a1640c84c16cdc162f0e6d8bb0b5b",
+  "boundary": "GRAPHITI_PROVIDER_RESULT_BINDING",
+  "configured_controller_timeout_ms": 160000,
+  "configured_extraction_timeout_ms": 180000,
+  "cleanup_reserve_ms": 20000,
+  "deadline_at": null,
+  "elapsed_ms": 0,
+  "last_progress": "AFTER_PROVIDER_COMPLETE_BEFORE_GOVERNED_RESULT_BINDING",
+  "termination": "AUTHORITY_EXHAUSTED_AFTER_PROVIDER_DISPATCH",
+  "provider_cause": "COMPLETE_USAGE_REPORTED",
+  "local_cause": "RESULT_CONTRACT_REJECTED",
+  "diagnostic_reference": "https://github.com/fol2/newsroom/issues/790#issuecomment-5468850124",
+  "report_digest": "sha256:0df9d4de8f0b4d49d041e716320727718f89c201f7d304962cd79edf2aaf4d0c"
+}
