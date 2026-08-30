@@ -3,41 +3,67 @@
 
 Exit 0 only when every line is PASS. Provider-free; no live Cursor call.
 
-O07 exact-head CI prefers Focus Gates on the tip SHA. After merge, dispatch
-Focus Gates on tip — do not wait for Full Repository Health.
+O07 accepts only Focus Gates success on the exact tip SHA. After merge,
+dispatch Focus Gates on tip — do not wait for Full Repository Health.
 
 Forecast B-gates dry-validate every combined-temporal failure class plus
-infra contracts that have already bitten live canaries. Residual model
-non-compliance cannot be proved provider-free; that residual is printed.
+infra contracts that have already bitten live canaries. Live-only residuals
+remain explicit without weakening readiness.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.metadata
 import json
 import os
 import re
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from datetime import UTC, datetime
 from json import JSONDecoder
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 ROOT_DEFAULT = Path("/Users/jamesto/Coding/newsroom")
-TIP_PLAN_DEFAULT = (
-    "sha256:58220d3a2b389ca25bf86f71b4d7974c6186ee26ab705af351091a20228e1db8"
-)
-PLAN_REL_DEFAULT = "docs/operations/2026-08-28-issue-790-success-sequence-step-15.json"
 DISP = "sha256:020f5b5669020da8e0bd4fb74cf2d9c5051533fa3b09dbed54824ccec456638c"
-PRED_EVENT = (
-    "sha256:3706d21a68b548a0fd5be56c5409a577c24fa265f7270887ac4cf8fce9a74d35"
-)
-PRED_LEDGER = 8865
 WORKER = "com.jamesto.newsroom-graphiti-worker"
-ACCEPTED_CI = ("focus-gates", "test", "full-deterministic-health")
+CONTROL_PLANE = "com.jamesto.newsroom-control-plane"
+FOCUS_GATE_CHECK = "focus-gates"
 CALL_SHAPE_PRIMARY_MAX_OUTPUT = 16_384
+GRAPHITI_CORE_VERSION = "0.29.3"
+REQUIRED_RETRY_LEDGER_SEQS = frozenset(
+    {1932, 1972, 8834, 8835, 13284, 13337, 13361, 13362}
+)
+STEP21_FULL_PATH_TEST = (
+    "newsroom/tests/test_graphiti_corpus_ingest.py::"
+    "test_step21_unmarked_zero_proposal_completion_survives_full_cycle"
+)
+_SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_FULL_PATH_TESTS = (
+    "newsroom/tests/test_graphiti_corpus_ingest.py::"
+    "test_zero_proposal_success_survives_full_evaluation_cycle",
+)
+_MARKER_TESTS = (
+    "newsroom/tests/test_graphiti_corpus_ingest.py::"
+    "test_step20_rolled_back_zero_proposal_completion_survives_full_cycle",
+    STEP21_FULL_PATH_TEST,
+)
+_FAIL_CLOSED_TESTS = (
+    "newsroom/tests/test_graphiti_adapter_real_executor.py::"
+    "test_retryable_failure_returns_diagnostic_receipt_without_structured_output",
+    "newsroom/tests/test_graphiti_adapter_real_executor.py::"
+    "test_ambiguity_with_proposals_remains_fail_closed_after_validation",
+    "newsroom/tests/test_graphiti_adapter_4d_outcomes.py::"
+    "test_authority_retains_honest_noncomplete_outcomes_without_proposal_admission",
+    "newsroom/tests/test_graphiti_adapter_4d_outcomes.py::"
+    "test_policy_blocked_outcome_is_retained_without_output_or_proposals",
+)
 
 
 def sh(*args: str, cwd: Path) -> str:
@@ -47,6 +73,401 @@ def sh(*args: str, cwd: Path) -> str:
 def _check(rows: list[tuple[str, bool, str]], name: str, ok: bool, detail: str) -> None:
     rows.append((name, ok, detail))
     print(f"[{'PASS' if ok else 'FAIL'}] {name} — {detail}")
+
+
+def _focus_gate_hits(check_runs: object, *, tip: str) -> list[dict[str, Any]]:
+    """Return exact-tip Focus Gates successes; no other workflow is sufficient."""
+
+    if not isinstance(check_runs, list):
+        return []
+    return [
+        item
+        for item in check_runs
+        if isinstance(item, dict)
+        and item.get("name") == FOCUS_GATE_CHECK
+        and item.get("status") == "completed"
+        and item.get("conclusion") == "success"
+        and item.get("head_sha") == tip
+    ]
+
+
+def _invalid_sha256_paths(value: object, *, path: str = "$") -> list[str]:
+    """Find malformed SHA-256 identities in owner and activation artefacts."""
+
+    invalid: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            child = f"{path}.{key}"
+            digest_field = "digest" in str(key).lower()
+            if digest_field and (
+                not isinstance(item, str) or _SHA256.fullmatch(item) is None
+            ):
+                invalid.append(child)
+            elif (
+                isinstance(item, str)
+                and item.startswith("sha256:")
+                and _SHA256.fullmatch(item) is None
+            ):
+                invalid.append(child)
+            elif isinstance(item, (dict, list)):
+                invalid.extend(_invalid_sha256_paths(item, path=child))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            child = f"{path}[{index}]"
+            if (
+                isinstance(item, str)
+                and item.startswith("sha256:")
+                and _SHA256.fullmatch(item) is None
+            ):
+                invalid.append(child)
+            elif isinstance(item, (dict, list)):
+                invalid.extend(_invalid_sha256_paths(item, path=child))
+    return invalid
+
+
+def _latest_failure_red_green(
+    comments: object,
+    *,
+    tip: str,
+) -> tuple[bool, str]:
+    """Bind the latest live failure to a later full-path red and tip green."""
+
+    if not isinstance(comments, list):
+        return False, "issue comments malformed"
+    ordered = sorted(
+        (item for item in comments if isinstance(item, dict)),
+        key=lambda item: str(item.get("created_at", "")),
+    )
+    failures = [
+        (index, item)
+        for index, item in enumerate(ordered)
+        if re.search(
+            r"(?im)^##[^\n]*live canary[^\n]*(?:\*\*FAIL\*\*|FAILED)",
+            str(item.get("body", "")),
+        )
+    ]
+    if not failures:
+        return False, "latest live failure absent"
+    failure_index, failure = failures[-1]
+    failure_body = str(failure.get("body", ""))
+    ledger_match = re.search(r"(?i)ledger\s+`?(\d+)`?", failure_body)
+    ledger = ledger_match.group(1) if ledger_match else None
+    if ledger is None:
+        return False, "latest live failure ledger absent"
+
+    diagnosis: tuple[int, dict[str, Any], str] | None = None
+    for index, item in enumerate(
+        ordered[failure_index + 1 :],
+        start=failure_index + 1,
+    ):
+        body = str(item.get("body", ""))
+        node = re.search(
+            r"`uv run --frozen pytest -q "
+            r"(newsroom/tests/[A-Za-z0-9_./-]+::test_[A-Za-z0-9_]+)`",
+            body,
+        )
+        if (
+            "full-path red" in body.lower()
+            and ledger in body
+            and re.search(r"(?i)red commit:\s*`[0-9a-f]{40}`", body)
+            and node is not None
+        ):
+            diagnosis = (index, item, node.group(1))
+            break
+    if diagnosis is None:
+        return False, f"ledger {ledger} full-path red absent"
+    diagnosis_index, _diagnosis, test_node = diagnosis
+    if test_node != STEP21_FULL_PATH_TEST:
+        return False, f"unexpected latest red test {test_node}"
+
+    for item in ordered[diagnosis_index + 1 :]:
+        body = str(item.get("body", ""))
+        if (
+            tip in body
+            and ledger in body
+            and "exact-main" in body.lower()
+            and "focus gates" in body.lower()
+            and re.search(r"(?i)focus gates[^\n]*(?:success|succeeded)", body)
+            and "full-path" in body.lower()
+        ):
+            return True, f"ledger {ledger} red→green on {tip[:12]}"
+    return False, f"ledger {ledger} current-main green absent"
+
+
+def _issue_comments(root: Path) -> list[dict[str, Any]]:
+    comments: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        value = json.loads(
+            sh(
+                "gh",
+                "api",
+                f"repos/fol2/newsroom/issues/790/comments?per_page=100&page={page}",
+                cwd=root,
+            )
+        )
+        if not isinstance(value, list):
+            raise ValueError("issue comments are malformed")
+        comments.extend(item for item in value if isinstance(item, dict))
+        if len(value) < 100:
+            return comments
+        page += 1
+
+
+def _graphiti_runtime_status() -> tuple[bool, str]:
+    """Import the pinned runtime through the exact adapter path used by canary."""
+
+    try:
+        from newsroom.graphiti_adapter.real import _load_graphiti
+
+        version = importlib.metadata.version("graphiti-core")
+        runtime = _load_graphiti()
+    except Exception as exc:
+        return False, f"{type(exc).__name__} via {sys.executable}"
+    ok = version == GRAPHITI_CORE_VERSION and hasattr(runtime, "Graphiti")
+    return ok, f"graphiti-core {version} via {sys.executable}"
+
+
+def _service_probes() -> tuple[bool, str, bool, str]:
+    """Prove worker and Control Plane LaunchAgents/processes are absent."""
+
+    try:
+        launchctl = subprocess.run(
+            ["/bin/launchctl", "list"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        worker = subprocess.run(
+            ["/usr/bin/pgrep", "-f", "scripts/hermes_graphiti_worker.py"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        control_plane = subprocess.run(
+            ["/usr/bin/pgrep", "-f", "scripts/hermes_control_plane.py"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        detail = type(exc).__name__
+        return False, detail, False, detail
+    probes_ok = (
+        launchctl.returncode == 0
+        and worker.returncode in {0, 1}
+        and control_plane.returncode in {0, 1}
+    )
+    worker_loaded = WORKER in launchctl.stdout or bool(worker.stdout.strip())
+    control_plane_loaded = CONTROL_PLANE in launchctl.stdout or bool(
+        control_plane.stdout.strip()
+    )
+    return (
+        probes_ok and not worker_loaded,
+        "LOADED" if worker_loaded else "unloaded",
+        probes_ok and not control_plane_loaded,
+        "LOADED" if control_plane_loaded else "unloaded",
+    )
+
+
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        is not None
+    )
+
+
+def _has_prior_execution(
+    connection: sqlite3.Connection,
+    *,
+    event_id: str,
+    ingest_ids: list[str],
+) -> bool:
+    """Inspect unpublished receipts by ingest identity, never by event column."""
+
+    if not ingest_ids:
+        return True
+    placeholders = ",".join("?" for _ in ingest_ids)
+    for table in (
+        "unpublished_graphiti_ingest",
+        "unpublished_graphiti_failures",
+        "unpublished_graphiti_receipts",
+        "unpublished_graphiti_attempt_receipts",
+        "unpublished_graphiti_spend",
+    ):
+        if _table_exists(connection, table) and connection.execute(
+            f"SELECT 1 FROM {table} WHERE ingest_id IN ({placeholders}) LIMIT 1",
+            ingest_ids,
+        ).fetchone():
+            return True
+    return bool(
+        _table_exists(connection, "model_work_envelopes")
+        and connection.execute(
+            f"SELECT 1 FROM model_work_envelopes WHERE cycle_id=? "
+            f"OR json_extract(record_json,'$.ingest_id') IN ({placeholders}) LIMIT 1",
+            (event_id, *ingest_ids),
+        ).fetchone()
+    )
+
+
+def _run_pytest_nodes(repo: Path, nodes: tuple[str, ...]) -> tuple[bool, str]:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "--assert=plain",
+            "-p",
+            "no:cacheprovider",
+            *nodes,
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    summary = (completed.stdout.strip().splitlines() or ["no pytest output"])[-1]
+    return completed.returncode == 0, summary
+
+
+def _inspection_sql_smoke() -> tuple[bool, str]:
+    with tempfile.TemporaryDirectory(prefix="issue-790-inspection-") as raw:
+        store = Path(raw) / "inspection.sqlite3"
+        connection = sqlite3.connect(store)
+        try:
+            connection.executescript(
+                """
+                CREATE TABLE model_work_envelopes(
+                    envelope_id TEXT PRIMARY KEY,
+                    cycle_id TEXT NOT NULL,
+                    record_json TEXT NOT NULL
+                );
+                CREATE TABLE unpublished_graphiti_attempt_receipts(
+                    ingest_id TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    receipt_digest TEXT NOT NULL,
+                    receipt_json TEXT NOT NULL,
+                    PRIMARY KEY(ingest_id, attempt_number)
+                );
+                """
+            )
+            connection.execute(
+                "INSERT INTO model_work_envelopes VALUES(?,?,?)",
+                ("envelope", "event", json.dumps({"ingest_id": "ingest"})),
+            )
+            connection.execute(
+                "INSERT INTO unpublished_graphiti_attempt_receipts VALUES(?,?,?,?)",
+                ("ingest", 1, "sha256:" + "11" * 32, "{}"),
+            )
+            observed = _has_prior_execution(
+                connection,
+                event_id="event",
+                ingest_ids=["ingest"],
+            )
+        finally:
+            connection.close()
+    return observed, "receipt schema has ingest_id and no event_id"
+
+
+def _retry_exclusion_append_smoke() -> tuple[bool, str]:
+    """Exercise the real append path twice, including exhausted ledger 13361."""
+
+    from newsroom.control_plane import issue_790_canary as canary_module
+    from newsroom.control_plane import issue_790_disposition as disposition_module
+    from newsroom.control_plane.issue_790_canary import Issue790CanaryRepository
+
+    root_plan = "sha256:" + "11" * 32
+    disposition = "sha256:" + "22" * 32
+    invocation = "sha256:" + "33" * 32
+    seqs = (1932, 1972, 8834, 8835, 13284, 13337, 13361, 13362)
+    events = [
+        {
+            "attempt_count": 1,
+            "available_at": "2026-08-30T00:00:00.000000Z",
+            "event_id": "sha256:" + hashlib.sha256(str(seq).encode()).hexdigest(),
+            "last_failure_code": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:SMOKE",
+            "ledger_seq": seq,
+            "provider_dispatched": True,
+            "state": "CONFIGURATION_HELD",
+        }
+        for seq in seqs
+    ]
+    with tempfile.TemporaryDirectory(prefix="issue-790-exclusions-") as raw:
+        store = Path(raw) / "canary.sqlite3"
+        repository = Issue790CanaryRepository(str(store))
+        connection = sqlite3.connect(store)
+        try:
+            connection.execute(
+                "CREATE TABLE model_usage_conservative_dispositions("
+                "invocation_id TEXT,approved_plan_digest TEXT,"
+                "disposition_digest TEXT PRIMARY KEY)"
+            )
+            connection.execute(
+                "INSERT INTO model_usage_conservative_dispositions VALUES(?,?,?)",
+                (invocation, root_plan, disposition),
+            )
+            connection.execute(
+                "CREATE TABLE unpublished_graphiti_revision_events("
+                "event_id TEXT,ledger_seq INTEGER,state TEXT,attempt_count INTEGER,"
+                "available_at TEXT,last_failure_code TEXT,provider_dispatched INTEGER)"
+            )
+            connection.executemany(
+                "INSERT INTO unpublished_graphiti_revision_events VALUES(?,?,?,?,?,?,?)",
+                [
+                    (
+                        item["event_id"],
+                        item["ledger_seq"],
+                        item["state"],
+                        item["attempt_count"],
+                        item["available_at"],
+                        item["last_failure_code"],
+                        int(item["provider_dispatched"]),
+                    )
+                    for item in events
+                ],
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        contract = SimpleNamespace(invocation_id=invocation)
+        without_13361 = [item for item in events if item["ledger_seq"] != 13361]
+        with patch.object(
+            canary_module,
+            "_require_effective_plan_contract",
+            return_value=contract,
+        ), patch.object(
+            disposition_module,
+            "issue_790_approved_plan_contract",
+            return_value=contract,
+        ):
+            repository.retain_retry_exclusions(
+                approved_plan_digest=root_plan,
+                disposition_digest=disposition,
+                events=without_13361,
+                excluded_at=datetime(2026, 8, 30, tzinfo=UTC),
+            )
+            plan = {
+                "canonical_digest": root_plan,
+                "retry_forbidden_events": events,
+            }
+            first = disposition_module._retain_retry_exclusions_for_plan(
+                repository,
+                plan=plan,
+                disposition_digest=disposition,
+                observed_at=datetime(2026, 8, 30, 1, tzinfo=UTC),
+            )
+            second = disposition_module._retain_retry_exclusions_for_plan(
+                repository,
+                plan=plan,
+                disposition_digest=disposition,
+                observed_at=datetime(2026, 8, 30, 2, tzinfo=UTC),
+            )
+    retained = [int(item["ledger_seq"]) for item in first]
+    return first == second and retained == list(seqs), f"retained={retained} replay=stable"
 
 
 def _expect_code(
@@ -73,7 +494,12 @@ def _ops_gates(
 ) -> tuple[list[tuple[str, bool, str]], tuple[str, int] | None]:
     rows: list[tuple[str, bool, str]] = []
     store = root / "data/newsroom/unpublished_store.sqlite3"
-    subprocess.run(["git", "fetch", "origin", "main"], check=True, capture_output=True, cwd=root)
+    subprocess.run(
+        ["git", "fetch", "origin", "main"],
+        check=True,
+        capture_output=True,
+        cwd=root,
+    )
     head = sh("git", "rev-parse", "HEAD", cwd=root)
     local = sh("git", "rev-parse", "refs/heads/main", cwd=root)
     origin = sh("git", "rev-parse", "refs/remotes/origin/main", cwd=root)
@@ -88,9 +514,12 @@ def _ops_gates(
         cwd=root,
     )
     plan_path = root / plan_rel
-    plan_digest = (
-        json.loads(plan_path.read_text())["canonical_digest"] if plan_path.is_file() else None
-    )
+    plan: dict[str, Any] = {}
+    if plan_path.is_file():
+        loaded_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        if isinstance(loaded_plan, dict):
+            plan = loaded_plan
+    plan_digest = plan.get("canonical_digest")
     raw = json.loads(
         sh(
             "gh",
@@ -101,112 +530,174 @@ def _ops_gates(
             cwd=root,
         )
     )
-    ci_hits = [
-        i
-        for i in raw.get("check_runs", [])
-        if isinstance(i, dict)
-        and i.get("name") in ACCEPTED_CI
-        and i.get("status") == "completed"
-        and i.get("conclusion") == "success"
-        and i.get("head_sha") == tip
-    ]
+    ci_hits = _focus_gate_hits(raw.get("check_runs"), tip=tip)
+    comments = _issue_comments(root)
+    red_green_ok, red_green_detail = _latest_failure_red_green(comments, tip=tip)
     key_ok = False
     envp = root / ".env"
     if envp.is_file():
         for line in envp.read_text().splitlines():
             if line.startswith("CURSOR_API_KEY=") and len(line.split("=", 1)[1].strip()) > 8:
                 key_ok = True
-    lst = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
-    pgrep = subprocess.run(
-        ["pgrep", "-f", "scripts/hermes_graphiti_worker.py"],
-        capture_output=True,
-        text=True,
-    )
-    worker_loaded = WORKER in lst.stdout or bool(pgrep.stdout.strip())
+    worker_ok, worker_state, control_plane_ok, control_plane_state = _service_probes()
+    runtime_ok, runtime_detail = _graphiti_runtime_status()
     qc = sh("sqlite3", str(store), "PRAGMA quick_check;", cwd=root)
     conn = sqlite3.connect(f"{store.as_uri()}?mode=ro", uri=True)
-    disp = conn.execute(
-        "SELECT approved_plan_digest FROM model_usage_conservative_dispositions "
-        "WHERE disposition_digest=?",
-        (DISP,),
-    ).fetchone()
-    route = conn.execute(
-        "SELECT state, reason FROM model_usage_route_circuit_events "
-        "WHERE route='GRAPHITI_CHAT_PRIMARY' "
-        "ORDER BY recorded_at DESC, rowid DESC LIMIT 1"
-    ).fetchone()
-    forbidden = {PRED_EVENT}
-    if plan_path.is_file():
-        for ev in json.loads(plan_path.read_text()).get("retry_forbidden_events") or []:
-            if isinstance(ev, dict) and ev.get("event_id"):
-                forbidden.add(str(ev["event_id"]))
-    pred = conn.execute(
-        "SELECT state, attempt_count FROM unpublished_graphiti_revision_events "
-        "WHERE event_id=? AND ledger_seq=?",
-        (PRED_EVENT, PRED_LEDGER),
-    ).fetchone()
-    cands = conn.execute(
-        "SELECT event_id, ledger_seq FROM unpublished_graphiti_revision_events "
-        "WHERE state='QUEUED' AND attempt_count=0 AND provider_dispatched=0 "
-        "ORDER BY ledger_seq DESC LIMIT 40"
-    ).fetchall()
-    conn.close()
+    try:
+        disp = conn.execute(
+            "SELECT approved_plan_digest FROM model_usage_conservative_dispositions "
+            "WHERE disposition_digest=?",
+            (DISP,),
+        ).fetchone()
+        route = conn.execute(
+            "SELECT state, reason FROM model_usage_route_circuit_events "
+            "WHERE route='GRAPHITI_CHAT_PRIMARY' "
+            "ORDER BY recorded_at DESC, rowid DESC LIMIT 1"
+        ).fetchone()
+        activation: dict[str, object] | None = None
+        activation_error: str | None = None
+        try:
+            from newsroom.control_plane.issue_790_step16_activation import (
+                load_step16_activation_record,
+                validate_step16_activation_receipt,
+            )
 
-    fresh: list[tuple[str, int]] = []
+            activation = load_step16_activation_record(
+                conn,
+                plan_digest=str(plan_digest),
+            )
+            validate_step16_activation_receipt(activation, plan=plan)
+        except Exception as exc:
+            activation_error = type(exc).__name__
+
+        from newsroom.control_plane.issue_790_canary import Issue790CanaryRepository
+
+        try:
+            exclusions = list(
+                Issue790CanaryRepository.open_existing(str(store)).retry_exclusions()
+            )
+            exclusion_error = None
+        except Exception as exc:
+            exclusions = []
+            exclusion_error = type(exc).__name__
+
+        plan_events = [
+            item
+            for item in plan.get("retry_forbidden_events", [])
+            if isinstance(item, dict)
+        ]
+        plan_seqs = [int(item.get("ledger_seq", 0)) for item in plan_events]
+        plan_event_ids = {
+            str(item["event_id"])
+            for item in plan_events
+            if isinstance(item.get("event_id"), str)
+        }
+        durable_seqs = {
+            int(item.get("ledger_seq", 0))
+            for item in exclusions
+            if isinstance(item, dict)
+        }
+        durable_event_ids = {
+            str(item["event_id"])
+            for item in exclusions
+            if isinstance(item, dict) and isinstance(item.get("event_id"), str)
+        }
+        plan_event_ids_by_seq = {
+            int(item.get("ledger_seq", 0)): str(item.get("event_id"))
+            for item in plan_events
+        }
+        durable_event_ids_by_seq = {
+            int(item.get("ledger_seq", 0)): str(item.get("event_id"))
+            for item in exclusions
+            if isinstance(item, dict)
+        }
+        cands = conn.execute(
+            "SELECT event_id,ledger_seq,state,attempt_count,provider_dispatched "
+            "FROM unpublished_graphiti_revision_events "
+            "WHERE state='QUEUED' AND attempt_count=0 AND provider_dispatched=0 "
+            "ORDER BY ledger_seq DESC LIMIT 40"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    invalid_digests = _invalid_sha256_paths(plan, path="$.plan")
+    if activation is None:
+        invalid_digests.append("$.activation:ABSENT")
+    else:
+        invalid_digests.extend(
+            _invalid_sha256_paths(activation, path="$.activation")
+        )
+        owner = activation.get("approval_payload")
+        if not isinstance(owner, dict):
+            invalid_digests.append("$.activation.approval_payload:ABSENT")
+
+    exclusions_ok = (
+        exclusion_error is None
+        and len(plan_seqs) == len(set(plan_seqs))
+        and REQUIRED_RETRY_LEDGER_SEQS.issubset(plan_seqs)
+        and REQUIRED_RETRY_LEDGER_SEQS.issubset(durable_seqs)
+        and all(
+            plan_event_ids_by_seq.get(seq) == durable_event_ids_by_seq.get(seq)
+            for seq in REQUIRED_RETRY_LEDGER_SEQS
+        )
+        and all(
+            item.get("reason") == "ISSUE_790_RETRY_FORBIDDEN"
+            and isinstance(item.get("event_snapshot"), dict)
+            and int(item["event_snapshot"].get("ledger_seq", 0))
+            == int(item.get("ledger_seq", 0))
+            for item in exclusions
+        )
+    )
+    forbidden_event_ids = plan_event_ids | durable_event_ids
+    forbidden_seqs = set(plan_seqs) | durable_seqs
+
     clean_event: tuple[str, int] | None = None
-    for e, s in cands:
-        if e in forbidden or s in {1932, 1972, 8834, 8835}:
+    fresh_detail = "NONE"
+    for event_id, ledger_seq, state, attempt_count, provider_dispatched in cands:
+        if event_id in forbidden_event_ids or int(ledger_seq) in forbidden_seqs:
             continue
-        fresh.append((e, s))
-    if fresh:
         from newsroom.control_plane.cycle import qualify_fresh_graphiti_event
 
         observed = datetime.now(UTC)
         proving = root / "data/newsroom/proving_store.sqlite3"
-        for e, s in fresh[:15]:
-            try:
-                evidence = qualify_fresh_graphiti_event(
-                    proving_store=str(proving),
-                    unpublished_store=str(store),
-                    event_id=e,
-                    ledger_seq=s,
-                    clock=lambda: observed,
-                )
-            except Exception:
-                continue
-            units = evidence.get("resolved_units") or []
-            ingest_ids = [str(u["ingest_id"]) for u in units if isinstance(u, dict)]
-            if not ingest_ids:
-                continue
-            ph = ",".join("?" for _ in ingest_ids)
-            c2 = sqlite3.connect(f"{store.as_uri()}?mode=ro", uri=True)
-            try:
-                prior = False
-                for table in (
-                    "unpublished_graphiti_ingest",
-                    "unpublished_graphiti_failures",
-                    "unpublished_graphiti_receipts",
-                    "unpublished_graphiti_attempt_receipts",
-                    "unpublished_graphiti_spend",
-                ):
-                    if c2.execute(
-                        f"SELECT 1 FROM {table} WHERE ingest_id IN ({ph}) LIMIT 1",
-                        ingest_ids,
-                    ).fetchone():
-                        prior = True
-                        break
-                if not prior and c2.execute(
-                    f"SELECT 1 FROM model_work_envelopes WHERE cycle_id=? "
-                    f"OR json_extract(record_json,'$.ingest_id') IN ({ph}) LIMIT 1",
-                    (e, *ingest_ids),
-                ).fetchone():
-                    prior = True
-            finally:
-                c2.close()
-            if not prior:
-                clean_event = (e, s)
-                break
-    fresh = [clean_event] if clean_event else []
+        try:
+            evidence = qualify_fresh_graphiti_event(
+                proving_store=str(proving),
+                unpublished_store=str(store),
+                event_id=str(event_id),
+                ledger_seq=int(ledger_seq),
+                clock=lambda: observed,
+            )
+        except Exception:
+            continue
+        units = evidence.get("resolved_units") or []
+        ingest_ids = [
+            str(unit["ingest_id"])
+            for unit in units
+            if isinstance(unit, dict) and isinstance(unit.get("ingest_id"), str)
+        ]
+        c2 = sqlite3.connect(f"{store.as_uri()}?mode=ro", uri=True)
+        try:
+            prior = _has_prior_execution(
+                c2,
+                event_id=str(event_id),
+                ingest_ids=ingest_ids,
+            )
+        finally:
+            c2.close()
+        exact_fresh = (
+            state == "QUEUED"
+            and int(attempt_count) == 0
+            and not bool(provider_dispatched)
+            and not prior
+        )
+        if exact_fresh:
+            clean_event = (str(event_id), int(ledger_seq))
+            fresh_detail = (
+                f"{str(event_id)[:24]}…/{ledger_seq} "
+                "QUEUED attempt=0 provider_dispatched=false"
+            )
+            break
 
     _check(rows, "O01 origin/main == github main == tip", origin == github == tip, origin[:12])
     _check(rows, "O02 HEAD == tip (exact deploy)", head == tip, f"HEAD={head[:12]}")
@@ -218,36 +709,66 @@ def _ops_gates(
         status == "",
         (status.splitlines() or ["clean"])[0],
     )
-    _check(rows, "O06 tip Step plan digest on disk", plan_digest == tip_plan, plan_digest or "MISSING")
     _check(
         rows,
-        "O07 exact-head accepted CI green",
-        bool(ci_hits),
-        ",".join(sorted({i["name"] for i in ci_hits})) or "none",
+        "O06 exact activated plan digest on disk",
+        plan_digest == tip_plan and _SHA256.fullmatch(str(plan_digest)) is not None,
+        str(plan_digest or "MISSING"),
     )
-    _check(rows, "O08 CURSOR_API_KEY in .env", key_ok, "present" if key_ok else "ABSENT")
-    _check(rows, "O09 graphiti worker UNLOADED", not worker_loaded, "LOADED" if worker_loaded else "unloaded")
-    _check(rows, "O10 unpublished_store quick_check=ok", qc == "ok", qc)
-    _check(rows, "O11 disposition 020f5b56… retained", disp is not None, (disp[0][:24] + "…") if disp else "ABSENT")
     _check(
         rows,
-        "O12 route circuit readable",
+        "O07 exact-main Focus Gates success on tip SHA",
+        bool(ci_hits),
+        FOCUS_GATE_CHECK if ci_hits else "none (Full Health is insufficient)",
+    )
+    _check(
+        rows,
+        "O08 owner/activation artefacts valid with exact SHA-256 digests",
+        activation_error is None and not invalid_digests,
+        "valid" if not invalid_digests and activation_error is None else str(
+            invalid_digests[0] if invalid_digests else activation_error
+        ),
+    )
+    _check(rows, "O09 graphiti-core 0.29.3 importable on canary runtime", runtime_ok, runtime_detail)
+    _check(rows, "O10 CURSOR_API_KEY in .env", key_ok, "present" if key_ok else "ABSENT")
+    _check(rows, "O11 graphiti worker UNLOADED", worker_ok, worker_state)
+    _check(rows, "O12 Hermes Control Plane UNLOADED", control_plane_ok, control_plane_state)
+    _check(rows, "O13 unpublished_store quick_check=ok", qc == "ok", qc)
+    _check(
+        rows,
+        "O14 disposition 020f5b56… retained",
+        disp is not None,
+        (disp[0][:24] + "…") if disp else "ABSENT",
+    )
+    _check(
+        rows,
+        "O15 route circuit readable",
         route is not None,
         f"{route[0]}:{str(route[1])[:48]}" if route else "ABSENT",
     )
     _check(
         rows,
-        "O13 predecessor event not QUEUED/0",
-        pred is not None and not (pred[0] == "QUEUED" and pred[1] == 0),
-        f"{pred}" if pred else "ABSENT",
+        "O16 all exhausted events durably retry-excluded",
+        exclusions_ok,
+        (
+            f"plan={sorted(set(plan_seqs))} durable={sorted(durable_seqs)}"
+            if exclusion_error is None
+            else exclusion_error
+        ),
     )
     _check(
         rows,
-        "O14 fresh QUEUED attempt-0 CLEAN",
-        bool(fresh),
-        f"{fresh[0][0][:24]}…/{fresh[0][1]}" if fresh else "NONE",
+        "O17 latest live failure has full-path red then current-main green",
+        red_green_ok,
+        red_green_detail,
     )
-    return rows, fresh[0] if fresh else None
+    _check(
+        rows,
+        "O18 fresh QUEUED attempt-0 undispatched event outside exclusions",
+        clean_event is not None,
+        fresh_detail,
+    )
+    return rows, clean_event
 
 
 def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
@@ -631,15 +1152,8 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
     _check(
         rows,
         "B19 canary fallback remains disabled before provider dispatch",
-        adapter_fallback._fallback_permitted is False
-        and "DISABLED_BEFORE_PROVIDER_DISPATCH" in (
-            (repo_for_imports / PLAN_REL_DEFAULT).read_text(encoding="utf-8")
-            if (repo_for_imports / PLAN_REL_DEFAULT).is_file()
-            else (repo_for_imports / "docs/operations/2026-08-28-issue-790-success-sequence-step-14.json").read_text(encoding="utf-8")
-            if (repo_for_imports / "docs/operations/2026-08-28-issue-790-success-sequence-step-14.json").is_file()
-            else ""
-        ),
-        "fallback_permitted=False + plan fallback_mode",
+        adapter_fallback._fallback_permitted is False,
+        "fallback_permitted=False; activated plan is checked separately",
     )
     # Ambiguous multi-cue → atom-local TEMPORAL_INVALID under projection
     multi_cue_body = (
@@ -697,9 +1211,52 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
         "EVIDENCE+IDENTITY+TEMPORAL+MALFORMED dry; PIPELINE mapped in B17",
     )
 
-    print(
-        "RESIDUAL (cannot preflight provider-free): provider outage; Neo4j "
-        "pipeline after a schema-valid extract; novel attribution edge cases."
+    full_path_ok, full_path_detail = _run_pytest_nodes(
+        repo_for_imports,
+        _FULL_PATH_TESTS,
+    )
+    _check(
+        rows,
+        "B21 Step 19 execute→ingest→bind accepts COMPLETE+0",
+        full_path_ok,
+        full_path_detail,
+    )
+    marker_ok, marker_detail = _run_pytest_nodes(repo_for_imports, _MARKER_TESTS)
+    _check(
+        rows,
+        "B22 Steps 20-21 marked and unmarked COMPLETE+0 avoid AMBIGUOUS_EFFECT",
+        marker_ok,
+        marker_detail,
+    )
+    fail_closed_ok, fail_closed_detail = _run_pytest_nodes(
+        repo_for_imports,
+        _FAIL_CLOSED_TESTS,
+    )
+    _check(
+        rows,
+        "B23 failure/blocked/proposal-bearing ambiguity remains fail-closed",
+        fail_closed_ok,
+        fail_closed_detail,
+    )
+    inspection_ok, inspection_detail = _inspection_sql_smoke()
+    _check(
+        rows,
+        "B24 unpublished receipt inspection resolves ingest_id via work envelope",
+        inspection_ok,
+        inspection_detail,
+    )
+    exclusion_ok, exclusion_detail = _retry_exclusion_append_smoke()
+    _check(
+        rows,
+        "B25 retry-exclusion apply appends 13361 idempotently",
+        exclusion_ok,
+        exclusion_detail,
+    )
+    _check(
+        rows,
+        "B26 provider-free preflight residuals remain explicit",
+        True,
+        "provider outage and novel live-only semantics remain F4 unknowns",
     )
     _ = canary_src  # retained for future source gates; silence lint
     return rows
@@ -710,8 +1267,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ops-root", type=Path, default=ROOT_DEFAULT)
     parser.add_argument("--code-root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--tip-merge", default=None, help="exact tip SHA; default origin/main")
-    parser.add_argument("--tip-plan", default=TIP_PLAN_DEFAULT)
-    parser.add_argument("--plan-rel", default=PLAN_REL_DEFAULT)
+    parser.add_argument("--tip-plan", required=True, help="exact activated plan SHA-256")
+    parser.add_argument("--plan-rel", required=True, help="activated plan path below ops root")
     parser.add_argument("--ops-only", action="store_true")
     parser.add_argument("--smoke-only", action="store_true")
     args = parser.parse_args(argv)
@@ -736,12 +1293,17 @@ def main(argv: list[str] | None = None) -> int:
         os.chdir(args.code_root)
         all_rows.extend(_blocker_smokes(args.code_root))
 
+    diagnostic_only = args.ops_only or args.smoke_only
     failed = [name for name, ok, _ in all_rows if not ok]
     print()
     if failed:
         print(f"RESULT: BLOCKED ({len(all_rows) - len(failed)}/{len(all_rows)})")
         print("DO NOT apply/canary until FAIL lines are green.")
         return 1
+    if diagnostic_only:
+        print("RESULT: BLOCKED (diagnostic subset cannot authorise a live canary)")
+        print("Run the complete preflight without --ops-only/--smoke-only.")
+        return 2
     print(f"RESULT: READY ({len(all_rows)}/{len(all_rows)})")
     if canary_event is not None:
         print(f"CANARY_EVENT={canary_event[0]}")

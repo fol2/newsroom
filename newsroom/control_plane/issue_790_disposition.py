@@ -294,8 +294,24 @@ _RETRY_FORBIDDEN_EVENTS_STEP21: tuple[dict[str, object], ...] = (
     *_RETRY_FORBIDDEN_EVENTS_STEP20,
     _EXHAUSTED_EVENT_13362,
 )
+_EXHAUSTED_EVENT_13361 = {
+    "attempt_count": 1,
+    "available_at": "2026-08-30T20:58:43.662872Z",
+    "event_id": (
+        "sha256:90c3b4de731f2df8d4353e516762f65450570e1e8372ed7b703423f717351ae7"
+    ),
+    "last_failure_code": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:AMBIGUOUS_EFFECT",
+    "ledger_seq": 13361,
+    "provider_dispatched": True,
+    "state": "CONFIGURATION_HELD",
+}
+_RETRY_FORBIDDEN_EVENTS_CURRENT: tuple[dict[str, object], ...] = (
+    *_RETRY_FORBIDDEN_EVENTS_STEP20,
+    _EXHAUSTED_EVENT_13361,
+    _EXHAUSTED_EVENT_13362,
+)
 _RETRY_FORBIDDEN_LEDGER_SEQS = frozenset(
-    int(item["ledger_seq"]) for item in _RETRY_FORBIDDEN_EVENTS_STEP21
+    int(item["ledger_seq"]) for item in _RETRY_FORBIDDEN_EVENTS_CURRENT
 )
 _STEP16_PREDECESSOR_TIMEOUTS = (160_000, 180_000, 20_000)
 _RUNNING_CODE_MODULES: tuple[tuple[str, str], ...] = (
