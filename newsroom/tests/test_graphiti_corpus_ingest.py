@@ -5407,6 +5407,59 @@ def test_zero_proposal_success_survives_full_evaluation_cycle(
     assert report.graphiti == 1
 
 
+def test_partial_zero_proposal_result_survives_cycle_binding(tmp_path: Path) -> None:
+    """A truthful partial empty result remains terminal across durable binding."""
+
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "partial-zero-proposal-cycle.sqlite3"
+
+    class PartialZeroProposal:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            return replace(
+                _complete(
+                    unit,
+                    proposal_count=0,
+                    entity_count=0,
+                    relation_count=0,
+                ),
+                outcome="PARTIAL",
+                failure_code="FIXTURE_PARTIAL",
+            )
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=PartialZeroProposal(),
+        max_graphiti=1,
+    )
+
+    connection = sqlite3.connect(unpublished)
+    ingest = connection.execute(
+        "SELECT outcome,proposal_count,failure_code "
+        "FROM unpublished_graphiti_ingest"
+    ).fetchone()
+    receipt = json.loads(
+        connection.execute(
+            "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts"
+        ).fetchone()[0]
+    )
+    failure = connection.execute(
+        "SELECT last_outcome,last_failure_code FROM unpublished_graphiti_failures"
+    ).fetchone()
+    connection.close()
+
+    assert report.graphiti == 1
+    assert ingest == ("PARTIAL", 0, "FIXTURE_PARTIAL")
+    assert failure is None
+    assert (receipt["outcome"], receipt["proposal_count"], receipt["failure_code"]) == (
+        "PARTIAL",
+        0,
+        "FIXTURE_PARTIAL",
+    )
+
+
 def test_step20_rolled_back_zero_proposal_completion_survives_full_cycle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
