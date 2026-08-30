@@ -84,6 +84,9 @@ def test_step20_is_new_family_and_binds_step19_and_the_reviewed_fix() -> None:
         13284,
         13337,
     ]
+    assert candidate["retry_forbidden_events"][-1]["available_at"] == (
+        "2026-08-30T13:00:55.782046Z"
+    )
     assert candidate["executable"] is False
     assert candidate["live_canary_authorised"] is False
     assert contract_module.issue_790_owner_activated_sequence(20) is True

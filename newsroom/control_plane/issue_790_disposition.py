@@ -260,7 +260,7 @@ _RETRY_FORBIDDEN_EVENTS_STEP19: tuple[dict[str, object], ...] = (
 )
 _EXHAUSTED_EVENT_13337 = {
     "attempt_count": 1,
-    "available_at": "2026-08-30T12:34:51.361556Z",
+    "available_at": "2026-08-30T13:00:55.782046Z",
     "event_id": (
         "sha256:e4ef6fd0af91d5d525af3f37f5cfb422733a1640c84c16cdc162f0e6d8bb0b5b"
     ),
