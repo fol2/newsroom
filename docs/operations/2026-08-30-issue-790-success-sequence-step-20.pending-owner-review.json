@@ -75,7 +75,7 @@
     },
     {
       "attempt_count": 1,
-      "available_at": "2026-08-30T12:34:51.361556Z",
+      "available_at": "2026-08-30T13:00:55.782046Z",
       "event_id": "sha256:e4ef6fd0af91d5d525af3f37f5cfb422733a1640c84c16cdc162f0e6d8bb0b5b",
       "last_failure_code": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:PRODUCER_INTERNAL_ERROR",
       "ledger_seq": 13337,
@@ -161,5 +161,5 @@
     "pre_dispatch_operational_requirements_digest": "sha256:968d0875cbed3a37cca56c2aa696598c3996e10d3a0ad6edc5978c21965d587b",
     "predecessor_canary_receipt_digest": "sha256:c2c0af333790b2dbfa33b9098f721cf5613d4843d1347ff7c2c1435185c28cec"
   },
-  "canonical_digest": "sha256:009905444e2cc23a4946799ed98b1abbbd7e630002889d0fb8c300d515094cdb"
+  "canonical_digest": "sha256:1eb28218a0aa6e939cd1c4106355c84d8db97917cca605c2e2686e2203bb27cf"
 }
