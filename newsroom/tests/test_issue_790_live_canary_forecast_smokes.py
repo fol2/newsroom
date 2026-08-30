@@ -10,6 +10,8 @@ import pytest
 from scripts.issue_790_live_canary_preflight import (
     STEP21_FULL_PATH_TEST,
     _blocker_smokes,
+    _effective_retry_exclusion_status,
+    _eligible_candidate_rows,
     _focus_gate_hits,
     _graphiti_runtime_status,
     _inspection_sql_smoke,
@@ -155,3 +157,83 @@ def test_retry_exclusion_apply_appends_all_exhausted_events_idempotently() -> No
     assert ok is True
     assert "13361" in detail
     assert "replay=stable" in detail
+
+
+def test_o16_uses_exhausted_consumption_without_rewriting_step21_plan() -> None:
+    event_id = "sha256:" + "61" * 32
+    base_seqs = (1932, 1972, 8834, 8835, 13284, 13337, 13362)
+    plan_events = [
+        {"event_id": "sha256:" + f"{seq:064x}", "ledger_seq": seq}
+        for seq in base_seqs
+    ]
+    exclusions = [
+        {
+            "event_id": item["event_id"],
+            "ledger_seq": item["ledger_seq"],
+            "reason": "ISSUE_790_RETRY_FORBIDDEN",
+            "event_snapshot": dict(item),
+        }
+        for item in plan_events
+    ]
+    consumption = {
+        "approved_plan_digest": "sha256:" + "aa" * 32,
+        "consumption_digest": "sha256:" + "bb" * 32,
+        "event_id": event_id,
+        "ledger_seq": 13361,
+        "attempt_count_before": 0,
+        "maximum_event_attempts": 1,
+    }
+    outcome = {
+        "approved_plan_digest": consumption["approved_plan_digest"],
+        "consumption_digest": consumption["consumption_digest"],
+        "event_id": event_id,
+        "ledger_seq": 13361,
+        "attempt_count": 1,
+        "provider_dispatched": True,
+        "retry_authorised": False,
+        "state_after_seal": "CONFIGURATION_HELD",
+        "failure_code_after_seal": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:AMBIGUOUS_EFFECT",
+    }
+    event_snapshot = {
+        "event_id": event_id,
+        "ledger_seq": 13361,
+        "state": "CONFIGURATION_HELD",
+        "attempt_count": 1,
+        "provider_dispatched": True,
+        "last_failure_code": outcome["failure_code_after_seal"],
+    }
+
+    ok, detail = _effective_retry_exclusion_status(
+        plan_events=plan_events,
+        exclusions=exclusions,
+        consumption=consumption,
+        outcome=outcome,
+        event_snapshot=event_snapshot,
+        activated_plan_digest=str(consumption["approved_plan_digest"]),
+        effectively_excluded_event_ids={event_id},
+    )
+
+    assert ok is True
+    assert "consumed=13361" in detail
+    outcome["retry_authorised"] = True
+    assert _effective_retry_exclusion_status(
+        plan_events=plan_events,
+        exclusions=exclusions,
+        consumption=consumption,
+        outcome=outcome,
+        event_snapshot=event_snapshot,
+        activated_plan_digest=str(consumption["approved_plan_digest"]),
+        effectively_excluded_event_ids={event_id},
+    )[0] is False
+
+
+def test_o18_skips_old_backlog_before_proving_qualification() -> None:
+    old = ("sha256:" + "11" * 32, 8819, "QUEUED", 0, 0)
+    future = ("sha256:" + "22" * 32, 14000, "QUEUED", 0, 0)
+
+    assert _eligible_candidate_rows(
+        (old,), forbidden_event_ids=set(), forbidden_seqs=set()
+    ) == ()
+    assert _eligible_candidate_rows(
+        (old, future), forbidden_event_ids=set(), forbidden_seqs=set()
+    ) == (future,)

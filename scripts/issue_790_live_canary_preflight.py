@@ -125,6 +125,184 @@ def _invalid_sha256_paths(value: object, *, path: str = "$") -> list[str]:
     return invalid
 
 
+def _resolve_tracked_activation(
+    connection: sqlite3.Connection,
+    *,
+    tracked_plan: dict[str, Any],
+    root: Path,
+) -> tuple[dict[str, object] | None, dict[str, object] | None, str | None]:
+    """Resolve a tracked pending family to its exact retained activation."""
+
+    try:
+        from newsroom.control_plane.issue_790_disposition import (
+            ISSUE_790_STEP16_PRE_DISPATCH_PATH,
+            _assemble_step16_owner_plan,
+            issue_790_checked_approval,
+            seal_issue_790_step16_plan,
+        )
+        from newsroom.control_plane.issue_790_step16_activation import (
+            load_step16_activation_record,
+            step16_owner_activation_binding,
+            validate_step16_activation_receipt,
+        )
+
+        pre_dispatch = json.loads(
+            (root / ISSUE_790_STEP16_PRE_DISPATCH_PATH).read_text(encoding="utf-8")
+        )
+        pending_digest = str(tracked_plan.get("canonical_digest"))
+        candidate = seal_issue_790_step16_plan(
+            tracked_plan,
+            issue_790_checked_approval(pending_digest),
+            pre_dispatch=pre_dispatch,
+        )
+        row = connection.execute(
+            "SELECT plan_digest FROM issue_790_step16_activations "
+            "WHERE checked_candidate_digest=?",
+            (candidate["canonical_digest"],),
+        ).fetchone()
+        if row is None:
+            raise ValueError("tracked family activation is absent")
+        activation = load_step16_activation_record(
+            connection,
+            plan_digest=str(row[0]),
+        )
+        payload = activation.get("approval_payload")
+        contract = activation.get("contract")
+        sequence = candidate.get("sequence")
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(contract, dict)
+            or not isinstance(sequence, dict)
+        ):
+            raise ValueError("tracked family activation differs")
+        binding = step16_owner_activation_binding(
+            payload,
+            template_digest=str(
+                sequence["pre_dispatch_operational_requirements_digest"]
+            ),
+        )
+        activated_plan = _assemble_step16_owner_plan(
+            candidate,
+            approval={
+                "approved_by": contract["approved_by"],
+                "approval_reference": activation["comment_url"],
+                "approved_at": activation["created_at"],
+                "scope": contract["scope"],
+            },
+            pre_dispatch=pre_dispatch,
+            revision=str(activation["final_main_commit"]),
+            tree=str(activation["final_main_tree"]),
+            owner_activation=binding,
+        )
+        validate_step16_activation_receipt(activation, plan=activated_plan)
+        return activation, activated_plan, None
+    except Exception as exc:
+        return None, None, f"{type(exc).__name__}: {exc}"
+
+
+def _effective_retry_exclusion_status(
+    *,
+    plan_events: list[dict[str, object]],
+    exclusions: list[dict[str, object]],
+    consumption: dict[str, object] | None,
+    outcome: dict[str, object] | None,
+    event_snapshot: dict[str, object] | None,
+    activated_plan_digest: str,
+    effectively_excluded_event_ids: set[str],
+) -> tuple[bool, str]:
+    """Prove historical exclusions plus the exhausted canary consumption."""
+
+    plan_by_seq = {
+        int(item.get("ledger_seq", 0)): str(item.get("event_id"))
+        for item in plan_events
+    }
+    durable_by_seq = {
+        int(item.get("ledger_seq", 0)): str(item.get("event_id"))
+        for item in exclusions
+    }
+    historical_ok = (
+        len(plan_by_seq) == len(plan_events)
+        and len(durable_by_seq) == len(exclusions)
+        and set(plan_by_seq).issubset(durable_by_seq)
+        and all(durable_by_seq.get(seq) == event_id for seq, event_id in plan_by_seq.items())
+        and all(
+            item.get("reason") == "ISSUE_790_RETRY_FORBIDDEN"
+            and item.get("event_snapshot")
+            == next(
+                (
+                    event
+                    for event in plan_events
+                    if int(event.get("ledger_seq", 0))
+                    == int(item.get("ledger_seq", 0))
+                ),
+                None,
+            )
+            for item in exclusions
+            if int(item.get("ledger_seq", 0)) in plan_by_seq
+        )
+    )
+    consumed_seq = int((consumption or {}).get("ledger_seq", 0))
+    consumed_event = str((consumption or {}).get("event_id", ""))
+    failure_code = str((outcome or {}).get("failure_code_after_seal", ""))
+    consumption_ok = (
+        consumption is not None
+        and outcome is not None
+        and event_snapshot is not None
+        and consumed_seq == 13361
+        and consumption.get("approved_plan_digest") == activated_plan_digest
+        and consumption.get("attempt_count_before") == 0
+        and consumption.get("maximum_event_attempts") == 1
+        and outcome.get("approved_plan_digest") == activated_plan_digest
+        and outcome.get("consumption_digest")
+        == consumption.get("consumption_digest")
+        and outcome.get("event_id") == consumed_event
+        and outcome.get("ledger_seq") == consumed_seq
+        and outcome.get("attempt_count") == 1
+        and outcome.get("provider_dispatched") is True
+        and outcome.get("retry_authorised") is False
+        and outcome.get("state_after_seal") == "CONFIGURATION_HELD"
+        and failure_code.startswith("BOUNDED_CANARY_AUTHORITY_EXHAUSTED:")
+        and event_snapshot.get("event_id") == consumed_event
+        and event_snapshot.get("ledger_seq") == consumed_seq
+        and event_snapshot.get("state") == "CONFIGURATION_HELD"
+        and event_snapshot.get("attempt_count") == 1
+        and event_snapshot.get("provider_dispatched") is True
+        and event_snapshot.get("last_failure_code") == failure_code
+        and consumed_event in effectively_excluded_event_ids
+    )
+    effective_seqs = set(durable_by_seq)
+    if consumption_ok:
+        effective_seqs.add(consumed_seq)
+    ok = (
+        historical_ok
+        and consumption_ok
+        and REQUIRED_RETRY_LEDGER_SEQS.issubset(effective_seqs)
+    )
+    return (
+        ok,
+        f"plan={sorted(plan_by_seq)} durable={sorted(durable_by_seq)} "
+        f"consumed={consumed_seq if consumption_ok else 'INVALID'}",
+    )
+
+
+def _eligible_candidate_rows(
+    rows: tuple[tuple[object, ...], ...] | list[tuple[object, ...]],
+    *,
+    forbidden_event_ids: set[str],
+    forbidden_seqs: set[int],
+) -> tuple[tuple[object, ...], ...]:
+    """Return only post-exhaustion candidates; old backlog stays fail-closed."""
+
+    floor = max(REQUIRED_RETRY_LEDGER_SEQS)
+    return tuple(
+        row
+        for row in rows
+        if str(row[0]) not in forbidden_event_ids
+        and int(row[1]) not in forbidden_seqs
+        and int(row[1]) > floor
+    )
+
+
 def _latest_failure_red_green(
     comments: object,
     *,
@@ -554,32 +732,60 @@ def _ops_gates(
             "WHERE route='GRAPHITI_CHAT_PRIMARY' "
             "ORDER BY recorded_at DESC, rowid DESC LIMIT 1"
         ).fetchone()
-        activation: dict[str, object] | None = None
-        activation_error: str | None = None
-        try:
-            from newsroom.control_plane.issue_790_step16_activation import (
-                load_step16_activation_record,
-                validate_step16_activation_receipt,
-            )
+        activation, activated_plan, activation_error = _resolve_tracked_activation(
+            conn,
+            tracked_plan=plan,
+            root=root,
+        )
 
-            activation = load_step16_activation_record(
-                conn,
-                plan_digest=str(plan_digest),
-            )
-            validate_step16_activation_receipt(activation, plan=plan)
-        except Exception as exc:
-            activation_error = type(exc).__name__
-
-        from newsroom.control_plane.issue_790_canary import Issue790CanaryRepository
+        from newsroom.control_plane.issue_790_canary import (
+            Issue790CanaryRepository,
+            graphiti_excluded_event_ids,
+        )
 
         try:
-            exclusions = list(
-                Issue790CanaryRepository.open_existing(str(store)).retry_exclusions()
-            )
+            repository = Issue790CanaryRepository.open_existing(str(store))
+            exclusions = list(repository.retry_exclusions())
             exclusion_error = None
         except Exception as exc:
+            repository = None
             exclusions = []
             exclusion_error = type(exc).__name__
+
+        activated_plan_digest = str(
+            (activated_plan or {}).get("canonical_digest", "")
+        )
+        consumption: dict[str, object] | None = None
+        outcome: dict[str, object] | None = None
+        event_snapshot: dict[str, object] | None = None
+        if repository is not None and activated_plan_digest:
+            consumption = repository.existing_consumption(
+                approved_plan_digest=activated_plan_digest,
+            )
+            if consumption is not None:
+                outcome = repository.existing_outcome(
+                    consumption_digest=str(consumption["consumption_digest"]),
+                )
+                event = conn.execute(
+                    "SELECT event_id,ledger_seq,state,attempt_count,available_at,"
+                    "last_failure_code,provider_dispatched "
+                    "FROM unpublished_graphiti_revision_events "
+                    "WHERE event_id=? AND ledger_seq=?",
+                    (consumption["event_id"], consumption["ledger_seq"]),
+                ).fetchone()
+                if event is not None:
+                    event_snapshot = {
+                        "event_id": str(event[0]),
+                        "ledger_seq": int(event[1]),
+                        "state": str(event[2]),
+                        "attempt_count": int(event[3]),
+                        "available_at": str(event[4]),
+                        "last_failure_code": (
+                            None if event[5] is None else str(event[5])
+                        ),
+                        "provider_dispatched": bool(event[6]),
+                    }
+        effectively_excluded_event_ids = set(graphiti_excluded_event_ids(conn))
 
         plan_events = [
             item
@@ -602,15 +808,6 @@ def _ops_gates(
             for item in exclusions
             if isinstance(item, dict) and isinstance(item.get("event_id"), str)
         }
-        plan_event_ids_by_seq = {
-            int(item.get("ledger_seq", 0)): str(item.get("event_id"))
-            for item in plan_events
-        }
-        durable_event_ids_by_seq = {
-            int(item.get("ledger_seq", 0)): str(item.get("event_id"))
-            for item in exclusions
-            if isinstance(item, dict)
-        }
         cands = conn.execute(
             "SELECT event_id,ledger_seq,state,attempt_count,provider_dispatched "
             "FROM unpublished_graphiti_revision_events "
@@ -631,31 +828,32 @@ def _ops_gates(
         if not isinstance(owner, dict):
             invalid_digests.append("$.activation.approval_payload:ABSENT")
 
-    exclusions_ok = (
-        exclusion_error is None
-        and len(plan_seqs) == len(set(plan_seqs))
-        and REQUIRED_RETRY_LEDGER_SEQS.issubset(plan_seqs)
-        and REQUIRED_RETRY_LEDGER_SEQS.issubset(durable_seqs)
-        and all(
-            plan_event_ids_by_seq.get(seq) == durable_event_ids_by_seq.get(seq)
-            for seq in REQUIRED_RETRY_LEDGER_SEQS
-        )
-        and all(
-            item.get("reason") == "ISSUE_790_RETRY_FORBIDDEN"
-            and isinstance(item.get("event_snapshot"), dict)
-            and int(item["event_snapshot"].get("ledger_seq", 0))
-            == int(item.get("ledger_seq", 0))
-            for item in exclusions
-        )
+    exclusions_ok, exclusions_detail = _effective_retry_exclusion_status(
+        plan_events=plan_events,
+        exclusions=exclusions,
+        consumption=consumption,
+        outcome=outcome,
+        event_snapshot=event_snapshot,
+        activated_plan_digest=activated_plan_digest,
+        effectively_excluded_event_ids=effectively_excluded_event_ids,
     )
+    if exclusion_error is not None:
+        exclusions_ok = False
+        exclusions_detail = exclusion_error
     forbidden_event_ids = plan_event_ids | durable_event_ids
     forbidden_seqs = set(plan_seqs) | durable_seqs
+    if consumption is not None:
+        forbidden_event_ids.add(str(consumption.get("event_id")))
+        forbidden_seqs.add(int(consumption.get("ledger_seq", 0)))
 
     clean_event: tuple[str, int] | None = None
     fresh_detail = "NONE"
-    for event_id, ledger_seq, state, attempt_count, provider_dispatched in cands:
-        if event_id in forbidden_event_ids or int(ledger_seq) in forbidden_seqs:
-            continue
+    eligible = _eligible_candidate_rows(
+        cands,
+        forbidden_event_ids=forbidden_event_ids,
+        forbidden_seqs=forbidden_seqs,
+    )
+    for event_id, ledger_seq, state, attempt_count, provider_dispatched in eligible:
         from newsroom.control_plane.cycle import qualify_fresh_graphiti_event
 
         observed = datetime.now(UTC)
@@ -711,7 +909,7 @@ def _ops_gates(
     )
     _check(
         rows,
-        "O06 exact activated plan digest on disk",
+        "O06 exact tracked family digest on disk",
         plan_digest == tip_plan and _SHA256.fullmatch(str(plan_digest)) is not None,
         str(plan_digest or "MISSING"),
     )
@@ -724,9 +922,16 @@ def _ops_gates(
     _check(
         rows,
         "O08 owner/activation artefacts valid with exact SHA-256 digests",
-        activation_error is None and not invalid_digests,
-        "valid" if not invalid_digests and activation_error is None else str(
+        activation_error is None and activated_plan is not None and not invalid_digests,
+        (
+            f"tracked={str(plan_digest)[:20]}… "
+            f"activated={activated_plan_digest[:20]}…"
+            if not invalid_digests
+            and activation_error is None
+            and activated_plan is not None
+            else str(
             invalid_digests[0] if invalid_digests else activation_error
+            )
         ),
     )
     _check(rows, "O09 graphiti-core 0.29.3 importable on canary runtime", runtime_ok, runtime_detail)
@@ -748,13 +953,9 @@ def _ops_gates(
     )
     _check(
         rows,
-        "O16 all exhausted events durably retry-excluded",
+        "O16 all exhausted events fail closed without rewriting historical plan",
         exclusions_ok,
-        (
-            f"plan={sorted(set(plan_seqs))} durable={sorted(durable_seqs)}"
-            if exclusion_error is None
-            else exclusion_error
-        ),
+        exclusions_detail,
     )
     _check(
         rows,
@@ -1267,8 +1468,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ops-root", type=Path, default=ROOT_DEFAULT)
     parser.add_argument("--code-root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--tip-merge", default=None, help="exact tip SHA; default origin/main")
-    parser.add_argument("--tip-plan", required=True, help="exact activated plan SHA-256")
-    parser.add_argument("--plan-rel", required=True, help="activated plan path below ops root")
+    parser.add_argument(
+        "--tip-plan",
+        required=True,
+        help="exact tracked pending-family SHA-256",
+    )
+    parser.add_argument(
+        "--plan-rel",
+        required=True,
+        help="tracked pending-family path below ops root",
+    )
     parser.add_argument("--ops-only", action="store_true")
     parser.add_argument("--smoke-only", action="store_true")
     args = parser.parse_args(argv)

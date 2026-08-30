@@ -62,6 +62,7 @@ from newsroom.graphiti_adapter.combined_temporal_validation import (
 )
 from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_VERSION
 from newsroom.graphiti_adapter.types import GraphitiAdapterContractError
+from scripts.issue_790_live_canary_preflight import _resolve_tracked_activation
 
 _ROOT = Path(__file__).resolve().parents[2]
 _REVOKED = (
@@ -606,6 +607,46 @@ def test_activation_is_idempotent_and_not_source_registered(tmp_path: Path) -> N
         store=first["store"],
         github_api=first["github"],
     )
+
+
+def test_preflight_resolves_tracked_pending_family_to_retained_activation(
+    tmp_path: Path,
+) -> None:
+    activated = _activate(tmp_path)
+    pending, _pre_dispatch = _pending_family()
+    store = activated["store"]
+    connection = sqlite3.connect(f"{Path(store).absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        record, plan, error = _resolve_tracked_activation(
+            connection,
+            tracked_plan=pending,
+            root=_ROOT,
+        )
+    finally:
+        connection.close()
+
+    assert error is None
+    assert record == activated["activation"]
+    assert plan == activated["plan"]
+
+
+def test_preflight_does_not_invent_missing_tracked_activation(tmp_path: Path) -> None:
+    pending, _pre_dispatch = _pending_family()
+    store = tmp_path / "authority.sqlite"
+    Issue790CanaryRepository(str(store))
+    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        record, plan, error = _resolve_tracked_activation(
+            connection,
+            tracked_plan=pending,
+            root=_ROOT,
+        )
+    finally:
+        connection.close()
+
+    assert record is None
+    assert plan is None
+    assert error == "ValueError: tracked family activation is absent"
 
 
 def test_contradictory_activation_fails_closed(tmp_path: Path) -> None:
