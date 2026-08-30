@@ -5,8 +5,8 @@ from dataclasses import replace
 import pytest
 
 from newsroom.authority.canonical import digest_canonical
-from newsroom.extraction.types import FixtureExtractionCase
 from newsroom.extraction import ExtractionContractError
+from newsroom.extraction.types import FixtureExtractionCase
 from newsroom.graphiti_adapter import (
     ApprovedReplayBundle,
     ApprovedReplayGraphitiAdapter,
@@ -117,6 +117,8 @@ def test_result_contract_allows_empty_terminal_success_but_not_failure_proposals
 
     assert complete.outcome is GraphitiAdapterOutcome.COMPLETE
     assert complete.produced.proposals
+    assert partial.outcome is GraphitiAdapterOutcome.PARTIAL
+    assert partial.produced.proposals
     assert replace(
         complete,
         produced=replace(

@@ -5315,6 +5315,19 @@ def test_zero_proposal_success_survives_full_evaluation_cycle(
 
     async def empty_graph(**values: object) -> object:
         telemetry = values["telemetry"]
+        telemetry.chat_invocations = [
+            {
+                "provider": "cursor-agent-cli",
+                "model": "composer-2.5",
+                "outcome": "COMPLETE",
+                "usage": {
+                    "usage_basis": "PROVIDER_REPORTED",
+                    "input_tokens": 4_240,
+                    "output_tokens": 2_435,
+                    "total_tokens": 7_091,
+                },
+            }
+        ]
         telemetry.embedding_usage = {
             "usage_basis": "NO_EMBEDDING_CALL",
             "request_count": 0,
@@ -5381,6 +5394,7 @@ def test_zero_proposal_success_survives_full_evaluation_cycle(
         "proposal_count": receipt.get("proposal_count"),
         "returned_raw_receipt_digest": receipt.get("returned_raw_receipt_digest"),
         "failure": failure,
+        "chat_invocation_count": len(receipt.get("chat_invocations", [])),
     }
     assert observed == {
         "binding_failure": None,
@@ -5388,6 +5402,7 @@ def test_zero_proposal_success_survives_full_evaluation_cycle(
         "proposal_count": 0,
         "returned_raw_receipt_digest": None,
         "failure": None,
+        "chat_invocation_count": 1,
     }
     assert report.graphiti == 1
 
@@ -5446,6 +5461,63 @@ def test_adapter_contract_failure_receipt_retains_only_allow_listed_stage(
     assert receipt["returned_raw_receipt_digest"] is None
     assert secret not in receipt_json
     assert secret not in store_dump
+
+
+def test_cycle_result_construction_failure_receipt_retains_allow_listed_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.control_plane import paths as control_paths
+    from newsroom.graphiti_adapter import real
+
+    class BrokenExecutionAdapter:
+        def __init__(self, **_values: object) -> None:
+            pass
+
+        def execute(self, **_values: object) -> object:
+            return SimpleNamespace(
+                outcome=SimpleNamespace(value="COMPLETE"),
+                failure_code="NONE",
+                produced=SimpleNamespace(
+                    raw_output_value={},
+                    attempt_receipt_value=None,
+                    proposals=(),
+                    usage=SimpleNamespace(),
+                ),
+            )
+
+    monkeypatch.setattr(real, "RealGraphitiAdapter", BrokenExecutionAdapter)
+    observed_at = datetime(2026, 8, 20, tzinfo=UTC)
+    clock = lambda: observed_at
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "construction-stage.sqlite3"
+    monkeypatch.setattr(control_paths, "CANONICAL_PROVING_STORE", proving)
+    monkeypatch.setattr(control_paths, "CANONICAL_UNPUBLISHED_STORE", unpublished)
+
+    run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=EvaluationGraphitiRunner(
+            clock=clock,
+            fallback_permitted=False,
+        ),
+        max_graphiti=1,
+        model_usage=ModelUsageService(str(unpublished)),
+        clock=clock,
+    )
+
+    connection = sqlite3.connect(unpublished)
+    receipt = json.loads(
+        connection.execute(
+            "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts"
+        ).fetchone()[0]
+    )
+    connection.close()
+    assert receipt["binding_failure"] == "RESULT_CONTRACT_REJECTED"
+    assert receipt["binding_failure_type"] == "GraphitiResultStageError"
+    assert receipt["binding_failure_stage"] == "CYCLE_RESULT_CONSTRUCTION"
+    assert receipt["returned_raw_receipt_digest"] is None
 
 
 def test_ingest_commits_when_writer_fails(tmp_path: Path) -> None:
