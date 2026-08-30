@@ -861,7 +861,7 @@ class Issue790CanaryRepository:
         extra = seqs[2:]
         if (
             seqs[:2] != (1932, 1972)
-            or any(seq not in {8834, 8835, 13284} for seq in extra)
+            or any(seq not in {8834, 8835, 13284, 13337} for seq in extra)
             or len(set(seqs)) != len(seqs)
         ):
             raise Issue790CanaryIntegrityError("retry exclusion targets differ")
@@ -1185,7 +1185,7 @@ class Issue790CanaryRepository:
         owner_id = _token(owner_id, field="canary owner id")
         if isinstance(ledger_seq, bool) or not isinstance(ledger_seq, int) or ledger_seq <= 0:
             raise Issue790CanaryIntegrityError("bounded canary ledger sequence is invalid")
-        if ledger_seq in {1932, 1972, 8834, 8835, 13284}:
+        if ledger_seq in {1932, 1972, 8834, 8835, 13284, 13337}:
             raise Issue790CanaryIntegrityError("bounded canary targeted a retained failure")
         consumed_at_text = _utc_text(consumed_at)
 
