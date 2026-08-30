@@ -2040,6 +2040,46 @@ def _require_retry_exclusions(
     return retained
 
 
+def _retain_retry_exclusions_for_plan(
+    repository: Issue790CanaryRepository,
+    *,
+    plan: Mapping[str, object],
+    disposition_digest: str,
+    observed_at: datetime,
+) -> list[dict[str, object]]:
+    """Retain the complete immutable exclusion set, including successors."""
+
+    retained = list(repository.retry_exclusions())
+    if retained:
+        bindings = {
+            (
+                str(record.get("approved_plan_digest")),
+                str(record.get("disposition_digest")),
+            )
+            for record in retained
+        }
+        if len(bindings) != 1:
+            raise Issue790DispositionError(
+                "issue #790 retry exclusion binding differs"
+            )
+        approved_plan_digest, retained_disposition_digest = next(iter(bindings))
+    else:
+        approved_plan_digest = str(plan["canonical_digest"])
+        retained_disposition_digest = disposition_digest
+    events = plan.get("retry_forbidden_events")
+    if not isinstance(events, list):
+        raise Issue790DispositionError("issue #790 durable retry exclusions differ")
+    repository.retain_retry_exclusions(
+        approved_plan_digest=approved_plan_digest,
+        disposition_digest=retained_disposition_digest,
+        events=tuple(
+            _record(item, field="retry-forbidden event") for item in events
+        ),
+        excluded_at=observed_at,
+    )
+    return _require_retry_exclusions(repository, plan=plan)
+
+
 def _require_sequence_predecessor(
     repository: Issue790CanaryRepository,
     *,
@@ -2866,23 +2906,15 @@ def _execute_issue_790_plan(
             raise Issue790DispositionError(
                 "issue #790 retained conservative total differs"
             )
-        if not canary_repository.retry_exclusions():
-            if predecessor is not None:
-                raise Issue790DispositionError(
-                    "issue #790 predecessor retry exclusions are absent"
-                )
-            canary_repository.retain_retry_exclusions(
-                approved_plan_digest=str(retained_plan["canonical_digest"]),
-                disposition_digest=str(disposition["disposition_digest"]),
-                events=tuple(
-                    _record(item, field="retry-forbidden event")
-                    for item in retained_plan["retry_forbidden_events"]  # type: ignore[union-attr]
-                ),
-                excluded_at=observed_at,
+        if predecessor is not None and not canary_repository.retry_exclusions():
+            raise Issue790DispositionError(
+                "issue #790 predecessor retry exclusions are absent"
             )
-        retry_exclusions = _require_retry_exclusions(
+        retry_exclusions = _retain_retry_exclusions_for_plan(
             canary_repository,
             plan=retained_plan,
+            disposition_digest=str(disposition["disposition_digest"]),
+            observed_at=observed_at,
         )
         route_state_before_release = service.route_state(str(target["route"]))
         expected_closed_reason = (

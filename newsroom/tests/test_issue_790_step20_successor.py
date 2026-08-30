@@ -13,6 +13,7 @@ import pytest
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane import issue_790_canary as canary_module
 from newsroom.control_plane import issue_790_contract as contract_module
+from newsroom.control_plane import issue_790_disposition as disposition_module
 from newsroom.control_plane.issue_790_canary import (
     Issue790CanaryIntegrityError,
     Issue790CanaryRepository,
@@ -21,6 +22,7 @@ from newsroom.control_plane.issue_790_disposition import (
     ISSUE_790_STEP16_PRE_DISPATCH_PATH,
     ISSUE_790_STEP20_PENDING_PLAN_PATH,
     Issue790DispositionError,
+    _retain_retry_exclusions_for_plan,
     _retry_event_snapshots,
     issue_790_checked_approval,
     qualify_issue_790_candidate_event,
@@ -249,3 +251,74 @@ def test_step20_can_retain_step19_target_as_retry_excluded(
     ]
     assert retained[-1]["event_snapshot"]["provider_dispatched"] is True
     assert _retry_event_snapshots(store, tuple(events)) == events
+
+
+def test_step20_appends_new_exhausted_event_to_existing_retry_exclusions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = tmp_path / "canary.sqlite"
+    repository = Issue790CanaryRepository(str(store))
+    events = _seal20()["retry_forbidden_events"]
+    root_plan_digest = "sha256:" + "11" * 32
+    disposition_digest = "sha256:" + "22" * 32
+    connection = sqlite3.connect(store)
+    try:
+        connection.execute(
+            "CREATE TABLE model_usage_conservative_dispositions("
+            "invocation_id TEXT,approved_plan_digest TEXT,"
+            "disposition_digest TEXT PRIMARY KEY)"
+        )
+        connection.execute(
+            "INSERT INTO model_usage_conservative_dispositions VALUES(?,?,?)",
+            ("invocation", root_plan_digest, disposition_digest),
+        )
+        connection.execute(
+            "CREATE TABLE unpublished_graphiti_revision_events("
+            "event_id TEXT,ledger_seq INTEGER,state TEXT,attempt_count INTEGER,"
+            "available_at TEXT,last_failure_code TEXT,provider_dispatched INTEGER)"
+        )
+        connection.executemany(
+            "INSERT INTO unpublished_graphiti_revision_events VALUES(?,?,?,?,?,?,?)",
+            [
+                (
+                    item["event_id"], item["ledger_seq"], item["state"],
+                    item["attempt_count"], item["available_at"],
+                    item["last_failure_code"], int(item["provider_dispatched"]),
+                )
+                for item in events
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    monkeypatch.setattr(
+        canary_module,
+        "_require_effective_plan_contract",
+        lambda *_args, **_kwargs: SimpleNamespace(invocation_id="invocation"),
+    )
+    monkeypatch.setattr(
+        disposition_module,
+        "issue_790_approved_plan_contract",
+        lambda *_args, **_kwargs: SimpleNamespace(invocation_id="invocation"),
+    )
+    repository.retain_retry_exclusions(
+        approved_plan_digest=root_plan_digest,
+        disposition_digest=disposition_digest,
+        events=events[:-1],
+        excluded_at=datetime(2026, 8, 30, tzinfo=UTC),
+    )
+
+    retained = _retain_retry_exclusions_for_plan(
+        repository,
+        plan={
+            "canonical_digest": root_plan_digest,
+            "retry_forbidden_events": events,
+        },
+        disposition_digest=disposition_digest,
+        observed_at=datetime(2026, 8, 30, 1, tzinfo=UTC),
+    )
+
+    assert [item["ledger_seq"] for item in retained] == [
+        1932, 1972, 8834, 8835, 13284, 13337
+    ]
