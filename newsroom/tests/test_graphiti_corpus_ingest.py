@@ -5521,6 +5521,157 @@ def test_step20_rolled_back_zero_proposal_completion_survives_full_cycle(
     )
 
 
+def test_step21_unmarked_zero_proposal_completion_survives_full_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A validated no-proposal completion is terminal without a rollback marker."""
+
+    from newsroom.control_plane import paths as control_paths
+    from newsroom.graphiti_adapter import real
+
+    executions: list[object] = []
+    validated_receipts: list[dict[str, object]] = []
+    embedding_requests = [
+        {
+            "provider": "openrouter",
+            "model": OPENROUTER_EMBEDDING_SLUG,
+            "request_id": f"step21-embedding-{index}",
+            "prompt_tokens": tokens,
+            "total_tokens": tokens,
+            "cost_usd_microunits": cost,
+            "cost_reported": True,
+            "outcome": "COMPLETE",
+        }
+        for index, (tokens, cost) in enumerate(
+            ((33, 4), (3, 0), (2, 0), (2, 0), (3, 0))
+        )
+    ]
+
+    async def unmarked_zero_effect(**values: object) -> object:
+        telemetry = values["telemetry"]
+        telemetry.chat_invocations = [
+            {
+                "provider": "cursor-agent-cli",
+                "model": "composer-2.5",
+                "outcome": "COMPLETE",
+                "usage": {
+                    "usage_basis": "PROVIDER_REPORTED",
+                    "input_tokens": 4_137,
+                    "cached_read_tokens": 480,
+                    "output_tokens": 1_683,
+                    "total_tokens": 6_300,
+                },
+            }
+        ]
+        telemetry.embedding_usage = {
+            "usage_basis": "PROVIDER_REPORTED",
+            "request_count": 5,
+            "embedding_tokens": 43,
+            "cost_usd_microunits": 4,
+            "requests": embedding_requests,
+        }
+        validated_receipts.append(
+            values["validate_result"](
+                SimpleNamespace(episode=None, nodes=(), edges=()),
+                telemetry,
+            )
+        )
+        raise real.AmbiguousEpisodeEffect(
+            "Graphiti completion became ambiguous after result validation"
+        )
+
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(real, "openrouter_api_key", lambda: "fixture-key")
+    monkeypatch.setattr(real, "neo4j_community_password", lambda: "fixture-password")
+    monkeypatch.setattr(real, "_add_episode", unmarked_zero_effect)
+
+    observed_at = datetime(2026, 8, 20, tzinfo=UTC)
+    clock = lambda: observed_at
+    adapter_clock = lambda: UtcTimestamp(observed_at)
+    adapter_type = real.RealGraphitiAdapter
+
+    class CapturingAdapter:
+        def __init__(self, **values: object) -> None:
+            self.delegate = adapter_type(clock=adapter_clock, **values)
+
+        def execute(self, **values: object) -> object:
+            execution = self.delegate.execute(**values)
+            executions.append(execution)
+            return execution
+
+    monkeypatch.setattr(
+        real,
+        "RealGraphitiAdapter",
+        CapturingAdapter,
+    )
+
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "step21-zero-effect-full-cycle.sqlite3"
+    monkeypatch.setattr(control_paths, "CANONICAL_PROVING_STORE", proving)
+    monkeypatch.setattr(control_paths, "CANONICAL_UNPUBLISHED_STORE", unpublished)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=EvaluationGraphitiRunner(clock=clock, fallback_permitted=False),
+        max_graphiti=1,
+        model_usage=ModelUsageService(str(unpublished)),
+        clock=clock,
+    )
+
+    connection = sqlite3.connect(unpublished)
+    receipt = json.loads(
+        connection.execute(
+            "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts"
+        ).fetchone()[0]
+    )
+    ingest = connection.execute(
+        "SELECT outcome,proposal_count FROM unpublished_graphiti_ingest"
+    ).fetchone()
+    failure = connection.execute(
+        "SELECT last_outcome,last_failure_code FROM unpublished_graphiti_failures"
+    ).fetchone()
+    connection.close()
+
+    execution = executions[0]
+    observed = {
+        "attempted": report.graphiti,
+        "validated_proposal_count": validated_receipts[0]["proposal_count"],
+        "adapter_outcome": execution.outcome.value,
+        "produced_outcome": execution.produced.outcome.value,
+        "produced_failure_code": execution.produced.failure_code.value,
+        "adapter_recovery_classification": (
+            execution.produced.attempt_receipt_value or {}
+        ).get("recovery_classification"),
+        "ingest": ingest,
+        "failure": failure,
+        "outcome": receipt["outcome"],
+        "proposal_count": receipt["proposal_count"],
+        "embedding_requests": receipt["embedding_usage"]["request_count"],
+        "embedding_tokens": receipt["embedding_usage"]["embedding_tokens"],
+        "chat_tokens": receipt["chat_invocations"][0]["usage"]["total_tokens"],
+        "recovery_classification": receipt.get("recovery_classification"),
+    }
+    assert observed == {
+        "attempted": 1,
+        "validated_proposal_count": 0,
+        "adapter_outcome": "COMPLETE",
+        "produced_outcome": "SUCCESS",
+        "produced_failure_code": "NONE",
+        "adapter_recovery_classification": None,
+        "ingest": ("COMPLETE", 0),
+        "failure": None,
+        "outcome": "COMPLETE",
+        "proposal_count": 0,
+        "embedding_requests": 5,
+        "embedding_tokens": 43,
+        "chat_tokens": 6_300,
+        "recovery_classification": None,
+    }
+
+
 def test_adapter_contract_failure_receipt_retains_only_allow_listed_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
