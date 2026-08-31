@@ -51,6 +51,10 @@ EVENT_13689 = (
     "sha256:0cf4c6da7a7be611d10fb87f82a7038ca42296f6112d5a2a03fcfb35abde9a39"
 )
 LEDGER_13689 = 13689
+EVENT_13690 = (
+    "sha256:57bfeadea2a60c8f24a269c0985611ea8828fcaeaccbfd1b7bed84b537293666"
+)
+LEDGER_13690 = 13690
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,6 +320,124 @@ def build_rehearsal_stores(
         plan=plan,
         sealed_digest=file_digest(sealed),
     )
+
+
+def insert_unused_queued_attempt_zero(
+    store: Path,
+    *,
+    source_ledger_seq: int,
+    event_id: str,
+    ledger_seq: int,
+) -> None:
+    """Clone a later unused QUEUED attempt-0 identity from an existing event.
+
+    Live 13690 landed after 13689 aborted. The successor keeps a distinct
+    source/item identity so UNIQUE(source, item, revision) stays intact.
+    """
+
+    connection = sqlite3.connect(store)
+    try:
+        source = connection.execute(
+            "SELECT source_id,item_key,revision_digest,published_at,updated_at,"
+            "landed_at,manifest_json,unit_count,projector_version,"
+            "projection_generation,available_at,proposal_count "
+            "FROM unpublished_graphiti_revision_events WHERE ledger_seq=?",
+            (source_ledger_seq,),
+        ).fetchone()
+        if source is None:
+            raise AssertionError(f"source event {source_ledger_seq} is absent")
+        manifest = json.loads(str(source[6]))
+        if not isinstance(manifest, dict):
+            raise AssertionError("source event manifest is malformed")
+        manifest["ledger_seq"] = ledger_seq
+        manifest_json = json.dumps(
+            manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        connection.execute(
+            """
+            INSERT INTO unpublished_graphiti_revision_events(
+                event_id,ledger_seq,ledger_digest,source_id,item_key,
+                revision_digest,published_at,updated_at,landed_at,
+                manifest_json,manifest_digest,unit_count,projector_version,
+                projection_generation,state,attempt_count,available_at,
+                last_failure_code,provider_dispatched,claim_owner,
+                claim_expires_at,terminal_at,proposal_count
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                event_id,
+                ledger_seq,
+                event_id,
+                f"{source[0]}-{ledger_seq}",
+                f"{source[1]}-{ledger_seq}",
+                source[2],
+                source[3],
+                source[4],
+                source[5],
+                manifest_json,
+                digest_canonical(manifest),
+                source[7],
+                source[8],
+                source[9],
+                "QUEUED",
+                0,
+                source[10],
+                None,
+                0,
+                None,
+                None,
+                None,
+                source[11],
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def transfer_proving_identity(
+    store: Path, *, spent_ledger_seq: int, unused_ledger_seq: int
+) -> None:
+    """Give a successor the spent event's proving 5-tuple after seal.
+
+    UNIQUE(source, item, revision, published, updated) can only hold one
+    row. After 13689 is sealed it no longer needs proving lookup; 13690 does.
+    """
+
+    connection = sqlite3.connect(store)
+    try:
+        spent = connection.execute(
+            "SELECT source_id,item_key,revision_digest,published_at,updated_at "
+            "FROM unpublished_graphiti_revision_events WHERE ledger_seq=?",
+            (spent_ledger_seq,),
+        ).fetchone()
+        unused = connection.execute(
+            "SELECT 1 FROM unpublished_graphiti_revision_events WHERE ledger_seq=?",
+            (unused_ledger_seq,),
+        ).fetchone()
+        if spent is None or unused is None:
+            raise AssertionError("spent or unused event is absent")
+        connection.execute(
+            "UPDATE unpublished_graphiti_revision_events "
+            "SET source_id=?, item_key=? WHERE ledger_seq=?",
+            (f"{spent[0]}-spent", f"{spent[1]}-spent", spent_ledger_seq),
+        )
+        connection.execute(
+            "UPDATE unpublished_graphiti_revision_events "
+            "SET source_id=?, item_key=?, revision_digest=?, published_at=?, "
+            "updated_at=? WHERE ledger_seq=?",
+            (
+                spent[0],
+                spent[1],
+                spent[2],
+                spent[3],
+                spent[4],
+                unused_ledger_seq,
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def event_identity(store: Path, ledger_seq: int) -> tuple[str, int, str]:
