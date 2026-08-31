@@ -21,6 +21,7 @@ from newsroom.control_plane import issue_790_disposition as issue_790_operation
 from newsroom.control_plane.issue_790_disposition import (
     ISSUE_790_STEP16_PENDING_PLAN_PATH,
     ISSUE_790_STEP16_PRE_DISPATCH_PATH,
+    ISSUE_790_STEP22_PENDING_PLAN_PATH,
     Issue790DispositionError,
     _release_step16_expired_open_circuit,
     _require_approved_plan,
@@ -647,6 +648,81 @@ def test_preflight_does_not_invent_missing_tracked_activation(tmp_path: Path) ->
     assert record is None
     assert plan is None
     assert error == "ValueError: tracked family activation is absent"
+
+
+def _successor_pending(activated: dict[str, object]) -> dict[str, object]:
+    pending = json.loads((_ROOT / ISSUE_790_STEP22_PENDING_PLAN_PATH).read_text())
+    sequence = dict(pending["sequence"])
+    predecessor = dict(sequence["predecessor"])
+    predecessor["plan_digest"] = activated["plan"]["canonical_digest"]
+    sequence["predecessor"] = predecessor
+    sequence["predecessor_activation_digest"] = activated["activation"][
+        "activation_digest"
+    ]
+    pending["sequence"] = sequence
+    return pending
+
+
+def test_preflight_resolves_successor_pending_to_predecessor_activation(
+    tmp_path: Path,
+) -> None:
+    activated = _activate(tmp_path)
+    pending = _successor_pending(activated)
+    store = activated["store"]
+    connection = sqlite3.connect(f"{Path(store).absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        record, plan, error = _resolve_tracked_activation(
+            connection,
+            tracked_plan=pending,
+            root=_ROOT,
+        )
+    finally:
+        connection.close()
+
+    assert error is None
+    assert record == activated["activation"]
+    assert plan == activated["plan"]
+
+
+def test_preflight_does_not_invent_missing_predecessor_activation(
+    tmp_path: Path,
+) -> None:
+    activated = _activate(tmp_path)
+    pending = json.loads((_ROOT / ISSUE_790_STEP22_PENDING_PLAN_PATH).read_text())
+    store = activated["store"]
+    connection = sqlite3.connect(f"{Path(store).absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        record, plan, error = _resolve_tracked_activation(
+            connection,
+            tracked_plan=pending,
+            root=_ROOT,
+        )
+    finally:
+        connection.close()
+
+    assert record is None
+    assert plan is None
+    assert error == "ValueError: predecessor activation is absent"
+
+
+def test_preflight_predecessor_plan_mismatch_fails_closed(tmp_path: Path) -> None:
+    activated = _activate(tmp_path)
+    pending = _successor_pending(activated)
+    pending["sequence"]["predecessor"]["plan_digest"] = "sha256:" + "00" * 32
+    store = activated["store"]
+    connection = sqlite3.connect(f"{Path(store).absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        record, plan, error = _resolve_tracked_activation(
+            connection,
+            tracked_plan=pending,
+            root=_ROOT,
+        )
+    finally:
+        connection.close()
+
+    assert record is None
+    assert plan is None
+    assert error == "ValueError: predecessor activation differs"
 
 
 def test_contradictory_activation_fails_closed(tmp_path: Path) -> None:

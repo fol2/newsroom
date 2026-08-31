@@ -159,13 +159,19 @@ def test_retry_exclusion_apply_appends_all_exhausted_events_idempotently() -> No
     assert "replay=stable" in detail
 
 
-def test_o16_uses_exhausted_consumption_without_rewriting_step21_plan() -> None:
+def _o16_exclusion_args(
+    *,
+    plan_includes_consumed: bool,
+    retry_authorised: bool = False,
+) -> dict[str, object]:
     event_id = "sha256:" + "61" * 32
     base_seqs = (1932, 1972, 8834, 8835, 13284, 13337, 13362)
     plan_events = [
         {"event_id": "sha256:" + f"{seq:064x}", "ledger_seq": seq}
         for seq in base_seqs
     ]
+    if plan_includes_consumed:
+        plan_events.append({"event_id": event_id, "ledger_seq": 13361})
     exclusions = [
         {
             "event_id": item["event_id"],
@@ -174,6 +180,7 @@ def test_o16_uses_exhausted_consumption_without_rewriting_step21_plan() -> None:
             "event_snapshot": dict(item),
         }
         for item in plan_events
+        if int(item["ledger_seq"]) != 13361
     ]
     consumption = {
         "approved_plan_digest": "sha256:" + "aa" * 32,
@@ -190,7 +197,7 @@ def test_o16_uses_exhausted_consumption_without_rewriting_step21_plan() -> None:
         "ledger_seq": 13361,
         "attempt_count": 1,
         "provider_dispatched": True,
-        "retry_authorised": False,
+        "retry_authorised": retry_authorised,
         "state_after_seal": "CONFIGURATION_HELD",
         "failure_code_after_seal": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:AMBIGUOUS_EFFECT",
     }
@@ -202,29 +209,43 @@ def test_o16_uses_exhausted_consumption_without_rewriting_step21_plan() -> None:
         "provider_dispatched": True,
         "last_failure_code": outcome["failure_code_after_seal"],
     }
+    return {
+        "plan_events": plan_events,
+        "exclusions": exclusions,
+        "consumption": consumption,
+        "outcome": outcome,
+        "event_snapshot": event_snapshot,
+        "activated_plan_digest": str(consumption["approved_plan_digest"]),
+        "effectively_excluded_event_ids": {event_id},
+    }
 
-    ok, detail = _effective_retry_exclusion_status(
-        plan_events=plan_events,
-        exclusions=exclusions,
-        consumption=consumption,
-        outcome=outcome,
-        event_snapshot=event_snapshot,
-        activated_plan_digest=str(consumption["approved_plan_digest"]),
-        effectively_excluded_event_ids={event_id},
-    )
 
+def test_o16_uses_exhausted_consumption_without_rewriting_step21_plan() -> None:
+    args = _o16_exclusion_args(plan_includes_consumed=False)
+    ok, detail = _effective_retry_exclusion_status(**args)
     assert ok is True
     assert "consumed=13361" in detail
-    outcome["retry_authorised"] = True
-    assert _effective_retry_exclusion_status(
-        plan_events=plan_events,
-        exclusions=exclusions,
-        consumption=consumption,
-        outcome=outcome,
-        event_snapshot=event_snapshot,
-        activated_plan_digest=str(consumption["approved_plan_digest"]),
-        effectively_excluded_event_ids={event_id},
-    )[0] is False
+    args["outcome"]["retry_authorised"] = True
+    assert _effective_retry_exclusion_status(**args)[0] is False
+
+
+def test_o16_successor_plan_may_list_13361_before_durable_apply() -> None:
+    args = _o16_exclusion_args(plan_includes_consumed=True)
+    ok, detail = _effective_retry_exclusion_status(**args)
+    assert ok is True
+    assert "consumed=13361" in detail
+    assert "13361" in detail.split("durable=")[0]
+    assert "13361" not in detail.split("durable=")[1].split("consumed=")[0]
+    args["outcome"]["retry_authorised"] = True
+    retry, retry_detail = _effective_retry_exclusion_status(**args)
+    assert retry is False
+    assert "consumed=INVALID" in retry_detail
+    args["outcome"]["retry_authorised"] = False
+    args["plan_events"] = [
+        *args["plan_events"],
+        {"event_id": "sha256:" + "99" * 32, "ledger_seq": 9999},
+    ]
+    assert _effective_retry_exclusion_status(**args)[0] is False
 
 
 def test_o18_skips_old_backlog_before_proving_qualification() -> None:
