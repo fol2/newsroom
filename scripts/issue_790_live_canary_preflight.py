@@ -76,6 +76,10 @@ STEP22_UNMATCHED_13689_CONSUMPTION_BLOCKS_13690_READY_FULL_PATH_TEST = (
     "newsroom/tests/test_issue_790_prepared_canary.py::"
     "test_step22_unmatched_13689_consumption_blocks_successor_ready_before_backup"
 )
+STEP22_PREPARED_CANARY_ABSENT_FULL_PATH_TEST = (
+    "newsroom/tests/test_issue_790_prepared_canary.py::"
+    "test_step22_fresh_missing_prepared_fails_before_any_effect"
+)
 LATEST_FAILURE_COVERING_FULL_PATH_TESTS = frozenset(
     {
         STEP21_FULL_PATH_TEST,
@@ -87,6 +91,7 @@ LATEST_FAILURE_COVERING_FULL_PATH_TESTS = frozenset(
         STEP22_CONSUMED_13683_ZERO_FULL_PATH_TEST,
         STEP22_ABORTED_SPAWN_13689_BACKUP_DEST_FULL_PATH_TEST,
         STEP22_UNMATCHED_13689_CONSUMPTION_BLOCKS_13690_READY_FULL_PATH_TEST,
+        STEP22_PREPARED_CANARY_ABSENT_FULL_PATH_TEST,
     }
 )
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
