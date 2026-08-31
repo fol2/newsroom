@@ -97,7 +97,7 @@ def test_step22_binds_exhausted_step21_fix_and_fresh_attempt_zero_event() -> Non
         "sha256:4e8d4759b8dcacb8fdb0d2e49a0432fe15c8ffba6a1b1b36fbab1e9be0cad4e0"
     )
     assert [item["ledger_seq"] for item in candidate["retry_forbidden_events"]] == [
-        1932, 1972, 8834, 8835, 13284, 13337, 13362, 13361
+        1932, 1972, 8834, 8835, 13284, 13337, 13361, 13362
     ]
     assert candidate["canary"]["event_binding"] == (
         "EXPLICIT_QUEUED_ATTEMPT_ZERO_EVENT"
@@ -226,5 +226,5 @@ def test_step22_appends_13361_to_the_existing_retry_exclusions(
         observed_at=datetime(2026, 8, 31, 10, 12, tzinfo=UTC),
     )
     assert [item["ledger_seq"] for item in retained] == [
-        1932, 1972, 8834, 8835, 13284, 13337, 13362, 13361
+        1932, 1972, 8834, 8835, 13284, 13337, 13361, 13362
     ]
