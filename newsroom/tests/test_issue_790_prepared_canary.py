@@ -8,6 +8,7 @@ import json
 import os
 import shlex
 import sqlite3
+import sys
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -2391,17 +2392,14 @@ def test_step22_complete_preflight_emits_prepared_bound_live_command(
     stores = build_rehearsal_stores(stores_root, unused_13689=True)
     activated = _activate_step22(stores.work_unpublished)
     plan = activated["plan"]
-    prepared = _prepare_production(
-        stores,
-        plan=plan,
-        event_id=EVENT_13689,
-        ledger_seq=LEDGER_13689,
+    prepared = preflight._prepare_preflight_canary(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        activated_plan=plan,
+        observed_at=OBSERVED_AT,
+        exact_head=EXACT_HEAD,
     )
-    activated_plan = tmp_path / "activated-plan.json"
-    activated_plan.write_text(
-        json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    activated_plan_path = tmp_path / "activated-plan.json"
     prepared_path = tmp_path / "prepared-canary.json"
     command_path = tmp_path / "live-canary.sh"
     monkeypatch.setattr(
@@ -2411,6 +2409,7 @@ def test_step22_complete_preflight_emits_prepared_bound_live_command(
             [("O01", True, "ready")],
             (EVENT_13689, LEDGER_13689),
             prepared,
+            plan,
         ),
     )
     monkeypatch.setattr(
@@ -2426,15 +2425,11 @@ def test_step22_complete_preflight_emits_prepared_bound_live_command(
             "--code-root",
             str(_ROOT),
             "--tip-plan",
-            str(plan["canonical_digest"]),
+            str(prepared.plan_identity["pending_digest"]),
             "--plan-rel",
             str(ISSUE_790_STEP22_PENDING_PLAN_PATH),
-            "--activated-plan",
-            str(activated_plan),
             "--prepared-canary-out",
             str(prepared_path),
-            "--canary-command-out",
-            str(command_path),
         ]
     )
 
@@ -2443,8 +2438,11 @@ def test_step22_complete_preflight_emits_prepared_bound_live_command(
         json.loads(prepared_path.read_text(encoding="utf-8"))
     )
     assert retained.decision_digest == prepared.decision_digest
+    assert json.loads(activated_plan_path.read_text(encoding="utf-8")) == plan
     assert command_path.stat().st_mode & 0o777 == 0o700
     script = command_path.read_text(encoding="utf-8")
+    assert "set -eu" in script
+    assert f"cd {shlex.quote(str(_ROOT))}" in script
     exec_line = next(line for line in script.splitlines() if line.startswith("exec "))
     tokens = shlex.split(exec_line)
 
@@ -2454,7 +2452,7 @@ def test_step22_complete_preflight_emits_prepared_bound_live_command(
 
     assert tokens[:5] == [
         "exec",
-        str(_ROOT / ".venv/bin/python"),
+        str(Path(sys.executable).absolute()),
         "-m",
         "scripts.issue_790_conservative_disposition",
         "canary",
@@ -2465,7 +2463,7 @@ def test_step22_complete_preflight_emits_prepared_bound_live_command(
     assert option("--proving-store") == str(
         _ROOT / "data/newsroom/proving_store.sqlite3"
     )
-    assert option("--plan") == str(activated_plan)
+    assert option("--plan") == str(activated_plan_path)
     assert option("--observed-at") == "$OBSERVED_AT"
     assert option("--receipt") == str(tmp_path / "canary-receipt.json")
     assert option("--backup") == str(
@@ -2478,6 +2476,45 @@ def test_step22_complete_preflight_emits_prepared_bound_live_command(
     assert option("--prepared-canary") == str(prepared_path)
     assert (tmp_path / "canary-receipt.json").exists() is False
     assert (tmp_path / "unpublished_store.pre-canary.sqlite3").exists() is False
+
+    with pytest.raises(Issue790DispositionError, match="canary command already exists"):
+        preflight._write_live_canary_command(
+            root=_ROOT,
+            activated_plan=activated_plan_path,
+            prepared_canary=prepared_path,
+            command_out=command_path,
+            event_id=EVENT_13689,
+            ledger_seq=LEDGER_13689,
+        )
+    existing_receipt = tmp_path / "canary-receipt.json"
+    existing_receipt.write_text("already used\n", encoding="utf-8")
+    blocked_command = tmp_path / "blocked-live-canary.sh"
+    with pytest.raises(Issue790DispositionError, match="canary receipt already exists"):
+        preflight._write_live_canary_command(
+            root=_ROOT,
+            activated_plan=activated_plan_path,
+            prepared_canary=prepared_path,
+            command_out=blocked_command,
+            event_id=EVENT_13689,
+            ledger_seq=LEDGER_13689,
+        )
+    assert blocked_command.exists() is False
+
+    RehearsalRealGraphitiAdapter.provider_calls = 0
+    RehearsalRealGraphitiAdapter.dispatch_started = False
+    rehearsal = run_prepared_canary_rehearsal(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        plan=plan,
+        observed_at=OBSERVED_AT,
+        exact_head=EXACT_HEAD,
+        prepared=retained,
+        event_id=EVENT_13689,
+        ledger_seq=LEDGER_13689,
+    )
+    assert rehearsal["decision_digest"] == retained.decision_digest
+    assert rehearsal["dispatch_started"] is True
+    assert rehearsal["provider_calls"] == 0
 
 
 def test_fresh_canary_rejects_backup_replacement_before_consumption(

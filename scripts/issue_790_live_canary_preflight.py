@@ -19,6 +19,7 @@ import importlib.metadata
 import json
 import os
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -76,9 +77,9 @@ STEP22_UNMATCHED_13689_CONSUMPTION_BLOCKS_13690_READY_FULL_PATH_TEST = (
     "newsroom/tests/test_issue_790_prepared_canary.py::"
     "test_step22_unmatched_13689_consumption_blocks_successor_ready_before_backup"
 )
-STEP22_PREPARED_CANARY_ABSENT_FULL_PATH_TEST = (
+STEP22_PREPARED_CANARY_HANDOFF_FULL_PATH_TEST = (
     "newsroom/tests/test_issue_790_prepared_canary.py::"
-    "test_step22_fresh_missing_prepared_fails_before_any_effect"
+    "test_step22_complete_preflight_emits_prepared_bound_live_command"
 )
 LATEST_FAILURE_COVERING_FULL_PATH_TESTS = frozenset(
     {
@@ -91,7 +92,7 @@ LATEST_FAILURE_COVERING_FULL_PATH_TESTS = frozenset(
         STEP22_CONSUMED_13683_ZERO_FULL_PATH_TEST,
         STEP22_ABORTED_SPAWN_13689_BACKUP_DEST_FULL_PATH_TEST,
         STEP22_UNMATCHED_13689_CONSUMPTION_BLOCKS_13690_READY_FULL_PATH_TEST,
-        STEP22_PREPARED_CANARY_ABSENT_FULL_PATH_TEST,
+        STEP22_PREPARED_CANARY_HANDOFF_FULL_PATH_TEST,
     }
 )
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -256,6 +257,94 @@ def _reconstruct_activated_plan(
     )
     validate_step16_activation_receipt(activation, plan=activated_plan)
     return activated_plan
+
+
+def _write_live_canary_command(
+    *,
+    root: Path,
+    activated_plan: Path,
+    prepared_canary: Path,
+    command_out: Path,
+    event_id: str,
+    ledger_seq: int,
+) -> tuple[Path, str, Path, Path]:
+    """Emit the sole live command from the same successful preflight decision."""
+
+    from newsroom.control_plane.issue_790_disposition import (
+        Issue790DispositionError,
+        assert_issue_790_paths_disjoint,
+        write_issue_790_executable_script,
+    )
+
+    root = root.expanduser().absolute()
+    activated_plan = activated_plan.expanduser().absolute()
+    prepared_canary = prepared_canary.expanduser().absolute()
+    command_out = command_out.expanduser().absolute()
+    store = root / "data/newsroom/unpublished_store.sqlite3"
+    proving_store = root / "data/newsroom/proving_store.sqlite3"
+    interpreter = Path(sys.executable).expanduser().absolute()
+    receipt = command_out.parent / "canary-receipt.json"
+    backup = command_out.parent / "unpublished_store.pre-canary.sqlite3"
+    if not interpreter.exists():
+        raise Issue790DispositionError("canary interpreter is absent")
+    assert_issue_790_paths_disjoint(
+        store,
+        proving_store,
+        activated_plan,
+        prepared_canary,
+        command_out,
+        receipt,
+        backup,
+    )
+    for field, destination in (("receipt", receipt), ("backup", backup)):
+        if os.path.lexists(destination):
+            raise Issue790DispositionError(f"canary {field} already exists")
+
+    before_observed_at = (
+        str(interpreter),
+        "-m",
+        "scripts.issue_790_conservative_disposition",
+        "canary",
+        "--store",
+        str(store),
+        "--proving-store",
+        str(proving_store),
+        "--plan",
+        str(activated_plan),
+    )
+    after_observed_at = (
+        "--receipt",
+        str(receipt),
+        "--backup",
+        str(backup),
+        "--repository-root",
+        str(root),
+        "--canary-event-id",
+        event_id,
+        "--canary-ledger-seq",
+        str(ledger_seq),
+        "--disposition-digest",
+        DISP,
+        "--prepared-canary",
+        str(prepared_canary),
+    )
+    payload = (
+        "#!/bin/sh\n"
+        "set -eu\n"
+        f"OBSERVED_AT=$({shlex.quote(str(interpreter))} -c "
+        f"{shlex.quote('from datetime import UTC, datetime; '
+                       'print(datetime.now(UTC).isoformat())')})\n"
+        f"cd {shlex.quote(str(root))}\n"
+        f"exec {shlex.join(before_observed_at)} "
+        f"--observed-at \"$OBSERVED_AT\" {shlex.join(after_observed_at)}\n"
+    )
+    destination = write_issue_790_executable_script(
+        command_out,
+        payload,
+        field="canary command",
+    )
+    digest = "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return destination, digest, receipt, backup
 
 
 def _resolve_tracked_activation(
@@ -517,7 +606,7 @@ def _latest_failure_red_green(
     if ledger is None:
         return False, "latest live failure ledger absent"
 
-    diagnosis: tuple[int, dict[str, Any], str] | None = None
+    diagnoses: list[tuple[int, dict[str, Any], str]] = []
     for index, item in enumerate(
         ordered[failure_index + 1 :],
         start=failure_index + 1,
@@ -534,11 +623,10 @@ def _latest_failure_red_green(
             and re.search(r"(?i)red commit:\s*`[0-9a-f]{40}`", body)
             and node is not None
         ):
-            diagnosis = (index, item, node.group(1))
-            break
-    if diagnosis is None:
+            diagnoses.append((index, item, node.group(1)))
+    if not diagnoses:
         return False, f"ledger {ledger} full-path red absent"
-    diagnosis_index, _diagnosis, test_node = diagnosis
+    diagnosis_index, _diagnosis, test_node = diagnoses[-1]
     if test_node not in LATEST_FAILURE_COVERING_FULL_PATH_TESTS:
         return False, f"unexpected latest red test {test_node}"
 
@@ -756,6 +844,35 @@ def _prepared_fresh_event_status(
     )
 
 
+def _prepare_preflight_canary(
+    *,
+    store: Path,
+    proving_store: Path,
+    activated_plan: dict[str, object] | None,
+    observed_at: datetime,
+    exact_head: str,
+) -> object:
+    """Build and round-trip the authority that the activated live plan consumes."""
+
+    from newsroom.control_plane.issue_790_prepared_canary import (
+        prepare_issue_790_canary,
+        prepared_canary_from_record,
+        prepared_canary_record,
+    )
+
+    if activated_plan is None:
+        raise ValueError("activated plan is absent")
+    prepared = prepare_issue_790_canary(
+        store=store,
+        proving_store=proving_store,
+        plan=activated_plan,
+        observed_at=observed_at,
+        exact_head=exact_head,
+        role="preflight",
+    )
+    return prepared_canary_from_record(prepared_canary_record(prepared))
+
+
 def _run_pytest_nodes(repo: Path, nodes: tuple[str, ...]) -> tuple[bool, str]:
     completed = subprocess.run(
         [
@@ -938,6 +1055,7 @@ def _ops_gates(
     list[tuple[str, bool, str]],
     tuple[str, int] | None,
     object | None,
+    dict[str, object] | None,
 ]:
     rows: list[tuple[str, bool, str]] = []
     store = root / "data/newsroom/unpublished_store.sqlite3"
@@ -1086,27 +1204,16 @@ def _ops_gates(
     prepared_detail = "ABSENT"
     prepared_result: object | None = None
     try:
-        from newsroom.control_plane.issue_790_prepared_canary import (
-            prepare_issue_790_canary,
-            prepared_canary_from_record,
-            prepared_canary_record,
-        )
-
         proving = root / "data/newsroom/proving_store.sqlite3"
-        prepared = prepare_issue_790_canary(
+        prepared_result = _prepare_preflight_canary(
             store=store,
             proving_store=proving,
-            plan=plan,
+            activated_plan=activated_plan,
             observed_at=datetime.now(tz=UTC),
             exact_head=head,
-            role="preflight",
-        )
-        prepared_result = prepared_canary_from_record(
-            prepared_canary_record(prepared)
         )
         prepared_ok = (
-            prepared_result.decision_digest == prepared.decision_digest
-            and isinstance(prepared_result.record_digest, str)
+            isinstance(prepared_result.record_digest, str)
             and _SHA256.fullmatch(prepared_result.record_digest) is not None
         )
         prepared_detail = (
@@ -1200,7 +1307,7 @@ def _ops_gates(
         prepared_ok,
         prepared_detail,
     )
-    return rows, clean_event, prepared_result
+    return rows, clean_event, prepared_result, activated_plan
 
 
 def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
@@ -1717,6 +1824,14 @@ def main(argv: list[str] | None = None) -> int:
         help="new outside-repository path for the complete READY artefact",
     )
     args = parser.parse_args(argv)
+    for field in (
+        "ops_root",
+        "code_root",
+        "prepared_canary_out",
+    ):
+        value = getattr(args, field)
+        if value is not None:
+            setattr(args, field, value.expanduser().absolute())
     if (
         not args.ops_only
         and not args.smoke_only
@@ -1729,10 +1844,11 @@ def main(argv: list[str] | None = None) -> int:
     all_rows: list[tuple[str, bool, str]] = []
     canary_event: tuple[str, int] | None = None
     prepared: object | None = None
+    activated_plan: dict[str, object] | None = None
 
     if not args.smoke_only:
         print("\n-- ops gates --")
-        ops_rows, canary_event, prepared = _ops_gates(
+        ops_rows, canary_event, prepared, activated_plan = _ops_gates(
             root=args.ops_root,
             tip_merge=args.tip_merge,
             tip_plan=args.tip_plan,
@@ -1756,8 +1872,13 @@ def main(argv: list[str] | None = None) -> int:
         print("RESULT: BLOCKED (diagnostic subset cannot authorise a live canary)")
         print("Run the complete preflight without --ops-only/--smoke-only.")
         return 2
-    if prepared is None or args.prepared_canary_out is None:
-        print("RESULT: BLOCKED (PreparedCanary artefact is absent)")
+    if (
+        prepared is None
+        or args.prepared_canary_out is None
+        or canary_event is None
+        or activated_plan is None
+    ):
+        print("RESULT: BLOCKED (PreparedCanary launch artefacts are absent)")
         return 2
     from newsroom.control_plane.issue_790_disposition import (
         write_issue_790_canonical_json,
@@ -1770,10 +1891,36 @@ def main(argv: list[str] | None = None) -> int:
     if not isinstance(prepared, PreparedCanary):
         print("RESULT: BLOCKED (PreparedCanary artefact is invalid)")
         return 2
+    prepared_event = prepared.candidate_identity.get("event_id")
+    prepared_ledger = prepared.candidate_identity.get("ledger_seq")
+    if (
+        not isinstance(prepared_event, str)
+        or not isinstance(prepared_ledger, int)
+        or isinstance(prepared_ledger, bool)
+        or (prepared_event, prepared_ledger) != canary_event
+    ):
+        print("RESULT: BLOCKED (PreparedCanary launch identity differs)")
+        return 2
     record = write_issue_790_canonical_json(
         args.prepared_canary_out,
         prepared_canary_record(prepared),
         field="prepared canary",
+    )
+    run_root = args.prepared_canary_out.parent
+    activated_plan_path = run_root / "activated-plan.json"
+    command_path = run_root / "live-canary.sh"
+    retained_activated_plan = write_issue_790_canonical_json(
+        activated_plan_path,
+        activated_plan,
+        field="activated plan",
+    )
+    command, command_digest, receipt, backup = _write_live_canary_command(
+        root=args.ops_root,
+        activated_plan=activated_plan_path,
+        prepared_canary=args.prepared_canary_out,
+        command_out=command_path,
+        event_id=prepared_event,
+        ledger_seq=prepared_ledger,
     )
     print(f"RESULT: READY ({len(all_rows)}/{len(all_rows)})")
     if canary_event is not None:
@@ -1791,6 +1938,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"PREPARED_CANARY_DIGEST={prepared_digest}")
     print(f"PREPARED_CANARY_ARTIFACT={args.prepared_canary_out}")
     print(f"PREPARED_CANARY_RECORD_DIGEST={record['record_digest']}")
+    print(f"ACTIVATED_PLAN_ARTIFACT={activated_plan_path}")
+    print(
+        "ACTIVATED_PLAN_DIGEST="
+        f"{retained_activated_plan['canonical_digest']}"
+    )
+    print(f"LIVE_CANARY_COMMAND={command}")
+    print(f"LIVE_CANARY_COMMAND_DIGEST={command_digest}")
+    print(f"LIVE_CANARY_RECEIPT={receipt}")
+    print(f"LIVE_CANARY_BACKUP={backup}")
     print(f"DISPOSITION={DISP}")
     print(f"PLAN={args.tip_plan}")
     return 0

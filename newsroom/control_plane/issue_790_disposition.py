@@ -5092,6 +5092,39 @@ def write_issue_790_canonical_json(
     return json.loads(reread)
 
 
+def write_issue_790_executable_script(
+    path: Path,
+    payload: str,
+    *,
+    field: str,
+) -> Path:
+    """Atomically publish one private executable without replacement."""
+
+    destination = require_issue_790_path_outside_git(path, field=field)
+    destination = _canonical_new_file(destination, field=field)
+    descriptor, temporary_text = mkstemp(
+        prefix=f".{destination.name}.",
+        dir=destination.parent,
+    )
+    temporary = Path(temporary_text)
+    try:
+        os.fchmod(descriptor, 0o700)
+        stream = os.fdopen(descriptor, "w", encoding="utf-8")
+        descriptor = -1
+        with stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _publish_file_no_replace(temporary, destination)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        _unlink_temporary(temporary)
+    if destination.read_text(encoding="utf-8") != payload:
+        raise Issue790DispositionError(f"{field} read-back differs")
+    return destination
+
+
 def issue_790_step16_checked_approval(pending_digest: str) -> dict[str, str]:
     """Return the Step 16 checked, non-live approval tuple."""
 
@@ -5810,5 +5843,6 @@ __all__ = [
     "require_issue_790_path_outside_git",
     "seal_issue_790_step16_plan",
     "write_issue_790_canonical_json",
+    "write_issue_790_executable_script",
     "write_issue_790_receipt",
 ]
