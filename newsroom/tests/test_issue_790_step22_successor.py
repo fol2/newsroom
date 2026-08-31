@@ -22,6 +22,7 @@ from newsroom.control_plane.issue_790_disposition import (
     ISSUE_790_STEP22_PENDING_PLAN_PATH,
     Issue790DispositionError,
     _require_retry_events_unchanged,
+    _require_retry_exclusions,
     _retain_retry_exclusions_for_plan,
     issue_790_checked_approval,
     qualify_issue_790_candidate_event,
@@ -218,7 +219,7 @@ def test_step22_appends_13361_to_the_existing_retry_exclusions(
     repository.retain_retry_exclusions(
         approved_plan_digest=root_plan_digest,
         disposition_digest=disposition_digest,
-        events=events[:-1],
+        events=[item for item in events if item["ledger_seq"] != 13361],
         excluded_at=datetime(2026, 8, 31, tzinfo=UTC),
     )
     retained = _retain_retry_exclusions_for_plan(
@@ -230,6 +231,79 @@ def test_step22_appends_13361_to_the_existing_retry_exclusions(
     assert [item["ledger_seq"] for item in retained] == [
         1932, 1972, 8834, 8835, 13284, 13337, 13361, 13362
     ]
+
+
+def test_live_apply_does_not_treat_o16_consumption_as_durable_exclusion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = tmp_path / "canary.sqlite3"
+    repository = Issue790CanaryRepository(str(store))
+    events = _seal22()["retry_forbidden_events"]
+    root_plan_digest = "sha256:" + "11" * 32
+    disposition_digest = "sha256:" + "22" * 32
+    connection = sqlite3.connect(store)
+    try:
+        connection.execute(
+            "CREATE TABLE model_usage_conservative_dispositions("
+            "invocation_id TEXT,approved_plan_digest TEXT,disposition_digest TEXT PRIMARY KEY)"
+        )
+        connection.execute(
+            "INSERT INTO model_usage_conservative_dispositions VALUES(?,?,?)",
+            ("invocation", root_plan_digest, disposition_digest),
+        )
+        connection.execute(
+            "CREATE TABLE unpublished_graphiti_revision_events("
+            "event_id TEXT,ledger_seq INTEGER,state TEXT,attempt_count INTEGER,"
+            "available_at TEXT,last_failure_code TEXT,provider_dispatched INTEGER)"
+        )
+        connection.executemany(
+            "INSERT INTO unpublished_graphiti_revision_events VALUES(?,?,?,?,?,?,?)",
+            [
+                (
+                    item["event_id"], item["ledger_seq"], item["state"],
+                    item["attempt_count"], item["available_at"],
+                    item["last_failure_code"], int(item["provider_dispatched"]),
+                )
+                for item in events
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    monkeypatch.setattr(
+        canary_module,
+        "_require_effective_plan_contract",
+        lambda *_args, **_kwargs: SimpleNamespace(invocation_id="invocation"),
+    )
+    monkeypatch.setattr(
+        disposition_module,
+        "issue_790_approved_plan_contract",
+        lambda *_args, **_kwargs: SimpleNamespace(invocation_id="invocation"),
+    )
+    repository.retain_retry_exclusions(
+        approved_plan_digest=root_plan_digest,
+        disposition_digest=disposition_digest,
+        events=[item for item in events if item["ledger_seq"] != 13361],
+        excluded_at=datetime(2026, 8, 31, tzinfo=UTC),
+    )
+    plan = {"canonical_digest": root_plan_digest, "retry_forbidden_events": events}
+    with pytest.raises(
+        Issue790DispositionError,
+        match="durable retry exclusions differ",
+    ):
+        _require_retry_exclusions(repository, plan=plan)
+    retained = _retain_retry_exclusions_for_plan(
+        repository,
+        plan=plan,
+        disposition_digest=disposition_digest,
+        observed_at=datetime(2026, 8, 31, 10, 12, tzinfo=UTC),
+    )
+    assert [item["ledger_seq"] for item in retained] == [
+        1932, 1972, 8834, 8835, 13284, 13337, 13361, 13362
+    ]
+    exhausted = next(item for item in events if item["ledger_seq"] == 13361)
+    assert exhausted["state"] == "CONFIGURATION_HELD"
+    assert exhausted["attempt_count"] == 1
 
 
 def _plan_retry_events() -> list[dict[str, object]]:

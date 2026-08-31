@@ -2105,6 +2105,11 @@ def _patch_recovery_bindings(
     )
     monkeypatch.setattr(
         issue_790_operation,
+        "_retain_retry_exclusions_for_plan",
+        lambda *a, **k: [],
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
         "_require_retry_events_unchanged",
         lambda *a, **k: retry,
     )

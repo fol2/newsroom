@@ -269,12 +269,14 @@ def retry_forbidden_live_snapshot(
     return snapshot
 
 
-def evaluate_retry_forbidden_safety(
+def validate_retry_forbidden_safety_state(
     *,
     expected: Mapping[str, object],
     live: Mapping[str, object] | None,
     excluded: bool,
 ) -> RetryForbiddenSafetyState:
+    """Shared preflight and live-apply retry-forbidden validator."""
+
     if live is None:
         raise RetryForbiddenSafetyError("retry-forbidden row is absent")
     expected_state = RetryForbiddenSafetyState.from_mapping(expected)
@@ -288,6 +290,9 @@ def evaluate_retry_forbidden_safety(
             "retry-forbidden durable exclusion is absent"
         )
     return live_state
+
+
+evaluate_retry_forbidden_safety = validate_retry_forbidden_safety_state
 
 
 def retry_forbidden_safety_states_match(
@@ -318,7 +323,7 @@ def retry_forbidden_safety_states_match(
                 return False
             seq = int(item["ledger_seq"])
             excluded = True if excluded_seqs is None else seq in excluded_seqs
-            evaluate_retry_forbidden_safety(
+            validate_retry_forbidden_safety_state(
                 expected=item,
                 live=live_by_seq.get(seq),
                 excluded=excluded,
@@ -1942,6 +1947,7 @@ __all__ = [
     "RetryForbiddenSafetyError",
     "RetryForbiddenSafetyState",
     "evaluate_retry_forbidden_safety",
+    "validate_retry_forbidden_safety_state",
     "graphiti_event_has_canary_consumption",
     "validate_graphiti_canary_target_unused",
     "graphiti_excluded_event_ids",

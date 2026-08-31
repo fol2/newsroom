@@ -3771,9 +3771,11 @@ def run_issue_790_canary(
         canary_repository,
         plan=retained_plan,
     )
-    retry_exclusions = _require_retry_exclusions(
+    retry_exclusions = _retain_retry_exclusions_for_plan(
         canary_repository,
         plan=retained_plan,
+        disposition_digest=disposition_digest,
+        observed_at=observed_at,
     )
     event_before = _event_snapshot(
         store,

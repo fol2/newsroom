@@ -317,8 +317,9 @@ def _effective_retry_exclusion_status(
     """Prove historical exclusions plus the exhausted canary consumption."""
 
     from newsroom.control_plane.issue_790_canary import (
-        live_retry_forbidden_row_is_unclaimed,
+        RetryForbiddenSafetyError,
         retry_forbidden_safety_states_match,
+        validate_retry_forbidden_safety_state,
     )
 
     plan_by_seq = {
@@ -334,11 +335,30 @@ def _effective_retry_exclusion_status(
     consumed_seq = int((consumption or {}).get("ledger_seq", 0))
     consumed_event = str((consumption or {}).get("event_id", ""))
     failure_code = str((outcome or {}).get("failure_code_after_seal", ""))
+    try:
+        consumed_safety_ok = (
+            event_snapshot is not None
+            and consumed_seq == 13361
+            and validate_retry_forbidden_safety_state(
+                expected={
+                    "attempt_count": 1,
+                    "event_id": consumed_event,
+                    "last_failure_code": failure_code,
+                    "ledger_seq": consumed_seq,
+                    "provider_dispatched": True,
+                    "state": "CONFIGURATION_HELD",
+                },
+                live=event_snapshot,
+                excluded=consumed_event in effectively_excluded_event_ids,
+            )
+            is not None
+        )
+    except (RetryForbiddenSafetyError, TypeError, ValueError, KeyError):
+        consumed_safety_ok = False
     consumption_ok = (
         consumption is not None
         and outcome is not None
-        and event_snapshot is not None
-        and consumed_seq == 13361
+        and consumed_safety_ok
         and consumption.get("approved_plan_digest") == activated_plan_digest
         and consumption.get("attempt_count_before") == 0
         and consumption.get("maximum_event_attempts") == 1
@@ -352,14 +372,6 @@ def _effective_retry_exclusion_status(
         and outcome.get("retry_authorised") is False
         and outcome.get("state_after_seal") == "CONFIGURATION_HELD"
         and failure_code.startswith("BOUNDED_CANARY_AUTHORITY_EXHAUSTED:")
-        and event_snapshot.get("event_id") == consumed_event
-        and event_snapshot.get("ledger_seq") == consumed_seq
-        and event_snapshot.get("state") == "CONFIGURATION_HELD"
-        and event_snapshot.get("attempt_count") == 1
-        and event_snapshot.get("provider_dispatched") is True
-        and event_snapshot.get("last_failure_code") == failure_code
-        and consumed_event in effectively_excluded_event_ids
-        and live_retry_forbidden_row_is_unclaimed(event_snapshot)
     )
     historical_ok = (
         len(plan_by_seq) == len(plan_events)
