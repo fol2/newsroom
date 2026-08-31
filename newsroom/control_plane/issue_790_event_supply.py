@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import sqlite3
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from newsroom.control_plane.corpus import CorpusIngestUnit
 from newsroom.control_plane.cycle import load_graphiti_units
 from newsroom.control_plane.graphiti_events import (
     ensure_graphiti_event_schema,
@@ -19,7 +21,7 @@ from newsroom.control_plane.store import (
     has_effective_revision_landed,
 )
 from newsroom.control_plane.veto import assert_private_store
-from newsroom.increment9.proving import Fetcher
+from newsroom.increment9.proving import Fetcher, PROVING_GATES, SOURCE_IDS
 
 
 class BoundedEventSupplyError(RuntimeError):
@@ -46,6 +48,93 @@ def _utc_text(value: datetime) -> str:
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _complete_authorised_run_instants(proving_store: str) -> dict[str, str]:
+    connection = sqlite3.connect(proving_store)
+    try:
+        names = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if not {"proving_runs", "proving_observations", "proving_gates"} <= names:
+            return {}
+        rows = connection.execute(
+            """
+            SELECT run.run_id, MIN(obs.fetched_at)
+            FROM proving_runs AS run
+            JOIN proving_observations AS obs
+              ON obs.run_id=run.run_id
+             AND obs.status_code=200
+             AND obs.error IS NULL
+            GROUP BY run.run_id
+            HAVING COUNT(DISTINCT obs.source_id)=?
+               AND (
+                 SELECT COUNT(*) FROM proving_gates AS gates
+                 WHERE gates.run_id=run.run_id
+               )=?
+               AND (
+                 SELECT COUNT(*) FROM proving_gates AS gates
+                 WHERE gates.run_id=run.run_id AND gates.status<>'PASS'
+               )=0
+            """,
+            (len(SOURCE_IDS), len(PROVING_GATES)),
+        ).fetchall()
+    finally:
+        connection.close()
+    return {str(run_id): str(fetched_at) for run_id, fetched_at in rows}
+
+
+def _frontier_landed_at(
+    connection: sqlite3.Connection, ledger_seq: int
+) -> str | None:
+    if ledger_seq == 0:
+        return None
+    row = connection.execute(
+        "SELECT landed_at FROM unpublished_graphiti_revision_events "
+        "WHERE ledger_seq=?",
+        (ledger_seq,),
+    ).fetchone()
+    if row is None:
+        return None
+    return str(row[0])
+
+
+def _stranded_unlanded_units(
+    units: Sequence[CorpusIngestUnit],
+    *,
+    proving_store: str,
+    unpublished: sqlite3.Connection,
+    window_start: str | None,
+) -> tuple[CorpusIngestUnit, ...]:
+    retained = _complete_authorised_run_instants(proving_store)
+    protected: list[CorpusIngestUnit] = []
+    for unit in units:
+        fetched_at = retained.get(unit.proving_run_id)
+        if fetched_at is None:
+            continue
+        if window_start is not None and fetched_at < window_start:
+            continue
+        if unit.coverage_first_observed_at != fetched_at:
+            continue
+        protected.append(unit)
+    unlanded_keys = set()
+    seen_keys = set()
+    for unit in protected:
+        key = unit.coverage_key()
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        if not has_effective_revision_landed(
+            unpublished,
+            unit.effective_revision,
+            published_at=unit.published_at or "",
+            updated_at=unit.updated_at or "",
+        ):
+            unlanded_keys.add(key)
+    return tuple(unit for unit in protected if unit.coverage_key() in unlanded_keys)
+
+
 def supply_one_graphiti_event(
     *,
     proving_store: str,
@@ -57,7 +146,10 @@ def supply_one_graphiti_event(
     """Intake and project one new revision, leaving it untouched.
 
     Several new coverage keys at the intake instant select the first key in
-    coverage-tuple order. Other new keys stay unlanded.
+    coverage-tuple order. Other new keys stay unlanded. If this instant
+    first-saw none, one unlanded key first-seen on a retained complete
+    authorised proving run still qualifies. Old-run and pre-frontier
+    first-seen keys do not.
     """
     if type(expected_frontier_ledger_seq) is not int or expected_frontier_ledger_seq < 0:
         raise BoundedEventSupplyError("expected frontier must be non-negative")
@@ -88,16 +180,6 @@ def supply_one_graphiti_event(
         if unit.proving_run_id == report.proving_run_id
         and unit.coverage_first_observed_at == intake_observed_at
     )
-    coverage_keys = {unit.coverage_key() for unit in current_units}
-    if not coverage_keys:
-        raise BoundedEventSupplyError(
-            f"intake must yield at least one new landed revision ({len(coverage_keys)})"
-        )
-    selected_key = sorted(coverage_keys)[0]
-    selected = tuple(
-        unit for unit in current_units if unit.coverage_key() == selected_key
-    )
-    first = selected[0]
 
     connection = connect(unpublished_store)
     try:
@@ -111,6 +193,26 @@ def supply_one_graphiti_event(
         )
         if frontier != expected_frontier_ledger_seq:
             raise BoundedEventSupplyError("Graphiti event frontier changed")
+        if not current_units:
+            current_units = _stranded_unlanded_units(
+                units,
+                proving_store=proving_store,
+                unpublished=connection,
+                window_start=_frontier_landed_at(
+                    connection, expected_frontier_ledger_seq
+                ),
+            )
+        coverage_keys = {unit.coverage_key() for unit in current_units}
+        if not coverage_keys:
+            raise BoundedEventSupplyError(
+                f"intake must yield at least one new landed revision "
+                f"({len(coverage_keys)})"
+            )
+        selected_key = sorted(coverage_keys)[0]
+        selected = tuple(
+            unit for unit in current_units if unit.coverage_key() == selected_key
+        )
+        first = selected[0]
         if has_effective_revision_landed(
             connection,
             first.effective_revision,
