@@ -14,6 +14,7 @@ from scripts.issue_790_live_canary_preflight import (
     STEP22_BROKERERROR_SETUP_FULL_PATH_TEST,
     STEP22_CANDIDATE_IDENTITY_FULL_PATH_TEST,
     STEP22_CONSUMED_13677_ZERO_FULL_PATH_TEST,
+    STEP22_CONSUMED_13683_ZERO_FULL_PATH_TEST,
     STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST,
     STEP22_PRODUCTION_UNTOUCHED_FULL_PATH_TEST,
     _blocker_smokes,
@@ -193,6 +194,7 @@ def test_covering_full_path_nodes_are_the_allowlist() -> None:
             STEP22_PRODUCTION_UNTOUCHED_FULL_PATH_TEST,
             STEP22_BROKERERROR_SETUP_FULL_PATH_TEST,
             STEP22_CONSUMED_13677_ZERO_FULL_PATH_TEST,
+            STEP22_CONSUMED_13683_ZERO_FULL_PATH_TEST,
         }
     )
 
@@ -207,6 +209,7 @@ def test_covering_full_path_nodes_are_the_allowlist() -> None:
         (13671, STEP22_PRODUCTION_UNTOUCHED_FULL_PATH_TEST),
         (13671, STEP22_BROKERERROR_SETUP_FULL_PATH_TEST),
         (13677, STEP22_CONSUMED_13677_ZERO_FULL_PATH_TEST),
+        (13683, STEP22_CONSUMED_13683_ZERO_FULL_PATH_TEST),
     ),
 )
 def test_latest_live_failure_accepts_step21_or_step22_covering_red(

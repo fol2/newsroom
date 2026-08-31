@@ -43,6 +43,10 @@ EVENT_13677 = (
     "sha256:1f60dac732657a0d89a9d46528aed13bcd7e2af5157a5bc6541bed579067705c"
 )
 LEDGER_13677 = 13677
+EVENT_13683 = (
+    "sha256:7d7bd60fac66b52c7e945a97021570e4220e3fdee0c01af4ee744a50a3993944"
+)
+LEDGER_13683 = 13683
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,13 +196,31 @@ def _spent_13677() -> dict[str, object]:
     }
 
 
+def _spent_13683() -> dict[str, object]:
+    return {
+        "attempt_count": 1,
+        "available_at": "2026-08-31T19:54:47.602000Z",
+        "event_id": EVENT_13683,
+        "last_failure_code": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:AMBIGUOUS_EFFECT",
+        "ledger_seq": LEDGER_13683,
+        "provider_dispatched": True,
+        "state": "CONFIGURATION_HELD",
+    }
+
+
 def build_rehearsal_stores(
-    tmp_path: Path, *, successor: bool = False, unused_13677: bool = False
+    tmp_path: Path,
+    *,
+    successor: bool = False,
+    unused_13677: bool = False,
+    unused_13683: bool = False,
 ) -> RehearsalStores:
     """Full sqlite backup-style copy with unused 13665 and drifted 13361."""
 
-    if successor and unused_13677:
-        raise ValueError("successor and unused_13677 are mutually exclusive")
+    if sum((successor, unused_13677, unused_13683)) > 1:
+        raise ValueError(
+            "successor, unused_13677 and unused_13683 are mutually exclusive"
+        )
     clock = MutableClock(OBSERVED_AT)
     proving, unpublished, source_event_id, _ledger_seq = _projected_zero_ref_event(
         tmp_path, clock
@@ -212,7 +234,20 @@ def build_rehearsal_stores(
     Issue790CanaryRepository(str(unpublished))
     connection = sqlite3.connect(unpublished)
     try:
-        if unused_13677:
+        if unused_13683:
+            unused = _spent_13683()
+            _bind_candidate(
+                connection,
+                source_event_id,
+                event_id=str(unused["event_id"]),
+                ledger_seq=int(unused["ledger_seq"]),
+            )
+            _insert_retry_forbidden_rows(
+                connection,
+                [_spent_13665(), _spent_13671(), _spent_13677()],
+                live_13361_drift=False,
+            )
+        elif unused_13677:
             unused = _spent_13677()
             _bind_candidate(
                 connection,

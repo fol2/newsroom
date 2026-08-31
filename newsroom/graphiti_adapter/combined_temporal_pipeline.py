@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from newsroom.authority.canonical import CanonicalizationError
 from newsroom.graphiti_adapter.edge_guard import guard_extracted_edges
 from newsroom.graphiti_adapter.neo4j_guard import GuardState, Neo4jMutationGuard
 
@@ -434,9 +435,24 @@ class ExistingGraphitiPipeline:
             if self.complete_receipt is None:
                 completed_receipt = durable_receipt
             else:
-                sealed = self.complete_receipt(
-                    resolved_nodes, output_edges, durable_receipt
-                )
+                try:
+                    sealed = self.complete_receipt(
+                        resolved_nodes, output_edges, durable_receipt
+                    )
+                except CanonicalizationError:
+                    # Live 13683: persistable edges after embeddings bind float
+                    # fact_embedding into the durable receipt. Canonicalisation
+                    # then fails, the persist is rolled back, and unmarked 0/0/0
+                    # was classified AMBIGUOUS_EFFECT. Seal explicit empty on the
+                    # original extract receipt instead.
+                    await self.guard.rollback_pending(
+                        chat_invocations=chat_invocations,
+                        embedding_usage=embedding_usage,
+                        reason="CanonicalizationError",
+                    )
+                    return await self._seal_empty_effect(
+                        receipt, embedding_skipped=False
+                    )
                 completed_receipt = (
                     sealed if isinstance(sealed, dict) else dict(sealed)
                 )

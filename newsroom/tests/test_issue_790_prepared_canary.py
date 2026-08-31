@@ -50,8 +50,10 @@ from newsroom.control_plane.issue_790_rehearsal import (
 from newsroom.tests.test_issue_790_rehearsal_fixtures import (
     EVENT_13361,
     EVENT_13677,
+    EVENT_13683,
     EXACT_HEAD,
     LEDGER_13677,
+    LEDGER_13683,
     LIVE_13361_AVAILABLE_AT,
     OBSERVED_AT,
     SEALED_13361_AVAILABLE_AT,
@@ -1334,6 +1336,435 @@ def test_step22_consumed_13677_zero_after_embeddings_survives_full_path(
     assert resumed["provider_dispatch_attempted_this_run"] is False
     assert consume_calls == [EVENT_13677]
     assert persist_calls == []
+
+
+def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live 13683: persistable leftover NEW + float fact_embedding is TERMINAL.
+
+    Provider COMPLETE + embeddings + persistable edges bound float
+    fact_embedding into the durable receipt. Canonicalisation failed after
+    persist and unmarked 0/0/0 became AMBIGUOUS_EFFECT. Fails on b7a02cdb
+    because that path still classifies the unmarked zero as ambiguous.
+    """
+
+    from contextlib import asynccontextmanager
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from newsroom.authority.types import UtcTimestamp
+    from newsroom.control_plane.corpus import CorpusIngestUnit
+    from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
+    from newsroom.graphiti_adapter import real as real_adapter
+    from newsroom.graphiti_adapter.combined_temporal_fixtures import (
+        PAIR_BODY,
+        _pair_entities,
+        _pair_fact,
+    )
+    from newsroom.graphiti_adapter.evaluation_packet import (
+        CURSOR_AGENT_MODEL_ID,
+        GRAPHITI_WORKSPACE_GROUP,
+    )
+    from newsroom.graphiti_adapter.neo4j_guard import GuardMarker, GuardState
+
+    persist_calls: list[str] = []
+    executions: list[object] = []
+    existing_nodes: list[object] = []
+    stores = build_rehearsal_stores(tmp_path, unused_13683=True)
+    activated = _activate_step22(stores.work_unpublished)
+    plan = activated["plan"]
+    _seed_production_disposition(stores.work_unpublished, plan)
+    _patch_production_predispatch(monkeypatch, plan=plan)
+    monkeypatch.setattr(
+        EvaluationGraphitiRunner,
+        "requires_canonical_control_plane_stores",
+        False,
+    )
+    monkeypatch.setattr(CorpusIngestUnit, "episode_body", PAIR_BODY)
+    adapter_type = real_adapter.RealGraphitiAdapter
+
+    class ClockedAdapter:
+        def __init__(self, **values: object) -> None:
+            self.delegate = adapter_type(
+                clock=lambda: UtcTimestamp(OBSERVED_AT),
+                **values,
+            )
+
+        def execute(self, **values: object) -> object:
+            execution = self.delegate.execute(**values)
+            executions.append(execution)
+            return execution
+
+    class Missing(Exception):
+        pass
+
+    retained: dict[str, object] = {}
+
+    class Episode:
+        def __init__(self, **values: object) -> None:
+            self.__dict__.update(values)
+            self.entity_edges: list[object] = []
+
+        @classmethod
+        async def get_by_uuid(cls, _driver: object, episode_id: str) -> object:
+            if episode_id not in retained:
+                raise Missing(episode_id)
+            return retained[episode_id]
+
+        async def save(self, _driver: object) -> None:
+            retained[str(self.uuid)] = self
+
+    class EntityNode:
+        def __init__(self, **values: object) -> None:
+            self.__dict__.update(values)
+
+        @classmethod
+        async def get_by_group_ids(
+            cls, _driver: object, _groups: object, with_embeddings: bool = False
+        ) -> list[object]:
+            del with_embeddings
+            return list(existing_nodes)
+
+    class EntityEdge:
+        def __init__(self, **values: object) -> None:
+            self.__dict__.update(values)
+
+    class Driver:
+        _database = "neo4j"
+
+        def clone(self, **_values: object) -> object:
+            raise AssertionError("must not clone driver")
+
+    class Graphiti:
+        def __init__(self, *_args: object, **values: object) -> None:
+            self.driver = Driver()
+            self.clients = SimpleNamespace(
+                driver=self.driver,
+                llm_client=values["llm_client"],
+                embedder=values["embedder"],
+            )
+
+        async def retrieve_episodes(self, *_a: object, **_k: object) -> list[object]:
+            return []
+
+        async def _process_episode_data(self, *_a: object, **_k: object) -> None:
+            persist_calls.append("process")
+
+        async def close(self) -> None:
+            return None
+
+    class Guard:
+        def __init__(self, *_a: object, **values: object) -> None:
+            self.driver = _a[0] if _a else None
+            self.group_id = values.get("group_id")
+            self.episode_uuid = values.get("episode_uuid")
+            self.input_digest = values.get("input_digest")
+
+        async def begin(self) -> object:
+            return GuardMarker(
+                state=GuardState.CREATED,
+                attempt_number=1,
+                input_digest=str(self.input_digest or "sha256:" + "0" * 64),
+            )
+
+        async def record_pending_telemetry(self, **_values: object) -> None:
+            return None
+
+        async def complete(self, _receipt: object) -> None:
+            return None
+
+        async def rollback_pending(self, **_values: object) -> bool:
+            return True
+
+        async def restore_preexisting(self) -> None:
+            return None
+
+        @asynccontextmanager
+        async def fenced_graph_mutation(self):
+            yield
+
+    class OpenAIEmbedder:
+        def __init__(self, config: object) -> None:
+            self.config = config
+            if not hasattr(self.config, "embedding_dim"):
+                self.config.embedding_dim = 2
+            if not hasattr(self.config, "embedding_model"):
+                self.config.embedding_model = "openai/text-embedding-3-large"
+            self.client = SimpleNamespace(
+                embeddings=SimpleNamespace(create=self._create)
+            )
+
+        async def _create(self, input=None, model=None, **_k: object) -> object:
+            del input, model
+            return SimpleNamespace(
+                id="emb-1",
+                data=[SimpleNamespace(embedding=[0.0, 1.0])],
+                usage={
+                    "prompt_tokens": 2,
+                    "total_tokens": 2,
+                    "cost": 0,
+                },
+            )
+
+    class LlmClient:
+        def __init__(
+            self,
+            invocation_observer=None,
+            fallback_permitted=True,
+            **_k: object,
+        ) -> None:
+            del fallback_permitted
+            self.invocations: list[dict[str, object]] = []
+            self._observer = invocation_observer
+
+        async def _generate_response(self, *_a: object, **_k: object) -> object:
+            if self._observer is not None:
+                token = self._observer.before_cli_invocation(
+                    provider="cursor-agent-cli",
+                    model=CURSOR_AGENT_MODEL_ID,
+                    prompt="live-13683 unmarked zero after embeddings",
+                    schema=None,
+                )
+                self._observer.transport_dispatch_started(token)
+                self._observer.after_cli_invocation(
+                    token,
+                    outcome="COMPLETE",
+                    usage={
+                        "usage_basis": "PROVIDER_REPORTED",
+                        "input_tokens": 4_000,
+                        "cached_read_tokens": 0,
+                        "output_tokens": 2_374,
+                        "total_tokens": 6_374,
+                    },
+                )
+            self.invocations.append(
+                {
+                    "provider": "cursor-agent-cli",
+                    "model": CURSOR_AGENT_MODEL_ID,
+                    "outcome": "COMPLETE",
+                    "usage": {
+                        "usage_basis": "PROVIDER_REPORTED",
+                        "input_tokens": 4_000,
+                        "cached_read_tokens": 0,
+                        "output_tokens": 2_374,
+                        "total_tokens": 6_374,
+                    },
+                }
+            )
+            return {
+                "entities": _pair_entities(),
+                "facts": [_pair_fact(valid_at=None, invalid_at=None)],
+            }
+
+    async def create_entity_edge_embeddings(
+        _embedder: object, edges: list[object]
+    ) -> None:
+        for edge in edges:
+            edge.fact_embedding = [0.0, 1.0]
+
+    def resolve_edge_pointers(
+        edges: list[object], uuid_map: dict[str, str]
+    ) -> list[object]:
+        for edge in edges:
+            edge.source_node_uuid = uuid_map.get(
+                str(edge.source_node_uuid), edge.source_node_uuid
+            )
+            edge.target_node_uuid = uuid_map.get(
+                str(edge.target_node_uuid), edge.target_node_uuid
+            )
+        return edges
+
+    runtime = SimpleNamespace(
+        Graphiti=Graphiti,
+        OpenAIEmbedder=OpenAIEmbedder,
+        OpenAIEmbedderConfig=lambda **values: SimpleNamespace(**values),
+        MeteredOpenAIEmbedder=real_adapter.MeteredOpenAIEmbedder,
+        IdentityCrossEncoder=lambda: object(),
+        EpisodeType=SimpleNamespace(text="text"),
+        EpisodicNode=Episode,
+        EntityNode=EntityNode,
+        EntityEdge=EntityEdge,
+        NodeNotFoundError=Missing,
+        MutationGuard=Guard,
+        create_entity_edge_embeddings=create_entity_edge_embeddings,
+        resolve_edge_pointers=resolve_edge_pointers,
+    )
+    original_factory = real_adapter.combined_temporal_pipeline_for
+
+    def wrapped_factory(**values: object) -> object:
+        source_id = str(values["source_id"])
+        existing_nodes[:] = [
+            SimpleNamespace(
+                uuid=f"leftover-{index}",
+                name=f"Leftover workspace entity {index}",
+                group_id=GRAPHITI_WORKSPACE_GROUP,
+                labels=["Entity"],
+                created_at=datetime(2026, 8, 31, tzinfo=UTC),
+                summary="",
+                attributes={
+                    "entity_type_id": 0,
+                    "permitted_source_ids": (source_id,),
+                    "source_id": source_id,
+                },
+                name_embedding=[1.0, 0.0],
+            )
+            for index in (1, 2)
+        ]
+        return original_factory(**values)
+
+    monkeypatch.setattr(real_adapter, "RealGraphitiAdapter", ClockedAdapter)
+    monkeypatch.setattr(real_adapter, "_load_graphiti", lambda: runtime)
+    monkeypatch.setattr(real_adapter, "openrouter_api_key", lambda: "fixture-key")
+    monkeypatch.setattr(
+        real_adapter, "neo4j_community_password", lambda: "fixture-password"
+    )
+    monkeypatch.setattr(real_adapter, "build_cli_llm_client", LlmClient)
+    monkeypatch.setattr(real_adapter, "combined_temporal_pipeline_for", wrapped_factory)
+
+    consume_calls: list[str] = []
+    real_consume = disposition._consume_issue_790_event
+
+    def consume_13683(**values: object) -> object:
+        consume_calls.append(str(values["event_id"]))
+        assert values["event_id"] == EVENT_13683
+        values.setdefault("clock", lambda: OBSERVED_AT)
+        values.setdefault(
+            "graphiti",
+            EvaluationGraphitiRunner(
+                clock=lambda: OBSERVED_AT,
+                fallback_permitted=False,
+            ),
+        )
+        return real_consume(**values)
+
+    monkeypatch.setattr(disposition, "_consume_issue_790_event", consume_13683)
+    receipt = disposition.run_issue_790_canary(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        backup_path=tmp_path / "zero-13683.sqlite3",
+        plan=plan,
+        observed_at=OBSERVED_AT,
+        repository_root=tmp_path,
+        event_id=EVENT_13683,
+        ledger_seq=LEDGER_13683,
+        disposition_digest=_PRODUCTION_DISPOSITION,
+        rehearsal=False,
+        exact_head=EXACT_HEAD,
+        github_api=activated["github"],
+    )
+    event = _sqlite_canary_event(stores.work_unpublished, ledger_seq=LEDGER_13683)
+    after = receipt["event_after"]["event"]
+    connection = sqlite3.connect(stores.work_unpublished)
+    try:
+        attempt_row = connection.execute(
+            "SELECT outcome,receipt_json FROM unpublished_graphiti_attempt_receipts"
+        ).fetchone()
+        ingest = connection.execute(
+            "SELECT outcome,proposal_count,entity_count,relation_count "
+            "FROM unpublished_graphiti_ingest"
+        ).fetchone()
+        spent_13665 = connection.execute(
+            "SELECT state,attempt_count,provider_dispatched FROM "
+            "unpublished_graphiti_revision_events WHERE ledger_seq=?",
+            (CANDIDATE_LEDGER_SEQ,),
+        ).fetchone()
+        spent_13671 = connection.execute(
+            "SELECT state,attempt_count,provider_dispatched FROM "
+            "unpublished_graphiti_revision_events WHERE ledger_seq=?",
+            (SUCCESSOR_LEDGER_SEQ,),
+        ).fetchone()
+        spent_13677 = connection.execute(
+            "SELECT state,attempt_count,provider_dispatched FROM "
+            "unpublished_graphiti_revision_events WHERE ledger_seq=?",
+            (LEDGER_13677,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert attempt_row is not None
+    attempt = json.loads(attempt_row[1])
+    execution = executions[0]
+    raw = execution.produced.raw_output_value
+    combined = None if not isinstance(raw, dict) else raw.get("combined_temporal_receipt")
+    unused = unused_queued_attempt_zero_candidates(stores.work_unpublished, plan)
+    assert persist_calls == ["process"]
+    assert consume_calls == [EVENT_13683]
+    assert receipt["consumption"]["event_id"] == EVENT_13683
+    assert receipt["consumption"]["ledger_seq"] == LEDGER_13683
+    assert receipt["exception"] is None
+    assert receipt["resumed_zero_io_finalisation"] is False
+    assert receipt["provider_dispatch_attempted_this_run"] is True
+    assert receipt["publication_performed"] is False
+    assert receipt["retry_authorised"] is False
+    assert receipt["process_result"]["state"] == "TERMINAL"
+    assert receipt["process_result"]["attempt_count"] == 1
+    assert after["state"] == "TERMINAL"
+    assert after["attempt_count"] == 1
+    assert after["last_failure_code"] is None
+    assert event["state"] == "TERMINAL"
+    assert event["attempt_count"] == 1
+    assert event["provider_dispatched"] == 1
+    assert type(event["provider_dispatched"]) is int
+    assert ingest == ("COMPLETE", 0, 0, 0)
+    assert attempt["outcome"] == "COMPLETE"
+    assert attempt["proposal_count"] == 0
+    assert attempt.get("entity_count") == 0
+    assert attempt.get("relation_count") == 0
+    assert execution.outcome.value == "COMPLETE"
+    assert execution.produced.outcome.value == "SUCCESS"
+    assert isinstance(combined, dict)
+    assert combined["zero_proposal_effect"] == "EXPLICIT"
+    assert attempt["chat_invocations"][0]["usage"]["total_tokens"] == 6_374
+    assert spent_13665 == ("CONFIGURATION_HELD", 1, 1)
+    assert spent_13671 == ("CONFIGURATION_HELD", 1, 0)
+    assert spent_13677 == ("CONFIGURATION_HELD", 1, 1)
+    assert EVENT_13683 not in {item[0] for item in unused}
+    assert LEDGER_13683 not in {item[1] for item in unused}
+    with pytest.raises(PreparedCanaryError) as spent_13665_target:
+        _candidate_from_plan(
+            plan,
+            event_id=CANDIDATE_EVENT_ID,
+            ledger_seq=CANDIDATE_LEDGER_SEQ,
+            role="canary",
+            store=stores.work_unpublished,
+        )
+    assert spent_13665_target.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    with pytest.raises(PreparedCanaryError) as spent_13671_target:
+        _candidate_from_plan(
+            plan,
+            event_id=SUCCESSOR_EVENT_ID,
+            ledger_seq=SUCCESSOR_LEDGER_SEQ,
+            role="canary",
+            store=stores.work_unpublished,
+        )
+    assert spent_13671_target.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    with pytest.raises(PreparedCanaryError) as spent_13677_target:
+        _candidate_from_plan(
+            plan,
+            event_id=EVENT_13677,
+            ledger_seq=LEDGER_13677,
+            role="canary",
+            store=stores.work_unpublished,
+        )
+    assert spent_13677_target.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    resumed = disposition.run_issue_790_canary(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        backup_path=tmp_path / "resume-zero-13683.sqlite3",
+        plan=plan,
+        observed_at=OBSERVED_AT,
+        repository_root=tmp_path,
+        event_id=EVENT_13683,
+        ledger_seq=LEDGER_13683,
+        disposition_digest=_PRODUCTION_DISPOSITION,
+        rehearsal=False,
+        exact_head=EXACT_HEAD,
+        github_api=activated["github"],
+    )
+    assert resumed["resumed_zero_io_finalisation"] is True
+    assert resumed["provider_dispatch_attempted_this_run"] is False
+    assert consume_calls == [EVENT_13683]
 
 
 @pytest.mark.parametrize(
