@@ -1851,6 +1851,9 @@ def _seed_canary_event(
     event_id: str = _EVENT_ID,
     ledger_seq: int = _LEDGER,
 ) -> None:
+    claim_expires_at = (
+        None if claim_owner is None else "2026-08-29T10:59:59.000000Z"
+    )
     connection = connect_unpublished_store(str(store))
     try:
         present = connection.execute(
@@ -1890,7 +1893,7 @@ def _seed_canary_event(
                     attempt_count,
                     "2026-08-28T00:00:00.000000Z",
                     claim_owner,
-                    None,
+                    claim_expires_at,
                     last_failure_code,
                     int(provider_dispatched),
                     terminal_at,
@@ -1900,13 +1903,14 @@ def _seed_canary_event(
             connection.execute(
                 "UPDATE unpublished_graphiti_revision_events SET "
                 "state=?,attempt_count=?,provider_dispatched=?,claim_owner=?,"
-                "last_failure_code=?,terminal_at=? "
+                "claim_expires_at=?,last_failure_code=?,terminal_at=? "
                 "WHERE event_id=? AND ledger_seq=?",
                 (
                     state,
                     attempt_count,
                     int(provider_dispatched),
                     claim_owner,
+                    claim_expires_at,
                     last_failure_code,
                     terminal_at,
                     event_id,
@@ -2166,6 +2170,11 @@ def _patch_recovery_bindings(
 
     monkeypatch.setattr(issue_790_operation, "_consume_issue_790_event", _no_consume)
     monkeypatch.setattr(issue_790_operation, "_qualify_issue_790_event", _no_qualify)
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_other_issue_790_legacy_canary_process_ids",
+        lambda **_kwargs: (),
+    )
 
 
 def _prepare_recovery_store(tmp_path: Path) -> tuple[Path, dict[str, object]]:
@@ -2178,6 +2187,10 @@ def _prepare_recovery_store(tmp_path: Path) -> tuple[Path, dict[str, object]]:
     proving = tmp_path / "proving.sqlite3"
     sqlite3.connect(str(proving)).close()
     activated["proving"] = proving
+    _seed_canary_event(store)
+    backup = tmp_path / "pre-operation.sqlite3"
+    activated["backup"] = backup
+    activated["backup_digest"] = issue_790_operation._sqlite_backup(store, backup)
     return store, activated
 
 
@@ -2198,11 +2211,11 @@ def _run_recovery(
         qualify_calls=qualify_calls,
         route_after=route_after,
     )
+    recovery = _table_count(store, "issue_790_bounded_canary_outcomes") == 0
     return run_issue_790_canary(
         store=store,
         proving_store=activated["proving"],
-        backup_path=tmp_path
-        / f"backup-{len(list(tmp_path.glob('backup-*.sqlite3')))}.sqlite3",
+        backup_path=activated["backup"],
         plan=activated["plan"],
         observed_at=_OBSERVED,
         repository_root=tmp_path,
@@ -2210,6 +2223,8 @@ def _run_recovery(
         ledger_seq=_LEDGER,
         disposition_digest=_DISPOSITION,
         github_api=activated["github"],
+        expected_backup_digest=activated["backup_digest"],
+        **({"recover_interrupted": True} if recovery else {}),
     )
 
 

@@ -3000,8 +3000,18 @@ def qualify_fresh_graphiti_event(
             }
             for unit in units
         ],
+        # ``evaluated_at`` proves when the decision was checked, but is not
+        # part of the underlying rights authority.  Keeping it outside these
+        # digests lets a prepared canary bind the same still-valid authority
+        # when the live command rechecks it at a later instant.
         "rights_decision_digests": [
-            digest_canonical(decision)
+            digest_canonical(
+                {
+                    key: value
+                    for key, value in decision.items()
+                    if key != "evaluated_at"
+                }
+            )
             for decision in rights_decisions
             if decision is not None
         ],

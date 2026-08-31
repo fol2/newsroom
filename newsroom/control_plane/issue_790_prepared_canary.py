@@ -38,6 +38,8 @@ TRACKED_PLAN_NAME = "issue-790-bounded-graphiti-canary"
 
 PREPARED_CANARY_ABSENT = "PREPARED_CANARY_ABSENT"
 PREPARED_CANARY_DIGEST_DRIFT = "PREPARED_CANARY_DIGEST_DRIFT"
+PREPARED_CANARY_RECORD_INVALID = "PREPARED_CANARY_RECORD_INVALID"
+PREPARED_CANARY_RECORD_SCHEMA = "newsroom.issue-790.prepared-canary.v1"
 
 FIELD_CLASSIFICATION: dict[str, str] = {
     "exact_head": "A",
@@ -59,7 +61,7 @@ FIELD_CLASSIFICATION: dict[str, str] = {
     "consumption_present": "B",
     "outcome_present": "B",
     "receipt_present": "B",
-    "permitted_effects": "A",
+    "non_effects": "A",
     "available_at": "C",
     "claim_expires_at": "C",
     "observed_at": "C",
@@ -149,6 +151,13 @@ FAIL_BRANCH_INVENTORY: tuple[FailBranch, ...] = (
         "test_digest_drift_fail_closes_before_dispatch",
     ),
     FailBranch(
+        "prepared_canary_record_valid",
+        PREPARED_CANARY_RECORD_INVALID,
+        True,
+        "test_prepared_canary_record_round_trip",
+        "test_prepared_canary_record_tamper_fail_closes",
+    ),
+    FailBranch(
         "live_store_write_refused",
         "LIVE_STORE_WRITE_REFUSED",
         True,
@@ -201,10 +210,11 @@ class PreparedCanary:
     plan_identity: dict[str, object]
     retry_exclusion_identity: dict[str, object]
     runtime_identity: dict[str, object]
-    permitted_effects: tuple[str, ...]
+    non_effects: tuple[str, ...]
     decision_digest: str
     observations: dict[str, object] = field(default_factory=dict)
     qualification_evidence: dict[str, object] | None = None
+    record_digest: str | None = None
 
     def as_decision_payload(self) -> dict[str, object]:
         return _decision_payload(
@@ -214,7 +224,10 @@ class PreparedCanary:
             plan_identity=self.plan_identity,
             retry_exclusion_identity=self.retry_exclusion_identity,
             runtime_identity=self.runtime_identity,
-            permitted_effects=self.permitted_effects,
+            non_effects=self.non_effects,
+            qualification_identity=_qualification_identity(
+                self.qualification_evidence
+            ),
         )
 
 
@@ -236,16 +249,22 @@ def _decision_payload(
     plan_identity: Mapping[str, object],
     retry_exclusion_identity: Mapping[str, object],
     runtime_identity: Mapping[str, object],
-    permitted_effects: Sequence[str],
+    non_effects: Sequence[str],
+    qualification_identity: Mapping[str, object] | None,
 ) -> dict[str, object]:
     return {
         "candidate_identity": dict(candidate_identity),
         "exact_head": exact_head,
-        "permitted_effects": list(permitted_effects),
+        "non_effects": list(non_effects),
         "plan_identity": dict(plan_identity),
         "retry_exclusion_identity": dict(retry_exclusion_identity),
         "runtime_identity": dict(runtime_identity),
         "safety_state": dict(safety_state),
+        "qualification_identity": (
+            None
+            if qualification_identity is None
+            else dict(qualification_identity)
+        ),
     }
 
 
@@ -257,6 +276,172 @@ def _op():
 
 def _raise(code: str, message: str) -> None:
     raise PreparedCanaryError(message, failure_code=code)
+
+
+def _qualification_identity(
+    qualification: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    """Return stable provider-free eligibility, excluding the check instant."""
+
+    if qualification is None:
+        return None
+    retained = dict(qualification)
+    supplied = retained.pop("evidence_digest", None)
+    if supplied != digest_canonical(retained):
+        _raise(
+            PREPARED_CANARY_RECORD_INVALID,
+            "prepared canary qualification digest differs",
+        )
+    retained.pop("evaluated_at", None)
+    return retained
+
+
+def prepared_canary_record(prepared: PreparedCanary) -> dict[str, object]:
+    """Serialise one content-addressed cross-process canary decision."""
+
+    decision = prepared.as_decision_payload()
+    if prepared.decision_digest != digest_canonical(decision):
+        _raise(
+            PREPARED_CANARY_RECORD_INVALID,
+            "prepared canary decision digest differs",
+        )
+    unsigned: dict[str, object] = {
+        "schema_version": PREPARED_CANARY_RECORD_SCHEMA,
+        "decision": decision,
+        "decision_digest": prepared.decision_digest,
+        "observations": dict(prepared.observations),
+        "qualification_evidence": (
+            None
+            if prepared.qualification_evidence is None
+            else dict(prepared.qualification_evidence)
+        ),
+    }
+    record_digest = digest_canonical(unsigned)
+    if prepared.record_digest not in {None, record_digest}:
+        _raise(
+            PREPARED_CANARY_RECORD_INVALID,
+            "prepared canary record digest differs",
+        )
+    return {**unsigned, "record_digest": record_digest}
+
+
+def prepared_canary_from_record(
+    value: Mapping[str, object],
+) -> PreparedCanary:
+    """Validate and reconstruct a cross-process PreparedCanary artefact."""
+
+    record = dict(value)
+    expected_fields = {
+        "decision",
+        "decision_digest",
+        "observations",
+        "qualification_evidence",
+        "record_digest",
+        "schema_version",
+    }
+    if set(record) != expected_fields:
+        _raise(
+            PREPARED_CANARY_RECORD_INVALID,
+            "prepared canary record fields differ",
+        )
+    supplied_record_digest = record.pop("record_digest")
+    if (
+        record.get("schema_version") != PREPARED_CANARY_RECORD_SCHEMA
+        or supplied_record_digest != digest_canonical(record)
+    ):
+        _raise(
+            PREPARED_CANARY_RECORD_INVALID,
+            "prepared canary record digest differs",
+        )
+    decision = record.get("decision")
+    observations = record.get("observations")
+    qualification = record.get("qualification_evidence")
+    if (
+        not isinstance(decision, dict)
+        or not isinstance(observations, dict)
+        or (qualification is not None and not isinstance(qualification, dict))
+    ):
+        _raise(
+            PREPARED_CANARY_RECORD_INVALID,
+            "prepared canary record content differs",
+        )
+    decision_digest = record.get("decision_digest")
+    if decision_digest != digest_canonical(decision):
+        _raise(
+            PREPARED_CANARY_RECORD_INVALID,
+            "prepared canary decision digest differs",
+        )
+    expected_decision_fields = {
+        "candidate_identity",
+        "exact_head",
+        "non_effects",
+        "plan_identity",
+        "qualification_identity",
+        "retry_exclusion_identity",
+        "runtime_identity",
+        "safety_state",
+    }
+    if set(decision) != expected_decision_fields:
+        _raise(
+            PREPARED_CANARY_RECORD_INVALID,
+            "prepared canary decision fields differ",
+        )
+    mapping_fields = (
+        "candidate_identity",
+        "plan_identity",
+        "retry_exclusion_identity",
+        "runtime_identity",
+        "safety_state",
+    )
+    if (
+        not isinstance(decision.get("exact_head"), str)
+        or not isinstance(decision.get("non_effects"), list)
+        or not all(
+            isinstance(item, str)
+            for item in decision.get("non_effects", [])
+        )
+        or not all(isinstance(decision.get(field), dict) for field in mapping_fields)
+    ):
+        _raise(
+            PREPARED_CANARY_RECORD_INVALID,
+            "prepared canary decision content differs",
+        )
+    qualification_identity = decision.get("qualification_identity")
+    if qualification_identity is not None and not isinstance(
+        qualification_identity, dict
+    ):
+        _raise(
+            PREPARED_CANARY_RECORD_INVALID,
+            "prepared canary qualification identity differs",
+        )
+    if _qualification_identity(qualification) != qualification_identity:
+        _raise(
+            PREPARED_CANARY_RECORD_INVALID,
+            "prepared canary qualification identity differs",
+        )
+    prepared = PreparedCanary(
+        exact_head=str(decision["exact_head"]),
+        candidate_identity=dict(decision["candidate_identity"]),  # type: ignore[arg-type]
+        safety_state=dict(decision["safety_state"]),  # type: ignore[arg-type]
+        plan_identity=dict(decision["plan_identity"]),  # type: ignore[arg-type]
+        retry_exclusion_identity=dict(  # type: ignore[arg-type]
+            decision["retry_exclusion_identity"]
+        ),
+        runtime_identity=dict(decision["runtime_identity"]),  # type: ignore[arg-type]
+        non_effects=tuple(decision["non_effects"]),  # type: ignore[arg-type]
+        decision_digest=str(decision_digest),
+        observations=dict(observations),
+        qualification_evidence=(
+            None if qualification is None else dict(qualification)
+        ),
+        record_digest=str(supplied_record_digest),
+    )
+    if prepared.as_decision_payload() != decision:
+        _raise(
+            PREPARED_CANARY_RECORD_INVALID,
+            "prepared canary decision payload differs",
+        )
+    return prepared
 
 
 def consume_prepared_canary(
@@ -704,11 +889,11 @@ def prepare_issue_790_canary(
         if qualification.get("event_manifest_digest") != manifest_digest:
             _raise("CANDIDATE_IDENTITY", "bounded canary candidate manifest differs")
 
-    permitted = plan.get("non_effects")
-    if not isinstance(permitted, list) or not all(
-        isinstance(item, str) for item in permitted
+    non_effects = plan.get("non_effects")
+    if not isinstance(non_effects, list) or not all(
+        isinstance(item, str) for item in non_effects
     ):
-        permitted = []
+        non_effects = []
     candidate_identity = {
         "event_id": bound_event_id,
         "event_manifest_digest": manifest_digest,
@@ -754,7 +939,8 @@ def prepare_issue_790_canary(
         plan_identity=plan_identity,
         retry_exclusion_identity=retry_exclusion_identity,
         runtime_identity=runtime_identity,
-        permitted_effects=tuple(permitted),
+        non_effects=tuple(non_effects),
+        qualification_identity=_qualification_identity(qualification),
     )
     return PreparedCanary(
         exact_head=exact_head,
@@ -763,7 +949,7 @@ def prepare_issue_790_canary(
         plan_identity=plan_identity,
         retry_exclusion_identity=retry_exclusion_identity,
         runtime_identity=runtime_identity,
-        permitted_effects=tuple(permitted),
+        non_effects=tuple(non_effects),
         decision_digest=digest_canonical(payload),
         observations=observations,
         qualification_evidence=qualification,
@@ -778,10 +964,14 @@ __all__ = [
     "LIVE_ONLY_PREDISPATCH_GATES",
     "PREPARED_CANARY_ABSENT",
     "PREPARED_CANARY_DIGEST_DRIFT",
+    "PREPARED_CANARY_RECORD_INVALID",
+    "PREPARED_CANARY_RECORD_SCHEMA",
     "PreparedCanary",
     "PreparedCanaryError",
     "consume_prepared_canary",
     "eligible_unused_candidate_rows",
+    "prepared_canary_from_record",
+    "prepared_canary_record",
     "prepare_issue_790_canary",
     "unused_queued_attempt_zero_candidates",
 ]

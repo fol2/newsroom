@@ -84,7 +84,19 @@ PREPARED_CANARY_PARITY_PATTERNS = (
 )
 PREPARED_CANARY_PARITY_TESTS = (
     "newsroom/tests/test_issue_790_prepared_canary.py",
+    "newsroom/tests/test_issue_790_prepared_canary_artifact.py",
     "newsroom/tests/test_issue_790_retry_forbidden_safety_state.py",
+)
+PREPARED_CANARY_CONSUMER_PATTERNS = (
+    "newsroom/control_plane/issue_790_disposition.py",
+    "newsroom/control_plane/issue_790_canary.py",
+    "newsroom/control_plane/issue_790_prepared_canary.py",
+    "newsroom/control_plane/issue_790_rehearsal.py",
+    "scripts/issue_790_live_canary_preflight.py",
+    "scripts/issue_790_prepared_canary_rehearsal.py",
+)
+PREPARED_CANARY_CONSUMER_TESTS = (
+    "newsroom/tests/test_model_usage_receipts.py",
 )
 EXECUTABLE_SUFFIXES = frozenset(
     {".py", ".toml", ".json", ".yml", ".yaml", ".sh", ".bash", ".sql"}
@@ -347,6 +359,10 @@ def select_focus(
         tests.update(legacy._existing(root, PREPARED_CANARY_PARITY_TESTS))
         gates.add("F1")
         reasons.add("prepared_canary_parity:F1")
+    if _matches_any(changed, PREPARED_CANARY_CONSUMER_PATTERNS):
+        tests.update(legacy._existing(root, PREPARED_CANARY_CONSUMER_TESTS))
+        gates.add("F2")
+        reasons.add("prepared_canary_consumers:F2")
     if stateful_required:
         if not (tests or service_tests):
             full_health_required = True

@@ -2,20 +2,23 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import stat
 import subprocess
 import uuid
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from tempfile import mkstemp
+from tempfile import gettempdir, mkstemp
 
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane import cycle as cycle_module
@@ -1991,19 +1994,16 @@ def _canonical_new_file(path: Path, *, field: str) -> Path:
     return absolute
 
 
-def _pre_provider_aborted_canary_claim(
+def _interrupted_canary_claim_manifest(
     store: Path,
     *,
     event_id: str,
     ledger_seq: int,
-) -> bool:
-    """True when dest-exists re-entry can seal without a second claim.
-
-    Live 13689: backup written, consumption present, RUNNING attempt 1,
-    provider_dispatched=0, no outcome, no DISPATCH_STARTED. Same family as
-    consume-then-abort before provider. Dest exists without consumption is
-    not this strand — that still fail-closes before claim.
-    """
+    approved_plan_digest: str,
+    disposition_digest: str,
+    recovery_checked_at: datetime,
+) -> str | None:
+    """Return the candidate manifest when an interrupted run can seal without I/O."""
 
     connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
     try:
@@ -2013,55 +2013,280 @@ def _pre_provider_aborted_canary_claim(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-        if (
-            "unpublished_graphiti_revision_events" not in tables
-            or "issue_790_bounded_canary_consumptions" not in tables
-        ):
-            return False
+        required = {
+            "issue_790_bounded_canary_consumptions",
+            "issue_790_bounded_canary_outcomes",
+            "model_invocation_allocations",
+            "model_transport_observations",
+            "unpublished_graphiti_revision_events",
+        }
+        if not required.issubset(tables):
+            return None
         event = connection.execute(
-            "SELECT state,attempt_count,provider_dispatched "
+            "SELECT manifest_digest,state,attempt_count,provider_dispatched,"
+            "claim_owner,claim_expires_at "
             "FROM unpublished_graphiti_revision_events "
             "WHERE event_id=? AND ledger_seq=?",
             (event_id, ledger_seq),
         ).fetchone()
-        if (
-            event is None
-            or str(event[0]) not in {"QUEUED", "CLAIMED", "RUNNING"}
-            or int(event[1]) not in {0, 1}
-            or bool(event[2])
-        ):
-            return False
-        consumption = connection.execute(
-            "SELECT consumption_digest FROM issue_790_bounded_canary_consumptions "
-            "WHERE event_id=? AND ledger_seq=? LIMIT 1",
+        if event is None:
+            return None
+        state = str(event[1])
+        attempt_count = int(event[2])
+        claim_owner = event[4]
+        claim_expires_at = event[5]
+        if state == "QUEUED":
+            if (
+                attempt_count != 0
+                or claim_owner is not None
+                or claim_expires_at is not None
+            ):
+                return None
+        elif state in {"CLAIMED", "RUNNING"}:
+            if (
+                attempt_count != 1
+                or claim_owner is None
+                or claim_expires_at is None
+                or _instant(
+                    claim_expires_at, field="canary claim expiry"
+                )
+                > recovery_checked_at.astimezone(UTC)
+            ):
+                return None
+        elif state in {
+            "RETRY_HELD",
+            "RIGHTS_HELD",
+            "CONFIGURATION_HELD",
+            "DEAD_LETTER",
+            "TERMINAL",
+        }:
+            if (
+                attempt_count != 1
+                or claim_owner is not None
+                or claim_expires_at is not None
+            ):
+                return None
+        else:
+            return None
+        consumptions = connection.execute(
+            "SELECT consumption_digest,approved_plan_digest,disposition_digest "
+            "FROM issue_790_bounded_canary_consumptions "
+            "WHERE event_id=? AND ledger_seq=?",
             (event_id, ledger_seq),
-        ).fetchone()
-        if consumption is None:
-            return False
-        if "issue_790_bounded_canary_outcomes" in tables and connection.execute(
+        ).fetchall()
+        if len(consumptions) != 1:
+            return None
+        consumption = consumptions[0]
+        if (
+            str(consumption[1]) != approved_plan_digest
+            or str(consumption[2]) != disposition_digest
+        ):
+            return None
+        if connection.execute(
             "SELECT 1 FROM issue_790_bounded_canary_outcomes "
             "WHERE consumption_digest=? LIMIT 1",
             (consumption[0],),
         ).fetchone() is not None:
-            return False
+            return None
+        return str(event[0])
+    finally:
+        connection.close()
+
+
+def _canary_event_manifest_digest(
+    store: Path,
+    *,
+    event_id: str,
+    ledger_seq: int,
+) -> str:
+    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        row = connection.execute(
+            "SELECT manifest_digest FROM unpublished_graphiti_revision_events "
+            "WHERE event_id=? AND ledger_seq=?",
+            (event_id, ledger_seq),
+        ).fetchone()
+    finally:
+        connection.close()
+    if row is None or not isinstance(row[0], str):
+        raise Issue790DispositionError("bounded canary event manifest is absent")
+    return str(row[0])
+
+
+def _snapshot_manifest_digest(
+    preflight: Mapping[str, object],
+    *,
+    store: Path,
+    event_id: str,
+    ledger_seq: int,
+) -> str:
+    retained = preflight.get("event_manifest_digest")
+    if isinstance(retained, str):
+        return retained
+    return _canary_event_manifest_digest(
+        store,
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+    )
+
+
+def _require_pre_operation_canary_backup(
+    connection: sqlite3.Connection,
+    *,
+    event_id: str,
+    ledger_seq: int,
+    manifest_digest: str,
+) -> None:
+    """Prove a retained file is the untouched candidate's SQLite backup."""
+
+    try:
+        check = connection.execute("PRAGMA quick_check").fetchone()
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        required = {
+            "issue_790_bounded_canary_consumptions",
+            "issue_790_bounded_canary_outcomes",
+            "model_invocation_allocations",
+            "model_transport_observations",
+            "unpublished_graphiti_revision_events",
+        }
+        event = (
+            None
+            if not required.issubset(tables)
+            else connection.execute(
+                "SELECT manifest_digest,state,attempt_count,provider_dispatched,"
+                "claim_owner,claim_expires_at "
+                "FROM unpublished_graphiti_revision_events "
+                "WHERE event_id=? AND ledger_seq=?",
+                (event_id, ledger_seq),
+            ).fetchone()
+        )
         if (
-            "model_invocation_allocations" in tables
-            and "model_transport_observations" in tables
-        ):
-            marker = connection.execute(
-                "SELECT EXISTS("
+            check is None
+            or str(check[0]) != "ok"
+            or event is None
+            or str(event[0]) != manifest_digest
+            or str(event[1]) != "QUEUED"
+            or int(event[2]) != 0
+            or bool(event[3])
+            or event[4] is not None
+            or event[5] is not None
+            or connection.execute(
+                "SELECT 1 FROM issue_790_bounded_canary_consumptions "
+                "WHERE event_id=? OR ledger_seq=? LIMIT 1",
+                (event_id, ledger_seq),
+            ).fetchone()
+            is not None
+            or connection.execute(
+                "SELECT 1 FROM issue_790_bounded_canary_outcomes "
+                "WHERE event_id=? OR ledger_seq=? LIMIT 1",
+                (event_id, ledger_seq),
+            ).fetchone()
+            is not None
+            or connection.execute(
                 "SELECT 1 FROM model_invocation_allocations AS allocation "
                 "JOIN model_transport_observations AS observation "
                 "ON observation.invocation_id=allocation.invocation_id "
                 "WHERE allocation.cycle_id=? "
-                "AND observation.state='DISPATCH_STARTED')",
+                "AND observation.state='DISPATCH_STARTED' LIMIT 1",
                 (event_id,),
             ).fetchone()
-            if marker is not None and bool(marker[0]):
-                return False
-        return True
+            is not None
+        ):
+            raise Issue790DispositionError(
+                "existing canary backup is not the pre-operation snapshot"
+            )
+    except sqlite3.Error as exc:
+        raise Issue790DispositionError(
+            "existing canary backup is not the pre-operation snapshot"
+        ) from exc
+
+
+def _sha256_file_descriptor(descriptor: int) -> str:
+    """Hash one already-open file without following a replacement path."""
+
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    while block := os.read(descriptor, 1024 * 1024):
+        digest.update(block)
+    return "sha256:" + digest.hexdigest()
+
+
+def _verified_pre_operation_canary_backup(
+    path: Path,
+    *,
+    event_id: str,
+    ledger_seq: int,
+    manifest_digest: str,
+    expected_digest: str | None,
+) -> tuple[Path, str]:
+    """Hash and inspect one stable O_NOFOLLOW descriptor, not a later path open."""
+
+    existing = _canonical_existing_file(path, field="canary backup destination")
+    descriptor = os.open(
+        existing,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        before = os.fstat(descriptor)
+        path_before = existing.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or (before.st_dev, before.st_ino)
+            != (path_before.st_dev, path_before.st_ino)
+        ):
+            raise Issue790DispositionError(
+                "existing canary backup is not the pre-operation snapshot"
+            )
+        actual_digest = _sha256_file_descriptor(descriptor)
+        if expected_digest is not None and actual_digest != expected_digest:
+            raise Issue790DispositionError("canary backup digest differs")
+        connection = sqlite3.connect(
+            f"file:/dev/fd/{descriptor}?mode=ro&immutable=1",
+            uri=True,
+        )
+        try:
+            _require_pre_operation_canary_backup(
+                connection,
+                event_id=event_id,
+                ledger_seq=ledger_seq,
+                manifest_digest=manifest_digest,
+            )
+        finally:
+            connection.close()
+        after = os.fstat(descriptor)
+        path_after = existing.stat(follow_symlinks=False)
+        if (
+            (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            )
+            != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            )
+            or (after.st_dev, after.st_ino)
+            != (path_after.st_dev, path_after.st_ino)
+            or _sha256_file_descriptor(descriptor) != actual_digest
+        ):
+            raise Issue790DispositionError("canary backup changed during verification")
+        return existing, actual_digest
+    except (OSError, sqlite3.Error) as exc:
+        raise Issue790DispositionError(
+            "existing canary backup is not the pre-operation snapshot"
+        ) from exc
     finally:
-        connection.close()
+        os.close(descriptor)
 
 
 def _resolve_canary_backup_destination(
@@ -2070,6 +2295,12 @@ def _resolve_canary_backup_destination(
     store: Path,
     event_id: str,
     ledger_seq: int,
+    approved_plan_digest: str,
+    disposition_digest: str,
+    recovery_checked_at: datetime,
+    allow_interrupted_recovery: bool,
+    expected_backup_digest: str | None,
+    completed_manifest_digest: str | None = None,
 ) -> tuple[Path, str | None]:
     """New dest, or reuse dest when 13689-class abort-strand can be sealed."""
 
@@ -2085,21 +2316,175 @@ def _resolve_canary_backup_destination(
             "canary backup destination parent path is not canonical"
         )
     if not os.path.lexists(absolute):
+        if allow_interrupted_recovery or completed_manifest_digest is not None:
+            raise Issue790DispositionError(
+                "interrupted canary backup destination is absent"
+            )
         return absolute, None
-    if not _pre_provider_aborted_canary_claim(
-        store, event_id=event_id, ledger_seq=ledger_seq
-    ):
+    if completed_manifest_digest is not None:
+        return _verified_pre_operation_canary_backup(
+            absolute,
+            event_id=event_id,
+            ledger_seq=ledger_seq,
+            manifest_digest=completed_manifest_digest,
+            expected_digest=expected_backup_digest,
+        )
+    if not allow_interrupted_recovery:
         raise Issue790DispositionError(
             "canary backup destination already exists",
             failure_code=CANARY_BACKUP_DESTINATION_ALREADY_EXISTS,
         )
-    existing = _canonical_existing_file(
-        absolute, field="canary backup destination"
+    manifest_digest = _interrupted_canary_claim_manifest(
+        store,
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        approved_plan_digest=approved_plan_digest,
+        disposition_digest=disposition_digest,
+        recovery_checked_at=recovery_checked_at,
     )
+    if manifest_digest is None:
+        raise Issue790DispositionError(
+            "canary backup destination already exists",
+            failure_code=CANARY_BACKUP_DESTINATION_ALREADY_EXISTS,
+        )
+    return _verified_pre_operation_canary_backup(
+        absolute,
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        manifest_digest=manifest_digest,
+        expected_digest=expected_backup_digest,
+    )
+
+
+@contextmanager
+def _exclusive_issue_790_canary_executor(store: Path):
+    """Hold one advisory lock for the whole canary run without locking SQLite."""
+
+    canonical = _canonical_existing_file(store, field="source unpublished store")
+    store_descriptor = os.open(
+        canonical,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+    )
+    store_metadata = os.fstat(store_descriptor)
+    if not stat.S_ISREG(store_metadata.st_mode):
+        os.close(store_descriptor)
+        raise Issue790DispositionError("source unpublished store differs")
+    lock_root = Path(gettempdir()) / f"newsroom-{os.getuid()}-issue-790-locks"
+    lock_root.mkdir(mode=0o700, parents=False, exist_ok=True)
+    root_metadata = lock_root.lstat()
+    if (
+        stat.S_ISLNK(root_metadata.st_mode)
+        or not stat.S_ISDIR(root_metadata.st_mode)
+        or root_metadata.st_uid != os.getuid()
+    ):
+        raise Issue790DispositionError("bounded canary lock directory differs")
+    lock_name = f"{store_metadata.st_dev}-{store_metadata.st_ino}.lock"
+    lock_path = lock_root / lock_name
+    try:
+        descriptor = os.open(
+            lock_path,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+                raise Issue790DispositionError("bounded canary lock file differs")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise Issue790DispositionError(
+                    "bounded canary executor is already active"
+                ) from exc
+            current = canonical.stat()
+            if (current.st_dev, current.st_ino) != (
+                store_metadata.st_dev,
+                store_metadata.st_ino,
+            ):
+                raise Issue790DispositionError("source unpublished store changed")
+            yield
+        finally:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+    finally:
+        os.close(store_descriptor)
+
+
+def _issue_790_canary_lock_path(store: Path) -> Path:
+    """Return the deterministic per-store lock path used by the executor."""
+
+    canonical = _canonical_existing_file(store, field="source unpublished store")
+    metadata = canonical.stat()
     return (
-        existing,
-        "sha256:" + hashlib.sha256(existing.read_bytes()).hexdigest(),
+        Path(gettempdir())
+        / f"newsroom-{os.getuid()}-issue-790-locks"
+        / f"{metadata.st_dev}-{metadata.st_ino}.lock"
     )
+
+
+def _command_option(tokens: list[str], option: str) -> str | None:
+    """Return one exact CLI option value without interpreting the command."""
+
+    prefix = f"{option}="
+    for index, token in enumerate(tokens):
+        if token.startswith(prefix):
+            return token[len(prefix) :]
+        if token == option and index + 1 < len(tokens):
+            return tokens[index + 1]
+    return None
+
+
+def _other_issue_790_legacy_canary_process_ids(
+    *,
+    event_id: str,
+    store: Path,
+) -> tuple[int, ...]:
+    """Fence a pre-lock CLI still targeting this exact recovery strand."""
+
+    try:
+        completed = subprocess.run(
+            ["/bin/ps", "-axo", "pid=,command="],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise Issue790DispositionError(
+            "interrupted canary process state is unavailable"
+        ) from exc
+    current = os.getpid()
+    found: list[int] = []
+    markers = frozenset(
+        {
+            "scripts.issue_790_conservative_disposition canary",
+            "scripts/issue_790_conservative_disposition.py canary",
+        }
+    )
+    canonical_store = str(store.resolve(strict=True))
+    for raw in completed.stdout.splitlines():
+        fields = raw.strip().split(maxsplit=1)
+        if len(fields) != 2 or not fields[0].isdigit():
+            continue
+        pid = int(fields[0])
+        if pid == current or not any(marker in fields[1] for marker in markers):
+            continue
+        try:
+            tokens = shlex.split(fields[1])
+        except ValueError:
+            continue
+        candidate_event = _command_option(tokens, "--canary-event-id")
+        candidate_store = _command_option(tokens, "--store")
+        if candidate_event != event_id or candidate_store is None:
+            continue
+        try:
+            same_store = str(Path(candidate_store).resolve(strict=True)) == canonical_store
+        except OSError:
+            same_store = False
+        if same_store:
+            found.append(pid)
+    return tuple(sorted(set(found)))
 
 
 def assert_issue_790_paths_disjoint(*paths: Path) -> None:
@@ -2896,8 +3281,6 @@ def _sqlite_backup(source: Path, destination: Path) -> str:
     try:
         os.fchmod(descriptor, 0o600)
         identity = os.fstat(descriptor)
-        os.close(descriptor)
-        descriptor = -1
         source_connection = sqlite3.connect(
             f"{source.absolute().as_uri()}?mode=ro",
             uri=True,
@@ -2919,24 +3302,39 @@ def _sqlite_backup(source: Path, destination: Path) -> str:
         destination_connection = None
         source_connection.close()
         source_connection = None
-        retained_identity = temporary.lstat()
+        retained_identity = os.fstat(descriptor)
         if (
-            stat.S_ISLNK(retained_identity.st_mode)
+            not stat.S_ISREG(retained_identity.st_mode)
             or retained_identity.st_dev != identity.st_dev
             or retained_identity.st_ino != identity.st_ino
         ):
             raise Issue790DispositionError("backup temporary identity changed")
-        descriptor = os.open(
-            temporary,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-        )
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-            descriptor = -1
+        os.fsync(descriptor)
+        before_publish = os.fstat(descriptor)
+        backup_digest = _sha256_file_descriptor(descriptor)
         _publish_file_no_replace(temporary, destination)
-        return "sha256:" + hashlib.sha256(destination.read_bytes()).hexdigest()
+        after_publish = os.fstat(descriptor)
+        published = destination.lstat()
+        if (
+            not stat.S_ISREG(published.st_mode)
+            or (published.st_dev, published.st_ino)
+            != (after_publish.st_dev, after_publish.st_ino)
+            or (
+                before_publish.st_dev,
+                before_publish.st_ino,
+                before_publish.st_size,
+                before_publish.st_mtime_ns,
+            )
+            != (
+                after_publish.st_dev,
+                after_publish.st_ino,
+                after_publish.st_size,
+                after_publish.st_mtime_ns,
+            )
+            or _sha256_file_descriptor(descriptor) != backup_digest
+        ):
+            raise Issue790DispositionError("backup published identity changed")
+        return backup_digest
     finally:
         if destination_connection is not None:
             destination_connection.close()
@@ -3896,56 +4294,72 @@ def run_issue_790_canary(
     disposition_digest: str,
     github_api: step16_activation_module.GitHubApi | None = None,
     prepared: object | None = None,
-    rehearsal: bool = False,
-    exact_head: str | None = None,
-    crash_before_dispatch: bool = False,
+    graphiti: graphiti_module.EvaluationGraphitiRunner | None = None,
+    recover_interrupted: bool = False,
+    expected_backup_digest: str | None = None,
 ) -> dict[str, object]:
-    """Consume and seal exactly one fresh event under the approved #790 authority."""
-
-    if rehearsal:
-        from newsroom.control_plane.issue_790_prepared_canary import (
-            PreparedCanary,
-            PreparedCanaryError,
-            _candidate_from_plan,
-        )
-        from newsroom.control_plane.issue_790_rehearsal import (
-            run_prepared_canary_rehearsal,
-        )
-
-        if prepared is not None and not isinstance(prepared, PreparedCanary):
-            raise PreparedCanaryError(
-                "prepared canary is absent",
-                failure_code="PREPARED_CANARY_ABSENT",
-            )
-        _candidate_from_plan(
-            plan,
-            event_id=event_id,
-            ledger_seq=ledger_seq,
-            role="canary",
-            store=store,
-        )
-        return run_prepared_canary_rehearsal(
-            store=store,
-            proving_store=proving_store,
-            plan=plan,
-            observed_at=observed_at,
-            exact_head=exact_head or "",
-            prepared=prepared,
-            crash_before_dispatch=crash_before_dispatch,
-            event_id=event_id,
-            ledger_seq=ledger_seq,
-        )
+    """Validate authority, then single-lock one exact #790 store executor."""
 
     retained_plan = _require_approved_plan(
         plan,
         store=store,
         github_api=github_api,
     )
+    canonical_store = _canonical_existing_file(
+        store,
+        field="source unpublished store",
+    )
+    with _exclusive_issue_790_canary_executor(canonical_store):
+        return _run_issue_790_canary_locked(
+            store=canonical_store,
+            proving_store=proving_store,
+            backup_path=backup_path,
+            plan=retained_plan,
+            observed_at=observed_at,
+            repository_root=repository_root,
+            event_id=event_id,
+            ledger_seq=ledger_seq,
+            disposition_digest=disposition_digest,
+            prepared=prepared,
+            graphiti=graphiti,
+            recover_interrupted=recover_interrupted,
+            expected_backup_digest=expected_backup_digest,
+        )
+
+
+def _run_issue_790_canary_locked(
+    *,
+    store: Path,
+    proving_store: Path,
+    backup_path: Path,
+    plan: Mapping[str, object],
+    observed_at: datetime,
+    repository_root: Path,
+    event_id: str,
+    ledger_seq: int,
+    disposition_digest: str,
+    prepared: object | None = None,
+    graphiti: graphiti_module.EvaluationGraphitiRunner | None = None,
+    recover_interrupted: bool = False,
+    expected_backup_digest: str | None = None,
+) -> dict[str, object]:
+    """Consume and seal exactly one event while its per-store lock is held."""
+
+    if graphiti is not None:
+        from newsroom.control_plane.issue_790_rehearsal import (
+            refuse_live_issue_790_store_paths,
+        )
+
+        refuse_live_issue_790_store_paths(store, proving_store, backup_path)
+
+    retained_plan = dict(plan)
     from newsroom.control_plane.issue_790_prepared_canary import (
+        PREPARED_CANARY_RECORD_INVALID,
         PreparedCanary,
         PreparedCanaryError,
         consume_prepared_canary,
         prepare_issue_790_canary,
+        prepared_canary_record,
         _candidate_from_plan,
     )
 
@@ -3954,7 +4368,15 @@ def run_issue_790_canary(
             "prepared canary is absent",
             failure_code="PREPARED_CANARY_ABSENT",
         )
-    store = _canonical_existing_file(store, field="source unpublished store")
+    if expected_backup_digest is not None and (
+        not isinstance(expected_backup_digest, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_backup_digest) is None
+    ):
+        raise Issue790DispositionError("expected canary backup digest is invalid")
+    if recover_interrupted and expected_backup_digest is None:
+        raise Issue790DispositionError(
+            "interrupted canary recovery requires the expected backup digest"
+        )
     _candidate_from_plan(
         retained_plan,
         event_id=event_id,
@@ -3967,11 +4389,119 @@ def run_issue_790_canary(
         field="source proving store",
     )
     assert_issue_790_paths_disjoint(store, proving_store)
+    try:
+        canary_repository = Issue790CanaryRepository.open_existing(str(store))
+        prior_consumption = canary_repository.existing_consumption(
+            approved_plan_digest=str(retained_plan["canonical_digest"]),
+            event_id=event_id,
+            ledger_seq=ledger_seq,
+        )
+        prior_outcome = (
+            None
+            if prior_consumption is None
+            else canary_repository.existing_outcome(
+                consumption_digest=str(prior_consumption["consumption_digest"])
+            )
+        )
+    except Issue790CanaryIntegrityError as exc:
+        raise Issue790DispositionError(str(exc)) from exc
+    interrupted_consumption = (
+        prior_consumption is not None and prior_outcome is None
+    )
+    if interrupted_consumption and not recover_interrupted:
+        raise Issue790DispositionError(
+            "interrupted canary recovery requires explicit authority"
+        )
+    if prior_consumption is None and recover_interrupted:
+        raise Issue790DispositionError(
+            "interrupted canary recovery authority is absent"
+        )
+    if prior_outcome is not None and recover_interrupted:
+        raise Issue790DispositionError(
+            "interrupted canary recovery is already complete"
+        )
+    if prior_consumption is None and expected_backup_digest is not None:
+        raise Issue790DispositionError(
+            "expected backup digest is accepted only for an existing canary"
+        )
+    recovery_checked_at = datetime.now(tz=UTC)
+    recovery_process_ids = (
+        _other_issue_790_legacy_canary_process_ids(
+            event_id=event_id,
+            store=store,
+        )
+        if interrupted_consumption
+        else ()
+    )
+    if recovery_process_ids:
+        raise Issue790DispositionError(
+            "another interrupted canary process is still active"
+        )
+    if prior_consumption is None and prepared is None:
+        raise PreparedCanaryError(
+            "prepared canary is absent",
+            failure_code="PREPARED_CANARY_ABSENT",
+        )
+    if prior_consumption is None and prepared is not None:
+        if prepared.record_digest is None:
+            raise PreparedCanaryError(
+                "prepared canary was not loaded from its durable record",
+                failure_code=PREPARED_CANARY_RECORD_INVALID,
+            )
+        prepared_canary_record(prepared)
+    effective_expected_backup_digest = expected_backup_digest
+    if prior_consumption is not None:
+        retained_preflight = _record(
+            prior_consumption.get("preflight_evidence"),
+            field="bounded canary preflight",
+        )
+        bound_backup_digest = retained_preflight.get(
+            "pre_operation_snapshot_digest"
+        )
+        if bound_backup_digest is not None and (
+            not isinstance(bound_backup_digest, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", bound_backup_digest) is None
+        ):
+            raise Issue790DispositionError(
+                "interrupted canary durable backup digest is invalid"
+            )
+        if (
+            bound_backup_digest is not None
+            and expected_backup_digest is not None
+            and bound_backup_digest != expected_backup_digest
+        ):
+            raise Issue790DispositionError(
+                "interrupted canary backup digest differs from durable authority"
+            )
+        if bound_backup_digest is not None:
+            effective_expected_backup_digest = bound_backup_digest
+        elif expected_backup_digest is None:
+            raise Issue790DispositionError(
+                "legacy canary replay requires the expected backup digest"
+            )
     backup_path, retained_backup_digest = _resolve_canary_backup_destination(
         backup_path,
         store=store,
         event_id=event_id,
         ledger_seq=ledger_seq,
+        approved_plan_digest=str(retained_plan["canonical_digest"]),
+        disposition_digest=disposition_digest,
+        recovery_checked_at=recovery_checked_at,
+        allow_interrupted_recovery=recover_interrupted,
+        expected_backup_digest=effective_expected_backup_digest,
+        completed_manifest_digest=(
+            None
+            if prior_outcome is None
+            else _snapshot_manifest_digest(
+                _record(
+                    prior_consumption.get("preflight_evidence"),
+                    field="bounded canary preflight",
+                ),
+                store=store,
+                event_id=event_id,
+                ledger_seq=ledger_seq,
+            )
+        ),
     )
     assert_issue_790_paths_disjoint(store, proving_store, backup_path)
     _sqlite_quick_check(proving_store, field="source proving store")
@@ -4006,10 +4536,6 @@ def run_issue_790_canary(
     )
     _assert_exact_target(store, retained_plan)
     target = _record(retained_plan["target"], field="target")
-    try:
-        canary_repository = Issue790CanaryRepository.open_existing(str(store))
-    except Issue790CanaryIntegrityError as exc:
-        raise Issue790DispositionError(str(exc)) from exc
     predecessor = _require_sequence_predecessor(
         canary_repository,
         plan=retained_plan,
@@ -4026,11 +4552,6 @@ def run_issue_790_canary(
         ledger_seq=ledger_seq,
     )
     event_before_record = _record(event_before["event"], field="canary event")
-    prior_consumption = canary_repository.existing_consumption(
-        approved_plan_digest=str(retained_plan["canonical_digest"]),
-        event_id=event_id,
-        ledger_seq=ledger_seq,
-    )
     resuming_zero_io_finalisation = prior_consumption is not None
     runtime_readiness = (
         None
@@ -4073,6 +4594,20 @@ def run_issue_790_canary(
         if retained_backup_digest is not None
         else _sqlite_backup(store, backup_path)
     )
+    if prior_consumption is None:
+        preflight_without_digest = dict(preflight_evidence)
+        preflight_without_digest.pop("evidence_digest", None)
+        preflight_without_digest["pre_operation_snapshot_digest"] = backup_digest
+        preflight_without_digest["prepared_canary_decision_digest"] = (
+            retained_prepared.decision_digest
+        )
+        preflight_without_digest["prepared_canary_record_digest"] = (
+            retained_prepared.record_digest
+        )
+        preflight_evidence = {
+            **preflight_without_digest,
+            "evidence_digest": digest_canonical(preflight_without_digest),
+        }
     operational_evidence_after_backup = collect_issue_790_operational_evidence(
         repository_root=repository_root,
         store=store,
@@ -4247,6 +4782,14 @@ def run_issue_790_canary(
                         consumption["consumption_digest"]
                     ),
                     model_usage=service,
+                    **(
+                        {}
+                        if graphiti is None
+                        else {
+                            "clock": lambda: observed_at,
+                            "graphiti": graphiti,
+                        }
+                    ),
                 )
                 if result is not None:
                     process_result = asdict(result)
@@ -4337,6 +4880,22 @@ def run_issue_790_canary(
         and worker_unloaded
         and store_quick_check == "ok"
     )
+    verified_backup_path, verified_backup_digest = (
+        _verified_pre_operation_canary_backup(
+            backup_path,
+            event_id=event_id,
+            ledger_seq=ledger_seq,
+            manifest_digest=_snapshot_manifest_digest(
+                preflight_evidence,
+                store=store,
+                event_id=event_id,
+                ledger_seq=ledger_seq,
+            ),
+            expected_digest=backup_digest,
+        )
+    )
+    if verified_backup_path != backup_path or verified_backup_digest != backup_digest:
+        raise Issue790DispositionError("canary backup changed before receipt")
     receipt_without_digest: dict[str, object] = {
         "schema_version": (
             ISSUE_790_CANARY_RECEIPT_SCHEMA
@@ -4354,6 +4913,12 @@ def run_issue_790_canary(
         "completed_at": _utc_text(completed_at),
         "disposition_digest": disposition_digest,
         "preflight_evidence": preflight_evidence,
+        "prepared_canary_decision_digest": preflight_evidence.get(
+            "prepared_canary_decision_digest"
+        ),
+        "prepared_canary_record_digest": preflight_evidence.get(
+            "prepared_canary_record_digest"
+        ),
         "runtime_readiness": runtime_readiness,
         "consumption": consumption,
         "outcome": outcome,
@@ -4376,6 +4941,17 @@ def run_issue_790_canary(
         "store_quick_check": store_quick_check,
         "canary_evidence_passed": canary_evidence_passed,
         "resumed_zero_io_finalisation": resuming_zero_io_finalisation,
+        "interrupted_recovery_evidence": (
+            None
+            if not recover_interrupted
+            else {
+                "checked_at": _utc_text(recovery_checked_at),
+                "other_canary_process_ids": list(recovery_process_ids),
+                "single_executor_lock_held": True,
+                "expected_backup_digest": expected_backup_digest,
+                "verified_backup_digest": backup_digest,
+            }
+        ),
         "provider_dispatch_attempted_this_run": not resuming_zero_io_finalisation,
         "retry_authorised": False,
         "publication_performed": False,

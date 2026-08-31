@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,6 +28,8 @@ from scripts.issue_790_live_canary_preflight import (
     _inspection_sql_smoke,
     _invalid_sha256_paths,
     _latest_failure_red_green,
+    _ops_gates,
+    _prepared_fresh_event_status,
     _retry_exclusion_append_smoke,
 )
 
@@ -68,6 +72,84 @@ def test_o07_accepts_only_exact_tip_focus_gates() -> None:
         ],
         tip=tip,
     ) == [{**common, "name": "focus-gates"}]
+
+
+def test_ops_gates_prepares_once_without_parallel_candidate_qualification() -> None:
+    source = inspect.getsource(_ops_gates)
+    assert source.count("prepare_issue_790_canary(") == 1
+    assert "unused_queued_attempt_zero_candidates" not in source
+    assert "qualify_fresh_graphiti_event" not in source
+    assert "prepared_canary_record(prepared)" in source
+    assert "prepared_canary_from_record" in source
+
+
+def test_o18_uses_the_prepared_candidate_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.issue_790_live_canary_preflight as preflight
+    from newsroom.control_plane.issue_790_prepared_canary import PreparedCanary
+
+    event_id = "sha256:" + "11" * 32
+    manifest_digest = "sha256:" + "22" * 32
+    store = tmp_path / "unpublished.sqlite3"
+    sqlite3.connect(store).close()
+    prepared = PreparedCanary(
+        exact_head="a" * 40,
+        candidate_identity={
+            "event_id": event_id,
+            "event_manifest_digest": manifest_digest,
+            "ledger_seq": 14000,
+        },
+        safety_state={
+            "candidate_attempt_count": 0,
+            "candidate_claim_present": False,
+            "candidate_provider_dispatched": False,
+            "candidate_state": "QUEUED",
+            "consumption_present": False,
+            "outcome_present": False,
+            "receipt_present": False,
+            "retry_claim_present": False,
+        },
+        plan_identity={},
+        retry_exclusion_identity={"retry_forbidden_event_ids": []},
+        runtime_identity={},
+        non_effects=(),
+        decision_digest="sha256:" + "33" * 32,
+        qualification_evidence={
+            "event_id": event_id,
+            "event_manifest_digest": manifest_digest,
+            "event_state": "QUEUED",
+            "event_attempt_count": 0,
+            "ledger_seq": 14000,
+            "owner_emergency_stop_clear": True,
+            "provider_calls": 0,
+            "resolved_units": [{"ingest_id": "ingest-1"}],
+            "store_mutations": 0,
+        },
+    )
+    seen: list[tuple[str, list[str]]] = []
+
+    def no_prior(
+        _connection: sqlite3.Connection,
+        *,
+        event_id: str,
+        ingest_ids: list[str],
+    ) -> bool:
+        seen.append((event_id, ingest_ids))
+        return False
+
+    monkeypatch.setattr(preflight, "_has_prior_execution", no_prior)
+    event, detail = _prepared_fresh_event_status(prepared, store=store)
+    assert event == (event_id, 14000)
+    assert detail.endswith("QUEUED attempt=0 provider_dispatched=false")
+    assert seen == [(event_id, ["ingest-1"])]
+
+    monkeypatch.setattr(preflight, "_has_prior_execution", lambda *_a, **_k: True)
+    assert _prepared_fresh_event_status(prepared, store=store) == (
+        None,
+        "PreparedCanary candidate has prior execution evidence",
+    )
 
 
 def test_owner_activation_digest_gate_requires_exact_lowercase_sha256() -> None:

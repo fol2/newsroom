@@ -665,6 +665,87 @@ def _has_prior_execution(
     )
 
 
+def _prepared_fresh_event_status(
+    prepared: object,
+    *,
+    store: Path,
+) -> tuple[tuple[str, int] | None, str]:
+    """Derive O18 from the one PreparedCanary qualification and safety read."""
+
+    from newsroom.control_plane.issue_790_prepared_canary import PreparedCanary
+
+    if not isinstance(prepared, PreparedCanary):
+        return None, "PreparedCanary is absent"
+    candidate = prepared.candidate_identity
+    safety = prepared.safety_state
+    qualification = prepared.qualification_evidence
+    event_id = candidate.get("event_id")
+    ledger_seq = candidate.get("ledger_seq")
+    manifest_digest = candidate.get("event_manifest_digest")
+    forbidden_ids = prepared.retry_exclusion_identity.get(
+        "retry_forbidden_event_ids"
+    )
+    if (
+        not isinstance(event_id, str)
+        or _SHA256.fullmatch(event_id) is None
+        or not isinstance(ledger_seq, int)
+        or isinstance(ledger_seq, bool)
+        or ledger_seq <= 0
+        or not isinstance(manifest_digest, str)
+        or _SHA256.fullmatch(manifest_digest) is None
+        or not isinstance(qualification, dict)
+        or not isinstance(forbidden_ids, list)
+        or not all(isinstance(item, str) for item in forbidden_ids)
+    ):
+        return None, "PreparedCanary candidate/qualification is incomplete"
+    if (
+        qualification.get("event_id") != event_id
+        or qualification.get("ledger_seq") != ledger_seq
+        or qualification.get("event_manifest_digest") != manifest_digest
+        or qualification.get("event_state") != "QUEUED"
+        or qualification.get("event_attempt_count") != 0
+        or qualification.get("owner_emergency_stop_clear") is not True
+        or qualification.get("provider_calls") != 0
+        or qualification.get("store_mutations") != 0
+        or safety.get("candidate_state") != "QUEUED"
+        or safety.get("candidate_attempt_count") != 0
+        or safety.get("candidate_provider_dispatched") is not False
+        or safety.get("candidate_claim_present") is not False
+        or safety.get("retry_claim_present") is not False
+        or safety.get("consumption_present") is not False
+        or safety.get("outcome_present") is not False
+        or safety.get("receipt_present") is not False
+        or event_id in forbidden_ids
+    ):
+        return None, "PreparedCanary candidate is not fresh and unused"
+    units = qualification.get("resolved_units")
+    if not isinstance(units, list) or not units:
+        return None, "PreparedCanary resolved units are absent"
+    ingest_ids = [
+        str(unit["ingest_id"])
+        for unit in units
+        if isinstance(unit, dict) and isinstance(unit.get("ingest_id"), str)
+    ]
+    if len(ingest_ids) != len(units):
+        return None, "PreparedCanary resolved ingest identity differs"
+    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        prior = _has_prior_execution(
+            connection,
+            event_id=event_id,
+            ingest_ids=ingest_ids,
+        )
+    finally:
+        connection.close()
+    if prior:
+        return None, "PreparedCanary candidate has prior execution evidence"
+    return (
+        (event_id, ledger_seq),
+        f"{event_id[:24]}…/{ledger_seq} "
+        "QUEUED attempt=0 provider_dispatched=false",
+    )
+
+
 def _run_pytest_nodes(repo: Path, nodes: tuple[str, ...]) -> tuple[bool, str]:
     completed = subprocess.run(
         [
@@ -843,7 +924,11 @@ def _ops_gates(
     tip_merge: str | None,
     tip_plan: str,
     plan_rel: str,
-) -> tuple[list[tuple[str, bool, str]], tuple[str, int] | None]:
+) -> tuple[
+    list[tuple[str, bool, str]],
+    tuple[str, int] | None,
+    object | None,
+]:
     rows: list[tuple[str, bool, str]] = []
     store = root / "data/newsroom/unpublished_store.sqlite3"
     subprocess.run(
@@ -987,49 +1072,45 @@ def _ops_gates(
         exclusions_ok = False
         exclusions_detail = exclusion_error
 
-    clean_event: tuple[str, int] | None = None
-    fresh_detail = "NONE"
-    from newsroom.control_plane.issue_790_prepared_canary import (
-        unused_queued_attempt_zero_candidates,
-    )
+    prepared_ok = False
+    prepared_detail = "ABSENT"
+    prepared_result: object | None = None
+    try:
+        from newsroom.control_plane.issue_790_prepared_canary import (
+            prepare_issue_790_canary,
+            prepared_canary_from_record,
+            prepared_canary_record,
+        )
 
-    for event_id, ledger_seq in unused_queued_attempt_zero_candidates(store, plan):
-        from newsroom.control_plane.cycle import qualify_fresh_graphiti_event
-
-        observed = datetime.now(UTC)
         proving = root / "data/newsroom/proving_store.sqlite3"
-        try:
-            evidence = qualify_fresh_graphiti_event(
-                proving_store=str(proving),
-                unpublished_store=str(store),
-                event_id=str(event_id),
-                ledger_seq=int(ledger_seq),
-                clock=lambda: observed,
-            )
-        except Exception:
-            continue
-        units = evidence.get("resolved_units") or []
-        ingest_ids = [
-            str(unit["ingest_id"])
-            for unit in units
-            if isinstance(unit, dict) and isinstance(unit.get("ingest_id"), str)
-        ]
-        c2 = sqlite3.connect(f"{store.as_uri()}?mode=ro", uri=True)
-        try:
-            prior = _has_prior_execution(
-                c2,
-                event_id=str(event_id),
-                ingest_ids=ingest_ids,
-            )
-        finally:
-            c2.close()
-        if not prior:
-            clean_event = (str(event_id), int(ledger_seq))
-            fresh_detail = (
-                f"{str(event_id)[:24]}…/{ledger_seq} "
-                "QUEUED attempt=0 provider_dispatched=false"
-            )
-            break
+        prepared = prepare_issue_790_canary(
+            store=store,
+            proving_store=proving,
+            plan=plan,
+            observed_at=datetime.now(tz=UTC),
+            exact_head=head,
+            role="preflight",
+        )
+        prepared_result = prepared_canary_from_record(
+            prepared_canary_record(prepared)
+        )
+        prepared_ok = (
+            prepared_result.decision_digest == prepared.decision_digest
+            and isinstance(prepared_result.record_digest, str)
+            and _SHA256.fullmatch(prepared_result.record_digest) is not None
+        )
+        prepared_detail = (
+            prepared_result.decision_digest
+            if prepared_ok
+            else "PreparedCanary decision/record differs"
+        )
+    except Exception as exc:
+        prepared_detail = f"{type(exc).__name__}: {exc}"
+        prepared_result = None
+    clean_event, fresh_detail = _prepared_fresh_event_status(
+        prepared_result,
+        store=store,
+    )
 
     _check(rows, "O01 origin/main == github main == tip", origin == github == tip, origin[:12])
     _check(rows, "O02 HEAD == tip (exact deploy)", head == tip, f"HEAD={head[:12]}")
@@ -1103,40 +1184,13 @@ def _ops_gates(
         clean_event is not None,
         fresh_detail,
     )
-    prepared_ok = False
-    prepared_detail = "ABSENT"
-    try:
-        from newsroom.control_plane.issue_790_prepared_canary import (
-            prepare_issue_790_canary,
-        )
-
-        proving = root / "data/newsroom/proving_store.sqlite3"
-        prepared = prepare_issue_790_canary(
-            store=store,
-            proving_store=proving,
-            plan=plan,
-            observed_at=datetime.now(tz=UTC),
-            exact_head=head,
-            role="preflight",
-        )
-        named = (
-            str(prepared.candidate_identity.get("event_id")),
-            int(prepared.candidate_identity.get("ledger_seq")),
-        )
-        if clean_event is not None and named != clean_event:
-            prepared_detail = "bounded canary candidate identity differs"
-        else:
-            prepared_ok = True
-            prepared_detail = prepared.decision_digest
-    except Exception as exc:
-        prepared_detail = f"{type(exc).__name__}: {exc}"
     _check(
         rows,
         "O19 PreparedCanary is unique pre-dispatch authority",
         prepared_ok,
         prepared_detail,
     )
-    return rows, clean_event
+    return rows, clean_event, prepared_result
 
 
 def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
@@ -1647,16 +1701,28 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--ops-only", action="store_true")
     parser.add_argument("--smoke-only", action="store_true")
+    parser.add_argument(
+        "--prepared-canary-out",
+        type=Path,
+        help="new outside-repository path for the complete READY artefact",
+    )
     args = parser.parse_args(argv)
+    if (
+        not args.ops_only
+        and not args.smoke_only
+        and args.prepared_canary_out is None
+    ):
+        parser.error("complete preflight requires --prepared-canary-out")
 
     print("LIVE CANARY PREFLIGHT (#790)")
     print(f"ops_root={args.ops_root}  code_root={args.code_root}")
     all_rows: list[tuple[str, bool, str]] = []
     canary_event: tuple[str, int] | None = None
+    prepared: object | None = None
 
     if not args.smoke_only:
         print("\n-- ops gates --")
-        ops_rows, canary_event = _ops_gates(
+        ops_rows, canary_event, prepared = _ops_gates(
             root=args.ops_root,
             tip_merge=args.tip_merge,
             tip_plan=args.tip_plan,
@@ -1680,6 +1746,25 @@ def main(argv: list[str] | None = None) -> int:
         print("RESULT: BLOCKED (diagnostic subset cannot authorise a live canary)")
         print("Run the complete preflight without --ops-only/--smoke-only.")
         return 2
+    if prepared is None or args.prepared_canary_out is None:
+        print("RESULT: BLOCKED (PreparedCanary artefact is absent)")
+        return 2
+    from newsroom.control_plane.issue_790_disposition import (
+        write_issue_790_canonical_json,
+    )
+    from newsroom.control_plane.issue_790_prepared_canary import (
+        PreparedCanary,
+        prepared_canary_record,
+    )
+
+    if not isinstance(prepared, PreparedCanary):
+        print("RESULT: BLOCKED (PreparedCanary artefact is invalid)")
+        return 2
+    record = write_issue_790_canonical_json(
+        args.prepared_canary_out,
+        prepared_canary_record(prepared),
+        field="prepared canary",
+    )
     print(f"RESULT: READY ({len(all_rows)}/{len(all_rows)})")
     if canary_event is not None:
         print(f"CANARY_EVENT={canary_event[0]}")
@@ -1694,6 +1779,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     if prepared_digest is not None:
         print(f"PREPARED_CANARY_DIGEST={prepared_digest}")
+    print(f"PREPARED_CANARY_ARTIFACT={args.prepared_canary_out}")
+    print(f"PREPARED_CANARY_RECORD_DIGEST={record['record_digest']}")
     print(f"DISPOSITION={DISP}")
     print(f"PLAN={args.tip_plan}")
     return 0

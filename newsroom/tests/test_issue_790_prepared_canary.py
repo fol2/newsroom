@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import os
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import replace
@@ -35,13 +36,17 @@ from newsroom.control_plane.issue_790_prepared_canary import (
     LIVE_ONLY_PREDISPATCH_GATES,
     PREPARED_CANARY_ABSENT,
     PREPARED_CANARY_DIGEST_DRIFT,
+    PREPARED_CANARY_RECORD_INVALID,
     PreparedCanaryError,
     consume_prepared_canary,
     prepare_issue_790_canary,
+    prepared_canary_from_record,
+    prepared_canary_record,
     unused_queued_attempt_zero_candidates,
     _candidate_from_plan,
 )
 from newsroom.control_plane.issue_790_rehearsal import (
+    RehearsalEvaluationGraphitiRunner,
     RehearsalRealGraphitiAdapter,
     live_issue_790_store_paths,
     refuse_live_issue_790_store_paths,
@@ -101,6 +106,81 @@ def _prepare(stores, *, store=None, role="preflight", **kwargs):
         role=role,
         **kwargs,
     )
+
+
+def _prepare_production(
+    stores,
+    *,
+    plan: Mapping[str, object],
+    event_id: str,
+    ledger_seq: int,
+):
+    return prepared_canary_from_record(
+        prepared_canary_record(
+            prepare_issue_790_canary(
+                store=stores.work_unpublished,
+                proving_store=stores.proving,
+                plan=plan,
+                observed_at=OBSERVED_AT,
+                exact_head=EXACT_HEAD,
+                event_id=event_id,
+                ledger_seq=ledger_seq,
+                role="canary",
+            )
+        )
+    )
+
+
+def _remove_snapshot_binding_from_canary_consumption(
+    store: Path,
+    *,
+    ledger_seq: int,
+) -> str:
+    """Rewrite a no-outcome fixture to the exact legacy preflight shape."""
+
+    connection = sqlite3.connect(store)
+    try:
+        row = connection.execute(
+            "SELECT consumption_digest,record_json "
+            "FROM issue_790_bounded_canary_consumptions WHERE ledger_seq=?",
+            (ledger_seq,),
+        ).fetchone()
+        assert row is not None
+        old_digest = str(row[0])
+        record = json.loads(str(row[1]))
+        preflight = dict(record["preflight_evidence"])
+        for field in (
+            "pre_operation_snapshot_digest",
+            "prepared_canary_decision_digest",
+            "prepared_canary_record_digest",
+        ):
+            preflight.pop(field, None)
+        preflight.pop("evidence_digest", None)
+        preflight["evidence_digest"] = digest_canonical(preflight)
+        record["preflight_evidence"] = preflight
+        record["preflight_evidence_digest"] = preflight["evidence_digest"]
+        record.pop("consumption_digest", None)
+        new_digest = digest_canonical(record)
+        record["consumption_digest"] = new_digest
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute(
+            "UPDATE issue_790_bounded_canary_consumptions "
+            "SET consumption_digest=?,record_json=? WHERE consumption_digest=?",
+            (
+                new_digest,
+                json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                old_digest,
+            ),
+        )
+        connection.commit()
+        return new_digest
+    finally:
+        connection.close()
 
 
 def _step22_activated_plan() -> dict[str, object]:
@@ -168,6 +248,19 @@ def _sqlite_canary_event(store: Path, *, ledger_seq: int) -> dict[str, object]:
         "terminal_at": row[7],
         "available_at": row[8],
     }
+
+
+def _expire_interrupted_canary_claim(store: Path, *, ledger_seq: int) -> None:
+    connection = sqlite3.connect(store)
+    try:
+        connection.execute(
+            "UPDATE unpublished_graphiti_revision_events SET claim_expires_at=? "
+            "WHERE ledger_seq=?",
+            ((OBSERVED_AT - timedelta(seconds=1)).isoformat(), ledger_seq),
+        )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def _runtime_semantics_kwargs(
@@ -456,18 +549,14 @@ def test_ready_successor_exact_head_implies_dispatch_started(tmp_path: Path) -> 
         role="preflight",
     )
     assert file_digest(stores.work_unpublished) == before
-    result = disposition.run_issue_790_canary(
+    result = run_prepared_canary_rehearsal(
         store=stores.work_unpublished,
         proving_store=stores.proving,
-        backup_path=tmp_path / "unused-backup.sqlite3",
         plan=plan,
         observed_at=OBSERVED_AT,
-        repository_root=_ROOT,
         event_id=CANDIDATE_EVENT_ID,
         ledger_seq=CANDIDATE_LEDGER_SEQ,
-        disposition_digest="sha256:" + "cd" * 32,
         prepared=prepared,
-        rehearsal=True,
         exact_head=_SUCCESSOR_SHA,
     )
     assert result["decision_digest"] == prepared.decision_digest
@@ -553,18 +642,14 @@ def test_successor_digest_drift_fail_closes_before_dispatch(tmp_path: Path) -> N
     RehearsalRealGraphitiAdapter.provider_calls = 0
     RehearsalRealGraphitiAdapter.dispatch_started = False
     with pytest.raises(PreparedCanaryError) as caught:
-        disposition.run_issue_790_canary(
+        run_prepared_canary_rehearsal(
             store=stores.work_unpublished,
             proving_store=stores.proving,
-            backup_path=tmp_path / "unused-backup.sqlite3",
             plan=plan,
             observed_at=OBSERVED_AT,
-            repository_root=_ROOT,
             event_id=CANDIDATE_EVENT_ID,
             ledger_seq=CANDIDATE_LEDGER_SEQ,
-            disposition_digest="sha256:" + "cd" * 32,
             prepared=drifted,
-            rehearsal=True,
             exact_head=_SUCCESSOR_SHA,
         )
     assert caught.value.failure_code == PREPARED_CANARY_DIGEST_DRIFT
@@ -668,18 +753,14 @@ def test_step22_spent_13665_successor_unused_attempt_zero_survives_full_path(
     assert bound == (SUCCESSOR_EVENT_ID, SUCCESSOR_LEDGER_SEQ)
     RehearsalRealGraphitiAdapter.provider_calls = 0
     RehearsalRealGraphitiAdapter.dispatch_started = False
-    result = disposition.run_issue_790_canary(
+    result = run_prepared_canary_rehearsal(
         store=stores.work_unpublished,
         proving_store=stores.proving,
-        backup_path=tmp_path / "unused-backup.sqlite3",
         plan=stores.plan,
         observed_at=OBSERVED_AT,
-        repository_root=tmp_path,
         event_id=SUCCESSOR_EVENT_ID,
         ledger_seq=SUCCESSOR_LEDGER_SEQ,
-        disposition_digest="sha256:" + "cd" * 32,
         prepared=prepared,
-        rehearsal=True,
         exact_head=EXACT_HEAD,
     )
     assert result["decision_digest"] == prepared.decision_digest
@@ -802,6 +883,12 @@ def test_step22_unused_13671_survives_production_pre_dispatch_untouched(
 
     monkeypatch.setattr(disposition, "_consume_issue_790_event", consume_successor)
     backup = tmp_path / "pre-dispatch-13671.sqlite3"
+    prepared = _prepare_production(
+        stores,
+        plan=plan,
+        event_id=SUCCESSOR_EVENT_ID,
+        ledger_seq=SUCCESSOR_LEDGER_SEQ,
+    )
     receipt = disposition.run_issue_790_canary(
         store=stores.work_unpublished,
         proving_store=stores.proving,
@@ -812,8 +899,7 @@ def test_step22_unused_13671_survives_production_pre_dispatch_untouched(
         event_id=SUCCESSOR_EVENT_ID,
         ledger_seq=SUCCESSOR_LEDGER_SEQ,
         disposition_digest=_PRODUCTION_DISPOSITION,
-        rehearsal=False,
-        exact_head=EXACT_HEAD,
+        prepared=prepared,
         github_api=activated["github"],
     )
     assert backup.is_file()
@@ -833,15 +919,13 @@ def test_step22_unused_13671_survives_production_pre_dispatch_untouched(
     resumed = disposition.run_issue_790_canary(
         store=stores.work_unpublished,
         proving_store=stores.proving,
-        backup_path=tmp_path / "resume-13671.sqlite3",
+        backup_path=backup,
         plan=plan,
         observed_at=OBSERVED_AT,
         repository_root=tmp_path,
         event_id=SUCCESSOR_EVENT_ID,
         ledger_seq=SUCCESSOR_LEDGER_SEQ,
         disposition_digest=_PRODUCTION_DISPOSITION,
-        rehearsal=False,
-        exact_head=EXACT_HEAD,
         github_api=activated["github"],
     )
     assert resumed["resumed_zero_io_finalisation"] is True
@@ -891,18 +975,24 @@ def test_step22_consumed_13671_brokererror_setup_survives_full_path(
         return real_consume(**values)
 
     monkeypatch.setattr(disposition, "_consume_issue_790_event", consume_successor)
+    prepared = _prepare_production(
+        stores,
+        plan=plan,
+        event_id=SUCCESSOR_EVENT_ID,
+        ledger_seq=SUCCESSOR_LEDGER_SEQ,
+    )
+    backup = tmp_path / "brokererror-13671.sqlite3"
     receipt = disposition.run_issue_790_canary(
         store=stores.work_unpublished,
         proving_store=stores.proving,
-        backup_path=tmp_path / "brokererror-13671.sqlite3",
+        backup_path=backup,
         plan=plan,
         observed_at=OBSERVED_AT,
         repository_root=tmp_path,
         event_id=SUCCESSOR_EVENT_ID,
         ledger_seq=SUCCESSOR_LEDGER_SEQ,
         disposition_digest=_PRODUCTION_DISPOSITION,
-        rehearsal=False,
-        exact_head=EXACT_HEAD,
+        prepared=prepared,
         github_api=activated["github"],
     )
     event = _sqlite_canary_event(
@@ -973,15 +1063,13 @@ def test_step22_consumed_13671_brokererror_setup_survives_full_path(
     resumed = disposition.run_issue_790_canary(
         store=stores.work_unpublished,
         proving_store=stores.proving,
-        backup_path=tmp_path / "resume-brokererror-13671.sqlite3",
+        backup_path=backup,
         plan=plan,
         observed_at=OBSERVED_AT,
         repository_root=tmp_path,
         event_id=SUCCESSOR_EVENT_ID,
         ledger_seq=SUCCESSOR_LEDGER_SEQ,
         disposition_digest=_PRODUCTION_DISPOSITION,
-        rehearsal=False,
-        exact_head=EXACT_HEAD,
         github_api=activated["github"],
     )
     assert resumed["resumed_zero_io_finalisation"] is True
@@ -1227,18 +1315,24 @@ def test_step22_consumed_13677_zero_after_embeddings_survives_full_path(
         return real_consume(**values)
 
     monkeypatch.setattr(disposition, "_consume_issue_790_event", consume_13677)
+    prepared = _prepare_production(
+        stores,
+        plan=plan,
+        event_id=EVENT_13677,
+        ledger_seq=LEDGER_13677,
+    )
+    backup = tmp_path / "zero-13677.sqlite3"
     receipt = disposition.run_issue_790_canary(
         store=stores.work_unpublished,
         proving_store=stores.proving,
-        backup_path=tmp_path / "zero-13677.sqlite3",
+        backup_path=backup,
         plan=plan,
         observed_at=OBSERVED_AT,
         repository_root=tmp_path,
         event_id=EVENT_13677,
         ledger_seq=LEDGER_13677,
         disposition_digest=_PRODUCTION_DISPOSITION,
-        rehearsal=False,
-        exact_head=EXACT_HEAD,
+        prepared=prepared,
         github_api=activated["github"],
     )
     event = _sqlite_canary_event(stores.work_unpublished, ledger_seq=LEDGER_13677)
@@ -1324,15 +1418,13 @@ def test_step22_consumed_13677_zero_after_embeddings_survives_full_path(
     resumed = disposition.run_issue_790_canary(
         store=stores.work_unpublished,
         proving_store=stores.proving,
-        backup_path=tmp_path / "resume-zero-13677.sqlite3",
+        backup_path=backup,
         plan=plan,
         observed_at=OBSERVED_AT,
         repository_root=tmp_path,
         event_id=EVENT_13677,
         ledger_seq=LEDGER_13677,
         disposition_digest=_PRODUCTION_DISPOSITION,
-        rehearsal=False,
-        exact_head=EXACT_HEAD,
         github_api=activated["github"],
     )
     assert resumed["resumed_zero_io_finalisation"] is True
@@ -1643,18 +1735,24 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
         return real_consume(**values)
 
     monkeypatch.setattr(disposition, "_consume_issue_790_event", consume_13683)
+    prepared = _prepare_production(
+        stores,
+        plan=plan,
+        event_id=EVENT_13683,
+        ledger_seq=LEDGER_13683,
+    )
+    backup = tmp_path / "zero-13683.sqlite3"
     receipt = disposition.run_issue_790_canary(
         store=stores.work_unpublished,
         proving_store=stores.proving,
-        backup_path=tmp_path / "zero-13683.sqlite3",
+        backup_path=backup,
         plan=plan,
         observed_at=OBSERVED_AT,
         repository_root=tmp_path,
         event_id=EVENT_13683,
         ledger_seq=LEDGER_13683,
         disposition_digest=_PRODUCTION_DISPOSITION,
-        rehearsal=False,
-        exact_head=EXACT_HEAD,
+        prepared=prepared,
         github_api=activated["github"],
     )
     event = _sqlite_canary_event(stores.work_unpublished, ledger_seq=LEDGER_13683)
@@ -1754,15 +1852,13 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
     resumed = disposition.run_issue_790_canary(
         store=stores.work_unpublished,
         proving_store=stores.proving,
-        backup_path=tmp_path / "resume-zero-13683.sqlite3",
+        backup_path=backup,
         plan=plan,
         observed_at=OBSERVED_AT,
         repository_root=tmp_path,
         event_id=EVENT_13683,
         ledger_seq=LEDGER_13683,
         disposition_digest=_PRODUCTION_DISPOSITION,
-        rehearsal=False,
-        exact_head=EXACT_HEAD,
         github_api=activated["github"],
     )
     assert resumed["resumed_zero_io_finalisation"] is True
@@ -1826,6 +1922,12 @@ def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
 
     monkeypatch.setattr(disposition, "_consume_issue_790_event", abort_after_claim)
     backup = tmp_path / "aborted-spawn-13689.sqlite3"
+    prepared = _prepare_production(
+        stores,
+        plan=plan,
+        event_id=EVENT_13689,
+        ledger_seq=LEDGER_13689,
+    )
     canary_kwargs = {
         "store": stores.work_unpublished,
         "proving_store": stores.proving,
@@ -1836,8 +1938,7 @@ def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
         "event_id": EVENT_13689,
         "ledger_seq": LEDGER_13689,
         "disposition_digest": _PRODUCTION_DISPOSITION,
-        "rehearsal": False,
-        "exact_head": EXACT_HEAD,
+        "prepared": prepared,
         "github_api": activated["github"],
     }
     with pytest.raises(_CanarySpawnAborted):
@@ -1883,6 +1984,19 @@ def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
     assert failure_code is None
     assert dispatch_started_count(stores.work_unpublished) == 0
 
+    # The retained live 13689 consumption predates durable snapshot binding.
+    legacy_consumption_digest = _remove_snapshot_binding_from_canary_consumption(
+        stores.work_unpublished,
+        ledger_seq=LEDGER_13689,
+    )
+
+    _expire_interrupted_canary_claim(
+        stores.work_unpublished, ledger_seq=LEDGER_13689
+    )
+    canary_kwargs["prepared"] = None
+    canary_kwargs["recover_interrupted"] = True
+    expected_backup_digest = "sha256:" + file_digest(backup)
+    canary_kwargs["expected_backup_digest"] = expected_backup_digest
     receipt = disposition.run_issue_790_canary(**canary_kwargs)
     sealed = _sqlite_canary_event(
         stores.work_unpublished, ledger_seq=LEDGER_13689
@@ -1911,8 +2025,23 @@ def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
     assert receipt["publication_performed"] is False
     assert receipt["consumption"]["event_id"] == EVENT_13689
     assert receipt["consumption"]["ledger_seq"] == LEDGER_13689
-    assert receipt["consumption"]["consumption_digest"] == consumption_row[0]
+    assert receipt["consumption"]["consumption_digest"] == (
+        legacy_consumption_digest
+    )
+    assert receipt["pre_operation_snapshot_digest"] == expected_backup_digest
     assert receipt["pre_operation_snapshot_digest"] == abort_backup_digest
+    assert "pre_operation_snapshot_digest" not in receipt["consumption"][
+        "preflight_evidence"
+    ]
+    assert receipt["prepared_canary_decision_digest"] is None
+    assert receipt["prepared_canary_record_digest"] is None
+    assert receipt["interrupted_recovery_evidence"] == {
+        "checked_at": receipt["interrupted_recovery_evidence"]["checked_at"],
+        "expected_backup_digest": expected_backup_digest,
+        "other_canary_process_ids": [],
+        "single_executor_lock_held": True,
+        "verified_backup_digest": expected_backup_digest,
+    }
     assert receipt["outcome"]["failure_code_after_seal"] == (
         "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:NO_EVENT_RESULT"
     )
@@ -1938,12 +2067,27 @@ def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
             store=stores.work_unpublished,
         )
     assert caught.value.failure_code == "RETRY_FORBIDDEN_TARGET"
-    with pytest.raises(Issue790DispositionError) as dest_exists:
+    canary_kwargs.pop("recover_interrupted")
+    canary_kwargs.pop("expected_backup_digest")
+    with pytest.raises(
+        Issue790DispositionError,
+        match="legacy canary replay requires the expected backup digest",
+    ):
         disposition.run_issue_790_canary(**canary_kwargs)
-    assert str(dest_exists.value) == "canary backup destination already exists"
-    assert dest_exists.value.failure_code == (
-        CANARY_BACKUP_DESTINATION_ALREADY_EXISTS
-    )
+    wrong_backup = tmp_path / "valid-but-unbound-completed-replay.sqlite3"
+    disposition._sqlite_backup(backup, wrong_backup)
+    connection = sqlite3.connect(wrong_backup)
+    try:
+        connection.execute("PRAGMA user_version=1")
+        connection.commit()
+    finally:
+        connection.close()
+    canary_kwargs["backup_path"] = wrong_backup
+    canary_kwargs["expected_backup_digest"] = expected_backup_digest
+    with pytest.raises(Issue790DispositionError, match="canary backup digest differs"):
+        disposition.run_issue_790_canary(**canary_kwargs)
+    canary_kwargs["backup_path"] = backup
+    replayed = disposition.run_issue_790_canary(**canary_kwargs)
     still = _sqlite_canary_event(
         stores.work_unpublished, ledger_seq=LEDGER_13689
     )
@@ -1953,6 +2097,12 @@ def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
     assert still["claim_owner"] is None
     assert consume_calls == [EVENT_13689]
     assert "sha256:" + file_digest(backup) == abort_backup_digest
+    assert replayed["resumed_zero_io_finalisation"] is True
+    assert replayed["provider_dispatch_attempted_this_run"] is False
+    assert replayed["pre_operation_snapshot_digest"] == expected_backup_digest
+    assert "pre_operation_snapshot_digest" not in replayed["consumption"][
+        "preflight_evidence"
+    ]
 
 
 def test_step22_backup_dest_exists_without_consumption_fail_closes_before_claim(
@@ -1975,6 +2125,12 @@ def test_step22_backup_dest_exists_without_consumption_fail_closes_before_claim(
     monkeypatch.setattr(disposition, "_consume_issue_790_event", must_not_consume)
     backup = tmp_path / "leftover-dest-13689.sqlite3"
     backup.write_bytes(b"leftover")
+    prepared = _prepare_production(
+        stores,
+        plan=plan,
+        event_id=EVENT_13689,
+        ledger_seq=LEDGER_13689,
+    )
     with pytest.raises(Issue790DispositionError) as dest_exists:
         disposition.run_issue_790_canary(
             store=stores.work_unpublished,
@@ -1986,8 +2142,7 @@ def test_step22_backup_dest_exists_without_consumption_fail_closes_before_claim(
             event_id=EVENT_13689,
             ledger_seq=LEDGER_13689,
             disposition_digest=_PRODUCTION_DISPOSITION,
-            rehearsal=False,
-            exact_head=EXACT_HEAD,
+            prepared=prepared,
             github_api=activated["github"],
         )
     event = _sqlite_canary_event(
@@ -2003,6 +2158,595 @@ def test_step22_backup_dest_exists_without_consumption_fail_closes_before_claim(
     assert event["provider_dispatched"] == 0
     assert event["claim_owner"] is None
     assert dispatch_started_count(stores.work_unpublished) == 0
+
+
+def test_step22_fresh_missing_prepared_fails_before_any_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh production claim requires the cross-process prepared artefact."""
+
+    stores = build_rehearsal_stores(tmp_path, unused_13689=True)
+    activated = _activate_step22(stores.work_unpublished)
+    plan = activated["plan"]
+    _seed_production_disposition(stores.work_unpublished, plan)
+    _patch_production_predispatch(monkeypatch, plan=plan)
+    consume_calls: list[str] = []
+
+    def must_not_consume(**_values: object) -> None:
+        consume_calls.append("called")
+        raise AssertionError("missing prepared artefact reached consumption")
+
+    monkeypatch.setattr(disposition, "_consume_issue_790_event", must_not_consume)
+    backup = tmp_path / "missing-prepared-must-not-exist.sqlite3"
+    with pytest.raises(PreparedCanaryError) as caught:
+        disposition.run_issue_790_canary(
+            store=stores.work_unpublished,
+            proving_store=stores.proving,
+            backup_path=backup,
+            plan=plan,
+            observed_at=OBSERVED_AT,
+            repository_root=tmp_path,
+            event_id=EVENT_13689,
+            ledger_seq=LEDGER_13689,
+            disposition_digest=_PRODUCTION_DISPOSITION,
+            github_api=activated["github"],
+        )
+    event = _sqlite_canary_event(
+        stores.work_unpublished, ledger_seq=LEDGER_13689
+    )
+    connection = sqlite3.connect(stores.work_unpublished)
+    try:
+        consumptions = connection.execute(
+            "SELECT COUNT(*) FROM issue_790_bounded_canary_consumptions "
+            "WHERE ledger_seq=?",
+            (LEDGER_13689,),
+        ).fetchone()[0]
+        outcomes = connection.execute(
+            "SELECT COUNT(*) FROM issue_790_bounded_canary_outcomes "
+            "WHERE ledger_seq=?",
+            (LEDGER_13689,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert caught.value.failure_code == PREPARED_CANARY_ABSENT
+    assert backup.exists() is False
+    assert consume_calls == []
+    assert consumptions == 0
+    assert outcomes == 0
+    assert event["state"] == "QUEUED"
+    assert event["attempt_count"] == 0
+    assert event["provider_dispatched"] == 0
+    assert event["claim_owner"] is None
+    assert dispatch_started_count(stores.work_unpublished) == 0
+
+
+def test_step22_fresh_in_memory_prepared_fails_before_any_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller cannot substitute an unpersisted in-memory decision."""
+
+    stores = build_rehearsal_stores(tmp_path, unused_13689=True)
+    activated = _activate_step22(stores.work_unpublished)
+    plan = activated["plan"]
+    _seed_production_disposition(stores.work_unpublished, plan)
+    prepared = prepare_issue_790_canary(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        plan=plan,
+        observed_at=OBSERVED_AT,
+        exact_head=EXACT_HEAD,
+        event_id=EVENT_13689,
+        ledger_seq=LEDGER_13689,
+        role="canary",
+    )
+    backup = tmp_path / "in-memory-prepared-must-not-exist.sqlite3"
+    with pytest.raises(PreparedCanaryError) as caught:
+        disposition.run_issue_790_canary(
+            store=stores.work_unpublished,
+            proving_store=stores.proving,
+            backup_path=backup,
+            plan=plan,
+            observed_at=OBSERVED_AT,
+            repository_root=tmp_path,
+            event_id=EVENT_13689,
+            ledger_seq=LEDGER_13689,
+            disposition_digest=_PRODUCTION_DISPOSITION,
+            prepared=prepared,
+            github_api=activated["github"],
+        )
+    assert caught.value.failure_code == PREPARED_CANARY_RECORD_INVALID
+    assert backup.exists() is False
+    assert dispatch_started_count(stores.work_unpublished) == 0
+
+
+def test_step22_fresh_recovery_flag_fails_before_any_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery authority never converts a fresh candidate into a recovery."""
+
+    stores = build_rehearsal_stores(tmp_path, unused_13689=True)
+    activated = _activate_step22(stores.work_unpublished)
+    plan = activated["plan"]
+    _seed_production_disposition(stores.work_unpublished, plan)
+    _patch_production_predispatch(monkeypatch, plan=plan)
+    prepared = _prepare_production(
+        stores,
+        plan=plan,
+        event_id=EVENT_13689,
+        ledger_seq=LEDGER_13689,
+    )
+    backup = tmp_path / "fresh-recovery-must-not-exist.sqlite3"
+    with pytest.raises(
+        Issue790DispositionError,
+        match="interrupted canary recovery authority is absent",
+    ):
+        disposition.run_issue_790_canary(
+            store=stores.work_unpublished,
+            proving_store=stores.proving,
+            backup_path=backup,
+            plan=plan,
+            observed_at=OBSERVED_AT,
+            repository_root=tmp_path,
+            event_id=EVENT_13689,
+            ledger_seq=LEDGER_13689,
+            disposition_digest=_PRODUCTION_DISPOSITION,
+            prepared=prepared,
+            recover_interrupted=True,
+            expected_backup_digest="sha256:" + "00" * 32,
+            github_api=activated["github"],
+        )
+    event = _sqlite_canary_event(
+        stores.work_unpublished, ledger_seq=LEDGER_13689
+    )
+    assert backup.exists() is False
+    assert event["state"] == "QUEUED"
+    assert event["attempt_count"] == 0
+    assert event["provider_dispatched"] == 0
+    assert event["claim_owner"] is None
+    assert dispatch_started_count(stores.work_unpublished) == 0
+
+
+def test_step22_full_executor_rehearsal_reaches_fixture_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The zero-provider runner traverses the full public production wrapper."""
+
+    stores = build_rehearsal_stores(tmp_path, unused_13689=True)
+    activated = _activate_step22(stores.work_unpublished)
+    plan = activated["plan"]
+    _seed_production_disposition(stores.work_unpublished, plan)
+    _patch_production_predispatch(monkeypatch, plan=plan)
+    prepared = _prepare_production(
+        stores,
+        plan=plan,
+        event_id=EVENT_13689,
+        ledger_seq=LEDGER_13689,
+    )
+    RehearsalRealGraphitiAdapter.provider_calls = 0
+    RehearsalRealGraphitiAdapter.dispatch_started = False
+    backup = tmp_path / "full-executor-rehearsal.sqlite3"
+    receipt = disposition.run_issue_790_canary(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        backup_path=backup,
+        plan=plan,
+        observed_at=OBSERVED_AT,
+        repository_root=tmp_path,
+        event_id=EVENT_13689,
+        ledger_seq=LEDGER_13689,
+        disposition_digest=_PRODUCTION_DISPOSITION,
+        prepared=prepared,
+        graphiti=RehearsalEvaluationGraphitiRunner(clock=lambda: OBSERVED_AT),
+        github_api=activated["github"],
+    )
+    connection = sqlite3.connect(stores.work_unpublished)
+    try:
+        consumptions = connection.execute(
+            "SELECT COUNT(*) FROM issue_790_bounded_canary_consumptions "
+            "WHERE ledger_seq=?",
+            (LEDGER_13689,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert backup.is_file()
+    assert consumptions == 1
+    assert receipt["pre_operation_snapshot_digest"] == (
+        receipt["consumption"]["preflight_evidence"][
+            "pre_operation_snapshot_digest"
+        ]
+    )
+    assert receipt["prepared_canary_decision_digest"] == prepared.decision_digest
+    assert receipt["prepared_canary_record_digest"] == prepared.record_digest
+    assert RehearsalRealGraphitiAdapter.dispatch_started is True
+    assert RehearsalRealGraphitiAdapter.provider_calls == 0
+    assert dispatch_started_count(stores.work_unpublished) >= 1
+    assert receipt["provider_dispatch_attempted_this_run"] is True
+    assert receipt["exception"] is None
+    assert receipt["process_result"]["state"] == "TERMINAL"
+    assert receipt["outcome"]["result_class"] == "TRUTHFUL_PROVIDER_SUCCESS"
+    assert receipt["canary_evidence_passed"] is True
+    assert receipt["publication_performed"] is False
+
+
+def test_fresh_canary_rejects_backup_replacement_before_consumption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The digest is bound to the backup fd, never a replaced path."""
+
+    stores = build_rehearsal_stores(tmp_path, unused_13689=True)
+    activated = _activate_step22(stores.work_unpublished)
+    plan = activated["plan"]
+    _seed_production_disposition(stores.work_unpublished, plan)
+    _patch_production_predispatch(monkeypatch, plan=plan)
+    prepared = _prepare_production(
+        stores,
+        plan=plan,
+        event_id=EVENT_13689,
+        ledger_seq=LEDGER_13689,
+    )
+    replacement = tmp_path / "replacement-pristine.sqlite3"
+    disposition._sqlite_backup(stores.work_unpublished, replacement)
+    connection = sqlite3.connect(replacement)
+    try:
+        connection.execute("PRAGMA user_version=1")
+        connection.commit()
+    finally:
+        connection.close()
+    publish = disposition._publish_file_no_replace
+
+    def publish_then_replace(temporary: Path, destination: Path) -> None:
+        publish(temporary, destination)
+        os.replace(replacement, destination)
+
+    monkeypatch.setattr(
+        disposition,
+        "_publish_file_no_replace",
+        publish_then_replace,
+    )
+    backup = tmp_path / "replaced-before-consumption.sqlite3"
+    with pytest.raises(
+        Issue790DispositionError,
+        match="backup published identity changed",
+    ):
+        disposition.run_issue_790_canary(
+            store=stores.work_unpublished,
+            proving_store=stores.proving,
+            backup_path=backup,
+            plan=plan,
+            observed_at=OBSERVED_AT,
+            repository_root=tmp_path,
+            event_id=EVENT_13689,
+            ledger_seq=LEDGER_13689,
+            disposition_digest=_PRODUCTION_DISPOSITION,
+            prepared=prepared,
+            github_api=activated["github"],
+        )
+    connection = sqlite3.connect(stores.work_unpublished)
+    try:
+        consumptions = connection.execute(
+            "SELECT COUNT(*) FROM issue_790_bounded_canary_consumptions "
+            "WHERE ledger_seq=?",
+            (LEDGER_13689,),
+        ).fetchone()[0]
+        outcomes = connection.execute(
+            "SELECT COUNT(*) FROM issue_790_bounded_canary_outcomes "
+            "WHERE ledger_seq=?",
+            (LEDGER_13689,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    event = _sqlite_canary_event(
+        stores.work_unpublished,
+        ledger_seq=LEDGER_13689,
+    )
+    assert consumptions == 0
+    assert outcomes == 0
+    assert event["state"] == "QUEUED"
+    assert event["attempt_count"] == 0
+    assert dispatch_started_count(stores.work_unpublished) == 0
+
+
+def test_step22_backup_replacement_after_execution_fails_before_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The receipt never claims retention after the checked snapshot is replaced."""
+
+    stores = build_rehearsal_stores(tmp_path, unused_13689=True)
+    activated = _activate_step22(stores.work_unpublished)
+    plan = activated["plan"]
+    _seed_production_disposition(stores.work_unpublished, plan)
+    _patch_production_predispatch(monkeypatch, plan=plan)
+    prepared = _prepare_production(
+        stores,
+        plan=plan,
+        event_id=EVENT_13689,
+        ledger_seq=LEDGER_13689,
+    )
+    backup = tmp_path / "replaced-after-execution.sqlite3"
+    replacement = tmp_path / "different-valid-snapshot.sqlite3"
+    disposition._sqlite_backup(stores.work_unpublished, replacement)
+    connection = sqlite3.connect(replacement)
+    try:
+        connection.execute("PRAGMA user_version=1")
+        connection.commit()
+    finally:
+        connection.close()
+    usage_evidence = disposition._issue_790_canary_usage_evidence
+    replaced = False
+
+    def replace_before_receipt(*args, **kwargs):
+        nonlocal replaced
+        if not replaced and backup.exists():
+            replacement.replace(backup)
+            replaced = True
+        return usage_evidence(*args, **kwargs)
+
+    monkeypatch.setattr(
+        disposition,
+        "_issue_790_canary_usage_evidence",
+        replace_before_receipt,
+    )
+    with pytest.raises(Issue790DispositionError, match="canary backup digest differs"):
+        disposition.run_issue_790_canary(
+            store=stores.work_unpublished,
+            proving_store=stores.proving,
+            backup_path=backup,
+            plan=plan,
+            observed_at=OBSERVED_AT,
+            repository_root=tmp_path,
+            event_id=EVENT_13689,
+            ledger_seq=LEDGER_13689,
+            disposition_digest=_PRODUCTION_DISPOSITION,
+            prepared=prepared,
+            graphiti=RehearsalEvaluationGraphitiRunner(clock=lambda: OBSERVED_AT),
+            github_api=activated["github"],
+        )
+    assert replaced is True
+
+
+@pytest.mark.parametrize(
+    ("mutation", "failure"),
+    (
+        (
+            "corrupt_backup",
+            "canary backup digest differs",
+        ),
+        (
+            "claimed_backup_snapshot",
+            "canary backup digest differs",
+        ),
+        (
+            "missing_transport_table",
+            "canary backup destination already exists",
+        ),
+        (
+            "consumption_authority_drift",
+            "canary backup destination already exists",
+        ),
+        (
+            "prepared_binding_tamper",
+            "canary consumption digest differs",
+        ),
+        (
+            "active_claim",
+            "canary backup destination already exists",
+        ),
+        (
+            "ownerless_active_expiry",
+            "canary backup destination already exists",
+        ),
+        (
+            "missing_recovery_flag",
+            "interrupted canary recovery requires explicit authority",
+        ),
+        (
+            "missing_backup_digest",
+            "interrupted canary recovery requires the expected backup digest",
+        ),
+        (
+            "absent_recovery_backup",
+            "interrupted canary backup destination is absent",
+        ),
+    ),
+)
+def test_step22_aborted_spawn_recovery_rejects_unproven_backup_or_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    failure: str,
+) -> None:
+    """Recovery re-entry must prove both the backup and durable authority."""
+
+    from newsroom.control_plane.graphiti_events import GraphitiEventQueue
+
+    stores = build_rehearsal_stores(tmp_path, unused_13689=True)
+    activated = _activate_step22(stores.work_unpublished)
+    plan = activated["plan"]
+    _seed_production_disposition(stores.work_unpublished, plan)
+    _patch_production_predispatch(monkeypatch, plan=plan)
+    consume_calls: list[str] = []
+
+    def abort_after_claim(**values: object) -> None:
+        consume_calls.append(str(values["event_id"]))
+        queue = GraphitiEventQueue(
+            str(values["unpublished_store"]),
+            clock=lambda: OBSERVED_AT,
+        )
+        claimed = queue.claim(
+            owner_id=str(values["owner_id"]),
+            lease_for=timedelta(minutes=15),
+            event_id=str(values["event_id"]),
+            require_fresh=True,
+            canary_consumption_digest=str(values["canary_consumption_digest"]),
+        )
+        assert claimed is not None
+        assert queue._start(
+            str(values["event_id"]), owner_id=str(values["owner_id"])
+        ) == 1
+        raise _CanarySpawnAborted("canary spawn aborted after claim")
+
+    monkeypatch.setattr(disposition, "_consume_issue_790_event", abort_after_claim)
+    backup = tmp_path / f"aborted-spawn-{mutation}.sqlite3"
+    prepared = _prepare_production(
+        stores,
+        plan=plan,
+        event_id=EVENT_13689,
+        ledger_seq=LEDGER_13689,
+    )
+    canary_kwargs = {
+        "store": stores.work_unpublished,
+        "proving_store": stores.proving,
+        "backup_path": backup,
+        "plan": plan,
+        "observed_at": OBSERVED_AT,
+        "repository_root": tmp_path,
+        "event_id": EVENT_13689,
+        "ledger_seq": LEDGER_13689,
+        "disposition_digest": _PRODUCTION_DISPOSITION,
+        "prepared": prepared,
+        "github_api": activated["github"],
+    }
+    with pytest.raises(_CanarySpawnAborted):
+        disposition.run_issue_790_canary(**canary_kwargs)
+
+    if mutation != "active_claim":
+        _expire_interrupted_canary_claim(
+            stores.work_unpublished, ledger_seq=LEDGER_13689
+        )
+    canary_kwargs["prepared"] = None
+    if mutation != "missing_recovery_flag":
+        canary_kwargs["recover_interrupted"] = True
+    if mutation not in {"missing_recovery_flag", "missing_backup_digest"}:
+        canary_kwargs["expected_backup_digest"] = "sha256:" + file_digest(backup)
+    before = _sqlite_canary_event(
+        stores.work_unpublished, ledger_seq=LEDGER_13689
+    )
+    assert before["state"] == "RUNNING"
+    assert before["attempt_count"] == 1
+    assert before["provider_dispatched"] == 0
+    assert before["claim_owner"] is not None
+    assert dispatch_started_count(stores.work_unpublished) == 0
+
+    if mutation == "corrupt_backup":
+        backup.write_bytes(b"not a sqlite database")
+    elif mutation == "claimed_backup_snapshot":
+        connection = sqlite3.connect(backup)
+        try:
+            connection.execute(
+                "UPDATE unpublished_graphiti_revision_events "
+                "SET state='CLAIMED',attempt_count=1,claim_owner='other-owner' "
+                "WHERE ledger_seq=?",
+                (LEDGER_13689,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+    elif mutation == "missing_transport_table":
+        connection = sqlite3.connect(stores.work_unpublished)
+        try:
+            connection.execute("DROP TABLE model_transport_observations")
+            connection.commit()
+        finally:
+            connection.close()
+    elif mutation == "consumption_authority_drift":
+        canary_kwargs["disposition_digest"] = "sha256:" + "ff" * 32
+    elif mutation == "prepared_binding_tamper":
+        connection = sqlite3.connect(stores.work_unpublished)
+        try:
+            row = connection.execute(
+                "SELECT record_json FROM issue_790_bounded_canary_consumptions "
+                "WHERE ledger_seq=?",
+                (LEDGER_13689,),
+            ).fetchone()
+            assert row is not None
+            record = json.loads(row[0])
+            record["preflight_evidence"]["prepared_canary_record_digest"] = (
+                "sha256:" + "00" * 32
+            )
+            connection.execute(
+                "UPDATE issue_790_bounded_canary_consumptions SET record_json=? "
+                "WHERE ledger_seq=?",
+                (json.dumps(record, sort_keys=True), LEDGER_13689),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+    elif mutation == "absent_recovery_backup":
+        canary_kwargs["backup_path"] = tmp_path / "absent-recovery.sqlite3"
+    else:
+        assert mutation in {
+            "active_claim",
+            "missing_backup_digest",
+            "missing_recovery_flag",
+            "ownerless_active_expiry",
+        }
+        if mutation == "active_claim":
+            connection = sqlite3.connect(stores.work_unpublished)
+            try:
+                connection.execute(
+                    "UPDATE unpublished_graphiti_revision_events "
+                    "SET claim_expires_at='2099-01-01T00:00:00+00:00' "
+                    "WHERE ledger_seq=?",
+                    (LEDGER_13689,),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            before = _sqlite_canary_event(
+                stores.work_unpublished, ledger_seq=LEDGER_13689
+            )
+        elif mutation == "ownerless_active_expiry":
+            connection = sqlite3.connect(stores.work_unpublished)
+            try:
+                connection.execute(
+                    "UPDATE unpublished_graphiti_revision_events "
+                    "SET claim_owner=NULL,"
+                    "claim_expires_at='2099-01-01T00:00:00+00:00' "
+                    "WHERE ledger_seq=?",
+                    (LEDGER_13689,),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            before = _sqlite_canary_event(
+                stores.work_unpublished, ledger_seq=LEDGER_13689
+            )
+
+    with pytest.raises(Issue790DispositionError, match=failure):
+        disposition.run_issue_790_canary(**canary_kwargs)
+
+    after = _sqlite_canary_event(
+        stores.work_unpublished, ledger_seq=LEDGER_13689
+    )
+    connection = sqlite3.connect(stores.work_unpublished)
+    try:
+        consumptions = connection.execute(
+            "SELECT COUNT(*) FROM issue_790_bounded_canary_consumptions "
+            "WHERE ledger_seq=?",
+            (LEDGER_13689,),
+        ).fetchone()[0]
+        outcomes = connection.execute(
+            "SELECT COUNT(*) FROM issue_790_bounded_canary_outcomes "
+            "WHERE ledger_seq=?",
+            (LEDGER_13689,),
+        ).fetchone()[0]
+        allocations = connection.execute(
+            "SELECT COUNT(*) FROM model_invocation_allocations WHERE cycle_id=?",
+            (EVENT_13689,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert consume_calls == [EVENT_13689]
+    assert consumptions == 1
+    assert outcomes == 0
+    assert allocations == 0
+    assert after == before
 
 
 @pytest.mark.parametrize(
@@ -2125,7 +2869,7 @@ def test_unique_prepare_is_consumed_by_preflight_apply_and_canary() -> None:
     sources = (
         (root / "scripts/issue_790_live_canary_preflight.py").read_text(encoding="utf-8"),
         inspect.getsource(disposition._execute_issue_790_plan),
-        inspect.getsource(disposition.run_issue_790_canary),
+        inspect.getsource(disposition._run_issue_790_canary_locked),
     )
     for source in sources:
         assert "prepare_issue_790_canary" in source
@@ -2238,7 +2982,7 @@ def test_sqlite_backup_refuses_overwrite(tmp_path: Path) -> None:
 
 
 def test_canary_consumes_prepared_digest_only() -> None:
-    source = inspect.getsource(disposition.run_issue_790_canary)
+    source = inspect.getsource(disposition._run_issue_790_canary_locked)
     pre_consume, _sep, _post = source.partition("_consume_issue_790_event")
     assert "prepare_issue_790_canary" in pre_consume
     assert "consume_prepared_canary" in pre_consume
@@ -2260,9 +3004,14 @@ def test_canary_consumes_prepared_digest_only() -> None:
 
 
 def test_fail_branch_inventory_has_named_parity_tests() -> None:
+    sources = (
+        _TEST_FILE,
+        _TEST_FILE.with_name("test_issue_790_prepared_canary_artifact.py"),
+    )
     names = {
         node.name
-        for node in ast.parse(_TEST_FILE.read_text(encoding="utf-8")).body
+        for source in sources
+        for node in ast.parse(source.read_text(encoding="utf-8")).body
         if isinstance(node, ast.FunctionDef)
     }
     for branch in FAIL_BRANCH_INVENTORY:
@@ -2340,23 +3089,17 @@ def test_rehearsal_skips_live_only_predispatch_gates() -> None:
         assert gate not in source
 
 
-def test_canary_rehearsal_path_uses_run_issue_790_canary(tmp_path: Path) -> None:
-    stores = build_rehearsal_stores(tmp_path)
-    prepared = _prepare(stores)
-    result = disposition.run_issue_790_canary(
-        store=stores.work_unpublished,
-        proving_store=stores.proving,
-        backup_path=tmp_path / "unused-backup.sqlite3",
-        plan=stores.plan,
-        observed_at=OBSERVED_AT,
-        repository_root=tmp_path,
-        event_id=CANDIDATE_EVENT_ID,
-        ledger_seq=CANDIDATE_LEDGER_SEQ,
-        disposition_digest="sha256:" + "cd" * 32,
-        prepared=prepared,
-        rehearsal=True,
-        exact_head=EXACT_HEAD,
+def test_full_rehearsal_uses_production_executor_not_parallel_branch() -> None:
+    production_source = inspect.getsource(disposition.run_issue_790_canary)
+    locked_source = inspect.getsource(disposition._run_issue_790_canary_locked)
+    script_source = (
+        _ROOT / "scripts/issue_790_prepared_canary_rehearsal.py"
+    ).read_text()
+    signature = inspect.signature(disposition.run_issue_790_canary)
+    assert {"rehearsal", "exact_head", "crash_before_dispatch"}.isdisjoint(
+        signature.parameters
     )
-    assert result["dispatch_started"] is True
-    assert result["provider_calls"] == 0
-    assert consume_prepared_canary(prepared, expected=prepared) is prepared
+    assert "run_prepared_canary_rehearsal" not in production_source
+    assert "run_prepared_canary_rehearsal" not in locked_source
+    assert "run_issue_790_canary(" in script_source
+    assert "graphiti=RehearsalEvaluationGraphitiRunner(" in script_source

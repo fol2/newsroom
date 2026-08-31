@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
-from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
 from newsroom.control_plane.issue_790_prepared_canary import (
     PreparedCanary,
@@ -26,7 +25,12 @@ from newsroom.extraction.types import (
     ExtractionOutputValidation,
 )
 from newsroom.graphiti_adapter.evaluation_packet import CURSOR_AGENT_MODEL_ID
-from newsroom.graphiti_adapter.real import RealGraphitiAdapter, _no_embedding_usage
+from newsroom.graphiti_adapter.real import (
+    RealGraphitiAdapter,
+    _EpisodeTelemetry,
+    _no_embedding_usage,
+    _raw_receipt,
+)
 from newsroom.graphiti_adapter.result_mapping import produced_extraction
 
 _MINI_UNPUBLISHED = Path(
@@ -70,9 +74,9 @@ def refuse_live_issue_790_store_paths(*paths: Path) -> None:
 
 
 def sqlite_backup_copy(source: Path, destination: Path) -> Path:
-    """Full sqlite backup, not a one-row export."""
+    """Read one SQLite source into a non-live full backup copy."""
 
-    refuse_live_issue_790_store_paths(source, destination)
+    refuse_live_issue_790_store_paths(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         raise PreparedCanaryError(
@@ -103,6 +107,23 @@ class RehearsalRealGraphitiAdapter(RealGraphitiAdapter):
     dispatch_started = False
 
     def _produce(self, attempt, started_at, **_kwargs) -> ProducedExtraction:
+        usage: dict[str, object] = {
+            "usage_basis": "PROVIDER_REPORTED",
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "cached_read_tokens": 0,
+            "cached_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": 12,
+        }
+        chat_invocations = [
+            {
+                "provider": "cursor-agent-cli",
+                "model": CURSOR_AGENT_MODEL_ID,
+                "outcome": "COMPLETE",
+                "usage": usage,
+            }
+        ]
         observer = self._invocation_observer
         if observer is not None:
             from newsroom.graphiti_adapter.cli_client import (
@@ -121,25 +142,25 @@ class RehearsalRealGraphitiAdapter(RealGraphitiAdapter):
             )
             _mark_observed_transport_dispatch(observer, token)
             type(self).dispatch_started = True
+            observer.after_cli_invocation(
+                token,
+                outcome="COMPLETE",
+                usage=usage,
+            )
         embedding = _no_embedding_usage()
-        raw: dict[str, object] = {
-            "chat_invocations": [],
-            "embedding_usage": embedding,
-            "entities": [],
-            "passages": [],
-            "proposals": [],
-            "provider_attempt_number": int(attempt.attempt_number),
-            "relations": [],
-            "token_usage": {
-                "cost_usd_microunits": 0,
-                "request_tokens": 0,
-                "response_tokens": 0,
-                "total_tokens": 0,
-                "usage_basis": "NO_PROVIDER_CALL",
-            },
-            "usage_basis": "NO_PROVIDER_CALL",
-        }
-        raw["raw_output_digest"] = digest_canonical(raw)
+        telemetry = _EpisodeTelemetry(
+            chat_invocations=chat_invocations,
+            embedding_usage=embedding,
+            predecessor_episode_uuid=attempt.predecessor_episode_uuid,
+            provider_attempt_number=int(attempt.attempt_number),
+        )
+        raw = _raw_receipt(
+            attempt,
+            started_at=started_at,
+            telemetry=telemetry,
+            result=None,
+            proposals=(),
+        )
         return produced_extraction(
             attempt,
             outcome=ExtractionOutcome.SUCCESS,

@@ -742,6 +742,18 @@ def _validated_preflight(
         raise Issue790CanaryIntegrityError(
             "bounded canary iterative preflight differs"
         )
+    if approved_contract.sequence_ordinal >= 22 and any(
+        not isinstance(retained.get(field), str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(retained.get(field))) is None
+        for field in (
+            "pre_operation_snapshot_digest",
+            "prepared_canary_decision_digest",
+            "prepared_canary_record_digest",
+        )
+    ):
+        raise Issue790CanaryIntegrityError(
+            "bounded canary prepared artefact binding differs"
+        )
     evaluated_at = _instant(retained.get("evaluated_at"), field="preflight time")
     if evaluated_at > consumed_at.astimezone(UTC):
         raise Issue790CanaryIntegrityError("bounded canary preflight follows consumption")

@@ -221,6 +221,33 @@ def test_prepared_canary_parity_is_required_for_pre_provider_changes(
     assert "prepared_canary_parity:F1" in route["reasons"]
 
 
+@pytest.mark.parametrize(
+    "changed",
+    (
+        "newsroom/control_plane/issue_790_disposition.py",
+        "newsroom/control_plane/issue_790_canary.py",
+        "newsroom/control_plane/issue_790_prepared_canary.py",
+        "newsroom/control_plane/issue_790_rehearsal.py",
+        "scripts/issue_790_live_canary_preflight.py",
+        "scripts/issue_790_prepared_canary_rehearsal.py",
+    ),
+)
+def test_prepared_canary_route_selects_model_usage_receipt_consumer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed: str,
+) -> None:
+    _write(tmp_path, changed, "VALUE = 1\n")
+    _write(tmp_path, "newsroom/tests/test_model_usage_receipts.py")
+    monkeypatch.setattr(selector, "build_dependency_graph", lambda _root: _Graph())
+
+    route = selector.select_focus((changed,), repo_root=tmp_path)
+
+    assert "F2" in route["gates"]
+    assert "newsroom/tests/test_model_usage_receipts.py" in route["selected_tests"]
+    assert "prepared_canary_consumers:F2" in route["reasons"]
+
+
 def test_f0_validates_yaml_and_shell_syntax(tmp_path: Path) -> None:
     valid_yaml = tmp_path / "valid.yml"
     invalid_yaml = tmp_path / "invalid.yml"
