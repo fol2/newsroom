@@ -167,6 +167,30 @@ def _durable_receipt(
     return durable
 
 
+def _float_fact_embedding_blocked(
+    receipt: Mapping[str, object], exc: CanonicalizationError
+) -> bool:
+    """True only for the live 13683 non-canonical bound fact_embedding vector."""
+
+    if "fact_embedding" not in str(exc):
+        return False
+    proposal = receipt.get("proposal_receipt")
+    if not isinstance(proposal, Mapping):
+        return False
+    relations = proposal.get("relation_proposals")
+    if not isinstance(relations, list):
+        return False
+    for item in relations:
+        if not isinstance(item, Mapping):
+            continue
+        embedding = item.get("fact_embedding")
+        if isinstance(embedding, list) and any(
+            isinstance(value, float) for value in embedding
+        ):
+            return True
+    return False
+
+
 @dataclass(slots=True)
 class ExistingGraphitiPipeline:
     """Bind proposals to Graphiti resolution, embedding and durable rollback."""
@@ -384,11 +408,16 @@ class ExistingGraphitiPipeline:
                 and str(edge.source_node_uuid) in uuid_map
                 and str(edge.target_node_uuid) in uuid_map
             ]
-            if not persistable_edges:
-                # Resolution/embeddings may already have run. Held, existing, or
-                # leftover NEW nodes without a persistable relation are not a
-                # governed graph mutation. Seal explicit zero instead of persisting
-                # entity-only state and classifying the empty completion as unmarked.
+            held_unpersistable_relation = (
+                "AMBIGUOUS_HOLD" in resolutions and bool(edges)
+            )
+            if not persistable_edges and not held_unpersistable_relation:
+                # Resolution/embeddings may already have run. Held-without-graph,
+                # existing, or leftover NEW nodes without a persistable relation
+                # are not a governed graph mutation. Seal explicit zero instead
+                # of persisting entity-only state. A held relation still present
+                # on the extract must keep AMBIGUOUS_HOLD resolutions and must
+                # not mint a guessed endpoint.
                 return await self._seal_empty_effect(
                     receipt, embedding_skipped=True
                 )
@@ -439,12 +468,19 @@ class ExistingGraphitiPipeline:
                     sealed = self.complete_receipt(
                         resolved_nodes, output_edges, durable_receipt
                     )
-                except CanonicalizationError:
-                    # Live 13683: persistable edges after embeddings bind float
-                    # fact_embedding into the durable receipt. Canonicalisation
-                    # then fails, the persist is rolled back, and unmarked 0/0/0
-                    # was classified AMBIGUOUS_EFFECT. Seal explicit empty on the
-                    # original extract receipt instead.
+                except CanonicalizationError as exc:
+                    if (
+                        "AMBIGUOUS_HOLD" in resolutions
+                        or not _float_fact_embedding_blocked(
+                            durable_receipt, exc
+                        )
+                    ):
+                        raise
+                    # Live 13683: persistable leftover NEW edges bind a float
+                    # fact_embedding. Canonicalisation fails after persist;
+                    # unmarked 0/0/0 was AMBIGUOUS_EFFECT. Seal explicit empty
+                    # only for that bound float vector, not every
+                    # CanonicalizationError.
                     await self.guard.rollback_pending(
                         chat_invocations=chat_invocations,
                         embedding_usage=embedding_usage,
