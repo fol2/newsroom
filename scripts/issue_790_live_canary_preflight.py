@@ -56,12 +56,17 @@ STEP22_PRODUCTION_UNTOUCHED_FULL_PATH_TEST = (
     "newsroom/tests/test_issue_790_prepared_canary.py::"
     "test_step22_unused_13671_survives_production_pre_dispatch_untouched"
 )
+STEP22_BROKERERROR_SETUP_FULL_PATH_TEST = (
+    "newsroom/tests/test_issue_790_prepared_canary.py::"
+    "test_step22_consumed_13671_brokererror_setup_survives_full_path"
+)
 LATEST_FAILURE_COVERING_FULL_PATH_TESTS = frozenset(
     {
         STEP21_FULL_PATH_TEST,
         STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST,
         STEP22_CANDIDATE_IDENTITY_FULL_PATH_TEST,
         STEP22_PRODUCTION_UNTOUCHED_FULL_PATH_TEST,
+        STEP22_BROKERERROR_SETUP_FULL_PATH_TEST,
     }
 )
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")

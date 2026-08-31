@@ -841,6 +841,147 @@ def test_step22_unused_13671_survives_production_pre_dispatch_untouched(
     assert consume_calls == [SUCCESSOR_EVENT_ID]
 
 
+def test_step22_consumed_13671_brokererror_setup_survives_full_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live 13671: consume then BrokerError setup stays NOT_DISPATCHED.
+
+    Fails on 47673c01 because this covering node is absent.
+    """
+
+    from newsroom.control_plane.broker import BrokerError
+    from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
+    from newsroom.graphiti_adapter import real as real_adapter
+
+    stores = build_rehearsal_stores(tmp_path, successor=True)
+    activated = _activate_step22(stores.work_unpublished)
+    plan = activated["plan"]
+    _seed_production_disposition(stores.work_unpublished, plan)
+    _patch_production_predispatch(monkeypatch, plan=plan)
+    monkeypatch.setattr(
+        EvaluationGraphitiRunner,
+        "requires_canonical_control_plane_stores",
+        False,
+    )
+    def refuse_keychain() -> str:
+        raise BrokerError("Keychain class OPENROUTER_API lookup failed")
+
+    monkeypatch.setattr(real_adapter, "_load_graphiti", lambda: object())
+    monkeypatch.setattr(real_adapter, "openrouter_api_key", refuse_keychain)
+
+    async def must_not_dispatch(**_values: object) -> object:
+        raise AssertionError("BrokerError setup reached provider")
+
+    monkeypatch.setattr(real_adapter, "_add_episode", must_not_dispatch)
+    consume_calls: list[str] = []
+    real_consume = disposition._consume_issue_790_event
+
+    def consume_successor(**values: object) -> object:
+        consume_calls.append(str(values["event_id"]))
+        assert values["event_id"] == SUCCESSOR_EVENT_ID
+        values.setdefault("clock", lambda: OBSERVED_AT)
+        return real_consume(**values)
+
+    monkeypatch.setattr(disposition, "_consume_issue_790_event", consume_successor)
+    receipt = disposition.run_issue_790_canary(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        backup_path=tmp_path / "brokererror-13671.sqlite3",
+        plan=plan,
+        observed_at=OBSERVED_AT,
+        repository_root=tmp_path,
+        event_id=SUCCESSOR_EVENT_ID,
+        ledger_seq=SUCCESSOR_LEDGER_SEQ,
+        disposition_digest=_PRODUCTION_DISPOSITION,
+        rehearsal=False,
+        exact_head=EXACT_HEAD,
+        github_api=activated["github"],
+    )
+    event = _sqlite_canary_event(
+        stores.work_unpublished, ledger_seq=SUCCESSOR_LEDGER_SEQ
+    )
+    after = receipt["event_after"]["event"]
+    usage = receipt["usage_evidence"]
+    connection = sqlite3.connect(stores.work_unpublished)
+    try:
+        failure_code = connection.execute(
+            "SELECT last_failure_code FROM unpublished_graphiti_revision_events "
+            "WHERE ledger_seq=?",
+            (SUCCESSOR_LEDGER_SEQ,),
+        ).fetchone()[0]
+        attempt_row = connection.execute(
+            "SELECT outcome,receipt_json FROM unpublished_graphiti_attempt_receipts"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert attempt_row is not None
+    ingest = json.loads(attempt_row[1])
+    unused = unused_queued_attempt_zero_candidates(stores.work_unpublished, plan)
+    assert consume_calls == [SUCCESSOR_EVENT_ID]
+    assert receipt["consumption"]["event_id"] == SUCCESSOR_EVENT_ID
+    assert receipt["consumption"]["ledger_seq"] == SUCCESSOR_LEDGER_SEQ
+    assert receipt["outcome"]["failure_code_after_seal"] == (
+        "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:BrokerError"
+    )
+    assert receipt["resumed_zero_io_finalisation"] is False
+    assert receipt["provider_dispatch_attempted_this_run"] is True
+    assert receipt["canary_evidence_passed"] is False
+    assert receipt["retry_authorised"] is False
+    assert receipt["publication_performed"] is False
+    assert receipt["exception"] is None
+    assert receipt["runtime_readiness"]["credential_resolution"] is False
+    assert receipt["runtime_readiness"]["provider_calls"] == 0
+    assert usage["committed_dispatch_observations"] == []
+    assert usage["provider_backed_terminal_count"] == 0
+    assert dispatch_started_count(stores.work_unpublished) == 0
+    assert after["state"] == "CONFIGURATION_HELD"
+    assert after["attempt_count"] == 1
+    assert after["last_failure_code"] == (
+        "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:BrokerError"
+    )
+    assert failure_code == "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:BrokerError"
+    assert event["provider_dispatched"] == 0
+    assert type(event["provider_dispatched"]) is int
+    assert receipt["event_after"]["circuit"]["state"] == "OPEN"
+    assert receipt["event_after"]["circuit"]["failure_code"] == "BrokerError"
+    assert attempt_row[0] == "FAILED"
+    assert ingest["failure_code"] == "PRODUCER_INTERNAL_ERROR"
+    assert ingest["setup_failure"] == "BrokerError"
+    assert ingest["dispatch_state"] == "NOT_DISPATCHED"
+    assert ingest["chat_invocations"] == []
+    assert ingest["embedding_usage"]["request_count"] == 0
+    assert ingest["usage_basis"] == "NO_EMBEDDING_CALL"
+    assert SUCCESSOR_EVENT_ID not in {item[0] for item in unused}
+    assert SUCCESSOR_LEDGER_SEQ not in {item[1] for item in unused}
+    with pytest.raises(PreparedCanaryError) as caught:
+        _candidate_from_plan(
+            plan,
+            event_id=CANDIDATE_EVENT_ID,
+            ledger_seq=CANDIDATE_LEDGER_SEQ,
+            role="canary",
+            store=stores.work_unpublished,
+        )
+    assert caught.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    resumed = disposition.run_issue_790_canary(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        backup_path=tmp_path / "resume-brokererror-13671.sqlite3",
+        plan=plan,
+        observed_at=OBSERVED_AT,
+        repository_root=tmp_path,
+        event_id=SUCCESSOR_EVENT_ID,
+        ledger_seq=SUCCESSOR_LEDGER_SEQ,
+        disposition_digest=_PRODUCTION_DISPOSITION,
+        rehearsal=False,
+        exact_head=EXACT_HEAD,
+        github_api=activated["github"],
+    )
+    assert resumed["resumed_zero_io_finalisation"] is True
+    assert consume_calls == [SUCCESSOR_EVENT_ID]
+    assert dispatch_started_count(stores.work_unpublished) == 0
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (
