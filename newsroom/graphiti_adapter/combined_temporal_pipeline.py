@@ -88,6 +88,10 @@ def _durable_receipt(
     proposal_raw = durable.get("proposal_receipt")
     if not isinstance(proposal_raw, Mapping):
         return durable
+    # An explicit empty graph effect keeps the original proposal receipt as
+    # rejected/held evidence. Do not require mention/edge identity binding.
+    if not nodes and not edges:
+        return durable
     proposal = dict(proposal_raw)
     mentions_raw = proposal.get("entity_mentions")
     relations_raw = proposal.get("relation_proposals")
@@ -261,6 +265,51 @@ class ExistingGraphitiPipeline:
         self._attempt_started = False
         return completed
 
+    async def _seal_empty_effect(
+        self,
+        receipt: Mapping[str, object],
+        *,
+        embedding_skipped: bool,
+    ) -> CombinedTemporalPipelineResult:
+        """Journal an explicit zero graph effect without mutation."""
+
+        chat_invocations = self.chat_receipt()
+        embedding_usage = self.embedding_receipt()
+        await self.guard.record_pending_telemetry(
+            chat_invocations=chat_invocations,
+            embedding_usage=embedding_usage,
+        )
+        durable_receipt = _durable_receipt(
+            receipt,
+            nodes=[],
+            edges=[],
+            resolutions=(),
+            chat_invocations=chat_invocations,
+            embedding_usage=embedding_usage,
+        )
+        if self.complete_receipt is None:
+            completed_receipt = durable_receipt
+        else:
+            sealed = self.complete_receipt([], [], durable_receipt)
+            # Prefer the sealed object itself so guard completion and
+            # ProducedExtraction share one canonical receipt.
+            completed_receipt = (
+                sealed if isinstance(sealed, dict) else dict(sealed)
+            )
+        await self.guard.complete(completed_receipt)
+        self._attempt_started = False
+        return CombinedTemporalPipelineResult(
+            nodes=(),
+            edges=(),
+            guarded_edges=(),
+            node_resolutions=(),
+            graph_effect_attempted=False,
+            embedding_skipped=embedding_skipped,
+            journal_skipped=False,
+            rollback_skipped=True,
+            completed_receipt=completed_receipt,
+        )
+
     def execute(
         self,
         *,
@@ -288,42 +337,10 @@ class ExistingGraphitiPipeline:
                     rollback_completed=False,
                 )
         if not nodes and not edges:
-            chat_invocations = self.chat_receipt()
-            embedding_usage = self.embedding_receipt()
-            await self.guard.record_pending_telemetry(
-                chat_invocations=chat_invocations,
-                embedding_usage=embedding_usage,
+            return await self._seal_empty_effect(
+                receipt, embedding_skipped=True
             )
-            durable_receipt = _durable_receipt(
-                receipt,
-                nodes=[],
-                edges=[],
-                resolutions=(),
-                chat_invocations=chat_invocations,
-                embedding_usage=embedding_usage,
-            )
-            if self.complete_receipt is None:
-                completed_receipt = durable_receipt
-            else:
-                sealed = self.complete_receipt([], [], durable_receipt)
-                # Prefer the sealed object itself so guard completion and
-                # ProducedExtraction share one canonical receipt.
-                completed_receipt = (
-                    sealed if isinstance(sealed, dict) else dict(sealed)
-                )
-            await self.guard.complete(completed_receipt)
-            self._attempt_started = False
-            return CombinedTemporalPipelineResult(
-                nodes=(),
-                edges=(),
-                guarded_edges=(),
-                node_resolutions=(),
-                graph_effect_attempted=False,
-                embedding_skipped=True,
-                journal_skipped=False,
-                rollback_skipped=True,
-                completed_receipt=completed_receipt,
-            )
+        mutation_attempted = False
         try:
             resolved_nodes, uuid_map, _duplicates = await self.resolve_nodes(
                 list(nodes)
@@ -363,6 +380,14 @@ class ExistingGraphitiPipeline:
                 and str(edge.source_node_uuid) in uuid_map
                 and str(edge.target_node_uuid) in uuid_map
             ]
+            if not persistable_nodes and not persistable_edges:
+                # Resolution/embeddings may already have run. Nothing remains to
+                # persist, so seal an explicit empty graph effect instead of
+                # mutating and classifying the empty completion as unmarked.
+                return await self._seal_empty_effect(
+                    receipt, embedding_skipped=True
+                )
+            mutation_attempted = True
             guarded, _invalidated, episode_edges = await guard_extracted_edges(
                 extracted_edges=persistable_edges,
                 uuid_map=uuid_map,
@@ -425,7 +450,7 @@ class ExistingGraphitiPipeline:
             self._attempt_started = False
             raise CombinedTemporalPipelineError(
                 "combined-temporal pipeline failed",
-                graph_effect_attempted=True,
+                graph_effect_attempted=mutation_attempted,
                 rollback_completed=rollback_completed,
             ) from exc
 

@@ -33,7 +33,7 @@ def test_issue_790_forecast_blocker_smokes_all_pass() -> None:
     assert "B14 dry-replay Step 14 stuffing ignored → projected null success" in names
     assert "B21 Step 19 execute→ingest→bind accepts COMPLETE+0" in names
     assert (
-        "B22 Steps 20-21 marked and unmarked COMPLETE+0 avoid AMBIGUOUS_EFFECT"
+        "B22 Steps 20-22 COMPLETE+0 avoid AMBIGUOUS_EFFECT"
         in names
     )
     assert "B23 failure/blocked/proposal-bearing ambiguity remains fail-closed" in names
