@@ -28,7 +28,9 @@ from newsroom.tests.test_graphiti_event_consumer import (
 _ROOT = Path(__file__).resolve().parents[2]
 SEALED_13361_AVAILABLE_AT = "2026-08-30T20:58:43.662872Z"
 LIVE_13361_AVAILABLE_AT = "2026-08-30T21:29:18.946358Z"
-OBSERVED_AT = datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
+# Must stay inside the proving HTTP retention window of `_proving()`
+# (fetched_at 2026-08-16, seven days). Consume uses this same instant.
+OBSERVED_AT = datetime(2026, 8, 20, 0, 1, tzinfo=UTC)
 EXACT_HEAD = "e1d8cbff65e039e3f6393b64cba0f7310f976fa5"
 EVENT_13361 = (
     "sha256:90c3b4de731f2df8d4353e516762f65450570e1e8372ed7b703423f717351ae7"
@@ -143,7 +145,7 @@ def _bind_candidate_13665(connection: sqlite3.Connection, source_event_id: str) 
 def build_rehearsal_stores(tmp_path: Path) -> RehearsalStores:
     """Full sqlite backup-style copy with unused 13665 and drifted 13361."""
 
-    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    clock = MutableClock(OBSERVED_AT)
     proving, unpublished, source_event_id, _ledger_seq = _projected_zero_ref_event(
         tmp_path, clock
     )

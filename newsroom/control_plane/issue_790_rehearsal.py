@@ -204,7 +204,11 @@ def run_prepared_canary_rehearsal(
             event_id=CANDIDATE_EVENT_ID,
             canary_consumption_digest=None,
             model_usage=service,
-            graphiti=RehearsalEvaluationGraphitiRunner(fallback_permitted=False),
+            graphiti=RehearsalEvaluationGraphitiRunner(
+                fallback_permitted=False,
+                clock=lambda: observed_at,
+            ),
+            clock=lambda: observed_at,
         )
         post_dispatch_error = None
     except Exception as exc:

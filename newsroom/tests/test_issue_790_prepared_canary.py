@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from newsroom.control_plane.issue_790_prepared_canary import (
     CANDIDATE_LEDGER_SEQ,
     FAIL_BRANCH_INVENTORY,
     FIELD_CLASSIFICATION,
+    LIVE_ONLY_PREDISPATCH_GATES,
     PREPARED_CANARY_ABSENT,
     PREPARED_CANARY_DIGEST_DRIFT,
     PreparedCanaryError,
@@ -306,9 +308,7 @@ def test_missing_prepared_canary_fail_closes_before_dispatch(tmp_path: Path) -> 
 def test_digest_drift_fail_closes_before_dispatch(tmp_path: Path) -> None:
     stores = build_rehearsal_stores(tmp_path)
     prepared = _prepare(stores)
-    mutate_retry_field(
-        stores.work_unpublished, ledger_seq=13361, field="state", value="QUEUED"
-    )
+    drifted = replace(prepared, decision_digest="sha256:" + "00" * 32)
     with pytest.raises(PreparedCanaryError) as caught:
         run_prepared_canary_rehearsal(
             store=stores.work_unpublished,
@@ -316,14 +316,12 @@ def test_digest_drift_fail_closes_before_dispatch(tmp_path: Path) -> None:
             plan=stores.plan,
             observed_at=OBSERVED_AT,
             exact_head=EXACT_HEAD,
-            prepared=prepared,
+            prepared=drifted,
         )
-    assert caught.value.failure_code in {
-        PREPARED_CANARY_DIGEST_DRIFT,
-        "RETRY_FORBIDDEN_SAFETY_STATE",
-    }
+    assert caught.value.failure_code == PREPARED_CANARY_DIGEST_DRIFT
     assert RehearsalRealGraphitiAdapter.dispatch_started is False
     assert dispatch_started_count(stores.work_unpublished) == 0
+    assert candidate_identity(stores.work_unpublished)[0] == CANDIDATE_EVENT_ID
 
 
 def test_dispatch_before_crash_leaves_candidate_unconsumed(tmp_path: Path) -> None:
@@ -385,27 +383,33 @@ def test_fail_branch_inventory_has_named_parity_tests() -> None:
 
 
 def test_prepared_failure_codes_are_inventoried() -> None:
-    module = (
-        Path(__file__).resolve().parents[2]
-        / "newsroom/control_plane/issue_790_prepared_canary.py"
+    root = Path(__file__).resolve().parents[2]
+    modules = (
+        root / "newsroom/control_plane/issue_790_prepared_canary.py",
+        root / "newsroom/control_plane/issue_790_rehearsal.py",
     )
-    tree = ast.parse(module.read_text(encoding="utf-8"))
-    codes = {
-        node.value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Constant)
-        and isinstance(node.value, str)
-        and node.value.isupper()
-        and "_" in node.value
-        and node.value
-        not in {
-            "UTC",
-            "QUEUED",
-            "EXPLICIT_QUEUED_ATTEMPT_ZERO_EVENT",
-            "DISABLED_BEFORE_PROVIDER_DISPATCH",
-            "PREDISPATCH_BINDING_FAILURE",
-        }
-    }
+    codes: set[str] = set()
+    for module in modules:
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        codes.update(
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value.isupper()
+            and "_" in node.value
+            and node.value
+            not in {
+                "UTC",
+                "QUEUED",
+                "EXPLICIT_QUEUED_ATTEMPT_ZERO_EVENT",
+                "DISABLED_BEFORE_PROVIDER_DISPATCH",
+                "PREDISPATCH_BINDING_FAILURE",
+                "DISPATCH_STARTED",
+                "NO_PROVIDER_CALL",
+                "UNSTRUCTURED",
+            }
+        )
     inventoried = {branch.failure_code for branch in FAIL_BRANCH_INVENTORY}
     named = {
         "PREPARED_CANARY_ABSENT",
@@ -423,6 +427,28 @@ def test_prepared_failure_codes_are_inventoried() -> None:
     }
     assert named <= inventoried
     assert named <= codes | inventoried
+    local_raise_codes = {
+        code
+        for code in codes
+        if code.endswith(("_ABSENT", "_DRIFT", "_STATE", "_TARGET", "_INVALID", "_FRESH", "_REFUSED", "_DISPATCH", "_ALIAS", "_IDENTITY"))
+        or code in named
+    }
+    assert local_raise_codes <= inventoried | named
+
+
+def test_rehearsal_skips_live_only_predispatch_gates() -> None:
+    source = inspect.getsource(run_prepared_canary_rehearsal)
+    assert LIVE_ONLY_PREDISPATCH_GATES
+    for gate in (
+        "_require_approved_plan",
+        "_validate_operational_evidence",
+        "_require_issue_790_canary_route",
+        "_require_step16_runtime_semantics",
+        "_require_worker_unloaded",
+        "_assert_exact_target",
+        "_require_sequence_predecessor",
+    ):
+        assert gate not in source
 
 
 def test_canary_rehearsal_path_uses_run_issue_790_canary(tmp_path: Path) -> None:

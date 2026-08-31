@@ -73,6 +73,8 @@ F4_PATTERNS = (
 )
 SHARED_BREADTH_PATTERNS = ("pyproject.toml", "uv.lock", "newsroom/tests/conftest.py")
 PREPARED_CANARY_PARITY_PATTERNS = (
+    "newsroom/control_plane/cycle.py",
+    "newsroom/control_plane/graphiti.py",
     "newsroom/control_plane/issue_790_disposition.py",
     "newsroom/control_plane/issue_790_canary.py",
     "newsroom/control_plane/issue_790_prepared_canary.py",

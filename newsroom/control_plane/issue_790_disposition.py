@@ -11,7 +11,7 @@ import sqlite3
 import stat
 import subprocess
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -3640,6 +3640,7 @@ def _consume_issue_790_event(
     canary_consumption_digest: str | None,
     model_usage: ModelUsageService,
     graphiti: graphiti_module.EvaluationGraphitiRunner | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> GraphitiProcessResult | None:
     from newsroom.control_plane.cycle import consume_next_graphiti_event
     from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
@@ -3659,6 +3660,7 @@ def _consume_issue_790_event(
         require_fresh=True,
         recover_model_usage=False,
         canary_consumption_digest=canary_consumption_digest,
+        **({} if clock is None else {"clock": clock}),
     )
 
 
@@ -3799,16 +3801,6 @@ def run_issue_790_canary(
             "prepared canary is absent",
             failure_code="PREPARED_CANARY_ABSENT",
         )
-    prepared_now = prepare_issue_790_canary(
-        store=store,
-        proving_store=proving_store,
-        plan=retained_plan,
-        observed_at=observed_at,
-        exact_head=str(operational_evidence.get("revision") or ""),
-        event_id=event_id,
-        ledger_seq=ledger_seq,
-        role="canary",
-    )
     latest = prepare_issue_790_canary(
         store=store,
         proving_store=proving_store,
@@ -3820,7 +3812,7 @@ def run_issue_790_canary(
         role="canary",
     )
     retained_prepared = consume_prepared_canary(
-        prepared_now if prepared is None else prepared,
+        latest if prepared is None else prepared,
         expected=latest,
     )
     _assert_exact_target(store, retained_plan)
