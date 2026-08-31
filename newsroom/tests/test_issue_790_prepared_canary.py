@@ -49,7 +49,9 @@ from newsroom.control_plane.issue_790_rehearsal import (
 )
 from newsroom.tests.test_issue_790_rehearsal_fixtures import (
     EVENT_13361,
+    EVENT_13677,
     EXACT_HEAD,
+    LEDGER_13677,
     LIVE_13361_AVAILABLE_AT,
     OBSERVED_AT,
     SEALED_13361_AVAILABLE_AT,
@@ -980,6 +982,330 @@ def test_step22_consumed_13671_brokererror_setup_survives_full_path(
     assert resumed["resumed_zero_io_finalisation"] is True
     assert consume_calls == [SUCCESSOR_EVENT_ID]
     assert dispatch_started_count(stores.work_unpublished) == 0
+
+
+def test_step22_consumed_13677_zero_after_embeddings_survives_full_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live 13677: leftover NEW nodes and no persistable relation is TERMINAL.
+
+    Provider COMPLETE + four embeddings + 0/0/0 was AMBIGUOUS_EFFECT before
+    the empty-effect seal covered leftover NEW nodes. Fails on be1e1895
+    because this covering node is absent and that seal did not apply.
+    """
+
+    from types import SimpleNamespace
+
+    from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
+    from newsroom.graphiti_adapter import real as real_adapter
+    from newsroom.graphiti_adapter.combined_temporal_pipeline import (
+        ExistingGraphitiPipeline,
+    )
+    from newsroom.graphiti_adapter.evaluation_packet import (
+        CURSOR_AGENT_MODEL_ID,
+        OPENROUTER_EMBEDDING_SLUG,
+    )
+    from newsroom.graphiti_adapter.neo4j_guard import GuardState
+
+    persist_calls: list[object] = []
+    stores = build_rehearsal_stores(tmp_path, unused_13677=True)
+    activated = _activate_step22(stores.work_unpublished)
+    plan = activated["plan"]
+    _seed_production_disposition(stores.work_unpublished, plan)
+    _patch_production_predispatch(monkeypatch, plan=plan)
+    monkeypatch.setattr(
+        EvaluationGraphitiRunner,
+        "requires_canonical_control_plane_stores",
+        False,
+    )
+    monkeypatch.setattr(real_adapter, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(real_adapter, "openrouter_api_key", lambda: "fixture-key")
+    monkeypatch.setattr(
+        real_adapter, "neo4j_community_password", lambda: "fixture-password"
+    )
+
+    class Guard:
+        async def begin(self) -> object:
+            return SimpleNamespace(state=GuardState.CREATED)
+
+        async def record_pending_telemetry(self, **_values: object) -> None:
+            return None
+
+        async def complete(self, _receipt: object) -> None:
+            return None
+
+        async def rollback_pending(self, **_values: object) -> bool:
+            return True
+
+    def _record_live_13677_leaves(observer: object) -> None:
+        if observer is None or not hasattr(observer, "before_cli_invocation"):
+            return
+        chat = observer.before_cli_invocation(
+            provider="cursor-agent-cli",
+            model=CURSOR_AGENT_MODEL_ID,
+            prompt="live-13677 leftover NEW without persistable edges",
+            schema=None,
+        )
+        observer.transport_dispatch_started(chat)
+        observer.after_cli_invocation(
+            chat,
+            outcome="COMPLETE",
+            usage={
+                "usage_basis": "PROVIDER_REPORTED",
+                "input_tokens": 5_400,
+                "cached_read_tokens": 500,
+                "output_tokens": 3_046,
+                "total_tokens": 8_446,
+            },
+        )
+        for index, (tokens, cost) in enumerate(((36, 5), (4, 1), (2, 0), (2, 0))):
+            embedding = observer.before_embedding_invocation(
+                provider="openrouter",
+                model=OPENROUTER_EMBEDDING_SLUG,
+                input_data=[f"live-13677-embedding-{index}"],
+            )
+            observer.transport_dispatch_started(embedding)
+            observer.after_embedding_invocation(
+                embedding,
+                outcome="COMPLETE",
+                usage={
+                    "usage_basis": "PROVIDER_REPORTED",
+                    "input_tokens": tokens,
+                    "output_tokens": 0,
+                    "cached_read_tokens": 0,
+                    "cached_write_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "total_tokens": tokens,
+                    "provider_telemetry": {
+                        "request_id": f"live-13677-embedding-{index}",
+                        "prompt_tokens": tokens,
+                        "total_tokens": tokens,
+                        "cost_usd_microunits": cost,
+                    },
+                },
+            )
+
+    async def leftover_new_nodes_without_edges(**values: object) -> object:
+        telemetry = values["telemetry"]
+        telemetry.chat_invocations = [
+            {
+                "provider": "cursor-agent-cli",
+                "model": CURSOR_AGENT_MODEL_ID,
+                "outcome": "COMPLETE",
+                "usage": {
+                    "usage_basis": "PROVIDER_REPORTED",
+                    "input_tokens": 5_400,
+                    "cached_read_tokens": 500,
+                    "output_tokens": 3_046,
+                    "total_tokens": 8_446,
+                },
+            }
+        ]
+        telemetry.embedding_usage = {
+            "usage_basis": "PROVIDER_REPORTED",
+            "request_count": 4,
+            "embedding_tokens": 44,
+            "cost_usd_microunits": 6,
+            "requests": [
+                {
+                    "provider": "openrouter",
+                    "model": OPENROUTER_EMBEDDING_SLUG,
+                    "request_id": f"live-13677-embedding-{index}",
+                    "prompt_tokens": tokens,
+                    "total_tokens": tokens,
+                    "cost_usd_microunits": cost,
+                    "cost_reported": True,
+                    "outcome": "COMPLETE",
+                }
+                for index, (tokens, cost) in enumerate(
+                    ((36, 5), (4, 1), (2, 0), (2, 0))
+                )
+            ],
+        }
+        _record_live_13677_leaves(values.get("invocation_observer"))
+
+        async def resolve_nodes(
+            nodes: list[object],
+        ) -> tuple[list[object], dict[str, str], list[tuple[object, object]]]:
+            created = [
+                SimpleNamespace(
+                    uuid=str(getattr(node, "uuid", "new")),
+                    attributes={"resolution": "DETERMINISTIC_NEW_NODE"},
+                )
+                for node in nodes
+            ]
+            return (
+                created,
+                {
+                    str(getattr(node, "uuid", "new")): str(
+                        getattr(node, "uuid", "new")
+                    )
+                    for node in nodes
+                },
+                [],
+            )
+
+        async def persist_graph(nodes: list[object], edges: list[object]) -> None:
+            persist_calls.append((list(nodes), list(edges)))
+            raise RuntimeError("persist must not run without persistable edges")
+
+        async def create_embeddings(_embedder: object, _edges: list[object]) -> None:
+            raise AssertionError(
+                "edge embeddings must not run without persistable edges"
+            )
+
+        pipeline = ExistingGraphitiPipeline(
+            guard=Guard(),  # type: ignore[arg-type]
+            resolve_nodes=resolve_nodes,
+            resolve_pointers=lambda edges, _uuid_map: edges,
+            create_embeddings=create_embeddings,
+            persist_graph=persist_graph,
+            embedder=object(),
+            run_async=lambda awaitable: awaitable,
+            chat_receipt=lambda: list(telemetry.chat_invocations),
+            embedding_receipt=lambda: dict(telemetry.embedding_usage),
+            complete_receipt=lambda nodes, edges, receipt: values["validate_result"](
+                SimpleNamespace(
+                    episode=None,
+                    nodes=tuple(nodes),
+                    edges=tuple(edges),
+                ),
+                telemetry,
+                receipt,
+            ),
+        )
+        await pipeline._prepare_attempt()
+        sealed = await pipeline._execute(
+            nodes=(SimpleNamespace(uuid="entity-1", attributes={}),),
+            edges=(),
+            receipt={"provider_attempt_number": 1},
+        )
+        assert persist_calls == []
+        assert sealed.graph_effect_attempted is False
+        return SimpleNamespace(episode=None, nodes=(), edges=())
+
+    monkeypatch.setattr(
+        real_adapter, "_add_episode", leftover_new_nodes_without_edges
+    )
+    consume_calls: list[str] = []
+    real_consume = disposition._consume_issue_790_event
+
+    def consume_13677(**values: object) -> object:
+        consume_calls.append(str(values["event_id"]))
+        assert values["event_id"] == EVENT_13677
+        values.setdefault("clock", lambda: OBSERVED_AT)
+        return real_consume(**values)
+
+    monkeypatch.setattr(disposition, "_consume_issue_790_event", consume_13677)
+    receipt = disposition.run_issue_790_canary(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        backup_path=tmp_path / "zero-13677.sqlite3",
+        plan=plan,
+        observed_at=OBSERVED_AT,
+        repository_root=tmp_path,
+        event_id=EVENT_13677,
+        ledger_seq=LEDGER_13677,
+        disposition_digest=_PRODUCTION_DISPOSITION,
+        rehearsal=False,
+        exact_head=EXACT_HEAD,
+        github_api=activated["github"],
+    )
+    event = _sqlite_canary_event(stores.work_unpublished, ledger_seq=LEDGER_13677)
+    after = receipt["event_after"]["event"]
+    connection = sqlite3.connect(stores.work_unpublished)
+    try:
+        attempt_row = connection.execute(
+            "SELECT outcome,receipt_json FROM unpublished_graphiti_attempt_receipts"
+        ).fetchone()
+        ingest = connection.execute(
+            "SELECT outcome,proposal_count,entity_count,relation_count "
+            "FROM unpublished_graphiti_ingest"
+        ).fetchone()
+        spent_13665 = connection.execute(
+            "SELECT state,attempt_count,provider_dispatched FROM "
+            "unpublished_graphiti_revision_events WHERE ledger_seq=?",
+            (CANDIDATE_LEDGER_SEQ,),
+        ).fetchone()
+        spent_13671 = connection.execute(
+            "SELECT state,attempt_count,provider_dispatched FROM "
+            "unpublished_graphiti_revision_events WHERE ledger_seq=?",
+            (SUCCESSOR_LEDGER_SEQ,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert attempt_row is not None
+    attempt = json.loads(attempt_row[1])
+    combined = attempt.get("combined_temporal_receipt")
+    unused = unused_queued_attempt_zero_candidates(stores.work_unpublished, plan)
+    assert persist_calls == []
+    assert consume_calls == [EVENT_13677]
+    assert receipt["consumption"]["event_id"] == EVENT_13677
+    assert receipt["consumption"]["ledger_seq"] == LEDGER_13677
+    assert receipt["exception"] is None
+    assert receipt["resumed_zero_io_finalisation"] is False
+    assert receipt["provider_dispatch_attempted_this_run"] is True
+    assert receipt["publication_performed"] is False
+    assert receipt["retry_authorised"] is False
+    assert receipt["process_result"]["state"] == "TERMINAL"
+    assert receipt["process_result"]["attempt_count"] == 1
+    assert after["state"] == "TERMINAL"
+    assert after["attempt_count"] == 1
+    assert after["last_failure_code"] is None
+    assert event["state"] == "TERMINAL"
+    assert event["attempt_count"] == 1
+    assert event["provider_dispatched"] == 1
+    assert type(event["provider_dispatched"]) is int
+    assert ingest == ("COMPLETE", 0, 0, 0)
+    assert attempt["outcome"] == "COMPLETE"
+    assert attempt["proposal_count"] == 0
+    assert attempt.get("entity_count") == 0
+    assert attempt.get("relation_count") == 0
+    assert isinstance(combined, dict)
+    assert combined["zero_proposal_effect"] == "EXPLICIT"
+    assert attempt["embedding_usage"]["request_count"] == 4
+    assert attempt["chat_invocations"][0]["usage"]["total_tokens"] == 8_446
+    assert spent_13665 == ("CONFIGURATION_HELD", 1, 1)
+    assert spent_13671 == ("CONFIGURATION_HELD", 1, 0)
+    assert EVENT_13677 not in {item[0] for item in unused}
+    assert LEDGER_13677 not in {item[1] for item in unused}
+    with pytest.raises(PreparedCanaryError) as spent_13665_target:
+        _candidate_from_plan(
+            plan,
+            event_id=CANDIDATE_EVENT_ID,
+            ledger_seq=CANDIDATE_LEDGER_SEQ,
+            role="canary",
+            store=stores.work_unpublished,
+        )
+    assert spent_13665_target.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    with pytest.raises(PreparedCanaryError) as spent_13671_target:
+        _candidate_from_plan(
+            plan,
+            event_id=SUCCESSOR_EVENT_ID,
+            ledger_seq=SUCCESSOR_LEDGER_SEQ,
+            role="canary",
+            store=stores.work_unpublished,
+        )
+    assert spent_13671_target.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    resumed = disposition.run_issue_790_canary(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        backup_path=tmp_path / "resume-zero-13677.sqlite3",
+        plan=plan,
+        observed_at=OBSERVED_AT,
+        repository_root=tmp_path,
+        event_id=EVENT_13677,
+        ledger_seq=LEDGER_13677,
+        disposition_digest=_PRODUCTION_DISPOSITION,
+        rehearsal=False,
+        exact_head=EXACT_HEAD,
+        github_api=activated["github"],
+    )
+    assert resumed["resumed_zero_io_finalisation"] is True
+    assert resumed["provider_dispatch_attempted_this_run"] is False
+    assert consume_calls == [EVENT_13677]
+    assert persist_calls == []
 
 
 @pytest.mark.parametrize(

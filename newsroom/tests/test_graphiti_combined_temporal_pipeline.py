@@ -517,6 +517,91 @@ def test_held_resolution_without_persistable_graph_seals_explicit_empty_effect()
     ]
 
 
+def test_new_nodes_without_persistable_edges_seal_explicit_empty_effect() -> None:
+    """Live 13677: leftover NEW nodes and no persistable relation is explicit zero."""
+
+    guard = _Guard()
+    persist_calls: list[object] = []
+    sealed: list[tuple[list[object], list[object]]] = []
+
+    async def resolve_nodes(
+        nodes: list[Any],
+    ) -> tuple[list[Any], dict[str, str], list[tuple[Any, Any]]]:
+        guard.calls.append("resolve")
+        created = [
+            SimpleNamespace(
+                uuid=str(node.uuid),
+                attributes={"resolution": "DETERMINISTIC_NEW_NODE"},
+            )
+            for node in nodes
+        ]
+        return (
+            created,
+            {str(node.uuid): str(node.uuid) for node in nodes},
+            [],
+        )
+
+    def resolve_pointers(edges: list[Any], _uuid_map: dict[str, str]) -> list[Any]:
+        guard.calls.append("pointers")
+        return edges
+
+    async def create_embeddings(_embedder: Any, _edges: list[Any]) -> None:
+        guard.calls.append("embed")
+        raise RuntimeError("edge embeddings must not run without persistable edges")
+
+    async def persist_graph(nodes: list[Any], edges: list[Any]) -> None:
+        persist_calls.append((list(nodes), list(edges)))
+        raise RuntimeError("persist must not run without persistable edges")
+
+    pipeline = ExistingGraphitiPipeline(
+        guard=guard,  # type: ignore[arg-type]
+        resolve_nodes=resolve_nodes,
+        resolve_pointers=resolve_pointers,
+        create_embeddings=create_embeddings,
+        persist_graph=persist_graph,
+        embedder=object(),
+        run_async=asyncio.run,
+        chat_receipt=lambda: [
+            {"model": "composer-2.5", "outcome": "COMPLETE"}
+        ],
+        embedding_receipt=lambda: {
+            "usage_basis": "PROVIDER_REPORTED",
+            "request_count": 4,
+            "embedding_tokens": 44,
+            "cost_usd_microunits": 6,
+            "requests": [{"outcome": "COMPLETE"}] * 4,
+        },
+        complete_receipt=lambda nodes, edges, receipt: (
+            sealed.append((list(nodes), list(edges))) or dict(receipt)
+        ),
+    )
+    result = pipeline.execute(
+        nodes=(_node("local-entity"),),
+        edges=(),
+        receipt={
+            "provider_attempt_number": 1,
+            "proposal_receipt": {
+                "entity_mentions": [{"local_id": 0}],
+                "relation_proposals": [],
+            },
+        },
+    )
+
+    assert persist_calls == []
+    assert sealed == [([], [])]
+    assert result.graph_effect_attempted is False
+    assert result.nodes == ()
+    assert result.edges == ()
+    assert result.embedding_skipped is True
+    assert guard.calls == ["begin", "resolve", "telemetry", "complete"]
+    assert result.completed_receipt is not None
+    assert result.completed_receipt["zero_proposal_effect"] == "EXPLICIT"
+    assert result.completed_receipt["embedding_usage"]["request_count"] == 4
+    assert result.completed_receipt["proposal_receipt"]["entity_mentions"] == [
+        {"local_id": 0}
+    ]
+
+
 def test_existing_pipeline_rejects_a_malformed_complete_marker_without_effect() -> None:
     guard = _Guard(GuardState.COMPLETE)
     with pytest.raises(CombinedTemporalPipelineError) as captured:

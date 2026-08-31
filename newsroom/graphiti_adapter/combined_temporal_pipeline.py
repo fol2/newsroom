@@ -383,10 +383,11 @@ class ExistingGraphitiPipeline:
                 and str(edge.source_node_uuid) in uuid_map
                 and str(edge.target_node_uuid) in uuid_map
             ]
-            if not persistable_nodes and not persistable_edges:
-                # Resolution/embeddings may already have run. Nothing remains to
-                # persist, so seal an explicit empty graph effect instead of
-                # mutating and classifying the empty completion as unmarked.
+            if not persistable_edges:
+                # Resolution/embeddings may already have run. Held, existing, or
+                # leftover NEW nodes without a persistable relation are not a
+                # governed graph mutation. Seal explicit zero instead of persisting
+                # entity-only state and classifying the empty completion as unmarked.
                 return await self._seal_empty_effect(
                     receipt, embedding_skipped=True
                 )
