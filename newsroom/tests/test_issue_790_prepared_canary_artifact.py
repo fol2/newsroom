@@ -236,30 +236,51 @@ def test_legacy_process_fence_matches_only_same_event_and_store(
     event = EVENT_13689
     output = "\n".join(
         (
-            f"101 {marker} --store {shlex.quote(str(stores.work_unpublished))} "
+            f"300 200 {marker} "
+            f"--store {shlex.quote(str(stores.work_unpublished))} "
             f"--canary-event-id {event}",
-            f"102 {marker} --store {shlex.quote(str(other))} "
+            f"200 100 uv run {marker} "
+            f"--store {shlex.quote(str(stores.work_unpublished))} "
             f"--canary-event-id {event}",
-            f"103 {marker} --store={shlex.quote(str(stores.work_unpublished))} "
+            f"100 1 /bin/zsh -lc uv run {marker} "
+            f"--store {shlex.quote(str(stores.work_unpublished))} "
+            f"--canary-event-id {event}",
+            f"301 300 {marker} "
+            f"--store {shlex.quote(str(stores.work_unpublished))} "
+            f"--canary-event-id {event}",
+            f"101 1 {marker} --store {shlex.quote(str(stores.work_unpublished))} "
+            f"--canary-event-id {event}",
+            f"102 1 {marker} --store {shlex.quote(str(other))} "
+            f"--canary-event-id {event}",
+            f"103 1 {marker} --store={shlex.quote(str(stores.work_unpublished))} "
             f"--canary-event-id=sha256:{'ff' * 32}",
-            "104 python unrelated.py",
+            "104 1 python unrelated.py",
+            "1 0 /sbin/launchd",
         )
     )
-    monkeypatch.setattr(
-        disposition.subprocess,
-        "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+    monkeypatch.setattr(disposition.os, "getpid", lambda: 300)
+
+    def ps_run(
+        *args: object, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        assert args == (["/bin/ps", "-axo", "pid=,ppid=,command="],)
+        return subprocess.CompletedProcess(
             args=[],
             returncode=0,
             stdout=output,
             stderr="",
-        ),
+        )
+
+    monkeypatch.setattr(
+        disposition.subprocess,
+        "run",
+        ps_run,
     )
 
     assert disposition._other_issue_790_legacy_canary_process_ids(
         event_id=event,
         store=stores.work_unpublished,
-    ) == (101,)
+    ) == (101, 301)
 
 
 def _event_manifest_digest(path: Path, *, ledger_seq: int) -> str:
