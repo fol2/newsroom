@@ -26,6 +26,9 @@ from scripts import issue_790_conservative_disposition as supply_cli
 
 NOW = datetime(2026, 8, 30, 23, 30, tzinfo=UTC)
 NOW_TEXT = "2026-08-30T23:30:00.000000Z"
+STRANDED_AT = datetime(2026, 8, 31, 9, 23, 20, tzinfo=UTC)
+STRANDED_TEXT = "2026-08-31T09:23:20.000000Z"
+LATER = datetime(2026, 8, 31, 9, 48, 27, tzinfo=UTC)
 
 
 def _unit(
@@ -114,7 +117,33 @@ def _rows(path: Path) -> tuple[list[tuple[object, ...]], int]:
         connection.close()
 
 
-def _live_shaped_current_run_units() -> tuple[CorpusIngestUnit, ...]:
+def _fixture_fetch(url: str) -> tuple[int, bytes]:
+    if "atom" in url:
+        return 200, ATOM
+    if url.endswith(".xml") or "rss" in url.lower() or "WarningsRSS" in url:
+        return 200, RSS
+    return 200, JSON_DOC
+
+
+def _land_units(path: Path, units: tuple[CorpusIngestUnit, ...]) -> None:
+    connection = connect(str(path))
+    connection.execute("BEGIN IMMEDIATE")
+    for unit in units:
+        assert emit_effective_revision_landed(
+            connection,
+            unit.effective_revision,
+            published_at=unit.published_at,
+            updated_at=unit.updated_at,
+            ingest_ids=(unit.ingest_id,),
+            landed_at=unit.coverage_first_observed_at,
+        )
+    connection.commit()
+    connection.close()
+
+
+def _live_shaped_current_run_units(
+    *, run_id: str = "run-fresh", observed_at: str = NOW_TEXT
+) -> tuple[CorpusIngestUnit, ...]:
     units: list[CorpusIngestUnit] = []
     number = 1
     for source_id, count in (
@@ -128,13 +157,43 @@ def _live_shaped_current_run_units() -> tuple[CorpusIngestUnit, ...]:
             units.append(
                 _unit(
                     number,
-                    run_id="run-fresh",
-                    observed_at=NOW_TEXT,
+                    run_id=run_id,
+                    observed_at=observed_at,
                     source_id=source_id,
                 )
             )
             number += 1
     return tuple(units)
+
+
+def _retain_stranded_first_seen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path, tuple[CorpusIngestUnit, ...]]:
+    proving = tmp_path / "proving_store.sqlite3"
+    unpublished = tmp_path / "unpublished_store.sqlite3"
+    _seed_frontier(unpublished)
+    retained = run_intake(
+        proving_store=str(proving),
+        fetch=_fixture_fetch,
+        clock=lambda: STRANDED_AT,
+    )
+    stranded = _live_shaped_current_run_units(
+        run_id=retained.proving_run_id, observed_at=STRANDED_TEXT
+    )
+    assert len({unit.coverage_key() for unit in stranded}) == 47
+    old_run = _unit(90, run_id="run-old", observed_at=NOW_TEXT, source_id="AA-00")
+    other_timestamp = _unit(
+        91, run_id=retained.proving_run_id, source_id="AA-01"
+    )
+    monkeypatch.setattr(
+        "newsroom.control_plane.issue_790_event_supply.run_intake",
+        lambda **_: _intake_report("run-later"),
+    )
+    monkeypatch.setattr(
+        "newsroom.control_plane.issue_790_event_supply.load_graphiti_units",
+        lambda **_: (*stranded, old_run, other_timestamp),
+    )
+    return proving, unpublished, stranded
 
 
 def test_supply_intakes_and_projects_only_one_fresh_revision(
@@ -190,16 +249,9 @@ def test_supply_full_path_uses_new_intake_not_existing_backlog(tmp_path: Path) -
     unpublished = tmp_path / "unpublished_store.sqlite3"
     baseline_at = NOW.replace(hour=22)
 
-    def baseline_fetch(url: str) -> tuple[int, bytes]:
-        if "atom" in url:
-            return 200, ATOM
-        if url.endswith(".xml") or "rss" in url.lower() or "WarningsRSS" in url:
-            return 200, RSS
-        return 200, JSON_DOC
-
     baseline = run_intake(
         proving_store=str(proving),
-        fetch=baseline_fetch,
+        fetch=_fixture_fetch,
         clock=lambda: baseline_at,
     )
     baseline_units = load_graphiti_units(
@@ -245,7 +297,7 @@ def test_supply_full_path_uses_new_intake_not_existing_backlog(tmp_path: Path) -
                 b'{"title":"BNO visa changed","base_path":"/british-national-'
                 b'overseas-bno-visa","content_id":"abc","description":"Apply."}',
             )
-        return baseline_fetch(url)
+        return _fixture_fetch(url)
 
     result = supply_one_graphiti_event(
         proving_store=str(proving),
@@ -386,6 +438,221 @@ def test_supply_selects_first_key_from_many_current_run_revisions(
         assert connection.execute(
             "SELECT COUNT(*) FROM unpublished_effective_revision_landed"
         ).fetchone() == (2,)
+    finally:
+        connection.close()
+
+
+def test_supply_selects_stranded_first_seen_key_on_later_empty_instant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proving, unpublished, stranded = _retain_stranded_first_seen(
+        tmp_path, monkeypatch
+    )
+    keys = sorted({unit.coverage_key() for unit in stranded})
+
+    result = supply_one_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        expected_frontier_ledger_seq=1,
+        clock=lambda: LATER,
+    )
+
+    assert result.proving_run_id == "run-later"
+    assert result.ledger_seq == 2
+    assert result.state == "QUEUED"
+    assert result.attempt_count == 0
+    assert result.provider_dispatched is False
+    assert result.claim_owner is None
+    assert result.unit_count == 1
+    connection = sqlite3.connect(unpublished)
+    try:
+        assert connection.execute(
+            "SELECT source_id,item_key,state,attempt_count,provider_dispatched,"
+            "claim_owner,unit_count FROM unpublished_graphiti_revision_events "
+            "WHERE event_id=?",
+            (result.event_id,),
+        ).fetchone() == ("HK-01", "item-1", "QUEUED", 0, 0, None, 1)
+        assert connection.execute(
+            "SELECT source_id,item_key FROM unpublished_effective_revision_landed "
+            "ORDER BY source_id,item_key"
+        ).fetchall() == [("HK-01", "item-1"), ("UK-01", "item-0")]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM unpublished_graphiti_revision_events"
+        ).fetchone() == (2,)
+        landed = {
+            (str(row[0]), str(row[1]), str(row[2]), str(row[3]), str(row[4]))
+            for row in connection.execute(
+                "SELECT source_id,item_key,revision_digest,published_at,updated_at "
+                "FROM unpublished_effective_revision_landed"
+            )
+        }
+        assert set(keys[1:]).isdisjoint(landed)
+    finally:
+        connection.close()
+
+
+def test_supply_fails_closed_when_stranded_keys_already_landed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proving, unpublished, stranded = _retain_stranded_first_seen(
+        tmp_path, monkeypatch
+    )
+    _land_units(unpublished, stranded)
+
+    with pytest.raises(
+        BoundedEventSupplyError, match=r"at least one new landed revision \(0\)"
+    ):
+        supply_one_graphiti_event(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            expected_frontier_ledger_seq=1,
+            clock=lambda: LATER,
+        )
+
+    events, landed = _rows(unpublished)
+    assert events == [(1, "QUEUED", 0, 0, None, None, 1)]
+    assert landed == 1 + len({unit.coverage_key() for unit in stranded})
+
+
+def test_supply_skips_landed_stranded_key_and_selects_next(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proving, unpublished, stranded = _retain_stranded_first_seen(
+        tmp_path, monkeypatch
+    )
+    keys = sorted({unit.coverage_key() for unit in stranded})
+    first = next(unit for unit in stranded if unit.coverage_key() == keys[0])
+    second = next(unit for unit in stranded if unit.coverage_key() == keys[1])
+    _land_units(unpublished, (first,))
+
+    result = supply_one_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        expected_frontier_ledger_seq=1,
+        clock=lambda: LATER,
+    )
+
+    assert result.ledger_seq == 2
+    assert result.state == "QUEUED"
+    assert result.attempt_count == 0
+    connection = sqlite3.connect(unpublished)
+    try:
+        assert connection.execute(
+            "SELECT source_id,item_key,state,attempt_count,provider_dispatched,"
+            "claim_owner FROM unpublished_graphiti_revision_events "
+            "WHERE event_id=?",
+            (result.event_id,),
+        ).fetchone() == (second.source_id, second.item_key, "QUEUED", 0, 0, None)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM unpublished_graphiti_revision_events"
+        ).fetchone() == (2,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM unpublished_effective_revision_landed"
+        ).fetchone() == (3,)
+    finally:
+        connection.close()
+
+
+def test_supply_fails_closed_when_selected_revision_already_landed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proving = tmp_path / "proving_store.sqlite3"
+    unpublished = tmp_path / "unpublished_store.sqlite3"
+    proving.touch()
+    _seed_frontier(unpublished)
+    fresh = _unit(1, run_id="run-fresh", observed_at=NOW_TEXT)
+    _land_units(unpublished, (fresh,))
+    monkeypatch.setattr(
+        "newsroom.control_plane.issue_790_event_supply.run_intake",
+        lambda **_: _intake_report(),
+    )
+    monkeypatch.setattr(
+        "newsroom.control_plane.issue_790_event_supply.load_graphiti_units",
+        lambda **_: (fresh,),
+    )
+
+    with pytest.raises(BoundedEventSupplyError, match="already landed"):
+        supply_one_graphiti_event(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            expected_frontier_ledger_seq=1,
+            clock=lambda: NOW,
+        )
+
+    assert _rows(unpublished) == (
+        [(1, "QUEUED", 0, 0, None, None, 1)],
+        2,
+    )
+
+
+def test_supply_full_path_projects_stranded_first_seen_after_later_poll(
+    tmp_path: Path,
+) -> None:
+    proving = tmp_path / "proving_store.sqlite3"
+    unpublished = tmp_path / "unpublished_store.sqlite3"
+    _seed_frontier(unpublished)
+    first = run_intake(
+        proving_store=str(proving),
+        fetch=_fixture_fetch,
+        clock=lambda: STRANDED_AT,
+    )
+    first_units = load_graphiti_units(
+        proving_store=str(proving),
+        evaluated_at=STRANDED_AT,
+    )
+    assert first.complete and first.authorised
+    keys = sorted({unit.coverage_key() for unit in first_units})
+    assert keys
+    expected = next(unit for unit in first_units if unit.coverage_key() == keys[0])
+
+    result = supply_one_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        expected_frontier_ledger_seq=1,
+        fetch=_fixture_fetch,
+        clock=lambda: LATER,
+    )
+
+    assert result.ledger_seq == 2
+    assert result.state == "QUEUED"
+    assert result.attempt_count == 0
+    assert result.provider_dispatched is False
+    assert result.unit_count == 1
+    connection = sqlite3.connect(unpublished)
+    try:
+        assert connection.execute(
+            "SELECT source_id,item_key,state,attempt_count,provider_dispatched,"
+            "claim_owner FROM unpublished_graphiti_revision_events "
+            "WHERE event_id=?",
+            (result.event_id,),
+        ).fetchone() == (
+            expected.source_id,
+            expected.item_key,
+            "QUEUED",
+            0,
+            0,
+            None,
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM unpublished_graphiti_revision_events"
+        ).fetchone() == (2,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM unpublished_effective_revision_landed"
+        ).fetchone() == (2,)
+        remaining = {
+            unit.coverage_key()
+            for unit in first_units
+            if unit.coverage_key() != keys[0]
+        }
+        landed = {
+            (str(row[0]), str(row[1]), str(row[2]), str(row[3]), str(row[4]))
+            for row in connection.execute(
+                "SELECT source_id,item_key,revision_digest,published_at,updated_at "
+                "FROM unpublished_effective_revision_landed"
+            )
+        }
+        assert remaining
+        assert remaining.isdisjoint(landed)
     finally:
         connection.close()
 
