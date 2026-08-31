@@ -997,6 +997,7 @@ def test_step22_consumed_13677_zero_after_embeddings_survives_full_path(
 
     from types import SimpleNamespace
 
+    from newsroom.authority.types import UtcTimestamp
     from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
     from newsroom.graphiti_adapter import real as real_adapter
     from newsroom.graphiti_adapter.combined_temporal_pipeline import (
@@ -1009,6 +1010,7 @@ def test_step22_consumed_13677_zero_after_embeddings_survives_full_path(
     from newsroom.graphiti_adapter.neo4j_guard import GuardState
 
     persist_calls: list[object] = []
+    executions: list[object] = []
     stores = build_rehearsal_stores(tmp_path, unused_13677=True)
     activated = _activate_step22(stores.work_unpublished)
     plan = activated["plan"]
@@ -1019,6 +1021,21 @@ def test_step22_consumed_13677_zero_after_embeddings_survives_full_path(
         "requires_canonical_control_plane_stores",
         False,
     )
+    adapter_type = real_adapter.RealGraphitiAdapter
+
+    class ClockedAdapter:
+        def __init__(self, **values: object) -> None:
+            self.delegate = adapter_type(
+                clock=lambda: UtcTimestamp(OBSERVED_AT),
+                **values,
+            )
+
+        def execute(self, **values: object) -> object:
+            execution = self.delegate.execute(**values)
+            executions.append(execution)
+            return execution
+
+    monkeypatch.setattr(real_adapter, "RealGraphitiAdapter", ClockedAdapter)
     monkeypatch.setattr(real_adapter, "_load_graphiti", lambda: SimpleNamespace())
     monkeypatch.setattr(real_adapter, "openrouter_api_key", lambda: "fixture-key")
     monkeypatch.setattr(
@@ -1195,6 +1212,13 @@ def test_step22_consumed_13677_zero_after_embeddings_survives_full_path(
         consume_calls.append(str(values["event_id"]))
         assert values["event_id"] == EVENT_13677
         values.setdefault("clock", lambda: OBSERVED_AT)
+        values.setdefault(
+            "graphiti",
+            EvaluationGraphitiRunner(
+                clock=lambda: OBSERVED_AT,
+                fallback_permitted=False,
+            ),
+        )
         return real_consume(**values)
 
     monkeypatch.setattr(disposition, "_consume_issue_790_event", consume_13677)
@@ -1237,7 +1261,9 @@ def test_step22_consumed_13677_zero_after_embeddings_survives_full_path(
         connection.close()
     assert attempt_row is not None
     attempt = json.loads(attempt_row[1])
-    combined = attempt.get("combined_temporal_receipt")
+    execution = executions[0]
+    raw = execution.produced.raw_output_value
+    combined = None if not isinstance(raw, dict) else raw.get("combined_temporal_receipt")
     unused = unused_queued_attempt_zero_candidates(stores.work_unpublished, plan)
     assert persist_calls == []
     assert consume_calls == [EVENT_13677]
@@ -1262,6 +1288,8 @@ def test_step22_consumed_13677_zero_after_embeddings_survives_full_path(
     assert attempt["proposal_count"] == 0
     assert attempt.get("entity_count") == 0
     assert attempt.get("relation_count") == 0
+    assert execution.outcome.value == "COMPLETE"
+    assert execution.produced.outcome.value == "SUCCESS"
     assert isinstance(combined, dict)
     assert combined["zero_proposal_effect"] == "EXPLICIT"
     assert attempt["embedding_usage"]["request_count"] == 4
