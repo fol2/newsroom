@@ -29,14 +29,18 @@ NOW_TEXT = "2026-08-30T23:30:00.000000Z"
 
 
 def _unit(
-    number: int, *, run_id: str, observed_at: str | None = None
+    number: int,
+    *,
+    run_id: str,
+    observed_at: str | None = None,
+    source_id: str = "UK-01",
 ) -> CorpusIngestUnit:
     observed_at = observed_at or f"2026-08-30T23:2{number}:00.000000Z"
     headline = f"Headline {number}"
     body = f"Body {number}"
     canonical_url = f"https://example.test/{number}"
     identity = EffectiveRevisionIdentity(
-        source_id="UK-01",
+        source_id=source_id,
         item_key=f"item-{number}",
         revision_digest=content_digest(
             headline=headline,
@@ -108,6 +112,29 @@ def _rows(path: Path) -> tuple[list[tuple[object, ...]], int]:
         return events, landed
     finally:
         connection.close()
+
+
+def _live_shaped_current_run_units() -> tuple[CorpusIngestUnit, ...]:
+    units: list[CorpusIngestUnit] = []
+    number = 1
+    for source_id, count in (
+        ("HK-01", 1),
+        ("HK-04", 3),
+        ("RAD-01", 20),
+        ("RAD-02", 22),
+        ("UK-05", 1),
+    ):
+        for _ in range(count):
+            units.append(
+                _unit(
+                    number,
+                    run_id="run-fresh",
+                    observed_at=NOW_TEXT,
+                    source_id=source_id,
+                )
+            )
+            number += 1
+    return tuple(units)
 
 
 def test_supply_intakes_and_projects_only_one_fresh_revision(
@@ -242,17 +269,140 @@ def test_supply_full_path_uses_new_intake_not_existing_backlog(tmp_path: Path) -
         connection.close()
 
 
+def test_supply_projects_one_event_from_several_current_run_revisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proving = tmp_path / "proving_store.sqlite3"
+    unpublished = tmp_path / "unpublished_store.sqlite3"
+    proving.touch()
+    _seed_frontier(unpublished)
+    later_source = _unit(1, run_id="run-fresh", observed_at=NOW_TEXT, source_id="UK-01")
+    middle_source = _unit(2, run_id="run-fresh", observed_at=NOW_TEXT, source_id="UK-02")
+    first_by_tuple = _unit(3, run_id="run-fresh", observed_at=NOW_TEXT, source_id="HK-04")
+    old_run = _unit(4, run_id="run-old", observed_at=NOW_TEXT, source_id="AA-00")
+    other_timestamp = _unit(5, run_id="run-fresh", source_id="AA-01")
+    monkeypatch.setattr(
+        "newsroom.control_plane.issue_790_event_supply.run_intake",
+        lambda **_: _intake_report(),
+    )
+    monkeypatch.setattr(
+        "newsroom.control_plane.issue_790_event_supply.load_graphiti_units",
+        lambda **_: (
+            later_source,
+            middle_source,
+            first_by_tuple,
+            old_run,
+            other_timestamp,
+        ),
+    )
+
+    result = supply_one_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        expected_frontier_ledger_seq=1,
+        clock=lambda: NOW,
+    )
+
+    assert result.ledger_seq == 2
+    assert result.state == "QUEUED"
+    assert result.attempt_count == 0
+    assert result.unit_count == 1
+    connection = sqlite3.connect(unpublished)
+    try:
+        assert connection.execute(
+            "SELECT source_id,item_key,state,attempt_count,provider_dispatched,"
+            "claim_owner FROM unpublished_graphiti_revision_events "
+            "WHERE event_id=?",
+            (result.event_id,),
+        ).fetchone() == ("HK-04", "item-3", "QUEUED", 0, 0, None)
+        assert connection.execute(
+            "SELECT source_id,item_key FROM unpublished_effective_revision_landed "
+            "ORDER BY source_id,item_key"
+        ).fetchall() == [("HK-04", "item-3"), ("UK-01", "item-0")]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM unpublished_graphiti_revision_events"
+        ).fetchone() == (2,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM unpublished_effective_revision_landed"
+        ).fetchone() == (2,)
+    finally:
+        connection.close()
+
+
+def test_supply_selects_first_key_from_many_current_run_revisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proving = tmp_path / "proving_store.sqlite3"
+    unpublished = tmp_path / "unpublished_store.sqlite3"
+    proving.touch()
+    _seed_frontier(unpublished)
+    current = _live_shaped_current_run_units()
+    old_run = _unit(90, run_id="run-old", observed_at=NOW_TEXT, source_id="AA-00")
+    other_timestamp = _unit(91, run_id="run-fresh", source_id="AA-01")
+    assert len({unit.coverage_key() for unit in current}) == 47
+    assert {unit.source_id for unit in current} == {
+        "HK-01",
+        "HK-04",
+        "RAD-01",
+        "RAD-02",
+        "UK-05",
+    }
+    monkeypatch.setattr(
+        "newsroom.control_plane.issue_790_event_supply.run_intake",
+        lambda **_: _intake_report(),
+    )
+    monkeypatch.setattr(
+        "newsroom.control_plane.issue_790_event_supply.load_graphiti_units",
+        lambda **_: (*current, old_run, other_timestamp),
+    )
+
+    result = supply_one_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        expected_frontier_ledger_seq=1,
+        clock=lambda: NOW,
+    )
+
+    assert result.ledger_seq == 2
+    assert result.state == "QUEUED"
+    assert result.attempt_count == 0
+    assert result.provider_dispatched is False
+    assert result.unit_count == 1
+    connection = sqlite3.connect(unpublished)
+    try:
+        assert connection.execute(
+            "SELECT source_id,item_key,state,attempt_count,provider_dispatched,"
+            "claim_owner,unit_count FROM unpublished_graphiti_revision_events "
+            "WHERE event_id=?",
+            (result.event_id,),
+        ).fetchone() == ("HK-01", "item-1", "QUEUED", 0, 0, None, 1)
+        assert connection.execute(
+            "SELECT source_id,item_key FROM unpublished_effective_revision_landed "
+            "ORDER BY source_id,item_key"
+        ).fetchall() == [("HK-01", "item-1"), ("UK-01", "item-0")]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM unpublished_graphiti_revision_events"
+        ).fetchone() == (2,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM unpublished_effective_revision_landed"
+        ).fetchone() == (2,)
+    finally:
+        connection.close()
+
+
 @pytest.mark.parametrize(
     ("report", "units", "message"),
     [
-        (_intake_report(), (), "exactly one new landed revision"),
+        (_intake_report(), (), r"at least one new landed revision \(0\)"),
         (
             _intake_report(),
-            (
-                _unit(1, run_id="run-fresh", observed_at=NOW_TEXT),
-                _unit(2, run_id="run-fresh", observed_at=NOW_TEXT),
-            ),
-            "exactly one new landed revision",
+            (_unit(1, run_id="run-old", observed_at=NOW_TEXT, source_id="AA-00"),),
+            r"at least one new landed revision \(0\)",
+        ),
+        (
+            _intake_report(),
+            (_unit(1, run_id="run-fresh", source_id="AA-01"),),
+            r"at least one new landed revision \(0\)",
         ),
         (
             IntakeReport(
@@ -272,7 +422,7 @@ def test_supply_full_path_uses_new_intake_not_existing_backlog(tmp_path: Path) -
         ),
     ],
 )
-def test_supply_fails_closed_without_exactly_one_complete_new_revision(
+def test_supply_fails_closed_without_a_complete_new_revision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     report: IntakeReport,

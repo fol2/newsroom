@@ -54,8 +54,11 @@ def supply_one_graphiti_event(
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
     fetch: Fetcher | None = None,
 ) -> BoundedEventSupplyResult:
-    """Intake and project exactly one new revision, leaving it untouched."""
+    """Intake and project one new revision, leaving it untouched.
 
+    Several new coverage keys at the intake instant select the first key in
+    coverage-tuple order. Other new keys stay unlanded.
+    """
     if type(expected_frontier_ledger_seq) is not int or expected_frontier_ledger_seq < 0:
         raise BoundedEventSupplyError("expected frontier must be non-negative")
     assert_private_store(proving_store)
@@ -86,12 +89,13 @@ def supply_one_graphiti_event(
         and unit.coverage_first_observed_at == intake_observed_at
     )
     coverage_keys = {unit.coverage_key() for unit in current_units}
-    if len(coverage_keys) != 1:
+    if not coverage_keys:
         raise BoundedEventSupplyError(
-            "intake must yield exactly one new landed revision"
+            f"intake must yield at least one new landed revision ({len(coverage_keys)})"
         )
+    selected_key = sorted(coverage_keys)[0]
     selected = tuple(
-        unit for unit in current_units if unit.coverage_key() in coverage_keys
+        unit for unit in current_units if unit.coverage_key() == selected_key
     )
     first = selected[0]
 
