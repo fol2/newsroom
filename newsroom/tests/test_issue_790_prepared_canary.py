@@ -8,7 +8,7 @@ import json
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -51,9 +51,11 @@ from newsroom.tests.test_issue_790_rehearsal_fixtures import (
     EVENT_13361,
     EVENT_13677,
     EVENT_13683,
+    EVENT_13689,
     EXACT_HEAD,
     LEDGER_13677,
     LEDGER_13683,
+    LEDGER_13689,
     LIVE_13361_AVAILABLE_AT,
     OBSERVED_AT,
     SEALED_13361_AVAILABLE_AT,
@@ -1765,6 +1767,220 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
     assert resumed["resumed_zero_io_finalisation"] is True
     assert resumed["provider_dispatch_attempted_this_run"] is False
     assert consume_calls == [EVENT_13683]
+
+
+class _CanarySpawnAborted(BaseException):
+    """Process-kill analogue: not Exception, so complete() does not run."""
+
+
+def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live 13689: dest exists after aborted claim must not stay RUNNING.
+
+    First spawn writes backup, consumes, claims RUNNING attempt 1, then
+    aborts before complete/receipt. Same dest re-entry seals via existing
+    zero-I/O finalisation (CONFIGURATION_HELD, provider_dispatched=0,
+    claim released, outcome present). Same dest must not claim again.
+    Fails on fdef41da because dest-exists raised before recovery.
+    """
+
+    from newsroom.control_plane.graphiti_events import GraphitiEventQueue
+
+    stores = build_rehearsal_stores(tmp_path, unused_13689=True)
+    activated = _activate_step22(stores.work_unpublished)
+    plan = activated["plan"]
+    _seed_production_disposition(stores.work_unpublished, plan)
+    _patch_production_predispatch(monkeypatch, plan=plan)
+    consume_calls: list[str] = []
+
+    def abort_after_claim(**values: object) -> None:
+        consume_calls.append(str(values["event_id"]))
+        assert values["event_id"] == EVENT_13689
+        queue = GraphitiEventQueue(
+            str(values["unpublished_store"]),
+            clock=lambda: OBSERVED_AT,
+        )
+        claimed = queue.claim(
+            owner_id=str(values["owner_id"]),
+            lease_for=timedelta(minutes=15),
+            event_id=str(values["event_id"]),
+            require_fresh=True,
+            canary_consumption_digest=str(values["canary_consumption_digest"]),
+        )
+        assert claimed is not None
+        assert queue._start(
+            str(values["event_id"]),
+            owner_id=str(values["owner_id"]),
+        ) == 1
+        raise _CanarySpawnAborted("canary spawn aborted after claim")
+
+    monkeypatch.setattr(disposition, "_consume_issue_790_event", abort_after_claim)
+    backup = tmp_path / "aborted-spawn-13689.sqlite3"
+    canary_kwargs = {
+        "store": stores.work_unpublished,
+        "proving_store": stores.proving,
+        "backup_path": backup,
+        "plan": plan,
+        "observed_at": OBSERVED_AT,
+        "repository_root": tmp_path,
+        "event_id": EVENT_13689,
+        "ledger_seq": LEDGER_13689,
+        "disposition_digest": _PRODUCTION_DISPOSITION,
+        "rehearsal": False,
+        "exact_head": EXACT_HEAD,
+        "github_api": activated["github"],
+    }
+    with pytest.raises(_CanarySpawnAborted):
+        disposition.run_issue_790_canary(**canary_kwargs)
+    stranded = _sqlite_canary_event(
+        stores.work_unpublished, ledger_seq=LEDGER_13689
+    )
+    connection = sqlite3.connect(stores.work_unpublished)
+    try:
+        consumption = connection.execute(
+            "SELECT COUNT(*) FROM issue_790_bounded_canary_consumptions "
+            "WHERE ledger_seq=?",
+            (LEDGER_13689,),
+        ).fetchone()[0]
+        outcomes = connection.execute(
+            "SELECT COUNT(*) FROM issue_790_bounded_canary_outcomes "
+            "WHERE ledger_seq=?",
+            (LEDGER_13689,),
+        ).fetchone()[0]
+        failure_code = connection.execute(
+            "SELECT last_failure_code FROM unpublished_graphiti_revision_events "
+            "WHERE ledger_seq=?",
+            (LEDGER_13689,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert backup.is_file()
+    assert stranded["state"] == "RUNNING"
+    assert stranded["attempt_count"] == 1
+    assert stranded["provider_dispatched"] == 0
+    assert stranded["claim_owner"] is not None
+    assert consumption == 1
+    assert outcomes == 0
+    assert failure_code is None
+    assert dispatch_started_count(stores.work_unpublished) == 0
+
+    receipt = disposition.run_issue_790_canary(**canary_kwargs)
+    sealed = _sqlite_canary_event(
+        stores.work_unpublished, ledger_seq=LEDGER_13689
+    )
+    connection = sqlite3.connect(stores.work_unpublished)
+    try:
+        failure_code = connection.execute(
+            "SELECT last_failure_code FROM unpublished_graphiti_revision_events "
+            "WHERE ledger_seq=?",
+            (LEDGER_13689,),
+        ).fetchone()[0]
+        outcomes = connection.execute(
+            "SELECT COUNT(*) FROM issue_790_bounded_canary_outcomes "
+            "WHERE ledger_seq=?",
+            (LEDGER_13689,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    unused = unused_queued_attempt_zero_candidates(stores.work_unpublished, plan)
+    after = receipt["event_after"]["event"]
+    assert consume_calls == [EVENT_13689]
+    assert receipt["resumed_zero_io_finalisation"] is True
+    assert receipt["provider_dispatch_attempted_this_run"] is False
+    assert receipt["canary_evidence_passed"] is False
+    assert receipt["retry_authorised"] is False
+    assert receipt["publication_performed"] is False
+    assert receipt["consumption"]["event_id"] == EVENT_13689
+    assert receipt["consumption"]["ledger_seq"] == LEDGER_13689
+    assert receipt["outcome"]["failure_code_after_seal"] == (
+        "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:NO_EVENT_RESULT"
+    )
+    assert receipt["outcome"]["state_after_seal"] == "CONFIGURATION_HELD"
+    assert after["state"] == "CONFIGURATION_HELD"
+    assert after["attempt_count"] == 1
+    assert sealed["state"] == "CONFIGURATION_HELD"
+    assert sealed["attempt_count"] == 1
+    assert sealed["provider_dispatched"] == 0
+    assert type(sealed["provider_dispatched"]) is int
+    assert sealed["claim_owner"] is None
+    assert failure_code == "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:NO_EVENT_RESULT"
+    assert outcomes == 1
+    assert dispatch_started_count(stores.work_unpublished) == 0
+    assert EVENT_13689 not in {item[0] for item in unused}
+    assert LEDGER_13689 not in {item[1] for item in unused}
+    with pytest.raises(PreparedCanaryError) as caught:
+        _candidate_from_plan(
+            plan,
+            event_id=CANDIDATE_EVENT_ID,
+            ledger_seq=CANDIDATE_LEDGER_SEQ,
+            role="canary",
+            store=stores.work_unpublished,
+        )
+    assert caught.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    with pytest.raises(
+        Issue790DispositionError,
+        match="canary backup destination already exists",
+    ):
+        disposition.run_issue_790_canary(**canary_kwargs)
+    still = _sqlite_canary_event(
+        stores.work_unpublished, ledger_seq=LEDGER_13689
+    )
+    assert still["state"] == "CONFIGURATION_HELD"
+    assert still["attempt_count"] == 1
+    assert still["provider_dispatched"] == 0
+    assert still["claim_owner"] is None
+    assert consume_calls == [EVENT_13689]
+
+
+def test_step22_backup_dest_exists_without_consumption_fail_closes_before_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same dest with unused QUEUED and no consumption must not claim."""
+
+    stores = build_rehearsal_stores(tmp_path, unused_13689=True)
+    activated = _activate_step22(stores.work_unpublished)
+    plan = activated["plan"]
+    _seed_production_disposition(stores.work_unpublished, plan)
+    _patch_production_predispatch(monkeypatch, plan=plan)
+    consume_calls: list[str] = []
+
+    def must_not_consume(**_values: object) -> None:
+        consume_calls.append("called")
+        raise AssertionError("dest-exists without consumption claimed")
+
+    monkeypatch.setattr(disposition, "_consume_issue_790_event", must_not_consume)
+    backup = tmp_path / "leftover-dest-13689.sqlite3"
+    backup.write_bytes(b"leftover")
+    with pytest.raises(
+        Issue790DispositionError,
+        match="canary backup destination already exists",
+    ):
+        disposition.run_issue_790_canary(
+            store=stores.work_unpublished,
+            proving_store=stores.proving,
+            backup_path=backup,
+            plan=plan,
+            observed_at=OBSERVED_AT,
+            repository_root=tmp_path,
+            event_id=EVENT_13689,
+            ledger_seq=LEDGER_13689,
+            disposition_digest=_PRODUCTION_DISPOSITION,
+            rehearsal=False,
+            exact_head=EXACT_HEAD,
+            github_api=activated["github"],
+        )
+    event = _sqlite_canary_event(
+        stores.work_unpublished, ledger_seq=LEDGER_13689
+    )
+    assert consume_calls == []
+    assert event["state"] == "QUEUED"
+    assert event["attempt_count"] == 0
+    assert event["provider_dispatched"] == 0
+    assert event["claim_owner"] is None
+    assert dispatch_started_count(stores.work_unpublished) == 0
 
 
 @pytest.mark.parametrize(

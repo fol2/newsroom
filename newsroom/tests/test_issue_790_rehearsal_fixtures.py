@@ -47,6 +47,10 @@ EVENT_13683 = (
     "sha256:7d7bd60fac66b52c7e945a97021570e4220e3fdee0c01af4ee744a50a3993944"
 )
 LEDGER_13683 = 13683
+EVENT_13689 = (
+    "sha256:0cf4c6da7a7be611d10fb87f82a7038ca42296f6112d5a2a03fcfb35abde9a39"
+)
+LEDGER_13689 = 13689
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,12 +218,14 @@ def build_rehearsal_stores(
     successor: bool = False,
     unused_13677: bool = False,
     unused_13683: bool = False,
+    unused_13689: bool = False,
 ) -> RehearsalStores:
     """Full sqlite backup-style copy with unused 13665 and drifted 13361."""
 
-    if sum((successor, unused_13677, unused_13683)) > 1:
+    if sum((successor, unused_13677, unused_13683, unused_13689)) > 1:
         raise ValueError(
-            "successor, unused_13677 and unused_13683 are mutually exclusive"
+            "successor, unused_13677, unused_13683 and unused_13689 "
+            "are mutually exclusive"
         )
     clock = MutableClock(OBSERVED_AT)
     proving, unpublished, source_event_id, _ledger_seq = _projected_zero_ref_event(
@@ -234,7 +240,19 @@ def build_rehearsal_stores(
     Issue790CanaryRepository(str(unpublished))
     connection = sqlite3.connect(unpublished)
     try:
-        if unused_13683:
+        if unused_13689:
+            _bind_candidate(
+                connection,
+                source_event_id,
+                event_id=EVENT_13689,
+                ledger_seq=LEDGER_13689,
+            )
+            _insert_retry_forbidden_rows(
+                connection,
+                [_spent_13665(), _spent_13671(), _spent_13677(), _spent_13683()],
+                live_13361_drift=False,
+            )
+        elif unused_13683:
             unused = _spent_13683()
             _bind_candidate(
                 connection,
