@@ -316,6 +316,12 @@ def _effective_retry_exclusion_status(
 ) -> tuple[bool, str]:
     """Prove historical exclusions plus the exhausted canary consumption."""
 
+    from newsroom.control_plane.issue_790_canary import (
+        RetryForbiddenSafetyError,
+        retry_forbidden_safety_states_match,
+        validate_retry_forbidden_safety_state,
+    )
+
     plan_by_seq = {
         int(item.get("ledger_seq", 0)): str(item.get("event_id"))
         for item in plan_events
@@ -329,11 +335,30 @@ def _effective_retry_exclusion_status(
     consumed_seq = int((consumption or {}).get("ledger_seq", 0))
     consumed_event = str((consumption or {}).get("event_id", ""))
     failure_code = str((outcome or {}).get("failure_code_after_seal", ""))
+    try:
+        consumed_safety_ok = (
+            event_snapshot is not None
+            and consumed_seq == 13361
+            and validate_retry_forbidden_safety_state(
+                expected={
+                    "attempt_count": 1,
+                    "event_id": consumed_event,
+                    "last_failure_code": failure_code,
+                    "ledger_seq": consumed_seq,
+                    "provider_dispatched": True,
+                    "state": "CONFIGURATION_HELD",
+                },
+                live=event_snapshot,
+                excluded=consumed_event in effectively_excluded_event_ids,
+            )
+            is not None
+        )
+    except (RetryForbiddenSafetyError, TypeError, ValueError, KeyError):
+        consumed_safety_ok = False
     consumption_ok = (
         consumption is not None
         and outcome is not None
-        and event_snapshot is not None
-        and consumed_seq == 13361
+        and consumed_safety_ok
         and consumption.get("approved_plan_digest") == activated_plan_digest
         and consumption.get("attempt_count_before") == 0
         and consumption.get("maximum_event_attempts") == 1
@@ -347,13 +372,6 @@ def _effective_retry_exclusion_status(
         and outcome.get("retry_authorised") is False
         and outcome.get("state_after_seal") == "CONFIGURATION_HELD"
         and failure_code.startswith("BOUNDED_CANARY_AUTHORITY_EXHAUSTED:")
-        and event_snapshot.get("event_id") == consumed_event
-        and event_snapshot.get("ledger_seq") == consumed_seq
-        and event_snapshot.get("state") == "CONFIGURATION_HELD"
-        and event_snapshot.get("attempt_count") == 1
-        and event_snapshot.get("provider_dispatched") is True
-        and event_snapshot.get("last_failure_code") == failure_code
-        and consumed_event in effectively_excluded_event_ids
     )
     historical_ok = (
         len(plan_by_seq) == len(plan_events)
@@ -361,15 +379,19 @@ def _effective_retry_exclusion_status(
         and all(durable_by_seq[seq] == plan_by_seq[seq] for seq in overlapping)
         and all(
             item.get("reason") == "ISSUE_790_RETRY_FORBIDDEN"
-            and item.get("event_snapshot")
-            == next(
+            and retry_forbidden_safety_states_match(
                 (
-                    event
-                    for event in plan_events
-                    if int(event.get("ledger_seq", 0))
-                    == int(item.get("ledger_seq", 0))
+                    next(
+                        (
+                            event
+                            for event in plan_events
+                            if int(event.get("ledger_seq", 0))
+                            == int(item.get("ledger_seq", 0))
+                        ),
+                        None,
+                    ),
                 ),
-                None,
+                (item.get("event_snapshot"),),
             )
             for item in exclusions
             if int(item.get("ledger_seq", 0)) in overlapping
@@ -850,6 +872,9 @@ def _ops_gates(
         from newsroom.control_plane.issue_790_canary import (
             Issue790CanaryRepository,
             graphiti_excluded_event_ids,
+            retry_forbidden_has_claim_columns,
+            retry_forbidden_live_select,
+            retry_forbidden_live_snapshot,
         )
 
         try:
@@ -875,25 +900,16 @@ def _ops_gates(
                 outcome = repository.existing_outcome(
                     consumption_digest=str(consumption["consumption_digest"]),
                 )
+                has_claims = retry_forbidden_has_claim_columns(conn)
                 event = conn.execute(
-                    "SELECT event_id,ledger_seq,state,attempt_count,available_at,"
-                    "last_failure_code,provider_dispatched "
-                    "FROM unpublished_graphiti_revision_events "
-                    "WHERE event_id=? AND ledger_seq=?",
+                    retry_forbidden_live_select(has_claims=has_claims)
+                    + " WHERE event_id=? AND ledger_seq=?",
                     (consumption["event_id"], consumption["ledger_seq"]),
                 ).fetchone()
                 if event is not None:
-                    event_snapshot = {
-                        "event_id": str(event[0]),
-                        "ledger_seq": int(event[1]),
-                        "state": str(event[2]),
-                        "attempt_count": int(event[3]),
-                        "available_at": str(event[4]),
-                        "last_failure_code": (
-                            None if event[5] is None else str(event[5])
-                        ),
-                        "provider_dispatched": bool(event[6]),
-                    }
+                    event_snapshot = retry_forbidden_live_snapshot(
+                        event, has_claims=has_claims
+                    )
         effectively_excluded_event_ids = set(graphiti_excluded_event_ids(conn))
 
         plan_events = [

@@ -166,8 +166,18 @@ def _o16_exclusion_args(
 ) -> dict[str, object]:
     event_id = "sha256:" + "61" * 32
     base_seqs = (1932, 1972, 8834, 8835, 13284, 13337, 13362)
+    sealed_at = "2026-08-30T20:58:43.662872Z"
+    live_at = "2026-08-30T21:29:18.946358Z"
     plan_events = [
-        {"event_id": "sha256:" + f"{seq:064x}", "ledger_seq": seq}
+        {
+            "attempt_count": 1,
+            "available_at": sealed_at,
+            "event_id": "sha256:" + f"{seq:064x}",
+            "last_failure_code": "HELD",
+            "ledger_seq": seq,
+            "provider_dispatched": False,
+            "state": "RETRY_HELD",
+        }
         for seq in base_seqs
     ]
     if plan_includes_consumed:
@@ -177,7 +187,7 @@ def _o16_exclusion_args(
             "event_id": item["event_id"],
             "ledger_seq": item["ledger_seq"],
             "reason": "ISSUE_790_RETRY_FORBIDDEN",
-            "event_snapshot": dict(item),
+            "event_snapshot": {**item, "available_at": live_at},
         }
         for item in plan_events
         if int(item["ledger_seq"]) != 13361
@@ -208,6 +218,7 @@ def _o16_exclusion_args(
         "attempt_count": 1,
         "provider_dispatched": True,
         "last_failure_code": outcome["failure_code_after_seal"],
+        "available_at": live_at,
     }
     return {
         "plan_events": plan_events,
@@ -245,6 +256,18 @@ def test_o16_successor_plan_may_list_13361_before_durable_apply() -> None:
         *args["plan_events"],
         {"event_id": "sha256:" + "99" * 32, "ledger_seq": 9999},
     ]
+    assert _effective_retry_exclusion_status(**args)[0] is False
+
+
+def test_o16_preflight_rejects_durable_safety_field_mutation() -> None:
+    args = _o16_exclusion_args(plan_includes_consumed=True)
+    args["exclusions"][0]["event_snapshot"]["state"] = "QUEUED"
+    assert _effective_retry_exclusion_status(**args)[0] is False
+
+
+def test_o16_preflight_rejects_claimed_exhausted_row() -> None:
+    args = _o16_exclusion_args(plan_includes_consumed=True)
+    args["event_snapshot"]["claim_owner"] = "worker-1"
     assert _effective_retry_exclusion_status(**args)[0] is False
 
 

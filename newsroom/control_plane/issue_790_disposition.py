@@ -34,6 +34,11 @@ from newsroom.control_plane.graphiti_requests import (
 from newsroom.control_plane.issue_790_canary import (
     Issue790CanaryIntegrityError,
     Issue790CanaryRepository,
+    RetryForbiddenSafetyError,
+    retry_forbidden_has_claim_columns,
+    retry_forbidden_live_select,
+    retry_forbidden_live_snapshot,
+    retry_forbidden_safety_states_match,
 )
 from newsroom.control_plane.issue_790_contract import (
     ISSUE_790_APPROVED_PLAN_DIGEST,
@@ -2061,26 +2066,16 @@ def _retry_event_snapshots(
     placeholders = ",".join("?" for _ in seqs)
     connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
     try:
+        has_claims = retry_forbidden_has_claim_columns(connection)
         rows = connection.execute(
-            "SELECT event_id,ledger_seq,state,attempt_count,available_at,"
-            "last_failure_code,provider_dispatched "
-            "FROM unpublished_graphiti_revision_events "
-            f"WHERE ledger_seq IN ({placeholders}) ORDER BY ledger_seq",
+            retry_forbidden_live_select(has_claims=has_claims)
+            + f" WHERE ledger_seq IN ({placeholders}) ORDER BY ledger_seq",
             seqs,
         ).fetchall()
     finally:
         connection.close()
     return [
-        {
-            "attempt_count": int(row[3]),
-            "available_at": str(row[4]),
-            "event_id": str(row[0]),
-            "last_failure_code": None if row[5] is None else str(row[5]),
-            "ledger_seq": int(row[1]),
-            "provider_dispatched": bool(row[6]),
-            "state": str(row[2]),
-        }
-        for row in rows
+        retry_forbidden_live_snapshot(row, has_claims=has_claims) for row in rows
     ]
 
 
@@ -2095,9 +2090,11 @@ def _require_retry_events_unchanged(
         if isinstance(expected, list)
         else None,
     )
-    if retained != expected:
+    if not retry_forbidden_safety_states_match(expected, retained):
         raise Issue790DispositionError(
-            "issue #790 retry-forbidden event state differs"
+            "issue #790 retry-forbidden event state differs "
+            f"[{RetryForbiddenSafetyError.classification}/"
+            f"{RetryForbiddenSafetyError.failure_code}]"
         )
     return retained
 
@@ -2115,7 +2112,9 @@ def _require_retry_exclusions(
         or len(expected_events) < 2
         or any(
             record.get("reason") != "ISSUE_790_RETRY_FORBIDDEN"
-            or record.get("event_snapshot") != expected
+            or not retry_forbidden_safety_states_match(
+                (expected,), (record.get("event_snapshot"),)
+            )
             for record, expected in zip(retained, expected_events, strict=True)
         )
     ):
@@ -2612,9 +2611,13 @@ def collect_issue_790_operational_evidence(
         else _RETRY_FORBIDDEN_EVENTS
     )
     retry_events = _retry_event_snapshots(store, expected_retry)
-    if retry_events != list(expected_retry):
+    if not retry_forbidden_safety_states_match(
+        list(expected_retry), retry_events
+    ):
         raise Issue790DispositionError(
-            "issue #790 retry-forbidden event state differs"
+            "issue #790 retry-forbidden event state differs "
+            f"[{RetryForbiddenSafetyError.classification}/"
+            f"{RetryForbiddenSafetyError.failure_code}]"
         )
     evidence_without_digest: dict[str, object] = {
         "schema_version": ISSUE_790_OPERATIONAL_EVIDENCE_SCHEMA,
@@ -2666,8 +2669,10 @@ def _validate_operational_evidence(
         or retained.get("revision") != retained.get("github_main_revision")
         or retained.get("store") != str(store.absolute())
         or retained.get("store_quick_check") != "ok"
-        or retained.get("retry_forbidden_events")
-        != plan.get("retry_forbidden_events")
+        or not retry_forbidden_safety_states_match(
+            plan.get("retry_forbidden_events"),
+            retained.get("retry_forbidden_events"),
+        )
     ):
         raise Issue790DispositionError("issue #790 operational evidence differs")
     revision = retained.get("revision")
@@ -3766,9 +3771,11 @@ def run_issue_790_canary(
         canary_repository,
         plan=retained_plan,
     )
-    retry_exclusions = _require_retry_exclusions(
+    retry_exclusions = _retain_retry_exclusions_for_plan(
         canary_repository,
         plan=retained_plan,
+        disposition_digest=disposition_digest,
+        observed_at=observed_at,
     )
     event_before = _event_snapshot(
         store,
@@ -4058,9 +4065,10 @@ def run_issue_790_canary(
         field="canary state counts",
     )
     dead_letters_after = int(state_counts_after.get("DEAD_LETTER", 0))
-    retry_unchanged = retry_after == retry_before == retained_plan.get(
-        "retry_forbidden_events"
-    )
+    retry_unchanged = retry_forbidden_safety_states_match(
+        retained_plan.get("retry_forbidden_events"),
+        retry_before,
+    ) and retry_forbidden_safety_states_match(retry_before, retry_after)
     worker_unloaded = worker_after == worker_before == {
         "label": _WORKER_LABEL,
         "launchctl_loaded": False,
