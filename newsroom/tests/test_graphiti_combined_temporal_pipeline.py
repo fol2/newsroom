@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from newsroom.authority.canonical import CanonicalizationError, canonical_json_bytes
 from newsroom.graphiti_adapter import real
 from newsroom.graphiti_adapter.combined_temporal_extraction import (
     CombinedTemporalOutcome,
@@ -600,6 +601,84 @@ def test_new_nodes_without_persistable_edges_seal_explicit_empty_effect() -> Non
     assert result.completed_receipt["proposal_receipt"]["entity_mentions"] == [
         {"local_id": 0}
     ]
+
+
+def test_persistable_float_fact_embedding_seals_explicit_empty_effect() -> None:
+    """Live 13683: persistable edges with float fact_embedding are explicit zero."""
+
+    guard = _Guard()
+    persist_calls: list[object] = []
+    sealed: list[tuple[list[object], list[object]]] = []
+    pipeline = _pipeline(guard)
+
+    async def persist_graph(nodes: list[Any], edges: list[Any]) -> None:
+        persist_calls.append((list(nodes), list(edges)))
+        guard.calls.append("persist")
+
+    def complete_receipt(
+        nodes: list[Any], edges: list[Any], receipt: object
+    ) -> dict[str, object]:
+        payload = dict(receipt)  # type: ignore[arg-type]
+        sealed.append((list(nodes), list(edges)))
+        canonical_json_bytes(payload)
+        return payload
+
+    pipeline.persist_graph = persist_graph
+    pipeline.complete_receipt = complete_receipt
+    edge = _edge()
+    edge.uuid = "edge-1"
+    result = pipeline.execute(
+        nodes=(_node("local-source"), _node("local-target")),
+        edges=(edge,),
+        receipt={
+            "provider_attempt_number": 1,
+            "proposal_receipt": {
+                "entity_mentions": [{"local_id": 0}, {"local_id": 1}],
+                "relation_proposals": [{"local_id": 0}],
+            },
+        },
+    )
+
+    assert persist_calls != []
+    assert "rollback" in guard.calls
+    assert sealed[-1] == ([], [])
+    assert result.graph_effect_attempted is False
+    assert result.nodes == ()
+    assert result.edges == ()
+    assert result.completed_receipt is not None
+    assert result.completed_receipt["zero_proposal_effect"] == "EXPLICIT"
+    canonical_json_bytes(dict(result.completed_receipt))
+
+
+def test_non_fact_embedding_canonicalization_error_stays_fail_closed() -> None:
+    """Other CanonicalizationError must not be sealed as explicit zero."""
+
+    guard = _Guard()
+    pipeline = _pipeline(guard)
+    edge = _edge()
+    edge.uuid = "edge-1"
+
+    def complete_receipt(
+        _nodes: list[Any], _edges: list[Any], _receipt: object
+    ) -> dict[str, object]:
+        raise CanonicalizationError("unsupported value type at $.other")
+
+    pipeline.complete_receipt = complete_receipt
+    with pytest.raises(CombinedTemporalPipelineError):
+        pipeline.execute(
+            nodes=(_node("local-source"), _node("local-target")),
+            edges=(edge,),
+            receipt={
+                "provider_attempt_number": 1,
+                "proposal_receipt": {
+                    "entity_mentions": [{"local_id": 0}, {"local_id": 1}],
+                    "relation_proposals": [{"local_id": 0}],
+                },
+            },
+        )
+
+    assert "rollback" in guard.calls
+    assert "complete" not in guard.calls
 
 
 def test_existing_pipeline_rejects_a_malformed_complete_marker_without_effect() -> None:

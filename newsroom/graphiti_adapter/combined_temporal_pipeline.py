@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from newsroom.authority.canonical import CanonicalizationError
 from newsroom.graphiti_adapter.edge_guard import guard_extracted_edges
 from newsroom.graphiti_adapter.neo4j_guard import GuardState, Neo4jMutationGuard
 
@@ -164,6 +165,30 @@ def _durable_receipt(
     proposal["node_resolutions"] = list(resolutions)
     durable["proposal_receipt"] = proposal
     return durable
+
+
+def _float_fact_embedding_blocked(
+    receipt: Mapping[str, object], exc: CanonicalizationError
+) -> bool:
+    """True only for the live 13683 non-canonical bound fact_embedding vector."""
+
+    if "fact_embedding" not in str(exc):
+        return False
+    proposal = receipt.get("proposal_receipt")
+    if not isinstance(proposal, Mapping):
+        return False
+    relations = proposal.get("relation_proposals")
+    if not isinstance(relations, list):
+        return False
+    for item in relations:
+        if not isinstance(item, Mapping):
+            continue
+        embedding = item.get("fact_embedding")
+        if isinstance(embedding, list) and any(
+            isinstance(value, float) for value in embedding
+        ):
+            return True
+    return False
 
 
 @dataclass(slots=True)
@@ -434,9 +459,25 @@ class ExistingGraphitiPipeline:
             if self.complete_receipt is None:
                 completed_receipt = durable_receipt
             else:
-                sealed = self.complete_receipt(
-                    resolved_nodes, output_edges, durable_receipt
-                )
+                try:
+                    sealed = self.complete_receipt(
+                        resolved_nodes, output_edges, durable_receipt
+                    )
+                except CanonicalizationError as exc:
+                    if not _float_fact_embedding_blocked(durable_receipt, exc):
+                        raise
+                    # Live 13683 only: persistable leftover NEW bound a float
+                    # fact_embedding, canonicalisation failed after persist, and
+                    # unmarked 0/0/0 was AMBIGUOUS_EFFECT. Other
+                    # CanonicalizationError stays fail-closed.
+                    await self.guard.rollback_pending(
+                        chat_invocations=chat_invocations,
+                        embedding_usage=embedding_usage,
+                        reason="CanonicalizationError",
+                    )
+                    return await self._seal_empty_effect(
+                        receipt, embedding_skipped=False
+                    )
                 completed_receipt = (
                     sealed if isinstance(sealed, dict) else dict(sealed)
                 )
