@@ -48,6 +48,12 @@ STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST = (
     "newsroom/tests/test_graphiti_corpus_ingest.py::"
     "test_step22_persistable_empty_zero_after_embeddings_survives_full_cycle"
 )
+LATEST_FAILURE_COVERING_FULL_PATH_TESTS = frozenset(
+    {
+        STEP21_FULL_PATH_TEST,
+        STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST,
+    }
+)
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _FULL_PATH_TESTS = (
     "newsroom/tests/test_graphiti_corpus_ingest.py::"
@@ -491,7 +497,7 @@ def _latest_failure_red_green(
     if diagnosis is None:
         return False, f"ledger {ledger} full-path red absent"
     diagnosis_index, _diagnosis, test_node = diagnosis
-    if test_node != STEP21_FULL_PATH_TEST:
+    if test_node not in LATEST_FAILURE_COVERING_FULL_PATH_TESTS:
         return False, f"unexpected latest red test {test_node}"
 
     for item in ordered[diagnosis_index + 1 :]:
