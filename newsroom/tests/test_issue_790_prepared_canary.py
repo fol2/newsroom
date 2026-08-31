@@ -16,6 +16,7 @@ import pytest
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane import issue_790_disposition as disposition
 from newsroom.control_plane.issue_790_disposition import (
+    CANARY_BACKUP_DESTINATION_ALREADY_EXISTS,
     ISSUE_790_STEP16_PRE_DISPATCH_PATH,
     ISSUE_790_STEP22_PENDING_PLAN_PATH,
     Issue790DispositionError,
@@ -1777,13 +1778,20 @@ def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Live 13689: dest exists after aborted claim must not stay RUNNING.
+    """Live 13689 abort + dest-exists: both halves of the demonstrated path.
 
-    First spawn writes backup, consumes, claims RUNNING attempt 1, then
-    aborts before complete/receipt. Same dest re-entry seals via existing
-    zero-I/O finalisation (CONFIGURATION_HELD, provider_dispatched=0,
-    claim released, outcome present). Same dest must not claim again.
-    Fails on fdef41da because dest-exists raised before recovery.
+    Watcher: PID 56093 was still running, then exited with no LIVE_EXIT and
+    no receipt after writing backup and claiming RUNNING. Colliding spawn
+    then EXIT 2 `canary backup destination already exists` /
+    CANARY_BACKUP_DESTINATION_ALREADY_EXISTS while sqlite last_failure_code
+    stayed NULL. Artefact `/Users/jamesto/issue-790-step22-live/20260831T211335Z`.
+    Dispatcher recap 5484862486; watcher supplement 5484885253.
+
+    Half 1: first spawn abort after backup + consume + RUNNING claim, no
+    receipt, no provider I/O. Half 2: same dest colliding re-entry must not
+    claim again and must not leave RUNNING with last_failure_code NULL.
+    Dest exists without that strand still fail-closes before claim with the
+    named code. Fails on fdef41da because dest-exists raised before recovery.
     """
 
     from newsroom.control_plane.graphiti_events import GraphitiEventQueue
@@ -1839,11 +1847,11 @@ def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
     )
     connection = sqlite3.connect(stores.work_unpublished)
     try:
-        consumption = connection.execute(
-            "SELECT COUNT(*) FROM issue_790_bounded_canary_consumptions "
-            "WHERE ledger_seq=?",
+        consumption_row = connection.execute(
+            "SELECT consumption_digest,owner_id FROM "
+            "issue_790_bounded_canary_consumptions WHERE ledger_seq=?",
             (LEDGER_13689,),
-        ).fetchone()[0]
+        ).fetchone()
         outcomes = connection.execute(
             "SELECT COUNT(*) FROM issue_790_bounded_canary_outcomes "
             "WHERE ledger_seq=?",
@@ -1856,12 +1864,21 @@ def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
         ).fetchone()[0]
     finally:
         connection.close()
+    abort_backup_digest = "sha256:" + file_digest(backup)
     assert backup.is_file()
+    assert abort_backup_digest.startswith("sha256:")
+    assert len(abort_backup_digest) == 71
     assert stranded["state"] == "RUNNING"
     assert stranded["attempt_count"] == 1
     assert stranded["provider_dispatched"] == 0
+    assert type(stranded["provider_dispatched"]) is int
     assert stranded["claim_owner"] is not None
-    assert consumption == 1
+    assert str(stranded["claim_owner"]).startswith("issue-790-canary:")
+    assert stranded["claim_expires_at"] is not None
+    assert stranded["terminal_at"] is None
+    assert consumption_row is not None
+    assert str(consumption_row[0]).startswith("sha256:")
+    assert consumption_row[1] == stranded["claim_owner"]
     assert outcomes == 0
     assert failure_code is None
     assert dispatch_started_count(stores.work_unpublished) == 0
@@ -1894,6 +1911,8 @@ def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
     assert receipt["publication_performed"] is False
     assert receipt["consumption"]["event_id"] == EVENT_13689
     assert receipt["consumption"]["ledger_seq"] == LEDGER_13689
+    assert receipt["consumption"]["consumption_digest"] == consumption_row[0]
+    assert receipt["pre_operation_snapshot_digest"] == abort_backup_digest
     assert receipt["outcome"]["failure_code_after_seal"] == (
         "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:NO_EVENT_RESULT"
     )
@@ -1919,11 +1938,12 @@ def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
             store=stores.work_unpublished,
         )
     assert caught.value.failure_code == "RETRY_FORBIDDEN_TARGET"
-    with pytest.raises(
-        Issue790DispositionError,
-        match="canary backup destination already exists",
-    ):
+    with pytest.raises(Issue790DispositionError) as dest_exists:
         disposition.run_issue_790_canary(**canary_kwargs)
+    assert str(dest_exists.value) == "canary backup destination already exists"
+    assert dest_exists.value.failure_code == (
+        CANARY_BACKUP_DESTINATION_ALREADY_EXISTS
+    )
     still = _sqlite_canary_event(
         stores.work_unpublished, ledger_seq=LEDGER_13689
     )
@@ -1932,6 +1952,7 @@ def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
     assert still["provider_dispatched"] == 0
     assert still["claim_owner"] is None
     assert consume_calls == [EVENT_13689]
+    assert "sha256:" + file_digest(backup) == abort_backup_digest
 
 
 def test_step22_backup_dest_exists_without_consumption_fail_closes_before_claim(
@@ -1954,10 +1975,7 @@ def test_step22_backup_dest_exists_without_consumption_fail_closes_before_claim(
     monkeypatch.setattr(disposition, "_consume_issue_790_event", must_not_consume)
     backup = tmp_path / "leftover-dest-13689.sqlite3"
     backup.write_bytes(b"leftover")
-    with pytest.raises(
-        Issue790DispositionError,
-        match="canary backup destination already exists",
-    ):
+    with pytest.raises(Issue790DispositionError) as dest_exists:
         disposition.run_issue_790_canary(
             store=stores.work_unpublished,
             proving_store=stores.proving,
@@ -1974,6 +1992,10 @@ def test_step22_backup_dest_exists_without_consumption_fail_closes_before_claim(
         )
     event = _sqlite_canary_event(
         stores.work_unpublished, ledger_seq=LEDGER_13689
+    )
+    assert str(dest_exists.value) == "canary backup destination already exists"
+    assert dest_exists.value.failure_code == (
+        CANARY_BACKUP_DESTINATION_ALREADY_EXISTS
     )
     assert consume_calls == []
     assert event["state"] == "QUEUED"

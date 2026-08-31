@@ -386,8 +386,17 @@ _RUNNING_CODE_PATHS: dict[str, str | None] = {
 }
 
 
+CANARY_BACKUP_DESTINATION_ALREADY_EXISTS = (
+    "CANARY_BACKUP_DESTINATION_ALREADY_EXISTS"
+)
+
+
 class Issue790DispositionError(RuntimeError):
     """The exact #790 plan, retained target or operation failed closed."""
+
+    def __init__(self, message: str, *, failure_code: str | None = None) -> None:
+        super().__init__(message)
+        self.failure_code = failure_code
 
 
 def _record(value: object, *, field: str) -> dict[str, object]:
@@ -2080,7 +2089,10 @@ def _resolve_canary_backup_destination(
     if not _pre_provider_aborted_canary_claim(
         store, event_id=event_id, ledger_seq=ledger_seq
     ):
-        raise Issue790DispositionError("canary backup destination already exists")
+        raise Issue790DispositionError(
+            "canary backup destination already exists",
+            failure_code=CANARY_BACKUP_DESTINATION_ALREADY_EXISTS,
+        )
     existing = _canonical_existing_file(
         absolute, field="canary backup destination"
     )
@@ -5177,6 +5189,7 @@ def qualify_issue_790_step16_readiness(
 
 
 __all__ = [
+    "CANARY_BACKUP_DESTINATION_ALREADY_EXISTS",
     "ISSUE_790_PLAN_SCHEMA",
     "ISSUE_790_RECEIPT_SCHEMA",
     "ISSUE_790_ITERATIVE_RECEIPT_SCHEMA",
