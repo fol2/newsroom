@@ -78,6 +78,7 @@ from newsroom.tests.test_issue_790_rehearsal_fixtures import (
     insert_unused_queued_attempt_zero,
     mutate_retry_field,
     retry_available_at,
+    transfer_proving_identity,
 )
 from newsroom.tests.test_issue_790_step16_activation import (
     _COMMENT_ID,
@@ -2916,6 +2917,11 @@ def test_step22_sealed_13689_abort_allows_successor_unused_without_already_consu
     assert sealed["resumed_zero_io_finalisation"] is True
     assert sealed["outcome"]["state_after_seal"] == "CONFIGURATION_HELD"
     assert sealed["consumption"]["ledger_seq"] == LEDGER_13689
+    transfer_proving_identity(
+        stores.work_unpublished,
+        spent_ledger_seq=LEDGER_13689,
+        unused_ledger_seq=LEDGER_13690,
+    )
     prepared = _prepare(stores)
     assert prepared.candidate_identity["event_id"] == EVENT_13690
     assert prepared.candidate_identity["ledger_seq"] == LEDGER_13690

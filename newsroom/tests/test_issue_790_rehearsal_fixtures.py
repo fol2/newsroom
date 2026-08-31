@@ -331,7 +331,7 @@ def insert_unused_queued_attempt_zero(
 ) -> None:
     """Clone a later unused QUEUED attempt-0 identity from an existing event.
 
-    Live 13690 landed after 13689 aborted. The successor keeps its own
+    Live 13690 landed after 13689 aborted. The successor keeps a distinct
     source/item identity so UNIQUE(source, item, revision) stays intact.
     """
 
@@ -388,6 +388,51 @@ def insert_unused_queued_attempt_zero(
                 None,
                 None,
                 source[11],
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def transfer_proving_identity(
+    store: Path, *, spent_ledger_seq: int, unused_ledger_seq: int
+) -> None:
+    """Give a successor the spent event's proving 5-tuple after seal.
+
+    UNIQUE(source, item, revision, published, updated) can only hold one
+    row. After 13689 is sealed it no longer needs proving lookup; 13690 does.
+    """
+
+    connection = sqlite3.connect(store)
+    try:
+        spent = connection.execute(
+            "SELECT source_id,item_key,revision_digest,published_at,updated_at "
+            "FROM unpublished_graphiti_revision_events WHERE ledger_seq=?",
+            (spent_ledger_seq,),
+        ).fetchone()
+        unused = connection.execute(
+            "SELECT 1 FROM unpublished_graphiti_revision_events WHERE ledger_seq=?",
+            (unused_ledger_seq,),
+        ).fetchone()
+        if spent is None or unused is None:
+            raise AssertionError("spent or unused event is absent")
+        connection.execute(
+            "UPDATE unpublished_graphiti_revision_events "
+            "SET source_id=?, item_key=? WHERE ledger_seq=?",
+            (f"{spent[0]}-spent", f"{spent[1]}-spent", spent_ledger_seq),
+        )
+        connection.execute(
+            "UPDATE unpublished_graphiti_revision_events "
+            "SET source_id=?, item_key=?, revision_digest=?, published_at=?, "
+            "updated_at=? WHERE ledger_seq=?",
+            (
+                spent[0],
+                spent[1],
+                spent[2],
+                spent[3],
+                spent[4],
+                unused_ledger_seq,
             ),
         )
         connection.commit()
