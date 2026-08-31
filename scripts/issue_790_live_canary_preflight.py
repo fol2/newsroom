@@ -316,6 +316,11 @@ def _effective_retry_exclusion_status(
 ) -> tuple[bool, str]:
     """Prove historical exclusions plus the exhausted canary consumption."""
 
+    from newsroom.control_plane.issue_790_canary import (
+        live_retry_forbidden_row_is_unclaimed,
+        retry_forbidden_safety_states_match,
+    )
+
     plan_by_seq = {
         int(item.get("ledger_seq", 0)): str(item.get("event_id"))
         for item in plan_events
@@ -354,6 +359,7 @@ def _effective_retry_exclusion_status(
         and event_snapshot.get("provider_dispatched") is True
         and event_snapshot.get("last_failure_code") == failure_code
         and consumed_event in effectively_excluded_event_ids
+        and live_retry_forbidden_row_is_unclaimed(event_snapshot)
     )
     historical_ok = (
         len(plan_by_seq) == len(plan_events)
@@ -361,15 +367,19 @@ def _effective_retry_exclusion_status(
         and all(durable_by_seq[seq] == plan_by_seq[seq] for seq in overlapping)
         and all(
             item.get("reason") == "ISSUE_790_RETRY_FORBIDDEN"
-            and item.get("event_snapshot")
-            == next(
+            and retry_forbidden_safety_states_match(
                 (
-                    event
-                    for event in plan_events
-                    if int(event.get("ledger_seq", 0))
-                    == int(item.get("ledger_seq", 0))
+                    next(
+                        (
+                            event
+                            for event in plan_events
+                            if int(event.get("ledger_seq", 0))
+                            == int(item.get("ledger_seq", 0))
+                        ),
+                        None,
+                    ),
                 ),
-                None,
+                (item.get("event_snapshot"),),
             )
             for item in exclusions
             if int(item.get("ledger_seq", 0)) in overlapping
@@ -850,6 +860,9 @@ def _ops_gates(
         from newsroom.control_plane.issue_790_canary import (
             Issue790CanaryRepository,
             graphiti_excluded_event_ids,
+            retry_forbidden_has_claim_columns,
+            retry_forbidden_live_select,
+            retry_forbidden_live_snapshot,
         )
 
         try:
@@ -875,25 +888,16 @@ def _ops_gates(
                 outcome = repository.existing_outcome(
                     consumption_digest=str(consumption["consumption_digest"]),
                 )
+                has_claims = retry_forbidden_has_claim_columns(conn)
                 event = conn.execute(
-                    "SELECT event_id,ledger_seq,state,attempt_count,available_at,"
-                    "last_failure_code,provider_dispatched "
-                    "FROM unpublished_graphiti_revision_events "
-                    "WHERE event_id=? AND ledger_seq=?",
+                    retry_forbidden_live_select(has_claims=has_claims)
+                    + " WHERE event_id=? AND ledger_seq=?",
                     (consumption["event_id"], consumption["ledger_seq"]),
                 ).fetchone()
                 if event is not None:
-                    event_snapshot = {
-                        "event_id": str(event[0]),
-                        "ledger_seq": int(event[1]),
-                        "state": str(event[2]),
-                        "attempt_count": int(event[3]),
-                        "available_at": str(event[4]),
-                        "last_failure_code": (
-                            None if event[5] is None else str(event[5])
-                        ),
-                        "provider_dispatched": bool(event[6]),
-                    }
+                    event_snapshot = retry_forbidden_live_snapshot(
+                        event, has_claims=has_claims
+                    )
         effectively_excluded_event_ids = set(graphiti_excluded_event_ids(conn))
 
         plan_events = [

@@ -16,8 +16,6 @@ from newsroom.control_plane import issue_790_disposition as disposition_module
 from newsroom.control_plane.issue_790_canary import (
     Issue790CanaryIntegrityError,
     Issue790CanaryRepository,
-    _retry_forbidden_event_states_match,
-    _retry_forbidden_row_matches,
 )
 from newsroom.control_plane.issue_790_disposition import (
     ISSUE_790_STEP16_PRE_DISPATCH_PATH,
@@ -39,7 +37,6 @@ _EVENT_13337 = "sha256:e4ef6fd0af91d5d525af3f37f5cfb422733a1640c84c16cdc162f0e6d
 _EVENT_13362 = "sha256:98d0ffbca828f6937b687751c711fec3be9182e679b2fcd041d3d14160f00c85"
 _EVENT_13361 = "sha256:90c3b4de731f2df8d4353e516762f65450570e1e8372ed7b703423f717351ae7"
 _EVENT_13665 = "sha256:b39a1e6ea465ca4a993893d4ae51c94ca9ac3e0db7f4fd70a8c780367263be6b"
-_SEALED_13361_AVAILABLE_AT = "2026-08-30T20:58:43.662872Z"
 _LIVE_13361_AVAILABLE_AT = "2026-08-30T21:29:18.946358Z"
 
 
@@ -279,67 +276,6 @@ def _write_retry_event_table(store: Path, events: list[dict[str, object]]) -> No
         connection.close()
 
 
-def test_retry_forbidden_compare_accepts_demonstrated_13361_available_at_drift() -> None:
-    sealed = _event(_plan_retry_events(), 13361)
-    live = dict(sealed)
-    live["available_at"] = _LIVE_13361_AVAILABLE_AT
-    assert sealed["available_at"] == _SEALED_13361_AVAILABLE_AT
-    assert sealed["state"] == "CONFIGURATION_HELD"
-    assert sealed["attempt_count"] == 1
-    assert sealed["provider_dispatched"] is True
-    assert _retry_forbidden_row_matches(sealed, live) is True
-    live_events = _with_available_at(
-        _plan_retry_events(), 13361, _LIVE_13361_AVAILABLE_AT
-    )
-    assert _retry_forbidden_event_states_match(_plan_retry_events(), live_events) is True
-
-
-def test_retry_forbidden_compare_accepts_13337_available_at_drift() -> None:
-    sealed = _event(_plan_retry_events(), 13337)
-    live = dict(sealed)
-    live["available_at"] = _LIVE_13361_AVAILABLE_AT
-    assert _retry_forbidden_row_matches(sealed, live) is True
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (
-        ("state", "QUEUED"),
-        ("attempt_count", 2),
-        ("provider_dispatched", False),
-        (
-            "last_failure_code",
-            "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:PRODUCER_INTERNAL_ERROR",
-        ),
-        ("event_id", _EVENT_13665),
-        ("ledger_seq", 13665),
-    ),
-)
-def test_retry_forbidden_compare_rejects_13361_identity_drift(
-    field: str, value: object
-) -> None:
-    sealed = _event(_plan_retry_events(), 13361)
-    live = dict(sealed)
-    live["available_at"] = _LIVE_13361_AVAILABLE_AT
-    live[field] = value
-    assert _retry_forbidden_row_matches(sealed, live) is False
-
-
-def test_retry_forbidden_compare_rejects_retry_held_available_at_drift() -> None:
-    sealed = _event(_plan_retry_events(), 1932)
-    live = dict(sealed)
-    live["available_at"] = _LIVE_13361_AVAILABLE_AT
-    assert sealed["state"] == "RETRY_HELD"
-    assert _retry_forbidden_row_matches(sealed, live) is False
-
-
-def test_retry_forbidden_compare_rejects_unparseable_available_at() -> None:
-    sealed = _event(_plan_retry_events(), 13361)
-    live = dict(sealed)
-    live["available_at"] = "not-a-time"
-    assert _retry_forbidden_row_matches(sealed, live) is False
-
-
 def test_require_retry_events_unchanged_accepts_13361_seal_available_at_drift(
     tmp_path: Path,
 ) -> None:
@@ -361,20 +297,18 @@ def test_require_retry_events_unchanged_accepts_13361_seal_available_at_drift(
     assert all(item["ledger_seq"] != 13665 for item in retained)
 
 
-def test_require_retry_events_unchanged_rejects_retry_held_available_at_drift(
+def test_require_retry_events_unchanged_accepts_retry_held_available_at_drift(
     tmp_path: Path,
 ) -> None:
     plan_events = _plan_retry_events()
     live_events = _with_available_at(plan_events, 1932, _LIVE_13361_AVAILABLE_AT)
     store = tmp_path / "unpublished.sqlite3"
     _write_retry_event_table(store, live_events)
-    with pytest.raises(
-        Issue790DispositionError,
-        match="issue #790 retry-forbidden event state differs",
-    ):
-        _require_retry_events_unchanged(
-            store, {"retry_forbidden_events": plan_events}
-        )
+    retained = _require_retry_events_unchanged(
+        store, {"retry_forbidden_events": plan_events}
+    )
+    assert _event(retained, 1932)["available_at"] == _LIVE_13361_AVAILABLE_AT
+    assert _event(retained, 1932)["state"] == "RETRY_HELD"
 
 
 def test_require_retry_events_unchanged_rejects_13361_state_change(
@@ -390,6 +324,52 @@ def test_require_retry_events_unchanged_rejects_13361_state_change(
     with pytest.raises(
         Issue790DispositionError,
         match="issue #790 retry-forbidden event state differs",
+    ):
+        _require_retry_events_unchanged(
+            store, {"retry_forbidden_events": plan_events}
+        )
+
+
+def test_require_retry_events_unchanged_rejects_claimed_13361(
+    tmp_path: Path,
+) -> None:
+    plan_events = _plan_retry_events()
+    live_events = _with_available_at(
+        plan_events, 13361, _LIVE_13361_AVAILABLE_AT
+    )
+    store = tmp_path / "unpublished.sqlite3"
+    connection = sqlite3.connect(store)
+    try:
+        connection.execute(
+            "CREATE TABLE unpublished_graphiti_revision_events("
+            "event_id TEXT,ledger_seq INTEGER,state TEXT,attempt_count INTEGER,"
+            "available_at TEXT,last_failure_code TEXT,provider_dispatched INTEGER,"
+            "claim_owner TEXT,claim_expires_at TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO unpublished_graphiti_revision_events "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    item["event_id"],
+                    item["ledger_seq"],
+                    item["state"],
+                    item["attempt_count"],
+                    item["available_at"],
+                    item["last_failure_code"],
+                    int(item["provider_dispatched"]),
+                    "worker-1" if item["ledger_seq"] == 13361 else None,
+                    None,
+                )
+                for item in live_events
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    with pytest.raises(
+        Issue790DispositionError,
+        match="RETRY_FORBIDDEN_SAFETY_STATE",
     ):
         _require_retry_events_unchanged(
             store, {"retry_forbidden_events": plan_events}

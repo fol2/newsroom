@@ -6,6 +6,7 @@ import json
 import re
 import sqlite3
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -158,74 +159,173 @@ def _instant(value: object, *, field: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-_EXHAUSTED_FAILURE_PREFIX = "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:"
+class RetryForbiddenSafetyError(ValueError):
+    """Missing row, safety-field contradiction, claim/lease, or missing exclusion."""
+
+    classification = "PREDISPATCH_BINDING_FAILURE"
+    failure_code = "RETRY_FORBIDDEN_SAFETY_STATE"
 
 
-def _parseable_utc_instant(value: object) -> bool:
-    if not isinstance(value, str) or not value:
-        return False
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    return parsed.tzinfo is not None
+@dataclass(frozen=True, slots=True)
+class RetryForbiddenSafetyState:
+    """Canonical retry-forbidden identity. ``available_at`` is not authority."""
+
+    event_id: str
+    ledger_seq: int
+    state: str
+    attempt_count: int
+    last_failure_code: str | None
+    provider_dispatched: bool
+
+    @classmethod
+    def from_mapping(cls, item: Mapping[str, object]) -> RetryForbiddenSafetyState:
+        event_id = item.get("event_id")
+        ledger_seq = item.get("ledger_seq")
+        state = item.get("state")
+        attempt = item.get("attempt_count")
+        failure = item.get("last_failure_code")
+        dispatched = item.get("provider_dispatched")
+        if (
+            not isinstance(event_id, str)
+            or not event_id.startswith("sha256:")
+            or isinstance(ledger_seq, bool)
+            or not isinstance(ledger_seq, int)
+            or ledger_seq <= 0
+            or not isinstance(state, str)
+            or not state
+            or isinstance(attempt, bool)
+            or not isinstance(attempt, int)
+            or attempt < 0
+            or not (failure is None or (isinstance(failure, str) and failure))
+            or not isinstance(dispatched, bool)
+        ):
+            raise RetryForbiddenSafetyError(
+                "retry-forbidden safety state is malformed"
+            )
+        return cls(
+            event_id=event_id,
+            ledger_seq=ledger_seq,
+            state=state,
+            attempt_count=attempt,
+            last_failure_code=failure,
+            provider_dispatched=dispatched,
+        )
 
 
-def _is_exhausted_configuration_held(item: Mapping[str, object]) -> bool:
-    attempt = item.get("attempt_count")
-    failure = item.get("last_failure_code")
+def retry_forbidden_observation(
+    item: Mapping[str, object],
+) -> dict[str, object]:
+    """Audit-only scheduler and lease fields. Never retry authority."""
+
+    return {
+        "available_at": item.get("available_at"),
+        "claim_expires_at": item.get("claim_expires_at"),
+        "claim_owner": item.get("claim_owner"),
+        "event_id": item.get("event_id"),
+        "ledger_seq": item.get("ledger_seq"),
+    }
+
+
+def live_retry_forbidden_row_is_unclaimed(item: Mapping[str, object]) -> bool:
     return (
-        item.get("state") == "CONFIGURATION_HELD"
-        and type(attempt) is int
-        and attempt == 1
-        and isinstance(failure, str)
-        and failure.startswith(_EXHAUSTED_FAILURE_PREFIX)
+        item.get("claim_owner") is None and item.get("claim_expires_at") is None
     )
 
 
-def _retry_forbidden_row_matches(expected: object, retained: object) -> bool:
-    """Compare one retry-forbidden snapshot, ignoring seal-time available_at.
-
-    Exhausted CONFIGURATION_HELD attempt-1 rows rewrite ``available_at`` on
-    authority seal. That timestamp is representational, not identity, when
-    event_id, ledger_seq, state, attempt_count, provider_dispatched and
-    last_failure_code still match.
-    """
-
-    if not isinstance(expected, Mapping) or not isinstance(retained, Mapping):
-        return False
-    if dict(expected) == dict(retained):
-        return True
-    if not (
-        _is_exhausted_configuration_held(expected)
-        and _is_exhausted_configuration_held(retained)
-    ):
-        return False
-    if not (
-        _parseable_utc_instant(expected.get("available_at"))
-        and _parseable_utc_instant(retained.get("available_at"))
-    ):
-        return False
-    expected_rest = {
-        key: value for key, value in expected.items() if key != "available_at"
+def retry_forbidden_has_claim_columns(connection: sqlite3.Connection) -> bool:
+    columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(unpublished_graphiti_revision_events)"
+        )
     }
-    retained_rest = {
-        key: value for key, value in retained.items() if key != "available_at"
+    return {"claim_owner", "claim_expires_at"} <= columns
+
+
+def retry_forbidden_live_select(*, has_claims: bool) -> str:
+    extra = ",claim_owner,claim_expires_at" if has_claims else ""
+    return (
+        "SELECT event_id,ledger_seq,state,attempt_count,available_at,"
+        f"last_failure_code,provider_dispatched{extra} "
+        "FROM unpublished_graphiti_revision_events"
+    )
+
+
+def retry_forbidden_live_snapshot(
+    row: Sequence[object], *, has_claims: bool
+) -> dict[str, object]:
+    snapshot: dict[str, object] = {
+        "attempt_count": int(row[3]),
+        "available_at": str(row[4]),
+        "event_id": str(row[0]),
+        "last_failure_code": None if row[5] is None else str(row[5]),
+        "ledger_seq": int(row[1]),
+        "provider_dispatched": bool(row[6]),
+        "state": str(row[2]),
     }
-    return expected_rest == retained_rest
+    if has_claims:
+        snapshot["claim_owner"] = None if row[7] is None else str(row[7])
+        snapshot["claim_expires_at"] = None if row[8] is None else str(row[8])
+    return snapshot
 
 
-def _retry_forbidden_event_states_match(expected: object, retained: object) -> bool:
+def evaluate_retry_forbidden_safety(
+    *,
+    expected: Mapping[str, object],
+    live: Mapping[str, object] | None,
+    excluded: bool,
+) -> RetryForbiddenSafetyState:
+    if live is None:
+        raise RetryForbiddenSafetyError("retry-forbidden row is absent")
+    expected_state = RetryForbiddenSafetyState.from_mapping(expected)
+    live_state = RetryForbiddenSafetyState.from_mapping(live)
+    if expected_state != live_state:
+        raise RetryForbiddenSafetyError("retry-forbidden safety state differs")
+    if not live_retry_forbidden_row_is_unclaimed(live):
+        raise RetryForbiddenSafetyError("retry-forbidden claim/lease is present")
+    if not excluded:
+        raise RetryForbiddenSafetyError(
+            "retry-forbidden durable exclusion is absent"
+        )
+    return live_state
+
+
+def retry_forbidden_safety_states_match(
+    expected: object,
+    retained: object,
+    *,
+    excluded_seqs: frozenset[int] | None = None,
+) -> bool:
     if not isinstance(expected, (list, tuple)) or not isinstance(
         retained, (list, tuple)
     ):
         return False
     if len(expected) != len(retained):
         return False
-    return all(
-        _retry_forbidden_row_matches(item, row)
-        for item, row in zip(expected, retained, strict=True)
-    )
+    live_by_seq: dict[int, Mapping[str, object]] = {}
+    for row in retained:
+        if not isinstance(row, Mapping):
+            return False
+        seq = row.get("ledger_seq")
+        if isinstance(seq, bool) or not isinstance(seq, int) or seq in live_by_seq:
+            return False
+        live_by_seq[seq] = row
+    if len(live_by_seq) != len(expected):
+        return False
+    try:
+        for item in expected:
+            if not isinstance(item, Mapping):
+                return False
+            seq = int(item["ledger_seq"])
+            excluded = True if excluded_seqs is None else seq in excluded_seqs
+            evaluate_retry_forbidden_safety(
+                expected=item,
+                live=live_by_seq.get(seq),
+                excluded=excluded,
+            )
+    except (KeyError, TypeError, ValueError, RetryForbiddenSafetyError):
+        return False
+    return True
 
 
 def _retry_exclusion_records_match(
@@ -241,8 +341,9 @@ def _retry_exclusion_records_match(
         for key, value in record.items()
         if key not in {"excluded_at", "exclusion_digest", "event_snapshot"}
     }
-    return prior_rest == record_rest and _retry_forbidden_row_matches(
-        prior.get("event_snapshot"), record.get("event_snapshot")
+    return prior_rest == record_rest and retry_forbidden_safety_states_match(
+        (prior.get("event_snapshot"),),
+        (record.get("event_snapshot"),),
     )
 
 
@@ -975,33 +1076,22 @@ class Issue790CanaryRepository:
                 or str(disposition[0]) != approved_contract.invocation_id
             ):
                 raise Issue790CanaryIntegrityError("retry exclusion authority differs")
+            has_claims = retry_forbidden_has_claim_columns(connection)
+            live_select = retry_forbidden_live_select(has_claims=has_claims)
             for item in expected:
                 event_id = _token(item.get("event_id"), field="retry exclusion event id")
                 ledger_seq = int(item["ledger_seq"])
                 row = connection.execute(
-                    "SELECT event_id,ledger_seq,state,attempt_count,available_at,"
-                    "last_failure_code,provider_dispatched "
-                    "FROM unpublished_graphiti_revision_events "
-                    "WHERE event_id=? AND ledger_seq=?",
+                    live_select + " WHERE event_id=? AND ledger_seq=?",
                     (event_id, ledger_seq),
                 ).fetchone()
                 snapshot = (
-                    {
-                        "event_id": str(row[0]),
-                        "ledger_seq": int(row[1]),
-                        "state": str(row[2]),
-                        "attempt_count": int(row[3]),
-                        "available_at": str(row[4]),
-                        "last_failure_code": (
-                            None if row[5] is None else str(row[5])
-                        ),
-                        "provider_dispatched": bool(row[6]),
-                    }
+                    retry_forbidden_live_snapshot(row, has_claims=has_claims)
                     if row is not None
                     else None
                 )
-                if snapshot is None or not _retry_forbidden_row_matches(
-                    item, snapshot
+                if snapshot is None or not retry_forbidden_safety_states_match(
+                    (item,), (snapshot,)
                 ):
                     raise Issue790CanaryIntegrityError(
                         "retry exclusion event state differs"
@@ -1849,9 +1939,18 @@ __all__ = [
     "ITERATIVE_CANARY_PREFLIGHT_SCHEMA",
     "Issue790CanaryIntegrityError",
     "Issue790CanaryRepository",
+    "RetryForbiddenSafetyError",
+    "RetryForbiddenSafetyState",
+    "evaluate_retry_forbidden_safety",
     "graphiti_event_has_canary_consumption",
     "validate_graphiti_canary_target_unused",
     "graphiti_excluded_event_ids",
     "graphiti_retry_excluded",
+    "live_retry_forbidden_row_is_unclaimed",
+    "retry_forbidden_has_claim_columns",
+    "retry_forbidden_live_select",
+    "retry_forbidden_live_snapshot",
+    "retry_forbidden_observation",
+    "retry_forbidden_safety_states_match",
     "validate_graphiti_canary_claim",
 ]
