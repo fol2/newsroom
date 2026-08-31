@@ -2445,7 +2445,7 @@ def _other_issue_790_legacy_canary_process_ids(
 
     try:
         completed = subprocess.run(
-            ["/bin/ps", "-axo", "pid=,command="],
+            ["/bin/ps", "-axo", "pid=,ppid=,command="],
             check=True,
             capture_output=True,
             text=True,
@@ -2454,7 +2454,26 @@ def _other_issue_790_legacy_canary_process_ids(
         raise Issue790DispositionError(
             "interrupted canary process state is unavailable"
         ) from exc
+    processes: list[tuple[int, int, str]] = []
+    for raw in completed.stdout.splitlines():
+        fields = raw.strip().split(maxsplit=2)
+        if (
+            len(fields) != 3
+            or not fields[0].isdigit()
+            or not fields[1].isdigit()
+        ):
+            continue
+        processes.append((int(fields[0]), int(fields[1]), fields[2]))
+
     current = os.getpid()
+    parent_by_pid = {pid: parent for pid, parent, _command in processes}
+    # uv and launcher ancestors retain the full canary command line.
+    own_process_ids = {current}
+    parent = parent_by_pid.get(current, os.getppid())
+    while parent > 0 and parent not in own_process_ids:
+        own_process_ids.add(parent)
+        parent = parent_by_pid.get(parent, 0)
+
     found: list[int] = []
     markers = frozenset(
         {
@@ -2463,15 +2482,13 @@ def _other_issue_790_legacy_canary_process_ids(
         }
     )
     canonical_store = str(store.resolve(strict=True))
-    for raw in completed.stdout.splitlines():
-        fields = raw.strip().split(maxsplit=1)
-        if len(fields) != 2 or not fields[0].isdigit():
-            continue
-        pid = int(fields[0])
-        if pid == current or not any(marker in fields[1] for marker in markers):
+    for pid, _parent, command in processes:
+        if pid in own_process_ids or not any(
+            marker in command for marker in markers
+        ):
             continue
         try:
-            tokens = shlex.split(fields[1])
+            tokens = shlex.split(command)
         except ValueError:
             continue
         candidate_event = _command_option(tokens, "--canary-event-id")
