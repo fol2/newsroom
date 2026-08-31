@@ -31,6 +31,8 @@ from newsroom.control_plane.issue_790_prepared_canary import (
     PreparedCanaryError,
     consume_prepared_canary,
     prepare_issue_790_canary,
+    unused_queued_attempt_zero_candidates,
+    _candidate_from_plan,
 )
 from newsroom.control_plane.issue_790_rehearsal import (
     RehearsalRealGraphitiAdapter,
@@ -45,9 +47,12 @@ from newsroom.tests.test_issue_790_rehearsal_fixtures import (
     LIVE_13361_AVAILABLE_AT,
     OBSERVED_AT,
     SEALED_13361_AVAILABLE_AT,
+    SUCCESSOR_EVENT_ID,
+    SUCCESSOR_LEDGER_SEQ,
     build_rehearsal_stores,
     candidate_identity,
     dispatch_started_count,
+    event_identity,
     file_digest,
     mutate_retry_field,
     retry_available_at,
@@ -187,6 +192,41 @@ def test_ready_implies_dispatch_started(tmp_path: Path) -> None:
     assert dispatch_started_count(stores.work_unpublished) >= 1
     assert file_digest(stores.sealed_unpublished) == stores.sealed_digest
     assert candidate_identity(stores.sealed_unpublished)[0] == CANDIDATE_EVENT_ID
+
+
+def test_ready_implies_dispatch_started_for_successor_unused_attempt_zero(
+    tmp_path: Path,
+) -> None:
+    stores = build_rehearsal_stores(tmp_path, successor=True)
+    before = file_digest(stores.work_unpublished)
+    prepared = _prepare(stores)
+    assert prepared.candidate_identity["event_id"] == SUCCESSOR_EVENT_ID
+    assert prepared.candidate_identity["ledger_seq"] == SUCCESSOR_LEDGER_SEQ
+    assert file_digest(stores.work_unpublished) == before
+    result = run_prepared_canary_rehearsal(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        plan=stores.plan,
+        observed_at=OBSERVED_AT,
+        exact_head=EXACT_HEAD,
+        prepared=prepared,
+        event_id=SUCCESSOR_EVENT_ID,
+        ledger_seq=SUCCESSOR_LEDGER_SEQ,
+    )
+    assert result["decision_digest"] == prepared.decision_digest
+    assert result["dispatch_started"] is True
+    assert result["provider_calls"] == 0
+    assert RehearsalRealGraphitiAdapter.provider_calls == 0
+    assert dispatch_started_count(stores.work_unpublished) >= 1
+    assert file_digest(stores.sealed_unpublished) == stores.sealed_digest
+    assert candidate_identity(stores.sealed_unpublished) == (
+        CANDIDATE_EVENT_ID,
+        CANDIDATE_LEDGER_SEQ,
+        "CONFIGURATION_HELD",
+    )
+    assert event_identity(stores.sealed_unpublished, SUCCESSOR_LEDGER_SEQ)[0] == (
+        SUCCESSOR_EVENT_ID
+    )
 
 
 def test_ready_successor_exact_head_implies_dispatch_started(tmp_path: Path) -> None:
@@ -336,6 +376,120 @@ def test_event_13665_identity_is_not_mutated(tmp_path: Path) -> None:
     assert event_id == CANDIDATE_EVENT_ID
     assert ledger_seq == CANDIDATE_LEDGER_SEQ
     assert candidate_identity(stores.sealed_unpublished)[0] == CANDIDATE_EVENT_ID
+
+
+def test_spent_13665_is_retry_forbidden_target(tmp_path: Path) -> None:
+    stores = build_rehearsal_stores(tmp_path, successor=True)
+    RehearsalRealGraphitiAdapter.provider_calls = 0
+    RehearsalRealGraphitiAdapter.dispatch_started = False
+    with pytest.raises(PreparedCanaryError) as caught:
+        prepare_issue_790_canary(
+            store=stores.work_unpublished,
+            proving_store=stores.proving,
+            plan=stores.plan,
+            observed_at=OBSERVED_AT,
+            exact_head=EXACT_HEAD,
+            event_id=CANDIDATE_EVENT_ID,
+            ledger_seq=CANDIDATE_LEDGER_SEQ,
+            role="canary",
+        )
+    assert caught.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    assert RehearsalRealGraphitiAdapter.dispatch_started is False
+    assert RehearsalRealGraphitiAdapter.provider_calls == 0
+    assert dispatch_started_count(stores.work_unpublished) == 0
+    assert candidate_identity(stores.work_unpublished) == (
+        CANDIDATE_EVENT_ID,
+        CANDIDATE_LEDGER_SEQ,
+        "CONFIGURATION_HELD",
+    )
+    assert candidate_identity(stores.sealed_unpublished) == (
+        CANDIDATE_EVENT_ID,
+        CANDIDATE_LEDGER_SEQ,
+        "CONFIGURATION_HELD",
+    )
+
+
+def test_cli_flags_disagree_with_unused_candidate_fail_closes(tmp_path: Path) -> None:
+    stores = build_rehearsal_stores(tmp_path)
+    with pytest.raises(PreparedCanaryError) as caught:
+        prepare_issue_790_canary(
+            store=stores.work_unpublished,
+            proving_store=stores.proving,
+            plan=stores.plan,
+            observed_at=OBSERVED_AT,
+            exact_head=EXACT_HEAD,
+            event_id=SUCCESSOR_EVENT_ID,
+            ledger_seq=SUCCESSOR_LEDGER_SEQ,
+            role="canary",
+        )
+    assert caught.value.failure_code == "CANDIDATE_IDENTITY"
+    assert candidate_identity(stores.work_unpublished)[2] == "QUEUED"
+
+
+def test_step22_spent_13665_successor_unused_attempt_zero_survives_full_path(
+    tmp_path: Path,
+) -> None:
+    """Live 13671 CANDIDATE_IDENTITY: READY unused and CLI agree after spent 13665."""
+
+    stores = build_rehearsal_stores(tmp_path, successor=True)
+    named = unused_queued_attempt_zero_candidates(stores.work_unpublished, stores.plan)
+    assert named[0] == (SUCCESSOR_EVENT_ID, SUCCESSOR_LEDGER_SEQ)
+    prepared = _prepare(stores)
+    assert prepared.candidate_identity["event_id"] == SUCCESSOR_EVENT_ID
+    assert prepared.candidate_identity["ledger_seq"] == SUCCESSOR_LEDGER_SEQ
+    with_flags = prepare_issue_790_canary(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        plan=stores.plan,
+        observed_at=OBSERVED_AT,
+        exact_head=EXACT_HEAD,
+        event_id=SUCCESSOR_EVENT_ID,
+        ledger_seq=SUCCESSOR_LEDGER_SEQ,
+        role="canary",
+    )
+    assert with_flags.decision_digest == prepared.decision_digest
+    bound = _candidate_from_plan(
+        stores.plan,
+        event_id=SUCCESSOR_EVENT_ID,
+        ledger_seq=SUCCESSOR_LEDGER_SEQ,
+        role="canary",
+        store=stores.work_unpublished,
+    )
+    assert bound == (SUCCESSOR_EVENT_ID, SUCCESSOR_LEDGER_SEQ)
+    RehearsalRealGraphitiAdapter.provider_calls = 0
+    RehearsalRealGraphitiAdapter.dispatch_started = False
+    result = disposition.run_issue_790_canary(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        backup_path=tmp_path / "unused-backup.sqlite3",
+        plan=stores.plan,
+        observed_at=OBSERVED_AT,
+        repository_root=tmp_path,
+        event_id=SUCCESSOR_EVENT_ID,
+        ledger_seq=SUCCESSOR_LEDGER_SEQ,
+        disposition_digest="sha256:" + "cd" * 32,
+        prepared=prepared,
+        rehearsal=True,
+        exact_head=EXACT_HEAD,
+    )
+    assert result["decision_digest"] == prepared.decision_digest
+    assert result["dispatch_started"] is True
+    assert result["provider_calls"] == 0
+    assert dispatch_started_count(stores.work_unpublished) >= 1
+    assert candidate_identity(stores.sealed_unpublished) == (
+        CANDIDATE_EVENT_ID,
+        CANDIDATE_LEDGER_SEQ,
+        "CONFIGURATION_HELD",
+    )
+    with pytest.raises(PreparedCanaryError) as caught:
+        _candidate_from_plan(
+            stores.plan,
+            event_id=CANDIDATE_EVENT_ID,
+            ledger_seq=CANDIDATE_LEDGER_SEQ,
+            role="canary",
+            store=stores.work_unpublished,
+        )
+    assert caught.value.failure_code == "RETRY_FORBIDDEN_TARGET"
 
 
 @pytest.mark.parametrize(

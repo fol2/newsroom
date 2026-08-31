@@ -11,6 +11,7 @@ from scripts.issue_790_live_canary_preflight import (
     LATEST_FAILURE_COVERING_FULL_PATH_TESTS,
     REQUIRED_RETRY_LEDGER_SEQS,
     STEP21_FULL_PATH_TEST,
+    STEP22_CANDIDATE_IDENTITY_FULL_PATH_TEST,
     STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST,
     _blocker_smokes,
     _effective_retry_exclusion_status,
@@ -180,11 +181,12 @@ def _full_path_green_comment(
     }
 
 
-def test_covering_full_path_nodes_are_step21_and_step22_only() -> None:
+def test_covering_full_path_nodes_are_the_allowlist() -> None:
     assert LATEST_FAILURE_COVERING_FULL_PATH_TESTS == frozenset(
         {
             STEP21_FULL_PATH_TEST,
             STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST,
+            STEP22_CANDIDATE_IDENTITY_FULL_PATH_TEST,
         }
     )
 
@@ -195,6 +197,7 @@ def test_covering_full_path_nodes_are_step21_and_step22_only() -> None:
         (13361, STEP21_FULL_PATH_TEST),
         (13665, STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST),
         (13665, STEP21_FULL_PATH_TEST),
+        (13671, STEP22_CANDIDATE_IDENTITY_FULL_PATH_TEST),
     ),
 )
 def test_latest_live_failure_accepts_step21_or_step22_covering_red(

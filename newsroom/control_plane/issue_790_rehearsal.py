@@ -10,8 +10,6 @@ from pathlib import Path
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
 from newsroom.control_plane.issue_790_prepared_canary import (
-    CANDIDATE_EVENT_ID,
-    CANDIDATE_LEDGER_SEQ,
     PreparedCanary,
     PreparedCanaryError,
     consume_prepared_canary,
@@ -170,6 +168,8 @@ def run_prepared_canary_rehearsal(
     exact_head: str,
     prepared: PreparedCanary | None = None,
     crash_before_dispatch: bool = False,
+    event_id: str | None = None,
+    ledger_seq: int | None = None,
 ) -> dict[str, object]:
     """READY digest then production consume path down to the transport seam."""
 
@@ -182,11 +182,13 @@ def run_prepared_canary_rehearsal(
         plan=plan,
         observed_at=observed_at,
         exact_head=exact_head,
-        event_id=CANDIDATE_EVENT_ID,
-        ledger_seq=CANDIDATE_LEDGER_SEQ,
+        event_id=event_id,
+        ledger_seq=ledger_seq,
         role="canary",
     )
     retained = consume_prepared_canary(prepared, expected=latest)
+    consume_event_id = str(retained.candidate_identity["event_id"])
+    consume_ledger_seq = int(retained.candidate_identity["ledger_seq"])
     if crash_before_dispatch:
         raise PreparedCanaryError(
             "rehearsal crashed before dispatch",
@@ -201,7 +203,7 @@ def run_prepared_canary_rehearsal(
             proving_store=proving_store,
             unpublished_store=store,
             owner_id=f"issue-790-rehearsal:{observed_at.astimezone(UTC).isoformat()}",
-            event_id=CANDIDATE_EVENT_ID,
+            event_id=consume_event_id,
             canary_consumption_digest=None,
             model_usage=service,
             graphiti=RehearsalEvaluationGraphitiRunner(

@@ -3794,6 +3794,7 @@ def run_issue_790_canary(
         from newsroom.control_plane.issue_790_prepared_canary import (
             PreparedCanary,
             PreparedCanaryError,
+            _candidate_from_plan,
         )
         from newsroom.control_plane.issue_790_rehearsal import (
             run_prepared_canary_rehearsal,
@@ -3804,6 +3805,13 @@ def run_issue_790_canary(
                 "prepared canary is absent",
                 failure_code="PREPARED_CANARY_ABSENT",
             )
+        _candidate_from_plan(
+            plan,
+            event_id=event_id,
+            ledger_seq=ledger_seq,
+            role="canary",
+            store=store,
+        )
         return run_prepared_canary_rehearsal(
             store=store,
             proving_store=proving_store,
@@ -3812,6 +3820,8 @@ def run_issue_790_canary(
             exact_head=exact_head or "",
             prepared=prepared,
             crash_before_dispatch=crash_before_dispatch,
+            event_id=event_id,
+            ledger_seq=ledger_seq,
         )
 
     retained_plan = _require_approved_plan(
@@ -3832,13 +3842,14 @@ def run_issue_790_canary(
             "prepared canary is absent",
             failure_code="PREPARED_CANARY_ABSENT",
         )
+    store = _canonical_existing_file(store, field="source unpublished store")
     _candidate_from_plan(
         retained_plan,
         event_id=event_id,
         ledger_seq=ledger_seq,
         role="canary",
+        store=store,
     )
-    store = _canonical_existing_file(store, field="source unpublished store")
     proving_store = _canonical_existing_file(
         proving_store,
         field="source proving store",

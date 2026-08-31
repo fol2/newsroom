@@ -13,8 +13,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from newsroom.control_plane.issue_790_prepared_canary import (
-    CANDIDATE_EVENT_ID,
-    CANDIDATE_LEDGER_SEQ,
     prepare_issue_790_canary,
 )
 from newsroom.control_plane.issue_790_rehearsal import (
@@ -49,8 +47,6 @@ def main(argv: list[str] | None = None) -> int:
         plan=plan,
         observed_at=observed_at,
         exact_head=args.exact_head,
-        event_id=CANDIDATE_EVENT_ID,
-        ledger_seq=CANDIDATE_LEDGER_SEQ,
         role="preflight",
     )
     result = run_prepared_canary_rehearsal(
@@ -60,6 +56,8 @@ def main(argv: list[str] | None = None) -> int:
         observed_at=observed_at,
         exact_head=args.exact_head,
         prepared=prepared,
+        event_id=str(prepared.candidate_identity["event_id"]),
+        ledger_seq=int(prepared.candidate_identity["ledger_seq"]),
     )
     print(f"PREPARED_CANARY_DIGEST={prepared.decision_digest}")
     print(f"DISPATCH_STARTED={result['dispatch_started']}")
