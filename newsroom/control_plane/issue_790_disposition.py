@@ -1982,6 +1982,114 @@ def _canonical_new_file(path: Path, *, field: str) -> Path:
     return absolute
 
 
+def _pre_provider_aborted_canary_claim(
+    store: Path,
+    *,
+    event_id: str,
+    ledger_seq: int,
+) -> bool:
+    """True when dest-exists re-entry can seal without a second claim.
+
+    Live 13689: backup written, consumption present, RUNNING attempt 1,
+    provider_dispatched=0, no outcome, no DISPATCH_STARTED. Same family as
+    consume-then-abort before provider. Dest exists without consumption is
+    not this strand — that still fail-closes before claim.
+    """
+
+    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if (
+            "unpublished_graphiti_revision_events" not in tables
+            or "issue_790_bounded_canary_consumptions" not in tables
+        ):
+            return False
+        event = connection.execute(
+            "SELECT state,attempt_count,provider_dispatched "
+            "FROM unpublished_graphiti_revision_events "
+            "WHERE event_id=? AND ledger_seq=?",
+            (event_id, ledger_seq),
+        ).fetchone()
+        if (
+            event is None
+            or str(event[0]) not in {"QUEUED", "CLAIMED", "RUNNING"}
+            or int(event[1]) not in {0, 1}
+            or bool(event[2])
+        ):
+            return False
+        consumption = connection.execute(
+            "SELECT consumption_digest FROM issue_790_bounded_canary_consumptions "
+            "WHERE event_id=? AND ledger_seq=? LIMIT 1",
+            (event_id, ledger_seq),
+        ).fetchone()
+        if consumption is None:
+            return False
+        if "issue_790_bounded_canary_outcomes" in tables and connection.execute(
+            "SELECT 1 FROM issue_790_bounded_canary_outcomes "
+            "WHERE consumption_digest=? LIMIT 1",
+            (consumption[0],),
+        ).fetchone() is not None:
+            return False
+        if (
+            "model_invocation_allocations" in tables
+            and "model_transport_observations" in tables
+        ):
+            marker = connection.execute(
+                "SELECT EXISTS("
+                "SELECT 1 FROM model_invocation_allocations AS allocation "
+                "JOIN model_transport_observations AS observation "
+                "ON observation.invocation_id=allocation.invocation_id "
+                "WHERE allocation.cycle_id=? "
+                "AND observation.state='DISPATCH_STARTED')",
+                (event_id,),
+            ).fetchone()
+            if marker is not None and bool(marker[0]):
+                return False
+        return True
+    finally:
+        connection.close()
+
+
+def _resolve_canary_backup_destination(
+    path: Path,
+    *,
+    store: Path,
+    event_id: str,
+    ledger_seq: int,
+) -> tuple[Path, str | None]:
+    """New dest, or reuse dest when 13689-class abort-strand can be sealed."""
+
+    absolute = path.expanduser().absolute()
+    try:
+        parent = absolute.parent.resolve(strict=True)
+    except OSError as exc:
+        raise Issue790DispositionError(
+            "canary backup destination parent is absent"
+        ) from exc
+    if parent != absolute.parent or not parent.is_dir():
+        raise Issue790DispositionError(
+            "canary backup destination parent path is not canonical"
+        )
+    if not os.path.lexists(absolute):
+        return absolute, None
+    if not _pre_provider_aborted_canary_claim(
+        store, event_id=event_id, ledger_seq=ledger_seq
+    ):
+        raise Issue790DispositionError("canary backup destination already exists")
+    existing = _canonical_existing_file(
+        absolute, field="canary backup destination"
+    )
+    return (
+        existing,
+        "sha256:" + hashlib.sha256(existing.read_bytes()).hexdigest(),
+    )
+
+
 def assert_issue_790_paths_disjoint(*paths: Path) -> None:
     """Reject path aliases before any issue #790 operation or evidence write."""
 
@@ -3847,7 +3955,12 @@ def run_issue_790_canary(
         field="source proving store",
     )
     assert_issue_790_paths_disjoint(store, proving_store)
-    backup_path = _canonical_new_file(backup_path, field="canary backup destination")
+    backup_path, retained_backup_digest = _resolve_canary_backup_destination(
+        backup_path,
+        store=store,
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+    )
     assert_issue_790_paths_disjoint(store, proving_store, backup_path)
     _sqlite_quick_check(proving_store, field="source proving store")
     operational_evidence = collect_issue_790_operational_evidence(
@@ -3943,7 +4056,11 @@ def run_issue_790_canary(
         field="canary state counts",
     )
     dead_letters_before = int(state_counts_before.get("DEAD_LETTER", 0))
-    backup_digest = _sqlite_backup(store, backup_path)
+    backup_digest = (
+        retained_backup_digest
+        if retained_backup_digest is not None
+        else _sqlite_backup(store, backup_path)
+    )
     operational_evidence_after_backup = collect_issue_790_operational_evidence(
         repository_root=repository_root,
         store=store,
