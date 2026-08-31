@@ -154,7 +154,21 @@ ISSUE_790_STEP21_PENDING_DIGEST = (
 ISSUE_790_STEP21_CHECKED_CANDIDATE_DIGEST = (
     "sha256:ffa787e74e16dbf5b606c3952f064e1a0d908dcc13bbf5ec8dcdc68e69ef7fd2"
 )
-ISSUE_790_OWNER_ACTIVATED_SEQUENCE_ORDINALS = frozenset({16, 17, 18, 19, 20, 21})
+ISSUE_790_STEP21_ACTIVATED_PLAN_DIGEST = (
+    "sha256:effc7aed0657c5f164427b81f0e7c05580fcdec5baa4ec18aea588a69912dbb1"
+)
+ISSUE_790_STEP21_ACTIVATION_DIGEST = (
+    "sha256:87b12eae84e1892174e1b720c0c7ba0ef5724798c7657efb72f097e26da9c003"
+)
+ISSUE_790_STEP22_PENDING_DIGEST = (
+    "sha256:5245ee8fab237fac3a0b9bf8863ef7693ba55d78311bf4e8ffe4e949f1a87ce4"
+)
+ISSUE_790_STEP22_CHECKED_CANDIDATE_DIGEST = (
+    "sha256:deae29a6ddb8d88300ba72c48c2140c6d15d5f3ff1f25343b9cc2608ae7287c8"
+)
+ISSUE_790_OWNER_ACTIVATED_SEQUENCE_ORDINALS = frozenset(
+    {16, 17, 18, 19, 20, 21, 22}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -969,6 +983,50 @@ _STEP21_CHECKED_CANDIDATE = Issue790CheckedCandidateContract(
     ),
 )
 
+_STEP22_CHECKED_CANDIDATE = Issue790CheckedCandidateContract(
+    schema_version=ISSUE_790_STEP16_CANDIDATE_SCHEMA,
+    candidate_digest=ISSUE_790_STEP22_CHECKED_CANDIDATE_DIGEST,
+    pending_digest=ISSUE_790_STEP22_PENDING_DIGEST,
+    invocation_id=(
+        "sha256:d0712807fd025520d0a94e5a28c532d4cb8684c936387290fe7eeb49d0b2336c"
+    ),
+    terminal_digest=(
+        "sha256:d48e844404516bd41b17038b42a834c6e54bf5da520ef046f3baf81ea7a8cbbe"
+    ),
+    allocation_digest=(
+        "sha256:c789330ca7151d097e6d366dd65481ff21d55f93891ff61e368d7369b12c7120"
+    ),
+    predecessor_plan_digest=ISSUE_790_STEP21_ACTIVATED_PLAN_DIGEST,
+    sequence_ordinal=22,
+    projection_policy_version="NewsroomGovernedProposalProjectionV1",
+    projection_policy_digest=(
+        "sha256:c68a9c5bf81a8d052ba9b05f286b0d1cf664e86e2e00ee3c39684f7809b16a7c"
+    ),
+    temporal_policy_version="graphiti-source-reference-time-v2",
+    validator_contract_version="NewsroomCombinedTemporalNormaliseV2",
+    pre_dispatch_operational_requirements_digest=(
+        "sha256:968d0875cbed3a37cca56c2aa696598c3996e10d3a0ad6edc5978c21965d587b"
+    ),
+    reviewed_fix_digest=(
+        "sha256:cd263467b00c0b93ad73cdba484cd2dbdd0ccab302bcc521c1a906aa052a1ebf"
+    ),
+    predecessor_causal_report_digest=(
+        "sha256:56a309f1a025cca776048559fa3ceb53d0d4f7c53e8fc7b844a6945e44e41acc"
+    ),
+    checked_approved_by="checked:issue-790-step22-sealer",
+    checked_approval_reference=f"checked:{ISSUE_790_STEP22_PENDING_DIGEST}",
+    candidate_event_qualification_digest=(
+        "sha256:df39aa693e712bc8d9b1c8c691f9effa6f1ff40bf945e20b9b997dbf32a16ed5"
+    ),
+    candidate_event_id=(
+        "sha256:b39a1e6ea465ca4a993893d4ae51c94ca9ac3e0db7f4fd70a8c780367263be6b"
+    ),
+    candidate_ledger_seq=13665,
+    candidate_event_manifest_digest=(
+        "sha256:43ae5b036c46427d2ef7d55c1290c32e23ae5aa313dd7c66cac384272ed97404"
+    ),
+)
+
 _CHECKED_CANDIDATES = {
     _STEP16_CHECKED_CANDIDATE.candidate_digest: _STEP16_CHECKED_CANDIDATE,
     _STEP17_CHECKED_CANDIDATE.candidate_digest: _STEP17_CHECKED_CANDIDATE,
@@ -976,6 +1034,7 @@ _CHECKED_CANDIDATES = {
     _STEP19_CHECKED_CANDIDATE.candidate_digest: _STEP19_CHECKED_CANDIDATE,
     _STEP20_CHECKED_CANDIDATE.candidate_digest: _STEP20_CHECKED_CANDIDATE,
     _STEP21_CHECKED_CANDIDATE.candidate_digest: _STEP21_CHECKED_CANDIDATE,
+    _STEP22_CHECKED_CANDIDATE.candidate_digest: _STEP22_CHECKED_CANDIDATE,
 }
 _CHECKED_CANDIDATES_BY_PENDING = {
     contract.pending_digest: contract
@@ -1123,6 +1182,10 @@ __all__ = [
     "ISSUE_790_STEP20_ACTIVATION_DIGEST",
     "ISSUE_790_STEP21_PENDING_DIGEST",
     "ISSUE_790_STEP21_CHECKED_CANDIDATE_DIGEST",
+    "ISSUE_790_STEP21_ACTIVATED_PLAN_DIGEST",
+    "ISSUE_790_STEP21_ACTIVATION_DIGEST",
+    "ISSUE_790_STEP22_PENDING_DIGEST",
+    "ISSUE_790_STEP22_CHECKED_CANDIDATE_DIGEST",
     "ISSUE_790_OWNER_ACTIVATED_SEQUENCE_ORDINALS",
     "Issue790ApprovedPlanContract",
     "Issue790CheckedCandidateContract",

@@ -1188,7 +1188,7 @@ class Issue790CanaryRepository:
         owner_id = _token(owner_id, field="canary owner id")
         if isinstance(ledger_seq, bool) or not isinstance(ledger_seq, int) or ledger_seq <= 0:
             raise Issue790CanaryIntegrityError("bounded canary ledger sequence is invalid")
-        if ledger_seq in {1932, 1972, 8834, 8835, 13284, 13337, 13362}:
+        if ledger_seq in {1932, 1972, 8834, 8835, 13284, 13337, 13361, 13362}:
             raise Issue790CanaryIntegrityError("bounded canary targeted a retained failure")
         consumed_at_text = _utc_text(consumed_at)
 
