@@ -4287,6 +4287,17 @@ def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
         store=store,
         observed_at=observed_at,
     )
+    preflight = _issue_790_canary_preflight(
+        store,
+        event_id=event_id,
+        ledger_seq=2002,
+        evaluated_at=observed_at,
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_qualify_issue_790_event",
+        lambda **_values: preflight,
+    )
     ready_runtime_check = issue_790_operation._qualify_real_graphiti_runtime
     monkeypatch.setattr(
         issue_790_operation,
@@ -4351,17 +4362,6 @@ def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
         issue_790_operation,
         "_require_retry_events_unchanged",
         tracked_retry_check,
-    )
-    preflight = _issue_790_canary_preflight(
-        store,
-        event_id=event_id,
-        ledger_seq=2002,
-        evaluated_at=observed_at,
-    )
-    monkeypatch.setattr(
-        issue_790_operation,
-        "_qualify_issue_790_event",
-        lambda **_values: preflight,
     )
 
     dispatch_calls: list[str] = []

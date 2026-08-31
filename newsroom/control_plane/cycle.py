@@ -3031,7 +3031,9 @@ def consume_next_graphiti_event(
 ) -> GraphitiProcessResult | None:
     """Claim and process one durable revision, independently from source polling."""
 
-    if isinstance(graphiti, GovernedRealGraphitiPort):
+    if isinstance(graphiti, GovernedRealGraphitiPort) and getattr(
+        graphiti, "requires_canonical_control_plane_stores", True
+    ):
         require_canonical_proving_store(proving_store)
         require_canonical_unpublished_store(unpublished_store)
         if model_usage is None:
@@ -3242,7 +3244,9 @@ def run_cycle(
             candidate,
             proving_store=proving_store,
         )
-    if isinstance(graphiti, GovernedRealGraphitiPort):
+    if isinstance(graphiti, GovernedRealGraphitiPort) and getattr(
+        graphiti, "requires_canonical_control_plane_stores", True
+    ):
         require_canonical_proving_store(proving_store)
         require_canonical_unpublished_store(unpublished_store)
     assert_private_store(unpublished_store)

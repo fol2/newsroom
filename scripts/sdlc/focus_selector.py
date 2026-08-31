@@ -72,6 +72,20 @@ F4_PATTERNS = (
     "newsroom/**/*publication*.py",
 )
 SHARED_BREADTH_PATTERNS = ("pyproject.toml", "uv.lock", "newsroom/tests/conftest.py")
+PREPARED_CANARY_PARITY_PATTERNS = (
+    "newsroom/control_plane/cycle.py",
+    "newsroom/control_plane/graphiti.py",
+    "newsroom/control_plane/issue_790_disposition.py",
+    "newsroom/control_plane/issue_790_canary.py",
+    "newsroom/control_plane/issue_790_prepared_canary.py",
+    "newsroom/control_plane/issue_790_rehearsal.py",
+    "scripts/issue_790_live_canary_preflight.py",
+    "scripts/issue_790_prepared_canary_rehearsal.py",
+)
+PREPARED_CANARY_PARITY_TESTS = (
+    "newsroom/tests/test_issue_790_prepared_canary.py",
+    "newsroom/tests/test_issue_790_retry_forbidden_safety_state.py",
+)
 EXECUTABLE_SUFFIXES = frozenset(
     {".py", ".toml", ".json", ".yml", ".yaml", ".sh", ".bash", ".sql"}
 )
@@ -329,6 +343,10 @@ def select_focus(
             full_health_required = True
             reasons.add("unresolved_dependency_analysis:full_health")
 
+    if _matches_any(changed, PREPARED_CANARY_PARITY_PATTERNS):
+        tests.update(legacy._existing(root, PREPARED_CANARY_PARITY_TESTS))
+        gates.add("F1")
+        reasons.add("prepared_canary_parity:F1")
     if stateful_required:
         if not (tests or service_tests):
             full_health_required = True

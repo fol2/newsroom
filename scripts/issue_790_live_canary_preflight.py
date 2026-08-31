@@ -1094,6 +1094,32 @@ def _ops_gates(
         clean_event is not None,
         fresh_detail,
     )
+    prepared_ok = False
+    prepared_detail = "ABSENT"
+    try:
+        from newsroom.control_plane.issue_790_prepared_canary import (
+            prepare_issue_790_canary,
+        )
+
+        proving = root / "data/newsroom/proving_store.sqlite3"
+        prepared = prepare_issue_790_canary(
+            store=store,
+            proving_store=proving,
+            plan=plan,
+            observed_at=datetime.now(tz=UTC),
+            exact_head=head,
+            role="preflight",
+        )
+        prepared_ok = True
+        prepared_detail = prepared.decision_digest
+    except Exception as exc:
+        prepared_detail = f"{type(exc).__name__}: {exc}"
+    _check(
+        rows,
+        "O19 PreparedCanary is unique pre-dispatch authority",
+        prepared_ok,
+        prepared_detail,
+    )
     return rows, clean_event
 
 
@@ -1642,6 +1668,16 @@ def main(argv: list[str] | None = None) -> int:
     if canary_event is not None:
         print(f"CANARY_EVENT={canary_event[0]}")
         print(f"CANARY_LEDGER={canary_event[1]}")
+    prepared_digest = next(
+        (
+            detail
+            for name, ok, detail in all_rows
+            if name.startswith("O19") and ok
+        ),
+        None,
+    )
+    if prepared_digest is not None:
+        print(f"PREPARED_CANARY_DIGEST={prepared_digest}")
     print(f"DISPOSITION={DISP}")
     print(f"PLAN={args.tip_plan}")
     return 0

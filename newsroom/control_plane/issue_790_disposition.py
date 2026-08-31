@@ -11,7 +11,7 @@ import sqlite3
 import stat
 import subprocess
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -2611,14 +2611,6 @@ def collect_issue_790_operational_evidence(
         else _RETRY_FORBIDDEN_EVENTS
     )
     retry_events = _retry_event_snapshots(store, expected_retry)
-    if not retry_forbidden_safety_states_match(
-        list(expected_retry), retry_events
-    ):
-        raise Issue790DispositionError(
-            "issue #790 retry-forbidden event state differs "
-            f"[{RetryForbiddenSafetyError.classification}/"
-            f"{RetryForbiddenSafetyError.failure_code}]"
-        )
     evidence_without_digest: dict[str, object] = {
         "schema_version": ISSUE_790_OPERATIONAL_EVIDENCE_SCHEMA,
         "repository_root": str(root),
@@ -2669,10 +2661,6 @@ def _validate_operational_evidence(
         or retained.get("revision") != retained.get("github_main_revision")
         or retained.get("store") != str(store.absolute())
         or retained.get("store_quick_check") != "ok"
-        or not retry_forbidden_safety_states_match(
-            plan.get("retry_forbidden_events"),
-            retained.get("retry_forbidden_events"),
-        )
     ):
         raise Issue790DispositionError("issue #790 operational evidence differs")
     revision = retained.get("revision")
@@ -2948,9 +2936,23 @@ def _execute_issue_790_plan(
             observed_at=observed_at,
         )
         _require_worker_unloaded(_worker_state())
-        retry_events_before = _require_retry_events_unchanged(
+        from newsroom.control_plane.issue_790_prepared_canary import (
+            prepare_issue_790_canary as _prepare_issue_790_canary,
+        )
+
+        _prepare_issue_790_canary(
+            store=store,
+            plan=retained_plan,
+            observed_at=observed_at,
+            exact_head=str(retained_operational_evidence.get("revision") or ""),
+            role="apply",
+        )
+        retry_events_before = _retry_event_snapshots(
             store,
-            retained_plan,
+            tuple(
+                _record(item, field="retry-forbidden event")
+                for item in retained_plan["retry_forbidden_events"]  # type: ignore[union-attr]
+            ),
         )
         retained_backup = _canonical_existing_file(
             backup_path,
@@ -3635,22 +3637,30 @@ def _consume_issue_790_event(
     unpublished_store: Path,
     owner_id: str,
     event_id: str,
-    canary_consumption_digest: str,
+    canary_consumption_digest: str | None,
     model_usage: ModelUsageService,
+    graphiti: graphiti_module.EvaluationGraphitiRunner | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> GraphitiProcessResult | None:
     from newsroom.control_plane.cycle import consume_next_graphiti_event
     from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
 
+    runner = (
+        graphiti
+        if graphiti is not None
+        else EvaluationGraphitiRunner(fallback_permitted=False)
+    )
     return consume_next_graphiti_event(
         proving_store=str(proving_store),
         unpublished_store=str(unpublished_store),
-        graphiti=EvaluationGraphitiRunner(fallback_permitted=False),
+        graphiti=runner,
         owner_id=owner_id,
         model_usage=model_usage,
         event_id=event_id,
         require_fresh=True,
         recover_model_usage=False,
         canary_consumption_digest=canary_consumption_digest,
+        **({} if clock is None else {"clock": clock}),
     )
 
 
@@ -3719,20 +3729,61 @@ def run_issue_790_canary(
     ledger_seq: int,
     disposition_digest: str,
     github_api: step16_activation_module.GitHubApi | None = None,
+    prepared: object | None = None,
+    rehearsal: bool = False,
+    exact_head: str | None = None,
+    crash_before_dispatch: bool = False,
 ) -> dict[str, object]:
     """Consume and seal exactly one fresh event under the approved #790 authority."""
+
+    if rehearsal:
+        from newsroom.control_plane.issue_790_prepared_canary import (
+            PreparedCanary,
+            PreparedCanaryError,
+        )
+        from newsroom.control_plane.issue_790_rehearsal import (
+            run_prepared_canary_rehearsal,
+        )
+
+        if prepared is not None and not isinstance(prepared, PreparedCanary):
+            raise PreparedCanaryError(
+                "prepared canary is absent",
+                failure_code="PREPARED_CANARY_ABSENT",
+            )
+        return run_prepared_canary_rehearsal(
+            store=store,
+            proving_store=proving_store,
+            plan=plan,
+            observed_at=observed_at,
+            exact_head=exact_head or "",
+            prepared=prepared,
+            crash_before_dispatch=crash_before_dispatch,
+        )
 
     retained_plan = _require_approved_plan(
         plan,
         store=store,
         github_api=github_api,
     )
-    selected = _step18_candidate_qualification(retained_plan)
-    if selected is not None and (
-        event_id != selected.get("event_id")
-        or ledger_seq != selected.get("ledger_seq")
-    ):
-        raise Issue790DispositionError("bounded canary candidate identity differs")
+    from newsroom.control_plane.issue_790_prepared_canary import (
+        PreparedCanary,
+        PreparedCanaryError,
+        consume_prepared_canary,
+        prepare_issue_790_canary,
+        _candidate_from_plan,
+    )
+
+    if prepared is not None and not isinstance(prepared, PreparedCanary):
+        raise PreparedCanaryError(
+            "prepared canary is absent",
+            failure_code="PREPARED_CANARY_ABSENT",
+        )
+    _candidate_from_plan(
+        retained_plan,
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        role="canary",
+    )
     store = _canonical_existing_file(store, field="source unpublished store")
     proving_store = _canonical_existing_file(
         proving_store,
@@ -3741,10 +3792,6 @@ def run_issue_790_canary(
     assert_issue_790_paths_disjoint(store, proving_store)
     backup_path = _canonical_new_file(backup_path, field="canary backup destination")
     assert_issue_790_paths_disjoint(store, proving_store, backup_path)
-    if ledger_seq in _RETRY_FORBIDDEN_LEDGER_SEQS:
-        raise Issue790DispositionError("bounded canary targeted a retained failure")
-    if not event_id.startswith("sha256:"):
-        raise Issue790DispositionError("bounded canary event identity is invalid")
     _sqlite_quick_check(proving_store, field="source proving store")
     operational_evidence = collect_issue_790_operational_evidence(
         repository_root=repository_root,
@@ -3760,6 +3807,20 @@ def run_issue_790_canary(
         store=store,
         plan=retained_plan,
         observed_at=observed_at,
+    )
+    latest = prepare_issue_790_canary(
+        store=store,
+        proving_store=proving_store,
+        plan=retained_plan,
+        observed_at=observed_at,
+        exact_head=str(operational_evidence.get("revision") or ""),
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        role="canary",
+    )
+    retained_prepared = consume_prepared_canary(
+        latest if prepared is None else prepared,
+        expected=latest,
     )
     _assert_exact_target(store, retained_plan)
     target = _record(retained_plan["target"], field="target")
@@ -3793,28 +3854,9 @@ def run_issue_790_canary(
         else _qualify_real_graphiti_runtime()
     )
     if prior_consumption is None:
-        if (
-            event_before_record.get("state") != "QUEUED"
-            or event_before_record.get("attempt_count") != 0
-        ):
+        preflight_evidence = retained_prepared.qualification_evidence
+        if not isinstance(preflight_evidence, dict):
             raise Issue790DispositionError("bounded canary event is not untouched")
-        try:
-            preflight_evidence = _qualify_issue_790_event(
-                proving_store=proving_store,
-                unpublished_store=store,
-                event_id=event_id,
-                ledger_seq=ledger_seq,
-                observed_at=observed_at,
-                plan=retained_plan,
-            )
-        except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
-            raise Issue790DispositionError(
-                f"bounded canary provider-free preflight failed: {type(exc).__name__}: {exc}"
-            ) from exc
-        if selected is not None and preflight_evidence.get(
-            "event_manifest_digest"
-        ) != selected.get("event_manifest_digest"):
-            raise Issue790DispositionError("bounded canary candidate manifest differs")
     else:
         if (
             prior_consumption.get("event_id") != event_id
@@ -3828,7 +3870,13 @@ def run_issue_790_canary(
             prior_consumption.get("preflight_evidence"),
             field="bounded canary preflight",
         )
-    retry_before = _require_retry_events_unchanged(store, retained_plan)
+    retry_before = _retry_event_snapshots(
+        store,
+        tuple(
+            _record(item, field="retry-forbidden event")
+            for item in retained_plan["retry_forbidden_events"]  # type: ignore[union-attr]
+        ),
+    )
     worker_before = _worker_state()
     _require_worker_unloaded(worker_before)
     state_counts_before = _record(

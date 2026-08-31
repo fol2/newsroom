@@ -193,6 +193,34 @@ def test_f0_uses_locked_interpreter_only_when_bootstrap_is_required() -> None:
     assert "python -m scripts.sdlc.focus_gate_v2" in workflow
 
 
+@pytest.mark.parametrize(
+    "changed",
+    (
+        "newsroom/control_plane/issue_790_disposition.py",
+        "newsroom/control_plane/cycle.py",
+        "newsroom/control_plane/graphiti.py",
+    ),
+)
+def test_prepared_canary_parity_is_required_for_pre_provider_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed: str,
+) -> None:
+    _write(tmp_path, changed, "VALUE = 1\n")
+    _write(tmp_path, "newsroom/tests/test_issue_790_prepared_canary.py")
+    _write(tmp_path, "newsroom/tests/test_issue_790_retry_forbidden_safety_state.py")
+    monkeypatch.setattr(selector, "build_dependency_graph", lambda _root: _Graph())
+
+    route = selector.select_focus((changed,), repo_root=tmp_path)
+
+    assert "newsroom/tests/test_issue_790_prepared_canary.py" in route["selected_tests"]
+    assert (
+        "newsroom/tests/test_issue_790_retry_forbidden_safety_state.py"
+        in route["selected_tests"]
+    )
+    assert "prepared_canary_parity:F1" in route["reasons"]
+
+
 def test_f0_validates_yaml_and_shell_syntax(tmp_path: Path) -> None:
     valid_yaml = tmp_path / "valid.yml"
     invalid_yaml = tmp_path / "invalid.yml"
