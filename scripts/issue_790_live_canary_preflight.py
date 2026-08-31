@@ -125,6 +125,84 @@ def _invalid_sha256_paths(value: object, *, path: str = "$") -> list[str]:
     return invalid
 
 
+def _successor_predecessor_activation_digest(plan: dict[str, Any]) -> str | None:
+    """Return the pinned predecessor activation for a never-activated successor."""
+
+    if (
+        plan.get("executable") is not False
+        or plan.get("live_canary_authorised") is not False
+        or plan.get("approval") is not None
+        or plan.get("plan_status") != "PENDING_OWNER_REVIEW"
+    ):
+        return None
+    sequence = plan.get("sequence")
+    if not isinstance(sequence, dict):
+        return None
+    digest = sequence.get("predecessor_activation_digest")
+    if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
+        return None
+    return digest
+
+
+def _pending_plan_path_for_ordinal(ordinal: int) -> Path:
+    from newsroom.control_plane import issue_790_disposition as disposition
+
+    paths = {
+        16: disposition.ISSUE_790_STEP16_PENDING_PLAN_PATH,
+        17: disposition.ISSUE_790_STEP17_PENDING_PLAN_PATH,
+        18: disposition.ISSUE_790_STEP18_PENDING_PLAN_PATH,
+        19: disposition.ISSUE_790_STEP19_PENDING_PLAN_PATH,
+        20: disposition.ISSUE_790_STEP20_PENDING_PLAN_PATH,
+        21: disposition.ISSUE_790_STEP21_PENDING_PLAN_PATH,
+    }
+    try:
+        return paths[ordinal]
+    except KeyError as exc:
+        raise ValueError("predecessor pending family is absent") from exc
+
+
+def _reconstruct_activated_plan(
+    *,
+    candidate: dict[str, Any],
+    activation: dict[str, object],
+    pre_dispatch: dict[str, Any],
+) -> dict[str, object]:
+    from newsroom.control_plane.issue_790_disposition import _assemble_step16_owner_plan
+    from newsroom.control_plane.issue_790_step16_activation import (
+        step16_owner_activation_binding,
+        validate_step16_activation_receipt,
+    )
+
+    payload = activation.get("approval_payload")
+    contract = activation.get("contract")
+    sequence = candidate.get("sequence")
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(contract, dict)
+        or not isinstance(sequence, dict)
+    ):
+        raise ValueError("tracked family activation differs")
+    binding = step16_owner_activation_binding(
+        payload,
+        template_digest=str(sequence["pre_dispatch_operational_requirements_digest"]),
+    )
+    activated_plan = _assemble_step16_owner_plan(
+        candidate,
+        approval={
+            "approved_by": contract["approved_by"],
+            "approval_reference": activation["comment_url"],
+            "approved_at": activation["created_at"],
+            "scope": contract["scope"],
+        },
+        pre_dispatch=pre_dispatch,
+        revision=str(activation["final_main_commit"]),
+        tree=str(activation["final_main_tree"]),
+        owner_activation=binding,
+    )
+    validate_step16_activation_receipt(activation, plan=activated_plan)
+    return activated_plan
+
+
 def _resolve_tracked_activation(
     connection: sqlite3.Connection,
     *,
@@ -134,67 +212,93 @@ def _resolve_tracked_activation(
     """Resolve a tracked pending family to its exact retained activation."""
 
     try:
+        from newsroom.control_plane.issue_790_contract import (
+            issue_790_checked_candidate_contract,
+        )
         from newsroom.control_plane.issue_790_disposition import (
             ISSUE_790_STEP16_PRE_DISPATCH_PATH,
-            _assemble_step16_owner_plan,
+            Issue790DispositionError,
             issue_790_checked_approval,
             seal_issue_790_step16_plan,
         )
         from newsroom.control_plane.issue_790_step16_activation import (
             load_step16_activation_record,
-            step16_owner_activation_binding,
-            validate_step16_activation_receipt,
         )
 
         pre_dispatch = json.loads(
             (root / ISSUE_790_STEP16_PRE_DISPATCH_PATH).read_text(encoding="utf-8")
         )
-        pending_digest = str(tracked_plan.get("canonical_digest"))
-        candidate = seal_issue_790_step16_plan(
-            tracked_plan,
-            issue_790_checked_approval(pending_digest),
-            pre_dispatch=pre_dispatch,
-        )
-        row = connection.execute(
-            "SELECT plan_digest FROM issue_790_step16_activations "
-            "WHERE checked_candidate_digest=?",
-            (candidate["canonical_digest"],),
-        ).fetchone()
-        if row is None:
+        predecessor_digest = _successor_predecessor_activation_digest(tracked_plan)
+        tracked_candidate: dict[str, Any] | None = None
+        try:
+            tracked_candidate = seal_issue_790_step16_plan(
+                tracked_plan,
+                issue_790_checked_approval(str(tracked_plan.get("canonical_digest"))),
+                pre_dispatch=pre_dispatch,
+            )
+        except Issue790DispositionError:
+            if predecessor_digest is None:
+                raise
+        activation: dict[str, object] | None = None
+        candidate: dict[str, Any] | None = None
+        if tracked_candidate is not None:
+            row = connection.execute(
+                "SELECT plan_digest FROM issue_790_step16_activations "
+                "WHERE checked_candidate_digest=?",
+                (tracked_candidate["canonical_digest"],),
+            ).fetchone()
+            if row is not None:
+                candidate = tracked_candidate
+                activation = load_step16_activation_record(
+                    connection,
+                    plan_digest=str(row[0]),
+                )
+        if activation is None:
+            if predecessor_digest is None:
+                raise ValueError("tracked family activation is absent")
+            row = connection.execute(
+                "SELECT plan_digest FROM issue_790_step16_activations "
+                "WHERE activation_digest=?",
+                (predecessor_digest,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("predecessor activation is absent")
+            activation = load_step16_activation_record(
+                connection,
+                plan_digest=str(row[0]),
+            )
+            predecessor = (tracked_plan.get("sequence") or {}).get("predecessor")
+            if (
+                activation.get("activation_digest") != predecessor_digest
+                or not isinstance(predecessor, dict)
+                or predecessor.get("plan_digest") != activation.get("plan_digest")
+            ):
+                raise ValueError("predecessor activation differs")
+            checked = issue_790_checked_candidate_contract(
+                str(activation["checked_candidate_digest"])
+            )
+            pending_path = root / _pending_plan_path_for_ordinal(
+                int(checked.sequence_ordinal)
+            )
+            predecessor_pending = json.loads(
+                pending_path.read_text(encoding="utf-8")
+            )
+            candidate = seal_issue_790_step16_plan(
+                predecessor_pending,
+                issue_790_checked_approval(
+                    str(predecessor_pending["canonical_digest"])
+                ),
+                pre_dispatch=pre_dispatch,
+            )
+            if candidate["canonical_digest"] != activation["checked_candidate_digest"]:
+                raise ValueError("predecessor activation differs")
+        if candidate is None:
             raise ValueError("tracked family activation is absent")
-        activation = load_step16_activation_record(
-            connection,
-            plan_digest=str(row[0]),
-        )
-        payload = activation.get("approval_payload")
-        contract = activation.get("contract")
-        sequence = candidate.get("sequence")
-        if (
-            not isinstance(payload, dict)
-            or not isinstance(contract, dict)
-            or not isinstance(sequence, dict)
-        ):
-            raise ValueError("tracked family activation differs")
-        binding = step16_owner_activation_binding(
-            payload,
-            template_digest=str(
-                sequence["pre_dispatch_operational_requirements_digest"]
-            ),
-        )
-        activated_plan = _assemble_step16_owner_plan(
-            candidate,
-            approval={
-                "approved_by": contract["approved_by"],
-                "approval_reference": activation["comment_url"],
-                "approved_at": activation["created_at"],
-                "scope": contract["scope"],
-            },
+        activated_plan = _reconstruct_activated_plan(
+            candidate=candidate,
+            activation=activation,
             pre_dispatch=pre_dispatch,
-            revision=str(activation["final_main_commit"]),
-            tree=str(activation["final_main_tree"]),
-            owner_activation=binding,
         )
-        validate_step16_activation_receipt(activation, plan=activated_plan)
         return activation, activated_plan, None
     except Exception as exc:
         return None, None, f"{type(exc).__name__}: {exc}"
@@ -220,27 +324,8 @@ def _effective_retry_exclusion_status(
         int(item.get("ledger_seq", 0)): str(item.get("event_id"))
         for item in exclusions
     }
-    historical_ok = (
-        len(plan_by_seq) == len(plan_events)
-        and len(durable_by_seq) == len(exclusions)
-        and set(plan_by_seq).issubset(durable_by_seq)
-        and all(durable_by_seq.get(seq) == event_id for seq, event_id in plan_by_seq.items())
-        and all(
-            item.get("reason") == "ISSUE_790_RETRY_FORBIDDEN"
-            and item.get("event_snapshot")
-            == next(
-                (
-                    event
-                    for event in plan_events
-                    if int(event.get("ledger_seq", 0))
-                    == int(item.get("ledger_seq", 0))
-                ),
-                None,
-            )
-            for item in exclusions
-            if int(item.get("ledger_seq", 0)) in plan_by_seq
-        )
-    )
+    overlapping = set(plan_by_seq) & set(durable_by_seq)
+    missing_from_durable = set(plan_by_seq) - set(durable_by_seq)
     consumed_seq = int((consumption or {}).get("ledger_seq", 0))
     consumed_event = str((consumption or {}).get("event_id", ""))
     failure_code = str((outcome or {}).get("failure_code_after_seal", ""))
@@ -269,6 +354,30 @@ def _effective_retry_exclusion_status(
         and event_snapshot.get("provider_dispatched") is True
         and event_snapshot.get("last_failure_code") == failure_code
         and consumed_event in effectively_excluded_event_ids
+    )
+    historical_ok = (
+        len(plan_by_seq) == len(plan_events)
+        and len(durable_by_seq) == len(exclusions)
+        and all(durable_by_seq[seq] == plan_by_seq[seq] for seq in overlapping)
+        and all(
+            item.get("reason") == "ISSUE_790_RETRY_FORBIDDEN"
+            and item.get("event_snapshot")
+            == next(
+                (
+                    event
+                    for event in plan_events
+                    if int(event.get("ledger_seq", 0))
+                    == int(item.get("ledger_seq", 0))
+                ),
+                None,
+            )
+            for item in exclusions
+            if int(item.get("ledger_seq", 0)) in overlapping
+        )
+        and (
+            not missing_from_durable
+            or (consumption_ok and missing_from_durable == {consumed_seq})
+        )
     )
     effective_seqs = set(durable_by_seq)
     if consumption_ok:
