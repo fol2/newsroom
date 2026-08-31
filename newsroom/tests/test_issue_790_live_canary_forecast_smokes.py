@@ -20,7 +20,7 @@ from scripts.issue_790_live_canary_preflight import (
     STEP22_CONSUMED_13677_ZERO_FULL_PATH_TEST,
     STEP22_CONSUMED_13683_ZERO_FULL_PATH_TEST,
     STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST,
-    STEP22_PREPARED_CANARY_ABSENT_FULL_PATH_TEST,
+    STEP22_PREPARED_CANARY_HANDOFF_FULL_PATH_TEST,
     STEP22_PRODUCTION_UNTOUCHED_FULL_PATH_TEST,
     _blocker_smokes,
     _effective_retry_exclusion_status,
@@ -31,6 +31,7 @@ from scripts.issue_790_live_canary_preflight import (
     _invalid_sha256_paths,
     _latest_failure_red_green,
     _ops_gates,
+    _prepare_preflight_canary,
     _prepared_fresh_event_status,
     _retry_exclusion_append_smoke,
 )
@@ -78,11 +79,15 @@ def test_o07_accepts_only_exact_tip_focus_gates() -> None:
 
 def test_ops_gates_prepares_once_without_parallel_candidate_qualification() -> None:
     source = inspect.getsource(_ops_gates)
-    assert source.count("prepare_issue_790_canary(") == 1
+    helper = inspect.getsource(_prepare_preflight_canary)
+    assert source.count("_prepare_preflight_canary(") == 1
+    assert "activated_plan=activated_plan" in source
+    assert helper.count("prepare_issue_790_canary(") == 1
+    assert "plan=activated_plan" in helper
     assert "unused_queued_attempt_zero_candidates" not in source
     assert "qualify_fresh_graphiti_event" not in source
-    assert "prepared_canary_record(prepared)" in source
-    assert "prepared_canary_from_record" in source
+    assert "prepared_canary_record(prepared)" in helper
+    assert "prepared_canary_from_record" in helper
 
 
 def test_o18_uses_the_prepared_candidate_evidence(
@@ -282,7 +287,7 @@ def test_covering_full_path_nodes_are_the_allowlist() -> None:
             STEP22_CONSUMED_13683_ZERO_FULL_PATH_TEST,
             STEP22_ABORTED_SPAWN_13689_BACKUP_DEST_FULL_PATH_TEST,
             STEP22_UNMATCHED_13689_CONSUMPTION_BLOCKS_13690_READY_FULL_PATH_TEST,
-            STEP22_PREPARED_CANARY_ABSENT_FULL_PATH_TEST,
+            STEP22_PREPARED_CANARY_HANDOFF_FULL_PATH_TEST,
         }
     )
 
@@ -300,7 +305,7 @@ def test_covering_full_path_nodes_are_the_allowlist() -> None:
         (13683, STEP22_CONSUMED_13683_ZERO_FULL_PATH_TEST),
         (13689, STEP22_ABORTED_SPAWN_13689_BACKUP_DEST_FULL_PATH_TEST),
         (13690, STEP22_UNMATCHED_13689_CONSUMPTION_BLOCKS_13690_READY_FULL_PATH_TEST),
-        (13690, STEP22_PREPARED_CANARY_ABSENT_FULL_PATH_TEST),
+        (13690, STEP22_PREPARED_CANARY_HANDOFF_FULL_PATH_TEST),
     ),
 )
 def test_latest_live_failure_accepts_step21_or_step22_covering_red(
@@ -319,6 +324,66 @@ def test_latest_live_failure_accepts_step21_or_step22_covering_red(
     assert _latest_failure_red_green(comments, tip=tip) == (
         True,
         f"ledger {ledger} red→green on {tip[:12]}",
+    )
+
+
+def test_latest_live_failure_skips_superseded_unallowlisted_diagnosis() -> None:
+    tip = "e" * 40
+    old_containment = (
+        "newsroom/tests/test_issue_790_prepared_canary.py::"
+        "test_step22_fresh_missing_prepared_fails_before_any_effect"
+    )
+    comments = [
+        _live_fail_comment(13690, created_at="2026-08-31T23:21:54Z"),
+        _full_path_red_comment(
+            13690,
+            old_containment,
+            created_at="2026-08-31T23:30:00Z",
+        ),
+        _full_path_red_comment(
+            13690,
+            STEP22_PREPARED_CANARY_HANDOFF_FULL_PATH_TEST,
+            created_at="2026-08-31T23:40:00Z",
+        ),
+        _full_path_green_comment(
+            13690,
+            tip,
+            created_at="2026-08-31T23:50:00Z",
+        ),
+    ]
+    assert _latest_failure_red_green(comments, tip=tip) == (
+        True,
+        f"ledger 13690 red→green on {tip[:12]}",
+    )
+
+
+def test_latest_live_failure_rejects_newer_unallowlisted_diagnosis() -> None:
+    tip = "f" * 40
+    unknown = (
+        "newsroom/tests/test_issue_790_prepared_canary.py::"
+        "test_future_unreviewed_diagnosis"
+    )
+    comments = [
+        _live_fail_comment(13690, created_at="2026-08-31T23:21:54Z"),
+        _full_path_red_comment(
+            13690,
+            STEP22_PREPARED_CANARY_HANDOFF_FULL_PATH_TEST,
+            created_at="2026-08-31T23:40:00Z",
+        ),
+        _full_path_green_comment(
+            13690,
+            tip,
+            created_at="2026-08-31T23:50:00Z",
+        ),
+        _full_path_red_comment(
+            13690,
+            unknown,
+            created_at="2026-09-01T00:00:00Z",
+        ),
+    ]
+    assert _latest_failure_red_green(comments, tip=tip) == (
+        False,
+        f"unexpected latest red test {unknown}",
     )
 
 

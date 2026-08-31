@@ -72,6 +72,7 @@ def test_preflight_and_live_apply_share_the_safety_state_validator() -> None:
     from scripts.issue_790_live_canary_preflight import (
         _effective_retry_exclusion_status,
         _ops_gates,
+        _prepare_preflight_canary,
     )
 
     preflight_src = inspect.getsource(_effective_retry_exclusion_status)
@@ -91,7 +92,10 @@ def test_preflight_and_live_apply_share_the_safety_state_validator() -> None:
         disposition._execute_issue_790_plan
     )
     assert "prepare_issue_790_canary" in canary_src
-    assert "prepare_issue_790_canary" in inspect.getsource(_ops_gates)
+    assert "_prepare_preflight_canary" in inspect.getsource(_ops_gates)
+    assert "prepare_issue_790_canary" in inspect.getsource(
+        _prepare_preflight_canary
+    )
 
 
 def test_safety_state_fields_exclude_available_at_and_claims() -> None:
