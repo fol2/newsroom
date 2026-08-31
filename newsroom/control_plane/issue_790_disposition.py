@@ -1336,11 +1336,47 @@ def _require_owner_approval_tuple(value: Mapping[str, object]) -> dict[str, str]
     }
 
 
+def _git_commit_is_ancestor(
+    ancestor: str,
+    descendant: str,
+    *,
+    repository_root: Path | None,
+) -> bool:
+    """True when *ancestor* is *descendant*, or a git ancestor of it."""
+
+    if ancestor == descendant:
+        return True
+    if repository_root is None:
+        return False
+    git = shutil.which("git")
+    if git is None:
+        return False
+    try:
+        completed = subprocess.run(
+            (git, "merge-base", "--is-ancestor", ancestor, descendant),
+            cwd=repository_root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
 def _require_step16_code_identity(
     plan: Mapping[str, object],
     *,
     evidence: Mapping[str, object],
 ) -> None:
+    """Bind current exact-head to the activation SHA or a descendant of it.
+
+    Owner activation remains the effects, caps and comment authority. It must
+    not freeze git SHA against later merged parity commits on the same
+    candidate. Current Focus Gates must succeed on evidence.revision.
+    """
+
     sequence = plan.get("sequence")
     if not isinstance(sequence, dict) or not issue_790_owner_activated_sequence(
         sequence.get("sequence_ordinal")
@@ -1354,12 +1390,30 @@ def _require_step16_code_identity(
     binding = _record(sequence.get("owner_activation"), field="owner activation")
     revision = sequence.get("reviewed_correction_revision")
     tree = sequence.get("reviewed_correction_tree")
+    exact_head = evidence.get("revision")
     if (
-        revision != evidence.get("revision")
-        or tree != evidence.get("tree")
-        or evidence.get("github_main_revision") != revision
+        not isinstance(revision, str)
+        or re.fullmatch(r"[0-9a-f]{40}", revision) is None
+        or not isinstance(tree, str)
+        or re.fullmatch(r"[0-9a-f]{40}", tree) is None
         or pre.get("exact_main_commit") != revision
         or pre.get("exact_main_tree") != tree
+    ):
+        raise Issue790DispositionError(
+            "issue #790 reviewed correction identity differs"
+        )
+    root_value = evidence.get("repository_root")
+    repository_root = (
+        Path(root_value) if isinstance(root_value, str) and root_value else None
+    )
+    if (
+        not isinstance(exact_head, str)
+        or re.fullmatch(r"[0-9a-f]{40}", exact_head) is None
+        or not _git_commit_is_ancestor(
+            revision,
+            exact_head,
+            repository_root=repository_root,
+        )
     ):
         raise Issue790DispositionError(
             "issue #790 reviewed correction identity differs"
@@ -1374,11 +1428,11 @@ def _require_step16_code_identity(
         or not isinstance(run_url, str)
         or run_url != expected_run
         or not isinstance(url, str)
-        or (url != expected_run and not url.startswith(f"{expected_run}/"))
-        or ci_test.get("name") != "focus-gates"
+        or not url.startswith("https://github.com/fol2/newsroom/actions/runs/")
+        or ci_test.get("name") not in _ISSUE_790_ACCEPTED_CI_CHECK_NAMES
         or ci_test.get("status") != "completed"
         or ci_test.get("conclusion") != "success"
-        or ci_test.get("head_sha") != revision
+        or ci_test.get("head_sha") != exact_head
     ):
         raise Issue790DispositionError("issue #790 focus gate evidence differs")
 

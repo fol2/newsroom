@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from newsroom.control_plane import issue_790_disposition as disposition
+from newsroom.control_plane.issue_790_disposition import (
+    ISSUE_790_STEP16_PRE_DISPATCH_PATH,
+    ISSUE_790_STEP22_PENDING_PLAN_PATH,
+    Issue790DispositionError,
+    _require_step16_code_identity,
+    finalise_issue_790_step16_plan,
+    issue_790_checked_approval,
+    seal_issue_790_step16_plan,
+)
 from newsroom.control_plane.issue_790_prepared_canary import (
     CANDIDATE_EVENT_ID,
     CANDIDATE_LEDGER_SEQ,
@@ -44,6 +54,14 @@ from newsroom.tests.test_issue_790_rehearsal_fixtures import (
 )
 
 _TEST_FILE = Path(__file__)
+_ROOT = _TEST_FILE.resolve().parents[2]
+_STEP22_ACTIVATION_SHA = "f7946e8a53620b56a09bb4ae923a8003b92da760"
+_STEP22_ACTIVATION_TREE = "8c443bde47adc34d8e9a38dd6ba80359fd56fa16"
+_STEP22_ACTIVATION_FG_RUN = 33387559058
+_SUCCESSOR_SHA = "a1f24f4e069af95ac94e8744f8f94c3e28e10d32"
+_SUCCESSOR_TREE = "a59e5c620cb9a15a509bced75b96e9a44da940ff"
+_SUCCESSOR_FG_RUN = 33404219327
+_ACTIVATION_PARENT_SHA = "00f7df954c21816e9be13d783871186efaa84073"
 
 
 def _prepare(stores, *, store=None, role="preflight", **kwargs):
@@ -56,6 +74,64 @@ def _prepare(stores, *, store=None, role="preflight", **kwargs):
         role=role,
         **kwargs,
     )
+
+
+def _step22_activated_plan() -> dict[str, object]:
+    pending = json.loads((_ROOT / ISSUE_790_STEP22_PENDING_PLAN_PATH).read_text())
+    pre_dispatch = json.loads((_ROOT / ISSUE_790_STEP16_PRE_DISPATCH_PATH).read_text())
+    candidate = seal_issue_790_step16_plan(
+        pending,
+        issue_790_checked_approval(str(pending["canonical_digest"])),
+        pre_dispatch=pre_dispatch,
+    )
+    plan = finalise_issue_790_step16_plan(
+        candidate,
+        {
+            "approved_by": "github:fol2",
+            "approval_reference": (
+                "https://github.com/fol2/newsroom/issues/790#issuecomment-5477950294"
+            ),
+            "approved_at": "2026-08-31T11:55:32.000000Z",
+            "scope": "CONSERVATIVE_SUBSCRIPTION_CLI_USAGE_DISPOSITION",
+            "reviewed_correction_revision": _STEP22_ACTIVATION_SHA,
+            "reviewed_correction_tree": _STEP22_ACTIVATION_TREE,
+        },
+        pre_dispatch=pre_dispatch,
+    )
+    sequence = dict(plan["sequence"])
+    binding = dict(sequence["owner_activation"])
+    binding["focus_gate_run_id"] = _STEP22_ACTIVATION_FG_RUN
+    binding["focus_gate_run_url"] = (
+        f"https://github.com/fol2/newsroom/actions/runs/{_STEP22_ACTIVATION_FG_RUN}"
+    )
+    sequence["owner_activation"] = binding
+    plan["sequence"] = sequence
+    return plan
+
+
+def _successor_evidence() -> dict[str, object]:
+    return {
+        "revision": _SUCCESSOR_SHA,
+        "tree": _SUCCESSOR_TREE,
+        "github_main_revision": _SUCCESSOR_SHA,
+        "repository_root": str(_ROOT),
+        "store_quick_check": "ok",
+        "worker": {
+            "label": "com.jamesto.newsroom-graphiti-worker",
+            "launchctl_loaded": False,
+            "process_ids": [],
+        },
+        "ci_test": {
+            "name": "focus-gates",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": _SUCCESSOR_SHA,
+            "url": (
+                "https://github.com/fol2/newsroom/actions/runs/"
+                f"{_SUCCESSOR_FG_RUN}"
+            ),
+        },
+    }
 
 
 def test_field_classification_keeps_available_at_as_audit_only() -> None:
@@ -111,6 +187,140 @@ def test_ready_implies_dispatch_started(tmp_path: Path) -> None:
     assert dispatch_started_count(stores.work_unpublished) >= 1
     assert file_digest(stores.sealed_unpublished) == stores.sealed_digest
     assert candidate_identity(stores.sealed_unpublished)[0] == CANDIDATE_EVENT_ID
+
+
+def test_ready_successor_exact_head_implies_dispatch_started(tmp_path: Path) -> None:
+    stores = build_rehearsal_stores(tmp_path)
+    plan = _step22_activated_plan()
+    sequence = plan["sequence"]
+    assert sequence["reviewed_correction_revision"] == _STEP22_ACTIVATION_SHA
+    assert sequence["owner_activation"]["focus_gate_run_id"] == _STEP22_ACTIVATION_FG_RUN
+    _require_step16_code_identity(plan, evidence=_successor_evidence())
+    before = file_digest(stores.work_unpublished)
+    prepared = prepare_issue_790_canary(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        plan=plan,
+        observed_at=OBSERVED_AT,
+        exact_head=_SUCCESSOR_SHA,
+        role="preflight",
+    )
+    assert file_digest(stores.work_unpublished) == before
+    result = disposition.run_issue_790_canary(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        backup_path=tmp_path / "unused-backup.sqlite3",
+        plan=plan,
+        observed_at=OBSERVED_AT,
+        repository_root=_ROOT,
+        event_id=CANDIDATE_EVENT_ID,
+        ledger_seq=CANDIDATE_LEDGER_SEQ,
+        disposition_digest="sha256:" + "cd" * 32,
+        prepared=prepared,
+        rehearsal=True,
+        exact_head=_SUCCESSOR_SHA,
+    )
+    assert result["decision_digest"] == prepared.decision_digest
+    assert result["dispatch_started"] is True
+    assert result["provider_calls"] == 0
+    assert RehearsalRealGraphitiAdapter.provider_calls == 0
+    assert dispatch_started_count(stores.work_unpublished) >= 1
+    assert file_digest(stores.sealed_unpublished) == stores.sealed_digest
+    assert candidate_identity(stores.sealed_unpublished) == (
+        CANDIDATE_EVENT_ID,
+        CANDIDATE_LEDGER_SEQ,
+        "QUEUED",
+    )
+
+
+def test_step22_activation_rejects_non_ancestor_exact_head() -> None:
+    plan = _step22_activated_plan()
+    evidence = _successor_evidence()
+    evidence["revision"] = _ACTIVATION_PARENT_SHA
+    evidence["github_main_revision"] = _ACTIVATION_PARENT_SHA
+    evidence["ci_test"] = dict(evidence["ci_test"])
+    evidence["ci_test"]["head_sha"] = _ACTIVATION_PARENT_SHA
+    with pytest.raises(
+        Issue790DispositionError, match="reviewed correction identity"
+    ):
+        _require_step16_code_identity(plan, evidence=evidence)
+
+
+def test_step22_activation_rejects_focus_gates_not_on_current_exact_head() -> None:
+    plan = _step22_activated_plan()
+    evidence = _successor_evidence()
+    evidence["ci_test"] = {
+        "name": "focus-gates",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": _STEP22_ACTIVATION_SHA,
+        "url": (
+            "https://github.com/fol2/newsroom/actions/runs/"
+            f"{_STEP22_ACTIVATION_FG_RUN}"
+        ),
+    }
+    with pytest.raises(Issue790DispositionError, match="focus gate evidence differs"):
+        _require_step16_code_identity(plan, evidence=evidence)
+
+
+def test_successor_safety_drift_fail_closes_before_dispatch(tmp_path: Path) -> None:
+    stores = build_rehearsal_stores(tmp_path)
+    plan = _step22_activated_plan()
+    mutate_retry_field(
+        stores.work_unpublished, ledger_seq=13361, field="state", value="QUEUED"
+    )
+    RehearsalRealGraphitiAdapter.provider_calls = 0
+    RehearsalRealGraphitiAdapter.dispatch_started = False
+    with pytest.raises(PreparedCanaryError) as caught:
+        prepare_issue_790_canary(
+            store=stores.work_unpublished,
+            proving_store=stores.proving,
+            plan=plan,
+            observed_at=OBSERVED_AT,
+            exact_head=_SUCCESSOR_SHA,
+            role="preflight",
+        )
+    assert caught.value.failure_code == "RETRY_FORBIDDEN_SAFETY_STATE"
+    assert RehearsalRealGraphitiAdapter.dispatch_started is False
+    assert RehearsalRealGraphitiAdapter.provider_calls == 0
+    assert dispatch_started_count(stores.work_unpublished) == 0
+    assert candidate_identity(stores.sealed_unpublished)[0] == CANDIDATE_EVENT_ID
+    assert candidate_identity(stores.work_unpublished)[0] == CANDIDATE_EVENT_ID
+
+
+def test_successor_digest_drift_fail_closes_before_dispatch(tmp_path: Path) -> None:
+    stores = build_rehearsal_stores(tmp_path)
+    plan = _step22_activated_plan()
+    prepared = prepare_issue_790_canary(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        plan=plan,
+        observed_at=OBSERVED_AT,
+        exact_head=_SUCCESSOR_SHA,
+        role="preflight",
+    )
+    drifted = replace(prepared, decision_digest="sha256:" + "00" * 32)
+    RehearsalRealGraphitiAdapter.provider_calls = 0
+    RehearsalRealGraphitiAdapter.dispatch_started = False
+    with pytest.raises(PreparedCanaryError) as caught:
+        disposition.run_issue_790_canary(
+            store=stores.work_unpublished,
+            proving_store=stores.proving,
+            backup_path=tmp_path / "unused-backup.sqlite3",
+            plan=plan,
+            observed_at=OBSERVED_AT,
+            repository_root=_ROOT,
+            event_id=CANDIDATE_EVENT_ID,
+            ledger_seq=CANDIDATE_LEDGER_SEQ,
+            disposition_digest="sha256:" + "cd" * 32,
+            prepared=drifted,
+            rehearsal=True,
+            exact_head=_SUCCESSOR_SHA,
+        )
+    assert caught.value.failure_code == PREPARED_CANARY_DIGEST_DRIFT
+    assert RehearsalRealGraphitiAdapter.dispatch_started is False
+    assert dispatch_started_count(stores.work_unpublished) == 0
+    assert candidate_identity(stores.work_unpublished)[0] == CANDIDATE_EVENT_ID
 
 
 def test_event_13665_identity_is_not_mutated(tmp_path: Path) -> None:
@@ -368,6 +578,14 @@ def test_canary_consumes_prepared_digest_only() -> None:
     assert "_require_retry_events_unchanged" not in pre_consume
     assert "retry_forbidden_safety_states_match" not in pre_consume
     assert "validate_retry_forbidden_safety_state" not in pre_consume
+    assert "_validate_operational_evidence" in source
+    assert "_require_step16_code_identity" in inspect.getsource(
+        disposition._validate_operational_evidence
+    )
+    identity_src = inspect.getsource(disposition._require_step16_code_identity)
+    assert "_git_commit_is_ancestor" in identity_src
+    assert "ci_test.get(\"head_sha\") != exact_head" in identity_src
+    assert "merge-base" in inspect.getsource(disposition._git_commit_is_ancestor)
 
 
 def test_fail_branch_inventory_has_named_parity_tests() -> None:

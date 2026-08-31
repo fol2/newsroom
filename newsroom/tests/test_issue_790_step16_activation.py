@@ -976,16 +976,16 @@ def test_focus_gate_identity_and_duplicate_approval_blocks_fail(
             observed_at=_OBSERVED,
             github_api=activated["github"],
         )
-    wrong_run = _evidence()
-    ci_test = dict(wrong_run["ci_test"])
-    ci_test["url"] = "https://github.com/fol2/newsroom/actions/runs/1/job/1"
-    wrong_run["ci_test"] = ci_test
+    wrong_head = _evidence()
+    ci_test = dict(wrong_head["ci_test"])
+    ci_test["head_sha"] = "0" * 40
+    wrong_head["ci_test"] = ci_test
     with pytest.raises(Issue790DispositionError, match="focus gate evidence"):
         qualify_issue_790_step16_readiness(
             plan=activated["plan"],
             store=activated["store"],
             proving_store=tmp_path / "unused-proving.sqlite",
-            evidence=wrong_run,
+            evidence=wrong_head,
             route_state={"state": "OPEN", "reason": "SYSTEMIC_TRANSPORT"},
             circuit_state=_closed_circuit(),
             canary_event=_ready_event(),
