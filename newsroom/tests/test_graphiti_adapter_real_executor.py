@@ -2726,6 +2726,14 @@ def test_unmarked_zero_without_validated_result_remains_ambiguous(
     assert produced.validation is None
     assert produced.raw_output_value is None
     assert produced.proposals == ()
+    receipt = produced.attempt_receipt_value
+    assert receipt is not None
+    # Live 13665 stored integer zeros from result=None. Those counts are not
+    # an accepted zero-proposal mark.
+    assert receipt["proposal_count"] == 0
+    assert receipt["entity_count"] == 0
+    assert receipt["relation_count"] == 0
+    assert receipt.get("zero_proposal_effect") is None
 
 
 def test_persistable_empty_after_embeddings_is_explicit_zero_success(
@@ -2870,6 +2878,9 @@ def test_persistable_empty_after_embeddings_is_explicit_zero_success(
     assert produced.raw_output_value["entity_count"] == 0
     assert produced.raw_output_value["relation_count"] == 0
     assert produced.raw_output_value["proposal_count"] == 0
+    combined = produced.raw_output_value.get("combined_temporal_receipt")
+    assert isinstance(combined, dict)
+    assert combined["zero_proposal_effect"] == "EXPLICIT"
     assert produced.raw_output_value["embedding_usage"]["request_count"] == 5
     assert produced.raw_output_value["chat_invocations"][0]["usage"][
         "total_tokens"

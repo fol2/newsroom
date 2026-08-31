@@ -287,6 +287,9 @@ class ExistingGraphitiPipeline:
             chat_invocations=chat_invocations,
             embedding_usage=embedding_usage,
         )
+        # Integer 0 counts are also emitted for unmarked result=None receipts.
+        # TERMINAL zero-as-success requires this explicit accepted-empty mark.
+        durable_receipt["zero_proposal_effect"] = "EXPLICIT"
         if self.complete_receipt is None:
             completed_receipt = durable_receipt
         else:

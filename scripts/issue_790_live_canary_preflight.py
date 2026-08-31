@@ -64,6 +64,10 @@ _FAIL_CLOSED_TESTS = (
     "test_retryable_failure_returns_diagnostic_receipt_without_structured_output",
     "newsroom/tests/test_graphiti_adapter_real_executor.py::"
     "test_ambiguity_with_proposals_remains_fail_closed_after_validation",
+    "newsroom/tests/test_graphiti_adapter_real_executor.py::"
+    "test_unmarked_zero_without_validated_result_remains_ambiguous",
+    "newsroom/tests/test_graphiti_corpus_ingest.py::"
+    "test_unmarked_zero_counts_without_validated_result_stay_ambiguous_full_cycle",
     "newsroom/tests/test_graphiti_adapter_4d_outcomes.py::"
     "test_authority_retains_honest_noncomplete_outcomes_without_proposal_admission",
     "newsroom/tests/test_graphiti_adapter_4d_outcomes.py::"

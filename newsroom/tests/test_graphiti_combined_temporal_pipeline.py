@@ -510,6 +510,7 @@ def test_held_resolution_without_persistable_graph_seals_explicit_empty_effect()
     assert result.embedding_skipped is True
     assert guard.calls == ["begin", "resolve", "telemetry", "complete"]
     assert result.completed_receipt is not None
+    assert result.completed_receipt["zero_proposal_effect"] == "EXPLICIT"
     assert result.completed_receipt["embedding_usage"]["request_count"] == 5
     assert result.completed_receipt["proposal_receipt"]["entity_mentions"] == [
         {"local_id": 0}

@@ -5905,11 +5905,23 @@ def test_step22_persistable_empty_zero_after_embeddings_survives_full_cycle(
     connection.close()
 
     execution = executions[0]
+    raw = execution.produced.raw_output_value
+    combined = None if not isinstance(raw, dict) else raw.get("combined_temporal_receipt")
     observed = {
         "attempted": report.graphiti,
         "adapter_outcome": execution.outcome.value,
         "produced_outcome": execution.produced.outcome.value,
         "produced_failure_code": execution.produced.failure_code.value,
+        "produced_validation": (
+            None
+            if execution.produced.validation is None
+            else execution.produced.validation.value
+        ),
+        "zero_proposal_effect": (
+            combined.get("zero_proposal_effect")
+            if isinstance(combined, dict)
+            else None
+        ),
         "ingest": ingest,
         "failure": failure,
         "outcome": receipt["outcome"],
@@ -5925,6 +5937,8 @@ def test_step22_persistable_empty_zero_after_embeddings_survives_full_cycle(
         "adapter_outcome": "COMPLETE",
         "produced_outcome": "SUCCESS",
         "produced_failure_code": "NONE",
+        "produced_validation": "VALID",
+        "zero_proposal_effect": "EXPLICIT",
         "ingest": ("COMPLETE", 0, 0, 0),
         "failure": None,
         "outcome": "COMPLETE",
@@ -5934,6 +5948,149 @@ def test_step22_persistable_empty_zero_after_embeddings_survives_full_cycle(
         "embedding_requests": 5,
         "chat_tokens": 8_266,
         "persist_calls": [],
+    }
+
+
+def test_unmarked_zero_counts_without_validated_result_stay_ambiguous_full_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Integer 0/0/0 from result=None is unmarked, not TERMINAL zero-as-success."""
+
+    from newsroom.control_plane import paths as control_paths
+    from newsroom.graphiti_adapter import real
+
+    executions: list[object] = []
+
+    async def unmarked_zero_counts(**values: object) -> object:
+        telemetry = values["telemetry"]
+        telemetry.chat_invocations = [
+            {
+                "provider": "cursor-agent-cli",
+                "model": "composer-2.5",
+                "outcome": "COMPLETE",
+                "usage": {
+                    "usage_basis": "PROVIDER_REPORTED",
+                    "input_tokens": 4_694,
+                    "cached_read_tokens": 448,
+                    "output_tokens": 3_124,
+                    "total_tokens": 8_266,
+                },
+            }
+        ]
+        telemetry.embedding_usage = {
+            "usage_basis": "PROVIDER_REPORTED",
+            "request_count": 5,
+            "embedding_tokens": 43,
+            "cost_usd_microunits": 4,
+            "requests": [
+                {
+                    "provider": "openrouter",
+                    "model": OPENROUTER_EMBEDDING_SLUG,
+                    "request_id": f"unmarked-embedding-{index}",
+                    "prompt_tokens": 2,
+                    "total_tokens": 2,
+                    "cost_usd_microunits": 0,
+                    "cost_reported": True,
+                    "outcome": "COMPLETE",
+                }
+                for index in range(5)
+            ],
+        }
+        raise real.AmbiguousEpisodeEffect(
+            "Graphiti completion became ambiguous after provider dispatch"
+        )
+
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(real, "openrouter_api_key", lambda: "fixture-key")
+    monkeypatch.setattr(real, "neo4j_community_password", lambda: "fixture-password")
+    monkeypatch.setattr(real, "_add_episode", unmarked_zero_counts)
+
+    observed_at = datetime(2026, 8, 20, tzinfo=UTC)
+    clock = lambda: observed_at
+    adapter_clock = lambda: UtcTimestamp(observed_at)
+    adapter_type = real.RealGraphitiAdapter
+
+    class CapturingAdapter:
+        def __init__(self, **values: object) -> None:
+            self.delegate = adapter_type(clock=adapter_clock, **values)
+
+        def execute(self, **values: object) -> object:
+            execution = self.delegate.execute(**values)
+            executions.append(execution)
+            return execution
+
+    monkeypatch.setattr(real, "RealGraphitiAdapter", CapturingAdapter)
+
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "unmarked-zero-counts-full-cycle.sqlite3"
+    monkeypatch.setattr(control_paths, "CANONICAL_PROVING_STORE", proving)
+    monkeypatch.setattr(control_paths, "CANONICAL_UNPUBLISHED_STORE", unpublished)
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=EvaluationGraphitiRunner(clock=clock, fallback_permitted=False),
+        max_graphiti=1,
+        model_usage=ModelUsageService(str(unpublished)),
+        clock=clock,
+    )
+
+    connection = sqlite3.connect(unpublished)
+    receipt = json.loads(
+        connection.execute(
+            "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts"
+        ).fetchone()[0]
+    )
+    ingest = connection.execute(
+        "SELECT outcome FROM unpublished_graphiti_ingest"
+    ).fetchone()
+    failure = connection.execute(
+        "SELECT last_outcome,last_failure_code FROM unpublished_graphiti_failures"
+    ).fetchone()
+    connection.close()
+
+    execution = executions[0]
+    observed = {
+        "attempted": report.graphiti,
+        "adapter_outcome": execution.outcome.value,
+        "produced_outcome": execution.produced.outcome.value,
+        "produced_failure_code": execution.produced.failure_code.value,
+        "produced_validation": execution.produced.validation,
+        "raw_output": execution.produced.raw_output_value,
+        "attempt_proposal_count": (
+            execution.produced.attempt_receipt_value or {}
+        ).get("proposal_count"),
+        "attempt_entity_count": (
+            execution.produced.attempt_receipt_value or {}
+        ).get("entity_count"),
+        "attempt_relation_count": (
+            execution.produced.attempt_receipt_value or {}
+        ).get("relation_count"),
+        "zero_proposal_effect": (
+            execution.produced.attempt_receipt_value or {}
+        ).get("zero_proposal_effect"),
+        "ingest": ingest,
+        "failure": failure,
+        "receipt_outcome": receipt["outcome"],
+        "receipt_proposal_count": receipt.get("proposal_count"),
+    }
+    assert observed == {
+        "attempted": 1,
+        "adapter_outcome": "AMBIGUOUS_EFFECT",
+        "produced_outcome": "RETRYABLE_FAILURE",
+        "produced_failure_code": "AMBIGUOUS_EFFECT",
+        "produced_validation": None,
+        "raw_output": None,
+        "attempt_proposal_count": 0,
+        "attempt_entity_count": 0,
+        "attempt_relation_count": 0,
+        "zero_proposal_effect": None,
+        "ingest": None,
+        "failure": ("AMBIGUOUS_EFFECT", "AMBIGUOUS_EFFECT"),
+        "receipt_outcome": "AMBIGUOUS_EFFECT",
+        "receipt_proposal_count": 0,
     }
 
 
