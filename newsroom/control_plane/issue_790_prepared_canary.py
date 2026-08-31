@@ -303,6 +303,8 @@ def _forbidden_identities(
     store: Path | None,
     plan: Mapping[str, object],
 ) -> tuple[set[str], set[int]]:
+    """Durable and plan retry-forbidden identities. Consumption is resume, not retry."""
+
     ids: set[str] = set()
     seqs: set[int] = set(_op()._RETRY_FORBIDDEN_LEDGER_SEQS)
     retry_events = plan.get("retry_forbidden_events")
@@ -329,12 +331,6 @@ def _forbidden_identities(
         if "issue_790_graphiti_retry_exclusions" in tables:
             for event_id, ledger_seq in connection.execute(
                 "SELECT event_id, ledger_seq FROM issue_790_graphiti_retry_exclusions"
-            ):
-                ids.add(str(event_id))
-                seqs.add(int(ledger_seq))
-        if "issue_790_bounded_canary_consumptions" in tables:
-            for event_id, ledger_seq in connection.execute(
-                "SELECT event_id, ledger_seq FROM issue_790_bounded_canary_consumptions"
             ):
                 ids.add(str(event_id))
                 seqs.add(int(ledger_seq))
@@ -433,9 +429,20 @@ def _spent_or_retry_forbidden(
         return True
     if store is None:
         return False
-    return _event_is_untouched_attempt_zero(
+    untouched = _event_is_untouched_attempt_zero(
         store, event_id=event_id, ledger_seq=ledger_seq
-    ) is False
+    )
+    if (
+        event_id == CANDIDATE_EVENT_ID
+        and ledger_seq == CANDIDATE_LEDGER_SEQ
+        and untouched is not True
+    ):
+        return True
+    if untouched is False and not _canary_flags(
+        store, event_id=event_id, ledger_seq=ledger_seq
+    )["consumption_present"]:
+        return True
+    return False
 
 
 def _candidate_from_plan(
@@ -464,6 +471,19 @@ def _candidate_from_plan(
             return requested
         if _spent_or_retry_forbidden(store, plan, event_id=event_id, ledger_seq=ledger_seq):
             _raise("RETRY_FORBIDDEN_TARGET", "bounded canary targeted a retained failure")
+        if live_bind is not None and requested != live_bind:
+            if (
+                store is not None
+                and _event_is_untouched_attempt_zero(
+                    store, event_id=event_id, ledger_seq=ledger_seq
+                )
+                is False
+            ):
+                _raise(
+                    "RETRY_FORBIDDEN_TARGET",
+                    "bounded canary targeted a retained failure",
+                )
+            _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
         if bound is not None and requested != bound:
             _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
         return requested
@@ -647,11 +667,7 @@ def prepare_issue_790_canary(
         candidate_attempt = int(manifest_row[2])
         candidate_dispatched = bool(manifest_row[3])
         candidate_claim_present = manifest_row[4] is not None or manifest_row[5] is not None
-        resume = flags["consumption_present"] and (
-            candidate_state == "QUEUED"
-            and candidate_attempt == 0
-            and candidate_dispatched is False
-        )
+        resume = flags["consumption_present"]
         if require_candidate_row and not resume and (
             candidate_state != "QUEUED"
             or candidate_attempt != 0
