@@ -4063,9 +4063,10 @@ def run_issue_790_canary(
         field="canary state counts",
     )
     dead_letters_after = int(state_counts_after.get("DEAD_LETTER", 0))
-    retry_unchanged = retry_after == retry_before == retained_plan.get(
-        "retry_forbidden_events"
-    )
+    retry_unchanged = retry_forbidden_safety_states_match(
+        retained_plan.get("retry_forbidden_events"),
+        retry_before,
+    ) and retry_forbidden_safety_states_match(retry_before, retry_after)
     worker_unloaded = worker_after == worker_before == {
         "label": _WORKER_LABEL,
         "launchctl_loaded": False,

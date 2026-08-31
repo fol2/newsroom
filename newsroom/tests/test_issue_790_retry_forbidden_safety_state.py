@@ -151,6 +151,11 @@ def test_red_claim_or_lease_is_present() -> None:
     leased["claim_expires_at"] = "2026-08-31T12:00:00.000000Z"
     with pytest.raises(RetryForbiddenSafetyError, match="claim/lease is present"):
         evaluate_retry_forbidden_safety(expected=sealed, live=leased, excluded=True)
+    live = _live_13361()
+    live["claim_owner"] = None
+    live["claim_expires_at"] = None
+    evaluate_retry_forbidden_safety(expected=sealed, live=live, excluded=True)
+    assert retry_forbidden_safety_states_match((sealed,), (live,)) is True
 
 
 def test_red_missing_row() -> None:
