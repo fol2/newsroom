@@ -8,8 +8,10 @@ from types import SimpleNamespace
 import pytest
 
 from scripts.issue_790_live_canary_preflight import (
+    LATEST_FAILURE_COVERING_FULL_PATH_TESTS,
     REQUIRED_RETRY_LEDGER_SEQS,
     STEP21_FULL_PATH_TEST,
+    STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST,
     _blocker_smokes,
     _effective_retry_exclusion_status,
     _eligible_candidate_rows,
@@ -144,6 +146,94 @@ def test_latest_live_failure_requires_later_red_and_exact_main_green() -> None:
         [failure, diagnosis, green, later_failure],
         tip=tip,
     )[0] is False
+
+
+def _live_fail_comment(ledger: int, *, created_at: str) -> dict[str, str]:
+    return {
+        "created_at": created_at,
+        "body": f"## Step 22 live canary — **FAIL**\n- event: ledger `{ledger}`",
+    }
+
+
+def _full_path_red_comment(
+    ledger: int, test_node: str, *, created_at: str
+) -> dict[str, str]:
+    return {
+        "created_at": created_at,
+        "body": (
+            f"## Diagnosis\nFull-path red for ledger {ledger}\n"
+            f"Red commit: `{'b' * 40}`\n"
+            f"`uv run --frozen pytest -q {test_node}`"
+        ),
+    }
+
+
+def _full_path_green_comment(
+    ledger: int, tip: str, *, created_at: str
+) -> dict[str, str]:
+    return {
+        "created_at": created_at,
+        "body": (
+            f"## Full-path repair\nexact-main {tip}; ledger {ledger}; "
+            "Focus Gates succeeded"
+        ),
+    }
+
+
+def test_covering_full_path_nodes_are_step21_and_step22_only() -> None:
+    assert LATEST_FAILURE_COVERING_FULL_PATH_TESTS == frozenset(
+        {
+            STEP21_FULL_PATH_TEST,
+            STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("ledger", "test_node"),
+    (
+        (13361, STEP21_FULL_PATH_TEST),
+        (13665, STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST),
+        (13665, STEP21_FULL_PATH_TEST),
+    ),
+)
+def test_latest_live_failure_accepts_step21_or_step22_covering_red(
+    ledger: int, test_node: str
+) -> None:
+    tip = "c" * 40
+    comments = [
+        _live_fail_comment(ledger, created_at="2026-08-31T15:21:47Z"),
+        _full_path_red_comment(
+            ledger, test_node, created_at="2026-08-31T15:40:00Z"
+        ),
+        _full_path_green_comment(
+            ledger, tip, created_at="2026-08-31T16:00:00Z"
+        ),
+    ]
+    assert _latest_failure_red_green(comments, tip=tip) == (
+        True,
+        f"ledger {ledger} red→green on {tip[:12]}",
+    )
+
+
+def test_latest_live_failure_rejects_non_covering_full_path_red() -> None:
+    tip = "d" * 40
+    other = (
+        "newsroom/tests/test_graphiti_corpus_ingest.py::"
+        "test_step20_rolled_back_zero_proposal_completion_survives_full_cycle"
+    )
+    comments = [
+        _live_fail_comment(13665, created_at="2026-08-31T15:21:47Z"),
+        _full_path_red_comment(
+            13665, other, created_at="2026-08-31T15:40:00Z"
+        ),
+        _full_path_green_comment(
+            13665, tip, created_at="2026-08-31T16:00:00Z"
+        ),
+    ]
+    ok, detail = _latest_failure_red_green(comments, tip=tip)
+    assert ok is False
+    assert detail == f"unexpected latest red test {other}"
 
 
 def test_inspection_sql_uses_ingest_identity_without_receipt_event_column() -> None:
