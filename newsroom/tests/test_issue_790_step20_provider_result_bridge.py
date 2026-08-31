@@ -103,7 +103,8 @@ def test_store_copy_rehearsal_seals_truthful_success_without_wider_effects(
         qualify_calls=[],
     )
 
-    backup = tmp_path / "backup-0.sqlite3"
+    backup = activated["backup"]
+    assert isinstance(backup, Path)
     assert backup.is_file()
     connection = sqlite3.connect(backup)
     assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
@@ -118,4 +119,5 @@ def test_store_copy_rehearsal_seals_truthful_success_without_wider_effects(
     assert receipt["worker_remained_unloaded"] is True
     assert receipt["retry_authorised"] is False
     assert receipt["disposition_digest"] == _DISPOSITION
+    assert receipt["pre_operation_snapshot_digest"] == activated["backup_digest"]
     assert _table_count(store, "issue_790_bounded_canary_outcomes") == 1

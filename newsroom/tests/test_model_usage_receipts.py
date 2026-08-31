@@ -48,6 +48,9 @@ from newsroom.control_plane.issue_790_prepared_canary import (
     CANDIDATE_EVENT_ID,
     CANDIDATE_LEDGER_SEQ,
     PreparedCanaryError,
+    prepare_issue_790_canary,
+    prepared_canary_from_record,
+    prepared_canary_record,
 )
 from newsroom.tests.test_issue_790_rehearsal_fixtures import (
     SUCCESSOR_EVENT_ID,
@@ -1113,6 +1116,33 @@ def _patch_issue_790_live_evidence(
         "_qualify_real_graphiti_runtime",
         lambda: {**runtime, "runtime_digest": _digest(runtime)},
     )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_other_issue_790_legacy_canary_process_ids",
+        lambda **_kwargs: (),
+    )
+
+
+def _persisted_issue_790_prepared_canary(
+    *,
+    store: Path,
+    proving_store: Path,
+    plan: Mapping[str, object],
+    observed_at: datetime,
+    event_id: str,
+    ledger_seq: int,
+):
+    prepared = prepare_issue_790_canary(
+        store=store,
+        proving_store=proving_store,
+        plan=plan,
+        observed_at=observed_at,
+        exact_head="a" * 40,
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        role="canary",
+    )
+    return prepared_canary_from_record(prepared_canary_record(prepared))
 
 
 def test_hold_or_reject_admission_creates_no_envelope_or_leaf(tmp_path: Path) -> None:
@@ -3909,6 +3939,8 @@ def test_issue_790_successor_plan_consumes_a_new_event_after_failed_predecessor(
             preflight_evidence=tampered_preflight,
             consumed_at=T0 + timedelta(seconds=105),
         )
+    second_backup = tmp_path / "successor-pre-operation.sqlite3"
+    second_backup_digest = issue_790_operation._sqlite_backup(store, second_backup)
     second_consumption = repository.consume(
         approved_plan_digest=successor_plan_digest,
         disposition_digest=str(second_disposition["disposition_digest"]),
@@ -3994,13 +4026,15 @@ def test_issue_790_successor_plan_consumes_a_new_event_after_failed_predecessor(
     recovery_receipt = run_issue_790_canary(
         store=store,
         proving_store=proving,
-        backup_path=tmp_path / "successor-recovery.sqlite3",
+        backup_path=second_backup,
         plan=successor_plan,
         observed_at=recovery_observed_at,
         repository_root=tmp_path,
         event_id=second_event_id,
         ledger_seq=2005,
         disposition_digest=str(second_disposition["disposition_digest"]),
+        recover_interrupted=True,
+        expected_backup_digest=second_backup_digest,
     )
     second_outcome = recovery_receipt["outcome"]
     retained_second_causal_report = second_outcome["causal_report"]
@@ -4583,6 +4617,14 @@ def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
         "_qualify_issue_790_event",
         lambda **_values: preflight,
     )
+    prepared = _persisted_issue_790_prepared_canary(
+        store=store,
+        proving_store=proving,
+        plan=plan,
+        observed_at=observed_at,
+        event_id=event_id,
+        ledger_seq=2002,
+    )
     ready_runtime_check = issue_790_operation._qualify_real_graphiti_runtime
     monkeypatch.setattr(
         issue_790_operation,
@@ -4606,6 +4648,7 @@ def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
             event_id=event_id,
             ledger_seq=2002,
             disposition_digest=str(disposition["disposition_digest"]),
+            prepared=prepared,
         )
     assert missing_runtime_backup.exists() is False
     assert canary_repository.existing_consumption(
@@ -4707,16 +4750,18 @@ def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
         "_consume_issue_790_event",
         consume_exact_event,
     )
+    backup = tmp_path / "pre-canary.sqlite3"
     receipt = run_issue_790_canary(
         store=store,
         proving_store=proving,
-        backup_path=tmp_path / "pre-canary.sqlite3",
+        backup_path=backup,
         plan=plan,
         observed_at=observed_at,
         repository_root=tmp_path,
         event_id=event_id,
         ledger_seq=2002,
         disposition_digest=str(disposition["disposition_digest"]),
+        prepared=prepared,
     )
 
     assert receipt["canary_evidence_passed"] is True
@@ -4744,7 +4789,7 @@ def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
     resumed = run_issue_790_canary(
         store=store,
         proving_store=proving,
-        backup_path=tmp_path / "pre-resumed-finalisation.sqlite3",
+        backup_path=backup,
         plan=plan,
         observed_at=observed_at,
         repository_root=tmp_path,
@@ -4858,6 +4903,14 @@ def test_issue_790_production_canary_accepts_successor_without_resuming_spent_pl
         consume_successor,
     )
     backup = tmp_path / "successor-13671.sqlite3"
+    prepared = _persisted_issue_790_prepared_canary(
+        store=store,
+        proving_store=proving,
+        plan=plan,
+        observed_at=observed_at,
+        event_id=SUCCESSOR_EVENT_ID,
+        ledger_seq=SUCCESSOR_LEDGER_SEQ,
+    )
     receipt = run_issue_790_canary(
         store=store,
         proving_store=proving,
@@ -4868,6 +4921,7 @@ def test_issue_790_production_canary_accepts_successor_without_resuming_spent_pl
         event_id=SUCCESSOR_EVENT_ID,
         ledger_seq=SUCCESSOR_LEDGER_SEQ,
         disposition_digest=disposition_digest,
+        prepared=prepared,
     )
     assert receipt["resumed_zero_io_finalisation"] is False
     assert receipt["provider_dispatch_attempted_this_run"] is True

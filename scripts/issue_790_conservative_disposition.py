@@ -29,6 +29,9 @@ from newsroom.control_plane.issue_790_event_supply import (
     BoundedEventSupplyError,
     supply_one_graphiti_event,
 )
+from newsroom.control_plane.issue_790_prepared_canary import (
+    prepared_canary_from_record,
+)
 from newsroom.control_plane.veto import VetoError
 
 
@@ -84,6 +87,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--disposition-digest")
     parser.add_argument("--scratch-store", type=Path)
     parser.add_argument("--backup", type=Path)
+    parser.add_argument("--prepared-canary", type=Path)
+    parser.add_argument("--recover-interrupted-canary", action="store_true")
+    parser.add_argument("--expected-backup-digest")
     parser.add_argument("--candidate", type=Path)
     parser.add_argument("--pre-dispatch", type=Path)
     parser.add_argument("--comment-id", type=int)
@@ -165,6 +171,16 @@ def _legacy_mode(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
         )
     if args.mode != "canary" and any(value is not None for value in canary_values):
         parser.error("canary arguments are accepted only in canary mode")
+    if args.mode != "canary" and args.prepared_canary is not None:
+        parser.error("--prepared-canary is accepted only in canary mode")
+    if args.mode != "canary" and args.recover_interrupted_canary:
+        parser.error("--recover-interrupted-canary is accepted only in canary mode")
+    if args.mode != "canary" and args.expected_backup_digest is not None:
+        parser.error("--expected-backup-digest is accepted only in canary mode")
+    if args.recover_interrupted_canary and args.expected_backup_digest is None:
+        parser.error(
+            "--recover-interrupted-canary requires --expected-backup-digest"
+        )
     if args.mode == "dry-run" and args.repository_root is not None:
         parser.error("dry-run does not accept --repository-root")
     destination_path = (
@@ -179,6 +195,8 @@ def _legacy_mode(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
     ]
     if args.proving_store is not None:
         operation_paths.append(args.proving_store)
+    if args.prepared_canary is not None:
+        operation_paths.append(args.prepared_canary)
     assert_issue_790_paths_disjoint(*operation_paths)
     plan = load_issue_790_plan(args.plan, store=args.store)
     if args.mode == "dry-run":
@@ -206,6 +224,16 @@ def _legacy_mode(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
         assert args.canary_event_id is not None
         assert args.canary_ledger_seq is not None
         assert args.disposition_digest is not None
+        prepared = (
+            None
+            if args.prepared_canary is None
+            else prepared_canary_from_record(
+                _load_object(
+                    args.prepared_canary,
+                    field="prepared canary",
+                )
+            )
+        )
         receipt = run_issue_790_canary(
             store=args.store,
             proving_store=args.proving_store,
@@ -216,6 +244,9 @@ def _legacy_mode(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
             event_id=args.canary_event_id,
             ledger_seq=args.canary_ledger_seq,
             disposition_digest=args.disposition_digest,
+            prepared=prepared,
+            recover_interrupted=args.recover_interrupted_canary,
+            expected_backup_digest=args.expected_backup_digest,
         )
     write_issue_790_receipt(args.receipt, receipt)
     sys.stdout.write(

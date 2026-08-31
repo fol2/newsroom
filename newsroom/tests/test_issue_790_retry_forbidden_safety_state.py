@@ -77,7 +77,9 @@ def test_preflight_and_live_apply_share_the_safety_state_validator() -> None:
     preflight_src = inspect.getsource(_effective_retry_exclusion_status)
     apply_src = inspect.getsource(disposition._require_retry_events_unchanged)
     exclusion_src = inspect.getsource(disposition._require_retry_exclusions)
-    canary_src = inspect.getsource(disposition.run_issue_790_canary)
+    canary_src = inspect.getsource(
+        disposition._run_issue_790_canary_locked
+    )
     assert "validate_retry_forbidden_safety_state" in preflight_src
     assert "retry_forbidden_safety_states_match" in preflight_src
     assert "retry_forbidden_safety_states_match" in apply_src
