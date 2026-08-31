@@ -521,18 +521,23 @@ def test_supply_skips_landed_stranded_key_and_selects_next(
         tmp_path, monkeypatch
     )
     keys = sorted({unit.coverage_key() for unit in stranded})
-    first = next(unit for unit in stranded if unit.coverage_key() == keys[0])
     second = next(unit for unit in stranded if unit.coverage_key() == keys[1])
-    _land_units(unpublished, (first,))
 
-    result = supply_one_graphiti_event(
+    first = supply_one_graphiti_event(
         proving_store=str(proving),
         unpublished_store=str(unpublished),
         expected_frontier_ledger_seq=1,
         clock=lambda: LATER,
     )
+    result = supply_one_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        expected_frontier_ledger_seq=first.ledger_seq,
+        clock=lambda: LATER,
+    )
 
-    assert result.ledger_seq == 2
+    assert first.ledger_seq == 2
+    assert result.ledger_seq == 3
     assert result.state == "QUEUED"
     assert result.attempt_count == 0
     connection = sqlite3.connect(unpublished)
@@ -545,7 +550,7 @@ def test_supply_skips_landed_stranded_key_and_selects_next(
         ).fetchone() == (second.source_id, second.item_key, "QUEUED", 0, 0, None)
         assert connection.execute(
             "SELECT COUNT(*) FROM unpublished_graphiti_revision_events"
-        ).fetchone() == (2,)
+        ).fetchone() == (3,)
         assert connection.execute(
             "SELECT COUNT(*) FROM unpublished_effective_revision_landed"
         ).fetchone() == (3,)
