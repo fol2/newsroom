@@ -4377,18 +4377,6 @@ def _run_issue_790_canary_locked(
         raise Issue790DispositionError(
             "interrupted canary recovery requires the expected backup digest"
         )
-    _candidate_from_plan(
-        retained_plan,
-        event_id=event_id,
-        ledger_seq=ledger_seq,
-        role="canary",
-        store=store,
-    )
-    proving_store = _canonical_existing_file(
-        proving_store,
-        field="source proving store",
-    )
-    assert_issue_790_paths_disjoint(store, proving_store)
     try:
         canary_repository = Issue790CanaryRepository.open_existing(str(store))
         prior_consumption = canary_repository.existing_consumption(
@@ -4424,32 +4412,8 @@ def _run_issue_790_canary_locked(
         raise Issue790DispositionError(
             "expected backup digest is accepted only for an existing canary"
         )
-    recovery_checked_at = datetime.now(tz=UTC)
-    recovery_process_ids = (
-        _other_issue_790_legacy_canary_process_ids(
-            event_id=event_id,
-            store=store,
-        )
-        if interrupted_consumption
-        else ()
-    )
-    if recovery_process_ids:
-        raise Issue790DispositionError(
-            "another interrupted canary process is still active"
-        )
-    if prior_consumption is None and prepared is None:
-        raise PreparedCanaryError(
-            "prepared canary is absent",
-            failure_code="PREPARED_CANARY_ABSENT",
-        )
-    if prior_consumption is None and prepared is not None:
-        if prepared.record_digest is None:
-            raise PreparedCanaryError(
-                "prepared canary was not loaded from its durable record",
-                failure_code=PREPARED_CANARY_RECORD_INVALID,
-            )
-        prepared_canary_record(prepared)
     effective_expected_backup_digest = expected_backup_digest
+    retained_preflight: dict[str, object] | None = None
     if prior_consumption is not None:
         retained_preflight = _record(
             prior_consumption.get("preflight_evidence"),
@@ -4475,10 +4439,54 @@ def _run_issue_790_canary_locked(
             )
         if bound_backup_digest is not None:
             effective_expected_backup_digest = bound_backup_digest
-        elif expected_backup_digest is None:
-            raise Issue790DispositionError(
-                "legacy canary replay requires the expected backup digest"
+    candidate_role = (
+        "recovery"
+        if interrupted_consumption
+        else "replay"
+        if prior_outcome is not None
+        else "canary"
+    )
+    _candidate_from_plan(
+        retained_plan,
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        role=candidate_role,
+        store=store,
+    )
+    if prior_consumption is not None and effective_expected_backup_digest is None:
+        raise Issue790DispositionError(
+            "legacy canary replay requires the expected backup digest"
+        )
+    proving_store = _canonical_existing_file(
+        proving_store,
+        field="source proving store",
+    )
+    assert_issue_790_paths_disjoint(store, proving_store)
+    recovery_checked_at = datetime.now(tz=UTC)
+    recovery_process_ids = (
+        _other_issue_790_legacy_canary_process_ids(
+            event_id=event_id,
+            store=store,
+        )
+        if interrupted_consumption
+        else ()
+    )
+    if recovery_process_ids:
+        raise Issue790DispositionError(
+            "another interrupted canary process is still active"
+        )
+    if prior_consumption is None and prepared is None:
+        raise PreparedCanaryError(
+            "prepared canary is absent",
+            failure_code="PREPARED_CANARY_ABSENT",
+        )
+    if prior_consumption is None and prepared is not None:
+        if prepared.record_digest is None:
+            raise PreparedCanaryError(
+                "prepared canary was not loaded from its durable record",
+                failure_code=PREPARED_CANARY_RECORD_INVALID,
             )
+        prepared_canary_record(prepared)
     backup_path, retained_backup_digest = _resolve_canary_backup_destination(
         backup_path,
         store=store,
@@ -4493,10 +4501,7 @@ def _run_issue_790_canary_locked(
             None
             if prior_outcome is None
             else _snapshot_manifest_digest(
-                _record(
-                    prior_consumption.get("preflight_evidence"),
-                    field="bounded canary preflight",
-                ),
+                retained_preflight or {},
                 store=store,
                 event_id=event_id,
                 ledger_seq=ledger_seq,
@@ -4528,7 +4533,7 @@ def _run_issue_790_canary_locked(
         exact_head=str(operational_evidence.get("revision") or ""),
         event_id=event_id,
         ledger_seq=ledger_seq,
-        role="canary",
+        role=candidate_role,
     )
     retained_prepared = consume_prepared_canary(
         latest if prepared is None else prepared,

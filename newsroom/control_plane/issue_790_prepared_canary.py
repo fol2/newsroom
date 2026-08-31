@@ -28,7 +28,7 @@ from newsroom.graphiti_adapter.combined_temporal_projection import (
     PROJECTION_POLICY_DIGEST,
 )
 
-PrepareRole = Literal["preflight", "apply", "canary"]
+PrepareRole = Literal["preflight", "apply", "canary", "recovery", "replay"]
 
 CANDIDATE_EVENT_ID = (
     "sha256:b39a1e6ea465ca4a993893d4ae51c94ca9ac3e0db7f4fd70a8c780367263be6b"
@@ -630,6 +630,43 @@ def _spent_or_retry_forbidden(
     return False
 
 
+def _matching_canary_consumption(
+    store: Path,
+    plan: Mapping[str, object],
+    *,
+    event_id: str,
+    ledger_seq: int,
+) -> bool:
+    """True only for this plan's exact already-consumed event identity."""
+
+    plan_digest = plan.get("canonical_digest")
+    if not isinstance(plan_digest, str):
+        return False
+    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "issue_790_bounded_canary_consumptions" not in tables:
+            return False
+        rows = connection.execute(
+            "SELECT approved_plan_digest,event_id,ledger_seq "
+            "FROM issue_790_bounded_canary_consumptions "
+            "WHERE event_id=? OR ledger_seq=?",
+            (event_id, ledger_seq),
+        ).fetchall()
+    finally:
+        connection.close()
+    return len(rows) == 1 and tuple(rows[0]) == (
+        plan_digest,
+        event_id,
+        ledger_seq,
+    )
+
+
 def _candidate_from_plan(
     plan: Mapping[str, object],
     *,
@@ -653,6 +690,28 @@ def _candidate_from_plan(
     if event_id is not None and ledger_seq is not None:
         requested = (event_id, ledger_seq)
         if not event_id.startswith("sha256:"):
+            return requested
+        if role in {"recovery", "replay"}:
+            if store is None or not _matching_canary_consumption(
+                store,
+                plan,
+                event_id=event_id,
+                ledger_seq=ledger_seq,
+            ):
+                _raise(
+                    "RETRY_FORBIDDEN_TARGET",
+                    "bounded canary recovery target is not an exact consumption",
+                )
+            if role == "replay" and _spent_or_retry_forbidden(
+                store,
+                plan,
+                event_id=event_id,
+                ledger_seq=ledger_seq,
+            ):
+                _raise(
+                    "RETRY_FORBIDDEN_TARGET",
+                    "bounded canary targeted a retained failure",
+                )
             return requested
         if _spent_or_retry_forbidden(store, plan, event_id=event_id, ledger_seq=ledger_seq):
             _raise("RETRY_FORBIDDEN_TARGET", "bounded canary targeted a retained failure")
@@ -835,7 +894,7 @@ def prepare_issue_790_canary(
         }
     )
     require_candidate_row = (
-        role in {"preflight", "canary"}
+        role in {"preflight", "canary", "recovery", "replay"}
         and bound_event_id is not None
         and bound_ledger_seq is not None
     )

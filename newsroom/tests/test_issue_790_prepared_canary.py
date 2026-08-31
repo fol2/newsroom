@@ -67,6 +67,7 @@ from newsroom.tests.test_issue_790_rehearsal_fixtures import (
     SEALED_13361_AVAILABLE_AT,
     SUCCESSOR_EVENT_ID,
     SUCCESSOR_LEDGER_SEQ,
+    _insert_retry_forbidden_rows,
     build_rehearsal_stores,
     candidate_identity,
     dispatch_started_count,
@@ -94,6 +95,9 @@ _ACTIVATION_PARENT_SHA = "00f7df954c21816e9be13d783871186efaa84073"
 _LIVE_13671_AVAILABLE_AT = "2026-08-31T16:17:39.354162Z"
 _LIVE_OBSERVED_AT = datetime(2026, 8, 31, 17, 39, 23, 783082, tzinfo=UTC)
 _PRODUCTION_DISPOSITION = "sha256:" + "cd" * 32
+_EVENT_13690 = (
+    "sha256:57bfeadea2a60c8f24a269c0985611ea8828fcaeaccbfd1b7bed84b537293666"
+)
 
 
 def _prepare(stores, *, store=None, role="preflight", **kwargs):
@@ -1888,6 +1892,10 @@ def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
     claim again and must not leave RUNNING with last_failure_code NULL.
     Dest exists without that strand still fail-closes before claim with the
     named code. Fails on fdef41da because dest-exists raised before recovery.
+
+    The first c3d266a recovery then failed before mutation because fresh 13690
+    became the normal live binding and hid the exact consumed 13689 strand.
+    Recovery must bypass selection only for that exact retained consumption.
     """
 
     from newsroom.control_plane.graphiti_events import GraphitiEventQueue
@@ -1990,6 +1998,57 @@ def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
         ledger_seq=LEDGER_13689,
     )
 
+    # The live recovery ran after a newer untouched candidate had landed.
+    # It remains the fresh binding without hiding the already-consumed strand.
+    connection = sqlite3.connect(stores.work_unpublished)
+    try:
+        _insert_retry_forbidden_rows(
+            connection,
+            [
+                {
+                    "attempt_count": 0,
+                    "available_at": "2026-08-31T22:19:18.565000Z",
+                    "event_id": _EVENT_13690,
+                    "last_failure_code": None,
+                    "ledger_seq": 13690,
+                    "provider_dispatched": False,
+                    "state": "QUEUED",
+                }
+            ],
+            live_13361_drift=False,
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    assert unused_queued_attempt_zero_candidates(
+        stores.work_unpublished, plan
+    )[0] == (_EVENT_13690, 13690)
+    with pytest.raises(PreparedCanaryError) as fresh_target:
+        _candidate_from_plan(
+            plan,
+            event_id=EVENT_13689,
+            ledger_seq=LEDGER_13689,
+            role="canary",
+            store=stores.work_unpublished,
+        )
+    assert fresh_target.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    assert _candidate_from_plan(
+        plan,
+        event_id=EVENT_13689,
+        ledger_seq=LEDGER_13689,
+        role="recovery",
+        store=stores.work_unpublished,
+    ) == (EVENT_13689, LEDGER_13689)
+    with pytest.raises(PreparedCanaryError) as unused_recovery:
+        _candidate_from_plan(
+            plan,
+            event_id=_EVENT_13690,
+            ledger_seq=13690,
+            role="recovery",
+            store=stores.work_unpublished,
+        )
+    assert unused_recovery.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+
     _expire_interrupted_canary_claim(
         stores.work_unpublished, ledger_seq=LEDGER_13689
     )
@@ -2016,6 +2075,7 @@ def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
     finally:
         connection.close()
     unused = unused_queued_attempt_zero_candidates(stores.work_unpublished, plan)
+    successor = _sqlite_canary_event(stores.work_unpublished, ledger_seq=13690)
     after = receipt["event_after"]["event"]
     assert consume_calls == [EVENT_13689]
     assert receipt["resumed_zero_io_finalisation"] is True
@@ -2058,6 +2118,11 @@ def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
     assert dispatch_started_count(stores.work_unpublished) == 0
     assert EVENT_13689 not in {item[0] for item in unused}
     assert LEDGER_13689 not in {item[1] for item in unused}
+    assert unused[0] == (_EVENT_13690, 13690)
+    assert successor["state"] == "QUEUED"
+    assert successor["attempt_count"] == 0
+    assert successor["provider_dispatched"] == 0
+    assert successor["claim_owner"] is None
     with pytest.raises(PreparedCanaryError) as caught:
         _candidate_from_plan(
             plan,
