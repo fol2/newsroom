@@ -71,6 +71,7 @@ def test_preflight_and_live_apply_share_the_safety_state_validator() -> None:
     from newsroom.control_plane import issue_790_disposition as disposition
     from scripts.issue_790_live_canary_preflight import (
         _effective_retry_exclusion_status,
+        _ops_gates,
     )
 
     preflight_src = inspect.getsource(_effective_retry_exclusion_status)
@@ -84,6 +85,11 @@ def test_preflight_and_live_apply_share_the_safety_state_validator() -> None:
     assert "event_snapshot\") == next(" not in preflight_src
     assert "_retain_retry_exclusions_for_plan" in canary_src
     assert "_require_retry_exclusions(" not in canary_src
+    assert "prepare_issue_790_canary" in inspect.getsource(
+        disposition._execute_issue_790_plan
+    )
+    assert "prepare_issue_790_canary" in canary_src
+    assert "prepare_issue_790_canary" in inspect.getsource(_ops_gates)
 
 
 def test_safety_state_fields_exclude_available_at_and_claims() -> None:

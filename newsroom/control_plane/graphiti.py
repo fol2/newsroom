@@ -1020,7 +1020,8 @@ class EvaluationGraphitiRunner:
                 adapter_options["invocation_observer"] = invocation_observer
             if not self._fallback_permitted:
                 adapter_options["fallback_permitted"] = False
-            adapter = RealGraphitiAdapter(**adapter_options)
+            adapter_cls = getattr(type(self), "_adapter_cls", RealGraphitiAdapter)
+            adapter = adapter_cls(**adapter_options)
             try:
                 execution = adapter.execute(
                     attempt=attempt,
