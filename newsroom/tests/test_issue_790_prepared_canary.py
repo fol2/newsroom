@@ -6,6 +6,7 @@ import ast
 import inspect
 import json
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +21,7 @@ from newsroom.control_plane.issue_790_disposition import (
     Issue790DispositionError,
     _require_step16_code_identity,
     _require_step16_runtime_semantics,
+    activate_issue_790_step16_plan,
     finalise_issue_790_step16_plan,
     issue_790_checked_approval,
     seal_issue_790_step16_plan,
@@ -61,6 +63,12 @@ from newsroom.tests.test_issue_790_rehearsal_fixtures import (
     mutate_retry_field,
     retry_available_at,
 )
+from newsroom.tests.test_issue_790_step16_activation import (
+    _COMMENT_ID,
+    _FakeGitHub,
+    _comment,
+    _payload,
+)
 
 _TEST_FILE = Path(__file__)
 _ROOT = _TEST_FILE.resolve().parents[2]
@@ -73,6 +81,7 @@ _SUCCESSOR_FG_RUN = 33404219327
 _ACTIVATION_PARENT_SHA = "00f7df954c21816e9be13d783871186efaa84073"
 _LIVE_13671_AVAILABLE_AT = "2026-08-31T16:17:39.354162Z"
 _LIVE_OBSERVED_AT = datetime(2026, 8, 31, 17, 39, 23, 783082, tzinfo=UTC)
+_PRODUCTION_DISPOSITION = "sha256:" + "cd" * 32
 
 
 def _prepare(stores, *, store=None, role="preflight", **kwargs):
@@ -180,13 +189,82 @@ def _production_runtime_evidence() -> dict[str, object]:
     }
 
 
+def _activate_step22(store: Path) -> dict[str, object]:
+    pending = json.loads((_ROOT / ISSUE_790_STEP22_PENDING_PLAN_PATH).read_text())
+    pre_dispatch = json.loads((_ROOT / ISSUE_790_STEP16_PRE_DISPATCH_PATH).read_text())
+    candidate = seal_issue_790_step16_plan(
+        pending,
+        issue_790_checked_approval(str(pending["canonical_digest"])),
+        pre_dispatch=pre_dispatch,
+    )
+    payload = _payload(candidate)
+    github = _FakeGitHub(_comment(payload))
+    activated = activate_issue_790_step16_plan(
+        candidate,
+        comment_id=_COMMENT_ID,
+        pre_dispatch=pre_dispatch,
+        store=store,
+        github_api=github,
+    )
+    return {**activated, "github": github, "candidate": candidate}
+
+
+def _seed_production_disposition(store: Path, plan: Mapping[str, object]) -> None:
+    target = plan["target"]
+    record = {
+        "exact_usage_remains_unknown": True,
+        "unknown_spend_released": False,
+    }
+    connection = sqlite3.connect(store)
+    try:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute(
+            "INSERT INTO model_usage_conservative_dispositions("
+            "disposition_digest,invocation_id,terminal_digest,allocation_digest,"
+            "policy_digest,approved_plan_digest,authority_digest,approved_by,"
+            "approval_reference,approved_at,observed_at,usage_status,record_json"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                _PRODUCTION_DISPOSITION,
+                target["invocation_id"],
+                target["terminal_digest"],
+                target["allocation_digest"],
+                "sha256:" + "11" * 32,
+                plan["canonical_digest"],
+                "sha256:" + "22" * 32,
+                "github:fol2",
+                "https://github.com/fol2/newsroom/issues/790#issuecomment-1",
+                "2026-08-31T11:55:32.000000Z",
+                "2026-08-31T11:55:33.000000Z",
+                "ESTIMATED",
+                json.dumps(record, sort_keys=True, separators=(",", ":")),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO model_usage_route_circuit_events("
+            "event_digest,route,state,reason,invocation_id,recorded_at,record_json"
+            ") VALUES(?,?,?,?,?,?,?)",
+            (
+                "sha256:" + "33" * 32,
+                "GRAPHITI_CHAT_PRIMARY",
+                "CLOSED",
+                f"AUTHORISED_OPERATOR_RESET:{_PRODUCTION_DISPOSITION}",
+                target["invocation_id"],
+                "2026-08-31T17:39:23.783082Z",
+                "{}",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def _patch_production_predispatch(
     monkeypatch: pytest.MonkeyPatch,
     *,
     plan: dict[str, object],
 ) -> None:
     retry = plan["retry_forbidden_events"]
-    monkeypatch.setattr(disposition, "_require_approved_plan", lambda *a, **k: plan)
     monkeypatch.setattr(disposition, "_assert_exact_target", lambda *a, **k: None)
     monkeypatch.setattr(
         disposition, "_require_sequence_predecessor", lambda *a, **k: None
@@ -222,7 +300,7 @@ def _patch_production_predispatch(
         "route_state",
         lambda self, route: {
             "state": "CLOSED",
-            "reason": "AUTHORISED_OPERATOR_RESET",
+            "reason": f"AUTHORISED_OPERATOR_RESET:{_PRODUCTION_DISPOSITION}",
         },
     )
     unsigned = {
@@ -695,7 +773,9 @@ def test_step22_unused_13671_survives_production_pre_dispatch_untouched(
     """Fails on 6c101627 with 'pre-dispatch event is not untouched'."""
 
     stores = build_rehearsal_stores(tmp_path, successor=True)
-    plan = _step22_activated_plan()
+    activated = _activate_step22(stores.work_unpublished)
+    plan = activated["plan"]
+    _seed_production_disposition(stores.work_unpublished, plan)
     assert plan["sequence"]["candidate_event_qualification"]["ledger_seq"] == (
         CANDIDATE_LEDGER_SEQ
     )
@@ -724,9 +804,10 @@ def test_step22_unused_13671_survives_production_pre_dispatch_untouched(
         repository_root=tmp_path,
         event_id=SUCCESSOR_EVENT_ID,
         ledger_seq=SUCCESSOR_LEDGER_SEQ,
-        disposition_digest="sha256:" + "cd" * 32,
+        disposition_digest=_PRODUCTION_DISPOSITION,
         rehearsal=False,
         exact_head=EXACT_HEAD,
+        github_api=activated["github"],
     )
     assert backup.is_file()
     assert consume_calls == [SUCCESSOR_EVENT_ID]
@@ -751,9 +832,10 @@ def test_step22_unused_13671_survives_production_pre_dispatch_untouched(
         repository_root=tmp_path,
         event_id=SUCCESSOR_EVENT_ID,
         ledger_seq=SUCCESSOR_LEDGER_SEQ,
-        disposition_digest="sha256:" + "cd" * 32,
+        disposition_digest=_PRODUCTION_DISPOSITION,
         rehearsal=False,
         exact_head=EXACT_HEAD,
+        github_api=activated["github"],
     )
     assert resumed["resumed_zero_io_finalisation"] is True
     assert consume_calls == [SUCCESSOR_EVENT_ID]
