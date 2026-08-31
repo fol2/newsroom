@@ -740,6 +740,10 @@ def test_canary_consumes_prepared_digest_only() -> None:
     assert "_git_commit_is_ancestor" in identity_src
     assert "ci_test.get(\"head_sha\") != exact_head" in identity_src
     assert "merge-base" in inspect.getsource(disposition._git_commit_is_ancestor)
+    resume = source.split("prior_consumption = canary_repository.existing_consumption", 1)[1]
+    resume = resume.split("resuming_zero_io_finalisation", 1)[0]
+    assert "event_id=event_id" in resume
+    assert "ledger_seq=ledger_seq" in resume
 
 
 def test_fail_branch_inventory_has_named_parity_tests() -> None:

@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS issue_790_graphiti_retry_exclusions(
 );
 CREATE TABLE IF NOT EXISTS issue_790_bounded_canary_consumptions(
     consumption_digest TEXT PRIMARY KEY,
-    approved_plan_digest TEXT NOT NULL UNIQUE,
+    approved_plan_digest TEXT NOT NULL,
     disposition_digest TEXT NOT NULL,
     event_id TEXT NOT NULL UNIQUE,
     ledger_seq INTEGER NOT NULL UNIQUE CHECK(ledger_seq > 0),
@@ -79,24 +79,28 @@ CREATE TABLE IF NOT EXISTS issue_790_bounded_canary_outcomes(
 """ + STEP16_ACTIVATION_TABLE_SQL + STEP16_CIRCUIT_RELEASE_TABLE_SQL
 
 
-def _allow_reused_dispositions(connection: sqlite3.Connection) -> None:
-    indexes = connection.execute(
-        "PRAGMA index_list(issue_790_bounded_canary_consumptions)"
-    ).fetchall()
-    disposition_is_unique = False
-    for index in indexes:
+def _unique_index_columns(
+    connection: sqlite3.Connection, *, table: str
+) -> frozenset[tuple[str, ...]]:
+    columns: set[tuple[str, ...]] = set()
+    for index in connection.execute(f"PRAGMA index_list({table})"):
         if not index[2]:
             continue
         name = str(index[1]).replace('"', '""')
-        columns = tuple(
-            str(column[2])
-            for column in connection.execute(f'PRAGMA index_info("{name}")')
+        columns.add(
+            tuple(
+                str(column[2])
+                for column in connection.execute(f'PRAGMA index_info("{name}")')
+            )
         )
-        disposition_is_unique = columns == ("disposition_digest",)
-        if disposition_is_unique:
-            break
-    if not disposition_is_unique:
-        return
+    return frozenset(columns)
+
+
+def _rebuild_canary_consumptions_table(
+    connection: sqlite3.Connection, *, message: str
+) -> None:
+    """Drop UNIQUE(approved_plan_digest). Keep UNIQUE event_id, ledger_seq, owner_id."""
+
     connection.commit()
     connection.execute("PRAGMA foreign_keys=OFF")
     connection.execute("PRAGMA legacy_alter_table=ON")
@@ -108,7 +112,7 @@ def _allow_reused_dispositions(connection: sqlite3.Connection) -> None:
                 RENAME TO issue_790_bounded_canary_consumptions_legacy;
             CREATE TABLE issue_790_bounded_canary_consumptions(
                 consumption_digest TEXT PRIMARY KEY,
-                approved_plan_digest TEXT NOT NULL UNIQUE,
+                approved_plan_digest TEXT NOT NULL,
                 disposition_digest TEXT NOT NULL,
                 event_id TEXT NOT NULL UNIQUE,
                 ledger_seq INTEGER NOT NULL UNIQUE CHECK(ledger_seq > 0),
@@ -132,9 +136,29 @@ def _allow_reused_dispositions(connection: sqlite3.Connection) -> None:
         connection.execute("PRAGMA legacy_alter_table=OFF")
         connection.execute("PRAGMA foreign_keys=ON")
     if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
-        raise Issue790CanaryIntegrityError(
-            "bounded canary disposition migration differs"
-        )
+        raise Issue790CanaryIntegrityError(message)
+
+
+def _allow_reused_dispositions(connection: sqlite3.Connection) -> None:
+    if ("disposition_digest",) not in _unique_index_columns(
+        connection, table="issue_790_bounded_canary_consumptions"
+    ):
+        return
+    _rebuild_canary_consumptions_table(
+        connection, message="bounded canary disposition migration differs"
+    )
+
+
+def _allow_plan_successor_consumptions(connection: sqlite3.Connection) -> None:
+    """Permit a sealed predecessor and a successor unused event on one plan."""
+
+    if ("approved_plan_digest",) not in _unique_index_columns(
+        connection, table="issue_790_bounded_canary_consumptions"
+    ):
+        return
+    _rebuild_canary_consumptions_table(
+        connection, message="bounded canary plan consumption migration differs"
+    )
 
 
 class Issue790CanaryIntegrityError(ValueError):
@@ -778,6 +802,7 @@ class Issue790CanaryRepository:
         connection = self._connection()
         try:
             _allow_reused_dispositions(connection)
+            _allow_plan_successor_consumptions(connection)
             connection.executescript(_SCHEMA)
             connection.commit()
         finally:
@@ -1192,15 +1217,31 @@ class Issue790CanaryRepository:
             connection.close()
 
     def existing_consumption(
-        self, *, approved_plan_digest: str
+        self,
+        *,
+        approved_plan_digest: str,
+        event_id: str | None = None,
+        ledger_seq: int | None = None,
     ) -> dict[str, object] | None:
+        if (event_id is None) != (ledger_seq is None):
+            raise Issue790CanaryIntegrityError(
+                "bounded canary consumption identity is incomplete"
+            )
         connection = self._read_connection()
         try:
-            row = connection.execute(
-                "SELECT * FROM issue_790_bounded_canary_consumptions "
-                "WHERE approved_plan_digest=?",
-                (approved_plan_digest,),
-            ).fetchone()
+            if event_id is None:
+                row = connection.execute(
+                    "SELECT * FROM issue_790_bounded_canary_consumptions "
+                    "WHERE approved_plan_digest=? "
+                    "ORDER BY ledger_seq ASC LIMIT 1",
+                    (approved_plan_digest,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT * FROM issue_790_bounded_canary_consumptions "
+                    "WHERE approved_plan_digest=? AND event_id=? AND ledger_seq=?",
+                    (approved_plan_digest, event_id, ledger_seq),
+                ).fetchone()
             return (
                 None
                 if row is None
@@ -1373,6 +1414,8 @@ class Issue790CanaryRepository:
 
         connection = self._connection()
         try:
+            _allow_reused_dispositions(connection)
+            _allow_plan_successor_consumptions(connection)
             connection.execute("BEGIN IMMEDIATE")
             approved_contract = _require_effective_plan_contract(
                 approved_plan_digest,
@@ -1381,7 +1424,18 @@ class Issue790CanaryRepository:
             )
             if connection.execute(
                 "SELECT 1 FROM issue_790_bounded_canary_consumptions "
-                "WHERE approved_plan_digest=? LIMIT 1",
+                "WHERE event_id=? OR ledger_seq=? LIMIT 1",
+                (event_id, ledger_seq),
+            ).fetchone() is not None:
+                raise Issue790CanaryIntegrityError(
+                    "bounded canary authority is already consumed"
+                )
+            if connection.execute(
+                "SELECT 1 FROM issue_790_bounded_canary_consumptions AS consumed "
+                "WHERE consumed.approved_plan_digest=? AND NOT EXISTS ("
+                "SELECT 1 FROM issue_790_bounded_canary_outcomes AS outcome "
+                "WHERE outcome.consumption_digest=consumed.consumption_digest"
+                ") LIMIT 1",
                 (approved_plan_digest,),
             ).fetchone() is not None:
                 raise Issue790CanaryIntegrityError(

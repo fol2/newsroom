@@ -44,6 +44,15 @@ from newsroom.control_plane.issue_790_canary import (
     Issue790CanaryIntegrityError,
     Issue790CanaryRepository,
 )
+from newsroom.control_plane.issue_790_prepared_canary import (
+    CANDIDATE_EVENT_ID,
+    CANDIDATE_LEDGER_SEQ,
+    PreparedCanaryError,
+)
+from newsroom.tests.test_issue_790_rehearsal_fixtures import (
+    SUCCESSOR_EVENT_ID,
+    SUCCESSOR_LEDGER_SEQ,
+)
 from newsroom.control_plane.model_usage import (
     InvocationAllocation,
     InvocationEfficiencyPolicy,
@@ -105,6 +114,23 @@ def _service(tmp_path: Path) -> ModelUsageService:
     return ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
 
 
+def _unique_consumption_columns(path: Path) -> set[tuple[str, ...]]:
+    connection = sqlite3.connect(path)
+    try:
+        return {
+            tuple(
+                str(column[2])
+                for column in connection.execute(f'PRAGMA index_info("{index[1]}")')
+            )
+            for index in connection.execute(
+                "PRAGMA index_list(issue_790_bounded_canary_consumptions)"
+            )
+            if index[2]
+        }
+    finally:
+        connection.close()
+
+
 def test_issue_790_migrates_legacy_unique_disposition_constraint(
     tmp_path: Path,
 ) -> None:
@@ -136,6 +162,66 @@ def test_issue_790_migrates_legacy_unique_disposition_constraint(
         "PRAGMA foreign_key_check"
     ).fetchone()
     connection.close()
+    assert ("disposition_digest",) not in unique_columns
+    assert foreign_key_failure is None
+
+
+def test_issue_790_migrates_legacy_unique_plan_consumption_constraint(
+    tmp_path: Path,
+) -> None:
+    _service(tmp_path)
+    path = tmp_path / "unpublished.sqlite3"
+    Issue790CanaryRepository(str(path))
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE UNIQUE INDEX issue_790_legacy_plan_consumption_unique ON "
+        "issue_790_bounded_canary_consumptions(approved_plan_digest)"
+    )
+    connection.commit()
+    connection.close()
+
+    Issue790CanaryRepository(str(path))
+
+    unique_columns = _unique_consumption_columns(path)
+    connection = sqlite3.connect(path)
+    foreign_key_failure = connection.execute(
+        "PRAGMA foreign_key_check"
+    ).fetchone()
+    connection.close()
+    assert ("approved_plan_digest",) not in unique_columns
+    assert ("event_id",) in unique_columns
+    assert ("ledger_seq",) in unique_columns
+    assert ("owner_id",) in unique_columns
+    assert ("disposition_digest",) not in unique_columns
+    assert foreign_key_failure is None
+
+
+def test_issue_790_migrates_legacy_unique_plan_consumption_constraint(
+    tmp_path: Path,
+) -> None:
+    _service(tmp_path)
+    path = tmp_path / "unpublished.sqlite3"
+    Issue790CanaryRepository(str(path))
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE UNIQUE INDEX issue_790_legacy_plan_consumption_unique ON "
+        "issue_790_bounded_canary_consumptions(approved_plan_digest)"
+    )
+    connection.commit()
+    connection.close()
+
+    Issue790CanaryRepository(str(path))
+
+    unique_columns = _unique_consumption_columns(path)
+    connection = sqlite3.connect(path)
+    foreign_key_failure = connection.execute(
+        "PRAGMA foreign_key_check"
+    ).fetchone()
+    connection.close()
+    assert ("approved_plan_digest",) not in unique_columns
+    assert ("event_id",) in unique_columns
+    assert ("ledger_seq",) in unique_columns
+    assert ("owner_id",) in unique_columns
     assert ("disposition_digest",) not in unique_columns
     assert foreign_key_failure is None
 
@@ -768,8 +854,9 @@ def _seed_fresh_issue_790_event(
     *,
     ledger_seq: int = 2001,
     retain_unit_refs: bool = True,
+    event_id: str | None = None,
 ) -> tuple[str, str]:
-    event_id = _digest({"fresh-event": ledger_seq})
+    event_id = event_id or _digest({"fresh-event": ledger_seq})
     ingest_id = f"fresh-ingest-{ledger_seq}"
     unit_ref = _fixture_issue_790_unit_ref(ledger_seq)
     manifest = {
@@ -812,6 +899,85 @@ def _seed_fresh_issue_790_event(
     finally:
         connection.close()
     return event_id, ingest_id
+
+
+def _released_issue_790_canary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, dict[str, object], dict[str, object], Issue790CanaryRepository]:
+    service = _service(tmp_path)
+    policy, allocation, terminal = _open_unreported_graphiti_subscription_leaf(
+        service
+    )
+    plan = _issue_790_plan(policy, allocation, terminal)
+    _bind_issue_790_fixture_contract(
+        monkeypatch,
+        allocation=allocation,
+        terminal=terminal,
+        plan_digest=str(plan["canonical_digest"]),
+    )
+    approved_at = T0 + timedelta(seconds=5)
+    authority, authority_digest = _conservative_disposition_authority(
+        allocation,
+        terminal,
+        approved_at=approved_at,
+        approved_plan_digest=str(plan["canonical_digest"]),
+    )
+    disposition = service.disposition_unreported_subscription_usage(
+        invocation_id=allocation.invocation_id,
+        expected_terminal_digest=terminal.terminal_digest,
+        expected_allocation_digest=allocation.canonical_digest,
+        approved_by=str(authority["approved_by"]),
+        approval_reference=str(authority["approval_reference"]),
+        approved_at=approved_at,
+        approved_plan_digest=str(plan["canonical_digest"]),
+        authority_digest=authority_digest,
+        observed_at=T0 + timedelta(seconds=10),
+    )
+    route = service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)
+    service.release_route_circuit(
+        route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+        release_kind="AUTHORISED_OPERATOR_RESET",
+        bound_failure_reason=str(route["reason"]),
+        evidence_digest=str(disposition["disposition_digest"]),
+        recorded_at=T0 + timedelta(seconds=11),
+    )
+    store = tmp_path / "unpublished.sqlite3"
+    _seed_issue_790_retry_events(store)
+    repository = Issue790CanaryRepository(str(store))
+    repository.retain_retry_exclusions(
+        approved_plan_digest=str(plan["canonical_digest"]),
+        disposition_digest=str(disposition["disposition_digest"]),
+        events=RETRY_FORBIDDEN_EVENTS,
+        excluded_at=T0 + timedelta(seconds=12),
+    )
+    return store, plan, disposition, repository
+
+
+def _consume_plan_event(
+    repository: Issue790CanaryRepository,
+    store: Path,
+    *,
+    plan_digest: str,
+    disposition_digest: str,
+    event_id: str,
+    ledger_seq: int,
+    owner_id: str,
+    consumed_at: datetime,
+) -> dict[str, object]:
+    return repository.consume(
+        approved_plan_digest=plan_digest,
+        disposition_digest=disposition_digest,
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        owner_id=owner_id,
+        preflight_evidence=_issue_790_canary_preflight(
+            store,
+            event_id=event_id,
+            ledger_seq=ledger_seq,
+            evaluated_at=consumed_at - timedelta(seconds=1),
+        ),
+        consumed_at=consumed_at,
+    )
 
 
 def _issue_790_canary_preflight(
@@ -3407,6 +3573,125 @@ def test_issue_790_bounded_canary_is_single_use_and_failed_attempt_is_inert(
     assert service_row_count(store, "issue_790_bounded_canary_outcomes") == 1
 
 
+def test_issue_790_same_plan_consumes_successor_after_sealed_spent_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, plan, disposition, repository = _released_issue_790_canary(
+        tmp_path, monkeypatch
+    )
+    plan_digest = str(plan["canonical_digest"])
+    disposition_digest = str(disposition["disposition_digest"])
+    _seed_fresh_issue_790_event(
+        store,
+        ledger_seq=CANDIDATE_LEDGER_SEQ,
+        event_id=CANDIDATE_EVENT_ID,
+    )
+    spent = _consume_plan_event(
+        repository,
+        store,
+        plan_digest=plan_digest,
+        disposition_digest=disposition_digest,
+        event_id=CANDIDATE_EVENT_ID,
+        ledger_seq=CANDIDATE_LEDGER_SEQ,
+        owner_id="issue-790-canary:spent-13665",
+        consumed_at=T0 + timedelta(seconds=20),
+    )
+    _seed_fresh_issue_790_event(
+        store,
+        ledger_seq=SUCCESSOR_LEDGER_SEQ,
+        event_id=SUCCESSOR_EVENT_ID,
+    )
+    with pytest.raises(Issue790CanaryIntegrityError, match="already consumed"):
+        _consume_plan_event(
+            repository,
+            store,
+            plan_digest=plan_digest,
+            disposition_digest=disposition_digest,
+            event_id=SUCCESSOR_EVENT_ID,
+            ledger_seq=SUCCESSOR_LEDGER_SEQ,
+            owner_id="issue-790-canary:successor-13671",
+            consumed_at=T0 + timedelta(seconds=21),
+        )
+    outcome = repository.complete(
+        consumption_digest=str(spent["consumption_digest"]),
+        event_id=CANDIDATE_EVENT_ID,
+        ledger_seq=CANDIDATE_LEDGER_SEQ,
+        owner_id="issue-790-canary:spent-13665",
+        process_result=None,
+        exception_code="AMBIGUOUS_EFFECT",
+        completed_at=T0 + timedelta(seconds=30),
+    )
+    assert outcome["state_after_seal"] == "CONFIGURATION_HELD"
+    connection = sqlite3.connect(store)
+    connection.execute(
+        "CREATE UNIQUE INDEX issue_790_legacy_plan_consumption_unique ON "
+        "issue_790_bounded_canary_consumptions(approved_plan_digest)"
+    )
+    connection.commit()
+    connection.close()
+    assert ("approved_plan_digest",) in _unique_consumption_columns(store)
+    assert repository.existing_consumption(
+        approved_plan_digest=plan_digest
+    )["ledger_seq"] == CANDIDATE_LEDGER_SEQ
+    assert repository.existing_consumption(
+        approved_plan_digest=plan_digest,
+        event_id=SUCCESSOR_EVENT_ID,
+        ledger_seq=SUCCESSOR_LEDGER_SEQ,
+    ) is None
+    writer = Issue790CanaryRepository.open_existing(str(store))
+    successor = _consume_plan_event(
+        writer,
+        store,
+        plan_digest=plan_digest,
+        disposition_digest=disposition_digest,
+        event_id=SUCCESSOR_EVENT_ID,
+        ledger_seq=SUCCESSOR_LEDGER_SEQ,
+        owner_id="issue-790-canary:successor-13671",
+        consumed_at=T0 + timedelta(seconds=40),
+    )
+    assert successor["event_id"] == SUCCESSOR_EVENT_ID
+    assert successor["ledger_seq"] == SUCCESSOR_LEDGER_SEQ
+    assert successor["approved_plan_digest"] == plan_digest
+    unique_columns = _unique_consumption_columns(store)
+    assert ("approved_plan_digest",) not in unique_columns
+    assert ("event_id",) in unique_columns
+    assert ("ledger_seq",) in unique_columns
+    with pytest.raises(Issue790CanaryIntegrityError, match="already consumed"):
+        _consume_plan_event(
+            writer,
+            store,
+            plan_digest=plan_digest,
+            disposition_digest=disposition_digest,
+            event_id=CANDIDATE_EVENT_ID,
+            ledger_seq=CANDIDATE_LEDGER_SEQ,
+            owner_id="issue-790-canary:retry-13665",
+            consumed_at=T0 + timedelta(seconds=41),
+        )
+    with pytest.raises(Issue790CanaryIntegrityError, match="already consumed"):
+        _consume_plan_event(
+            writer,
+            store,
+            plan_digest=plan_digest,
+            disposition_digest=disposition_digest,
+            event_id=SUCCESSOR_EVENT_ID,
+            ledger_seq=SUCCESSOR_LEDGER_SEQ,
+            owner_id="issue-790-canary:retry-13671",
+            consumed_at=T0 + timedelta(seconds=42),
+        )
+    assert repository.existing_consumption(
+        approved_plan_digest=plan_digest,
+        event_id=CANDIDATE_EVENT_ID,
+        ledger_seq=CANDIDATE_LEDGER_SEQ,
+    )["consumption_digest"] == spent["consumption_digest"]
+    assert repository.existing_consumption(
+        approved_plan_digest=plan_digest,
+        event_id=SUCCESSOR_EVENT_ID,
+        ledger_seq=SUCCESSOR_LEDGER_SEQ,
+    )["consumption_digest"] == successor["consumption_digest"]
+    assert service_row_count(store, "issue_790_bounded_canary_consumptions") == 2
+
+
 def test_issue_790_successor_plan_consumes_a_new_event_after_failed_predecessor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4479,6 +4764,121 @@ def test_issue_790_canary_orchestrator_runs_only_exact_fresh_event(
     assert resumed["runtime_readiness"] is None
     assert runtime_checks == ["checked-before-consumption"]
     assert dispatch_calls == [event_id]
+
+
+def test_issue_790_production_canary_accepts_successor_without_resuming_spent_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, plan, disposition, repository = _released_issue_790_canary(
+        tmp_path, monkeypatch
+    )
+    plan_digest = str(plan["canonical_digest"])
+    disposition_digest = str(disposition["disposition_digest"])
+    _seed_fresh_issue_790_event(
+        store,
+        ledger_seq=CANDIDATE_LEDGER_SEQ,
+        event_id=CANDIDATE_EVENT_ID,
+    )
+    spent = _consume_plan_event(
+        repository,
+        store,
+        plan_digest=plan_digest,
+        disposition_digest=disposition_digest,
+        event_id=CANDIDATE_EVENT_ID,
+        ledger_seq=CANDIDATE_LEDGER_SEQ,
+        owner_id="issue-790-canary:spent-13665",
+        consumed_at=T0 + timedelta(seconds=20),
+    )
+    repository.complete(
+        consumption_digest=str(spent["consumption_digest"]),
+        event_id=CANDIDATE_EVENT_ID,
+        ledger_seq=CANDIDATE_LEDGER_SEQ,
+        owner_id="issue-790-canary:spent-13665",
+        process_result=None,
+        exception_code="AMBIGUOUS_EFFECT",
+        completed_at=T0 + timedelta(seconds=30),
+    )
+    connection = sqlite3.connect(store)
+    connection.execute(
+        "CREATE UNIQUE INDEX issue_790_legacy_plan_consumption_unique ON "
+        "issue_790_bounded_canary_consumptions(approved_plan_digest)"
+    )
+    connection.commit()
+    connection.close()
+    _seed_fresh_issue_790_event(
+        store,
+        ledger_seq=SUCCESSOR_LEDGER_SEQ,
+        event_id=SUCCESSOR_EVENT_ID,
+    )
+    proving = tmp_path / "proving.sqlite3"
+    proving_connection = sqlite3.connect(proving)
+    proving_connection.execute("CREATE TABLE fixture(value INTEGER)")
+    proving_connection.commit()
+    proving_connection.close()
+    observed_at = T0 + timedelta(seconds=40)
+    _patch_issue_790_live_evidence(
+        monkeypatch, store=store, observed_at=observed_at
+    )
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_qualify_issue_790_event",
+        lambda **values: _issue_790_canary_preflight(
+            store,
+            event_id=str(values["event_id"]),
+            ledger_seq=int(values["ledger_seq"]),  # type: ignore[arg-type]
+            evaluated_at=observed_at,
+        ),
+    )
+    spent_backup = tmp_path / "spent-13665.sqlite3"
+    with pytest.raises(PreparedCanaryError) as caught:
+        run_issue_790_canary(
+            store=store,
+            proving_store=proving,
+            backup_path=spent_backup,
+            plan=plan,
+            observed_at=observed_at,
+            repository_root=tmp_path,
+            event_id=CANDIDATE_EVENT_ID,
+            ledger_seq=CANDIDATE_LEDGER_SEQ,
+            disposition_digest=disposition_digest,
+        )
+    assert caught.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    assert spent_backup.exists() is False
+    dispatch_calls: list[str] = []
+
+    def consume_successor(**values: object) -> None:
+        dispatch_calls.append(str(values["event_id"]))
+        assert values["event_id"] == SUCCESSOR_EVENT_ID
+        return None
+
+    monkeypatch.setattr(
+        issue_790_operation,
+        "_consume_issue_790_event",
+        consume_successor,
+    )
+    backup = tmp_path / "successor-13671.sqlite3"
+    receipt = run_issue_790_canary(
+        store=store,
+        proving_store=proving,
+        backup_path=backup,
+        plan=plan,
+        observed_at=observed_at,
+        repository_root=tmp_path,
+        event_id=SUCCESSOR_EVENT_ID,
+        ledger_seq=SUCCESSOR_LEDGER_SEQ,
+        disposition_digest=disposition_digest,
+    )
+    assert receipt["resumed_zero_io_finalisation"] is False
+    assert receipt["provider_dispatch_attempted_this_run"] is True
+    assert receipt["consumption"]["event_id"] == SUCCESSOR_EVENT_ID
+    assert receipt["consumption"]["ledger_seq"] == SUCCESSOR_LEDGER_SEQ
+    assert receipt["consumption"]["approved_plan_digest"] == plan_digest
+    assert receipt["consumption"]["consumption_digest"] != spent["consumption_digest"]
+    assert dispatch_calls == [SUCCESSOR_EVENT_ID]
+    assert backup.is_file()
+    assert ("approved_plan_digest",) not in _unique_consumption_columns(store)
+    assert service_row_count(store, "issue_790_bounded_canary_consumptions") == 2
 
 
 def test_issue_790_crash_after_leaf_marker_syncs_dispatch_during_finalisation(

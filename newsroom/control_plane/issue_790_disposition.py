@@ -3911,6 +3911,8 @@ def run_issue_790_canary(
     event_before_record = _record(event_before["event"], field="canary event")
     prior_consumption = canary_repository.existing_consumption(
         approved_plan_digest=str(retained_plan["canonical_digest"]),
+        event_id=event_id,
+        ledger_seq=ledger_seq,
     )
     resuming_zero_io_finalisation = prior_consumption is not None
     runtime_readiness = (
