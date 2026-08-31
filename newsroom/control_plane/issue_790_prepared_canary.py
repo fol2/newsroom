@@ -407,6 +407,20 @@ def _event_is_untouched_attempt_zero(
     return str(row[0]) == "QUEUED" and int(row[1]) == 0 and not bool(row[2])
 
 
+def _qualification_is_current_unused(
+    store: Path | None,
+    *,
+    event_id: str,
+    ledger_seq: int,
+) -> bool:
+    if store is None:
+        return True
+    untouched = _event_is_untouched_attempt_zero(
+        store, event_id=event_id, ledger_seq=ledger_seq
+    )
+    return untouched is not False
+
+
 def _spent_or_retry_forbidden(
     store: Path | None,
     plan: Mapping[str, object],
@@ -419,10 +433,9 @@ def _spent_or_retry_forbidden(
         return True
     if store is None:
         return False
-    untouched = _event_is_untouched_attempt_zero(
+    return _event_is_untouched_attempt_zero(
         store, event_id=event_id, ledger_seq=ledger_seq
-    )
-    return untouched is False
+    ) is False
 
 
 def _candidate_from_plan(
@@ -437,31 +450,29 @@ def _candidate_from_plan(
     selected_live: tuple[str, int] | None = None
     if selected is not None:
         selected_tuple = (str(selected["event_id"]), int(selected["ledger_seq"]))
-        if not _spent_or_retry_forbidden(
-            store, plan, event_id=selected_tuple[0], ledger_seq=selected_tuple[1]
+        if _qualification_is_current_unused(
+            store, event_id=selected_tuple[0], ledger_seq=selected_tuple[1]
         ):
             selected_live = selected_tuple
     live = unused_queued_attempt_zero_candidates(store, plan)[:1] if store is not None else ()
     live_bind = live[0] if live else None
+    bound = live_bind or selected_live
 
     if event_id is not None and ledger_seq is not None:
         requested = (event_id, ledger_seq)
+        if not event_id.startswith("sha256:"):
+            return requested
         if _spent_or_retry_forbidden(store, plan, event_id=event_id, ledger_seq=ledger_seq):
             _raise("RETRY_FORBIDDEN_TARGET", "bounded canary targeted a retained failure")
-        if live_bind is not None and requested != live_bind:
-            _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
-        if selected_live is not None and requested != selected_live:
+        if bound is not None and requested != bound:
             _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
         return requested
 
-    bound = live_bind or selected_live
     if bound is None:
         if role == "apply":
             return None, None
         if store is not None:
             _raise("CANDIDATE_NOT_FRESH", "bounded canary event is not untouched")
-        if event_id is not None and ledger_seq is not None:
-            return event_id, ledger_seq
         return CANDIDATE_EVENT_ID, CANDIDATE_LEDGER_SEQ
     if event_id is not None and event_id != bound[0]:
         _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
