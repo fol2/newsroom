@@ -314,7 +314,7 @@ def _effective_retry_exclusion_status(
     activated_plan_digest: str,
     effectively_excluded_event_ids: set[str],
 ) -> tuple[bool, str]:
-    """Prove historical exclusions plus the exhausted canary consumption."""
+    """Prove historical exclusions; exhausted consumption covers a missing durable seq."""
 
     from newsroom.control_plane.issue_790_canary import (
         RetryForbiddenSafetyError,
@@ -404,11 +404,7 @@ def _effective_retry_exclusion_status(
     effective_seqs = set(durable_by_seq)
     if consumption_ok:
         effective_seqs.add(consumed_seq)
-    ok = (
-        historical_ok
-        and consumption_ok
-        and REQUIRED_RETRY_LEDGER_SEQS.issubset(effective_seqs)
-    )
+    ok = historical_ok and REQUIRED_RETRY_LEDGER_SEQS.issubset(effective_seqs)
     return (
         ok,
         f"plan={sorted(plan_by_seq)} durable={sorted(durable_by_seq)} "

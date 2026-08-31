@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from scripts.issue_790_live_canary_preflight import (
+    REQUIRED_RETRY_LEDGER_SEQS,
     STEP21_FULL_PATH_TEST,
     _blocker_smokes,
     _effective_retry_exclusion_status,
@@ -255,6 +256,56 @@ def test_o16_successor_plan_may_list_13361_before_durable_apply() -> None:
     args["plan_events"] = [
         *args["plan_events"],
         {"event_id": "sha256:" + "99" * 32, "ledger_seq": 9999},
+    ]
+    assert _effective_retry_exclusion_status(**args)[0] is False
+
+
+def test_o16_fail_closed_before_dispatch_durable_complete_successor_passes() -> None:
+    args = _o16_exclusion_args(plan_includes_consumed=True)
+    live_at = args["exclusions"][0]["event_snapshot"]["available_at"]
+    sealed_at = args["plan_events"][0]["available_at"]
+    consumed = next(
+        item for item in args["plan_events"] if int(item["ledger_seq"]) == 13361
+    )
+    consumed.update(
+        {
+            "attempt_count": 1,
+            "available_at": sealed_at,
+            "last_failure_code": args["outcome"]["failure_code_after_seal"],
+            "provider_dispatched": True,
+            "state": "CONFIGURATION_HELD",
+        }
+    )
+    args["exclusions"].append(
+        {
+            "event_id": consumed["event_id"],
+            "ledger_seq": 13361,
+            "reason": "ISSUE_790_RETRY_FORBIDDEN",
+            "event_snapshot": {**consumed, "available_at": live_at},
+        }
+    )
+    plan_seqs = {int(item["ledger_seq"]) for item in args["plan_events"]}
+    durable_seqs = {int(item["ledger_seq"]) for item in args["exclusions"]}
+    assert REQUIRED_RETRY_LEDGER_SEQS <= plan_seqs
+    assert REQUIRED_RETRY_LEDGER_SEQS <= durable_seqs
+    assert 13361 in plan_seqs
+    assert 13361 in durable_seqs
+
+    args["consumption"] = None
+    args["outcome"] = None
+    none_ok, none_detail = _effective_retry_exclusion_status(**args)
+    assert none_ok is True
+    assert "consumed=INVALID" in none_detail
+    assert "13361" in none_detail.split("durable=")[1].split("consumed=")[0]
+
+    args["consumption"] = {"approved_plan_digest": "sha256:" + "ff" * 32}
+    args["outcome"] = {"retry_authorised": True}
+    invalid_ok, invalid_detail = _effective_retry_exclusion_status(**args)
+    assert invalid_ok is True
+    assert "consumed=INVALID" in invalid_detail
+
+    args["exclusions"] = [
+        item for item in args["exclusions"] if int(item["ledger_seq"]) != 13361
     ]
     assert _effective_retry_exclusion_status(**args)[0] is False
 
