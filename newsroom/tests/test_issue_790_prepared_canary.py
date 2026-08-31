@@ -6,6 +6,7 @@ import ast
 import inspect
 import json
 import os
+import shlex
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import replace
@@ -2375,6 +2376,108 @@ def test_step22_full_executor_rehearsal_reaches_fixture_success(
     assert receipt["outcome"]["result_class"] == "TRUTHFUL_PROVIDER_SUCCESS"
     assert receipt["canary_evidence_passed"] is True
     assert receipt["publication_performed"] is False
+
+
+def test_step22_complete_preflight_emits_prepared_bound_live_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """READY emits the sole live command with its exact PreparedCanary path."""
+
+    import scripts.issue_790_live_canary_preflight as preflight
+
+    stores_root = tmp_path / "stores"
+    stores_root.mkdir()
+    stores = build_rehearsal_stores(stores_root, unused_13689=True)
+    activated = _activate_step22(stores.work_unpublished)
+    plan = activated["plan"]
+    prepared = _prepare_production(
+        stores,
+        plan=plan,
+        event_id=EVENT_13689,
+        ledger_seq=LEDGER_13689,
+    )
+    activated_plan = tmp_path / "activated-plan.json"
+    activated_plan.write_text(
+        json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    prepared_path = tmp_path / "prepared-canary.json"
+    command_path = tmp_path / "live-canary.sh"
+    monkeypatch.setattr(
+        preflight,
+        "_ops_gates",
+        lambda **_kwargs: (
+            [("O01", True, "ready")],
+            (EVENT_13689, LEDGER_13689),
+            prepared,
+        ),
+    )
+    monkeypatch.setattr(
+        preflight,
+        "_blocker_smokes",
+        lambda _root: [("B01", True, "ready")],
+    )
+
+    result = preflight.main(
+        [
+            "--ops-root",
+            str(_ROOT),
+            "--code-root",
+            str(_ROOT),
+            "--tip-plan",
+            str(plan["canonical_digest"]),
+            "--plan-rel",
+            str(ISSUE_790_STEP22_PENDING_PLAN_PATH),
+            "--activated-plan",
+            str(activated_plan),
+            "--prepared-canary-out",
+            str(prepared_path),
+            "--canary-command-out",
+            str(command_path),
+        ]
+    )
+
+    assert result == 0
+    retained = prepared_canary_from_record(
+        json.loads(prepared_path.read_text(encoding="utf-8"))
+    )
+    assert retained.decision_digest == prepared.decision_digest
+    assert command_path.stat().st_mode & 0o777 == 0o700
+    script = command_path.read_text(encoding="utf-8")
+    exec_line = next(line for line in script.splitlines() if line.startswith("exec "))
+    tokens = shlex.split(exec_line)
+
+    def option(name: str) -> str:
+        assert tokens.count(name) == 1
+        return tokens[tokens.index(name) + 1]
+
+    assert tokens[:5] == [
+        "exec",
+        str(_ROOT / ".venv/bin/python"),
+        "-m",
+        "scripts.issue_790_conservative_disposition",
+        "canary",
+    ]
+    assert option("--store") == str(
+        _ROOT / "data/newsroom/unpublished_store.sqlite3"
+    )
+    assert option("--proving-store") == str(
+        _ROOT / "data/newsroom/proving_store.sqlite3"
+    )
+    assert option("--plan") == str(activated_plan)
+    assert option("--observed-at") == "$OBSERVED_AT"
+    assert option("--receipt") == str(tmp_path / "canary-receipt.json")
+    assert option("--backup") == str(
+        tmp_path / "unpublished_store.pre-canary.sqlite3"
+    )
+    assert option("--repository-root") == str(_ROOT)
+    assert option("--canary-event-id") == EVENT_13689
+    assert option("--canary-ledger-seq") == str(LEDGER_13689)
+    assert option("--disposition-digest") == preflight.DISP
+    assert option("--prepared-canary") == str(prepared_path)
+    assert (tmp_path / "canary-receipt.json").exists() is False
+    assert (tmp_path / "unpublished_store.pre-canary.sqlite3").exists() is False
 
 
 def test_fresh_canary_rejects_backup_replacement_before_consumption(
