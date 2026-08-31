@@ -29,7 +29,7 @@ from newsroom.control_plane.issue_790_rehearsal import (
     run_prepared_canary_rehearsal,
     sqlite_backup_copy,
 )
-from newsroom.tests.issue_790_rehearsal_fixtures import (
+from newsroom.tests.test_issue_790_rehearsal_fixtures import (
     EVENT_13361,
     EXACT_HEAD,
     LIVE_13361_AVAILABLE_AT,
