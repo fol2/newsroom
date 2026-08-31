@@ -144,6 +144,9 @@ ISSUE_790_STEP20_PENDING_PLAN_PATH = Path(
 ISSUE_790_STEP21_PENDING_PLAN_PATH = Path(
     "docs/operations/2026-08-30-issue-790-success-sequence-step-21.pending-owner-review.json"
 )
+ISSUE_790_STEP22_PENDING_PLAN_PATH = Path(
+    "docs/operations/2026-08-31-issue-790-success-sequence-step-22.pending-owner-review.json"
+)
 ISSUE_790_STEP16_PRE_DISPATCH_PATH = Path(
     "docs/operations/2026-08-28-issue-790-step-16-pre-dispatch-operational-requirements.json"
 )
@@ -154,6 +157,7 @@ ISSUE_790_STEP18_CHECKED_APPROVED_AT = "2026-08-30T06:35:43.000000Z"
 ISSUE_790_STEP19_CHECKED_APPROVED_AT = "2026-08-30T12:34:51.361556Z"
 ISSUE_790_STEP20_CHECKED_APPROVED_AT = "2026-08-30T16:13:38.000000Z"
 ISSUE_790_STEP21_CHECKED_APPROVED_AT = "2026-08-30T20:58:43.662872Z"
+ISSUE_790_STEP22_CHECKED_APPROVED_AT = "2026-08-31T10:11:17.609260Z"
 _EXHAUSTED_EVENT_8835 = {
     "attempt_count": 1,
     "available_at": "2026-08-29T19:51:59.301612Z",
@@ -305,10 +309,12 @@ _EXHAUSTED_EVENT_13361 = {
     "provider_dispatched": True,
     "state": "CONFIGURATION_HELD",
 }
-_RETRY_FORBIDDEN_EVENTS_CURRENT: tuple[dict[str, object], ...] = (
-    *_RETRY_FORBIDDEN_EVENTS_STEP20,
+_RETRY_FORBIDDEN_EVENTS_STEP22: tuple[dict[str, object], ...] = (
+    *_RETRY_FORBIDDEN_EVENTS_STEP21,
     _EXHAUSTED_EVENT_13361,
-    _EXHAUSTED_EVENT_13362,
+)
+_RETRY_FORBIDDEN_EVENTS_CURRENT: tuple[dict[str, object], ...] = (
+    *_RETRY_FORBIDDEN_EVENTS_STEP22,
 )
 _RETRY_FORBIDDEN_LEDGER_SEQS = frozenset(
     int(item["ledger_seq"]) for item in _RETRY_FORBIDDEN_EVENTS_CURRENT
@@ -775,6 +781,8 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
             expected_retry = _RETRY_FORBIDDEN_EVENTS_STEP20
         elif sequence_preview.get("sequence_ordinal") == 21:
             expected_retry = _RETRY_FORBIDDEN_EVENTS_STEP21
+        elif sequence_preview.get("sequence_ordinal") == 22:
+            expected_retry = _RETRY_FORBIDDEN_EVENTS_STEP22
     if plan.get("retry_forbidden_events") != list(expected_retry):
         raise Issue790DispositionError("issue #790 retry exclusions differ")
     expected_canary = {
@@ -853,6 +861,15 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
                     "candidate_event_preparation_digest",
                 }
             )
+        if sequence.get("sequence_ordinal") == 22:
+            expected_sequence_fields.update(
+                {
+                    "predecessor_canary_receipt_digest",
+                    "predecessor_activation_digest",
+                    "candidate_event_qualification",
+                    "candidate_event_preparation_digest",
+                }
+            )
         if set(sequence) != expected_sequence_fields:
             raise Issue790DispositionError("issue #790 sequence fields differ")
         predecessor = _record(sequence.get("predecessor"), field="predecessor")
@@ -867,7 +884,7 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
                 "plan_digest", "gate_outcome_digest", "event_id", "ledger_seq"
             }
             digest_fields = ("gate_outcome_digest",)
-        if ordinal in {20, 21}:
+        if ordinal in {20, 21, 22}:
             predecessor_fields = {
                 "plan_digest", "outcome_digest", "event_id", "ledger_seq"
             }
@@ -965,6 +982,7 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
                 19: issue_790_contract_module.ISSUE_790_STEP18_ACTIVATED_PLAN_DIGEST,
                 20: issue_790_contract_module.ISSUE_790_STEP19_ACTIVATED_PLAN_DIGEST,
                 21: issue_790_contract_module.ISSUE_790_STEP20_ACTIVATED_PLAN_DIGEST,
+                22: issue_790_contract_module.ISSUE_790_STEP21_ACTIVATED_PLAN_DIGEST,
             }[int(sequence["sequence_ordinal"])]
             if predecessor.get("plan_digest") != expected_predecessor:
                 raise Issue790DispositionError(
@@ -1079,6 +1097,35 @@ def validate_issue_790_plan(value: Mapping[str, object]) -> dict[str, object]:
                 ):
                     raise Issue790DispositionError(
                         "issue #790 Step 21 successor binding differs"
+                    )
+            if sequence.get("sequence_ordinal") == 22:
+                qualification = _validated_step18_candidate_qualification(
+                    sequence.get("candidate_event_qualification")
+                )
+                if (
+                    sequence.get("predecessor_activation_digest")
+                    != issue_790_contract_module.ISSUE_790_STEP21_ACTIVATION_DIGEST
+                    or sequence.get("predecessor_canary_receipt_digest")
+                    != (
+                        "sha256:152da04e879640d557b6c8742254f1eb0ccc0c2471b0d05eff975076e17127e0"
+                    )
+                    or predecessor.get("outcome_digest")
+                    != (
+                        "sha256:c15908dcd008860de77f505ba6910be2aa0de56f21f37acc3c639e716b2ecf1f"
+                    )
+                    or predecessor.get("event_id") != _EXHAUSTED_EVENT_13361["event_id"]
+                    or predecessor.get("ledger_seq") != 13361
+                    or qualification.get("qualification_digest")
+                    != (
+                        "sha256:df39aa693e712bc8d9b1c8c691f9effa6f1ff40bf945e20b9b997dbf32a16ed5"
+                    )
+                    or sequence.get("candidate_event_preparation_digest")
+                    != (
+                        "sha256:4e8d4759b8dcacb8fdb0d2e49a0432fe15c8ffba6a1b1b36fbab1e9be0cad4e0"
+                    )
+                ):
+                    raise Issue790DispositionError(
+                        "issue #790 Step 22 successor binding differs"
                     )
             _reject_checked_live_approval(approval)
             pre_dispatch = _record(
@@ -1449,7 +1496,7 @@ def _step18_candidate_qualification(
     sequence = plan.get("sequence")
     if (
         not isinstance(sequence, dict)
-        or sequence.get("sequence_ordinal") not in {18, 19, 21}
+        or sequence.get("sequence_ordinal") not in {18, 19, 21, 22}
     ):
         return None
     return _validated_step18_candidate_qualification(
@@ -1739,6 +1786,10 @@ def _require_approved_plan(
                     21: (
                         issue_790_contract_module.ISSUE_790_STEP20_ACTIVATED_PLAN_DIGEST,
                         issue_790_contract_module.ISSUE_790_STEP20_ACTIVATION_DIGEST,
+                    ),
+                    22: (
+                        issue_790_contract_module.ISSUE_790_STEP21_ACTIVATED_PLAN_DIGEST,
+                        issue_790_contract_module.ISSUE_790_STEP21_ACTIVATION_DIGEST,
                     ),
                 }.get(contract.sequence_ordinal)
                 if (
@@ -2195,6 +2246,7 @@ def _require_sequence_predecessor(
             issue_790_contract_module.ISSUE_790_STEP18_ACTIVATED_PLAN_DIGEST,
             issue_790_contract_module.ISSUE_790_STEP19_ACTIVATED_PLAN_DIGEST,
             issue_790_contract_module.ISSUE_790_STEP20_ACTIVATED_PLAN_DIGEST,
+            issue_790_contract_module.ISSUE_790_STEP21_ACTIVATED_PLAN_DIGEST,
         }:
             raise Issue790DispositionError(
                 "issue #790 predecessor plan differs"
@@ -2236,7 +2288,7 @@ def _require_sequence_predecessor(
         and consumption.get("event_id") == predecessor.get("event_id")
         and consumption.get("ledger_seq") == predecessor.get("ledger_seq")
     )
-    if ordinal not in {20, 21}:
+    if ordinal not in {20, 21, 22}:
         consumption_matches = consumption_matches and (
             consumption is not None
             and consumption.get("consumption_digest")
@@ -4233,6 +4285,7 @@ def issue_790_checked_approval(pending_digest: str) -> dict[str, str]:
         19: ISSUE_790_STEP19_CHECKED_APPROVED_AT,
         20: ISSUE_790_STEP20_CHECKED_APPROVED_AT,
         21: ISSUE_790_STEP21_CHECKED_APPROVED_AT,
+        22: ISSUE_790_STEP22_CHECKED_APPROVED_AT,
     }[contract.sequence_ordinal]
     return {
         "approved_by": contract.checked_approved_by,
@@ -4383,7 +4436,7 @@ def validate_issue_790_step16_candidate(
         or approval.get("approval_reference") != contract.checked_approval_reference
     ):
         raise Issue790DispositionError("issue #790 candidate contract differs")
-    if contract.sequence_ordinal in {18, 19, 21}:
+    if contract.sequence_ordinal in {18, 19, 21, 22}:
         qualification = _validated_step18_candidate_qualification(
             sequence.get("candidate_event_qualification")
         )
@@ -4431,6 +4484,7 @@ def seal_issue_790_step16_plan(
         19: ISSUE_790_STEP19_CHECKED_APPROVED_AT,
         20: ISSUE_790_STEP20_CHECKED_APPROVED_AT,
         21: ISSUE_790_STEP21_CHECKED_APPROVED_AT,
+        22: ISSUE_790_STEP22_CHECKED_APPROVED_AT,
     }[pending_contract.sequence_ordinal]
     if (
         checked.get("approved_by") != pending_contract.checked_approved_by
@@ -4899,6 +4953,7 @@ __all__ = [
     "ISSUE_790_STEP19_PENDING_PLAN_PATH",
     "ISSUE_790_STEP20_PENDING_PLAN_PATH",
     "ISSUE_790_STEP21_PENDING_PLAN_PATH",
+    "ISSUE_790_STEP22_PENDING_PLAN_PATH",
     "Issue790DispositionError",
     "activate_issue_790_step16_plan",
     "apply_issue_790_plan",

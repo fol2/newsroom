@@ -93,7 +93,8 @@ def test_step20_is_new_family_and_binds_step19_and_the_reviewed_fix() -> None:
     assert candidate["live_canary_authorised"] is False
     assert contract_module.issue_790_owner_activated_sequence(20) is True
     assert contract_module.issue_790_owner_activated_sequence(21) is True
-    assert contract_module.issue_790_owner_activated_sequence(22) is False
+    assert contract_module.issue_790_owner_activated_sequence(22) is True
+    assert contract_module.issue_790_owner_activated_sequence(23) is False
     contract = contract_module.issue_790_checked_candidate_contract(
         candidate["canonical_digest"]
     )
