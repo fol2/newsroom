@@ -1638,13 +1638,12 @@ def _require_step16_runtime_semantics(
         ) from exc
     ledger_seq = canary_event.get("ledger_seq")
     event_id = canary_event.get("event_id")
-    selected = _step18_candidate_qualification(plan)
     if (
         pre.get("untouched_attempt_zero_events_only") != 1
         or pre.get("fresh_provider_backed_attempt_count") != 1
         or canary_event.get("state") != "QUEUED"
         or canary_event.get("attempt_count") != 0
-        or canary_event.get("provider_dispatched") is not False
+        or canary_event.get("provider_dispatched") not in {False, 0}
         or canary_event.get("claim_owner") is not None
         or canary_event.get("claim_expires_at") is not None
         or canary_event.get("terminal_at") is not None
@@ -1655,13 +1654,6 @@ def _require_step16_runtime_semantics(
         or ledger_seq <= 0
         or ledger_seq in _RETRY_FORBIDDEN_LEDGER_SEQS
         or event_available > observed_at
-        or (
-            selected is not None
-            and (
-                event_id != selected.get("event_id")
-                or ledger_seq != selected.get("ledger_seq")
-            )
-        )
     ):
         raise Issue790DispositionError(
             "issue #790 pre-dispatch event is not untouched"

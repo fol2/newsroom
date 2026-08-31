@@ -13,6 +13,7 @@ from scripts.issue_790_live_canary_preflight import (
     STEP21_FULL_PATH_TEST,
     STEP22_CANDIDATE_IDENTITY_FULL_PATH_TEST,
     STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST,
+    STEP22_PRODUCTION_UNTOUCHED_FULL_PATH_TEST,
     _blocker_smokes,
     _effective_retry_exclusion_status,
     _eligible_candidate_rows,
@@ -187,6 +188,7 @@ def test_covering_full_path_nodes_are_the_allowlist() -> None:
             STEP21_FULL_PATH_TEST,
             STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST,
             STEP22_CANDIDATE_IDENTITY_FULL_PATH_TEST,
+            STEP22_PRODUCTION_UNTOUCHED_FULL_PATH_TEST,
         }
     )
 
@@ -198,6 +200,7 @@ def test_covering_full_path_nodes_are_the_allowlist() -> None:
         (13665, STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST),
         (13665, STEP21_FULL_PATH_TEST),
         (13671, STEP22_CANDIDATE_IDENTITY_FULL_PATH_TEST),
+        (13671, STEP22_PRODUCTION_UNTOUCHED_FULL_PATH_TEST),
     ),
 )
 def test_latest_live_failure_accepts_step21_or_step22_covering_red(

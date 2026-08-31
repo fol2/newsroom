@@ -5,17 +5,21 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import sqlite3
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane import issue_790_disposition as disposition
 from newsroom.control_plane.issue_790_disposition import (
     ISSUE_790_STEP16_PRE_DISPATCH_PATH,
     ISSUE_790_STEP22_PENDING_PLAN_PATH,
     Issue790DispositionError,
     _require_step16_code_identity,
+    _require_step16_runtime_semantics,
     finalise_issue_790_step16_plan,
     issue_790_checked_approval,
     seal_issue_790_step16_plan,
@@ -67,6 +71,8 @@ _SUCCESSOR_SHA = "a1f24f4e069af95ac94e8744f8f94c3e28e10d32"
 _SUCCESSOR_TREE = "a59e5c620cb9a15a509bced75b96e9a44da940ff"
 _SUCCESSOR_FG_RUN = 33404219327
 _ACTIVATION_PARENT_SHA = "00f7df954c21816e9be13d783871186efaa84073"
+_LIVE_13671_AVAILABLE_AT = "2026-08-31T16:17:39.354162Z"
+_LIVE_OBSERVED_AT = datetime(2026, 8, 31, 17, 39, 23, 783082, tzinfo=UTC)
 
 
 def _prepare(stores, *, store=None, role="preflight", **kwargs):
@@ -112,6 +118,125 @@ def _step22_activated_plan() -> dict[str, object]:
     sequence["owner_activation"] = binding
     plan["sequence"] = sequence
     return plan
+
+
+def _closed_circuit() -> dict[str, object]:
+    return {
+        "state": "CLOSED",
+        "opened_at": None,
+        "available_at": None,
+        "failure_code": None,
+    }
+
+
+def _sqlite_canary_event(store: Path, *, ledger_seq: int) -> dict[str, object]:
+    connection = sqlite3.connect(store)
+    try:
+        row = connection.execute(
+            "SELECT event_id,ledger_seq,state,attempt_count,provider_dispatched,"
+            "claim_owner,claim_expires_at,terminal_at,available_at "
+            "FROM unpublished_graphiti_revision_events WHERE ledger_seq=?",
+            (ledger_seq,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert row is not None
+    return {
+        "event_id": row[0],
+        "ledger_seq": row[1],
+        "state": row[2],
+        "attempt_count": row[3],
+        "provider_dispatched": row[4],
+        "claim_owner": row[5],
+        "claim_expires_at": row[6],
+        "terminal_at": row[7],
+        "available_at": row[8],
+    }
+
+
+def _runtime_semantics_kwargs(
+    event: dict[str, object],
+    *,
+    observed_at: datetime = OBSERVED_AT,
+) -> dict[str, object]:
+    return {
+        "evidence": _successor_evidence(),
+        "route_state": {"state": "OPEN", "reason": "SYSTEMIC_TRANSPORT"},
+        "circuit_state": _closed_circuit(),
+        "observed_at": observed_at,
+        "canary_event": event,
+    }
+
+
+def _production_runtime_evidence() -> dict[str, object]:
+    return {
+        "revision": EXACT_HEAD,
+        "store_quick_check": "ok",
+        "worker": {
+            "label": "com.jamesto.newsroom-graphiti-worker",
+            "launchctl_loaded": False,
+            "process_ids": [],
+        },
+    }
+
+
+def _patch_production_predispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    plan: dict[str, object],
+) -> None:
+    retry = plan["retry_forbidden_events"]
+    monkeypatch.setattr(disposition, "_require_approved_plan", lambda *a, **k: plan)
+    monkeypatch.setattr(disposition, "_assert_exact_target", lambda *a, **k: None)
+    monkeypatch.setattr(
+        disposition, "_require_sequence_predecessor", lambda *a, **k: None
+    )
+    monkeypatch.setattr(disposition, "_require_retry_exclusions", lambda *a, **k: [])
+    monkeypatch.setattr(
+        disposition, "_retain_retry_exclusions_for_plan", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        disposition, "_require_retry_events_unchanged", lambda *a, **k: retry
+    )
+    monkeypatch.setattr(disposition, "_retry_event_snapshots", lambda *a, **k: retry)
+    monkeypatch.setattr(
+        disposition,
+        "collect_issue_790_operational_evidence",
+        lambda **k: _production_runtime_evidence(),
+    )
+    monkeypatch.setattr(
+        disposition,
+        "_validate_operational_evidence",
+        lambda evidence, **k: evidence,
+    )
+    monkeypatch.setattr(
+        disposition,
+        "_worker_state",
+        lambda: _production_runtime_evidence()["worker"],
+    )
+    monkeypatch.setattr(
+        disposition, "_require_issue_790_canary_route", lambda **k: None
+    )
+    monkeypatch.setattr(
+        disposition.ModelUsageService,
+        "route_state",
+        lambda self, route: {
+            "state": "CLOSED",
+            "reason": "AUTHORISED_OPERATOR_RESET",
+        },
+    )
+    unsigned = {
+        "schema_version": "newsroom.issue-790.graphiti-runtime-readiness.v1",
+        "framework": "graphiti-core",
+        "framework_version": "0.29.3",
+        "provider_calls": 0,
+        "credential_resolution": False,
+    }
+    monkeypatch.setattr(
+        disposition,
+        "_qualify_real_graphiti_runtime",
+        lambda: {**unsigned, "runtime_digest": digest_canonical(unsigned)},
+    )
 
 
 def _successor_evidence() -> dict[str, object]:
@@ -490,6 +615,148 @@ def test_step22_spent_13665_successor_unused_attempt_zero_survives_full_path(
             store=stores.work_unpublished,
         )
     assert caught.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+
+
+def test_step22_sqlite_integer_zero_provider_dispatched_is_untouched(
+    tmp_path: Path,
+) -> None:
+    stores = build_rehearsal_stores(tmp_path)
+    plan = _step22_activated_plan()
+    assert plan["sequence"]["candidate_event_qualification"]["ledger_seq"] == (
+        CANDIDATE_LEDGER_SEQ
+    )
+    event = _sqlite_canary_event(
+        stores.work_unpublished, ledger_seq=CANDIDATE_LEDGER_SEQ
+    )
+    assert event["state"] == "QUEUED"
+    assert event["attempt_count"] == 0
+    assert type(event["attempt_count"]) is int
+    assert event["provider_dispatched"] == 0
+    assert type(event["provider_dispatched"]) is int
+    _require_step16_runtime_semantics(
+        plan, **_runtime_semantics_kwargs(event)
+    )
+    event["provider_dispatched"] = 1
+    with pytest.raises(Issue790DispositionError, match="not untouched"):
+        _require_step16_runtime_semantics(
+            plan, **_runtime_semantics_kwargs(event)
+        )
+
+
+def test_step22_sqlite_successor_attempt_zero_is_pre_dispatch_untouched(
+    tmp_path: Path,
+) -> None:
+    stores = build_rehearsal_stores(tmp_path, successor=True)
+    plan = _step22_activated_plan()
+    qualification = plan["sequence"]["candidate_event_qualification"]
+    assert qualification["ledger_seq"] == CANDIDATE_LEDGER_SEQ
+    assert qualification["event_id"] == CANDIDATE_EVENT_ID
+    connection = sqlite3.connect(stores.work_unpublished)
+    try:
+        connection.execute(
+            "UPDATE unpublished_graphiti_revision_events SET available_at=? "
+            "WHERE ledger_seq=?",
+            (_LIVE_13671_AVAILABLE_AT, SUCCESSOR_LEDGER_SEQ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    event = _sqlite_canary_event(
+        stores.work_unpublished, ledger_seq=SUCCESSOR_LEDGER_SEQ
+    )
+    assert event["event_id"] == SUCCESSOR_EVENT_ID
+    assert event["ledger_seq"] == SUCCESSOR_LEDGER_SEQ
+    assert event["state"] == "QUEUED"
+    assert event["attempt_count"] == 0
+    assert event["provider_dispatched"] == 0
+    assert type(event["provider_dispatched"]) is int
+    assert event["available_at"] == _LIVE_13671_AVAILABLE_AT
+    assert event["claim_owner"] is None
+    _require_step16_runtime_semantics(
+        plan,
+        **_runtime_semantics_kwargs(event, observed_at=_LIVE_OBSERVED_AT),
+    )
+    spent = _sqlite_canary_event(
+        stores.work_unpublished, ledger_seq=CANDIDATE_LEDGER_SEQ
+    )
+    assert spent["state"] == "CONFIGURATION_HELD"
+    assert spent["provider_dispatched"] == 1
+    with pytest.raises(Issue790DispositionError, match="not untouched"):
+        _require_step16_runtime_semantics(
+            plan,
+            **_runtime_semantics_kwargs(spent, observed_at=_LIVE_OBSERVED_AT),
+        )
+
+
+def test_step22_unused_13671_survives_production_pre_dispatch_untouched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fails on 6c101627 with 'pre-dispatch event is not untouched'."""
+
+    stores = build_rehearsal_stores(tmp_path, successor=True)
+    plan = _step22_activated_plan()
+    assert plan["sequence"]["candidate_event_qualification"]["ledger_seq"] == (
+        CANDIDATE_LEDGER_SEQ
+    )
+    event = _sqlite_canary_event(
+        stores.work_unpublished, ledger_seq=SUCCESSOR_LEDGER_SEQ
+    )
+    assert event["provider_dispatched"] == 0
+    assert type(event["provider_dispatched"]) is int
+    assert event["attempt_count"] == 0
+    _patch_production_predispatch(monkeypatch, plan=plan)
+    consume_calls: list[str] = []
+
+    def consume_successor(**values: object) -> None:
+        consume_calls.append(str(values["event_id"]))
+        assert values["event_id"] == SUCCESSOR_EVENT_ID
+        return None
+
+    monkeypatch.setattr(disposition, "_consume_issue_790_event", consume_successor)
+    backup = tmp_path / "pre-dispatch-13671.sqlite3"
+    receipt = disposition.run_issue_790_canary(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        backup_path=backup,
+        plan=plan,
+        observed_at=OBSERVED_AT,
+        repository_root=tmp_path,
+        event_id=SUCCESSOR_EVENT_ID,
+        ledger_seq=SUCCESSOR_LEDGER_SEQ,
+        disposition_digest="sha256:" + "cd" * 32,
+        rehearsal=False,
+        exact_head=EXACT_HEAD,
+    )
+    assert backup.is_file()
+    assert consume_calls == [SUCCESSOR_EVENT_ID]
+    assert receipt["resumed_zero_io_finalisation"] is False
+    assert receipt["consumption"]["event_id"] == SUCCESSOR_EVENT_ID
+    assert receipt["consumption"]["ledger_seq"] == SUCCESSOR_LEDGER_SEQ
+    with pytest.raises(PreparedCanaryError) as caught:
+        _candidate_from_plan(
+            plan,
+            event_id=CANDIDATE_EVENT_ID,
+            ledger_seq=CANDIDATE_LEDGER_SEQ,
+            role="canary",
+            store=stores.work_unpublished,
+        )
+    assert caught.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    resumed = disposition.run_issue_790_canary(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        backup_path=tmp_path / "resume-13671.sqlite3",
+        plan=plan,
+        observed_at=OBSERVED_AT,
+        repository_root=tmp_path,
+        event_id=SUCCESSOR_EVENT_ID,
+        ledger_seq=SUCCESSOR_LEDGER_SEQ,
+        disposition_digest="sha256:" + "cd" * 32,
+        rehearsal=False,
+        exact_head=EXACT_HEAD,
+    )
+    assert resumed["resumed_zero_io_finalisation"] is True
+    assert consume_calls == [SUCCESSOR_EVENT_ID]
 
 
 @pytest.mark.parametrize(
