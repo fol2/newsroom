@@ -2668,6 +2668,225 @@ def test_unmarked_ambiguity_after_empty_success_returns_validated_success(
     assert "recovery_classification" not in produced.raw_output_value
 
 
+def test_unmarked_zero_without_validated_result_remains_ambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+
+    async def complete_then_unmarked(**values: object) -> object:
+        values["telemetry"].chat_invocations = [
+            {
+                "provider": "cursor-agent-cli",
+                "model": "composer-2.5",
+                "outcome": "COMPLETE",
+                "usage": {
+                    "usage_basis": "PROVIDER_REPORTED",
+                    "input_tokens": 4_694,
+                    "cached_read_tokens": 448,
+                    "output_tokens": 3_124,
+                    "total_tokens": 8_266,
+                },
+            }
+        ]
+        values["telemetry"].embedding_usage = {
+            "usage_basis": "PROVIDER_REPORTED",
+            "request_count": 5,
+            "embedding_tokens": 43,
+            "cost_usd_microunits": 4,
+            "requests": [
+                {
+                    "provider": "openrouter",
+                    "model": "openai/text-embedding-3-large",
+                    "request_id": f"unmarked-embedding-{index}",
+                    "prompt_tokens": 2,
+                    "total_tokens": 2,
+                    "cost_usd_microunits": 0,
+                    "cost_reported": True,
+                    "outcome": "COMPLETE",
+                }
+                for index in range(5)
+            ],
+        }
+        raise real.AmbiguousEpisodeEffect(
+            "Graphiti completion became ambiguous after provider dispatch"
+        )
+
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(real, "openrouter_api_key", lambda: "key")
+    monkeypatch.setattr(real, "neo4j_community_password", lambda: "password")
+    monkeypatch.setattr(real, "_add_episode", complete_then_unmarked)
+
+    produced = RealGraphitiAdapter()._produce(
+        evaluation_attempt_for(("A retained source passage.",)),
+        UtcTimestamp.parse("2026-08-20T00:00:00.000000Z"),
+    )
+
+    assert produced.outcome is ExtractionOutcome.RETRYABLE_FAILURE
+    assert produced.failure_code is ExtractionFailureCode.AMBIGUOUS_EFFECT
+    assert produced.validation is None
+    assert produced.raw_output_value is None
+    assert produced.proposals == ()
+    receipt = produced.attempt_receipt_value
+    assert receipt is not None
+    # Live 13665 stored integer zeros from result=None. Those counts are not
+    # an accepted zero-proposal mark.
+    assert receipt["proposal_count"] == 0
+    assert receipt["entity_count"] == 0
+    assert receipt["relation_count"] == 0
+    assert receipt.get("zero_proposal_effect") is None
+
+
+def test_persistable_empty_after_embeddings_is_explicit_zero_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+    from newsroom.graphiti_adapter.combined_temporal_pipeline import (
+        ExistingGraphitiPipeline,
+    )
+    from newsroom.graphiti_adapter.neo4j_guard import GuardState
+
+    persist_calls: list[object] = []
+
+    class Guard:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def begin(self) -> object:
+            self.calls.append("begin")
+            return SimpleNamespace(state=GuardState.CREATED)
+
+        async def record_pending_telemetry(self, **_values: object) -> None:
+            self.calls.append("telemetry")
+
+        async def complete(self, _receipt: object) -> None:
+            self.calls.append("complete")
+
+        async def rollback_pending(self, **_values: object) -> bool:
+            self.calls.append("rollback")
+            return True
+
+    async def persistable_empty_after_embeddings(**values: object) -> object:
+        telemetry = values["telemetry"]
+        telemetry.chat_invocations = [
+            {
+                "provider": "cursor-agent-cli",
+                "model": "composer-2.5",
+                "outcome": "COMPLETE",
+                "usage": {
+                    "usage_basis": "PROVIDER_REPORTED",
+                    "input_tokens": 4_694,
+                    "cached_read_tokens": 448,
+                    "output_tokens": 3_124,
+                    "total_tokens": 8_266,
+                },
+            }
+        ]
+        telemetry.embedding_usage = {
+            "usage_basis": "PROVIDER_REPORTED",
+            "request_count": 5,
+            "embedding_tokens": 43,
+            "cost_usd_microunits": 4,
+            "requests": [
+                {
+                    "provider": "openrouter",
+                    "model": "openai/text-embedding-3-large",
+                    "request_id": f"live-embedding-{index}",
+                    "prompt_tokens": tokens,
+                    "total_tokens": tokens,
+                    "cost_usd_microunits": cost,
+                    "cost_reported": True,
+                    "outcome": "COMPLETE",
+                }
+                for index, (tokens, cost) in enumerate(
+                    ((33, 4), (3, 0), (2, 0), (2, 0), (3, 0))
+                )
+            ],
+        }
+
+        async def resolve_nodes(
+            nodes: list[object],
+        ) -> tuple[list[object], dict[str, str], list[tuple[object, object]]]:
+            held = [
+                SimpleNamespace(
+                    uuid=str(getattr(node, "uuid", "held")),
+                    attributes={"resolution": "AMBIGUOUS_HOLD"},
+                )
+                for node in nodes
+            ]
+            return (
+                held,
+                {
+                    str(getattr(node, "uuid", "held")): str(
+                        getattr(node, "uuid", "held")
+                    )
+                    for node in nodes
+                },
+                [],
+            )
+
+        async def persist_graph(nodes: list[object], edges: list[object]) -> None:
+            persist_calls.append((list(nodes), list(edges)))
+            raise RuntimeError("persist must not run for empty persistable effect")
+
+        pipeline = ExistingGraphitiPipeline(
+            guard=Guard(),  # type: ignore[arg-type]
+            resolve_nodes=resolve_nodes,
+            resolve_pointers=lambda edges, _uuid_map: edges,
+            create_embeddings=lambda _embedder, _edges: asyncio.sleep(0),
+            persist_graph=persist_graph,
+            embedder=object(),
+            run_async=asyncio.run,
+            chat_receipt=lambda: list(telemetry.chat_invocations),
+            embedding_receipt=lambda: dict(telemetry.embedding_usage),
+            complete_receipt=lambda nodes, edges, receipt: values["validate_result"](
+                SimpleNamespace(
+                    episode=None,
+                    nodes=tuple(nodes),
+                    edges=tuple(edges),
+                ),
+                telemetry,
+                receipt,
+            ),
+        )
+        await pipeline._prepare_attempt()
+        sealed = await pipeline._execute(
+            nodes=(SimpleNamespace(uuid="entity-1", attributes={}),),
+            edges=(),
+            receipt={"provider_attempt_number": 1},
+        )
+        assert persist_calls == []
+        assert sealed.graph_effect_attempted is False
+        assert sealed.nodes == ()
+        return SimpleNamespace(episode=None, nodes=(), edges=())
+
+    monkeypatch.setattr(real, "_load_graphiti", lambda: SimpleNamespace())
+    monkeypatch.setattr(real, "openrouter_api_key", lambda: "key")
+    monkeypatch.setattr(real, "neo4j_community_password", lambda: "password")
+    monkeypatch.setattr(real, "_add_episode", persistable_empty_after_embeddings)
+
+    produced = RealGraphitiAdapter()._produce(
+        evaluation_attempt_for(("A retained source passage.",)),
+        UtcTimestamp.parse("2026-08-20T00:00:00.000000Z"),
+    )
+
+    assert persist_calls == []
+    assert produced.outcome is ExtractionOutcome.SUCCESS
+    assert produced.failure_code is ExtractionFailureCode.NONE
+    assert produced.validation is ExtractionOutputValidation.VALID
+    assert produced.proposals == ()
+    assert produced.raw_output_value is not None
+    assert produced.raw_output_value["entity_count"] == 0
+    assert produced.raw_output_value["relation_count"] == 0
+    assert produced.raw_output_value["proposal_count"] == 0
+    combined = produced.raw_output_value.get("combined_temporal_receipt")
+    assert isinstance(combined, dict)
+    assert combined["zero_proposal_effect"] == "EXPLICIT"
+    assert produced.raw_output_value["embedding_usage"]["request_count"] == 5
+    assert produced.raw_output_value["chat_invocations"][0]["usage"][
+        "total_tokens"
+    ] == 8_266
+
+
 @pytest.mark.parametrize("with_recovery_marker", (False, True))
 def test_ambiguity_with_proposals_remains_fail_closed_after_validation(
     monkeypatch: pytest.MonkeyPatch, with_recovery_marker: bool

@@ -44,6 +44,10 @@ STEP21_FULL_PATH_TEST = (
     "newsroom/tests/test_graphiti_corpus_ingest.py::"
     "test_step21_unmarked_zero_proposal_completion_survives_full_cycle"
 )
+STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST = (
+    "newsroom/tests/test_graphiti_corpus_ingest.py::"
+    "test_step22_persistable_empty_zero_after_embeddings_survives_full_cycle"
+)
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _FULL_PATH_TESTS = (
     "newsroom/tests/test_graphiti_corpus_ingest.py::"
@@ -53,12 +57,17 @@ _MARKER_TESTS = (
     "newsroom/tests/test_graphiti_corpus_ingest.py::"
     "test_step20_rolled_back_zero_proposal_completion_survives_full_cycle",
     STEP21_FULL_PATH_TEST,
+    STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST,
 )
 _FAIL_CLOSED_TESTS = (
     "newsroom/tests/test_graphiti_adapter_real_executor.py::"
     "test_retryable_failure_returns_diagnostic_receipt_without_structured_output",
     "newsroom/tests/test_graphiti_adapter_real_executor.py::"
     "test_ambiguity_with_proposals_remains_fail_closed_after_validation",
+    "newsroom/tests/test_graphiti_adapter_real_executor.py::"
+    "test_unmarked_zero_without_validated_result_remains_ambiguous",
+    "newsroom/tests/test_graphiti_corpus_ingest.py::"
+    "test_unmarked_zero_counts_without_validated_result_stay_ambiguous_full_cycle",
     "newsroom/tests/test_graphiti_adapter_4d_outcomes.py::"
     "test_authority_retains_honest_noncomplete_outcomes_without_proposal_admission",
     "newsroom/tests/test_graphiti_adapter_4d_outcomes.py::"
@@ -1572,7 +1581,7 @@ def _blocker_smokes(repo_for_imports: Path) -> list[tuple[str, bool, str]]:
     marker_ok, marker_detail = _run_pytest_nodes(repo_for_imports, _MARKER_TESTS)
     _check(
         rows,
-        "B22 Steps 20-21 marked and unmarked COMPLETE+0 avoid AMBIGUOUS_EFFECT",
+        "B22 Steps 20-22 COMPLETE+0 avoid AMBIGUOUS_EFFECT",
         marker_ok,
         marker_detail,
     )
