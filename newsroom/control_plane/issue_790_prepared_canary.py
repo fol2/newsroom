@@ -306,7 +306,13 @@ def _candidate_from_plan(
             _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
         return bound_event, bound_seq
     if selected is not None:
-        return str(selected["event_id"]), int(selected["ledger_seq"])
+        bound_event = str(selected["event_id"])
+        bound_seq = int(selected["ledger_seq"])
+        if event_id is not None and event_id != bound_event:
+            _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
+        if ledger_seq is not None and ledger_seq != bound_seq:
+            _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
+        return bound_event, bound_seq
     if event_id is not None and ledger_seq is not None:
         return event_id, ledger_seq
     if role == "apply":
@@ -376,16 +382,8 @@ def prepare_issue_790_canary(
         _raise("EXACT_HEAD_ABSENT", "exact head is absent")
     try:
         store = op._canonical_existing_file(store, field="source unpublished store")
-        if proving_store is not None:
-            proving_store = op._canonical_existing_file(
-                proving_store,
-                field="source proving store",
-            )
-            op.assert_issue_790_paths_disjoint(store, proving_store)
     except Issue790DispositionError as exc:
-        message = str(exc)
-        code = "PATHS_ALIAS" if "alias" in message else "STORE_ABSENT"
-        raise PreparedCanaryError(message, failure_code=code) from exc
+        raise PreparedCanaryError(str(exc), failure_code="STORE_ABSENT") from exc
 
     bound_event_id, bound_ledger_seq = _candidate_from_plan(
         plan, event_id=event_id, ledger_seq=ledger_seq, role=role
@@ -396,6 +394,17 @@ def prepare_issue_790_canary(
         _raise("RETRY_FORBIDDEN_TARGET", "bounded canary targeted a retained failure")
     if bound_event_id is not None and not bound_event_id.startswith("sha256:"):
         _raise("EVENT_IDENTITY_INVALID", "bounded canary event identity is invalid")
+    try:
+        if proving_store is not None:
+            proving_store = op._canonical_existing_file(
+                proving_store,
+                field="source proving store",
+            )
+            op.assert_issue_790_paths_disjoint(store, proving_store)
+    except Issue790DispositionError as exc:
+        message = str(exc)
+        code = "PATHS_ALIAS" if "alias" in message else "STORE_ABSENT"
+        raise PreparedCanaryError(message, failure_code=code) from exc
 
     retry_events = plan.get("retry_forbidden_events")
     if not isinstance(retry_events, list) or not retry_events:
@@ -505,6 +514,7 @@ def prepare_issue_790_canary(
             RuntimeError,
             TypeError,
             ValueError,
+            sqlite3.Error,
         ) as exc:
             raise PreparedCanaryError(
                 f"bounded canary provider-free preflight failed: {exc}",

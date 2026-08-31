@@ -3765,6 +3765,25 @@ def run_issue_790_canary(
         store=store,
         github_api=github_api,
     )
+    from newsroom.control_plane.issue_790_prepared_canary import (
+        PreparedCanary,
+        PreparedCanaryError,
+        consume_prepared_canary,
+        prepare_issue_790_canary,
+        _candidate_from_plan,
+    )
+
+    if prepared is not None and not isinstance(prepared, PreparedCanary):
+        raise PreparedCanaryError(
+            "prepared canary is absent",
+            failure_code="PREPARED_CANARY_ABSENT",
+        )
+    _candidate_from_plan(
+        retained_plan,
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        role="canary",
+    )
     store = _canonical_existing_file(store, field="source unpublished store")
     proving_store = _canonical_existing_file(
         proving_store,
@@ -3789,18 +3808,6 @@ def run_issue_790_canary(
         plan=retained_plan,
         observed_at=observed_at,
     )
-    from newsroom.control_plane.issue_790_prepared_canary import (
-        PreparedCanary,
-        PreparedCanaryError,
-        consume_prepared_canary,
-        prepare_issue_790_canary,
-    )
-
-    if prepared is not None and not isinstance(prepared, PreparedCanary):
-        raise PreparedCanaryError(
-            "prepared canary is absent",
-            failure_code="PREPARED_CANARY_ABSENT",
-        )
     latest = prepare_issue_790_canary(
         store=store,
         proving_store=proving_store,
