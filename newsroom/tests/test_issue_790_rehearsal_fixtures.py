@@ -35,6 +35,10 @@ EXACT_HEAD = "e1d8cbff65e039e3f6393b64cba0f7310f976fa5"
 EVENT_13361 = (
     "sha256:90c3b4de731f2df8d4353e516762f65450570e1e8372ed7b703423f717351ae7"
 )
+SUCCESSOR_EVENT_ID = (
+    "sha256:db17fb48469b96b7134b9f0ab7c73c27ddc2f4ebb3bc6016fe268b6326ccb08e"
+)
+SUCCESSOR_LEDGER_SEQ = 13671
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +115,13 @@ def _insert_retry_forbidden_rows(
         )
 
 
-def _bind_candidate_13665(connection: sqlite3.Connection, source_event_id: str) -> None:
+def _bind_candidate(
+    connection: sqlite3.Connection,
+    source_event_id: str,
+    *,
+    event_id: str,
+    ledger_seq: int,
+) -> None:
     row = connection.execute(
         "SELECT manifest_json FROM unpublished_graphiti_revision_events "
         "WHERE event_id=?",
@@ -122,7 +132,7 @@ def _bind_candidate_13665(connection: sqlite3.Connection, source_event_id: str) 
     manifest = json.loads(str(row[0]))
     if not isinstance(manifest, dict):
         raise AssertionError("projected Graphiti event manifest is malformed")
-    manifest["ledger_seq"] = CANDIDATE_LEDGER_SEQ
+    manifest["ledger_seq"] = ledger_seq
     manifest_json = json.dumps(
         manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
@@ -133,8 +143,8 @@ def _bind_candidate_13665(connection: sqlite3.Connection, source_event_id: str) 
         WHERE event_id=?
         """,
         (
-            CANDIDATE_EVENT_ID,
-            CANDIDATE_LEDGER_SEQ,
+            event_id,
+            ledger_seq,
             manifest_json,
             digest_canonical(manifest),
             source_event_id,
@@ -142,7 +152,19 @@ def _bind_candidate_13665(connection: sqlite3.Connection, source_event_id: str) 
     )
 
 
-def build_rehearsal_stores(tmp_path: Path) -> RehearsalStores:
+def _spent_13665() -> dict[str, object]:
+    return {
+        "attempt_count": 1,
+        "available_at": "2026-08-31T15:24:40.761622Z",
+        "event_id": CANDIDATE_EVENT_ID,
+        "last_failure_code": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:AMBIGUOUS_EFFECT",
+        "ledger_seq": CANDIDATE_LEDGER_SEQ,
+        "provider_dispatched": True,
+        "state": "CONFIGURATION_HELD",
+    }
+
+
+def build_rehearsal_stores(tmp_path: Path, *, successor: bool = False) -> RehearsalStores:
     """Full sqlite backup-style copy with unused 13665 and drifted 13361."""
 
     clock = MutableClock(OBSERVED_AT)
@@ -158,7 +180,25 @@ def build_rehearsal_stores(tmp_path: Path) -> RehearsalStores:
     Issue790CanaryRepository(str(unpublished))
     connection = sqlite3.connect(unpublished)
     try:
-        _bind_candidate_13665(connection, source_event_id)
+        if successor:
+            _bind_candidate(
+                connection,
+                source_event_id,
+                event_id=SUCCESSOR_EVENT_ID,
+                ledger_seq=SUCCESSOR_LEDGER_SEQ,
+            )
+            _insert_retry_forbidden_rows(
+                connection,
+                [_spent_13665()],
+                live_13361_drift=False,
+            )
+        else:
+            _bind_candidate(
+                connection,
+                source_event_id,
+                event_id=CANDIDATE_EVENT_ID,
+                ledger_seq=CANDIDATE_LEDGER_SEQ,
+            )
         _insert_retry_forbidden_rows(
             connection,
             list(plan["retry_forbidden_events"]),
@@ -180,19 +220,23 @@ def build_rehearsal_stores(tmp_path: Path) -> RehearsalStores:
     )
 
 
-def candidate_identity(store: Path) -> tuple[str, int, str]:
+def event_identity(store: Path, ledger_seq: int) -> tuple[str, int, str]:
     connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
     try:
         row = connection.execute(
             "SELECT event_id,ledger_seq,state,attempt_count,provider_dispatched "
             "FROM unpublished_graphiti_revision_events WHERE ledger_seq=?",
-            (CANDIDATE_LEDGER_SEQ,),
+            (ledger_seq,),
         ).fetchone()
     finally:
         connection.close()
     if row is None:
-        raise AssertionError("candidate 13665 is absent")
+        raise AssertionError(f"event {ledger_seq} is absent")
     return str(row[0]), int(row[1]), str(row[2])
+
+
+def candidate_identity(store: Path) -> tuple[str, int, str]:
+    return event_identity(store, CANDIDATE_LEDGER_SEQ)
 
 
 def retry_available_at(store: Path, ledger_seq: int) -> str:

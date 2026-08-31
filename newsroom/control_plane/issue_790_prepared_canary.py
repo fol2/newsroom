@@ -96,8 +96,8 @@ FAIL_BRANCH_INVENTORY: tuple[FailBranch, ...] = (
         "candidate_identity",
         "CANDIDATE_IDENTITY",
         True,
-        "test_event_13665_identity_is_not_mutated",
-        "test_retry_forbidden_target_fail_closes",
+        "test_step22_spent_13665_successor_unused_attempt_zero_survives_full_path",
+        "test_cli_flags_disagree_with_unused_candidate_fail_closes",
     ),
     FailBranch(
         "store_readable",
@@ -159,7 +159,7 @@ FAIL_BRANCH_INVENTORY: tuple[FailBranch, ...] = (
         "retry_forbidden_target",
         "RETRY_FORBIDDEN_TARGET",
         True,
-        "test_event_13665_identity_is_not_mutated",
+        "test_spent_13665_is_retry_forbidden_target",
         "test_retry_forbidden_target_fail_closes",
     ),
     FailBranch(
@@ -281,43 +281,224 @@ def consume_prepared_canary(
     return prepared
 
 
+def eligible_unused_candidate_rows(
+    rows: Sequence[tuple[object, ...]],
+    *,
+    forbidden_event_ids: set[str],
+    forbidden_seqs: set[int],
+    floor: int,
+) -> tuple[tuple[object, ...], ...]:
+    """Keep only post-exhaustion QUEUED attempt-0 rows above the exclusion floor."""
+
+    return tuple(
+        row
+        for row in rows
+        if str(row[0]) not in forbidden_event_ids
+        and int(row[1]) not in forbidden_seqs
+        and int(row[1]) > floor
+    )
+
+
+def _forbidden_identities(
+    store: Path | None,
+    plan: Mapping[str, object],
+) -> tuple[set[str], set[int]]:
+    """Durable and plan retry-forbidden identities. Consumption is resume, not retry."""
+
+    ids: set[str] = set()
+    seqs: set[int] = set(_op()._RETRY_FORBIDDEN_LEDGER_SEQS)
+    retry_events = plan.get("retry_forbidden_events")
+    if isinstance(retry_events, list):
+        for item in retry_events:
+            if not isinstance(item, dict):
+                continue
+            event_id = item.get("event_id")
+            ledger_seq = item.get("ledger_seq")
+            if isinstance(event_id, str):
+                ids.add(event_id)
+            if isinstance(ledger_seq, int) and not isinstance(ledger_seq, bool):
+                seqs.add(ledger_seq)
+    if store is None:
+        return ids, seqs
+    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "issue_790_graphiti_retry_exclusions" in tables:
+            for event_id, ledger_seq in connection.execute(
+                "SELECT event_id, ledger_seq FROM issue_790_graphiti_retry_exclusions"
+            ):
+                ids.add(str(event_id))
+                seqs.add(int(ledger_seq))
+    finally:
+        connection.close()
+    return ids, seqs
+
+
+def unused_queued_attempt_zero_candidates(
+    store: Path,
+    plan: Mapping[str, object],
+) -> tuple[tuple[str, int], ...]:
+    """Current unused QUEUED attempt-0 identities, highest ledger first."""
+
+    forbidden_ids, forbidden_seqs = _forbidden_identities(store, plan)
+    floor = max(_op()._RETRY_FORBIDDEN_LEDGER_SEQS)
+    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "unpublished_graphiti_revision_events" not in tables:
+            return ()
+        rows = connection.execute(
+            "SELECT event_id,ledger_seq,state,attempt_count,provider_dispatched "
+            "FROM unpublished_graphiti_revision_events "
+            "WHERE state='QUEUED' AND attempt_count=0 AND provider_dispatched=0 "
+            "ORDER BY ledger_seq DESC LIMIT 40"
+        ).fetchall()
+    finally:
+        connection.close()
+    eligible = eligible_unused_candidate_rows(
+        rows,
+        forbidden_event_ids=forbidden_ids,
+        forbidden_seqs=forbidden_seqs,
+        floor=floor,
+    )
+    return tuple((str(row[0]), int(row[1])) for row in eligible)
+
+
+def _event_is_untouched_attempt_zero(
+    store: Path,
+    *,
+    event_id: str,
+    ledger_seq: int,
+) -> bool | None:
+    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "unpublished_graphiti_revision_events" not in tables:
+            return None
+        row = connection.execute(
+            "SELECT state,attempt_count,provider_dispatched "
+            "FROM unpublished_graphiti_revision_events "
+            "WHERE event_id=? AND ledger_seq=?",
+            (event_id, ledger_seq),
+        ).fetchone()
+    finally:
+        connection.close()
+    if row is None:
+        return None
+    return str(row[0]) == "QUEUED" and int(row[1]) == 0 and not bool(row[2])
+
+
+def _qualification_is_current_unused(
+    store: Path | None,
+    *,
+    event_id: str,
+    ledger_seq: int,
+) -> bool:
+    if store is None:
+        return True
+    untouched = _event_is_untouched_attempt_zero(
+        store, event_id=event_id, ledger_seq=ledger_seq
+    )
+    return untouched is not False
+
+
+def _spent_or_retry_forbidden(
+    store: Path | None,
+    plan: Mapping[str, object],
+    *,
+    event_id: str,
+    ledger_seq: int,
+) -> bool:
+    forbidden_ids, forbidden_seqs = _forbidden_identities(store, plan)
+    if event_id in forbidden_ids or ledger_seq in forbidden_seqs:
+        return True
+    if store is None:
+        return False
+    untouched = _event_is_untouched_attempt_zero(
+        store, event_id=event_id, ledger_seq=ledger_seq
+    )
+    if (
+        event_id == CANDIDATE_EVENT_ID
+        and ledger_seq == CANDIDATE_LEDGER_SEQ
+        and untouched is not True
+    ):
+        return True
+    if untouched is False and not _canary_flags(
+        store, event_id=event_id, ledger_seq=ledger_seq
+    )["consumption_present"]:
+        return True
+    return False
+
+
 def _candidate_from_plan(
     plan: Mapping[str, object],
     *,
     event_id: str | None,
     ledger_seq: int | None,
     role: PrepareRole,
+    store: Path | None = None,
 ) -> tuple[str | None, int | None]:
-    op = _op()
-    selected = op._step18_candidate_qualification(plan)
-    sequence = plan.get("sequence") if isinstance(plan.get("sequence"), dict) else {}
-    ordinal = sequence.get("sequence_ordinal")
-    if ordinal == 22:
-        bound_event = CANDIDATE_EVENT_ID
-        bound_seq = CANDIDATE_LEDGER_SEQ
-        if selected is not None and (
-            selected.get("event_id") != bound_event
-            or selected.get("ledger_seq") != bound_seq
-        ):
-            _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
-        if event_id is not None and event_id != bound_event:
-            _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
-        if ledger_seq is not None and ledger_seq != bound_seq:
-            _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
-        return bound_event, bound_seq
+    selected = _op()._step18_candidate_qualification(plan)
+    selected_live: tuple[str, int] | None = None
     if selected is not None:
-        bound_event = str(selected["event_id"])
-        bound_seq = int(selected["ledger_seq"])
-        if event_id is not None and event_id != bound_event:
-            _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
-        if ledger_seq is not None and ledger_seq != bound_seq:
-            _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
-        return bound_event, bound_seq
+        selected_tuple = (str(selected["event_id"]), int(selected["ledger_seq"]))
+        if _qualification_is_current_unused(
+            store, event_id=selected_tuple[0], ledger_seq=selected_tuple[1]
+        ):
+            selected_live = selected_tuple
+    live = unused_queued_attempt_zero_candidates(store, plan)[:1] if store is not None else ()
+    live_bind = live[0] if live else None
+    bound = live_bind or selected_live
+
     if event_id is not None and ledger_seq is not None:
-        return event_id, ledger_seq
-    if role == "apply":
-        return None, None
-    return CANDIDATE_EVENT_ID, CANDIDATE_LEDGER_SEQ
+        requested = (event_id, ledger_seq)
+        if not event_id.startswith("sha256:"):
+            return requested
+        if _spent_or_retry_forbidden(store, plan, event_id=event_id, ledger_seq=ledger_seq):
+            _raise("RETRY_FORBIDDEN_TARGET", "bounded canary targeted a retained failure")
+        if live_bind is not None and requested != live_bind:
+            if (
+                store is not None
+                and _event_is_untouched_attempt_zero(
+                    store, event_id=event_id, ledger_seq=ledger_seq
+                )
+                is False
+            ):
+                _raise(
+                    "RETRY_FORBIDDEN_TARGET",
+                    "bounded canary targeted a retained failure",
+                )
+            _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
+        if bound is not None and requested != bound:
+            _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
+        return requested
+
+    if bound is None:
+        if role == "apply":
+            return None, None
+        if store is not None:
+            _raise("CANDIDATE_NOT_FRESH", "bounded canary event is not untouched")
+        return CANDIDATE_EVENT_ID, CANDIDATE_LEDGER_SEQ
+    if event_id is not None and event_id != bound[0]:
+        _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
+    if ledger_seq is not None and ledger_seq != bound[1]:
+        _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
+    return bound
 
 
 def _row_claim_present(row: Mapping[str, object]) -> bool:
@@ -386,7 +567,7 @@ def prepare_issue_790_canary(
         raise PreparedCanaryError(str(exc), failure_code="STORE_ABSENT") from exc
 
     bound_event_id, bound_ledger_seq = _candidate_from_plan(
-        plan, event_id=event_id, ledger_seq=ledger_seq, role=role
+        plan, event_id=event_id, ledger_seq=ledger_seq, role=role, store=store
     )
     sequence = plan.get("sequence") if isinstance(plan.get("sequence"), dict) else {}
     ordinal = sequence.get("sequence_ordinal")
@@ -600,5 +781,7 @@ __all__ = [
     "PreparedCanary",
     "PreparedCanaryError",
     "consume_prepared_canary",
+    "eligible_unused_candidate_rows",
     "prepare_issue_790_canary",
+    "unused_queued_attempt_zero_candidates",
 ]

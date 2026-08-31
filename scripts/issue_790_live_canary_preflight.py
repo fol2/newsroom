@@ -48,10 +48,15 @@ STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST = (
     "newsroom/tests/test_graphiti_corpus_ingest.py::"
     "test_step22_persistable_empty_zero_after_embeddings_survives_full_cycle"
 )
+STEP22_CANDIDATE_IDENTITY_FULL_PATH_TEST = (
+    "newsroom/tests/test_issue_790_prepared_canary.py::"
+    "test_step22_spent_13665_successor_unused_attempt_zero_survives_full_path"
+)
 LATEST_FAILURE_COVERING_FULL_PATH_TESTS = frozenset(
     {
         STEP21_FULL_PATH_TEST,
         STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST,
+        STEP22_CANDIDATE_IDENTITY_FULL_PATH_TEST,
     }
 )
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -435,13 +440,15 @@ def _eligible_candidate_rows(
 ) -> tuple[tuple[object, ...], ...]:
     """Return only post-exhaustion candidates; old backlog stays fail-closed."""
 
-    floor = max(REQUIRED_RETRY_LEDGER_SEQS)
-    return tuple(
-        row
-        for row in rows
-        if str(row[0]) not in forbidden_event_ids
-        and int(row[1]) not in forbidden_seqs
-        and int(row[1]) > floor
+    from newsroom.control_plane.issue_790_prepared_canary import (
+        eligible_unused_candidate_rows,
+    )
+
+    return eligible_unused_candidate_rows(
+        rows,
+        forbidden_event_ids=forbidden_event_ids,
+        forbidden_seqs=forbidden_seqs,
+        floor=max(REQUIRED_RETRY_LEDGER_SEQS),
     )
 
 
@@ -928,28 +935,6 @@ def _ops_gates(
             for item in plan.get("retry_forbidden_events", [])
             if isinstance(item, dict)
         ]
-        plan_seqs = [int(item.get("ledger_seq", 0)) for item in plan_events]
-        plan_event_ids = {
-            str(item["event_id"])
-            for item in plan_events
-            if isinstance(item.get("event_id"), str)
-        }
-        durable_seqs = {
-            int(item.get("ledger_seq", 0))
-            for item in exclusions
-            if isinstance(item, dict)
-        }
-        durable_event_ids = {
-            str(item["event_id"])
-            for item in exclusions
-            if isinstance(item, dict) and isinstance(item.get("event_id"), str)
-        }
-        cands = conn.execute(
-            "SELECT event_id,ledger_seq,state,attempt_count,provider_dispatched "
-            "FROM unpublished_graphiti_revision_events "
-            "WHERE state='QUEUED' AND attempt_count=0 AND provider_dispatched=0 "
-            "ORDER BY ledger_seq DESC LIMIT 40"
-        ).fetchall()
     finally:
         conn.close()
 
@@ -976,20 +961,14 @@ def _ops_gates(
     if exclusion_error is not None:
         exclusions_ok = False
         exclusions_detail = exclusion_error
-    forbidden_event_ids = plan_event_ids | durable_event_ids
-    forbidden_seqs = set(plan_seqs) | durable_seqs
-    if consumption is not None:
-        forbidden_event_ids.add(str(consumption.get("event_id")))
-        forbidden_seqs.add(int(consumption.get("ledger_seq", 0)))
 
     clean_event: tuple[str, int] | None = None
     fresh_detail = "NONE"
-    eligible = _eligible_candidate_rows(
-        cands,
-        forbidden_event_ids=forbidden_event_ids,
-        forbidden_seqs=forbidden_seqs,
+    from newsroom.control_plane.issue_790_prepared_canary import (
+        unused_queued_attempt_zero_candidates,
     )
-    for event_id, ledger_seq, state, attempt_count, provider_dispatched in eligible:
+
+    for event_id, ledger_seq in unused_queued_attempt_zero_candidates(store, plan):
         from newsroom.control_plane.cycle import qualify_fresh_graphiti_event
 
         observed = datetime.now(UTC)
@@ -1019,13 +998,7 @@ def _ops_gates(
             )
         finally:
             c2.close()
-        exact_fresh = (
-            state == "QUEUED"
-            and int(attempt_count) == 0
-            and not bool(provider_dispatched)
-            and not prior
-        )
-        if exact_fresh:
+        if not prior:
             clean_event = (str(event_id), int(ledger_seq))
             fresh_detail = (
                 f"{str(event_id)[:24]}…/{ledger_seq} "
@@ -1121,8 +1094,15 @@ def _ops_gates(
             exact_head=head,
             role="preflight",
         )
-        prepared_ok = True
-        prepared_detail = prepared.decision_digest
+        named = (
+            str(prepared.candidate_identity.get("event_id")),
+            int(prepared.candidate_identity.get("ledger_seq")),
+        )
+        if clean_event is not None and named != clean_event:
+            prepared_detail = "bounded canary candidate identity differs"
+        else:
+            prepared_ok = True
+            prepared_detail = prepared.decision_digest
     except Exception as exc:
         prepared_detail = f"{type(exc).__name__}: {exc}"
     _check(
