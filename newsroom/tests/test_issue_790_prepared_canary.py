@@ -29,6 +29,7 @@ from newsroom.control_plane.issue_790_disposition import (
     seal_issue_790_step16_plan,
 )
 from newsroom.control_plane.issue_790_prepared_canary import (
+    BOUNDED_CANARY_AUTHORITY_CONSUMED,
     CANDIDATE_EVENT_ID,
     CANDIDATE_LEDGER_SEQ,
     FAIL_BRANCH_INVENTORY,
@@ -58,10 +59,12 @@ from newsroom.tests.test_issue_790_rehearsal_fixtures import (
     EVENT_13677,
     EVENT_13683,
     EVENT_13689,
+    EVENT_13690,
     EXACT_HEAD,
     LEDGER_13677,
     LEDGER_13683,
     LEDGER_13689,
+    LEDGER_13690,
     LIVE_13361_AVAILABLE_AT,
     OBSERVED_AT,
     SEALED_13361_AVAILABLE_AT,
@@ -72,6 +75,7 @@ from newsroom.tests.test_issue_790_rehearsal_fixtures import (
     dispatch_started_count,
     event_identity,
     file_digest,
+    insert_unused_queued_attempt_zero,
     mutate_retry_field,
     retry_available_at,
 )
@@ -2749,6 +2753,215 @@ def test_step22_aborted_spawn_recovery_rejects_unproven_backup_or_authority(
     assert after == before
 
 
+def _abort_13689_unmatched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[object, dict[str, object], Path]:
+    """Reproduce live 13689: consume, claim RUNNING, abort, no outcome."""
+
+    from newsroom.control_plane.graphiti_events import GraphitiEventQueue
+
+    stores = build_rehearsal_stores(tmp_path, unused_13689=True)
+    activated = _activate_step22(stores.work_unpublished)
+    plan = activated["plan"]
+    _seed_production_disposition(stores.work_unpublished, plan)
+    _patch_production_predispatch(monkeypatch, plan=plan)
+
+    def abort_after_claim(**values: object) -> None:
+        assert values["event_id"] == EVENT_13689
+        queue = GraphitiEventQueue(
+            str(values["unpublished_store"]),
+            clock=lambda: OBSERVED_AT,
+        )
+        claimed = queue.claim(
+            owner_id=str(values["owner_id"]),
+            lease_for=timedelta(minutes=15),
+            event_id=str(values["event_id"]),
+            require_fresh=True,
+            canary_consumption_digest=str(values["canary_consumption_digest"]),
+        )
+        assert claimed is not None
+        assert queue._start(
+            str(values["event_id"]),
+            owner_id=str(values["owner_id"]),
+        ) == 1
+        raise _CanarySpawnAborted("canary spawn aborted after claim")
+
+    monkeypatch.setattr(disposition, "_consume_issue_790_event", abort_after_claim)
+    backup = tmp_path / "aborted-spawn-13689.sqlite3"
+    prepared = _prepare_production(
+        stores,
+        plan=plan,
+        event_id=EVENT_13689,
+        ledger_seq=LEDGER_13689,
+    )
+    canary_kwargs = {
+        "store": stores.work_unpublished,
+        "proving_store": stores.proving,
+        "backup_path": backup,
+        "plan": plan,
+        "observed_at": OBSERVED_AT,
+        "repository_root": tmp_path,
+        "event_id": EVENT_13689,
+        "ledger_seq": LEDGER_13689,
+        "disposition_digest": _PRODUCTION_DISPOSITION,
+        "prepared": prepared,
+        "github_api": activated["github"],
+    }
+    with pytest.raises(_CanarySpawnAborted):
+        disposition.run_issue_790_canary(**canary_kwargs)
+    return stores, canary_kwargs, backup
+
+
+def test_step22_unmatched_13689_consumption_blocks_successor_ready_before_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live 13690: unmatched 13689 consumption must not READY then write dest.
+
+    Watcher: 13689 consumed with no outcome. Preflight still READY 45/45 for
+    unused 13690, DISPATCH_STARTED, then EXIT 2
+    `bounded canary authority is already consumed` after writing
+    unpublished_store.pre-canary.sqlite3. Event 13690 stayed QUEUED attempt 0.
+    Recap 5485653227. Hole belongs in prepare, not a post-READY gate.
+    """
+
+    stores, aborted, _backup = _abort_13689_unmatched(tmp_path, monkeypatch)
+    insert_unused_queued_attempt_zero(
+        stores.work_unpublished,
+        source_ledger_seq=LEDGER_13689,
+        event_id=EVENT_13690,
+        ledger_seq=LEDGER_13690,
+    )
+    unused = unused_queued_attempt_zero_candidates(
+        stores.work_unpublished, stores.plan
+    )
+    assert unused[0] == (EVENT_13690, LEDGER_13690)
+    with pytest.raises(PreparedCanaryError) as caught:
+        _prepare(stores)
+    assert caught.value.failure_code == BOUNDED_CANARY_AUTHORITY_CONSUMED
+    assert str(caught.value) == "bounded canary authority is already consumed"
+    successor = _sqlite_canary_event(
+        stores.work_unpublished, ledger_seq=LEDGER_13690
+    )
+    assert successor["state"] == "QUEUED"
+    assert successor["attempt_count"] == 0
+    assert successor["provider_dispatched"] == 0
+    assert successor["claim_owner"] is None
+
+    consume_calls: list[str] = []
+
+    def must_not_consume(**_values: object) -> None:
+        consume_calls.append("called")
+        raise AssertionError("unmatched consumption dispatched a successor")
+
+    monkeypatch.setattr(disposition, "_consume_issue_790_event", must_not_consume)
+    dest = tmp_path / "successor-13690.sqlite3"
+    with pytest.raises(PreparedCanaryError) as dispatched:
+        disposition.run_issue_790_canary(
+            **{
+                **aborted,
+                "backup_path": dest,
+                "event_id": EVENT_13690,
+                "ledger_seq": LEDGER_13690,
+            }
+        )
+    assert dispatched.value.failure_code == BOUNDED_CANARY_AUTHORITY_CONSUMED
+    assert str(dispatched.value) == "bounded canary authority is already consumed"
+    assert consume_calls == []
+    assert dest.exists() is False
+    still = _sqlite_canary_event(stores.work_unpublished, ledger_seq=LEDGER_13690)
+    assert still["state"] == "QUEUED"
+    assert still["attempt_count"] == 0
+    assert still["provider_dispatched"] == 0
+    assert dispatch_started_count(stores.work_unpublished) == 0
+
+
+def test_step22_sealed_13689_abort_allows_successor_unused_without_already_consumed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sealed 13689 abort-strand must not leave Step 22 permanently unusable.
+
+    Dest-exists zero-I/O writes the outcome. Successor 13690 then consumes on
+    the same plan without `bounded canary authority is already consumed`.
+    13689 stays never-retry. Do not mint Step 23.
+    """
+
+    stores, aborted, backup = _abort_13689_unmatched(tmp_path, monkeypatch)
+    insert_unused_queued_attempt_zero(
+        stores.work_unpublished,
+        source_ledger_seq=LEDGER_13689,
+        event_id=EVENT_13690,
+        ledger_seq=LEDGER_13690,
+    )
+    with pytest.raises(PreparedCanaryError) as blocked:
+        _prepare(stores)
+    assert blocked.value.failure_code == BOUNDED_CANARY_AUTHORITY_CONSUMED
+
+    consume_calls: list[str] = []
+
+    def record_successor(**values: object) -> None:
+        consume_calls.append(str(values["event_id"]))
+        assert values["event_id"] == EVENT_13690
+
+    monkeypatch.setattr(disposition, "_consume_issue_790_event", record_successor)
+    _expire_interrupted_canary_claim(
+        stores.work_unpublished, ledger_seq=LEDGER_13689
+    )
+    aborted["prepared"] = None
+    aborted["recover_interrupted"] = True
+    aborted["expected_backup_digest"] = "sha256:" + file_digest(backup)
+    sealed = disposition.run_issue_790_canary(**aborted)
+    assert sealed["resumed_zero_io_finalisation"] is True
+    assert sealed["outcome"]["state_after_seal"] == "CONFIGURATION_HELD"
+    assert sealed["consumption"]["ledger_seq"] == LEDGER_13689
+    prepared = _prepare(stores)
+    assert prepared.candidate_identity["event_id"] == EVENT_13690
+    assert prepared.candidate_identity["ledger_seq"] == LEDGER_13690
+    with pytest.raises(PreparedCanaryError) as spent_13689:
+        _candidate_from_plan(
+            aborted["plan"],
+            event_id=EVENT_13689,
+            ledger_seq=LEDGER_13689,
+            role="canary",
+            store=stores.work_unpublished,
+        )
+    assert spent_13689.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    dest = tmp_path / "successor-13690.sqlite3"
+    successor_kwargs = {
+        **aborted,
+        "backup_path": dest,
+        "event_id": EVENT_13690,
+        "ledger_seq": LEDGER_13690,
+        "prepared": _prepare_production(
+            stores,
+            plan=aborted["plan"],
+            event_id=EVENT_13690,
+            ledger_seq=LEDGER_13690,
+        ),
+        "recover_interrupted": False,
+    }
+    successor_kwargs.pop("expected_backup_digest", None)
+    receipt = disposition.run_issue_790_canary(**successor_kwargs)
+    unused = unused_queued_attempt_zero_candidates(
+        stores.work_unpublished, stores.plan
+    )
+    assert dest.is_file()
+    assert consume_calls == [EVENT_13690]
+    assert receipt["consumption"]["event_id"] == EVENT_13690
+    assert receipt["consumption"]["ledger_seq"] == LEDGER_13690
+    assert receipt["retry_authorised"] is False
+    assert EVENT_13689 not in {item[0] for item in unused}
+    assert LEDGER_13689 not in {item[1] for item in unused}
+    with pytest.raises(
+        Issue790DispositionError,
+        match="interrupted canary recovery is already complete",
+    ):
+        disposition.run_issue_790_canary(**aborted)
+    assert backup.is_file()
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (
@@ -2986,6 +3199,9 @@ def test_canary_consumes_prepared_digest_only() -> None:
     pre_consume, _sep, _post = source.partition("_consume_issue_790_event")
     assert "prepare_issue_790_canary" in pre_consume
     assert "consume_prepared_canary" in pre_consume
+    assert source.index("_candidate_from_plan") < source.index(
+        "_resolve_canary_backup_destination"
+    )
     assert "_require_retry_events_unchanged" not in pre_consume
     assert "retry_forbidden_safety_states_match" not in pre_consume
     assert "validate_retry_forbidden_safety_state" not in pre_consume
@@ -3062,13 +3278,28 @@ def test_prepared_failure_codes_are_inventoried() -> None:
         "CANDIDATE_NOT_FRESH",
         "LIVE_STORE_WRITE_REFUSED",
         "REHEARSAL_CRASH_BEFORE_DISPATCH",
+        "BOUNDED_CANARY_AUTHORITY_CONSUMED",
     }
     assert named <= inventoried
     assert named <= codes | inventoried
     local_raise_codes = {
         code
         for code in codes
-        if code.endswith(("_ABSENT", "_DRIFT", "_STATE", "_TARGET", "_INVALID", "_FRESH", "_REFUSED", "_DISPATCH", "_ALIAS", "_IDENTITY"))
+        if code.endswith(
+            (
+                "_ABSENT",
+                "_DRIFT",
+                "_STATE",
+                "_TARGET",
+                "_INVALID",
+                "_FRESH",
+                "_REFUSED",
+                "_DISPATCH",
+                "_ALIAS",
+                "_IDENTITY",
+                "_CONSUMED",
+            )
+        )
         or code in named
     }
     assert local_raise_codes <= inventoried | named

@@ -21,6 +21,7 @@ from newsroom.control_plane.issue_790_canary import (
     retry_forbidden_has_claim_columns,
     retry_forbidden_live_select,
     retry_forbidden_live_snapshot,
+    unmatched_bounded_canary_consumption,
 )
 from newsroom.control_plane.issue_790_contract import ISSUE_790_STEP22_PENDING_DIGEST
 from newsroom.control_plane.issue_790_disposition import Issue790DispositionError
@@ -40,6 +41,7 @@ PREPARED_CANARY_ABSENT = "PREPARED_CANARY_ABSENT"
 PREPARED_CANARY_DIGEST_DRIFT = "PREPARED_CANARY_DIGEST_DRIFT"
 PREPARED_CANARY_RECORD_INVALID = "PREPARED_CANARY_RECORD_INVALID"
 PREPARED_CANARY_RECORD_SCHEMA = "newsroom.issue-790.prepared-canary.v1"
+BOUNDED_CANARY_AUTHORITY_CONSUMED = "BOUNDED_CANARY_AUTHORITY_CONSUMED"
 
 FIELD_CLASSIFICATION: dict[str, str] = {
     "exact_head": "A",
@@ -135,6 +137,13 @@ FAIL_BRANCH_INVENTORY: tuple[FailBranch, ...] = (
         True,
         "test_ready_implies_dispatch_started",
         "test_candidate_claim_fail_closes",
+    ),
+    FailBranch(
+        "unmatched_plan_consumption",
+        BOUNDED_CANARY_AUTHORITY_CONSUMED,
+        True,
+        "test_step22_sealed_13689_abort_allows_successor_unused_without_already_consumed",
+        "test_step22_unmatched_13689_consumption_blocks_successor_ready_before_backup",
     ),
     FailBranch(
         "prepared_canary_present",
@@ -630,6 +639,30 @@ def _spent_or_retry_forbidden(
     return False
 
 
+def _unmatched_consumption_identity(store: Path) -> tuple[str, int] | None:
+    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        return unmatched_bounded_canary_consumption(connection)
+    finally:
+        connection.close()
+
+
+def _reject_unmatched_plan_consumption(
+    store: Path | None, *, event_id: str | None, ledger_seq: int | None
+) -> None:
+    """Fail-closed when a different event already consumed the bound plan."""
+
+    if store is None or event_id is None or ledger_seq is None:
+        return
+    unmatched = _unmatched_consumption_identity(store)
+    if unmatched is None or unmatched == (event_id, ledger_seq):
+        return
+    _raise(
+        BOUNDED_CANARY_AUTHORITY_CONSUMED,
+        "bounded canary authority is already consumed",
+    )
+
+
 def _candidate_from_plan(
     plan: Mapping[str, object],
     *,
@@ -657,6 +690,11 @@ def _candidate_from_plan(
         if _spent_or_retry_forbidden(store, plan, event_id=event_id, ledger_seq=ledger_seq):
             _raise("RETRY_FORBIDDEN_TARGET", "bounded canary targeted a retained failure")
         if live_bind is not None and requested != live_bind:
+            if store is not None and _unmatched_consumption_identity(store) == requested:
+                _reject_unmatched_plan_consumption(
+                    store, event_id=event_id, ledger_seq=ledger_seq
+                )
+                return requested
             if (
                 store is not None
                 and _event_is_untouched_attempt_zero(
@@ -671,6 +709,9 @@ def _candidate_from_plan(
             _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
         if bound is not None and requested != bound:
             _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
+        _reject_unmatched_plan_consumption(
+            store, event_id=event_id, ledger_seq=ledger_seq
+        )
         return requested
 
     if bound is None:
@@ -683,6 +724,7 @@ def _candidate_from_plan(
         _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
     if ledger_seq is not None and ledger_seq != bound[1]:
         _raise("CANDIDATE_IDENTITY", "bounded canary candidate identity differs")
+    _reject_unmatched_plan_consumption(store, event_id=bound[0], ledger_seq=bound[1])
     return bound
 
 
@@ -957,6 +999,7 @@ def prepare_issue_790_canary(
 
 
 __all__ = [
+    "BOUNDED_CANARY_AUTHORITY_CONSUMED",
     "CANDIDATE_EVENT_ID",
     "CANDIDATE_LEDGER_SEQ",
     "FAIL_BRANCH_INVENTORY",

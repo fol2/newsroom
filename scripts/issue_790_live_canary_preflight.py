@@ -72,6 +72,10 @@ STEP22_ABORTED_SPAWN_13689_BACKUP_DEST_FULL_PATH_TEST = (
     "newsroom/tests/test_issue_790_prepared_canary.py::"
     "test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running"
 )
+STEP22_UNMATCHED_13689_CONSUMPTION_BLOCKS_13690_READY_FULL_PATH_TEST = (
+    "newsroom/tests/test_issue_790_prepared_canary.py::"
+    "test_step22_unmatched_13689_consumption_blocks_successor_ready_before_backup"
+)
 LATEST_FAILURE_COVERING_FULL_PATH_TESTS = frozenset(
     {
         STEP21_FULL_PATH_TEST,
@@ -82,6 +86,7 @@ LATEST_FAILURE_COVERING_FULL_PATH_TESTS = frozenset(
         STEP22_CONSUMED_13677_ZERO_FULL_PATH_TEST,
         STEP22_CONSUMED_13683_ZERO_FULL_PATH_TEST,
         STEP22_ABORTED_SPAWN_13689_BACKUP_DEST_FULL_PATH_TEST,
+        STEP22_UNMATCHED_13689_CONSUMPTION_BLOCKS_13690_READY_FULL_PATH_TEST,
     }
 )
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")

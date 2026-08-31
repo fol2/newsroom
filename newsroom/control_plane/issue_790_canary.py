@@ -621,6 +621,45 @@ def graphiti_event_has_canary_consumption(
     )
 
 
+def unmatched_bounded_canary_consumption(
+    connection: sqlite3.Connection,
+    *,
+    approved_plan_digest: str | None = None,
+) -> tuple[str, int] | None:
+    """Return the unmatched consumption identity, if any.
+
+    Unmatched means a consumption row with no outcome. A circuit_release does
+    not substitute for an outcome; consume-once stays keyed on that pair.
+    ``approved_plan_digest`` narrows to one bound plan when known. Preflight
+    may omit it because the pending-family digest is not the activated digest.
+    """
+
+    if not _table_exists(connection, "issue_790_bounded_canary_consumptions"):
+        return None
+    clauses = []
+    params: list[object] = []
+    if approved_plan_digest is not None:
+        clauses.append("consumed.approved_plan_digest=?")
+        params.append(approved_plan_digest)
+    if _table_exists(connection, "issue_790_bounded_canary_outcomes"):
+        clauses.append(
+            "NOT EXISTS ("
+            "SELECT 1 FROM issue_790_bounded_canary_outcomes AS outcome "
+            "WHERE outcome.consumption_digest=consumed.consumption_digest)"
+        )
+    where = " AND ".join(clauses)
+    sql = (
+        "SELECT consumed.event_id, consumed.ledger_seq "
+        "FROM issue_790_bounded_canary_consumptions AS consumed"
+    )
+    if where:
+        sql = f"{sql} WHERE {where}"
+    row = connection.execute(f"{sql} LIMIT 1", params).fetchone()
+    if row is None:
+        return None
+    return str(row[0]), int(row[1])
+
+
 def validate_graphiti_canary_target_unused(
     connection: sqlite3.Connection,
     *,
@@ -1442,14 +1481,10 @@ class Issue790CanaryRepository:
                 raise Issue790CanaryIntegrityError(
                     "bounded canary authority is already consumed"
                 )
-            if connection.execute(
-                "SELECT 1 FROM issue_790_bounded_canary_consumptions AS consumed "
-                "WHERE consumed.approved_plan_digest=? AND NOT EXISTS ("
-                "SELECT 1 FROM issue_790_bounded_canary_outcomes AS outcome "
-                "WHERE outcome.consumption_digest=consumed.consumption_digest"
-                ") LIMIT 1",
-                (approved_plan_digest,),
-            ).fetchone() is not None:
+            if unmatched_bounded_canary_consumption(
+                connection,
+                approved_plan_digest=approved_plan_digest,
+            ) is not None:
                 raise Issue790CanaryIntegrityError(
                     "bounded canary authority is already consumed"
                 )
@@ -2015,6 +2050,7 @@ __all__ = [
     "evaluate_retry_forbidden_safety",
     "validate_retry_forbidden_safety_state",
     "graphiti_event_has_canary_consumption",
+    "unmatched_bounded_canary_consumption",
     "validate_graphiti_canary_target_unused",
     "graphiti_excluded_event_ids",
     "graphiti_retry_excluded",
