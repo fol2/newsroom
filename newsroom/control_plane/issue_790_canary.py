@@ -158,6 +158,94 @@ def _instant(value: object, *, field: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+_EXHAUSTED_FAILURE_PREFIX = "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:"
+
+
+def _parseable_utc_instant(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+def _is_exhausted_configuration_held(item: Mapping[str, object]) -> bool:
+    attempt = item.get("attempt_count")
+    failure = item.get("last_failure_code")
+    return (
+        item.get("state") == "CONFIGURATION_HELD"
+        and type(attempt) is int
+        and attempt == 1
+        and isinstance(failure, str)
+        and failure.startswith(_EXHAUSTED_FAILURE_PREFIX)
+    )
+
+
+def _retry_forbidden_row_matches(expected: object, retained: object) -> bool:
+    """Compare one retry-forbidden snapshot, ignoring seal-time available_at.
+
+    Exhausted CONFIGURATION_HELD attempt-1 rows rewrite ``available_at`` on
+    authority seal. That timestamp is representational, not identity, when
+    event_id, ledger_seq, state, attempt_count, provider_dispatched and
+    last_failure_code still match.
+    """
+
+    if not isinstance(expected, Mapping) or not isinstance(retained, Mapping):
+        return False
+    if dict(expected) == dict(retained):
+        return True
+    if not (
+        _is_exhausted_configuration_held(expected)
+        and _is_exhausted_configuration_held(retained)
+    ):
+        return False
+    if not (
+        _parseable_utc_instant(expected.get("available_at"))
+        and _parseable_utc_instant(retained.get("available_at"))
+    ):
+        return False
+    expected_rest = {
+        key: value for key, value in expected.items() if key != "available_at"
+    }
+    retained_rest = {
+        key: value for key, value in retained.items() if key != "available_at"
+    }
+    return expected_rest == retained_rest
+
+
+def _retry_forbidden_event_states_match(expected: object, retained: object) -> bool:
+    if not isinstance(expected, (list, tuple)) or not isinstance(
+        retained, (list, tuple)
+    ):
+        return False
+    if len(expected) != len(retained):
+        return False
+    return all(
+        _retry_forbidden_row_matches(item, row)
+        for item, row in zip(expected, retained, strict=True)
+    )
+
+
+def _retry_exclusion_records_match(
+    prior: Mapping[str, object], record: Mapping[str, object]
+) -> bool:
+    prior_rest = {
+        key: value
+        for key, value in prior.items()
+        if key not in {"excluded_at", "exclusion_digest", "event_snapshot"}
+    }
+    record_rest = {
+        key: value
+        for key, value in record.items()
+        if key not in {"excluded_at", "exclusion_digest", "event_snapshot"}
+    }
+    return prior_rest == record_rest and _retry_forbidden_row_matches(
+        prior.get("event_snapshot"), record.get("event_snapshot")
+    )
+
+
 def _token(value: object, *, field: str) -> str:
     if (
         not isinstance(value, str)
@@ -912,7 +1000,9 @@ class Issue790CanaryRepository:
                     if row is not None
                     else None
                 )
-                if snapshot != dict(item):
+                if snapshot is None or not _retry_forbidden_row_matches(
+                    item, snapshot
+                ):
                     raise Issue790CanaryIntegrityError(
                         "retry exclusion event state differs"
                     )
@@ -948,13 +1038,7 @@ class Issue790CanaryRepository:
                         ),
                         field="retry exclusion",
                     )
-                    stable_prior = dict(prior_record)
-                    stable_prior.pop("excluded_at", None)
-                    stable_record = dict(record)
-                    stable_record.pop("excluded_at", None)
-                    stable_prior.pop("exclusion_digest", None)
-                    stable_record.pop("exclusion_digest", None)
-                    if stable_prior != stable_record:
+                    if not _retry_exclusion_records_match(prior_record, record):
                         raise Issue790CanaryIntegrityError(
                             "conflicting retry exclusion replay"
                         )

@@ -34,6 +34,8 @@ from newsroom.control_plane.graphiti_requests import (
 from newsroom.control_plane.issue_790_canary import (
     Issue790CanaryIntegrityError,
     Issue790CanaryRepository,
+    _retry_forbidden_event_states_match,
+    _retry_forbidden_row_matches,
 )
 from newsroom.control_plane.issue_790_contract import (
     ISSUE_790_APPROVED_PLAN_DIGEST,
@@ -2095,7 +2097,7 @@ def _require_retry_events_unchanged(
         if isinstance(expected, list)
         else None,
     )
-    if retained != expected:
+    if not _retry_forbidden_event_states_match(expected, retained):
         raise Issue790DispositionError(
             "issue #790 retry-forbidden event state differs"
         )
@@ -2115,7 +2117,9 @@ def _require_retry_exclusions(
         or len(expected_events) < 2
         or any(
             record.get("reason") != "ISSUE_790_RETRY_FORBIDDEN"
-            or record.get("event_snapshot") != expected
+            or not _retry_forbidden_row_matches(
+                expected, record.get("event_snapshot")
+            )
             for record, expected in zip(retained, expected_events, strict=True)
         )
     ):
@@ -2612,7 +2616,9 @@ def collect_issue_790_operational_evidence(
         else _RETRY_FORBIDDEN_EVENTS
     )
     retry_events = _retry_event_snapshots(store, expected_retry)
-    if retry_events != list(expected_retry):
+    if not _retry_forbidden_event_states_match(
+        list(expected_retry), retry_events
+    ):
         raise Issue790DispositionError(
             "issue #790 retry-forbidden event state differs"
         )
@@ -2666,8 +2672,10 @@ def _validate_operational_evidence(
         or retained.get("revision") != retained.get("github_main_revision")
         or retained.get("store") != str(store.absolute())
         or retained.get("store_quick_check") != "ok"
-        or retained.get("retry_forbidden_events")
-        != plan.get("retry_forbidden_events")
+        or not _retry_forbidden_event_states_match(
+            plan.get("retry_forbidden_events"),
+            retained.get("retry_forbidden_events"),
+        )
     ):
         raise Issue790DispositionError("issue #790 operational evidence differs")
     revision = retained.get("revision")
