@@ -652,13 +652,27 @@ def validate_replay_receipt_binding(outer: object) -> dict[str, object]:
             "accepted object digests contradict proposal wire facts",
         )
     proposals = outer.get("proposals")
+    proposal_kinds = (
+        [item.get("kind") for item in proposals if isinstance(item, Mapping)]
+        if isinstance(proposals, list)
+        else []
+    )
+    entity_proposal_count = sum(
+        item in {"ENTITY_MENTION", "ENTITY_EQUIVALENCE"}
+        for item in proposal_kinds
+    )
+    relation_proposal_count = sum(
+        item == "RELATION" for item in proposal_kinds
+    )
     if (
         not isinstance(proposals, list)
+        or len(proposal_kinds) != len(proposals)
         or outer.get("proposal_count") != len(proposals)
         or outer.get("entity_count") != len(entities)
         or outer.get("relation_count") != len(facts)
-        or outer.get("proposal_count")
-        != int(outer.get("entity_count", -1)) + int(outer.get("relation_count", -1))
+        or entity_proposal_count + relation_proposal_count != len(proposals)
+        or entity_proposal_count > len(entities)
+        or relation_proposal_count > len(facts)
     ):
         raise CombinedTemporalError(
             CombinedTemporalFailureCode.PIPELINE_FAILED,
