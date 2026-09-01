@@ -500,7 +500,7 @@ def _forbidden_identities(
     """Durable and plan retry-forbidden identities. Consumption is resume, not retry."""
 
     ids: set[str] = set()
-    seqs: set[int] = set()
+    seqs: set[int] = set(_op()._RETRY_FORBIDDEN_LEDGER_SEQS)
     retry_events = plan.get("retry_forbidden_events")
     if isinstance(retry_events, list):
         for item in retry_events:
