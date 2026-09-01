@@ -491,9 +491,12 @@ def _effective_retry_exclusion_status(
         validate_retry_forbidden_safety_state,
     )
 
+    plan_records_by_seq = {
+        int(item.get("ledger_seq", 0)): item for item in plan_events
+    }
     plan_by_seq = {
-        int(item.get("ledger_seq", 0)): str(item.get("event_id"))
-        for item in plan_events
+        seq: str(item.get("event_id"))
+        for seq, item in plan_records_by_seq.items()
     }
     durable_by_seq = {
         int(item.get("ledger_seq", 0)): str(item.get("event_id"))
@@ -557,6 +560,28 @@ def _effective_retry_exclusion_status(
             failure_code = (current_outcome or {}).get("failure_code_after_seal")
             outcome_state = (current_outcome or {}).get("state_after_seal")
             dispatched = (current_outcome or {}).get("provider_dispatched")
+            plan_safety = plan_records_by_seq.get(consumed_seq)
+            expected_safety = (
+                plan_safety
+                if plan_safety is not None
+                else {
+                    "attempt_count": 1,
+                    "event_id": consumed_event,
+                    "last_failure_code": failure_code,
+                    "ledger_seq": consumed_seq,
+                    "provider_dispatched": dispatched,
+                    "state": outcome_state,
+                }
+            )
+            outcome_matches_plan = (
+                plan_safety is None
+                or (
+                    outcome_state == plan_safety.get("state")
+                    and failure_code == plan_safety.get("last_failure_code")
+                    and isinstance(dispatched, bool)
+                    and dispatched == plan_safety.get("provider_dispatched")
+                )
+            )
             held_failure = (
                 outcome_state == "CONFIGURATION_HELD"
                 and isinstance(failure_code, str)
@@ -577,14 +602,7 @@ def _effective_retry_exclusion_status(
             try:
                 safety_ok = (
                     validate_retry_forbidden_safety_state(
-                        expected={
-                            "attempt_count": 1,
-                            "event_id": consumed_event,
-                            "last_failure_code": failure_code,
-                            "ledger_seq": consumed_seq,
-                            "provider_dispatched": dispatched,
-                            "state": outcome_state,
-                        },
+                        expected=expected_safety,
                         live=current_snapshot,
                         excluded=(
                             consumed_event in effectively_excluded_event_ids
@@ -609,7 +627,8 @@ def _effective_retry_exclusion_status(
                 and current_outcome.get("event_id") == consumed_event
                 and current_outcome.get("ledger_seq") == consumed_seq
                 and current_outcome.get("attempt_count") == 1
-                and current_outcome.get("provider_dispatched") is dispatched
+                and isinstance(dispatched, bool)
+                and outcome_matches_plan
                 and current_outcome.get("retry_authorised") is False
                 and (held_failure or terminal_success)
             ):

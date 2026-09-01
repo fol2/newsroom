@@ -502,7 +502,19 @@ def _o16_exclusion_args(
         for seq in base_seqs
     ]
     if plan_includes_consumed:
-        plan_events.append({"event_id": event_id, "ledger_seq": 13361})
+        plan_events.append(
+            {
+                "attempt_count": 1,
+                "available_at": sealed_at,
+                "event_id": event_id,
+                "last_failure_code": (
+                    "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:AMBIGUOUS_EFFECT"
+                ),
+                "ledger_seq": 13361,
+                "provider_dispatched": True,
+                "state": "CONFIGURATION_HELD",
+            }
+        )
     exclusions = [
         {
             "event_id": item["event_id"],
@@ -729,7 +741,16 @@ def _o16_step23_exclusion_args() -> dict[str, object]:
             if suffix is None
             else f"BOUNDED_CANARY_AUTHORITY_EXHAUSTED:{suffix}"
         )
-        args["plan_events"].append({"event_id": event_id, "ledger_seq": seq})
+        args["plan_events"].append(
+            {
+                "attempt_count": 1,
+                "event_id": event_id,
+                "last_failure_code": failure,
+                "ledger_seq": seq,
+                "provider_dispatched": dispatched,
+                "state": state,
+            }
+        )
         consumptions.append(
             {
                 "approved_plan_digest": predecessor_plan,
@@ -805,6 +826,7 @@ def test_o16_step23_proves_every_missing_predecessor_plan_consumption() -> None:
         "retry_authorised",
         "invalid_held_failure",
         "invalid_terminal_success",
+        "mutated_plan_provider_state",
     ),
 )
 def test_o16_step23_consumption_proofs_fail_closed(mutation: str) -> None:
@@ -824,8 +846,10 @@ def test_o16_step23_consumption_proofs_fail_closed(mutation: str) -> None:
     elif mutation == "invalid_held_failure":
         args["outcomes"][0]["failure_code_after_seal"] = "HELD"
         args["event_snapshots"][0]["last_failure_code"] = "HELD"
-    else:
+    elif mutation == "invalid_terminal_success":
         args["outcomes"][-1]["result_class"] = "UNCLASSIFIED_NON_SUCCESS"
+    else:
+        args["plan_events"][-1]["provider_dispatched"] = False
 
     ok, detail = _effective_retry_exclusion_status(**args)
     assert ok is False
