@@ -1410,6 +1410,90 @@ def test_pending_guard_recovery_uses_retained_attempt_snapshot() -> None:
     assert set(snapshot_ids) == {"episode-id:1"}
 
 
+def test_discard_uncommitted_generation_keeps_pending_claim_and_snapshot() -> None:
+    """Live 13690: rollback_pending consumed PENDING before the empty seal."""
+
+    from newsroom.graphiti_adapter.neo4j_guard import Neo4jMutationGuard
+
+    queries: list[str] = []
+    marker_state = "PENDING"
+
+    class Driver:
+        async def execute_query(
+            self,
+            query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            nonlocal marker_state
+            del params
+            assert routing_ == "w"
+            queries.append(query)
+            if "SET m.claim_expires_at" in query and "RETURN m.state AS state" in query:
+                if marker_state != "PENDING":
+                    return ([], None, None)
+                return ([{"state": "PENDING"}], None, None)
+            if "SET m.state = 'COMPLETE'" in query:
+                marker_state = "COMPLETE"
+                return ([{"state": "COMPLETE"}], None, None)
+            if "SET m.state = 'ROLLING_BACK'" in query:
+                marker_state = "ROLLING_BACK"
+                return ([{"state": "ROLLING_BACK"}], None, None)
+            if "SET m.state = 'RECOVERED_AMBIGUOUS'" in query:
+                marker_state = "RECOVERED_AMBIGUOUS"
+                return ([{"state": "RECOVERED_AMBIGUOUS"}], None, None)
+            return ([], None, None)
+
+    guard = Neo4jMutationGuard(
+        Driver(),
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        episode_uuid="episode-id",
+        attempt_number=1,
+        input_digest="sha256:" + "0" * 64,
+    )
+    guard._claim_token = "owner"  # type: ignore[attr-defined]
+
+    asyncio.run(guard.discard_uncommitted_generation())
+    discard_queries = list(queries)
+    assert any("SET m.claim_expires_at" in query for query in discard_queries)
+    assert not any("ROLLING_BACK" in query for query in discard_queries)
+    assert not any("RECOVERED_AMBIGUOUS" in query for query in discard_queries)
+    assert not any("DELETE s" in query for query in discard_queries)
+
+    asyncio.run(guard.complete({"provider_attempt_number": 1}))
+    assert marker_state == "COMPLETE"
+    assert any("DELETE s" in query for query in queries)
+
+
+def test_discard_uncommitted_generation_requires_pending_claim() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import GuardError, Neo4jMutationGuard
+
+    class Driver:
+        async def execute_query(
+            self,
+            _query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[dict[str, object]], None, None]:
+            del params
+            assert routing_ == "w"
+            return ([], None, None)
+
+    guard = Neo4jMutationGuard(
+        Driver(),
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        episode_uuid="episode-id",
+        attempt_number=1,
+        input_digest="sha256:" + "0" * 64,
+    )
+    guard._claim_token = "owner"  # type: ignore[attr-defined]
+
+    with pytest.raises(GuardError, match="cannot discard an uncommitted generation"):
+        asyncio.run(guard.discard_uncommitted_generation())
+
+
 @pytest.mark.parametrize("state", ["SNAPSHOTTING", "RECOVERED_AMBIGUOUS"])
 def test_guard_retry_resets_snapshot_after_retained_attempt_cleanup(
     state: str,

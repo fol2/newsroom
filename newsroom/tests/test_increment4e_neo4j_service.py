@@ -273,6 +273,139 @@ def test_actual_service_guard_rollback_does_not_promote_snapshot_copies() -> Non
     asyncio.run(exercise())
 
 
+def test_actual_service_guard_discard_keeps_pending_claim_and_snapshot() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import Neo4jMutationGuard
+
+    async def exercise() -> None:
+        config = _service_config()
+        suffix = str(uuid.uuid4())
+        group_id = f"newsroom-guard-discard-{suffix}"
+        episode_uuid = f"episode-{suffix}"
+        snapshot_id = f"{episode_uuid}:1"
+        driver = _DatabaseBoundAsyncDriver(
+            AsyncGraphDatabase.driver(
+                config.uri,
+                auth=(config.username, config.password),
+            ),
+            database=config.database,
+        )
+
+        async def query(cypher: str, **parameters: object) -> EagerResult:
+            return await driver.execute_query(
+                cypher, params=parameters, routing_="w"
+            )
+
+        try:
+            await query(
+                """
+                CREATE (a:Entity {uuid:$a, group_id:$group_id, name:'before'}),
+                       (b:Entity {uuid:$b, group_id:$group_id, name:'other'}),
+                       (a)-[:REL {uuid:$relationship, fact:'before'}]->(b)
+                """,
+                a=f"a-{suffix}",
+                b=f"b-{suffix}",
+                relationship=f"relationship-{suffix}",
+                group_id=group_id,
+            )
+            guard = Neo4jMutationGuard(
+                driver,
+                group_id=group_id,
+                episode_uuid=episode_uuid,
+                attempt_number=1,
+                input_digest="sha256:" + "1" * 64,
+            )
+            await guard.begin()
+            await query(
+                """
+                MATCH (a {uuid:$a})-[r]->()
+                SET a.name='after', r.fact='after'
+                CREATE (:Entity {uuid:$new, group_id:$group_id, name:'new'})
+                """,
+                a=f"a-{suffix}",
+                new=f"new-{suffix}",
+                group_id=group_id,
+            )
+            await guard.discard_uncommitted_generation()
+            result = await query(
+                """
+                MATCH (n {group_id:$group_id})
+                WHERE n.uuid IS NOT NULL
+                OPTIONAL MATCH (n)-[r]->()
+                RETURN collect(DISTINCT [n.uuid,n.name]) AS nodes,
+                       collect(DISTINCT [r.uuid,r.fact]) AS relationships
+                """,
+                group_id=group_id,
+            )
+            marker = await query(
+                """
+                MATCH (m:NewsroomIngestMarker {episode_uuid:$episode_uuid})
+                RETURN m.state AS state, m.recovery_reason AS recovery_reason
+                """,
+                episode_uuid=episode_uuid,
+            )
+            snapshots = await query(
+                """
+                MATCH (s)
+                WHERE s._newsroom_snapshot_id=$snapshot_id
+                RETURN count(s) AS count
+                """,
+                snapshot_id=snapshot_id,
+            )
+            record = result.records[0]
+            assert sorted(record["nodes"]) == sorted(
+                [[f"a-{suffix}", "before"], [f"b-{suffix}", "other"]]
+            )
+            assert [
+                item for item in record["relationships"] if item[0] is not None
+            ] == [[f"relationship-{suffix}", "before"]]
+            assert marker.records[0]["state"] == "PENDING"
+            assert marker.records[0]["recovery_reason"] is None
+            assert int(snapshots.records[0]["count"]) > 0
+            await guard.record_pending_telemetry(
+                chat_invocations=[],
+                embedding_usage={
+                    "usage_basis": "NO_EMBEDDING_CALL",
+                    "request_count": 0,
+                },
+            )
+            await guard.complete({"provider_attempt_number": 1})
+            completed = await query(
+                """
+                MATCH (m:NewsroomIngestMarker {episode_uuid:$episode_uuid})
+                RETURN m.state AS state
+                """,
+                episode_uuid=episode_uuid,
+            )
+            remaining = await query(
+                """
+                MATCH (s)
+                WHERE s._newsroom_snapshot_id=$snapshot_id
+                RETURN count(s) AS count
+                """,
+                snapshot_id=snapshot_id,
+            )
+            assert completed.records[0]["state"] == "COMPLETE"
+            assert int(remaining.records[0]["count"]) == 0
+        finally:
+            try:
+                await query(
+                    """
+                    MATCH (n)
+                    WHERE n.group_id=$group_id
+                       OR n.episode_uuid=$episode_uuid
+                       OR n._newsroom_snapshot_id=$snapshot_id
+                    DETACH DELETE n
+                    """,
+                    group_id=group_id,
+                    episode_uuid=episode_uuid,
+                    snapshot_id=snapshot_id,
+                )
+            finally:
+                await driver.close()
+
+    asyncio.run(exercise())
+
+
 def test_actual_service_increment4_admitted_state_projects_exactly_and_replays(
     tmp_path: Path,
 ) -> None:
