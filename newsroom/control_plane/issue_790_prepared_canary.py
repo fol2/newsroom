@@ -23,7 +23,10 @@ from newsroom.control_plane.issue_790_canary import (
     retry_forbidden_live_snapshot,
     unmatched_bounded_canary_consumption,
 )
-from newsroom.control_plane.issue_790_contract import ISSUE_790_STEP22_PENDING_DIGEST
+from newsroom.control_plane.issue_790_contract import (
+    ISSUE_790_STEP22_PENDING_DIGEST,
+    ISSUE_790_STEP23_PENDING_DIGEST,
+)
 from newsroom.control_plane.issue_790_disposition import Issue790DispositionError
 from newsroom.graphiti_adapter.combined_temporal_projection import (
     PROJECTION_POLICY_DIGEST,
@@ -597,20 +600,6 @@ def _event_is_untouched_attempt_zero(
     return str(row[0]) == "QUEUED" and int(row[1]) == 0 and not bool(row[2])
 
 
-def _qualification_is_current_unused(
-    store: Path | None,
-    *,
-    event_id: str,
-    ledger_seq: int,
-) -> bool:
-    if store is None:
-        return True
-    untouched = _event_is_untouched_attempt_zero(
-        store, event_id=event_id, ledger_seq=ledger_seq
-    )
-    return untouched is not False
-
-
 def _spent_or_retry_forbidden(
     store: Path | None,
     plan: Mapping[str, object],
@@ -657,14 +646,22 @@ def _plan_consumption_identity(
         return None
     connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
     try:
+        if connection.execute(
+            "SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?",
+            ("issue_790_bounded_canary_consumptions",),
+        ).fetchone() is None:
+            return None
         rows = connection.execute(
             "SELECT event_id,ledger_seq "
             "FROM issue_790_bounded_canary_consumptions "
             "WHERE approved_plan_digest=?",
             (plan_digest,),
         ).fetchall()
-    except sqlite3.OperationalError:
-        return None
+    except sqlite3.OperationalError as exc:
+        raise PreparedCanaryError(
+            "bounded canary consumption authority schema differs",
+            failure_code=BOUNDED_CANARY_AUTHORITY_CONSUMED,
+        ) from exc
     finally:
         connection.close()
     if len(rows) > 1:
@@ -1000,9 +997,10 @@ def prepare_issue_790_canary(
         "candidate_event_id": bound_event_id,
         "candidate_ledger_seq": bound_ledger_seq,
         "pending_digest": (
-            ISSUE_790_STEP22_PENDING_DIGEST
-            if ordinal == 22
-            else str(plan.get("canonical_digest") or "")
+            {
+                22: ISSUE_790_STEP22_PENDING_DIGEST,
+                23: ISSUE_790_STEP23_PENDING_DIGEST,
+            }.get(ordinal, str(plan.get("canonical_digest") or ""))
         ),
         "tracked_plan": TRACKED_PLAN_NAME,
     }

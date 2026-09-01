@@ -41,6 +41,12 @@ GRAPHITI_CORE_VERSION = "0.29.3"
 REQUIRED_RETRY_LEDGER_SEQS = frozenset(
     {1932, 1972, 8834, 8835, 13284, 13337, 13361, 13362}
 )
+STEP23_RETRY_LEDGER_SEQS = frozenset(
+    {
+        *REQUIRED_RETRY_LEDGER_SEQS,
+        13665, 13671, 13677, 13683, 13689, 13690, 13696,
+    }
+)
 STEP21_FULL_PATH_TEST = (
     "newsroom/tests/test_graphiti_corpus_ingest.py::"
     "test_step21_unmarked_zero_proposal_completion_survives_full_cycle"
@@ -210,6 +216,7 @@ def _pending_plan_path_for_ordinal(ordinal: int) -> Path:
         19: disposition.ISSUE_790_STEP19_PENDING_PLAN_PATH,
         20: disposition.ISSUE_790_STEP20_PENDING_PLAN_PATH,
         21: disposition.ISSUE_790_STEP21_PENDING_PLAN_PATH,
+        22: disposition.ISSUE_790_STEP22_PENDING_PLAN_PATH,
     }
     try:
         return paths[ordinal]
@@ -943,7 +950,7 @@ def _retry_exclusion_append_smoke() -> tuple[bool, str]:
     root_plan = "sha256:" + "11" * 32
     disposition = "sha256:" + "22" * 32
     invocation = "sha256:" + "33" * 32
-    seqs = (1932, 1972, 8834, 8835, 13284, 13337, 13361, 13362)
+    seqs = tuple(sorted(STEP23_RETRY_LEDGER_SEQS))
     events = [
         {
             "attempt_count": 1,

@@ -4137,8 +4137,12 @@ def test_issue_790_success_sequence_stops_after_truthful_predecessor_success() -
 
     class SuccessfulPredecessorRepository:
         @staticmethod
-        def existing_consumption(*, approved_plan_digest: str) -> dict[str, object]:
+        def existing_consumption(
+            *, approved_plan_digest: str, event_id: str, ledger_seq: int
+        ) -> dict[str, object]:
             assert approved_plan_digest == predecessor["plan_digest"]
+            assert event_id == predecessor["event_id"]
+            assert ledger_seq == predecessor["ledger_seq"]
             return consumption
 
         @staticmethod
@@ -4194,8 +4198,12 @@ def test_issue_790_sequence_stops_after_misclassified_terminal_success() -> None
 
     class UnclassifiedPredecessorRepository:
         @staticmethod
-        def existing_consumption(*, approved_plan_digest: str) -> dict[str, object]:
+        def existing_consumption(
+            *, approved_plan_digest: str, event_id: str, ledger_seq: int
+        ) -> dict[str, object]:
             assert approved_plan_digest == predecessor["plan_digest"]
+            assert event_id == predecessor["event_id"]
+            assert ledger_seq == predecessor["ledger_seq"]
             return consumption
 
         @staticmethod
@@ -4284,8 +4292,12 @@ def test_issue_790_reviewed_non_timeout_fix_preserves_attempt_budgets() -> None:
 
     class ReviewedFixRepository:
         @staticmethod
-        def existing_consumption(*, approved_plan_digest: str) -> dict[str, object]:
+        def existing_consumption(
+            *, approved_plan_digest: str, event_id: str, ledger_seq: int
+        ) -> dict[str, object]:
             assert approved_plan_digest == predecessor["plan_digest"]
+            assert event_id == predecessor["event_id"]
+            assert ledger_seq == predecessor["ledger_seq"]
             return consumption
 
         @staticmethod

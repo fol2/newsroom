@@ -1119,7 +1119,10 @@ class Issue790CanaryRepository:
         if (
             seqs[:2] != (1932, 1972)
             or any(
-                seq not in {8834, 8835, 13284, 13337, 13361, 13362}
+                seq not in {
+                    8834, 8835, 13284, 13337, 13361, 13362,
+                    13665, 13671, 13677, 13683, 13689, 13690, 13696,
+                }
                 for seq in extra
             )
             or len(set(seqs)) != len(seqs)
