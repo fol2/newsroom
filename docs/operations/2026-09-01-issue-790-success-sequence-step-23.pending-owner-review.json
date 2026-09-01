@@ -1,0 +1,261 @@
+{
+  "schema_version": "newsroom.issue-790.iterative-canary-plan.v2",
+  "issue": 790,
+  "plan_status": "PENDING_OWNER_REVIEW",
+  "executable": false,
+  "live_canary_authorised": false,
+  "approval": null,
+  "target": {
+    "allocation_digest": "sha256:c789330ca7151d097e6d366dd65481ff21d55f93891ff61e368d7369b12c7120",
+    "conservative_total_source": "QUALIFIED_POLICY_MAX_TOTAL_TOKENS",
+    "expected_conservative_total_tokens": 147456,
+    "invocation_id": "sha256:d0712807fd025520d0a94e5a28c532d4cb8684c936387290fe7eeb49d0b2336c",
+    "policy_digest": "sha256:0d1b6d2f7b7163f26df1a5e382ba8341798726dad9e38e7d38a00ba2abf3a3eb",
+    "provider": "cursor-agent-cli",
+    "route": "GRAPHITI_CHAT_PRIMARY",
+    "route_open_reason": "SYSTEMIC_TRANSPORT",
+    "terminal_digest": "sha256:d48e844404516bd41b17038b42a834c6e54bf5da520ef046f3baf81ea7a8cbbe",
+    "terminal_failure_class": "MISSING_PROVIDER_TELEMETRY",
+    "terminal_outcome": "FAILED",
+    "terminal_usage_status": "UNREPORTED",
+    "workload_class": "GRAPHITI_CHAT_PRIMARY"
+  },
+  "release": {
+    "kind": "PENDING_OWNER_APPROVAL",
+    "evidence": "REVIEWED_FIX_RECORD",
+    "reviewed_fix_record_digest": "sha256:15c8bf30930821db11464a71ddbfca678e2ab2970a74be5542ace95f33938bc7",
+    "merged_commit": "c0b60ad1a67b5380c6e83d36e880fd6c7fd7fc9c",
+    "merged_tree": "ca2be4f677ec1490b2f2ddcbfcde44ea872f7706"
+  },
+  "retry_forbidden_events": [
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-26T12:25:29.807056Z",
+      "event_id": "sha256:bacb9104c81dd86ca3f62a39f6c386cd4d84ab470e9675e31acf8e2feb50443e",
+      "last_failure_code": "PRODUCER_INTERNAL_ERROR",
+      "ledger_seq": 1932,
+      "provider_dispatched": true,
+      "state": "RETRY_HELD"
+    },
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-26T13:52:15.763233Z",
+      "event_id": "sha256:de7bb58fde4829f4778936e7c5ebd1dd583a63f8658fb6af2fcb4b6fc873b0d5",
+      "last_failure_code": "PRODUCER_INTERNAL_ERROR",
+      "ledger_seq": 1972,
+      "provider_dispatched": false,
+      "state": "RETRY_HELD"
+    },
+    {
+      "attempt_count": 0,
+      "available_at": "2026-08-26T08:41:34.385400Z",
+      "event_id": "sha256:cac05a3829b4283a12330c38b7ea3e4d1e998024e4b3ed2e73508c476996a04b",
+      "last_failure_code": null,
+      "ledger_seq": 8834,
+      "provider_dispatched": false,
+      "state": "QUEUED"
+    },
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-29T19:51:59.301612Z",
+      "event_id": "sha256:2c6941748dce73271a0d4aae2e94766384d0dd16bc29707524f74b8026d7c3b9",
+      "last_failure_code": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:GATE_ValueError",
+      "ledger_seq": 8835,
+      "provider_dispatched": false,
+      "state": "CONFIGURATION_HELD"
+    },
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-30T12:00:42.331096Z",
+      "event_id": "sha256:fb49a59d1c421c261bab4586873680e50e8181acfd0d6ebc03a14f889147d896",
+      "last_failure_code": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:GraphitiAdapterContractError",
+      "ledger_seq": 13284,
+      "provider_dispatched": false,
+      "state": "CONFIGURATION_HELD"
+    },
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-30T13:00:55.782046Z",
+      "event_id": "sha256:e4ef6fd0af91d5d525af3f37f5cfb422733a1640c84c16cdc162f0e6d8bb0b5b",
+      "last_failure_code": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:PRODUCER_INTERNAL_ERROR",
+      "ledger_seq": 13337,
+      "provider_dispatched": true,
+      "state": "CONFIGURATION_HELD"
+    },
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-30T20:58:43.662872Z",
+      "event_id": "sha256:90c3b4de731f2df8d4353e516762f65450570e1e8372ed7b703423f717351ae7",
+      "last_failure_code": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:AMBIGUOUS_EFFECT",
+      "ledger_seq": 13361,
+      "provider_dispatched": true,
+      "state": "CONFIGURATION_HELD"
+    },
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-30T20:31:56.025450Z",
+      "event_id": "sha256:98d0ffbca828f6937b687751c711fec3be9182e679b2fcd041d3d14160f00c85",
+      "last_failure_code": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:AMBIGUOUS_EFFECT",
+      "ledger_seq": 13362,
+      "provider_dispatched": true,
+      "state": "CONFIGURATION_HELD"
+    },
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-31T15:25:10.756577Z",
+      "event_id": "sha256:b39a1e6ea465ca4a993893d4ae51c94ca9ac3e0db7f4fd70a8c780367263be6b",
+      "last_failure_code": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:AMBIGUOUS_EFFECT",
+      "ledger_seq": 13665,
+      "provider_dispatched": true,
+      "state": "CONFIGURATION_HELD"
+    },
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-31T18:33:06.133883Z",
+      "event_id": "sha256:db17fb48469b96b7134b9f0ab7c73c27ddc2f4ebb3bc6016fe268b6326ccb08e",
+      "last_failure_code": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:BrokerError",
+      "ledger_seq": 13671,
+      "provider_dispatched": false,
+      "state": "CONFIGURATION_HELD"
+    },
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-31T19:08:34.928456Z",
+      "event_id": "sha256:1f60dac732657a0d89a9d46528aed13bcd7e2af5157a5bc6541bed579067705c",
+      "last_failure_code": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:AMBIGUOUS_EFFECT",
+      "ledger_seq": 13677,
+      "provider_dispatched": true,
+      "state": "CONFIGURATION_HELD"
+    },
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-31T19:58:00.274309Z",
+      "event_id": "sha256:7d7bd60fac66b52c7e945a97021570e4220e3fdee0c01af4ee744a50a3993944",
+      "last_failure_code": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:AMBIGUOUS_EFFECT",
+      "ledger_seq": 13683,
+      "provider_dispatched": true,
+      "state": "CONFIGURATION_HELD"
+    },
+    {
+      "attempt_count": 1,
+      "available_at": "2026-08-31T21:09:43.725082Z",
+      "event_id": "sha256:0cf4c6da7a7be611d10fb87f82a7038ca42296f6112d5a2a03fcfb35abde9a39",
+      "last_failure_code": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:NO_EVENT_RESULT",
+      "ledger_seq": 13689,
+      "provider_dispatched": false,
+      "state": "CONFIGURATION_HELD"
+    },
+    {
+      "attempt_count": 1,
+      "available_at": "2026-09-01T00:37:11.511490Z",
+      "event_id": "sha256:57bfeadea2a60c8f24a269c0985611ea8828fcaeaccbfd1b7bed84b537293666",
+      "last_failure_code": "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:GuardError",
+      "ledger_seq": 13690,
+      "provider_dispatched": true,
+      "state": "CONFIGURATION_HELD"
+    },
+    {
+      "attempt_count": 1,
+      "available_at": "2026-09-01T01:24:52.778230Z",
+      "event_id": "sha256:a50799d126f82a229e1630816ea27a0e3fff2731fee87b48c986bc0f9b51b7f2",
+      "last_failure_code": null,
+      "ledger_seq": 13696,
+      "provider_dispatched": true,
+      "state": "TERMINAL"
+    }
+  ],
+  "canary": {
+    "authority_consumption": "APPEND_ONLY_SINGLE_USE_BEFORE_PROVIDER_IO",
+    "event_binding": "EXPLICIT_QUEUED_ATTEMPT_ZERO_EVENT",
+    "fallback_mode": "DISABLED_BEFORE_PROVIDER_DISPATCH",
+    "fresh_provider_backed_attempt_count": 1,
+    "persistent_worker_state_before_canary": "UNLOADED",
+    "requires_exact_main_deployment": true
+  },
+  "non_effects": [
+    "NO_PUBLICATION",
+    "NO_PUBLIC_DISPATCH",
+    "NO_BACKLOG_DRAIN",
+    "NO_BULK_REQUEUE",
+    "NO_PRODUCTION_OPERATIONAL_ADMISSION",
+    "NO_WIDER_ACTIVATION",
+    "NO_PROVIDER_SUBSTITUTION",
+    "NO_MODEL_SUBSTITUTION",
+    "NO_TOKEN_LIMIT_REMOVAL",
+    "NO_UNRELATED_SPEND_DISPOSITION",
+    "NO_LIVE_CANARY_WITHOUT_OWNER_APPROVAL"
+  ],
+  "sequence": {
+    "root_plan_digest": "sha256:ce7ee7fd56c931b147158dad2a74047ada90b805e5a4c545e53db1f4d2ae7383",
+    "sequence_ordinal": 23,
+    "constraint_change": "REVIEWED_NON_TIMEOUT_FIX",
+    "controller_timeout_ms": 160000,
+    "extraction_timeout_ms": 180000,
+    "cleanup_reserve_ms": 20000,
+    "timeout_increment_ms": 10000,
+    "call_shape_policy_version": "issue-816-v2",
+    "call_shape_policy_digest": "sha256:ba1cb4267ff78419174b50a0e233545a4bf745168d4f7fdbffa2fb6007ab5abc",
+    "fixed_constraints_digest": "sha256:accd35045a4bc3c8d20c50c272755e7d4e6980dc6d7e1a4f029b36b3cd2a20c1",
+    "projection_policy_version": "NewsroomGovernedProposalProjectionV1",
+    "projection_policy_digest": "sha256:c68a9c5bf81a8d052ba9b05f286b0d1cf664e86e2e00ee3c39684f7809b16a7c",
+    "temporal_policy_version": "graphiti-source-reference-time-v2",
+    "validator_contract_version": "NewsroomCombinedTemporalNormaliseV2",
+    "stop_condition": "FIRST_TRUTHFUL_PROVIDER_BACKED_SUCCESS",
+    "predecessor": {
+      "plan_digest": "sha256:1a0711aad02e849e456293549e4f9b9a1b1100b7ba01603ca4dcf465a410c529",
+      "outcome_digest": "sha256:6a3c9f19717104e42cda8ea5a06c692a99465a1e95104033e89d8fecf3151463",
+      "event_id": "sha256:a50799d126f82a229e1630816ea27a0e3fff2731fee87b48c986bc0f9b51b7f2",
+      "ledger_seq": 13696
+    },
+    "predecessor_causal_report": {
+      "schema_version": "newsroom.issue-790.non-timeout-causal-report.v1",
+      "classification": "NON_TIMEOUT_FAILURE",
+      "causal_constraint": "REVIEWED_CODE_OR_CONFIGURATION_FIX",
+      "predecessor_outcome_digest": "sha256:6a3c9f19717104e42cda8ea5a06c692a99465a1e95104033e89d8fecf3151463",
+      "event_id": "sha256:a50799d126f82a229e1630816ea27a0e3fff2731fee87b48c986bc0f9b51b7f2",
+      "boundary": "BOUNDED_CANARY_SINGLE_USE_AUTHORITY",
+      "configured_controller_timeout_ms": 160000,
+      "configured_extraction_timeout_ms": 180000,
+      "cleanup_reserve_ms": 20000,
+      "deadline_at": null,
+      "elapsed_ms": 191798,
+      "last_progress": "TRUTHFUL_PROVIDER_SUCCESS_TERMINALLY_RECORDED",
+      "termination": "ACTIVATED_OWNER_CAP_CONSUMED",
+      "provider_cause": "TRUTHFUL_PROVIDER_SUCCESS",
+      "local_cause": "DYNAMIC_SUCCESSOR_SELECTION_AFTER_COMPLETED_SINGLE_USE_CONSUMPTION",
+      "diagnostic_reference": "https://github.com/fol2/newsroom/issues/790#issuecomment-5487260985",
+      "report_digest": "sha256:215355c6f247856ce141d40bc90fd3a30b4d05fc0af82bfa5e8119641f8fb3ae"
+    },
+    "reviewed_fix": {
+      "schema_version": "newsroom.issue-790.reviewed-non-timeout-fix.v1",
+      "predecessor_outcome_digest": "sha256:6a3c9f19717104e42cda8ea5a06c692a99465a1e95104033e89d8fecf3151463",
+      "causal_report_digest": "sha256:215355c6f247856ce141d40bc90fd3a30b4d05fc0af82bfa5e8119641f8fb3ae",
+      "fix_kind": "CODE",
+      "pull_request_url": "https://github.com/fol2/newsroom/pull/892",
+      "reviewed_fix_revision": "475497f00d6610c707a3237f7c6b1fccf2ad5665",
+      "corrected_red_revision": "59d356368bc9df97841c4359d38333dc28123a97",
+      "review_receipt_digest": "sha256:8e650bbde4c4518355fe54415c9a1e31e4728b70e855428ddc92e69f8a06a77a",
+      "provider_free_qualification_digest": "sha256:6d5b861ea665c5959a20beae9eb663b0744caeefebf93bfcee8076a4c2f21b84",
+      "record_digest": "sha256:15c8bf30930821db11464a71ddbfca678e2ab2970a74be5542ace95f33938bc7"
+    },
+    "predecessor_activation_digest": "sha256:e6fe0a0f4eeaefc731071b550ea866979ebea1bf674ddfed42c57669bdbea310",
+    "hold_comment": "5487260985",
+    "pre_dispatch_operational_requirements_digest": "sha256:968d0875cbed3a37cca56c2aa696598c3996e10d3a0ad6edc5978c21965d587b",
+    "predecessor_canary_receipt_digest": "sha256:8a5c32f2e7327221e2fb082e0d25bc9530b4688a39ec9d6b193da49afaa1f9cc",
+    "candidate_event_qualification": {
+      "event_id": "sha256:bf467ee5908bca49b84d8309cceb225503e627177e7065efefb0a54196e8ef15",
+      "event_manifest_digest": "sha256:3e3fb1143091b9e8f364a1db22503b803a859da098a67dcc36964cf1565f774b",
+      "event_preflight_digest": "sha256:22dda71d2a9ae6a6ef69a679b5662300ff9adf4c2263d2b7920f29a0defe5f7a",
+      "ledger_seq": 13702,
+      "observed_at": "2026-09-01T01:31:53.722227Z",
+      "provider_calls": 0,
+      "qualification_digest": "sha256:c1dca544d0de449d7a951d3673858ce7700e5271ad56a372ba0706a3fae6604c",
+      "resolved_unit_count": 1,
+      "schema_version": "newsroom.issue-790.candidate-event-qualification.v1",
+      "status": "READY_FOR_OWNER_PACKET",
+      "store_mutations": 0
+    },
+    "candidate_event_preparation_digest": "sha256:90ef3df005e95df3f0343ecd312d47859b4698387d8b27d91fb3abba2f3f650d"
+  },
+  "canonical_digest": "sha256:2ca46f70c0f64737b81cf28a1b3aac15943cdf3b4c14048aeb7c60f9585b7d6e"
+}

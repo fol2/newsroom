@@ -173,10 +173,10 @@ ISSUE_790_STEP22_ACTIVATION_DIGEST = (
     "sha256:e6fe0a0f4eeaefc731071b550ea866979ebea1bf674ddfed42c57669bdbea310"
 )
 ISSUE_790_STEP23_PENDING_DIGEST = (
-    "sha256:92bdb41621a102ef0ac4dd2f4564bfc2efa0cb332b1f1d92f1fff7496249f0b5"
+    "sha256:2ca46f70c0f64737b81cf28a1b3aac15943cdf3b4c14048aeb7c60f9585b7d6e"
 )
 ISSUE_790_STEP23_CHECKED_CANDIDATE_DIGEST = (
-    "sha256:72c079e57c67bdb4caf40c5d0a0e6d2285b425c65edc982c8f734b4b927ee521"
+    "sha256:7e8bc6c5e254a3fe530e5b3ca71782720214d0eaa1f2d5936a13fe62518c5078"
 )
 ISSUE_790_OWNER_ACTIVATED_SEQUENCE_ORDINALS = frozenset(
     {16, 17, 18, 19, 20, 21, 22, 23}
@@ -1053,7 +1053,7 @@ _STEP23_CHECKED_CANDIDATE = Issue790CheckedCandidateContract(
     temporal_policy_version="graphiti-source-reference-time-v2",
     validator_contract_version="NewsroomCombinedTemporalNormaliseV2",
     pre_dispatch_operational_requirements_digest="sha256:968d0875cbed3a37cca56c2aa696598c3996e10d3a0ad6edc5978c21965d587b",
-    reviewed_fix_digest="sha256:a9c27e5ba79b9a7478ef91334f2d56eae2afd12cd954d431682ef4fe42280ffe",
+    reviewed_fix_digest="sha256:15c8bf30930821db11464a71ddbfca678e2ab2970a74be5542ace95f33938bc7",
     predecessor_causal_report_digest="sha256:215355c6f247856ce141d40bc90fd3a30b4d05fc0af82bfa5e8119641f8fb3ae",
     checked_approved_by="checked:issue-790-step23-sealer",
     checked_approval_reference=f"checked:{ISSUE_790_STEP23_PENDING_DIGEST}",

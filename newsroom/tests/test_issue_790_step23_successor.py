@@ -5,7 +5,6 @@ from __future__ import annotations
 import sqlite3
 import json
 from copy import deepcopy
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -62,71 +61,25 @@ def _causal_report() -> dict[str, object]:
 
 
 def _reviewed_fix(report: dict[str, object]) -> dict[str, object]:
-    fix: dict[str, object] = {
-        "schema_version": "newsroom.issue-790.reviewed-non-timeout-fix.v1",
-        "predecessor_outcome_digest": _OUTCOME_13696,
-        "causal_report_digest": report["report_digest"],
-        "fix_kind": "CODE",
-        "pull_request_url": "https://github.com/fol2/newsroom/pull/892",
-        "reviewed_fix_revision": "1" * 40,
-        "review_receipt_digest": "sha256:" + "2" * 64,
-        "provider_free_qualification_digest": (
-            "sha256:c1dca544d0de449d7a951d3673858ce7700e5271ad56a372ba0706a3fae6604c"
-        ),
-    }
-    fix["record_digest"] = digest_canonical(fix)
-    return fix
+    assert report["report_digest"] == (
+        "sha256:215355c6f247856ce141d40bc90fd3a30b4d05fc0af82bfa5e8119641f8fb3ae"
+    )
+    return json.loads(
+        (
+            _ROOT
+            / "docs/operations/2026-09-01-issue-790-step-23-reviewed-fix-record.json"
+        ).read_text(encoding="utf-8")
+    )
 
 
-def _pending23(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+def _pending23() -> dict[str, object]:
     pending = json.loads(
-        (_ROOT / disposition_module.ISSUE_790_STEP22_PENDING_PLAN_PATH).read_text()
+        (_ROOT / disposition_module.ISSUE_790_STEP23_PENDING_PLAN_PATH).read_text()
     )
     report = _causal_report()
     fix = _reviewed_fix(report)
-    sequence = dict(pending["sequence"])
-    sequence.update(
-        {
-            "sequence_ordinal": 23,
-            "predecessor": {
-                "plan_digest": _STEP22_PLAN,
-                "outcome_digest": _OUTCOME_13696,
-                "event_id": _EVENT_13696,
-                "ledger_seq": 13696,
-            },
-            "predecessor_causal_report": report,
-            "reviewed_fix": fix,
-            "predecessor_activation_digest": _STEP22_ACTIVATION,
-            "predecessor_canary_receipt_digest": _RECEIPT_13696,
-            "candidate_event_qualification": {
-                "schema_version": "newsroom.issue-790.candidate-event-qualification.v1",
-                "status": "READY_FOR_OWNER_PACKET",
-                "event_id": _EVENT_13702,
-                "ledger_seq": 13702,
-                "event_manifest_digest": "sha256:3e3fb1143091b9e8f364a1db22503b803a859da098a67dcc36964cf1565f774b",
-                "event_preflight_digest": "sha256:22dda71d2a9ae6a6ef69a679b5662300ff9adf4c2263d2b7920f29a0defe5f7a",
-                "resolved_unit_count": 1,
-                "provider_calls": 0,
-                "store_mutations": 0,
-                "observed_at": "2026-09-01T01:31:53.722227Z",
-                "qualification_digest": "sha256:c1dca544d0de449d7a951d3673858ce7700e5271ad56a372ba0706a3fae6604c",
-            },
-            "candidate_event_preparation_digest": "sha256:90ef3df005e95df3f0343ecd312d47859b4698387d8b27d91fb3abba2f3f650d",
-        }
-    )
-    pending["sequence"] = sequence
-    pending["retry_forbidden_events"] = [
-        dict(item) for item in disposition_module._RETRY_FORBIDDEN_EVENTS_STEP23
-    ]
-    pending["release"] = {
-        "kind": "PENDING_OWNER_APPROVAL",
-        "evidence": "REVIEWED_FIX_RECORD",
-        "reviewed_fix_record_digest": fix["record_digest"],
-        "merged_commit": "c0b60ad1a67b5380c6e83d36e880fd6c7fd7fc9c",
-        "merged_tree": "ca2be4f677ec1490b2f2ddcbfcde44ea872f7706",
-    }
-    pending.pop("canonical_digest", None)
-    pending["canonical_digest"] = digest_canonical(pending)
+    assert pending["sequence"]["predecessor_causal_report"] == report
+    assert pending["sequence"]["reviewed_fix"] == fix
 
     checked = {
         "approved_by": "checked:issue-790-step23-sealer",
@@ -141,27 +94,10 @@ def _pending23(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     candidate["approval"] = checked
     candidate.pop("canonical_digest", None)
     candidate["canonical_digest"] = digest_canonical(candidate)
-    base = contract_module.issue_790_checked_candidate_contract_for_pending(
-        contract_module.ISSUE_790_STEP23_PENDING_DIGEST
+    contract = contract_module.issue_790_checked_candidate_contract_for_pending(
+        str(pending["canonical_digest"])
     )
-    contract = replace(
-        base,
-        pending_digest=str(pending["canonical_digest"]),
-        candidate_digest=str(candidate["canonical_digest"]),
-        reviewed_fix_digest=str(fix["record_digest"]),
-        predecessor_causal_report_digest=str(report["report_digest"]),
-        checked_approval_reference=str(checked["approval_reference"]),
-    )
-    monkeypatch.setitem(
-        contract_module._CHECKED_CANDIDATES_BY_PENDING,
-        contract.pending_digest,
-        contract,
-    )
-    monkeypatch.setitem(
-        contract_module._CHECKED_CANDIDATES,
-        contract.candidate_digest,
-        contract,
-    )
+    assert candidate["canonical_digest"] == contract.candidate_digest
     return pending
 
 
@@ -233,6 +169,46 @@ def test_step23_contract_is_the_only_registered_next_ordinal() -> None:
     assert contract.sequence_ordinal == 23
     assert contract.candidate_event_id == _EVENT_13702
     assert contract.candidate_ledger_seq == 13702
+
+
+def test_step23_reviewed_fix_and_pending_packet_bind_reviewed_head() -> None:
+    report = _causal_report()
+    fix = _reviewed_fix(report)
+    fix_unsigned = {key: value for key, value in fix.items() if key != "record_digest"}
+    pending = json.loads(
+        (_ROOT / disposition_module.ISSUE_790_STEP23_PENDING_PLAN_PATH).read_text(
+            encoding="utf-8"
+        )
+    )
+    pending_unsigned = {
+        key: value for key, value in pending.items() if key != "canonical_digest"
+    }
+
+    assert fix["reviewed_fix_revision"] == (
+        "475497f00d6610c707a3237f7c6b1fccf2ad5665"
+    )
+    assert fix["corrected_red_revision"] == (
+        "59d356368bc9df97841c4359d38333dc28123a97"
+    )
+    assert fix["review_receipt_digest"] == (
+        "sha256:8e650bbde4c4518355fe54415c9a1e31e4728b70e855428ddc92e69f8a06a77a"
+    )
+    assert fix["provider_free_qualification_digest"] == (
+        "sha256:6d5b861ea665c5959a20beae9eb663b0744caeefebf93bfcee8076a4c2f21b84"
+    )
+    assert fix["record_digest"] == digest_canonical(fix_unsigned)
+    assert pending["canonical_digest"] == digest_canonical(pending_unsigned)
+    assert pending["canonical_digest"] == contract_module.ISSUE_790_STEP23_PENDING_DIGEST
+    assert pending["release"] == {
+        "kind": "PENDING_OWNER_APPROVAL",
+        "evidence": "REVIEWED_FIX_RECORD",
+        "reviewed_fix_record_digest": fix["record_digest"],
+        "merged_commit": "c0b60ad1a67b5380c6e83d36e880fd6c7fd7fc9c",
+        "merged_tree": "ca2be4f677ec1490b2f2ddcbfcde44ea872f7706",
+    }
+    assert pending["sequence"]["candidate_event_preparation_digest"] == (
+        "sha256:90ef3df005e95df3f0343ecd312d47859b4698387d8b27d91fb3abba2f3f650d"
+    )
 
 
 def test_step23_is_the_global_immutable_retry_frontier() -> None:
@@ -418,7 +394,7 @@ def test_step23_plan_selects_only_qualified_event_not_higher_unrelated_queue(
 def test_step23_seal_and_provider_free_apply_preflight_bind_same_identity(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    pending = _pending23(monkeypatch)
+    pending = _pending23()
     pre_dispatch = json.loads(
         (_ROOT / ISSUE_790_STEP16_PRE_DISPATCH_PATH).read_text(encoding="utf-8")
     )
