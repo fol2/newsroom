@@ -11,6 +11,7 @@ import pytest
 
 from scripts.issue_790_live_canary_preflight import (
     LATEST_FAILURE_COVERING_FULL_PATH_TESTS,
+    LATEST_FAILURE_EXACT_RED_BY_LEDGER,
     REQUIRED_RETRY_LEDGER_SEQS,
     STEP21_FULL_PATH_TEST,
     STEP22_ABORTED_SPAWN_13689_BACKUP_DEST_FULL_PATH_TEST,
@@ -22,6 +23,8 @@ from scripts.issue_790_live_canary_preflight import (
     STEP22_PERSISTABLE_EMPTY_FULL_PATH_TEST,
     STEP22_PREPARED_CANARY_HANDOFF_FULL_PATH_TEST,
     STEP22_PRODUCTION_UNTOUCHED_FULL_PATH_TEST,
+    STEP23_SINGLE_USE_AUTHORITY_FULL_PATH_TEST,
+    STEP23_SINGLE_USE_AUTHORITY_RED_COMMIT,
     _blocker_smokes,
     _effective_retry_exclusion_status,
     _eligible_candidate_rows,
@@ -251,13 +254,17 @@ def _live_fail_comment(ledger: int, *, created_at: str) -> dict[str, str]:
 
 
 def _full_path_red_comment(
-    ledger: int, test_node: str, *, created_at: str
+    ledger: int,
+    test_node: str,
+    *,
+    created_at: str,
+    red_commit: str = "b" * 40,
 ) -> dict[str, str]:
     return {
         "created_at": created_at,
         "body": (
             f"## Diagnosis\nFull-path red for ledger {ledger}\n"
-            f"Red commit: `{'b' * 40}`\n"
+            f"Red commit: `{red_commit}`\n"
             f"`uv run --frozen pytest -q {test_node}`"
         ),
     }
@@ -288,7 +295,59 @@ def test_covering_full_path_nodes_are_the_allowlist() -> None:
             STEP22_ABORTED_SPAWN_13689_BACKUP_DEST_FULL_PATH_TEST,
             STEP22_UNMATCHED_13689_CONSUMPTION_BLOCKS_13690_READY_FULL_PATH_TEST,
             STEP22_PREPARED_CANARY_HANDOFF_FULL_PATH_TEST,
+            STEP23_SINGLE_USE_AUTHORITY_FULL_PATH_TEST,
         }
+    )
+
+
+def test_latest_live_failure_accepts_only_the_exact_step23_full_path_red() -> None:
+    tip = "c" * 40
+    failure = _live_fail_comment(13696, created_at="2026-09-01T01:24:52Z")
+    green = _full_path_green_comment(
+        13696, tip, created_at="2026-09-01T03:00:00Z"
+    )
+    exact = _full_path_red_comment(
+        13696,
+        STEP23_SINGLE_USE_AUTHORITY_FULL_PATH_TEST,
+        created_at="2026-09-01T02:34:28Z",
+        red_commit=STEP23_SINGLE_USE_AUTHORITY_RED_COMMIT,
+    )
+    wrong = _full_path_red_comment(
+        13696,
+        STEP23_SINGLE_USE_AUTHORITY_FULL_PATH_TEST,
+        created_at="2026-09-01T02:34:28Z",
+    )
+
+    assert _latest_failure_red_green([failure, exact, green], tip=tip)[0] is True
+    assert _latest_failure_red_green([failure, wrong, green], tip=tip) == (
+        False,
+        "ledger 13696 exact full-path red differs",
+    )
+    assert LATEST_FAILURE_EXACT_RED_BY_LEDGER == {
+        13696: (
+            STEP23_SINGLE_USE_AUTHORITY_FULL_PATH_TEST,
+            STEP23_SINGLE_USE_AUTHORITY_RED_COMMIT,
+        )
+    }
+
+
+def test_latest_13696_failure_rejects_older_allowlisted_red() -> None:
+    tip = "c" * 40
+    comments = [
+        _live_fail_comment(13696, created_at="2026-09-01T01:24:52Z"),
+        _full_path_red_comment(
+            13696,
+            STEP22_PREPARED_CANARY_HANDOFF_FULL_PATH_TEST,
+            created_at="2026-09-01T02:34:28Z",
+        ),
+        _full_path_green_comment(
+            13696, tip, created_at="2026-09-01T03:00:00Z"
+        ),
+    ]
+
+    assert _latest_failure_red_green(comments, tip=tip) == (
+        False,
+        "ledger 13696 exact full-path red differs",
     )
 
 

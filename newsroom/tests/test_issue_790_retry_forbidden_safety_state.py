@@ -220,7 +220,7 @@ def test_event_13665_is_unused_target_and_not_retry_forbidden() -> None:
 def test_13665_machine_qualification_without_mini_store_stops(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(Issue790DispositionError, match="source unpublished store is absent"):
+    with pytest.raises(Issue790DispositionError, match="candidate event is forbidden"):
         qualify_issue_790_candidate_event(
             store=tmp_path / "missing.sqlite3",
             proving_store=tmp_path / "missing-proving.sqlite3",

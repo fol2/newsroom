@@ -108,7 +108,8 @@ def test_step22_binds_exhausted_step21_fix_and_fresh_attempt_zero_event() -> Non
     assert candidate["executable"] is False
     assert candidate["live_canary_authorised"] is False
     assert contract_module.issue_790_owner_activated_sequence(22) is True
-    assert contract_module.issue_790_owner_activated_sequence(23) is False
+    assert contract_module.issue_790_owner_activated_sequence(23) is True
+    assert contract_module.issue_790_owner_activated_sequence(24) is False
     with pytest.raises(KeyError):
         contract_module.issue_790_approved_plan_contract(candidate["canonical_digest"])
 
