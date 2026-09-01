@@ -478,8 +478,12 @@ def _effective_retry_exclusion_status(
     event_snapshot: dict[str, object] | None,
     activated_plan_digest: str,
     effectively_excluded_event_ids: set[str],
+    consumptions: list[dict[str, object]] | None = None,
+    outcomes: list[dict[str, object]] | None = None,
+    event_snapshots: list[dict[str, object]] | None = None,
+    accepted_consumption_plan_digest: str | None = None,
 ) -> tuple[bool, str]:
-    """Prove historical exclusions; exhausted consumption covers a missing durable seq."""
+    """Prove every plan event through durable or exact exhausted-event evidence."""
 
     from newsroom.control_plane.issue_790_canary import (
         RetryForbiddenSafetyError,
@@ -487,9 +491,12 @@ def _effective_retry_exclusion_status(
         validate_retry_forbidden_safety_state,
     )
 
+    plan_records_by_seq = {
+        int(item.get("ledger_seq", 0)): item for item in plan_events
+    }
     plan_by_seq = {
-        int(item.get("ledger_seq", 0)): str(item.get("event_id"))
-        for item in plan_events
+        seq: str(item.get("event_id"))
+        for seq, item in plan_records_by_seq.items()
     }
     durable_by_seq = {
         int(item.get("ledger_seq", 0)): str(item.get("event_id"))
@@ -497,47 +504,136 @@ def _effective_retry_exclusion_status(
     }
     overlapping = set(plan_by_seq) & set(durable_by_seq)
     missing_from_durable = set(plan_by_seq) - set(durable_by_seq)
-    consumed_seq = int((consumption or {}).get("ledger_seq", 0))
-    consumed_event = str((consumption or {}).get("event_id", ""))
-    failure_code = str((outcome or {}).get("failure_code_after_seal", ""))
-    try:
-        consumed_safety_ok = (
-            event_snapshot is not None
-            and consumed_seq == 13361
-            and validate_retry_forbidden_safety_state(
-                expected={
+    proof_plan_digest = (
+        activated_plan_digest
+        if accepted_consumption_plan_digest is None
+        else accepted_consumption_plan_digest
+    )
+    proof_consumptions = list(consumptions or ())
+    proof_outcomes = list(outcomes or ())
+    proof_snapshots = list(event_snapshots or ())
+    if consumption is not None:
+        proof_consumptions.append(consumption)
+    if outcome is not None:
+        proof_outcomes.append(outcome)
+    if event_snapshot is not None:
+        proof_snapshots.append(event_snapshot)
+
+    consumptions_by_seq = {
+        int(item.get("ledger_seq", 0)): item for item in proof_consumptions
+    }
+    outcomes_by_consumption = {
+        str(item.get("consumption_digest", "")): item for item in proof_outcomes
+    }
+    snapshots_by_seq = {
+        int(item.get("ledger_seq", 0)): item for item in proof_snapshots
+    }
+    proofs_unique = (
+        len(consumptions_by_seq) == len(proof_consumptions)
+        and len(outcomes_by_consumption) == len(proof_outcomes)
+        and len(snapshots_by_seq) == len(proof_snapshots)
+    )
+    consumed_seqs: set[int] = set()
+    if proofs_unique:
+        proof_seqs = set(missing_from_durable)
+        if (
+            consumption is not None
+            and int(consumption.get("ledger_seq", 0)) == 13361
+            and 13361 not in durable_by_seq
+        ):
+            proof_seqs.add(13361)
+        for consumed_seq in proof_seqs:
+            consumed_event = plan_by_seq.get(
+                consumed_seq,
+                str(
+                    (consumptions_by_seq.get(consumed_seq) or {}).get(
+                        "event_id", ""
+                    )
+                ),
+            )
+            current_consumption = consumptions_by_seq.get(consumed_seq)
+            consumption_digest = str(
+                (current_consumption or {}).get("consumption_digest", "")
+            )
+            current_outcome = outcomes_by_consumption.get(consumption_digest)
+            current_snapshot = snapshots_by_seq.get(consumed_seq)
+            failure_code = (current_outcome or {}).get("failure_code_after_seal")
+            outcome_state = (current_outcome or {}).get("state_after_seal")
+            dispatched = (current_outcome or {}).get("provider_dispatched")
+            plan_safety = plan_records_by_seq.get(consumed_seq)
+            expected_safety = (
+                plan_safety
+                if plan_safety is not None
+                else {
                     "attempt_count": 1,
                     "event_id": consumed_event,
                     "last_failure_code": failure_code,
                     "ledger_seq": consumed_seq,
-                    "provider_dispatched": True,
-                    "state": "CONFIGURATION_HELD",
-                },
-                live=event_snapshot,
-                excluded=consumed_event in effectively_excluded_event_ids,
+                    "provider_dispatched": dispatched,
+                    "state": outcome_state,
+                }
             )
-            is not None
-        )
-    except (RetryForbiddenSafetyError, TypeError, ValueError, KeyError):
-        consumed_safety_ok = False
-    consumption_ok = (
-        consumption is not None
-        and outcome is not None
-        and consumed_safety_ok
-        and consumption.get("approved_plan_digest") == activated_plan_digest
-        and consumption.get("attempt_count_before") == 0
-        and consumption.get("maximum_event_attempts") == 1
-        and outcome.get("approved_plan_digest") == activated_plan_digest
-        and outcome.get("consumption_digest")
-        == consumption.get("consumption_digest")
-        and outcome.get("event_id") == consumed_event
-        and outcome.get("ledger_seq") == consumed_seq
-        and outcome.get("attempt_count") == 1
-        and outcome.get("provider_dispatched") is True
-        and outcome.get("retry_authorised") is False
-        and outcome.get("state_after_seal") == "CONFIGURATION_HELD"
-        and failure_code.startswith("BOUNDED_CANARY_AUTHORITY_EXHAUSTED:")
-    )
+            outcome_matches_plan = (
+                plan_safety is None
+                or (
+                    outcome_state == plan_safety.get("state")
+                    and failure_code == plan_safety.get("last_failure_code")
+                    and isinstance(dispatched, bool)
+                    and dispatched == plan_safety.get("provider_dispatched")
+                )
+            )
+            held_failure = (
+                outcome_state == "CONFIGURATION_HELD"
+                and isinstance(failure_code, str)
+                and failure_code.startswith(
+                    "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:"
+                )
+                and failure_code != "BOUNDED_CANARY_AUTHORITY_EXHAUSTED:"
+                and (current_outcome or {}).get("result_class")
+                != "TRUTHFUL_PROVIDER_SUCCESS"
+            )
+            terminal_success = (
+                outcome_state == "TERMINAL"
+                and failure_code is None
+                and dispatched is True
+                and (current_outcome or {}).get("result_class")
+                == "TRUTHFUL_PROVIDER_SUCCESS"
+            )
+            try:
+                safety_ok = (
+                    validate_retry_forbidden_safety_state(
+                        expected=expected_safety,
+                        live=current_snapshot,
+                        excluded=(
+                            consumed_event in effectively_excluded_event_ids
+                        ),
+                    )
+                    is not None
+                )
+            except (RetryForbiddenSafetyError, TypeError, ValueError, KeyError):
+                safety_ok = False
+            if not (
+                current_consumption is not None
+                and current_outcome is not None
+                and safety_ok
+                and current_consumption.get("approved_plan_digest")
+                == proof_plan_digest
+                and current_consumption.get("event_id") == consumed_event
+                and current_consumption.get("ledger_seq") == consumed_seq
+                and current_consumption.get("attempt_count_before") == 0
+                and current_consumption.get("maximum_event_attempts") == 1
+                and current_outcome.get("approved_plan_digest")
+                == proof_plan_digest
+                and current_outcome.get("event_id") == consumed_event
+                and current_outcome.get("ledger_seq") == consumed_seq
+                and current_outcome.get("attempt_count") == 1
+                and isinstance(dispatched, bool)
+                and outcome_matches_plan
+                and current_outcome.get("retry_authorised") is False
+                and (held_failure or terminal_success)
+            ):
+                continue
+            consumed_seqs.add(consumed_seq)
     historical_ok = (
         len(plan_by_seq) == len(plan_events)
         and len(durable_by_seq) == len(exclusions)
@@ -563,17 +659,16 @@ def _effective_retry_exclusion_status(
         )
         and (
             not missing_from_durable
-            or (consumption_ok and missing_from_durable == {consumed_seq})
+            or missing_from_durable == consumed_seqs
         )
     )
     effective_seqs = set(durable_by_seq)
-    if consumption_ok:
-        effective_seqs.add(consumed_seq)
+    effective_seqs.update(consumed_seqs)
     ok = historical_ok and REQUIRED_RETRY_LEDGER_SEQS.issubset(effective_seqs)
     return (
         ok,
         f"plan={sorted(plan_by_seq)} durable={sorted(durable_by_seq)} "
-        f"consumed={consumed_seq if consumption_ok else 'INVALID'}",
+        f"consumed={sorted(consumed_seqs) if consumed_seqs else 'INVALID'}",
     )
 
 
@@ -1170,34 +1265,67 @@ def _ops_gates(
         activated_plan_digest = str(
             (activated_plan or {}).get("canonical_digest", "")
         )
-        consumption: dict[str, object] | None = None
-        outcome: dict[str, object] | None = None
-        event_snapshot: dict[str, object] | None = None
-        if repository is not None and activated_plan_digest:
-            consumption = repository.existing_consumption(
-                approved_plan_digest=activated_plan_digest,
+        accepted_consumption_plan_digest = activated_plan_digest
+        sequence = (activated_plan or {}).get("sequence")
+        if isinstance(sequence, dict) and sequence.get("sequence_ordinal") == 23:
+            predecessor = sequence.get("predecessor")
+            accepted_consumption_plan_digest = (
+                str(predecessor.get("plan_digest", ""))
+                if isinstance(predecessor, dict)
+                else ""
             )
-            if consumption is not None:
-                outcome = repository.existing_outcome(
-                    consumption_digest=str(consumption["consumption_digest"]),
-                )
-                has_claims = retry_forbidden_has_claim_columns(conn)
-                event = conn.execute(
-                    retry_forbidden_live_select(has_claims=has_claims)
-                    + " WHERE event_id=? AND ledger_seq=?",
-                    (consumption["event_id"], consumption["ledger_seq"]),
-                ).fetchone()
-                if event is not None:
-                    event_snapshot = retry_forbidden_live_snapshot(
-                        event, has_claims=has_claims
-                    )
-        effectively_excluded_event_ids = set(graphiti_excluded_event_ids(conn))
-
         plan_events = [
             item
             for item in plan.get("retry_forbidden_events", [])
             if isinstance(item, dict)
         ]
+        durable_seqs = {
+            int(item.get("ledger_seq", 0)) for item in exclusions
+        }
+        missing_plan_events = [
+            item
+            for item in plan_events
+            if int(item.get("ledger_seq", 0)) not in durable_seqs
+        ]
+        consumption: dict[str, object] | None = None
+        outcome: dict[str, object] | None = None
+        event_snapshot: dict[str, object] | None = None
+        consumptions: list[dict[str, object]] = []
+        outcomes: list[dict[str, object]] = []
+        event_snapshots: list[dict[str, object]] = []
+        if repository is not None and accepted_consumption_plan_digest:
+            has_claims = retry_forbidden_has_claim_columns(conn)
+            for missing in missing_plan_events:
+                current_consumption = repository.existing_consumption(
+                    approved_plan_digest=accepted_consumption_plan_digest,
+                    event_id=str(missing.get("event_id", "")),
+                    ledger_seq=int(missing.get("ledger_seq", 0)),
+                )
+                if current_consumption is None:
+                    continue
+                consumptions.append(current_consumption)
+                current_outcome = repository.existing_outcome(
+                    consumption_digest=str(
+                        current_consumption["consumption_digest"]
+                    ),
+                )
+                if current_outcome is not None:
+                    outcomes.append(current_outcome)
+                event = conn.execute(
+                    retry_forbidden_live_select(has_claims=has_claims)
+                    + " WHERE event_id=? AND ledger_seq=?",
+                    (
+                        current_consumption["event_id"],
+                        current_consumption["ledger_seq"],
+                    ),
+                ).fetchone()
+                if event is not None:
+                    event_snapshots.append(
+                        retry_forbidden_live_snapshot(
+                            event, has_claims=has_claims
+                        )
+                    )
+        effectively_excluded_event_ids = set(graphiti_excluded_event_ids(conn))
     finally:
         conn.close()
 
@@ -1220,6 +1348,10 @@ def _ops_gates(
         event_snapshot=event_snapshot,
         activated_plan_digest=activated_plan_digest,
         effectively_excluded_event_ids=effectively_excluded_event_ids,
+        consumptions=consumptions,
+        outcomes=outcomes,
+        event_snapshots=event_snapshots,
+        accepted_consumption_plan_digest=accepted_consumption_plan_digest,
     )
     if exclusion_error is not None:
         exclusions_ok = False
