@@ -138,6 +138,23 @@ def _prepare_production(
     )
 
 
+def _bind_qualified_candidate(
+    monkeypatch: pytest.MonkeyPatch, *, event_id: str, ledger_seq: int
+) -> None:
+    """Bind a downstream-path fixture to the exact candidate it exercises."""
+
+    qualification = dict(
+        disposition._step18_candidate_qualification(_step22_activated_plan())
+    )
+    qualification["event_id"] = event_id
+    qualification["ledger_seq"] = ledger_seq
+    monkeypatch.setattr(
+        disposition,
+        "_step18_candidate_qualification",
+        lambda _plan: qualification,
+    )
+
+
 def _remove_snapshot_binding_from_canary_consumption(
     store: Path,
     *,
@@ -509,26 +526,10 @@ def test_ready_implies_dispatch_started_for_successor_unused_attempt_zero(
 ) -> None:
     stores = build_rehearsal_stores(tmp_path, successor=True)
     before = file_digest(stores.work_unpublished)
-    prepared = _prepare(stores)
-    assert prepared.candidate_identity["event_id"] == SUCCESSOR_EVENT_ID
-    assert prepared.candidate_identity["ledger_seq"] == SUCCESSOR_LEDGER_SEQ
+    with pytest.raises(PreparedCanaryError) as caught:
+        _prepare(stores)
+    assert caught.value.failure_code == "CANDIDATE_NOT_FRESH"
     assert file_digest(stores.work_unpublished) == before
-    result = run_prepared_canary_rehearsal(
-        store=stores.work_unpublished,
-        proving_store=stores.proving,
-        plan=stores.plan,
-        observed_at=OBSERVED_AT,
-        exact_head=EXACT_HEAD,
-        prepared=prepared,
-        event_id=SUCCESSOR_EVENT_ID,
-        ledger_seq=SUCCESSOR_LEDGER_SEQ,
-    )
-    assert result["decision_digest"] == prepared.decision_digest
-    assert result["dispatch_started"] is True
-    assert result["provider_calls"] == 0
-    assert RehearsalRealGraphitiAdapter.provider_calls == 0
-    assert dispatch_started_count(stores.work_unpublished) >= 1
-    assert file_digest(stores.sealed_unpublished) == stores.sealed_digest
     assert candidate_identity(stores.sealed_unpublished) == (
         CANDIDATE_EVENT_ID,
         CANDIDATE_LEDGER_SEQ,
@@ -731,63 +732,23 @@ def test_cli_flags_disagree_with_unused_candidate_fail_closes(tmp_path: Path) ->
 def test_step22_spent_13665_successor_unused_attempt_zero_survives_full_path(
     tmp_path: Path,
 ) -> None:
-    """Live 13671 CANDIDATE_IDENTITY: READY unused and CLI agree after spent 13665."""
+    """A qualified spent candidate cannot drift to an unused successor."""
 
     stores = build_rehearsal_stores(tmp_path, successor=True)
     named = unused_queued_attempt_zero_candidates(stores.work_unpublished, stores.plan)
     assert named[0] == (SUCCESSOR_EVENT_ID, SUCCESSOR_LEDGER_SEQ)
-    prepared = _prepare(stores)
-    assert prepared.candidate_identity["event_id"] == SUCCESSOR_EVENT_ID
-    assert prepared.candidate_identity["ledger_seq"] == SUCCESSOR_LEDGER_SEQ
-    with_flags = prepare_issue_790_canary(
-        store=stores.work_unpublished,
-        proving_store=stores.proving,
-        plan=stores.plan,
-        observed_at=OBSERVED_AT,
-        exact_head=EXACT_HEAD,
-        event_id=SUCCESSOR_EVENT_ID,
-        ledger_seq=SUCCESSOR_LEDGER_SEQ,
-        role="canary",
-    )
-    assert with_flags.decision_digest == prepared.decision_digest
-    bound = _candidate_from_plan(
-        stores.plan,
-        event_id=SUCCESSOR_EVENT_ID,
-        ledger_seq=SUCCESSOR_LEDGER_SEQ,
-        role="canary",
-        store=stores.work_unpublished,
-    )
-    assert bound == (SUCCESSOR_EVENT_ID, SUCCESSOR_LEDGER_SEQ)
-    RehearsalRealGraphitiAdapter.provider_calls = 0
-    RehearsalRealGraphitiAdapter.dispatch_started = False
-    result = run_prepared_canary_rehearsal(
-        store=stores.work_unpublished,
-        proving_store=stores.proving,
-        plan=stores.plan,
-        observed_at=OBSERVED_AT,
-        event_id=SUCCESSOR_EVENT_ID,
-        ledger_seq=SUCCESSOR_LEDGER_SEQ,
-        prepared=prepared,
-        exact_head=EXACT_HEAD,
-    )
-    assert result["decision_digest"] == prepared.decision_digest
-    assert result["dispatch_started"] is True
-    assert result["provider_calls"] == 0
-    assert dispatch_started_count(stores.work_unpublished) >= 1
-    assert candidate_identity(stores.sealed_unpublished) == (
-        CANDIDATE_EVENT_ID,
-        CANDIDATE_LEDGER_SEQ,
-        "CONFIGURATION_HELD",
-    )
-    with pytest.raises(PreparedCanaryError) as caught:
+    with pytest.raises(PreparedCanaryError) as implicit:
+        _prepare(stores)
+    assert implicit.value.failure_code == "CANDIDATE_NOT_FRESH"
+    with pytest.raises(PreparedCanaryError) as explicit:
         _candidate_from_plan(
             stores.plan,
-            event_id=CANDIDATE_EVENT_ID,
-            ledger_seq=CANDIDATE_LEDGER_SEQ,
+            event_id=SUCCESSOR_EVENT_ID,
+            ledger_seq=SUCCESSOR_LEDGER_SEQ,
             role="canary",
             store=stores.work_unpublished,
         )
-    assert caught.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    assert explicit.value.failure_code == "CANDIDATE_IDENTITY"
 
 
 def test_step22_sqlite_integer_zero_provider_dispatched_is_untouched(
@@ -870,6 +831,9 @@ def test_step22_unused_13671_survives_production_pre_dispatch_untouched(
     stores = build_rehearsal_stores(tmp_path, successor=True)
     activated = _activate_step22(stores.work_unpublished)
     plan = activated["plan"]
+    _bind_qualified_candidate(
+        monkeypatch, event_id=SUCCESSOR_EVENT_ID, ledger_seq=SUCCESSOR_LEDGER_SEQ
+    )
     _seed_production_disposition(stores.work_unpublished, plan)
     assert plan["sequence"]["candidate_event_qualification"]["ledger_seq"] == (
         CANDIDATE_LEDGER_SEQ
@@ -922,7 +886,7 @@ def test_step22_unused_13671_survives_production_pre_dispatch_untouched(
             role="canary",
             store=stores.work_unpublished,
         )
-    assert caught.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    assert caught.value.failure_code == BOUNDED_CANARY_AUTHORITY_CONSUMED
     resumed = disposition.run_issue_790_canary(
         store=stores.work_unpublished,
         proving_store=stores.proving,
@@ -955,6 +919,9 @@ def test_step22_consumed_13671_brokererror_setup_survives_full_path(
     stores = build_rehearsal_stores(tmp_path, successor=True)
     activated = _activate_step22(stores.work_unpublished)
     plan = activated["plan"]
+    _bind_qualified_candidate(
+        monkeypatch, event_id=SUCCESSOR_EVENT_ID, ledger_seq=SUCCESSOR_LEDGER_SEQ
+    )
     _seed_production_disposition(stores.work_unpublished, plan)
     _patch_production_predispatch(monkeypatch, plan=plan)
     monkeypatch.setattr(
@@ -1066,7 +1033,7 @@ def test_step22_consumed_13671_brokererror_setup_survives_full_path(
             role="canary",
             store=stores.work_unpublished,
         )
-    assert caught.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    assert caught.value.failure_code == BOUNDED_CANARY_AUTHORITY_CONSUMED
     resumed = disposition.run_issue_790_canary(
         store=stores.work_unpublished,
         proving_store=stores.proving,
@@ -1114,6 +1081,9 @@ def test_step22_consumed_13677_zero_after_embeddings_survives_full_path(
     stores = build_rehearsal_stores(tmp_path, unused_13677=True)
     activated = _activate_step22(stores.work_unpublished)
     plan = activated["plan"]
+    _bind_qualified_candidate(
+        monkeypatch, event_id=EVENT_13677, ledger_seq=LEDGER_13677
+    )
     _seed_production_disposition(stores.work_unpublished, plan)
     _patch_production_predispatch(monkeypatch, plan=plan)
     monkeypatch.setattr(
@@ -1412,7 +1382,7 @@ def test_step22_consumed_13677_zero_after_embeddings_survives_full_path(
             role="canary",
             store=stores.work_unpublished,
         )
-    assert spent_13665_target.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    assert spent_13665_target.value.failure_code == BOUNDED_CANARY_AUTHORITY_CONSUMED
     with pytest.raises(PreparedCanaryError) as spent_13671_target:
         _candidate_from_plan(
             plan,
@@ -1421,7 +1391,7 @@ def test_step22_consumed_13677_zero_after_embeddings_survives_full_path(
             role="canary",
             store=stores.work_unpublished,
         )
-    assert spent_13671_target.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    assert spent_13671_target.value.failure_code == BOUNDED_CANARY_AUTHORITY_CONSUMED
     resumed = disposition.run_issue_790_canary(
         store=stores.work_unpublished,
         proving_store=stores.proving,
@@ -1482,6 +1452,9 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
     stores = build_rehearsal_stores(tmp_path, unused_13683=True)
     activated = _activate_step22(stores.work_unpublished)
     plan = activated["plan"]
+    _bind_qualified_candidate(
+        monkeypatch, event_id=EVENT_13683, ledger_seq=LEDGER_13683
+    )
     _seed_production_disposition(stores.work_unpublished, plan)
     _patch_production_predispatch(monkeypatch, plan=plan)
     monkeypatch.setattr(
@@ -1861,7 +1834,7 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
             role="canary",
             store=stores.work_unpublished,
         )
-    assert spent_13665_target.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    assert spent_13665_target.value.failure_code == BOUNDED_CANARY_AUTHORITY_CONSUMED
     with pytest.raises(PreparedCanaryError) as spent_13671_target:
         _candidate_from_plan(
             plan,
@@ -1870,7 +1843,7 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
             role="canary",
             store=stores.work_unpublished,
         )
-    assert spent_13671_target.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    assert spent_13671_target.value.failure_code == BOUNDED_CANARY_AUTHORITY_CONSUMED
     with pytest.raises(PreparedCanaryError) as spent_13677_target:
         _candidate_from_plan(
             plan,
@@ -1879,7 +1852,7 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
             role="canary",
             store=stores.work_unpublished,
         )
-    assert spent_13677_target.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    assert spent_13677_target.value.failure_code == BOUNDED_CANARY_AUTHORITY_CONSUMED
     resumed = disposition.run_issue_790_canary(
         store=stores.work_unpublished,
         proving_store=stores.proving,
@@ -1926,6 +1899,9 @@ def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
     stores = build_rehearsal_stores(tmp_path, unused_13689=True)
     activated = _activate_step22(stores.work_unpublished)
     plan = activated["plan"]
+    _bind_qualified_candidate(
+        monkeypatch, event_id=EVENT_13689, ledger_seq=LEDGER_13689
+    )
     _seed_production_disposition(stores.work_unpublished, plan)
     _patch_production_predispatch(monkeypatch, plan=plan)
     consume_calls: list[str] = []
@@ -2097,7 +2073,7 @@ def test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running(
             role="canary",
             store=stores.work_unpublished,
         )
-    assert caught.value.failure_code == "RETRY_FORBIDDEN_TARGET"
+    assert caught.value.failure_code == BOUNDED_CANARY_AUTHORITY_CONSUMED
     canary_kwargs.pop("recover_interrupted")
     canary_kwargs.pop("expected_backup_digest")
     with pytest.raises(
@@ -2145,6 +2121,9 @@ def test_step22_backup_dest_exists_without_consumption_fail_closes_before_claim(
     stores = build_rehearsal_stores(tmp_path, unused_13689=True)
     activated = _activate_step22(stores.work_unpublished)
     plan = activated["plan"]
+    _bind_qualified_candidate(
+        monkeypatch, event_id=EVENT_13689, ledger_seq=LEDGER_13689
+    )
     _seed_production_disposition(stores.work_unpublished, plan)
     _patch_production_predispatch(monkeypatch, plan=plan)
     consume_calls: list[str] = []
@@ -2200,6 +2179,9 @@ def test_step22_fresh_missing_prepared_fails_before_any_effect(
     stores = build_rehearsal_stores(tmp_path, unused_13689=True)
     activated = _activate_step22(stores.work_unpublished)
     plan = activated["plan"]
+    _bind_qualified_candidate(
+        monkeypatch, event_id=EVENT_13689, ledger_seq=LEDGER_13689
+    )
     _seed_production_disposition(stores.work_unpublished, plan)
     _patch_production_predispatch(monkeypatch, plan=plan)
     consume_calls: list[str] = []
@@ -2261,6 +2243,9 @@ def test_step22_fresh_in_memory_prepared_fails_before_any_effect(
     stores = build_rehearsal_stores(tmp_path, unused_13689=True)
     activated = _activate_step22(stores.work_unpublished)
     plan = activated["plan"]
+    _bind_qualified_candidate(
+        monkeypatch, event_id=EVENT_13689, ledger_seq=LEDGER_13689
+    )
     _seed_production_disposition(stores.work_unpublished, plan)
     prepared = prepare_issue_790_canary(
         store=stores.work_unpublished,
@@ -2301,6 +2286,9 @@ def test_step22_fresh_recovery_flag_fails_before_any_effect(
     stores = build_rehearsal_stores(tmp_path, unused_13689=True)
     activated = _activate_step22(stores.work_unpublished)
     plan = activated["plan"]
+    _bind_qualified_candidate(
+        monkeypatch, event_id=EVENT_13689, ledger_seq=LEDGER_13689
+    )
     _seed_production_disposition(stores.work_unpublished, plan)
     _patch_production_predispatch(monkeypatch, plan=plan)
     prepared = _prepare_production(
@@ -2349,6 +2337,9 @@ def test_step22_full_executor_rehearsal_reaches_fixture_success(
     stores = build_rehearsal_stores(tmp_path, unused_13689=True)
     activated = _activate_step22(stores.work_unpublished)
     plan = activated["plan"]
+    _bind_qualified_candidate(
+        monkeypatch, event_id=EVENT_13689, ledger_seq=LEDGER_13689
+    )
     _seed_production_disposition(stores.work_unpublished, plan)
     _patch_production_predispatch(monkeypatch, plan=plan)
     prepared = _prepare_production(
@@ -2428,6 +2419,9 @@ def test_step22_complete_preflight_emits_prepared_bound_live_command(
     stores = build_rehearsal_stores(stores_root, unused_13689=True)
     activated = _activate_step22(stores.work_unpublished)
     plan = activated["plan"]
+    _bind_qualified_candidate(
+        monkeypatch, event_id=EVENT_13689, ledger_seq=LEDGER_13689
+    )
     prepared = preflight._prepare_preflight_canary(
         store=stores.work_unpublished,
         proving_store=stores.proving,
@@ -2562,6 +2556,9 @@ def test_fresh_canary_rejects_backup_replacement_before_consumption(
     stores = build_rehearsal_stores(tmp_path, unused_13689=True)
     activated = _activate_step22(stores.work_unpublished)
     plan = activated["plan"]
+    _bind_qualified_candidate(
+        monkeypatch, event_id=EVENT_13689, ledger_seq=LEDGER_13689
+    )
     _seed_production_disposition(stores.work_unpublished, plan)
     _patch_production_predispatch(monkeypatch, plan=plan)
     prepared = _prepare_production(
@@ -2641,6 +2638,9 @@ def test_step22_backup_replacement_after_execution_fails_before_receipt(
     stores = build_rehearsal_stores(tmp_path, unused_13689=True)
     activated = _activate_step22(stores.work_unpublished)
     plan = activated["plan"]
+    _bind_qualified_candidate(
+        monkeypatch, event_id=EVENT_13689, ledger_seq=LEDGER_13689
+    )
     _seed_production_disposition(stores.work_unpublished, plan)
     _patch_production_predispatch(monkeypatch, plan=plan)
     prepared = _prepare_production(
@@ -2749,6 +2749,9 @@ def test_step22_aborted_spawn_recovery_rejects_unproven_backup_or_authority(
     stores = build_rehearsal_stores(tmp_path, unused_13689=True)
     activated = _activate_step22(stores.work_unpublished)
     plan = activated["plan"]
+    _bind_qualified_candidate(
+        monkeypatch, event_id=EVENT_13689, ledger_seq=LEDGER_13689
+    )
     _seed_production_disposition(stores.work_unpublished, plan)
     _patch_production_predispatch(monkeypatch, plan=plan)
     consume_calls: list[str] = []
@@ -2941,6 +2944,9 @@ def _abort_13689_unmatched(
     stores = build_rehearsal_stores(tmp_path, unused_13689=True)
     activated = _activate_step22(stores.work_unpublished)
     plan = activated["plan"]
+    _bind_qualified_candidate(
+        monkeypatch, event_id=EVENT_13689, ledger_seq=LEDGER_13689
+    )
     _seed_production_disposition(stores.work_unpublished, plan)
     _patch_production_predispatch(monkeypatch, plan=plan)
 
@@ -3015,7 +3021,14 @@ def test_step22_unmatched_13689_consumption_blocks_successor_ready_before_backup
     )
     assert unused[0] == (EVENT_13690, LEDGER_13690)
     with pytest.raises(PreparedCanaryError) as caught:
-        _prepare(stores)
+        prepare_issue_790_canary(
+            store=stores.work_unpublished,
+            proving_store=stores.proving,
+            plan=aborted["plan"],
+            observed_at=OBSERVED_AT,
+            exact_head=EXACT_HEAD,
+            role="preflight",
+        )
     assert caught.value.failure_code == BOUNDED_CANARY_AUTHORITY_CONSUMED
     assert str(caught.value) == "bounded canary authority is already consumed"
     successor = _sqlite_canary_event(
@@ -3054,94 +3067,58 @@ def test_step22_unmatched_13689_consumption_blocks_successor_ready_before_backup
     assert dispatch_started_count(stores.work_unpublished) == 0
 
 
-def test_step22_sealed_13689_abort_allows_successor_unused_without_already_consumed(
+def test_step22_sealed_13689_abort_exhausts_plan_before_successor_prepare(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Sealed 13689 abort-strand must not leave Step 22 permanently unusable.
+    """A sealed consumption exhausts Step 22 before a dynamic successor."""
 
-    Dest-exists zero-I/O writes the outcome. Successor 13690 then consumes on
-    the same plan without `bounded canary authority is already consumed`.
-    13689 stays never-retry. Do not mint Step 23.
-    """
-
-    stores, aborted, backup = _abort_13689_unmatched(tmp_path, monkeypatch)
+    stores = build_rehearsal_stores(tmp_path)
     insert_unused_queued_attempt_zero(
         stores.work_unpublished,
-        source_ledger_seq=LEDGER_13689,
+        source_ledger_seq=CANDIDATE_LEDGER_SEQ,
         event_id=EVENT_13690,
         ledger_seq=LEDGER_13690,
     )
-    with pytest.raises(PreparedCanaryError) as blocked:
-        _prepare(stores)
-    assert blocked.value.failure_code == BOUNDED_CANARY_AUTHORITY_CONSUMED
-
-    consume_calls: list[str] = []
-
-    def record_successor(**values: object) -> None:
-        consume_calls.append(str(values["event_id"]))
-        assert values["event_id"] == EVENT_13690
-
-    monkeypatch.setattr(disposition, "_consume_issue_790_event", record_successor)
-    _expire_interrupted_canary_claim(
-        stores.work_unpublished, ledger_seq=LEDGER_13689
-    )
-    aborted["prepared"] = None
-    aborted["recover_interrupted"] = True
-    aborted["expected_backup_digest"] = "sha256:" + file_digest(backup)
-    sealed = disposition.run_issue_790_canary(**aborted)
-    assert sealed["resumed_zero_io_finalisation"] is True
-    assert sealed["outcome"]["state_after_seal"] == "CONFIGURATION_HELD"
-    assert sealed["consumption"]["ledger_seq"] == LEDGER_13689
-    transfer_proving_identity(
-        stores.work_unpublished,
-        spent_ledger_seq=LEDGER_13689,
-        unused_ledger_seq=LEDGER_13690,
-    )
-    prepared = _prepare(stores)
-    assert prepared.candidate_identity["event_id"] == EVENT_13690
-    assert prepared.candidate_identity["ledger_seq"] == LEDGER_13690
-    with pytest.raises(PreparedCanaryError) as spent_13689:
-        _candidate_from_plan(
-            aborted["plan"],
-            event_id=EVENT_13689,
-            ledger_seq=LEDGER_13689,
-            role="canary",
-            store=stores.work_unpublished,
+    plan_digest = str(stores.plan["canonical_digest"])
+    connection = sqlite3.connect(stores.work_unpublished)
+    try:
+        connection.execute(
+            "INSERT INTO issue_790_bounded_canary_consumptions VALUES(?,?,?,?,?,?,?,?)",
+            (
+                "sha256:" + "71" * 32,
+                plan_digest,
+                "sha256:" + "72" * 32,
+                EVENT_13689,
+                LEDGER_13689,
+                "issue-790-canary:sealed",
+                "2026-08-31T23:00:00.000000Z",
+                "{}",
+            ),
         )
-    assert spent_13689.value.failure_code == "RETRY_FORBIDDEN_TARGET"
-    dest = tmp_path / "successor-13690.sqlite3"
-    successor_kwargs = {
-        **aborted,
-        "backup_path": dest,
-        "event_id": EVENT_13690,
-        "ledger_seq": LEDGER_13690,
-        "prepared": _prepare_production(
-            stores,
-            plan=aborted["plan"],
-            event_id=EVENT_13690,
-            ledger_seq=LEDGER_13690,
-        ),
-        "recover_interrupted": False,
-    }
-    successor_kwargs.pop("expected_backup_digest", None)
-    receipt = disposition.run_issue_790_canary(**successor_kwargs)
-    unused = unused_queued_attempt_zero_candidates(
-        stores.work_unpublished, stores.plan
+        connection.execute(
+            "INSERT INTO issue_790_bounded_canary_outcomes VALUES(?,?,?,?,?,?)",
+            (
+                "sha256:" + "73" * 32,
+                "sha256:" + "71" * 32,
+                EVENT_13689,
+                LEDGER_13689,
+                "2026-08-31T23:01:00.000000Z",
+                "{}",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    with pytest.raises(PreparedCanaryError) as exhausted:
+        _prepare(stores)
+    assert exhausted.value.failure_code == BOUNDED_CANARY_AUTHORITY_CONSUMED
+    successor = _sqlite_canary_event(
+        stores.work_unpublished, ledger_seq=LEDGER_13690
     )
-    assert dest.is_file()
-    assert consume_calls == [EVENT_13690]
-    assert receipt["consumption"]["event_id"] == EVENT_13690
-    assert receipt["consumption"]["ledger_seq"] == LEDGER_13690
-    assert receipt["retry_authorised"] is False
-    assert EVENT_13689 not in {item[0] for item in unused}
-    assert LEDGER_13689 not in {item[1] for item in unused}
-    with pytest.raises(
-        Issue790DispositionError,
-        match="interrupted canary recovery is already complete",
-    ):
-        disposition.run_issue_790_canary(**aborted)
-    assert backup.is_file()
+    assert successor["state"] == "QUEUED"
+    assert successor["attempt_count"] == 0
+    assert successor["provider_dispatched"] == 0
 
 
 @pytest.mark.parametrize(

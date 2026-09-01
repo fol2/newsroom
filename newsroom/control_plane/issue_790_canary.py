@@ -149,18 +149,6 @@ def _allow_reused_dispositions(connection: sqlite3.Connection) -> None:
     )
 
 
-def _allow_plan_successor_consumptions(connection: sqlite3.Connection) -> None:
-    """Permit a sealed predecessor and a successor unused event on one plan."""
-
-    if ("approved_plan_digest",) not in _unique_index_columns(
-        connection, table="issue_790_bounded_canary_consumptions"
-    ):
-        return
-    _rebuild_canary_consumptions_table(
-        connection, message="bounded canary plan consumption migration differs"
-    )
-
-
 class Issue790CanaryIntegrityError(ValueError):
     """The bounded authority, event or retained state is contradictory."""
 
@@ -853,7 +841,6 @@ class Issue790CanaryRepository:
         connection = self._connection()
         try:
             _allow_reused_dispositions(connection)
-            _allow_plan_successor_consumptions(connection)
             connection.executescript(_SCHEMA)
             connection.commit()
         finally:
@@ -1466,13 +1453,20 @@ class Issue790CanaryRepository:
         connection = self._connection()
         try:
             _allow_reused_dispositions(connection)
-            _allow_plan_successor_consumptions(connection)
             connection.execute("BEGIN IMMEDIATE")
             approved_contract = _require_effective_plan_contract(
                 approved_plan_digest,
                 connection,
                 message="bounded canary approved plan differs",
             )
+            if connection.execute(
+                "SELECT 1 FROM issue_790_bounded_canary_consumptions "
+                "WHERE approved_plan_digest=? LIMIT 1",
+                (approved_plan_digest,),
+            ).fetchone() is not None:
+                raise Issue790CanaryIntegrityError(
+                    "bounded canary authority is already consumed"
+                )
             if connection.execute(
                 "SELECT 1 FROM issue_790_bounded_canary_consumptions "
                 "WHERE event_id=? OR ledger_seq=? LIMIT 1",

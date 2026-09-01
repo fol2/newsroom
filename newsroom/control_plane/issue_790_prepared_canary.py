@@ -142,7 +142,7 @@ FAIL_BRANCH_INVENTORY: tuple[FailBranch, ...] = (
         "unmatched_plan_consumption",
         BOUNDED_CANARY_AUTHORITY_CONSUMED,
         True,
-        "test_step22_sealed_13689_abort_allows_successor_unused_without_already_consumed",
+        "test_step22_aborted_spawn_13689_backup_dest_exists_does_not_strand_running",
         "test_step22_unmatched_13689_consumption_blocks_successor_ready_before_backup",
     ),
     FailBranch(
@@ -500,7 +500,7 @@ def _forbidden_identities(
     """Durable and plan retry-forbidden identities. Consumption is resume, not retry."""
 
     ids: set[str] = set()
-    seqs: set[int] = set(_op()._RETRY_FORBIDDEN_LEDGER_SEQS)
+    seqs: set[int] = set()
     retry_events = plan.get("retry_forbidden_events")
     if isinstance(retry_events, list):
         for item in retry_events:
@@ -647,6 +647,34 @@ def _unmatched_consumption_identity(store: Path) -> tuple[str, int] | None:
         connection.close()
 
 
+def _plan_consumption_identity(
+    store: Path, plan: Mapping[str, object]
+) -> tuple[str, int] | None:
+    """Return any consumption for this one-shot plan, if present."""
+
+    plan_digest = plan.get("canonical_digest")
+    if not isinstance(plan_digest, str):
+        return None
+    connection = sqlite3.connect(f"{store.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        rows = connection.execute(
+            "SELECT event_id,ledger_seq "
+            "FROM issue_790_bounded_canary_consumptions "
+            "WHERE approved_plan_digest=?",
+            (plan_digest,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        connection.close()
+    if len(rows) > 1:
+        _raise(
+            BOUNDED_CANARY_AUTHORITY_CONSUMED,
+            "bounded canary authority is already consumed",
+        )
+    return None if not rows else (str(rows[0][0]), int(rows[0][1]))
+
+
 def _reject_unmatched_plan_consumption(
     store: Path | None, *, event_id: str | None, ledger_seq: int | None
 ) -> None:
@@ -671,24 +699,42 @@ def _candidate_from_plan(
     role: PrepareRole,
     store: Path | None = None,
 ) -> tuple[str | None, int | None]:
+    prior_consumption = (
+        _plan_consumption_identity(store, plan) if store is not None else None
+    )
+    requested = (
+        (event_id, ledger_seq)
+        if event_id is not None and ledger_seq is not None
+        else None
+    )
+    if prior_consumption is not None and requested != prior_consumption:
+        _raise(
+            BOUNDED_CANARY_AUTHORITY_CONSUMED,
+            "bounded canary authority is already consumed",
+        )
     selected = _op()._step18_candidate_qualification(plan)
-    selected_live: tuple[str, int] | None = None
+    selected_tuple: tuple[str, int] | None = None
     if selected is not None:
         selected_tuple = (str(selected["event_id"]), int(selected["ledger_seq"]))
-        if _qualification_is_current_unused(
-            store, event_id=selected_tuple[0], ledger_seq=selected_tuple[1]
-        ):
-            selected_live = selected_tuple
-    live = unused_queued_attempt_zero_candidates(store, plan)[:1] if store is not None else ()
+    live = (
+        unused_queued_attempt_zero_candidates(store, plan)[:1]
+        if store is not None and selected is None
+        else ()
+    )
     live_bind = live[0] if live else None
-    bound = live_bind or selected_live
+    bound = selected_tuple if selected_tuple is not None else live_bind
 
     if event_id is not None and ledger_seq is not None:
         requested = (event_id, ledger_seq)
         if not event_id.startswith("sha256:"):
             return requested
-        if _spent_or_retry_forbidden(store, plan, event_id=event_id, ledger_seq=ledger_seq):
-            _raise("RETRY_FORBIDDEN_TARGET", "bounded canary targeted a retained failure")
+        if _spent_or_retry_forbidden(
+            store, plan, event_id=event_id, ledger_seq=ledger_seq
+        ):
+            _raise(
+                "RETRY_FORBIDDEN_TARGET",
+                "bounded canary targeted a retained failure",
+            )
         if live_bind is not None and requested != live_bind:
             if store is not None and _unmatched_consumption_identity(store) == requested:
                 _reject_unmatched_plan_consumption(
@@ -798,8 +844,6 @@ def prepare_issue_790_canary(
     )
     sequence = plan.get("sequence") if isinstance(plan.get("sequence"), dict) else {}
     ordinal = sequence.get("sequence_ordinal")
-    if bound_ledger_seq is not None and bound_ledger_seq in op._RETRY_FORBIDDEN_LEDGER_SEQS:
-        _raise("RETRY_FORBIDDEN_TARGET", "bounded canary targeted a retained failure")
     if bound_event_id is not None and not bound_event_id.startswith("sha256:"):
         _raise("EVENT_IDENTITY_INVALID", "bounded canary event identity is invalid")
     try:
