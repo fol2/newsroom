@@ -642,6 +642,158 @@ def test_o16_preflight_rejects_claimed_exhausted_row() -> None:
     assert _effective_retry_exclusion_status(**args)[0] is False
 
 
+def _o16_step23_exclusion_args() -> dict[str, object]:
+    args = _o16_exclusion_args(plan_includes_consumed=True)
+    consumed = next(
+        item for item in args["plan_events"] if int(item["ledger_seq"]) == 13361
+    )
+    consumed.update(
+        {
+            "attempt_count": 1,
+            "last_failure_code": args["outcome"]["failure_code_after_seal"],
+            "provider_dispatched": True,
+            "state": "CONFIGURATION_HELD",
+        }
+    )
+    args["exclusions"].append(
+        {
+            "event_id": consumed["event_id"],
+            "ledger_seq": 13361,
+            "reason": "ISSUE_790_RETRY_FORBIDDEN",
+            "event_snapshot": dict(args["event_snapshot"]),
+        }
+    )
+
+    predecessor_plan = (
+        "sha256:1a0711aad02e849e456293549e4f9b9a1b1100b7ba01603ca4dcf465a410c529"
+    )
+    spent = (
+        (
+            13665,
+            "b39a1e6ea465ca4a993893d4ae51c94ca9ac3e0db7f4fd70a8c780367263be6b",
+            True,
+            "CONFIGURATION_HELD",
+            "AMBIGUOUS_EFFECT",
+        ),
+        (
+            13671,
+            "db17fb48469b96b7134b9f0ab7c73c27ddc2f4ebb3bc6016fe268b6326ccb08e",
+            False,
+            "CONFIGURATION_HELD",
+            "BrokerError",
+        ),
+        (
+            13677,
+            "1f60dac732657a0d89a9d46528aed13bcd7e2af5157a5bc6541bed579067705c",
+            True,
+            "CONFIGURATION_HELD",
+            "AMBIGUOUS_EFFECT",
+        ),
+        (
+            13683,
+            "7d7bd60fac66b52c7e945a97021570e4220e3fdee0c01af4ee744a50a3993944",
+            True,
+            "CONFIGURATION_HELD",
+            "AMBIGUOUS_EFFECT",
+        ),
+        (
+            13689,
+            "0cf4c6da7a7be611d10fb87f82a7038ca42296f6112d5a2a03fcfb35abde9a39",
+            False,
+            "CONFIGURATION_HELD",
+            "NO_EVENT_RESULT",
+        ),
+        (
+            13690,
+            "57bfeadea2a60c8f24a269c0985611ea8828fcaeaccbfd1b7bed84b537293666",
+            True,
+            "CONFIGURATION_HELD",
+            "GuardError",
+        ),
+        (
+            13696,
+            "a50799d126f82a229e1630816ea27a0e3fff2731fee87b48c986bc0f9b51b7f2",
+            True,
+            "TERMINAL",
+            None,
+        ),
+    )
+    consumptions: list[dict[str, object]] = []
+    outcomes: list[dict[str, object]] = []
+    snapshots: list[dict[str, object]] = []
+    for seq, event_hash, dispatched, state, suffix in spent:
+        event_id = "sha256:" + event_hash
+        consumption_digest = "sha256:" + f"{seq:064x}"
+        failure = (
+            None
+            if suffix is None
+            else f"BOUNDED_CANARY_AUTHORITY_EXHAUSTED:{suffix}"
+        )
+        args["plan_events"].append({"event_id": event_id, "ledger_seq": seq})
+        consumptions.append(
+            {
+                "approved_plan_digest": predecessor_plan,
+                "consumption_digest": consumption_digest,
+                "event_id": event_id,
+                "ledger_seq": seq,
+                "attempt_count_before": 0,
+                "maximum_event_attempts": 1,
+            }
+        )
+        outcomes.append(
+            {
+                "approved_plan_digest": predecessor_plan,
+                "consumption_digest": consumption_digest,
+                "event_id": event_id,
+                "ledger_seq": seq,
+                "attempt_count": 1,
+                "provider_dispatched": dispatched,
+                "retry_authorised": False,
+                "result_class": (
+                    "TRUTHFUL_PROVIDER_SUCCESS"
+                    if state == "TERMINAL"
+                    else "UNCLASSIFIED_NON_SUCCESS"
+                ),
+                "state_after_seal": state,
+                "failure_code_after_seal": failure,
+            }
+        )
+        snapshots.append(
+            {
+                "attempt_count": 1,
+                "event_id": event_id,
+                "last_failure_code": failure,
+                "ledger_seq": seq,
+                "provider_dispatched": dispatched,
+                "state": state,
+            }
+        )
+
+    args.update(
+        {
+            "consumption": None,
+            "outcome": None,
+            "event_snapshot": None,
+            "consumptions": consumptions,
+            "outcomes": outcomes,
+            "event_snapshots": snapshots,
+            "accepted_consumption_plan_digest": predecessor_plan,
+            "effectively_excluded_event_ids": {
+                *args["effectively_excluded_event_ids"],
+                *(item["event_id"] for item in snapshots),
+            },
+        }
+    )
+    return args
+
+
+def test_o16_step23_proves_every_missing_predecessor_plan_consumption() -> None:
+    args = _o16_step23_exclusion_args()
+    ok, detail = _effective_retry_exclusion_status(**args)
+    assert ok is True
+    assert "consumed=[13665, 13671, 13677, 13683, 13689, 13690, 13696]" in detail
+
+
 def test_o18_skips_old_backlog_before_proving_qualification() -> None:
     old = ("sha256:" + "11" * 32, 8819, "QUEUED", 0, 0)
     future = ("sha256:" + "22" * 32, 14000, "QUEUED", 0, 0)
