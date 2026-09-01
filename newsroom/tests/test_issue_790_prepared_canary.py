@@ -1446,10 +1446,9 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
 ) -> None:
     """Live 13683: persistable leftover NEW + float fact_embedding is TERMINAL.
 
-    Provider COMPLETE + embeddings + persistable edges bound float
-    fact_embedding into the durable receipt. Canonicalisation failed after
-    persist and unmarked 0/0/0 became AMBIGUOUS_EFFECT. Fails on b7a02cdb
-    because that path still classifies the unmarked zero as ambiguous.
+    Provider COMPLETE + embeddings + persistable edges bind float
+    fact_embedding into the durable receipt. Canonicalisation must seal an
+    explicit zero before persistence while the guard claim is still pending.
     """
 
     from contextlib import asynccontextmanager
@@ -1476,6 +1475,8 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
     )
 
     persist_calls: list[str] = []
+    guard_calls: list[str] = []
+    guards: list[object] = []
     executions: list[object] = []
     existing_nodes: list[object] = []
     stores = build_rehearsal_stores(tmp_path, unused_13683=True)
@@ -1568,6 +1569,7 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
             self.episode_uuid = values.get("episode_uuid")
             self.input_digest = values.get("input_digest")
             self.state = GuardState.CREATED
+            guards.append(self)
 
         async def begin(self) -> object:
             marker = GuardMarker(
@@ -1584,14 +1586,17 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
 
         async def record_pending_telemetry(self, **_values: object) -> None:
             self.require_pending("telemetry")
+            guard_calls.append("telemetry")
 
         async def complete(self, _receipt: object) -> None:
             self.require_pending("completion")
             self.state = GuardState.COMPLETE
+            guard_calls.append("complete")
 
         async def rollback_pending(self, **_values: object) -> bool:
             self.require_pending("rollback")
             self.state = GuardState.RECOVERED_AMBIGUOUS
+            guard_calls.append("rollback")
             return True
 
         async def restore_preexisting(self) -> None:
@@ -1811,6 +1816,8 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
     combined = None if not isinstance(raw, dict) else raw.get("combined_temporal_receipt")
     unused = unused_queued_attempt_zero_candidates(stores.work_unpublished, plan)
     assert persist_calls == []
+    assert guard_calls == ["telemetry", "complete"]
+    assert getattr(guards[-1], "state") is GuardState.COMPLETE
     assert consume_calls == [EVENT_13683]
     assert receipt["consumption"]["event_id"] == EVENT_13683
     assert receipt["consumption"]["ledger_seq"] == LEDGER_13683

@@ -433,9 +433,6 @@ class ExistingGraphitiPipeline:
                 attributes = dict(getattr(node, "attributes", {}) or {})
                 attributes["resolution"] = resolution
                 node.attributes = attributes
-            async with self.guard.fenced_graph_mutation():
-                await self.persist_graph(persistable_nodes, guarded)
-                await self.guard.restore_preexisting()
             guarded_iterator = iter(guarded)
             persistable_edge_ids = {id(edge) for edge in persistable_edges}
             output_edges = [
@@ -444,10 +441,6 @@ class ExistingGraphitiPipeline:
             ]
             chat_invocations = self.chat_receipt()
             embedding_usage = self.embedding_receipt()
-            await self.guard.record_pending_telemetry(
-                chat_invocations=chat_invocations,
-                embedding_usage=embedding_usage,
-            )
             durable_receipt = _durable_receipt(
                 receipt,
                 nodes=resolved_nodes,
@@ -466,21 +459,22 @@ class ExistingGraphitiPipeline:
                 except CanonicalizationError as exc:
                     if not _float_fact_embedding_blocked(durable_receipt, exc):
                         raise
-                    # Live 13683 only: persistable leftover NEW bound a float
-                    # fact_embedding, canonicalisation failed after persist, and
-                    # unmarked 0/0/0 was AMBIGUOUS_EFFECT. Other
-                    # CanonicalizationError stays fail-closed.
-                    await self.guard.rollback_pending(
-                        chat_invocations=chat_invocations,
-                        embedding_usage=embedding_usage,
-                        reason="CanonicalizationError",
-                    )
+                    # A float fact_embedding cannot enter the canonical receipt.
+                    # Seal explicit zero while the guard still owns a pending
+                    # claim, before any graph mutation requires rollback.
                     return await self._seal_empty_effect(
                         receipt, embedding_skipped=False
                     )
                 completed_receipt = (
                     sealed if isinstance(sealed, dict) else dict(sealed)
                 )
+            async with self.guard.fenced_graph_mutation():
+                await self.persist_graph(persistable_nodes, guarded)
+                await self.guard.restore_preexisting()
+            await self.guard.record_pending_telemetry(
+                chat_invocations=chat_invocations,
+                embedding_usage=embedding_usage,
+            )
             await self.guard.complete(completed_receipt)
         except Exception as exc:
             rollback_completed = False
