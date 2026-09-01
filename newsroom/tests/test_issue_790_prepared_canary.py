@@ -2387,6 +2387,18 @@ def test_step22_complete_preflight_emits_prepared_bound_live_command(
 
     import scripts.issue_790_live_canary_preflight as preflight
 
+    ops_source = inspect.getsource(preflight._ops_gates)
+    digest_drift_message = (
+        "ledger 13690 prepared canary decision digest differs: "
+        "preflight must prepare from the activated plan consumed by the live command"
+    )
+    assert "activated_plan=activated_plan" in ops_source, digest_drift_message
+    prepare_helper = getattr(preflight, "_prepare_preflight_canary", None)
+    if prepare_helper is not None:
+        assert "plan=activated_plan" in inspect.getsource(prepare_helper), (
+            digest_drift_message
+        )
+
     stores_root = tmp_path / "stores"
     stores_root.mkdir()
     stores = build_rehearsal_stores(stores_root, unused_13689=True)
