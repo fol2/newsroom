@@ -6,7 +6,6 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from newsroom.authority.canonical import CanonicalizationError
 from newsroom.graphiti_adapter.edge_guard import guard_extracted_edges
 from newsroom.graphiti_adapter.neo4j_guard import GuardState, Neo4jMutationGuard
 
@@ -140,12 +139,13 @@ def _durable_receipt(
         if not isinstance(raw, Mapping):
             raise ValueError("relation proposal receipt is malformed")
         item = dict(raw)
+        item.pop("fact_embedding", None)
+        fact_embedding = getattr(edge, "fact_embedding", None)
         item.update(
             {
                 "proposal_identity": str(edge.uuid),
                 "source_identity": str(edge.source_node_uuid),
                 "target_identity": str(edge.target_node_uuid),
-                "fact_embedding": getattr(edge, "fact_embedding", None),
                 "proposal_status": (
                     "COLLAPSED_EXACT_SIDECAR_DUPLICATE"
                     if (getattr(edge, "attributes", {}) or {}).get(
@@ -153,7 +153,7 @@ def _durable_receipt(
                     )
                     else (
                         "AMBIGUOUS_HOLD_ENDPOINT"
-                        if getattr(edge, "fact_embedding", None) is None
+                        if fact_embedding is None
                         else "PROPOSED"
                     )
                 ),
@@ -165,30 +165,6 @@ def _durable_receipt(
     proposal["node_resolutions"] = list(resolutions)
     durable["proposal_receipt"] = proposal
     return durable
-
-
-def _float_fact_embedding_blocked(
-    receipt: Mapping[str, object], exc: CanonicalizationError
-) -> bool:
-    """True only for the live 13683 non-canonical bound fact_embedding vector."""
-
-    if "fact_embedding" not in str(exc):
-        return False
-    proposal = receipt.get("proposal_receipt")
-    if not isinstance(proposal, Mapping):
-        return False
-    relations = proposal.get("relation_proposals")
-    if not isinstance(relations, list):
-        return False
-    for item in relations:
-        if not isinstance(item, Mapping):
-            continue
-        embedding = item.get("fact_embedding")
-        if isinstance(embedding, list) and any(
-            isinstance(value, float) for value in embedding
-        ):
-            return True
-    return False
 
 
 @dataclass(slots=True)
@@ -433,6 +409,9 @@ class ExistingGraphitiPipeline:
                 attributes = dict(getattr(node, "attributes", {}) or {})
                 attributes["resolution"] = resolution
                 node.attributes = attributes
+            async with self.guard.fenced_graph_mutation():
+                await self.persist_graph(persistable_nodes, guarded)
+                await self.guard.restore_preexisting()
             guarded_iterator = iter(guarded)
             persistable_edge_ids = {id(edge) for edge in persistable_edges}
             output_edges = [
@@ -452,25 +431,12 @@ class ExistingGraphitiPipeline:
             if self.complete_receipt is None:
                 completed_receipt = durable_receipt
             else:
-                try:
-                    sealed = self.complete_receipt(
-                        resolved_nodes, output_edges, durable_receipt
-                    )
-                except CanonicalizationError as exc:
-                    if not _float_fact_embedding_blocked(durable_receipt, exc):
-                        raise
-                    # A float fact_embedding cannot enter the canonical receipt.
-                    # Seal explicit zero while the guard still owns a pending
-                    # claim, before any graph mutation requires rollback.
-                    return await self._seal_empty_effect(
-                        receipt, embedding_skipped=False
-                    )
+                sealed = self.complete_receipt(
+                    resolved_nodes, output_edges, durable_receipt
+                )
                 completed_receipt = (
                     sealed if isinstance(sealed, dict) else dict(sealed)
                 )
-            async with self.guard.fenced_graph_mutation():
-                await self.persist_graph(persistable_nodes, guarded)
-                await self.guard.restore_preexisting()
             await self.guard.record_pending_telemetry(
                 chat_invocations=chat_invocations,
                 embedding_usage=embedding_usage,
