@@ -87,6 +87,13 @@ STEP22_PREPARED_CANARY_HANDOFF_FULL_PATH_TEST = (
     "newsroom/tests/test_issue_790_prepared_canary.py::"
     "test_step22_complete_preflight_emits_prepared_bound_live_command"
 )
+STEP23_SINGLE_USE_AUTHORITY_FULL_PATH_TEST = (
+    "newsroom/tests/test_issue_790_step23_successor.py::"
+    "test_completed_consumption_exhausts_plan_before_dynamic_successor_selection"
+)
+STEP23_SINGLE_USE_AUTHORITY_RED_COMMIT = (
+    "59d356368bc9df97841c4359d38333dc28123a97"
+)
 LATEST_FAILURE_COVERING_FULL_PATH_TESTS = frozenset(
     {
         STEP21_FULL_PATH_TEST,
@@ -99,6 +106,7 @@ LATEST_FAILURE_COVERING_FULL_PATH_TESTS = frozenset(
         STEP22_ABORTED_SPAWN_13689_BACKUP_DEST_FULL_PATH_TEST,
         STEP22_UNMATCHED_13689_CONSUMPTION_BLOCKS_13690_READY_FULL_PATH_TEST,
         STEP22_PREPARED_CANARY_HANDOFF_FULL_PATH_TEST,
+        STEP23_SINGLE_USE_AUTHORITY_FULL_PATH_TEST,
     }
 )
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -579,7 +587,7 @@ def _eligible_candidate_rows(
         rows,
         forbidden_event_ids=forbidden_event_ids,
         forbidden_seqs=forbidden_seqs,
-        floor=max(REQUIRED_RETRY_LEDGER_SEQS),
+        floor=max(STEP23_RETRY_LEDGER_SEQS),
     )
 
 
@@ -613,7 +621,7 @@ def _latest_failure_red_green(
     if ledger is None:
         return False, "latest live failure ledger absent"
 
-    diagnoses: list[tuple[int, dict[str, Any], str]] = []
+    diagnoses: list[tuple[int, dict[str, Any], str, str]] = []
     for index, item in enumerate(
         ordered[failure_index + 1 :],
         start=failure_index + 1,
@@ -624,18 +632,24 @@ def _latest_failure_red_green(
             r"(newsroom/tests/[A-Za-z0-9_./-]+::test_[A-Za-z0-9_]+)`",
             body,
         )
+        red_commit = re.search(r"(?i)red commit:\s*`([0-9a-f]{40})`", body)
         if (
             "full-path red" in body.lower()
             and ledger in body
-            and re.search(r"(?i)red commit:\s*`[0-9a-f]{40}`", body)
+            and red_commit is not None
             and node is not None
         ):
-            diagnoses.append((index, item, node.group(1)))
+            diagnoses.append((index, item, node.group(1), red_commit.group(1)))
     if not diagnoses:
         return False, f"ledger {ledger} full-path red absent"
-    diagnosis_index, _diagnosis, test_node = diagnoses[-1]
+    diagnosis_index, _diagnosis, test_node, red_commit = diagnoses[-1]
     if test_node not in LATEST_FAILURE_COVERING_FULL_PATH_TESTS:
         return False, f"unexpected latest red test {test_node}"
+    if (
+        test_node == STEP23_SINGLE_USE_AUTHORITY_FULL_PATH_TEST
+        and red_commit != STEP23_SINGLE_USE_AUTHORITY_RED_COMMIT
+    ):
+        return False, "Step 23 full-path red commit differs"
 
     for item in ordered[diagnosis_index + 1 :]:
         body = str(item.get("body", ""))

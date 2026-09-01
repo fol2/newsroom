@@ -380,7 +380,7 @@ _RETRY_FORBIDDEN_EVENTS_STEP23: tuple[dict[str, object], ...] = (
     *_EXHAUSTED_STEP23_EVENTS,
 )
 _RETRY_FORBIDDEN_EVENTS_CURRENT: tuple[dict[str, object], ...] = (
-    *_RETRY_FORBIDDEN_EVENTS_STEP22,
+    *_RETRY_FORBIDDEN_EVENTS_STEP23,
 )
 _RETRY_FORBIDDEN_LEDGER_SEQS = frozenset(
     int(item["ledger_seq"]) for item in _RETRY_FORBIDDEN_EVENTS_CURRENT

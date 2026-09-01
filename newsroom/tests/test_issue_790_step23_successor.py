@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from newsroom.control_plane import issue_790_canary as canary_module
+from newsroom.control_plane import cycle as cycle_module
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane import issue_790_contract as contract_module
 from newsroom.control_plane import issue_790_disposition as disposition_module
@@ -21,6 +22,7 @@ from newsroom.control_plane.issue_790_disposition import (
     Issue790DispositionError,
     _require_sequence_predecessor,
     issue_790_checked_approval,
+    qualify_issue_790_candidate_event,
     seal_issue_790_step16_plan,
 )
 from newsroom.control_plane.issue_790_canary import (
@@ -231,6 +233,83 @@ def test_step23_contract_is_the_only_registered_next_ordinal() -> None:
     assert contract.sequence_ordinal == 23
     assert contract.candidate_event_id == _EVENT_13702
     assert contract.candidate_ledger_seq == 13702
+
+
+def test_step23_is_the_global_immutable_retry_frontier() -> None:
+    current = disposition_module._RETRY_FORBIDDEN_EVENTS_CURRENT
+    current_seqs = {
+        int(item["ledger_seq"])
+        for item in current
+    }
+
+    assert current == disposition_module._RETRY_FORBIDDEN_EVENTS_STEP23
+    assert {13665, 13671, 13677, 13683, 13689, 13690, 13696}.issubset(
+        current_seqs
+    )
+    assert disposition_module._RETRY_FORBIDDEN_LEDGER_SEQS == current_seqs
+    assert max(current_seqs) == 13696
+    assert 13702 not in current_seqs
+
+
+@pytest.mark.parametrize(
+    ("event_id", "ledger_seq"),
+    tuple(
+        (str(item["event_id"]), int(item["ledger_seq"]))
+        for item in disposition_module._RETRY_FORBIDDEN_EVENTS_STEP23
+        if int(item["ledger_seq"]) >= 13665
+    ),
+)
+def test_step23_global_qualification_rejects_every_newly_spent_identity_before_store_open(
+    tmp_path: Path, event_id: str, ledger_seq: int
+) -> None:
+    with pytest.raises(Issue790DispositionError, match="candidate event is forbidden"):
+        qualify_issue_790_candidate_event(
+            store=tmp_path / "missing.sqlite3",
+            proving_store=tmp_path / "missing-proving.sqlite3",
+            event_id=event_id,
+            ledger_seq=ledger_seq,
+            observed_at=datetime(2026, 9, 1, 1, 31, 53, tzinfo=UTC),
+        )
+
+
+def test_step23_global_qualification_allows_13702(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = tmp_path.resolve() / "unpublished.sqlite3"
+    proving_store = tmp_path.resolve() / "proving.sqlite3"
+    Issue790CanaryRepository(str(store))
+    with sqlite3.connect(proving_store) as connection:
+        connection.execute("CREATE TABLE proving_fixture(value INTEGER)")
+    preflight = {
+        "event_id": _EVENT_13702,
+        "ledger_seq": 13702,
+        "event_manifest_digest": "sha256:" + "1" * 64,
+        "resolved_units": [{"ingest_id": "ingest-13702"}],
+        "provider_calls": 0,
+        "store_mutations": 0,
+    }
+    preflight["evidence_digest"] = digest_canonical(preflight)
+    monkeypatch.setattr(
+        cycle_module,
+        "qualify_fresh_graphiti_event",
+        lambda **_values: preflight,
+    )
+    monkeypatch.setattr(
+        canary_module,
+        "validate_graphiti_canary_target_unused",
+        lambda *_args, **_kwargs: None,
+    )
+
+    receipt = qualify_issue_790_candidate_event(
+        store=store,
+        proving_store=proving_store,
+        event_id=_EVENT_13702,
+        ledger_seq=13702,
+        observed_at=datetime(2026, 9, 1, 1, 31, 53, tzinfo=UTC),
+    )
+
+    assert receipt["status"] == "READY_FOR_OWNER_PACKET"
+    assert (receipt["event_id"], receipt["ledger_seq"]) == (_EVENT_13702, 13702)
 
 
 def test_step23_exact_authority_drift_predecessor_is_accepted() -> None:
