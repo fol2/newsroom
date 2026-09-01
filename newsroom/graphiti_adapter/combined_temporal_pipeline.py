@@ -466,15 +466,11 @@ class ExistingGraphitiPipeline:
                 except CanonicalizationError as exc:
                     if not _float_fact_embedding_blocked(durable_receipt, exc):
                         raise
-                    # Live 13683 only: persistable leftover NEW bound a float
-                    # fact_embedding, canonicalisation failed after persist, and
-                    # unmarked 0/0/0 was AMBIGUOUS_EFFECT. Other
-                    # CanonicalizationError stays fail-closed.
-                    await self.guard.rollback_pending(
-                        chat_invocations=chat_invocations,
-                        embedding_usage=embedding_usage,
-                        reason="CanonicalizationError",
-                    )
+                    # Live 13683 bound a float fact_embedding after persist.
+                    # Live 13690 then called rollback_pending before sealing
+                    # empty: marker RECOVERED_AMBIGUOUS, no snapshot rows,
+                    # complete() raised GuardError. Keep the PENDING claim.
+                    await self.guard.discard_uncommitted_generation()
                     return await self._seal_empty_effect(
                         receipt, embedding_skipped=False
                     )

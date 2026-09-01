@@ -516,36 +516,7 @@ class Neo4jMutationGuard:
         await self._restore_labels()
         await self.assert_preexisting_unchanged()
 
-    async def rollback_pending(
-        self,
-        *,
-        chat_invocations: list[dict[str, object]],
-        embedding_usage: dict[str, object],
-        reason: str,
-    ) -> bool:
-        """Restore the exact pre-attempt generation and retain a recovery marker."""
-
-        claimed = await self._query(
-            f"""
-            MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
-            WHERE m.state = 'PENDING' AND m.claim_token = $claim_token
-            SET m.state = 'ROLLING_BACK'
-            RETURN m.state AS state
-            """,
-            episode_uuid=self._episode_uuid,
-            claim_token=self._claim_token,
-        )
-        if not claimed:
-            retained = await self._marker()
-            state = None if retained is None else str(retained.get("state"))
-            if state == GuardState.COMPLETE.value:
-                await self._delete_snapshot()
-                return False
-            if state != GuardState.ROLLING_BACK.value:
-                raise GuardError("Graphiti marker cannot enter rollback")
-            if str(retained.get("claim_token") or "") != self._claim_token:
-                raise GuardError("Graphiti rollback is owned by another claim")
-
+    async def _undo_uncommitted_graph(self) -> None:
         await self._query(
             f"""
             MATCH (a)-[r]->(b)
@@ -582,6 +553,58 @@ class Neo4jMutationGuard:
         await self._restore_properties()
         await self._restore_labels()
         await self.assert_preexisting_unchanged()
+
+    async def discard_uncommitted_generation(self) -> None:
+        """Undo new graph objects while keeping the PENDING completion claim."""
+
+        claimed = await self._query(
+            f"""
+            MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
+            WHERE m.state = 'PENDING' AND m.claim_token = $claim_token
+            SET m.claim_expires_at = datetime() + duration($claim_lease)
+            RETURN m.state AS state
+            """,
+            episode_uuid=self._episode_uuid,
+            claim_token=self._claim_token,
+            claim_lease=_MARKER_CLAIM_LEASE,
+        )
+        if not claimed or _record_value(claimed[0], "state") != "PENDING":
+            raise GuardError(
+                "Graphiti marker cannot discard an uncommitted generation"
+            )
+        await self._undo_uncommitted_graph()
+
+    async def rollback_pending(
+        self,
+        *,
+        chat_invocations: list[dict[str, object]],
+        embedding_usage: dict[str, object],
+        reason: str,
+    ) -> bool:
+        """Restore the exact pre-attempt generation and retain a recovery marker."""
+
+        claimed = await self._query(
+            f"""
+            MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
+            WHERE m.state = 'PENDING' AND m.claim_token = $claim_token
+            SET m.state = 'ROLLING_BACK'
+            RETURN m.state AS state
+            """,
+            episode_uuid=self._episode_uuid,
+            claim_token=self._claim_token,
+        )
+        if not claimed:
+            retained = await self._marker()
+            state = None if retained is None else str(retained.get("state"))
+            if state == GuardState.COMPLETE.value:
+                await self._delete_snapshot()
+                return False
+            if state != GuardState.ROLLING_BACK.value:
+                raise GuardError("Graphiti marker cannot enter rollback")
+            if str(retained.get("claim_token") or "") != self._claim_token:
+                raise GuardError("Graphiti rollback is owned by another claim")
+
+        await self._undo_uncommitted_graph()
         recovered = await self._query(
             f"""
             MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
