@@ -10,6 +10,7 @@ import pytest
 
 import newsroom.control_plane.read_only_snapshot as snapshot_module
 from newsroom.authority.canonical import digest_bytes, digest_canonical
+from newsroom.authority.migrations import MIGRATIONS
 from newsroom.control_plane.graphiti_events import (
     GRAPHITI_EVENT_PROJECTION_GENERATION,
     GRAPHITI_EVENT_PROJECTOR_VERSION,
@@ -23,7 +24,13 @@ from newsroom.control_plane.read_only_snapshot import (
     read_only_snapshot,
 )
 from newsroom.control_plane.store import connect
+from newsroom.graphiti_adapter.identity import attempt_ids
 from newsroom.increment9.proving import PROVING_GATES, SOURCE_IDS, SOURCE_URLS
+from newsroom.increment4.contracts import (
+    increment4_admitted_family_v1,
+    increment4_admitted_mapping_v1,
+    increment4_admitted_ontology_v1,
+)
 from scripts import graphiti_steady_state_report
 
 NOW = datetime(2026, 9, 1, 12, tzinfo=UTC)
@@ -199,6 +206,71 @@ def _turn_terminal_receipt_into_historical_raw_only(
         "UPDATE unpublished_graphiti_revision_events SET proposal_count=1"
     )
     connection.commit()
+
+
+def _bind_terminal_raw_proposal_to_authority(
+    unpublished: Path,
+    authority: Path,
+) -> None:
+    unpublished_connection = sqlite3.connect(unpublished)
+    row = unpublished_connection.execute(
+        "SELECT receipt_json FROM unpublished_graphiti_receipts "
+        "WHERE ingest_id='ingest-1'"
+    ).fetchone()
+    assert row is not None
+    receipt = json.loads(str(row[0]))
+    receipt.pop("receipt_digest")
+    receipt["attempt_number"] = 1
+    receipt_digest = digest_canonical(receipt)
+    retained_json = json.dumps(
+        {**receipt, "receipt_digest": receipt_digest}, sort_keys=True
+    )
+    unpublished_connection.execute(
+        "UPDATE unpublished_graphiti_ingest SET receipt_digest=? "
+        "WHERE ingest_id='ingest-1'",
+        (receipt_digest,),
+    )
+    unpublished_connection.execute(
+        "UPDATE unpublished_graphiti_receipts SET receipt_json=? "
+        "WHERE ingest_id='ingest-1'",
+        (retained_json,),
+    )
+    unpublished_connection.execute(
+        "UPDATE unpublished_graphiti_attempt_receipts "
+        "SET receipt_digest=?,receipt_json=? WHERE ingest_id='ingest-1'",
+        (receipt_digest, retained_json),
+    )
+    unpublished_connection.commit()
+    unpublished_connection.close()
+
+    proposal = receipt["proposals"][0]
+    authority_connection = sqlite3.connect(authority)
+    authority_connection.execute(
+        "INSERT INTO graphiti_adapter_attempts VALUES(?,?,?,?,?,?,?)",
+        (
+            str(attempt_ids("ingest-1", 1)[0]),
+            "COMPLETE",
+            1,
+            "proposal-set",
+            "output",
+            "run",
+            "run-version",
+        ),
+    )
+    authority_connection.execute(
+        "INSERT INTO extraction_proposals VALUES(?,?,?,?,?,?,?)",
+        (
+            "proposal-id",
+            "proposal-set",
+            "output",
+            "run",
+            "run-version",
+            proposal["local_id"],
+            digest_canonical(proposal),
+        ),
+    )
+    authority_connection.commit()
+    authority_connection.close()
 
 
 def _nonterminal_obligation(
@@ -433,20 +505,104 @@ def _authority_store(tmp_path: Path) -> Path:
             applied_at TEXT NOT NULL
         );
         CREATE TABLE ledger_events(ledger_seq INTEGER PRIMARY KEY);
-        CREATE TABLE extraction_proposals(proposal_id TEXT PRIMARY KEY);
+        CREATE TABLE extraction_proposals(
+            proposal_id TEXT PRIMARY KEY,
+            proposal_set_id TEXT NOT NULL,
+            output_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            run_version_id TEXT NOT NULL,
+            local_id TEXT NOT NULL,
+            semantic_digest TEXT NOT NULL
+        );
         CREATE TABLE entity_resolution_decisions(decision_id TEXT PRIMARY KEY);
         CREATE TABLE editorial_relation_decisions(decision_id TEXT PRIMARY KEY);
-        CREATE TABLE graphiti_adapter_attempts(attempt_id TEXT PRIMARY KEY);
+        CREATE TABLE graphiti_adapter_attempts(
+            attempt_id TEXT PRIMARY KEY,
+            outcome TEXT NOT NULL,
+            proposal_count INTEGER NOT NULL,
+            proposal_set_id TEXT,
+            extraction_output_id TEXT,
+            run_id TEXT NOT NULL,
+            run_version_id TEXT NOT NULL
+        );
+        CREATE TABLE projection_ontology_contracts(
+            contract_digest TEXT PRIMARY KEY,
+            ontology_id TEXT NOT NULL,
+            ontology_version TEXT NOT NULL
+        );
+        CREATE TABLE projection_mapping_contracts(
+            contract_digest TEXT PRIMARY KEY,
+            mapping_id TEXT NOT NULL,
+            mapping_version TEXT NOT NULL,
+            ontology_contract_digest TEXT NOT NULL
+        );
+        CREATE TABLE projection_family_definitions(
+            definition_digest TEXT PRIMARY KEY,
+            family_id TEXT NOT NULL,
+            definition_version TEXT NOT NULL,
+            projector_version TEXT NOT NULL,
+            ontology_contract_digest TEXT NOT NULL,
+            mapping_contract_digest TEXT NOT NULL
+        );
+        CREATE TABLE projection_families(
+            family_id TEXT PRIMARY KEY,
+            definition_digest TEXT NOT NULL
+        );
+        CREATE TABLE projection_generations(
+            generation_id TEXT PRIMARY KEY,
+            family_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            validated_through_ledger_seq INTEGER NOT NULL
+        );
         INSERT INTO ledger_events VALUES(7);
         """
     )
+    ontology = increment4_admitted_ontology_v1()
+    mapping = increment4_admitted_mapping_v1(ontology)
+    family = increment4_admitted_family_v1(ontology, mapping)
     connection.executemany(
         "INSERT INTO authority_migrations VALUES(?,?,?,?)",
+        tuple(
+            (int(item.version), str(item.name), str(item.checksum), NOW.isoformat())
+            for item in MIGRATIONS
+        ),
+    )
+    connection.execute(f"PRAGMA user_version={max(int(item.version) for item in MIGRATIONS)}")
+    connection.execute(
+        "INSERT INTO projection_ontology_contracts VALUES(?,?,?)",
+        (ontology.contract_digest, ontology.ontology_id, ontology.ontology_version),
+    )
+    connection.execute(
+        "INSERT INTO projection_mapping_contracts VALUES(?,?,?,?)",
         (
-            (13, "extraction_run_authority_v13", "sha256:" + "a" * 64, NOW.isoformat()),
-            (14, "entity_resolution_authority_v14", "sha256:" + "b" * 64, NOW.isoformat()),
-            (15, "editorial_relation_authority_v15", "sha256:" + "c" * 64, NOW.isoformat()),
-            (16, "graphiti_proposal_adapter_v16", "sha256:" + "d" * 64, NOW.isoformat()),
+            mapping.contract_digest,
+            mapping.mapping_id,
+            mapping.mapping_version,
+            mapping.ontology_contract_digest,
+        ),
+    )
+    connection.execute(
+        "INSERT INTO projection_family_definitions VALUES(?,?,?,?,?,?)",
+        (
+            family.digest,
+            family.family_id,
+            family.definition_version,
+            family.projector_version,
+            family.ontology_contract_digest,
+            family.mapping_contract_digest,
+        ),
+    )
+    connection.execute(
+        "INSERT INTO projection_families VALUES(?,?)",
+        (family.family_id, family.digest),
+    )
+    connection.execute(
+        "INSERT INTO projection_generations VALUES(?,?,?,?)",
+        (
+            "00000000-0000-4000-8000-000000000895",
+            family.family_id,
+            "ACTIVE",
+            7,
         ),
     )
     connection.commit()
@@ -464,17 +620,25 @@ def _campaign_input(packet: dict[str, object]) -> dict[str, object]:
     assert isinstance(partition, dict)
     candidates = partition["current_preflight_candidates"]
     assert isinstance(candidates, list)
+    authority_evidence = packet["authority_snapshot_evidence"]
+    assert isinstance(authority_evidence, dict)
+    graph_readback = authority_evidence["active_projection_authority"]
+    assert isinstance(graph_readback, dict)
     selection = {
         "policy_id": "issue-895-current-preflight",
         "policy_version": "v1",
     }
     graph = {
         "destination_id": "neo4j-production",
-        "family_id": "increment4",
-        "ontology_version": "increment4-v1",
-        "mapping_version": "graphiti-admission-v1",
-        "projector_version": "increment4e-full-current-v1",
-        "current_generation_id": "generation-active",
+        "family_id": graph_readback["family_id"],
+        "ontology_id": graph_readback["ontology_id"],
+        "ontology_version": graph_readback["ontology_version"],
+        "ontology_contract_digest": graph_readback["ontology_contract_digest"],
+        "mapping_id": graph_readback["mapping_id"],
+        "mapping_version": graph_readback["mapping_version"],
+        "mapping_contract_digest": graph_readback["mapping_contract_digest"],
+        "projector_version": graph_readback["projector_version"],
+        "current_generation_id": graph_readback["generation_id"],
     }
     target_generation_id = digest_canonical(
         {
@@ -533,9 +697,21 @@ def _campaign_input(packet: dict[str, object]) -> dict[str, object]:
             "rate": {"events_per_minute": 1},
         },
         "ramp": {
-            "initial_events": 1,
-            "increment_events": 1,
-            "observation_seconds": 60,
+            "phases": [
+                {
+                    "phase_id": "phase-1",
+                    "event_limit": len(candidates),
+                    "entry_conditions": [
+                        "EXACT_SNAPSHOT_AND_IDENTITY_RECONFIRMED",
+                        "OWNER_F4_GO_RETAINED",
+                    ],
+                    "advance_conditions": [
+                        "ALL_EXACT_RECEIPTS_RECONCILED",
+                        "CAPS_AND_ACCOUNTING_RECONCILED",
+                        "NO_STOP_CONDITION_OBSERVED",
+                    ],
+                }
+            ]
         },
         "recovery": {
             "backup_identity": "backup-before-campaign",
@@ -544,12 +720,22 @@ def _campaign_input(packet: dict[str, object]) -> dict[str, object]:
         },
         "immediate_stop_conditions": [
             "CAP_REACHED",
+            "CIRCUIT_OPEN",
             "CONFIG_DRIFT",
+            "EXACT_RECEIPT_DRIFT",
+            "GRAPH_IDENTITY_DRIFT",
+            "IDENTITY_DRIFT",
             "INTEGRITY_FAILURE",
             "PROVIDER_FAILURE",
+            "PROVIDER_USAGE_DRIFT",
+            "PROJECTION_GENERATION_DRIFT",
+            "RATE_CAP_REACHED",
             "RECONCILIATION_FAILURE",
+            "RECONCILIATION_DRIFT",
             "RIGHTS_DRIFT",
             "SNAPSHOT_DRIFT",
+            "SPEND_ACCOUNTING_DRIFT",
+            "WALL_TIME_CAP_REACHED",
         ],
         "success_objectives": {
             "watermark": "selected cohort terminal",
@@ -719,7 +905,7 @@ def test_historical_partition_is_total_disjoint_and_candidates_are_unauthorised(
     ]["ledger_sequences"] == [6]
 
 
-def test_complete_exact_campaign_is_ready_without_authorising_effects(
+def test_complete_packet_remains_no_go_without_runtime_and_graph_readback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -758,9 +944,10 @@ def test_complete_exact_campaign_is_ready_without_authorising_effects(
         campaign_input=campaign,
     )
 
-    assert packet["blockers"] == []
-    assert packet["verdict"] == "READY_FOR_OWNER_DECISION"
-    assert packet["readiness"] == "F4_CAMPAIGN_READY_FOR_OWNER_DECISION"
+    assert packet["verdict"] == "NO_GO"
+    assert packet["readiness"] == "ENGINEERING_PREPARATION_ONLY"
+    assert "GRAPH_DESTINATION_READBACK_UNAVAILABLE" in packet["blockers"]
+    assert "RUNTIME_CAMPAIGN_ENFORCEMENT_UNPROVEN" in packet["blockers"]
     assert packet["bounded_campaign"]["campaign_authorised"] is False
     assert packet["bounded_campaign"]["cohort"]["dispatch_authorised"] is False
     assert packet["bounded_campaign"]["cohort"]["claim_performed"] is False
@@ -768,11 +955,13 @@ def test_complete_exact_campaign_is_ready_without_authorising_effects(
         "NON_REPLAYABLE_OR_AMBIGUOUS_EFFECT_HOLD"
     ]["count"] == 1
     assert packet["runtime_composition"] == {
-        "state": "PROVIDER_FREE_ENGINEERING_COMPLETE",
+        "state": "PACKET_ONLY_NOT_RUNTIME_ENFORCED",
         "authority_store_configured": True,
         "durable_proposal_envelope_binding": True,
         "admission_policy_configured": True,
         "full_generation_projector_configured": True,
+        "campaign_packet_enforced": False,
+        "actual_graph_readback_observed": False,
         "campaign_authorised": False,
     }
 
@@ -862,6 +1051,160 @@ def test_historical_raw_only_proposal_is_immutable_non_blocking_hold(
         "IMMUTABLE_RAW_PROPOSAL_WITHOUT_DURABLE_ENVELOPE": 1
     }
     assert "HISTORICAL_EFFECT_ADJUDICATION_REQUIRED" not in packet["blockers"]
+
+
+def test_historical_proposal_is_verified_only_from_exact_4a_4d_snapshot(
+    tmp_path: Path,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _terminal_zero_proposal(connection)
+    _turn_terminal_receipt_into_historical_raw_only(connection)
+    connection.close()
+    authority = _authority_store(tmp_path)
+    _bind_terminal_raw_proposal_to_authority(unpublished, authority)
+
+    packet = _packet(proving, unpublished, authority_store=authority)
+
+    assert packet["historical_partition"]["categories"]["VERIFIED_TERMINAL"][
+        "ledger_sequences"
+    ] == [1]
+    assert packet["historical_partition"]["categories"][
+        "NON_REPLAYABLE_OR_AMBIGUOUS_EFFECT_HOLD"
+    ]["count"] == 0
+
+
+def test_forged_admission_queue_does_not_create_durable_4a_4d_authority(
+    tmp_path: Path,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _terminal_zero_proposal(connection)
+    _turn_terminal_receipt_into_historical_raw_only(connection)
+    receipt_digest = connection.execute(
+        "SELECT receipt_digest FROM unpublished_graphiti_ingest "
+        "WHERE ingest_id='ingest-1'"
+    ).fetchone()[0]
+    forged_request = {
+        "proposal_authority_binding": {
+            "proposal_envelope": {"local_id": "historical-raw-only"}
+        }
+    }
+    connection.execute(
+        "INSERT INTO unpublished_graphiti_admission_queue("
+        "proposal_key,ingest_id,source_revision_id,source_receipt_digest,"
+        "proposal_digest,proposal_kind,request_json,request_digest,state,"
+        "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "forged-key",
+            "ingest-1",
+            "revision",
+            str(receipt_digest),
+            "sha256:" + "1" * 64,
+            "ENTITY_MENTION",
+            json.dumps(forged_request, sort_keys=True),
+            digest_canonical(forged_request),
+            "READY",
+            NOW.isoformat(),
+            NOW.isoformat(),
+        ),
+    )
+    connection.commit()
+    connection.close()
+    authority = _authority_store(tmp_path)
+
+    packet = _packet(proving, unpublished, authority_store=authority)
+
+    hold = packet["historical_partition"]["categories"][
+        "NON_REPLAYABLE_OR_AMBIGUOUS_EFFECT_HOLD"
+    ]
+    assert hold["reason_counts"] == {
+        "IMMUTABLE_RAW_PROPOSAL_WITHOUT_DURABLE_ENVELOPE": 1
+    }
+
+
+def test_arbitrary_migration_checksum_and_generation_are_no_go(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=1,
+        item_key="candidate",
+        ingest_id="candidate-ingest",
+    )
+    connection.commit()
+    connection.close()
+    _seed_proving_accountability(proving)
+    authority = _authority_store(tmp_path)
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti_steady_state."
+        "load_graphiti_units_from_connection",
+        lambda _connection, *, evaluated_at: (
+            _current_unit(item_key="candidate", ingest_id="candidate-ingest"),
+        ),
+    )
+    preparation = _packet(proving, unpublished, authority_store=authority)
+    campaign = _campaign_input(preparation)
+    campaign["graph"]["current_generation_id"] = "self-addressed-generation"
+    authority_connection = sqlite3.connect(authority)
+    authority_connection.execute(
+        "UPDATE authority_migrations SET checksum=? WHERE version=16",
+        ("sha256:" + "0" * 64,),
+    )
+    authority_connection.commit()
+    authority_connection.close()
+
+    packet = _packet(
+        proving,
+        unpublished,
+        authority_store=authority,
+        campaign_input=campaign,
+    )
+
+    assert "AUTHORITY_MIGRATION_HISTORY_INVALID" in packet["blockers"]
+    assert "CAMPAIGN_GRAPH_IDENTITY_DIFFERS_FROM_AUTHORITY" in packet["blockers"]
+    assert "SOURCE_SNAPSHOT_DRIFT" in packet["blockers"]
+
+
+def test_fallback_stop_and_ramp_contracts_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=1,
+        item_key="candidate",
+        ingest_id="candidate-ingest",
+    )
+    connection.commit()
+    connection.close()
+    _seed_proving_accountability(proving)
+    authority = _authority_store(tmp_path)
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti_steady_state."
+        "load_graphiti_units_from_connection",
+        lambda _connection, *, evaluated_at: (
+            _current_unit(item_key="candidate", ingest_id="candidate-ingest"),
+        ),
+    )
+    preparation = _packet(proving, unpublished, authority_store=authority)
+    campaign = _campaign_input(preparation)
+    campaign["caps"]["per_event"]["fallbacks"] = 1
+    campaign["immediate_stop_conditions"].remove("EXACT_RECEIPT_DRIFT")
+    phase = campaign["ramp"]["phases"][0]
+    phase["entry_conditions"] = ["OWNER_F4_GO_RETAINED", "OWNER_F4_GO_RETAINED"]
+
+    packet = _packet(
+        proving,
+        unpublished,
+        authority_store=authority,
+        campaign_input=campaign,
+    )
+
+    assert "FALLBACK_CAP_MUST_BE_ZERO" in packet["blockers"]
+    assert "IMMEDIATE_STOP_CONDITIONS_INCOMPLETE" in packet["blockers"]
+    assert "RAMP_PHASE_1_ENTRY_INVALID" in packet["blockers"]
 
 
 def test_event_manifest_rejects_resolved_landed_identity_mismatch(

@@ -17,6 +17,7 @@ from newsroom.authority.canonical import (
     digest_canonical,
     validate_sha256_digest,
 )
+from newsroom.authority.migrations import MIGRATIONS
 from newsroom.control_plane.graphiti_admission import graphiti_admission_telemetry
 from newsroom.control_plane.corpus import CorpusIngestUnit
 from newsroom.control_plane.cycle import load_graphiti_units_from_connection
@@ -33,6 +34,19 @@ from newsroom.increment9.proving import (
     SOURCE_IDS,
     SOURCE_URLS,
 )
+from newsroom.graphiti_adapter.identity import attempt_ids
+from newsroom.increment4.contracts import (
+    INCREMENT4_ADMITTED_FAMILY_ID,
+    INCREMENT4_ADMITTED_MAPPING_ID,
+    INCREMENT4_ADMITTED_MAPPING_VERSION,
+    INCREMENT4_ADMITTED_ONTOLOGY_ID,
+    INCREMENT4_ADMITTED_ONTOLOGY_VERSION,
+    INCREMENT4_ADMITTED_PROJECTOR_VERSION,
+    increment4_admitted_family_v1,
+    increment4_admitted_mapping_v1,
+    increment4_admitted_ontology_v1,
+)
+from newsroom.projection import ProjectionGenerationId
 
 SCHEMA_VERSION = "newsroom.graphiti-steady-state-packet.v3"
 
@@ -42,11 +56,32 @@ _REQUIRED_STOP_CONDITIONS = frozenset(
     {
         "CAP_REACHED",
         "CONFIG_DRIFT",
+        "EXACT_RECEIPT_DRIFT",
+        "GRAPH_IDENTITY_DRIFT",
+        "IDENTITY_DRIFT",
         "INTEGRITY_FAILURE",
         "PROVIDER_FAILURE",
+        "PROVIDER_USAGE_DRIFT",
+        "PROJECTION_GENERATION_DRIFT",
+        "RATE_CAP_REACHED",
         "RECONCILIATION_FAILURE",
+        "RECONCILIATION_DRIFT",
         "RIGHTS_DRIFT",
         "SNAPSHOT_DRIFT",
+        "SPEND_ACCOUNTING_DRIFT",
+        "CIRCUIT_OPEN",
+        "WALL_TIME_CAP_REACHED",
+    }
+)
+
+_RAMP_ENTRY_BASE = frozenset(
+    {"EXACT_SNAPSHOT_AND_IDENTITY_RECONFIRMED", "OWNER_F4_GO_RETAINED"}
+)
+_RAMP_ADVANCE_BASE = frozenset(
+    {
+        "ALL_EXACT_RECEIPTS_RECONCILED",
+        "CAPS_AND_ACCOUNTING_RECONCILED",
+        "NO_STOP_CONDITION_OBSERVED",
     }
 )
 
@@ -121,6 +156,231 @@ def _store_descriptor(snapshot: object) -> dict[str, object]:
         "watermark": watermark,
     }
     return {**value, "descriptor_digest": digest_canonical(value)}
+
+
+def _authority_snapshot_evidence(
+    connection: sqlite3.Connection,
+) -> tuple[dict[str, object], list[str]]:
+    tables = _tables(connection)
+    required = {
+        "authority_migrations",
+        "ledger_events",
+        "extraction_proposals",
+        "graphiti_adapter_attempts",
+        "entity_resolution_decisions",
+        "editorial_relation_decisions",
+        "projection_ontology_contracts",
+        "projection_mapping_contracts",
+        "projection_family_definitions",
+        "projection_families",
+        "projection_generations",
+    }
+    if not required.issubset(tables):
+        return {"schema_present": False}, ["AUTHORITY_STORE_SCHEMA_INCOMPLETE"]
+    actual_migrations = [
+        (int(row[0]), str(row[1]), str(row[2]))
+        for row in connection.execute(
+            "SELECT version,name,checksum FROM authority_migrations ORDER BY version"
+        )
+    ]
+    expected_migrations = [
+        (int(item.version), str(item.name), str(item.checksum)) for item in MIGRATIONS
+    ]
+    migration_valid = bool(actual_migrations) and actual_migrations == expected_migrations[
+        : len(actual_migrations)
+    ]
+    max_version = max((item[0] for item in actual_migrations), default=0)
+    user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
+    blockers: list[str] = []
+    if not migration_valid or user_version != max_version or max_version < 16:
+        blockers.append("AUTHORITY_MIGRATION_HISTORY_INVALID")
+    if integrity != "ok":
+        blockers.append("AUTHORITY_STORE_INTEGRITY_FAILURE")
+
+    graph_rows = connection.execute(
+        "SELECT g.generation_id,g.state,g.validated_through_ledger_seq,"
+        "g.family_id,d.projector_version,o.ontology_id,o.ontology_version,"
+        "m.mapping_id,m.mapping_version,o.contract_digest,m.contract_digest,"
+        "d.definition_digest FROM projection_generations AS g "
+        "JOIN projection_families AS f ON f.family_id=g.family_id "
+        "JOIN projection_family_definitions AS d "
+        "ON d.definition_digest=f.definition_digest "
+        "JOIN projection_ontology_contracts AS o "
+        "ON o.contract_digest=d.ontology_contract_digest "
+        "JOIN projection_mapping_contracts AS m "
+        "ON m.contract_digest=d.mapping_contract_digest "
+        "WHERE g.family_id=? AND g.state='ACTIVE'",
+        (INCREMENT4_ADMITTED_FAMILY_ID,),
+    ).fetchall()
+    graph_readback: dict[str, object] | None = None
+    if len(graph_rows) != 1:
+        blockers.append("ACTIVE_GRAPH_GENERATION_READBACK_INVALID")
+    else:
+        row = graph_rows[0]
+        validated_through = row[2]
+        if (
+            isinstance(validated_through, bool)
+            or not isinstance(validated_through, int)
+            or validated_through < 0
+        ):
+            blockers.append("ACTIVE_GRAPH_WATERMARK_INVALID")
+            validated_through = -1
+        graph_readback = {
+            "generation_id": str(row[0]),
+            "state": str(row[1]),
+            "validated_through_ledger_seq": validated_through,
+            "family_id": str(row[3]),
+            "projector_version": str(row[4]),
+            "ontology_id": str(row[5]),
+            "ontology_version": str(row[6]),
+            "mapping_id": str(row[7]),
+            "mapping_version": str(row[8]),
+            "ontology_contract_digest": str(row[9]),
+            "mapping_contract_digest": str(row[10]),
+            "family_definition_digest": str(row[11]),
+        }
+        expected_graph = {
+            "family_id": INCREMENT4_ADMITTED_FAMILY_ID,
+            "projector_version": INCREMENT4_ADMITTED_PROJECTOR_VERSION,
+            "ontology_id": INCREMENT4_ADMITTED_ONTOLOGY_ID,
+            "ontology_version": INCREMENT4_ADMITTED_ONTOLOGY_VERSION,
+            "mapping_id": INCREMENT4_ADMITTED_MAPPING_ID,
+            "mapping_version": INCREMENT4_ADMITTED_MAPPING_VERSION,
+        }
+        if any(graph_readback.get(key) != value for key, value in expected_graph.items()):
+            blockers.append("ACTIVE_GRAPH_IDENTITY_INVALID")
+        ontology = increment4_admitted_ontology_v1()
+        mapping = increment4_admitted_mapping_v1(ontology)
+        family = increment4_admitted_family_v1(ontology, mapping)
+        if (
+            graph_readback["ontology_contract_digest"] != ontology.contract_digest
+            or graph_readback["mapping_contract_digest"] != mapping.contract_digest
+            or graph_readback["family_definition_digest"] != family.digest
+        ):
+            blockers.append("ACTIVE_GRAPH_CONTRACT_DIGEST_INVALID")
+        try:
+            ProjectionGenerationId.parse(str(graph_readback["generation_id"]))
+        except (TypeError, ValueError):
+            blockers.append("ACTIVE_GRAPH_GENERATION_ID_INVALID")
+        if (
+            graph_readback["validated_through_ledger_seq"] < 0
+            or graph_readback["validated_through_ledger_seq"]
+            > int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(ledger_seq),0) FROM ledger_events"
+                ).fetchone()[0]
+            )
+        ):
+            blockers.append("ACTIVE_GRAPH_WATERMARK_INVALID")
+        for field in (
+            "ontology_contract_digest",
+            "mapping_contract_digest",
+            "family_definition_digest",
+        ):
+            try:
+                validate_sha256_digest(graph_readback[field], field=field)
+            except (TypeError, ValueError):
+                blockers.append("ACTIVE_GRAPH_CONTRACT_DIGEST_INVALID")
+                break
+    value = {
+        "schema_present": True,
+        "migration_history_digest": digest_canonical(actual_migrations),
+        "migration_history_valid": migration_valid,
+        "user_version": user_version,
+        "watermark": int(
+            connection.execute(
+                "SELECT COALESCE(MAX(ledger_seq),0) FROM ledger_events"
+            ).fetchone()[0]
+        ),
+        "integrity_check": integrity,
+        "active_projection_authority": graph_readback,
+    }
+    return value, blockers
+
+
+def _has_exact_durable_proposal_authority(
+    authority: sqlite3.Connection | None,
+    unpublished: sqlite3.Connection,
+    ingest_ids: tuple[str, ...],
+) -> bool:
+    retained_rows = [
+        unpublished.execute(
+            "SELECT ingest.proposal_count,receipt.receipt_json "
+            "FROM unpublished_graphiti_ingest AS ingest "
+            "JOIN unpublished_graphiti_receipts AS receipt USING(ingest_id) "
+            "WHERE ingest.ingest_id=?",
+            (ingest_id,),
+        ).fetchone()
+        for ingest_id in ingest_ids
+    ]
+    if any(row is None for row in retained_rows):
+        return False
+    if all(int(row[0]) == 0 for row in retained_rows if row is not None):
+        return True
+    if authority is None:
+        return False
+    authority_tables = _tables(authority)
+    if not {"graphiti_adapter_attempts", "extraction_proposals"}.issubset(
+        authority_tables
+    ):
+        return False
+    for ingest_id, retained in zip(ingest_ids, retained_rows, strict=True):
+        assert retained is not None
+        proposal_count = int(retained[0])
+        if proposal_count == 0:
+            continue
+        try:
+            receipt = json.loads(str(retained[1]))
+            attempt_number = receipt["attempt_number"]
+            proposals = receipt["proposals"]
+            if (
+                isinstance(attempt_number, bool)
+                or not isinstance(attempt_number, int)
+                or attempt_number <= 0
+                or not isinstance(proposals, list)
+                or len(proposals) != proposal_count
+            ):
+                return False
+            attempt_id = str(attempt_ids(ingest_id, attempt_number)[0])
+            attempt = authority.execute(
+                "SELECT outcome,proposal_count,proposal_set_id,extraction_output_id,"
+                "run_id,run_version_id FROM graphiti_adapter_attempts "
+                "WHERE attempt_id=?",
+                (attempt_id,),
+            ).fetchone()
+            if (
+                attempt is None
+                or str(attempt[0]) not in {"COMPLETE", "PARTIAL"}
+                or int(attempt[1]) != proposal_count
+                or attempt[2] is None
+                or attempt[3] is None
+            ):
+                return False
+            envelopes = authority.execute(
+                "SELECT local_id,semantic_digest,output_id,run_id,run_version_id "
+                "FROM extraction_proposals WHERE proposal_set_id=? "
+                "ORDER BY local_id",
+                (str(attempt[2]),),
+            ).fetchall()
+            raw_by_local_id = {
+                str(item["local_id"]): digest_canonical(item)
+                for item in proposals
+                if isinstance(item, Mapping) and isinstance(item.get("local_id"), str)
+            }
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, sqlite3.Error):
+            return False
+        if len(raw_by_local_id) != proposal_count or len(envelopes) != proposal_count:
+            return False
+        if any(
+            raw_by_local_id.get(str(row[0])) != str(row[1])
+            or str(row[2]) != str(attempt[3])
+            or str(row[3]) != str(attempt[4])
+            or str(row[4]) != str(attempt[5])
+            for row in envelopes
+        ):
+            return False
+    return True
 
 
 def _proving_accounting(
@@ -535,6 +795,7 @@ def _historical_partition(
     proving: sqlite3.Connection,
     unpublished: sqlite3.Connection,
     *,
+    authority: sqlite3.Connection | None,
     observed_at: datetime,
     event_evidence: Mapping[str, object],
     receipt_evidence: Mapping[str, object],
@@ -693,21 +954,10 @@ def _historical_partition(
                     ):
                         category = "UNCLASSIFIED"
                         reason = "TERMINAL_OUTCOME_UNVERIFIED"
-                    elif any(
-                        int(row[0]) > 0
-                        and int(row[1]) != int(row[0])
-                        for ingest_id in resolved_ingest_ids
-                        for row in unpublished.execute(
-                            "SELECT ingest.proposal_count,(SELECT COUNT(*) FROM "
-                            "unpublished_graphiti_admission_queue AS queue "
-                            "WHERE queue.ingest_id=ingest.ingest_id "
-                            "AND queue.source_receipt_digest=ingest.receipt_digest "
-                            "AND json_extract(queue.request_json, "
-                            "'$.proposal_authority_binding.proposal_envelope') "
-                            "IS NOT NULL) FROM unpublished_graphiti_ingest AS ingest "
-                            "WHERE ingest.ingest_id=?",
-                            (ingest_id,),
-                        ).fetchall()
+                    elif not _has_exact_durable_proposal_authority(
+                        authority,
+                        unpublished,
+                        tuple(str(item) for item in resolved_ingest_ids),
                     ):
                         category = "NON_REPLAYABLE_OR_AMBIGUOUS_EFFECT_HOLD"
                         reason = "IMMUTABLE_RAW_PROPOSAL_WITHOUT_DURABLE_ENVELOPE"
@@ -892,6 +1142,7 @@ def _campaign_evidence(
     tree_sha: str,
     store_descriptors: Mapping[str, Mapping[str, object]],
     historical_partition: Mapping[str, object],
+    authority_evidence: Mapping[str, object],
 ) -> tuple[dict[str, object], list[str]]:
     if campaign is None:
         return {"configured": False, "campaign_authorised": False}, [
@@ -1014,12 +1265,40 @@ def _campaign_evidence(
         for key in (
             "destination_id",
             "family_id",
+            "ontology_id",
             "ontology_version",
+            "ontology_contract_digest",
+            "mapping_id",
             "mapping_version",
+            "mapping_contract_digest",
             "projector_version",
             "current_generation_id",
         )
     }
+    graph_readback = authority_evidence.get("active_projection_authority")
+    if not isinstance(graph_readback, Mapping):
+        blockers.append("ACTIVE_GRAPH_GENERATION_READBACK_INVALID")
+    else:
+        exact_readback_fields = {
+            "family_id": "family_id",
+            "ontology_id": "ontology_id",
+            "ontology_version": "ontology_version",
+            "ontology_contract_digest": "ontology_contract_digest",
+            "mapping_id": "mapping_id",
+            "mapping_version": "mapping_version",
+            "mapping_contract_digest": "mapping_contract_digest",
+            "projector_version": "projector_version",
+            "current_generation_id": "generation_id",
+        }
+        if any(
+            graph_value[campaign_field] != graph_readback[readback_field]
+            for campaign_field, readback_field in exact_readback_fields.items()
+        ):
+            blockers.append("CAMPAIGN_GRAPH_IDENTITY_DIFFERS_FROM_AUTHORITY")
+    # The canonical authority store proves projection authority, not the actual
+    # external graph destination. A worker-owned authenticated graph readback is
+    # required before this identity can support an F4 READY packet.
+    blockers.append("GRAPH_DESTINATION_READBACK_UNAVAILABLE")
     target_generation_id = digest_canonical(
         {
             "current_generation_id": graph_value["current_generation_id"],
@@ -1073,21 +1352,61 @@ def _campaign_evidence(
     }
     if derived_event_ids and caps_value["total"]["events"] < len(derived_event_ids):
         blockers.append("TOTAL_EVENT_CAP_BELOW_SELECTED_COHORT")
+    if (
+        caps_value["per_event"]["fallbacks"] != 0
+        or caps_value["total"]["fallbacks"] != 0
+    ):
+        blockers.append("FALLBACK_CAP_MUST_BE_ZERO")
 
     ramp = mapping(campaign.get("ramp"), "RAMP_ENTRY")
-    ramp_value = {
-        "initial_events": finite(
-            ramp.get("initial_events"), "RAMP_INITIAL_EVENTS", positive=True
-        ),
-        "increment_events": finite(
-            ramp.get("increment_events"), "RAMP_INCREMENT_EVENTS", positive=True
-        ),
-        "observation_seconds": finite(
-            ramp.get("observation_seconds"), "RAMP_OBSERVATION_SECONDS", positive=True
-        ),
-    }
-    if ramp_value["initial_events"] > caps_value["total"]["events"]:
-        blockers.append("RAMP_EXCEEDS_EVENT_CAP")
+    phases = ramp.get("phases")
+    ramp_phases: list[dict[str, object]] = []
+    if not isinstance(phases, list) or not phases:
+        blockers.append("RAMP_PHASES_INVALID")
+    else:
+        prior_limit = 0
+        for index, raw_phase in enumerate(phases):
+            phase = mapping(raw_phase, f"RAMP_PHASE_{index + 1}")
+            phase_id = token(phase.get("phase_id"), f"RAMP_PHASE_{index + 1}_ID")
+            event_limit = finite(
+                phase.get("event_limit"),
+                f"RAMP_PHASE_{index + 1}_EVENT_LIMIT",
+                positive=True,
+            )
+            entry = phase.get("entry_conditions")
+            advance = phase.get("advance_conditions")
+            if (
+                not isinstance(entry, list)
+                or not entry
+                or not all(isinstance(item, str) and item for item in entry)
+                or entry != sorted(set(entry))
+                or not _RAMP_ENTRY_BASE.issubset(entry)
+            ):
+                blockers.append(f"RAMP_PHASE_{index + 1}_ENTRY_INVALID")
+                entry = []
+            if (
+                not isinstance(advance, list)
+                or not advance
+                or not all(isinstance(item, str) and item for item in advance)
+                or advance != sorted(set(advance))
+                or not _RAMP_ADVANCE_BASE.issubset(advance)
+            ):
+                blockers.append(f"RAMP_PHASE_{index + 1}_ADVANCE_INVALID")
+                advance = []
+            if event_limit <= prior_limit:
+                blockers.append("RAMP_PHASE_LIMITS_NOT_STRICTLY_INCREASING")
+            prior_limit = event_limit
+            ramp_phases.append(
+                {
+                    "phase_id": phase_id,
+                    "event_limit": event_limit,
+                    "entry_conditions": entry,
+                    "advance_conditions": advance,
+                }
+            )
+        if prior_limit != caps_value["total"]["events"]:
+            blockers.append("RAMP_FINAL_PHASE_DIFFERS_FROM_EVENT_CAP")
+    ramp_value = {"phases": ramp_phases}
 
     recovery = mapping(campaign.get("recovery"), "RECOVERY_BINDINGS")
     recovery_value = {
@@ -1146,6 +1465,9 @@ def _campaign_evidence(
         "objectives_are_prospective": True,
         "campaign_authorised": False,
     }
+    # The present worker does not consume or enforce this packet. Packet
+    # completeness must never be presented as runtime campaign enforcement.
+    blockers.append("RUNTIME_CAMPAIGN_ENFORCEMENT_UNPROVEN")
     return value, blockers
 
 
@@ -1181,6 +1503,7 @@ def build_graphiti_steady_state_packet(
         historical_partition, partition_blockers = _historical_partition(
             proving.connection,
             unpublished.connection,
+            authority=None if authority is None else authority.connection,
             observed_at=observed_at,
             event_evidence=events,
             receipt_evidence=receipts,
@@ -1194,32 +1517,21 @@ def build_graphiti_steady_state_packet(
             "unpublished": _store_descriptor(unpublished),
         }
         authority_blockers: list[str] = []
+        authority_evidence: dict[str, object] = {"configured": False}
         if authority is None:
             authority_blockers.append("AUTHORITY_STORE_UNCONFIGURED")
         else:
             store_descriptors["authority"] = _store_descriptor(authority)
-            authority_tables = _tables(authority.connection)
-            migration_versions = {
-                int(item["version"])
-                for item in store_descriptors["authority"]["migration_identity"]
-            }
-            if (
-                not {13, 14, 15, 16}.issubset(migration_versions)
-                or not {
-                    "extraction_proposals",
-                    "entity_resolution_decisions",
-                    "editorial_relation_decisions",
-                    "graphiti_adapter_attempts",
-                    "ledger_events",
-                }.issubset(authority_tables)
-            ):
-                authority_blockers.append("AUTHORITY_STORE_MIGRATION_IDENTITY_MISSING")
+            authority_evidence, authority_blockers = _authority_snapshot_evidence(
+                authority.connection
+            )
         campaign, campaign_blockers = _campaign_evidence(
             campaign_input,
             head_sha=head_sha,
             tree_sha=tree_sha,
             store_descriptors=store_descriptors,
             historical_partition=historical_partition,
+            authority_evidence=authority_evidence,
         )
         blockers = (
             proving_blockers
@@ -1241,12 +1553,15 @@ def build_graphiti_steady_state_packet(
             .replace("+00:00", "Z"),
             "store_snapshots": store_descriptors,
             "proving_accountability": proving_accounting,
+            "authority_snapshot_evidence": authority_evidence,
             "runtime_composition": {
-                "state": "PROVIDER_FREE_ENGINEERING_COMPLETE",
+                "state": "PACKET_ONLY_NOT_RUNTIME_ENFORCED",
                 "authority_store_configured": authority is not None,
                 "durable_proposal_envelope_binding": True,
                 "admission_policy_configured": True,
                 "full_generation_projector_configured": True,
+                "campaign_packet_enforced": False,
+                "actual_graph_readback_observed": False,
                 "campaign_authorised": False,
             },
             "bounded_campaign": campaign,
