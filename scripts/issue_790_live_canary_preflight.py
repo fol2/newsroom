@@ -81,6 +81,10 @@ STEP22_PREPARED_CANARY_HANDOFF_FULL_PATH_TEST = (
     "newsroom/tests/test_issue_790_prepared_canary.py::"
     "test_step22_complete_preflight_emits_prepared_bound_live_command"
 )
+STEP22_PREPARED_CANARY_DECISION_DIGEST_PARITY_FULL_PATH_TEST = (
+    "newsroom/tests/test_issue_790_prepared_canary.py::"
+    "test_step22_preflight_written_prepared_json_reaches_dispatch_started"
+)
 LATEST_FAILURE_COVERING_FULL_PATH_TESTS = frozenset(
     {
         STEP21_FULL_PATH_TEST,
@@ -93,6 +97,7 @@ LATEST_FAILURE_COVERING_FULL_PATH_TESTS = frozenset(
         STEP22_ABORTED_SPAWN_13689_BACKUP_DEST_FULL_PATH_TEST,
         STEP22_UNMATCHED_13689_CONSUMPTION_BLOCKS_13690_READY_FULL_PATH_TEST,
         STEP22_PREPARED_CANARY_HANDOFF_FULL_PATH_TEST,
+        STEP22_PREPARED_CANARY_DECISION_DIGEST_PARITY_FULL_PATH_TEST,
     }
 )
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
