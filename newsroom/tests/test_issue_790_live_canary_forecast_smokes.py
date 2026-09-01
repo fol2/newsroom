@@ -556,7 +556,7 @@ def test_o16_uses_exhausted_consumption_without_rewriting_step21_plan() -> None:
     args = _o16_exclusion_args(plan_includes_consumed=False)
     ok, detail = _effective_retry_exclusion_status(**args)
     assert ok is True
-    assert "consumed=13361" in detail
+    assert "consumed=[13361]" in detail
     args["outcome"]["retry_authorised"] = True
     assert _effective_retry_exclusion_status(**args)[0] is False
 
@@ -565,7 +565,7 @@ def test_o16_successor_plan_may_list_13361_before_durable_apply() -> None:
     args = _o16_exclusion_args(plan_includes_consumed=True)
     ok, detail = _effective_retry_exclusion_status(**args)
     assert ok is True
-    assert "consumed=13361" in detail
+    assert "consumed=[13361]" in detail
     assert "13361" in detail.split("durable=")[0]
     assert "13361" not in detail.split("durable=")[1].split("consumed=")[0]
     args["outcome"]["retry_authorised"] = True
@@ -792,6 +792,44 @@ def test_o16_step23_proves_every_missing_predecessor_plan_consumption() -> None:
     ok, detail = _effective_retry_exclusion_status(**args)
     assert ok is True
     assert "consumed=[13665, 13671, 13677, 13683, 13689, 13690, 13696]" in detail
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing_outcome",
+        "tampered_outcome",
+        "wrong_plan",
+        "claimed_snapshot",
+        "mutated_snapshot",
+        "retry_authorised",
+        "invalid_held_failure",
+        "invalid_terminal_success",
+    ),
+)
+def test_o16_step23_consumption_proofs_fail_closed(mutation: str) -> None:
+    args = _o16_step23_exclusion_args()
+    if mutation == "missing_outcome":
+        args["outcomes"].pop(0)
+    elif mutation == "tampered_outcome":
+        args["outcomes"][0]["event_id"] = "sha256:" + "ff" * 32
+    elif mutation == "wrong_plan":
+        args["consumptions"][0]["approved_plan_digest"] = "sha256:" + "ff" * 32
+    elif mutation == "claimed_snapshot":
+        args["event_snapshots"][0]["claim_owner"] = "worker-1"
+    elif mutation == "mutated_snapshot":
+        args["event_snapshots"][0]["attempt_count"] = 2
+    elif mutation == "retry_authorised":
+        args["outcomes"][0]["retry_authorised"] = True
+    elif mutation == "invalid_held_failure":
+        args["outcomes"][0]["failure_code_after_seal"] = "HELD"
+        args["event_snapshots"][0]["last_failure_code"] = "HELD"
+    else:
+        args["outcomes"][-1]["result_class"] = "UNCLASSIFIED_NON_SUCCESS"
+
+    ok, detail = _effective_retry_exclusion_status(**args)
+    assert ok is False
+    assert "consumed=" in detail
 
 
 def test_o18_skips_old_backlog_before_proving_qualification() -> None:
