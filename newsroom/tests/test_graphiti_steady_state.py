@@ -166,6 +166,41 @@ def _terminal_zero_proposal(connection: sqlite3.Connection) -> None:
     connection.commit()
 
 
+def _turn_terminal_receipt_into_historical_raw_only(
+    connection: sqlite3.Connection,
+) -> None:
+    row = connection.execute(
+        "SELECT receipt_json FROM unpublished_graphiti_receipts WHERE ingest_id='ingest-1'"
+    ).fetchone()
+    assert row is not None
+    receipt = json.loads(str(row[0]))
+    receipt.pop("receipt_digest")
+    receipt["proposal_count"] = 1
+    receipt["proposals"] = [{"local_id": "historical-raw-only"}]
+    receipt_digest = digest_canonical(receipt)
+    retained = {**receipt, "receipt_digest": receipt_digest}
+    retained_json = json.dumps(retained, sort_keys=True)
+    connection.execute(
+        "UPDATE unpublished_graphiti_ingest SET proposal_count=1,receipt_digest=? "
+        "WHERE ingest_id='ingest-1'",
+        (receipt_digest,),
+    )
+    connection.execute(
+        "UPDATE unpublished_graphiti_receipts SET receipt_json=? "
+        "WHERE ingest_id='ingest-1'",
+        (retained_json,),
+    )
+    connection.execute(
+        "UPDATE unpublished_graphiti_attempt_receipts "
+        "SET receipt_digest=?,receipt_json=? WHERE ingest_id='ingest-1'",
+        (receipt_digest, retained_json),
+    )
+    connection.execute(
+        "UPDATE unpublished_graphiti_revision_events SET proposal_count=1"
+    )
+    connection.commit()
+
+
 def _nonterminal_obligation(
     connection: sqlite3.Connection,
     *,
@@ -386,6 +421,147 @@ def _seed_proving_accountability(
     connection.close()
 
 
+def _authority_store(tmp_path: Path) -> Path:
+    path = tmp_path / "authority.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE authority_migrations(
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            checksum TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        );
+        CREATE TABLE ledger_events(ledger_seq INTEGER PRIMARY KEY);
+        CREATE TABLE extraction_proposals(proposal_id TEXT PRIMARY KEY);
+        CREATE TABLE entity_resolution_decisions(decision_id TEXT PRIMARY KEY);
+        CREATE TABLE editorial_relation_decisions(decision_id TEXT PRIMARY KEY);
+        CREATE TABLE graphiti_adapter_attempts(attempt_id TEXT PRIMARY KEY);
+        INSERT INTO ledger_events VALUES(7);
+        """
+    )
+    connection.executemany(
+        "INSERT INTO authority_migrations VALUES(?,?,?,?)",
+        (
+            (13, "extraction_run_authority_v13", "sha256:" + "a" * 64, NOW.isoformat()),
+            (14, "entity_resolution_authority_v14", "sha256:" + "b" * 64, NOW.isoformat()),
+            (15, "editorial_relation_authority_v15", "sha256:" + "c" * 64, NOW.isoformat()),
+            (16, "graphiti_proposal_adapter_v16", "sha256:" + "d" * 64, NOW.isoformat()),
+        ),
+    )
+    connection.commit()
+    connection.close()
+    return path
+
+
+def _campaign_input(packet: dict[str, object]) -> dict[str, object]:
+    snapshots = packet["store_snapshots"]
+    assert isinstance(snapshots, dict)
+    snapshot_digests = {
+        name: value["descriptor_digest"] for name, value in snapshots.items()
+    }
+    partition = packet["historical_partition"]
+    assert isinstance(partition, dict)
+    candidates = partition["current_preflight_candidates"]
+    assert isinstance(candidates, list)
+    selection = {
+        "policy_id": "issue-895-current-preflight",
+        "policy_version": "v1",
+    }
+    graph = {
+        "destination_id": "neo4j-production",
+        "family_id": "increment4",
+        "ontology_version": "increment4-v1",
+        "mapping_version": "graphiti-admission-v1",
+        "projector_version": "increment4e-full-current-v1",
+        "current_generation_id": "generation-active",
+    }
+    target_generation_id = digest_canonical(
+        {
+            "current_generation_id": graph["current_generation_id"],
+            "projector_version": graph["projector_version"],
+            "source_snapshot_digests": snapshot_digests,
+            "cohort_manifest_digest": partition[
+                "current_preflight_candidate_manifest_digest"
+            ],
+            "selection_policy_digest": digest_canonical(selection),
+        }
+    )
+    return {
+        "schema_version": "newsroom.graphiti-bounded-campaign-input.v1",
+        "code_identity": {"head_sha": "head", "tree_sha": "tree"},
+        "focus_gate": {
+            "head_sha": "head",
+            "tree_sha": "tree",
+            "conclusion": "SUCCESS",
+            "manifest_digest": "sha256:" + "f" * 64,
+        },
+        "source_snapshot_digests": snapshot_digests,
+        "cohort": {
+            "event_ids": [item["event_id"] for item in candidates],
+            "manifest_digest": partition[
+                "current_preflight_candidate_manifest_digest"
+            ],
+        },
+        "selection_policy": {**selection, "digest": digest_canonical(selection)},
+        "provider": {
+            "provider_id": "provider",
+            "model_id": "model",
+            "embedding_model_id": "embedding",
+        },
+        "graph": {**graph, "target_generation_id": target_generation_id},
+        "caps": {
+            "per_event": {
+                "proposals": 20,
+                "entity_admits": 10,
+                "relation_admits": 10,
+                "effects": 20,
+                "retries": 1,
+                "fallbacks": 0,
+            },
+            "total": {
+                "events": len(candidates),
+                "proposals": 20,
+                "entity_admits": 10,
+                "relation_admits": 10,
+                "effects": 20,
+                "retries": 1,
+                "fallbacks": 0,
+                "wall_time_seconds": 600,
+                "spend_gbp_microunits": 1000000,
+            },
+            "rate": {"events_per_minute": 1},
+        },
+        "ramp": {
+            "initial_events": 1,
+            "increment_events": 1,
+            "observation_seconds": 60,
+        },
+        "recovery": {
+            "backup_identity": "backup-before-campaign",
+            "rollback_procedure_id": "restore-active-generation",
+            "reconciliation_procedure_id": "increment4-full-reconciliation",
+        },
+        "immediate_stop_conditions": [
+            "CAP_REACHED",
+            "CONFIG_DRIFT",
+            "INTEGRITY_FAILURE",
+            "PROVIDER_FAILURE",
+            "RECONCILIATION_FAILURE",
+            "RIGHTS_DRIFT",
+            "SNAPSHOT_DRIFT",
+        ],
+        "success_objectives": {
+            "watermark": "selected cohort terminal",
+            "backlog": 0,
+            "velocity": "positive",
+            "lag": "bounded",
+            "reconciliation": "exact",
+        },
+        "campaign_authorised": False,
+    }
+
+
 def test_wal_snapshot_does_not_change_source_files(tmp_path: Path) -> None:
     path = tmp_path / "wal.sqlite3"
     connection = sqlite3.connect(path)
@@ -427,7 +603,7 @@ def test_snapshot_rejects_wal_topology_created_during_copy(
             pytest.fail("changed WAL topology was accepted")
 
 
-def test_default_uncomposed_is_explicit_no_go(tmp_path: Path) -> None:
+def test_missing_campaign_inputs_are_finite_no_go(tmp_path: Path) -> None:
     proving, unpublished, connection = _stores(tmp_path)
     connection.close()
 
@@ -435,7 +611,9 @@ def test_default_uncomposed_is_explicit_no_go(tmp_path: Path) -> None:
 
     assert packet["verdict"] == "NO_GO"
     assert packet["readiness"] == "ENGINEERING_PREPARATION_ONLY"
-    assert "ADMISSION_RUNTIME_UNCOMPOSED" in packet["blockers"]
+    assert "AUTHORITY_STORE_UNCONFIGURED" in packet["blockers"]
+    assert "CAMPAIGN_INPUT_MISSING" in packet["blockers"]
+    assert packet["runtime_composition"]["durable_proposal_envelope_binding"] is True
     assert packet["non_effects"] == {
         "provider_calls": 0,
         "store_mutations": 0,
@@ -541,6 +719,109 @@ def test_historical_partition_is_total_disjoint_and_candidates_are_unauthorised(
     ]["ledger_sequences"] == [6]
 
 
+def test_complete_exact_campaign_is_ready_without_authorising_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=1,
+        item_key="candidate",
+        ingest_id="candidate-ingest",
+    )
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=2,
+        item_key="historical-hold",
+        ingest_id="held-ingest",
+        provider_dispatched=1,
+    )
+    connection.commit()
+    connection.close()
+    _seed_proving_accountability(proving)
+    authority = _authority_store(tmp_path)
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti_steady_state."
+        "load_graphiti_units_from_connection",
+        lambda _connection, *, evaluated_at: (
+            _current_unit(item_key="candidate", ingest_id="candidate-ingest"),
+        ),
+    )
+
+    preparation = _packet(proving, unpublished, authority_store=authority)
+    campaign = _campaign_input(preparation)
+    packet = _packet(
+        proving,
+        unpublished,
+        authority_store=authority,
+        campaign_input=campaign,
+    )
+
+    assert packet["blockers"] == []
+    assert packet["verdict"] == "READY_FOR_OWNER_DECISION"
+    assert packet["readiness"] == "F4_CAMPAIGN_READY_FOR_OWNER_DECISION"
+    assert packet["bounded_campaign"]["campaign_authorised"] is False
+    assert packet["bounded_campaign"]["cohort"]["dispatch_authorised"] is False
+    assert packet["bounded_campaign"]["cohort"]["claim_performed"] is False
+    assert packet["historical_partition"]["categories"][
+        "NON_REPLAYABLE_OR_AMBIGUOUS_EFFECT_HOLD"
+    ]["count"] == 1
+    assert packet["runtime_composition"] == {
+        "state": "PROVIDER_FREE_ENGINEERING_COMPLETE",
+        "authority_store_configured": True,
+        "durable_proposal_envelope_binding": True,
+        "admission_policy_configured": True,
+        "full_generation_projector_configured": True,
+        "campaign_authorised": False,
+    }
+
+
+def test_self_addressed_cohort_and_snapshot_drift_are_no_go(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=1,
+        item_key="candidate",
+        ingest_id="candidate-ingest",
+    )
+    connection.commit()
+    connection.close()
+    _seed_proving_accountability(proving)
+    authority = _authority_store(tmp_path)
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti_steady_state."
+        "load_graphiti_units_from_connection",
+        lambda _connection, *, evaluated_at: (
+            _current_unit(item_key="candidate", ingest_id="candidate-ingest"),
+        ),
+    )
+    preparation = _packet(proving, unpublished, authority_store=authority)
+    campaign = _campaign_input(preparation)
+    campaign["cohort"] = {
+        "event_ids": ["self-addressed-event"],
+        "manifest_digest": campaign["cohort"]["manifest_digest"],
+    }
+    campaign["source_snapshot_digests"] = {
+        **campaign["source_snapshot_digests"],
+        "authority": "sha256:" + "0" * 64,
+    }
+
+    packet = _packet(
+        proving,
+        unpublished,
+        authority_store=authority,
+        campaign_input=campaign,
+    )
+
+    assert packet["verdict"] == "NO_GO"
+    assert "CAMPAIGN_COHORT_DIFFERS_FROM_CURRENT_PREFLIGHT" in packet["blockers"]
+    assert "SOURCE_SNAPSHOT_DRIFT" in packet["blockers"]
+
+
 def test_unverified_terminal_is_unclassified_in_historical_partition(
     tmp_path: Path,
 ) -> None:
@@ -561,6 +842,26 @@ def test_unverified_terminal_is_unclassified_in_historical_partition(
     assert partition["categories"]["UNCLASSIFIED"]["reason_counts"] == {
         "TERMINAL_OUTCOME_UNVERIFIED": 1
     }
+
+
+def test_historical_raw_only_proposal_is_immutable_non_blocking_hold(
+    tmp_path: Path,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _terminal_zero_proposal(connection)
+    _turn_terminal_receipt_into_historical_raw_only(connection)
+    connection.close()
+
+    packet = _packet(proving, unpublished)
+    hold = packet["historical_partition"]["categories"][
+        "NON_REPLAYABLE_OR_AMBIGUOUS_EFFECT_HOLD"
+    ]
+
+    assert hold["ledger_sequences"] == [1]
+    assert hold["reason_counts"] == {
+        "IMMUTABLE_RAW_PROPOSAL_WITHOUT_DURABLE_ENVELOPE": 1
+    }
+    assert "HISTORICAL_EFFECT_ADJUDICATION_REQUIRED" not in packet["blockers"]
 
 
 def test_event_manifest_rejects_resolved_landed_identity_mismatch(
@@ -707,3 +1008,38 @@ def test_report_git_commands_are_anchored_to_executing_repository(
 
     assert graphiti_steady_state_report._git("rev-parse", "HEAD") == "value"
     assert observed["cwd"] == graphiti_steady_state_report.REPOSITORY_ROOT
+
+
+@pytest.mark.parametrize(
+    ("verdict", "expected_exit"),
+    (("READY_FOR_OWNER_DECISION", 0), ("NO_GO", 2)),
+)
+def test_report_exit_zero_only_for_owner_decision_ready(
+    verdict: str,
+    expected_exit: int,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        graphiti_steady_state_report,
+        "_exact_main_identity",
+        lambda: ("head", "tree"),
+    )
+    monkeypatch.setattr(
+        graphiti_steady_state_report,
+        "build_graphiti_steady_state_packet",
+        lambda **_kwargs: {"verdict": verdict},
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "graphiti_steady_state_report.py",
+            "--proving",
+            "proving.sqlite3",
+            "--unpublished",
+            "unpublished.sqlite3",
+        ],
+    )
+
+    assert graphiti_steady_state_report.main() == expected_exit
+    assert json.loads(capsys.readouterr().out) == {"verdict": verdict}

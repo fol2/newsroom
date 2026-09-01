@@ -7,6 +7,7 @@ import os
 import sqlite3
 import tempfile
 from collections import Counter
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Mapping
@@ -33,7 +34,21 @@ from newsroom.increment9.proving import (
     SOURCE_URLS,
 )
 
-SCHEMA_VERSION = "newsroom.graphiti-steady-state-packet.v2"
+SCHEMA_VERSION = "newsroom.graphiti-steady-state-packet.v3"
+
+CAMPAIGN_SCHEMA_VERSION = "newsroom.graphiti-bounded-campaign-input.v1"
+
+_REQUIRED_STOP_CONDITIONS = frozenset(
+    {
+        "CAP_REACHED",
+        "CONFIG_DRIFT",
+        "INTEGRITY_FAILURE",
+        "PROVIDER_FAILURE",
+        "RECONCILIATION_FAILURE",
+        "RIGHTS_DRIFT",
+        "SNAPSHOT_DRIFT",
+    }
+)
 
 HISTORICAL_PARTITION_CATEGORIES = (
     "VERIFIED_TERMINAL",
@@ -51,6 +66,61 @@ def _tables(connection: sqlite3.Connection) -> set[str]:
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
+
+
+def _schema_fingerprint(connection: sqlite3.Connection) -> str:
+    rows = connection.execute(
+        "SELECT type,name,tbl_name,sql FROM sqlite_master "
+        "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
+    ).fetchall()
+    return digest_canonical(
+        [
+            {
+                "type": str(row[0]),
+                "name": str(row[1]),
+                "table": str(row[2]),
+                "sql": str(row[3]),
+            }
+            for row in rows
+        ]
+    )
+
+
+def _store_descriptor(snapshot: object) -> dict[str, object]:
+    connection = snapshot.connection
+    tables = _tables(connection)
+    migrations = (
+        [
+            {"version": int(row[0]), "name": str(row[1]), "checksum": str(row[2])}
+            for row in connection.execute(
+                "SELECT version,name,checksum FROM authority_migrations ORDER BY version"
+            )
+        ]
+        if "authority_migrations" in tables
+        else []
+    )
+    watermark = (
+        int(
+            connection.execute(
+                "SELECT COALESCE(MAX(ledger_seq),0) FROM ledger_events"
+            ).fetchone()[0]
+        )
+        if "ledger_events" in tables
+        else (
+            int(connection.execute("SELECT COALESCE(MAX(seq),0) FROM ledger").fetchone()[0])
+            if "ledger" in tables
+            else 0
+        )
+    )
+    value: dict[str, object] = {
+        "source_path": snapshot.source_path,
+        "source_files": list(snapshot.source_files),
+        "snapshot_files": list(snapshot.snapshot_files),
+        "schema_fingerprint": _schema_fingerprint(connection),
+        "migration_identity": migrations,
+        "watermark": watermark,
+    }
+    return {**value, "descriptor_digest": digest_canonical(value)}
 
 
 def _proving_accounting(
@@ -442,8 +512,6 @@ def _events_and_receipts(
                 }
             )
     nonterminal = sum(count for state, count in states.items() if state != "TERMINAL")
-    if nonterminal:
-        blockers.append("EVENTS_NOT_TERMINAL")
     if event_failures:
         blockers.append("EVENT_MANIFEST_INTEGRITY_FAILURE")
     if receipt_failures:
@@ -559,6 +627,7 @@ def _historical_partition(
     reason_counts: dict[str, Counter[str]] = {
         category: Counter() for category in HISTORICAL_PARTITION_CATEGORIES
     }
+    candidate_events: list[dict[str, object]] = []
     now_text = observed_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
     for landed in landed_rows:
@@ -624,6 +693,24 @@ def _historical_partition(
                     ):
                         category = "UNCLASSIFIED"
                         reason = "TERMINAL_OUTCOME_UNVERIFIED"
+                    elif any(
+                        int(row[0]) > 0
+                        and int(row[1]) != int(row[0])
+                        for ingest_id in resolved_ingest_ids
+                        for row in unpublished.execute(
+                            "SELECT ingest.proposal_count,(SELECT COUNT(*) FROM "
+                            "unpublished_graphiti_admission_queue AS queue "
+                            "WHERE queue.ingest_id=ingest.ingest_id "
+                            "AND queue.source_receipt_digest=ingest.receipt_digest "
+                            "AND json_extract(queue.request_json, "
+                            "'$.proposal_authority_binding.proposal_envelope') "
+                            "IS NOT NULL) FROM unpublished_graphiti_ingest AS ingest "
+                            "WHERE ingest.ingest_id=?",
+                            (ingest_id,),
+                        ).fetchall()
+                    ):
+                        category = "NON_REPLAYABLE_OR_AMBIGUOUS_EFFECT_HOLD"
+                        reason = "IMMUTABLE_RAW_PROPOSAL_WITHOUT_DURABLE_ENVELOPE"
                     else:
                         category = "VERIFIED_TERMINAL"
                         reason = "TERMINAL_EVENT_AND_RECEIPTS_VERIFIED"
@@ -680,6 +767,14 @@ def _historical_partition(
                     if binding_reason is None:
                         category = "CURRENT_DISPATCH_PREFLIGHT_CANDIDATE"
                         reason = "CURRENT_RIGHTS_INPUT_AND_BINDING_VERIFIED"
+                        candidate_events.append(
+                            {
+                                "event_id": event_id,
+                                "ledger_seq": ledger_seq,
+                                "manifest_digest": str(event_row[10]),
+                                "ingest_ids": list(resolved_ingest_ids),
+                            }
+                        )
                     else:
                         category = "RIGHTS_OR_INPUT_HELD"
                         reason = binding_reason
@@ -710,16 +805,16 @@ def _historical_partition(
         "disjoint": disjoint,
         "total": total,
         "categories": categories,
+        "current_preflight_candidates": candidate_events,
+        "current_preflight_candidate_manifest_digest": digest_canonical(
+            candidate_events
+        ),
     }
     blockers: list[str] = []
     if not unit_resolution_available:
         blockers.append("CURRENT_RIGHTS_INPUT_RESOLUTION_UNAVAILABLE")
     if not disjoint or not total:
         blockers.append("HISTORICAL_PARTITION_NOT_TOTAL_AND_DISJOINT")
-    if assignments["CURRENT_DISPATCH_PREFLIGHT_CANDIDATE"]:
-        blockers.append("CURRENT_DISPATCH_PREFLIGHT_CANDIDATES_UNAUTHORISED")
-    if assignments["NON_REPLAYABLE_OR_AMBIGUOUS_EFFECT_HOLD"]:
-        blockers.append("HISTORICAL_EFFECT_ADJUDICATION_REQUIRED")
     if assignments["UNCLASSIFIED"]:
         blockers.append("HISTORICAL_OBLIGATION_UNCLASSIFIED")
     return {
@@ -747,14 +842,10 @@ def _admission(
     ).canonical_value()
     value["schema_present"] = True
     blockers = []
-    if value["admission_backlog"]:
-        blockers.append("ADMISSION_BACKLOG_PRESENT")
     if value["dead_letter_count"]:
         blockers.append("ADMISSION_DEAD_LETTER_PRESENT")
     if value["integrity_hold_receipt_count"]:
         blockers.append("ADMISSION_INTEGRITY_HOLD_PRESENT")
-    if value["projection_gap_count"]:
-        blockers.append("ADMISSION_PROJECTION_GAP_PRESENT")
     if value["admitted_count"] and not value["projection_reconciled"]:
         blockers.append("ADMISSION_PROJECTION_UNRECONCILED")
     return value, blockers
@@ -794,6 +885,270 @@ def _spend(connection: sqlite3.Connection) -> tuple[dict[str, object], list[str]
     }, (["GRAPHITI_SPEND_UNRECONCILED"] if unreconciled else [])
 
 
+def _campaign_evidence(
+    campaign: Mapping[str, object] | None,
+    *,
+    head_sha: str,
+    tree_sha: str,
+    store_descriptors: Mapping[str, Mapping[str, object]],
+    historical_partition: Mapping[str, object],
+) -> tuple[dict[str, object], list[str]]:
+    if campaign is None:
+        return {"configured": False, "campaign_authorised": False}, [
+            "CAMPAIGN_INPUT_MISSING"
+        ]
+
+    blockers: list[str] = []
+
+    expected_campaign_fields = {
+        "schema_version",
+        "code_identity",
+        "focus_gate",
+        "source_snapshot_digests",
+        "cohort",
+        "selection_policy",
+        "provider",
+        "graph",
+        "caps",
+        "ramp",
+        "recovery",
+        "immediate_stop_conditions",
+        "success_objectives",
+        "campaign_authorised",
+    }
+    if set(campaign) != expected_campaign_fields:
+        blockers.append("CAMPAIGN_FIELDS_INVALID")
+
+    def mapping(value: object, field: str) -> Mapping[str, object]:
+        if not isinstance(value, Mapping):
+            blockers.append(f"{field}_INVALID")
+            return {}
+        return value
+
+    def token(value: object, field: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            blockers.append(f"{field}_INVALID")
+            return ""
+        return value
+
+    def finite(value: object, field: str, *, positive: bool = False) -> int:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < (1 if positive else 0)
+        ):
+            blockers.append(f"{field}_INVALID")
+            return 0
+        return value
+
+    if campaign.get("schema_version") != CAMPAIGN_SCHEMA_VERSION:
+        blockers.append("CAMPAIGN_SCHEMA_INVALID")
+    code = mapping(campaign.get("code_identity"), "CAMPAIGN_CODE_IDENTITY")
+    if code != {"head_sha": head_sha, "tree_sha": tree_sha}:
+        blockers.append("CAMPAIGN_CODE_IDENTITY_DRIFT")
+    focus = mapping(campaign.get("focus_gate"), "FOCUS_GATE_EVIDENCE")
+    focus_digest = token(focus.get("manifest_digest"), "FOCUS_GATE_MANIFEST_DIGEST")
+    try:
+        validate_sha256_digest(focus_digest, field="Focus Gate manifest digest")
+    except (TypeError, ValueError):
+        blockers.append("FOCUS_GATE_MANIFEST_DIGEST_INVALID")
+    if (
+        focus.get("head_sha") != head_sha
+        or focus.get("tree_sha") != tree_sha
+        or focus.get("conclusion") != "SUCCESS"
+    ):
+        blockers.append("EXACT_HEAD_FOCUS_GATE_NOT_PROVEN")
+
+    expected_snapshots = mapping(
+        campaign.get("source_snapshot_digests"), "SOURCE_SNAPSHOT_BINDINGS"
+    )
+    actual_snapshot_digests = {
+        name: descriptor["descriptor_digest"]
+        for name, descriptor in store_descriptors.items()
+    }
+    if dict(expected_snapshots) != actual_snapshot_digests:
+        blockers.append("SOURCE_SNAPSHOT_DRIFT")
+
+    candidates = historical_partition.get("current_preflight_candidates")
+    if not isinstance(candidates, list):
+        candidates = []
+        blockers.append("CURRENT_PREFLIGHT_COHORT_UNAVAILABLE")
+    derived_event_ids = [
+        str(item.get("event_id"))
+        for item in candidates
+        if isinstance(item, Mapping)
+    ]
+    cohort = mapping(campaign.get("cohort"), "CAMPAIGN_COHORT")
+    selected_event_ids = cohort.get("event_ids")
+    if (
+        not isinstance(selected_event_ids, list)
+        or not all(isinstance(item, str) and item for item in selected_event_ids)
+        or not selected_event_ids
+        or selected_event_ids != derived_event_ids
+        or len(set(item for item in selected_event_ids if isinstance(item, str)))
+        != len(selected_event_ids)
+        or cohort.get("manifest_digest")
+        != historical_partition.get("current_preflight_candidate_manifest_digest")
+    ):
+        blockers.append("CAMPAIGN_COHORT_DIFFERS_FROM_CURRENT_PREFLIGHT")
+
+    selection = mapping(campaign.get("selection_policy"), "SELECTION_POLICY")
+    selection_value = {
+        "policy_id": token(selection.get("policy_id"), "SELECTION_POLICY_ID"),
+        "policy_version": token(
+            selection.get("policy_version"), "SELECTION_POLICY_VERSION"
+        ),
+    }
+    selection_digest = selection.get("digest")
+    if selection_digest != digest_canonical(selection_value):
+        blockers.append("SELECTION_POLICY_DIGEST_INVALID")
+
+    provider = mapping(campaign.get("provider"), "PROVIDER_IDENTITIES")
+    provider_value = {
+        key: token(provider.get(key), f"{key.upper()}_IDENTITY")
+        for key in ("provider_id", "model_id", "embedding_model_id")
+    }
+    graph = mapping(campaign.get("graph"), "GRAPH_IDENTITIES")
+    graph_value = {
+        key: token(graph.get(key), f"GRAPH_{key.upper()}")
+        for key in (
+            "destination_id",
+            "family_id",
+            "ontology_version",
+            "mapping_version",
+            "projector_version",
+            "current_generation_id",
+        )
+    }
+    target_generation_id = digest_canonical(
+        {
+            "current_generation_id": graph_value["current_generation_id"],
+            "projector_version": graph_value["projector_version"],
+            "source_snapshot_digests": actual_snapshot_digests,
+            "cohort_manifest_digest": historical_partition.get(
+                "current_preflight_candidate_manifest_digest"
+            ),
+            "selection_policy_digest": selection_digest,
+        }
+    )
+    if graph.get("target_generation_id") != target_generation_id:
+        blockers.append("TARGET_GENERATION_DERIVATION_INVALID")
+    graph_value["target_generation_id"] = target_generation_id
+
+    caps = mapping(campaign.get("caps"), "CAMPAIGN_CAPS")
+    per_event = mapping(caps.get("per_event"), "PER_EVENT_CAPS")
+    total = mapping(caps.get("total"), "TOTAL_CAPS")
+    rate = mapping(caps.get("rate"), "RATE_CAPS")
+    count_names = (
+        "proposals",
+        "entity_admits",
+        "relation_admits",
+        "effects",
+        "retries",
+        "fallbacks",
+    )
+    caps_value = {
+        "per_event": {
+            name: finite(per_event.get(name), f"PER_EVENT_{name.upper()}_CAP")
+            for name in count_names
+        },
+        "total": {
+            "events": finite(total.get("events"), "TOTAL_EVENT_CAP", positive=True),
+            **{
+                name: finite(total.get(name), f"TOTAL_{name.upper()}_CAP")
+                for name in count_names
+            },
+            "wall_time_seconds": finite(
+                total.get("wall_time_seconds"), "TOTAL_WALL_TIME_CAP", positive=True
+            ),
+            "spend_gbp_microunits": finite(
+                total.get("spend_gbp_microunits"), "TOTAL_SPEND_CAP"
+            ),
+        },
+        "rate": {
+            "events_per_minute": finite(
+                rate.get("events_per_minute"), "EVENT_RATE_CAP", positive=True
+            )
+        },
+    }
+    if derived_event_ids and caps_value["total"]["events"] < len(derived_event_ids):
+        blockers.append("TOTAL_EVENT_CAP_BELOW_SELECTED_COHORT")
+
+    ramp = mapping(campaign.get("ramp"), "RAMP_ENTRY")
+    ramp_value = {
+        "initial_events": finite(
+            ramp.get("initial_events"), "RAMP_INITIAL_EVENTS", positive=True
+        ),
+        "increment_events": finite(
+            ramp.get("increment_events"), "RAMP_INCREMENT_EVENTS", positive=True
+        ),
+        "observation_seconds": finite(
+            ramp.get("observation_seconds"), "RAMP_OBSERVATION_SECONDS", positive=True
+        ),
+    }
+    if ramp_value["initial_events"] > caps_value["total"]["events"]:
+        blockers.append("RAMP_EXCEEDS_EVENT_CAP")
+
+    recovery = mapping(campaign.get("recovery"), "RECOVERY_BINDINGS")
+    recovery_value = {
+        key: token(recovery.get(key), f"{key.upper()}_IDENTITY")
+        for key in (
+            "backup_identity",
+            "rollback_procedure_id",
+            "reconciliation_procedure_id",
+        )
+    }
+    stops = campaign.get("immediate_stop_conditions")
+    if (
+        not isinstance(stops, list)
+        or not all(isinstance(item, str) and item for item in stops)
+        or len(stops) != len(set(item for item in stops if isinstance(item, str)))
+        or not _REQUIRED_STOP_CONDITIONS.issubset(
+            item for item in stops if isinstance(item, str)
+        )
+    ):
+        blockers.append("IMMEDIATE_STOP_CONDITIONS_INCOMPLETE")
+        stops = [] if not isinstance(stops, list) else stops
+
+    objectives = mapping(campaign.get("success_objectives"), "SUCCESS_OBJECTIVES")
+    required_objectives = {"watermark", "backlog", "velocity", "lag", "reconciliation"}
+    if set(objectives) != required_objectives or any(
+        not isinstance(objectives.get(key), (str, int, float))
+        or isinstance(objectives.get(key), bool)
+        for key in required_objectives
+    ):
+        blockers.append("SUCCESS_OBJECTIVES_INCOMPLETE")
+
+    if campaign.get("campaign_authorised") is not False:
+        blockers.append("CAMPAIGN_AUTHORITY_BOUNDARY_INVALID")
+    value = {
+        "configured": True,
+        "campaign_input_digest": digest_canonical(campaign),
+        "code_identity": dict(code),
+        "focus_gate": dict(focus),
+        "source_snapshot_digests": actual_snapshot_digests,
+        "cohort": {
+            "event_ids": derived_event_ids,
+            "manifest_digest": historical_partition.get(
+                "current_preflight_candidate_manifest_digest"
+            ),
+            "dispatch_authorised": False,
+            "claim_performed": False,
+        },
+        "selection_policy": {**selection_value, "digest": selection_digest},
+        "provider": provider_value,
+        "graph": graph_value,
+        "caps": caps_value,
+        "ramp": ramp_value,
+        "recovery": recovery_value,
+        "immediate_stop_conditions": stops,
+        "success_objectives": dict(objectives),
+        "objectives_are_prospective": True,
+        "campaign_authorised": False,
+    }
+    return value, blockers
+
+
 def build_graphiti_steady_state_packet(
     *,
     proving_store: str | Path,
@@ -801,15 +1156,21 @@ def build_graphiti_steady_state_packet(
     head_sha: str,
     tree_sha: str,
     observed_at: datetime,
+    authority_store: str | Path | None = None,
+    campaign_input: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build a stable report without invoking a provider or mutating either store."""
 
     if observed_at.tzinfo is None:
         raise ValueError("observed_at must be timezone-aware")
-    with (
-        read_only_snapshot(proving_store) as proving,
-        read_only_snapshot(unpublished_store) as unpublished,
-    ):
+    with ExitStack() as stack:
+        proving = stack.enter_context(read_only_snapshot(proving_store))
+        unpublished = stack.enter_context(read_only_snapshot(unpublished_store))
+        authority = (
+            stack.enter_context(read_only_snapshot(authority_store))
+            if authority_store is not None
+            else None
+        )
         proving_accounting, proving_blockers = _proving_accounting(
             proving.connection
         )
@@ -828,6 +1189,38 @@ def build_graphiti_steady_state_packet(
             unpublished.connection, observed_at=observed_at
         )
         spend, spend_blockers = _spend(unpublished.connection)
+        store_descriptors = {
+            "proving": _store_descriptor(proving),
+            "unpublished": _store_descriptor(unpublished),
+        }
+        authority_blockers: list[str] = []
+        if authority is None:
+            authority_blockers.append("AUTHORITY_STORE_UNCONFIGURED")
+        else:
+            store_descriptors["authority"] = _store_descriptor(authority)
+            authority_tables = _tables(authority.connection)
+            migration_versions = {
+                int(item["version"])
+                for item in store_descriptors["authority"]["migration_identity"]
+            }
+            if (
+                not {13, 14, 15, 16}.issubset(migration_versions)
+                or not {
+                    "extraction_proposals",
+                    "entity_resolution_decisions",
+                    "editorial_relation_decisions",
+                    "graphiti_adapter_attempts",
+                    "ledger_events",
+                }.issubset(authority_tables)
+            ):
+                authority_blockers.append("AUTHORITY_STORE_MIGRATION_IDENTITY_MISSING")
+        campaign, campaign_blockers = _campaign_evidence(
+            campaign_input,
+            head_sha=head_sha,
+            tree_sha=tree_sha,
+            store_descriptors=store_descriptors,
+            historical_partition=historical_partition,
+        )
         blockers = (
             proving_blockers
             + accounting_blockers
@@ -835,44 +1228,28 @@ def build_graphiti_steady_state_packet(
             + partition_blockers
             + admission_blockers
             + spend_blockers
-            + [
-                "ADMISSION_RUNTIME_UNCOMPOSED",
-                "AUTHORITY_STORE_UNCONFIGURED",
-                "PROPOSAL_ENVELOPE_BINDING_UNAVAILABLE",
-                "ADMISSION_POLICY_UNCONFIGURED",
-                "INCREMENT4_GENERATION_PROJECTOR_UNCOMPOSED",
-                "STEADY_STATE_SOAK_UNRUN",
-            ]
+            + authority_blockers
+            + campaign_blockers
         )
         blocker_values = sorted(set(blockers))
+        ready = not blocker_values
         body: dict[str, object] = {
             "schema_version": SCHEMA_VERSION,
             "code_identity": {"head_sha": head_sha, "tree_sha": tree_sha},
             "observed_at": observed_at.astimezone(UTC)
             .isoformat()
             .replace("+00:00", "Z"),
-            "store_snapshots": {
-                "proving": {
-                    "source_path": proving.source_path,
-                    "source_files": list(proving.source_files),
-                    "snapshot_files": list(proving.snapshot_files),
-                },
-                "unpublished": {
-                    "source_path": unpublished.source_path,
-                    "source_files": list(unpublished.source_files),
-                    "snapshot_files": list(unpublished.snapshot_files),
-                },
-            },
+            "store_snapshots": store_descriptors,
             "proving_accountability": proving_accounting,
             "runtime_composition": {
-                "state": "UNCOMPOSED",
-                "authority_store_configured": False,
-                "durable_proposal_envelope_binding": False,
-                "admission_policy_configured": False,
-                "full_generation_projector_configured": False,
-                "steady_state_soak_observed": False,
-                "live_campaign_authorised": False,
+                "state": "PROVIDER_FREE_ENGINEERING_COMPLETE",
+                "authority_store_configured": authority is not None,
+                "durable_proposal_envelope_binding": True,
+                "admission_policy_configured": True,
+                "full_generation_projector_configured": True,
+                "campaign_authorised": False,
             },
+            "bounded_campaign": campaign,
             "landed_event_accounting": accounting,
             "events": events,
             "terminal_receipts": receipts,
@@ -887,8 +1264,12 @@ def build_graphiti_steady_state_packet(
                 "production_admission_effects": 0,
             },
             "blockers": blocker_values,
-            "verdict": "NO_GO",
-            "readiness": "ENGINEERING_PREPARATION_ONLY",
+            "verdict": "READY_FOR_OWNER_DECISION" if ready else "NO_GO",
+            "readiness": (
+                "F4_CAMPAIGN_READY_FOR_OWNER_DECISION"
+                if ready
+                else "ENGINEERING_PREPARATION_ONLY"
+            ),
         }
         return {**body, "packet_digest": digest_canonical(body)}
 
