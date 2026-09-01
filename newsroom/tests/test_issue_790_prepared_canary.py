@@ -1447,8 +1447,8 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
     """Live 13683: persistable leftover NEW + float fact_embedding is TERMINAL.
 
     Provider COMPLETE + embeddings + persistable edges bind float
-    fact_embedding into the durable receipt. Canonicalisation must seal an
-    explicit zero before persistence while the guard claim is still pending.
+    fact_embedding for persistence. The derivative vector is omitted from the
+    canonical receipt without erasing the accepted relation.
     """
 
     from contextlib import asynccontextmanager
@@ -1815,7 +1815,7 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
     raw = execution.produced.raw_output_value
     combined = None if not isinstance(raw, dict) else raw.get("combined_temporal_receipt")
     unused = unused_queued_attempt_zero_candidates(stores.work_unpublished, plan)
-    assert persist_calls == []
+    assert persist_calls == ["process"]
     assert guard_calls == ["telemetry", "complete"]
     assert getattr(guards[-1], "state") is GuardState.COMPLETE
     assert consume_calls == [EVENT_13683]
@@ -1835,15 +1835,18 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
     assert event["attempt_count"] == 1
     assert event["provider_dispatched"] == 1
     assert type(event["provider_dispatched"]) is int
-    assert ingest == ("COMPLETE", 0, 0, 0)
+    assert ingest == ("COMPLETE", 3, 2, 1)
     assert attempt["outcome"] == "COMPLETE"
-    assert attempt["proposal_count"] == 0
-    assert attempt.get("entity_count") == 0
-    assert attempt.get("relation_count") == 0
+    assert attempt["proposal_count"] == 3
+    assert attempt.get("entity_count") == 2
+    assert attempt.get("relation_count") == 1
     assert execution.outcome.value == "COMPLETE"
     assert execution.produced.outcome.value == "SUCCESS"
     assert isinstance(combined, dict)
-    assert combined["zero_proposal_effect"] == "EXPLICIT"
+    relation = combined["proposal_receipt"]["relation_proposals"][0]
+    assert relation["proposal_status"] == "PROPOSED"
+    assert "fact_embedding" not in relation
+    assert "zero_proposal_effect" not in combined
     assert attempt["chat_invocations"][0]["usage"]["total_tokens"] == 6_374
     assert spent_13665 == ("CONFIGURATION_HELD", 1, 1)
     assert spent_13671 == ("CONFIGURATION_HELD", 1, 0)
