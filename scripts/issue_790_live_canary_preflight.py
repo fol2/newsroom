@@ -94,6 +94,12 @@ STEP23_SINGLE_USE_AUTHORITY_FULL_PATH_TEST = (
 STEP23_SINGLE_USE_AUTHORITY_RED_COMMIT = (
     "59d356368bc9df97841c4359d38333dc28123a97"
 )
+LATEST_FAILURE_EXACT_RED_BY_LEDGER = {
+    13696: (
+        STEP23_SINGLE_USE_AUTHORITY_FULL_PATH_TEST,
+        STEP23_SINGLE_USE_AUTHORITY_RED_COMMIT,
+    ),
+}
 LATEST_FAILURE_COVERING_FULL_PATH_TESTS = frozenset(
     {
         STEP21_FULL_PATH_TEST,
@@ -645,11 +651,9 @@ def _latest_failure_red_green(
     diagnosis_index, _diagnosis, test_node, red_commit = diagnoses[-1]
     if test_node not in LATEST_FAILURE_COVERING_FULL_PATH_TESTS:
         return False, f"unexpected latest red test {test_node}"
-    if (
-        test_node == STEP23_SINGLE_USE_AUTHORITY_FULL_PATH_TEST
-        and red_commit != STEP23_SINGLE_USE_AUTHORITY_RED_COMMIT
-    ):
-        return False, "Step 23 full-path red commit differs"
+    exact_red = LATEST_FAILURE_EXACT_RED_BY_LEDGER.get(int(ledger))
+    if exact_red is not None and (test_node, red_commit) != exact_red:
+        return False, f"ledger {ledger} exact full-path red differs"
 
     for item in ordered[diagnosis_index + 1 :]:
         body = str(item.get("body", ""))

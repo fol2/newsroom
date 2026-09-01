@@ -11,6 +11,7 @@ import pytest
 
 from scripts.issue_790_live_canary_preflight import (
     LATEST_FAILURE_COVERING_FULL_PATH_TESTS,
+    LATEST_FAILURE_EXACT_RED_BY_LEDGER,
     REQUIRED_RETRY_LEDGER_SEQS,
     STEP21_FULL_PATH_TEST,
     STEP22_ABORTED_SPAWN_13689_BACKUP_DEST_FULL_PATH_TEST,
@@ -320,7 +321,33 @@ def test_latest_live_failure_accepts_only_the_exact_step23_full_path_red() -> No
     assert _latest_failure_red_green([failure, exact, green], tip=tip)[0] is True
     assert _latest_failure_red_green([failure, wrong, green], tip=tip) == (
         False,
-        "Step 23 full-path red commit differs",
+        "ledger 13696 exact full-path red differs",
+    )
+    assert LATEST_FAILURE_EXACT_RED_BY_LEDGER == {
+        13696: (
+            STEP23_SINGLE_USE_AUTHORITY_FULL_PATH_TEST,
+            STEP23_SINGLE_USE_AUTHORITY_RED_COMMIT,
+        )
+    }
+
+
+def test_latest_13696_failure_rejects_older_allowlisted_red() -> None:
+    tip = "c" * 40
+    comments = [
+        _live_fail_comment(13696, created_at="2026-09-01T01:24:52Z"),
+        _full_path_red_comment(
+            13696,
+            STEP22_PREPARED_CANARY_HANDOFF_FULL_PATH_TEST,
+            created_at="2026-09-01T02:34:28Z",
+        ),
+        _full_path_green_comment(
+            13696, tip, created_at="2026-09-01T03:00:00Z"
+        ),
+    ]
+
+    assert _latest_failure_red_green(comments, tip=tip) == (
+        False,
+        "ledger 13696 exact full-path red differs",
     )
 
 
