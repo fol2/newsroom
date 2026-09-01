@@ -50,6 +50,15 @@ _STEP22_PLAN = "sha256:1a0711aad02e849e456293549e4f9b9a1b1100b7ba01603ca4dcf465a
 _STEP22_ACTIVATION = "sha256:e6fe0a0f4eeaefc731071b550ea866979ebea1bf674ddfed42c57669bdbea310"
 _OUTCOME_13696 = "sha256:6a3c9f19717104e42cda8ea5a06c692a99465a1e95104033e89d8fecf3151463"
 _RECEIPT_13696 = "sha256:8a5c32f2e7327221e2fb082e0d25bc9530b4688a39ec9d6b193da49afaa1f9cc"
+_OLD_STEP23_CHECKED_CANDIDATE = (
+    "sha256:7e8bc6c5e254a3fe530e5b3ca71782720214d0eaa1f2d5936a13fe62518c5078"
+)
+_RENEWED_STEP23_PENDING = (
+    "sha256:fc09a40a3cab18b1ce0dd406138cc44f7088f79ba37a1d73e69dd2af2cb3a409"
+)
+_RENEWED_STEP23_CHECKED_CANDIDATE = (
+    "sha256:cde151cc717be54b6d382d2cd8509a72221c6dadd3510661e20d22acba43799d"
+)
 _ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -169,6 +178,9 @@ def test_step23_contract_is_the_only_registered_next_ordinal() -> None:
     assert contract.sequence_ordinal == 23
     assert contract.candidate_event_id == _EVENT_13702
     assert contract.candidate_ledger_seq == 13702
+    assert contract.pending_digest == _RENEWED_STEP23_PENDING
+    assert contract.candidate_digest == _RENEWED_STEP23_CHECKED_CANDIDATE
+    assert contract.candidate_digest != _OLD_STEP23_CHECKED_CANDIDATE
 
 
 def test_step23_reviewed_fix_and_pending_packet_bind_reviewed_head() -> None:
@@ -203,9 +215,18 @@ def test_step23_reviewed_fix_and_pending_packet_bind_reviewed_head() -> None:
         "kind": "PENDING_OWNER_APPROVAL",
         "evidence": "REVIEWED_FIX_RECORD",
         "reviewed_fix_record_digest": fix["record_digest"],
-        "merged_commit": "c0b60ad1a67b5380c6e83d36e880fd6c7fd7fc9c",
-        "merged_tree": "ca2be4f677ec1490b2f2ddcbfcde44ea872f7706",
+        "merged_commit": "68a1a88460d9d9ad1bbbdbd7f71ba07fa3281180",
+        "merged_tree": "b391181d254fa0ee627aa76e92370960f6eadf3f",
     }
+    assert pending["sequence"]["sequence_ordinal"] == 23
+    assert pending["sequence"]["predecessor"]["event_id"] == _EVENT_13696
+    assert pending["sequence"]["predecessor"]["ledger_seq"] == 13696
+    assert pending["sequence"]["candidate_event_qualification"]["event_id"] == (
+        _EVENT_13702
+    )
+    assert pending["sequence"]["candidate_event_qualification"]["ledger_seq"] == (
+        13702
+    )
     assert pending["sequence"]["candidate_event_preparation_digest"] == (
         "sha256:90ef3df005e95df3f0343ecd312d47859b4698387d8b27d91fb3abba2f3f650d"
     )
