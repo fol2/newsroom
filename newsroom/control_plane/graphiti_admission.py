@@ -1506,8 +1506,6 @@ class GraphitiAdmissionConsumer:
                     isinstance(byte_length, bool)
                     or not isinstance(byte_length, int)
                     or evidence.end_byte > byte_length
-                    or passage.get("text_digest")
-                    != evidence.evidence_text_digest
                 ):
                     raise GraphitiAdmissionConsumerError(
                         "Graphiti proposal evidence differs from retained passage bytes"

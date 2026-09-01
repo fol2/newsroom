@@ -168,6 +168,8 @@ def _seed_receipt(
     *drafts: ProposalDraft,
     ingest_id: str = "sha256:" + ("75" * 32),
     missing_relation_temporal_field: str | None = None,
+    passage_byte_length: int = 128,
+    passage_text_digest: str = DIGEST_A,
 ) -> dict[str, object]:
     revision_id = "00000000-0000-4000-8000-000000007580"
     passage = {
@@ -175,9 +177,9 @@ def _seed_receipt(
         "admission_id": "00000000-0000-4000-8000-000000007582",
         "access_decision_id": "00000000-0000-4000-8000-000000007583",
         "byte_offset": 0,
-        "byte_length": 128,
+        "byte_length": passage_byte_length,
         "blob_digest": DIGEST_A,
-        "text_digest": DIGEST_A,
+        "text_digest": passage_text_digest,
     }
     records = (
         {
@@ -554,6 +556,85 @@ def test_complete_receipts_map_exactly_and_only_admit_projects(tmp_path) -> None
     assert telemetry.admission_backlog == 0
     assert telemetry.contiguous_projection_watermark == 103
     assert consumer.telemetry().projection_reconciled is True
+
+
+def test_local_entity_and_relation_evidence_spans_bind_and_admit(tmp_path) -> None:
+    connection = connect(str(tmp_path / "local-evidence-spans.sqlite3"))
+    passage = b"Before Alice briefed Example Council after the meeting."
+    passage_id = ExtractionPassageId.parse(
+        "00000000-0000-4000-8000-000000007581"
+    )
+
+    def with_span(
+        draft: ProposalDraft,
+        evidence: bytes,
+    ) -> ProposalDraft:
+        start = passage.index(evidence)
+        return replace(
+            draft,
+            evidence=(
+                EvidenceRange(
+                    passage_id=passage_id,
+                    start_byte=start,
+                    end_byte=start + len(evidence),
+                    evidence_text_digest=digest_bytes(evidence),
+                ),
+            ),
+        )
+
+    subject = with_span(
+        _draft("entity.0001", ExtractionProposalKind.ENTITY_MENTION),
+        b"Alice",
+    )
+    object_ = with_span(
+        _draft(
+            "entity.0002",
+            ExtractionProposalKind.ENTITY_MENTION,
+            subject="Example Council",
+        ),
+        b"Example Council",
+    )
+    relation = with_span(
+        _draft("relation.0001", ExtractionProposalKind.RELATION),
+        b"Alice briefed Example Council",
+    )
+    source = _seed_receipt(
+        connection,
+        subject,
+        object_,
+        relation,
+        passage_byte_length=len(passage),
+        passage_text_digest=digest_bytes(passage),
+    )
+    assert all(
+        draft.evidence[0].evidence_text_digest != digest_bytes(passage)
+        for draft in (subject, object_, relation)
+    )
+    authority = _Authority(
+        {
+            subject.local_id: GraphitiProposalAdmissionAction.ADMIT,
+            object_.local_id: GraphitiProposalAdmissionAction.ADMIT,
+            relation.local_id: GraphitiProposalAdmissionAction.ADMIT,
+        }
+    )
+    consumer = _consumer(connection, authority, _Projector(), _Rights())
+
+    assert consumer.enqueue_complete_receipts(
+        ingest_ids=(str(source["ingest_id"]),)
+    ) == 3
+    report = consumer.drain(
+        worker_id="fixture-worker",
+        limit=3,
+        ingest_ids=(str(source["ingest_id"]),),
+    )
+
+    assert report.decided == 3
+    assert [call[0].proposal.local_id for call in authority.calls] == [
+        subject.local_id,
+        object_.local_id,
+        relation.local_id,
+    ]
+    connection.close()
 
 
 def test_non_empty_all_hold_cohort_still_promotes_one_full_snapshot(tmp_path) -> None:

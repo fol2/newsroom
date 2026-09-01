@@ -710,7 +710,9 @@ def test_proposal_authority_binds_exact_4d_attempt_and_4a_envelope() -> None:
     attempt_id = attempt_ids(ingest_id, 1)[0]
     passage = SimpleNamespace(
         passage_id=envelope.evidence[0].passage_id,
-        text_digest=envelope.evidence[0].evidence_text_digest,
+        text_digest=digest_bytes(
+            b"Alice briefed Example Council in a longer retained passage."
+        ),
     )
     attempt = SimpleNamespace(
         attempt_id=attempt_id,

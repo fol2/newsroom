@@ -234,8 +234,6 @@ class ExistingGovernedGraphitiProposalAuthority:
         manifest_passages = {item.passage_id: item for item in manifest.passages}
         if any(
             evidence.passage_id not in manifest_passages
-            or evidence.evidence_text_digest
-            != manifest_passages[evidence.passage_id].text_digest
             for evidence in envelope.evidence
         ):
             return None
