@@ -425,6 +425,317 @@ def test_ready_qualification_cannot_fail_the_unchanged_live_gate(
     assert result is not None and result.state == "TERMINAL"
 
 
+def test_exact_event_reaches_admission_and_one_generation_before_terminal(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, unpublished, event_id, ledger_seq = _projected_zero_ref_event(
+        tmp_path, clock
+    )
+    evidence = qualify_fresh_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        clock=clock,
+    )
+    ingest_ids = tuple(
+        sorted(str(item["ingest_id"]) for item in evidence["resolved_units"])
+    )
+    calls: list[tuple[str, object]] = []
+
+    class FixtureGraphiti:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            calls.append(("extract", unit.ingest_id))
+            return _complete(unit)
+
+    class Report:
+        claimed = 1
+        decided = 1
+        projected = 0
+        failed = 0
+        dead_lettered = 0
+
+    class Admission:
+        def enqueue_complete_receipts(self, *, ingest_ids=None):
+            calls.append(("enqueue", ingest_ids))
+            return 1
+
+        def drain(
+            self,
+            *,
+            worker_id,
+            limit=100,
+            ingest_ids=None,
+            stop_on_failure=False,
+        ):
+            calls.append(
+                (
+                    "decide",
+                    (worker_id, limit, ingest_ids, stop_on_failure),
+                )
+            )
+            return Report()
+
+        def finalise_decided_cohort(self, *, ingest_ids):
+            calls.append(("generation", ingest_ids))
+            return Report()
+
+    result = consume_next_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        graphiti=FixtureGraphiti(),
+        owner_id="worker",
+        clock=clock,
+        event_id=event_id,
+        require_fresh=True,
+        recover_model_usage=False,
+        prepared_event_preflight=evidence,
+        graphiti_admission_factory=lambda _connection: Admission(),
+        max_graphiti_admissions=7,
+    )
+
+    assert result is not None and result.state == "TERMINAL"
+    assert calls[-3:] == [
+        ("enqueue", ingest_ids),
+        ("decide", (f"hermes-event:{event_id}", 7, ingest_ids, True)),
+        ("generation", ingest_ids),
+    ]
+
+
+def test_admission_failure_after_provider_dispatch_opens_circuit_and_holds_event(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, unpublished, event_id, ledger_seq = _projected_zero_ref_event(
+        tmp_path, clock
+    )
+    evidence = qualify_fresh_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        clock=clock,
+    )
+
+    class FixtureGraphiti:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            return _complete(unit)
+
+    class CommittedMarker:
+        def has_committed_provider_dispatch(self, *, cycle_id: str) -> bool:
+            return cycle_id == event_id
+
+    class Report:
+        failed = 0
+        dead_lettered = 0
+
+    class BrokenGeneration:
+        def enqueue_complete_receipts(self, *, ingest_ids=None):
+            return 1
+
+        def drain(
+            self,
+            *,
+            worker_id,
+            limit=100,
+            ingest_ids=None,
+            stop_on_failure=False,
+        ):
+            return Report()
+
+        def finalise_decided_cohort(self, *, ingest_ids):
+            raise RuntimeError("projection controller unavailable")
+
+    result = consume_next_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        graphiti=FixtureGraphiti(),
+        owner_id="worker",
+        clock=clock,
+        event_id=event_id,
+        require_fresh=True,
+        recover_model_usage=False,
+        prepared_event_preflight=evidence,
+        model_usage=CommittedMarker(),  # type: ignore[arg-type]
+        graphiti_admission_factory=lambda _connection: BrokenGeneration(),
+    )
+
+    assert result is not None and result.state == "RETRY_HELD"
+    retained = sqlite3.connect(unpublished)
+    assert retained.execute(
+        "SELECT state,provider_dispatched,last_failure_code "
+        "FROM unpublished_graphiti_revision_events WHERE event_id=?",
+        (event_id,),
+    ).fetchone() == (
+        "RETRY_HELD",
+        1,
+        "ADMISSION_COHORT_EXECUTION_FAILED",
+    )
+    assert retained.execute(
+        "SELECT state,failure_code FROM unpublished_graphiti_event_circuit "
+        "WHERE singleton=1"
+    ).fetchone() == (
+        "OPEN",
+        "ADMISSION_COHORT_EXECUTION_FAILED",
+    )
+    retained.close()
+
+
+def test_campaign_event_enqueues_then_defers_decision_and_generation(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, unpublished, event_id, ledger_seq = _projected_zero_ref_event(
+        tmp_path, clock
+    )
+    evidence = qualify_fresh_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        clock=clock,
+    )
+    ingest_ids = tuple(
+        sorted(str(item["ingest_id"]) for item in evidence["resolved_units"])
+    )
+    calls: list[tuple[str, object]] = []
+
+    class FixtureGraphiti:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            return _complete(unit)
+
+    class Admission:
+        def enqueue_complete_receipts(self, *, ingest_ids=None):
+            calls.append(("enqueue", ingest_ids))
+            return 1
+
+        def drain(self, **_kwargs):
+            raise AssertionError("campaign admission was not deferred")
+
+        def finalise_decided_cohort(self, **_kwargs):
+            raise AssertionError("campaign generation was not deferred")
+
+    result = consume_next_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        graphiti=FixtureGraphiti(),
+        owner_id="campaign-worker",
+        clock=clock,
+        event_id=event_id,
+        require_fresh=True,
+        recover_model_usage=False,
+        prepared_event_preflight=evidence,
+        graphiti_admission_factory=lambda _connection: Admission(),
+        require_graphiti_admission=True,
+        defer_graphiti_admission=True,
+    )
+
+    assert result is not None and result.state == "TERMINAL"
+    assert calls == [("enqueue", ingest_ids)]
+
+
+def test_nonzero_proposals_require_governed_admission_when_requested(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, unpublished, event_id, ledger_seq = _projected_zero_ref_event(
+        tmp_path, clock
+    )
+    evidence = qualify_fresh_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        clock=clock,
+    )
+
+    class FixtureGraphiti:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            return _complete(unit)
+
+    result = consume_next_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        graphiti=FixtureGraphiti(),
+        owner_id="campaign-worker",
+        clock=clock,
+        event_id=event_id,
+        require_fresh=True,
+        recover_model_usage=False,
+        prepared_event_preflight=evidence,
+        require_graphiti_admission=True,
+    )
+
+    assert result is not None and result.state == "RETRY_HELD"
+    retained = sqlite3.connect(unpublished)
+    assert retained.execute(
+        "SELECT state,last_failure_code FROM "
+        "unpublished_graphiti_revision_events WHERE event_id=?",
+        (event_id,),
+    ).fetchone() == ("RETRY_HELD", "ADMISSION_COMPOSITION_REQUIRED")
+    retained.close()
+
+
+def test_partial_zero_proposal_is_non_terminal_when_admission_is_required(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, unpublished, event_id, ledger_seq = _projected_zero_ref_event(
+        tmp_path, clock
+    )
+    evidence = qualify_fresh_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        clock=clock,
+    )
+
+    class PartialGraphiti:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            return replace(
+                _complete(
+                    unit,
+                    proposal_count=0,
+                    entity_count=0,
+                    relation_count=0,
+                ),
+                outcome="PARTIAL",
+                failure_code="FIXTURE_PARTIAL",
+            )
+
+    class UnreachedAdmission:
+        def enqueue_complete_receipts(self, *, ingest_ids=None):
+            raise AssertionError("non-terminal extraction reached admission")
+
+    result = consume_next_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        graphiti=PartialGraphiti(),
+        owner_id="worker",
+        clock=clock,
+        event_id=event_id,
+        require_fresh=True,
+        recover_model_usage=False,
+        prepared_event_preflight=evidence,
+        graphiti_admission_factory=lambda _connection: UnreachedAdmission(),
+    )
+
+    assert result is not None and result.state == "RETRY_HELD"
+    retained = sqlite3.connect(unpublished)
+    assert retained.execute(
+        "SELECT state,proposal_count,last_failure_code "
+        "FROM unpublished_graphiti_revision_events WHERE event_id=?",
+        (event_id,),
+    ).fetchone() == (
+        "RETRY_HELD",
+        None,
+        "ADMISSION_SOURCE_ATTEMPT_NON_TERMINAL",
+    )
+    retained.close()
+
+
 def test_legacy_distinct_event_identity_preserves_ledger_binding_on_hydration(
     tmp_path: Path,
 ) -> None:

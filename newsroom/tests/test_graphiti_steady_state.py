@@ -9,14 +9,21 @@ from types import SimpleNamespace
 import pytest
 
 import newsroom.control_plane.read_only_snapshot as snapshot_module
-from newsroom.authority.canonical import digest_bytes, digest_canonical
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+)
 from newsroom.authority.migrations import MIGRATIONS
+from newsroom.authority.types import UtcTimestamp
 from newsroom.control_plane.graphiti_events import (
     GRAPHITI_EVENT_PROJECTION_GENERATION,
     GRAPHITI_EVENT_PROJECTOR_VERSION,
 )
 from newsroom.control_plane.graphiti_steady_state import (
+    GraphitiCampaignRuntime,
     build_graphiti_steady_state_packet,
+    validate_graphiti_campaign_packet,
     write_content_addressed_packet,
 )
 from newsroom.control_plane.read_only_snapshot import (
@@ -31,6 +38,8 @@ from newsroom.increment4.contracts import (
     increment4_admitted_mapping_v1,
     increment4_admitted_ontology_v1,
 )
+from newsroom.projection import ProjectionGenerationId
+from newsroom.projection.neo4j import StructuralReconciliationView
 from scripts import graphiti_steady_state_report
 
 NOW = datetime(2026, 9, 1, 12, tzinfo=UTC)
@@ -221,6 +230,11 @@ def _bind_terminal_raw_proposal_to_authority(
     receipt = json.loads(str(row[0]))
     receipt.pop("receipt_digest")
     receipt["attempt_number"] = 1
+    raw = dict(receipt)
+    raw.pop("raw_output_digest", None)
+    raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
+    receipt["raw_output_digest"] = raw["raw_output_digest"]
+    raw_bytes = canonical_json_bytes(raw)
     receipt_digest = digest_canonical(receipt)
     retained_json = json.dumps(
         {**receipt, "receipt_digest": receipt_digest}, sort_keys=True
@@ -255,6 +269,16 @@ def _bind_terminal_raw_proposal_to_authority(
             "output",
             "run",
             "run-version",
+        ),
+    )
+    authority_connection.execute(
+        "INSERT INTO extraction_outputs VALUES(?,?,?,?,?)",
+        (
+            "output",
+            "run",
+            "run-version",
+            raw_bytes,
+            digest_bytes(raw_bytes),
         ),
     )
     authority_connection.execute(
@@ -514,6 +538,13 @@ def _authority_store(tmp_path: Path) -> Path:
             local_id TEXT NOT NULL,
             semantic_digest TEXT NOT NULL
         );
+        CREATE TABLE extraction_outputs(
+            output_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            run_version_id TEXT NOT NULL,
+            canonical_bytes BLOB NOT NULL,
+            canonical_digest TEXT NOT NULL
+        );
         CREATE TABLE entity_resolution_decisions(decision_id TEXT PRIMARY KEY);
         CREATE TABLE editorial_relation_decisions(decision_id TEXT PRIMARY KEY);
         CREATE TABLE graphiti_adapter_attempts(
@@ -611,69 +642,30 @@ def _authority_store(tmp_path: Path) -> Path:
 
 
 def _campaign_input(packet: dict[str, object]) -> dict[str, object]:
-    snapshots = packet["store_snapshots"]
-    assert isinstance(snapshots, dict)
-    snapshot_digests = {
-        name: value["descriptor_digest"] for name, value in snapshots.items()
-    }
     partition = packet["historical_partition"]
     assert isinstance(partition, dict)
     candidates = partition["current_preflight_candidates"]
     assert isinstance(candidates, list)
-    authority_evidence = packet["authority_snapshot_evidence"]
-    assert isinstance(authority_evidence, dict)
-    graph_readback = authority_evidence["active_projection_authority"]
-    assert isinstance(graph_readback, dict)
     selection = {
         "policy_id": "issue-895-current-preflight",
         "policy_version": "v1",
     }
-    graph = {
-        "destination_id": "neo4j-production",
-        "family_id": graph_readback["family_id"],
-        "ontology_id": graph_readback["ontology_id"],
-        "ontology_version": graph_readback["ontology_version"],
-        "ontology_contract_digest": graph_readback["ontology_contract_digest"],
-        "mapping_id": graph_readback["mapping_id"],
-        "mapping_version": graph_readback["mapping_version"],
-        "mapping_contract_digest": graph_readback["mapping_contract_digest"],
-        "projector_version": graph_readback["projector_version"],
-        "current_generation_id": graph_readback["generation_id"],
-    }
-    target_generation_id = digest_canonical(
-        {
-            "current_generation_id": graph["current_generation_id"],
-            "projector_version": graph["projector_version"],
-            "source_snapshot_digests": snapshot_digests,
-            "cohort_manifest_digest": partition[
-                "current_preflight_candidate_manifest_digest"
-            ],
-            "selection_policy_digest": digest_canonical(selection),
-        }
-    )
     return {
-        "schema_version": "newsroom.graphiti-bounded-campaign-input.v1",
-        "code_identity": {"head_sha": "head", "tree_sha": "tree"},
+        "schema_version": "newsroom.graphiti-bounded-campaign-input.v2",
         "focus_gate": {
             "head_sha": "head",
             "tree_sha": "tree",
             "conclusion": "SUCCESS",
             "manifest_digest": "sha256:" + "f" * 64,
         },
-        "source_snapshot_digests": snapshot_digests,
-        "cohort": {
-            "event_ids": [item["event_id"] for item in candidates],
-            "manifest_digest": partition[
-                "current_preflight_candidate_manifest_digest"
-            ],
-        },
-        "selection_policy": {**selection, "digest": digest_canonical(selection)},
+        "selection_policy": selection,
         "provider": {
             "provider_id": "provider",
             "model_id": "model",
+            "embedding_provider_id": "embedding-provider",
             "embedding_model_id": "embedding",
         },
-        "graph": {**graph, "target_generation_id": target_generation_id},
+        "graph": {"destination_id": "neo4j-production"},
         "caps": {
             "per_event": {
                 "proposals": 20,
@@ -748,6 +740,49 @@ def _campaign_input(packet: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _graph_destination_reconciliation(
+    packet: dict[str, object],
+    *,
+    family_id: str | None = None,
+    generation_id: str | None = None,
+    checkpoint_ledger_seq: int | None = None,
+    serving_time: str | None = None,
+) -> StructuralReconciliationView:
+    authority_evidence = packet["authority_snapshot_evidence"]
+    assert isinstance(authority_evidence, dict)
+    graph = authority_evidence["active_projection_authority"]
+    assert isinstance(graph, dict)
+    return StructuralReconciliationView(
+        family_id=family_id or str(graph["family_id"]),
+        generation_id=ProjectionGenerationId.parse(
+            generation_id or str(graph["generation_id"])
+        ),
+        checkpoint_ledger_seq=(
+            int(graph["validated_through_ledger_seq"])
+            if checkpoint_ledger_seq is None
+            else checkpoint_ledger_seq
+        ),
+        projection_state_digest="sha256:" + "d" * 64,
+        serving_time=UtcTimestamp.parse(
+            serving_time or str(packet["observed_at"])
+        ),
+    )
+
+
+def _governed_runtime(packet: dict[str, object]) -> GraphitiCampaignRuntime:
+    stores = packet["store_snapshots"]
+    assert isinstance(stores, dict)
+    authority = stores["authority"]
+    assert isinstance(authority, dict)
+    return GraphitiCampaignRuntime(
+        graphiti=object(),
+        admission_factory=lambda _connection: object(),
+        graph_state_fence=lambda _campaign: {},
+        authority_store_source_path=str(authority["source_path"]),
+        authority_store_descriptor_digest=str(authority["descriptor_digest"]),
+    )
+
+
 def test_wal_snapshot_does_not_change_source_files(tmp_path: Path) -> None:
     path = tmp_path / "wal.sqlite3"
     connection = sqlite3.connect(path)
@@ -799,7 +834,7 @@ def test_missing_campaign_inputs_are_finite_no_go(tmp_path: Path) -> None:
     assert packet["readiness"] == "ENGINEERING_PREPARATION_ONLY"
     assert "AUTHORITY_STORE_UNCONFIGURED" in packet["blockers"]
     assert "CAMPAIGN_INPUT_MISSING" in packet["blockers"]
-    assert packet["runtime_composition"]["durable_proposal_envelope_binding"] is True
+    assert packet["runtime_composition"]["durable_proposal_envelope_binding"] is False
     assert packet["non_effects"] == {
         "provider_calls": 0,
         "store_mutations": 0,
@@ -905,7 +940,7 @@ def test_historical_partition_is_total_disjoint_and_candidates_are_unauthorised(
     ]["ledger_sequences"] == [6]
 
 
-def test_complete_packet_remains_no_go_without_runtime_and_graph_readback(
+def test_complete_packet_remains_no_go_without_graph_readback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -947,7 +982,6 @@ def test_complete_packet_remains_no_go_without_runtime_and_graph_readback(
     assert packet["verdict"] == "NO_GO"
     assert packet["readiness"] == "ENGINEERING_PREPARATION_ONLY"
     assert "GRAPH_DESTINATION_READBACK_UNAVAILABLE" in packet["blockers"]
-    assert "RUNTIME_CAMPAIGN_ENFORCEMENT_UNPROVEN" in packet["blockers"]
     assert packet["bounded_campaign"]["campaign_authorised"] is False
     assert packet["bounded_campaign"]["cohort"]["dispatch_authorised"] is False
     assert packet["bounded_campaign"]["cohort"]["claim_performed"] is False
@@ -955,18 +989,21 @@ def test_complete_packet_remains_no_go_without_runtime_and_graph_readback(
         "NON_REPLAYABLE_OR_AMBIGUOUS_EFFECT_HOLD"
     ]["count"] == 1
     assert packet["runtime_composition"] == {
-        "state": "PACKET_ONLY_NOT_RUNTIME_ENFORCED",
+        "state": "CANONICAL_OPERATOR_RUNTIME_UNCONFIGURED",
         "authority_store_configured": True,
-        "durable_proposal_envelope_binding": True,
-        "admission_policy_configured": True,
-        "full_generation_projector_configured": True,
+        "authority_store_source_path": None,
+        "authority_store_descriptor_digest": None,
+        "durable_proposal_envelope_binding": False,
+        "admission_policy_configured": False,
+        "full_generation_projector_configured": False,
+        "dormant_worker_path_wired": False,
         "campaign_packet_enforced": False,
         "actual_graph_readback_observed": False,
         "campaign_authorised": False,
     }
 
 
-def test_self_addressed_cohort_and_snapshot_drift_are_no_go(
+def test_owner_input_rejects_extra_derived_fields(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -990,14 +1027,12 @@ def test_self_addressed_cohort_and_snapshot_drift_are_no_go(
     )
     preparation = _packet(proving, unpublished, authority_store=authority)
     campaign = _campaign_input(preparation)
+    campaign["code_identity"] = {"head_sha": "head", "tree_sha": "tree"}
     campaign["cohort"] = {
         "event_ids": ["self-addressed-event"],
-        "manifest_digest": campaign["cohort"]["manifest_digest"],
+        "manifest_digest": "sha256:" + "0" * 64,
     }
-    campaign["source_snapshot_digests"] = {
-        **campaign["source_snapshot_digests"],
-        "authority": "sha256:" + "0" * 64,
-    }
+    campaign["source_snapshot_digests"] = {}
 
     packet = _packet(
         proving,
@@ -1007,8 +1042,304 @@ def test_self_addressed_cohort_and_snapshot_drift_are_no_go(
     )
 
     assert packet["verdict"] == "NO_GO"
-    assert "CAMPAIGN_COHORT_DIFFERS_FROM_CURRENT_PREFLIGHT" in packet["blockers"]
-    assert "SOURCE_SNAPSHOT_DRIFT" in packet["blockers"]
+    assert "CAMPAIGN_FIELDS_INVALID" in packet["blockers"]
+
+
+def test_authenticated_graph_readback_builds_valid_ready_packet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=1,
+        item_key="candidate",
+        ingest_id="candidate-ingest",
+    )
+    connection.commit()
+    connection.close()
+    _seed_proving_accountability(proving)
+    authority = _authority_store(tmp_path)
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti_steady_state."
+        "load_graphiti_units_from_connection",
+        lambda _connection, *, evaluated_at: (
+            _current_unit(item_key="candidate", ingest_id="candidate-ingest"),
+        ),
+    )
+    preparation = _packet(proving, unpublished, authority_store=authority)
+    campaign = _campaign_input(preparation)
+    reconciliation = _graph_destination_reconciliation(preparation)
+    runtime = _governed_runtime(preparation)
+
+    packet = _packet(
+        proving,
+        unpublished,
+        authority_store=authority,
+        campaign_input=campaign,
+        graph_destination_reconciliation=reconciliation,
+        governed_runtime=runtime,
+    )
+
+    assert packet["verdict"] == "READY_FOR_OWNER_DECISION"
+    assert packet["readiness"] == "F4_CAMPAIGN_READY_FOR_OWNER_DECISION"
+    assert packet["blockers"] == []
+    assert packet["bounded_campaign"]["cohort"] == {
+        "event_ids": ["sha256:" + f"{1:064x}"],
+        "manifest_digest": packet["historical_partition"][
+            "current_preflight_candidate_manifest_digest"
+        ],
+        "events": packet["historical_partition"]["current_preflight_candidates"],
+        "dispatch_authorised": False,
+        "claim_performed": False,
+    }
+    assert packet["bounded_campaign"]["graph_destination_readback"] == {
+        "destination_id": "neo4j-production",
+        "family_id": reconciliation.family_id,
+        "generation_id": str(reconciliation.generation_id),
+        "checkpoint_ledger_seq": reconciliation.checkpoint_ledger_seq,
+        "projection_state_digest": reconciliation.projection_state_digest,
+        "serving_time": reconciliation.serving_time.to_text(),
+    }
+    assert packet["runtime_composition"]["actual_graph_readback_observed"] is True
+    assert packet["runtime_composition"]["authority_store_source_path"] == (
+        packet["store_snapshots"]["authority"]["source_path"]
+    )
+    assert packet["runtime_composition"][
+        "authority_store_descriptor_digest"
+    ] == packet["store_snapshots"]["authority"]["descriptor_digest"]
+    assert validate_graphiti_campaign_packet(packet) == packet["bounded_campaign"]
+
+    cap_drift = json.loads(json.dumps(packet))
+    cap_drift["bounded_campaign"]["caps"]["total"]["events"] = 2
+    cap_drift["packet_digest"] = digest_canonical(
+        {key: value for key, value in cap_drift.items() if key != "packet_digest"}
+    )
+    with pytest.raises(ValueError, match="caps differ"):
+        validate_graphiti_campaign_packet(cap_drift)
+
+    ramp_drift = json.loads(json.dumps(packet))
+    ramp_drift["bounded_campaign"]["ramp"]["phases"][-1]["event_limit"] = 2
+    ramp_drift["packet_digest"] = digest_canonical(
+        {key: value for key, value in ramp_drift.items() if key != "packet_digest"}
+    )
+    with pytest.raises(ValueError, match="cohort cap differs"):
+        validate_graphiti_campaign_packet(ramp_drift)
+
+    stop_drift = json.loads(json.dumps(packet))
+    stop_drift["bounded_campaign"]["immediate_stop_conditions"].remove(
+        "RIGHTS_DRIFT"
+    )
+    stop_drift["packet_digest"] = digest_canonical(
+        {key: value for key, value in stop_drift.items() if key != "packet_digest"}
+    )
+    with pytest.raises(ValueError, match="stop conditions differ"):
+        validate_graphiti_campaign_packet(stop_drift)
+
+
+def test_untyped_caller_graph_readback_is_no_go(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=1,
+        item_key="candidate",
+        ingest_id="candidate-ingest",
+    )
+    connection.commit()
+    connection.close()
+    _seed_proving_accountability(proving)
+    authority = _authority_store(tmp_path)
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti_steady_state."
+        "load_graphiti_units_from_connection",
+        lambda _connection, *, evaluated_at: (
+            _current_unit(item_key="candidate", ingest_id="candidate-ingest"),
+        ),
+    )
+    preparation = _packet(proving, unpublished, authority_store=authority)
+    packet = _packet(
+        proving,
+        unpublished,
+        authority_store=authority,
+        campaign_input=_campaign_input(preparation),
+        graph_destination_reconciliation={  # type: ignore[arg-type]
+            "destination_id": "neo4j-production",
+            "generation_id": "00000000-0000-4000-8000-000000000895",
+            "readback_digest": "sha256:" + "0" * 64,
+        },
+        governed_runtime=_governed_runtime(preparation),
+    )
+
+    assert packet["verdict"] == "NO_GO"
+    assert "GRAPH_DESTINATION_READBACK_INVALID" in packet["blockers"]
+    assert packet["runtime_composition"]["actual_graph_readback_observed"] is False
+
+
+def test_runtime_authority_descriptor_drift_is_no_go(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=1,
+        item_key="candidate",
+        ingest_id="candidate-ingest",
+    )
+    connection.commit()
+    connection.close()
+    _seed_proving_accountability(proving)
+    authority = _authority_store(tmp_path)
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti_steady_state."
+        "load_graphiti_units_from_connection",
+        lambda _connection, *, evaluated_at: (
+            _current_unit(item_key="candidate", ingest_id="candidate-ingest"),
+        ),
+    )
+    preparation = _packet(proving, unpublished, authority_store=authority)
+    runtime = _governed_runtime(preparation)
+    drifted_runtime = GraphitiCampaignRuntime(
+        graphiti=runtime.graphiti,
+        admission_factory=runtime.admission_factory,
+        graph_state_fence=runtime.graph_state_fence,
+        authority_store_source_path=runtime.authority_store_source_path,
+        authority_store_descriptor_digest="sha256:" + "0" * 64,
+    )
+
+    packet = _packet(
+        proving,
+        unpublished,
+        authority_store=authority,
+        campaign_input=_campaign_input(preparation),
+        graph_destination_reconciliation=(
+            _graph_destination_reconciliation(preparation)
+        ),
+        governed_runtime=drifted_runtime,
+    )
+
+    assert packet["verdict"] == "NO_GO"
+    assert "CANONICAL_OPERATOR_RUNTIME_UNCONFIGURED" in packet["blockers"]
+    assert packet["runtime_composition"]["authority_store_descriptor_digest"] == (
+        "sha256:" + "0" * 64
+    )
+    assert packet["runtime_composition"]["campaign_packet_enforced"] is False
+
+
+@pytest.mark.parametrize(
+    "reconciliation_overrides",
+    (
+        {"family_id": "graph.different"},
+        {"generation_id": "00000000-0000-4000-8000-000000000000"},
+        {"checkpoint_ledger_seq": 8},
+        {"serving_time": "2026-09-01T13:00:00Z"},
+    ),
+)
+def test_graph_reconciliation_identity_drift_is_no_go(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reconciliation_overrides: dict[str, object],
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=1,
+        item_key="candidate",
+        ingest_id="candidate-ingest",
+    )
+    connection.commit()
+    connection.close()
+    _seed_proving_accountability(proving)
+    authority = _authority_store(tmp_path)
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti_steady_state."
+        "load_graphiti_units_from_connection",
+        lambda _connection, *, evaluated_at: (
+            _current_unit(item_key="candidate", ingest_id="candidate-ingest"),
+        ),
+    )
+    preparation = _packet(proving, unpublished, authority_store=authority)
+    reconciliation = _graph_destination_reconciliation(
+        preparation,
+        **reconciliation_overrides,  # type: ignore[arg-type]
+    )
+
+    packet = _packet(
+        proving,
+        unpublished,
+        authority_store=authority,
+        campaign_input=_campaign_input(preparation),
+        graph_destination_reconciliation=reconciliation,
+        governed_runtime=_governed_runtime(preparation),
+    )
+
+    assert packet["verdict"] == "NO_GO"
+    assert "GRAPH_DESTINATION_READBACK_INVALID" in packet["blockers"]
+
+
+def test_typed_graph_readback_without_operator_runtime_is_no_go(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=1,
+        item_key="candidate",
+        ingest_id="candidate-ingest",
+    )
+    connection.commit()
+    connection.close()
+    _seed_proving_accountability(proving)
+    authority = _authority_store(tmp_path)
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti_steady_state."
+        "load_graphiti_units_from_connection",
+        lambda _connection, *, evaluated_at: (
+            _current_unit(item_key="candidate", ingest_id="candidate-ingest"),
+        ),
+    )
+    preparation = _packet(proving, unpublished, authority_store=authority)
+    packet = _packet(
+        proving,
+        unpublished,
+        authority_store=authority,
+        campaign_input=_campaign_input(preparation),
+        graph_destination_reconciliation=(
+            _graph_destination_reconciliation(preparation)
+        ),
+    )
+
+    assert packet["verdict"] == "NO_GO"
+    assert "CANONICAL_OPERATOR_RUNTIME_UNCONFIGURED" in packet["blockers"]
+    assert packet["runtime_composition"] == {
+        "state": "CANONICAL_OPERATOR_RUNTIME_UNCONFIGURED",
+        "authority_store_configured": True,
+        "authority_store_source_path": None,
+        "authority_store_descriptor_digest": None,
+        "durable_proposal_envelope_binding": False,
+        "admission_policy_configured": False,
+        "full_generation_projector_configured": False,
+        "dormant_worker_path_wired": False,
+        "campaign_packet_enforced": False,
+        "actual_graph_readback_observed": True,
+        "campaign_authorised": False,
+    }
+
+
+def test_campaign_packet_validator_rejects_digest_drift(
+    tmp_path: Path,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    connection.close()
+    packet = _packet(proving, unpublished)
+    packet["packet_digest"] = "sha256:" + "0" * 64
+
+    with pytest.raises(ValueError, match="canonical digest differs"):
+        validate_graphiti_campaign_packet(packet)
 
 
 def test_unverified_terminal_is_unclassified_in_historical_partition(
@@ -1073,6 +1404,71 @@ def test_historical_proposal_is_verified_only_from_exact_4a_4d_snapshot(
     ]["count"] == 0
 
 
+def test_non_terminal_4d_partial_attempt_is_not_future_admission_authority(
+    tmp_path: Path,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _terminal_zero_proposal(connection)
+    _turn_terminal_receipt_into_historical_raw_only(connection)
+    connection.close()
+    authority = _authority_store(tmp_path)
+    _bind_terminal_raw_proposal_to_authority(unpublished, authority)
+    authority_connection = sqlite3.connect(authority)
+    authority_connection.execute(
+        "UPDATE graphiti_adapter_attempts SET outcome='PARTIAL'"
+    )
+    authority_connection.commit()
+    authority_connection.close()
+
+    packet = _packet(proving, unpublished, authority_store=authority)
+
+    hold = packet["historical_partition"]["categories"][
+        "NON_REPLAYABLE_OR_AMBIGUOUS_EFFECT_HOLD"
+    ]
+    assert hold["ledger_sequences"] == [1]
+    assert hold["reason_counts"] == {
+        "IMMUTABLE_RAW_PROPOSAL_WITHOUT_DURABLE_ENVELOPE": 1
+    }
+
+
+def test_internally_valid_raw_output_drift_keeps_historical_proposal_on_hold(
+    tmp_path: Path,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _terminal_zero_proposal(connection)
+    _turn_terminal_receipt_into_historical_raw_only(connection)
+    connection.close()
+    authority = _authority_store(tmp_path)
+    _bind_terminal_raw_proposal_to_authority(unpublished, authority)
+    authority_connection = sqlite3.connect(authority)
+    row = authority_connection.execute(
+        "SELECT canonical_bytes FROM extraction_outputs WHERE output_id='output'"
+    ).fetchone()
+    assert row is not None
+    raw = json.loads(bytes(row[0]))
+    raw.pop("raw_output_digest")
+    raw["proposals"][0]["local_id"] = "different-retained-proposal"
+    raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
+    raw_bytes = canonical_json_bytes(raw)
+    authority_connection.execute(
+        "UPDATE extraction_outputs SET canonical_bytes=?,canonical_digest=? "
+        "WHERE output_id='output'",
+        (raw_bytes, digest_bytes(raw_bytes)),
+    )
+    authority_connection.commit()
+    authority_connection.close()
+
+    packet = _packet(proving, unpublished, authority_store=authority)
+
+    hold = packet["historical_partition"]["categories"][
+        "NON_REPLAYABLE_OR_AMBIGUOUS_EFFECT_HOLD"
+    ]
+    assert hold["ledger_sequences"] == [1]
+    assert hold["reason_counts"] == {
+        "IMMUTABLE_RAW_PROPOSAL_WITHOUT_DURABLE_ENVELOPE": 1
+    }
+
+
 def test_forged_admission_queue_does_not_create_durable_4a_4d_authority(
     tmp_path: Path,
 ) -> None:
@@ -1121,7 +1517,7 @@ def test_forged_admission_queue_does_not_create_durable_4a_4d_authority(
     }
 
 
-def test_arbitrary_migration_checksum_and_generation_are_no_go(
+def test_arbitrary_migration_checksum_and_owner_supplied_generation_are_no_go(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1162,8 +1558,7 @@ def test_arbitrary_migration_checksum_and_generation_are_no_go(
     )
 
     assert "AUTHORITY_MIGRATION_HISTORY_INVALID" in packet["blockers"]
-    assert "CAMPAIGN_GRAPH_IDENTITY_DIFFERS_FROM_AUTHORITY" in packet["blockers"]
-    assert "SOURCE_SNAPSHOT_DRIFT" in packet["blockers"]
+    assert "GRAPH_IDENTITY_FIELDS_INVALID" in packet["blockers"]
 
 
 def test_fallback_stop_and_ramp_contracts_fail_closed(

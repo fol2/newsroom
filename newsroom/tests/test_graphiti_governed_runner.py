@@ -81,8 +81,9 @@ def _governed_dependencies(*, malformed_raw_proposal: bool = False):
         retained["configuration"] = configuration
         return object()
 
-    def execute(attempt, _proof):
+    def execute(attempt, _proof, **controls):
         calls.append("execute")
+        retained["execution_controls"] = controls
         passage = attempt.extraction_request.input_binding.passages[0]
         evidence = EvidenceRange(
             passage_id=passage.passage_id,
@@ -270,11 +271,14 @@ def test_governed_runner_uses_exact_4d_and_4a_authority(monkeypatch) -> None:
         DirectAdapter,
         raising=False,
     )
+    deadline = datetime(2026, 8, 20, 0, 1, tzinfo=UTC)
+    observer = object()
     result = EvaluationGraphitiRunner(
         proposal_adapter=adapter,
         extraction_records=extraction,
         proof=proof,
-    ).ingest(_unit())
+        fallback_permitted=False,
+    )._ingest(_unit(), deadline=deadline, invocation_observer=observer)
 
     raw = retained["raw"]
     assert calls == ["register", "execute"]
@@ -282,6 +286,11 @@ def test_governed_runner_uses_exact_4d_and_4a_authority(monkeypatch) -> None:
     assert canonical_json_bytes(result.raw_receipt) == raw.canonical_bytes
     assert result.proposals == tuple(result.raw_receipt["proposals"])
     assert result.proposal_count == 1
+    assert retained["execution_controls"] == {
+        "execution_deadline": deadline,
+        "fallback_permitted": False,
+        "invocation_observer": observer,
+    }
 
 
 def test_governed_runner_dependencies_are_all_or_none() -> None:
@@ -324,5 +333,10 @@ def test_governed_runner_rejects_raw_proposals_that_differ_from_authority() -> N
             proposal_adapter=adapter,
             extraction_records=extraction,
             proof=proof,
-        ).ingest(_unit())
+            fallback_permitted=False,
+        )._ingest(
+            _unit(),
+            deadline=datetime(2026, 8, 20, 0, 1, tzinfo=UTC),
+            invocation_observer=object(),
+        )
     assert raised.value.stage == "CYCLE_RESULT_CONSTRUCTION"

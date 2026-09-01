@@ -39,6 +39,7 @@ _NEO4J_EXPORTS = frozenset(
         "Increment4Neo4jBuildRequest",
         "Increment4Neo4jBuildResult",
         "Increment4Neo4jController",
+        "Increment4Neo4jCurrentBuildRequest",
         "Increment4Neo4jGenerationStatus",
         "Increment4Neo4jProofError",
     }
@@ -73,6 +74,7 @@ __all__ = [
     "Increment4Neo4jBuildRequest",
     "Increment4Neo4jBuildResult",
     "Increment4Neo4jController",
+    "Increment4Neo4jCurrentBuildRequest",
     "Increment4Neo4jGenerationStatus",
     "Increment4Neo4jProofError",
     "Increment4EntityProjectionState",

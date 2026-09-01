@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 
 from newsroom.authority.auth import AuthenticationProof
 from newsroom.extraction.types import ExtractionRunId
@@ -11,6 +12,7 @@ from newsroom.graphiti_adapter import (
     GraphitiAttemptId,
     GraphitiAttemptRecord,
     GraphitiAttemptRequest,
+    GraphitiInputManifest,
     GraphitiReplayApprovalRequest,
     GraphitiReplaySourceId,
     GraphitiReplaySourceRecord,
@@ -27,6 +29,7 @@ class GovernedGraphitiProposalAdapter:
         "__configuration",
         "__attempt",
         "__attempt_history",
+        "__manifest_for_attempt",
         "__replay_source",
     )
 
@@ -37,9 +40,7 @@ class GovernedGraphitiProposalAdapter:
             [GraphitiAdapterConfiguration, AuthenticationProof],
             GraphitiAdapterConfigurationRecord,
         ],
-        execute_attempt: Callable[
-            [GraphitiAttemptRequest, AuthenticationProof], GraphitiAttemptRecord
-        ],
+        execute_attempt: Callable[..., GraphitiAttemptRecord],
         approve_replay: Callable[
             [GraphitiReplayApprovalRequest, AuthenticationProof],
             GraphitiReplaySourceRecord,
@@ -55,6 +56,9 @@ class GovernedGraphitiProposalAdapter:
             [ExtractionRunId, int, AuthenticationProof],
             tuple[GraphitiAttemptRecord, ...],
         ],
+        manifest_for_attempt: Callable[
+            [GraphitiAttemptId, AuthenticationProof], GraphitiInputManifest
+        ],
         replay_source: Callable[
             [GraphitiReplaySourceId, AuthenticationProof],
             GraphitiReplaySourceRecord,
@@ -66,6 +70,7 @@ class GovernedGraphitiProposalAdapter:
         self.__configuration = configuration
         self.__attempt = attempt
         self.__attempt_history = attempt_history
+        self.__manifest_for_attempt = manifest_for_attempt
         self.__replay_source = replay_source
 
     def register_configuration(
@@ -81,8 +86,17 @@ class GovernedGraphitiProposalAdapter:
         attempt: GraphitiAttemptRequest,
         *,
         proof: AuthenticationProof,
+        execution_deadline: datetime | None = None,
+        fallback_permitted: bool = True,
+        invocation_observer: object | None = None,
     ) -> GraphitiAttemptRecord:
-        return self.__execute_attempt(attempt, proof)
+        return self.__execute_attempt(
+            attempt,
+            proof,
+            execution_deadline=execution_deadline,
+            fallback_permitted=fallback_permitted,
+            invocation_observer=invocation_observer,
+        )
 
     def approve_replay(
         self,
@@ -116,6 +130,14 @@ class GovernedGraphitiProposalAdapter:
         proof: AuthenticationProof,
     ) -> tuple[GraphitiAttemptRecord, ...]:
         return self.__attempt_history(run_id, limit, proof)
+
+    def manifest_for_attempt(
+        self,
+        attempt_id: GraphitiAttemptId,
+        *,
+        proof: AuthenticationProof,
+    ) -> GraphitiInputManifest:
+        return self.__manifest_for_attempt(attempt_id, proof)
 
     def replay_source(
         self,

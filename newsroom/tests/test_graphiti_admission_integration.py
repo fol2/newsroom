@@ -1,24 +1,39 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
 from newsroom.authority.auth import AuthenticationProof
-from newsroom.authority.canonical import digest_canonical
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+)
 from newsroom.authority.types import EventId, UtcTimestamp
 from newsroom.control_plane.graphiti_admission import (
     GraphitiAdmissionConsumerError,
     GraphitiAdmissionRequest,
     GraphitiGovernedDecision,
+    GraphitiProposalAuthorityBinding,
+    GraphitiProjectionRequest,
 )
 from newsroom.control_plane.graphiti_admission_integration import (
+    ConservativeGraphitiRelationPlanBuilder,
+    ExistingIncrement4GenerationProjector,
+    ExistingGovernedGraphitiProposalAuthority,
+    ExistingGovernedGraphitiRightsAuthority,
     ExistingGovernedGraphitiAdmissionAuthority,
     GraphitiEntityAdmissionPlan,
     GraphitiRelationAdmissionPlan,
+    GraphitiRelationOperationalDecisionPlan,
+    compose_existing_graphiti_admission_consumer,
+    conservative_entity_mention_plan,
 )
 from newsroom.entities.models import (
     EntityMentionAdmissionRequest,
+    EntityResolutionDependencyRequest,
     EntityResolutionDecision,
     EntityResolutionDecisionRequest,
     EntityResolutionProposalRequest,
@@ -34,20 +49,32 @@ from newsroom.entities.types import (
     EntityMentionId,
     EntityResolutionDecisionAction,
     EntityResolutionDecisionId,
+    EntityResolutionDependencyId,
     EntityResolutionProposalId,
     EntityResolutionProposalKind,
     EntityResolutionProposalVersionId,
     EntityScript,
 )
-from newsroom.extraction.models import ProposalDraft
+from newsroom.extraction.models import ProposalDraft, ProposalEnvelope
 from newsroom.extraction.types import (
     EvidenceRange,
     ExtractionPassageId,
     ExtractionProposalKind,
     ProposalEnvelopeId,
+    ProposalSetId,
+    ExtractionOutputId,
+    ExtractionRunId,
+    ExtractionRunVersionId,
     ProposalPredicateHint,
 )
 from newsroom.graphiti_adapter.admission import GraphitiProposalAdmissionAction
+from newsroom.graphiti_adapter.identity import attempt_ids, typed_id
+from newsroom.graphiti_adapter.types import GraphitiAdapterOutcome
+from newsroom.increment4.neo4j import Increment4Neo4jCurrentBuildRequest
+from newsroom.projection.models import (
+    ProjectionGenerationId,
+    ProjectionGenerationState,
+)
 from newsroom.relations.editorial_models import (
     CanonicalEntityRelationEndpoint,
     EditorialRelationTemporalScope,
@@ -59,6 +86,43 @@ from newsroom.relations.editorial_types import (
 )
 
 DIGEST = "sha256:" + ("ab" * 32)
+
+
+def _binding(
+    draft: ProposalDraft,
+    *,
+    cohort_seed: str | None = None,
+) -> GraphitiProposalAuthorityBinding:
+    shared = cohort_seed or draft.digest
+    proposal_id = typed_id(ProposalEnvelopeId, "proposal", shared, draft.digest)
+    proposal_set_id = typed_id(ProposalSetId, "set", shared)
+    output_id = typed_id(ExtractionOutputId, "output", shared)
+    run_id = typed_id(ExtractionRunId, "run", shared)
+    run_version_id = typed_id(ExtractionRunVersionId, "version", shared)
+    producer = digest_canonical({"producer": "fixture"})
+    envelope_digest = digest_canonical({
+        "proposal_id": str(proposal_id), "proposal_set_id": str(proposal_set_id),
+        "output_id": str(output_id), "run_id": str(run_id),
+        "run_version_id": str(run_version_id), "draft": draft.canonical_value(),
+        "producer_contract_digest": producer,
+    })
+    return GraphitiProposalAuthorityBinding(
+        graphiti_attempt_id=str(typed_id(ProposalEnvelopeId, "attempt", shared)),
+        graphiti_attempt_authority_event_id=str(typed_id(ProposalEnvelopeId, "event", shared)),
+        proposal_envelope=ProposalEnvelope(
+            proposal_id=proposal_id, proposal_set_id=proposal_set_id,
+            output_id=output_id, run_id=run_id, run_version_id=run_version_id,
+            local_id=draft.local_id, kind=draft.kind,
+            subject_placeholder=draft.subject_placeholder,
+            object_placeholder=draft.object_placeholder,
+            predicate_hint=draft.predicate_hint,
+            confidence_basis_points=draft.confidence_basis_points,
+            uncertainty_codes=draft.uncertainty_codes,
+            rationale_codes=draft.rationale_codes, evidence=draft.evidence,
+            producer_contract_digest=producer, canonical_digest=envelope_digest,
+            retained_at=UtcTimestamp.parse("2026-08-24T00:00:00Z"),
+        ),
+    )
 
 
 def _request() -> GraphitiAdmissionRequest:
@@ -86,6 +150,7 @@ def _request() -> GraphitiAdmissionRequest:
         queue_seq=1,
         proposal_key="proposal-key",
         source_receipt_digest=DIGEST,
+        proposal_authority_binding=_binding(proposal),
         proposal=proposal,
         proposal_payload=proposal.canonical_value(),
         evidence_passages=({"passage_id": str(proposal.evidence[0].passage_id)},),
@@ -93,6 +158,59 @@ def _request() -> GraphitiAdmissionRequest:
         relation_statement=None,
         relation_temporal_bounds=None,
         source_lineage={"revision_id": "fixture"},
+    )
+
+
+def _relation_request(
+    predicate_hint: ProposalPredicateHint = ProposalPredicateHint.SAME_PROCESS_AS,
+) -> GraphitiAdmissionRequest:
+    entity = _request().proposal
+    endpoints = (
+        replace(entity, local_id="entity.0001", subject_placeholder="Alice"),
+        replace(entity, local_id="entity.0002", subject_placeholder="Bob"),
+    )
+    proposal = ProposalDraft(
+        local_id="relation.0001",
+        kind=ExtractionProposalKind.RELATION,
+        subject_placeholder="Alice",
+        object_placeholder="Bob",
+        predicate_hint=predicate_hint,
+        confidence_basis_points=9_000,
+        uncertainty_codes=("REQUIRES_RELATION_ADMISSION",),
+        rationale_codes=("EXACT_EXTRACTION_EVIDENCE",),
+        evidence=entity.evidence,
+    )
+    cohort_seed = "relation-plan"
+    return GraphitiAdmissionRequest(
+        queue_seq=3,
+        proposal_key="relation-proposal-key",
+        source_receipt_digest=DIGEST,
+        proposal_authority_binding=_binding(
+            proposal,
+            cohort_seed=cohort_seed,
+        ),
+        proposal=proposal,
+        proposal_payload=proposal.canonical_value(),
+        evidence_passages=(
+            {
+                "passage_id": str(proposal.evidence[0].passage_id),
+                "language": "en-GB",
+            },
+        ),
+        proposed_endpoints=("Alice", "Bob"),
+        relation_statement="Alice and Bob participate in the same process.",
+        relation_temporal_bounds={
+            "valid_at": "2026-08-24T00:00:00Z",
+            "invalid_at": None,
+            "expired_at": None,
+        },
+        source_lineage={
+            "revision_id": "fixture",
+            "reference_time": "2026-08-24T00:00:00Z",
+        },
+        relation_endpoint_bindings=tuple(
+            _binding(item, cohort_seed=cohort_seed) for item in endpoints
+        ),
     )
 
 
@@ -303,6 +421,18 @@ def test_existing_authority_marks_merged_entity_head_stale() -> None:
 
 def test_existing_authority_hydrates_current_relation_facts() -> None:
     entity_request = _request()
+    endpoint_drafts = (
+        replace(
+            entity_request.proposal,
+            local_id="entity.0001",
+            subject_placeholder="Alice",
+        ),
+        replace(
+            entity_request.proposal,
+            local_id="entity.0002",
+            subject_placeholder="Bob",
+        ),
+    )
     proposal = ProposalDraft(
         local_id="relation.0001",
         kind=ExtractionProposalKind.RELATION,
@@ -318,10 +448,14 @@ def test_existing_authority_hydrates_current_relation_facts() -> None:
         queue_seq=1,
         proposal_key="relation-proposal-key",
         source_receipt_digest=DIGEST,
+        proposal_authority_binding=_binding(proposal, cohort_seed="relation"),
         proposal=proposal,
         proposal_payload=proposal.canonical_value(),
         evidence_passages=entity_request.evidence_passages,
         proposed_endpoints=("Alice", "Bob"),
+        relation_endpoint_bindings=tuple(
+            _binding(item, cohort_seed="relation") for item in endpoint_drafts
+        ),
         relation_statement="Alice supports Bob",
         relation_temporal_bounds={
             "valid_at": "2026-08-24T00:00:00Z",
@@ -340,6 +474,7 @@ def test_existing_authority_hydrates_current_relation_facts() -> None:
         authority_ledger_seq=43,
         reason_code="FIXTURE_ACCEPT",
         authority_receipt_digest=DIGEST,
+        admitted_authority_id="00000000-0000-4000-8000-0000000076a6",
         endpoint_resolution_decision_ids=(
             "00000000-0000-4000-8000-0000000076b1",
             "00000000-0000-4000-8000-0000000076b2",
@@ -394,6 +529,26 @@ def test_existing_authority_hydrates_current_relation_facts() -> None:
     endpoint_proposal_ids = (
         EntityResolutionProposalId.parse("00000000-0000-4000-8000-0000000076c1"),
         EntityResolutionProposalId.parse("00000000-0000-4000-8000-0000000076c2"),
+    )
+    relation_envelope = request.proposal_authority_binding.proposal_envelope
+    dependency_requests = tuple(
+        EntityResolutionDependencyRequest(
+            dependency_id=EntityResolutionDependencyId.parse(
+                f"00000000-0000-4000-8000-{index:012d}"
+            ),
+            dependent_proposal_id=relation_envelope.proposal_id,
+            expected_dependent_proposal_digest=relation_envelope.canonical_digest,
+            resolution_proposal_id=proposal_id,
+            expected_resolution_proposal_version_id=(
+                EntityResolutionProposalVersionId.parse(
+                    f"00000000-0000-4000-8000-{index + 10:012d}"
+                )
+            ),
+            expected_resolution_proposal_digest=DIGEST,
+            material=True,
+            idempotency_key=f"dependency-{index}",
+        )
+        for index, proposal_id in enumerate(endpoint_proposal_ids, start=1)
     )
     endpoint_by_entity = {
         subject.entity_id: subject,
@@ -466,6 +621,7 @@ def test_existing_authority_hydrates_current_relation_facts() -> None:
         graphiti_proposal_local_id=proposal.local_id,
         proposal_request=SimpleNamespace(proposal_id="relation-proposal"),  # type: ignore[arg-type]
         decision_request=SimpleNamespace(),  # type: ignore[arg-type]
+        dependency_requests=dependency_requests,
         endpoint_resolution_proposal_ids=endpoint_proposal_ids,
         resolved_endpoint_names=("Alice", "Bob"),
     )
@@ -544,3 +700,785 @@ def test_required_rights_rejection_is_checked_before_authority_mutation() -> Non
         )
 
     assert entities.calls == []
+
+
+def test_proposal_authority_binds_exact_4d_attempt_and_4a_envelope() -> None:
+    request = _request()
+    binding = request.proposal_authority_binding
+    envelope = binding.proposal_envelope
+    ingest_id = "fixture"
+    attempt_id = attempt_ids(ingest_id, 1)[0]
+    passage = SimpleNamespace(
+        passage_id=envelope.evidence[0].passage_id,
+        text_digest=envelope.evidence[0].evidence_text_digest,
+    )
+    attempt = SimpleNamespace(
+        attempt_id=attempt_id,
+        attempt_number=1,
+        outcome=GraphitiAdapterOutcome.COMPLETE,
+        authority_event_id=EventId.parse(binding.graphiti_attempt_authority_event_id),
+        output_id=envelope.output_id,
+        proposal_set_id=envelope.proposal_set_id,
+        manifest_id="manifest",
+        run_id=envelope.run_id,
+        run_version_id=envelope.run_version_id,
+    )
+    manifest = SimpleNamespace(
+        manifest_id="manifest",
+        run_id=envelope.run_id,
+        requested_run_version_id=envelope.run_version_id,
+        passages=(passage,),
+    )
+    unsigned_raw = {
+        "attempt_number": 1,
+        "provider_attempt_number": 1,
+        "generation_id": "newsroom-eval-generation-v1",
+        "episode_uuid": ingest_id,
+        "temporal_basis": "SOURCE_PUBLISHED",
+        "reference_time": "2026-08-24T00:00:00Z",
+        "proposals": [request.proposal.canonical_value()],
+        "passages": [{"passage_id": str(passage.passage_id)}],
+        "entities": [],
+        "relations": [],
+        "proposal_count": 1,
+        "entity_count": 0,
+        "relation_count": 0,
+    }
+    inner_digest = digest_bytes(canonical_json_bytes(unsigned_raw))
+    raw_bytes = canonical_json_bytes(
+        {**unsigned_raw, "raw_output_digest": inner_digest}
+    )
+    output_view = SimpleNamespace(
+        output_id=envelope.output_id,
+        canonical_digest=digest_bytes(raw_bytes),
+    )
+    adapter = SimpleNamespace(
+        attempt=lambda *_args, **_kwargs: attempt,
+        manifest_for_attempt=lambda *_args, **_kwargs: manifest,
+    )
+    extraction = SimpleNamespace(
+        metadata=lambda *_args, **_kwargs: SimpleNamespace(
+            terminal=True,
+            run_id=envelope.run_id,
+            output=output_view,
+        ),
+        raw_output=lambda *_args, **_kwargs: SimpleNamespace(
+            view=output_view,
+            canonical_bytes=raw_bytes,
+        ),
+        proposals=lambda *_args, **_kwargs: (envelope,),
+    )
+    authority = ExistingGovernedGraphitiProposalAuthority(
+        adapter=adapter,  # type: ignore[arg-type]
+        extraction=extraction,  # type: ignore[arg-type]
+        proof=AuthenticationProof(method="STATIC_TOKEN", credential="fixture"),
+    )
+
+    retained = authority.bind_proposal(
+        ingest_id=ingest_id,
+        terminal_receipt={
+            "ingest_id": ingest_id,
+            "outcome": "COMPLETE",
+            **unsigned_raw,
+            "raw_output_digest": inner_digest,
+        },
+        proposal=request.proposal,
+    )
+
+    assert retained == GraphitiProposalAuthorityBinding(
+        graphiti_attempt_id=str(attempt_id),
+        graphiti_attempt_authority_event_id=(
+            binding.graphiti_attempt_authority_event_id
+        ),
+        proposal_envelope=envelope,
+    )
+    assert authority.bind_proposal(
+        ingest_id=ingest_id,
+        terminal_receipt={
+            "ingest_id": ingest_id,
+            "outcome": "COMPLETE",
+            **unsigned_raw,
+            "raw_output_digest": DIGEST,
+        },
+        proposal=request.proposal,
+    ) is None
+    assert authority.bind_proposal(
+        ingest_id=ingest_id,
+        terminal_receipt={
+            "ingest_id": ingest_id,
+            "outcome": "COMPLETE",
+            **unsigned_raw,
+            "proposals": [],
+            "proposal_count": 0,
+            "raw_output_digest": inner_digest,
+        },
+        proposal=request.proposal,
+    ) is None
+    attempt.outcome = GraphitiAdapterOutcome.PARTIAL
+    assert authority.bind_proposal(
+        ingest_id=ingest_id,
+        terminal_receipt={
+            "ingest_id": ingest_id,
+            "outcome": "PARTIAL",
+            **unsigned_raw,
+            "raw_output_digest": inner_digest,
+        },
+        proposal=request.proposal,
+    ) is None
+    attempt.outcome = GraphitiAdapterOutcome.COMPLETE
+    assert authority.bind_proposal(
+        ingest_id=ingest_id,
+        terminal_receipt={
+            "ingest_id": ingest_id,
+            "outcome": "PARTIAL",
+            **unsigned_raw,
+            "raw_output_digest": inner_digest,
+        },
+        proposal=request.proposal,
+    ) is None
+
+
+def test_generation_projector_uses_one_current_increment4_snapshot() -> None:
+    request = _request()
+    decision = GraphitiGovernedDecision(
+        proposal_key=request.proposal_key,
+        proposal_digest=request.proposal.digest,
+        proposal_kind=request.proposal.kind,
+        proposal_local_id=request.proposal.local_id,
+        action=GraphitiProposalAdmissionAction.ADMIT,
+        decision_id="decision:proposal-key",
+        authority_ledger_seq=42,
+        reason_code="EXACT_MENTION_TO_NEW_UNKNOWN_ENTITY",
+        authority_receipt_digest=DIGEST,
+        admitted_authority_id="00000000-0000-4000-8000-0000000076f1",
+    )
+    generation_id = ProjectionGenerationId.parse(
+        "00000000-0000-4000-8000-0000000076f2"
+    )
+    observed: list[tuple[object, object]] = []
+
+    class Controller:
+        def build_current_and_promote(self, build_request, *, proof):
+            observed.append((build_request, proof))
+            return SimpleNamespace(
+                generation=SimpleNamespace(
+                    generation_id=generation_id,
+                    state=ProjectionGenerationState.ACTIVE,
+                ),
+                source_watermark_ledger_seq=42,
+                checkpoint_ledger_seq=42,
+                source_snapshot_digest=DIGEST,
+                validation=SimpleNamespace(
+                    validation_digest=DIGEST,
+                    projection_state_digest=DIGEST,
+                ),
+                promotion=SimpleNamespace(
+                    promotion_digest=DIGEST,
+                    validation_digest=DIGEST,
+                ),
+                projection_state_digest=DIGEST,
+            )
+
+    proof = AuthenticationProof(method="STATIC_TOKEN", credential="fixture")
+    projector = ExistingIncrement4GenerationProjector(
+        controller=Controller(),  # type: ignore[arg-type]
+        proof=proof,
+    )
+
+    result = projector.build_and_promote_increment4_cohort(
+        (GraphitiProjectionRequest(request=request, decision=decision),),
+        cohort_digest=DIGEST,
+        generation_id=str(generation_id),
+        idempotency_key="graphiti-generation:fixture",
+    )
+
+    assert result.source_snapshot_digest == DIGEST
+    assert result.admitted_authority_ids == (decision.admitted_authority_id,)
+    assert observed[0][1] == proof
+    build_request = observed[0][0]
+    assert isinstance(build_request, Increment4Neo4jCurrentBuildRequest)
+    assert build_request.generation_id == generation_id
+    assert build_request.idempotency_key == "graphiti-generation:fixture"
+
+
+def test_rights_authority_rehydrates_exact_current_source_bytes() -> None:
+    data = b"Alice"
+    admission_id = "00000000-0000-4000-8000-0000000076f3"
+    request = replace(
+        _request(),
+        evidence_passages=(
+            {
+                "passage_id": "00000000-0000-4000-8000-000000007601",
+                "admission_id": admission_id,
+                "purpose": "graphiti.corpus-ingest",
+                "byte_offset": 0,
+                "byte_length": len(data),
+                "blob_digest": digest_bytes(data),
+                "allowed_use": "proposal.extraction",
+                "security_scope": "evaluation",
+                "retention_scope": "disposable-workspace",
+            },
+        ),
+    )
+    proof = AuthenticationProof(method="STATIC_TOKEN", credential="fixture")
+    calls: list[object] = []
+
+    class Objects:
+        def hydrate(self, hydration, *, proof):
+            calls.append((hydration, proof))
+            return SimpleNamespace(
+                data=data,
+                decision=SimpleNamespace(
+                    admission_id=hydration.admission_id,
+                    offset=0,
+                    allowed_bytes=len(data),
+                    purpose="graphiti.corpus-ingest",
+                    allowed_use="proposal.extraction",
+                    security_scope="evaluation",
+                    retention_scope="disposable-workspace",
+                ),
+            )
+
+    authority = ExistingGovernedGraphitiRightsAuthority(
+        objects=Objects(),  # type: ignore[arg-type]
+        proof=proof,
+    )
+
+    assert authority.is_current(request) is True
+    assert len(calls) == 1
+    assert authority.is_current(
+        replace(
+            request,
+            evidence_passages=(
+                {**request.evidence_passages[0], "blob_digest": DIGEST},
+            ),
+        )
+    ) is False
+
+
+def test_conservative_entity_plan_allocates_separate_unknown_identity() -> None:
+    request = _request()
+    request = replace(
+        request,
+        evidence_passages=(
+            {
+                "passage_id": str(request.proposal.evidence[0].passage_id),
+                "language": "en-GB",
+            },
+        ),
+    )
+
+    plan = conservative_entity_mention_plan(
+        request,
+        GraphitiProposalAdmissionAction.ADMIT,
+        "graphiti-admit:proposal-key",
+    )
+
+    assert plan.mention_requests[0].entity_kind is EntityKind.UNKNOWN
+    assert plan.proposal_request.kind is EntityResolutionProposalKind.MENTION_TO_NEW_ENTITY
+    assert plan.proposal_request.candidate_entity_id is None
+    assert plan.decision_request.action is EntityResolutionDecisionAction.ACCEPT
+    assert plan.decision_request.accepted_entity_id is not None
+
+
+def test_conservative_entity_plan_rejects_stale_rights_without_allocating_entity() -> None:
+    request = _request()
+    request = replace(
+        request,
+        evidence_passages=(
+            {
+                "passage_id": str(request.proposal.evidence[0].passage_id),
+                "language": "en-GB",
+            },
+        ),
+    )
+
+    plan = conservative_entity_mention_plan(
+        request,
+        GraphitiProposalAdmissionAction.REJECT,
+        "graphiti-admit:proposal-key",
+    )
+
+    assert plan.decision_request.action is EntityResolutionDecisionAction.REJECT
+    assert plan.decision_request.accepted_entity_id is None
+    assert plan.decision_request.accepted_entity_version_id is None
+    assert plan.decision_request.alias_id is None
+
+
+def test_entity_equivalence_reuses_exact_mentions_and_always_holds() -> None:
+    first = _request().proposal
+    second_evidence = EvidenceRange(
+        passage_id=first.evidence[0].passage_id,
+        start_byte=10,
+        end_byte=13,
+        evidence_text_digest=digest_canonical({"mention": "Bob"}),
+    )
+    endpoints = (
+        first,
+        replace(
+            first,
+            local_id="entity.0002",
+            subject_placeholder="Bob",
+            evidence=(second_evidence,),
+        ),
+    )
+    proposal = ProposalDraft(
+        local_id="equivalence.0001",
+        kind=ExtractionProposalKind.ENTITY_EQUIVALENCE,
+        subject_placeholder="Alice",
+        object_placeholder="Bob",
+        predicate_hint=None,
+        confidence_basis_points=10_000,
+        uncertainty_codes=("REQUIRES_EXPLICIT_RESOLUTION",),
+        rationale_codes=("NAME_EQUALITY_ONLY",),
+        evidence=(first.evidence[0], second_evidence),
+    )
+    cohort_seed = "entity-equivalence-plan"
+    request = GraphitiAdmissionRequest(
+        queue_seq=3,
+        proposal_key="equivalence-proposal-key",
+        source_receipt_digest=DIGEST,
+        proposal_authority_binding=_binding(proposal, cohort_seed=cohort_seed),
+        proposal=proposal,
+        proposal_payload=proposal.canonical_value(),
+        evidence_passages=(
+            {
+                "passage_id": str(first.evidence[0].passage_id),
+                "language": "en-GB",
+            },
+        ),
+        proposed_endpoints=("Alice", "Bob"),
+        relation_statement=None,
+        relation_temporal_bounds=None,
+        source_lineage={"revision_id": "fixture"},
+        relation_endpoint_bindings=tuple(
+            _binding(item, cohort_seed=cohort_seed) for item in endpoints
+        ),
+    )
+
+    plan = conservative_entity_mention_plan(
+        request,
+        GraphitiProposalAdmissionAction.HOLD,
+        "graphiti-admit:equivalence-proposal-key",
+    )
+
+    assert plan.mention_requests == ()
+    assert plan.proposal_request.kind is EntityResolutionProposalKind.MENTION_EQUIVALENCE
+    assert plan.proposal_request.subject_mention_id == typed_id(
+        EntityMentionId,
+        "graphiti-v1-mention",
+        request.relation_endpoint_bindings[0].proposal_envelope.canonical_digest,
+    )
+    assert plan.proposal_request.object_mention_id == typed_id(
+        EntityMentionId,
+        "graphiti-v1-mention",
+        request.relation_endpoint_bindings[1].proposal_envelope.canonical_digest,
+    )
+    assert plan.decision_request.action is EntityResolutionDecisionAction.HOLD
+    assert plan.decision_request.accepted_entity_id is None
+
+
+class _RelationEndpointAuthorities:
+    def __init__(
+        self,
+        request: GraphitiAdmissionRequest,
+        *,
+        second_action: EntityResolutionDecisionAction = (
+            EntityResolutionDecisionAction.ACCEPT
+        ),
+    ) -> None:
+        self.proposals: dict[EntityResolutionProposalId, object] = {}
+        self.decisions: dict[EntityResolutionProposalId, object] = {}
+        self.preferred_rows: dict[CanonicalEntityId, object] = {}
+        self.version_rows: dict[CanonicalEntityVersionId, object] = {}
+        self.dependency_calls: list[EntityResolutionDependencyRequest] = []
+        for ordinal, binding in enumerate(
+            request.relation_endpoint_bindings,
+            start=1,
+        ):
+            envelope = binding.proposal_envelope
+            proposal_id = typed_id(
+                EntityResolutionProposalId,
+                "graphiti-v1-resolution",
+                envelope.canonical_digest,
+            )
+            proposal_version_id = typed_id(
+                EntityResolutionProposalVersionId,
+                "graphiti-v1-resolution-version",
+                envelope.canonical_digest,
+            )
+            proposal_digest = digest_canonical(
+                {"proposal": str(proposal_id), "ordinal": ordinal}
+            )
+            entity_id = typed_id(
+                CanonicalEntityId,
+                "graphiti-v1-entity",
+                envelope.canonical_digest,
+            )
+            entity_version_id = typed_id(
+                CanonicalEntityVersionId,
+                "graphiti-v1-entity-version",
+                envelope.canonical_digest,
+            )
+            action = (
+                second_action
+                if ordinal == 2
+                else EntityResolutionDecisionAction.ACCEPT
+            )
+            self.proposals[proposal_id] = SimpleNamespace(
+                proposal_id=proposal_id,
+                proposal_version_id=proposal_version_id,
+                source_proposal_id=envelope.proposal_id,
+                source_proposal_digest=envelope.canonical_digest,
+                canonical_digest=proposal_digest,
+            )
+            self.decisions[proposal_id] = SimpleNamespace(
+                action=action,
+                decision_id=typed_id(
+                    EntityResolutionDecisionId,
+                    "graphiti-v1-test-decision",
+                    envelope.canonical_digest,
+                ),
+                proposal_id=proposal_id,
+                proposal_version_id=proposal_version_id,
+                proposal_digest=proposal_digest,
+                accepted_entity_id=(
+                    entity_id
+                    if action is EntityResolutionDecisionAction.ACCEPT
+                    else None
+                ),
+                accepted_entity_version_id=(
+                    entity_version_id
+                    if action is EntityResolutionDecisionAction.ACCEPT
+                    else None
+                ),
+            )
+            self.preferred_rows[entity_id] = SimpleNamespace(
+                entity_id=entity_id,
+                preferred_entity_id=entity_id,
+                current_entity_version_id=entity_version_id,
+                lifecycle=CanonicalEntityLifecycle.ACTIVE,
+            )
+            self.version_rows[entity_version_id] = SimpleNamespace(
+                entity_id=entity_id,
+                entity_version_id=entity_version_id,
+                lifecycle=CanonicalEntityLifecycle.ACTIVE,
+            )
+
+    def proposal(self, proposal_id, *, proof):
+        return self.proposals[proposal_id]
+
+    def decision(self, proposal_id, *, proof):
+        return self.decisions[proposal_id]
+
+    def preferred(self, entity_id, *, proof):
+        return self.preferred_rows[entity_id]
+
+    def entity_version(self, version_id, *, proof):
+        return self.version_rows[version_id]
+
+    def bind_resolution_dependency(self, dependency, *, proof):
+        self.dependency_calls.append(dependency)
+        ordinal = len(self.dependency_calls)
+        return SimpleNamespace(
+            dependency_id=dependency.dependency_id,
+            dependent_proposal_id=dependency.dependent_proposal_id,
+            dependent_proposal_digest=dependency.expected_dependent_proposal_digest,
+            resolution_proposal_id=dependency.resolution_proposal_id,
+            proposal_version_id=dependency.expected_resolution_proposal_version_id,
+            proposal_version_digest=dependency.expected_resolution_proposal_digest,
+            material=dependency.material,
+            authority_event_id=typed_id(
+                EventId,
+                "graphiti-v1-test-dependency-event",
+                str(dependency.dependency_id),
+            ),
+            authority_ledger_seq=100 + ordinal,
+            canonical_digest=digest_canonical(dependency.canonical_value()),
+        )
+
+
+class _RelationAuthorities:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def propose(self, proposal, *, proof):
+        self.calls.append("propose")
+        return SimpleNamespace(
+            proposal_id=proposal.proposal_id,
+            proposal_version_id=proposal.proposal_version_id,
+            canonical_digest=proposal.canonical_digest,
+        )
+
+    def decide(self, decision, *, proof):
+        self.calls.append("decide")
+        return SimpleNamespace(
+            action=decision.action,
+            decision_id=decision.decision_id,
+            authority_ledger_seq=199,
+            reason_code=decision.reason_code,
+            canonical_digest=DIGEST,
+            assertion_id=decision.assertion_id,
+        )
+
+
+@pytest.mark.parametrize(
+    ("predicate_hint", "second_action", "expected_reason"),
+    (
+        (
+            ProposalPredicateHint.SUPERSEDES,
+            EntityResolutionDecisionAction.ACCEPT,
+            "RELATION_PREDICATE_UNSUPPORTED_FOR_CANONICAL_ENTITY_ENDPOINTS",
+        ),
+        (
+            ProposalPredicateHint.SAME_PROCESS_AS,
+            EntityResolutionDecisionAction.HOLD,
+            "RELATION_ENDPOINT_RESOLUTION_NOT_ACCEPTED_OR_CURRENT",
+        ),
+    ),
+)
+def test_relation_without_admissible_predicate_or_endpoints_is_operational_hold(
+    predicate_hint: ProposalPredicateHint,
+    second_action: EntityResolutionDecisionAction,
+    expected_reason: str,
+) -> None:
+    request = _relation_request(predicate_hint)
+    proof = AuthenticationProof(method="STATIC_TOKEN", credential="fixture")
+    entities = _RelationEndpointAuthorities(
+        request,
+        second_action=second_action,
+    )
+    relations = _RelationAuthorities()
+    builder = ConservativeGraphitiRelationPlanBuilder(
+        entities=entities,  # type: ignore[arg-type]
+        proof=proof,
+    )
+    plan = builder(
+        request,
+        GraphitiProposalAdmissionAction.HOLD,
+        "graphiti-admit:relation-proposal-key",
+    )
+    authority = ExistingGovernedGraphitiAdmissionAuthority(
+        entities=entities,  # type: ignore[arg-type]
+        relations=relations,  # type: ignore[arg-type]
+        proof=proof,
+        entity_plan=lambda *_: pytest.fail("entity planner called"),
+        relation_plan=builder,
+    )
+
+    decision = authority.decide_relation_admission(
+        request,
+        required_action=GraphitiProposalAdmissionAction.HOLD,
+        idempotency_key="graphiti-admit:relation-proposal-key",
+    )
+
+    assert isinstance(plan, GraphitiRelationOperationalDecisionPlan)
+    assert all(not item.material for item in plan.dependency_requests)
+    assert decision.action is GraphitiProposalAdmissionAction.HOLD
+    assert decision.reason_code == expected_reason
+    assert len(decision.relation_hold_basis) == 2
+    assert relations.calls == []
+    assert entities.dependency_calls == list(plan.dependency_requests)
+
+
+def test_relation_with_missing_temporal_field_is_real_4c_hold() -> None:
+    request = replace(
+        _relation_request(),
+        relation_temporal_bounds={"valid_at": "2026-08-24T00:00:00Z"},
+    )
+    proof = AuthenticationProof(method="STATIC_TOKEN", credential="fixture")
+    entities = _RelationEndpointAuthorities(request)
+    relations = _RelationAuthorities()
+    builder = ConservativeGraphitiRelationPlanBuilder(
+        entities=entities,  # type: ignore[arg-type]
+        proof=proof,
+    )
+    plan = builder(
+        request,
+        GraphitiProposalAdmissionAction.HOLD,
+        "graphiti-admit:relation-proposal-key",
+    )
+    authority = ExistingGovernedGraphitiAdmissionAuthority(
+        entities=entities,  # type: ignore[arg-type]
+        relations=relations,  # type: ignore[arg-type]
+        proof=proof,
+        entity_plan=lambda *_: pytest.fail("entity planner called"),
+        relation_plan=builder,
+    )
+
+    decision = authority.decide_relation_admission(
+        request,
+        required_action=GraphitiProposalAdmissionAction.HOLD,
+        idempotency_key="graphiti-admit:relation-proposal-key",
+    )
+
+    assert isinstance(plan, GraphitiRelationAdmissionPlan)
+    assert plan.decision_request.action is EditorialRelationDecisionAction.HOLD
+    assert decision.action is GraphitiProposalAdmissionAction.HOLD
+    assert decision.relation_hold_basis == ()
+    assert relations.calls == ["propose", "decide"]
+
+
+def test_conservative_relation_plan_binds_two_exact_4b_dependencies() -> None:
+    request = _relation_request()
+    proof = AuthenticationProof(method="STATIC_TOKEN", credential="fixture")
+    proposals: dict[EntityResolutionProposalId, object] = {}
+    decisions: dict[EntityResolutionProposalId, object] = {}
+    preferred: dict[CanonicalEntityId, object] = {}
+    versions: dict[CanonicalEntityVersionId, object] = {}
+    for ordinal, binding in enumerate(request.relation_endpoint_bindings, start=1):
+        envelope = binding.proposal_envelope
+        proposal_id = typed_id(
+            EntityResolutionProposalId,
+            "graphiti-v1-resolution",
+            envelope.canonical_digest,
+        )
+        proposal_version_id = typed_id(
+            EntityResolutionProposalVersionId,
+            "graphiti-v1-resolution-version",
+            envelope.canonical_digest,
+        )
+        entity_id = typed_id(
+            CanonicalEntityId,
+            "graphiti-v1-entity",
+            envelope.canonical_digest,
+        )
+        entity_version_id = typed_id(
+            CanonicalEntityVersionId,
+            "graphiti-v1-entity-version",
+            envelope.canonical_digest,
+        )
+        proposal_digest = digest_canonical(
+            {"proposal": str(proposal_id), "ordinal": ordinal}
+        )
+        proposals[proposal_id] = SimpleNamespace(
+            proposal_id=proposal_id,
+            proposal_version_id=proposal_version_id,
+            source_proposal_id=envelope.proposal_id,
+            source_proposal_digest=envelope.canonical_digest,
+            canonical_digest=proposal_digest,
+        )
+        decisions[proposal_id] = SimpleNamespace(
+            action=EntityResolutionDecisionAction.ACCEPT,
+            decision_id=typed_id(
+                EntityResolutionDecisionId,
+                "graphiti-v1-test-decision",
+                envelope.canonical_digest,
+            ),
+            proposal_id=proposal_id,
+            proposal_version_id=proposal_version_id,
+            proposal_digest=proposal_digest,
+            accepted_entity_id=entity_id,
+            accepted_entity_version_id=entity_version_id,
+        )
+        preferred[entity_id] = SimpleNamespace(
+            entity_id=entity_id,
+            preferred_entity_id=entity_id,
+            current_entity_version_id=entity_version_id,
+            lifecycle=CanonicalEntityLifecycle.ACTIVE,
+        )
+        versions[entity_version_id] = SimpleNamespace(
+            entity_id=entity_id,
+            entity_version_id=entity_version_id,
+            lifecycle=CanonicalEntityLifecycle.ACTIVE,
+        )
+
+    dependency_calls: list[EntityResolutionDependencyRequest] = []
+
+    class Entities:
+        def proposal(self, proposal_id, *, proof):
+            return proposals[proposal_id]
+
+        def decision(self, proposal_id, *, proof):
+            return decisions[proposal_id]
+
+        def preferred(self, entity_id, *, proof):
+            return preferred[entity_id]
+
+        def entity_version(self, version_id, *, proof):
+            return versions[version_id]
+
+        def bind_resolution_dependency(self, dependency, *, proof):
+            dependency_calls.append(dependency)
+            return SimpleNamespace(
+                dependency_id=dependency.dependency_id,
+                dependent_proposal_id=dependency.dependent_proposal_id,
+                dependent_proposal_digest=(
+                    dependency.expected_dependent_proposal_digest
+                ),
+                resolution_proposal_id=dependency.resolution_proposal_id,
+                proposal_version_id=(
+                    dependency.expected_resolution_proposal_version_id
+                ),
+                proposal_version_digest=(
+                    dependency.expected_resolution_proposal_digest
+                ),
+                material=dependency.material,
+            )
+
+    class Relations:
+        def propose(self, proposal, *, proof):
+            return SimpleNamespace(
+                proposal_id=proposal.proposal_id,
+                proposal_version_id=proposal.proposal_version_id,
+                canonical_digest=proposal.canonical_digest,
+            )
+
+        def decide(self, decision, *, proof):
+            return SimpleNamespace(
+                action=decision.action,
+                decision_id=decision.decision_id,
+                authority_ledger_seq=99,
+                reason_code=decision.reason_code,
+                canonical_digest=DIGEST,
+                assertion_id=decision.assertion_id,
+            )
+
+    entities = Entities()
+    builder = ConservativeGraphitiRelationPlanBuilder(
+        entities=entities,  # type: ignore[arg-type]
+        proof=proof,
+    )
+    plan = builder(
+        request,
+        GraphitiProposalAdmissionAction.ADMIT,
+        "graphiti-admit:relation-proposal-key",
+    )
+    authority = ExistingGovernedGraphitiAdmissionAuthority(
+        entities=entities,  # type: ignore[arg-type]
+        relations=Relations(),  # type: ignore[arg-type]
+        proof=proof,
+        entity_plan=lambda *_: pytest.fail("entity planner called"),
+        relation_plan=builder,
+    )
+
+    decision = authority.decide_relation_admission(
+        request,
+        required_action=GraphitiProposalAdmissionAction.ADMIT,
+        idempotency_key="graphiti-admit:relation-proposal-key",
+    )
+
+    assert plan.proposal_request.predicate is EditorialPredicateCode.SAME_PROCESS_AS
+    assert plan.decision_request.action is EditorialRelationDecisionAction.ACCEPT
+    assert tuple(
+        item.dependent_proposal_id for item in plan.dependency_requests
+    ) == (request.proposal_authority_binding.proposal_envelope.proposal_id,) * 2
+    assert dependency_calls == list(plan.dependency_requests)
+    assert decision.action is GraphitiProposalAdmissionAction.ADMIT
+    assert decision.admitted_authority_id == str(plan.decision_request.assertion_id)
+
+
+def test_existing_runtime_composer_uses_only_existing_components() -> None:
+    component = SimpleNamespace()
+    consumer = compose_existing_graphiti_admission_consumer(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        adapter=component,  # type: ignore[arg-type]
+        extraction=component,  # type: ignore[arg-type]
+        objects=component,  # type: ignore[arg-type]
+        entities=component,  # type: ignore[arg-type]
+        relations=component,  # type: ignore[arg-type]
+        increment4=component,  # type: ignore[arg-type]
+        proof=AuthenticationProof(method="STATIC_TOKEN", credential="fixture"),
+    )
+
+    assert consumer.__class__.__name__ == "GraphitiAdmissionConsumer"

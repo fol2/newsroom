@@ -6,7 +6,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, digest_canonical
+from newsroom.authority.types import UtcTimestamp
 from newsroom.control_plane.cycle import _dispatch_writer
 from newsroom.control_plane.editorial import GroupedObservation, form_candidates
 from newsroom.control_plane.evidence import package_for
@@ -21,24 +22,62 @@ from newsroom.control_plane.governed_context import (
 from newsroom.control_plane.graphiti_admission import (
     GraphitiAdmissionRequest,
     GraphitiGovernedDecision,
+    GraphitiProposalAuthorityBinding,
     GraphitiProjectionReceipt,
 )
 from newsroom.control_plane.items import SourceItem
 from newsroom.control_plane.store import connect
 from newsroom.control_plane.writer import CliChainWriter, WriterDispatchError
-from newsroom.extraction.models import ProposalDraft
+from newsroom.extraction.models import ProposalDraft, ProposalEnvelope
 from newsroom.extraction.types import (
     EvidenceRange,
     ExtractionPassageId,
     ExtractionProposalKind,
+    ExtractionOutputId,
+    ExtractionRunId,
+    ExtractionRunVersionId,
+    ProposalEnvelopeId,
+    ProposalSetId,
 )
 from newsroom.graphiti_adapter.admission import GraphitiProposalAdmissionAction
+from newsroom.graphiti_adapter.identity import typed_id
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
 DIGEST_A = "sha256:" + ("a1" * 32)
 DIGEST_B = "sha256:" + ("b2" * 32)
 DIGEST_C = "sha256:" + ("c3" * 32)
 GENERATION_ID = "00000000-0000-4000-8000-000000007599"
+
+
+def _binding(draft: ProposalDraft) -> GraphitiProposalAuthorityBinding:
+    values = {
+        "proposal_id": typed_id(ProposalEnvelopeId, "proposal", draft.digest),
+        "proposal_set_id": typed_id(ProposalSetId, "set", draft.digest),
+        "output_id": typed_id(ExtractionOutputId, "output", draft.digest),
+        "run_id": typed_id(ExtractionRunId, "run", draft.digest),
+        "run_version_id": typed_id(ExtractionRunVersionId, "version", draft.digest),
+    }
+    producer = digest_canonical({"producer": "fixture"})
+    envelope_digest = digest_canonical({
+        **{key: str(value) for key, value in values.items()},
+        "draft": draft.canonical_value(),
+        "producer_contract_digest": producer,
+    })
+    return GraphitiProposalAuthorityBinding(
+        graphiti_attempt_id=str(typed_id(ProposalEnvelopeId, "attempt", draft.digest)),
+        graphiti_attempt_authority_event_id=str(typed_id(ProposalEnvelopeId, "event", draft.digest)),
+        proposal_envelope=ProposalEnvelope(
+            **values, local_id=draft.local_id, kind=draft.kind,
+            subject_placeholder=draft.subject_placeholder,
+            object_placeholder=draft.object_placeholder,
+            predicate_hint=draft.predicate_hint,
+            confidence_basis_points=draft.confidence_basis_points,
+            uncertainty_codes=draft.uncertainty_codes,
+            rationale_codes=draft.rationale_codes, evidence=draft.evidence,
+            producer_contract_digest=producer, canonical_digest=envelope_digest,
+            retained_at=UtcTimestamp.parse("2026-08-24T00:00:00Z"),
+        ),
+    )
 
 
 class _CurrentAuthority:
@@ -105,6 +144,7 @@ def _seed_entity(
         queue_seq=1,
         proposal_key=DIGEST_B,
         source_receipt_digest=DIGEST_A,
+        proposal_authority_binding=_binding(proposal),
         proposal=proposal,
         proposal_payload=proposal.canonical_value(),
         evidence_passages=(
@@ -147,6 +187,11 @@ def _seed_entity(
         authority_ledger_seq=101,
         reason_code="FIXTURE_POLICY",
         authority_receipt_digest=DIGEST_A,
+        admitted_authority_id=(
+            "00000000-0000-4000-8000-000000007501"
+            if action is GraphitiProposalAdmissionAction.ADMIT
+            else None
+        ),
     )
     request_json = canonical_json_bytes(request.canonical_value()).decode()
     decision_json = canonical_json_bytes(decision.canonical_value()).decode()
@@ -808,6 +853,7 @@ def test_later_rejected_decision_advances_contiguous_not_projection_watermark(
         queue_seq=2,
         proposal_key=DIGEST_C,
         source_receipt_digest=DIGEST_C,
+        proposal_authority_binding=_binding(proposal),
         proposal=proposal,
         proposal_payload=proposal.canonical_value(),
         evidence_passages=(

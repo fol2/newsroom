@@ -1047,13 +1047,13 @@ class EvaluationGraphitiRunner:
             assert self._extraction_records is not None
             assert self._proof is not None
             if (
-                deadline is not None
-                or invocation_observer is not None
-                or not self._fallback_permitted
+                self._fallback_permitted
+                or deadline is None
+                or invocation_observer is None
             ):
-                # The existing governed facade does not carry these runtime
-                # controls into the 4D boundary.  Refuse rather than silently
-                # weakening the caller's deadline, usage, or fallback policy.
+                # A governed REAL attempt is safe only when the caller's
+                # bounded deadline, zero-fallback rule and usage observer all
+                # cross the 4D boundary together.
                 raise GraphitiResultStageError(
                     GRAPHITI_RESULT_STAGE_ADAPTER_EXECUTION
                 )
@@ -1065,6 +1065,9 @@ class EvaluationGraphitiRunner:
                 retained_attempt = self._proposal_adapter.execute_attempt(
                     attempt,
                     proof=self._proof,
+                    execution_deadline=deadline,
+                    fallback_permitted=self._fallback_permitted,
+                    invocation_observer=invocation_observer,
                 )
             except GraphitiAdapterContractError as exc:
                 raise GraphitiResultStageError(

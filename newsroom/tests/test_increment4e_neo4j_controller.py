@@ -10,6 +10,7 @@ from newsroom.authority import AggregateId
 from newsroom.increment4 import (
     Increment4Neo4jActiveReadRequest,
     Increment4Neo4jBuildRequest,
+    Increment4Neo4jCurrentBuildRequest,
     build_increment4_admitted_batches,
     increment4_admitted_contract_registry,
 )
@@ -52,6 +53,14 @@ def _request(generation_id: ProjectionGenerationId, snapshot, *, key: str):
     )
 
 
+def _current_request(generation_id: ProjectionGenerationId, *, key: str):
+    return Increment4Neo4jCurrentBuildRequest(
+        generation_id=generation_id,
+        reason_code="INCREMENT4_CURRENT_AUTHORITY_REBUILD",
+        idempotency_key=key,
+    )
+
+
 def _entity_canonical_ids(adapter: MemoryNeo4jAdapter, generation_id):
     return tuple(
         sorted(
@@ -81,6 +90,78 @@ class _FailRetiredCleanupOnceAdapter(MemoryNeo4jAdapter):
             self.failed_cleanup = True
             raise Neo4jWriteError("fixed retired-generation cleanup failure")
         return super().cleanup_generation(generation_id)
+
+
+def test_increment4_current_build_rederives_complete_admitted_authority(
+    tmp_path: Path,
+) -> None:
+    state, snapshot = admitted_increment4_fixture(tmp_path)
+    adapter = MemoryNeo4jAdapter()
+    family = increment4_admitted_contract_registry().family(
+        "graph.increment4.admitted"
+    )
+    expected = build_increment4_admitted_batches(
+        snapshot,
+        generation_id=GENERATION_1,
+        family=family,
+    )
+
+    with open_increment4_neo4j_system(state, adapter) as system:
+        result = system.increment4.build_current_and_promote(
+            _current_request(
+                GENERATION_1,
+                key="increment4-current-authority-build-v1",
+            ),
+            proof=extraction_proof(),
+        )
+
+    actual = tuple(
+        batch
+        for (generation, _sequence), batch in sorted(adapter.deliveries.items())
+        if generation == str(GENERATION_1)
+    )
+    assert result.generation.state is ProjectionGenerationState.ACTIVE
+    assert result.source_watermark_ledger_seq == snapshot.through_ledger_seq
+    assert tuple(item.batch_digest for item in actual) == tuple(
+        item.batch_digest for item in expected
+    )
+
+
+def test_increment4_current_build_failure_keeps_prior_generation_active(
+    tmp_path: Path,
+) -> None:
+    state, _snapshot = admitted_increment4_fixture(tmp_path)
+    adapter = MemoryNeo4jAdapter()
+
+    with open_increment4_neo4j_system(state, adapter) as system:
+        first = system.increment4.build_current_and_promote(
+            _current_request(
+                GENERATION_1,
+                key="increment4-current-prior-v1",
+            ),
+            proof=extraction_proof(),
+        )
+        adapter.reconciliation_mismatch = True
+        with pytest.raises(Neo4jIdentityConflict):
+            system.increment4.build_current_and_promote(
+                _current_request(
+                    GENERATION_2,
+                    key="increment4-current-failed-replacement-v1",
+                ),
+                proof=extraction_proof(),
+            )
+        first_status = system.increment4.generation_status(
+            GENERATION_1,
+            proof=extraction_proof(),
+        )
+        second_status = system.increment4.generation_status(
+            GENERATION_2,
+            proof=extraction_proof(),
+        )
+
+    assert first.generation.state is ProjectionGenerationState.ACTIVE
+    assert first_status.generation.state is ProjectionGenerationState.ACTIVE
+    assert second_status.generation.state is ProjectionGenerationState.VALIDATING
 
 
 def test_increment4_controller_builds_validates_promotes_and_reads_active(
