@@ -39,15 +39,26 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--proving", required=True)
     parser.add_argument("--unpublished", required=True)
+    parser.add_argument("--authority")
+    parser.add_argument("--campaign-input", type=Path)
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
     head_sha, tree_sha = _exact_main_identity()
+    campaign_input = (
+        json.loads(args.campaign_input.read_text(encoding="utf-8"))
+        if args.campaign_input is not None
+        else None
+    )
+    if campaign_input is not None and not isinstance(campaign_input, dict):
+        raise ValueError("campaign input must be a JSON object")
     packet = build_graphiti_steady_state_packet(
         proving_store=args.proving,
         unpublished_store=args.unpublished,
         head_sha=head_sha,
         tree_sha=tree_sha,
         observed_at=datetime.now(tz=UTC),
+        authority_store=args.authority,
+        campaign_input=campaign_input,
     )
     if _exact_main_identity() != (head_sha, tree_sha):
         raise RuntimeError("code identity changed while building steady-state evidence")
@@ -55,7 +66,7 @@ def main() -> int:
         print(json.dumps(packet, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(write_content_addressed_packet(packet, args.output_dir))
-    return 0 if packet["verdict"] == "GO" else 2
+    return 0 if packet["verdict"] == "READY_FOR_OWNER_DECISION" else 2
 
 
 if __name__ == "__main__":

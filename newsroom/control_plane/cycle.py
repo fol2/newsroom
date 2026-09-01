@@ -208,7 +208,12 @@ class GraphitiAdmissionCycleAtom(Protocol):
         worker_id: str,
         limit: int = 100,
         ingest_ids: tuple[str, ...] | None = None,
-    ) -> object: ...
+        stop_on_failure: bool = False,
+    ) -> GraphitiAdmissionCycleReport: ...
+
+    def finalise_decided_cohort(
+        self, *, ingest_ids: tuple[str, ...]
+    ) -> GraphitiAdmissionCycleReport: ...
 
     def reconcile_rights(
         self,
@@ -216,6 +221,16 @@ class GraphitiAdmissionCycleAtom(Protocol):
         limit: int = 100,
         ingest_ids: tuple[str, ...] | None = None,
     ) -> int: ...
+
+
+class GraphitiAdmissionCycleReport(Protocol):
+    """The report fields returned by each bounded admission stage."""
+
+    claimed: int
+    decided: int
+    projected: int
+    failed: int
+    dead_lettered: int
 
 
 GraphitiAdmissionFactory = Callable[
@@ -3114,6 +3129,10 @@ def consume_next_graphiti_event(
     max_dispatch_seconds: float | None = None,
     prepared_event_preflight: Mapping[str, object] | None = None,
     max_reserved_gbp_microunits: int | None = None,
+    graphiti_admission_factory: GraphitiAdmissionFactory | None = None,
+    max_graphiti_admissions: int = 100,
+    require_graphiti_admission: bool = False,
+    defer_graphiti_admission: bool = False,
 ) -> GraphitiProcessResult | None:
     """Claim and process one durable revision, independently from source polling."""
 
@@ -3123,6 +3142,18 @@ def consume_next_graphiti_event(
         or max_reserved_gbp_microunits <= 0
     ):
         raise ValueError("maximum Graphiti reserved spend must be positive")
+    if (
+        isinstance(max_graphiti_admissions, bool)
+        or not isinstance(max_graphiti_admissions, int)
+        or max_graphiti_admissions <= 0
+    ):
+        raise ValueError("maximum Graphiti admissions must be positive")
+    if not isinstance(require_graphiti_admission, bool):
+        raise TypeError("Graphiti admission requirement must be boolean")
+    if not isinstance(defer_graphiti_admission, bool):
+        raise TypeError("Graphiti admission deferral must be boolean")
+    if defer_graphiti_admission and graphiti_admission_factory is None:
+        raise ValueError("deferred Graphiti admission requires a governed factory")
     if prepared_event_preflight is not None:
         if event_id is None or canary_consumption_digest is not None:
             raise ValueError("prepared Graphiti preflight requires one exact event")
@@ -3254,7 +3285,7 @@ def consume_next_graphiti_event(
         event = replace(event, units=units_for(event))
         unpublished = connect(unpublished_store)
         try:
-            ingest_ids = tuple(unit.ingest_id for unit in event.units)
+            ingest_ids = tuple(sorted({unit.ingest_id for unit in event.units}))
             provider_dispatched = False
 
             def committed_provider_dispatch() -> bool:
@@ -3295,6 +3326,23 @@ def consume_next_graphiti_event(
                 )
                 if all(has_graphiti_ingest(unpublished, item) for item in ingest_ids):
                     placeholders = ",".join("?" for _ in ingest_ids)
+                    ingest_outcomes = tuple(
+                        str(row[0])
+                        for row in unpublished.execute(
+                            f"SELECT outcome FROM unpublished_graphiti_ingest "
+                            f"WHERE ingest_id IN ({placeholders}) "
+                            "ORDER BY ingest_id",
+                            ingest_ids,
+                        )
+                    )
+                    if (
+                        graphiti_admission_factory is not None
+                        and ingest_outcomes != tuple("COMPLETE" for _ in ingest_ids)
+                    ):
+                        raise SystemicGraphitiEventFailure(
+                            "ADMISSION_SOURCE_ATTEMPT_NON_TERMINAL",
+                            provider_dispatched=committed_provider_dispatch(),
+                        )
                     proposal_count = int(
                         unpublished.execute(
                             f"SELECT COALESCE(SUM(proposal_count),0) "
@@ -3303,6 +3351,80 @@ def consume_next_graphiti_event(
                             ingest_ids,
                         ).fetchone()[0]
                     )
+                    if (
+                        proposal_count > 0
+                        and require_graphiti_admission
+                        and graphiti_admission_factory is None
+                    ):
+                        raise SystemicGraphitiEventFailure(
+                            "ADMISSION_COMPOSITION_REQUIRED",
+                            provider_dispatched=committed_provider_dispatch(),
+                        )
+                    if graphiti_admission_factory is not None:
+                        try:
+                            if proposal_count > max_graphiti_admissions:
+                                raise SystemicGraphitiEventFailure(
+                                    "ADMISSION_PROPOSAL_CAP_EXCEEDED",
+                                    provider_dispatched=(
+                                        committed_provider_dispatch()
+                                    ),
+                                )
+                            admission = graphiti_admission_factory(unpublished)
+                            admission.enqueue_complete_receipts(
+                                ingest_ids=ingest_ids
+                            )
+                            unpublished.commit()
+                            if defer_graphiti_admission:
+                                return GraphitiDispatchResult.terminal(
+                                    proposal_count=proposal_count,
+                                    provider_dispatched=provider_dispatched,
+                                )
+                            decision_report = admission.drain(
+                                worker_id=f"hermes-event:{event.event_id}",
+                                limit=max_graphiti_admissions,
+                                ingest_ids=ingest_ids,
+                                stop_on_failure=True,
+                            )
+                            if (
+                                decision_report.failed
+                                or decision_report.dead_lettered
+                            ):
+                                raise SystemicGraphitiEventFailure(
+                                    "ADMISSION_COHORT_DECISION_INCOMPLETE",
+                                    provider_dispatched=(
+                                        committed_provider_dispatch()
+                                    ),
+                                )
+                            generation_report = admission.finalise_decided_cohort(
+                                ingest_ids=ingest_ids
+                            )
+                            if (
+                                generation_report.failed
+                                or generation_report.dead_lettered
+                            ):
+                                raise SystemicGraphitiEventFailure(
+                                    "ADMISSION_COHORT_PROJECTION_INCOMPLETE",
+                                    provider_dispatched=(
+                                        committed_provider_dispatch()
+                                    ),
+                                )
+                            unpublished.commit()
+                        except SystemicGraphitiEventFailure:
+                            raise
+                        except (
+                            json.JSONDecodeError,
+                            OSError,
+                            RuntimeError,
+                            TypeError,
+                            ValueError,
+                            sqlite3.Error,
+                        ) as exc:
+                            raise SystemicGraphitiEventFailure(
+                                "ADMISSION_COHORT_EXECUTION_FAILED",
+                                provider_dispatched=(
+                                    committed_provider_dispatch()
+                                ),
+                            ) from exc
                     return GraphitiDispatchResult.terminal(
                         proposal_count=proposal_count,
                         provider_dispatched=provider_dispatched,

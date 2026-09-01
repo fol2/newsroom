@@ -1808,13 +1808,15 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
     assert event["attempt_count"] == 1
     assert event["provider_dispatched"] == 1
     assert type(event["provider_dispatched"]) is int
-    assert ingest == ("COMPLETE", 3, 2, 1)
+    assert ingest == ("COMPLETE", 2, 2, 1)
     assert attempt["outcome"] == "COMPLETE"
-    assert attempt["proposal_count"] == 3
+    assert attempt["proposal_count"] == 2
     assert attempt.get("entity_count") == 2
     assert attempt.get("relation_count") == 1
     assert execution.outcome.value == "COMPLETE"
     assert execution.produced.outcome.value == "SUCCESS"
+    assert len(raw["proposals"]) == 2
+    assert raw["relations"][0]["proposal_status"] == "HELD_NO_EXACT_EVIDENCE"
     assert isinstance(combined, dict)
     relation = combined["proposal_receipt"]["relation_proposals"][0]
     assert relation["proposal_status"] == "PROPOSED"

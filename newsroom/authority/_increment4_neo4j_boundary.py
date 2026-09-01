@@ -16,6 +16,7 @@ from newsroom.increment4.neo4j import (
     Increment4Neo4jActiveReadRequest,
     Increment4Neo4jBuildRequest,
     Increment4Neo4jBuildResult,
+    Increment4Neo4jCurrentBuildRequest,
     Increment4Neo4jGenerationStatus,
 )
 from newsroom.increment4.projection import build_increment4_admitted_batches
@@ -709,6 +710,7 @@ class _Increment4Neo4jBoundary:
             ignored_optional_count=ignored,
             deleted_target_graph_record_count=deleted_target,
             purged_retired_graph_record_count=purged_prior,
+            source_snapshot_digest=request.snapshot.canonical_digest,
             projection_state_digest=state_digest,
             serving_time=metadata.serving_time,
         )
@@ -860,6 +862,38 @@ class _Increment4Neo4jBoundary:
                 validation=validation,
                 promotion=promotion,
                 state_digest=state_digest,
+            )
+
+    def build_current_and_promote(
+        self,
+        request: Increment4Neo4jCurrentBuildRequest,
+        proof: AuthenticationProof,
+    ) -> Increment4Neo4jBuildResult:
+        """Build from one authority-owned snapshot of all current admissions."""
+
+        if not isinstance(request, Increment4Neo4jCurrentBuildRequest):
+            raise TypeError("Increment 4 current build requires a typed request")
+        with self._operation_lock:
+            self._register_family(proof)
+            self._authenticate_management(
+                generation_id=request.generation_id,
+                operation="increment4-build-current-and-promote",
+                semantic_value={
+                    "generation_id": str(request.generation_id),
+                    "purge_retired_generation": request.purge_retired_generation,
+                },
+                proof=proof,
+            )
+            snapshot = self._store.increment4_admitted_snapshot()
+            return self.build_and_promote(
+                Increment4Neo4jBuildRequest(
+                    generation_id=request.generation_id,
+                    snapshot=snapshot,
+                    reason_code=request.reason_code,
+                    idempotency_key=request.idempotency_key,
+                    purge_retired_generation=request.purge_retired_generation,
+                ),
+                proof,
             )
 
     def generation_status(

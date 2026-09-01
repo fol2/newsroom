@@ -86,15 +86,18 @@ def entity_proposals(
     return tuple(sorted(drafts, key=lambda item: item.local_id))
 
 
-def _predicate_hint(name: object) -> ProposalPredicateHint:
+def _predicate_hint(name: object) -> ProposalPredicateHint | None:
     if isinstance(name, str):
         hint = _PREDICATE_HINTS.get(name.strip().upper().replace(" ", "_"))
         if hint is not None:
             return hint
-    return ProposalPredicateHint.ABOUT_EVENT
+    return None
 
 
-def _node_names(result: Any) -> dict[str, str]:
+def _proposed_node_names(
+    result: Any,
+    attempt: GraphitiAttemptRequest,
+) -> dict[str, str]:
     names: dict[str, str] = {}
     for node in getattr(result, "nodes", ()) or ():
         uuid = getattr(node, "uuid", None)
@@ -102,7 +105,11 @@ def _node_names(result: Any) -> dict[str, str]:
         if uuid is None or not isinstance(raw_name, str):
             continue
         name = " ".join(raw_name.split())
-        if name:
+        if (
+            name
+            and not is_source_registry_name(name)
+            and _evidence_for(name, attempt) is not None
+        ):
             names[str(uuid)] = name
     return names
 
@@ -111,14 +118,14 @@ def relation_proposals(
     result: Any, attempt: GraphitiAttemptRequest
 ) -> tuple[ProposalDraft, ...]:
     drafts: list[ProposalDraft] = []
-    names = _node_names(result)
+    names = _proposed_node_names(result, attempt)
     for index, edge in enumerate(getattr(result, "edges", ()) or (), start=1):
         fact = getattr(edge, "fact", None)
         fact_text = " ".join(str(fact).split()) if fact else ""
         source_uuid = str(getattr(edge, "source_node_uuid", "") or "")
         target_uuid = str(getattr(edge, "target_node_uuid", "") or "")
-        subject = names.get(source_uuid) or source_uuid
-        obj = names.get(target_uuid) or target_uuid
+        subject = names.get(source_uuid)
+        obj = names.get(target_uuid)
         if not subject or not obj:
             continue
         if is_source_registry_name(subject) or is_source_registry_name(obj):
@@ -128,13 +135,16 @@ def relation_proposals(
         evidence = _evidence_for(fact_text, attempt) if fact_text else None
         if evidence is None:
             continue
+        predicate_hint = _predicate_hint(getattr(edge, "name", None))
+        if predicate_hint is None:
+            continue
         drafts.append(
             ProposalDraft(
                 local_id=f"relation.{index:04d}",
                 kind=ExtractionProposalKind.RELATION,
                 subject_placeholder=subject,
                 object_placeholder=obj,
-                predicate_hint=_predicate_hint(getattr(edge, "name", None)),
+                predicate_hint=predicate_hint,
                 confidence_basis_points=None,
                 uncertainty_codes=("REQUIRES_RELATION_ADMISSION",),
                 rationale_codes=("GRAPHITI_EVALUATION_SPAN",),

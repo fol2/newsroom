@@ -51,6 +51,9 @@ def test_configuration_and_fake_attempt_are_atomic_replayable_and_readable(
         assert system.graphiti.attempt(
             attempt.attempt_id, proof=extraction_proof()
         ) == retained
+        assert system.graphiti.manifest_for_attempt(
+            attempt.attempt_id, proof=extraction_proof()
+        ) == attempt.manifest
         assert system.graphiti.attempt_history(
             attempt.extraction_request.run_id,
             limit=10,
@@ -68,6 +71,9 @@ def test_configuration_and_fake_attempt_are_atomic_replayable_and_readable(
         assert reopened.graphiti.attempt(
             attempt.attempt_id, proof=extraction_proof()
         ).outcome is GraphitiAdapterOutcome.COMPLETE
+        assert reopened.graphiti.manifest_for_attempt(
+            attempt.attempt_id, proof=extraction_proof()
+        ) == attempt.manifest
 
 
 def test_configuration_identifier_reuse_and_read_scopes_fail_closed(tmp_path) -> None:

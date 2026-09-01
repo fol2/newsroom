@@ -15,6 +15,7 @@ from newsroom.graphiti_adapter.models import (
     ApprovedReplayBundle,
     GraphitiAdapterConfigurationRecord,
     GraphitiAttemptRecord,
+    GraphitiInputManifest,
     GraphitiReplaySourceRecord,
 )
 from newsroom.graphiti_adapter.types import (
@@ -86,6 +87,39 @@ class _GraphitiAdapterReadMixin:
             for result in results:
                 self._require_graphiti_attempt_current(self._connection, result)
             return results
+
+    def graphiti_manifest_for_attempt(
+        self, attempt_id: GraphitiAttemptId
+    ) -> GraphitiInputManifest:
+        if not isinstance(attempt_id, GraphitiAttemptId):
+            raise TypeError("adapter attempt identity must be typed")
+        with self._lock:
+            attempt_row = self._graphiti_attempt_row(self._connection, attempt_id)
+            attempt = self._graphiti_attempt_from_row(
+                self._connection, attempt_row, replayed=False
+            )
+            self._require_graphiti_attempt_current(self._connection, attempt)
+            manifest_row = self._connection.execute(
+                "SELECT * FROM graphiti_input_manifests WHERE manifest_id=?",
+                (str(attempt.manifest_id),),
+            ).fetchone()
+            if manifest_row is None:
+                raise AuthorityPersistenceError(
+                    "Graphiti attempt manifest is missing"
+                )
+            manifest = self._graphiti_manifest_from_row(
+                self._connection, manifest_row
+            )
+            if (
+                manifest.run_id != attempt.run_id
+                or manifest.requested_run_version_id != attempt.run_version_id
+                or manifest.configuration_id != attempt.configuration_id
+                or manifest.configuration_digest != attempt.configuration_digest
+            ):
+                raise AuthorityPersistenceError(
+                    "Graphiti attempt manifest binding differs"
+                )
+            return manifest
 
     def graphiti_replay_source(
         self, replay_source_id: GraphitiReplaySourceId

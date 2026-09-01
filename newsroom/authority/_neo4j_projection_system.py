@@ -1667,6 +1667,7 @@ def _open_with_adapter(
             ),
             increment4=Increment4Neo4jController(
                 build=increment4_boundary.build_and_promote,
+                build_current=increment4_boundary.build_current_and_promote,
                 status=increment4_boundary.generation_status,
                 read_active=increment4_boundary.read_active,
             ),

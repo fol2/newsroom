@@ -41,6 +41,7 @@ def test_public_graphiti_facade_exposes_only_typed_proposal_adapter_operations()
         "attempt_history",
         "configuration",
         "execute_attempt",
+        "manifest_for_attempt",
         "register_configuration",
         "replay_source",
     }
@@ -185,6 +186,9 @@ def test_configuration_attempt_and_replay_read_scopes_are_independent(
         assert attempt_only.graphiti.attempt_history(
             attempt.run_id, limit=10, proof=extraction_proof()
         ) == (attempt,)
+        assert attempt_only.graphiti.manifest_for_attempt(
+            attempt.attempt_id, proof=extraction_proof()
+        ) == request.manifest
         with pytest.raises(PermissionError):
             attempt_only.graphiti.configuration(
                 configuration.configuration.configuration_id,
@@ -210,6 +214,10 @@ def test_configuration_attempt_and_replay_read_scopes_are_independent(
             )
         with pytest.raises(PermissionError):
             replay_only.graphiti.attempt(
+                attempt.attempt_id, proof=extraction_proof()
+            )
+        with pytest.raises(PermissionError):
+            replay_only.graphiti.manifest_for_attempt(
                 attempt.attempt_id, proof=extraction_proof()
             )
 

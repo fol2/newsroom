@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from threading import RLock
 from typing import Any, Callable
@@ -31,6 +32,7 @@ from newsroom.graphiti_adapter import (
     GraphitiAttemptRecord,
     GraphitiAttemptRequest,
     GraphitiCleanupReason,
+    GraphitiInputManifest,
     GraphitiReplayApprovalRequest,
     GraphitiReplaySourceId,
     GraphitiReplaySourceRecord,
@@ -51,7 +53,7 @@ _GRAPHITI_READ_SCHEMA_DIGEST = digest_canonical(
     {
         "contract": "graphiti-proposal-adapter-authority-read-no-payload-v1",
         "payload_mode": "NO_PAYLOAD",
-        "surfaces": ["CONFIGURATION", "ATTEMPT", "REPLAY_APPROVAL"],
+        "surfaces": ["CONFIGURATION", "ATTEMPT", "MANIFEST", "REPLAY_APPROVAL"],
         "raw_output": "EXCLUDED",
     }
 )
@@ -155,17 +157,54 @@ class _GraphitiAdapterBoundary:
         self,
         attempt: GraphitiAttemptRequest,
         proof: AuthenticationProof,
+        *,
+        execution_deadline: datetime | None = None,
+        fallback_permitted: bool = True,
+        invocation_observer: object | None = None,
     ) -> GraphitiAttemptRecord:
         with self._command_lock:
-            return self._execute_attempt_locked(attempt, proof)
+            return self._execute_attempt_locked(
+                attempt,
+                proof,
+                execution_deadline=execution_deadline,
+                fallback_permitted=fallback_permitted,
+                invocation_observer=invocation_observer,
+            )
 
     def _execute_attempt_locked(
         self,
         attempt: GraphitiAttemptRequest,
         proof: AuthenticationProof,
+        *,
+        execution_deadline: datetime | None,
+        fallback_permitted: bool,
+        invocation_observer: object | None,
     ) -> GraphitiAttemptRecord:
         if not isinstance(attempt, GraphitiAttemptRequest):
             raise TypeError("adapter attempt must be typed")
+        if not isinstance(fallback_permitted, bool):
+            raise TypeError("Graphiti fallback permission must be boolean")
+        if execution_deadline is not None and (
+            not isinstance(execution_deadline, datetime)
+            or execution_deadline.tzinfo is None
+            or execution_deadline.utcoffset() is None
+        ):
+            raise GraphitiAdapterContractError(
+                "real adapter execution deadline must have an explicit offset"
+            )
+        if attempt.configuration.runtime_mode is GraphitiRuntimeMode.REAL_GRAPHITI:
+            if fallback_permitted:
+                raise GraphitiAdapterContractError(
+                    "governed real Graphiti requires fallback to be disabled"
+                )
+            if execution_deadline is None:
+                raise GraphitiAdapterContractError(
+                    "governed real Graphiti requires an execution deadline"
+                )
+            if invocation_observer is None:
+                raise GraphitiAdapterContractError(
+                    "governed real Graphiti requires usage observation"
+                )
         adapter_command = SemanticCommand(
             command_type=GRAPHITI_ATTEMPT_EXECUTE_COMMAND,
             aggregate_id=AggregateId(attempt.attempt_id.value),
@@ -221,7 +260,12 @@ class _GraphitiAdapterBoundary:
             )
         else:
             attempt.configuration.require_execution_authorized()
-            adapter = RealGraphitiAdapter(clock=self._clock)
+            adapter = RealGraphitiAdapter(
+                clock=self._clock,
+                execution_deadline=execution_deadline,
+                fallback_permitted=fallback_permitted,
+                invocation_observer=invocation_observer,
+            )
 
         bridge = GraphitiProposalProducerBridge(
             adapter=adapter,
@@ -404,6 +448,21 @@ class _GraphitiAdapterBoundary:
             limit=limit,
         )
         return self._store.graphiti_attempt_history(run_id, limit=limit)
+
+    def manifest_for_attempt(
+        self,
+        attempt_id: GraphitiAttemptId,
+        proof: AuthenticationProof,
+    ) -> GraphitiInputManifest:
+        self._authorize_read(
+            proof,
+            operation="read:graphiti_adapter:manifest_for_attempt",
+            aggregate_type="graphiti_adapter_attempt",
+            aggregate_id=str(attempt_id),
+            required_scope=self._read_policy.attempt_required_scope,
+            trust_scope=TrustScope.PROPOSED,
+        )
+        return self._store.graphiti_manifest_for_attempt(attempt_id)
 
     def replay_source(
         self,

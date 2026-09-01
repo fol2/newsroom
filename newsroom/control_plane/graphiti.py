@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -10,6 +11,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Protocol, runtime_checkable
 
+from newsroom.authority._extraction_facade import GovernedExtractionRecords
+from newsroom.authority._graphiti_adapter_facade import (
+    GovernedGraphitiProposalAdapter,
+)
+from newsroom.authority.auth import AuthenticationProof
 from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
@@ -877,11 +883,34 @@ class EvaluationGraphitiRunner:
         *,
         clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
         fallback_permitted: bool = True,
+        proposal_adapter: GovernedGraphitiProposalAdapter | None = None,
+        extraction_records: GovernedExtractionRecords | None = None,
+        proof: AuthenticationProof | None = None,
     ) -> None:
         if not isinstance(fallback_permitted, bool):
             raise TypeError("Graphiti fallback permission must be boolean")
         self._clock = clock
         self._fallback_permitted = fallback_permitted
+        governed_dependencies = (proposal_adapter, extraction_records, proof)
+        if any(item is not None for item in governed_dependencies) and not all(
+            item is not None for item in governed_dependencies
+        ):
+            raise ValueError(
+                "Governed Graphiti execution dependencies must be supplied together"
+            )
+        if proposal_adapter is not None and not isinstance(
+            proposal_adapter, GovernedGraphitiProposalAdapter
+        ):
+            raise TypeError("Graphiti proposal adapter must be governed")
+        if extraction_records is not None and not isinstance(
+            extraction_records, GovernedExtractionRecords
+        ):
+            raise TypeError("Graphiti extraction records must be governed")
+        if proof is not None and not isinstance(proof, AuthenticationProof):
+            raise TypeError("Graphiti authority proof must be typed")
+        self._proposal_adapter = proposal_adapter
+        self._extraction_records = extraction_records
+        self._proof = proof
         self._pending_usage: dict[
             tuple[str, int], tuple[ModelUsageService, WorkEnvelope]
         ] = {}
@@ -1014,6 +1043,46 @@ class EvaluationGraphitiRunner:
             attempt_number=unit.attempt_number,
             predecessor_episode_uuid=unit.predecessor_ingest_id,
         )
+        if self._proposal_adapter is not None:
+            assert self._extraction_records is not None
+            assert self._proof is not None
+            if (
+                self._fallback_permitted
+                or deadline is None
+                or invocation_observer is None
+            ):
+                # A governed REAL attempt is safe only when the caller's
+                # bounded deadline, zero-fallback rule and usage observer all
+                # cross the 4D boundary together.
+                raise GraphitiResultStageError(
+                    GRAPHITI_RESULT_STAGE_ADAPTER_EXECUTION
+                )
+            try:
+                self._proposal_adapter.register_configuration(
+                    attempt.configuration,
+                    proof=self._proof,
+                )
+                retained_attempt = self._proposal_adapter.execute_attempt(
+                    attempt,
+                    proof=self._proof,
+                    execution_deadline=deadline,
+                    fallback_permitted=self._fallback_permitted,
+                    invocation_observer=invocation_observer,
+                )
+            except GraphitiAdapterContractError as exc:
+                raise GraphitiResultStageError(
+                    GRAPHITI_RESULT_STAGE_ADAPTER_EXECUTION
+                ) from exc
+            try:
+                return self._result_from_governed_authority(
+                    unit=unit,
+                    attempt=attempt,
+                    retained_attempt=retained_attempt,
+                )
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                raise GraphitiResultStageError(
+                    GRAPHITI_RESULT_STAGE_CYCLE_RESULT_CONSTRUCTION
+                ) from exc
         with TemporaryDirectory() as root:
             adapter_options: dict[str, object] = {"execution_deadline": deadline}
             if invocation_observer is not None:
@@ -1110,6 +1179,201 @@ class EvaluationGraphitiRunner:
             raise GraphitiResultStageError(
                 GRAPHITI_RESULT_STAGE_CYCLE_RESULT_CONSTRUCTION
             ) from exc
+
+    def _result_from_governed_authority(
+        self,
+        *,
+        unit: CorpusIngestUnit,
+        attempt: object,
+        retained_attempt: object,
+    ) -> GraphitiCycleResult:
+        from newsroom.extraction.models import ProposalDraft
+        from newsroom.extraction.types import ExtractionOutcome
+        from newsroom.graphiti_adapter import GraphitiAttemptRecord
+        from newsroom.graphiti_adapter.models import GraphitiAttemptRequest
+        from newsroom.graphiti_adapter.types import GraphitiAdapterOutcome
+
+        if not isinstance(attempt, GraphitiAttemptRequest):
+            raise TypeError("governed Graphiti request must be typed")
+        if not isinstance(retained_attempt, GraphitiAttemptRecord):
+            raise TypeError("governed Graphiti attempt must be typed")
+        if (
+            retained_attempt.attempt_id != attempt.attempt_id
+            or retained_attempt.run_id != attempt.extraction_request.run_id
+            or retained_attempt.run_version_id
+            != attempt.extraction_request.run_version_id
+            or retained_attempt.attempt_number != attempt.attempt_number
+            or retained_attempt.previous_attempt_id
+            != attempt.expected_previous_attempt_id
+            or retained_attempt.configuration_id
+            != attempt.configuration.configuration_id
+            or retained_attempt.configuration_digest
+            != attempt.configuration.canonical_digest
+            or retained_attempt.manifest_id != attempt.manifest.manifest_id
+        ):
+            raise ValueError("governed Graphiti attempt differs from its request")
+        if retained_attempt.output_id is None:
+            raise ValueError("governed Graphiti attempt has no retained raw output")
+
+        assert self._extraction_records is not None
+        assert self._proof is not None
+        metadata = self._extraction_records.metadata(
+            retained_attempt.run_version_id,
+            proof=self._proof,
+        )
+        raw_output = self._extraction_records.raw_output(
+            retained_attempt.output_id,
+            proof=self._proof,
+        )
+        proposals = self._extraction_records.proposals(
+            retained_attempt.run_version_id,
+            proof=self._proof,
+        )
+        extraction_outcome = {
+            GraphitiAdapterOutcome.COMPLETE: ExtractionOutcome.SUCCESS,
+            GraphitiAdapterOutcome.PARTIAL: ExtractionOutcome.PARTIAL,
+            GraphitiAdapterOutcome.TIMEOUT: ExtractionOutcome.RETRYABLE_FAILURE,
+            GraphitiAdapterOutcome.MALFORMED_OUTPUT: ExtractionOutcome.INVALID_OUTPUT,
+            GraphitiAdapterOutcome.PROVIDER_REJECTED: (
+                ExtractionOutcome.RETRYABLE_FAILURE
+            ),
+            GraphitiAdapterOutcome.POLICY_BLOCKED: (
+                ExtractionOutcome.BLOCKING_FAILURE
+            ),
+            GraphitiAdapterOutcome.FAILED: ExtractionOutcome.RETRYABLE_FAILURE,
+            GraphitiAdapterOutcome.AMBIGUOUS_EFFECT: (
+                ExtractionOutcome.RETRYABLE_FAILURE
+            ),
+        }[retained_attempt.outcome]
+        if (
+            metadata.run_id != retained_attempt.run_id
+            or metadata.run_version_id != retained_attempt.run_version_id
+            or metadata.output != raw_output.view
+            or metadata.outcome is not extraction_outcome
+            or metadata.failure_code.value != retained_attempt.failure_code
+            or metadata.usage != retained_attempt.usage
+            or metadata.proposal_count != len(proposals)
+        ):
+            raise ValueError("governed extraction metadata differs from the attempt")
+        if any(
+            proposal.output_id != retained_attempt.output_id
+            or proposal.proposal_set_id != retained_attempt.proposal_set_id
+            or proposal.run_id != retained_attempt.run_id
+            or proposal.run_version_id != retained_attempt.run_version_id
+            for proposal in proposals
+        ):
+            raise ValueError("governed proposal lineage differs from the attempt")
+
+        decoded = json.loads(raw_output.canonical_bytes)
+        if not isinstance(decoded, dict):
+            raise TypeError("governed Graphiti raw output must be an object")
+        if canonical_json_bytes(decoded) != raw_output.canonical_bytes:
+            raise ValueError("governed Graphiti raw output is not canonical")
+        expected_receipt_binding = {
+            "workspace_group": GRAPHITI_WORKSPACE_GROUP,
+            "generation_id": attempt.generation_id,
+            "episode_uuid": attempt.episode_uuid,
+            "attempt_number": attempt.attempt_number,
+            "predecessor_episode_uuid": attempt.predecessor_episode_uuid,
+            "temporal_basis": attempt.temporal_basis,
+            "reference_time": (
+                None
+                if attempt.reference_time is None
+                else attempt.reference_time.to_text()
+            ),
+            "passages": [item.canonical_value() for item in attempt.manifest.passages],
+        }
+        if any(
+            decoded.get(field) != expected
+            for field, expected in expected_receipt_binding.items()
+        ):
+            raise ValueError("governed Graphiti raw output differs from its manifest")
+        unsigned = dict(decoded)
+        receipt_digest = unsigned.pop("raw_output_digest", None)
+        if not isinstance(receipt_digest, str) or receipt_digest != digest_bytes(
+            canonical_json_bytes(unsigned)
+        ):
+            raise ValueError("governed Graphiti raw receipt digest differs")
+
+        proposal_values = decoded.get("proposals")
+        if not isinstance(proposal_values, list) or any(
+            not isinstance(item, dict) for item in proposal_values
+        ):
+            raise TypeError("governed Graphiti raw proposals must be objects")
+        retained_drafts = tuple(
+            ProposalDraft(
+                local_id=item.local_id,
+                kind=item.kind,
+                subject_placeholder=item.subject_placeholder,
+                object_placeholder=item.object_placeholder,
+                predicate_hint=item.predicate_hint,
+                confidence_basis_points=item.confidence_basis_points,
+                uncertainty_codes=item.uncertainty_codes,
+                rationale_codes=item.rationale_codes,
+                evidence=item.evidence,
+            ).canonical_value()
+            for item in proposals
+        )
+        if tuple(proposal_values) != retained_drafts:
+            raise ValueError(
+                "governed raw proposals differ from ProposalEnvelope authority"
+            )
+
+        relations = decoded.get("relations")
+        entities = decoded.get("entities")
+        invocations = decoded.get("chat_invocations")
+        passages = decoded.get("passages")
+        embedding_usage = decoded.get("embedding_usage")
+        token_usage = decoded.get("token_usage")
+        if not isinstance(relations, list) or not isinstance(entities, list):
+            raise TypeError(
+                "governed Graphiti entity or relation receipts are malformed"
+            )
+        temporal = unit.temporal()
+        usage_basis = decoded.get("usage_basis")
+        return GraphitiCycleResult(
+            ingest_id=unit.ingest_id,
+            source_id=unit.source_id,
+            item_key=unit.item_key,
+            outcome=retained_attempt.outcome.value,
+            proposal_count=len(proposals),
+            entity_count=len(entities),
+            relation_count=len(relations),
+            failure_code=retained_attempt.failure_code,
+            temporal_basis=temporal.basis,
+            reference_time=temporal.reference_time.to_text(),
+            generation_id=attempt.generation_id,
+            receipt_digest=receipt_digest,
+            workspace_group=GRAPHITI_WORKSPACE_GROUP,
+            episode_uuid=str(decoded.get("episode_uuid") or ""),
+            entities=tuple(entities),
+            relations=tuple(relations),
+            proposals=tuple(proposal_values),
+            passages=tuple(passages) if isinstance(passages, list) else (),
+            chat_invocations=(
+                tuple(invocations) if isinstance(invocations, list) else ()
+            ),
+            embedding_usage=(
+                embedding_usage if isinstance(embedding_usage, dict) else None
+            ),
+            token_usage=token_usage if isinstance(token_usage, dict) else None,
+            request_tokens=retained_attempt.usage.request_tokens,
+            response_tokens=retained_attempt.usage.response_tokens,
+            cost_microunits=retained_attempt.usage.cost_microunits,
+            usage_basis=(
+                usage_basis if isinstance(usage_basis, str) else "UNOBSERVED"
+            ),
+            prompt_version=GRAPHITI_PROMPT_COMPONENT.component_version,
+            attempt_number=retained_attempt.attempt_number,
+            provider_attempt_number=(
+                int(decoded["provider_attempt_number"])
+                if isinstance(decoded.get("provider_attempt_number"), int)
+                and not isinstance(decoded.get("provider_attempt_number"), bool)
+                else retained_attempt.attempt_number
+            ),
+            predecessor_episode_uuid=attempt.predecessor_episode_uuid,
+            raw_receipt=decoded,
+        )
 
 
 __all__ = [

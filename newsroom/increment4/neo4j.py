@@ -71,6 +71,24 @@ class Increment4Neo4jBuildRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class Increment4Neo4jCurrentBuildRequest:
+    """Request a complete rebuild from current admitted authority."""
+
+    generation_id: ProjectionGenerationId
+    reason_code: str
+    idempotency_key: str
+    purge_retired_generation: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.generation_id, ProjectionGenerationId):
+            raise TypeError("Increment 4 build generation identity must be typed")
+        _require_reason(self.reason_code)
+        _require_idempotency_key(self.idempotency_key)
+        if not isinstance(self.purge_retired_generation, bool):
+            raise TypeError("Increment 4 retired-generation purge flag must be boolean")
+
+
+@dataclass(frozen=True, slots=True)
 class Increment4Neo4jBuildResult:
     family_id: str
     generation: ProjectionGenerationView
@@ -83,6 +101,7 @@ class Increment4Neo4jBuildResult:
     ignored_optional_count: int
     deleted_target_graph_record_count: int
     purged_retired_graph_record_count: int
+    source_snapshot_digest: str
     projection_state_digest: str
     serving_time: UtcTimestamp
 
@@ -125,6 +144,9 @@ class Increment4Neo4jBuildResult:
             _require_non_negative_int(value, field=field)
         if self.checkpoint_ledger_seq < self.source_watermark_ledger_seq:
             raise ValueError("Increment 4 checkpoint cannot precede source watermark")
+        validate_sha256_digest(
+            self.source_snapshot_digest, field="source_snapshot_digest"
+        )
         validate_sha256_digest(
             self.projection_state_digest, field="projection_state_digest"
         )
@@ -191,13 +213,17 @@ class Increment4Neo4jActiveReadRequest:
 class Increment4Neo4jController:
     """Bounded proof controller; it owns no SQLite or Neo4j capability."""
 
-    __slots__ = ("__build", "__status", "__read_active")
+    __slots__ = ("__build", "__build_current", "__status", "__read_active")
 
     def __init__(
         self,
         *,
         build: Callable[
             [Increment4Neo4jBuildRequest, AuthenticationProof],
+            Increment4Neo4jBuildResult,
+        ],
+        build_current: Callable[
+            [Increment4Neo4jCurrentBuildRequest, AuthenticationProof],
             Increment4Neo4jBuildResult,
         ],
         status: Callable[
@@ -210,6 +236,7 @@ class Increment4Neo4jController:
         ],
     ) -> None:
         self.__build = build
+        self.__build_current = build_current
         self.__status = status
         self.__read_active = read_active
 
@@ -220,6 +247,16 @@ class Increment4Neo4jController:
         proof: AuthenticationProof,
     ) -> Increment4Neo4jBuildResult:
         return self.__build(request, proof)
+
+    def build_current_and_promote(
+        self,
+        request: Increment4Neo4jCurrentBuildRequest,
+        *,
+        proof: AuthenticationProof,
+    ) -> Increment4Neo4jBuildResult:
+        """Build one generation from all current admitted 4B/4C authority."""
+
+        return self.__build_current(request, proof)
 
     def generation_status(
         self,
@@ -243,6 +280,7 @@ __all__ = [
     "Increment4Neo4jBuildRequest",
     "Increment4Neo4jBuildResult",
     "Increment4Neo4jController",
+    "Increment4Neo4jCurrentBuildRequest",
     "Increment4Neo4jGenerationStatus",
     "Increment4Neo4jProofError",
 ]

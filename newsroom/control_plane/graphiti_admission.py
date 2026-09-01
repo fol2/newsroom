@@ -21,19 +21,30 @@ from newsroom.authority.canonical import (
     digest_canonical,
     validate_sha256_digest,
 )
-from newsroom.entities.types import EntityResolutionDecisionId
-from newsroom.extraction.models import ProposalDraft
+from newsroom.authority.types import EventId, UtcTimestamp
+from newsroom.entities.types import (
+    EntityResolutionDecisionId,
+    EntityResolutionDependencyId,
+)
+from newsroom.extraction.models import ProposalDraft, ProposalEnvelope
 from newsroom.extraction.types import (
     EvidenceRange,
     ExtractionPassageId,
     ExtractionProposalKind,
+    ExtractionOutputId,
+    ExtractionRunId,
+    ExtractionRunVersionId,
+    ProposalEnvelopeId,
     ProposalPredicateHint,
+    ProposalSetId,
 )
 from newsroom.graphiti_adapter.admission import GraphitiProposalAdmissionAction
 from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_WORKSPACE_GROUP
+from newsroom.graphiti_adapter.identity import typed_id
+from newsroom.graphiti_adapter.types import GraphitiAttemptId
 from newsroom.projection.models import ProjectionGenerationId
 
-_TERMINAL_INGEST_OUTCOMES = frozenset({"COMPLETE", "PARTIAL"})
+_TERMINAL_INGEST_OUTCOMES = frozenset({"COMPLETE"})
 _PROJECTABLE_KINDS = frozenset(
     {
         ExtractionProposalKind.ENTITY_MENTION,
@@ -53,10 +64,20 @@ _LINEAGE_FIELDS = (
     "temporal_basis",
 )
 _MAX_ADMISSION_REQUEST_BYTES = 256 * 1024
+GRAPHITI_ADMISSION_COHORT_SCHEMA_VERSION = (
+    "newsroom.graphiti-admission.exact-decided-cohort.v2"
+)
+GRAPHITI_ADMISSION_GENERATION_IDENTITY_VERSION = (
+    "graphiti-admission-generation-v2"
+)
 
 
 class GraphitiAdmissionConsumerError(RuntimeError):
     """A durable receipt or governed admission response is invalid."""
+
+
+class _HistoricalRawProposalHold(GraphitiAdmissionConsumerError):
+    """A raw receipt has no exact 4D/4A authority and stays outside admission."""
 
 
 def _exact_ingest_ids(
@@ -79,11 +100,224 @@ def _exact_ingest_ids(
     return ingest_ids
 
 
+def graphiti_admission_generation_identity(
+    *,
+    ingest_ids: tuple[str, ...],
+    source_receipts: tuple[Mapping[str, object], ...],
+    members: tuple[Mapping[str, object], ...],
+) -> tuple[str, str]:
+    """Derive the one deterministic generation identity for an exact cohort."""
+
+    exact = _exact_ingest_ids(ingest_ids)
+    assert exact is not None
+    receipt_values = tuple(dict(item) for item in source_receipts)
+    member_values = tuple(dict(item) for item in members)
+    if tuple(str(item.get("ingest_id") or "") for item in receipt_values) != exact:
+        raise GraphitiAdmissionConsumerError(
+            "generation source receipts differ from the exact cohort"
+        )
+    proposal_count = 0
+    for item in receipt_values:
+        if set(item) != {"ingest_id", "receipt_digest", "proposal_count"}:
+            raise GraphitiAdmissionConsumerError(
+                "generation source receipt fields differ"
+            )
+        proposal_count += _exact_integer(
+            item["proposal_count"], field="generation proposal denominator"
+        )
+        validate_sha256_digest(
+            str(item["receipt_digest"]),
+            field="generation source receipt digest",
+        )
+    proposal_keys: list[str] = []
+    for item in member_values:
+        if set(item) != {
+            "ingest_id",
+            "proposal_key",
+            "proposal_envelope_id",
+            "decision_digest",
+            "decision",
+        }:
+            raise GraphitiAdmissionConsumerError("generation member fields differ")
+        if str(item["ingest_id"]) not in exact:
+            raise GraphitiAdmissionConsumerError(
+                "generation member is outside the exact cohort"
+            )
+        proposal_key = str(item["proposal_key"])
+        if not proposal_key or not str(item["proposal_envelope_id"]):
+            raise GraphitiAdmissionConsumerError(
+                "generation member identity is incomplete"
+            )
+        validate_sha256_digest(
+            str(item["decision_digest"]),
+            field="generation decision digest",
+        )
+        if not isinstance(item["decision"], Mapping):
+            raise GraphitiAdmissionConsumerError(
+                "generation decision value is invalid"
+            )
+        proposal_keys.append(proposal_key)
+    if (
+        len(member_values) != proposal_count
+        or len(proposal_keys) != len(set(proposal_keys))
+    ):
+        raise GraphitiAdmissionConsumerError(
+            "generation members differ from the proposal denominator"
+        )
+    cohort_digest = digest_canonical(
+        {
+            "schema_version": GRAPHITI_ADMISSION_COHORT_SCHEMA_VERSION,
+            "ingest_ids": list(exact),
+            "source_receipts": list(receipt_values),
+            "members": sorted(
+                member_values,
+                key=lambda item: str(item["proposal_key"]),
+            ),
+        }
+    )
+    generation_id = str(
+        typed_id(
+            ProjectionGenerationId,
+            GRAPHITI_ADMISSION_GENERATION_IDENTITY_VERSION,
+            cohort_digest,
+        )
+    )
+    return cohort_digest, generation_id
+
+
+def _proposal_envelope_value(envelope: ProposalEnvelope) -> dict[str, object]:
+    draft = ProposalDraft(
+        local_id=envelope.local_id,
+        kind=envelope.kind,
+        subject_placeholder=envelope.subject_placeholder,
+        object_placeholder=envelope.object_placeholder,
+        predicate_hint=envelope.predicate_hint,
+        confidence_basis_points=envelope.confidence_basis_points,
+        uncertainty_codes=envelope.uncertainty_codes,
+        rationale_codes=envelope.rationale_codes,
+        evidence=envelope.evidence,
+    )
+    return {
+        "proposal_id": str(envelope.proposal_id),
+        "proposal_set_id": str(envelope.proposal_set_id),
+        "output_id": str(envelope.output_id),
+        "run_id": str(envelope.run_id),
+        "run_version_id": str(envelope.run_version_id),
+        "draft": draft.canonical_value(),
+        "producer_contract_digest": envelope.producer_contract_digest,
+        "canonical_digest": envelope.canonical_digest,
+        "retained_at": envelope.retained_at.to_text(),
+    }
+
+
+def _proposal_envelope_from_value(value: Mapping[str, object]) -> ProposalEnvelope:
+    raw = dict(value)
+    expected = {
+        "proposal_id",
+        "proposal_set_id",
+        "output_id",
+        "run_id",
+        "run_version_id",
+        "draft",
+        "producer_contract_digest",
+        "canonical_digest",
+        "retained_at",
+    }
+    if set(raw) != expected:
+        raise GraphitiAdmissionConsumerError(
+            "proposal envelope fields differ from the 4A contract"
+        )
+    draft = _parse_proposal(_mapping(raw["draft"], field="proposal envelope draft"))
+    try:
+        return ProposalEnvelope(
+            proposal_id=ProposalEnvelopeId.parse(str(raw["proposal_id"])),
+            proposal_set_id=ProposalSetId.parse(str(raw["proposal_set_id"])),
+            output_id=ExtractionOutputId.parse(str(raw["output_id"])),
+            run_id=ExtractionRunId.parse(str(raw["run_id"])),
+            run_version_id=ExtractionRunVersionId.parse(
+                str(raw["run_version_id"])
+            ),
+            local_id=draft.local_id,
+            kind=draft.kind,
+            subject_placeholder=draft.subject_placeholder,
+            object_placeholder=draft.object_placeholder,
+            predicate_hint=draft.predicate_hint,
+            confidence_basis_points=draft.confidence_basis_points,
+            uncertainty_codes=draft.uncertainty_codes,
+            rationale_codes=draft.rationale_codes,
+            evidence=draft.evidence,
+            producer_contract_digest=str(raw["producer_contract_digest"]),
+            canonical_digest=str(raw["canonical_digest"]),
+            retained_at=UtcTimestamp.parse(str(raw["retained_at"])),
+        )
+    except (TypeError, ValueError) as exc:
+        raise GraphitiAdmissionConsumerError(
+            "proposal envelope is not exact typed 4A authority"
+        ) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class GraphitiProposalAuthorityBinding:
+    """Exact 4D attempt and 4A ProposalEnvelope authority for one raw proposal."""
+
+    graphiti_attempt_id: str
+    graphiti_attempt_authority_event_id: str
+    proposal_envelope: ProposalEnvelope
+
+    def __post_init__(self) -> None:
+        try:
+            GraphitiAttemptId.parse(self.graphiti_attempt_id)
+            EventId.parse(self.graphiti_attempt_authority_event_id)
+        except (TypeError, ValueError) as exc:
+            raise GraphitiAdmissionConsumerError(
+                "proposal authority binding has invalid 4D identities"
+            ) from exc
+        if not isinstance(self.proposal_envelope, ProposalEnvelope):
+            raise GraphitiAdmissionConsumerError(
+                "proposal authority binding needs a typed 4A envelope"
+            )
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "graphiti_attempt_id": self.graphiti_attempt_id,
+            "graphiti_attempt_authority_event_id": (
+                self.graphiti_attempt_authority_event_id
+            ),
+            "proposal_envelope": _proposal_envelope_value(
+                self.proposal_envelope
+            ),
+        }
+
+
+def _proposal_authority_binding_from_value(
+    value: Mapping[str, object],
+) -> GraphitiProposalAuthorityBinding:
+    raw = dict(value)
+    if set(raw) != {
+        "graphiti_attempt_id",
+        "graphiti_attempt_authority_event_id",
+        "proposal_envelope",
+    }:
+        raise GraphitiAdmissionConsumerError(
+            "proposal authority binding fields differ"
+        )
+    return GraphitiProposalAuthorityBinding(
+        graphiti_attempt_id=str(raw["graphiti_attempt_id"]),
+        graphiti_attempt_authority_event_id=str(
+            raw["graphiti_attempt_authority_event_id"]
+        ),
+        proposal_envelope=_proposal_envelope_from_value(
+            _mapping(raw["proposal_envelope"], field="proposal envelope")
+        ),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class GraphitiAdmissionRequest:
     queue_seq: int
     proposal_key: str
     source_receipt_digest: str
+    proposal_authority_binding: GraphitiProposalAuthorityBinding
     proposal: ProposalDraft
     proposal_payload: Mapping[str, object]
     evidence_passages: tuple[Mapping[str, object], ...]
@@ -91,23 +325,106 @@ class GraphitiAdmissionRequest:
     relation_statement: str | None
     relation_temporal_bounds: Mapping[str, object] | None
     source_lineage: Mapping[str, object]
+    relation_endpoint_bindings: tuple[GraphitiProposalAuthorityBinding, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.proposal.kind is ExtractionProposalKind.RELATION:
+        envelope = self.proposal_authority_binding.proposal_envelope
+        envelope_draft = ProposalDraft(
+            local_id=envelope.local_id,
+            kind=envelope.kind,
+            subject_placeholder=envelope.subject_placeholder,
+            object_placeholder=envelope.object_placeholder,
+            predicate_hint=envelope.predicate_hint,
+            confidence_basis_points=envelope.confidence_basis_points,
+            uncertainty_codes=envelope.uncertainty_codes,
+            rationale_codes=envelope.rationale_codes,
+            evidence=envelope.evidence,
+        )
+        if envelope_draft != self.proposal:
+            raise GraphitiAdmissionConsumerError(
+                "admission request differs from its exact ProposalEnvelope"
+            )
+        endpoint_bound_kind = self.proposal.kind in {
+            ExtractionProposalKind.ENTITY_EQUIVALENCE,
+            ExtractionProposalKind.RELATION,
+        }
+        if endpoint_bound_kind:
             expected = (
                 self.proposal.subject_placeholder,
                 self.proposal.object_placeholder,
             )
-            if (
-                self.proposed_endpoints != expected
-                or not self.relation_statement
-                or self.relation_temporal_bounds is None
-                or set(self.relation_temporal_bounds)
-                != {"valid_at", "invalid_at", "expired_at"}
+            if self.proposed_endpoints != expected:
+                raise GraphitiAdmissionConsumerError(
+                    "proposal admission mapping lacks its exact endpoints"
+                )
+            if self.proposal.kind is ExtractionProposalKind.RELATION:
+                temporal_fields = set(self.relation_temporal_bounds or {})
+                if (
+                    not self.relation_statement
+                    or self.relation_temporal_bounds is None
+                    or not temporal_fields.issubset(
+                        {"valid_at", "invalid_at", "expired_at"}
+                    )
+                ):
+                    raise GraphitiAdmissionConsumerError(
+                        "relation admission mapping lacks statement or exact temporal evidence"
+                    )
+            elif (
+                self.relation_statement is not None
+                or self.relation_temporal_bounds is not None
             ):
                 raise GraphitiAdmissionConsumerError(
-                    "relation admission mapping lacks proposed endpoints or temporal evidence"
+                    "entity equivalence cannot carry relation evidence"
                 )
+            endpoint_envelopes = tuple(
+                item.proposal_envelope for item in self.relation_endpoint_bindings
+            )
+            parent_envelope = self.proposal_authority_binding.proposal_envelope
+            if (
+                len(endpoint_envelopes) != 2
+                or len({item.proposal_id for item in endpoint_envelopes}) != 2
+                or len({item.local_id for item in endpoint_envelopes}) != 2
+                or any(
+                    item.kind is not ExtractionProposalKind.ENTITY_MENTION
+                    for item in endpoint_envelopes
+                )
+                or tuple(item.subject_placeholder for item in endpoint_envelopes)
+                != self.proposed_endpoints
+                or any(
+                    binding.graphiti_attempt_id
+                    != self.proposal_authority_binding.graphiti_attempt_id
+                    or binding.graphiti_attempt_authority_event_id
+                    != self.proposal_authority_binding.graphiti_attempt_authority_event_id
+                    or binding.proposal_envelope.proposal_set_id
+                    != parent_envelope.proposal_set_id
+                    or binding.proposal_envelope.output_id != parent_envelope.output_id
+                    or binding.proposal_envelope.run_id != parent_envelope.run_id
+                    or binding.proposal_envelope.run_version_id
+                    != parent_envelope.run_version_id
+                    for binding in self.relation_endpoint_bindings
+                )
+            ):
+                raise GraphitiAdmissionConsumerError(
+                    "proposal admission lacks two exact same-attempt entity ProposalEnvelopes"
+                )
+            if self.proposal.kind is ExtractionProposalKind.ENTITY_EQUIVALENCE:
+                parent_evidence = {
+                    canonical_json_bytes(item.canonical_value())
+                    for item in parent_envelope.evidence
+                }
+                endpoint_evidence = {
+                    canonical_json_bytes(item.canonical_value())
+                    for endpoint in endpoint_envelopes
+                    for item in endpoint.evidence
+                }
+                if (
+                    len(parent_envelope.evidence) != 2
+                    or any(len(endpoint.evidence) != 1 for endpoint in endpoint_envelopes)
+                    or parent_evidence != endpoint_evidence
+                ):
+                    raise GraphitiAdmissionConsumerError(
+                        "entity equivalence evidence differs from its exact mentions"
+                    )
         elif any(
             value is not None
             for value in (
@@ -115,7 +432,7 @@ class GraphitiAdmissionRequest:
                 self.relation_statement,
                 self.relation_temporal_bounds,
             )
-        ):
+        ) or self.relation_endpoint_bindings:
             raise GraphitiAdmissionConsumerError(
                 "entity admission mapping cannot carry relation evidence"
             )
@@ -129,11 +446,17 @@ class GraphitiAdmissionRequest:
             "queue_seq": self.queue_seq,
             "proposal_key": self.proposal_key,
             "source_receipt_digest": self.source_receipt_digest,
+            "proposal_authority_binding": (
+                self.proposal_authority_binding.canonical_value()
+            ),
             "proposal": dict(self.proposal_payload),
             "evidence_passages": [dict(item) for item in self.evidence_passages],
             "proposed_endpoints": (
                 None if self.proposed_endpoints is None else list(self.proposed_endpoints)
             ),
+            "relation_endpoint_bindings": [
+                item.canonical_value() for item in self.relation_endpoint_bindings
+            ],
             "relation_statement": self.relation_statement,
             "relation_temporal_bounds": (
                 None
@@ -149,6 +472,45 @@ class GraphitiAdmissionRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class GraphitiRelationHoldBasis:
+    """Existing 4B dependency receipts supporting a non-authoritative HOLD."""
+
+    dependency_id: str
+    authority_event_id: str
+    authority_ledger_seq: int
+    authority_receipt_digest: str
+
+    def __post_init__(self) -> None:
+        try:
+            EntityResolutionDependencyId.parse(self.dependency_id)
+            EventId.parse(self.authority_event_id)
+        except (TypeError, ValueError) as exc:
+            raise GraphitiAdmissionConsumerError(
+                "relation HOLD basis has invalid 4B identities"
+            ) from exc
+        if (
+            isinstance(self.authority_ledger_seq, bool)
+            or not isinstance(self.authority_ledger_seq, int)
+            or self.authority_ledger_seq <= 0
+        ):
+            raise GraphitiAdmissionConsumerError(
+                "relation HOLD basis needs a positive 4B ledger sequence"
+            )
+        validate_sha256_digest(
+            self.authority_receipt_digest,
+            field="relation HOLD 4B dependency receipt digest",
+        )
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "dependency_id": self.dependency_id,
+            "authority_event_id": self.authority_event_id,
+            "authority_ledger_seq": self.authority_ledger_seq,
+            "authority_receipt_digest": self.authority_receipt_digest,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class GraphitiGovernedDecision:
     proposal_key: str
     proposal_digest: str
@@ -159,8 +521,10 @@ class GraphitiGovernedDecision:
     authority_ledger_seq: int
     reason_code: str
     authority_receipt_digest: str
+    admitted_authority_id: str | None = None
     endpoint_resolution_decision_ids: tuple[str, ...] = ()
     resolved_endpoint_names: tuple[str, ...] = ()
+    relation_hold_basis: tuple[GraphitiRelationHoldBasis, ...] = ()
     provider_model_calls: int = 0
 
     def __post_init__(self) -> None:
@@ -196,6 +560,15 @@ class GraphitiGovernedDecision:
             self.authority_receipt_digest,
             field="Graphiti governed admission receipt digest",
         )
+        if self.action is GraphitiProposalAdmissionAction.ADMIT:
+            if not self.admitted_authority_id:
+                raise GraphitiAdmissionConsumerError(
+                    "admitted decision needs its canonical authority identity"
+                )
+        elif self.admitted_authority_id is not None:
+            raise GraphitiAdmissionConsumerError(
+                "non-admitted decision cannot name canonical authority"
+            )
         if self.proposal_kind is ExtractionProposalKind.RELATION:
             if (
                 self.action is GraphitiProposalAdmissionAction.ADMIT
@@ -220,6 +593,20 @@ class GraphitiGovernedDecision:
             raise GraphitiAdmissionConsumerError(
                 "entity resolution decision cannot name relation endpoints"
             )
+        if self.relation_hold_basis:
+            if (
+                self.proposal_kind is not ExtractionProposalKind.RELATION
+                or self.action is GraphitiProposalAdmissionAction.ADMIT
+                or len(self.relation_hold_basis) != 2
+                or len({item.dependency_id for item in self.relation_hold_basis}) != 2
+                or tuple(
+                    sorted(self.relation_hold_basis, key=lambda item: item.dependency_id)
+                )
+                != self.relation_hold_basis
+            ):
+                raise GraphitiAdmissionConsumerError(
+                    "operational relation HOLD needs two sorted 4B dependency bases"
+                )
         if self.provider_model_calls != 0:
             raise GraphitiAdmissionConsumerError(
                 "admission authority must make zero provider/model calls"
@@ -236,10 +623,14 @@ class GraphitiGovernedDecision:
             "authority_ledger_seq": self.authority_ledger_seq,
             "reason_code": self.reason_code,
             "authority_receipt_digest": self.authority_receipt_digest,
+            "admitted_authority_id": self.admitted_authority_id,
             "endpoint_resolution_decision_ids": list(
                 self.endpoint_resolution_decision_ids
             ),
             "resolved_endpoint_names": list(self.resolved_endpoint_names),
+            "relation_hold_basis": [
+                item.canonical_value() for item in self.relation_hold_basis
+            ],
             "provider_model_calls": self.provider_model_calls,
         }
 
@@ -261,6 +652,11 @@ class GraphitiProjectionReceipt:
     generation_id: str = ""
     schema_version: str = "newsroom.increment4.admitted-projection.v1"
     trust_scope: str = "ADMITTED"
+    cohort_digest: str | None = None
+    source_snapshot_digest: str | None = None
+    validation_digest: str | None = None
+    promotion_digest: str | None = None
+    generation_result_digest: str | None = None
     provider_model_calls: int = 0
 
     def __post_init__(self) -> None:
@@ -294,10 +690,44 @@ class GraphitiProjectionReceipt:
             raise GraphitiAdmissionConsumerError(
                 "projection receipt generation identity must be UUIDv4"
             ) from exc
-        if (
-            self.schema_version != "newsroom.increment4.admitted-projection.v1"
-            or self.trust_scope != "ADMITTED"
-        ):
+        legacy_schema = "newsroom.increment4.admitted-projection.v1"
+        generation_schema = (
+            "newsroom.increment4.admitted-generation-binding.v2"
+        )
+        generation_fields = (
+            self.cohort_digest,
+            self.source_snapshot_digest,
+            self.validation_digest,
+            self.promotion_digest,
+            self.generation_result_digest,
+        )
+        if self.schema_version == legacy_schema:
+            if any(item is not None for item in generation_fields):
+                raise GraphitiAdmissionConsumerError(
+                    "legacy projection receipt cannot claim generation binding"
+                )
+        elif self.schema_version == generation_schema:
+            if any(item is None for item in generation_fields):
+                raise GraphitiAdmissionConsumerError(
+                    "generation binding receipt is incomplete"
+                )
+            for field, value in zip(
+                (
+                    "cohort_digest",
+                    "source_snapshot_digest",
+                    "validation_digest",
+                    "promotion_digest",
+                    "generation_result_digest",
+                ),
+                generation_fields,
+                strict=True,
+            ):
+                validate_sha256_digest(str(value), field=field)
+        else:
+            raise GraphitiAdmissionConsumerError(
+                "projection receipt schema differs"
+            )
+        if self.trust_scope != "ADMITTED":
             raise GraphitiAdmissionConsumerError(
                 "projection receipt schema or trust scope differs"
             )
@@ -317,8 +747,79 @@ class GraphitiProjectionReceipt:
             "generation_id": self.generation_id,
             "schema_version": self.schema_version,
             "trust_scope": self.trust_scope,
+            "cohort_digest": self.cohort_digest,
+            "source_snapshot_digest": self.source_snapshot_digest,
+            "validation_digest": self.validation_digest,
+            "promotion_digest": self.promotion_digest,
+            "generation_result_digest": self.generation_result_digest,
             "provider_model_calls": self.provider_model_calls,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class GraphitiProjectionGenerationResult:
+    """One complete reconciled Increment 4 generation for a decided cohort."""
+
+    cohort_digest: str
+    generation_id: str
+    source_snapshot_digest: str
+    authority_watermark: int
+    validation_digest: str
+    promotion_digest: str
+    reconciliation_digest: str
+    admitted_authority_ids: tuple[str, ...]
+    provider_model_calls: int = 0
+
+    def __post_init__(self) -> None:
+        for field, value in (
+            ("cohort_digest", self.cohort_digest),
+            ("source_snapshot_digest", self.source_snapshot_digest),
+            ("validation_digest", self.validation_digest),
+            ("promotion_digest", self.promotion_digest),
+            ("reconciliation_digest", self.reconciliation_digest),
+        ):
+            validate_sha256_digest(value, field=field)
+        try:
+            ProjectionGenerationId.parse(self.generation_id)
+        except (TypeError, ValueError) as exc:
+            raise GraphitiAdmissionConsumerError(
+                "generation result identity must be UUIDv4"
+            ) from exc
+        if (
+            isinstance(self.authority_watermark, bool)
+            or not isinstance(self.authority_watermark, int)
+            or self.authority_watermark <= 0
+        ):
+            raise GraphitiAdmissionConsumerError(
+                "generation result needs a positive authority watermark"
+            )
+        if self.admitted_authority_ids != tuple(
+            sorted(set(self.admitted_authority_ids))
+        ) or any(not item for item in self.admitted_authority_ids):
+            raise GraphitiAdmissionConsumerError(
+                "generation admitted authority identities must be sorted and unique"
+            )
+        if self.provider_model_calls != 0:
+            raise GraphitiAdmissionConsumerError(
+                "generation projection must make zero provider/model calls"
+            )
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "cohort_digest": self.cohort_digest,
+            "generation_id": self.generation_id,
+            "source_snapshot_digest": self.source_snapshot_digest,
+            "authority_watermark": self.authority_watermark,
+            "validation_digest": self.validation_digest,
+            "promotion_digest": self.promotion_digest,
+            "reconciliation_digest": self.reconciliation_digest,
+            "admitted_authority_ids": list(self.admitted_authority_ids),
+            "provider_model_calls": self.provider_model_calls,
+        }
+
+    @property
+    def digest(self) -> str:
+        return digest_canonical(self.canonical_value())
 
 
 @dataclass(frozen=True, slots=True)
@@ -410,6 +911,15 @@ class GovernedGraphitiAdmissionAuthority(Protocol):
 
 
 class GovernedGraphitiProjector(Protocol):
+    def build_and_promote_increment4_cohort(
+        self,
+        requests: tuple[GraphitiProjectionRequest, ...],
+        *,
+        cohort_digest: str,
+        generation_id: str,
+        idempotency_key: str,
+    ) -> GraphitiProjectionGenerationResult: ...
+
     def recover_increment4_admitted_receipt(
         self, *, idempotency_key: str
     ) -> GraphitiProjectionReceipt | None: ...
@@ -434,6 +944,18 @@ class GovernedGraphitiProjector(Protocol):
         *,
         generation_id: str,
     ) -> GraphitiProjectionReconciliationReceipt: ...
+
+
+class GraphitiProposalAuthority(Protocol):
+    """Resolve a raw receipt proposal to exact retained 4D/4A authority."""
+
+    def bind_proposal(
+        self,
+        *,
+        ingest_id: str,
+        terminal_receipt: Mapping[str, object],
+        proposal: ProposalDraft,
+    ) -> GraphitiProposalAuthorityBinding | None: ...
 
 
 class GraphitiRightsAuthority(Protocol):
@@ -493,10 +1015,12 @@ class _MappedProposal:
     ingest_id: str
     source_revision_id: str
     source_receipt_digest: str
+    proposal_authority_binding: GraphitiProposalAuthorityBinding
     proposal: ProposalDraft
     proposal_payload: dict[str, object]
     evidence_passages: tuple[dict[str, object], ...]
     proposed_endpoints: tuple[str, str] | None
+    relation_endpoint_bindings: tuple[GraphitiProposalAuthorityBinding, ...]
     relation_statement: str | None
     relation_temporal_bounds: dict[str, object] | None
     private_graph_receipt: dict[str, object] | None
@@ -609,6 +1133,12 @@ def graphiti_admission_request_from_value(
         queue_seq=_exact_integer(raw["queue_seq"], field="queue sequence"),
         proposal_key=str(raw["proposal_key"]),
         source_receipt_digest=str(raw["source_receipt_digest"]),
+        proposal_authority_binding=_proposal_authority_binding_from_value(
+            _mapping(
+                raw["proposal_authority_binding"],
+                field="proposal authority binding",
+            )
+        ),
         proposal=_parse_proposal(proposal_payload),
         proposal_payload=proposal_payload,
         evidence_passages=tuple(
@@ -619,6 +1149,12 @@ def graphiti_admission_request_from_value(
             None
             if endpoints_raw is None
             else (str(endpoints_raw[0]), str(endpoints_raw[1]))  # type: ignore[index]
+        ),
+        relation_endpoint_bindings=tuple(
+            _proposal_authority_binding_from_value(
+                _mapping(item, field="relation endpoint authority binding")
+            )
+            for item in raw.get("relation_endpoint_bindings", [])  # type: ignore[union-attr]
         ),
         relation_statement=(
             None
@@ -636,6 +1172,21 @@ def graphiti_admission_request_from_value(
 
 def graphiti_governed_decision_from_json(value: str) -> GraphitiGovernedDecision:
     raw = _mapping(json.loads(value), field="retained admission decision")
+    hold_basis = tuple(
+        GraphitiRelationHoldBasis(
+            dependency_id=str(item["dependency_id"]),
+            authority_event_id=str(item["authority_event_id"]),
+            authority_ledger_seq=_exact_integer(
+                item["authority_ledger_seq"],
+                field="relation HOLD basis ledger sequence",
+            ),
+            authority_receipt_digest=str(item["authority_receipt_digest"]),
+        )
+        for item in (
+            _mapping(value, field="relation HOLD basis")
+            for value in raw.get("relation_hold_basis", [])  # type: ignore[union-attr]
+        )
+    )
     return GraphitiGovernedDecision(
         proposal_key=str(raw["proposal_key"]),
         proposal_digest=str(raw["proposal_digest"]),
@@ -648,12 +1199,18 @@ def graphiti_governed_decision_from_json(value: str) -> GraphitiGovernedDecision
         ),
         reason_code=str(raw["reason_code"]),
         authority_receipt_digest=str(raw["authority_receipt_digest"]),
+        admitted_authority_id=(
+            None
+            if raw.get("admitted_authority_id") is None
+            else str(raw["admitted_authority_id"])
+        ),
         endpoint_resolution_decision_ids=tuple(
             str(item) for item in raw["endpoint_resolution_decision_ids"]  # type: ignore[union-attr]
         ),
         resolved_endpoint_names=tuple(
             str(item) for item in raw["resolved_endpoint_names"]  # type: ignore[union-attr]
         ),
+        relation_hold_basis=hold_basis,
         provider_model_calls=_exact_integer(
             raw["provider_model_calls"], field="provider model calls"
         ),
@@ -674,6 +1231,31 @@ def graphiti_projection_receipt_from_json(value: str) -> GraphitiProjectionRecei
         generation_id=str(raw["generation_id"]),
         schema_version=str(raw["schema_version"]),
         trust_scope=str(raw["trust_scope"]),
+        cohort_digest=(
+            None
+            if raw.get("cohort_digest") is None
+            else str(raw["cohort_digest"])
+        ),
+        source_snapshot_digest=(
+            None
+            if raw.get("source_snapshot_digest") is None
+            else str(raw["source_snapshot_digest"])
+        ),
+        validation_digest=(
+            None
+            if raw.get("validation_digest") is None
+            else str(raw["validation_digest"])
+        ),
+        promotion_digest=(
+            None
+            if raw.get("promotion_digest") is None
+            else str(raw["promotion_digest"])
+        ),
+        generation_result_digest=(
+            None
+            if raw.get("generation_result_digest") is None
+            else str(raw["generation_result_digest"])
+        ),
         provider_model_calls=_exact_integer(
             raw["provider_model_calls"], field="provider model calls"
         ),
@@ -709,25 +1291,29 @@ class GraphitiAdmissionConsumer:
         self,
         connection: sqlite3.Connection,
         *,
+        proposal_authority: GraphitiProposalAuthority,
         authority: GovernedGraphitiAdmissionAuthority,
         projector: GovernedGraphitiProjector,
         rights: GraphitiRightsAuthority,
         clock: Callable[[], datetime] | None = None,
         max_attempts: int = 3,
         lease_seconds: int = 60,
-        projection_generation_id: str,
+        projection_generation_id: str | None = None,
     ) -> None:
         if max_attempts <= 0 or lease_seconds <= 0:
             raise ValueError("admission retry and lease bounds must be positive")
         self._connection = connection
+        self._proposal_authority = proposal_authority
         self._authority = authority
         self._projector = projector
         self._rights = rights
         self._clock = clock or (lambda: datetime.now(tz=UTC))
         self._max_attempts = max_attempts
         self._lease_seconds = lease_seconds
-        self._projection_generation_id = str(
-            ProjectionGenerationId.parse(projection_generation_id)
+        self._projection_generation_id = (
+            None
+            if projection_generation_id is None
+            else str(ProjectionGenerationId.parse(projection_generation_id))
         )
 
     def _now(self) -> datetime:
@@ -750,7 +1336,7 @@ class GraphitiAdmissionConsumer:
                    ingest.receipt_digest, receipt.receipt_json
             FROM unpublished_graphiti_ingest AS ingest
             JOIN unpublished_graphiti_receipts AS receipt USING(ingest_id)
-            WHERE ingest.outcome IN ('COMPLETE','PARTIAL')
+            WHERE ingest.outcome='COMPLETE'
             """
         parameters: tuple[object, ...] = ()
         if exact is not None:
@@ -778,6 +1364,13 @@ class GraphitiAdmissionConsumer:
                     receipt_digest=receipt_digest,
                     receipt_json=str(row[6]),
                 )
+            except _HistoricalRawProposalHold as exc:
+                if exact is not None:
+                    raise GraphitiAdmissionConsumerError(
+                        "exact Graphiti admission receipt lacks durable "
+                        f"ProposalEnvelope authority: {ingest_id}"
+                    ) from exc
+                continue
             except (
                 GraphitiAdmissionConsumerError,
                 IndexError,
@@ -890,17 +1483,18 @@ class GraphitiAdmissionConsumer:
             raise GraphitiAdmissionConsumerError(
                 "Graphiti entity and relation receipt identities must be unique"
             )
-        result = []
-        local_ids: set[str] = set()
-        entity_local_ids: set[str] = set()
-        relation_local_ids: set[str] = set()
+        parsed_proposals: list[
+            tuple[dict[str, object], ProposalDraft, GraphitiProposalAuthorityBinding]
+        ] = []
+        proposal_by_local_id: dict[str, ProposalDraft] = {}
+        binding_by_local_id: dict[str, GraphitiProposalAuthorityBinding] = {}
         for proposal_payload in proposals:
             proposal = _parse_proposal(proposal_payload)
-            if proposal.local_id in local_ids:
+            if proposal.local_id in proposal_by_local_id:
                 raise GraphitiAdmissionConsumerError(
                     "Graphiti proposal local identities must be unique"
                 )
-            local_ids.add(proposal.local_id)
+            proposal_by_local_id[proposal.local_id] = proposal
             for evidence in proposal.evidence:
                 passage = passages_by_id.get(str(evidence.passage_id))
                 if passage is None:
@@ -914,29 +1508,60 @@ class GraphitiAdmissionConsumer:
                     or evidence.end_byte > byte_length
                 ):
                     raise GraphitiAdmissionConsumerError(
-                        "Graphiti proposal evidence exceeds retained passage bytes"
+                        "Graphiti proposal evidence differs from retained passage bytes"
                     )
+            authority_binding = self._proposal_authority.bind_proposal(
+                ingest_id=ingest_id,
+                terminal_receipt=receipt,
+                proposal=proposal,
+            )
+            if authority_binding is None:
+                raise _HistoricalRawProposalHold(
+                    "Graphiti raw receipt lacks durable ProposalEnvelope authority"
+                )
+            if authority_binding.proposal_envelope.local_id != proposal.local_id:
+                raise GraphitiAdmissionConsumerError(
+                    "Graphiti ProposalEnvelope names another raw proposal"
+                )
+            binding_by_local_id[proposal.local_id] = authority_binding
+            parsed_proposals.append((proposal_payload, proposal, authority_binding))
+
+        entity_local_id_by_uuid: dict[str, str] = {}
+        for local_id, payload in entities_by_id.items():
+            if payload.get("source_registry_id") is True:
+                continue
+            node_uuid = payload.get("uuid")
+            if not isinstance(node_uuid, str) or not node_uuid:
+                if local_id in proposal_by_local_id:
+                    raise GraphitiAdmissionConsumerError(
+                        "Graphiti entity proposal lacks its exact private node link"
+                    )
+                continue
+            if node_uuid in entity_local_id_by_uuid:
+                raise GraphitiAdmissionConsumerError(
+                    "Graphiti private node identities must be unique within a receipt"
+                )
+            entity_local_id_by_uuid[node_uuid] = local_id
+
+        result = []
+        for proposal_payload, proposal, authority_binding in parsed_proposals:
             relation_payload = relations_by_id.get(proposal.local_id)
             entity_payload = entities_by_id.get(proposal.local_id)
             relation_statement: str | None = None
             relation_temporal_bounds: dict[str, object] | None = None
             proposed_endpoints: tuple[str, str] | None = None
+            relation_endpoint_bindings: tuple[
+                GraphitiProposalAuthorityBinding, ...
+            ] = ()
             if proposal.kind is ExtractionProposalKind.RELATION:
-                relation_local_ids.add(proposal.local_id)
                 if relation_payload is None:
                     raise GraphitiAdmissionConsumerError(
                         "Graphiti relation proposal lacks endpoint and temporal receipt"
                     )
-                for field in (
-                    "source_node_uuid",
-                    "target_node_uuid",
-                    "valid_at",
-                    "invalid_at",
-                    "expired_at",
-                ):
+                for field in ("source_node_uuid", "target_node_uuid"):
                     if field not in relation_payload:
                         raise GraphitiAdmissionConsumerError(
-                            "Graphiti relation endpoint or temporal receipt is incomplete"
+                            "Graphiti relation endpoint receipt is incomplete"
                         )
                 relation_statement = str(relation_payload.get("fact") or "")
                 if not relation_statement:
@@ -946,10 +1571,103 @@ class GraphitiAdmissionConsumer:
                 relation_temporal_bounds = {
                     field: relation_payload[field]
                     for field in ("valid_at", "invalid_at", "expired_at")
+                    if field in relation_payload
                 }
                 proposed_endpoints = (
                     proposal.subject_placeholder,
                     str(proposal.object_placeholder),
+                )
+                private_endpoint_ids = tuple(
+                    relation_payload[field]
+                    for field in ("source_node_uuid", "target_node_uuid")
+                )
+                if (
+                    any(
+                        not isinstance(item, str) or not item
+                        for item in private_endpoint_ids
+                    )
+                    or private_endpoint_ids[0] == private_endpoint_ids[1]
+                ):
+                    raise GraphitiAdmissionConsumerError(
+                        "Graphiti relation private endpoint links are invalid"
+                    )
+                endpoint_local_ids = tuple(
+                    entity_local_id_by_uuid.get(str(item))
+                    for item in private_endpoint_ids
+                )
+                if any(item is None for item in endpoint_local_ids):
+                    raise GraphitiAdmissionConsumerError(
+                        "Graphiti relation lacks exact same-receipt entity endpoints"
+                    )
+                endpoint_proposals = tuple(
+                    proposal_by_local_id.get(str(item)) for item in endpoint_local_ids
+                )
+                if (
+                    any(item is None for item in endpoint_proposals)
+                    or any(
+                        item.kind is not ExtractionProposalKind.ENTITY_MENTION
+                        for item in endpoint_proposals
+                        if item is not None
+                    )
+                    or tuple(
+                        item.subject_placeholder
+                        for item in endpoint_proposals
+                        if item is not None
+                    )
+                    != proposed_endpoints
+                ):
+                    raise GraphitiAdmissionConsumerError(
+                        "Graphiti relation endpoints do not bind exact entity proposals"
+                    )
+                relation_endpoint_bindings = tuple(
+                    binding_by_local_id[str(item)] for item in endpoint_local_ids
+                )
+            elif proposal.kind is ExtractionProposalKind.ENTITY_EQUIVALENCE:
+                proposed_endpoints = (
+                    proposal.subject_placeholder,
+                    str(proposal.object_placeholder),
+                )
+                equivalence_evidence = {
+                    canonical_json_bytes(item.canonical_value())
+                    for item in proposal.evidence
+                }
+                candidates = tuple(
+                    candidate
+                    for candidate in proposal_by_local_id.values()
+                    if candidate.kind is ExtractionProposalKind.ENTITY_MENTION
+                    and candidate.subject_placeholder in proposed_endpoints
+                    and len(candidate.evidence) == 1
+                    and canonical_json_bytes(
+                        candidate.evidence[0].canonical_value()
+                    )
+                    in equivalence_evidence
+                )
+                if (
+                    len(candidates) != 2
+                    or len({item.local_id for item in candidates}) != 2
+                    or sorted(item.subject_placeholder for item in candidates)
+                    != sorted(proposed_endpoints)
+                    or {
+                        canonical_json_bytes(item.evidence[0].canonical_value())
+                        for item in candidates
+                    }
+                    != equivalence_evidence
+                ):
+                    raise GraphitiAdmissionConsumerError(
+                        "Graphiti entity equivalence lacks two exact entity mentions"
+                    )
+                ordered_candidates = tuple(
+                    sorted(
+                        candidates,
+                        key=lambda item: (
+                            proposed_endpoints.index(item.subject_placeholder),
+                            item.local_id,
+                        ),
+                    )
+                )
+                relation_endpoint_bindings = tuple(
+                    binding_by_local_id[item.local_id]
+                    for item in ordered_candidates
                 )
             elif (
                 entity_payload is None
@@ -959,8 +1677,6 @@ class GraphitiAdmissionConsumer:
                 raise GraphitiAdmissionConsumerError(
                     "Graphiti entity proposal lacks its retained mention receipt"
                 )
-            else:
-                entity_local_ids.add(proposal.local_id)
             referenced_passages = tuple(
                 passages_by_id[str(evidence.passage_id)]
                 for evidence in proposal.evidence
@@ -968,8 +1684,15 @@ class GraphitiAdmissionConsumer:
             proposal_key = digest_canonical(
                 {
                     "source_receipt_digest": receipt_digest,
-                    "proposal_local_id": proposal.local_id,
-                    "proposal_digest": proposal.digest,
+                    "graphiti_attempt_id": (
+                        authority_binding.graphiti_attempt_id
+                    ),
+                    "proposal_envelope_id": str(
+                        authority_binding.proposal_envelope.proposal_id
+                    ),
+                    "proposal_envelope_digest": (
+                        authority_binding.proposal_envelope.canonical_digest
+                    ),
                 }
             )
             result.append(
@@ -978,10 +1701,12 @@ class GraphitiAdmissionConsumer:
                     ingest_id=ingest_id,
                     source_revision_id=str(lineage["revision_id"]),
                     source_receipt_digest=receipt_digest,
+                    proposal_authority_binding=authority_binding,
                     proposal=proposal,
                     proposal_payload=proposal_payload,
                     evidence_passages=referenced_passages,
                     proposed_endpoints=proposed_endpoints,
+                    relation_endpoint_bindings=relation_endpoint_bindings,
                     relation_statement=relation_statement,
                     relation_temporal_bounds=relation_temporal_bounds,
                     private_graph_receipt=(
@@ -989,13 +1714,6 @@ class GraphitiAdmissionConsumer:
                     ),
                     source_lineage=lineage,
                 )
-            )
-        if (
-            entity_local_ids != set(entities_by_id)
-            or relation_local_ids != set(relations_by_id)
-        ):
-            raise GraphitiAdmissionConsumerError(
-                "Graphiti entity or relation receipts do not exactly cover proposals"
             )
         return tuple(result)
 
@@ -1111,10 +1829,12 @@ class GraphitiAdmissionConsumer:
             queue_seq=queue_seq,
             proposal_key=mapped.proposal_key,
             source_receipt_digest=mapped.source_receipt_digest,
+            proposal_authority_binding=mapped.proposal_authority_binding,
             proposal=mapped.proposal,
             proposal_payload=mapped.proposal_payload,
             evidence_passages=mapped.evidence_passages,
             proposed_endpoints=mapped.proposed_endpoints,
+            relation_endpoint_bindings=mapped.relation_endpoint_bindings,
             relation_statement=mapped.relation_statement,
             relation_temporal_bounds=mapped.relation_temporal_bounds,
             source_lineage=mapped.source_lineage,
@@ -1180,16 +1900,41 @@ class GraphitiAdmissionConsumer:
                            proposal_kind
                     FROM unpublished_graphiti_admission_queue
                     WHERE (state='READY'
-                       OR (state='CLAIMED' AND claim_until<=?)
-                       OR (state='DECIDED' AND (claim_until IS NULL OR claim_until<=?)))
+                       OR (state='CLAIMED' AND claim_until<=?))
+                      AND CASE
+                            WHEN json_valid(request_json)
+                             AND json_type(
+                                request_json, '$.proposal_authority_binding'
+                             ) IS NULL
+                             AND json_type(request_json, '$.proposal')='object'
+                             AND json_type(
+                                request_json, '$.evidence_passages'
+                             )='array'
+                             AND json_type(
+                                request_json, '$.source_lineage'
+                             )='object'
+                             AND json_type(
+                                request_json, '$.proposal_key'
+                             )='text'
+                             AND json_type(
+                                request_json, '$.source_receipt_digest'
+                             )='text'
+                            THEN 0
+                            ELSE 1
+                          END
                     """
-                parameters: tuple[object, ...] = (now_text, now_text)
+                parameters: tuple[object, ...] = (now_text,)
                 if exact is not None:
                     statement += " AND ingest_id IN (" + ",".join(
                         "?" for _ in exact
                     ) + ")"
                     parameters = (*parameters, *exact)
-                statement += " ORDER BY queue_seq LIMIT 1"
+                statement += (
+                    " ORDER BY CASE proposal_kind "
+                    "WHEN 'ENTITY_MENTION' THEN 0 "
+                    "WHEN 'ENTITY_EQUIVALENCE' THEN 1 ELSE 2 END, "
+                    "queue_seq LIMIT 1"
+                )
                 row = self._connection.execute(statement, parameters).fetchone()
                 if row is None:
                     return None
@@ -1203,6 +1948,25 @@ class GraphitiAdmissionConsumer:
                     proposal_digest,
                     proposal_kind,
                 ) = map(str, row)
+                if proposal_kind == ExtractionProposalKind.RELATION.value:
+                    unresolved = """
+                        SELECT COUNT(*)
+                        FROM unpublished_graphiti_admission_queue
+                        WHERE proposal_kind!='RELATION'
+                          AND state NOT IN ('DECIDED','TERMINAL','PROJECTED','REVOKED')
+                        """
+                    unresolved_parameters: tuple[object, ...] = ()
+                    if exact is not None:
+                        unresolved += " AND ingest_id IN (" + ",".join(
+                            "?" for _ in exact
+                        ) + ")"
+                        unresolved_parameters = exact
+                    if int(
+                        self._connection.execute(
+                            unresolved, unresolved_parameters
+                        ).fetchone()[0]
+                    ):
+                        return None
                 try:
                     retained_request = _mapping(
                         json.loads(request_json),
@@ -1262,17 +2026,13 @@ class GraphitiAdmissionConsumer:
                 updated = self._connection.execute(
                     """
                     UPDATE unpublished_graphiti_admission_queue
-                    SET state=CASE
-                          WHEN state='DECIDED' THEN 'DECIDED' ELSE 'CLAIMED'
-                        END,
+                    SET state='CLAIMED',
                         claim_owner=?, claim_until=?, updated_at=?
                     WHERE proposal_key=?
                       AND (state='READY'
-                        OR (state='CLAIMED' AND claim_until<=?)
-                        OR (state='DECIDED'
-                            AND (claim_until IS NULL OR claim_until<=?)))
+                        OR (state='CLAIMED' AND claim_until<=?))
                     """,
-                    (worker_id, until, now_text, proposal_key, now_text, now_text),
+                    (worker_id, until, now_text, proposal_key, now_text),
                 ).rowcount
                 if updated != 1:
                     continue
@@ -1285,122 +2045,535 @@ class GraphitiAdmissionConsumer:
         worker_id: str,
         limit: int = 100,
         ingest_ids: tuple[str, ...] | None = None,
+        stop_on_failure: bool = False,
     ) -> GraphitiAdmissionDrainReport:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("admission drain limit must be positive")
+        if not isinstance(stop_on_failure, bool):
+            raise TypeError("admission stop-on-failure control must be boolean")
         exact = _exact_ingest_ids(ingest_ids)
-        claimed = decided = projected = failed = dead_lettered = 0
+        claimed = decided = failed = dead_lettered = 0
         for _ in range(limit):
             claim = self._claim_next(worker_id, ingest_ids=exact)
             if claim is None:
                 break
-            proposal_key, request, previous_state = claim
+            proposal_key, request, _previous_state = claim
             claimed += 1
             try:
-                decision = (
-                    self._retained_decision(proposal_key)
-                    if previous_state == "DECIDED"
-                    else None
+                rights_current = self._rights.is_current(request)
+                if stop_on_failure and not rights_current:
+                    raise GraphitiAdmissionConsumerError(
+                        "exact Graphiti campaign rights drifted before decision"
+                    )
+                required_action = (
+                    None
+                    if rights_current
+                    else GraphitiProposalAdmissionAction.REJECT
                 )
-                if decision is None:
-                    required_action = (
-                        None
-                        if self._rights.is_current(request)
-                        else GraphitiProposalAdmissionAction.REJECT
+                decide = (
+                    self._authority.decide_relation_admission
+                    if request.proposal.kind is ExtractionProposalKind.RELATION
+                    else self._authority.decide_entity_resolution
+                )
+                decision = decide(
+                    request,
+                    required_action=required_action,
+                    idempotency_key=f"graphiti-admit:{proposal_key}",
+                )
+                if (
+                    required_action is not None
+                    and decision.action is not required_action
+                ):
+                    raise GraphitiAdmissionConsumerError(
+                        "governed authority did not honour the rights rejection"
                     )
-                    decide = (
-                        self._authority.decide_relation_admission
-                        if request.proposal.kind is ExtractionProposalKind.RELATION
-                        else self._authority.decide_entity_resolution
-                    )
-                    decision = decide(
-                        request,
-                        required_action=required_action,
-                        idempotency_key=f"graphiti-admit:{proposal_key}",
-                    )
-                    if (
-                        required_action is not None
-                        and decision.action is not required_action
-                    ):
-                        raise GraphitiAdmissionConsumerError(
-                            "governed authority did not honour the rights rejection"
-                        )
-                    if (
-                        request.proposal.kind is ExtractionProposalKind.RELATION
-                        and decision.action
-                        is GraphitiProposalAdmissionAction.ADMIT
-                        and not self._authority.relation_endpoint_resolutions_current(
-                            request, decision
-                        )
-                    ):
-                        raise GraphitiAdmissionConsumerError(
-                            "relation endpoints lack current governed resolutions"
-                        )
-                    self._retain_decision(request, decision)
-                    decided += 1
-                if decision.action is GraphitiProposalAdmissionAction.ADMIT:
-                    endpoints_current = not (
-                        request.proposal.kind is ExtractionProposalKind.RELATION
-                    ) or self._authority.relation_endpoint_resolutions_current(
+                if (
+                    request.proposal.kind is ExtractionProposalKind.RELATION
+                    and decision.action is GraphitiProposalAdmissionAction.ADMIT
+                    and not self._authority.relation_endpoint_resolutions_current(
                         request, decision
                     )
-                    rights_current = self._rights.is_current(request)
-                    if not endpoints_current or not rights_current:
-                        if previous_state == "DECIDED":
-                            recovered = (
-                                self._projector.recover_increment4_admitted_receipt(
-                                    idempotency_key=(
-                                        f"graphiti-project:{proposal_key}:"
-                                        f"{decision.decision_id}"
-                                    )
-                                )
-                            )
-                            if recovered is not None:
-                                self._retain_projection(
-                                    request, decision, recovered
-                                )
-                                try:
-                                    self._tombstone_projection(
-                                        proposal_key=proposal_key,
-                                        request=request,
-                                        decision=decision,
-                                    )
-                                except Exception as exc:
-                                    failed += 1
-                                    if self._record_rights_reconciliation_failure(
-                                        proposal_key, exc
-                                    ):
-                                        dead_lettered += 1
-                                continue
-                        self._mark_revoked_before_projection(request)
-                        continue
-                    if (
-                        request.proposal.kind is ExtractionProposalKind.RELATION
-                        and not self._authority.relation_endpoint_resolutions_current(
-                            request, decision
-                        )
-                    ):
-                        raise GraphitiAdmissionConsumerError(
-                            "relation endpoints are no longer governed-current"
-                        )
-                    delivery = GraphitiProjectionRequest(request, decision)
-                    receipt = self._projector.deliver_increment4_admitted(
-                        delivery,
-                        idempotency_key=f"graphiti-project:{proposal_key}:{decision.decision_id}",
+                ):
+                    raise GraphitiAdmissionConsumerError(
+                        "relation endpoints lack current governed resolutions"
                     )
-                    self._retain_projection(request, decision, receipt)
-                    projected += 1
+                self._retain_decision(request, decision)
+                decided += 1
             except Exception as exc:
                 failed += 1
                 if self._record_work_failure(proposal_key, exc):
                     dead_lettered += 1
+                if stop_on_failure:
+                    break
         return GraphitiAdmissionDrainReport(
             claimed=claimed,
             decided=decided,
-            projected=projected,
+            projected=0,
             failed=failed,
             dead_lettered=dead_lettered,
         )
+
+    def finalise_decided_cohort(
+        self,
+        *,
+        ingest_ids: tuple[str, ...],
+    ) -> GraphitiAdmissionDrainReport:
+        """Promote one exact, completely decided cohort as one full generation.
+
+        Admission decisions remain individual immutable 4B/4C authority
+        receipts. Projection is deliberately different: every admitted member
+        of the exact cohort binds the same complete Increment 4 snapshot
+        generation and reconciliation receipt.
+        """
+
+        exact = _exact_ingest_ids(ingest_ids)
+        assert exact is not None
+        placeholders = ",".join("?" for _ in exact)
+        ingest_rows = self._connection.execute(
+            f"""
+            SELECT ingest.ingest_id, ingest.outcome, ingest.proposal_count,
+                   ingest.receipt_digest, receipt.receipt_json
+            FROM unpublished_graphiti_ingest AS ingest
+            JOIN unpublished_graphiti_receipts AS receipt USING(ingest_id)
+            WHERE ingest.ingest_id IN ({placeholders})
+              AND ingest.outcome='COMPLETE'
+            ORDER BY ingest.ingest_id
+            """,
+            exact,
+        ).fetchall()
+        if tuple(str(row[0]) for row in ingest_rows) != exact:
+            raise GraphitiAdmissionConsumerError(
+                "exact Graphiti admission receipts are missing or non-terminal"
+            )
+
+        source_receipts: list[dict[str, object]] = []
+        proposal_denominator = 0
+        for ingest_id, outcome, proposal_count, receipt_digest, receipt_json in (
+            ingest_rows
+        ):
+            receipt = _mapping(
+                json.loads(str(receipt_json)),
+                field="exact Graphiti terminal receipt",
+            )
+            unsigned = dict(receipt)
+            supplied_digest = unsigned.pop("receipt_digest", None)
+            actual_digest = digest_bytes(canonical_json_bytes(unsigned))
+            count = _exact_integer(
+                proposal_count,
+                field="exact Graphiti proposal denominator",
+            )
+            if (
+                receipt.get("ingest_id") != str(ingest_id)
+                or receipt.get("outcome") != str(outcome)
+                or receipt.get("proposal_count") != count
+                or supplied_digest != str(receipt_digest)
+                or actual_digest != str(receipt_digest)
+            ):
+                raise GraphitiAdmissionConsumerError(
+                    "exact Graphiti terminal receipt integrity differs"
+                )
+            proposal_denominator += count
+            source_receipts.append(
+                {
+                    "ingest_id": str(ingest_id),
+                    "receipt_digest": str(receipt_digest),
+                    "proposal_count": count,
+                }
+            )
+
+        failure_count = int(
+            self._connection.execute(
+                "SELECT COUNT(*) FROM "
+                "unpublished_graphiti_admission_receipt_failures "
+                f"WHERE ingest_id IN ({placeholders})",
+                exact,
+            ).fetchone()[0]
+        )
+        if failure_count:
+            raise GraphitiAdmissionConsumerError(
+                "exact Graphiti admission cohort has retained integrity failures"
+            )
+
+        queue_rows = self._connection.execute(
+            f"""
+            SELECT queue.queue_seq, queue.proposal_key, queue.ingest_id,
+                   queue.source_receipt_digest, queue.proposal_digest,
+                   queue.proposal_kind, queue.request_json,
+                   queue.request_digest, queue.state,
+                   decision.decision_json, decision.decision_digest
+            FROM unpublished_graphiti_admission_queue AS queue
+            LEFT JOIN unpublished_graphiti_admission_decisions AS decision
+              USING(proposal_key)
+            WHERE queue.ingest_id IN ({placeholders})
+            ORDER BY CASE queue.proposal_kind
+                         WHEN 'ENTITY_MENTION' THEN 0
+                         WHEN 'ENTITY_EQUIVALENCE' THEN 1
+                         ELSE 2
+                     END,
+                     queue.queue_seq
+            """,
+            exact,
+        ).fetchall()
+        if len(queue_rows) != proposal_denominator:
+            raise GraphitiAdmissionConsumerError(
+                "exact Graphiti cohort is not fully bound to durable ProposalEnvelope authority"
+            )
+        if proposal_denominator == 0:
+            return GraphitiAdmissionDrainReport()
+
+        receipt_by_ingest = {
+            str(item["ingest_id"]): str(item["receipt_digest"])
+            for item in source_receipts
+        }
+        decided_items: list[
+            tuple[GraphitiAdmissionRequest, GraphitiGovernedDecision]
+        ] = []
+        cohort_members: list[dict[str, object]] = []
+        stale_proposals: list[str] = []
+        for row in queue_rows:
+            (
+                queue_seq,
+                proposal_key,
+                ingest_id,
+                source_receipt_digest,
+                proposal_digest,
+                proposal_kind,
+                request_json,
+                request_digest,
+                state,
+                decision_json,
+                decision_digest,
+            ) = row
+            if decision_json is None or decision_digest is None:
+                raise GraphitiAdmissionConsumerError(
+                    "exact Graphiti cohort is not completely decided"
+                )
+            retained_request = _mapping(
+                json.loads(str(request_json)),
+                field="queued admission request",
+            )
+            request = graphiti_admission_request_from_value(retained_request)
+            decision = graphiti_governed_decision_from_json(str(decision_json))
+            if (
+                digest_bytes(canonical_json_bytes(retained_request))
+                != str(request_digest)
+                or digest_bytes(str(decision_json).encode("utf-8"))
+                != str(decision_digest)
+                or request.queue_seq != int(queue_seq)
+                or request.proposal_key != str(proposal_key)
+                or request.source_receipt_digest != str(source_receipt_digest)
+                or receipt_by_ingest.get(str(ingest_id))
+                != str(source_receipt_digest)
+                or request.proposal.digest != str(proposal_digest)
+                or request.proposal.kind.value != str(proposal_kind)
+                or decision.proposal_key != request.proposal_key
+                or decision.proposal_digest != request.proposal.digest
+                or decision.proposal_kind is not request.proposal.kind
+                or decision.proposal_local_id != request.proposal.local_id
+            ):
+                raise GraphitiAdmissionConsumerError(
+                    "exact Graphiti cohort decision integrity differs"
+                )
+            expected_states = (
+                {"DECIDED", "PROJECTED"}
+                if decision.action is GraphitiProposalAdmissionAction.ADMIT
+                else {"TERMINAL"}
+            )
+            if str(state) not in expected_states:
+                raise GraphitiAdmissionConsumerError(
+                    "exact Graphiti cohort contains non-terminal work"
+                )
+            if decision.action is GraphitiProposalAdmissionAction.ADMIT:
+                current = self._rights.is_current(request)
+                if request.proposal.kind is ExtractionProposalKind.RELATION:
+                    current = current and (
+                        decision.resolved_endpoint_names
+                        == request.proposed_endpoints
+                        and self._authority.relation_endpoint_resolutions_current(
+                            request, decision
+                        )
+                    )
+                if not current:
+                    stale_proposals.append(request.proposal_key)
+            decided_items.append((request, decision))
+            cohort_members.append(
+                {
+                    "ingest_id": str(ingest_id),
+                    "proposal_key": request.proposal_key,
+                    "proposal_envelope_id": str(
+                        request.proposal_authority_binding.proposal_envelope.proposal_id
+                    ),
+                    "decision_digest": str(decision_digest),
+                    "decision": decision.canonical_value(),
+                }
+            )
+
+        if stale_proposals:
+            now = self._time_text(self._now())
+            with _transaction(self._connection):
+                self._connection.executemany(
+                    """
+                    UPDATE unpublished_graphiti_admission_queue
+                    SET state='REVOKED', claim_owner=NULL, claim_until=NULL,
+                        last_error='RIGHTS_OR_ENDPOINT_AUTHORITY_REVOKED_BEFORE_GENERATION',
+                        updated_at=?
+                    WHERE proposal_key=? AND state='DECIDED'
+                    """,
+                    ((now, item) for item in stale_proposals),
+                )
+            raise GraphitiAdmissionConsumerError(
+                "exact Graphiti cohort lost current rights or endpoint authority"
+            )
+
+        cohort_digest, generation_id = graphiti_admission_generation_identity(
+            ingest_ids=exact,
+            source_receipts=tuple(source_receipts),
+            members=tuple(cohort_members),
+        )
+        projection_requests = tuple(
+            sorted(
+                (
+                    GraphitiProjectionRequest(request=request, decision=decision)
+                    for request, decision in decided_items
+                ),
+                key=lambda item: item.request.proposal_key,
+            )
+        )
+        admitted = tuple(
+            item
+            for item in projection_requests
+            if item.decision.action is GraphitiProposalAdmissionAction.ADMIT
+        )
+        admitted_authority_ids = tuple(
+            sorted(str(item.decision.admitted_authority_id) for item in admitted)
+        )
+        if len(admitted_authority_ids) != len(set(admitted_authority_ids)):
+            raise GraphitiAdmissionConsumerError(
+                "exact Graphiti cohort reuses canonical admitted authority identity"
+            )
+
+        existing_rows = self._connection.execute(
+            f"""
+            SELECT projection.proposal_key, projection.receipt_json
+            FROM unpublished_graphiti_projection_receipts AS projection
+            JOIN unpublished_graphiti_admission_queue AS queue USING(proposal_key)
+            WHERE queue.ingest_id IN ({placeholders})
+            ORDER BY projection.proposal_key
+            """,
+            exact,
+        ).fetchall()
+        reconciliation_rows = self._connection.execute(
+            "SELECT receipt_json FROM "
+            "unpublished_graphiti_projection_reconciliations "
+            "WHERE generation_id=? ORDER BY reconciled_at, receipt_digest",
+            (generation_id,),
+        ).fetchall()
+        retained_receipts: list[GraphitiProjectionReceipt] = []
+        retained_reconciliation: dict[str, object] | None = None
+        if existing_rows or reconciliation_rows:
+            if (
+                len(existing_rows) != len(admitted)
+                or len(reconciliation_rows) != 1
+            ):
+                raise GraphitiAdmissionConsumerError(
+                    "exact Graphiti generation retention is partial"
+                )
+            expected_by_key = {
+                item.request.proposal_key: item for item in admitted
+            }
+            for proposal_key, receipt_json in existing_rows:
+                receipt = graphiti_projection_receipt_from_json(str(receipt_json))
+                item = expected_by_key.get(str(proposal_key))
+                if (
+                    item is None
+                    or receipt.schema_version
+                    != "newsroom.increment4.admitted-generation-binding.v2"
+                    or receipt.generation_id != generation_id
+                    or receipt.cohort_digest != cohort_digest
+                    or receipt.decision_id != item.decision.decision_id
+                    or receipt.effect_id != item.decision.admitted_authority_id
+                ):
+                    raise GraphitiAdmissionConsumerError(
+                        "exact Graphiti retained generation identity differs"
+                    )
+                retained_receipts.append(receipt)
+            retained_reconciliation = _mapping(
+                json.loads(str(reconciliation_rows[0][0])),
+                field="retained projection reconciliation",
+            )
+            if (
+                retained_reconciliation.get("generation_id") != generation_id
+                or tuple(
+                    retained_reconciliation.get("expected_effect_ids") or ()
+                )
+                != admitted_authority_ids
+                or tuple(
+                    retained_reconciliation.get("actual_effect_ids") or ()
+                )
+                != admitted_authority_ids
+            ):
+                raise GraphitiAdmissionConsumerError(
+                    "exact Graphiti retained reconciliation differs"
+                )
+
+        result = self._projector.build_and_promote_increment4_cohort(
+            projection_requests,
+            cohort_digest=cohort_digest,
+            generation_id=generation_id,
+            idempotency_key=f"graphiti-generation:{cohort_digest}",
+        )
+        required_watermark = max(
+            decision.authority_ledger_seq for _request, decision in decided_items
+        )
+        if (
+            result.cohort_digest != cohort_digest
+            or result.generation_id != generation_id
+            or result.authority_watermark < required_watermark
+            or result.admitted_authority_ids != admitted_authority_ids
+        ):
+            raise GraphitiAdmissionConsumerError(
+                "Increment 4 generation result differs from exact admission authority"
+            )
+
+        if retained_reconciliation is not None:
+            if (
+                retained_reconciliation.get("authority_watermark")
+                != result.authority_watermark
+                or retained_reconciliation.get("receipt_digest")
+                != result.reconciliation_digest
+                or any(
+                    receipt.authority_watermark != result.authority_watermark
+                    or receipt.source_snapshot_digest
+                    != result.source_snapshot_digest
+                    or receipt.validation_digest != result.validation_digest
+                    or receipt.promotion_digest != result.promotion_digest
+                    or receipt.generation_result_digest != result.digest
+                    for receipt in retained_receipts
+                )
+            ):
+                raise GraphitiAdmissionConsumerError(
+                    "Increment 4 active generation differs from retained reconciliation"
+                )
+            return GraphitiAdmissionDrainReport()
+
+        generation_result_digest = result.digest
+        receipts: list[GraphitiProjectionReceipt] = []
+        for item in admitted:
+            material: dict[str, object] = {
+                "proposal_key": item.request.proposal_key,
+                "decision_id": item.decision.decision_id,
+                "effect_id": item.decision.admitted_authority_id,
+                "authority_watermark": result.authority_watermark,
+                "projector_family_id": "graph.increment4.admitted",
+                "generation_id": generation_id,
+                "schema_version": (
+                    "newsroom.increment4.admitted-generation-binding.v2"
+                ),
+                "trust_scope": "ADMITTED",
+                "cohort_digest": cohort_digest,
+                "source_snapshot_digest": result.source_snapshot_digest,
+                "validation_digest": result.validation_digest,
+                "promotion_digest": result.promotion_digest,
+                "generation_result_digest": generation_result_digest,
+                "provider_model_calls": 0,
+            }
+            receipts.append(
+                GraphitiProjectionReceipt(
+                    **material,
+                    receipt_digest=digest_canonical(material),
+                )
+            )
+        reconciliation = GraphitiProjectionReconciliationReceipt(
+            generation_id=generation_id,
+            expected_effect_ids=admitted_authority_ids,
+            actual_effect_ids=admitted_authority_ids,
+            authority_watermark=result.authority_watermark,
+            receipt_digest=result.reconciliation_digest,
+        )
+        now = self._time_text(self._now())
+        with _transaction(self._connection):
+            retained_count = int(
+                self._connection.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM unpublished_graphiti_projection_receipts AS projection
+                    JOIN unpublished_graphiti_admission_queue AS queue
+                      USING(proposal_key)
+                    WHERE queue.ingest_id IN ({placeholders})
+                    """,
+                    exact,
+                ).fetchone()[0]
+            )
+            retained_reconciliation_count = int(
+                self._connection.execute(
+                    "SELECT COUNT(*) FROM "
+                    "unpublished_graphiti_projection_reconciliations "
+                    "WHERE generation_id=?",
+                    (generation_id,),
+                ).fetchone()[0]
+            )
+            if retained_count or retained_reconciliation_count:
+                raise GraphitiAdmissionConsumerError(
+                    "exact Graphiti generation retention raced another writer"
+                )
+            for item, receipt in zip(admitted, receipts, strict=True):
+                encoded = canonical_json_bytes(
+                    receipt.canonical_value()
+                ).decode("utf-8")
+                self._connection.execute(
+                    """
+                    INSERT INTO unpublished_graphiti_projection_receipts(
+                        proposal_key, effect_id, authority_watermark,
+                        projector_family_id, generation_id, schema_version,
+                        trust_scope, receipt_json, receipt_digest, projected_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        item.request.proposal_key,
+                        receipt.effect_id,
+                        receipt.authority_watermark,
+                        receipt.projector_family_id,
+                        receipt.generation_id,
+                        receipt.schema_version,
+                        receipt.trust_scope,
+                        encoded,
+                        receipt.receipt_digest,
+                        now,
+                    ),
+                )
+                updated = self._connection.execute(
+                    """
+                    UPDATE unpublished_graphiti_admission_queue
+                    SET state='PROJECTED', claim_owner=NULL, claim_until=NULL,
+                        attempt_count=0, last_error=NULL, updated_at=?
+                    WHERE proposal_key=? AND state='DECIDED'
+                    """,
+                    (now, item.request.proposal_key),
+                ).rowcount
+                if updated != 1:
+                    raise GraphitiAdmissionConsumerError(
+                        "exact Graphiti admitted cohort state changed before retention"
+                    )
+            reconciliation_json = canonical_json_bytes(
+                reconciliation.canonical_value()
+            ).decode("utf-8")
+            self._connection.execute(
+                """
+                INSERT INTO unpublished_graphiti_projection_reconciliations(
+                    receipt_digest, projector_family_id, generation_id,
+                    authority_watermark, receipt_json, reconciled_at
+                ) VALUES(?,?,?,?,?,?)
+                """,
+                (
+                    reconciliation.receipt_digest,
+                    reconciliation.projector_family_id,
+                    reconciliation.generation_id,
+                    reconciliation.authority_watermark,
+                    reconciliation_json,
+                    now,
+                ),
+            )
+        return GraphitiAdmissionDrainReport(projected=len(receipts))
 
     def _mark_revoked_before_projection(
         self, request: GraphitiAdmissionRequest
@@ -1599,6 +2772,12 @@ class GraphitiAdmissionConsumer:
         limit: int = 100,
         ingest_ids: tuple[str, ...] | None = None,
     ) -> int:
+        """Reconcile legacy v1 per-proposal effects only.
+
+        Generation-bound v2 receipts are replaced only by another complete
+        Increment 4 snapshot; they must never enter this historical tombstone
+        path.
+        """
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("rights reconciliation limit must be positive")
         exact = _exact_ingest_ids(ingest_ids)
@@ -1613,6 +2792,8 @@ class GraphitiAdmissionConsumer:
               USING(proposal_key)
             WHERE decision.action='ADMIT' AND tombstone.proposal_key IS NULL
               AND queue.state='PROJECTED'
+              AND projection.schema_version=
+                  'newsroom.increment4.admitted-projection.v1'
             """
         parameters: tuple[object, ...] = ()
         if exact is not None:
@@ -1883,13 +3064,21 @@ def graphiti_admission_telemetry(
     *,
     now: datetime | None = None,
 ) -> GraphitiAdmissionTelemetry:
-    denominator = int(
+    queued_denominator = int(
         connection.execute(
-            "SELECT COALESCE(SUM(proposal_count),0) "
-            "FROM unpublished_graphiti_ingest "
-            "WHERE outcome IN ('COMPLETE','PARTIAL')"
+            "SELECT COUNT(*) FROM unpublished_graphiti_admission_queue"
         ).fetchone()[0]
     )
+    integrity_hold_denominator = int(
+        connection.execute(
+            """
+            SELECT COALESCE(SUM(ingest.proposal_count), 0)
+            FROM unpublished_graphiti_admission_receipt_failures AS failure
+            JOIN unpublished_graphiti_ingest AS ingest USING(ingest_id)
+            """
+        ).fetchone()[0]
+    )
+    denominator = queued_denominator + integrity_hold_denominator
     action_counts = {
         str(row[0]): int(row[1])
         for row in connection.execute(
@@ -2085,10 +3274,14 @@ __all__ = [
     "GraphitiAdmissionRequest",
     "GraphitiAdmissionTelemetry",
     "GraphitiGovernedDecision",
+    "GraphitiProjectionGenerationResult",
     "GraphitiProjectionReceipt",
     "GraphitiProjectionReconciliationReceipt",
     "GraphitiProjectionRequest",
+    "GraphitiProposalAuthority",
+    "GraphitiProposalAuthorityBinding",
     "GraphitiProposalAdmissionAction",
+    "GraphitiRelationHoldBasis",
     "GraphitiRightsAuthority",
     "graphiti_admission_request_from_value",
     "graphiti_admission_telemetry",

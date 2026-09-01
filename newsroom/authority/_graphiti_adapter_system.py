@@ -108,6 +108,7 @@ def open_governed_graphiti_adapter_authority_system(
                 configuration=boundary.configuration,
                 attempt=boundary.attempt,
                 attempt_history=boundary.attempt_history,
+                manifest_for_attempt=boundary.manifest_for_attempt,
                 replay_source=boundary.replay_source,
             ),
             close=close,
