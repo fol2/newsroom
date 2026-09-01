@@ -763,21 +763,13 @@ class GraphitiEventQueue:
             raise ValueError(reason)
         ordered = tuple(sorted(units, key=lambda item: item.chunk_ordinal))
         resolved_refs = _unit_refs(ordered)
-        manifest: dict[str, object] = {
-            "event_type": "EFFECTIVE_SOURCE_REVISION_LANDED",
-            "ledger_seq": event.ledger_seq,
-            "ledger_digest": event.event_id,
-            "landed_ingest_ids": list(event.landed_ingest_ids),
-            "landed_payload_digest": event.landed_payload_digest,
-            "unit_refs": resolved_refs,
-        }
-        manifest_json = _manifest_json(manifest)
         connection = _connect(self._path)
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
-                SELECT unit_count,manifest_json
+                SELECT unit_count,manifest_json,manifest_digest,ledger_seq,
+                       ledger_digest
                 FROM unpublished_graphiti_revision_events
                 WHERE event_id=? AND state='RUNNING' AND claim_owner=?
                 """,
@@ -785,8 +777,16 @@ class GraphitiEventQueue:
             ).fetchone()
             if row is None:
                 raise RuntimeError("Graphiti event binding lost its claim")
+            retained = json.loads(str(row[1]))
+            if (
+                not isinstance(retained, dict)
+                or digest_canonical(retained) != str(row[2])
+                or int(row[3]) != event.ledger_seq
+                or retained.get("ledger_seq") != event.ledger_seq
+                or retained.get("ledger_digest") != str(row[4])
+            ):
+                raise ValueError("Graphiti retained event identity differs")
             if int(row[0]) > 0:
-                retained = json.loads(str(row[1]))
                 retained_refs = (
                     retained.get("unit_refs") if isinstance(retained, dict) else None
                 )
@@ -797,6 +797,15 @@ class GraphitiEventQueue:
                 ) != tuple(_stable_unit_ref(ref) for ref in resolved_refs):
                     raise ValueError("RESOLVED_CHUNKS_DIFFER_FROM_RETAINED_REFS")
             else:
+                manifest: dict[str, object] = {
+                    "event_type": "EFFECTIVE_SOURCE_REVISION_LANDED",
+                    "ledger_seq": event.ledger_seq,
+                    "ledger_digest": str(row[4]),
+                    "landed_ingest_ids": list(event.landed_ingest_ids),
+                    "landed_payload_digest": event.landed_payload_digest,
+                    "unit_refs": resolved_refs,
+                }
+                manifest_json = _manifest_json(manifest)
                 connection.execute(
                     """
                     UPDATE unpublished_graphiti_revision_events

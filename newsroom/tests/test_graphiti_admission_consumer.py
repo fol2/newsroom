@@ -9,6 +9,7 @@ import pytest
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.graphiti_admission import (
     GraphitiAdmissionConsumer,
+    GraphitiAdmissionConsumerError,
     GraphitiGovernedDecision,
     GraphitiProjectionReconciliationReceipt,
     GraphitiProjectionReceipt,
@@ -63,8 +64,11 @@ def _draft(local_id: str, kind: ExtractionProposalKind) -> ProposalDraft:
     )
 
 
-def _seed_receipt(connection, *drafts: ProposalDraft) -> dict[str, object]:
-    ingest_id = "sha256:" + ("75" * 32)
+def _seed_receipt(
+    connection,
+    *drafts: ProposalDraft,
+    ingest_id: str = "sha256:" + ("75" * 32),
+) -> dict[str, object]:
     revision_id = "00000000-0000-4000-8000-000000007580"
     passage = {
         "passage_id": "00000000-0000-4000-8000-000000007581",
@@ -378,7 +382,80 @@ def test_complete_receipts_map_exactly_and_only_admit_projects(tmp_path) -> None
         receipt.effect_id for receipt in projector.deliveries.values()
     )
     assert consumer.telemetry().projection_reconciled is True
+
+
+def test_exact_ingest_cohort_never_enqueues_or_drains_other_receipts(tmp_path) -> None:
+    connection = connect(str(tmp_path / "admission.sqlite3"))
+    first_id = "00000000-0000-4000-8000-0000000075a1"
+    second_id = "00000000-0000-4000-8000-0000000075a2"
+    first = _draft("entity.0001", ExtractionProposalKind.ENTITY_MENTION)
+    second = _draft("entity.0002", ExtractionProposalKind.ENTITY_MENTION)
+    _seed_receipt(connection, first, ingest_id=first_id)
+    _seed_receipt(connection, second, ingest_id=second_id)
+    authority = _Authority(
+        {
+            first.local_id: GraphitiProposalAdmissionAction.REJECT,
+            second.local_id: GraphitiProposalAdmissionAction.REJECT,
+        }
+    )
+    consumer = _consumer(connection, authority, _Projector(), _Rights())
+
+    assert consumer.enqueue_complete_receipts(ingest_ids=(second_id,)) == 1
+    assert connection.execute(
+        "SELECT ingest_id FROM unpublished_graphiti_admission_queue"
+    ).fetchall() == [(second_id,)]
+    assert consumer.enqueue_complete_receipts(ingest_ids=(first_id,)) == 1
+
+    report = consumer.drain(
+        worker_id="fixture-worker",
+        limit=10,
+        ingest_ids=(second_id,),
+    )
+
+    assert report.claimed == 1
+    assert report.decided == 1
+    assert connection.execute(
+        "SELECT ingest_id,state FROM unpublished_graphiti_admission_queue "
+        "ORDER BY ingest_id"
+    ).fetchall() == [(first_id, "READY"), (second_id, "TERMINAL")]
+    assert [call[0].source_lineage["ingest_id"] for call in authority.calls] == [
+        second_id
+    ]
+
+
+@pytest.mark.parametrize(
+    "ingest_ids",
+    ((), ("b", "a"), ("a", "a"), ("",)),
+)
+def test_exact_ingest_cohort_must_be_nonempty_sorted_and_unique(
+    tmp_path,
+    ingest_ids,
+) -> None:
+    connection = connect(str(tmp_path / "admission.sqlite3"))
+    consumer = _consumer(connection, _Authority({}), _Projector(), _Rights())
+
+    with pytest.raises(ValueError, match="exact Graphiti admission ingest"):
+        consumer.enqueue_complete_receipts(ingest_ids=ingest_ids)
+    with pytest.raises(ValueError, match="exact Graphiti admission ingest"):
+        consumer.drain(worker_id="fixture-worker", ingest_ids=ingest_ids)
     assert consumer.telemetry().projection_gap_count == 0
+    connection.close()
+
+
+def test_exact_ingest_cohort_distinguishes_zero_proposals_from_missing(
+    tmp_path,
+) -> None:
+    connection = connect(str(tmp_path / "admission.sqlite3"))
+    zero_id = "00000000-0000-4000-8000-0000000075b1"
+    _seed_receipt(connection, ingest_id=zero_id)
+    consumer = _consumer(connection, _Authority({}), _Projector(), _Rights())
+
+    assert consumer.enqueue_complete_receipts(ingest_ids=(zero_id,)) == 0
+    with pytest.raises(GraphitiAdmissionConsumerError, match="missing or non-terminal"):
+        consumer.enqueue_complete_receipts(
+            ingest_ids=("00000000-0000-4000-8000-0000000075b2",)
+        )
+
     connection.close()
 
 
@@ -403,6 +480,74 @@ def test_integrity_invalid_terminal_receipt_is_never_claimable_or_silent(tmp_pat
     assert telemetry.proposal_denominator == 1
     assert telemetry.admission_backlog == 1
     assert telemetry.integrity_hold_receipt_count == 1
+    connection.close()
+
+
+def test_exact_ingest_cohort_rejects_invalid_receipt_after_recording_failure(
+    tmp_path,
+) -> None:
+    connection = connect(str(tmp_path / "invalid-exact.sqlite3"))
+    ingest_id = "00000000-0000-4000-8000-0000000075b3"
+    draft = _draft("entity.0001", ExtractionProposalKind.ENTITY_MENTION)
+    receipt = _seed_receipt(connection, draft, ingest_id=ingest_id)
+    tampered = dict(receipt)
+    tampered["proposals"] = [
+        {**draft.canonical_value(), "subject_placeholder": "Mallory"}
+    ]
+    connection.execute(
+        "UPDATE unpublished_graphiti_receipts SET receipt_json=? WHERE ingest_id=?",
+        (json.dumps(tampered, sort_keys=True), ingest_id),
+    )
+    connection.commit()
+    consumer = _consumer(connection, _Authority({}), _Projector(), _Rights())
+
+    with pytest.raises(
+        GraphitiAdmissionConsumerError,
+        match="exact Graphiti admission receipt is invalid",
+    ):
+        consumer.enqueue_complete_receipts(ingest_ids=(ingest_id,))
+
+    failure = connection.execute(
+        "SELECT ingest_id,receipt_digest FROM "
+        "unpublished_graphiti_admission_receipt_failures"
+    ).fetchone()
+    assert failure == (ingest_id, receipt["receipt_digest"])
+    connection.close()
+
+
+def test_exact_ingest_cohort_validates_every_receipt_before_enqueuing(
+    tmp_path,
+) -> None:
+    connection = connect(str(tmp_path / "invalid-exact-batch.sqlite3"))
+    valid_id = "00000000-0000-4000-8000-0000000075b4"
+    invalid_id = "00000000-0000-4000-8000-0000000075b5"
+    valid = _draft("entity.0001", ExtractionProposalKind.ENTITY_MENTION)
+    invalid = _draft("entity.0002", ExtractionProposalKind.ENTITY_MENTION)
+    _seed_receipt(connection, valid, ingest_id=valid_id)
+    receipt = _seed_receipt(connection, invalid, ingest_id=invalid_id)
+    tampered = dict(receipt)
+    tampered["proposals"] = [
+        {**invalid.canonical_value(), "subject_placeholder": "Mallory"}
+    ]
+    connection.execute(
+        "UPDATE unpublished_graphiti_receipts SET receipt_json=? WHERE ingest_id=?",
+        (json.dumps(tampered, sort_keys=True), invalid_id),
+    )
+    connection.commit()
+    consumer = _consumer(connection, _Authority({}), _Projector(), _Rights())
+
+    with pytest.raises(
+        GraphitiAdmissionConsumerError,
+        match="exact Graphiti admission receipt is invalid",
+    ):
+        consumer.enqueue_complete_receipts(ingest_ids=(valid_id, invalid_id))
+
+    assert connection.execute(
+        "SELECT COUNT(*) FROM unpublished_graphiti_admission_queue"
+    ).fetchone() == (0,)
+    assert connection.execute(
+        "SELECT ingest_id FROM unpublished_graphiti_admission_receipt_failures"
+    ).fetchall() == [(invalid_id,)]
     connection.close()
 
 
