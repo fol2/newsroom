@@ -1446,10 +1446,9 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
 ) -> None:
     """Live 13683: persistable leftover NEW + float fact_embedding is TERMINAL.
 
-    Provider COMPLETE + embeddings + persistable edges bound float
-    fact_embedding into the durable receipt. Canonicalisation failed after
-    persist and unmarked 0/0/0 became AMBIGUOUS_EFFECT. Fails on b7a02cdb
-    because that path still classifies the unmarked zero as ambiguous.
+    Provider COMPLETE + embeddings + persistable edges bind float
+    fact_embedding for persistence. The derivative vector is omitted from the
+    canonical receipt without erasing the accepted relation.
     """
 
     from contextlib import asynccontextmanager
@@ -1469,9 +1468,15 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
         CURSOR_AGENT_MODEL_ID,
         GRAPHITI_WORKSPACE_GROUP,
     )
-    from newsroom.graphiti_adapter.neo4j_guard import GuardMarker, GuardState
+    from newsroom.graphiti_adapter.neo4j_guard import (
+        GuardError,
+        GuardMarker,
+        GuardState,
+    )
 
     persist_calls: list[str] = []
+    guard_calls: list[str] = []
+    guards: list[object] = []
     executions: list[object] = []
     existing_nodes: list[object] = []
     stores = build_rehearsal_stores(tmp_path, unused_13683=True)
@@ -1563,21 +1568,35 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
             self.group_id = values.get("group_id")
             self.episode_uuid = values.get("episode_uuid")
             self.input_digest = values.get("input_digest")
+            self.state = GuardState.CREATED
+            guards.append(self)
 
         async def begin(self) -> object:
-            return GuardMarker(
+            marker = GuardMarker(
                 state=GuardState.CREATED,
                 attempt_number=1,
                 input_digest=str(self.input_digest or "sha256:" + "0" * 64),
             )
+            self.state = GuardState.PENDING
+            return marker
+
+        def require_pending(self, operation: str) -> None:
+            if self.state is not GuardState.PENDING:
+                raise GuardError(f"Graphiti {operation} lost its pending claim")
 
         async def record_pending_telemetry(self, **_values: object) -> None:
-            return None
+            self.require_pending("telemetry")
+            guard_calls.append("telemetry")
 
         async def complete(self, _receipt: object) -> None:
-            return None
+            self.require_pending("completion")
+            self.state = GuardState.COMPLETE
+            guard_calls.append("complete")
 
         async def rollback_pending(self, **_values: object) -> bool:
+            self.require_pending("rollback")
+            self.state = GuardState.RECOVERED_AMBIGUOUS
+            guard_calls.append("rollback")
             return True
 
         async def restore_preexisting(self) -> None:
@@ -1797,6 +1816,8 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
     combined = None if not isinstance(raw, dict) else raw.get("combined_temporal_receipt")
     unused = unused_queued_attempt_zero_candidates(stores.work_unpublished, plan)
     assert persist_calls == ["process"]
+    assert guard_calls == ["telemetry", "complete"]
+    assert getattr(guards[-1], "state") is GuardState.COMPLETE
     assert consume_calls == [EVENT_13683]
     assert receipt["consumption"]["event_id"] == EVENT_13683
     assert receipt["consumption"]["ledger_seq"] == LEDGER_13683
@@ -1814,15 +1835,18 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
     assert event["attempt_count"] == 1
     assert event["provider_dispatched"] == 1
     assert type(event["provider_dispatched"]) is int
-    assert ingest == ("COMPLETE", 0, 0, 0)
+    assert ingest == ("COMPLETE", 3, 2, 1)
     assert attempt["outcome"] == "COMPLETE"
-    assert attempt["proposal_count"] == 0
-    assert attempt.get("entity_count") == 0
-    assert attempt.get("relation_count") == 0
+    assert attempt["proposal_count"] == 3
+    assert attempt.get("entity_count") == 2
+    assert attempt.get("relation_count") == 1
     assert execution.outcome.value == "COMPLETE"
     assert execution.produced.outcome.value == "SUCCESS"
     assert isinstance(combined, dict)
-    assert combined["zero_proposal_effect"] == "EXPLICIT"
+    relation = combined["proposal_receipt"]["relation_proposals"][0]
+    assert relation["proposal_status"] == "PROPOSED"
+    assert "fact_embedding" not in relation
+    assert "zero_proposal_effect" not in combined
     assert attempt["chat_invocations"][0]["usage"]["total_tokens"] == 6_374
     assert spent_13665 == ("CONFIGURATION_HELD", 1, 1)
     assert spent_13671 == ("CONFIGURATION_HELD", 1, 0)

@@ -28,7 +28,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_WORKSPACE_GROUP,
 )
-from newsroom.graphiti_adapter.neo4j_guard import GuardState
+from newsroom.graphiti_adapter.neo4j_guard import GuardError, GuardState
 
 
 class _Guard:
@@ -71,6 +71,40 @@ class _Guard:
 
     async def rollback_pending(self, **_kwargs: Any) -> bool:
         self.calls.append("rollback")
+        return True
+
+
+class _StatefulGuard(_Guard):
+    """Model the native guard's terminal transition after rollback."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.claim_state = GuardState.CREATED
+        self.pending_telemetry: dict[str, object] | None = None
+
+    async def begin(self) -> Any:
+        marker = await super().begin()
+        self.claim_state = GuardState.PENDING
+        return marker
+
+    def _require_pending(self, operation: str) -> None:
+        if self.claim_state is not GuardState.PENDING:
+            raise GuardError(f"Graphiti {operation} lost its pending claim")
+
+    async def record_pending_telemetry(self, **_kwargs: Any) -> None:
+        self._require_pending("telemetry")
+        self.pending_telemetry = dict(_kwargs)
+        await super().record_pending_telemetry(**_kwargs)
+
+    async def complete(self, receipt: dict[str, object]) -> None:
+        self._require_pending("completion")
+        await super().complete(receipt)
+        self.claim_state = GuardState.COMPLETE
+
+    async def rollback_pending(self, **_kwargs: Any) -> bool:
+        self._require_pending("rollback")
+        self.calls.append("rollback")
+        self.claim_state = GuardState.RECOVERED_AMBIGUOUS
         return True
 
 
@@ -603,16 +637,18 @@ def test_new_nodes_without_persistable_edges_seal_explicit_empty_effect() -> Non
     ]
 
 
-def test_persistable_float_fact_embedding_seals_explicit_empty_effect() -> None:
-    """Live 13683: persistable edges with float fact_embedding are explicit zero."""
+def test_persistable_float_fact_embedding_remains_nonzero_and_canonical() -> None:
+    """A derivative float embedding must not erase a persistable relation."""
 
-    guard = _Guard()
+    guard = _StatefulGuard()
     persist_calls: list[object] = []
     sealed: list[tuple[list[object], list[object]]] = []
+    embedding_usage = {"request_count": 1}
     pipeline = _pipeline(guard)
 
     async def persist_graph(nodes: list[Any], edges: list[Any]) -> None:
         persist_calls.append((list(nodes), list(edges)))
+        embedding_usage["request_count"] = 2
         guard.calls.append("persist")
 
     def complete_receipt(
@@ -624,6 +660,7 @@ def test_persistable_float_fact_embedding_seals_explicit_empty_effect() -> None:
         return payload
 
     pipeline.persist_graph = persist_graph
+    pipeline.embedding_receipt = lambda: dict(embedding_usage)
     pipeline.complete_receipt = complete_receipt
     edge = _edge()
     edge.uuid = "edge-1"
@@ -639,14 +676,21 @@ def test_persistable_float_fact_embedding_seals_explicit_empty_effect() -> None:
         },
     )
 
-    assert persist_calls != []
-    assert "rollback" in guard.calls
-    assert sealed[-1] == ([], [])
-    assert result.graph_effect_attempted is False
-    assert result.nodes == ()
-    assert result.edges == ()
+    assert len(persist_calls) == 1
+    assert "rollback" not in guard.calls
+    assert guard.claim_state is GuardState.COMPLETE
+    assert len(sealed[-1][0]) == 2
+    assert len(sealed[-1][1]) == 1
+    assert result.graph_effect_attempted is True
+    assert len(result.nodes) == 2
+    assert len(result.edges) == 1
     assert result.completed_receipt is not None
-    assert result.completed_receipt["zero_proposal_effect"] == "EXPLICIT"
+    relation = result.completed_receipt["proposal_receipt"]["relation_proposals"][0]
+    assert relation["proposal_status"] == "PROPOSED"
+    assert "fact_embedding" not in relation
+    assert result.completed_receipt["embedding_usage"]["request_count"] == 2
+    assert guard.pending_telemetry is not None
+    assert guard.pending_telemetry["embedding_usage"]["request_count"] == 2
     canonical_json_bytes(dict(result.completed_receipt))
 
 
