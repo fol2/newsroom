@@ -2228,6 +2228,93 @@ def test_step22_fresh_missing_prepared_fails_before_any_effect(
     assert dispatch_started_count(stores.work_unpublished) == 0
 
 
+def test_step22_fresh_decision_digest_differs_fails_before_any_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pending-plan READY artefact must not consume against the activated plan."""
+
+    stores = build_rehearsal_stores(tmp_path, unused_13689=True)
+    activated = _activate_step22(stores.work_unpublished)
+    plan = activated["plan"]
+    pending = json.loads((_ROOT / ISSUE_790_STEP22_PENDING_PLAN_PATH).read_text())
+    pending_prepared = prepared_canary_from_record(
+        prepared_canary_record(
+            prepare_issue_790_canary(
+                store=stores.work_unpublished,
+                proving_store=stores.proving,
+                plan=pending,
+                observed_at=OBSERVED_AT,
+                exact_head=EXACT_HEAD,
+                event_id=EVENT_13689,
+                ledger_seq=LEDGER_13689,
+                role="preflight",
+            )
+        )
+    )
+    artefact = tmp_path / "pending-prepared-canary.json"
+    disposition.write_issue_790_canonical_json(
+        artefact,
+        prepared_canary_record(pending_prepared),
+        field="prepared canary",
+    )
+    loaded = prepared_canary_from_record(
+        json.loads(artefact.read_text(encoding="utf-8"))
+    )
+    _seed_production_disposition(stores.work_unpublished, plan)
+    _patch_production_predispatch(monkeypatch, plan=plan)
+    consume_calls: list[str] = []
+
+    def must_not_consume(**_values: object) -> None:
+        consume_calls.append("called")
+        raise AssertionError("decision-digest mismatch reached consumption")
+
+    monkeypatch.setattr(disposition, "_consume_issue_790_event", must_not_consume)
+    backup = tmp_path / "decision-digest-differs-must-not-exist.sqlite3"
+    with pytest.raises(PreparedCanaryError) as caught:
+        disposition.run_issue_790_canary(
+            store=stores.work_unpublished,
+            proving_store=stores.proving,
+            backup_path=backup,
+            plan=plan,
+            observed_at=OBSERVED_AT,
+            repository_root=tmp_path,
+            event_id=EVENT_13689,
+            ledger_seq=LEDGER_13689,
+            disposition_digest=_PRODUCTION_DISPOSITION,
+            prepared=loaded,
+            github_api=activated["github"],
+        )
+    event = _sqlite_canary_event(
+        stores.work_unpublished, ledger_seq=LEDGER_13689
+    )
+    connection = sqlite3.connect(stores.work_unpublished)
+    try:
+        consumptions = connection.execute(
+            "SELECT COUNT(*) FROM issue_790_bounded_canary_consumptions "
+            "WHERE ledger_seq=?",
+            (LEDGER_13689,),
+        ).fetchone()[0]
+        outcomes = connection.execute(
+            "SELECT COUNT(*) FROM issue_790_bounded_canary_outcomes "
+            "WHERE ledger_seq=?",
+            (LEDGER_13689,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert str(caught.value) == "prepared canary decision digest differs"
+    assert caught.value.failure_code == PREPARED_CANARY_DIGEST_DRIFT
+    assert backup.exists() is False
+    assert consume_calls == []
+    assert consumptions == 0
+    assert outcomes == 0
+    assert event["state"] == "QUEUED"
+    assert event["attempt_count"] == 0
+    assert event["provider_dispatched"] == 0
+    assert event["claim_owner"] is None
+    assert dispatch_started_count(stores.work_unpublished) == 0
+
+
 def test_step22_fresh_in_memory_prepared_fails_before_any_effect(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2527,6 +2614,87 @@ def test_step22_complete_preflight_emits_prepared_bound_live_command(
     assert rehearsal["decision_digest"] == retained.decision_digest
     assert rehearsal["dispatch_started"] is True
     assert rehearsal["provider_calls"] == 0
+
+
+def test_step22_preflight_written_prepared_json_reaches_dispatch_started(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid preflight JSON artefact is the live consume authority."""
+
+    from scripts.issue_790_live_canary_preflight import (
+        _ops_gates,
+        _prepare_preflight_canary,
+    )
+
+    ops = inspect.getsource(_ops_gates)
+    helper = inspect.getsource(_prepare_preflight_canary)
+    assert ops.count("_prepare_preflight_canary(") == 1
+    assert "activated_plan=activated_plan" in ops
+    assert "plan=activated_plan" in helper
+    stores = build_rehearsal_stores(tmp_path, unused_13689=True)
+    activated = _activate_step22(stores.work_unpublished)
+    plan = activated["plan"]
+    _seed_production_disposition(stores.work_unpublished, plan)
+    _patch_production_predispatch(monkeypatch, plan=plan)
+    prepared = _prepare_preflight_canary(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        activated_plan=plan,
+        observed_at=OBSERVED_AT,
+        exact_head=EXACT_HEAD,
+    )
+    artefact = tmp_path / "prepared-canary.json"
+    record = disposition.write_issue_790_canonical_json(
+        artefact,
+        prepared_canary_record(prepared),
+        field="prepared canary",
+    )
+    loaded = prepared_canary_from_record(
+        json.loads(artefact.read_text(encoding="utf-8"))
+    )
+    RehearsalRealGraphitiAdapter.provider_calls = 0
+    RehearsalRealGraphitiAdapter.dispatch_started = False
+    backup = tmp_path / "preflight-written-prepared.sqlite3"
+    later = OBSERVED_AT + timedelta(seconds=30)
+    receipt = disposition.run_issue_790_canary(
+        store=stores.work_unpublished,
+        proving_store=stores.proving,
+        backup_path=backup,
+        plan=plan,
+        observed_at=later,
+        repository_root=tmp_path,
+        event_id=str(loaded.candidate_identity["event_id"]),
+        ledger_seq=int(loaded.candidate_identity["ledger_seq"]),
+        disposition_digest=_PRODUCTION_DISPOSITION,
+        prepared=loaded,
+        graphiti=RehearsalEvaluationGraphitiRunner(clock=lambda: later),
+        github_api=activated["github"],
+    )
+    connection = sqlite3.connect(stores.work_unpublished)
+    try:
+        consumptions = connection.execute(
+            "SELECT COUNT(*) FROM issue_790_bounded_canary_consumptions "
+            "WHERE ledger_seq=?",
+            (LEDGER_13689,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert loaded.decision_digest == prepared.decision_digest
+    assert loaded.record_digest == record["record_digest"]
+    assert backup.is_file()
+    assert consumptions == 1
+    assert receipt["prepared_canary_decision_digest"] == loaded.decision_digest
+    assert receipt["prepared_canary_record_digest"] == loaded.record_digest
+    assert RehearsalRealGraphitiAdapter.dispatch_started is True
+    assert RehearsalRealGraphitiAdapter.provider_calls == 0
+    assert dispatch_started_count(stores.work_unpublished) >= 1
+    assert receipt["provider_dispatch_attempted_this_run"] is True
+    assert receipt["exception"] is None
+    assert receipt["process_result"]["state"] == "TERMINAL"
+    assert receipt["outcome"]["result_class"] == "TRUTHFUL_PROVIDER_SUCCESS"
+    assert receipt["canary_evidence_passed"] is True
+    assert receipt["publication_performed"] is False
 
 
 def test_fresh_canary_rejects_backup_replacement_before_consumption(
@@ -3236,14 +3404,21 @@ def test_retry_forbidden_target_fail_closes(tmp_path: Path) -> None:
 
 
 def test_unique_prepare_is_consumed_by_preflight_apply_and_canary() -> None:
+    from scripts.issue_790_live_canary_preflight import (
+        _ops_gates,
+        _prepare_preflight_canary,
+    )
+
     root = _TEST_FILE.resolve().parents[2]
     sources = (
-        (root / "scripts/issue_790_live_canary_preflight.py").read_text(encoding="utf-8"),
+        inspect.getsource(_prepare_preflight_canary),
         inspect.getsource(disposition._execute_issue_790_plan),
         inspect.getsource(disposition._run_issue_790_canary_locked),
     )
     for source in sources:
         assert "prepare_issue_790_canary" in source
+    assert "plan=activated_plan" in sources[0]
+    assert "_prepare_preflight_canary(" in inspect.getsource(_ops_gates)
     definitions = [
         node
         for node in ast.parse(
