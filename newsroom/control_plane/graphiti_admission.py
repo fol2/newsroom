@@ -59,6 +59,26 @@ class GraphitiAdmissionConsumerError(RuntimeError):
     """A durable receipt or governed admission response is invalid."""
 
 
+def _exact_ingest_ids(
+    ingest_ids: tuple[str, ...] | None,
+) -> tuple[str, ...] | None:
+    if ingest_ids is None:
+        return None
+    if (
+        not isinstance(ingest_ids, tuple)
+        or not ingest_ids
+        or any(
+            not isinstance(item, str)
+            or not item
+            or len(item.encode("utf-8")) > 256
+            for item in ingest_ids
+        )
+        or ingest_ids != tuple(sorted(set(ingest_ids)))
+    ):
+        raise ValueError("exact Graphiti admission ingest identities are invalid")
+    return ingest_ids
+
+
 @dataclass(frozen=True, slots=True)
 class GraphitiAdmissionRequest:
     queue_seq: int
@@ -720,19 +740,31 @@ class GraphitiAdmissionConsumer:
     def _time_text(value: datetime) -> str:
         return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
-    def enqueue_complete_receipts(self) -> int:
-        rows = self._connection.execute(
-            """
+    def enqueue_complete_receipts(
+        self, *, ingest_ids: tuple[str, ...] | None = None
+    ) -> int:
+        exact = _exact_ingest_ids(ingest_ids)
+        statement = """
             SELECT ingest.ingest_id, ingest.outcome, ingest.proposal_count,
                    ingest.entity_count, ingest.relation_count,
                    ingest.receipt_digest, receipt.receipt_json
             FROM unpublished_graphiti_ingest AS ingest
             JOIN unpublished_graphiti_receipts AS receipt USING(ingest_id)
             WHERE ingest.outcome IN ('COMPLETE','PARTIAL')
-            ORDER BY ingest.at, ingest.ingest_id
             """
-        )
-        enqueued = 0
+        parameters: tuple[object, ...] = ()
+        if exact is not None:
+            statement += " AND ingest.ingest_id IN (" + ",".join(
+                "?" for _ in exact
+            ) + ")"
+            parameters = exact
+        statement += " ORDER BY ingest.at, ingest.ingest_id"
+        rows = self._connection.execute(statement, parameters).fetchall()
+        if exact is not None and tuple(sorted(str(row[0]) for row in rows)) != exact:
+            raise GraphitiAdmissionConsumerError(
+                "exact Graphiti admission receipts are missing or non-terminal"
+            )
+        mapped_receipts: list[tuple[str, tuple[_MappedProposal, ...]]] = []
         for row in rows:
             ingest_id = str(row[0])
             receipt_digest = str(row[5])
@@ -746,14 +778,6 @@ class GraphitiAdmissionConsumer:
                     receipt_digest=receipt_digest,
                     receipt_json=str(row[6]),
                 )
-                with _transaction(self._connection):
-                    for mapped in requests:
-                        enqueued += self._insert_request(mapped)
-                    self._connection.execute(
-                        "DELETE FROM unpublished_graphiti_admission_receipt_failures "
-                        "WHERE ingest_id=?",
-                        (ingest_id,),
-                    )
             except (
                 GraphitiAdmissionConsumerError,
                 IndexError,
@@ -766,6 +790,23 @@ class GraphitiAdmissionConsumer:
                     ingest_id=ingest_id,
                     receipt_digest=receipt_digest,
                     detail=str(exc),
+                )
+                if exact is not None:
+                    raise GraphitiAdmissionConsumerError(
+                        "exact Graphiti admission receipt is invalid: "
+                        f"{ingest_id}"
+                    ) from exc
+                continue
+            mapped_receipts.append((ingest_id, requests))
+        enqueued = 0
+        with _transaction(self._connection):
+            for ingest_id, requests in mapped_receipts:
+                for mapped in requests:
+                    enqueued += self._insert_request(mapped)
+                self._connection.execute(
+                    "DELETE FROM unpublished_graphiti_admission_receipt_failures "
+                    "WHERE ingest_id=?",
+                    (ingest_id,),
                 )
         return enqueued
 
@@ -1119,28 +1160,37 @@ class GraphitiAdmissionConsumer:
                 (ingest_id, receipt_digest, detail[:4096], now, now),
             )
 
-    def _claim_next(self, worker_id: str) -> tuple[str, GraphitiAdmissionRequest, str] | None:
+    def _claim_next(
+        self,
+        worker_id: str,
+        *,
+        ingest_ids: tuple[str, ...] | None = None,
+    ) -> tuple[str, GraphitiAdmissionRequest, str] | None:
         if not worker_id or len(worker_id.encode("utf-8")) > 256:
             raise ValueError("admission worker identity is invalid")
+        exact = _exact_ingest_ids(ingest_ids)
         now = self._now()
         now_text = self._time_text(now)
         until = self._time_text(now + timedelta(seconds=self._lease_seconds))
         with _transaction(self._connection):
             while True:
-                row = self._connection.execute(
-                    """
+                statement = """
                     SELECT proposal_key, ingest_id, request_json, request_digest,
                            state, source_receipt_digest, proposal_digest,
                            proposal_kind
                     FROM unpublished_graphiti_admission_queue
-                    WHERE state='READY'
+                    WHERE (state='READY'
                        OR (state='CLAIMED' AND claim_until<=?)
-                       OR (state='DECIDED' AND (claim_until IS NULL OR claim_until<=?))
-                    ORDER BY queue_seq
-                    LIMIT 1
-                    """,
-                    (now_text, now_text),
-                ).fetchone()
+                       OR (state='DECIDED' AND (claim_until IS NULL OR claim_until<=?)))
+                    """
+                parameters: tuple[object, ...] = (now_text, now_text)
+                if exact is not None:
+                    statement += " AND ingest_id IN (" + ",".join(
+                        "?" for _ in exact
+                    ) + ")"
+                    parameters = (*parameters, *exact)
+                statement += " ORDER BY queue_seq LIMIT 1"
+                row = self._connection.execute(statement, parameters).fetchone()
                 if row is None:
                     return None
                 (
@@ -1229,12 +1279,19 @@ class GraphitiAdmissionConsumer:
                 break
         return proposal_key, request, state
 
-    def drain(self, *, worker_id: str, limit: int = 100) -> GraphitiAdmissionDrainReport:
+    def drain(
+        self,
+        *,
+        worker_id: str,
+        limit: int = 100,
+        ingest_ids: tuple[str, ...] | None = None,
+    ) -> GraphitiAdmissionDrainReport:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("admission drain limit must be positive")
+        exact = _exact_ingest_ids(ingest_ids)
         claimed = decided = projected = failed = dead_lettered = 0
         for _ in range(limit):
-            claim = self._claim_next(worker_id)
+            claim = self._claim_next(worker_id, ingest_ids=exact)
             if claim is None:
                 break
             proposal_key, request, previous_state = claim
@@ -1536,11 +1593,16 @@ class GraphitiAdmissionConsumer:
             )
         return dead
 
-    def reconcile_rights(self, *, limit: int = 100) -> int:
+    def reconcile_rights(
+        self,
+        *,
+        limit: int = 100,
+        ingest_ids: tuple[str, ...] | None = None,
+    ) -> int:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("rights reconciliation limit must be positive")
-        rows = self._connection.execute(
-            """
+        exact = _exact_ingest_ids(ingest_ids)
+        statement = """
             SELECT queue.proposal_key, queue.request_json, decision.decision_json
             FROM unpublished_graphiti_admission_queue AS queue
             JOIN unpublished_graphiti_admission_decisions AS decision
@@ -1551,9 +1613,15 @@ class GraphitiAdmissionConsumer:
               USING(proposal_key)
             WHERE decision.action='ADMIT' AND tombstone.proposal_key IS NULL
               AND queue.state='PROJECTED'
-            ORDER BY queue.queue_seq
             """
-        ).fetchall()
+        parameters: tuple[object, ...] = ()
+        if exact is not None:
+            statement += " AND queue.ingest_id IN (" + ",".join(
+                "?" for _ in exact
+            ) + ")"
+            parameters = exact
+        statement += " ORDER BY queue.queue_seq"
+        rows = self._connection.execute(statement, parameters).fetchall()
         revoked = 0
         for proposal_key, request_json, decision_json in rows:
             if revoked >= limit:

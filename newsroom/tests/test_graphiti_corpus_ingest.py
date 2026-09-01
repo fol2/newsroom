@@ -4,7 +4,7 @@ import json
 import sqlite3
 import threading
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal, Never
@@ -26,6 +26,7 @@ from newsroom.control_plane.cycle import (
     CycleReport,
     _bind_result,
     _dispatch_rights_decision,
+    _graphiti_dispatch_controls,
     _latest_run_id,
     _latest_run_with_global_authority,
     _reconcile_result_spend,
@@ -2345,6 +2346,45 @@ def test_dispatch_veto_and_source_rights_use_one_sqlite_snapshot(
     assert "PROVING_RUNS" in combined
     assert "PROVING_GATES" in combined
     assert "PROVING_RIGHTS_PACKETS" in combined
+
+
+def test_graphiti_dispatch_controls_honour_a_stricter_runtime_cap(
+    tmp_path: Path,
+) -> None:
+    proving = _proving(tmp_path)
+    now = datetime(2026, 8, 21, tzinfo=UTC)
+    current = {"now": now}
+    unit = SimpleNamespace(
+        source_id="UK-01",
+        source_definition_url=SOURCE_URLS["UK-01"],
+    )
+    _check, fence = _graphiti_dispatch_controls(
+        str(proving),
+        clock=lambda: current["now"],
+        max_dispatch_seconds=45,
+    )
+
+    current["now"] = now + timedelta(seconds=30)
+    with fence(unit) as authority:  # type: ignore[arg-type]
+        assert authority is not None
+        assert authority.deadline == now + timedelta(seconds=45)
+
+    current["now"] = now + timedelta(seconds=46)
+    with fence(unit) as authority:  # type: ignore[arg-type]
+        assert authority is None
+
+
+@pytest.mark.parametrize("value", (0, -1, float("nan"), float("inf"), True))
+def test_graphiti_dispatch_controls_reject_invalid_runtime_caps(
+    tmp_path: Path,
+    value: object,
+) -> None:
+    with pytest.raises(ValueError, match="finite and positive"):
+        _graphiti_dispatch_controls(
+            str(tmp_path / "unused.sqlite3"),
+            clock=lambda: datetime(2026, 8, 21, tzinfo=UTC),
+            max_dispatch_seconds=value,  # type: ignore[arg-type]
+        )
 
 
 def test_dispatch_requires_rights_beyond_the_full_extraction_deadline(

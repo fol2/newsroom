@@ -9,37 +9,48 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from newsroom.control_plane.graphiti_steady_state import (
-    AdmissionRuntimeComposition,
     build_graphiti_steady_state_packet,
     write_content_addressed_packet,
 )
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _git(*args: str) -> str:
     return subprocess.run(
-        ("git", *args), check=True, capture_output=True, text=True
+        ("git", *args),
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=REPOSITORY_ROOT,
     ).stdout.strip()
+
+
+def _exact_main_identity() -> tuple[str, str]:
+    if _git("status", "--porcelain=v1", "--untracked-files=all"):
+        raise RuntimeError("steady-state evidence requires a clean worktree")
+    head_sha = _git("rev-parse", "HEAD")
+    if head_sha != _git("rev-parse", "origin/main"):
+        raise RuntimeError("steady-state evidence requires exact origin/main")
+    return head_sha, _git("rev-parse", "HEAD^{tree}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--proving", required=True)
     parser.add_argument("--unpublished", required=True)
-    parser.add_argument(
-        "--admission-runtime",
-        choices=[item.value for item in AdmissionRuntimeComposition],
-        default=AdmissionRuntimeComposition.UNCOMPOSED.value,
-    )
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
+    head_sha, tree_sha = _exact_main_identity()
     packet = build_graphiti_steady_state_packet(
         proving_store=args.proving,
         unpublished_store=args.unpublished,
-        head_sha=_git("rev-parse", "HEAD"),
-        tree_sha=_git("rev-parse", "HEAD^{tree}"),
+        head_sha=head_sha,
+        tree_sha=tree_sha,
         observed_at=datetime.now(tz=UTC),
-        admission_runtime=AdmissionRuntimeComposition(args.admission_runtime),
     )
+    if _exact_main_identity() != (head_sha, tree_sha):
+        raise RuntimeError("code identity changed while building steady-state evidence")
     if args.output_dir is None:
         print(json.dumps(packet, ensure_ascii=False, indent=2, sort_keys=True))
     else:

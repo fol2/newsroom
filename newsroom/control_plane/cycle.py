@@ -6,10 +6,11 @@ Graphiti corpus ingest is independent of CONT writes (GING-001).
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import uuid
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -65,7 +66,10 @@ from newsroom.control_plane.graphiti_events import (
     graphiti_unit_binding_reason,
 )
 from newsroom.control_plane.items import parse_observation
-from newsroom.control_plane.issue_790_canary import Issue790CanaryRepository
+from newsroom.control_plane.issue_790_canary import (
+    Issue790CanaryRepository,
+    graphiti_retry_excluded,
+)
 from newsroom.control_plane.model_usage import (
     InvocationAllocation,
     InvocationEfficiencyPolicy,
@@ -167,6 +171,7 @@ _PROVING_RUN_LATEST_ORDER = "rowid DESC"
 _PROVING_RUN_EARLIEST_ORDER = "rowid ASC"
 _PROVING_FENCE_TIMEOUT_SECONDS = 5.0
 _RAW_HTTP_RETENTION: Final = timedelta(days=7)
+GRAPHITI_UNIT_RESERVATION_GBP_MICROUNITS: Final[int] = 500_000
 _GRAPHITI_RECOVERY_CLOSED_LEDGER_KIND: Final[str] = "GRAPHITI_EVALUATION_RECOVERY_CLOSED"
 _CLOSED_MARKER_RECOVERIES: Final[
     frozenset[GraphitiRecoveryClassification]
@@ -193,11 +198,24 @@ class _ProviderAttemptRecoveryAccounting(TypedDict):
 class GraphitiAdmissionCycleAtom(Protocol):
     """Bounded admission work configured by the Hermes composition root."""
 
-    def enqueue_complete_receipts(self) -> int: ...
+    def enqueue_complete_receipts(
+        self, *, ingest_ids: tuple[str, ...] | None = None
+    ) -> int: ...
 
-    def drain(self, *, worker_id: str, limit: int = 100) -> object: ...
+    def drain(
+        self,
+        *,
+        worker_id: str,
+        limit: int = 100,
+        ingest_ids: tuple[str, ...] | None = None,
+    ) -> object: ...
 
-    def reconcile_rights(self, *, limit: int = 100) -> int: ...
+    def reconcile_rights(
+        self,
+        *,
+        limit: int = 100,
+        ingest_ids: tuple[str, ...] | None = None,
+    ) -> int: ...
 
 
 GraphitiAdmissionFactory = Callable[
@@ -1156,7 +1174,7 @@ def _ingest(
                 attempt_number=attempt_number,
                 proving_run_id=unit.proving_run_id,
                 generation_id=GRAPHITI_GENERATION_ID,
-                reserved_gbp_microunits=500_000,
+                reserved_gbp_microunits=GRAPHITI_UNIT_RESERVATION_GBP_MICROUNITS,
                 ceiling_gbp_microunits=OD_011_CASH_CEILING_GBP * 1_000_000,
             )
         except GraphitiSpendCeilingExceeded:
@@ -1187,7 +1205,9 @@ def _ingest(
                     "profile": "EVALUATION",
                     "metered_api": OPENROUTER_API,
                     "metered_use": "embeddings",
-                    "reserved_gbp_microunits": 500_000,
+                    "reserved_gbp_microunits": (
+                        GRAPHITI_UNIT_RESERVATION_GBP_MICROUNITS
+                    ),
                     "chat": GRAPHITI_CHAT_MODEL,
                     "chat_fallback": GRAPHITI_CHAT_FALLBACK,
                     "chat_subscription_not_debited": True,
@@ -2725,21 +2745,48 @@ def _graphiti_dispatch_controls(
     proving_store: str,
     *,
     clock: Callable[[], datetime],
+    max_dispatch_seconds: float | None = None,
 ) -> tuple[
     Callable[[CorpusIngestUnit], dict[str, object] | None],
     Callable[[CorpusIngestUnit], ContextManager[_DispatchAuthority | None]],
 ]:
+    fixed_timeout_seconds = GRAPHITI_EXTRACTION_TIMEOUT_MS / 1_000
+    if max_dispatch_seconds is None:
+        dispatch_seconds = fixed_timeout_seconds
+    elif (
+        isinstance(max_dispatch_seconds, bool)
+        or not isinstance(max_dispatch_seconds, (int, float))
+        or not math.isfinite(float(max_dispatch_seconds))
+        or max_dispatch_seconds <= 0
+    ):
+        raise ValueError(
+            "maximum Graphiti dispatch seconds must be finite and positive"
+        )
+    else:
+        dispatch_seconds = min(float(max_dispatch_seconds), fixed_timeout_seconds)
+
+    fixed_deadline = (
+        None
+        if max_dispatch_seconds is None
+        else clock().astimezone(UTC) + timedelta(seconds=dispatch_seconds)
+    )
+
+    def deadline_for(evaluated_at: datetime) -> datetime:
+        return fixed_deadline or evaluated_at + timedelta(seconds=dispatch_seconds)
+
     def rights_check(unit: CorpusIngestUnit) -> dict[str, object] | None:
         current = sqlite3.connect(proving_store)
         apply_control_plane_sqlite_profile(current, query_only=True)
         try:
             evaluated_at = clock().astimezone(UTC)
+            if fixed_deadline is not None and evaluated_at >= fixed_deadline:
+                return None
             return _dispatch_rights_decision(
                 current,
                 source_id=unit.source_id,
                 source_url=unit.source_definition_url,
                 evaluated_at=_utc_text(evaluated_at),
-                required_valid_until=_dispatch_valid_until(evaluated_at),
+                required_valid_until=_utc_text(deadline_for(evaluated_at)),
             )
         finally:
             current.close()
@@ -2774,20 +2821,24 @@ def _graphiti_dispatch_controls(
                     )
 
             evaluated_at = clock().astimezone(UTC)
-            decision = _dispatch_rights_decision(
-                current,
-                source_id=unit.source_id,
-                source_url=unit.source_definition_url,
-                evaluated_at=_utc_text(evaluated_at),
-                required_valid_until=_dispatch_valid_until(evaluated_at),
+            deadline = deadline_for(evaluated_at)
+            decision = (
+                None
+                if fixed_deadline is not None and evaluated_at >= fixed_deadline
+                else _dispatch_rights_decision(
+                    current,
+                    source_id=unit.source_id,
+                    source_url=unit.source_definition_url,
+                    evaluated_at=_utc_text(evaluated_at),
+                    required_valid_until=_utc_text(deadline),
+                )
             )
             yield (
                 None
                 if decision is None
                 else _DispatchAuthority(
                     rights=decision,
-                    deadline=evaluated_at
-                    + timedelta(milliseconds=GRAPHITI_EXTRACTION_TIMEOUT_MS),
+                    deadline=deadline,
                     owner_stop_check=prove_owner_stop_clear,
                 )
             )
@@ -2861,28 +2912,41 @@ def load_graphiti_units(
 
     proving = sqlite3.connect(proving_store)
     apply_control_plane_sqlite_profile(proving, query_only=True)
-    collected: list[CorpusIngestUnit] = []
     try:
-        _run_id, _latest, corpus_rows = _permitted_rows(
+        return load_graphiti_units_from_connection(
             proving,
-            evaluated_at=_utc_text(evaluated_at),
-            required_valid_until=_dispatch_valid_until(evaluated_at),
+            evaluated_at=evaluated_at,
         )
-        resolver = EffectiveRevisionIdentityResolver(proving)
-        for row in corpus_rows:
-            collected.extend(
-                units_from(
-                    _parsed_observations((row,)),
-                    proving_run_id=row.run_id,
-                    rights_authority_run_id=row.rights_authority_run_id,
-                    rights_gate_id=row.rights_gate_id,
-                    rights_gate_reason=row.rights_gate_reason,
-                    source_definition_url=row.url,
-                    effective_revision_resolver=resolver,
-                )
-            )
     finally:
         proving.close()
+
+
+def load_graphiti_units_from_connection(
+    proving: sqlite3.Connection,
+    *,
+    evaluated_at: datetime,
+) -> tuple[CorpusIngestUnit, ...]:
+    """Resolve current rights-permitted units from an existing read-only view."""
+
+    collected: list[CorpusIngestUnit] = []
+    _run_id, _latest, corpus_rows = _permitted_rows(
+        proving,
+        evaluated_at=_utc_text(evaluated_at),
+        required_valid_until=_dispatch_valid_until(evaluated_at),
+    )
+    resolver = EffectiveRevisionIdentityResolver(proving)
+    for row in corpus_rows:
+        collected.extend(
+            units_from(
+                _parsed_observations((row,)),
+                proving_run_id=row.run_id,
+                rights_authority_run_id=row.rights_authority_run_id,
+                rights_gate_id=row.rights_gate_id,
+                rights_gate_reason=row.rights_gate_reason,
+                source_definition_url=row.url,
+                effective_revision_resolver=resolver,
+            )
+        )
     return unique_chunk_units(tuple(collected))
 
 
@@ -2906,13 +2970,20 @@ def qualify_fresh_graphiti_event(
         row = unpublished.execute(
             "SELECT event_id,ledger_seq,source_id,item_key,revision_digest,"
             "published_at,updated_at,unit_count,manifest_json,manifest_digest,"
-            "state,attempt_count,available_at,claim_owner,claim_expires_at "
+            "state,attempt_count,available_at,claim_owner,claim_expires_at,"
+            "ledger_digest "
             "FROM unpublished_graphiti_revision_events "
             "WHERE event_id=? AND ledger_seq=?",
             (event_id, ledger_seq),
         ).fetchone()
+        retry_excluded = graphiti_retry_excluded(
+            unpublished,
+            event_id=event_id,
+        )
     finally:
         unpublished.close()
+    if retry_excluded:
+        raise ValueError("bounded Graphiti event is durably retry-excluded")
     if (
         row is None
         or str(row[10]) != "QUEUED"
@@ -2930,6 +3001,7 @@ def qualify_fresh_graphiti_event(
         not isinstance(manifest, dict)
         or digest_canonical(manifest) != str(row[9])
         or manifest.get("ledger_seq") != int(row[1])
+        or manifest.get("ledger_digest") != str(row[15])
     ):
         raise ValueError("bounded Graphiti event manifest differs")
     unit_refs = manifest.get("unit_refs")
@@ -2986,6 +3058,7 @@ def qualify_fresh_graphiti_event(
         "schema_version": "newsroom.graphiti-fresh-event-preflight.v1",
         "event_id": event.event_id,
         "ledger_seq": event.ledger_seq,
+        "ledger_digest": str(row[15]),
         "event_state": event.state,
         "event_attempt_count": event.attempt_count,
         "event_manifest_digest": str(row[9]),
@@ -3038,8 +3111,42 @@ def consume_next_graphiti_event(
     require_fresh: bool = False,
     recover_model_usage: bool = True,
     canary_consumption_digest: str | None = None,
+    max_dispatch_seconds: float | None = None,
+    prepared_event_preflight: Mapping[str, object] | None = None,
+    max_reserved_gbp_microunits: int | None = None,
 ) -> GraphitiProcessResult | None:
     """Claim and process one durable revision, independently from source polling."""
+
+    if max_reserved_gbp_microunits is not None and (
+        isinstance(max_reserved_gbp_microunits, bool)
+        or not isinstance(max_reserved_gbp_microunits, int)
+        or max_reserved_gbp_microunits <= 0
+    ):
+        raise ValueError("maximum Graphiti reserved spend must be positive")
+    if prepared_event_preflight is not None:
+        if event_id is None or canary_consumption_digest is not None:
+            raise ValueError("prepared Graphiti preflight requires one exact event")
+        prepared = dict(prepared_event_preflight)
+        supplied_digest = prepared.pop("evidence_digest", None)
+        if (
+            supplied_digest != digest_canonical(prepared)
+            or prepared.get("schema_version")
+            != "newsroom.graphiti-fresh-event-preflight.v1"
+            or prepared.get("event_id") != event_id
+            or not isinstance(prepared.get("ledger_digest"), str)
+            or not prepared.get("ledger_digest")
+            or isinstance(prepared.get("ledger_seq"), bool)
+            or not isinstance(prepared.get("ledger_seq"), int)
+            or prepared.get("event_state") != "QUEUED"
+            or prepared.get("event_attempt_count") != 0
+            or not isinstance(prepared.get("event_manifest_digest"), str)
+            or prepared.get("owner_emergency_stop_clear") is not True
+            or prepared.get("provider_calls") != 0
+            or prepared.get("store_mutations") != 0
+            or not isinstance(prepared.get("resolved_units"), list)
+            or not prepared["resolved_units"]
+        ):
+            raise ValueError("prepared Graphiti preflight differs")
 
     if isinstance(graphiti, GovernedRealGraphitiPort) and getattr(
         graphiti, "requires_canonical_control_plane_stores", True
@@ -3050,20 +3157,26 @@ def consume_next_graphiti_event(
             model_usage = ModelUsageService(unpublished_store)
         if recover_model_usage:
             model_usage.recover_unresolved(observed_at=clock().astimezone(UTC))
-    rights_check, rights_fence = _graphiti_dispatch_controls(proving_store, clock=clock)
+    rights_check, rights_fence = _graphiti_dispatch_controls(
+        proving_store,
+        clock=clock,
+        max_dispatch_seconds=max_dispatch_seconds,
+    )
     queue = GraphitiEventQueue(unpublished_store, clock=clock)
     resolved_units: dict[str, tuple[CorpusIngestUnit, ...]] = {}
-    canary_preflight: dict[str, object] | None = None
+    required_preflight: Mapping[str, object] | None = prepared_event_preflight
+    preflight_drift_reason = "PREPARED_EVENT_INPUT_DRIFT"
     if canary_consumption_digest is not None:
         if event_id is None:
             raise ValueError("bounded canary requires an exact event")
-        canary_preflight = Issue790CanaryRepository.open_existing(
+        required_preflight = Issue790CanaryRepository.open_existing(
             unpublished_store
         ).preflight_for_consumption(
             consumption_digest=canary_consumption_digest,
             event_id=event_id,
             owner_id=owner_id,
         )
+        preflight_drift_reason = "CANARY_PREFLIGHT_INPUT_DRIFT"
 
     def units_for(event: GraphitiRevisionEvent) -> tuple[CorpusIngestUnit, ...]:
         cached = resolved_units.get(event.event_id)
@@ -3081,8 +3194,21 @@ def consume_next_graphiti_event(
         units = units_for(event)
         if not units:
             return GraphitiDispatchGate.hold("CANONICAL_INPUT_UNAVAILABLE")
-        if canary_preflight is not None:
-            expected = canary_preflight.get("resolved_units")
+        if required_preflight is not None:
+            retained = sqlite3.connect(
+                f"{Path(unpublished_store).absolute().as_uri()}?mode=ro",
+                uri=True,
+            )
+            apply_control_plane_sqlite_profile(retained, query_only=True)
+            try:
+                current_identity = retained.execute(
+                    "SELECT ledger_seq,ledger_digest,manifest_digest "
+                    "FROM unpublished_graphiti_revision_events WHERE event_id=?",
+                    (event.event_id,),
+                ).fetchone()
+            finally:
+                retained.close()
+            expected = required_preflight.get("resolved_units")
             actual = [
                 {
                     "ingest_id": unit.ingest_id,
@@ -3094,8 +3220,27 @@ def consume_next_graphiti_event(
                 }
                 for unit in units
             ]
-            if expected != actual:
-                return GraphitiDispatchGate.hold("CANARY_PREFLIGHT_INPUT_DRIFT")
+            if (
+                current_identity is None
+                or required_preflight.get("event_id") != event.event_id
+                or required_preflight.get("ledger_seq") != event.ledger_seq
+                or int(current_identity[0]) != event.ledger_seq
+                or (
+                    "ledger_digest" in required_preflight
+                    and required_preflight.get("ledger_digest")
+                    != str(current_identity[1])
+                )
+                or required_preflight.get("event_manifest_digest")
+                != str(current_identity[2])
+                or expected != actual
+            ):
+                return GraphitiDispatchGate.hold(preflight_drift_reason)
+        if (
+            max_reserved_gbp_microunits is not None
+            and len(units) * GRAPHITI_UNIT_RESERVATION_GBP_MICROUNITS
+            > max_reserved_gbp_microunits
+        ):
+            return GraphitiDispatchGate.hold("RESERVED_SPEND_BOUND_EXCEEDED")
         for unit in units:
             if rights_check(unit) is None:
                 return GraphitiDispatchGate.hold("NO_CURRENT_DISPATCH_RIGHTS")

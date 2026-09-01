@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import newsroom.control_plane.cycle as cycle_module
 from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
@@ -366,6 +367,30 @@ def test_fresh_event_preflight_hydrates_zero_ref_manifest_without_writes(
     assert after == before
 
 
+def test_fresh_event_preflight_rejects_durable_retry_exclusion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, unpublished, event_id, ledger_seq = _projected_zero_ref_event(
+        tmp_path, clock
+    )
+    monkeypatch.setattr(
+        cycle_module,
+        "graphiti_retry_excluded",
+        lambda _connection, *, event_id: True,
+    )
+
+    with pytest.raises(ValueError, match="durably retry-excluded"):
+        qualify_fresh_graphiti_event(
+            proving_store=str(proving),
+            unpublished_store=str(unpublished),
+            event_id=event_id,
+            ledger_seq=ledger_seq,
+            clock=clock,
+        )
+
+
 def test_ready_qualification_cannot_fail_the_unchanged_live_gate(
     tmp_path: Path,
 ) -> None:
@@ -395,8 +420,229 @@ def test_ready_qualification_cannot_fail_the_unchanged_live_gate(
         event_id=event_id,
         require_fresh=True,
         recover_model_usage=False,
+        prepared_event_preflight=evidence,
     )
     assert result is not None and result.state == "TERMINAL"
+
+
+def test_legacy_distinct_event_identity_preserves_ledger_binding_on_hydration(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, unpublished, original_event_id, ledger_seq = _projected_zero_ref_event(
+        tmp_path, clock
+    )
+    event_id = "sha256:" + ("e7" * 32)
+    connection = sqlite3.connect(unpublished)
+    connection.execute(
+        "UPDATE unpublished_graphiti_revision_events SET event_id=? WHERE event_id=?",
+        (event_id, original_event_id),
+    )
+    connection.commit()
+    connection.close()
+    evidence = qualify_fresh_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        clock=clock,
+    )
+    assert evidence["ledger_digest"] == original_event_id
+
+    class FixtureGraphiti:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            return _complete(unit)
+
+    result = consume_next_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        graphiti=FixtureGraphiti(),
+        owner_id="worker",
+        clock=clock,
+        event_id=event_id,
+        require_fresh=True,
+        recover_model_usage=False,
+        prepared_event_preflight=evidence,
+    )
+
+    assert result is not None and result.state == "TERMINAL"
+    connection = sqlite3.connect(unpublished)
+    row = connection.execute(
+        "SELECT ledger_digest,manifest_json,manifest_digest "
+        "FROM unpublished_graphiti_revision_events WHERE event_id=?",
+        (event_id,),
+    ).fetchone()
+    connection.close()
+    assert row is not None
+    manifest = json.loads(str(row[1]))
+    assert row[0] == original_event_id
+    assert manifest["ledger_digest"] == row[0]
+    assert digest_canonical(manifest) == row[2]
+
+
+def test_prepared_event_input_drift_stops_before_provider_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, unpublished, event_id, ledger_seq = _projected_zero_ref_event(
+        tmp_path, clock
+    )
+    evidence = qualify_fresh_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        clock=clock,
+    )
+    resolve = cycle_module._resolve_graphiti_event_units
+
+    def drifted_units(**kwargs):
+        units = resolve(**kwargs)
+        return (
+            replace(
+                units[0],
+                item_key=f"{units[0].item_key}-drifted",
+            ),
+        )
+
+    monkeypatch.setattr(cycle_module, "_resolve_graphiti_event_units", drifted_units)
+
+    class MustNotDispatch:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            raise AssertionError(f"provider boundary reached for {unit.ingest_id}")
+
+    result = consume_next_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        graphiti=MustNotDispatch(),
+        owner_id="worker",
+        clock=clock,
+        event_id=event_id,
+        require_fresh=True,
+        recover_model_usage=False,
+        prepared_event_preflight=evidence,
+        max_reserved_gbp_microunits=500_000,
+    )
+
+    assert result is not None and result.state == "RIGHTS_HELD"
+    connection = sqlite3.connect(unpublished)
+    assert connection.execute(
+        "SELECT last_failure_code,provider_dispatched "
+        "FROM unpublished_graphiti_revision_events WHERE event_id=?",
+        (event_id,),
+    ).fetchone() == ("PREPARED_EVENT_INPUT_DRIFT", 0)
+    connection.close()
+
+
+def test_prepared_event_manifest_drift_stops_before_provider_dispatch(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, unpublished, event_id, ledger_seq = _projected_zero_ref_event(
+        tmp_path, clock
+    )
+    evidence = qualify_fresh_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        event_id=event_id,
+        ledger_seq=ledger_seq,
+        clock=clock,
+    )
+    connection = sqlite3.connect(unpublished)
+    manifest = json.loads(
+        connection.execute(
+            "SELECT manifest_json FROM unpublished_graphiti_revision_events "
+            "WHERE event_id=?",
+            (event_id,),
+        ).fetchone()[0]
+    )
+    manifest["landed_payload_digest"] = "sha256:" + ("f0" * 32)
+    connection.execute(
+        "UPDATE unpublished_graphiti_revision_events "
+        "SET manifest_json=?,manifest_digest=? WHERE event_id=?",
+        (
+            json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            digest_canonical(manifest),
+            event_id,
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    class MustNotDispatch:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            raise AssertionError(f"provider boundary reached for {unit.ingest_id}")
+
+    result = consume_next_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        graphiti=MustNotDispatch(),
+        owner_id="worker",
+        clock=clock,
+        event_id=event_id,
+        require_fresh=True,
+        recover_model_usage=False,
+        prepared_event_preflight=evidence,
+        max_reserved_gbp_microunits=500_000,
+    )
+
+    assert result is not None and result.state == "RIGHTS_HELD"
+    connection = sqlite3.connect(unpublished)
+    assert connection.execute(
+        "SELECT last_failure_code,provider_dispatched "
+        "FROM unpublished_graphiti_revision_events WHERE event_id=?",
+        (event_id,),
+    ).fetchone() == ("PREPARED_EVENT_INPUT_DRIFT", 0)
+    connection.close()
+
+
+def test_actual_event_units_cannot_exceed_reserved_spend_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving, unpublished, event_id, _ledger_seq = _projected_zero_ref_event(
+        tmp_path, clock
+    )
+    resolve = cycle_module._resolve_graphiti_event_units
+
+    def two_units(**kwargs):
+        units = resolve(**kwargs)
+        return (
+            units[0],
+            replace(
+                units[0],
+                item_key=f"{units[0].item_key}-second",
+            ),
+        )
+
+    monkeypatch.setattr(cycle_module, "_resolve_graphiti_event_units", two_units)
+
+    class MustNotDispatch:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            raise AssertionError(f"provider boundary reached for {unit.ingest_id}")
+
+    result = consume_next_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        graphiti=MustNotDispatch(),
+        owner_id="worker",
+        clock=clock,
+        event_id=event_id,
+        require_fresh=True,
+        recover_model_usage=False,
+        max_reserved_gbp_microunits=500_000,
+    )
+
+    assert result is not None and result.state == "RIGHTS_HELD"
+    connection = sqlite3.connect(unpublished)
+    assert connection.execute(
+        "SELECT last_failure_code,provider_dispatched "
+        "FROM unpublished_graphiti_revision_events WHERE event_id=?",
+        (event_id,),
+    ).fetchone() == ("RESERVED_SPEND_BOUND_EXCEEDED", 0)
+    connection.close()
 
 
 def test_unit_binding_reason_matches_event_8835_landed_ingest_mismatch() -> None:
