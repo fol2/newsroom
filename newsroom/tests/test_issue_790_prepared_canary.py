@@ -1469,7 +1469,11 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
         CURSOR_AGENT_MODEL_ID,
         GRAPHITI_WORKSPACE_GROUP,
     )
-    from newsroom.graphiti_adapter.neo4j_guard import GuardMarker, GuardState
+    from newsroom.graphiti_adapter.neo4j_guard import (
+        GuardError,
+        GuardMarker,
+        GuardState,
+    )
 
     persist_calls: list[str] = []
     executions: list[object] = []
@@ -1563,21 +1567,31 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
             self.group_id = values.get("group_id")
             self.episode_uuid = values.get("episode_uuid")
             self.input_digest = values.get("input_digest")
+            self.state = GuardState.CREATED
 
         async def begin(self) -> object:
-            return GuardMarker(
+            marker = GuardMarker(
                 state=GuardState.CREATED,
                 attempt_number=1,
                 input_digest=str(self.input_digest or "sha256:" + "0" * 64),
             )
+            self.state = GuardState.PENDING
+            return marker
+
+        def require_pending(self, operation: str) -> None:
+            if self.state is not GuardState.PENDING:
+                raise GuardError(f"Graphiti {operation} lost its pending claim")
 
         async def record_pending_telemetry(self, **_values: object) -> None:
-            return None
+            self.require_pending("telemetry")
 
         async def complete(self, _receipt: object) -> None:
-            return None
+            self.require_pending("completion")
+            self.state = GuardState.COMPLETE
 
         async def rollback_pending(self, **_values: object) -> bool:
+            self.require_pending("rollback")
+            self.state = GuardState.RECOVERED_AMBIGUOUS
             return True
 
         async def restore_preexisting(self) -> None:
@@ -1796,7 +1810,7 @@ def test_step22_consumed_13683_unmarked_zero_after_embeddings_survives_full_path
     raw = execution.produced.raw_output_value
     combined = None if not isinstance(raw, dict) else raw.get("combined_temporal_receipt")
     unused = unused_queued_attempt_zero_candidates(stores.work_unpublished, plan)
-    assert persist_calls == ["process"]
+    assert persist_calls == []
     assert consume_calls == [EVENT_13683]
     assert receipt["consumption"]["event_id"] == EVENT_13683
     assert receipt["consumption"]["ledger_seq"] == LEDGER_13683

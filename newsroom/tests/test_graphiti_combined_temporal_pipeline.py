@@ -28,7 +28,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     GRAPHITI_CORE_RELEASE,
     GRAPHITI_WORKSPACE_GROUP,
 )
-from newsroom.graphiti_adapter.neo4j_guard import GuardState
+from newsroom.graphiti_adapter.neo4j_guard import GuardError, GuardState
 
 
 class _Guard:
@@ -71,6 +71,38 @@ class _Guard:
 
     async def rollback_pending(self, **_kwargs: Any) -> bool:
         self.calls.append("rollback")
+        return True
+
+
+class _StatefulGuard(_Guard):
+    """Model the native guard's terminal transition after rollback."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.claim_state = GuardState.CREATED
+
+    async def begin(self) -> Any:
+        marker = await super().begin()
+        self.claim_state = GuardState.PENDING
+        return marker
+
+    def _require_pending(self, operation: str) -> None:
+        if self.claim_state is not GuardState.PENDING:
+            raise GuardError(f"Graphiti {operation} lost its pending claim")
+
+    async def record_pending_telemetry(self, **_kwargs: Any) -> None:
+        self._require_pending("telemetry")
+        await super().record_pending_telemetry(**_kwargs)
+
+    async def complete(self, receipt: dict[str, object]) -> None:
+        self._require_pending("completion")
+        await super().complete(receipt)
+        self.claim_state = GuardState.COMPLETE
+
+    async def rollback_pending(self, **_kwargs: Any) -> bool:
+        self._require_pending("rollback")
+        self.calls.append("rollback")
+        self.claim_state = GuardState.RECOVERED_AMBIGUOUS
         return True
 
 
@@ -606,7 +638,7 @@ def test_new_nodes_without_persistable_edges_seal_explicit_empty_effect() -> Non
 def test_persistable_float_fact_embedding_seals_explicit_empty_effect() -> None:
     """Live 13683: persistable edges with float fact_embedding are explicit zero."""
 
-    guard = _Guard()
+    guard = _StatefulGuard()
     persist_calls: list[object] = []
     sealed: list[tuple[list[object], list[object]]] = []
     pipeline = _pipeline(guard)
@@ -639,8 +671,9 @@ def test_persistable_float_fact_embedding_seals_explicit_empty_effect() -> None:
         },
     )
 
-    assert persist_calls != []
-    assert "rollback" in guard.calls
+    assert persist_calls == []
+    assert "rollback" not in guard.calls
+    assert guard.claim_state is GuardState.COMPLETE
     assert sealed[-1] == ([], [])
     assert result.graph_effect_attempted is False
     assert result.nodes == ()
