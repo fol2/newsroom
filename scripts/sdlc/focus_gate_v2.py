@@ -217,9 +217,9 @@ def build_selected_test_commands(
             (
                 *common,
                 "-n",
-                "5",
+                "4",
                 "--dist",
-                "worksteal",
+                "load",
                 "--max-worker-restart=0",
                 *local,
                 f"--junitxml={stem}-provider-free{suffix}",
