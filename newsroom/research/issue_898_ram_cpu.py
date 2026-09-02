@@ -1573,7 +1573,14 @@ def decide(
     rust_child_peak = rust_scan.get("max_peak_rss_bytes")
     e2e_peak = rust_e2e.get("max_peak_rss_bytes")
     python_cpu = python_scan.get("median_cpu_seconds")
-    e2e_cpu = rust_e2e.get("median_cpu_seconds")
+    rust_child_cpu = rust_scan.get("median_cpu_seconds")
+    rust_parent_cpu = rust_e2e.get("median_cpu_seconds")
+    rust_total_cpu = (
+        float(rust_child_cpu) + float(rust_parent_cpu)
+        if isinstance(rust_child_cpu, (int, float))
+        and isinstance(rust_parent_cpu, (int, float))
+        else UNOBSERVED
+    )
     r2 = summaries.get("R2_bounded_candidate", {})
     r2_hold = True
     if r2:
@@ -1603,24 +1610,31 @@ def decide(
         )
         cpu_regress = (
             isinstance(python_cpu, (int, float))
-            and isinstance(e2e_cpu, (int, float))
+            and isinstance(rust_total_cpu, (int, float))
             and python_cpu > 0
-            and e2e_cpu > python_cpu * 1.2
+            and rust_total_cpu > python_cpu * 1.2
         )
-        if threshold_ok and cpu_regress:
+        if threshold_ok and rust_total_cpu is UNOBSERVED:
             decision = "HOLD"
             reason = (
                 "Rust reduces observation-scan RSS enough to clear the gate, but "
-                "local CPU regresses more than 20% and the owner has not accepted "
-                "that RAM trade-off"
+                "Rust child-plus-parent CPU is UNOBSERVED"
+            )
+        elif threshold_ok and cpu_regress:
+            decision = "HOLD"
+            reason = (
+                "Rust reduces observation-scan RSS enough to clear the gate, but "
+                "local CPU (Rust child plus e2e parent) regresses more than 20% "
+                "and the owner has not accepted that RAM trade-off"
             )
         elif threshold_ok:
-            decision = "GO"
+            decision = "FEASIBILITY_GO"
             reason = (
-                "Rust observation-scan comparator matches Python output and reduces "
-                "end-to-end peak RSS by at least 20% or 64 MiB after launch/IPC. "
-                "This GO is for the retained-observation body-scan boundary only; "
-                "it does not claim event-resolution unit parity and authorises no "
+                "R1 FEASIBILITY_GO: Rust observation-scan comparator matches "
+                "Python output and reduces end-to-end peak RSS by at least 20% "
+                "or 64 MiB after launch/IPC. First migration atom / R2 remains "
+                "HOLD pending a bounded useful output boundary. This does not "
+                "claim event-resolution unit parity and authorises no "
                 "implementation."
             )
         else:
@@ -1631,29 +1645,49 @@ def decide(
             )
         return {
             "go_or_no_go": decision,
+            "first_migration_atom": "HOLD",
             "reason": reason,
             "threshold_ok": threshold_ok,
             "parity": parity,
             "python_scan_peak_rss_bytes": python_peak,
+            "python_scan_cpu_seconds": python_cpu if isinstance(python_cpu, (int, float)) else UNOBSERVED,
             "rust_child_peak_rss_bytes": rust_child_peak if isinstance(rust_child_peak, int) else UNOBSERVED,
+            "rust_child_cpu_seconds": rust_child_cpu if isinstance(rust_child_cpu, (int, float)) else UNOBSERVED,
             "rust_e2e_peak_rss_bytes": e2e_peak,
+            "rust_e2e_parent_cpu_seconds": rust_parent_cpu if isinstance(rust_parent_cpu, (int, float)) else UNOBSERVED,
+            "rust_total_cpu_seconds": rust_total_cpu,
             "removable_peak_rss_bytes": removable,
             "r2_hold": r2_hold,
             "selected_boundary": "retained_observation_body_scan",
             "unit_parity_claimed": False,
+            "go_basis": "peak_rss",
+            "retained_rss_note": (
+                "Rust e2e retained RSS is dominated by child-process termination; "
+                "the R1 feasibility GO is based on peak RSS, not post-exit parent RSS"
+            ),
         }
     return {
         "go_or_no_go": decision,
+        "first_migration_atom": "HOLD",
         "reason": reason,
         "threshold_ok": False,
         "parity": parity,
         "python_scan_peak_rss_bytes": python_peak if isinstance(python_peak, int) else UNOBSERVED,
+        "python_scan_cpu_seconds": python_cpu if isinstance(python_cpu, (int, float)) else UNOBSERVED,
         "rust_child_peak_rss_bytes": rust_child_peak if isinstance(rust_child_peak, int) else UNOBSERVED,
+        "rust_child_cpu_seconds": rust_child_cpu if isinstance(rust_child_cpu, (int, float)) else UNOBSERVED,
         "rust_e2e_peak_rss_bytes": e2e_peak if isinstance(e2e_peak, int) else UNOBSERVED,
+        "rust_e2e_parent_cpu_seconds": rust_parent_cpu if isinstance(rust_parent_cpu, (int, float)) else UNOBSERVED,
+        "rust_total_cpu_seconds": rust_total_cpu,
         "removable_peak_rss_bytes": UNOBSERVED,
         "r2_hold": r2_hold,
         "selected_boundary": "retained_observation_body_scan",
         "unit_parity_claimed": False,
+        "go_basis": "peak_rss",
+        "retained_rss_note": (
+            "Rust e2e retained RSS is dominated by child-process termination; "
+            "the R1 feasibility GO is based on peak RSS, not post-exit parent RSS"
+        ),
     }
 
 
@@ -1757,7 +1791,7 @@ def assemble_packet(
         "9_dominant_memory_source": "retained_corpus_reconstruction",
         "10_bounded_rust_process_would_remove_dominant_allocation": (
             True
-            if decision["go_or_no_go"] == "GO"
+            if decision["go_or_no_go"] == "FEASIBILITY_GO"
             else False
             if decision["go_or_no_go"] == "NO_GO"
             else UNOBSERVED
@@ -1767,6 +1801,7 @@ def assemble_packet(
         "issue": ISSUE,
         "status": "MEASURED",
         "decision": decision["go_or_no_go"],
+        "first_migration_atom": decision.get("first_migration_atom", "HOLD"),
         "decision_reason": decision["reason"],
         "previous_no_go_withdrawn": True,
         "inspection_head": git_head(),
@@ -1785,6 +1820,8 @@ def assemble_packet(
             "fresh_process_per_case": True,
             "warmup_plus_measured_runs": f"{WARMUPS} warmup and {MEASURED_RUNS} fresh-process executions",
             "rust": "research-only crate docs/research/issue-898-ram-cpu-rust",
+            "cpu_gate": "Python scan median CPU versus Rust child plus e2e parent CPU",
+            "go_basis": "peak RSS after launch/IPC; retained RSS is not the GO basis",
         },
         "go_gate": decision,
         "questions": questions,

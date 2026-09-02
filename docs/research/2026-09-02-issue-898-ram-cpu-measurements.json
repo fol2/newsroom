@@ -4964,10 +4964,13 @@
     },
     "writable_canonical": false
   },
-  "decision": "GO",
-  "decision_reason": "Rust observation-scan comparator matches Python output and reduces end-to-end peak RSS by at least 20% or 64 MiB after launch/IPC. This GO is for the retained-observation body-scan boundary only; it does not claim event-resolution unit parity and authorises no implementation.",
+  "decision": "FEASIBILITY_GO",
+  "decision_reason": "R1 FEASIBILITY_GO: Rust observation-scan comparator matches Python output and reduces end-to-end peak RSS by at least 20% or 64 MiB after launch/IPC. First migration atom / R2 remains HOLD pending a bounded useful output boundary. This does not claim event-resolution unit parity and authorises no implementation.",
+  "first_migration_atom": "HOLD",
   "go_gate": {
-    "go_or_no_go": "GO",
+    "first_migration_atom": "HOLD",
+    "go_basis": "peak_rss",
+    "go_or_no_go": "FEASIBILITY_GO",
     "parity": {
       "boundary": "retained_observation_body_scan",
       "e2e_manifest_digest": "sha256:ec31a8baf6bc5a58204ed4551fd58a0fa896bc55b035f5dd90a49c663d97d0cb",
@@ -4977,15 +4980,28 @@
       "schema": "newsroom.issue-898.observation-scan.v1",
       "unit_parity_claimed": false
     },
+    "python_scan_cpu_seconds": 1.365364,
     "python_scan_peak_rss_bytes": 693944320,
     "r2_hold": true,
-    "reason": "Rust observation-scan comparator matches Python output and reduces end-to-end peak RSS by at least 20% or 64 MiB after launch/IPC. This GO is for the retained-observation body-scan boundary only; it does not claim event-resolution unit parity and authorises no implementation.",
+    "reason": "R1 FEASIBILITY_GO: Rust observation-scan comparator matches Python output and reduces end-to-end peak RSS by at least 20% or 64 MiB after launch/IPC. First migration atom / R2 remains HOLD pending a bounded useful output boundary. This does not claim event-resolution unit parity and authorises no implementation.",
     "removable_peak_rss_bytes": 142114816,
+    "retained_rss_note": "Rust e2e retained RSS is dominated by child-process termination; the R1 feasibility GO is based on peak RSS, not post-exit parent RSS",
+    "rust_child_cpu_seconds": 1.55,
     "rust_child_peak_rss_bytes": 506150912,
+    "rust_e2e_parent_cpu_seconds": 0.064772,
     "rust_e2e_peak_rss_bytes": 551829504,
+    "rust_total_cpu_seconds": 1.614772,
     "selected_boundary": "retained_observation_body_scan",
     "threshold_ok": true,
     "unit_parity_claimed": false
+  },
+  "graphiti_research_lane": {
+    "base_result": "FAILURE",
+    "base_sha": "a67871d28164147a049670f71ce155afefb62a02",
+    "base_summary": "1 failed, 284 passed",
+    "classification": "exact-base pre-existing unrelated failure",
+    "failed_test": "newsroom/tests/test_graphiti_combined_temporal_runtime.py::test_ambiguous_hold_does_not_mint_or_guess_relation_endpoint",
+    "head_result": "FAILURE"
   },
   "inspection_date": "2026-09-02",
   "inspection_head": "2b82e8b2ca7918a41ed5b837f073eab6f7e34994",
@@ -5000,10 +5016,12 @@
   },
   "issue": 898,
   "method": {
+    "cpu_gate": "Python scan median CPU versus Rust child plus e2e parent CPU",
     "current_or_retained_rss": [
       "ps -o rss"
     ],
     "fresh_process_per_case": true,
+    "go_basis": "peak RSS after launch/IPC; retained RSS is not the GO basis",
     "one_event": "event identity prepared outside the measured child; one _resolve_graphiti_event_units call",
     "peak_rss_and_cpu": [
       "/usr/bin/time -l",

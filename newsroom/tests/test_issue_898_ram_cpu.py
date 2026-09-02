@@ -227,8 +227,43 @@ def test_decide_go_when_rust_scan_clears_gate() -> None:
             },
         }
     )
-    assert decision["go_or_no_go"] == "GO"
+    assert decision["go_or_no_go"] == "FEASIBILITY_GO"
+    assert decision["first_migration_atom"] == "HOLD"
     assert decision["unit_parity_claimed"] is False
+    assert decision["rust_total_cpu_seconds"] == 0.9
+
+
+def test_decide_holds_when_rust_child_cpu_regresses() -> None:
+    digest_run = {
+        "status": "OK",
+        "outcome": {"manifest_digest": "sha256:" + ("ab" * 32)},
+    }
+    decision = decide(
+        {
+            "R0_rust_process_baseline": {
+                "max_peak_rss_bytes": 2 * 1024 * 1024,
+                "runs": [{"status": "OK", "outcome": {}}],
+            },
+            "R1_python_observation_scan": {
+                "max_peak_rss_bytes": 400 * 1024 * 1024,
+                "median_cpu_seconds": 1.0,
+                "runs": [digest_run],
+            },
+            "R1_rust_observation_scan": {
+                "max_peak_rss_bytes": 40 * 1024 * 1024,
+                "median_cpu_seconds": 2.0,
+                "runs": [digest_run],
+            },
+            "R1_rust_e2e_parent": {
+                "max_peak_rss_bytes": 50 * 1024 * 1024,
+                "median_cpu_seconds": 0.01,
+                "runs": [digest_run],
+            },
+        }
+    )
+    assert decision["go_or_no_go"] == "HOLD"
+    assert decision["rust_total_cpu_seconds"] == 2.01
+    assert "child plus e2e parent" in decision["reason"]
 
 
 def test_decide_no_go_when_rust_does_not_clear_gate() -> None:
