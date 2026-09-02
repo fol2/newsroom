@@ -1260,12 +1260,32 @@ def _completion_evidence(
 
 
 def test_campaign_completion_proves_exact_all_hold_operational_objectives(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    from scripts import hermes_graphiti_worker as worker
+
     connection, _start, event, before, after = _campaign_completion_fixture(
         tmp_path
     )
     generation_identity = _insert_all_hold_generation(connection)
+    exact_admission = {
+        "total": True,
+        "disjoint": True,
+        "latest_generation_id": generation_identity[1],
+        "cohorts": [
+            {
+                "cohort_digest": generation_identity[0],
+                "generation_id": generation_identity[1],
+                "ingest_ids": ["ingest-1"],
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        worker,
+        "_exact_admission_reconciliation",
+        lambda _connection: exact_admission,
+    )
     evidence = _completion_evidence(
         connection,
         event=event,
@@ -1287,9 +1307,56 @@ def test_campaign_completion_proves_exact_all_hold_operational_objectives(
         generation_identity[1]
     ]
     assert evidence["reconciliation"]["receipt"]["effect_ids"] == []
+    assert evidence["reconciliation"]["exact_admission"] == exact_admission
     assert evidence["reconciliation"]["global_admission"][
         "projection_reconciled"
     ] is True
+    connection.close()
+
+
+def test_campaign_completion_rechecks_terminal_queue_in_final_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from scripts import hermes_graphiti_worker as worker
+
+    connection, _start, event, before, after = _campaign_completion_fixture(
+        tmp_path
+    )
+    generation_identity = _insert_all_hold_generation(connection)
+    connection.execute(
+        "UPDATE unpublished_graphiti_admission_queue SET state='READY' "
+        "WHERE proposal_key='proposal-1'"
+    )
+    observed: dict[str, object] = {}
+
+    def exact_admission(candidate: sqlite3.Connection) -> dict[str, object]:
+        observed["in_transaction"] = candidate.in_transaction
+        observed["queue_state"] = candidate.execute(
+            "SELECT state FROM unpublished_graphiti_admission_queue "
+            "WHERE proposal_key='proposal-1'"
+        ).fetchone()[0]
+        raise RuntimeError("non-terminal admission queue state")
+
+    monkeypatch.setattr(
+        worker,
+        "_exact_admission_reconciliation",
+        exact_admission,
+    )
+    with pytest.raises(
+        worker.GraphitiCampaignStop,
+        match="terminal admission reconciliation differs",
+    ):
+        _completion_evidence(
+            connection,
+            event=event,
+            before=before,
+            after=after,
+            expected_generation_identity=generation_identity,
+            proposal_count=1,
+        )
+
+    assert observed == {"in_transaction": True, "queue_state": "READY"}
     connection.close()
 
 
@@ -1509,6 +1576,7 @@ def test_campaign_completion_requires_zero_actionable_backlog_at_watermark(
 
 
 def test_campaign_completion_requires_zero_global_admission_backlog(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     from scripts import hermes_graphiti_worker as worker
@@ -1534,6 +1602,11 @@ def test_campaign_completion_requires_zero_global_admission_backlog(
             "2026-09-01T12:00:01Z",
             "2026-09-01T12:00:01Z",
         ),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_exact_admission_reconciliation",
+        lambda _connection: {"total": True, "disjoint": True, "cohorts": []},
     )
     with pytest.raises(
         worker.GraphitiCampaignStop,

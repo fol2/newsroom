@@ -1615,6 +1615,7 @@ def _exact_admission_reconciliation(
             "cohort_count": 0,
             "covered_ingest_count": 0,
             "queue_ingest_count": 0,
+            "latest_generation_id": None,
             "total": True,
             "disjoint": True,
             "cohorts": [],
@@ -1773,6 +1774,7 @@ def _exact_admission_reconciliation(
         "cohort_count": len(generations),
         "covered_ingest_count": len(covered_ingest_ids),
         "queue_ingest_count": len(queue_ingest_ids),
+        "latest_generation_id": generations[-1]["generation_id"],
         "total": total,
         "disjoint": disjoint,
         "cohorts": generations,
@@ -1809,6 +1811,7 @@ def _admission(
     ):
         exact_reconciliation = {
             "schema_version": GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION,
+            "latest_generation_id": None,
             "total": False,
             "disjoint": False,
             "cohorts": [],
@@ -2448,6 +2451,22 @@ def build_graphiti_steady_state_packet(
             runtime_graph_destination_id=runtime_graph_destination_id,
         )
         campaign_graph = campaign.get("graph")
+        exact_reconciliation = admission.get("exact_cohort_reconciliation")
+        latest_exact_generation = (
+            exact_reconciliation.get("latest_generation_id")
+            if isinstance(exact_reconciliation, Mapping)
+            else None
+        )
+        active_projection = authority_evidence.get("active_projection_authority")
+        authenticated_readback = campaign.get("graph_destination_readback")
+        if latest_exact_generation is not None and (
+            not isinstance(active_projection, Mapping)
+            or active_projection.get("generation_id") != latest_exact_generation
+            or not isinstance(authenticated_readback, Mapping)
+            or authenticated_readback.get("generation_id")
+            != latest_exact_generation
+        ):
+            campaign_blockers.append("ADMISSION_ACTIVE_GENERATION_DRIFT")
         runtime_campaign_graph_bound = (
             runtime_composed
             and isinstance(campaign_graph, Mapping)
@@ -2910,6 +2929,42 @@ def validate_graphiti_campaign_packet(
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("campaign packet graph readback differs") from exc
+    admission = value.get("admission")
+    exact_reconciliation = (
+        admission.get("exact_cohort_reconciliation")
+        if isinstance(admission, Mapping)
+        else None
+    )
+    cohorts = (
+        exact_reconciliation.get("cohorts")
+        if isinstance(exact_reconciliation, Mapping)
+        else None
+    )
+    latest_exact_generation = (
+        exact_reconciliation.get("latest_generation_id")
+        if isinstance(exact_reconciliation, Mapping)
+        else None
+    )
+    if (
+        not isinstance(exact_reconciliation, Mapping)
+        or exact_reconciliation.get("total") is not True
+        or exact_reconciliation.get("disjoint") is not True
+        or not isinstance(cohorts, list)
+    ) or (
+        cohorts
+        and (
+            not isinstance(cohorts[-1], Mapping)
+            or not isinstance(latest_exact_generation, str)
+            or not latest_exact_generation
+            or cohorts[-1].get("generation_id") != latest_exact_generation
+            or latest_exact_generation != graph.get("current_generation_id")
+            or latest_exact_generation != readback.get("generation_id")
+            or latest_exact_generation != active_authority.get("generation_id")
+        )
+    ) or (not cohorts and latest_exact_generation is not None):
+        raise ValueError(
+            "campaign packet active generation differs from exact admission"
+        )
     if value.get("non_effects") != {
         "provider_calls": 0,
         "store_mutations": 0,

@@ -1732,6 +1732,27 @@ def test_exact_all_hold_generation_reconciliation_is_ready(
         exact_identity,
     )
 
+    mismatched = _bounded_candidate_packet(
+        proving,
+        unpublished,
+        authority,
+        monkeypatch,
+    )
+
+    assert mismatched["verdict"] == "NO_GO"
+    assert mismatched["admission"]["exact_cohort_reconciliation"][
+        "latest_generation_id"
+    ] == generation_id
+    assert "ADMISSION_ACTIVE_GENERATION_DRIFT" in mismatched["blockers"]
+
+    authority_connection = sqlite3.connect(authority)
+    authority_connection.execute(
+        "UPDATE projection_generations SET generation_id=? WHERE state='ACTIVE'",
+        (generation_id,),
+    )
+    authority_connection.commit()
+    authority_connection.close()
+
     packet = _bounded_candidate_packet(
         proving,
         unpublished,
@@ -1744,6 +1765,21 @@ def test_exact_all_hold_generation_reconciliation_is_ready(
     assert packet["admission"]["exact_cohort_reconciliation"]["total"] is True
     assert packet["admission"]["exact_cohort_reconciliation"]["disjoint"] is True
     assert packet["blockers"] == []
+    assert validate_graphiti_campaign_packet(packet) == packet["bounded_campaign"]
+
+    generation_drift = json.loads(json.dumps(packet))
+    generation_drift["admission"]["exact_cohort_reconciliation"][
+        "latest_generation_id"
+    ] = "00000000-0000-4000-8000-000000000895"
+    generation_drift["packet_digest"] = digest_canonical(
+        {
+            key: value
+            for key, value in generation_drift.items()
+            if key != "packet_digest"
+        }
+    )
+    with pytest.raises(ValueError, match="active generation differs"):
+        validate_graphiti_campaign_packet(generation_drift)
 
     connection = sqlite3.connect(unpublished)
     connection.execute(

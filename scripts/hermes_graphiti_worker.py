@@ -41,6 +41,7 @@ from newsroom.control_plane.graphiti_admission import (
 from newsroom.control_plane.graphiti_events import GraphitiProcessResult
 from newsroom.control_plane.graphiti_steady_state import (
     GraphitiCampaignRuntime,
+    _exact_admission_reconciliation,
     _mint_graphiti_campaign_runtime,
     graphiti_graph_destination_readback,
     graphiti_operational_partition_snapshot,
@@ -973,6 +974,39 @@ def _campaign_completion_evidence(
         generation_id = None
         reconciliation = None
 
+    try:
+        exact_admission = _exact_admission_reconciliation(connection)
+    except (RuntimeError, TypeError, ValueError, KeyError, sqlite3.Error) as exc:
+        raise GraphitiCampaignStop(
+            "campaign terminal admission reconciliation differs"
+        ) from exc
+    if exact_admission.get("total") is not True or exact_admission.get(
+        "disjoint"
+    ) is not True:
+        raise GraphitiCampaignStop(
+            "campaign terminal admission reconciliation differs"
+        )
+    if proposal_count:
+        exact_cohorts = exact_admission.get("cohorts")
+        if not isinstance(exact_cohorts, list):
+            raise GraphitiCampaignStop(
+                "campaign terminal admission reconciliation differs"
+            )
+        matching_cohorts = [
+            item
+            for item in exact_cohorts
+            if isinstance(item, Mapping)
+            and item.get("ingest_ids") == list(expected_ingest_ids)
+        ]
+        if len(matching_cohorts) != 1 or (
+            matching_cohorts[0].get("cohort_digest") != cohort_digest
+            or matching_cohorts[0].get("generation_id") != generation_id
+            or exact_admission.get("latest_generation_id") != generation_id
+        ):
+            raise GraphitiCampaignStop(
+                "campaign terminal admission cohort differs"
+            )
+
     admission = graphiti_admission_telemetry(
         connection,
         now=end_observation,
@@ -1049,6 +1083,7 @@ def _campaign_completion_evidence(
             "cohort_digest": cohort_digest,
             "generation_id": generation_id,
             "receipt": reconciliation,
+            "exact_admission": exact_admission,
             "global_admission": admission,
             "passed": True,
         },
