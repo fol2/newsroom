@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from newsroom.authority.canonical import digest_bytes, digest_canonical
-from newsroom.authority.objects import ObjectAccessDecisionId
+from newsroom.authority.objects import (
+    HydrationPolicyContract,
+    ObjectAccessDecisionId,
+)
 from newsroom.authority.types import ObjectAdmissionId
 from newsroom.effective_revision import EffectiveRevisionIdentity
 from newsroom.extraction.models import (
@@ -72,7 +75,21 @@ _PIN = digest_canonical(
         "embedding": GRAPHITI_EMBEDDING_MODEL,
     }
 )
-_HYDRATION = digest_canonical({"policy": "graphiti-evaluation-passage-v2"})
+GRAPHITI_EVALUATION_HYDRATION_POLICY = HydrationPolicyContract(
+    policy_id="graphiti-evaluation-passage",
+    contract_version="hydration-v2",
+    implementation_version="graphiti-evaluation-passage-v2",
+    purpose="graphiti.corpus-ingest",
+    required_scope="authority.objects.read",
+    allowed_principal_ids=frozenset({"newsroom.control-plane"}),
+    allowed_authority_domains=frozenset({"newsroom.evaluation"}),
+    allowed_object_classes=frozenset({"source.expression"}),
+    allowed_uses=frozenset({"proposal.extraction"}),
+    allowed_security_scopes=frozenset({"evaluation"}),
+    allowed_retention_scopes=frozenset({"disposable-workspace"}),
+    max_bytes=MAX_EPISODE_BYTES,
+    allow_ranges=True,
+)
 
 
 def _component(component_id: str, version: str) -> VersionedExtractionComponent:
@@ -92,7 +109,9 @@ def _passage(
         passage_id=typed_id(ExtractionPassageId, "passage", ingest_id),
         admission_id=admission_id,
         access_decision_id=access_decision_id,
-        hydration_policy_contract_digest=_HYDRATION,
+        hydration_policy_contract_digest=(
+            GRAPHITI_EVALUATION_HYDRATION_POLICY.contract_digest
+        ),
         principal_id="newsroom.control-plane",
         authority_domain="newsroom.evaluation",
         purpose="graphiti.corpus-ingest",

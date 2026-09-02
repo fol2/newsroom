@@ -3114,6 +3114,118 @@ def qualify_fresh_graphiti_event(
     }
 
 
+def _bind_graphiti_unit_authority(
+    *,
+    event: GraphitiRevisionEvent,
+    units: tuple[CorpusIngestUnit, ...],
+    resolver: Callable[[CorpusIngestUnit], CorpusIngestUnit],
+) -> tuple[CorpusIngestUnit, ...]:
+    """Bind canonical object authority without changing the selected revision."""
+
+    source_record_types = frozenset(
+        {
+            "SOURCE_DEFINITION",
+            "SOURCE_DEFINITION_VERSION",
+            "SOURCE_ITEM",
+            "SOURCE_REVISION",
+            "DISCOVERY_REPRESENTATION",
+        }
+    )
+    allowed_record_types = source_record_types | frozenset(
+        {"OBJECT_ADMISSION", "OBJECT_ACCESS_DECISION"}
+    )
+    bound: list[CorpusIngestUnit] = []
+    for unit in units:
+        resolved = resolver(unit)
+        if not isinstance(resolved, CorpusIngestUnit):
+            raise TypeError("Graphiti unit authority resolver returned an invalid unit")
+        if resolved.authority is None or any(
+            not isinstance(value, str) or not value
+            for value in (
+                resolved.authority.admission_id,
+                resolved.authority.access_decision_id,
+                resolved.authority.definition_id,
+                resolved.authority.definition_version_id,
+                resolved.authority.item_id,
+                resolved.authority.revision_id,
+                resolved.authority.representation_id,
+            )
+        ):
+            raise ValueError("Graphiti unit canonical authority is incomplete")
+        if replace(resolved, authority=unit.authority) != unit:
+            raise ValueError("Graphiti unit authority changed dispatch identity")
+        if unit.authority is not None and (
+            resolved.authority.definition_id,
+            resolved.authority.definition_version_id,
+            resolved.authority.item_id,
+            resolved.authority.revision_id,
+            resolved.authority.representation_id,
+            tuple(
+                record
+                for record in resolved.authority.records
+                if record.get("record_type") in source_record_types
+            ),
+        ) != (
+            unit.authority.definition_id,
+            unit.authority.definition_version_id,
+            unit.authority.item_id,
+            unit.authority.revision_id,
+            unit.authority.representation_id,
+            tuple(
+                record
+                for record in unit.authority.records
+                if record.get("record_type") in source_record_types
+            ),
+        ):
+            raise ValueError("Graphiti unit authority changed source identity")
+        records = resolved.authority.records
+        if any(
+            not isinstance(record, dict)
+            or record.get("record_type") not in allowed_record_types
+            or not isinstance(record.get("record_id"), str)
+            or not record["record_id"]
+            for record in records
+        ):
+            raise ValueError("Graphiti unit canonical authority is incomplete")
+        records_by_type = {
+            record_type: tuple(
+                record for record in records if record["record_type"] == record_type
+            )
+            for record_type in allowed_record_types
+        }
+        if (
+            any(
+                len(records_by_type[record_type]) != 1
+                for record_type in allowed_record_types
+            )
+            or {
+                str(record["record_id"])
+                for record_type in source_record_types
+                for record in records_by_type[record_type]
+            }
+            != {
+                resolved.authority.definition_id,
+                resolved.authority.definition_version_id,
+                resolved.authority.item_id,
+                resolved.authority.revision_id,
+                resolved.authority.representation_id,
+            }
+            or len(records_by_type["OBJECT_ADMISSION"]) != 1
+            or records_by_type["OBJECT_ADMISSION"][0]["record_id"]
+            != resolved.authority.admission_id
+            or len(records_by_type["OBJECT_ACCESS_DECISION"]) != 1
+            or records_by_type["OBJECT_ACCESS_DECISION"][0]["record_id"]
+            != resolved.authority.access_decision_id
+        ):
+            raise ValueError("Graphiti unit canonical authority is incomplete")
+        bound.append(resolved)
+    result = tuple(bound)
+    reason = graphiti_unit_binding_reason(event, result)
+    if reason is not None:
+        raise ValueError(f"Graphiti unit authority changed event binding: {reason}")
+    return result
+
+
 def consume_next_graphiti_event(
     *,
     proving_store: str,
@@ -3133,6 +3245,9 @@ def consume_next_graphiti_event(
     max_graphiti_admissions: int = 100,
     require_graphiti_admission: bool = False,
     defer_graphiti_admission: bool = False,
+    unit_authority_resolver: (
+        Callable[[CorpusIngestUnit], CorpusIngestUnit] | None
+    ) = None,
 ) -> GraphitiProcessResult | None:
     """Claim and process one durable revision, independently from source polling."""
 
@@ -3154,6 +3269,10 @@ def consume_next_graphiti_event(
         raise TypeError("Graphiti admission deferral must be boolean")
     if defer_graphiti_admission and graphiti_admission_factory is None:
         raise ValueError("deferred Graphiti admission requires a governed factory")
+    if unit_authority_resolver is not None and not callable(
+        unit_authority_resolver
+    ):
+        raise TypeError("Graphiti unit authority resolver must be callable")
     if prepared_event_preflight is not None:
         if event_id is None or canary_consumption_digest is not None:
             raise ValueError("prepared Graphiti preflight requires one exact event")
@@ -3195,6 +3314,7 @@ def consume_next_graphiti_event(
     )
     queue = GraphitiEventQueue(unpublished_store, clock=clock)
     resolved_units: dict[str, tuple[CorpusIngestUnit, ...]] = {}
+    authority_bound_units: dict[str, tuple[CorpusIngestUnit, ...]] = {}
     required_preflight: Mapping[str, object] | None = prepared_event_preflight
     preflight_drift_reason = "PREPARED_EVENT_INPUT_DRIFT"
     if canary_consumption_digest is not None:
@@ -3278,11 +3398,22 @@ def consume_next_graphiti_event(
         binding_reason = graphiti_unit_binding_reason(event, units)
         if binding_reason is not None:
             return GraphitiDispatchGate.hold(binding_reason)
-        queue.bind_resolved_units(event, owner_id=owner_id, units=units)
+        bound_units = units
+        if unit_authority_resolver is not None:
+            bound_units = _bind_graphiti_unit_authority(
+                event=event,
+                units=units,
+                resolver=unit_authority_resolver,
+            )
+        authority_bound_units[event.event_id] = bound_units
+        queue.bind_resolved_units(event, owner_id=owner_id, units=bound_units)
         return GraphitiDispatchGate.allow()
 
     def dispatch(event: GraphitiRevisionEvent) -> GraphitiDispatchResult:
-        event = replace(event, units=units_for(event))
+        units = authority_bound_units.get(event.event_id)
+        if units is None:
+            raise RuntimeError("Graphiti unit authority was not bound by the gate")
+        event = replace(event, units=units)
         unpublished = connect(unpublished_store)
         try:
             ingest_ids = tuple(sorted({unit.ingest_id for unit in event.units}))

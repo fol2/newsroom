@@ -39,6 +39,7 @@ from newsroom.projection.neo4j.models import (
     StructuralActiveReadRequest,
     StructuralBatch,
     StructuralReadResponse,
+    StructuralReconciliationView,
 )
 from newsroom.projection.neo4j.qualification import neo4j_compatibility_digest
 
@@ -81,6 +82,12 @@ class _Increment4StructuralReader(Protocol):
         request: StructuralActiveReadRequest,
         proof: AuthenticationProof,
     ) -> StructuralReadResponse:
+        ...
+
+    def reconcile_increment4_active(
+        self,
+        proof: AuthenticationProof,
+    ) -> StructuralReconciliationView:
         ...
 
 
@@ -922,6 +929,12 @@ class _Increment4Neo4jBoundary:
             ),
             serving_time=metadata.serving_time,
         )
+
+    def reconcile_active(
+        self,
+        proof: AuthenticationProof,
+    ) -> StructuralReconciliationView:
+        return self._structural_reader.reconcile_increment4_active(proof)
 
     def read_active(
         self,

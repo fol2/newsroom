@@ -39,6 +39,7 @@ from newsroom.control_plane.graphiti_steady_state import (
     _spend,
     build_graphiti_steady_state_packet,
     graphiti_operational_partition_snapshot,
+    graphiti_store_snapshot_digests,
     validate_graphiti_campaign_packet,
     write_content_addressed_packet,
 )
@@ -968,6 +969,7 @@ def _governed_runtime(packet: dict[str, object]) -> GraphitiCampaignRuntime:
     return _mint_graphiti_campaign_runtime(
         graphiti=object(),
         admission_factory=lambda _connection: object(),
+        bind_unit_authority=lambda unit: unit,
         graph_state_fence=lambda _campaign: {},
         graph_destination_id=GRAPH_DESTINATION_ID,
         authority_store_source_path=str(authority["source_path"]),
@@ -1073,6 +1075,7 @@ def test_campaign_runtime_rejects_non_governed_construction_token() -> None:
         GraphitiCampaignRuntime(
             graphiti=object(),
             admission_factory=lambda _connection: object(),
+            bind_unit_authority=lambda unit: unit,
             graph_state_fence=lambda _campaign: {},
             authority_store_source_path="/authority.sqlite3",
             authority_store_descriptor_digest="sha256:" + "a" * 64,
@@ -1099,6 +1102,45 @@ def test_wal_snapshot_does_not_change_source_files(tmp_path: Path) -> None:
 
     assert tuple(item.read_bytes() for item in paths) == before
     connection.close()
+
+
+def test_store_identity_survives_wal_checkpoint_but_detects_data_change(
+    tmp_path: Path,
+) -> None:
+    proving = tmp_path / "proving.sqlite3"
+    unpublished = tmp_path / "unpublished.sqlite3"
+    authority = tmp_path / "authority.sqlite3"
+    connections = []
+    for path in (proving, unpublished, authority):
+        connection = sqlite3.connect(path)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("CREATE TABLE evidence(value TEXT)")
+        connection.execute("INSERT INTO evidence VALUES('retained')")
+        connection.commit()
+        connections.append(connection)
+
+    while_open = graphiti_store_snapshot_digests(
+        proving_store=proving,
+        unpublished_store=unpublished,
+        authority_store=authority,
+    )
+    for connection in connections:
+        connection.close()
+    after_checkpoint = graphiti_store_snapshot_digests(
+        proving_store=proving,
+        unpublished_store=unpublished,
+        authority_store=authority,
+    )
+
+    assert after_checkpoint == while_open
+
+    with sqlite3.connect(authority) as connection:
+        connection.execute("UPDATE evidence SET value='changed'")
+    assert graphiti_store_snapshot_digests(
+        proving_store=proving,
+        unpublished_store=unpublished,
+        authority_store=authority,
+    )["authority"] != after_checkpoint["authority"]
 
 
 def test_snapshot_rejects_wal_topology_created_during_copy(
@@ -1893,6 +1935,7 @@ def test_runtime_authority_descriptor_drift_is_no_go(
     drifted_runtime = _mint_graphiti_campaign_runtime(
         graphiti=runtime.graphiti,
         admission_factory=runtime.admission_factory,
+        bind_unit_authority=runtime.bind_unit_authority,
         graph_state_fence=runtime.graph_state_fence,
         graph_destination_id=runtime.graph_destination_id,
         authority_store_source_path=runtime.authority_store_source_path,

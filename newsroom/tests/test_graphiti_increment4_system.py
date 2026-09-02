@@ -38,6 +38,13 @@ from .increment4e_helpers import (
     increment4_projection_read_policy,
 )
 from .projection_b2_helpers import MemoryNeo4jAdapter
+from .source_3a_helpers import (
+    definition_request,
+    item_request,
+    read_policy as source_read_policy,
+    scopes as source_scopes,
+    version_request,
+)
 
 
 class TrackingMemoryNeo4jAdapter(MemoryNeo4jAdapter):
@@ -57,6 +64,7 @@ def _open(
     rights, hydration, admissions = _policy_registries()
     scopes = (
         extraction_scopes()
+        | source_scopes()
         | ENTITY_SCOPES
         | RELATION_SCOPES
         | GRAPHITI_SCOPES
@@ -89,6 +97,7 @@ def _open(
             policy_version="combined-increment4-test-v1",
             grants_by_principal={"principal.alpha": scopes},
         ),
+        source_read_policy=source_read_policy(),
         extraction_read_policy=extraction_read_policy(),
         entity_read_policy=entity_read_policy(),
         relation_read_policy=relation_read_policy(),
@@ -124,8 +133,27 @@ def test_combined_increment4_system_owns_one_writer_and_real_facades(
         )
         request = contract_request()
         contract = system.extraction.register_contract(request, proof=proof())
+        definition_request_value = definition_request()
+        definition = system.sources.register_definition(
+            definition_request_value,
+            proof=proof(),
+        )
+        system.sources.record_definition_version(
+            version_request(),
+            proof=proof(),
+        )
+        item_request_value = item_request()
+        item = system.sources.register_item(item_request_value, proof=proof())
 
         assert admission.admission.admission_id is not None
+        assert (
+            system.sources.definition(
+                definition_request_value.definition_id,
+                proof=proof(),
+            )
+            == definition
+        )
+        assert system.sources.item(item_request_value.item_id, proof=proof()) == item
         assert (
             system.extraction.contract(request.contract_id, proof=proof())
             == contract
