@@ -17,17 +17,22 @@ from typing import Protocol
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.graphiti_admission import (
+    GraphitiAdmissionConsumerError,
     GraphitiAdmissionRequest,
     GraphitiAdmissionTelemetry,
     GraphitiGovernedDecision,
+    GraphitiProjectionReconciliationReceipt,
     GraphitiRightsAuthority,
     graphiti_admission_request_from_value,
     graphiti_admission_telemetry,
+    graphiti_decided_cohort_generation_identity,
     graphiti_governed_decision_from_json,
     graphiti_projection_receipt_from_json,
+    graphiti_projection_reconciliation_from_json,
 )
 from newsroom.extraction.types import ExtractionProposalKind
 from newsroom.graphiti_adapter.admission import GraphitiProposalAdmissionAction
+from newsroom.projection.models import ProjectionGenerationId
 
 ADMITTED_CONTEXT_SCHEMA_VERSION = "newsroom.admitted-graphrag-context.v1"
 ADMITTED_CONTEXT_TRUST_LABEL = "ADMITTED_GOVERNED_AUTHORITY_CONTEXT"
@@ -356,12 +361,18 @@ class GovernedContext:
     def currency_consistent(self) -> bool:
         if self.status is not GovernedContextStatus.READY:
             return True
+        try:
+            ProjectionGenerationId.parse(str(self.projection_generation_id))
+            for item in self.items:
+                ProjectionGenerationId.parse(item.projection_generation_id)
+        except (TypeError, ValueError):
+            return False
         return bool(
             self.projection_generation_id
             and self.contiguous_projection_watermark is not None
             and self.contiguous_projection_watermark > 0
             and all(
-                item.projection_generation_id == self.projection_generation_id
+                item.projection_generation_id
                 and item.contiguous_projection_watermark
                 == self.contiguous_projection_watermark
                 and item.projection_gap_count == self.projection_gap_count
@@ -628,6 +639,153 @@ class GovernedContextHydrator:
             raise TypeError("projection tombstone watermark must be an integer")
         return watermark
 
+    def _validate_exact_projection_generations(
+        self,
+        *,
+        reconciliation_rows: tuple[tuple[object, ...], ...],
+        active_projection_snapshot: tuple[tuple[str, int, str], ...],
+        contiguous_watermark: int | None,
+    ) -> str:
+        """Validate the latest generation and every active receipt's cohort."""
+
+        parsed: dict[
+            str,
+            tuple[
+                GraphitiProjectionReconciliationReceipt,
+                dict[str, object] | None,
+            ],
+        ] = {}
+        for row in reconciliation_rows:
+            receipt_text = str(row[0])
+            receipt, binding = graphiti_projection_reconciliation_from_json(
+                receipt_text
+            )
+            if (
+                receipt.receipt_digest != str(row[1])
+                or receipt.projector_family_id != str(row[2])
+                or receipt.generation_id != str(row[3])
+                or receipt.authority_watermark != int(row[4])
+                or receipt.generation_id in parsed
+            ):
+                raise GraphitiAdmissionConsumerError(
+                    "projection reconciliation SQL identity differs"
+                )
+            parsed[receipt.generation_id] = (receipt, binding)
+
+        latest_receipt, latest_binding = next(iter(parsed.values()))
+        if latest_binding is None:
+            raise GraphitiAdmissionConsumerError(
+                "latest projection generation lacks exact cohort authority"
+            )
+        latest_generation_id = str(latest_receipt.generation_id)
+        if latest_receipt.authority_watermark != contiguous_watermark:
+            raise GraphitiAdmissionConsumerError(
+                "latest projection watermark differs from contiguous authority"
+            )
+
+        required_generation_ids = {
+            latest_generation_id,
+            *(
+                generation_id
+                for _effect_id, _watermark, generation_id
+                in active_projection_snapshot
+            ),
+        }
+        bound_ingest_ids: set[str] = set()
+        for generation_id in required_generation_ids:
+            retained = parsed.get(generation_id)
+            if retained is None or retained[1] is None:
+                raise GraphitiAdmissionConsumerError(
+                    "active projection lacks exact cohort reconciliation"
+                )
+            reconciliation = retained[0]
+            binding = retained[1]
+            assert binding is not None
+            ingest_ids = tuple(str(item) for item in binding["ingest_ids"])
+            cohort_digest, rebuilt_generation_id = (
+                graphiti_decided_cohort_generation_identity(
+                    self._connection,
+                    ingest_ids=ingest_ids,
+                )
+            )
+            if (
+                cohort_digest != str(binding["cohort_digest"])
+                or rebuilt_generation_id != generation_id
+                or bound_ingest_ids.intersection(ingest_ids)
+            ):
+                raise GraphitiAdmissionConsumerError(
+                    "exact projection cohort authority differs"
+                )
+            bound_ingest_ids.update(ingest_ids)
+
+            placeholders = ",".join("?" for _ in ingest_ids)
+            projection_rows = self._connection.execute(
+                f"""
+                SELECT projection.receipt_json, projection.receipt_digest,
+                       projection.effect_id, projection.authority_watermark,
+                       projection.generation_id, queue.ingest_id
+                FROM unpublished_graphiti_projection_receipts AS projection
+                JOIN unpublished_graphiti_admission_queue AS queue
+                  USING(proposal_key)
+                WHERE queue.ingest_id IN ({placeholders})
+                ORDER BY projection.effect_id
+                """,
+                ingest_ids,
+            ).fetchall()
+            effect_ids: list[str] = []
+            for projection_row in projection_rows:
+                projection = graphiti_projection_receipt_from_json(
+                    str(projection_row[0])
+                )
+                projection_material = projection.canonical_value()
+                projection_material.pop("receipt_digest")
+                if (
+                    projection.receipt_digest != str(projection_row[1])
+                    or digest_bytes(canonical_json_bytes(projection_material))
+                    != projection.receipt_digest
+                    or projection.effect_id != str(projection_row[2])
+                    or projection.authority_watermark != int(projection_row[3])
+                    or projection.generation_id != str(projection_row[4])
+                    or str(projection_row[5]) not in ingest_ids
+                    or projection.schema_version
+                    != "newsroom.increment4.admitted-generation-binding.v2"
+                    or projection.cohort_digest != cohort_digest
+                    or projection.generation_id != generation_id
+                    or projection.authority_watermark
+                    != reconciliation.authority_watermark
+                ):
+                    raise GraphitiAdmissionConsumerError(
+                        "exact projection receipt authority differs"
+                    )
+                effect_ids.append(projection.effect_id)
+            exact_effect_ids = tuple(effect_ids)
+            if (
+                reconciliation.expected_effect_ids != exact_effect_ids
+                or reconciliation.actual_effect_ids != exact_effect_ids
+            ):
+                raise GraphitiAdmissionConsumerError(
+                    "exact projection cohort effects differ"
+                )
+
+            decision_watermark = self._connection.execute(
+                f"""
+                SELECT MAX(decision.authority_ledger_seq)
+                FROM unpublished_graphiti_admission_queue AS queue
+                JOIN unpublished_graphiti_admission_decisions AS decision
+                  USING(proposal_key)
+                WHERE queue.ingest_id IN ({placeholders})
+                """,
+                ingest_ids,
+            ).fetchone()[0]
+            if (
+                decision_watermark is None
+                or reconciliation.authority_watermark < int(decision_watermark)
+            ):
+                raise GraphitiAdmissionConsumerError(
+                    "exact projection cohort watermark differs"
+                )
+        return latest_generation_id
+
     def _empty_or_size_hold(
         self,
         *,
@@ -674,12 +832,13 @@ class GovernedContextHydrator:
                 "AMBIGUOUS_PROJECTION_WATERMARK", telemetry, read_at=read_at
             )
 
-        reconciliation_row = self._connection.execute(
+        reconciliation_rows = tuple(self._connection.execute(
             "SELECT receipt_json, receipt_digest, projector_family_id, generation_id, "
             "authority_watermark FROM "
             "unpublished_graphiti_projection_reconciliations "
-            "ORDER BY reconciled_at DESC, receipt_digest DESC LIMIT 1"
-        ).fetchone()
+            "ORDER BY reconciled_at DESC, receipt_digest DESC"
+        ).fetchall())
+        reconciliation_row = reconciliation_rows[0] if reconciliation_rows else None
         generation_id: str | None = None
         active_projection_snapshot: tuple[tuple[str, int, str], ...] = ()
         if telemetry.admitted_count:
@@ -689,43 +848,67 @@ class GovernedContextHydrator:
                 )
             try:
                 reconciliation_text = str(reconciliation_row[0])
-                reconciliation = json.loads(reconciliation_text)
-                if not isinstance(reconciliation, dict):
-                    raise TypeError("reconciliation must be an object")
-                generation_id = str(reconciliation_row[3])
-                active_projection_snapshot = self._active_projection_snapshot()
-                active_effect_ids = tuple(
-                    str(row[0]) for row in active_projection_snapshot
-                )
-                governed_projection_watermark = (
-                    max(row[1] for row in active_projection_snapshot)
-                    if active_projection_snapshot
-                    else self._tombstone_projection_watermark(generation_id)
-                )
-                if (
-                    canonical_json_bytes(reconciliation).decode() != reconciliation_text
-                    or reconciliation.get("receipt_digest")
-                    != str(reconciliation_row[1])
-                    or reconciliation.get("projector_family_id")
-                    != str(reconciliation_row[2])
-                    or reconciliation.get("generation_id") != generation_id
-                    or reconciliation.get("authority_watermark")
-                    != int(reconciliation_row[4])
-                    or reconciliation.get("authority_watermark")
-                    != governed_projection_watermark
-                    or any(
-                        str(row[2]) != generation_id
-                        for row in active_projection_snapshot
+                reconciliation_value = json.loads(reconciliation_text)
+                reconciliation, _binding = (
+                    graphiti_projection_reconciliation_from_json(
+                        reconciliation_text
                     )
-                    or tuple(reconciliation.get("expected_effect_ids", ()))
-                    != active_effect_ids
-                    or tuple(reconciliation.get("actual_effect_ids", ()))
-                    != active_effect_ids
+                )
+                generation_id = reconciliation.generation_id
+                active_projection_snapshot = self._active_projection_snapshot()
+                if _binding is not None:
+                    generation_id = self._validate_exact_projection_generations(
+                        reconciliation_rows=reconciliation_rows,
+                        active_projection_snapshot=active_projection_snapshot,
+                        contiguous_watermark=(
+                            telemetry.contiguous_projection_watermark
+                        ),
+                    )
+                else:
+                    active_effect_ids = tuple(
+                        str(row[0]) for row in active_projection_snapshot
+                    )
+                    governed_projection_watermark = (
+                        max(row[1] for row in active_projection_snapshot)
+                        if active_projection_snapshot
+                        else self._tombstone_projection_watermark(generation_id)
+                    )
+                    if (
+                        len(reconciliation_rows) != 1
+                        or reconciliation.authority_watermark
+                        != governed_projection_watermark
+                        or any(
+                            str(row[2]) != generation_id
+                            for row in active_projection_snapshot
+                        )
+                        or reconciliation.expected_effect_ids != active_effect_ids
+                        or reconciliation.actual_effect_ids != active_effect_ids
+                    ):
+                        return self._hold(
+                            "ADMITTED_CONTEXT_RECEIPT_DRIFT",
+                            telemetry,
+                            read_at=read_at,
+                        )
+                if (
+                    canonical_json_bytes(reconciliation_value).decode()
+                    != reconciliation_text
+                    or reconciliation.receipt_digest
+                    != str(reconciliation_row[1])
+                    or reconciliation.projector_family_id
+                    != str(reconciliation_row[2])
+                    or generation_id != str(reconciliation_row[3])
+                    or reconciliation.authority_watermark
+                    != int(reconciliation_row[4])
                 ):
                     return self._hold(
                         "ADMITTED_CONTEXT_RECEIPT_DRIFT", telemetry, read_at=read_at
                     )
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except (
+                GraphitiAdmissionConsumerError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+            ):
                 return self._hold(
                     "ADMITTED_CONTEXT_RECEIPT_INVALID", telemetry, read_at=read_at
                 )
@@ -866,7 +1049,6 @@ class GovernedContextHydrator:
                     or projection.proposal_key != request.proposal_key
                     or projection.decision_id != decision.decision_id
                     or projection.authority_watermark != decision.authority_ledger_seq
-                    or projection.generation_id != generation_id
                     or projection.trust_scope != "ADMITTED"
                 ):
                     return self._hold(
@@ -979,15 +1161,15 @@ class GovernedContextHydrator:
 
         canonical_items = tuple(sorted(items, key=lambda item: item.proposal_key))
         final_projection_snapshot = self._active_projection_snapshot()
-        final_reconciliation_row = self._connection.execute(
+        final_reconciliation_rows = tuple(self._connection.execute(
             "SELECT receipt_json, receipt_digest, projector_family_id, generation_id, "
             "authority_watermark FROM "
             "unpublished_graphiti_projection_reconciliations "
-            "ORDER BY reconciled_at DESC, receipt_digest DESC LIMIT 1"
-        ).fetchone()
+            "ORDER BY reconciled_at DESC, receipt_digest DESC"
+        ).fetchall())
         if (
             final_projection_snapshot != active_projection_snapshot
-            or final_reconciliation_row != reconciliation_row
+            or final_reconciliation_rows != reconciliation_rows
         ):
             return self._hold(
                 "ADMITTED_CONTEXT_RECEIPT_DRIFT", telemetry, read_at=read_at
