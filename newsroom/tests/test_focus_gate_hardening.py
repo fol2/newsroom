@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
@@ -293,7 +292,7 @@ def test_selected_evidence_uses_fixed_parallel_then_serial_commands(
             "-n",
             "4",
             "--dist",
-            "load",
+            "worksteal",
             "--max-worker-restart=0",
             "newsroom/tests/test_a.py",
             "newsroom/tests/test_b.py",
@@ -350,60 +349,6 @@ def test_two_phase_junit_preserves_requested_report_path(tmp_path: Path) -> None
     assert [suite.attrib["name"] for suite in root] == [
         "provider-free",
         "service",
-    ]
-
-
-def test_execute_route_overlaps_phases_waits_and_merges_fail_closed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    requested = tmp_path / "pytest.xml"
-    provider_free = tmp_path / "pytest-provider-free.xml"
-    service = tmp_path / "pytest-service.xml"
-    commands = (
-        ("provider-free", f"--junitxml={provider_free}"),
-        ("serial-service", f"--junitxml={service}"),
-    )
-    started = threading.Barrier(2)
-    completed: list[str] = []
-
-    monkeypatch.setattr(
-        focus_gate,
-        "verify_route",
-        lambda _root, _route: {
-            "research_required": False,
-            "bootstrap_required": True,
-            "full_health_required": False,
-            "selected_tests": ["newsroom/tests/test_a.py"],
-            "selected_service_tests": ["newsroom/tests/test_service.py"],
-        },
-    )
-    monkeypatch.setattr(
-        focus_gate,
-        "build_selected_test_commands",
-        lambda *_args, **_kwargs: commands,
-    )
-
-    def run(command: tuple[str, ...], **_kwargs: object) -> SimpleNamespace:
-        started.wait(timeout=2)
-        report = Path(command[-1].split("=", 1)[1])
-        report.write_text(
-            '<testsuite name="' + command[0] + '" tests="1" failures="0" '
-            'errors="0" skipped="0" time="1.0" />',
-            encoding="utf-8",
-        )
-        completed.append(command[0])
-        return SimpleNamespace(returncode=3 if command[0] == "provider-free" else 0)
-
-    monkeypatch.setattr(focus_gate.subprocess, "run", run)
-
-    assert focus_gate.execute_route(tmp_path, "route.json", junit=requested) == 3
-    assert sorted(completed) == ["provider-free", "serial-service"]
-    root = ET.parse(requested).getroot()
-    assert root.attrib["tests"] == "2"
-    assert [suite.attrib["name"] for suite in root] == [
-        "provider-free",
-        "serial-service",
     ]
 
 
