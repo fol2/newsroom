@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -265,3 +268,122 @@ def test_f0_validates_yaml_and_shell_syntax(tmp_path: Path) -> None:
         focus_gate._validate_yaml(invalid_yaml)
     with pytest.raises(focus_gate.FocusGateError, match="invalid shell syntax"):
         focus_gate._validate_shell(invalid_shell)
+
+
+def test_selected_evidence_uses_fixed_parallel_then_serial_commands(
+    tmp_path: Path,
+) -> None:
+    commands = focus_gate.build_selected_test_commands(
+        tmp_path,
+        selected_tests=("newsroom/tests/test_b.py", "newsroom/tests/test_a.py"),
+        selected_service_tests=("newsroom/tests/test_neo4j_service.py",),
+        junit=".focus/pytest.xml",
+    )
+
+    assert commands == (
+        (
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "--assert=plain",
+            "-p",
+            "no:cacheprovider",
+            "-n",
+            "4",
+            "--dist",
+            "worksteal",
+            "--max-worker-restart=0",
+            "newsroom/tests/test_a.py",
+            "newsroom/tests/test_b.py",
+            f"--junitxml={tmp_path / '.focus/pytest-provider-free.xml'}",
+        ),
+        (
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "--assert=plain",
+            "-p",
+            "no:cacheprovider",
+            "newsroom/tests/test_neo4j_service.py",
+            f"--junitxml={tmp_path / '.focus/pytest-service.xml'}",
+        ),
+    )
+
+
+def test_focus_workflow_keeps_finite_budget_for_two_phase_execution() -> None:
+    workflow = (
+        Path(__file__).parents[2] / ".github/workflows/focus-gates.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "timeout-minutes: 25" in workflow
+    assert "--junit .focus/pytest.xml" in workflow
+
+
+def test_two_phase_junit_preserves_requested_report_path(tmp_path: Path) -> None:
+    provider_free = tmp_path / "pytest-provider-free.xml"
+    service = tmp_path / "pytest-service.xml"
+    requested = tmp_path / "pytest.xml"
+    provider_free.write_text(
+        '<testsuites><testsuite name="provider-free" tests="2" failures="0" '
+        'errors="0" skipped="1" time="1.25" /></testsuites>',
+        encoding="utf-8",
+    )
+    service.write_text(
+        '<testsuites><testsuite name="service" tests="1" failures="0" '
+        'errors="0" skipped="0" time="2.5" /></testsuites>',
+        encoding="utf-8",
+    )
+
+    focus_gate._merge_junit_reports(requested, (provider_free, service))
+
+    root = ET.parse(requested).getroot()
+    assert root.attrib == {
+        "tests": "3",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "1",
+        "time": "3.750000",
+    }
+    assert [suite.attrib["name"] for suite in root] == [
+        "provider-free",
+        "service",
+    ]
+
+
+def test_failed_phase_cannot_publish_stale_junit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested = tmp_path / "pytest.xml"
+    stale = tmp_path / "pytest-provider-free.xml"
+    requested.write_text("stale requested", encoding="utf-8")
+    stale.write_text("stale phase", encoding="utf-8")
+    command = ("pytest", f"--junitxml={stale}")
+
+    monkeypatch.setattr(
+        focus_gate,
+        "verify_route",
+        lambda _root, _route: {
+            "research_required": False,
+            "bootstrap_required": True,
+            "full_health_required": False,
+            "selected_tests": ["newsroom/tests/test_a.py"],
+            "selected_service_tests": [],
+        },
+    )
+    monkeypatch.setattr(
+        focus_gate,
+        "build_selected_test_commands",
+        lambda *_args, **_kwargs: (command,),
+    )
+    monkeypatch.setattr(
+        focus_gate.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=3),
+    )
+
+    assert focus_gate.execute_route(tmp_path, "route.json", junit=requested) == 3
+    assert not requested.exists()
+    assert not stale.exists()

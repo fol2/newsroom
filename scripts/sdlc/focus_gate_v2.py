@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import subprocess
 import sys
 import tomllib
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from shutil import copyfile
 from typing import Mapping, Sequence
 
 from . import focus_gate as legacy
@@ -151,13 +153,51 @@ def execute_route(
         return 0
     if route["full_health_required"]:
         return legacy.execute_full_health(root, junit=junit)
-    selectors = tuple(
-        sorted(set(route["selected_tests"]) | set(route["selected_service_tests"]))
-    )
-    if not selectors:
+    selected_tests = tuple(sorted(set(route["selected_tests"])))
+    selected_service_tests = tuple(sorted(set(route["selected_service_tests"])))
+    if not selected_tests and not selected_service_tests:
         return 0
-    report = legacy._junit_path(root, junit)
-    command = (
+    commands = build_selected_test_commands(
+        root,
+        selected_tests=selected_tests,
+        selected_service_tests=selected_service_tests,
+        junit=junit,
+    )
+    requested_report = legacy._junit_path(root, junit)
+    requested_report.unlink(missing_ok=True)
+    phase_reports: list[Path] = []
+    for command in commands:
+        phase_report = Path(
+            next(
+                value.split("=", 1)[1]
+                for value in command
+                if value.startswith("--junitxml=")
+            )
+        )
+        phase_report.unlink(missing_ok=True)
+        result = subprocess.run(command, cwd=root, check=False).returncode
+        phase_reports.append(phase_report)
+        if result:
+            _merge_junit_reports(requested_report, tuple(phase_reports))
+            return result
+    _merge_junit_reports(requested_report, tuple(phase_reports))
+    return 0
+
+
+def build_selected_test_commands(
+    repo_root: str | Path,
+    *,
+    selected_tests: Sequence[str],
+    selected_service_tests: Sequence[str],
+    junit: str | Path,
+) -> tuple[tuple[str, ...], ...]:
+    """Build the fixed parallel/local then serial/service Focus commands."""
+
+    root = Path(repo_root).resolve()
+    requested = legacy._junit_path(root, junit)
+    suffix = requested.suffix or ".xml"
+    stem = requested.with_suffix("")
+    common = (
         sys.executable,
         "-m",
         "pytest",
@@ -165,10 +205,57 @@ def execute_route(
         "--assert=plain",
         "-p",
         "no:cacheprovider",
-        *selectors,
-        f"--junitxml={report}",
     )
-    return subprocess.run(command, cwd=root, check=False).returncode
+    commands: list[tuple[str, ...]] = []
+    local = tuple(sorted(set(selected_tests)))
+    service = tuple(sorted(set(selected_service_tests)))
+    if local:
+        commands.append(
+            (
+                *common,
+                "-n",
+                "4",
+                "--dist",
+                "worksteal",
+                "--max-worker-restart=0",
+                *local,
+                f"--junitxml={stem}-provider-free{suffix}",
+            )
+        )
+    if service:
+        commands.append(
+            (
+                *common,
+                *service,
+                f"--junitxml={stem}-service{suffix}",
+            )
+        )
+    return tuple(commands)
+
+
+def _merge_junit_reports(destination: Path, reports: Sequence[Path]) -> None:
+    """Preserve the requested JUnit path while retaining phase reports."""
+
+    existing = tuple(path for path in reports if path.is_file())
+    if not existing:
+        return
+    if len(existing) == 1:
+        copyfile(existing[0], destination)
+        return
+    suites = ET.Element("testsuites")
+    totals = {key: 0 for key in ("tests", "failures", "errors", "skipped")}
+    total_time = 0.0
+    for report in existing:
+        root = ET.parse(report).getroot()
+        children = list(root) if root.tag == "testsuites" else [root]
+        for child in children:
+            suites.append(child)
+            for key in totals:
+                totals[key] += int(child.attrib.get(key, "0"))
+            total_time += float(child.attrib.get("time", "0"))
+    suites.attrib.update({key: str(value) for key, value in totals.items()})
+    suites.attrib["time"] = f"{total_time:.6f}"
+    ET.ElementTree(suites).write(destination, encoding="utf-8", xml_declaration=True)
 
 
 def _parser() -> argparse.ArgumentParser:

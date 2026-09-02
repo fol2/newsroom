@@ -2198,6 +2198,121 @@ def test_complete_marker_recovery_releases_retry_without_second_provider_call(
     assert report["cost_complete"] is True
 
 
+def test_recovered_zero_retry_without_graph_journal_is_retained_as_hold(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    connection = connect(str(path))
+    no_provider_leaf = {
+        "outcome": "PREDISPATCH_REFUSED",
+        "usage": {
+            "usage_basis": "NO_PROVIDER_CALL",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_read_tokens": 0,
+            "cached_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": 0,
+        },
+    }
+    first = _reserve(connection, ingest_id="journal-less-recovery", attempt=1)
+    first_accounting = reconcile_graphiti_spend(
+        connection, spend_id=first, embedding_usage=_no_embedding_usage()
+    )
+    insert_graphiti_attempt_receipt(
+        connection,
+        ingest_id="journal-less-recovery",
+        attempt_number=1,
+        outcome="FAILED",
+        receipt={
+            "ingest_id": "journal-less-recovery",
+            "attempt_number": 1,
+            "outcome": "FAILED",
+            "provider_attempt_number": 1,
+            "chat_invocations": [no_provider_leaf],
+            "embedding_usage": _no_embedding_usage(),
+            "accounting": first_accounting,
+        },
+    )
+    retry = _reserve(connection, ingest_id="journal-less-recovery", attempt=2)
+    retry_accounting = reconcile_graphiti_spend(
+        connection, spend_id=retry, embedding_usage=_no_embedding_usage()
+    )
+    insert_graphiti_attempt_receipt(
+        connection,
+        ingest_id="journal-less-recovery",
+        attempt_number=2,
+        outcome="FAILED",
+        receipt={
+            "ingest_id": "journal-less-recovery",
+            "attempt_number": 2,
+            "outcome": "FAILED",
+            "provider_attempt_number": 1,
+            "chat_invocations": [no_provider_leaf],
+            "embedding_usage": _no_embedding_usage(),
+            "accounting": {
+                "provider_attempt": {
+                    "spend_id": first,
+                    "status": "RECONCILED",
+                    "retained_attempt_receipt": True,
+                    "reconciled_again": False,
+                    "accounting": None,
+                },
+                "current_attempt": retry_accounting,
+                "recovery_classification": "RECOVERED_IMMUTABLE_COMPLETE",
+            },
+        },
+    )
+    connection.commit()
+    connection.close()
+
+    plan = plan_graphiti_spend_reconciliation(
+        str(path), evaluated_at=datetime(2026, 8, 24, tzinfo=UTC)
+    )
+
+    by_spend = {item.spend_id: item for item in plan.transitions}
+    assert by_spend[retry].disposition is (
+        GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD
+    )
+    assert by_spend[retry].evidence_basis == (
+        "RECOVERED_IMMUTABLE_COMPLETE_WITHOUT_GRAPH_JOURNAL"
+    )
+    assert by_spend[retry].graph_journal_state == "UNOBSERVED"
+    assert by_spend[retry].actual_usd_microunits is None
+    assert by_spend[retry].unused_reservation_released is False
+
+    with sqlite3.connect(path) as connection:
+        retained = json.loads(
+            connection.execute(
+                "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts "
+                "WHERE ingest_id=? AND attempt_number=2",
+                ("journal-less-recovery",),
+            ).fetchone()[0]
+        )
+        retained["accounting"]["current_attempt"]["actual_usd_microunits"] = 1
+        retained.pop("receipt_digest")
+        retained_digest = digest_bytes(canonical_json_bytes(retained))
+        retained["receipt_digest"] = retained_digest
+        connection.execute(
+            "UPDATE unpublished_graphiti_attempt_receipts "
+            "SET receipt_digest=?,receipt_json=? "
+            "WHERE ingest_id=? AND attempt_number=2",
+            (
+                retained_digest,
+                canonical_json_bytes(retained).decode("utf-8"),
+                "journal-less-recovery",
+            ),
+        )
+
+    with pytest.raises(
+        GraphitiSpendReconciliationError,
+        match="attempt receipt provider attempt differs from its spend join",
+    ):
+        plan_graphiti_spend_reconciliation(
+            str(path), evaluated_at=datetime(2026, 8, 24, tzinfo=UTC)
+        )
+
+
 def test_later_recovery_can_join_a_previously_dispositioned_provider_attempt(
     tmp_path: Path,
 ) -> None:

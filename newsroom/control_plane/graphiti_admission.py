@@ -70,6 +70,9 @@ GRAPHITI_ADMISSION_COHORT_SCHEMA_VERSION = (
 GRAPHITI_ADMISSION_GENERATION_IDENTITY_VERSION = (
     "graphiti-admission-generation-v2"
 )
+GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION = (
+    "newsroom.graphiti-admission.exact-generation-reconciliation.v1"
+)
 
 
 class GraphitiAdmissionConsumerError(RuntimeError):
@@ -859,7 +862,11 @@ class GraphitiProjectionReconciliationReceipt:
             raise GraphitiAdmissionConsumerError(
                 "projection reconciliation family differs from Increment 4"
             )
-        if self.authority_watermark <= 0:
+        if (
+            isinstance(self.authority_watermark, bool)
+            or not isinstance(self.authority_watermark, int)
+            or self.authority_watermark <= 0
+        ):
             raise GraphitiAdmissionConsumerError(
                 "projection reconciliation needs a positive authority watermark"
             )
@@ -1259,6 +1266,287 @@ def graphiti_projection_receipt_from_json(value: str) -> GraphitiProjectionRecei
         provider_model_calls=_exact_integer(
             raw["provider_model_calls"], field="provider model calls"
         ),
+    )
+
+
+def graphiti_projection_reconciliation_from_json(
+    value: str,
+) -> tuple[GraphitiProjectionReconciliationReceipt, dict[str, object] | None]:
+    """Parse a raw reconciliation or its exact-cohort binding envelope."""
+
+    record = _mapping(
+        json.loads(value),
+        field="retained projection reconciliation",
+    )
+    binding: dict[str, object] | None = None
+    raw = record
+    if record.get("schema_version") is not None:
+        if (
+            set(record)
+            != {"schema_version", "cohort_digest", "ingest_ids", "raw_receipt"}
+            or record.get("schema_version")
+            != GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION
+            or canonical_json_bytes(record).decode("utf-8") != value
+        ):
+            raise GraphitiAdmissionConsumerError(
+                "exact reconciliation binding envelope differs"
+            )
+        cohort_digest = str(record.get("cohort_digest") or "")
+        validate_sha256_digest(
+            cohort_digest,
+            field="exact reconciliation cohort digest",
+        )
+        ingest_values = record.get("ingest_ids")
+        if not isinstance(ingest_values, list) or any(
+            not isinstance(item, str) for item in ingest_values
+        ):
+            raise GraphitiAdmissionConsumerError(
+                "exact reconciliation ingest identities differ"
+            )
+        ingest_ids = _exact_ingest_ids(tuple(ingest_values))
+        assert ingest_ids is not None
+        raw = _mapping(
+            record.get("raw_receipt"),
+            field="exact reconciliation raw receipt",
+        )
+        binding = {
+            "schema_version": GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION,
+            "cohort_digest": cohort_digest,
+            "ingest_ids": list(ingest_ids),
+        }
+
+    if set(raw) != {
+        "generation_id",
+        "expected_effect_ids",
+        "actual_effect_ids",
+        "authority_watermark",
+        "receipt_digest",
+        "projector_family_id",
+        "provider_model_calls",
+    }:
+        raise GraphitiAdmissionConsumerError(
+            "projection reconciliation receipt fields differ"
+        )
+    expected = raw.get("expected_effect_ids")
+    actual = raw.get("actual_effect_ids")
+    if (
+        not isinstance(expected, list)
+        or not isinstance(actual, list)
+        or any(not isinstance(item, str) for item in (*expected, *actual))
+    ):
+        raise GraphitiAdmissionConsumerError(
+            "projection reconciliation effect identities differ"
+        )
+    receipt = GraphitiProjectionReconciliationReceipt(
+        generation_id=str(raw["generation_id"]),
+        expected_effect_ids=tuple(expected),
+        actual_effect_ids=tuple(actual),
+        authority_watermark=_exact_integer(
+            raw["authority_watermark"],
+            field="projection reconciliation authority watermark",
+        ),
+        receipt_digest=str(raw["receipt_digest"]),
+        projector_family_id=str(raw["projector_family_id"]),
+        provider_model_calls=_exact_integer(
+            raw["provider_model_calls"],
+            field="projection reconciliation provider calls",
+        ),
+    )
+    if receipt.canonical_value() != raw:
+        raise GraphitiAdmissionConsumerError(
+            "projection reconciliation receipt value differs"
+        )
+    if binding is not None:
+        expected_generation_id = str(
+            typed_id(
+                ProjectionGenerationId,
+                GRAPHITI_ADMISSION_GENERATION_IDENTITY_VERSION,
+                str(binding["cohort_digest"]),
+            )
+        )
+        if receipt.generation_id != expected_generation_id:
+            raise GraphitiAdmissionConsumerError(
+                "exact reconciliation generation identity differs"
+            )
+    return receipt, binding
+
+
+def graphiti_decided_cohort_generation_identity(
+    connection: sqlite3.Connection,
+    *,
+    ingest_ids: tuple[str, ...],
+    require_terminal_states: bool = False,
+) -> tuple[str, str]:
+    """Rebuild one exact generation identity from durable cohort evidence."""
+
+    exact = _exact_ingest_ids(ingest_ids)
+    assert exact is not None
+    placeholders = ",".join("?" for _ in exact)
+    ingest_rows = connection.execute(
+        f"""
+        SELECT ingest.ingest_id, ingest.outcome, ingest.proposal_count,
+               ingest.receipt_digest, receipt.receipt_json
+        FROM unpublished_graphiti_ingest AS ingest
+        JOIN unpublished_graphiti_receipts AS receipt USING(ingest_id)
+        WHERE ingest.ingest_id IN ({placeholders})
+          AND ingest.outcome='COMPLETE'
+        ORDER BY ingest.ingest_id
+        """,
+        exact,
+    ).fetchall()
+    if tuple(str(row[0]) for row in ingest_rows) != exact:
+        raise GraphitiAdmissionConsumerError(
+            "exact generation receipts are missing or non-terminal"
+        )
+
+    source_receipts: list[dict[str, object]] = []
+    proposal_denominator = 0
+    for ingest_id, outcome, proposal_count, receipt_digest, receipt_json in ingest_rows:
+        receipt = _mapping(
+            json.loads(str(receipt_json)),
+            field="exact generation terminal receipt",
+        )
+        unsigned = dict(receipt)
+        supplied_digest = unsigned.pop("receipt_digest", None)
+        actual_digest = digest_bytes(canonical_json_bytes(unsigned))
+        count = _exact_integer(
+            proposal_count,
+            field="exact generation proposal denominator",
+        )
+        if (
+            count < 0
+            or receipt.get("ingest_id") != str(ingest_id)
+            or receipt.get("outcome") != str(outcome)
+            or receipt.get("proposal_count") != count
+            or supplied_digest != str(receipt_digest)
+            or actual_digest != str(receipt_digest)
+        ):
+            raise GraphitiAdmissionConsumerError(
+                "exact generation terminal receipt integrity differs"
+            )
+        proposal_denominator += count
+        source_receipts.append(
+            {
+                "ingest_id": str(ingest_id),
+                "receipt_digest": str(receipt_digest),
+                "proposal_count": count,
+            }
+        )
+
+    integrity_failures = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM "
+            "unpublished_graphiti_admission_receipt_failures "
+            f"WHERE ingest_id IN ({placeholders})",
+            exact,
+        ).fetchone()[0]
+    )
+    if integrity_failures:
+        raise GraphitiAdmissionConsumerError(
+            "exact generation has retained admission integrity failures"
+        )
+    queue_rows = connection.execute(
+        f"""
+        SELECT queue.queue_seq, queue.proposal_key, queue.ingest_id,
+               queue.source_receipt_digest, queue.proposal_digest,
+               queue.proposal_kind, queue.request_json, queue.request_digest,
+               queue.state,
+               decision.action, decision.decision_id,
+               decision.authority_ledger_seq, decision.reason_code,
+               decision.authority_receipt_digest, decision.decision_json,
+               decision.decision_digest
+        FROM unpublished_graphiti_admission_queue AS queue
+        JOIN unpublished_graphiti_admission_decisions AS decision
+          USING(proposal_key)
+        WHERE queue.ingest_id IN ({placeholders})
+        ORDER BY queue.queue_seq
+        """,
+        exact,
+    ).fetchall()
+    if len(queue_rows) != proposal_denominator or proposal_denominator == 0:
+        raise GraphitiAdmissionConsumerError(
+            "exact generation is not bound to a complete decided cohort"
+        )
+    receipt_by_ingest = {
+        str(item["ingest_id"]): str(item["receipt_digest"])
+        for item in source_receipts
+    }
+    members: list[dict[str, object]] = []
+    for row in queue_rows:
+        (
+            queue_seq,
+            proposal_key,
+            ingest_id,
+            source_receipt_digest,
+            proposal_digest,
+            proposal_kind,
+            request_json,
+            request_digest,
+            queue_state,
+            decision_action,
+            decision_id,
+            decision_authority_ledger_seq,
+            decision_reason_code,
+            decision_authority_receipt_digest,
+            decision_json,
+            decision_digest,
+        ) = row
+        retained_request = _mapping(
+            json.loads(str(request_json)),
+            field="exact generation admission request",
+        )
+        request = graphiti_admission_request_from_value(retained_request)
+        decision = graphiti_governed_decision_from_json(str(decision_json))
+        expected_states = (
+            {"PROJECTED", "REVOKED"}
+            if require_terminal_states
+            and decision.action is GraphitiProposalAdmissionAction.ADMIT
+            else {"DECIDED", "PROJECTED", "REVOKED"}
+            if decision.action is GraphitiProposalAdmissionAction.ADMIT
+            else {"TERMINAL"}
+        )
+        if (
+            digest_bytes(canonical_json_bytes(retained_request))
+            != str(request_digest)
+            or digest_bytes(str(decision_json).encode("utf-8"))
+            != str(decision_digest)
+            or request.queue_seq != int(queue_seq)
+            or request.proposal_key != str(proposal_key)
+            or request.source_receipt_digest != str(source_receipt_digest)
+            or receipt_by_ingest.get(str(ingest_id))
+            != str(source_receipt_digest)
+            or request.proposal.digest != str(proposal_digest)
+            or request.proposal.kind.value != str(proposal_kind)
+            or decision.proposal_key != request.proposal_key
+            or decision.proposal_digest != request.proposal.digest
+            or decision.proposal_kind is not request.proposal.kind
+            or decision.proposal_local_id != request.proposal.local_id
+            or decision.action.value != str(decision_action)
+            or decision.decision_id != str(decision_id)
+            or decision.authority_ledger_seq != int(decision_authority_ledger_seq)
+            or decision.reason_code != str(decision_reason_code)
+            or decision.authority_receipt_digest
+            != str(decision_authority_receipt_digest)
+            or str(queue_state) not in expected_states
+        ):
+            raise GraphitiAdmissionConsumerError(
+                "exact generation decision integrity differs"
+            )
+        members.append(
+            {
+                "ingest_id": str(ingest_id),
+                "proposal_key": request.proposal_key,
+                "proposal_envelope_id": str(
+                    request.proposal_authority_binding.proposal_envelope.proposal_id
+                ),
+                "decision_digest": str(decision_digest),
+                "decision": decision.canonical_value(),
+            }
+        )
+    return graphiti_admission_generation_identity(
+        ingest_ids=exact,
+        source_receipts=tuple(source_receipts),
+        members=tuple(members),
     )
 
 
@@ -2369,7 +2657,7 @@ class GraphitiAdmissionConsumer:
             (generation_id,),
         ).fetchall()
         retained_receipts: list[GraphitiProjectionReceipt] = []
-        retained_reconciliation: dict[str, object] | None = None
+        retained_reconciliation: GraphitiProjectionReconciliationReceipt | None = None
         if existing_rows or reconciliation_rows:
             if (
                 len(existing_rows) != len(admitted)
@@ -2397,19 +2685,24 @@ class GraphitiAdmissionConsumer:
                         "exact Graphiti retained generation identity differs"
                     )
                 retained_receipts.append(receipt)
-            retained_reconciliation = _mapping(
-                json.loads(str(reconciliation_rows[0][0])),
-                field="retained projection reconciliation",
+            retained_reconciliation, retained_binding = (
+                graphiti_projection_reconciliation_from_json(
+                    str(reconciliation_rows[0][0])
+                )
             )
             if (
-                retained_reconciliation.get("generation_id") != generation_id
-                or tuple(
-                    retained_reconciliation.get("expected_effect_ids") or ()
-                )
+                retained_binding
+                != {
+                    "schema_version": (
+                        GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION
+                    ),
+                    "cohort_digest": cohort_digest,
+                    "ingest_ids": list(exact),
+                }
+                or retained_reconciliation.generation_id != generation_id
+                or retained_reconciliation.expected_effect_ids
                 != admitted_authority_ids
-                or tuple(
-                    retained_reconciliation.get("actual_effect_ids") or ()
-                )
+                or retained_reconciliation.actual_effect_ids
                 != admitted_authority_ids
             ):
                 raise GraphitiAdmissionConsumerError(
@@ -2437,9 +2730,9 @@ class GraphitiAdmissionConsumer:
 
         if retained_reconciliation is not None:
             if (
-                retained_reconciliation.get("authority_watermark")
+                retained_reconciliation.authority_watermark
                 != result.authority_watermark
-                or retained_reconciliation.get("receipt_digest")
+                or retained_reconciliation.receipt_digest
                 != result.reconciliation_digest
                 or any(
                     receipt.authority_watermark != result.authority_watermark
@@ -2555,7 +2848,14 @@ class GraphitiAdmissionConsumer:
                         "exact Graphiti admitted cohort state changed before retention"
                     )
             reconciliation_json = canonical_json_bytes(
-                reconciliation.canonical_value()
+                {
+                    "schema_version": (
+                        GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION
+                    ),
+                    "cohort_digest": cohort_digest,
+                    "ingest_ids": list(exact),
+                    "raw_receipt": reconciliation.canonical_value(),
+                }
             ).decode("utf-8")
             self._connection.execute(
                 """
@@ -3129,7 +3429,7 @@ def graphiti_admission_telemetry(
     )
     reconciliation_row = connection.execute(
         "SELECT receipt_json FROM unpublished_graphiti_projection_reconciliations "
-        "ORDER BY reconciled_at DESC LIMIT 1"
+        "ORDER BY reconciled_at DESC,receipt_digest DESC LIMIT 1"
     ).fetchone()
     reconciled = False
     rights_tombstone_failures = int(
@@ -3139,32 +3439,35 @@ def graphiti_admission_telemetry(
         ).fetchone()[0]
     )
     if reconciliation_row is not None:
-        reconciliation = _mapping(
-            json.loads(str(reconciliation_row[0])),
-            field="projection reconciliation telemetry",
-        )
-        generation_effect_ids = tuple(
-            str(row[0])
-            for row in connection.execute(
-                """
-                SELECT projection.effect_id
-                FROM unpublished_graphiti_projection_receipts AS projection
-                LEFT JOIN unpublished_graphiti_projection_tombstones AS tombstone
-                  USING(proposal_key)
-                WHERE projection.generation_id=?
-                  AND tombstone.proposal_key IS NULL
-                ORDER BY projection.effect_id
-                """,
-                (str(reconciliation.get("generation_id") or ""),),
+        try:
+            reconciliation, _binding = (
+                graphiti_projection_reconciliation_from_json(
+                    str(reconciliation_row[0])
+                )
             )
-        )
-        actual_effect_ids = reconciliation.get("actual_effect_ids")
-        reconciled = (
-            rights_tombstone_failures == 0
-            and isinstance(actual_effect_ids, list)
-            and tuple(actual_effect_ids) == generation_effect_ids
-            and active_admitted == len(active_effect_ids)
-        )
+        except (GraphitiAdmissionConsumerError, json.JSONDecodeError, ValueError):
+            pass
+        else:
+            generation_effect_ids = tuple(
+                str(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT projection.effect_id
+                    FROM unpublished_graphiti_projection_receipts AS projection
+                    LEFT JOIN unpublished_graphiti_projection_tombstones AS tombstone
+                      USING(proposal_key)
+                    WHERE projection.generation_id=?
+                      AND tombstone.proposal_key IS NULL
+                    ORDER BY projection.effect_id
+                    """,
+                    (reconciliation.generation_id,),
+                )
+            )
+            reconciled = (
+                rights_tombstone_failures == 0
+                and reconciliation.actual_effect_ids == generation_effect_ids
+                and active_admitted == len(active_effect_ids)
+            )
     integrity_holds = int(
         connection.execute(
             "SELECT COUNT(*) FROM unpublished_graphiti_admission_receipt_failures"
@@ -3283,8 +3586,11 @@ __all__ = [
     "GraphitiProposalAdmissionAction",
     "GraphitiRelationHoldBasis",
     "GraphitiRightsAuthority",
+    "GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION",
     "graphiti_admission_request_from_value",
     "graphiti_admission_telemetry",
+    "graphiti_decided_cohort_generation_identity",
     "graphiti_governed_decision_from_json",
     "graphiti_projection_receipt_from_json",
+    "graphiti_projection_reconciliation_from_json",
 ]
