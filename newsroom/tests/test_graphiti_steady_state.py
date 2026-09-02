@@ -26,11 +26,19 @@ from newsroom.control_plane.graphiti_events import (
     GRAPHITI_EVENT_PROJECTION_GENERATION,
     GRAPHITI_EVENT_PROJECTOR_VERSION,
 )
+from newsroom.control_plane.graphiti_admission import (
+    GRAPHITI_ADMISSION_GENERATION_IDENTITY_VERSION,
+    GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION,
+    GraphitiAdmissionConsumerError,
+    GraphitiGovernedDecision,
+    GraphitiProjectionReconciliationReceipt,
+)
 from newsroom.control_plane.graphiti_steady_state import (
     GraphitiCampaignRuntime,
     _mint_graphiti_campaign_runtime,
     _spend,
     build_graphiti_steady_state_packet,
+    graphiti_operational_partition_snapshot,
     validate_graphiti_campaign_packet,
     write_content_addressed_packet,
 )
@@ -50,7 +58,9 @@ from newsroom.control_plane.store import (
     reserve_graphiti_spend,
 )
 from newsroom.effective_revision import EffectiveRevisionIdentity
-from newsroom.graphiti_adapter.identity import attempt_ids
+from newsroom.extraction.types import ExtractionProposalKind
+from newsroom.graphiti_adapter.admission import GraphitiProposalAdmissionAction
+from newsroom.graphiti_adapter.identity import attempt_ids, typed_id
 from newsroom.increment9.proving import PROVING_GATES, SOURCE_IDS, SOURCE_URLS
 from newsroom.increment4.contracts import (
     increment4_admitted_family_v1,
@@ -832,7 +842,7 @@ def _campaign_input(packet: dict[str, object]) -> dict[str, object]:
         "policy_version": "v1",
     }
     return {
-        "schema_version": "newsroom.graphiti-bounded-campaign-input.v2",
+        "schema_version": "newsroom.graphiti-bounded-campaign-input.v3",
         "focus_gate": {
             "head_sha": "head",
             "tree_sha": "tree",
@@ -913,8 +923,8 @@ def _campaign_input(packet: dict[str, object]) -> dict[str, object]:
         "success_objectives": {
             "watermark": "selected cohort terminal",
             "backlog": 0,
-            "velocity": "positive",
-            "lag": "bounded",
+            "velocity": "service_at_least_arrival",
+            "lag": {"max_oldest_eligible_seconds": 300},
             "reconciliation": "exact",
         },
         "campaign_authorised": False,
@@ -963,6 +973,97 @@ def _governed_runtime(packet: dict[str, object]) -> GraphitiCampaignRuntime:
         authority_store_source_path=str(authority["source_path"]),
         authority_store_descriptor_digest=str(authority["descriptor_digest"]),
     )
+
+
+def _bounded_candidate_packet(
+    proving: Path,
+    unpublished: Path,
+    authority: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, object]:
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti_steady_state."
+        "load_graphiti_units_from_connection",
+        lambda _connection, *, evaluated_at: (
+            _current_unit(item_key="candidate", ingest_id="candidate-ingest"),
+        ),
+    )
+    preparation = _packet(
+        proving,
+        unpublished,
+        authority_store=authority,
+    )
+    return _packet(
+        proving,
+        unpublished,
+        authority_store=authority,
+        campaign_input=_campaign_input(preparation),
+        graph_destination_reconciliation=(
+            _graph_destination_reconciliation(preparation)
+        ),
+        governed_runtime=_governed_runtime(preparation),
+    )
+
+
+def _seed_admission_obligation(
+    connection: sqlite3.Connection,
+    *,
+    action: str | None,
+) -> None:
+    at = "2026-09-01T12:00:00.000000Z"
+    proposal_key = "proposal-1"
+    connection.execute(
+        "INSERT INTO unpublished_graphiti_admission_queue("
+        "proposal_key,ingest_id,source_revision_id,source_receipt_digest,"
+        "proposal_digest,proposal_kind,request_json,request_digest,state,"
+        "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            proposal_key,
+            "proposal-ingest",
+            "proposal-revision",
+            "sha256:" + "1" * 64,
+            "sha256:" + "2" * 64,
+            "ENTITY_MENTION",
+            "{}",
+            "sha256:" + "3" * 64,
+            "READY" if action is None else "TERMINAL",
+            at,
+            at,
+        ),
+    )
+    if action is not None:
+        decision = GraphitiGovernedDecision(
+            proposal_key=proposal_key,
+            proposal_digest="sha256:" + "2" * 64,
+            proposal_kind=ExtractionProposalKind.ENTITY_MENTION,
+            proposal_local_id="proposal-local-1",
+            action=GraphitiProposalAdmissionAction(action),
+            decision_id="decision-1",
+            authority_ledger_seq=1,
+            reason_code="FIXTURE_POLICY",
+            authority_receipt_digest="sha256:" + "4" * 64,
+        )
+        decision_json = canonical_json_bytes(decision.canonical_value()).decode(
+            "utf-8"
+        )
+        connection.execute(
+            "INSERT INTO unpublished_graphiti_admission_decisions("
+            "proposal_key,action,decision_id,authority_ledger_seq,reason_code,"
+            "authority_receipt_digest,decision_json,decision_digest,decided_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                proposal_key,
+                action,
+                "decision-1",
+                1,
+                "FIXTURE_POLICY",
+                "sha256:" + "4" * 64,
+                decision_json,
+                digest_bytes(decision_json.encode("utf-8")),
+                at,
+            ),
+        )
+    connection.commit()
 
 
 def test_campaign_runtime_rejects_non_governed_construction_token() -> None:
@@ -1135,6 +1236,74 @@ def test_historical_partition_is_total_disjoint_and_candidates_are_unauthorised(
     assert partition["categories"][
         "NON_REPLAYABLE_OR_AMBIGUOUS_EFFECT_HOLD"
     ]["ledger_sequences"] == [6]
+
+
+def test_operational_partition_reuses_fresh_gap_and_hold_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proving, _unpublished, connection = _stores(tmp_path)
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=1,
+        item_key="candidate",
+        ingest_id="candidate-ingest",
+    )
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=2,
+        item_key="projectable-gap",
+        ingest_id="gap-ingest",
+        with_event=False,
+    )
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=3,
+        item_key="claimed-history",
+        ingest_id="claimed-ingest",
+    )
+    connection.execute(
+        "UPDATE unpublished_graphiti_revision_events SET state='CLAIMED',"
+        "claim_owner='historical-worker',claim_expires_at=? WHERE ledger_seq=3",
+        ("2026-09-01T12:05:00.000000Z",),
+    )
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=4,
+        item_key="rights-held-gap",
+        ingest_id="held-ingest",
+        with_event=False,
+    )
+    connection.commit()
+    proving_connection = sqlite3.connect(proving)
+    authority = sqlite3.connect(":memory:")
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti_steady_state."
+        "load_graphiti_units_from_connection",
+        lambda _connection, *, evaluated_at: (
+            _current_unit(item_key="candidate", ingest_id="candidate-ingest"),
+            _current_unit(item_key="projectable-gap", ingest_id="gap-ingest"),
+        ),
+    )
+
+    snapshot = graphiti_operational_partition_snapshot(
+        proving_connection,
+        connection,
+        authority=authority,
+        observed_at=NOW,
+    )
+
+    assert [item["kind"] for item in snapshot["actionable"]] == [
+        "FRESH_EVENT",
+        "PROJECT_EVENT_GAP",
+    ]
+    assert [item["ledger_seq"] for item in snapshot["holds"]] == [3, 4]
+    assert snapshot["snapshot_digest"] == digest_canonical(
+        {key: value for key, value in snapshot.items() if key != "snapshot_digest"}
+    )
+    authority.close()
+    proving_connection.close()
+    connection.close()
 
 
 def test_complete_packet_remains_no_go_without_graph_readback(
@@ -1350,6 +1519,252 @@ def test_authenticated_graph_readback_builds_valid_ready_packet(
     )
     with pytest.raises(ValueError, match="graph readback differs"):
         validate_graphiti_campaign_packet(runtime_graph_drift)
+
+
+def test_admission_backlog_blocks_owner_decision_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=1,
+        item_key="candidate",
+        ingest_id="candidate-ingest",
+    )
+    _seed_admission_obligation(connection, action=None)
+    connection.close()
+    _seed_proving_accountability(proving)
+    authority = _authority_store(tmp_path)
+
+    packet = _bounded_candidate_packet(
+        proving,
+        unpublished,
+        authority,
+        monkeypatch,
+    )
+
+    assert packet["verdict"] == "NO_GO"
+    assert packet["admission"]["proposal_denominator"] == 1
+    assert packet["admission"]["admission_backlog"] == 1
+    assert packet["admission"]["projection_reconciled"] is False
+    assert "ADMISSION_BACKLOG_PRESENT" in packet["blockers"]
+    assert "ADMISSION_PROJECTION_UNRECONCILED" in packet["blockers"]
+    assert "ADMISSION_DEAD_LETTER_PRESENT" not in packet["blockers"]
+    assert "ADMISSION_INTEGRITY_HOLD_PRESENT" not in packet["blockers"]
+
+
+def test_all_hold_admission_rejects_unbound_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=1,
+        item_key="candidate",
+        ingest_id="candidate-ingest",
+    )
+    _seed_admission_obligation(connection, action="HOLD")
+    connection.close()
+    _seed_proving_accountability(proving)
+    authority = _authority_store(tmp_path)
+
+    unreconciled = _bounded_candidate_packet(
+        proving,
+        unpublished,
+        authority,
+        monkeypatch,
+    )
+
+    assert unreconciled["verdict"] == "NO_GO"
+    assert unreconciled["admission"]["proposal_denominator"] == 1
+    assert unreconciled["admission"]["admitted_count"] == 0
+    assert unreconciled["admission"]["held_count"] == 1
+    assert unreconciled["admission"]["admission_backlog"] == 0
+    assert unreconciled["admission"]["projection_reconciled"] is False
+    assert "ADMISSION_PROJECTION_UNRECONCILED" in unreconciled["blockers"]
+    assert "ADMISSION_BACKLOG_PRESENT" not in unreconciled["blockers"]
+
+    connection = sqlite3.connect(unpublished)
+    receipt = GraphitiProjectionReconciliationReceipt(
+        generation_id="00000000-0000-4000-8000-000000000895",
+        expected_effect_ids=(),
+        actual_effect_ids=(),
+        authority_watermark=1,
+        receipt_digest="sha256:" + "5" * 64,
+    ).canonical_value()
+    connection.execute(
+        "INSERT INTO unpublished_graphiti_projection_reconciliations("
+        "receipt_digest,projector_family_id,generation_id,"
+        "authority_watermark,receipt_json,reconciled_at) VALUES(?,?,?,?,?,?)",
+        (
+            receipt["receipt_digest"],
+            receipt["projector_family_id"],
+            receipt["generation_id"],
+            1,
+            canonical_json_bytes(receipt).decode("utf-8"),
+            "2026-09-01T12:00:00.000000Z",
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    unbound = _bounded_candidate_packet(
+        proving,
+        unpublished,
+        authority,
+        monkeypatch,
+    )
+
+    assert unbound["verdict"] == "NO_GO"
+    assert unbound["admission"]["telemetry_projection_reconciled"] is True
+    assert unbound["admission"]["projection_reconciled"] is False
+    assert unbound["admission"]["exact_cohort_reconciliation"]["total"] is False
+    assert "ADMISSION_PROJECTION_UNRECONCILED" in unbound["blockers"]
+
+
+def test_orphan_reconciliation_blocks_without_a_proposal_denominator(
+    tmp_path: Path,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    receipt = GraphitiProjectionReconciliationReceipt(
+        generation_id="00000000-0000-4000-8000-000000000895",
+        expected_effect_ids=(),
+        actual_effect_ids=(),
+        authority_watermark=1,
+        receipt_digest="sha256:" + "5" * 64,
+    ).canonical_value()
+    connection.execute(
+        "INSERT INTO unpublished_graphiti_projection_reconciliations("
+        "receipt_digest,projector_family_id,generation_id,"
+        "authority_watermark,receipt_json,reconciled_at) VALUES(?,?,?,?,?,?)",
+        (
+            receipt["receipt_digest"],
+            receipt["projector_family_id"],
+            receipt["generation_id"],
+            1,
+            canonical_json_bytes(receipt).decode("utf-8"),
+            "2026-09-01T12:00:00.000000Z",
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    packet = _packet(proving, unpublished)
+
+    assert packet["admission"]["proposal_denominator"] == 0
+    assert packet["admission"]["exact_cohort_reconciliation"]["total"] is False
+    assert "ADMISSION_PROJECTION_UNRECONCILED" in packet["blockers"]
+
+
+def test_exact_all_hold_generation_reconciliation_is_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=1,
+        item_key="candidate",
+        ingest_id="candidate-ingest",
+    )
+    _seed_admission_obligation(connection, action="HOLD")
+    cohort_digest = "sha256:" + "6" * 64
+    generation_id = str(
+        typed_id(
+            ProjectionGenerationId,
+            GRAPHITI_ADMISSION_GENERATION_IDENTITY_VERSION,
+            cohort_digest,
+        )
+    )
+    raw_receipt = GraphitiProjectionReconciliationReceipt(
+        generation_id=generation_id,
+        expected_effect_ids=(),
+        actual_effect_ids=(),
+        authority_watermark=1,
+        receipt_digest="sha256:" + "7" * 64,
+    )
+    binding = {
+        "schema_version": GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION,
+        "cohort_digest": cohort_digest,
+        "ingest_ids": ["proposal-ingest"],
+        "raw_receipt": raw_receipt.canonical_value(),
+    }
+    connection.execute(
+        "INSERT INTO unpublished_graphiti_projection_reconciliations("
+        "receipt_digest,projector_family_id,generation_id,"
+        "authority_watermark,receipt_json,reconciled_at) VALUES(?,?,?,?,?,?)",
+        (
+            raw_receipt.receipt_digest,
+            raw_receipt.projector_family_id,
+            raw_receipt.generation_id,
+            raw_receipt.authority_watermark,
+            canonical_json_bytes(binding).decode("utf-8"),
+            "2026-09-01T12:00:00.000000Z",
+        ),
+    )
+    connection.commit()
+    connection.close()
+    _seed_proving_accountability(proving)
+    authority = _authority_store(tmp_path)
+    def exact_identity(
+        exact_connection: sqlite3.Connection,
+        *,
+        ingest_ids: tuple[str, ...],
+        require_terminal_states: bool,
+    ) -> tuple[str, str]:
+        assert ingest_ids == ("proposal-ingest",)
+        assert require_terminal_states is True
+        state = exact_connection.execute(
+            "SELECT state FROM unpublished_graphiti_admission_queue "
+            "WHERE proposal_key='proposal-1'"
+        ).fetchone()[0]
+        if state != "TERMINAL":
+            raise GraphitiAdmissionConsumerError(
+                "exact generation decision integrity differs"
+            )
+        return cohort_digest, generation_id
+
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti_steady_state."
+        "graphiti_decided_cohort_generation_identity",
+        exact_identity,
+    )
+
+    packet = _bounded_candidate_packet(
+        proving,
+        unpublished,
+        authority,
+        monkeypatch,
+    )
+
+    assert packet["verdict"] == "READY_FOR_OWNER_DECISION"
+    assert packet["admission"]["projection_reconciled"] is True
+    assert packet["admission"]["exact_cohort_reconciliation"]["total"] is True
+    assert packet["admission"]["exact_cohort_reconciliation"]["disjoint"] is True
+    assert packet["blockers"] == []
+
+    connection = sqlite3.connect(unpublished)
+    connection.execute(
+        "UPDATE unpublished_graphiti_admission_queue SET state='READY' "
+        "WHERE proposal_key='proposal-1'"
+    )
+    connection.commit()
+    connection.close()
+
+    corrupt_state = _bounded_candidate_packet(
+        proving,
+        unpublished,
+        authority,
+        monkeypatch,
+    )
+
+    assert corrupt_state["admission"]["admission_backlog"] == 0
+    assert corrupt_state["admission"]["telemetry_projection_reconciled"] is True
+    assert corrupt_state["admission"]["projection_reconciled"] is False
+    assert corrupt_state["verdict"] == "NO_GO"
+    assert "ADMISSION_PROJECTION_UNRECONCILED" in corrupt_state["blockers"]
 
 
 def test_untyped_caller_graph_readback_is_no_go(

@@ -638,8 +638,12 @@ def test_local_entity_and_relation_evidence_spans_bind_and_admit(tmp_path) -> No
 
 
 def test_non_empty_all_hold_cohort_still_promotes_one_full_snapshot(tmp_path) -> None:
-    from scripts.hermes_graphiti_worker import (
-        _campaign_decided_generation_identity,
+    from newsroom.control_plane.graphiti_admission import (
+        GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION,
+        graphiti_decided_cohort_generation_identity,
+    )
+    from newsroom.control_plane.graphiti_steady_state import (
+        _exact_admission_reconciliation,
     )
 
     connection = connect(str(tmp_path / "all-hold-generation.sqlite3"))
@@ -672,17 +676,42 @@ def test_non_empty_all_hold_cohort_still_promotes_one_full_snapshot(tmp_path) ->
         "unpublished_graphiti_projection_reconciliations"
     ).fetchone()
     assert reconciliation is not None
-    cohort_digest, generation_id = _campaign_decided_generation_identity(
+    cohort_digest, generation_id = graphiti_decided_cohort_generation_identity(
         connection,
         ingest_ids=(ingest_id,),
     )
     assert generation_id == reconciliation[0]
-    assert json.loads(reconciliation[1])["expected_effect_ids"] == []
+    reconciliation_binding = json.loads(reconciliation[1])
+    assert reconciliation_binding["schema_version"] == (
+        GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION
+    )
+    assert reconciliation_binding["cohort_digest"] == cohort_digest
+    assert reconciliation_binding["ingest_ids"] == [ingest_id]
+    assert reconciliation_binding["raw_receipt"]["generation_id"] == generation_id
+    assert reconciliation_binding["raw_receipt"]["expected_effect_ids"] == []
+    assert reconciliation_binding["raw_receipt"]["actual_effect_ids"] == []
+    exact_reconciliation = _exact_admission_reconciliation(connection)
+    assert exact_reconciliation["total"] is True
+    assert exact_reconciliation["disjoint"] is True
+    assert exact_reconciliation["cohort_count"] == 1
+    assert exact_reconciliation["cohorts"][0]["cohort_digest"] == cohort_digest
     assert cohort_digest.startswith("sha256:")
     assert consumer.finalise_decided_cohort(
         ingest_ids=(ingest_id,)
     ) == GraphitiAdmissionDrainReport()
     assert len(projector.generation_calls) == 2
+    connection.execute(
+        "UPDATE unpublished_graphiti_admission_queue SET state='READY'"
+    )
+    with pytest.raises(
+        GraphitiAdmissionConsumerError,
+        match="decision integrity differs",
+    ):
+        graphiti_decided_cohort_generation_identity(
+            connection,
+            ingest_ids=(ingest_id,),
+            require_terminal_states=True,
+        )
     connection.close()
 
 

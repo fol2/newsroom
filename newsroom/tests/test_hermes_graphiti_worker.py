@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -532,7 +533,19 @@ def test_campaign_cli_stop_reports_durable_partial_progress(
         worker,
         "run_bounded_campaign",
         lambda **_kwargs: (_ for _ in ()).throw(
-            worker.GraphitiCampaignStop("event 2 stopped")
+            worker.GraphitiCampaignStop(
+                "event 2 stopped",
+                evidence={
+                    "arrival_count": 1,
+                    "actionable_gaps": [
+                        {
+                            "ledger_seq": 3,
+                            "event_id": "event-3",
+                            "kind": "PROJECT_EVENT_GAP",
+                        }
+                    ],
+                },
+            )
         ),
     )
 
@@ -559,6 +572,16 @@ def test_campaign_cli_stop_reports_durable_partial_progress(
     assert report["terminal_event_count"] == 1
     assert report["attempted_event_count"] == 2
     assert report["provider_dispatched_event_count"] == 2
+    assert report["failure_evidence"] == {
+        "arrival_count": 1,
+        "actionable_gaps": [
+            {
+                "ledger_seq": 3,
+                "event_id": "event-3",
+                "kind": "PROJECT_EVENT_GAP",
+            }
+        ],
+    }
     assert report["spend"] == {
         "row_count": 1,
         "status_counts": {"RECONCILED": 1},
@@ -577,6 +600,9 @@ def test_campaign_stop_report_attributes_all_hold_reconciliation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from scripts import hermes_graphiti_worker as worker
+    from newsroom.control_plane.graphiti_admission import (
+        graphiti_admission_generation_identity,
+    )
 
     unpublished = tmp_path / "unpublished.sqlite3"
     connection = worker.connect(str(unpublished))
@@ -669,9 +695,27 @@ def test_campaign_stop_report_attributes_all_hold_reconciliation(
             "2026-09-01T12:00:01Z",
         ),
     )
-    generation_id = "00000000-0000-4000-8000-000000000895"
+    cohort_digest, generation_id = graphiti_admission_generation_identity(
+        ingest_ids=("ingest-1",),
+        source_receipts=(
+            {
+                "ingest_id": "ingest-1",
+                "receipt_digest": "sha256:" + "1" * 64,
+                "proposal_count": 1,
+            },
+        ),
+        members=(
+            {
+                "ingest_id": "ingest-1",
+                "proposal_key": "proposal-1",
+                "proposal_envelope_id": "envelope-1",
+                "decision_digest": "sha256:" + "2" * 64,
+                "decision": {},
+            },
+        ),
+    )
     reconciliation_digest = "sha256:" + "c" * 64
-    reconciliation = {
+    raw_reconciliation = {
         "generation_id": generation_id,
         "expected_effect_ids": [],
         "actual_effect_ids": [],
@@ -679,6 +723,14 @@ def test_campaign_stop_report_attributes_all_hold_reconciliation(
         "receipt_digest": reconciliation_digest,
         "projector_family_id": "graph.increment4.admitted",
         "provider_model_calls": 0,
+    }
+    reconciliation = {
+        "schema_version": (
+            worker.GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION
+        ),
+        "cohort_digest": cohort_digest,
+        "ingest_ids": ["ingest-1"],
+        "raw_receipt": raw_reconciliation,
     }
     connection.execute(
         "INSERT INTO unpublished_graphiti_projection_reconciliations("
@@ -690,7 +742,7 @@ def test_campaign_stop_report_attributes_all_hold_reconciliation(
             "graph.increment4.admitted",
             generation_id,
             1,
-            json.dumps(reconciliation),
+            worker.canonical_json_bytes(reconciliation).decode("utf-8"),
             "2026-09-01T12:00:02Z",
         ),
     )
@@ -698,9 +750,9 @@ def test_campaign_stop_report_attributes_all_hold_reconciliation(
     connection.close()
     monkeypatch.setattr(
         worker,
-        "_campaign_decided_generation_identity",
+        "graphiti_decided_cohort_generation_identity",
         lambda _connection, *, ingest_ids: (
-            "sha256:" + "b" * 64,
+            cohort_digest,
             generation_id,
         ),
     )
@@ -728,7 +780,7 @@ def test_campaign_stop_report_attributes_all_hold_reconciliation(
     assert report["stage"] == "PROJECTION_RECORDED"
     assert report["admission"]["projection_receipt_count"] == 0
     assert report["generation"] == {
-        "cohort_digest": "sha256:" + "b" * 64,
+        "cohort_digest": cohort_digest,
         "generation_id": generation_id,
         "reconciliation_count": 1,
         "reconciliations": [
@@ -899,72 +951,639 @@ def test_campaign_receipt_requires_exact_attempt_and_reconciled_spend(
         )
 
 
-def test_campaign_completion_proves_fixed_operational_objectives(
-    tmp_path: Path,
-) -> None:
+def _insert_campaign_event(
+    connection: sqlite3.Connection,
+    *,
+    ledger_seq: int,
+    state: str,
+    landed_at: datetime,
+    available_at: datetime | None = None,
+    terminal_at: datetime | None = None,
+    project_event: bool = True,
+) -> str:
     from scripts import hermes_graphiti_worker as worker
 
-    connection = worker.connect(str(tmp_path / "unpublished.sqlite3"))
+    event_id = "sha256:" + f"{ledger_seq:064x}"
+    previous = connection.execute(
+        "SELECT digest FROM ledger ORDER BY seq DESC LIMIT 1"
+    ).fetchone()
     connection.execute(
-        "INSERT INTO unpublished_graphiti_revision_events("
-        "event_id,ledger_seq,ledger_digest,source_id,item_key,revision_digest,"
-        "published_at,updated_at,landed_at,manifest_json,manifest_digest,"
-        "unit_count,projector_version,projection_generation,state,attempt_count,"
-        "available_at,provider_dispatched,terminal_at,proposal_count) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO ledger("
+        "seq,at,kind,payload_digest,payload_json,prev_digest,digest) "
+        "VALUES(?,?,?,?,?,?,?)",
         (
-            "event-1",
-            7,
-            "ledger-digest",
-            "source",
-            "item",
-            "revision",
-            "",
-            "",
-            "2026-09-01T12:00:00Z",
+            ledger_seq,
+            landed_at.isoformat().replace("+00:00", "Z"),
+            "EFFECTIVE_REVISION_LANDED",
+            "sha256:" + f"{ledger_seq + 1000:064x}",
             "{}",
-            "manifest-digest",
-            1,
-            "projector",
-            "generation",
-            "TERMINAL",
-            1,
-            "2026-09-01T12:00:00Z",
-            1,
-            "2026-09-01T12:00:05Z",
-            1,
+            previous[0] if previous else "sha256:" + "0" * 64,
+            event_id,
         ),
     )
+    connection.execute(
+        "INSERT INTO unpublished_effective_revision_landed("
+        "source_id,item_key,revision_digest,published_at,updated_at,"
+        "first_observed_at,ingest_ids_json,legacy_v10,payload_digest,"
+        "ledger_digest,at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            f"source-{ledger_seq}",
+            f"item-{ledger_seq}",
+            f"revision-{ledger_seq}",
+            "",
+            "",
+            landed_at.isoformat().replace("+00:00", "Z"),
+            "[]",
+            0,
+            "sha256:" + f"{ledger_seq + 1000:064x}",
+            event_id,
+            landed_at.isoformat().replace("+00:00", "Z"),
+        ),
+    )
+    if project_event:
+        connection.execute(
+            "INSERT INTO unpublished_graphiti_revision_events("
+            "event_id,ledger_seq,ledger_digest,source_id,item_key,revision_digest,"
+            "published_at,updated_at,landed_at,manifest_json,manifest_digest,"
+            "unit_count,projector_version,projection_generation,state,attempt_count,"
+            "available_at,provider_dispatched,terminal_at,proposal_count) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                event_id,
+                ledger_seq,
+                event_id,
+                f"source-{ledger_seq}",
+                f"item-{ledger_seq}",
+                f"revision-{ledger_seq}",
+                "",
+                "",
+                landed_at.isoformat().replace("+00:00", "Z"),
+                "{}",
+                "sha256:" + f"{ledger_seq + 2000:064x}",
+                1,
+                "projector",
+                "generation",
+                state,
+                1 if state == "TERMINAL" else 0,
+                (available_at or landed_at).isoformat().replace("+00:00", "Z"),
+                1 if state == "TERMINAL" else 0,
+                (
+                    None
+                    if terminal_at is None
+                    else terminal_at.isoformat().replace("+00:00", "Z")
+                ),
+                0 if state == "TERMINAL" else None,
+            ),
+        )
+    return event_id
+
+
+def _complete_campaign_event(
+    connection: sqlite3.Connection,
+    *,
+    event_id: str,
+    terminal_at: datetime,
+) -> None:
+    connection.execute(
+        "UPDATE unpublished_graphiti_revision_events SET state='TERMINAL',"
+        "attempt_count=1,provider_dispatched=1,terminal_at=?,proposal_count=1 "
+        "WHERE event_id=?",
+        (terminal_at.isoformat().replace("+00:00", "Z"), event_id),
+    )
+
+
+def _insert_all_hold_generation(
+    connection: sqlite3.Connection,
+    *,
+    binding_cohort_digest: str | None = None,
+) -> tuple[str, str]:
+    from scripts import hermes_graphiti_worker as worker
+    from newsroom.control_plane.graphiti_admission import (
+        graphiti_admission_generation_identity,
+    )
+
+    connection.execute(
+        "INSERT INTO unpublished_graphiti_admission_queue("
+        "proposal_key,ingest_id,source_revision_id,source_receipt_digest,"
+        "proposal_digest,proposal_kind,request_json,request_digest,state,"
+        "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "proposal-1",
+            "ingest-1",
+            "revision-1",
+            "sha256:" + "1" * 64,
+            "sha256:" + "2" * 64,
+            "ENTITY_MENTION",
+            "{}",
+            "sha256:" + "3" * 64,
+            "TERMINAL",
+            "2026-09-01T12:00:01Z",
+            "2026-09-01T12:00:01Z",
+        ),
+    )
+    connection.execute(
+        "INSERT INTO unpublished_graphiti_admission_decisions("
+        "proposal_key,action,decision_id,authority_ledger_seq,reason_code,"
+        "authority_receipt_digest,decision_json,decision_digest,decided_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            "proposal-1",
+            "HOLD",
+            "decision-1",
+            1,
+            "AMBIGUOUS",
+            "sha256:" + "4" * 64,
+            "{}",
+            "sha256:" + "5" * 64,
+            "2026-09-01T12:00:02Z",
+        ),
+    )
+    cohort_digest, generation_id = graphiti_admission_generation_identity(
+        ingest_ids=("ingest-1",),
+        source_receipts=(
+            {
+                "ingest_id": "ingest-1",
+                "receipt_digest": "sha256:" + "1" * 64,
+                "proposal_count": 1,
+            },
+        ),
+        members=(
+            {
+                "ingest_id": "ingest-1",
+                "proposal_key": "proposal-1",
+                "proposal_envelope_id": "envelope-1",
+                "decision_digest": "sha256:" + "5" * 64,
+                "decision": {},
+            },
+        ),
+    )
+    receipt_digest = "sha256:" + "6" * 64
+    raw_receipt = {
+        "generation_id": generation_id,
+        "expected_effect_ids": [],
+        "actual_effect_ids": [],
+        "authority_watermark": 1,
+        "receipt_digest": receipt_digest,
+        "projector_family_id": "graph.increment4.admitted",
+        "provider_model_calls": 0,
+    }
+    receipt = {
+        "schema_version": (
+            worker.GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION
+        ),
+        "cohort_digest": binding_cohort_digest or cohort_digest,
+        "ingest_ids": ["ingest-1"],
+        "raw_receipt": raw_receipt,
+    }
     connection.execute(
         "INSERT INTO unpublished_graphiti_projection_reconciliations "
         "VALUES(?,?,?,?,?,?)",
         (
-            "reconciliation-receipt",
+            receipt_digest,
             "graph.increment4.admitted",
-            "generation-1",
-            9,
-            "{}",
-            "2026-09-01T12:00:06Z",
+            generation_id,
+            1,
+            worker.canonical_json_bytes(receipt).decode("utf-8"),
+            "2026-09-01T12:00:03Z",
         ),
     )
-    evidence = worker._campaign_completion_evidence(
+    return cohort_digest, generation_id
+
+
+def _campaign_event(
+    event_id: str,
+    *,
+    ledger_seq: int = 7,
+) -> dict[str, object]:
+    return {
+        "event_id": event_id,
+        "ledger_seq": ledger_seq,
+        "manifest_digest": f"manifest-{ledger_seq}",
+        "ingest_ids": [f"ingest-{ledger_seq}"],
+    }
+
+
+def _fresh_actionable(
+    event: Mapping[str, object],
+    *,
+    landed_at: datetime,
+) -> dict[str, object]:
+    return {
+        "ledger_seq": event["ledger_seq"],
+        "event_id": event["event_id"],
+        "landed_at": landed_at.isoformat().replace("+00:00", "Z"),
+        "kind": "FRESH_EVENT",
+        "manifest_digest": event["manifest_digest"],
+        "ingest_ids": event["ingest_ids"],
+    }
+
+
+def _operational_snapshot(
+    *,
+    observed_at: datetime,
+    actionable: list[dict[str, object]],
+    holds: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    value = {
+        "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+        "partition_digest": digest_canonical(actionable),
+        "actionable": actionable,
+        "holds": [] if holds is None else holds,
+    }
+    return {**value, "snapshot_digest": digest_canonical(value)}
+
+
+def _campaign_completion_fixture(
+    tmp_path: Path,
+) -> tuple[
+    sqlite3.Connection,
+    datetime,
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+]:
+    from scripts import hermes_graphiti_worker as worker
+
+    start = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    connection = worker.connect(str(tmp_path / "unpublished.sqlite3"))
+    event_id = _insert_campaign_event(
         connection,
-        events=[{"event_id": "event-1", "ledger_seq": 7}],
+        ledger_seq=7,
+        state="QUEUED",
+        landed_at=start - timedelta(seconds=5),
+    )
+    event = _campaign_event(event_id)
+    before = _operational_snapshot(
+        observed_at=start,
+        actionable=[
+            _fresh_actionable(event, landed_at=start - timedelta(seconds=5))
+        ],
+    )
+    _complete_campaign_event(
+        connection,
+        event_id=event_id,
+        terminal_at=start + timedelta(seconds=5),
+    )
+    after = _operational_snapshot(
+        observed_at=start + timedelta(seconds=10),
+        actionable=[],
+    )
+    return connection, start, event, before, after
+
+
+def _completion_evidence(
+    connection: sqlite3.Connection,
+    *,
+    event: dict[str, object],
+    before: dict[str, object],
+    after: dict[str, object],
+    expected_generation_identity: tuple[str, str] | None = None,
+    proposal_count: int = 0,
+    elapsed_seconds: float = 10.0,
+    max_oldest_eligible_seconds: int = 60,
+) -> dict[str, object]:
+    from scripts import hermes_graphiti_worker as worker
+
+    return worker._campaign_completion_evidence(
+        connection,
+        events=[event],
+        operational_before=before,
+        operational_after=after,
         reconciliation_ids_before=frozenset(),
-        proposal_count=1,
-        elapsed_seconds=6.0,
+        expected_generation_identity=expected_generation_identity,
+        expected_ingest_ids=("ingest-1",),
+        proposal_count=proposal_count,
+        elapsed_seconds=elapsed_seconds,
         wall_time_cap=60,
+        max_oldest_eligible_seconds=max_oldest_eligible_seconds,
     )
 
-    assert evidence["watermark"] == {
-        "target": "selected cohort terminal",
-        "terminal_ledger_seq": 7,
-        "passed": True,
+
+def test_campaign_completion_proves_exact_all_hold_operational_objectives(
+    tmp_path: Path,
+) -> None:
+    connection, _start, event, before, after = _campaign_completion_fixture(
+        tmp_path
+    )
+    generation_identity = _insert_all_hold_generation(connection)
+    evidence = _completion_evidence(
+        connection,
+        event=event,
+        before=before,
+        after=after,
+        expected_generation_identity=generation_identity,
+        proposal_count=1,
+        elapsed_seconds=6.0,
+        max_oldest_eligible_seconds=30,
+    )
+
+    assert evidence["watermark"]["terminal_ledger_seq"] == 7
+    assert evidence["watermark"]["observed_operational_ledger_seq"] == 7
+    assert evidence["backlog"]["remaining_actionable_at_watermark"] == []
+    assert evidence["velocity"]["arrival_count"] == 0
+    assert evidence["velocity"]["service_count"] == 1
+    assert evidence["lag"]["oldest_post_watermark_eligible_seconds"] == 0
+    assert evidence["reconciliation"]["new_generation_ids"] == [
+        generation_identity[1]
+    ]
+    assert evidence["reconciliation"]["receipt"]["effect_ids"] == []
+    assert evidence["reconciliation"]["global_admission"][
+        "projection_reconciled"
+    ] is True
+    connection.close()
+
+
+def test_campaign_rejects_unrelated_all_hold_reconciliation(
+    tmp_path: Path,
+) -> None:
+    from scripts import hermes_graphiti_worker as worker
+
+    connection, _start, event, before, after = _campaign_completion_fixture(
+        tmp_path
+    )
+    generation_identity = _insert_all_hold_generation(
+        connection,
+        binding_cohort_digest="sha256:" + "8" * 64,
+    )
+    with pytest.raises(
+        worker.GraphitiCampaignStop,
+        match="projection reconciliation is malformed",
+    ):
+        _completion_evidence(
+            connection,
+            event=event,
+            before=before,
+            after=after,
+            expected_generation_identity=generation_identity,
+            proposal_count=1,
+        )
+    connection.close()
+
+
+def test_campaign_completion_stops_when_arrival_velocity_exceeds_service(
+    tmp_path: Path,
+) -> None:
+    from scripts import hermes_graphiti_worker as worker
+
+    connection, start, event, before, _after = _campaign_completion_fixture(
+        tmp_path
+    )
+    arrivals = [
+        _campaign_event("sha256:" + f"{sequence:064x}", ledger_seq=sequence)
+        for sequence in (8, 9)
+    ]
+    after = _operational_snapshot(
+        observed_at=start + timedelta(seconds=10),
+        actionable=[
+            _fresh_actionable(
+                arrival,
+                landed_at=start + timedelta(seconds=int(arrival["ledger_seq"]) - 7),
+            )
+            for arrival in arrivals
+        ],
+    )
+    with pytest.raises(
+        worker.GraphitiCampaignStop,
+        match="service velocity is below arrival velocity",
+    ):
+        _completion_evidence(
+            connection,
+            event=event,
+            before=before,
+            after=after,
+        )
+    connection.close()
+
+
+def test_campaign_completion_counts_one_true_new_arrival(
+    tmp_path: Path,
+) -> None:
+    connection, start, event, before, _after = _campaign_completion_fixture(
+        tmp_path
+    )
+    arrival = _campaign_event("sha256:" + f"{8:064x}", ledger_seq=8)
+    after = _operational_snapshot(
+        observed_at=start + timedelta(seconds=10),
+        actionable=[
+            _fresh_actionable(arrival, landed_at=start + timedelta(seconds=1))
+        ],
+    )
+
+    evidence = _completion_evidence(
+        connection,
+        event=event,
+        before=before,
+        after=after,
+    )
+
+    assert evidence["velocity"]["arrival_count"] == 1
+    assert evidence["velocity"]["service_count"] == 1
+    connection.close()
+
+
+def test_campaign_completion_stops_on_oldest_post_watermark_lag(
+    tmp_path: Path,
+) -> None:
+    from scripts import hermes_graphiti_worker as worker
+
+    connection, start, event, before, _after = _campaign_completion_fixture(
+        tmp_path
+    )
+    waiting = _campaign_event("sha256:" + f"{8:064x}", ledger_seq=8)
+    after = _operational_snapshot(
+        observed_at=start + timedelta(seconds=10),
+        actionable=[
+            _fresh_actionable(waiting, landed_at=start - timedelta(seconds=61))
+        ],
+    )
+    with pytest.raises(
+        worker.GraphitiCampaignStop,
+        match="oldest eligible lag objective",
+    ):
+        _completion_evidence(
+            connection,
+            event=event,
+            before=before,
+            after=after,
+            max_oldest_eligible_seconds=60,
+        )
+    connection.close()
+
+
+def test_campaign_completion_reports_legitimate_hold_without_failing(
+    tmp_path: Path,
+) -> None:
+    connection, start, event, before, _after = _campaign_completion_fixture(
+        tmp_path
+    )
+    hold = {
+        "ledger_seq": 8,
+        "event_id": "sha256:" + f"{8:064x}",
+        "reason": "CURRENT_RIGHTS_OR_INPUT_HELD",
     }
-    assert evidence["backlog"]["remaining_selected_events"] == 0
-    assert evidence["velocity"]["completed_events"] == 1
-    assert evidence["lag"]["passed"] is True
-    assert evidence["reconciliation"]["new_generation_ids"] == ["generation-1"]
+    after = _operational_snapshot(
+        observed_at=start + timedelta(seconds=10),
+        actionable=[],
+        holds=[hold],
+    )
+
+    evidence = _completion_evidence(
+        connection,
+        event=event,
+        before=before,
+        after=after,
+    )
+
+    assert evidence["backlog"]["holds"] == [hold]
+    assert evidence["velocity"]["arrival_count"] == 0
+    assert evidence["lag"]["oldest_post_watermark_eligible_seconds"] == 0
+    connection.close()
+
+
+@pytest.mark.parametrize("kind", ["PROJECT_EVENT_GAP", "UNCLASSIFIED_GAP"])
+def test_campaign_completion_stops_on_actionable_event_gap(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    from scripts import hermes_graphiti_worker as worker
+
+    connection, start, event, before, _after = _campaign_completion_fixture(
+        tmp_path
+    )
+    after = _operational_snapshot(
+        observed_at=start + timedelta(seconds=10),
+        actionable=[
+            {
+                "ledger_seq": 8,
+                "event_id": "sha256:" + f"{8:064x}",
+                "landed_at": (start + timedelta(seconds=1))
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "kind": kind,
+            }
+        ],
+    )
+    with pytest.raises(
+        worker.GraphitiCampaignStop,
+        match="projectable or unclassified Graphiti event gap",
+    ) as stopped:
+        _completion_evidence(
+            connection,
+            event=event,
+            before=before,
+            after=after,
+        )
+    assert stopped.value.evidence is not None
+    assert stopped.value.evidence["arrival_count"] == 1
+    assert stopped.value.evidence["arrivals"] == after["actionable"]
+    assert stopped.value.evidence["actionable_gaps"] == after["actionable"]
+    connection.close()
+
+
+def test_campaign_completion_requires_zero_actionable_backlog_at_watermark(
+    tmp_path: Path,
+) -> None:
+    from scripts import hermes_graphiti_worker as worker
+
+    connection, start, event, before, _after = _campaign_completion_fixture(
+        tmp_path
+    )
+    old = _campaign_event("sha256:" + f"{6:064x}", ledger_seq=6)
+    after = _operational_snapshot(
+        observed_at=start + timedelta(seconds=10),
+        actionable=[
+            _fresh_actionable(old, landed_at=start - timedelta(seconds=6))
+        ],
+    )
+    with pytest.raises(
+        worker.GraphitiCampaignStop,
+        match="backlog at watermark is non-zero",
+    ):
+        _completion_evidence(
+            connection,
+            event=event,
+            before=before,
+            after=after,
+        )
+    connection.close()
+
+
+def test_campaign_completion_requires_zero_global_admission_backlog(
+    tmp_path: Path,
+) -> None:
+    from scripts import hermes_graphiti_worker as worker
+
+    connection, _start, event, before, after = _campaign_completion_fixture(
+        tmp_path
+    )
+    connection.execute(
+        "INSERT INTO unpublished_graphiti_admission_queue("
+        "proposal_key,ingest_id,source_revision_id,source_receipt_digest,"
+        "proposal_digest,proposal_kind,request_json,request_digest,state,"
+        "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "proposal-pending",
+            "ingest-pending",
+            "revision-pending",
+            "sha256:" + "1" * 64,
+            "sha256:" + "2" * 64,
+            "ENTITY_MENTION",
+            "{}",
+            "sha256:" + "3" * 64,
+            "READY",
+            "2026-09-01T12:00:01Z",
+            "2026-09-01T12:00:01Z",
+        ),
+    )
+    with pytest.raises(
+        worker.GraphitiCampaignStop,
+        match="admission backlog is non-zero",
+    ):
+        _completion_evidence(
+            connection,
+            event=event,
+            before=before,
+            after=after,
+        )
+    connection.close()
+
+
+def test_zero_proposal_campaign_requires_no_generation(tmp_path: Path) -> None:
+    connection, _start, event, before, after = _campaign_completion_fixture(
+        tmp_path
+    )
+    evidence = _completion_evidence(
+        connection,
+        event=event,
+        before=before,
+        after=after,
+    )
+
+    assert evidence["reconciliation"]["new_generation_ids"] == []
+    assert evidence["reconciliation"]["receipt"] is None
+    connection.close()
+
+
+def test_campaign_velocity_requires_positive_observation_window(
+    tmp_path: Path,
+) -> None:
+    from scripts import hermes_graphiti_worker as worker
+
+    connection, start, event, before, _after = _campaign_completion_fixture(
+        tmp_path
+    )
+    after = _operational_snapshot(observed_at=start, actionable=[])
+    with pytest.raises(
+        worker.GraphitiCampaignStop,
+        match="observation window differs",
+    ):
+        _completion_evidence(
+            connection,
+            event=event,
+            before=before,
+            after=after,
+            elapsed_seconds=1.0,
+        )
     connection.close()
 
 
@@ -1057,19 +1676,35 @@ def _campaign() -> dict[str, object]:
         "success_objectives": {
             "watermark": "selected cohort terminal",
             "backlog": 0,
-            "velocity": "positive",
-            "lag": "bounded",
+            "velocity": "service_at_least_arrival",
+            "lag": {"max_oldest_eligible_seconds": 300},
             "reconciliation": "exact",
         },
     }
 
 
-def test_bounded_campaign_extracts_all_events_then_decides_and_projects_once(
+@pytest.mark.parametrize(
+    "extra_fresh_candidate",
+    [False, True],
+    ids=["exact-snapshot", "fresh-candidate-race"],
+)
+def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
     monkeypatch: pytest.MonkeyPatch,
+    extra_fresh_candidate: bool,
 ) -> None:
     from scripts import hermes_graphiti_worker as worker
 
     campaign = _campaign()
+    partition_events = list(campaign["cohort"]["events"])
+    if extra_fresh_candidate:
+        partition_events.append(
+            {
+                "event_id": "event-3",
+                "ledger_seq": 3,
+                "manifest_digest": "manifest-3",
+                "ingest_ids": ["ingest-3"],
+            }
+        )
     packet = {
         "packet_digest": "sha256:" + "a" * 64,
         "code_identity": {"head_sha": "head", "tree_sha": "tree"},
@@ -1120,6 +1755,20 @@ def test_bounded_campaign_extracts_all_events_then_decides_and_projects_once(
         "_assert_fresh_campaign_ingests",
         lambda *_args, **_kwargs: None,
     )
+    monkeypatch.setattr(
+        worker,
+        "_campaign_operational_partition_snapshot",
+        lambda **_kwargs: _operational_snapshot(
+            observed_at=datetime(2026, 9, 1, 12, 0, tzinfo=UTC),
+            actionable=[
+                _fresh_actionable(
+                    event,
+                    landed_at=datetime(2026, 9, 1, 11, 59, tzinfo=UTC),
+                )
+                for event in partition_events
+            ],
+        ),
+    )
     monkeypatch.setattr(worker, "consume_next_graphiti_event", consume)
     monkeypatch.setattr(
         worker,
@@ -1151,6 +1800,14 @@ def test_bounded_campaign_extracts_all_events_then_decides_and_projects_once(
         worker,
         "_campaign_reconciliation_ids",
         lambda _connection: frozenset(),
+    )
+    monkeypatch.setattr(
+        worker,
+        "graphiti_decided_cohort_generation_identity",
+        lambda *_args, **_kwargs: (
+            "sha256:" + "7" * 64,
+            "00000000-0000-4000-8000-000000000895",
+        ),
     )
     objective_evidence = {
         "watermark": {"passed": True},
@@ -1199,17 +1856,35 @@ def test_bounded_campaign_extracts_all_events_then_decides_and_projects_once(
         assert value is packet
         calls.append(("gate", "owner"))
 
-    report = worker.run_bounded_campaign(
-        packet=packet,
-        proving_store="proving",
-        unpublished_store="unpublished",
-        runtime=runtime,
-        head_sha="head",
-        tree_sha="tree",
-        owner_f4_fence=owner_fence,
-        monotonic=lambda: 0.0,
-        sleep=lambda _delay: None,
-    )
+    arguments = {
+        "packet": packet,
+        "proving_store": "proving",
+        "unpublished_store": "unpublished",
+        "runtime": runtime,
+        "head_sha": "head",
+        "tree_sha": "tree",
+        "owner_f4_fence": owner_fence,
+        "monotonic": lambda: 0.0,
+        "sleep": lambda _delay: None,
+    }
+    if extra_fresh_candidate:
+        with pytest.raises(
+            worker.GraphitiCampaignStop,
+            match="snapshot or candidate identity drifted",
+        ) as stopped:
+            worker.run_bounded_campaign(**arguments)
+        assert calls == [("gate", "owner"), ("gate", "graph")]
+        assert stopped.value.evidence is not None
+        assert stopped.value.evidence["operational_candidates"][-1] == {
+            "ledger_seq": 3,
+            "event_id": "event-3",
+            "manifest_digest": "manifest-3",
+            "ingest_ids": ["ingest-3"],
+        }
+        connection.close()
+        return
+
+    report = worker.run_bounded_campaign(**arguments)
 
     assert calls == [
         ("gate", "owner"),
@@ -1344,6 +2019,20 @@ def test_campaign_cap_stops_before_any_canonical_admission(
         worker,
         "_assert_fresh_campaign_ingests",
         lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_campaign_operational_partition_snapshot",
+        lambda **_kwargs: _operational_snapshot(
+            observed_at=datetime(2026, 9, 1, 12, 0, tzinfo=UTC),
+            actionable=[
+                _fresh_actionable(
+                    event,
+                    landed_at=datetime(2026, 9, 1, 11, 59, tzinfo=UTC),
+                )
+                for event in campaign["cohort"]["events"]
+            ],
+        ),
     )
     monkeypatch.setattr(
         worker,

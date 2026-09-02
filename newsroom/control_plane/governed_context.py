@@ -706,6 +706,7 @@ class GovernedContextHydrator:
                 graphiti_decided_cohort_generation_identity(
                     self._connection,
                     ingest_ids=ingest_ids,
+                    require_terminal_states=True,
                 )
             )
             if (
@@ -841,7 +842,7 @@ class GovernedContextHydrator:
         reconciliation_row = reconciliation_rows[0] if reconciliation_rows else None
         generation_id: str | None = None
         active_projection_snapshot: tuple[tuple[str, int, str], ...] = ()
-        if telemetry.admitted_count:
+        if telemetry.admitted_count or reconciliation_row is not None:
             if reconciliation_row is None:
                 return self._hold(
                     "AMBIGUOUS_PROJECTION_WATERMARK", telemetry, read_at=read_at

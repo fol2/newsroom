@@ -715,6 +715,24 @@ def test_latest_all_hold_generation_preserves_prior_exact_admitted_context(
     assert context.items[0].projection_authority_watermark == 101
 
 
+def test_exact_all_hold_generation_is_the_empty_context_generation(tmp_path) -> None:
+    connection = connect(str(tmp_path / "all-hold-cohort.sqlite3"))
+    generation_id = _seed_exact_all_hold_cohort(connection)
+
+    context = GovernedContextHydrator(
+        connection,
+        authority=_CurrentAuthority(),
+        rights=_Rights(),
+        clock=lambda: NOW,
+    ).hydrate()
+
+    assert context.status is GovernedContextStatus.EMPTY
+    assert context.reason_code == "ZERO_ADMITTED_CONTEXT"
+    assert context.projection_generation_id == generation_id
+    assert context.contiguous_projection_watermark == 102
+    assert context.items == ()
+
+
 def test_multi_cohort_context_holds_without_every_exact_binding(tmp_path) -> None:
     connection = connect(str(tmp_path / "multi-cohort-legacy.sqlite3"))
     _seed_entity(connection)

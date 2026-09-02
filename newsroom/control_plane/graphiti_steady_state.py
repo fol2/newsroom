@@ -23,7 +23,13 @@ from newsroom.authority.migrations import MIGRATIONS
 from newsroom.control_plane.graphiti_admission import (
     GRAPHITI_ADMISSION_COHORT_SCHEMA_VERSION,
     GRAPHITI_ADMISSION_GENERATION_IDENTITY_VERSION,
+    GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION,
+    GraphitiAdmissionConsumerError,
     graphiti_admission_telemetry,
+    graphiti_decided_cohort_generation_identity,
+    graphiti_governed_decision_from_json,
+    graphiti_projection_receipt_from_json,
+    graphiti_projection_reconciliation_from_json,
 )
 from newsroom.control_plane.corpus import CorpusIngestUnit
 from newsroom.control_plane.cycle import load_graphiti_units_from_connection
@@ -67,7 +73,7 @@ from newsroom.projection.neo4j import StructuralReconciliationView
 
 SCHEMA_VERSION = "newsroom.graphiti-steady-state-packet.v4"
 
-CAMPAIGN_SCHEMA_VERSION = "newsroom.graphiti-bounded-campaign-input.v2"
+CAMPAIGN_SCHEMA_VERSION = "newsroom.graphiti-bounded-campaign-input.v3"
 
 _REQUIRED_STOP_CONDITIONS = frozenset(
     {
@@ -102,11 +108,10 @@ _RAMP_ADVANCE_BASE = frozenset(
     }
 )
 
-_CAMPAIGN_SUCCESS_OBJECTIVES = {
+_CAMPAIGN_SUCCESS_OBJECTIVE_BASE = {
     "watermark": "selected cohort terminal",
     "backlog": 0,
-    "velocity": "positive",
-    "lag": "bounded",
+    "velocity": "service_at_least_arrival",
     "reconciliation": "exact",
 }
 
@@ -1348,6 +1353,432 @@ def _historical_partition(
     }, blockers
 
 
+def graphiti_operational_partition_snapshot(
+    proving: sqlite3.Connection,
+    unpublished: sqlite3.Connection,
+    *,
+    authority: sqlite3.Connection,
+    observed_at: datetime,
+) -> dict[str, object]:
+    """Return the existing exact dispatch partition as bounded campaign evidence."""
+
+    if observed_at.tzinfo is None:
+        raise GraphitiEventReconciliationError(
+            "operational partition observation must be timezone-aware"
+        )
+    resolved_units = load_graphiti_units_from_connection(
+        proving,
+        evaluated_at=observed_at,
+    )
+    gap_decisions = classify_graphiti_event_gaps(
+        proving,
+        unpublished,
+        evaluated_at=observed_at,
+        resolved_units=resolved_units,
+    )
+    excluded_event_ids = graphiti_excluded_event_ids(unpublished)
+    event_evidence, receipt_evidence, receipt_blockers = _events_and_receipts(
+        unpublished
+    )
+    accounting, accounting_blockers = _event_accounting(
+        unpublished,
+        gap_decisions=gap_decisions,
+    )
+    partition, partition_blockers = _historical_partition(
+        proving,
+        unpublished,
+        authority=authority,
+        observed_at=observed_at,
+        event_evidence=event_evidence,
+        receipt_evidence=receipt_evidence,
+        event_gap_decisions=gap_decisions,
+        resolved_units=resolved_units,
+        excluded_event_ids=excluded_event_ids,
+    )
+
+    accepted_accounting_blockers = {
+        "LANDED_REVISION_EVENT_MISSING",
+        "LANDED_REVISION_EVENT_UNCLASSIFIED",
+    }
+    unexpected_accounting_blockers = sorted(
+        set(accounting_blockers) - accepted_accounting_blockers
+    )
+    gap_unclassified = {
+        item.ledger_seq
+        for item in gap_decisions
+        if item.disposition is GraphitiEventRepairDisposition.UNCLASSIFIED
+    }
+    categories = partition.get("categories")
+    if not isinstance(categories, Mapping):
+        raise GraphitiEventReconciliationError(
+            "operational partition categories are unavailable"
+        )
+    unclassified_category = categories.get("UNCLASSIFIED")
+    unclassified_sequences = (
+        set(unclassified_category.get("ledger_sequences", ()))
+        if isinstance(unclassified_category, Mapping)
+        else set()
+    )
+    unexpected_partition_blockers = sorted(
+        blocker
+        for blocker in partition_blockers
+        if not (
+            blocker == "HISTORICAL_OBLIGATION_UNCLASSIFIED"
+            and unclassified_sequences == gap_unclassified
+        )
+    )
+    if (
+        receipt_blockers
+        or unexpected_accounting_blockers
+        or unexpected_partition_blockers
+        or unclassified_sequences != gap_unclassified
+        or accounting.get("gap_classification_complete") is not True
+    ):
+        blockers = sorted(
+            {
+                *receipt_blockers,
+                *unexpected_accounting_blockers,
+                *unexpected_partition_blockers,
+                *(
+                    ("HISTORICAL_OBLIGATION_UNCLASSIFIED",)
+                    if unclassified_sequences != gap_unclassified
+                    else ()
+                ),
+                *(
+                    ("EVENT_GAP_CLASSIFICATION_INCOMPLETE",)
+                    if accounting.get("gap_classification_complete") is not True
+                    else ()
+                ),
+            }
+        )
+        raise GraphitiEventReconciliationError(
+            "operational partition integrity differs: " + ",".join(blockers)
+        )
+
+    landed_rows = unpublished.execute(
+        "SELECT ledger.seq,ledger.digest,landed.at "
+        "FROM unpublished_effective_revision_landed AS landed "
+        "JOIN ledger ON ledger.digest=landed.ledger_digest "
+        "WHERE NOT (landed.legacy_v10=1 AND EXISTS ("
+        "SELECT 1 FROM unpublished_effective_revision_landed AS marker "
+        "WHERE marker.legacy_v10=0 "
+        "AND marker.source_id=landed.source_id "
+        "AND marker.item_key=landed.item_key "
+        "AND marker.revision_digest=landed.revision_digest "
+        "AND marker.first_observed_at=landed.first_observed_at "
+        "AND (marker.published_at<>'' OR marker.updated_at<>''))) "
+        "ORDER BY ledger.seq"
+    ).fetchall()
+    landed = {
+        int(ledger_seq): {
+            "event_id": str(event_id),
+            "landed_at": str(landed_at),
+        }
+        for ledger_seq, event_id, landed_at in landed_rows
+    }
+    for landing in landed.values():
+        try:
+            landed_at = datetime.fromisoformat(
+                str(landing["landed_at"]).replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise GraphitiEventReconciliationError(
+                "operational landing time is invalid"
+            ) from exc
+        if landed_at.tzinfo is None or landed_at.astimezone(UTC) > observed_at:
+            raise GraphitiEventReconciliationError(
+                "operational landing time differs from the observation"
+            )
+    candidate_by_sequence = {
+        int(item["ledger_seq"]): item
+        for item in partition.get("current_preflight_candidates", ())
+        if isinstance(item, Mapping)
+    }
+    actionable: list[dict[str, object]] = []
+    for ledger_seq, candidate in candidate_by_sequence.items():
+        landing = landed.get(ledger_seq)
+        if landing is None or landing["event_id"] != candidate.get("event_id"):
+            raise GraphitiEventReconciliationError(
+                "operational candidate landing identity differs"
+            )
+        actionable.append(
+            {
+                "ledger_seq": ledger_seq,
+                "event_id": str(candidate["event_id"]),
+                "landed_at": str(landing["landed_at"]),
+                "kind": "FRESH_EVENT",
+                "manifest_digest": str(candidate["manifest_digest"]),
+                "ingest_ids": list(candidate["ingest_ids"]),
+            }
+        )
+    for decision in gap_decisions:
+        if decision.disposition not in {
+            GraphitiEventRepairDisposition.PROJECT_EVENT,
+            GraphitiEventRepairDisposition.UNCLASSIFIED,
+        }:
+            continue
+        landing = landed.get(decision.ledger_seq)
+        if landing is None or landing["event_id"] != decision.event_id:
+            raise GraphitiEventReconciliationError(
+                "operational event-gap landing identity differs"
+            )
+        actionable.append(
+            {
+                "ledger_seq": decision.ledger_seq,
+                "event_id": decision.event_id,
+                "landed_at": str(landing["landed_at"]),
+                "kind": (
+                    "PROJECT_EVENT_GAP"
+                    if decision.disposition
+                    is GraphitiEventRepairDisposition.PROJECT_EVENT
+                    else "UNCLASSIFIED_GAP"
+                ),
+            }
+        )
+
+    projectable_or_unclassified_gaps = {
+        item.ledger_seq
+        for item in gap_decisions
+        if item.disposition
+        in {
+            GraphitiEventRepairDisposition.PROJECT_EVENT,
+            GraphitiEventRepairDisposition.UNCLASSIFIED,
+        }
+    }
+    hold_reasons = {
+        item.ledger_seq: str(item.reason or "CURRENT_RIGHTS_OR_INPUT_HELD")
+        for item in gap_decisions
+        if item.disposition is GraphitiEventRepairDisposition.HOLD
+    }
+    for category in (
+        "RIGHTS_OR_INPUT_HELD",
+        "NON_REPLAYABLE_OR_AMBIGUOUS_EFFECT_HOLD",
+    ):
+        category_value = categories.get(category)
+        if not isinstance(category_value, Mapping):
+            raise GraphitiEventReconciliationError(
+                "operational hold partition is unavailable"
+            )
+        for ledger_seq in category_value.get("ledger_sequences", ()):
+            sequence = int(ledger_seq)
+            if sequence in projectable_or_unclassified_gaps:
+                continue
+            hold_reasons.setdefault(sequence, category)
+    holds = []
+    for ledger_seq, reason in sorted(hold_reasons.items()):
+        landing = landed.get(ledger_seq)
+        if landing is None:
+            raise GraphitiEventReconciliationError(
+                "operational hold landing identity differs"
+            )
+        holds.append(
+            {
+                "ledger_seq": ledger_seq,
+                "event_id": str(landing["event_id"]),
+                "reason": reason,
+            }
+        )
+
+    value: dict[str, object] = {
+        "observed_at": observed_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        "partition_digest": partition["partition_digest"],
+        "actionable": sorted(
+            actionable,
+            key=lambda item: (int(item["ledger_seq"]), str(item["event_id"])),
+        ),
+        "holds": holds,
+    }
+    return {**value, "snapshot_digest": digest_canonical(value)}
+
+
+def _exact_admission_reconciliation(
+    connection: sqlite3.Connection,
+) -> dict[str, object]:
+    """Verify total, disjoint exact-cohort reconciliation membership."""
+
+    queue_ingest_ids = tuple(
+        str(row[0])
+        for row in connection.execute(
+            "SELECT DISTINCT ingest_id FROM unpublished_graphiti_admission_queue "
+            "ORDER BY ingest_id"
+        )
+    )
+    reconciliation_rows = connection.execute(
+        "SELECT receipt_digest,projector_family_id,generation_id,"
+        "authority_watermark,receipt_json FROM "
+        "unpublished_graphiti_projection_reconciliations "
+        "ORDER BY reconciled_at,receipt_digest"
+    ).fetchall()
+    if not queue_ingest_ids and not reconciliation_rows:
+        return {
+            "schema_version": GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION,
+            "cohort_count": 0,
+            "covered_ingest_count": 0,
+            "queue_ingest_count": 0,
+            "total": True,
+            "disjoint": True,
+            "cohorts": [],
+        }
+
+    covered_ingest_ids: list[str] = []
+    generations: list[dict[str, object]] = []
+    for (
+        receipt_digest,
+        family_id,
+        generation_id,
+        authority_watermark,
+        receipt_json,
+    ) in reconciliation_rows:
+        receipt, binding = graphiti_projection_reconciliation_from_json(
+            str(receipt_json)
+        )
+        if binding is None:
+            raise GraphitiAdmissionConsumerError(
+                "projection reconciliation lacks exact cohort membership"
+            )
+        ingest_ids = tuple(str(item) for item in binding["ingest_ids"])
+        cohort_digest, expected_generation_id = (
+            graphiti_decided_cohort_generation_identity(
+                connection,
+                ingest_ids=ingest_ids,
+                require_terminal_states=True,
+            )
+        )
+        if (
+            receipt.receipt_digest != str(receipt_digest)
+            or receipt.projector_family_id != str(family_id)
+            or receipt.generation_id != str(generation_id)
+            or receipt.authority_watermark != int(authority_watermark)
+            or binding["cohort_digest"] != cohort_digest
+            or receipt.generation_id != expected_generation_id
+        ):
+            raise GraphitiAdmissionConsumerError(
+                "projection reconciliation SQL or cohort identity differs"
+            )
+
+        placeholders = ",".join("?" for _ in ingest_ids)
+        decision_rows = connection.execute(
+            "SELECT decision.action,decision.authority_ledger_seq,"
+            "decision.decision_json FROM "
+            "unpublished_graphiti_admission_decisions AS decision "
+            "JOIN unpublished_graphiti_admission_queue AS queue "
+            "USING(proposal_key) WHERE queue.ingest_id IN ("
+            + placeholders
+            + ") ORDER BY queue.queue_seq",
+            ingest_ids,
+        ).fetchall()
+        admitted_effect_ids: list[str] = []
+        decision_watermarks: list[int] = []
+        for action, decision_watermark, decision_json in decision_rows:
+            decision = graphiti_governed_decision_from_json(str(decision_json))
+            if (
+                decision.action.value != str(action)
+                or decision.authority_ledger_seq != int(decision_watermark)
+            ):
+                raise GraphitiAdmissionConsumerError(
+                    "projection reconciliation decision or terminal state differs"
+                )
+            decision_watermarks.append(int(decision_watermark))
+            if decision.action.value == "ADMIT":
+                assert decision.admitted_authority_id is not None
+                admitted_effect_ids.append(decision.admitted_authority_id)
+        expected_effect_ids = tuple(sorted(admitted_effect_ids))
+
+        projection_rows = connection.execute(
+            "SELECT projection.proposal_key,decision.decision_id,"
+            "projection.effect_id,projection.authority_watermark,"
+            "projection.projector_family_id,projection.generation_id,"
+            "projection.schema_version,projection.trust_scope,"
+            "projection.receipt_json,projection.receipt_digest "
+            "FROM unpublished_graphiti_projection_receipts AS projection "
+            "JOIN unpublished_graphiti_admission_queue AS queue "
+            "USING(proposal_key) JOIN unpublished_graphiti_admission_decisions "
+            "AS decision USING(proposal_key) WHERE queue.ingest_id IN ("
+            + placeholders
+            + ") ORDER BY projection.effect_id",
+            ingest_ids,
+        ).fetchall()
+        projected_effect_ids: list[str] = []
+        generation_bindings: set[tuple[str, str, str, str]] = set()
+        for projection_row in projection_rows:
+            projection_json = str(projection_row[8])
+            projection = graphiti_projection_receipt_from_json(
+                projection_json
+            )
+            projection_value = json.loads(projection_json)
+            projection_unsigned = dict(projection_value)
+            supplied_projection_digest = projection_unsigned.pop(
+                "receipt_digest", None
+            )
+            if (
+                not isinstance(projection_value, dict)
+                or canonical_json_bytes(projection_value).decode("utf-8")
+                != projection_json
+                or supplied_projection_digest
+                != digest_canonical(projection_unsigned)
+                or projection.proposal_key != str(projection_row[0])
+                or projection.decision_id != str(projection_row[1])
+                or projection.effect_id != str(projection_row[2])
+                or projection.authority_watermark != int(projection_row[3])
+                or projection.projector_family_id != str(projection_row[4])
+                or projection.generation_id != str(projection_row[5])
+                or projection.schema_version != str(projection_row[6])
+                or projection.trust_scope != str(projection_row[7])
+                or projection.receipt_digest != str(projection_row[9])
+                or projection.generation_id != receipt.generation_id
+                or projection.cohort_digest != cohort_digest
+            ):
+                raise GraphitiAdmissionConsumerError(
+                    "projection receipt differs from exact cohort reconciliation"
+                )
+            projected_effect_ids.append(projection.effect_id)
+            generation_bindings.add(
+                (
+                    str(projection.source_snapshot_digest),
+                    str(projection.validation_digest),
+                    str(projection.promotion_digest),
+                    str(projection.generation_result_digest),
+                )
+            )
+        if (
+            not decision_watermarks
+            or len(generation_bindings) > 1
+            or receipt.authority_watermark < max(decision_watermarks)
+            or receipt.expected_effect_ids != expected_effect_ids
+            or receipt.actual_effect_ids != expected_effect_ids
+            or tuple(projected_effect_ids) != expected_effect_ids
+        ):
+            raise GraphitiAdmissionConsumerError(
+                "projection effects or authority watermark differ from exact cohort"
+            )
+        covered_ingest_ids.extend(ingest_ids)
+        generations.append(
+            {
+                "cohort_digest": cohort_digest,
+                "generation_id": receipt.generation_id,
+                "ingest_ids": list(ingest_ids),
+                "effect_count": len(expected_effect_ids),
+                "authority_watermark": receipt.authority_watermark,
+            }
+        )
+
+    disjoint = len(covered_ingest_ids) == len(set(covered_ingest_ids))
+    total = set(queue_ingest_ids).issubset(covered_ingest_ids)
+    if not disjoint or not total:
+        raise GraphitiAdmissionConsumerError(
+            "projection reconciliation cohort membership is not total and disjoint"
+        )
+    return {
+        "schema_version": GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION,
+        "cohort_count": len(generations),
+        "covered_ingest_count": len(covered_ingest_ids),
+        "queue_ingest_count": len(queue_ingest_ids),
+        "total": total,
+        "disjoint": disjoint,
+        "cohorts": generations,
+    }
+
+
 def _admission(
     connection: sqlite3.Connection, *, observed_at: datetime
 ) -> tuple[dict[str, object], list[str]]:
@@ -1366,12 +1797,42 @@ def _admission(
         connection, now=observed_at
     ).canonical_value()
     value["schema_present"] = True
+    try:
+        exact_reconciliation = _exact_admission_reconciliation(connection)
+    except (
+        GraphitiAdmissionConsumerError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+        sqlite3.Error,
+    ):
+        exact_reconciliation = {
+            "schema_version": GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION,
+            "total": False,
+            "disjoint": False,
+            "cohorts": [],
+        }
+    value["telemetry_projection_reconciled"] = value["projection_reconciled"]
+    value["exact_cohort_reconciliation"] = exact_reconciliation
+    value["projection_reconciled"] = bool(
+        value["projection_reconciled"]
+        and exact_reconciliation.get("total") is True
+        and exact_reconciliation.get("disjoint") is True
+    )
     blockers = []
     if value["dead_letter_count"]:
         blockers.append("ADMISSION_DEAD_LETTER_PRESENT")
     if value["integrity_hold_receipt_count"]:
         blockers.append("ADMISSION_INTEGRITY_HOLD_PRESENT")
-    if value["admitted_count"] and not value["projection_reconciled"]:
+    if value["admission_backlog"]:
+        blockers.append("ADMISSION_BACKLOG_PRESENT")
+    if (
+        exact_reconciliation.get("total") is not True
+        or exact_reconciliation.get("disjoint") is not True
+        or value["proposal_denominator"]
+        and not value["projection_reconciled"]
+    ):
         blockers.append("ADMISSION_PROJECTION_UNRECONCILED")
     return value, blockers
 
@@ -1795,7 +2256,26 @@ def _campaign_evidence(
         stops = [] if not isinstance(stops, list) else stops
 
     objectives = mapping(campaign.get("success_objectives"), "SUCCESS_OBJECTIVES")
-    if dict(objectives) != _CAMPAIGN_SUCCESS_OBJECTIVES:
+    lag_objective = mapping(objectives.get("lag"), "SUCCESS_OBJECTIVE_LAG")
+    max_oldest_eligible_seconds = finite(
+        lag_objective.get("max_oldest_eligible_seconds"),
+        "MAX_OLDEST_ELIGIBLE_LAG",
+        positive=True,
+    )
+    objectives_value = {
+        **_CAMPAIGN_SUCCESS_OBJECTIVE_BASE,
+        "lag": {
+            "max_oldest_eligible_seconds": max_oldest_eligible_seconds,
+        },
+    }
+    if (
+        set(objectives) != {*_CAMPAIGN_SUCCESS_OBJECTIVE_BASE, "lag"}
+        or any(
+            objectives.get(key) != expected
+            for key, expected in _CAMPAIGN_SUCCESS_OBJECTIVE_BASE.items()
+        )
+        or set(lag_objective) != {"max_oldest_eligible_seconds"}
+    ):
         blockers.append("SUCCESS_OBJECTIVES_INCOMPLETE")
 
     if campaign.get("campaign_authorised") is not False:
@@ -1823,7 +2303,7 @@ def _campaign_evidence(
         "ramp": ramp_value,
         "recovery": recovery_value,
         "immediate_stop_conditions": stops,
-        "success_objectives": dict(objectives),
+        "success_objectives": objectives_value,
         "objectives_are_prospective": True,
         "campaign_authorised": False,
     }
@@ -2349,9 +2829,19 @@ def validate_graphiti_campaign_packet(
     ):
         raise ValueError("campaign packet stop conditions differ")
     objectives = campaign.get("success_objectives")
+    lag_objective = objectives.get("lag") if isinstance(objectives, Mapping) else None
     if (
         not isinstance(objectives, Mapping)
-        or dict(objectives) != _CAMPAIGN_SUCCESS_OBJECTIVES
+        or set(objectives) != {*_CAMPAIGN_SUCCESS_OBJECTIVE_BASE, "lag"}
+        or any(
+            objectives.get(key) != expected
+            for key, expected in _CAMPAIGN_SUCCESS_OBJECTIVE_BASE.items()
+        )
+        or not isinstance(lag_objective, Mapping)
+        or set(lag_objective) != {"max_oldest_eligible_seconds"}
+        or isinstance(lag_objective.get("max_oldest_eligible_seconds"), bool)
+        or not isinstance(lag_objective.get("max_oldest_eligible_seconds"), int)
+        or int(lag_objective["max_oldest_eligible_seconds"]) <= 0
     ):
         raise ValueError("campaign packet objectives differ")
 

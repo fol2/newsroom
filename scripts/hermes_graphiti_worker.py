@@ -16,7 +16,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from newsroom.authority.auth import AuthenticationProof
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+)
 from newsroom.authority.graphiti_increment4_system import (
     GovernedGraphitiIncrement4AuthoritySystem,
 )
@@ -30,15 +33,17 @@ from newsroom.control_plane.graphiti_admission_integration import (
     compose_existing_graphiti_admission_consumer,
 )
 from newsroom.control_plane.graphiti_admission import (
-    graphiti_admission_generation_identity,
-    graphiti_admission_request_from_value,
-    graphiti_governed_decision_from_json,
+    GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION,
+    graphiti_admission_telemetry,
+    graphiti_decided_cohort_generation_identity,
+    graphiti_projection_reconciliation_from_json,
 )
 from newsroom.control_plane.graphiti_events import GraphitiProcessResult
 from newsroom.control_plane.graphiti_steady_state import (
     GraphitiCampaignRuntime,
     _mint_graphiti_campaign_runtime,
     graphiti_graph_destination_readback,
+    graphiti_operational_partition_snapshot,
     graphiti_store_snapshot_digests,
     validate_graphiti_campaign_packet,
 )
@@ -54,6 +59,15 @@ from newsroom.projection.neo4j import StructuralActiveReconciliationRequest
 
 class GraphitiCampaignStop(RuntimeError):
     """A bounded campaign invariant stopped all later effects."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        evidence: Mapping[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.evidence = None if evidence is None else dict(evidence)
 
 
 GovernedGraphitiWorkerRuntime = GraphitiCampaignRuntime
@@ -630,36 +644,166 @@ def _campaign_reconciliation_ids(
     )
 
 
+def _utc_instant(value: object, *, field: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise GraphitiCampaignStop(f"{field} is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise GraphitiCampaignStop(f"{field} is invalid") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _campaign_operational_partition_snapshot(
+    *,
+    proving_store: str,
+    unpublished_store: str,
+    authority_store: str,
+    observed_at: datetime,
+    unpublished_connection: sqlite3.Connection | None = None,
+) -> dict[str, object]:
+    """Read the shared exact operational partition without selecting work."""
+
+    owned: list[sqlite3.Connection] = []
+    connections: list[sqlite3.Connection] = []
+    try:
+        for path_value in (proving_store, authority_store):
+            path = Path(path_value).expanduser().resolve()
+            connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("BEGIN")
+            owned.append(connection)
+            connections.append(connection)
+        if unpublished_connection is None:
+            path = Path(unpublished_store).expanduser().resolve()
+            unpublished_connection = sqlite3.connect(
+                f"{path.as_uri()}?mode=ro", uri=True
+            )
+            unpublished_connection.execute("PRAGMA query_only=ON")
+            unpublished_connection.execute("BEGIN")
+            owned.append(unpublished_connection)
+        return graphiti_operational_partition_snapshot(
+            connections[0],
+            unpublished_connection,
+            authority=connections[1],
+            observed_at=observed_at,
+        )
+    finally:
+        for connection in reversed(owned):
+            connection.close()
+
+
+def _campaign_reconciliation_evidence(
+    connection: sqlite3.Connection,
+    *,
+    cohort_digest: str,
+    generation_id: str,
+    ingest_ids: tuple[str, ...],
+) -> dict[str, object]:
+    rows = connection.execute(
+        "SELECT receipt_digest,projector_family_id,generation_id,"
+        "authority_watermark,receipt_json FROM "
+        "unpublished_graphiti_projection_reconciliations "
+        "WHERE generation_id=?",
+        (generation_id,),
+    ).fetchall()
+    if len(rows) != 1:
+        raise GraphitiCampaignStop(
+            "campaign projection reconciliation differs"
+        )
+    receipt_digest, family_id, retained_generation, watermark, receipt_json = rows[0]
+    try:
+        receipt, binding = graphiti_projection_reconciliation_from_json(
+            str(receipt_json)
+        )
+    except (RuntimeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise GraphitiCampaignStop(
+            "campaign projection reconciliation is malformed"
+        ) from exc
+    if (
+        binding
+        != {
+            "schema_version": (
+                GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION
+            ),
+            "cohort_digest": cohort_digest,
+            "ingest_ids": list(ingest_ids),
+        }
+        or receipt.receipt_digest != str(receipt_digest)
+        or receipt.projector_family_id != str(family_id)
+        or receipt.generation_id != str(retained_generation)
+        or receipt.generation_id != generation_id
+        or receipt.authority_watermark != int(watermark)
+        or receipt.provider_model_calls != 0
+    ):
+        raise GraphitiCampaignStop(
+            "campaign projection reconciliation integrity differs"
+        )
+    return {
+        "receipt_digest": str(receipt_digest),
+        "generation_id": generation_id,
+        "authority_watermark": int(watermark),
+        "effect_ids": list(receipt.expected_effect_ids),
+        "provider_model_calls": 0,
+    }
+
+
 def _campaign_completion_evidence(
     connection: sqlite3.Connection,
     *,
     events: list[object],
+    operational_before: Mapping[str, object],
+    operational_after: Mapping[str, object],
     reconciliation_ids_before: frozenset[str],
+    expected_generation_identity: tuple[str, str] | None,
+    expected_ingest_ids: tuple[str, ...],
     proposal_count: int,
     elapsed_seconds: float,
     wall_time_cap: int,
+    max_oldest_eligible_seconds: int,
 ) -> dict[str, object]:
-    """Prove the fixed watermark/backlog/velocity/lag/reconciliation goals."""
+    """Prove exact W0 completion from the shared operational partition."""
 
-    expected = {
-        str(_mapping(item, field="campaign event")["event_id"]): _integer(
-            _mapping(item, field="campaign event").get("ledger_seq"),
-            field="campaign ledger sequence",
-            positive=True,
+    expected: dict[tuple[int, str], Mapping[str, object]] = {}
+    for raw_event in events:
+        event = _mapping(raw_event, field="campaign event")
+        identity = (
+            _integer(
+                event.get("ledger_seq"),
+                field="campaign ledger sequence",
+                positive=True,
+            ),
+            str(event.get("event_id") or ""),
         )
-        for item in events
-    }
+        if not identity[1] or identity in expected:
+            raise GraphitiCampaignStop("campaign selected event identities differ")
+        expected[identity] = event
+
+    start_observation = _utc_instant(
+        operational_before.get("observed_at"),
+        field="campaign initial observation time",
+    )
+    end_observation = _utc_instant(
+        operational_after.get("observed_at"),
+        field="campaign completion observation time",
+    )
+    observation_seconds = (end_observation - start_observation).total_seconds()
+    if not math.isfinite(observation_seconds) or observation_seconds <= 0:
+        raise GraphitiCampaignStop("campaign observation window differs")
+
     placeholders = ",".join("?" for _ in expected)
     rows = connection.execute(
         "SELECT event_id,ledger_seq,state,attempt_count,terminal_at "
         "FROM unpublished_graphiti_revision_events "
         f"WHERE event_id IN ({placeholders}) ORDER BY ledger_seq",
-        tuple(expected),
+        tuple(event_id for _ledger_seq, event_id in expected),
     ).fetchall()
     if (
         len(rows) != len(expected)
         or any(
-            expected.get(str(event_id)) != int(ledger_seq)
+            (int(ledger_seq), str(event_id)) not in expected
             or str(state) != "TERMINAL"
             or int(attempt_count) != 1
             or terminal_at is None
@@ -667,10 +811,180 @@ def _campaign_completion_evidence(
         )
     ):
         raise GraphitiCampaignStop("campaign selected-cohort watermark differs")
+    if any(
+        not start_observation
+        < _utc_instant(terminal_at, field="campaign terminal time")
+        <= end_observation
+        for _event_id, _ledger_seq, _state, _attempt_count, terminal_at in rows
+    ):
+        raise GraphitiCampaignStop("campaign selected-cohort terminal time differs")
+
+    def actionables(
+        snapshot: Mapping[str, object], *, field: str, observed_at: datetime
+    ) -> list[dict[str, object]]:
+        raw_items = snapshot.get("actionable")
+        if not isinstance(raw_items, list):
+            raise GraphitiCampaignStop(f"{field} actionable partition differs")
+        retained: list[dict[str, object]] = []
+        identities: set[tuple[int, str]] = set()
+        for raw_item in raw_items:
+            item = dict(_mapping(raw_item, field=f"{field} actionable item"))
+            identity = (
+                _integer(
+                    item.get("ledger_seq"),
+                    field=f"{field} actionable ledger sequence",
+                    positive=True,
+                ),
+                str(item.get("event_id") or ""),
+            )
+            if (
+                not identity[1]
+                or identity in identities
+                or item.get("kind")
+                not in {"FRESH_EVENT", "PROJECT_EVENT_GAP", "UNCLASSIFIED_GAP"}
+            ):
+                raise GraphitiCampaignStop(f"{field} actionable partition differs")
+            if (
+                _utc_instant(item.get("landed_at"), field=f"{field} landed time")
+                > observed_at
+            ):
+                raise GraphitiCampaignStop(f"{field} landing time differs")
+            identities.add(identity)
+            retained.append(item)
+        return retained
+
+    before = actionables(
+        operational_before,
+        field="campaign initial",
+        observed_at=start_observation,
+    )
+    after = actionables(
+        operational_after,
+        field="campaign completion",
+        observed_at=end_observation,
+    )
+    before_by_identity = {
+        (int(item["ledger_seq"]), str(item["event_id"])): item for item in before
+    }
+    after_by_identity = {
+        (int(item["ledger_seq"]), str(item["event_id"])): item for item in after
+    }
+    if set(before_by_identity) != set(expected):
+        raise GraphitiCampaignStop(
+            "campaign initial selected-event partition differs"
+        )
+    for identity, event in expected.items():
+        candidate = before_by_identity.get(identity)
+        if (
+            candidate is None
+            or candidate.get("kind") != "FRESH_EVENT"
+            or candidate.get("manifest_digest") != event.get("manifest_digest")
+            or candidate.get("ingest_ids") != event.get("ingest_ids")
+        ):
+            raise GraphitiCampaignStop(
+                "campaign initial selected-event partition differs"
+            )
+
+    watermark = max(ledger_seq for ledger_seq, _event_id in expected)
+    backlog_at_watermark = [
+        item for item in after if int(item["ledger_seq"]) <= watermark
+    ]
+    before_identities = set(before_by_identity)
+    after_identities = set(after_by_identity)
+    new_identities = after_identities - before_identities
+    post_watermark = [
+        item for item in after if int(item["ledger_seq"]) > watermark
+    ]
+    arrivals = [
+        item
+        for item in post_watermark
+        if (int(item["ledger_seq"]), str(item["event_id"])) in new_identities
+    ]
+    oldest_post_watermark_lag = max(
+        (
+            max(
+                math.ceil(
+                    (
+                        end_observation
+                        - _utc_instant(
+                            item["landed_at"],
+                            field="campaign actionable landed time",
+                        )
+                    ).total_seconds()
+                ),
+                0,
+            )
+            for item in post_watermark
+        ),
+        default=0,
+    )
+    gaps = [item for item in after if item["kind"] != "FRESH_EVENT"]
+    operational_stop_evidence = {
+        "watermark": watermark,
+        "partition_before_digest": operational_before.get("snapshot_digest"),
+        "partition_after_digest": operational_after.get("snapshot_digest"),
+        "arrival_count": len(arrivals),
+        "arrivals": arrivals,
+        "actionable_gaps": gaps,
+        "actionable_backlog_at_watermark": backlog_at_watermark,
+        "oldest_post_watermark_eligible_seconds": oldest_post_watermark_lag,
+    }
+    if gaps:
+        raise GraphitiCampaignStop(
+            "campaign has a projectable or unclassified Graphiti event gap",
+            evidence=operational_stop_evidence,
+        )
+    if backlog_at_watermark:
+        raise GraphitiCampaignStop(
+            "campaign actionable backlog at watermark is non-zero",
+            evidence=operational_stop_evidence,
+        )
+    if oldest_post_watermark_lag > max_oldest_eligible_seconds:
+        raise GraphitiCampaignStop(
+            "campaign oldest eligible lag objective differs",
+            evidence=operational_stop_evidence,
+        )
+
+    campaign_service_ids = sorted(event_id for _ledger_seq, event_id in expected)
+    if len(campaign_service_ids) < len(arrivals):
+        raise GraphitiCampaignStop(
+            "campaign service velocity is below arrival velocity",
+            evidence=operational_stop_evidence,
+        )
+
     reconciliation_ids_after = _campaign_reconciliation_ids(connection)
     new_reconciliations = reconciliation_ids_after - reconciliation_ids_before
-    expected_reconciliations = 1 if proposal_count else 0
-    if len(new_reconciliations) != expected_reconciliations:
+    if proposal_count:
+        if expected_generation_identity is None:
+            raise GraphitiCampaignStop("campaign generation identity is missing")
+        cohort_digest, generation_id = expected_generation_identity
+        if new_reconciliations != {generation_id}:
+            raise GraphitiCampaignStop("campaign projection reconciliation differs")
+        reconciliation = _campaign_reconciliation_evidence(
+            connection,
+            cohort_digest=cohort_digest,
+            generation_id=generation_id,
+            ingest_ids=expected_ingest_ids,
+        )
+    else:
+        if expected_generation_identity is not None or new_reconciliations:
+            raise GraphitiCampaignStop("campaign projection reconciliation differs")
+        cohort_digest = None
+        generation_id = None
+        reconciliation = None
+
+    admission = graphiti_admission_telemetry(
+        connection,
+        now=end_observation,
+    ).canonical_value()
+    if admission["admission_backlog"] != 0:
+        raise GraphitiCampaignStop("campaign admission backlog is non-zero")
+    if admission["dead_letter_count"] or admission["integrity_hold_receipt_count"]:
+        raise GraphitiCampaignStop("campaign admission terminal evidence differs")
+    if admission["projection_gap_count"] != 0 or (
+        admission["proposal_denominator"]
+        and admission["projection_reconciled"] is not True
+    ):
         raise GraphitiCampaignStop("campaign projection reconciliation differs")
     if (
         not math.isfinite(elapsed_seconds)
@@ -678,24 +992,53 @@ def _campaign_completion_evidence(
         or elapsed_seconds >= wall_time_cap
     ):
         raise GraphitiCampaignStop("campaign bounded lag objective differs")
+
+    raw_holds = operational_after.get("holds")
+    if not isinstance(raw_holds, list) or not all(
+        isinstance(item, Mapping) for item in raw_holds
+    ):
+        raise GraphitiCampaignStop("campaign completion hold partition differs")
+    holds = [dict(item) for item in raw_holds]
+    observed_operational_seq = max(
+        [
+            watermark,
+            *(int(item["ledger_seq"]) for item in after),
+            *(int(item["ledger_seq"]) for item in holds),
+        ]
+    )
     return {
         "watermark": {
             "target": "selected cohort terminal",
-            "terminal_ledger_seq": max(expected.values()),
+            "terminal_ledger_seq": watermark,
+            "observed_operational_ledger_seq": observed_operational_seq,
+            "partition_before_digest": operational_before.get("snapshot_digest"),
+            "partition_after_digest": operational_after.get("snapshot_digest"),
             "passed": True,
         },
         "backlog": {
-            "target": 0,
-            "remaining_selected_events": 0,
+            "target": "zero_at_selected_watermark",
+            "remaining_actionable_at_watermark": [],
+            "post_watermark_actionable": post_watermark,
+            "holds": holds,
+            "global_admission_backlog": admission["admission_backlog"],
             "passed": True,
         },
         "velocity": {
-            "target": "positive",
-            "completed_events": len(rows),
-            "passed": bool(rows),
+            "target": "service_at_least_arrival",
+            "window_seconds": observation_seconds,
+            "arrivals": arrivals,
+            "campaign_service_event_ids": campaign_service_ids,
+            "arrival_count": len(arrivals),
+            "service_count": len(campaign_service_ids),
+            "passed": True,
         },
         "lag": {
-            "target": "bounded",
+            "target": {
+                "max_oldest_eligible_seconds": max_oldest_eligible_seconds,
+            },
+            "oldest_post_watermark_eligible_seconds": (
+                oldest_post_watermark_lag
+            ),
             "elapsed_seconds": elapsed_seconds,
             "wall_time_cap_seconds": wall_time_cap,
             "passed": True,
@@ -703,167 +1046,13 @@ def _campaign_completion_evidence(
         "reconciliation": {
             "target": "exact",
             "new_generation_ids": sorted(new_reconciliations),
+            "cohort_digest": cohort_digest,
+            "generation_id": generation_id,
+            "receipt": reconciliation,
+            "global_admission": admission,
             "passed": True,
         },
     }
-
-
-def _campaign_decided_generation_identity(
-    connection: sqlite3.Connection,
-    *,
-    ingest_ids: tuple[str, ...],
-) -> tuple[str, str]:
-    """Rebuild the exact cohort generation identity from durable decisions."""
-
-    if (
-        not ingest_ids
-        or ingest_ids != tuple(sorted(set(ingest_ids)))
-        or any(not item for item in ingest_ids)
-    ):
-        raise GraphitiCampaignStop("campaign generation ingest identities differ")
-    placeholders = ",".join("?" for _ in ingest_ids)
-    ingest_rows = connection.execute(
-        f"""
-        SELECT ingest.ingest_id, ingest.outcome, ingest.proposal_count,
-               ingest.receipt_digest, receipt.receipt_json
-        FROM unpublished_graphiti_ingest AS ingest
-        JOIN unpublished_graphiti_receipts AS receipt USING(ingest_id)
-        WHERE ingest.ingest_id IN ({placeholders})
-          AND ingest.outcome='COMPLETE'
-        ORDER BY ingest.ingest_id
-        """,
-        ingest_ids,
-    ).fetchall()
-    if tuple(str(row[0]) for row in ingest_rows) != ingest_ids:
-        raise GraphitiCampaignStop(
-            "campaign generation receipts are missing or non-terminal"
-        )
-
-    source_receipts: list[dict[str, object]] = []
-    proposal_denominator = 0
-    for ingest_id, outcome, proposal_count, receipt_digest, receipt_json in (
-        ingest_rows
-    ):
-        receipt = _mapping(
-            json.loads(str(receipt_json)),
-            field="campaign generation terminal receipt",
-        )
-        unsigned = dict(receipt)
-        supplied_digest = unsigned.pop("receipt_digest", None)
-        actual_digest = digest_bytes(canonical_json_bytes(unsigned))
-        count = _integer(
-            proposal_count,
-            field="campaign generation proposal denominator",
-        )
-        if (
-            receipt.get("ingest_id") != str(ingest_id)
-            or receipt.get("outcome") != str(outcome)
-            or receipt.get("proposal_count") != count
-            or supplied_digest != str(receipt_digest)
-            or actual_digest != str(receipt_digest)
-        ):
-            raise GraphitiCampaignStop(
-                "campaign generation terminal receipt integrity differs"
-            )
-        proposal_denominator += count
-        source_receipts.append(
-            {
-                "ingest_id": str(ingest_id),
-                "receipt_digest": str(receipt_digest),
-                "proposal_count": count,
-            }
-        )
-
-    integrity_failures = int(
-        connection.execute(
-            "SELECT COUNT(*) FROM "
-            "unpublished_graphiti_admission_receipt_failures "
-            f"WHERE ingest_id IN ({placeholders})",
-            ingest_ids,
-        ).fetchone()[0]
-    )
-    if integrity_failures:
-        raise GraphitiCampaignStop(
-            "campaign generation has retained admission integrity failures"
-        )
-    queue_rows = connection.execute(
-        f"""
-        SELECT queue.queue_seq, queue.proposal_key, queue.ingest_id,
-               queue.source_receipt_digest, queue.proposal_digest,
-               queue.proposal_kind, queue.request_json, queue.request_digest,
-               decision.decision_json, decision.decision_digest
-        FROM unpublished_graphiti_admission_queue AS queue
-        JOIN unpublished_graphiti_admission_decisions AS decision
-          USING(proposal_key)
-        WHERE queue.ingest_id IN ({placeholders})
-        ORDER BY queue.queue_seq
-        """,
-        ingest_ids,
-    ).fetchall()
-    if len(queue_rows) != proposal_denominator or proposal_denominator == 0:
-        raise GraphitiCampaignStop(
-            "campaign generation is not bound to a complete decided cohort"
-        )
-    receipt_by_ingest = {
-        str(item["ingest_id"]): str(item["receipt_digest"])
-        for item in source_receipts
-    }
-    members: list[dict[str, object]] = []
-    for row in queue_rows:
-        (
-            queue_seq,
-            proposal_key,
-            ingest_id,
-            source_receipt_digest,
-            proposal_digest,
-            proposal_kind,
-            request_json,
-            request_digest,
-            decision_json,
-            decision_digest,
-        ) = row
-        retained_request = _mapping(
-            json.loads(str(request_json)),
-            field="campaign generation admission request",
-        )
-        request = graphiti_admission_request_from_value(retained_request)
-        decision = graphiti_governed_decision_from_json(str(decision_json))
-        if (
-            digest_bytes(canonical_json_bytes(retained_request))
-            != str(request_digest)
-            or digest_bytes(str(decision_json).encode("utf-8"))
-            != str(decision_digest)
-            or request.queue_seq != int(queue_seq)
-            or request.proposal_key != str(proposal_key)
-            or request.source_receipt_digest != str(source_receipt_digest)
-            or receipt_by_ingest.get(str(ingest_id))
-            != str(source_receipt_digest)
-            or request.proposal.digest != str(proposal_digest)
-            or request.proposal.kind.value != str(proposal_kind)
-            or decision.proposal_key != request.proposal_key
-            or decision.proposal_digest != request.proposal.digest
-            or decision.proposal_kind is not request.proposal.kind
-            or decision.proposal_local_id != request.proposal.local_id
-        ):
-            raise GraphitiCampaignStop(
-                "campaign generation decision integrity differs"
-            )
-        members.append(
-            {
-                "ingest_id": str(ingest_id),
-                "proposal_key": request.proposal_key,
-                "proposal_envelope_id": str(
-                    request.proposal_authority_binding.proposal_envelope.proposal_id
-                ),
-                "decision_digest": str(decision_digest),
-                "decision": decision.canonical_value(),
-            }
-        )
-    return graphiti_admission_generation_identity(
-        ingest_ids=ingest_ids,
-        source_receipts=tuple(source_receipts),
-        members=tuple(members),
-    )
 
 
 def _campaign_stop_report(
@@ -1033,7 +1222,7 @@ def _campaign_stop_report(
                 ):
                     try:
                         cohort_digest, generation_id = (
-                            _campaign_decided_generation_identity(
+                            graphiti_decided_cohort_generation_identity(
                                 connection,
                                 ingest_ids=exact_ingest_ids,
                             )
@@ -1049,18 +1238,27 @@ def _campaign_stop_report(
                         ).fetchall()
                         reconciliations: list[dict[str, object]] = []
                         for row in reconciliation_rows:
-                            retained = _mapping(
-                                json.loads(str(row["receipt_json"])),
-                                field="campaign projection reconciliation",
+                            retained, binding = (
+                                graphiti_projection_reconciliation_from_json(
+                                    str(row["receipt_json"])
+                                )
                             )
                             if (
-                                retained.get("receipt_digest")
+                                binding
+                                != {
+                                    "schema_version": (
+                                        GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION
+                                    ),
+                                    "cohort_digest": cohort_digest,
+                                    "ingest_ids": list(exact_ingest_ids),
+                                }
+                                or retained.receipt_digest
                                 != str(row["receipt_digest"])
-                                or retained.get("projector_family_id")
+                                or retained.projector_family_id
                                 != str(row["projector_family_id"])
-                                or retained.get("generation_id")
+                                or retained.generation_id
                                 != str(row["generation_id"])
-                                or retained.get("authority_watermark")
+                                or retained.authority_watermark
                                 != int(row["authority_watermark"])
                             ):
                                 raise GraphitiCampaignStop(
@@ -1077,10 +1275,10 @@ def _campaign_stop_report(
                                         row["authority_watermark"]
                                     ),
                                     "expected_effect_ids": list(
-                                        retained.get("expected_effect_ids") or []
+                                        retained.expected_effect_ids
                                     ),
                                     "actual_effect_ids": list(
-                                        retained.get("actual_effect_ids") or []
+                                        retained.actual_effect_ids
                                     ),
                                     "reconciled_at": str(row["reconciled_at"]),
                                 }
@@ -1181,6 +1379,7 @@ def _campaign_stop_report(
         "packet_digest": packet_digest,
         "failure_type": type(failure).__name__,
         "failure": str(failure),
+        "failure_evidence": getattr(failure, "evidence", None),
         "stage": last_durable_stage,
         "observation_complete": event_observation_complete,
         "observation_failure": observation_failure,
@@ -1274,14 +1473,30 @@ def run_bounded_campaign(
     events = cohort.get("events")
     if not isinstance(events, list) or not events:
         raise GraphitiCampaignStop("campaign cohort events are missing")
-    if campaign.get("success_objectives") != {
-        "watermark": "selected cohort terminal",
-        "backlog": 0,
-        "velocity": "positive",
-        "lag": "bounded",
-        "reconciliation": "exact",
-    }:
+    objectives = _mapping(
+        campaign.get("success_objectives"),
+        field="campaign success objectives",
+    )
+    lag_objective = _mapping(
+        objectives.get("lag"),
+        field="campaign lag objective",
+    )
+    if (
+        set(objectives)
+        != {"watermark", "backlog", "velocity", "lag", "reconciliation"}
+        or objectives.get("watermark") != "selected cohort terminal"
+        or objectives.get("backlog") != 0
+        or isinstance(objectives.get("backlog"), bool)
+        or objectives.get("velocity") != "service_at_least_arrival"
+        or objectives.get("reconciliation") != "exact"
+        or set(lag_objective) != {"max_oldest_eligible_seconds"}
+    ):
         raise GraphitiCampaignStop("campaign success objectives differ")
+    max_oldest_eligible_seconds = _integer(
+        lag_objective.get("max_oldest_eligible_seconds"),
+        field="maximum oldest eligible lag",
+        positive=True,
+    )
     caps = _mapping(campaign.get("caps"), field="campaign caps")
     total_caps = _mapping(caps.get("total"), field="total campaign caps")
     event_cap = _integer(
@@ -1403,12 +1618,92 @@ def run_bounded_campaign(
     actual_spend_total = 0
     fallback_total = 0
     retry_total = 0
+    operational_before: dict[str, object] | None = None
     for event, preflight in zip(events, preflights, strict=True):
         completed_before = len(completed)
         phase = phase_starts.get(completed_before)
         if phase is not None:
             owner_f4_fence(packet)
             runtime.graph_state_fence(campaign)
+        if operational_before is None:
+            operational_before = _campaign_operational_partition_snapshot(
+                proving_store=proving_store,
+                unpublished_store=unpublished_store,
+                authority_store=authority_path,
+                observed_at=clock(),
+            )
+            actionables = operational_before.get("actionable")
+            if not isinstance(actionables, list) or not all(
+                isinstance(item, Mapping) for item in actionables
+            ):
+                raise GraphitiCampaignStop(
+                    "campaign initial actionable partition differs"
+                )
+            gaps = [
+                dict(item)
+                for item in actionables
+                if item.get("kind") != "FRESH_EVENT"
+            ]
+            fresh_actionables = [
+                item for item in actionables if item.get("kind") == "FRESH_EVENT"
+            ]
+            packet_candidates: list[dict[str, object]] = []
+            operational_candidates: list[dict[str, object]] = []
+            for source, target, field in (
+                (events, packet_candidates, "campaign event"),
+                (
+                    fresh_actionables,
+                    operational_candidates,
+                    "operational candidate",
+                ),
+            ):
+                for raw_candidate in source:
+                    candidate = _mapping(raw_candidate, field=field)
+                    ingest_ids = candidate.get("ingest_ids")
+                    value = {
+                        "ledger_seq": _integer(
+                            candidate.get("ledger_seq"),
+                            field=f"{field} ledger sequence",
+                            positive=True,
+                        ),
+                        "event_id": str(candidate.get("event_id") or ""),
+                        "manifest_digest": str(
+                            candidate.get("manifest_digest") or ""
+                        ),
+                        "ingest_ids": ingest_ids,
+                    }
+                    if (
+                        not value["event_id"]
+                        or not value["manifest_digest"]
+                        or not isinstance(ingest_ids, list)
+                        or not all(
+                            isinstance(ingest_id, str) and ingest_id
+                            for ingest_id in ingest_ids
+                        )
+                    ):
+                        raise GraphitiCampaignStop(
+                            "campaign initial candidate identity differs"
+                        )
+                    target.append(value)
+            packet_candidates.sort(
+                key=lambda item: (int(item["ledger_seq"]), str(item["event_id"]))
+            )
+            operational_candidates.sort(
+                key=lambda item: (int(item["ledger_seq"]), str(item["event_id"]))
+            )
+            if gaps or operational_candidates != packet_candidates:
+                raise GraphitiCampaignStop(
+                    "campaign snapshot or candidate identity drifted",
+                    evidence={
+                        "stage": "PRE_DISPATCH_OPERATIONAL_PARTITION",
+                        "partition_digest": operational_before.get(
+                            "snapshot_digest"
+                        ),
+                        "packet_candidates": packet_candidates,
+                        "operational_candidates": operational_candidates,
+                        "actionable_gaps": gaps,
+                    },
+                )
         now = monotonic()
         if last_dispatch is not None and now - last_dispatch < minimum_interval:
             delay = minimum_interval - (now - last_dispatch)
@@ -1595,6 +1890,14 @@ def run_bounded_campaign(
             caps=caps,
             decisions_required=True,
         )
+        expected_generation_identity = (
+            graphiti_decided_cohort_generation_identity(
+                connection,
+                ingest_ids=exact_ingest_ids,
+            )
+            if proposal_total
+            else None
+        )
         if monotonic() - started >= wall_cap:
             raise GraphitiCampaignStop("wall time cap reached before projection")
         generation_report = admission.finalise_decided_cohort(
@@ -1604,16 +1907,36 @@ def run_bounded_campaign(
             raise GraphitiCampaignStop("campaign generation was incomplete")
         if generation_report.projected != actual["effects"]:
             raise GraphitiCampaignStop("campaign projection denominator differs")
+        if connection.in_transaction:
+            raise GraphitiCampaignStop(
+                "campaign completion began with an open store transaction"
+            )
+        connection.execute("BEGIN IMMEDIATE")
         completed_elapsed = monotonic() - started
         if completed_elapsed >= wall_cap:
             raise GraphitiCampaignStop("wall time cap reached after projection")
+        if operational_before is None:
+            raise GraphitiCampaignStop("campaign initial partition is missing")
+        completed_at = clock()
+        operational_after = _campaign_operational_partition_snapshot(
+            proving_store=proving_store,
+            unpublished_store=unpublished_store,
+            authority_store=authority_path,
+            observed_at=completed_at,
+            unpublished_connection=connection,
+        )
         objective_evidence = _campaign_completion_evidence(
             connection,
             events=events,
+            operational_before=operational_before,
+            operational_after=operational_after,
             reconciliation_ids_before=reconciliation_ids_before,
+            expected_generation_identity=expected_generation_identity,
+            expected_ingest_ids=exact_ingest_ids,
             proposal_count=proposal_total,
             elapsed_seconds=completed_elapsed,
             wall_time_cap=wall_cap,
+            max_oldest_eligible_seconds=max_oldest_eligible_seconds,
         )
         connection.commit()
     finally:
