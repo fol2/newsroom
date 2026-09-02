@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import subprocess
 import sys
@@ -175,13 +176,15 @@ def execute_route(
             )
         )
         phase_report.unlink(missing_ok=True)
-        result = subprocess.run(command, cwd=root, check=False).returncode
         phase_reports.append(phase_report)
-        if result:
-            _merge_junit_reports(requested_report, tuple(phase_reports))
-            return result
+    with ThreadPoolExecutor(max_workers=len(commands)) as executor:
+        futures = tuple(
+            executor.submit(subprocess.run, command, cwd=root, check=False)
+            for command in commands
+        )
+        results = tuple(future.result().returncode for future in futures)
     _merge_junit_reports(requested_report, tuple(phase_reports))
-    return 0
+    return next((result for result in results if result), 0)
 
 
 def build_selected_test_commands(
@@ -191,7 +194,7 @@ def build_selected_test_commands(
     selected_service_tests: Sequence[str],
     junit: str | Path,
 ) -> tuple[tuple[str, ...], ...]:
-    """Build the fixed parallel/local then serial/service Focus commands."""
+    """Build independent parallel-local and serial-service Focus commands."""
 
     root = Path(repo_root).resolve()
     requested = legacy._junit_path(root, junit)
