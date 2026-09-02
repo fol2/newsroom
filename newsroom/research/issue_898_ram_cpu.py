@@ -37,6 +37,34 @@ GO_PEAK_RATIO = 0.20
 GO_PEAK_BYTES = 64 * MIB
 RAW_HTTP_RETENTION = timedelta(days=7)
 SCAN_SCHEMA = "newsroom.issue-898.observation-scan.v1"
+R2_SCHEMA = "newsroom.issue-898.bounded-units.v1"
+R2_SPEC_ALLOWED = frozenset(
+    {
+        "configuration_digest",
+        "item_key",
+        "keys",
+        "published_at",
+        "revision_digest",
+        "schema",
+        "source_id",
+        "temporal_policy_version",
+        "updated_at",
+    }
+)
+R2_SPEC_FORBIDDEN = frozenset(
+    {
+        "authority_record_ids",
+        "chunk_digest",
+        "chunk_ordinal",
+        "ingest_id",
+        "observation_digest",
+        "predecessor_ingest_id",
+        "proving_run_id",
+        "representation_digest",
+        "revision_id",
+        "unit_refs",
+    }
+)
 RUST_CRATE = (
     Path(__file__).resolve().parents[2] / "docs" / "research" / "issue-898-ram-cpu-rust"
 )
@@ -483,6 +511,7 @@ def scan_observations(path: str, cutoff: str) -> dict[str, object]:
 
 def prepare_event_identity(proving: str, clock: datetime) -> dict[str, object]:
     from newsroom.control_plane.cycle import load_graphiti_units
+    from newsroom.control_plane.graphiti_events import graphiti_unit_refs
 
     units = load_graphiti_units(proving_store=proving, evaluated_at=clock)
     if not units:
@@ -513,7 +542,7 @@ def prepare_event_identity(proving: str, clock: datetime) -> dict[str, object]:
         unit.published_at or "",
         unit.updated_at or "",
     )
-    selected = [
+    selected = tuple(
         item
         for item in units
         if (
@@ -524,7 +553,7 @@ def prepare_event_identity(proving: str, clock: datetime) -> dict[str, object]:
             item.updated_at or "",
         )
         == identity
-    ]
+    )
     spec = {
         "clock": utc_text(clock),
         "event_id": "measure-event",
@@ -539,7 +568,7 @@ def prepare_event_identity(proving: str, clock: datetime) -> dict[str, object]:
         "revision_digest": unit.revision_digest,
         "source_id": unit.source_id,
         "status": "OK",
-        "unit_refs": [],
+        "unit_refs": graphiti_unit_refs(selected),
         "updated_at": unit.updated_at or "",
     }
     spec["event_manifest_digest"] = digest_text(canonical_json(spec))
@@ -590,6 +619,335 @@ def _unit_manifest(units: tuple[Any, ...]) -> list[dict[str, object]]:
             }
         )
     return rows
+
+
+def bounded_observation_keys(spec: dict[str, object]) -> list[tuple[str, str, str]]:
+    """Deduplicate exact proving-row coordinates from retained unit_refs."""
+
+    source_id = str(spec.get("source_id") or "")
+    keys: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for ref in spec.get("unit_refs") or ():
+        if not isinstance(ref, dict):
+            continue
+        run_id = str(ref.get("proving_run_id") or "")
+        digest = str(ref.get("observation_digest") or "")
+        if not run_id or not digest or not source_id:
+            continue
+        key = (run_id, source_id, digest)
+        if key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+    return keys
+
+
+def r2_spec_from_event(event: dict[str, object]) -> dict[str, object]:
+    """Build the measured R2 input. Coordinates only; unit_ref identities stay oracle."""
+
+    from newsroom.graphiti_adapter.identity import configuration_digest
+    from newsroom.graphiti_adapter.temporal_vocabulary import TEMPORAL_POLICY_VERSION
+
+    spec = {
+        "configuration_digest": configuration_digest(),
+        "item_key": str(event.get("item_key") or ""),
+        "keys": [
+            {"observation_digest": digest, "run_id": run_id}
+            for run_id, _source_id, digest in bounded_observation_keys(event)
+        ],
+        "published_at": str(event.get("published_at") or ""),
+        "revision_digest": str(event.get("revision_digest") or ""),
+        "schema": R2_SCHEMA,
+        "source_id": str(event.get("source_id") or ""),
+        "temporal_policy_version": TEMPORAL_POLICY_VERSION,
+        "updated_at": str(event.get("updated_at") or ""),
+    }
+    extra = set(spec) - R2_SPEC_ALLOWED
+    leaked = set(spec) & R2_SPEC_FORBIDDEN
+    if extra or leaked:
+        raise ValueError(f"R2 spec must not carry oracle fields: {sorted(extra | leaked)}")
+    return spec
+
+
+def write_r2_spec(path: Path, event: dict[str, object]) -> dict[str, object]:
+    spec = r2_spec_from_event(event)
+    path.write_text(
+        json.dumps(spec, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return spec
+
+
+def _r2_unit_row(
+    *,
+    source_id: str,
+    item_key: str,
+    published_at: str | None,
+    updated_at: str | None,
+    observation_digest: str,
+    proving_run_id: str,
+    observed_at: str,
+    headline: str,
+    body: str,
+    canonical_url: str,
+) -> list[dict[str, object]]:
+    from newsroom.control_plane.corpus import chunk_text
+    from newsroom.graphiti_adapter.identity import (
+        content_digest,
+        ingest_key,
+        representation_digest_for,
+        source_revision_id,
+    )
+
+    revision_digest = content_digest(
+        headline=headline, body=body, canonical_url=canonical_url
+    )
+    representation_digest = representation_digest_for(
+        source_id=source_id,
+        item_key=item_key,
+        revision_digest=revision_digest,
+        published_at=published_at,
+        updated_at=updated_at,
+    )
+    revision_id = str(
+        source_revision_id(
+            source_id=source_id,
+            item_key=item_key,
+            revision_digest=revision_digest,
+            published_at=published_at,
+            updated_at=updated_at,
+        )
+    )
+    full_text = "\n".join(
+        part for part in (headline.strip(), body.strip(), canonical_url.strip()) if part
+    )
+    chunks = chunk_text(full_text)
+    predecessor: str | None = None
+    rows: list[dict[str, object]] = []
+    for ordinal, chunk in enumerate(chunks, start=1):
+        chunk_digest = content_digest(headline="", body=chunk, canonical_url="")
+        ingest_id = ingest_key(
+            source_id=source_id,
+            item_key=item_key,
+            content_digest_value=revision_digest,
+            revision_id=revision_id,
+            representation_digest=representation_digest,
+            published_at=published_at,
+            updated_at=updated_at,
+            chunk_ordinal=ordinal,
+        )
+        rows.append(
+            {
+                "chunk_count": len(chunks),
+                "chunk_digest": chunk_digest,
+                "chunk_ordinal": ordinal,
+                "ingest_id": ingest_id,
+                "item_key": item_key,
+                "observation_digest": observation_digest,
+                "observed_at": observed_at,
+                "predecessor_ingest_id": predecessor,
+                "proving_run_id": proving_run_id,
+                "published_at": published_at,
+                "representation_digest": representation_digest,
+                "revision_digest": revision_digest,
+                "revision_id": revision_id,
+                "source_id": source_id,
+                "updated_at": updated_at,
+            }
+        )
+        predecessor = ingest_id
+    return rows
+
+
+def _unique_r2_units(units: list[dict[str, object]]) -> list[dict[str, object]]:
+    selected: dict[tuple[object, ...], dict[str, object]] = {}
+    for unit in units:
+        key = (
+            unit["source_id"],
+            unit["item_key"],
+            unit["revision_digest"],
+            unit.get("published_at") or "",
+            unit.get("updated_at") or "",
+            unit["chunk_ordinal"],
+        )
+        previous = selected.get(key)
+        if previous is None or str(unit.get("observed_at") or "") < str(
+            previous.get("observed_at") or ""
+        ):
+            selected[key] = unit
+    return sorted(
+        selected.values(),
+        key=lambda item: (
+            str(item.get("observed_at") or ""),
+            str(item.get("revision_id") or ""),
+            int(item["chunk_ordinal"]),
+        ),
+    )
+
+
+def r2_oracle_match(
+    units: list[dict[str, object]], unit_refs: object
+) -> dict[str, object]:
+    refs = [item for item in (unit_refs or ()) if isinstance(item, dict)]
+    compared = (
+        "chunk_digest",
+        "chunk_ordinal",
+        "ingest_id",
+        "observation_digest",
+        "predecessor_ingest_id",
+        "proving_run_id",
+        "representation_digest",
+        "revision_id",
+    )
+    mismatches: list[dict[str, object]] = []
+    if len(units) != len(refs):
+        return {
+            "match": False,
+            "compared_fields": list(compared),
+            "reason": f"unit count {len(units)} != unit_refs {len(refs)}",
+            "unit_count": len(units),
+            "unit_ref_count": len(refs),
+        }
+    for index, (unit, ref) in enumerate(zip(units, refs, strict=True)):
+        for field in compared:
+            if unit.get(field) != ref.get(field):
+                mismatches.append(
+                    {"index": index, "field": field, "computed": unit.get(field)}
+                )
+    return {
+        "match": not mismatches,
+        "compared_fields": list(compared),
+        "mismatch_count": len(mismatches),
+        "unit_count": len(units),
+        "unit_ref_count": len(refs),
+    }
+
+
+def bounded_useful_units(proving: str, event: dict[str, object]) -> dict[str, object]:
+    from newsroom.control_plane.items import parse_observation
+
+    keys = bounded_observation_keys(event)
+    if not keys:
+        return {
+            "body_bytes": 0,
+            "manifest_digest": UNOBSERVED,
+            "oracle": {
+                "match": False,
+                "reason": "prepared event has no unit_refs coordinates",
+            },
+            "queue_claimed": False,
+            "reason": (
+                "R2 has a retained unit_refs seam, but this event spec has no "
+                "row coordinates. The missing-column HOLD is withdrawn; this "
+                "run did not use the existing exact-row lookup."
+            ),
+            "row_count": 0,
+            "schema": R2_SCHEMA,
+            "status": "HOLD",
+            "unit_count": 0,
+            "writable": False,
+        }
+    refuse_canonical_store(proving)
+    connection = sqlite3.connect(
+        f"{Path(proving).resolve().as_uri()}?mode=ro", uri=True
+    )
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        collected: list[dict[str, object]] = []
+        body_bytes = 0
+        rows_found = 0
+        identity = (
+            str(event.get("item_key") or ""),
+            str(event.get("revision_digest") or ""),
+            str(event.get("published_at") or ""),
+            str(event.get("updated_at") or ""),
+        )
+        for run_id, source_id, digest in keys:
+            row = connection.execute(
+                """
+                SELECT source_id, url, fetched_at, status_code, body_digest, body, error
+                FROM proving_observations
+                WHERE run_id=? AND source_id=? AND body_digest=?
+                """,
+                (run_id, source_id, digest),
+            ).fetchone()
+            if row is None:
+                continue
+            source_id_row, url, fetched_at, status_code, body_digest, body, error = row
+            if int(status_code) != 200 or not body or error is not None:
+                continue
+            payload = bytes(body)
+            body_bytes += len(payload)
+            rows_found += 1
+            for item in parse_observation(
+                source_id=str(source_id_row), url=str(url), body=payload
+            ):
+                units = _r2_unit_row(
+                    source_id=str(source_id_row),
+                    item_key=item.item_key,
+                    published_at=item.published_at,
+                    updated_at=item.updated_at,
+                    observation_digest=str(body_digest),
+                    proving_run_id=run_id,
+                    observed_at=str(fetched_at),
+                    headline=item.headline,
+                    body=item.retained_corpus_body,
+                    canonical_url=item.canonical_url,
+                )
+                for unit in units:
+                    if (
+                        unit["item_key"],
+                        unit["revision_digest"],
+                        unit.get("published_at") or "",
+                        unit.get("updated_at") or "",
+                    ) == identity:
+                        collected.append(unit)
+        units = _unique_r2_units(collected)
+        comparable = [
+            {key: value for key, value in unit.items() if key != "observed_at"}
+            for unit in units
+        ]
+        manifest = {
+            "row_count": rows_found,
+            "schema": R2_SCHEMA,
+            "unit_count": len(comparable),
+            "units": comparable,
+        }
+        oracle = r2_oracle_match(units, event.get("unit_refs"))
+        status = "OK" if oracle["match"] and comparable else "HOLD"
+        reason = None
+        if not keys:
+            reason = "no unit_refs coordinates"
+        elif rows_found == 0:
+            reason = "unit_refs coordinates did not match proving_observations rows"
+            status = "HOLD"
+        elif not comparable:
+            reason = (
+                "bounded rows were read, but parser/identity produced no units "
+                "matching the prepared event identity"
+            )
+            status = "HOLD"
+        elif not oracle["match"]:
+            reason = (
+                "bounded rows were read and units were computed from bodies, "
+                "but the computed useful output does not match retained "
+                "unit_refs (parser, identity, chunking, or ordering)"
+            )
+            status = "HOLD"
+        return {
+            "body_bytes": body_bytes,
+            "manifest_digest": digest_text(canonical_json(manifest)),
+            "oracle": oracle,
+            "queue_claimed": False,
+            "reason": reason,
+            "row_count": rows_found,
+            "schema": R2_SCHEMA,
+            "status": status,
+            "unit_count": len(comparable),
+            "writable": False,
+        }
+    finally:
+        connection.close()
 
 
 def case_bare_interpreter() -> dict[str, object]:
@@ -940,21 +1298,60 @@ def case_observation_scan(proving: str, cutoff: str) -> dict[str, object]:
     return measure(lambda: scan_observations(proving, cutoff))
 
 
-def case_rust_r2() -> dict[str, object]:
-    return {
-        "mode": "r2",
-        "status": "HOLD",
-        "reason": (
-            "proving_observations has no item_key, revision_digest, published_at "
-            "or updated_at columns; event identity is derived after "
-            "parse_observation / units_from. Bounding the SQL to one event "
-            "requires a product schema or query change, which #898 forbids."
-        ),
-        "missing_seam": (
-            "exact event identity columns or an existing exact-row selection API"
-        ),
-        "queue_claimed": False,
-    }
+def case_python_r2(proving: str, event: dict[str, object]) -> dict[str, object]:
+    return measure(lambda: bounded_useful_units(proving, event))
+
+
+def case_rust_r2(binary: str, proving: str, spec_path: str) -> dict[str, object]:
+    return _run_rust_binary(binary, ["r2", "--db", proving, "--spec", spec_path])
+
+
+def case_rust_r2_e2e(binary: str, proving: str, spec_path: str) -> dict[str, object]:
+    def work() -> dict[str, object]:
+        proc = subprocess.Popen(
+            [binary, "r2", "--db", proving, "--spec", spec_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        combined_peak: int | str = 0
+        while proc.poll() is None:
+            parent = current_rss_bytes()
+            child = rss_bytes_for_pid(proc.pid)
+            if isinstance(parent, int) and isinstance(child, int):
+                if combined_peak == 0 or (
+                    isinstance(combined_peak, int) and parent + child > combined_peak
+                ):
+                    combined_peak = parent + child
+            time.sleep(0.02)
+        stdout, stderr = proc.communicate()
+        try:
+            payload = json.loads(stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError, ValueError):
+            payload = {
+                "status": "ERROR",
+                "outcome": {
+                    "error": "rust stdout was not JSON",
+                    "stderr_tail": stderr[-1000:],
+                },
+            }
+        outcome = payload.get("outcome", {})
+        if not isinstance(outcome, dict):
+            outcome = {"value": outcome}
+        parent = current_rss_bytes()
+        if isinstance(parent, int) and isinstance(combined_peak, int):
+            combined_peak = max(combined_peak, parent)
+        outcome = {
+            **outcome,
+            "child_status": payload.get("status"),
+            "combined_peak_rss_bytes": combined_peak,
+            "parent_rss_after_bytes": parent,
+            "queue_claimed": False,
+            "returncode": proc.returncode,
+        }
+        return outcome
+
+    return measure(work)
 
 
 def fixture_rows(kind: str) -> tuple[tuple[str, bytes], ...]:
@@ -1021,6 +1418,7 @@ def fixture_rows(kind: str) -> tuple[tuple[str, bytes], ...]:
 def _write_event(path: Path, proving: str, clock: datetime) -> dict[str, object]:
     spec = prepare_event_identity(proving, clock)
     path.write_text(json.dumps(spec, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    write_r2_spec(path.with_name("r2-spec-" + path.name.removeprefix("event-")), spec)
     return spec
 
 
@@ -1114,6 +1512,11 @@ def build_research_rust(binary: Path) -> dict[str, object]:
     rustc = subprocess.check_output(["rustc", "-vV"], text=True)
     cargo = subprocess.check_output(["cargo", "--version"], text=True).strip()
     lock = RUST_CRATE / "Cargo.lock"
+    sources = sorted((RUST_CRATE / "src").glob("*.rs"))
+    source_hasher = hashlib.sha256()
+    for path in sources:
+        source_hasher.update(path.name.encode("utf-8"))
+        source_hasher.update(path.read_bytes())
     return {
         "status": "OK",
         "binary_digest": _sha256_file(binary),
@@ -1122,7 +1525,8 @@ def build_research_rust(binary: Path) -> dict[str, object]:
         "cargo_lock_digest": _sha256_file(lock) if lock.is_file() else UNOBSERVED,
         "crate_path": str(RUST_CRATE.relative_to(RUST_CRATE.parents[2])),
         "profile": "release",
-        "source_digest": _sha256_file(RUST_CRATE / "src" / "main.rs"),
+        "source_digest": "sha256:" + source_hasher.hexdigest(),
+        "source_files": [path.name for path in sources],
         "toolchain": rustc.strip().splitlines(),
     }
 
@@ -1158,7 +1562,9 @@ CASE_SPECS: tuple[tuple[str, str, str], ...] = (
     ("R1_python_observation_scan", "python_scan", "copied"),
     ("R1_rust_observation_scan", "rust_r1", "copied"),
     ("R1_rust_e2e_parent", "rust_e2e", "copied"),
-    ("R2_bounded_candidate", "rust_r2", ""),
+    ("R2_python_bounded_units", "python_r2", "copied"),
+    ("R2_bounded_candidate", "rust_r2", "copied"),
+    ("R2_rust_e2e_parent", "rust_r2_e2e", "copied"),
     ("S1_import_cycle_tracemalloc", "import_cycle_tracemalloc", ""),
     ("S2_resolve_solo_tracemalloc", "resolve_tracemalloc", "solo"),
 )
@@ -1211,8 +1617,6 @@ def run_named_case(
         return case_process_tree()
     if kind == "admission_generation":
         return case_admission_generation()
-    if kind == "rust_r2":
-        return case_rust_r2()
     proving = _store_path(workspace, store) if store else None
     if kind == "resolve":
         if not proving:
@@ -1282,6 +1686,24 @@ def run_named_case(
             target,
             _cutoff(workspace, store or "scaled"),
         )
+    if kind == "python_r2":
+        target = proving or workspace.get("proving_scaled")
+        event_name = store or "scaled"
+        if not target:
+            return {"status": UNOBSERVED, "reason": "r2 proving store missing"}
+        return case_python_r2(target, _event_spec(workspace, event_name))
+    if kind in {"rust_r2", "rust_r2_e2e"}:
+        binary = workspace.get("rust_binary")
+        target = proving or workspace.get("proving_scaled")
+        spec_path = workspace.get(f"r2_spec_{store or 'scaled'}")
+        if not binary or not target or not spec_path:
+            return {
+                "status": UNOBSERVED,
+                "reason": "rust binary, r2 store or r2 spec missing",
+            }
+        if kind == "rust_r2_e2e":
+            return case_rust_r2_e2e(binary, target, spec_path)
+        return case_rust_r2(binary, target, spec_path)
     raise ValueError(f"unknown case kind: {kind}")
 
 
@@ -1521,7 +1943,7 @@ def summarise_case(name: str, runs: list[dict[str, object]]) -> dict[str, object
             cpus.append(float(user) + float(system))
     return {
         "case": name,
-        "warmup_count": 0 if name in {"A6_process_tree", "R2_bounded_candidate", "S1_import_cycle_tracemalloc", "S2_resolve_solo_tracemalloc"} else WARMUPS,
+        "warmup_count": 0 if name in {"A6_process_tree", "S1_import_cycle_tracemalloc", "S2_resolve_solo_tracemalloc"} else WARMUPS,
         "measured_count": len(measured),
         "max_peak_rss_bytes": max(peaks) if peaks else UNOBSERVED,
         "median_cpu_seconds": _median(cpus) if cpus else UNOBSERVED,
@@ -1530,18 +1952,27 @@ def summarise_case(name: str, runs: list[dict[str, object]]) -> dict[str, object
     }
 
 
-def _parity_from_summaries(summaries: dict[str, dict[str, object]]) -> dict[str, object]:
-    def last_digest(name: str) -> object:
-        runs = summaries.get(name, {}).get("runs") or []
-        for item in reversed(runs):
-            outcome = item.get("outcome") if isinstance(item.get("outcome"), dict) else {}
-            if isinstance(outcome, dict) and outcome.get("manifest_digest"):
-                return outcome["manifest_digest"]
-        return UNOBSERVED
+def _last_outcome(summary: dict[str, object]) -> dict[str, object]:
+    runs = summary.get("runs") or []
+    for item in reversed(runs):
+        if not isinstance(item, dict):
+            continue
+        outcome = item.get("outcome") if isinstance(item.get("outcome"), dict) else item
+        if isinstance(outcome, dict):
+            return outcome
+    return {}
 
-    python_digest = last_digest("R1_python_observation_scan")
-    rust_digest = last_digest("R1_rust_observation_scan")
-    e2e_digest = last_digest("R1_rust_e2e_parent")
+
+def _last_digest(summary: dict[str, object]) -> object:
+    outcome = _last_outcome(summary)
+    digest = outcome.get("manifest_digest")
+    return digest if isinstance(digest, str) and digest.startswith("sha256:") else UNOBSERVED
+
+
+def _parity_from_summaries(summaries: dict[str, dict[str, object]]) -> dict[str, object]:
+    python_digest = _last_digest(summaries.get("R1_python_observation_scan", {}))
+    rust_digest = _last_digest(summaries.get("R1_rust_observation_scan", {}))
+    e2e_digest = _last_digest(summaries.get("R1_rust_e2e_parent", {}))
     match = (
         isinstance(python_digest, str)
         and python_digest.startswith("sha256:")
@@ -1559,12 +1990,189 @@ def _parity_from_summaries(summaries: dict[str, dict[str, object]]) -> dict[str,
     }
 
 
+def _r2_parity_from_summaries(summaries: dict[str, dict[str, object]]) -> dict[str, object]:
+    python = summaries.get("R2_python_bounded_units", {})
+    rust = summaries.get("R2_bounded_candidate", {})
+    e2e = summaries.get("R2_rust_e2e_parent", {})
+    python_digest = _last_digest(python)
+    rust_digest = _last_digest(rust)
+    e2e_digest = _last_digest(e2e)
+    python_outcome = _last_outcome(python)
+    oracle = python_outcome.get("oracle") if isinstance(python_outcome.get("oracle"), dict) else {}
+    match = (
+        isinstance(python_digest, str)
+        and python_digest.startswith("sha256:")
+        and python_digest == rust_digest
+        and (e2e_digest in {rust_digest, UNOBSERVED} or e2e_digest == python_digest)
+    )
+    return {
+        "boundary": "bounded_useful_units",
+        "e2e_manifest_digest": e2e_digest,
+        "match": match,
+        "oracle_match": oracle.get("match") is True,
+        "python_manifest_digest": python_digest,
+        "rust_manifest_digest": rust_digest,
+        "schema": R2_SCHEMA,
+        "unit_parity_claimed": match and oracle.get("match") is True,
+    }
+
+
+def _migration_atom(
+    summaries: dict[str, dict[str, object]],
+    r2_parity: dict[str, object],
+) -> dict[str, object]:
+    python = summaries.get("R2_python_bounded_units", {})
+    rust = summaries.get("R2_bounded_candidate", {})
+    e2e = summaries.get("R2_rust_e2e_parent", {})
+    python_outcome = _last_outcome(python)
+    rust_outcome = _last_outcome(rust)
+    python_peak = python.get("max_peak_rss_bytes")
+    e2e_peak = e2e.get("max_peak_rss_bytes")
+    rust_child_peak = rust.get("max_peak_rss_bytes")
+    python_cpu = python.get("median_cpu_seconds")
+    rust_child_cpu = rust.get("median_cpu_seconds")
+    rust_parent_cpu = e2e.get("median_cpu_seconds")
+    rust_total_cpu = (
+        float(rust_child_cpu) + float(rust_parent_cpu)
+        if isinstance(rust_child_cpu, (int, float))
+        and isinstance(rust_parent_cpu, (int, float))
+        else UNOBSERVED
+    )
+    keys_present = bool(
+        (python_outcome.get("row_count") or rust_outcome.get("row_count")) not in {0, None, UNOBSERVED}
+    )
+    if not python and not rust:
+        return {
+            "first_migration_atom": "HOLD",
+            "r2_hold": True,
+            "r2_reason": (
+                "R2 bounded useful-output path was not measured; first migration "
+                "atom remains HOLD"
+            ),
+            "r2_parity": r2_parity,
+            "unit_parity_claimed": False,
+        }
+    if python_outcome.get("status") == "HOLD" and not r2_parity.get("oracle_match"):
+        return {
+            "first_migration_atom": "HOLD",
+            "r2_hold": True,
+            "r2_reason": str(
+                python_outcome.get("reason")
+                or "bounded rows exist but useful-output parity with unit_refs is unproved"
+            ),
+            "r2_parity": r2_parity,
+            "unit_parity_claimed": False,
+        }
+    if not r2_parity.get("oracle_match"):
+        return {
+            "first_migration_atom": "HOLD",
+            "r2_hold": True,
+            "r2_reason": (
+                "bounded proving rows are selectable from unit_refs, but computed "
+                "useful output does not match the retained unit_refs oracle"
+            ),
+            "r2_parity": r2_parity,
+            "unit_parity_claimed": False,
+        }
+    if r2_parity.get("match") is not True:
+        return {
+            "first_migration_atom": "HOLD",
+            "r2_hold": True,
+            "r2_reason": (
+                "Python bounded useful output matches unit_refs, but the research "
+                "Rust comparator digest does not match (parser/identity/chunking)"
+            ),
+            "r2_parity": r2_parity,
+            "unit_parity_claimed": False,
+        }
+    if not isinstance(python_peak, int) or not isinstance(e2e_peak, int):
+        return {
+            "first_migration_atom": "HOLD",
+            "r2_hold": True,
+            "r2_reason": "R2 Python or Rust end-to-end peak RSS is UNOBSERVED",
+            "r2_parity": r2_parity,
+            "unit_parity_claimed": True,
+        }
+    removable = max(0, python_peak - e2e_peak)
+    threshold_ok = removable >= GO_PEAK_BYTES or (
+        python_peak > 0 and removable / python_peak >= GO_PEAK_RATIO
+    )
+    cpu_regress = (
+        isinstance(python_cpu, (int, float))
+        and isinstance(rust_total_cpu, (int, float))
+        and python_cpu > 0
+        and rust_total_cpu > python_cpu * 1.2
+    )
+    if rust_total_cpu is UNOBSERVED:
+        return {
+            "first_migration_atom": "HOLD",
+            "r2_hold": True,
+            "r2_reason": "R2 useful-output parity holds, but Rust child-plus-parent CPU is UNOBSERVED",
+            "r2_parity": r2_parity,
+            "r2_python_peak_rss_bytes": python_peak,
+            "r2_rust_e2e_peak_rss_bytes": e2e_peak,
+            "r2_removable_peak_rss_bytes": removable,
+            "unit_parity_claimed": True,
+        }
+    if cpu_regress:
+        return {
+            "first_migration_atom": "HOLD",
+            "r2_hold": True,
+            "r2_reason": (
+                "R2 useful-output parity holds, but Rust child-plus-parent CPU "
+                "regresses more than 20%"
+            ),
+            "r2_parity": r2_parity,
+            "r2_python_cpu_seconds": python_cpu,
+            "r2_rust_total_cpu_seconds": rust_total_cpu,
+            "unit_parity_claimed": True,
+        }
+    if not threshold_ok:
+        return {
+            "first_migration_atom": "HOLD",
+            "r2_hold": True,
+            "r2_reason": (
+                "R2 reconstructed exact useful output from bounded rows, but "
+                "peak-RSS reduction versus the Python bounded path is below "
+                "both the 20% and 64 MiB gates"
+            ),
+            "r2_parity": r2_parity,
+            "r2_python_peak_rss_bytes": python_peak,
+            "r2_rust_child_peak_rss_bytes": rust_child_peak,
+            "r2_rust_e2e_peak_rss_bytes": e2e_peak,
+            "r2_removable_peak_rss_bytes": removable,
+            "unit_parity_claimed": True,
+        }
+    return {
+        "first_migration_atom": "GO",
+        "r2_hold": False,
+        "r2_reason": (
+            "R2 GO: research Rust reconstructed exact useful output from bounded "
+            "unit_refs rows and reduced end-to-end peak RSS by at least 20% or "
+            "64 MiB after launch/IPC. This still authorises no product migration."
+        ),
+        "r2_parity": r2_parity,
+        "r2_python_peak_rss_bytes": python_peak,
+        "r2_rust_child_peak_rss_bytes": rust_child_peak,
+        "r2_rust_e2e_peak_rss_bytes": e2e_peak,
+        "r2_python_cpu_seconds": python_cpu,
+        "r2_rust_child_cpu_seconds": rust_child_cpu,
+        "r2_rust_e2e_parent_cpu_seconds": rust_parent_cpu,
+        "r2_rust_total_cpu_seconds": rust_total_cpu,
+        "r2_removable_peak_rss_bytes": removable,
+        "unit_parity_claimed": True,
+        "keys_present": keys_present,
+    }
+
+
 def decide(
     summaries: dict[str, dict[str, object]],
     *,
     parity: dict[str, object] | None = None,
 ) -> dict[str, object]:
     parity = parity or _parity_from_summaries(summaries)
+    r2_parity = _r2_parity_from_summaries(summaries)
+    atom = _migration_atom(summaries, r2_parity)
     python_scan = summaries.get("R1_python_observation_scan", {})
     rust_scan = summaries.get("R1_rust_observation_scan", {})
     rust_e2e = summaries.get("R1_rust_e2e_parent", {})
@@ -1581,13 +2189,6 @@ def decide(
         and isinstance(rust_parent_cpu, (int, float))
         else UNOBSERVED
     )
-    r2 = summaries.get("R2_bounded_candidate", {})
-    r2_hold = True
-    if r2:
-        last = (r2.get("runs") or [{}])[-1]
-        r2_hold = last.get("status") == "HOLD" or (
-            isinstance(last.get("outcome"), dict) and last["outcome"].get("status") == "HOLD"
-        ) or last.get("mode") == "r2"
     rust_present = rust_r0.get("max_peak_rss_bytes") is not UNOBSERVED or any(
         run.get("status") == "OK" for run in (rust_r0.get("runs") or [])
     )
@@ -1632,10 +2233,9 @@ def decide(
             reason = (
                 "R1 FEASIBILITY_GO: Rust observation-scan comparator matches "
                 "Python output and reduces end-to-end peak RSS by at least 20% "
-                "or 64 MiB after launch/IPC. First migration atom / R2 remains "
-                "HOLD pending a bounded useful output boundary. This does not "
-                "claim event-resolution unit parity and authorises no "
-                "implementation."
+                "or 64 MiB after launch/IPC. First migration atom is "
+                f"{atom['first_migration_atom']}: {atom['r2_reason']} "
+                "R1 does not authorise implementation."
             )
         else:
             decision = "NO_GO"
@@ -1645,7 +2245,7 @@ def decide(
             )
         return {
             "go_or_no_go": decision,
-            "first_migration_atom": "HOLD",
+            "first_migration_atom": atom["first_migration_atom"],
             "reason": reason,
             "threshold_ok": threshold_ok,
             "parity": parity,
@@ -1657,9 +2257,11 @@ def decide(
             "rust_e2e_parent_cpu_seconds": rust_parent_cpu if isinstance(rust_parent_cpu, (int, float)) else UNOBSERVED,
             "rust_total_cpu_seconds": rust_total_cpu,
             "removable_peak_rss_bytes": removable,
-            "r2_hold": r2_hold,
+            "r2_hold": atom["r2_hold"],
+            "r2_reason": atom["r2_reason"],
+            "r2_parity": r2_parity,
             "selected_boundary": "retained_observation_body_scan",
-            "unit_parity_claimed": False,
+            "unit_parity_claimed": atom["unit_parity_claimed"],
             "go_basis": "peak_rss",
             "retained_rss_note": (
                 "Rust e2e retained RSS is dominated by child-process termination; "
@@ -1668,7 +2270,7 @@ def decide(
         }
     return {
         "go_or_no_go": decision,
-        "first_migration_atom": "HOLD",
+        "first_migration_atom": atom["first_migration_atom"],
         "reason": reason,
         "threshold_ok": False,
         "parity": parity,
@@ -1680,9 +2282,11 @@ def decide(
         "rust_e2e_parent_cpu_seconds": rust_parent_cpu if isinstance(rust_parent_cpu, (int, float)) else UNOBSERVED,
         "rust_total_cpu_seconds": rust_total_cpu,
         "removable_peak_rss_bytes": UNOBSERVED,
-        "r2_hold": r2_hold,
+        "r2_hold": atom["r2_hold"],
+        "r2_reason": atom["r2_reason"],
+        "r2_parity": r2_parity,
         "selected_boundary": "retained_observation_body_scan",
-        "unit_parity_claimed": False,
+        "unit_parity_claimed": atom["unit_parity_claimed"],
         "go_basis": "peak_rss",
         "retained_rss_note": (
             "Rust e2e retained RSS is dominated by child-process termination; "
@@ -1744,6 +2348,7 @@ def assemble_packet(
     workspace_digest: str,
 ) -> dict[str, object]:
     parity = _parity_from_summaries(summaries)
+    r2_parity = _r2_parity_from_summaries(summaries)
     decision = decide(summaries, parity=parity)
     questions = {
         "1_largest_idle_rss_process": summaries.get("A6_process_tree", {})
@@ -1810,6 +2415,8 @@ def assemble_packet(
         "copy_meta": copy_meta,
         "rust_meta": rust_meta,
         "parity": parity,
+        "r2_parity": r2_parity,
+        "r2_reason": decision.get("r2_reason"),
         "workspace_digest": workspace_digest,
         "method": {
             "peak_rss_and_cpu": ["/usr/bin/time -l", "resource.getrusage"],
@@ -1817,6 +2424,11 @@ def assemble_packet(
             "python_allocation_supplement": "tracemalloc off for primary; S1/S2 only",
             "sqlite_snapshot": "sqlite3.Connection.backup from read-only source",
             "one_event": "event identity prepared outside the measured child; one _resolve_graphiti_event_units call",
+            "r2": (
+                "unit_refs retained on the prepared event; R2 selects "
+                "(proving_run_id, source_id, observation_digest) rows and "
+                "computes useful output from bodies. unit_refs are oracle only."
+            ),
             "fresh_process_per_case": True,
             "warmup_plus_measured_runs": f"{WARMUPS} warmup and {MEASURED_RUNS} fresh-process executions",
             "rust": "research-only crate docs/research/issue-898-ram-cpu-rust",
@@ -1841,7 +2453,14 @@ def assemble_packet(
     }
 
 
-def orchestrate(*, output: Path, workspace: Path | None = None) -> dict[str, object]:
+def orchestrate(
+    *,
+    output: Path,
+    workspace: Path | None = None,
+    only: tuple[str, ...] = (),
+    merge_into: Path | None = None,
+    refresh_copied_event: bool = False,
+) -> dict[str, object]:
     close_workspace = False
     if workspace is None:
         workspace = Path(tempfile.mkdtemp(prefix="newsroom-898-"))
@@ -1849,17 +2468,38 @@ def orchestrate(*, output: Path, workspace: Path | None = None) -> dict[str, obj
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
-        paths = build_workspace(workspace)
-        copy_meta = json.loads(paths.get("copy_meta", "{}"))
-        rust_meta = json.loads(paths.get("rust_meta", "{}"))
+        if merge_into is not None and workspace.exists() and any(workspace.glob("proving-*.sqlite3")):
+            paths = load_workspace(workspace)
+            rust_meta = build_research_rust(workspace / "issue-898-ram-cpu")
+            paths["rust_meta"] = json.dumps(rust_meta, sort_keys=True)
+            if rust_meta.get("status") == "OK":
+                paths["rust_binary"] = str(workspace / "issue-898-ram-cpu")
+            if refresh_copied_event and "proving_copied" in paths:
+                print("workspace: refresh copied event identity begin", flush=True)
+                clock = (
+                    parse_utc(paths["clock_copied"])
+                    if "clock_copied" in paths
+                    else datetime.now(tz=UTC)
+                )
+                _write_event(workspace / "event-copied.json", paths["proving_copied"], clock)
+                paths["event_copied"] = str(workspace / "event-copied.json")
+                paths["r2_spec_copied"] = str(workspace / "r2-spec-copied.json")
+                print("workspace: refresh copied event identity done", flush=True)
+            copy_meta = json.loads(merge_into.read_text(encoding="utf-8")).get("copy_meta") or {}
+        else:
+            paths = build_workspace(workspace)
+            copy_meta = json.loads(paths.get("copy_meta", "{}"))
+            rust_meta = json.loads(paths.get("rust_meta", "{}"))
+        selected_cases = tuple(
+            item for item in CASE_SPECS if not only or item[0] in only
+        )
         summaries: dict[str, dict[str, object]] = {}
         once = {
             "A6_process_tree",
-            "R2_bounded_candidate",
             "S1_import_cycle_tracemalloc",
             "S2_resolve_solo_tracemalloc",
         }
-        for name, _kind, _store in CASE_SPECS:
+        for name, _kind, _store in selected_cases:
             print(f"case {name} begin", flush=True)
             runs: list[dict[str, object]] = []
             repeats = 1 if name in once else WARMUPS + MEASURED_RUNS
@@ -1878,13 +2518,26 @@ def orchestrate(*, output: Path, workspace: Path | None = None) -> dict[str, obj
                     runs.append(
                         run_timed_command([sys.executable, "-c", script], env)
                     )
-            elif name.startswith("R0") or name.startswith("R1_rust_observation"):
+            elif name.startswith("R0") or name.startswith("R1_rust_observation") or name == "R2_bounded_candidate":
                 binary = paths.get("rust_binary")
                 if not binary:
                     runs.append({"status": UNOBSERVED, "reason": "research rust binary missing", "outcome": {}})
                 elif name.startswith("R0"):
                     for _ in range(repeats):
                         runs.append(run_timed_command([binary, "r0"], env))
+                elif name == "R2_bounded_candidate":
+                    store = paths.get("proving_copied") or paths.get("proving_scaled")
+                    spec_path = paths.get("r2_spec_copied") or paths.get("r2_spec_scaled")
+                    if not store or not spec_path:
+                        runs.append({"status": UNOBSERVED, "reason": "r2 store or spec missing", "outcome": {}})
+                    else:
+                        for _ in range(repeats):
+                            runs.append(
+                                run_timed_command(
+                                    [binary, "r2", "--db", store, "--spec", spec_path],
+                                    env,
+                                )
+                            )
                 else:
                     store = paths.get("proving_copied") or paths.get("proving_scaled")
                     cutoff = paths.get("cutoff_copied") or paths.get("cutoff_scaled")
@@ -1920,12 +2573,28 @@ def orchestrate(*, output: Path, workspace: Path | None = None) -> dict[str, obj
         workspace_digest = hashlib.sha256(
             json.dumps(sorted(paths.items()), sort_keys=True).encode()
         ).hexdigest()
+        if merge_into is not None:
+            base = json.loads(merge_into.read_text(encoding="utf-8"))
+            merged = dict(base.get("cases") or {})
+            merged.update(summaries)
+            summaries = merged
+            copy_meta = base.get("copy_meta") or copy_meta
+            if not rust_meta:
+                rust_meta = base.get("rust_meta") or {}
         packet = assemble_packet(
             summaries=summaries,
             copy_meta=copy_meta,
             rust_meta=rust_meta,
             workspace_digest="sha256:" + workspace_digest,
         )
+        if merge_into is not None:
+            base_head = json.loads(merge_into.read_text(encoding="utf-8")).get(
+                "inspection_head"
+            )
+            packet["r1_inspection_head"] = base_head
+            packet["r2_measurement_head"] = packet.get("inspection_head")
+            packet["inspection_head"] = base_head
+            packet["r2_reused_snapshot"] = True
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(
             json.dumps(packet, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -1945,6 +2614,8 @@ def load_workspace(path: Path) -> dict[str, str]:
         mapping[f"unpublished_{item.stem.removeprefix('unpublished-')}"] = str(item)
     for item in path.glob("event-*.json"):
         mapping[f"event_{item.stem.removeprefix('event-')}"] = str(item)
+    for item in path.glob("r2-spec-*.json"):
+        mapping[f"r2_spec_{item.stem.removeprefix('r2-spec-')}"] = str(item)
     rust_binary = path / "issue-898-ram-cpu"
     if rust_binary.is_file():
         mapping["rust_binary"] = str(rust_binary)
@@ -1979,6 +2650,20 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=Path("docs/research/2026-09-02-issue-898-ram-cpu-measurements.json"),
     )
+    parser.add_argument(
+        "--only",
+        help="comma-separated case names; omit to run the full packet",
+    )
+    parser.add_argument(
+        "--merge-into",
+        type=Path,
+        help="existing packet JSON whose other cases are retained",
+    )
+    parser.add_argument(
+        "--refresh-copied-event",
+        action="store_true",
+        help="rebuild copied event identity and R2 spec from an existing snapshot",
+    )
     args = parser.parse_args(argv)
     if args.case:
         if args.workspace is None:
@@ -1990,7 +2675,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return 0
-    orchestrate(output=args.output, workspace=args.workspace)
+    only = tuple(item for item in (args.only or "").split(",") if item)
+    orchestrate(
+        output=args.output,
+        workspace=args.workspace,
+        only=only,
+        merge_into=args.merge_into,
+        refresh_copied_event=args.refresh_copied_event,
+    )
     print(args.output)
     return 0
 

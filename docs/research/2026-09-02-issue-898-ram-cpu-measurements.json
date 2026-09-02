@@ -4812,10 +4812,144 @@
     },
     "R2_bounded_candidate": {
       "case": "R2_bounded_candidate",
-      "max_peak_rss_bytes": 24412160,
-      "max_retained_rss_bytes": "UNOBSERVED",
-      "measured_count": 1,
-      "median_cpu_seconds": "UNOBSERVED",
+      "max_peak_rss_bytes": 4423680,
+      "max_retained_rss_bytes": 4390912,
+      "measured_count": 3,
+      "median_cpu_seconds": 0.0,
+      "runs": [
+        {
+          "command": [
+            "/tmp/newsroom-898-corrected/issue-898-ram-cpu",
+            "r2",
+            "--db",
+            "/tmp/newsroom-898-corrected/proving-copied.sqlite3",
+            "--spec",
+            "/tmp/newsroom-898-corrected/r2-spec-copied.json"
+          ],
+          "mode": "r2",
+          "outcome": {
+            "body_bytes": 86133,
+            "manifest_digest": "sha256:9777c193d16d9abe83307f0e6109145fca777dc66f7002d9d4810974bf5981b0",
+            "queue_claimed": false,
+            "reason": null,
+            "row_count": 1,
+            "schema": "newsroom.issue-898.bounded-units.v1",
+            "status": "OK",
+            "unit_count": 1,
+            "writable": false
+          },
+          "peak_from_time_l_bytes": 4407296,
+          "returncode": 0,
+          "rss_after_bytes": 4374528,
+          "rss_held_bytes": 4325376,
+          "ru_maxrss_bytes": 4407296,
+          "status": "OK",
+          "system_cpu_seconds": 0.0,
+          "time_l_maxrss_bytes": 4407296,
+          "user_cpu_seconds": 0.01
+        },
+        {
+          "command": [
+            "/tmp/newsroom-898-corrected/issue-898-ram-cpu",
+            "r2",
+            "--db",
+            "/tmp/newsroom-898-corrected/proving-copied.sqlite3",
+            "--spec",
+            "/tmp/newsroom-898-corrected/r2-spec-copied.json"
+          ],
+          "mode": "r2",
+          "outcome": {
+            "body_bytes": 86133,
+            "manifest_digest": "sha256:9777c193d16d9abe83307f0e6109145fca777dc66f7002d9d4810974bf5981b0",
+            "queue_claimed": false,
+            "reason": null,
+            "row_count": 1,
+            "schema": "newsroom.issue-898.bounded-units.v1",
+            "status": "OK",
+            "unit_count": 1,
+            "writable": false
+          },
+          "peak_from_time_l_bytes": 4374528,
+          "returncode": 0,
+          "rss_after_bytes": 4341760,
+          "rss_held_bytes": 4308992,
+          "ru_maxrss_bytes": 4374528,
+          "status": "OK",
+          "system_cpu_seconds": 0.0,
+          "time_l_maxrss_bytes": 4374528,
+          "user_cpu_seconds": 0.0
+        },
+        {
+          "command": [
+            "/tmp/newsroom-898-corrected/issue-898-ram-cpu",
+            "r2",
+            "--db",
+            "/tmp/newsroom-898-corrected/proving-copied.sqlite3",
+            "--spec",
+            "/tmp/newsroom-898-corrected/r2-spec-copied.json"
+          ],
+          "mode": "r2",
+          "outcome": {
+            "body_bytes": 86133,
+            "manifest_digest": "sha256:9777c193d16d9abe83307f0e6109145fca777dc66f7002d9d4810974bf5981b0",
+            "queue_claimed": false,
+            "reason": null,
+            "row_count": 1,
+            "schema": "newsroom.issue-898.bounded-units.v1",
+            "status": "OK",
+            "unit_count": 1,
+            "writable": false
+          },
+          "peak_from_time_l_bytes": 4390912,
+          "returncode": 0,
+          "rss_after_bytes": 4358144,
+          "rss_held_bytes": 4325376,
+          "ru_maxrss_bytes": 4390912,
+          "status": "OK",
+          "system_cpu_seconds": 0.0,
+          "time_l_maxrss_bytes": 4390912,
+          "user_cpu_seconds": 0.0
+        },
+        {
+          "command": [
+            "/tmp/newsroom-898-corrected/issue-898-ram-cpu",
+            "r2",
+            "--db",
+            "/tmp/newsroom-898-corrected/proving-copied.sqlite3",
+            "--spec",
+            "/tmp/newsroom-898-corrected/r2-spec-copied.json"
+          ],
+          "mode": "r2",
+          "outcome": {
+            "body_bytes": 86133,
+            "manifest_digest": "sha256:9777c193d16d9abe83307f0e6109145fca777dc66f7002d9d4810974bf5981b0",
+            "queue_claimed": false,
+            "reason": null,
+            "row_count": 1,
+            "schema": "newsroom.issue-898.bounded-units.v1",
+            "status": "OK",
+            "unit_count": 1,
+            "writable": false
+          },
+          "peak_from_time_l_bytes": 4423680,
+          "returncode": 0,
+          "rss_after_bytes": 4390912,
+          "rss_held_bytes": 4374528,
+          "ru_maxrss_bytes": 4423680,
+          "status": "OK",
+          "system_cpu_seconds": 0.0,
+          "time_l_maxrss_bytes": 4423680,
+          "user_cpu_seconds": 0.0
+        }
+      ],
+      "warmup_count": 1
+    },
+    "R2_python_bounded_units": {
+      "case": "R2_python_bounded_units",
+      "max_peak_rss_bytes": 81477632,
+      "max_retained_rss_bytes": 81362944,
+      "measured_count": 3,
+      "median_cpu_seconds": 0.608377,
       "runs": [
         {
           "command": [
@@ -4825,21 +4959,386 @@
             "-m",
             "newsroom.research.issue_898_ram_cpu",
             "--case",
-            "R2_bounded_candidate",
+            "R2_python_bounded_units",
             "--workspace",
             "/tmp/newsroom-898-corrected"
           ],
-          "missing_seam": "exact event identity columns or an existing exact-row selection API",
-          "mode": "r2",
-          "queue_claimed": false,
-          "reason": "proving_observations has no item_key, revision_digest, published_at or updated_at columns; event identity is derived after parse_observation / units_from. Bounding the SQL to one event requires a product schema or query change, which #898 forbids.",
+          "outcome": {
+            "body_bytes": 86133,
+            "manifest_digest": "sha256:9777c193d16d9abe83307f0e6109145fca777dc66f7002d9d4810974bf5981b0",
+            "oracle": {
+              "compared_fields": [
+                "chunk_digest",
+                "chunk_ordinal",
+                "ingest_id",
+                "observation_digest",
+                "predecessor_ingest_id",
+                "proving_run_id",
+                "representation_digest",
+                "revision_id"
+              ],
+              "match": true,
+              "mismatch_count": 0,
+              "unit_count": 1,
+              "unit_ref_count": 1
+            },
+            "queue_claimed": false,
+            "reason": null,
+            "row_count": 1,
+            "schema": "newsroom.issue-898.bounded-units.v1",
+            "status": "OK",
+            "unit_count": 1,
+            "writable": false
+          },
+          "pid": 96140,
           "returncode": 0,
-          "ru_maxrss_bytes": 24412160,
-          "status": "HOLD",
-          "time_l_maxrss_bytes": 24412160
+          "rss_after_bytes": 81641472,
+          "rss_before_bytes": 24477696,
+          "ru_maxrss_bytes": 81657856,
+          "status": "OK",
+          "system_cpu_seconds": 0.054231,
+          "time_l_maxrss_bytes": 81756160,
+          "tracemalloc_current_bytes": "UNOBSERVED",
+          "tracemalloc_enabled": false,
+          "tracemalloc_peak_bytes": "UNOBSERVED",
+          "user_cpu_seconds": 0.6551239999999999,
+          "wall_seconds": 1.5384727499913424
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "R2_python_bounded_units",
+            "--workspace",
+            "/tmp/newsroom-898-corrected"
+          ],
+          "outcome": {
+            "body_bytes": 86133,
+            "manifest_digest": "sha256:9777c193d16d9abe83307f0e6109145fca777dc66f7002d9d4810974bf5981b0",
+            "oracle": {
+              "compared_fields": [
+                "chunk_digest",
+                "chunk_ordinal",
+                "ingest_id",
+                "observation_digest",
+                "predecessor_ingest_id",
+                "proving_run_id",
+                "representation_digest",
+                "revision_id"
+              ],
+              "match": true,
+              "mismatch_count": 0,
+              "unit_count": 1,
+              "unit_ref_count": 1
+            },
+            "queue_claimed": false,
+            "reason": null,
+            "row_count": 1,
+            "schema": "newsroom.issue-898.bounded-units.v1",
+            "status": "OK",
+            "unit_count": 1,
+            "writable": false
+          },
+          "pid": 96190,
+          "returncode": 0,
+          "rss_after_bytes": 81068032,
+          "rss_before_bytes": 24494080,
+          "ru_maxrss_bytes": 81084416,
+          "status": "OK",
+          "system_cpu_seconds": 0.026125999999999996,
+          "time_l_maxrss_bytes": 81182720,
+          "tracemalloc_current_bytes": "UNOBSERVED",
+          "tracemalloc_enabled": false,
+          "tracemalloc_peak_bytes": "UNOBSERVED",
+          "user_cpu_seconds": 0.600103,
+          "wall_seconds": 0.6195644589606673
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "R2_python_bounded_units",
+            "--workspace",
+            "/tmp/newsroom-898-corrected"
+          ],
+          "outcome": {
+            "body_bytes": 86133,
+            "manifest_digest": "sha256:9777c193d16d9abe83307f0e6109145fca777dc66f7002d9d4810974bf5981b0",
+            "oracle": {
+              "compared_fields": [
+                "chunk_digest",
+                "chunk_ordinal",
+                "ingest_id",
+                "observation_digest",
+                "predecessor_ingest_id",
+                "proving_run_id",
+                "representation_digest",
+                "revision_id"
+              ],
+              "match": true,
+              "mismatch_count": 0,
+              "unit_count": 1,
+              "unit_ref_count": 1
+            },
+            "queue_claimed": false,
+            "reason": null,
+            "row_count": 1,
+            "schema": "newsroom.issue-898.bounded-units.v1",
+            "status": "OK",
+            "unit_count": 1,
+            "writable": false
+          },
+          "pid": 96195,
+          "returncode": 0,
+          "rss_after_bytes": 76939264,
+          "rss_before_bytes": 24346624,
+          "ru_maxrss_bytes": 77725696,
+          "status": "OK",
+          "system_cpu_seconds": 0.024628999999999998,
+          "time_l_maxrss_bytes": 77725696,
+          "tracemalloc_current_bytes": "UNOBSERVED",
+          "tracemalloc_enabled": false,
+          "tracemalloc_peak_bytes": "UNOBSERVED",
+          "user_cpu_seconds": 0.5837479999999999,
+          "wall_seconds": 0.6087985000340268
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "R2_python_bounded_units",
+            "--workspace",
+            "/tmp/newsroom-898-corrected"
+          ],
+          "outcome": {
+            "body_bytes": 86133,
+            "manifest_digest": "sha256:9777c193d16d9abe83307f0e6109145fca777dc66f7002d9d4810974bf5981b0",
+            "oracle": {
+              "compared_fields": [
+                "chunk_digest",
+                "chunk_ordinal",
+                "ingest_id",
+                "observation_digest",
+                "predecessor_ingest_id",
+                "proving_run_id",
+                "representation_digest",
+                "revision_id"
+              ],
+              "match": true,
+              "mismatch_count": 0,
+              "unit_count": 1,
+              "unit_ref_count": 1
+            },
+            "queue_claimed": false,
+            "reason": null,
+            "row_count": 1,
+            "schema": "newsroom.issue-898.bounded-units.v1",
+            "status": "OK",
+            "unit_count": 1,
+            "writable": false
+          },
+          "pid": 96208,
+          "returncode": 0,
+          "rss_after_bytes": 81362944,
+          "rss_before_bytes": 24346624,
+          "ru_maxrss_bytes": 81379328,
+          "status": "OK",
+          "system_cpu_seconds": 0.0214,
+          "time_l_maxrss_bytes": 81477632,
+          "tracemalloc_current_bytes": "UNOBSERVED",
+          "tracemalloc_enabled": false,
+          "tracemalloc_peak_bytes": "UNOBSERVED",
+          "user_cpu_seconds": 0.574719,
+          "wall_seconds": 0.5876676660263911
         }
       ],
-      "warmup_count": 0
+      "warmup_count": 1
+    },
+    "R2_rust_e2e_parent": {
+      "case": "R2_rust_e2e_parent",
+      "max_peak_rss_bytes": 28803072,
+      "max_retained_rss_bytes": 24543232,
+      "measured_count": 3,
+      "median_cpu_seconds": 0.004006000000000002,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "R2_rust_e2e_parent",
+            "--workspace",
+            "/tmp/newsroom-898-corrected"
+          ],
+          "outcome": {
+            "body_bytes": 86133,
+            "child_status": "OK",
+            "combined_peak_rss_bytes": 28835840,
+            "manifest_digest": "sha256:9777c193d16d9abe83307f0e6109145fca777dc66f7002d9d4810974bf5981b0",
+            "parent_rss_after_bytes": 24592384,
+            "queue_claimed": false,
+            "reason": null,
+            "returncode": 0,
+            "row_count": 1,
+            "schema": "newsroom.issue-898.bounded-units.v1",
+            "status": "OK",
+            "unit_count": 1,
+            "writable": false
+          },
+          "pid": 96342,
+          "returncode": 0,
+          "rss_after_bytes": 24592384,
+          "rss_before_bytes": 24510464,
+          "ru_maxrss_bytes": 24592384,
+          "status": "OK",
+          "system_cpu_seconds": 0.0022320000000000005,
+          "time_l_maxrss_bytes": 24707072,
+          "tracemalloc_current_bytes": "UNOBSERVED",
+          "tracemalloc_enabled": false,
+          "tracemalloc_peak_bytes": "UNOBSERVED",
+          "user_cpu_seconds": 0.0017319999999999974,
+          "wall_seconds": 0.04978983395267278
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "R2_rust_e2e_parent",
+            "--workspace",
+            "/tmp/newsroom-898-corrected"
+          ],
+          "outcome": {
+            "body_bytes": 86133,
+            "child_status": "OK",
+            "combined_peak_rss_bytes": 28803072,
+            "manifest_digest": "sha256:9777c193d16d9abe83307f0e6109145fca777dc66f7002d9d4810974bf5981b0",
+            "parent_rss_after_bytes": 24543232,
+            "queue_claimed": false,
+            "reason": null,
+            "returncode": 0,
+            "row_count": 1,
+            "schema": "newsroom.issue-898.bounded-units.v1",
+            "status": "OK",
+            "unit_count": 1,
+            "writable": false
+          },
+          "pid": 96383,
+          "returncode": 0,
+          "rss_after_bytes": 24543232,
+          "rss_before_bytes": 24461312,
+          "ru_maxrss_bytes": 24543232,
+          "status": "OK",
+          "system_cpu_seconds": 0.002132,
+          "time_l_maxrss_bytes": 24641536,
+          "tracemalloc_current_bytes": "UNOBSERVED",
+          "tracemalloc_enabled": false,
+          "tracemalloc_peak_bytes": "UNOBSERVED",
+          "user_cpu_seconds": 0.0015270000000000006,
+          "wall_seconds": 0.09013066696934402
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "R2_rust_e2e_parent",
+            "--workspace",
+            "/tmp/newsroom-898-corrected"
+          ],
+          "outcome": {
+            "body_bytes": 86133,
+            "child_status": "OK",
+            "combined_peak_rss_bytes": 28655616,
+            "manifest_digest": "sha256:9777c193d16d9abe83307f0e6109145fca777dc66f7002d9d4810974bf5981b0",
+            "parent_rss_after_bytes": 24444928,
+            "queue_claimed": false,
+            "reason": null,
+            "returncode": 0,
+            "row_count": 1,
+            "schema": "newsroom.issue-898.bounded-units.v1",
+            "status": "OK",
+            "unit_count": 1,
+            "writable": false
+          },
+          "pid": 96426,
+          "returncode": 0,
+          "rss_after_bytes": 24444928,
+          "rss_before_bytes": 24363008,
+          "ru_maxrss_bytes": 24444928,
+          "status": "OK",
+          "system_cpu_seconds": 0.0023880000000000004,
+          "time_l_maxrss_bytes": 24543232,
+          "tracemalloc_current_bytes": "UNOBSERVED",
+          "tracemalloc_enabled": false,
+          "tracemalloc_peak_bytes": "UNOBSERVED",
+          "user_cpu_seconds": 0.0016180000000000014,
+          "wall_seconds": 0.04835816705599427
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "R2_rust_e2e_parent",
+            "--workspace",
+            "/tmp/newsroom-898-corrected"
+          ],
+          "outcome": {
+            "body_bytes": 86133,
+            "child_status": "OK",
+            "combined_peak_rss_bytes": 24559616,
+            "manifest_digest": "sha256:9777c193d16d9abe83307f0e6109145fca777dc66f7002d9d4810974bf5981b0",
+            "parent_rss_after_bytes": 24461312,
+            "queue_claimed": false,
+            "reason": null,
+            "returncode": 0,
+            "row_count": 1,
+            "schema": "newsroom.issue-898.bounded-units.v1",
+            "status": "OK",
+            "unit_count": 1,
+            "writable": false
+          },
+          "pid": 96466,
+          "returncode": 0,
+          "rss_after_bytes": 24461312,
+          "rss_before_bytes": 24379392,
+          "ru_maxrss_bytes": 24461312,
+          "status": "OK",
+          "system_cpu_seconds": 0.0024930000000000004,
+          "time_l_maxrss_bytes": 24559616,
+          "tracemalloc_current_bytes": "UNOBSERVED",
+          "tracemalloc_enabled": false,
+          "tracemalloc_peak_bytes": "UNOBSERVED",
+          "user_cpu_seconds": 0.0015559999999999984,
+          "wall_seconds": 0.05558162508532405
+        }
+      ],
+      "warmup_count": 1
     },
     "S1_import_cycle_tracemalloc": {
       "case": "S1_import_cycle_tracemalloc",
@@ -4965,10 +5464,10 @@
     "writable_canonical": false
   },
   "decision": "FEASIBILITY_GO",
-  "decision_reason": "R1 FEASIBILITY_GO: Rust observation-scan comparator matches Python output and reduces end-to-end peak RSS by at least 20% or 64 MiB after launch/IPC. First migration atom / R2 remains HOLD pending a bounded useful output boundary. This does not claim event-resolution unit parity and authorises no implementation.",
-  "first_migration_atom": "HOLD",
+  "decision_reason": "R1 FEASIBILITY_GO: Rust observation-scan comparator matches Python output and reduces end-to-end peak RSS by at least 20% or 64 MiB after launch/IPC. First migration atom is GO: R2 GO: research Rust reconstructed exact useful output from bounded unit_refs rows and reduced end-to-end peak RSS by at least 20% or 64 MiB after launch/IPC. This still authorises no product migration. R1 does not authorise implementation.",
+  "first_migration_atom": "GO",
   "go_gate": {
-    "first_migration_atom": "HOLD",
+    "first_migration_atom": "GO",
     "go_basis": "peak_rss",
     "go_or_no_go": "FEASIBILITY_GO",
     "parity": {
@@ -4982,8 +5481,19 @@
     },
     "python_scan_cpu_seconds": 1.365364,
     "python_scan_peak_rss_bytes": 693944320,
-    "r2_hold": true,
-    "reason": "R1 FEASIBILITY_GO: Rust observation-scan comparator matches Python output and reduces end-to-end peak RSS by at least 20% or 64 MiB after launch/IPC. First migration atom / R2 remains HOLD pending a bounded useful output boundary. This does not claim event-resolution unit parity and authorises no implementation.",
+    "r2_hold": false,
+    "r2_parity": {
+      "boundary": "bounded_useful_units",
+      "e2e_manifest_digest": "sha256:9777c193d16d9abe83307f0e6109145fca777dc66f7002d9d4810974bf5981b0",
+      "match": true,
+      "oracle_match": true,
+      "python_manifest_digest": "sha256:9777c193d16d9abe83307f0e6109145fca777dc66f7002d9d4810974bf5981b0",
+      "rust_manifest_digest": "sha256:9777c193d16d9abe83307f0e6109145fca777dc66f7002d9d4810974bf5981b0",
+      "schema": "newsroom.issue-898.bounded-units.v1",
+      "unit_parity_claimed": true
+    },
+    "r2_reason": "R2 GO: research Rust reconstructed exact useful output from bounded unit_refs rows and reduced end-to-end peak RSS by at least 20% or 64 MiB after launch/IPC. This still authorises no product migration.",
+    "reason": "R1 FEASIBILITY_GO: Rust observation-scan comparator matches Python output and reduces end-to-end peak RSS by at least 20% or 64 MiB after launch/IPC. First migration atom is GO: R2 GO: research Rust reconstructed exact useful output from bounded unit_refs rows and reduced end-to-end peak RSS by at least 20% or 64 MiB after launch/IPC. This still authorises no product migration. R1 does not authorise implementation.",
     "removable_peak_rss_bytes": 142114816,
     "retained_rss_note": "Rust e2e retained RSS is dominated by child-process termination; the R1 feasibility GO is based on peak RSS, not post-exit parent RSS",
     "rust_child_cpu_seconds": 1.55,
@@ -4993,15 +5503,7 @@
     "rust_total_cpu_seconds": 1.614772,
     "selected_boundary": "retained_observation_body_scan",
     "threshold_ok": true,
-    "unit_parity_claimed": false
-  },
-  "graphiti_research_lane": {
-    "base_result": "FAILURE",
-    "base_sha": "a67871d28164147a049670f71ce155afefb62a02",
-    "base_summary": "1 failed, 284 passed",
-    "classification": "exact-base pre-existing unrelated failure",
-    "failed_test": "newsroom/tests/test_graphiti_combined_temporal_runtime.py::test_ambiguous_hold_does_not_mint_or_guess_relation_endpoint",
-    "head_result": "FAILURE"
+    "unit_parity_claimed": true
   },
   "inspection_date": "2026-09-02",
   "inspection_head": "2b82e8b2ca7918a41ed5b837f073eab6f7e34994",
@@ -5028,6 +5530,7 @@
       "resource.getrusage"
     ],
     "python_allocation_supplement": "tracemalloc off for primary; S1/S2 only",
+    "r2": "unit_refs retained on the prepared event; R2 selects (proving_run_id, source_id, observation_digest) rows and computes useful output from bodies. unit_refs are oracle only.",
     "rust": "research-only crate docs/research/issue-898-ram-cpu-rust",
     "sqlite_snapshot": "sqlite3.Connection.backup from read-only source",
     "warmup_plus_measured_runs": "1 warmup and 3 fresh-process executions"
@@ -5071,16 +5574,34 @@
     "8_latest_bodies_parsed_or_materialised_more_than_once": "YES_STATIC",
     "9_dominant_memory_source": "retained_corpus_reconstruction"
   },
+  "r1_inspection_head": "2b82e8b2ca7918a41ed5b837f073eab6f7e34994",
+  "r2_measurement_head": "4f25ab19ebb4833fa572f15d0450c6058dbb4127",
+  "r2_parity": {
+    "boundary": "bounded_useful_units",
+    "e2e_manifest_digest": "sha256:9777c193d16d9abe83307f0e6109145fca777dc66f7002d9d4810974bf5981b0",
+    "match": true,
+    "oracle_match": true,
+    "python_manifest_digest": "sha256:9777c193d16d9abe83307f0e6109145fca777dc66f7002d9d4810974bf5981b0",
+    "rust_manifest_digest": "sha256:9777c193d16d9abe83307f0e6109145fca777dc66f7002d9d4810974bf5981b0",
+    "schema": "newsroom.issue-898.bounded-units.v1",
+    "unit_parity_claimed": true
+  },
+  "r2_reason": "R2 GO: research Rust reconstructed exact useful output from bounded unit_refs rows and reduced end-to-end peak RSS by at least 20% or 64 MiB after launch/IPC. This still authorises no product migration.",
+  "r2_reused_snapshot": true,
   "rust_meta": {
-    "binary_digest": "sha256:5253a1ca63f0fc53ae74459e9917e4cd49ee1d8febefd42fe5c744cf5dbd0f1d",
+    "binary_digest": "sha256:2f8d80f44a459446c3db7aeb741d297e711d02082330108f6f0879f9299fd787",
     "build_flags": [
       "--release"
     ],
     "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05) (Homebrew)",
-    "cargo_lock_digest": "sha256:a359554ef8b2254e79a41bb7cbdd2a13fa776431ca65b3c3258497ebdfb33e05",
+    "cargo_lock_digest": "sha256:6b0eaffd9f4c09154cb96dbd96e472150d1bafc0184d4ba0cf6e1bacf68451b7",
     "crate_path": "docs/research/issue-898-ram-cpu-rust",
     "profile": "release",
-    "source_digest": "sha256:d0cba7fb9e9a9709a63b2e9e0354e47c150860e9e00e5c668c97e104c877db23",
+    "source_digest": "sha256:c1eb5795839c352b5ec60f126dc6b853b67f272c526e9ebd6da8618eceb1ef4e",
+    "source_files": [
+      "main.rs",
+      "r2.rs"
+    ],
     "status": "OK",
     "toolchain": [
       "rustc 1.98.0 (88d9e12ae 2026-08-18) (Homebrew)",
@@ -5093,5 +5614,5 @@
     ]
   },
   "status": "MEASURED",
-  "workspace_digest": "sha256:b9e6214e064eeb571855fd7e79651906a6b56fd198f39ed36766a38bde367e91"
+  "workspace_digest": "sha256:2bab3cb5792012ffed17d7222583b4b9004cc08da420b39a6fa9e7235fd81576"
 }

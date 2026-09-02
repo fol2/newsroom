@@ -1,5 +1,7 @@
 //! Research-only #898 RAM/CPU comparator. Not a product runtime.
 
+mod r2;
+
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -9,7 +11,7 @@ use std::process::{Command, ExitCode};
 
 const SCHEMA: &str = "newsroom.issue-898.observation-scan.v1";
 
-fn current_rss_bytes() -> Value {
+pub(crate) fn current_rss_bytes() -> Value {
     let pid = std::process::id();
     match Command::new("ps")
         .args(["-o", "rss=", "-p", &pid.to_string()])
@@ -26,7 +28,7 @@ fn current_rss_bytes() -> Value {
     }
 }
 
-fn fail(reason: &str) -> ExitCode {
+pub(crate) fn fail(reason: &str) -> ExitCode {
     let _ = writeln!(
         io::stdout(),
         "{}",
@@ -46,19 +48,7 @@ fn r0() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn r2() -> ExitCode {
-    let payload = json!({
-        "mode": "r2",
-        "status": "HOLD",
-        "reason": "proving_observations has no item_key, revision_digest, published_at or updated_at columns; event identity is derived after parse_observation / units_from. Bounding the SQL to one event requires a product schema or query change, which #898 forbids.",
-        "missing_seam": "exact event identity columns or an existing exact-row selection API",
-        "rss_after_bytes": current_rss_bytes(),
-    });
-    let _ = writeln!(io::stdout(), "{payload}");
-    ExitCode::SUCCESS
-}
-
-fn arg_value(args: &[String], name: &str) -> Option<String> {
+pub(crate) fn arg_value(args: &[String], name: &str) -> Option<String> {
     args.windows(2)
         .find(|pair| pair[0] == name)
         .map(|pair| pair[1].clone())
@@ -207,7 +197,7 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         Some("r0") => r0(),
         Some("r1") => r1(&args),
-        Some("r2") => r2(),
+        Some("r2") => r2::run(&args),
         _ => fail("mode must be r0, r1 or r2"),
     }
 }

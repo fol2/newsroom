@@ -9,6 +9,8 @@ from newsroom.control_plane.paths import CANONICAL_PROVING_STORE
 from newsroom.control_plane import cycle as cycle_module
 from newsroom.research.issue_898_ram_cpu import (
     UNOBSERVED,
+    bounded_observation_keys,
+    bounded_useful_units,
     canonical_json,
     case_admission_generation,
     case_resolve_event,
@@ -17,6 +19,7 @@ from newsroom.research.issue_898_ram_cpu import (
     fixture_rows,
     measure,
     prepare_event_identity,
+    r2_spec_from_event,
     raw_http_cutoff,
     refuse_canonical_store,
     scan_observations,
@@ -24,6 +27,7 @@ from newsroom.research.issue_898_ram_cpu import (
     summarise_case,
     CLOCK,
     write_proving_store,
+    write_r2_spec,
     write_unpublished_store,
 )
 
@@ -295,3 +299,188 @@ def test_decide_no_go_when_rust_does_not_clear_gate() -> None:
         }
     )
     assert decision["go_or_no_go"] == "NO_GO"
+
+
+def test_prepare_event_retains_unit_refs(tmp_path: Path) -> None:
+    proving = tmp_path / "proving.sqlite3"
+    write_proving_store(proving, fixture_rows("solo"))
+    event = prepare_event_identity(str(proving), CLOCK)
+    assert event["unit_refs"]
+    keys = bounded_observation_keys(event)
+    assert keys == [
+        (
+            event["unit_refs"][0]["proving_run_id"],
+            event["source_id"],
+            event["unit_refs"][0]["observation_digest"],
+        )
+    ]
+    spec = r2_spec_from_event(event)
+    assert "unit_refs" not in spec
+    assert "ingest_id" not in spec
+    assert "chunk_digest" not in spec
+    assert spec["keys"][0]["observation_digest"] == event["unit_refs"][0][
+        "observation_digest"
+    ]
+
+
+def test_python_r2_matches_unit_refs_oracle(tmp_path: Path) -> None:
+    proving = tmp_path / "proving.sqlite3"
+    write_proving_store(proving, fixture_rows("large"))
+    event = prepare_event_identity(str(proving), CLOCK)
+    result = bounded_useful_units(str(proving), event)
+    assert result["status"] == "OK"
+    assert result["oracle"]["match"] is True
+    assert result["unit_count"] == len(event["unit_refs"]) >= 1
+    assert result["row_count"] == 1
+    assert str(result["manifest_digest"]).startswith("sha256:")
+
+
+def test_rust_r2_matches_python_digest(tmp_path: Path) -> None:
+    import json
+    import shutil
+    import subprocess
+
+    if shutil.which("cargo") is None:
+        pytest.skip("cargo missing")
+    proving = tmp_path / "proving.sqlite3"
+    write_proving_store(proving, fixture_rows("rss"))
+    event = prepare_event_identity(str(proving), CLOCK)
+    spec_path = tmp_path / "r2-spec.json"
+    write_r2_spec(spec_path, event)
+    python = bounded_useful_units(str(proving), event)
+    from newsroom.research.issue_898_ram_cpu import RUST_CRATE, RUST_TARGET
+
+    built = RUST_TARGET / "release" / "issue-898-ram-cpu"
+    if not built.is_file():
+        subprocess.run(
+            [
+                "cargo",
+                "build",
+                "--release",
+                "--manifest-path",
+                str(RUST_CRATE / "Cargo.toml"),
+            ],
+            check=True,
+            env={**__import__("os").environ, "CARGO_TARGET_DIR": str(RUST_TARGET)},
+        )
+    completed = subprocess.run(
+        [str(built), "r2", "--db", str(proving), "--spec", str(spec_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rust = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert rust["status"] == "OK"
+    assert rust["outcome"]["manifest_digest"] == python["manifest_digest"]
+
+
+def test_decide_r2_holds_when_rust_child_cpu_regresses() -> None:
+    digest = "sha256:" + ("cd" * 32)
+    r2_run = {
+        "status": "OK",
+        "outcome": {
+            "manifest_digest": digest,
+            "oracle": {"match": True},
+            "row_count": 1,
+            "status": "OK",
+            "unit_count": 1,
+        },
+    }
+    decision = decide(
+        {
+            "R0_rust_process_baseline": {
+                "max_peak_rss_bytes": 2 * 1024 * 1024,
+                "runs": [{"status": "OK", "outcome": {}}],
+            },
+            "R1_python_observation_scan": {
+                "max_peak_rss_bytes": 400 * 1024 * 1024,
+                "median_cpu_seconds": 2.0,
+                "runs": [{"status": "OK", "outcome": {"manifest_digest": "sha256:" + ("ab" * 32)}}],
+            },
+            "R1_rust_observation_scan": {
+                "max_peak_rss_bytes": 40 * 1024 * 1024,
+                "median_cpu_seconds": 0.4,
+                "runs": [{"status": "OK", "outcome": {"manifest_digest": "sha256:" + ("ab" * 32)}}],
+            },
+            "R1_rust_e2e_parent": {
+                "max_peak_rss_bytes": 50 * 1024 * 1024,
+                "median_cpu_seconds": 0.5,
+                "runs": [{"status": "OK", "outcome": {"manifest_digest": "sha256:" + ("ab" * 32)}}],
+            },
+            "R2_python_bounded_units": {
+                "max_peak_rss_bytes": 80 * 1024 * 1024,
+                "median_cpu_seconds": 1.0,
+                "runs": [r2_run],
+            },
+            "R2_bounded_candidate": {
+                "max_peak_rss_bytes": 10 * 1024 * 1024,
+                "median_cpu_seconds": 2.0,
+                "runs": [r2_run],
+            },
+            "R2_rust_e2e_parent": {
+                "max_peak_rss_bytes": 12 * 1024 * 1024,
+                "median_cpu_seconds": 0.01,
+                "runs": [r2_run],
+            },
+        }
+    )
+    assert decision["go_or_no_go"] == "FEASIBILITY_GO"
+    assert decision["first_migration_atom"] == "HOLD"
+    assert decision["r2_hold"] is True
+    assert "CPU" in decision["r2_reason"]
+
+
+def test_decide_r2_go_when_bounded_output_clears_gate() -> None:
+    digest = "sha256:" + ("cd" * 32)
+    r2_run = {
+        "status": "OK",
+        "outcome": {
+            "manifest_digest": digest,
+            "oracle": {"match": True},
+            "row_count": 1,
+            "status": "OK",
+            "unit_count": 1,
+        },
+    }
+    decision = decide(
+        {
+            "R0_rust_process_baseline": {
+                "max_peak_rss_bytes": 2 * 1024 * 1024,
+                "runs": [{"status": "OK", "outcome": {}}],
+            },
+            "R1_python_observation_scan": {
+                "max_peak_rss_bytes": 400 * 1024 * 1024,
+                "median_cpu_seconds": 2.0,
+                "runs": [{"status": "OK", "outcome": {"manifest_digest": "sha256:" + ("ab" * 32)}}],
+            },
+            "R1_rust_observation_scan": {
+                "max_peak_rss_bytes": 40 * 1024 * 1024,
+                "median_cpu_seconds": 0.4,
+                "runs": [{"status": "OK", "outcome": {"manifest_digest": "sha256:" + ("ab" * 32)}}],
+            },
+            "R1_rust_e2e_parent": {
+                "max_peak_rss_bytes": 50 * 1024 * 1024,
+                "median_cpu_seconds": 0.5,
+                "runs": [{"status": "OK", "outcome": {"manifest_digest": "sha256:" + ("ab" * 32)}}],
+            },
+            "R2_python_bounded_units": {
+                "max_peak_rss_bytes": 80 * 1024 * 1024,
+                "median_cpu_seconds": 1.0,
+                "runs": [r2_run],
+            },
+            "R2_bounded_candidate": {
+                "max_peak_rss_bytes": 10 * 1024 * 1024,
+                "median_cpu_seconds": 0.4,
+                "runs": [r2_run],
+            },
+            "R2_rust_e2e_parent": {
+                "max_peak_rss_bytes": 12 * 1024 * 1024,
+                "median_cpu_seconds": 0.1,
+                "runs": [r2_run],
+            },
+        }
+    )
+    assert decision["go_or_no_go"] == "FEASIBILITY_GO"
+    assert decision["first_migration_atom"] == "GO"
+    assert decision["r2_hold"] is False
+    assert decision["unit_parity_claimed"] is True
