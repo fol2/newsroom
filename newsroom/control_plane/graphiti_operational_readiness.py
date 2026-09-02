@@ -68,6 +68,7 @@ from newsroom.control_plane.read_only_snapshot import read_only_snapshot
 from newsroom.entities.types import EntityReadPolicy
 from newsroom.extraction.types import ExtractionReadPolicy
 from newsroom.graphiti_adapter import GraphitiAdapterReadPolicy
+from newsroom.graphiti_adapter.cursor_transport import CURSOR_SDK_TRANSPORT
 from newsroom.graphiti_adapter.evaluation_attempt import (
     GRAPHITI_EVALUATION_HYDRATION_POLICY,
 )
@@ -608,6 +609,69 @@ def _source_requests(
     return definition, version, item, revision, representation
 
 
+def _preflight_source_revision_semantics(
+    authority: sqlite3.Connection,
+    requests: tuple[SourceRevisionRequest, ...],
+) -> None:
+    """Reject SourceRevision identity conflicts before any authority write."""
+
+    planned: dict[tuple[str, str], str] = {}
+    for request in requests:
+        semantic_key = (
+            str(request.item_id),
+            request.revision_identity_digest,
+        )
+        prior_id = planned.setdefault(semantic_key, str(request.revision_id))
+        if prior_id != str(request.revision_id):
+            raise GraphitiOperationalReadinessError(
+                "current cohort allocates multiple SourceRevision identities "
+                "to one permitted source state"
+            )
+
+    table = authority.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_revisions'"
+    ).fetchone()
+    if table is None:
+        return
+    retained_rows = authority.execute(
+        "SELECT revision_id,item_id,revision_identity_digest,canonical_digest "
+        "FROM source_revisions"
+    ).fetchall()
+    retained_by_id = {str(row[0]): row for row in retained_rows}
+    retained_by_semantics: dict[tuple[str, str], object] = {}
+    for row in retained_rows:
+        semantic_key = (str(row[1]), str(row[2]))
+        prior = retained_by_semantics.setdefault(semantic_key, row)
+        if str(prior[0]) != str(row[0]):
+            raise GraphitiOperationalReadinessError(
+                "canonical authority retains conflicting SourceRevision semantics"
+            )
+
+    for request in requests:
+        revision_id = str(request.revision_id)
+        semantic_key = (
+            str(request.item_id),
+            request.revision_identity_digest,
+        )
+        retained = retained_by_id.get(revision_id)
+        if retained is not None:
+            if (
+                str(retained[1]) != semantic_key[0]
+                or str(retained[2]) != semantic_key[1]
+                or str(retained[3]) != request.digest
+            ):
+                raise GraphitiOperationalReadinessError(
+                    "retained SourceRevision identity differs from the exact "
+                    "bootstrap request"
+                )
+            continue
+        retained = retained_by_semantics.get(semantic_key)
+        if retained is not None:
+            raise GraphitiOperationalReadinessError(
+                "SourceRevision semantics already belong to another retained identity"
+            )
+
+
 def _revision_predecessor_bindings(
     units: tuple[CorpusIngestUnit, ...],
 ) -> tuple[tuple[str, str | None], ...]:
@@ -736,6 +800,7 @@ def plan_operational_authority_bootstrap(
         rights_by_source.append((source_id, decision))
     rights_map = dict(rights_by_source)
     request_digests: list[dict[str, object]] = []
+    revision_requests: list[SourceRevisionRequest] = []
     for unit in units:
         assert unit.authority is not None
         prior = predecessor_map[unit.authority.revision_id]
@@ -746,6 +811,7 @@ def plan_operational_authority_bootstrap(
                 None if prior is None else SourceRevisionId.parse(prior)
             ),
         )
+        revision_requests.append(requests[3])
         request_digests.append(
             {
                 "ingest_id": unit.ingest_id,
@@ -756,6 +822,7 @@ def plan_operational_authority_bootstrap(
                 "rights_packet_digest": rights_map[unit.source_id]["packet_digest"],
             }
         )
+    _preflight_source_revision_semantics(authority, tuple(revision_requests))
     cohort_value = {
         "partition_snapshot_digest": partition["snapshot_digest"],
         "candidate_events": [dict(item) for item in candidate_events],
@@ -1471,6 +1538,7 @@ def build_operational_campaign_input(
         },
         "provider": {
             "provider_id": "cursor-agent-cli",
+            "transport_id": CURSOR_SDK_TRANSPORT,
             "model_id": CURSOR_AGENT_MODEL_ID,
             "embedding_provider_id": GRAPHITI_EMBEDDING_MODEL.split(":", 1)[0],
             "embedding_model_id": OPENROUTER_EMBEDDING_SLUG,

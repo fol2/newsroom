@@ -486,10 +486,15 @@ def _nonterminal_obligation(
     ingest_id: str,
     with_event: bool = True,
     provider_dispatched: int = 0,
+    revision_digest: str | None = None,
+    published_at: str = "",
+    updated_at: str = "",
+    revision_id: str | None = None,
 ) -> None:
     at = "2026-09-01T12:00:00.000000Z"
     ledger_digest = f"sha256:{ledger_seq:064x}"
-    revision_digest = f"revision-{item_key}"
+    revision_digest = revision_digest or f"revision-{item_key}"
+    revision_id = revision_id or f"revision-id-{item_key}"
     identity = EffectiveRevisionIdentity(
         source_id="source",
         item_key=item_key,
@@ -498,6 +503,8 @@ def _nonterminal_obligation(
     )
     payload = effective_revision_landed_payload(
         identity,
+        published_at=published_at,
+        updated_at=updated_at,
         ingest_ids=(ingest_id,),
         first_observed_at=at,
     )
@@ -527,8 +534,8 @@ def _nonterminal_obligation(
             "source",
             item_key,
             revision_digest,
-            "",
-            "",
+            published_at,
+            updated_at,
             at,
             json.dumps([ingest_id]),
             0,
@@ -548,7 +555,7 @@ def _nonterminal_obligation(
         "unit_refs": [
             {
                 "ingest_id": ingest_id,
-                "revision_id": f"revision-id-{item_key}",
+                "revision_id": revision_id,
                 "representation_digest": f"representation-{item_key}",
                 "chunk_digest": f"chunk-{item_key}",
                 "chunk_ordinal": 1,
@@ -569,8 +576,8 @@ def _nonterminal_obligation(
             "source",
             item_key,
             revision_digest,
-            "",
-            "",
+            published_at,
+            updated_at,
             at,
             json.dumps(manifest, sort_keys=True),
             digest_canonical(manifest),
@@ -585,17 +592,27 @@ def _nonterminal_obligation(
     )
 
 
-def _current_unit(*, item_key: str, ingest_id: str) -> SimpleNamespace:
+def _current_unit(
+    *,
+    item_key: str,
+    ingest_id: str,
+    revision_digest: str | None = None,
+    published_at: str | None = None,
+    updated_at: str | None = None,
+    revision_id: str | None = None,
+    authority_item_id: str | None = None,
+) -> SimpleNamespace:
+    revision_id = revision_id or f"revision-id-{item_key}"
     return SimpleNamespace(
         source_id="source",
         item_key=item_key,
-        revision_digest=f"revision-{item_key}",
-        published_at=None,
-        updated_at=None,
+        revision_digest=revision_digest or f"revision-{item_key}",
+        published_at=published_at,
+        updated_at=updated_at,
         ingest_id=ingest_id,
         proving_run_id="run",
         observation_digest="observation",
-        revision_id=f"revision-id-{item_key}",
+        revision_id=revision_id,
         representation_digest=f"representation-{item_key}",
         digest=f"chunk-{item_key}",
         chunk_ordinal=1,
@@ -603,7 +620,15 @@ def _current_unit(*, item_key: str, ingest_id: str) -> SimpleNamespace:
         predecessor_ingest_id=None,
         observed_at="2026-09-01T12:00:00.000000Z",
         effective_pull_first_observed_at="2026-09-01T12:00:00.000000Z",
-        authority=None,
+        authority=(
+            None
+            if authority_item_id is None
+            else SimpleNamespace(
+                item_id=authority_item_id,
+                revision_id=revision_id,
+                records=(),
+            )
+        ),
     )
 
 
@@ -843,7 +868,7 @@ def _campaign_input(packet: dict[str, object]) -> dict[str, object]:
         "policy_version": "v1",
     }
     return {
-        "schema_version": "newsroom.graphiti-bounded-campaign-input.v3",
+        "schema_version": "newsroom.graphiti-bounded-campaign-input.v4",
         "focus_gate": {
             "head_sha": "head",
             "tree_sha": "tree",
@@ -852,6 +877,7 @@ def _campaign_input(packet: dict[str, object]) -> dict[str, object]:
         },
         "selection_policy": selection,
         "provider": {
+            "transport_id": "CURSOR_SDK",
             "provider_id": "provider",
             "model_id": "model",
             "embedding_provider_id": "embedding-provider",
@@ -1300,6 +1326,100 @@ def test_historical_partition_is_total_disjoint_and_candidates_are_unauthorised(
     assert partition["categories"][
         "NON_REPLAYABLE_OR_AMBIGUOUS_EFFECT_HOLD"
     ]["ledger_sequences"] == [6]
+
+
+@pytest.mark.parametrize(
+    ("retained_revision_id", "candidate_sequences", "held_sequences"),
+    ((None, [1], [2]), ("revision-later", [2], [1]), ("revision-other", [], [1, 2])),
+)
+def test_unchanged_content_reobserved_at_changed_timestamp_converges_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    retained_revision_id: str | None,
+    candidate_sequences: list[int],
+    held_sequences: list[int],
+) -> None:
+    proving, _unpublished, connection = _stores(tmp_path)
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=1,
+        item_key="same-item",
+        ingest_id="earlier-ingest",
+        revision_digest="same-content",
+        published_at="2026-09-01T09:00:00Z",
+        revision_id="revision-earlier",
+    )
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=2,
+        item_key="same-item",
+        ingest_id="later-ingest",
+        revision_digest="same-content",
+        published_at="2026-09-01T10:00:00Z",
+        updated_at="2026-09-01T11:00:00Z",
+        revision_id="revision-later",
+    )
+    connection.commit()
+    units = (
+        _current_unit(
+            item_key="same-item",
+            ingest_id="earlier-ingest",
+            revision_digest="same-content",
+            published_at="2026-09-01T09:00:00Z",
+            revision_id="revision-earlier",
+            authority_item_id="canonical-item",
+        ),
+        _current_unit(
+            item_key="same-item",
+            ingest_id="later-ingest",
+            revision_digest="same-content",
+            published_at="2026-09-01T10:00:00Z",
+            updated_at="2026-09-01T11:00:00Z",
+            revision_id="revision-later",
+            authority_item_id="canonical-item",
+        ),
+    )
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti_steady_state."
+        "load_graphiti_units_from_connection",
+        lambda _connection, *, evaluated_at: units,
+    )
+    authority = sqlite3.connect(":memory:")
+    authority.execute(
+        "CREATE TABLE source_revisions("
+        "revision_id TEXT PRIMARY KEY,revision_identity_digest TEXT NOT NULL)"
+    )
+    if retained_revision_id is not None:
+        authority.execute(
+            "INSERT INTO source_revisions VALUES(?,?)",
+            (
+                retained_revision_id,
+                digest_canonical(
+                    {
+                        "item_id": "canonical-item",
+                        "source_native_revision_token": None,
+                        "permitted_state_digest": "same-content",
+                    }
+                ),
+            ),
+        )
+
+    snapshot = graphiti_operational_partition_snapshot(
+        sqlite3.connect(proving),
+        connection,
+        authority=authority,
+        observed_at=NOW,
+    )
+
+    assert [
+        item["ledger_seq"] for item in snapshot["actionable"]
+    ] == candidate_sequences
+    assert [item["ledger_seq"] for item in snapshot["holds"]] == held_sequences
+    assert {item["reason"] for item in snapshot["holds"]} == (
+        {"UNCHANGED_CONTENT_REOBSERVATION_REQUIRES_OCCURRENCE"}
+        if held_sequences
+        else set()
+    )
 
 
 def test_operational_partition_reuses_fresh_gap_and_hold_policy(
