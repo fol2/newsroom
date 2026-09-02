@@ -327,5 +327,46 @@ class _ObjectHydrationStoreMixin:
                 canonical_digest=str(row["canonical_digest"]),
             )
 
+    def latest_access_decision(
+        self,
+        *,
+        admission_id: ObjectAdmissionId,
+        policy_contract_digest: str,
+        principal_id: str,
+        authority_domain: str,
+        purpose: str,
+    ) -> ObjectAccessDecisionView:
+        """Return the latest exact retained complete-object access decision."""
+
+        with self._lock:
+            admission = self._current_admission_row(
+                self._connection,
+                str(admission_id),
+                now=self._clock(),
+                require_active=True,
+                require_bytes=True,
+            )
+            row = self._connection.execute(
+                "SELECT access_decision_id FROM object_access_decisions "
+                "WHERE admission_id=? "
+                "AND hydration_policy_contract_digest=? "
+                "AND principal_id=? AND authority_domain=? AND purpose=? "
+                "AND byte_offset=0 AND allowed_bytes=? "
+                "ORDER BY decided_at DESC,access_decision_id DESC LIMIT 1",
+                (
+                    str(admission_id),
+                    policy_contract_digest,
+                    principal_id,
+                    authority_domain,
+                    purpose,
+                    int(admission["size_bytes"]),
+                ),
+            ).fetchone()
+            if row is None:
+                raise KeyError(str(admission_id))
+            return self.access_decision_view(
+                ObjectAccessDecisionId.parse(str(row["access_decision_id"]))
+            )
+
 
 __all__ = ["_ObjectHydrationStoreMixin"]

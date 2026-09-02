@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+import sqlite3
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -19,14 +20,21 @@ from newsroom.projection.policy import (
     merge_projection_authority_registries,
 )
 from newsroom.relations.editorial_models import EditorialRelationReadPolicy
+from newsroom.sources.policy import (
+    SOURCE_REGISTRY_COMMAND_TYPES,
+    merge_source_registry_authority_registries,
+)
+from newsroom.sources.types import SourceRegistryReadPolicy
 
 from ._capability import _CapabilityIssuer
 from ._editorial_relation_boundary import _EditorialRelationBoundary
 from ._editorial_relation_facade import GovernedEditorialRelations
 from ._entity_boundary import _EntityBoundary
 from ._entity_facade import GovernedEntityRecords
+from ._entity_store_common import _EntityStoreSupport
 from ._extraction_boundary import _ExtractionBoundary
 from ._extraction_facade import GovernedExtractionRecords
+from ._extraction_store_common import _ExtractionStoreSupport
 from ._graphiti_adapter_boundary import _GraphitiAdapterBoundary
 from ._graphiti_adapter_facade import GovernedGraphitiProposalAdapter
 from ._graphiti_adapter_store import _GraphitiAdapterAuthorityStore
@@ -43,6 +51,9 @@ from ._object_cas import _GovernedCAS
 from ._object_store import _GovernedObjectAuthorityStore
 from ._object_system import GovernedObjects, _ObjectBoundary
 from ._projection_system import _ProjectionBoundary
+from ._source_registry_store import _SourceRegistryAuthorityStore
+from ._source_registry_store_common import _SourceRegistryStoreSupport
+from ._source_registry_system import GovernedSources, _SourceRegistryBoundary
 from .object_policy import (
     HydrationPolicyRegistry,
     ObjectAdmissionRegistry,
@@ -56,11 +67,103 @@ from .types import UtcTimestamp
 
 
 class _GraphitiIncrement4AuthorityStore(
+    _SourceRegistryAuthorityStore,
     _GraphitiAdapterAuthorityStore,
     _Increment4ProjectionAuthorityStore,
     _GovernedObjectAuthorityStore,
 ):
     """One existing authority SQLite/CAS writer for Increment 4."""
+
+    _SOURCE_TABLES = frozenset(
+        {
+            "discovery_occurrences",
+            "discovery_representations",
+            "source_locator_continuity_decisions",
+            "source_definition_versions",
+            "source_definitions",
+            "source_items",
+            "source_revisions",
+        }
+    )
+
+    @staticmethod
+    def _ensure_identifier_absent(
+        conn: sqlite3.Connection,
+        *,
+        table: str,
+        column: str,
+        identifier: str,
+        identity: str,
+    ) -> None:
+        support = (
+            _SourceRegistryStoreSupport
+            if table in _GraphitiIncrement4AuthorityStore._SOURCE_TABLES
+            else _EntityStoreSupport
+        )
+        support._ensure_identifier_absent(
+            conn,
+            table=table,
+            column=column,
+            identifier=identifier,
+            identity=identity,
+        )
+
+    @staticmethod
+    def _ensure_semantic_absent(
+        conn: sqlite3.Connection,
+        *,
+        table: str,
+        identity: str,
+        column: str | None = None,
+        digest: str | None = None,
+        predicate: str | None = None,
+        parameters: tuple[object, ...] | None = None,
+    ) -> None:
+        if table in _GraphitiIncrement4AuthorityStore._SOURCE_TABLES:
+            if predicate is None or parameters is None:
+                raise TypeError("source semantic check requires a predicate")
+            _SourceRegistryStoreSupport._ensure_semantic_absent(
+                conn,
+                table=table,
+                predicate=predicate,
+                parameters=parameters,
+                identity=identity,
+            )
+            return
+        if column is None or digest is None:
+            raise TypeError("authority semantic check requires a digest column")
+        _EntityStoreSupport._ensure_semantic_absent(
+            conn,
+            table=table,
+            column=column,
+            digest=digest,
+            identity=identity,
+        )
+
+    @classmethod
+    def _validate_record_envelope(
+        cls,
+        conn: sqlite3.Connection,
+        row: Mapping[str, Any],
+        *,
+        command_type: str,
+        aggregate_id: str,
+        canonical_bytes: bytes,
+        canonical_digest: str,
+    ) -> sqlite3.Row:
+        support = (
+            _SourceRegistryStoreSupport
+            if command_type in SOURCE_REGISTRY_COMMAND_TYPES
+            else _ExtractionStoreSupport
+        )
+        return support._validate_record_envelope(
+            conn,
+            row,
+            command_type=command_type,
+            aggregate_id=aggregate_id,
+            canonical_bytes=canonical_bytes,
+            canonical_digest=canonical_digest,
+        )
 
 
 _SYSTEM_CONSTRUCTION_TOKEN = object()
@@ -69,6 +172,7 @@ _SYSTEM_CONSTRUCTION_TOKEN = object()
 class GovernedGraphitiIncrement4AuthoritySystem:
     __slots__ = (
         "__graphiti",
+        "__sources",
         "__extraction",
         "__objects",
         "__entities",
@@ -85,6 +189,7 @@ class GovernedGraphitiIncrement4AuthoritySystem:
         self,
         *,
         graphiti: GovernedGraphitiProposalAdapter,
+        sources: GovernedSources,
         extraction: GovernedExtractionRecords,
         objects: GovernedObjects,
         entities: GovernedEntityRecords,
@@ -100,6 +205,7 @@ class GovernedGraphitiIncrement4AuthoritySystem:
         if _construction_token is not _SYSTEM_CONSTRUCTION_TOKEN:
             raise TypeError("combined Increment 4 authority systems require the opener")
         self.__graphiti = graphiti
+        self.__sources = sources
         self.__extraction = extraction
         self.__objects = objects
         self.__entities = entities
@@ -118,6 +224,10 @@ class GovernedGraphitiIncrement4AuthoritySystem:
     @property
     def graphiti(self) -> GovernedGraphitiProposalAdapter:
         return self.__graphiti
+
+    @property
+    def sources(self) -> GovernedSources:
+        return self.__sources
 
     @property
     def extraction(self) -> GovernedExtractionRecords:
@@ -182,6 +292,7 @@ def _open_with_adapter(
     contracts: ProjectionContractRegistry,
     authenticator: Any,
     authorizer: Any,
+    source_read_policy: SourceRegistryReadPolicy,
     extraction_read_policy: ExtractionReadPolicy,
     entity_read_policy: EntityReadPolicy,
     relation_read_policy: EditorialRelationReadPolicy,
@@ -198,12 +309,16 @@ def _open_with_adapter(
 ) -> GovernedGraphitiIncrement4AuthoritySystem:
     store: _GraphitiIncrement4AuthorityStore | None = None
     try:
-        merged_registry, merged_schemas = merge_authority_registries(
+        merged_registry, merged_schemas = merge_source_registry_authority_registries(
             command_registry=registry,
             payload_schemas=payload_schemas,
         )
+        merged_registry, merged_schemas = merge_authority_registries(
+            command_registry=merged_registry,
+            payload_schemas=merged_schemas,
+        )
         # These merges are cumulative. Keep the explicit order aligned with the
-        # retained Object -> 4A/4B/4C/4D -> 4E authority dependencies.
+        # retained Source -> Object -> 4A/4B/4C/4D -> 4E authority dependencies.
         merged_registry, merged_schemas = merge_graphiti_adapter_authority_registries(
             command_registry=merged_registry,
             payload_schemas=merged_schemas,
@@ -269,6 +384,14 @@ def _open_with_adapter(
             authorizer=authorizer,
             command_service=command_service,
             command_registry=merged_registry,
+            clock=clock,
+        )
+        source_boundary = _SourceRegistryBoundary(
+            store=store,
+            command_service=command_service,
+            authenticator=authenticator,
+            authorizer=authorizer,
+            read_policy=source_read_policy,
             clock=clock,
         )
         extraction_boundary = _ExtractionBoundary(
@@ -345,6 +468,21 @@ def _open_with_adapter(
                 store.close()
 
         return GovernedGraphitiIncrement4AuthoritySystem(
+            sources=GovernedSources(
+                register_definition=source_boundary.register_definition,
+                record_version=source_boundary.record_version,
+                register_item=source_boundary.register_item,
+                decide_locator=source_boundary.decide_locator,
+                record_revision=source_boundary.record_revision,
+                record_representation=source_boundary.record_representation,
+                record_occurrence=source_boundary.record_occurrence,
+                definition=source_boundary.definition,
+                current_summary=source_boundary.current_summary,
+                version_details=source_boundary.version_details,
+                item=source_boundary.item,
+                revision=source_boundary.revision,
+                occurrences=source_boundary.occurrences,
+            ),
             graphiti=GovernedGraphitiProposalAdapter(
                 register_configuration=graphiti_boundary.register_configuration,
                 execute_attempt=graphiti_boundary.execute_attempt,
@@ -367,6 +505,9 @@ def _open_with_adapter(
             objects=GovernedObjects(
                 admit=object_boundary.admit,
                 hydrate=object_boundary.hydrate,
+                latest_access_decision=(
+                    object_boundary.latest_access_decision
+                ),
                 revoke=object_boundary.revoke,
                 request_deletion=object_boundary.request_deletion,
                 tombstone=object_boundary.tombstone,
@@ -423,6 +564,7 @@ def _open_with_adapter(
                 build_current=increment4_boundary.build_current_and_promote,
                 status=increment4_boundary.generation_status,
                 read_active=increment4_boundary.read_active,
+                reconcile_active=increment4_boundary.reconcile_active,
             ),
             compatibility=compatibility,
             authority_store_path=path,
@@ -452,6 +594,7 @@ def open_governed_graphiti_increment4_authority_system(
     contracts: ProjectionContractRegistry,
     authenticator: Any,
     authorizer: Any,
+    source_read_policy: SourceRegistryReadPolicy,
     extraction_read_policy: ExtractionReadPolicy,
     entity_read_policy: EntityReadPolicy,
     relation_read_policy: EditorialRelationReadPolicy,
@@ -488,6 +631,7 @@ def open_governed_graphiti_increment4_authority_system(
         contracts=contracts,
         authenticator=authenticator,
         authorizer=authorizer,
+        source_read_policy=source_read_policy,
         extraction_read_policy=extraction_read_policy,
         entity_read_policy=entity_read_policy,
         relation_read_policy=relation_read_policy,

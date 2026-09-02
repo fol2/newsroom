@@ -11,7 +11,10 @@ from newsroom.projection import (
     ProjectionGenerationValidationView,
     ProjectionGenerationView,
 )
-from newsroom.projection.neo4j import StructuralReadResponse
+from newsroom.projection.neo4j import (
+    StructuralReadResponse,
+    StructuralReconciliationView,
+)
 
 from .contracts import INCREMENT4_ADMITTED_FAMILY_ID
 from .models import Increment4AdmittedProjectionSnapshot
@@ -213,7 +216,13 @@ class Increment4Neo4jActiveReadRequest:
 class Increment4Neo4jController:
     """Bounded proof controller; it owns no SQLite or Neo4j capability."""
 
-    __slots__ = ("__build", "__build_current", "__status", "__read_active")
+    __slots__ = (
+        "__build",
+        "__build_current",
+        "__status",
+        "__read_active",
+        "__reconcile_active",
+    )
 
     def __init__(
         self,
@@ -234,11 +243,15 @@ class Increment4Neo4jController:
             [Increment4Neo4jActiveReadRequest, AuthenticationProof],
             StructuralReadResponse,
         ],
+        reconcile_active: Callable[
+            [AuthenticationProof], StructuralReconciliationView
+        ],
     ) -> None:
         self.__build = build
         self.__build_current = build_current
         self.__status = status
         self.__read_active = read_active
+        self.__reconcile_active = reconcile_active
 
     def build_and_promote(
         self,
@@ -273,6 +286,13 @@ class Increment4Neo4jController:
         proof: AuthenticationProof,
     ) -> StructuralReadResponse:
         return self.__read_active(request, proof)
+
+    def reconcile_active(
+        self, *, proof: AuthenticationProof
+    ) -> StructuralReconciliationView:
+        """Authenticate and reconcile the authority-selected ACTIVE generation."""
+
+        return self.__reconcile_active(proof)
 
 
 __all__ = [

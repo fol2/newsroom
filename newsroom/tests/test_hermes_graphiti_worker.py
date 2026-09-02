@@ -57,6 +57,7 @@ def test_exact_event_is_preflighted_time_bounded_and_fallback_free(
     runtime = worker._mint_graphiti_campaign_runtime(
         graphiti=Runner(),
         admission_factory=lambda _connection: object(),
+        bind_unit_authority=lambda unit: unit,
         graph_state_fence=lambda _campaign: {},
         graph_destination_id=GRAPH_DESTINATION_ID,
         authority_store_source_path="/authority.sqlite3",
@@ -89,6 +90,7 @@ def test_exact_event_is_preflighted_time_bounded_and_fallback_free(
     assert consumed["max_reserved_gbp_microunits"] == 500000
     assert consumed["graphiti"] is runtime.graphiti
     assert consumed["graphiti_admission_factory"] is runtime.admission_factory
+    assert consumed["unit_authority_resolver"] is runtime.bind_unit_authority
     assert consumed["require_graphiti_admission"] is True
     bodies = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [body["event"] for body in bodies] == [
@@ -130,6 +132,7 @@ def test_runtime_composes_existing_4a_4d_4b_4c_4e_authorities(
     )
     authority_system = _open(tmp_path, TrackingMemoryNeo4jAdapter())
     authority_proof = proof()
+    bind_unit_authority = lambda unit: unit
     try:
         with pytest.raises(ValueError, match="path differs"):
             worker.compose_governed_graphiti_worker_runtime(
@@ -137,6 +140,7 @@ def test_runtime_composes_existing_4a_4d_4b_4c_4e_authorities(
                 expected_authority_store_path=str(tmp_path / "different.sqlite3"),
                 authority_store_descriptor_digest="sha256:" + "a" * 64,
                 proof=authority_proof,
+                bind_unit_authority=bind_unit_authority,
                 max_attempts=1,
             )
 
@@ -145,6 +149,7 @@ def test_runtime_composes_existing_4a_4d_4b_4c_4e_authorities(
             expected_authority_store_path=str(tmp_path / "authority.sqlite3"),
             authority_store_descriptor_digest="sha256:" + "a" * 64,
             proof=authority_proof,
+            bind_unit_authority=bind_unit_authority,
             max_attempts=1,
         )
         connection = sqlite3.connect(":memory:")
@@ -154,6 +159,7 @@ def test_runtime_composes_existing_4a_4d_4b_4c_4e_authorities(
         )
         assert runtime.authority_store_descriptor_digest == "sha256:" + "a" * 64
         assert runtime.graph_destination_id == authority_system.graph_destination_id
+        assert runtime.bind_unit_authority is bind_unit_authority
 
         assert captured["runner"] == {
             "fallback_permitted": False,
@@ -236,6 +242,7 @@ def test_preflight_refusal_has_no_runner_or_dispatch(
     runtime = worker._mint_graphiti_campaign_runtime(
         graphiti=object(),
         admission_factory=lambda _connection: object(),
+        bind_unit_authority=lambda unit: unit,
         graph_state_fence=lambda _campaign: {},
         graph_destination_id=GRAPH_DESTINATION_ID,
         authority_store_source_path="/authority.sqlite3",
@@ -267,6 +274,7 @@ def test_conservative_spend_bound_refuses_before_runner_or_dispatch(
     runtime = worker._mint_graphiti_campaign_runtime(
         graphiti=object(),
         admission_factory=lambda _connection: object(),
+        bind_unit_authority=lambda unit: unit,
         graph_state_fence=lambda _campaign: {},
         graph_destination_id=GRAPH_DESTINATION_ID,
         authority_store_source_path="/authority.sqlite3",
@@ -371,6 +379,7 @@ def test_campaign_cli_executes_exact_packet_through_injected_fence(
     runtime = worker._mint_graphiti_campaign_runtime(
         graphiti=object(),
         admission_factory=lambda _connection: object(),
+        bind_unit_authority=lambda unit: unit,
         graph_state_fence=lambda _campaign: {},
         graph_destination_id=GRAPH_DESTINATION_ID,
         authority_store_source_path="/authority.sqlite3",
@@ -523,6 +532,7 @@ def test_campaign_cli_stop_reports_durable_partial_progress(
     runtime = worker._mint_graphiti_campaign_runtime(
         graphiti=object(),
         admission_factory=lambda _connection: object(),
+        bind_unit_authority=lambda unit: unit,
         graph_state_fence=lambda _campaign: {},
         graph_destination_id=GRAPH_DESTINATION_ID,
         authority_store_source_path="/authority.sqlite3",
@@ -830,12 +840,15 @@ def test_campaign_receipt_requires_exact_attempt_and_reconciled_spend(
         "provider_attempt_number": 1,
         "chat_invocations": [
             {
-                "provider": "provider",
+                "provider": "cursor-agent-cli",
                 "model": "model",
                 "outcome": "COMPLETE",
                 "model_invocation_id": "chat-invocation",
                 "usage": {"usage_basis": "PROVIDER_REPORTED"},
-                "transport_qualification": {"max_retries": 0},
+                "transport_qualification": {
+                    "transport": "CURSOR_SDK",
+                    "max_retries": 0,
+                },
             }
         ],
         "embedding_usage": embedding,
@@ -910,7 +923,8 @@ def test_campaign_receipt_requires_exact_attempt_and_reconciled_spend(
         str(path),
         ingest_ids=("ingest-1",),
         provider={
-            "provider_id": "provider",
+            "provider_id": "cursor-agent-cli",
+            "transport_id": "CURSOR_SDK",
             "model_id": "model",
             "embedding_provider_id": "embedding-provider",
             "embedding_model_id": "embedding",
@@ -932,6 +946,19 @@ def test_campaign_receipt_requires_exact_attempt_and_reconciled_spend(
             str(path), ingest_ids=("ingest-1",)
         )
 
+    with pytest.raises(worker.GraphitiCampaignStop, match="transport"):
+        worker._campaign_receipt_evidence(
+            str(path),
+            ingest_ids=("ingest-1",),
+            provider={
+                "provider_id": "cursor-agent-cli",
+                "transport_id": "RETIRED_TRANSPORT",
+                "model_id": "model",
+                "embedding_provider_id": "embedding-provider",
+                "embedding_model_id": "embedding",
+            },
+        )
+
     connection = sqlite3.connect(path)
     connection.execute(
         "UPDATE unpublished_graphiti_spend SET status='UNRECONCILED'"
@@ -943,7 +970,8 @@ def test_campaign_receipt_requires_exact_attempt_and_reconciled_spend(
             str(path),
             ingest_ids=("ingest-1",),
             provider={
-                "provider_id": "provider",
+                "provider_id": "cursor-agent-cli",
+                "transport_id": "CURSOR_SDK",
                 "model_id": "model",
                 "embedding_provider_id": "embedding-provider",
                 "embedding_model_id": "embedding",
@@ -1685,6 +1713,7 @@ def _campaign() -> dict[str, object]:
         },
         "provider": {
             "provider_id": "provider",
+            "transport_id": "CURSOR_SDK",
             "model_id": "model",
             "embedding_provider_id": "embedding-provider",
             "embedding_model_id": "embedding",
@@ -1757,13 +1786,25 @@ def _campaign() -> dict[str, object]:
 
 
 @pytest.mark.parametrize(
-    "extra_fresh_candidate",
-    [False, True],
-    ids=["exact-snapshot", "fresh-candidate-race"],
+    (
+        "extra_fresh_candidate",
+        "processing_seconds",
+        "expected_sleeps",
+        "expected_dispatch_budgets",
+    ),
+    [
+        (False, 0.25, [0.75], [120.0, 119.0]),
+        (False, 1.25, [], [120.0, 118.75]),
+        (True, 0.0, [], []),
+    ],
+    ids=["fast-events", "slow-events", "fresh-candidate-race"],
 )
 def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
     monkeypatch: pytest.MonkeyPatch,
     extra_fresh_candidate: bool,
+    processing_seconds: float,
+    expected_sleeps: list[float],
+    expected_dispatch_budgets: list[float],
 ) -> None:
     from scripts import hermes_graphiti_worker as worker
 
@@ -1789,6 +1830,24 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
         },
     }
     calls: list[tuple[str, object]] = []
+    dispatch_budgets: list[float] = []
+
+    class FakeMonotonic:
+        def __init__(self) -> None:
+            self.value = 0.0
+            self.sleeps: list[float] = []
+
+        def __call__(self) -> float:
+            return self.value
+
+        def advance(self, seconds: float) -> None:
+            self.value += seconds
+
+        def sleep(self, seconds: float) -> None:
+            self.sleeps.append(seconds)
+            self.advance(seconds)
+
+    monotonic = FakeMonotonic()
     monkeypatch.setattr(
         worker,
         "validate_graphiti_campaign_packet",
@@ -1808,8 +1867,11 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
     def consume(**kwargs: object) -> GraphitiProcessResult:
         event_id = str(kwargs["event_id"])
         calls.append(("extract", event_id))
+        dispatch_budgets.append(float(kwargs["max_dispatch_seconds"]))
         assert kwargs["defer_graphiti_admission"] is True
         assert kwargs["require_graphiti_admission"] is True
+        assert kwargs["unit_authority_resolver"] is runtime.bind_unit_authority
+        monotonic.advance(processing_seconds)
         return GraphitiProcessResult(
             event_id,
             int(event_id.removeprefix("event-")),
@@ -1917,6 +1979,7 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
     runtime = worker._mint_graphiti_campaign_runtime(
         graphiti=object(),
         admission_factory=lambda _connection: Admission(),
+        bind_unit_authority=lambda unit: unit,
         graph_state_fence=lambda _campaign: (
             calls.append(("gate", "graph")) or {}
         ),
@@ -1937,8 +2000,8 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
         "head_sha": "head",
         "tree_sha": "tree",
         "owner_f4_fence": owner_fence,
-        "monotonic": lambda: 0.0,
-        "sleep": lambda _delay: None,
+        "monotonic": monotonic,
+        "sleep": monotonic.sleep,
     }
     if extra_fresh_candidate:
         with pytest.raises(
@@ -1954,6 +2017,8 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
             "manifest_digest": "manifest-3",
             "ingest_ids": ["ingest-3"],
         }
+        assert monotonic.sleeps == expected_sleeps
+        assert dispatch_budgets == expected_dispatch_budgets
         connection.close()
         return
 
@@ -1977,6 +2042,8 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
     assert report["entity_admits"] == 1
     assert report["relation_admits"] == 1
     assert report["success_objectives"] == objective_evidence
+    assert monotonic.sleeps == expected_sleeps
+    assert dispatch_budgets == expected_dispatch_budgets
     assert [item["state"] for item in report["events"]] == [
         "EXTRACTION_TERMINAL_CAMPAIGN_PENDING",
         "EXTRACTION_TERMINAL_CAMPAIGN_PENDING",
@@ -2038,6 +2105,7 @@ def test_bounded_campaign_checks_owner_f4_before_graph_readback(
     runtime = worker._mint_graphiti_campaign_runtime(
         graphiti=object(),
         admission_factory=lambda _connection: object(),
+        bind_unit_authority=lambda unit: unit,
         graph_state_fence=lambda _campaign: pytest.fail(
             "graph readback reached before F4"
         ),
@@ -2171,6 +2239,7 @@ def test_campaign_cap_stops_before_any_canonical_admission(
     runtime = worker._mint_graphiti_campaign_runtime(
         graphiti=object(),
         admission_factory=lambda _connection: Admission(),
+        bind_unit_authority=lambda unit: unit,
         graph_state_fence=lambda _campaign: {},
         graph_destination_id=GRAPH_DESTINATION_ID,
         authority_store_source_path="/authority.sqlite3",

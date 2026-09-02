@@ -13,10 +13,16 @@ import pytest
 
 from newsroom.control_plane.broker import (
     NEO4J_KEYCHAIN_SKIP,
+    NEO4J_PROJECTOR_ACCOUNT,
+    NEO4J_PROJECTOR_SERVICE,
+    NEO4J_PROJECTOR_USERNAME,
     OPENROUTER_KEYCHAIN_SKIP,
     BrokerError,
     neo4j_community_password,
     neo4j_keychain_ready,
+    neo4j_projector_config,
+    neo4j_projector_keychain_ready,
+    neo4j_projector_password,
     openrouter_api_key,
     openrouter_keychain_ready,
     prove_neo4j_keychain,
@@ -53,6 +59,43 @@ def test_non_utf8_keychain_output_is_a_secret_safe_broker_error(
 
     message = str(raised.value)
     assert "private-output" not in message
+
+
+def test_projector_credential_is_separate_and_builds_non_admin_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def password(*, account: str, service: str) -> str:
+        calls.append((account, service))
+        return "projector-password-long-enough"
+
+    monkeypatch.setattr("newsroom.control_plane.broker._keychain_password", password)
+
+    assert neo4j_projector_password() == "projector-password-long-enough"
+    config = neo4j_projector_config()
+    assert config.username == NEO4J_PROJECTOR_USERNAME == "newsroom_projector"
+    assert config.database == "neo4j"
+    assert config.uri == "bolt://127.0.0.1:7687"
+    assert calls == [
+        (NEO4J_PROJECTOR_ACCOUNT, NEO4J_PROJECTOR_SERVICE),
+        (NEO4J_PROJECTOR_ACCOUNT, NEO4J_PROJECTOR_SERVICE),
+    ]
+
+
+def test_projector_readiness_uses_its_dedicated_keychain_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def present(*, account: str, service: str) -> bool:
+        calls.append((account, service))
+        return True
+
+    monkeypatch.setattr("newsroom.control_plane.broker.keychain_present", present)
+
+    assert neo4j_projector_keychain_ready() is True
+    assert calls == [(NEO4J_PROJECTOR_ACCOUNT, NEO4J_PROJECTOR_SERVICE)]
 
 
 @pytest.mark.skipif(not grok_cli_ready(), reason="Grok Build CLI not on this host")

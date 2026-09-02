@@ -50,6 +50,14 @@ CANONICAL_PROVING_STORE = HOST_CONTROL_PLANE_STATE_ROOT / "proving_store.sqlite3
 CANONICAL_UNPUBLISHED_STORE = (
     HOST_CONTROL_PLANE_STATE_ROOT / "unpublished_store.sqlite3"
 )
+CANONICAL_INCREMENT4_STATE_ROOT = HOST_CONTROL_PLANE_STATE_ROOT / "increment4"
+CANONICAL_INCREMENT4_AUTHORITY_STORE = (
+    CANONICAL_INCREMENT4_STATE_ROOT / "authority.sqlite3"
+)
+CANONICAL_OBJECT_CAS_ROOT = CANONICAL_INCREMENT4_STATE_ROOT / "object_cas"
+CANONICAL_GRAPHITI_WORKSPACE_ROOT = (
+    CANONICAL_INCREMENT4_STATE_ROOT / "graphiti_workspaces"
+)
 
 
 def _ensure_private_directory(path: Path) -> None:
@@ -60,6 +68,19 @@ def _ensure_private_directory(path: Path) -> None:
 def ensure_control_plane_state_root() -> None:
     if HOST_CONTROL_PLANE_STATE_ROOT == Path.home() / ".local" / "share" / "newsroom":
         _ensure_private_directory(HOST_CONTROL_PLANE_STATE_ROOT)
+
+
+def ensure_increment4_state_paths() -> None:
+    """Create only the private directories needed by the canonical state set."""
+    require_canonical_increment4_authority_store(
+        CANONICAL_INCREMENT4_AUTHORITY_STORE
+    )
+    require_canonical_object_cas_root(CANONICAL_OBJECT_CAS_ROOT)
+    require_canonical_graphiti_workspace_root(CANONICAL_GRAPHITI_WORKSPACE_ROOT)
+    ensure_control_plane_state_root()
+    _ensure_private_directory(CANONICAL_INCREMENT4_STATE_ROOT)
+    _ensure_private_directory(CANONICAL_OBJECT_CAS_ROOT)
+    _ensure_private_directory(CANONICAL_GRAPHITI_WORKSPACE_ROOT)
 
 
 def _require_canonical_store(*, supplied: str, canonical: Path, label: str) -> None:
@@ -83,11 +104,74 @@ def require_canonical_unpublished_store(path: str) -> None:
     )
 
 
+def _require_canonical_increment4_path(
+    *, supplied: str | Path, canonical: Path, label: str
+) -> None:
+    supplied_path = Path(supplied).expanduser()
+    if supplied_path != canonical:
+        raise ValueError(f"Increment 4 requires the canonical {label}")
+    try:
+        relative = canonical.relative_to(HOST_CONTROL_PLANE_STATE_ROOT)
+    except ValueError:
+        raise ValueError(
+            f"canonical Increment 4 {label} escaped the Control Plane state root"
+        ) from None
+    current = HOST_CONTROL_PLANE_STATE_ROOT
+    for component in relative.parts:
+        if current.is_symlink():
+            raise ValueError(
+                f"canonical Increment 4 {label} has a symlink identity conflict"
+            )
+        current /= component
+    if current.is_symlink():
+        raise ValueError(
+            f"canonical Increment 4 {label} has a symlink identity conflict"
+        )
+    if canonical.resolve(strict=False) != (
+        HOST_CONTROL_PLANE_STATE_ROOT.resolve(strict=False) / relative
+    ):
+        raise ValueError(
+            f"canonical Increment 4 {label} escaped the Control Plane state root"
+        )
+
+
+def require_canonical_increment4_authority_store(path: str | Path) -> None:
+    _require_canonical_increment4_path(
+        supplied=path,
+        canonical=CANONICAL_INCREMENT4_AUTHORITY_STORE,
+        label="authority store",
+    )
+
+
+def require_canonical_object_cas_root(path: str | Path) -> None:
+    _require_canonical_increment4_path(
+        supplied=path,
+        canonical=CANONICAL_OBJECT_CAS_ROOT,
+        label="Object CAS root",
+    )
+
+
+def require_canonical_graphiti_workspace_root(path: str | Path) -> None:
+    _require_canonical_increment4_path(
+        supplied=path,
+        canonical=CANONICAL_GRAPHITI_WORKSPACE_ROOT,
+        label="Graphiti workspace root",
+    )
+
+
 __all__ = [
+    "CANONICAL_GRAPHITI_WORKSPACE_ROOT",
+    "CANONICAL_INCREMENT4_AUTHORITY_STORE",
+    "CANONICAL_INCREMENT4_STATE_ROOT",
+    "CANONICAL_OBJECT_CAS_ROOT",
     "CANONICAL_PROVING_STORE",
     "CANONICAL_UNPUBLISHED_STORE",
     "HOST_CONTROL_PLANE_STATE_ROOT",
     "ensure_control_plane_state_root",
+    "ensure_increment4_state_paths",
+    "require_canonical_graphiti_workspace_root",
+    "require_canonical_increment4_authority_store",
+    "require_canonical_object_cas_root",
     "require_canonical_proving_store",
     "require_canonical_unpublished_store",
 ]

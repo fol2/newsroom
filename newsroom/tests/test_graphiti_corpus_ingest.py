@@ -11,6 +11,7 @@ from typing import Any, Literal, Never
 
 import pytest
 
+from newsroom.authority import HydrationPolicyRegistry
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.types import UtcTimestamp
 from newsroom.control_plane.corpus import (
@@ -69,6 +70,7 @@ from newsroom.effective_revision import (
     retain_observation_revision_first_seen,
 )
 from newsroom.graphiti_adapter.evaluation_attempt import (
+    GRAPHITI_EVALUATION_HYDRATION_POLICY,
     evaluation_attempt_for,
     evaluation_attempt_for_body,
 )
@@ -6460,6 +6462,23 @@ def test_attempt_canonical_digest_covers_temporal_episode_and_generation() -> No
     )
     with pytest.raises(GraphitiAdapterContractError, match="temporal_basis"):
         replace(base, temporal_basis="STARTED_AT")
+
+
+def test_evaluation_passage_binds_registered_hydration_policy() -> None:
+    attempt = evaluation_attempt_for(("Hong Kong Observatory issued a warning.",))
+    passage = attempt.manifest.passages[0]
+    policy = HydrationPolicyRegistry(
+        (GRAPHITI_EVALUATION_HYDRATION_POLICY,)
+    ).resolve_for_purpose(passage.purpose)
+
+    assert passage.hydration_policy_contract_digest == policy.contract_digest
+    assert passage.principal_id in policy.allowed_principal_ids
+    assert passage.authority_domain in policy.allowed_authority_domains
+    assert passage.object_class in policy.allowed_object_classes
+    assert passage.allowed_use in policy.allowed_uses
+    assert passage.security_scope in policy.allowed_security_scopes
+    assert passage.retention_scope in policy.allowed_retention_scopes
+    assert passage.byte_length <= policy.max_bytes
 
 
 def test_result_binding_rejects_generation_and_receipt_digest_drift() -> None:
