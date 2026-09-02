@@ -1,7 +1,8 @@
 """Provider-free Mini RAM/CPU packet for issue #898.
 
 Stdlib-only at import time so baseline children are not contaminated.
-Does not claim queue events, write canonical stores, or start Rust.
+Does not claim queue events, write canonical stores, or change product code.
+Research-only Rust lives under docs/research/issue-898-ram-cpu-rust/.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import sys
 import tempfile
 import time
 import tracemalloc
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,6 +35,12 @@ MEASURED_RUNS = 3
 MIB = 1024 * 1024
 GO_PEAK_RATIO = 0.20
 GO_PEAK_BYTES = 64 * MIB
+RAW_HTTP_RETENTION = timedelta(days=7)
+SCAN_SCHEMA = "newsroom.issue-898.observation-scan.v1"
+RUST_CRATE = (
+    Path(__file__).resolve().parents[2] / "docs" / "research" / "issue-898-ram-cpu-rust"
+)
+RUST_TARGET = Path("/tmp/newsroom-898-rust-target")
 
 ATOM = (
     b'<?xml version="1.0" encoding="UTF-8"?>'
@@ -59,10 +66,54 @@ def rss_body(*, guid: str, title: str, description: str) -> bytes:
     ).encode("utf-8")
 
 
+def utc_text(value: datetime) -> str:
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def parse_utc(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def raw_http_cutoff(evaluated_at: datetime) -> str:
+    return utc_text(evaluated_at - RAW_HTTP_RETENTION)
+
+
+def canonical_json(value: object) -> str:
+    if isinstance(value, dict):
+        parts = []
+        for key in sorted(value):
+            parts.append(json.dumps(key, ensure_ascii=False) + ":" + canonical_json(value[key]))
+        return "{" + ",".join(parts) + "}"
+    if isinstance(value, list):
+        return "[" + ",".join(canonical_json(item) for item in value) + "]"
+    return json.dumps(value, ensure_ascii=False)
+
+
+def digest_text(value: str) -> str:
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def current_rss_bytes() -> int | str:
     try:
         out = subprocess.check_output(
             ["ps", "-o", "rss=", "-p", str(os.getpid())],
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return UNOBSERVED
+    text = out.strip().split()
+    if not text:
+        return UNOBSERVED
+    return int(text[0]) * 1024
+
+
+def rss_bytes_for_pid(pid: int) -> int | str:
+    try:
+        out = subprocess.check_output(
+            ["ps", "-o", "rss=", "-p", str(pid)],
             text=True,
         )
     except (OSError, subprocess.CalledProcessError):
@@ -104,34 +155,83 @@ def refuse_canonical_store(path: str | Path) -> Path:
     return resolved
 
 
-def copy_canonical_proving(destination: Path) -> dict[str, object]:
-    proving, _unpublished = canonical_store_paths()
+def sqlite_backup_snapshot(source: Path, destination: Path) -> dict[str, object]:
+    """Copy one SQLite database through the backup API. Never reuse by size."""
+
     refuse_canonical_store(destination)
-    if not proving.is_file():
-        return {"status": UNOBSERVED, "reason": "canonical proving store missing"}
-    source_size = proving.stat().st_size
-    reuse = (
-        destination.is_file()
-        and destination.stat().st_size == source_size
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        destination.unlink()
+    for suffix in ("-wal", "-shm", "-journal"):
+        Path(str(destination) + suffix).unlink(missing_ok=True)
+    if not source.is_file():
+        return {"status": UNOBSERVED, "reason": "source sqlite missing"}
+    wal = Path(str(source) + "-wal")
+    shm = Path(str(source) + "-shm")
+    journal = Path(str(source) + "-journal")
+    wal_state = {
+        "journal_exists": journal.exists(),
+        "shm_exists": shm.exists(),
+        "wal_bytes": wal.stat().st_size if wal.exists() else 0,
+        "wal_exists": wal.exists(),
+    }
+    source_connection = sqlite3.connect(
+        f"{source.resolve().as_uri()}?mode=ro",
+        uri=True,
     )
-    if not reuse:
-        shutil.copy2(proving, destination)
-        for suffix in ("-wal", "-shm"):
-            side = Path(str(proving) + suffix)
-            if side.exists():
-                shutil.copy2(side, Path(str(destination) + suffix))
+    destination_connection = sqlite3.connect(destination)
+    try:
+        page_size = int(source_connection.execute("PRAGMA page_size").fetchone()[0])
+        page_count = int(source_connection.execute("PRAGMA page_count").fetchone()[0])
+        journal_mode = str(source_connection.execute("PRAGMA journal_mode").fetchone()[0])
+        source_connection.backup(destination_connection)
+        destination_connection.commit()
+        check = destination_connection.execute("PRAGMA quick_check").fetchone()
+        if check is None or str(check[0]) != "ok":
+            raise RuntimeError("sqlite backup quick_check failed")
+        observation_count = int(
+            destination_connection.execute(
+                "SELECT COUNT(*) FROM proving_observations"
+            ).fetchone()[0]
+        )
+        body_bytes = int(
+            destination_connection.execute(
+                "SELECT COALESCE(SUM(LENGTH(body)),0) FROM proving_observations"
+            ).fetchone()[0]
+        )
+        schema_sql = [
+            str(row[0])
+            for row in destination_connection.execute(
+                "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name"
+            )
+        ]
+    finally:
+        destination_connection.close()
+        source_connection.close()
     return {
+        "body_bytes": body_bytes,
+        "copy_digest": _sha256_file(destination),
+        "journal_mode": journal_mode,
+        "method": "sqlite3.Connection.backup",
+        "observation_count": observation_count,
+        "page_count": page_count,
+        "page_size": page_size,
+        "reused_existing_copy": False,
+        "schema_digest": digest_text("\n".join(schema_sql)),
+        "snapshot_bytes": destination.stat().st_size,
+        "source_path_name": source.name,
+        "source_size_bytes": source.stat().st_size,
         "status": "COPIED",
-        "reused_existing_copy": reuse,
-        "source_path_name": proving.name,
-        "source_size_bytes": source_size,
-        "copy_digest": (
-            f"reuse:{source_size}:{destination.stat().st_mtime_ns}"
-            if reuse
-            else _sha256_file(destination)
-        ),
+        "wal_state": wal_state,
         "writable_canonical": False,
     }
+
+
+def backup_canonical_proving(destination: Path) -> dict[str, object]:
+    proving, _unpublished = canonical_store_paths()
+    if not proving.is_file():
+        return {"status": UNOBSERVED, "reason": "canonical proving store missing"}
+    return sqlite_backup_snapshot(proving, destination)
 
 
 def _rights_packet(source_id: str) -> dict[str, object]:
@@ -270,11 +370,16 @@ def write_unpublished_store(path: Path) -> None:
     connection.close()
 
 
-def measure(work: Callable[[], dict[str, object]]) -> dict[str, object]:
+def measure(
+    work: Callable[[], dict[str, object]],
+    *,
+    use_tracemalloc: bool = False,
+) -> dict[str, object]:
     gc.collect()
     rss_before = current_rss_bytes()
     usage_before = resource.getrusage(resource.RUSAGE_SELF)
-    tracemalloc.start()
+    if use_tracemalloc:
+        tracemalloc.start()
     started = time.perf_counter()
     try:
         outcome = work()
@@ -283,8 +388,11 @@ def measure(work: Callable[[], dict[str, object]]) -> dict[str, object]:
         outcome = {"error": f"{type(exc).__name__}: {exc}"}
         status = "ERROR"
     wall = time.perf_counter() - started
-    traced_current, traced_peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
+    if use_tracemalloc:
+        traced_current, traced_peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+    else:
+        traced_current = traced_peak = UNOBSERVED
     gc.collect()
     usage_after = resource.getrusage(resource.RUSAGE_SELF)
     return {
@@ -296,6 +404,7 @@ def measure(work: Callable[[], dict[str, object]]) -> dict[str, object]:
         "user_cpu_seconds": usage_after.ru_utime - usage_before.ru_utime,
         "system_cpu_seconds": usage_after.ru_stime - usage_before.ru_stime,
         "wall_seconds": wall,
+        "tracemalloc_enabled": use_tracemalloc,
         "tracemalloc_peak_bytes": traced_peak,
         "tracemalloc_current_bytes": traced_current,
         "outcome": outcome,
@@ -311,51 +420,189 @@ def _open_proving(path: str) -> sqlite3.Connection:
     return connection
 
 
-def _counts(units: tuple[Any, ...], rows: tuple[Any, ...] = ()) -> dict[str, object]:
-    body_bytes = 0
-    for row in rows:
-        body = getattr(row, "body", b"")
-        body_bytes += len(body) if isinstance(body, (bytes, bytearray)) else 0
-    return {
-        "row_count": len(rows),
-        "unit_count": len(units),
-        "body_bytes": body_bytes,
-        "source_ids": sorted({getattr(unit, "source_id", "") for unit in units}),
+def scan_observations(path: str, cutoff: str) -> dict[str, object]:
+    refuse_canonical_store(path)
+    connection = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        run_ids = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT run_id FROM proving_runs ORDER BY rowid ASC"
+            )
+        ]
+        rows: list[dict[str, object]] = []
+        bodies: list[bytes] = []
+        for run_id in run_ids:
+            values = connection.execute(
+                """
+                SELECT source_id, url, fetched_at, status_code, body_digest, body, error
+                FROM proving_observations
+                WHERE run_id=? AND fetched_at>=?
+                ORDER BY source_id, fetched_at, body_digest
+                """,
+                (run_id, cutoff),
+            )
+            for source_id, url, fetched_at, status_code, body_digest, body, error in values:
+                if int(status_code) != 200 or not body or error is not None:
+                    continue
+                body_bytes = bytes(body)
+                bodies.append(body_bytes)
+                rows.append(
+                    {
+                        "body_digest": str(body_digest),
+                        "body_len": len(body_bytes),
+                        "body_sha256": "sha256:" + hashlib.sha256(body_bytes).hexdigest(),
+                        "fetched_at": str(fetched_at),
+                        "run_id": str(run_id),
+                        "source_id": str(source_id),
+                        "status_code": int(status_code),
+                        "url": str(url),
+                    }
+                )
+        manifest = {
+            "row_count": len(rows),
+            "rows": rows,
+            "schema": SCAN_SCHEMA,
+        }
+        digest = digest_text(canonical_json(manifest))
+        body_bytes_total = sum(len(item) for item in bodies)
+        del bodies
+        return {
+            "body_bytes": body_bytes_total,
+            "cutoff": cutoff,
+            "manifest_digest": digest,
+            "queue_claimed": False,
+            "row_count": len(rows),
+            "schema": SCAN_SCHEMA,
+            "writable": False,
+        }
+    finally:
+        connection.close()
+
+
+def prepare_event_identity(proving: str, clock: datetime) -> dict[str, object]:
+    from newsroom.control_plane.cycle import load_graphiti_units
+
+    units = load_graphiti_units(proving_store=proving, evaluated_at=clock)
+    if not units:
+        spec = {
+            "clock": utc_text(clock),
+            "event_id": "measure-event",
+            "expected_selected_count": 0,
+            "expected_unit_count": 0,
+            "item_key": "missing",
+            "landed_ingest_ids": [],
+            "landed_payload_digest": "sha256:" + ("00" * 32),
+            "ledger_seq": 1,
+            "prep_unit_count": 0,
+            "published_at": "",
+            "revision_digest": "sha256:" + ("00" * 32),
+            "source_id": "UK-01",
+            "status": "EMPTY",
+            "unit_refs": [],
+            "updated_at": "",
+        }
+        spec["event_manifest_digest"] = digest_text(canonical_json(spec))
+        return spec
+    unit = units[0]
+    identity = (
+        unit.source_id,
+        unit.item_key,
+        unit.revision_digest,
+        unit.published_at or "",
+        unit.updated_at or "",
+    )
+    selected = [
+        item
+        for item in units
+        if (
+            item.source_id,
+            item.item_key,
+            item.revision_digest,
+            item.published_at or "",
+            item.updated_at or "",
+        )
+        == identity
+    ]
+    spec = {
+        "clock": utc_text(clock),
+        "event_id": "measure-event",
+        "expected_selected_count": len(selected),
+        "expected_unit_count": len(selected),
+        "item_key": unit.item_key,
+        "landed_ingest_ids": [item.ingest_id for item in selected],
+        "landed_payload_digest": "sha256:" + ("00" * 32),
+        "ledger_seq": 1,
+        "prep_unit_count": len(units),
+        "published_at": unit.published_at or "",
+        "revision_digest": unit.revision_digest,
+        "source_id": unit.source_id,
+        "status": "OK",
+        "unit_refs": [],
+        "updated_at": unit.updated_at or "",
     }
+    spec["event_manifest_digest"] = digest_text(canonical_json(spec))
+    return spec
 
 
-def _event_for(unit: Any) -> Any:
+def _event_from_spec(spec: dict[str, object]) -> Any:
     from newsroom.control_plane.graphiti_events import GraphitiRevisionEvent
 
     return GraphitiRevisionEvent(
-        event_id="measure-event",
-        ledger_seq=1,
-        source_id=unit.source_id,
-        item_key=unit.item_key,
-        revision_digest=unit.revision_digest,
-        published_at=unit.published_at or "",
-        updated_at=unit.updated_at or "",
-        expected_unit_count=1,
-        landed_ingest_ids=(unit.ingest_id,),
-        landed_payload_digest="sha256:" + ("00" * 32),
-        unit_refs=(),
+        event_id=str(spec.get("event_id") or "measure-event"),
+        ledger_seq=int(spec.get("ledger_seq") or 1),
+        source_id=str(spec["source_id"]),
+        item_key=str(spec["item_key"]),
+        revision_digest=str(spec["revision_digest"]),
+        published_at=str(spec.get("published_at") or ""),
+        updated_at=str(spec.get("updated_at") or ""),
+        expected_unit_count=int(
+            spec.get("expected_unit_count") or spec.get("expected_selected_count") or 0
+        ),
+        landed_ingest_ids=tuple(spec.get("landed_ingest_ids") or ()),
+        landed_payload_digest=str(
+            spec.get("landed_payload_digest") or ("sha256:" + ("00" * 32))
+        ),
+        unit_refs=tuple(spec.get("unit_refs") or ()),
         state="QUEUED",
         attempt_count=0,
         units=(),
     )
 
 
+def _unit_manifest(units: tuple[Any, ...]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for unit in units:
+        rows.append(
+            {
+                "chunk_count": unit.chunk_count,
+                "chunk_digest": unit.digest,
+                "chunk_ordinal": unit.chunk_ordinal,
+                "ingest_id": unit.ingest_id,
+                "item_key": unit.item_key,
+                "predecessor_ingest_id": unit.predecessor_ingest_id,
+                "published_at": unit.published_at or "",
+                "representation_digest": unit.representation_digest,
+                "revision_digest": unit.revision_digest,
+                "source_id": unit.source_id,
+                "updated_at": unit.updated_at or "",
+            }
+        )
+    return rows
+
+
 def case_bare_interpreter() -> dict[str, object]:
     return measure(lambda: {"imported": False})
 
 
-def case_import_cycle() -> dict[str, object]:
+def case_import_cycle(*, use_tracemalloc: bool = False) -> dict[str, object]:
     def work() -> dict[str, object]:
         from newsroom.control_plane import cycle as cycle_module
 
         return {"module": cycle_module.__name__}
 
-    return measure(work)
+    return measure(work, use_tracemalloc=use_tracemalloc)
 
 
 def case_instantiate_runner() -> dict[str, object]:
@@ -363,7 +610,10 @@ def case_instantiate_runner() -> dict[str, object]:
         from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
 
         runner = EvaluationGraphitiRunner()
-        return {"runner": type(runner).__name__, "graphiti_core_imported": "graphiti_core" in sys.modules}
+        return {
+            "runner": type(runner).__name__,
+            "graphiti_core_imported": "graphiti_core" in sys.modules,
+        }
 
     return measure(work)
 
@@ -444,12 +694,6 @@ def case_process_tree() -> dict[str, object]:
     }
 
 
-def _load_units(proving: str) -> tuple[Any, ...]:
-    from newsroom.control_plane.cycle import load_graphiti_units
-
-    return load_graphiti_units(proving_store=proving, evaluated_at=CLOCK)
-
-
 def case_load_units(proving: str, *, clock: datetime = CLOCK) -> dict[str, object]:
     def work() -> dict[str, object]:
         from newsroom.control_plane.cycle import load_graphiti_units
@@ -459,34 +703,39 @@ def case_load_units(proving: str, *, clock: datetime = CLOCK) -> dict[str, objec
             "unit_count": len(units),
             "source_count": len({unit.source_id for unit in units}),
             "chunk_count": len(units),
+            "queue_claimed": False,
         }
 
     return measure(work)
 
 
-def case_resolve_event(proving: str, *, clock: datetime = CLOCK) -> dict[str, object]:
+def case_resolve_event(
+    proving: str,
+    event: dict[str, object],
+    *,
+    use_tracemalloc: bool = False,
+) -> dict[str, object]:
     def work() -> dict[str, object]:
-        from newsroom.control_plane.cycle import (
-            _resolve_graphiti_event_units,
-            load_graphiti_units,
-        )
+        from newsroom.control_plane.cycle import _resolve_graphiti_event_units
 
-        units = load_graphiti_units(proving_store=proving, evaluated_at=clock)
-        if not units:
-            return {"unit_count": 0, "selected_unit_count": 0, "queue_claimed": False}
+        clock = parse_utc(str(event["clock"]))
         selected = _resolve_graphiti_event_units(
             proving_store=proving,
-            event=_event_for(units[0]),
+            event=_event_from_spec(event),
             evaluated_at=clock,
         )
+        manifest = _unit_manifest(selected)
         return {
-            "unit_count": len(units),
-            "selected_unit_count": len(selected),
+            "event_manifest_digest": event.get("event_manifest_digest"),
             "queue_claimed": False,
-            "source_id": units[0].source_id,
+            "selected_unit_count": len(selected),
+            "source_id": event.get("source_id"),
+            "unit_count": event.get("prep_unit_count"),
+            "unit_manifest_digest": digest_text(canonical_json(manifest)),
+            "unit_manifest": manifest,
         }
 
-    return measure(work)
+    return measure(work, use_tracemalloc=use_tracemalloc)
 
 
 def case_permitted_rows(proving: str, *, clock: datetime = CLOCK) -> dict[str, object]:
@@ -675,6 +924,7 @@ def case_cycle_max_writes_0(
             "minted": report.minted,
             "graphiti": report.graphiti,
             "write_ready": report.write_ready,
+            "queue_claimed": False,
         }
 
     try:
@@ -684,6 +934,27 @@ def case_cycle_max_writes_0(
             owned_unpublished.unlink(missing_ok=True)
             for suffix in ("-wal", "-shm"):
                 Path(str(owned_unpublished) + suffix).unlink(missing_ok=True)
+
+
+def case_observation_scan(proving: str, cutoff: str) -> dict[str, object]:
+    return measure(lambda: scan_observations(proving, cutoff))
+
+
+def case_rust_r2() -> dict[str, object]:
+    return {
+        "mode": "r2",
+        "status": "HOLD",
+        "reason": (
+            "proving_observations has no item_key, revision_digest, published_at "
+            "or updated_at columns; event identity is derived after "
+            "parse_observation / units_from. Bounding the SQL to one event "
+            "requires a product schema or query change, which #898 forbids."
+        ),
+        "missing_seam": (
+            "exact event identity columns or an existing exact-row selection API"
+        ),
+        "queue_claimed": False,
+    }
 
 
 def fixture_rows(kind: str) -> tuple[tuple[str, bytes], ...]:
@@ -710,6 +981,19 @@ def fixture_rows(kind: str) -> tuple[tuple[str, bytes], ...]:
             for index in range(10)
         )
         return (("UK-01", ATOM),) + extras
+    if kind == "scaled":
+        extras = tuple(
+            (
+                "HK-01",
+                rss_body(
+                    guid=f"hk-scaled-{index}",
+                    title=f"Scaled retained item {index}",
+                    description=("D" * 8192),
+                ),
+            )
+            for index in range(40)
+        )
+        return (("UK-01", ATOM),) + extras
     if kind == "json":
         return (("UK-02", JSON_DOC),)
     if kind == "rss":
@@ -734,20 +1018,28 @@ def fixture_rows(kind: str) -> tuple[tuple[str, bytes], ...]:
     raise ValueError(f"unknown fixture kind: {kind}")
 
 
+def _write_event(path: Path, proving: str, clock: datetime) -> dict[str, object]:
+    spec = prepare_event_identity(proving, clock)
+    path.write_text(json.dumps(spec, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    return spec
+
+
 def build_workspace(root: Path) -> dict[str, str]:
     root.mkdir(parents=True, exist_ok=True)
     paths: dict[str, str] = {}
-    for kind in (
+    kinds = (
         "solo",
         "representative",
         "times10",
+        "scaled",
         "json",
         "rss",
         "atom",
         "large",
         "malformed",
         "empty",
-    ):
+    )
+    for kind in kinds:
         proving = root / f"proving-{kind}.sqlite3"
         unpublished = root / f"unpublished-{kind}.sqlite3"
         proving.unlink(missing_ok=True)
@@ -759,15 +1051,80 @@ def build_workspace(root: Path) -> dict[str, str]:
         write_unpublished_store(unpublished)
         paths[f"proving_{kind}"] = str(proving)
         paths[f"unpublished_{kind}"] = str(unpublished)
+        _write_event(root / f"event-{kind}.json", str(proving), CLOCK)
+        paths[f"event_{kind}"] = str(root / f"event-{kind}.json")
+        paths[f"cutoff_{kind}"] = raw_http_cutoff(CLOCK)
     copied = root / "proving-copied.sqlite3"
-    copy_meta = copy_canonical_proving(copied)
+    print("workspace: sqlite backup begin", flush=True)
+    copy_meta = backup_canonical_proving(copied)
+    print(f"workspace: sqlite backup {copy_meta.get('status')}", flush=True)
     paths["copy_meta"] = json.dumps(copy_meta, sort_keys=True)
     if copy_meta.get("status") == "COPIED":
         paths["proving_copied"] = str(copied)
         unpublished_copied = root / "unpublished-copied.sqlite3"
         write_unpublished_store(unpublished_copied)
         paths["unpublished_copied"] = str(unpublished_copied)
+        copied_clock = datetime.now(tz=UTC)
+        print("workspace: copied event identity begin", flush=True)
+        _write_event(root / "event-copied.json", str(copied), copied_clock)
+        print("workspace: copied event identity done", flush=True)
+        paths["event_copied"] = str(root / "event-copied.json")
+        paths["cutoff_copied"] = raw_http_cutoff(copied_clock)
+        paths["clock_copied"] = utc_text(copied_clock)
+    print("workspace: rust build begin", flush=True)
+    rust_meta = build_research_rust(root / "issue-898-ram-cpu")
+    paths["rust_meta"] = json.dumps(rust_meta, sort_keys=True)
+    if rust_meta.get("status") == "OK":
+        paths["rust_binary"] = str(root / "issue-898-ram-cpu")
     return paths
+
+
+def build_research_rust(binary: Path) -> dict[str, object]:
+    if shutil.which("cargo") is None or shutil.which("rustc") is None:
+        return {"status": UNOBSERVED, "reason": "cargo or rustc missing"}
+    if not (RUST_CRATE / "Cargo.toml").is_file():
+        return {"status": UNOBSERVED, "reason": "research crate missing"}
+    env = dict(os.environ)
+    env["CARGO_TARGET_DIR"] = str(RUST_TARGET)
+    env["CARGO_TERM_COLOR"] = "never"
+    completed = subprocess.run(
+        [
+            "cargo",
+            "build",
+            "--release",
+            "--manifest-path",
+            str(RUST_CRATE / "Cargo.toml"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    built = RUST_TARGET / "release" / "issue-898-ram-cpu"
+    if completed.returncode != 0 or not built.is_file():
+        return {
+            "status": "ERROR",
+            "reason": "cargo build failed",
+            "stderr_tail": completed.stderr[-2000:],
+        }
+    if binary.exists():
+        binary.unlink()
+    shutil.copy2(built, binary)
+    os.chmod(binary, 0o755)
+    rustc = subprocess.check_output(["rustc", "-vV"], text=True)
+    cargo = subprocess.check_output(["cargo", "--version"], text=True).strip()
+    lock = RUST_CRATE / "Cargo.lock"
+    return {
+        "status": "OK",
+        "binary_digest": _sha256_file(binary),
+        "build_flags": ["--release"],
+        "cargo": cargo,
+        "cargo_lock_digest": _sha256_file(lock) if lock.is_file() else UNOBSERVED,
+        "crate_path": str(RUST_CRATE.relative_to(RUST_CRATE.parents[2])),
+        "profile": "release",
+        "source_digest": _sha256_file(RUST_CRATE / "src" / "main.rs"),
+        "toolchain": rustc.strip().splitlines(),
+    }
 
 
 CASE_SPECS: tuple[tuple[str, str, str], ...] = (
@@ -786,30 +1143,64 @@ CASE_SPECS: tuple[tuple[str, str, str], ...] = (
     ("B7_large_body", "resolve", "large"),
     ("B8_malformed", "resolve", "malformed"),
     ("B9_empty", "resolve", "empty"),
-    ("B10_copied_canonical", "resolve_copied", "copied"),
-    ("C1_permitted_rows", "permitted_rows", "times10"),
-    ("C2_parsed_observations", "parsed_observations", "times10"),
-    ("C3_units_from", "units_from", "times10"),
-    ("C4_unique_and_revisions", "unique_and_revisions", "times10"),
-    ("C5_load_graphiti_units", "load", "times10"),
-    ("C6_resolve_event_units", "resolve_copied_or_times10", "times10"),
+    ("B10_copied_one_event", "resolve", "copied"),
+    ("B11_scaled_one_event", "resolve", "scaled"),
+    ("C1_permitted_rows", "permitted_rows", "scaled"),
+    ("C2_parsed_observations", "parsed_observations", "scaled"),
+    ("C3_units_from", "units_from", "scaled"),
+    ("C4_unique_and_revisions", "unique_and_revisions", "scaled"),
+    ("C5_load_graphiti_units", "load", "scaled"),
+    ("C6_resolve_event_units", "resolve", "scaled"),
     ("C7_admission_generation", "admission_generation", ""),
-    ("D1_cycle_max_writes_0", "cycle", "copied_or_representative"),
+    ("D1_cycle_max_writes_0", "cycle", "copied"),
+    ("E1_copied_full_corpus_load", "load", "copied"),
+    ("R0_rust_process_baseline", "rust_r0", ""),
+    ("R1_python_observation_scan", "python_scan", "copied"),
+    ("R1_rust_observation_scan", "rust_r1", "copied"),
+    ("R1_rust_e2e_parent", "rust_e2e", "copied"),
+    ("R2_bounded_candidate", "rust_r2", ""),
+    ("S1_import_cycle_tracemalloc", "import_cycle_tracemalloc", ""),
+    ("S2_resolve_solo_tracemalloc", "resolve_tracemalloc", "solo"),
 )
 
 
-def run_named_case(name: str, workspace: dict[str, str]) -> dict[str, object]:
+def _event_spec(workspace: dict[str, str], store: str) -> dict[str, object]:
+    path = Path(workspace[f"event_{store}"])
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _store_path(workspace: dict[str, str], store: str) -> str | None:
+    if store == "copied":
+        return workspace.get("proving_copied")
+    return workspace.get(f"proving_{store}")
+
+
+def _cutoff(workspace: dict[str, str], store: str) -> str:
+    if store == "copied" and "cutoff_copied" in workspace:
+        return workspace["cutoff_copied"]
+    return workspace.get(f"cutoff_{store}", raw_http_cutoff(CLOCK))
+
+
+def _clock(workspace: dict[str, str], store: str) -> datetime:
+    if store == "copied" and "clock_copied" in workspace:
+        return parse_utc(workspace["clock_copied"])
+    return CLOCK
+
+
+def run_named_case(
+    name: str,
+    workspace: dict[str, str],
+    *,
+    use_tracemalloc: bool = False,
+) -> dict[str, object]:
     spec = {item[0]: item for item in CASE_SPECS}[name]
     _case_name, kind, store = spec
-    copied = workspace.get("proving_copied")
-    times10 = workspace["proving_times10"]
-    stage_store = times10
-    stage_clock = CLOCK
-
     if kind == "bare":
         return case_bare_interpreter()
     if kind == "import_cycle":
-        return case_import_cycle()
+        return case_import_cycle(use_tracemalloc=use_tracemalloc)
+    if kind == "import_cycle_tracemalloc":
+        return case_import_cycle(use_tracemalloc=True)
     if kind == "instantiate_runner":
         return case_instantiate_runner()
     if kind == "idle_worker":
@@ -820,29 +1211,167 @@ def run_named_case(name: str, workspace: dict[str, str]) -> dict[str, object]:
         return case_process_tree()
     if kind == "admission_generation":
         return case_admission_generation()
+    if kind == "rust_r2":
+        return case_rust_r2()
+    proving = _store_path(workspace, store) if store else None
     if kind == "resolve":
-        return case_resolve_event(workspace[f"proving_{store}"])
-    if kind == "resolve_copied":
-        if not copied:
-            return {"status": UNOBSERVED, "reason": "canonical proving copy missing"}
-        return case_resolve_event(copied, clock=datetime.now(tz=UTC))
+        if not proving:
+            return {"status": UNOBSERVED, "reason": f"{store} proving store missing"}
+        return case_resolve_event(
+            proving,
+            _event_spec(workspace, store),
+            use_tracemalloc=use_tracemalloc,
+        )
+    if kind == "resolve_tracemalloc":
+        if not proving:
+            return {"status": UNOBSERVED, "reason": f"{store} proving store missing"}
+        return case_resolve_event(
+            proving,
+            _event_spec(workspace, store),
+            use_tracemalloc=True,
+        )
     if kind == "permitted_rows":
-        return case_permitted_rows(stage_store, clock=stage_clock)
+        return case_permitted_rows(proving or workspace["proving_scaled"], clock=_clock(workspace, store or "scaled"))
     if kind == "parsed_observations":
-        return case_parsed_observations(stage_store, clock=stage_clock)
+        return case_parsed_observations(proving or workspace["proving_scaled"], clock=_clock(workspace, store or "scaled"))
     if kind == "units_from":
-        return case_units_from(stage_store, clock=stage_clock)
+        return case_units_from(proving or workspace["proving_scaled"], clock=_clock(workspace, store or "scaled"))
     if kind == "unique_and_revisions":
-        return case_unique_and_revisions(stage_store, clock=stage_clock)
+        return case_unique_and_revisions(proving or workspace["proving_scaled"], clock=_clock(workspace, store or "scaled"))
     if kind == "load":
-        return case_load_units(stage_store, clock=stage_clock)
-    if kind == "resolve_copied_or_times10":
-        return case_resolve_event(stage_store, clock=stage_clock)
+        if not proving:
+            return {"status": UNOBSERVED, "reason": f"{store} proving store missing"}
+        return case_load_units(proving, clock=_clock(workspace, store))
     if kind == "cycle":
-        if copied:
-            return case_cycle_max_writes_0(copied, clock=datetime.now(tz=UTC))
-        return case_cycle_max_writes_0(workspace["proving_representative"])
+        if not proving:
+            return case_cycle_max_writes_0(workspace["proving_representative"])
+        unpublished = workspace.get("unpublished_copied") or workspace.get(
+            "unpublished_representative"
+        )
+        return case_cycle_max_writes_0(
+            proving,
+            unpublished,
+            clock=_clock(workspace, store),
+        )
+    if kind == "python_scan":
+        target = proving or workspace.get("proving_scaled")
+        if not target:
+            return {"status": UNOBSERVED, "reason": "scan store missing"}
+        return case_observation_scan(target, _cutoff(workspace, store or "scaled"))
+    if kind == "rust_r0":
+        binary = workspace.get("rust_binary")
+        if not binary:
+            return {"status": UNOBSERVED, "reason": "research rust binary missing"}
+        return _run_rust_binary(binary, ["r0"])
+    if kind == "rust_r1":
+        binary = workspace.get("rust_binary")
+        target = proving or workspace.get("proving_scaled")
+        if not binary or not target:
+            return {"status": UNOBSERVED, "reason": "rust binary or scan store missing"}
+        return _run_rust_binary(
+            binary,
+            ["r1", "--db", target, "--cutoff", _cutoff(workspace, store or "scaled")],
+        )
+    if kind == "rust_e2e":
+        binary = workspace.get("rust_binary")
+        target = proving or workspace.get("proving_scaled")
+        if not binary or not target:
+            return {"status": UNOBSERVED, "reason": "rust binary or scan store missing"}
+        return case_rust_e2e(
+            binary,
+            target,
+            _cutoff(workspace, store or "scaled"),
+        )
     raise ValueError(f"unknown case kind: {kind}")
+
+
+def _run_rust_binary(binary: str, args: list[str]) -> dict[str, object]:
+    gc.collect()
+    rss_before = current_rss_bytes()
+    usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    started = time.perf_counter()
+    completed = subprocess.run(
+        [binary, *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    wall = time.perf_counter() - started
+    usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    try:
+        payload = json.loads(completed.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError, ValueError):
+        payload = {
+            "status": "ERROR",
+            "outcome": {
+                "error": "rust stdout was not JSON",
+                "stderr_tail": completed.stderr[-1000:],
+            },
+        }
+    outcome = payload.get("outcome", payload)
+    return {
+        "pid": os.getpid(),
+        "status": payload.get("status", "ERROR"),
+        "rss_before_bytes": rss_before,
+        "rss_after_bytes": payload.get("rss_after_bytes", current_rss_bytes()),
+        "rss_held_bytes": payload.get("rss_held_bytes", UNOBSERVED),
+        "ru_maxrss_bytes": UNOBSERVED,
+        "child_user_cpu_seconds": usage_after.ru_utime - usage_before.ru_utime,
+        "child_system_cpu_seconds": usage_after.ru_stime - usage_before.ru_stime,
+        "user_cpu_seconds": usage_after.ru_utime - usage_before.ru_utime,
+        "system_cpu_seconds": usage_after.ru_stime - usage_before.ru_stime,
+        "wall_seconds": wall,
+        "tracemalloc_enabled": False,
+        "tracemalloc_peak_bytes": UNOBSERVED,
+        "tracemalloc_current_bytes": UNOBSERVED,
+        "returncode": completed.returncode,
+        "outcome": outcome if isinstance(outcome, dict) else {"value": outcome},
+    }
+
+
+def case_rust_e2e(binary: str, proving: str, cutoff: str) -> dict[str, object]:
+    def work() -> dict[str, object]:
+        proc = subprocess.Popen(
+            [binary, "r1", "--db", proving, "--cutoff", cutoff],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        combined_peak: int | str = 0
+        while proc.poll() is None:
+            parent = current_rss_bytes()
+            child = rss_bytes_for_pid(proc.pid)
+            if isinstance(parent, int) and isinstance(child, int):
+                if combined_peak == 0 or (
+                    isinstance(combined_peak, int) and parent + child > combined_peak
+                ):
+                    combined_peak = parent + child
+            time.sleep(0.02)
+        stdout, stderr = proc.communicate()
+        try:
+            payload = json.loads(stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError, ValueError):
+            payload = {
+                "status": "ERROR",
+                "outcome": {"error": "rust stdout was not JSON", "stderr_tail": stderr[-1000:]},
+            }
+        outcome = payload.get("outcome", {})
+        if not isinstance(outcome, dict):
+            outcome = {"value": outcome}
+        parent = current_rss_bytes()
+        if isinstance(parent, int) and isinstance(combined_peak, int):
+            combined_peak = max(combined_peak, parent)
+        outcome = {
+            **outcome,
+            "child_status": payload.get("status"),
+            "combined_peak_rss_bytes": combined_peak,
+            "parent_rss_after_bytes": parent,
+            "queue_claimed": False,
+            "returncode": proc.returncode,
+        }
+        return outcome
+
+    return measure(work)
 
 
 def _parse_time_l(stderr: str) -> int | str:
@@ -856,6 +1385,19 @@ def _parse_time_l(stderr: str) -> int | str:
     return UNOBSERVED
 
 
+def _parse_time_l_cpu(stderr: str) -> tuple[object, object]:
+    for line in stderr.splitlines():
+        parts = line.split()
+        if "real" in parts and "user" in parts and "sys" in parts:
+            try:
+                user = float(parts[parts.index("user") - 1])
+                system = float(parts[parts.index("sys") - 1])
+            except (ValueError, IndexError):
+                return UNOBSERVED, UNOBSERVED
+            return user, system
+    return UNOBSERVED, UNOBSERVED
+
+
 def run_child_case(
     *,
     executable: str,
@@ -863,6 +1405,7 @@ def run_child_case(
     case: str,
     workspace: Path,
     env: dict[str, str],
+    extra_args: tuple[str, ...] = (),
 ) -> dict[str, object]:
     command = [
         "/usr/bin/time",
@@ -874,6 +1417,7 @@ def run_child_case(
         case,
         "--workspace",
         str(workspace),
+        *extra_args,
     ]
     completed = subprocess.run(
         command,
@@ -882,7 +1426,6 @@ def run_child_case(
         text=True,
         env=env,
     )
-    payload: dict[str, object]
     try:
         payload = json.loads(completed.stdout.strip().splitlines()[-1])
     except (json.JSONDecodeError, IndexError, ValueError):
@@ -895,8 +1438,44 @@ def run_child_case(
             },
         }
     payload["time_l_maxrss_bytes"] = _parse_time_l(completed.stderr)
+    if payload.get("ru_maxrss_bytes") in {None, UNOBSERVED} and isinstance(
+        payload.get("time_l_maxrss_bytes"), int
+    ):
+        payload["ru_maxrss_bytes"] = payload["time_l_maxrss_bytes"]
     payload["returncode"] = completed.returncode
     payload["command"] = command
+    return payload
+
+
+def run_timed_command(command: list[str], env: dict[str, str]) -> dict[str, object]:
+    completed = subprocess.run(
+        ["/usr/bin/time", "-l", *command],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    try:
+        payload = json.loads(completed.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError, ValueError):
+        payload = {
+            "status": "ERROR",
+            "outcome": {
+                "error": "timed stdout was not JSON",
+                "stderr_tail": completed.stderr[-1000:],
+            },
+        }
+    time_l = _parse_time_l(completed.stderr)
+    user, system = _parse_time_l_cpu(completed.stderr)
+    if isinstance(time_l, int):
+        payload["ru_maxrss_bytes"] = time_l
+    payload["time_l_maxrss_bytes"] = time_l
+    payload["peak_from_time_l_bytes"] = time_l
+    payload["returncode"] = completed.returncode
+    payload["command"] = command
+    if payload.get("user_cpu_seconds") in {None, UNOBSERVED}:
+        payload["user_cpu_seconds"] = user
+        payload["system_cpu_seconds"] = system
     return payload
 
 
@@ -911,12 +1490,24 @@ def _median(values: list[float]) -> float:
 
 
 def summarise_case(name: str, runs: list[dict[str, object]]) -> dict[str, object]:
-    measured = runs[WARMUPS:]
+    measured = runs[WARMUPS:] if len(runs) > WARMUPS else runs
     peaks: list[int] = []
     cpus: list[float] = []
     retained: list[int] = []
     for item in measured:
-        peak = item.get("ru_maxrss_bytes")
+        outcome = item.get("outcome") if isinstance(item.get("outcome"), dict) else {}
+        combined = outcome.get("combined_peak_rss_bytes") if isinstance(outcome, dict) else None
+        held = item.get("rss_held_bytes")
+        peak = combined if isinstance(combined, int) else None
+        if peak is None and isinstance(held, int):
+            peak = held
+        if peak is None:
+            time_l = item.get("time_l_maxrss_bytes")
+            ru = item.get("ru_maxrss_bytes")
+            if isinstance(time_l, int):
+                peak = time_l
+            elif isinstance(ru, int):
+                peak = ru
         after = item.get("rss_after_bytes")
         user = item.get("user_cpu_seconds")
         system = item.get("system_cpu_seconds")
@@ -928,7 +1519,7 @@ def summarise_case(name: str, runs: list[dict[str, object]]) -> dict[str, object
             cpus.append(float(user) + float(system))
     return {
         "case": name,
-        "warmup_count": WARMUPS,
+        "warmup_count": 0 if name in {"A6_process_tree", "R2_bounded_candidate", "S1_import_cycle_tracemalloc", "S2_resolve_solo_tracemalloc"} else WARMUPS,
         "measured_count": len(measured),
         "max_peak_rss_bytes": max(peaks) if peaks else UNOBSERVED,
         "median_cpu_seconds": _median(cpus) if cpus else UNOBSERVED,
@@ -937,73 +1528,130 @@ def summarise_case(name: str, runs: list[dict[str, object]]) -> dict[str, object
     }
 
 
-def decide(summaries: dict[str, dict[str, object]]) -> dict[str, object]:
-    import_peak = summaries.get("A2_import_cycle", {}).get("max_peak_rss_bytes")
-    ranked: list[dict[str, object]] = []
-    for name, summary in summaries.items():
-        peak = summary.get("max_peak_rss_bytes")
-        if not isinstance(peak, int):
-            continue
-        removable = (
-            max(0, peak - import_peak) if isinstance(import_peak, int) else peak
-        )
-        ranked.append(
-            {
-                "case": name,
-                "peak_rss_bytes": peak,
-                "retained_rss_bytes": summary.get("max_retained_rss_bytes"),
-                "local_cpu_seconds": summary.get("median_cpu_seconds"),
-                "removable_peak_rss_bytes": removable,
-            }
-        )
-    ranked.sort(
-        key=lambda item: (
-            int(item["removable_peak_rss_bytes"]),
-            int(item["peak_rss_bytes"]),
-        ),
-        reverse=True,
+def _parity_from_summaries(summaries: dict[str, dict[str, object]]) -> dict[str, object]:
+    def last_digest(name: str) -> object:
+        runs = summaries.get(name, {}).get("runs") or []
+        for item in reversed(runs):
+            outcome = item.get("outcome") if isinstance(item.get("outcome"), dict) else {}
+            if isinstance(outcome, dict) and outcome.get("manifest_digest"):
+                return outcome["manifest_digest"]
+        return UNOBSERVED
+
+    python_digest = last_digest("R1_python_observation_scan")
+    rust_digest = last_digest("R1_rust_observation_scan")
+    e2e_digest = last_digest("R1_rust_e2e_parent")
+    match = (
+        isinstance(python_digest, str)
+        and python_digest.startswith("sha256:")
+        and python_digest == rust_digest
+        and (e2e_digest in {rust_digest, UNOBSERVED} or e2e_digest == python_digest)
     )
-    leader = ranked[0] if ranked else None
-    threshold_ok = False
-    if leader is not None:
-        removable = int(leader["removable_peak_rss_bytes"])
-        peak = int(leader["peak_rss_bytes"])
-        threshold_ok = removable >= GO_PEAK_BYTES or (
-            peak > 0 and removable / peak >= GO_PEAK_RATIO
-        )
-    h2_names = {
-        "B10_copied_canonical",
-        "C1_permitted_rows",
-        "C2_parsed_observations",
-        "C5_load_graphiti_units",
-        "C6_resolve_event_units",
-        "D1_cycle_max_writes_0",
+    return {
+        "boundary": "retained_observation_body_scan",
+        "e2e_manifest_digest": e2e_digest,
+        "match": match,
+        "python_manifest_digest": python_digest,
+        "rust_manifest_digest": rust_digest,
+        "schema": SCAN_SCHEMA,
+        "unit_parity_claimed": False,
     }
-    h2_leads = bool(leader and str(leader["case"]) in h2_names)
-    if not ranked:
-        decision = "HOLD_FOR_MINI_MEASUREMENT"
-        reason = "no measured peaks"
-    elif h2_leads:
-        decision = "NO_GO"
-        reason = (
-            "H2 full-corpus reconstruction is the largest measured contributor; "
-            "next correction is exact row selection plus bounded/streaming "
-            "resolution in Python, not a Rust translation of the scan"
-        )
-    elif threshold_ok:
-        decision = "GO"
-        reason = "leading candidate meets the pre-registered RSS floor"
+
+
+def decide(
+    summaries: dict[str, dict[str, object]],
+    *,
+    parity: dict[str, object] | None = None,
+) -> dict[str, object]:
+    parity = parity or _parity_from_summaries(summaries)
+    python_scan = summaries.get("R1_python_observation_scan", {})
+    rust_scan = summaries.get("R1_rust_observation_scan", {})
+    rust_e2e = summaries.get("R1_rust_e2e_parent", {})
+    rust_r0 = summaries.get("R0_rust_process_baseline", {})
+    python_peak = python_scan.get("max_peak_rss_bytes")
+    rust_child_peak = rust_scan.get("max_peak_rss_bytes")
+    e2e_peak = rust_e2e.get("max_peak_rss_bytes")
+    python_cpu = python_scan.get("median_cpu_seconds")
+    e2e_cpu = rust_e2e.get("median_cpu_seconds")
+    r2 = summaries.get("R2_bounded_candidate", {})
+    r2_hold = True
+    if r2:
+        last = (r2.get("runs") or [{}])[-1]
+        r2_hold = last.get("status") == "HOLD" or (
+            isinstance(last.get("outcome"), dict) and last["outcome"].get("status") == "HOLD"
+        ) or last.get("mode") == "r2"
+    rust_present = rust_r0.get("max_peak_rss_bytes") is not UNOBSERVED or any(
+        run.get("status") == "OK" for run in (rust_r0.get("runs") or [])
+    )
+    if not rust_present or rust_scan.get("max_peak_rss_bytes") is UNOBSERVED:
+        decision = "HOLD"
+        reason = "research Rust comparator was not measured on this host"
+    elif python_peak is UNOBSERVED or e2e_peak is UNOBSERVED:
+        decision = "HOLD"
+        reason = "Python or Rust end-to-end observation-scan RSS is UNOBSERVED"
+    elif parity.get("match") is not True:
+        decision = "HOLD"
+        reason = "observation-scan manifest parity is incomplete or mismatched"
+    elif not isinstance(python_peak, int) or not isinstance(e2e_peak, int):
+        decision = "HOLD"
+        reason = "observation-scan RSS is not an integer measurement"
     else:
-        decision = "NO_GO"
-        reason = "no candidate meets 20% of process peak RSS or 64 MiB removable peak"
+        removable = max(0, python_peak - e2e_peak)
+        threshold_ok = removable >= GO_PEAK_BYTES or (
+            python_peak > 0 and removable / python_peak >= GO_PEAK_RATIO
+        )
+        cpu_regress = (
+            isinstance(python_cpu, (int, float))
+            and isinstance(e2e_cpu, (int, float))
+            and python_cpu > 0
+            and e2e_cpu > python_cpu * 1.2
+        )
+        if threshold_ok and cpu_regress:
+            decision = "HOLD"
+            reason = (
+                "Rust reduces observation-scan RSS enough to clear the gate, but "
+                "local CPU regresses more than 20% and the owner has not accepted "
+                "that RAM trade-off"
+            )
+        elif threshold_ok:
+            decision = "GO"
+            reason = (
+                "Rust observation-scan comparator matches Python output and reduces "
+                "end-to-end peak RSS by at least 20% or 64 MiB after launch/IPC. "
+                "This GO is for the retained-observation body-scan boundary only; "
+                "it does not claim event-resolution unit parity and authorises no "
+                "implementation."
+            )
+        else:
+            decision = "NO_GO"
+            reason = (
+                "methodologically valid Rust observation-scan comparison shows RAM "
+                "improvement below both the 20% and 64 MiB thresholds after launch/IPC"
+            )
+        return {
+            "go_or_no_go": decision,
+            "reason": reason,
+            "threshold_ok": threshold_ok,
+            "parity": parity,
+            "python_scan_peak_rss_bytes": python_peak,
+            "rust_child_peak_rss_bytes": rust_child_peak if isinstance(rust_child_peak, int) else UNOBSERVED,
+            "rust_e2e_peak_rss_bytes": e2e_peak,
+            "removable_peak_rss_bytes": removable,
+            "r2_hold": r2_hold,
+            "selected_boundary": "retained_observation_body_scan",
+            "unit_parity_claimed": False,
+        }
     return {
         "go_or_no_go": decision,
         "reason": reason,
-        "threshold_ok": threshold_ok,
-        "leader": leader,
-        "ranked_candidate_boundaries": ranked[:12],
-        "h2_leads": h2_leads,
-        "import_peak_rss_bytes": import_peak if isinstance(import_peak, int) else UNOBSERVED,
+        "threshold_ok": False,
+        "parity": parity,
+        "python_scan_peak_rss_bytes": python_peak if isinstance(python_peak, int) else UNOBSERVED,
+        "rust_child_peak_rss_bytes": rust_child_peak if isinstance(rust_child_peak, int) else UNOBSERVED,
+        "rust_e2e_peak_rss_bytes": e2e_peak if isinstance(e2e_peak, int) else UNOBSERVED,
+        "removable_peak_rss_bytes": UNOBSERVED,
+        "r2_hold": r2_hold,
+        "selected_boundary": "retained_observation_body_scan",
+        "unit_parity_claimed": False,
     }
 
 
@@ -1056,9 +1704,11 @@ def assemble_packet(
     *,
     summaries: dict[str, dict[str, object]],
     copy_meta: dict[str, object],
+    rust_meta: dict[str, object],
     workspace_digest: str,
 ) -> dict[str, object]:
-    decision = decide(summaries)
+    parity = _parity_from_summaries(summaries)
+    decision = decide(summaries, parity=parity)
     questions = {
         "1_largest_idle_rss_process": summaries.get("A6_process_tree", {})
         .get("runs", [{}])[-1]
@@ -1069,14 +1719,12 @@ def assemble_packet(
             "A4_idle_worker", {}
         ).get("max_retained_rss_bytes", UNOBSERVED),
         "3_active_peak_resolving_one_graphiti_event": summaries.get(
-            "B10_copied_canonical", summaries.get("B2_one_event_representative", {})
+            "B10_copied_one_event", summaries.get("B2_one_event_representative", {})
         ).get("max_peak_rss_bytes", UNOBSERVED),
         "4_rss_after_one_event_or_cycle": summaries.get(
             "D1_cycle_max_writes_0", {}
         ).get("max_retained_rss_bytes", UNOBSERVED),
-        "5_stage_largest_removable_peak_rss": (decision.get("leader") or {}).get(
-            "case", UNOBSERVED
-        ),
+        "5_stage_largest_removable_peak_rss": UNOBSERVED,
         "6_stage_most_local_cpu": max(
             (
                 (
@@ -1096,16 +1744,21 @@ def assemble_packet(
             "times10_peak": summaries.get("B3_one_event_times10", {}).get(
                 "max_peak_rss_bytes", UNOBSERVED
             ),
-            "copied_peak": summaries.get("B10_copied_canonical", {}).get(
+            "scaled_peak": summaries.get("B11_scaled_one_event", {}).get(
+                "max_peak_rss_bytes", UNOBSERVED
+            ),
+            "copied_peak": summaries.get("B10_copied_one_event", {}).get(
                 "max_peak_rss_bytes", UNOBSERVED
             ),
         },
         "8_latest_bodies_parsed_or_materialised_more_than_once": "YES_STATIC",
-        "9_dominant_memory_source": (decision.get("leader") or {}).get(
-            "case", UNOBSERVED
-        ),
+        "9_dominant_memory_source": "retained_corpus_reconstruction",
         "10_bounded_rust_process_would_remove_dominant_allocation": (
-            False if decision["go_or_no_go"] == "NO_GO" else UNOBSERVED
+            True
+            if decision["go_or_no_go"] == "GO"
+            else False
+            if decision["go_or_no_go"] == "NO_GO"
+            else UNOBSERVED
         ),
     }
     return {
@@ -1113,29 +1766,38 @@ def assemble_packet(
         "status": "MEASURED",
         "decision": decision["go_or_no_go"],
         "decision_reason": decision["reason"],
+        "previous_no_go_withdrawn": True,
         "inspection_head": git_head(),
         "inspection_date": datetime.now(tz=UTC).strftime("%Y-%m-%d"),
         "intended_hardware": host_identity(),
         "copy_meta": copy_meta,
+        "rust_meta": rust_meta,
+        "parity": parity,
         "workspace_digest": workspace_digest,
         "method": {
             "peak_rss_and_cpu": ["/usr/bin/time -l", "resource.getrusage"],
             "current_or_retained_rss": ["ps -o rss"],
-            "python_allocation_supplement": "tracemalloc",
+            "python_allocation_supplement": "tracemalloc off for primary; S1/S2 only",
+            "sqlite_snapshot": "sqlite3.Connection.backup from read-only source",
+            "one_event": "event identity prepared outside the measured child; one _resolve_graphiti_event_units call",
             "fresh_process_per_case": True,
             "warmup_plus_measured_runs": f"{WARMUPS} warmup and {MEASURED_RUNS} fresh-process executions",
+            "rust": "research-only crate docs/research/issue-898-ram-cpu-rust",
         },
         "go_gate": decision,
         "questions": questions,
         "cases": summaries,
         "non_effects": [
-            "no Rust production code",
+            "no product code change",
+            "no Python exact-row-selection or query fix",
+            "no production Rust crate, Cargo workspace or runtime integration",
             "no provider or model-catalogue call",
             "no queue claim, consume, retry or release",
             "no writable canonical-store access",
             "no Neo4j or Graphiti mutation",
             "no publication, deployment, activation or canary",
             "no live daemon restart, signal or reconfiguration",
+            "no implementation issue created",
         ],
     }
 
@@ -1150,39 +1812,55 @@ def orchestrate(*, output: Path, workspace: Path | None = None) -> dict[str, obj
     try:
         paths = build_workspace(workspace)
         copy_meta = json.loads(paths.get("copy_meta", "{}"))
+        rust_meta = json.loads(paths.get("rust_meta", "{}"))
         summaries: dict[str, dict[str, object]] = {}
+        once = {
+            "A6_process_tree",
+            "R2_bounded_candidate",
+            "S1_import_cycle_tracemalloc",
+            "S2_resolve_solo_tracemalloc",
+        }
         for name, _kind, _store in CASE_SPECS:
+            print(f"case {name} begin", flush=True)
             runs: list[dict[str, object]] = []
-            repeats = 1 if name == "A6_process_tree" else WARMUPS + MEASURED_RUNS
+            repeats = 1 if name in once else WARMUPS + MEASURED_RUNS
             if name == "A1_bare_interpreter":
+                script = (
+                    "import gc,json,os,resource,subprocess,sys,time\n"
+                    "gc.collect()\n"
+                    "rss=lambda:int(subprocess.check_output(['ps','-o','rss=','-p',str(os.getpid())],text=True).split()[0])*1024\n"
+                    "before=rss(); u0=resource.getrusage(resource.RUSAGE_SELF); t0=time.perf_counter()\n"
+                    "ok=True\n"
+                    "gc.collect(); u1=resource.getrusage(resource.RUSAGE_SELF)\n"
+                    "raw=u1.ru_maxrss; maxrss=raw if sys.platform=='darwin' else raw*1024\n"
+                    "print(json.dumps({'pid':os.getpid(),'status':'OK','rss_before_bytes':before,'rss_after_bytes':rss(),'ru_maxrss_bytes':maxrss,'user_cpu_seconds':u1.ru_utime-u0.ru_utime,'system_cpu_seconds':u1.ru_stime-u0.ru_stime,'wall_seconds':time.perf_counter()-t0,'tracemalloc_enabled':False,'tracemalloc_peak_bytes':'UNOBSERVED','outcome':{'imported':False}}))\n"
+                )
                 for _ in range(repeats):
-                    script = (
-                        "import gc,json,os,resource,subprocess,sys,time,tracemalloc\n"
-                        "gc.collect()\n"
-                        "rss=lambda:int(subprocess.check_output(['ps','-o','rss=','-p',str(os.getpid())],text=True).split()[0])*1024\n"
-                        "before=rss(); u0=resource.getrusage(resource.RUSAGE_SELF); tracemalloc.start(); t0=time.perf_counter()\n"
-                        "ok=True\n"
-                        "traced,peak=tracemalloc.get_traced_memory(); tracemalloc.stop(); gc.collect(); u1=resource.getrusage(resource.RUSAGE_SELF)\n"
-                        "raw=u1.ru_maxrss; maxrss=raw if sys.platform=='darwin' else raw*1024\n"
-                        "print(json.dumps({'pid':os.getpid(),'status':'OK','rss_before_bytes':before,'rss_after_bytes':rss(),'ru_maxrss_bytes':maxrss,'user_cpu_seconds':u1.ru_utime-u0.ru_utime,'system_cpu_seconds':u1.ru_stime-u0.ru_stime,'wall_seconds':time.perf_counter()-t0,'tracemalloc_peak_bytes':peak,'outcome':{'imported':False}}))\n"
+                    runs.append(
+                        run_timed_command([sys.executable, "-c", script], env)
                     )
-                    completed = subprocess.run(
-                        ["/usr/bin/time", "-l", sys.executable, "-c", script],
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                        env=env,
-                    )
-                    try:
-                        payload = json.loads(completed.stdout.strip().splitlines()[-1])
-                    except (json.JSONDecodeError, IndexError, ValueError):
-                        payload = {
-                            "status": "ERROR",
-                            "outcome": {"error": completed.stderr[-1000:]},
-                        }
-                    payload["time_l_maxrss_bytes"] = _parse_time_l(completed.stderr)
-                    runs.append(payload)
+            elif name.startswith("R0") or name.startswith("R1_rust_observation"):
+                binary = paths.get("rust_binary")
+                if not binary:
+                    runs.append({"status": UNOBSERVED, "reason": "research rust binary missing", "outcome": {}})
+                elif name.startswith("R0"):
+                    for _ in range(repeats):
+                        runs.append(run_timed_command([binary, "r0"], env))
+                else:
+                    store = paths.get("proving_copied") or paths.get("proving_scaled")
+                    cutoff = paths.get("cutoff_copied") or paths.get("cutoff_scaled")
+                    if not store or not cutoff:
+                        runs.append({"status": UNOBSERVED, "reason": "scan store missing", "outcome": {}})
+                    else:
+                        for _ in range(repeats):
+                            runs.append(
+                                run_timed_command(
+                                    [binary, "r1", "--db", store, "--cutoff", cutoff],
+                                    env,
+                                )
+                            )
             else:
+                extra = ("--tracemalloc",) if name.startswith("S") else ()
                 for _ in range(repeats):
                     runs.append(
                         run_child_case(
@@ -1191,15 +1869,22 @@ def orchestrate(*, output: Path, workspace: Path | None = None) -> dict[str, obj
                             case=name,
                             workspace=workspace,
                             env=env,
+                            extra_args=extra,
                         )
                     )
             summaries[name] = summarise_case(name, runs)
+            print(
+                f"case {name} peak={summaries[name]['max_peak_rss_bytes']} "
+                f"cpu={summaries[name]['median_cpu_seconds']}",
+                flush=True,
+            )
         workspace_digest = hashlib.sha256(
             json.dumps(sorted(paths.items()), sort_keys=True).encode()
         ).hexdigest()
         packet = assemble_packet(
             summaries=summaries,
             copy_meta=copy_meta,
+            rust_meta=rust_meta,
             workspace_digest="sha256:" + workspace_digest,
         )
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -1219,6 +1904,29 @@ def load_workspace(path: Path) -> dict[str, str]:
         mapping[f"proving_{item.stem.removeprefix('proving-')}"] = str(item)
     for item in path.glob("unpublished-*.sqlite3"):
         mapping[f"unpublished_{item.stem.removeprefix('unpublished-')}"] = str(item)
+    for item in path.glob("event-*.json"):
+        mapping[f"event_{item.stem.removeprefix('event-')}"] = str(item)
+    rust_binary = path / "issue-898-ram-cpu"
+    if rust_binary.is_file():
+        mapping["rust_binary"] = str(rust_binary)
+    copied_event = path / "event-copied.json"
+    if copied_event.is_file():
+        spec = json.loads(copied_event.read_text(encoding="utf-8"))
+        mapping["clock_copied"] = str(spec.get("clock") or utc_text(datetime.now(tz=UTC)))
+        mapping["cutoff_copied"] = raw_http_cutoff(parse_utc(mapping["clock_copied"]))
+    for kind in (
+        "solo",
+        "representative",
+        "times10",
+        "scaled",
+        "json",
+        "rss",
+        "atom",
+        "large",
+        "malformed",
+        "empty",
+    ):
+        mapping[f"cutoff_{kind}"] = raw_http_cutoff(CLOCK)
     return mapping
 
 
@@ -1226,6 +1934,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Issue #898 Mini RAM/CPU packet")
     parser.add_argument("--case")
     parser.add_argument("--workspace", type=Path)
+    parser.add_argument("--tracemalloc", action="store_true")
     parser.add_argument(
         "--output",
         type=Path,
@@ -1235,7 +1944,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.case:
         if args.workspace is None:
             raise SystemExit("--workspace is required with --case")
-        payload = run_named_case(args.case, load_workspace(args.workspace))
+        payload = run_named_case(
+            args.case,
+            load_workspace(args.workspace),
+            use_tracemalloc=args.tracemalloc,
+        )
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return 0
     orchestrate(output=args.output, workspace=args.workspace)
