@@ -217,7 +217,7 @@ def build_selected_test_commands(
             (
                 *common,
                 "-n",
-                "4",
+                "5",
                 "--dist",
                 "worksteal",
                 "--max-worker-restart=0",

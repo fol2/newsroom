@@ -291,7 +291,7 @@ def test_selected_evidence_uses_fixed_parallel_then_serial_commands(
             "-p",
             "no:cacheprovider",
             "-n",
-            "4",
+            "5",
             "--dist",
             "worksteal",
             "--max-worker-restart=0",
