@@ -311,11 +311,18 @@ def _campaign_receipt_evidence(
         connection.close()
 
     provider_id = str(provider.get("provider_id") or "")
+    transport_id = str(provider.get("transport_id") or "")
     model_id = str(provider.get("model_id") or "")
     embedding_provider_id = str(provider.get("embedding_provider_id") or "")
     embedding_model_id = str(provider.get("embedding_model_id") or "")
     if not all(
-        (provider_id, model_id, embedding_provider_id, embedding_model_id)
+        (
+            provider_id,
+            transport_id,
+            model_id,
+            embedding_provider_id,
+            embedding_model_id,
+        )
     ):
         raise GraphitiCampaignStop("campaign provider identities are incomplete")
     proposal_count = 0
@@ -388,13 +395,14 @@ def _campaign_receipt_evidence(
                 or not isinstance(usage, Mapping)
                 or usage.get("usage_basis") != "PROVIDER_REPORTED"
                 or not isinstance(transport, Mapping)
+                or transport.get("transport") != transport_id
                 or transport.get("max_retries") != 0
                 or not isinstance(invocation_id, str)
                 or not invocation_id
                 or invocation_id in invocation_ids
             ):
                 raise GraphitiCampaignStop(
-                    "campaign provider identity, usage or retry drifted"
+                    "campaign provider identity, transport, usage or retry drifted"
                 )
             invocation_ids.add(invocation_id)
             chat_count += 1

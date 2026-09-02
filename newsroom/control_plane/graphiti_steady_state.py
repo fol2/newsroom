@@ -74,7 +74,7 @@ from newsroom.projection.neo4j import StructuralReconciliationView
 
 SCHEMA_VERSION = "newsroom.graphiti-steady-state-packet.v4"
 
-CAMPAIGN_SCHEMA_VERSION = "newsroom.graphiti-bounded-campaign-input.v3"
+CAMPAIGN_SCHEMA_VERSION = "newsroom.graphiti-bounded-campaign-input.v4"
 
 CAMPAIGN_REQUIRED_STOP_CONDITIONS = frozenset(
     {
@@ -1189,6 +1189,7 @@ def _historical_partition(
         category: Counter() for category in HISTORICAL_PARTITION_CATEGORIES
     }
     candidate_events: list[dict[str, object]] = []
+    candidate_source_semantics: dict[int, tuple[str, str]] = {}
     now_text = observed_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
     for landed in landed_rows:
@@ -1345,11 +1346,87 @@ def _historical_partition(
                                 "ingest_ids": current_ingest_ids,
                             }
                         )
+                        authorities = {
+                            (
+                                digest_canonical(
+                                    {
+                                        "item_id": item.authority.item_id,
+                                        "source_native_revision_token": None,
+                                        "permitted_state_digest": item.revision_digest,
+                                    }
+                                ),
+                                item.authority.revision_id,
+                            )
+                            for item in current_units
+                            if item.authority is not None
+                        }
+                        if len(authorities) == 1 and all(
+                            item.authority is not None for item in current_units
+                        ):
+                            candidate_source_semantics[ledger_seq] = authorities.pop()
                     else:
                         category = "RIGHTS_OR_INPUT_HELD"
                         reason = binding_reason
         assignments[category].append(ledger_seq)
         reason_counts[category][reason] += 1
+
+    retained_revision_by_semantics: dict[str, str] = {}
+    if authority is not None and authority.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_revisions'"
+    ).fetchone():
+        retained_revision_by_semantics = {
+            str(row[1]): str(row[0])
+            for row in authority.execute(
+                "SELECT revision_id,revision_identity_digest "
+                "FROM source_revisions"
+            ).fetchall()
+        }
+
+    candidates_by_semantics: dict[str, list[tuple[int, str]]] = {}
+    for ledger_seq, (revision_semantics, revision_id) in (
+        candidate_source_semantics.items()
+    ):
+        candidates_by_semantics.setdefault(revision_semantics, []).append(
+            (ledger_seq, revision_id)
+        )
+    held_semantic_duplicates: set[int] = set()
+    for semantic_key, semantic_candidates in candidates_by_semantics.items():
+        ordered = sorted(semantic_candidates)
+        retained_revision_id = retained_revision_by_semantics.get(semantic_key)
+        if retained_revision_id is None:
+            held_semantic_duplicates.update(seq for seq, _revision_id in ordered[1:])
+            continue
+        exact = [
+            seq
+            for seq, revision_id in ordered
+            if revision_id == retained_revision_id
+        ]
+        keep = exact[0] if exact else None
+        held_semantic_duplicates.update(
+            seq for seq, _revision_id in ordered if seq != keep
+        )
+
+    if held_semantic_duplicates:
+        candidate_assignments = assignments["CURRENT_DISPATCH_PREFLIGHT_CANDIDATE"]
+        assignments["CURRENT_DISPATCH_PREFLIGHT_CANDIDATE"] = [
+            seq for seq in candidate_assignments if seq not in held_semantic_duplicates
+        ]
+        assignments["RIGHTS_OR_INPUT_HELD"].extend(held_semantic_duplicates)
+        assignments["RIGHTS_OR_INPUT_HELD"].sort()
+        current_reason = "CURRENT_RIGHTS_INPUT_AND_BINDING_VERIFIED"
+        reason_counts["CURRENT_DISPATCH_PREFLIGHT_CANDIDATE"][current_reason] -= len(
+            held_semantic_duplicates
+        )
+        if not reason_counts["CURRENT_DISPATCH_PREFLIGHT_CANDIDATE"][current_reason]:
+            del reason_counts["CURRENT_DISPATCH_PREFLIGHT_CANDIDATE"][current_reason]
+        reason_counts["RIGHTS_OR_INPUT_HELD"][
+            "UNCHANGED_CONTENT_REOBSERVATION_REQUIRES_OCCURRENCE"
+        ] += len(held_semantic_duplicates)
+        candidate_events = [
+            candidate
+            for candidate in candidate_events
+            if int(candidate["ledger_seq"]) not in held_semantic_duplicates
+        ]
 
     all_sequences = [seq for values in assignments.values() for seq in values]
     disjoint = len(all_sequences) == len(set(all_sequences))
@@ -1375,6 +1452,7 @@ def _historical_partition(
         "disjoint": disjoint,
         "total": total,
         "categories": categories,
+        "source_semantic_collision_holds": sorted(held_semantic_duplicates),
         "current_preflight_candidates": candidate_events,
         "current_preflight_candidate_manifest_digest": digest_canonical(
             candidate_events
@@ -1590,6 +1668,12 @@ def graphiti_operational_partition_snapshot(
         for item in gap_decisions
         if item.disposition is GraphitiEventRepairDisposition.HOLD
     }
+    hold_reasons.update(
+        {
+            int(ledger_seq): "UNCHANGED_CONTENT_REOBSERVATION_REQUIRES_OCCURRENCE"
+            for ledger_seq in partition.get("source_semantic_collision_holds", ())
+        }
+    )
     for category in (
         "RIGHTS_OR_INPUT_HELD",
         "NON_REPLAYABLE_OR_AMBIGUOUS_EFFECT_HOLD",
@@ -2086,6 +2170,7 @@ def _campaign_evidence(
 
     provider = mapping(campaign.get("provider"), "PROVIDER_IDENTITIES")
     if set(provider) != {
+        "transport_id",
         "provider_id",
         "model_id",
         "embedding_provider_id",
@@ -2095,6 +2180,7 @@ def _campaign_evidence(
     provider_value = {
         key: token(provider.get(key), f"{key.upper()}_IDENTITY")
         for key in (
+            "transport_id",
             "provider_id",
             "model_id",
             "embedding_provider_id",
@@ -2774,6 +2860,7 @@ def validate_graphiti_campaign_packet(
         not isinstance(provider, Mapping)
         or set(provider)
         != {
+            "transport_id",
             "provider_id",
             "model_id",
             "embedding_provider_id",

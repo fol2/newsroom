@@ -23,6 +23,7 @@ from newsroom.control_plane.graphiti_operational_readiness import (
     GraphitiOperationalReadinessError,
     OperationalAuthorityBootstrapPlan,
     _accepted_source_contract,
+    _preflight_source_revision_semantics,
     _revision_predecessor_bindings,
     _source_contract_shape,
     _source_requests,
@@ -55,7 +56,9 @@ from newsroom.sources.types import (
     PortfolioFunction,
     SourceDependencyKind,
     SourceLifecycleStage,
+    SourceRevisionId,
     SourceRole,
+    SourceTime,
 )
 
 from .authority_event_helpers import payload_schemas, registry_v1
@@ -356,6 +359,7 @@ def test_campaign_input_is_dormant_exact_bounded_machine_contract() -> None:
     }
     assert campaign["provider"] == {
         "provider_id": "cursor-agent-cli",
+        "transport_id": "CURSOR_SDK",
         "model_id": "composer-2.5",
         "embedding_provider_id": "openrouter",
         "embedding_model_id": "openai/text-embedding-3-large",
@@ -678,6 +682,32 @@ def test_source_requests_reject_missing_retained_or_rights_identity() -> None:
         _source_requests(replace(unit, authority=None), _rights())
     with pytest.raises(GraphitiOperationalReadinessError, match="rights evidence"):
         _source_requests(unit, {"packet_digest": ""})
+
+
+def test_prewrite_rejects_timestamp_only_reobservation_as_a_second_revision() -> None:
+    unit = _unit()
+    first = _source_requests(unit, _rights())[3]
+    reobserved = replace(
+        first,
+        revision_id=SourceRevisionId.new(),
+        source_published_time=SourceTime.exact(
+            UtcTimestamp.parse("2026-09-02T11:00:00.000000Z")
+        ),
+        observed_at=UtcTimestamp.parse("2026-09-02T13:00:00.000000Z"),
+        idempotency_key="issue895-source-revision:timestamp-reobservation",
+    )
+    assert first.revision_id != reobserved.revision_id
+    assert first.revision_identity_digest == reobserved.revision_identity_digest
+
+    authority = sqlite3.connect(":memory:")
+    try:
+        with pytest.raises(
+            GraphitiOperationalReadinessError,
+            match="multiple SourceRevision identities",
+        ):
+            _preflight_source_revision_semantics(authority, (first, reobserved))
+    finally:
+        authority.close()
 
 
 def test_bootstrap_uses_real_source_and_object_authority_and_replays(

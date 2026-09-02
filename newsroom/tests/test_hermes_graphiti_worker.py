@@ -840,12 +840,15 @@ def test_campaign_receipt_requires_exact_attempt_and_reconciled_spend(
         "provider_attempt_number": 1,
         "chat_invocations": [
             {
-                "provider": "provider",
+                "provider": "cursor-agent-cli",
                 "model": "model",
                 "outcome": "COMPLETE",
                 "model_invocation_id": "chat-invocation",
                 "usage": {"usage_basis": "PROVIDER_REPORTED"},
-                "transport_qualification": {"max_retries": 0},
+                "transport_qualification": {
+                    "transport": "CURSOR_SDK",
+                    "max_retries": 0,
+                },
             }
         ],
         "embedding_usage": embedding,
@@ -920,7 +923,8 @@ def test_campaign_receipt_requires_exact_attempt_and_reconciled_spend(
         str(path),
         ingest_ids=("ingest-1",),
         provider={
-            "provider_id": "provider",
+            "provider_id": "cursor-agent-cli",
+            "transport_id": "CURSOR_SDK",
             "model_id": "model",
             "embedding_provider_id": "embedding-provider",
             "embedding_model_id": "embedding",
@@ -942,6 +946,19 @@ def test_campaign_receipt_requires_exact_attempt_and_reconciled_spend(
             str(path), ingest_ids=("ingest-1",)
         )
 
+    with pytest.raises(worker.GraphitiCampaignStop, match="transport"):
+        worker._campaign_receipt_evidence(
+            str(path),
+            ingest_ids=("ingest-1",),
+            provider={
+                "provider_id": "cursor-agent-cli",
+                "transport_id": "RETIRED_TRANSPORT",
+                "model_id": "model",
+                "embedding_provider_id": "embedding-provider",
+                "embedding_model_id": "embedding",
+            },
+        )
+
     connection = sqlite3.connect(path)
     connection.execute(
         "UPDATE unpublished_graphiti_spend SET status='UNRECONCILED'"
@@ -953,7 +970,8 @@ def test_campaign_receipt_requires_exact_attempt_and_reconciled_spend(
             str(path),
             ingest_ids=("ingest-1",),
             provider={
-                "provider_id": "provider",
+                "provider_id": "cursor-agent-cli",
+                "transport_id": "CURSOR_SDK",
                 "model_id": "model",
                 "embedding_provider_id": "embedding-provider",
                 "embedding_model_id": "embedding",
@@ -1695,6 +1713,7 @@ def _campaign() -> dict[str, object]:
         },
         "provider": {
             "provider_id": "provider",
+            "transport_id": "CURSOR_SDK",
             "model_id": "model",
             "embedding_provider_id": "embedding-provider",
             "embedding_model_id": "embedding",
