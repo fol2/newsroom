@@ -23,6 +23,7 @@ from newsroom.control_plane.graphiti_operational_readiness import (
     GraphitiOperationalReadinessError,
     OperationalAuthorityBootstrapPlan,
     _accepted_source_contract,
+    _revision_predecessor_bindings,
     _source_contract_shape,
     _source_requests,
     bootstrap_operational_authority,
@@ -53,6 +54,7 @@ from newsroom.sources.types import (
     ObservationModel,
     PortfolioFunction,
     SourceDependencyKind,
+    SourceLifecycleStage,
     SourceRole,
 )
 
@@ -156,6 +158,80 @@ def _unit() -> CorpusIngestUnit:
     )
 
 
+def _next_revision(unit: CorpusIngestUnit) -> CorpusIngestUnit:
+    body = "Later current body with a materially changed exact revision."
+    observed_at = "2026-09-02T12:30:00.000000Z"
+    updated_at = "2026-09-02T12:20:00.000000Z"
+    revision_digest = content_digest(
+        headline=unit.headline,
+        body=body,
+        canonical_url=unit.canonical_url,
+    )
+    base = replace(
+        unit,
+        body=body,
+        updated_at=updated_at,
+        effective_revision=EffectiveRevisionIdentity(
+            source_id=unit.source_id,
+            item_key=unit.item_key,
+            revision_digest=revision_digest,
+            first_observed_at=observed_at,
+        ),
+        effective_pull_first_observed_at=observed_at,
+        authority=None,
+    )
+    (
+        admission_id,
+        access_id,
+        definition_id,
+        item_id,
+        revision_id,
+        representation_id,
+    ) = observation_authority_ids(
+        source_id=base.source_id,
+        item_key=base.item_key,
+        revision_digest=base.revision_digest,
+        representation_digest=base.representation_digest,
+        rights_authority_run_id="rights-run-1",
+        rights_gate_id="RIGHTS_UK-01",
+        rights_gate_reason="retained PASS",
+        published_at=base.published_at,
+        updated_at=base.updated_at,
+    )
+    version_id = source_definition_version_id(
+        source_id=base.source_id,
+        source_url=base.source_definition_url,
+    )
+    records = (
+        {"record_type": "SOURCE_DEFINITION", "record_id": str(definition_id)},
+        {
+            "record_type": "SOURCE_DEFINITION_VERSION",
+            "record_id": str(version_id),
+        },
+        {"record_type": "SOURCE_ITEM", "record_id": str(item_id)},
+        {"record_type": "SOURCE_REVISION", "record_id": str(revision_id)},
+        {
+            "record_type": "DISCOVERY_REPRESENTATION",
+            "record_id": str(representation_id),
+        },
+        {"record_type": "OBJECT_ADMISSION", "record_id": str(admission_id)},
+        {"record_type": "OBJECT_ACCESS_DECISION", "record_id": str(access_id)},
+    )
+    return replace(
+        base,
+        authority=CorpusAuthorityBinding(
+            admission_id=str(admission_id),
+            access_decision_id=str(access_id),
+            definition_id=str(definition_id),
+            definition_version_id=str(version_id),
+            item_id=str(item_id),
+            revision_id=str(revision_id),
+            representation_id=str(representation_id),
+            records=records,
+        ),
+    )
+
+
 def _rights() -> dict[str, object]:
     return {
         "rights_authority_run_id": "rights-run-1",
@@ -177,6 +253,7 @@ def _plan(unit: CorpusIngestUnit) -> OperationalAuthorityBootstrapPlan:
         candidate_events=(event,),
         units=(unit,),
         rights_by_source=((unit.source_id, _rights()),),
+        revision_predecessors=((unit.revision_id, None),),
         cohort_digest=digest_canonical({"cohort": "current"}),
         plan_digest=digest_canonical({"plan": "current"}),
     )
@@ -273,6 +350,10 @@ def test_campaign_input_is_dormant_exact_bounded_machine_contract() -> None:
 
     assert campaign["campaign_authorised"] is False
     assert campaign["focus_gate"]["head_sha"] == "a" * 40
+    assert campaign["selection_policy"] == {
+        "policy_id": "graphiti-operational-current-cohort",
+        "policy_version": "v1",
+    }
     assert campaign["provider"] == {
         "provider_id": "cursor-agent-cli",
         "model_id": "composer-2.5",
@@ -318,6 +399,10 @@ def test_source_requests_bind_exact_retained_identity_and_rights() -> None:
         unit, _rights()
     )
     assert str(definition.definition_id) == unit.authority.definition_id
+    assert definition.name == "UK-01 Home Office + UKVI Atom"
+    assert definition.editorial_purpose == (
+        "Observe Home Office and UKVI immigration, status and guidance updates."
+    )
     assert str(version.version_id) == unit.authority.definition_version_id
     assert str(item.item_id) == unit.authority.item_id
     assert str(revision.revision_id) == unit.authority.revision_id
@@ -326,6 +411,32 @@ def test_source_requests_bind_exact_retained_identity_and_rights() -> None:
     assert revision.permitted_state_digest == unit.revision_digest
     assert representation.representation_digest == unit.representation_digest
     assert version.rights.allowed_use == "proposal.extraction"
+    assert version.rights.rights_policy_version == "control-plane-dispatch-rights-v1"
+    assert version.adapter_contract.canonical_value() == {
+        "policy_id": "control-plane-retained-source-adapter",
+        "policy_version": "v1",
+    }
+    assert version.baseline_policy.reference.canonical_value() == {
+        "policy_id": "operational-current-cohort-baseline",
+        "policy_version": "v1",
+    }
+    assert version.baseline_policy.freshness_window_seconds == 7 * 24 * 60 * 60
+    assert version.item_identity_policy.policy_id == "source-id-item-key-composite"
+    assert version.revision_policy.policy_id == "effective-revision-identity"
+    assert (
+        version.canonicalization_policy.policy_id
+        == "graphiti-corpus-canonicalization"
+    )
+    assert representation.adapter_version == (
+        "control-plane-retained-source-adapter-v1"
+    )
+    assert representation.parser_version == "control-plane-parse-observation-v1"
+    assert representation.normalizer_version == (
+        "graphiti-corpus-canonicalization-v1"
+    )
+    assert representation.extraction_scope_version == (
+        "operational-graphiti-passage-fields-v1"
+    )
     assert len(version.coverage_mappings) == 1
     coverage = version.coverage_mappings[0]
     assert coverage.obligation_id == "COV-020"
@@ -345,11 +456,13 @@ def test_source_requests_bind_exact_retained_identity_and_rights() -> None:
 @pytest.mark.parametrize(
     (
         "source_id",
+        "name",
         "role",
         "function",
         "dependency_kind",
         "observation_model",
         "baseline_kind",
+        "lifecycle_stage",
         "limitation",
         "coverage_obligation_id",
         "coverage_responsibility",
@@ -360,11 +473,13 @@ def test_source_requests_bind_exact_retained_identity_and_rights() -> None:
     [
         (
             "UK-01",
+            "UK-01 Home Office + UKVI Atom",
             SourceRole.ORIGINATING_AUTHORITY,
             PortfolioFunction.ANCHOR,
             SourceDependencyKind.ORIGINATING_MATERIAL,
             ObservationModel.ROLLING_LIST,
             BaselinePolicyKind.BOUNDED_BACKFILL,
+            SourceLifecycleStage.SHADOW_SHORTLISTED,
             "Entry metadata still needs maintained-page inspection.",
             "COV-020",
             CoverageResponsibility.ACTIVE,
@@ -374,11 +489,13 @@ def test_source_requests_bind_exact_retained_identity_and_rights() -> None:
         ),
         (
             "UK-10",
+            "UK-10 Met Office warnings",
             SourceRole.ORIGINATING_AUTHORITY,
             PortfolioFunction.ANCHOR,
             None,
             ObservationModel.COMPLETE_CURRENT_STATE,
             BaselinePolicyKind.COMPLETE_STATE_FIRST_OBSERVED_ACTIVE,
+            SourceLifecycleStage.SHADOW_SHORTLISTED,
             "Regional and transition semantics remain Topic 5 work.",
             "COV-023",
             CoverageResponsibility.ACTIVE,
@@ -388,11 +505,13 @@ def test_source_requests_bind_exact_retained_identity_and_rights() -> None:
         ),
         (
             "HK-01",
+            "HK-01 news.gov.hk top stories",
             SourceRole.SPECIALIST_OR_LOCAL_RADAR,
             PortfolioFunction.ANCHOR,
             SourceDependencyKind.EDITORIAL_SELECTION,
             ObservationModel.ROLLING_LIST,
             BaselinePolicyKind.BOUNDED_BACKFILL,
+            SourceLifecycleStage.SHADOW_SHORTLISTED,
             "Curated, not the full government-release universe.",
             "COV-012",
             CoverageResponsibility.ACTIVE,
@@ -402,11 +521,13 @@ def test_source_requests_bind_exact_retained_identity_and_rights() -> None:
         ),
         (
             "RAD-01",
+            "RAD-01 RTHK local news",
             SourceRole.ESTABLISHED_MEDIA_RADAR,
             PortfolioFunction.COMPARATOR,
             SourceDependencyKind.EDITORIAL_SELECTION,
             ObservationModel.ROLLING_LIST,
             BaselinePolicyKind.BOUNDED_BACKFILL,
+            SourceLifecycleStage.COMPARATOR_ONLY,
             "Lead-only discovery role.",
             "COV-012",
             CoverageResponsibility.EVALUATION,
@@ -415,12 +536,30 @@ def test_source_requests_bind_exact_retained_identity_and_rights() -> None:
             "zh-HK",
         ),
         (
+            "HK-04",
+            "HK-04 Education Bureau latest news",
+            SourceRole.ORIGINATING_AUTHORITY,
+            PortfolioFunction.ANCHOR,
+            None,
+            ObservationModel.ROLLING_LIST,
+            BaselinePolicyKind.BOUNDED_BACKFILL,
+            SourceLifecycleStage.SHADOW_SHORTLISTED,
+            "No school-level completeness.",
+            "COV-012",
+            CoverageResponsibility.ACTIVE,
+            CoverageContribution.DETECTION_PATH,
+            "Hong Kong",
+            "zh-HK",
+        ),
+        (
             "RAD-02",
+            "RAD-02 BBC UK news",
             SourceRole.ESTABLISHED_MEDIA_RADAR,
             PortfolioFunction.COMPARATOR,
             SourceDependencyKind.EDITORIAL_SELECTION,
             ObservationModel.ROLLING_LIST,
             BaselinePolicyKind.BOUNDED_BACKFILL,
+            SourceLifecycleStage.COMPARATOR_ONLY,
             "Broad, duplicate-prone and weak on local completeness.",
             "COV-010",
             CoverageResponsibility.EVALUATION,
@@ -432,11 +571,13 @@ def test_source_requests_bind_exact_retained_identity_and_rights() -> None:
 )
 def test_current_sources_retain_their_accepted_contract(
     source_id: str,
+    name: str,
     role: SourceRole,
     function: PortfolioFunction,
     dependency_kind: SourceDependencyKind | None,
     observation_model: ObservationModel,
     baseline_kind: BaselinePolicyKind,
+    lifecycle_stage: SourceLifecycleStage,
     limitation: str,
     coverage_obligation_id: str,
     coverage_responsibility: CoverageResponsibility,
@@ -447,10 +588,12 @@ def test_current_sources_retain_their_accepted_contract(
     contract = _accepted_source_contract(source_id)
 
     assert _source_contract_shape(source_id) == (role, function)
+    assert contract.name == name
     assert contract.role is role
     assert contract.function is function
     assert contract.observation_model is observation_model
     assert contract.baseline_kind is baseline_kind
+    assert contract.lifecycle_stage is lifecycle_stage
     assert limitation in contract.limitations
     assert contract.coverage_obligation_id == coverage_obligation_id
     assert contract.coverage_responsibility is coverage_responsibility
@@ -605,6 +748,67 @@ def test_bootstrap_uses_real_source_and_object_authority_and_replays(
         )
     assert before == after
     assert after[1] == 1
+
+
+def test_bootstrap_orders_multiple_revisions_and_resumes_after_first_revision(
+    tmp_path: Path,
+) -> None:
+    first = _unit()
+    second = _next_revision(first)
+    bindings = _revision_predecessor_bindings((second, first))
+    assert dict(bindings) == {
+        first.revision_id: None,
+        second.revision_id: first.revision_id,
+    }
+
+    initial = _open_operational_test_system(tmp_path)
+    try:
+        bootstrap_operational_authority(initial, proof=_PROOF, plan=_plan(first))
+    finally:
+        initial.close()
+
+    full_plan = replace(
+        _plan(first),
+        candidate_events=(
+            {
+                "kind": "FRESH_EVENT",
+                "event_id": digest_canonical({"event": "first"}),
+                "ingest_ids": [first.ingest_id],
+            },
+            {
+                "kind": "FRESH_EVENT",
+                "event_id": digest_canonical({"event": "second"}),
+                "ingest_ids": [second.ingest_id],
+            },
+        ),
+        units=(second, first),
+        revision_predecessors=bindings,
+        cohort_digest=digest_canonical({"cohort": "two-revisions"}),
+        plan_digest=digest_canonical({"plan": "two-revisions"}),
+    )
+    resumed = _open_operational_test_system(tmp_path)
+    try:
+        bootstrap_operational_authority(resumed, proof=_PROOF, plan=full_plan)
+    finally:
+        resumed.close()
+    replayed = _open_operational_test_system(tmp_path)
+    try:
+        bootstrap_operational_authority(replayed, proof=_PROOF, plan=full_plan)
+    finally:
+        replayed.close()
+
+    with sqlite3.connect(tmp_path / "authority.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT r.revision_id,r.prior_revision_id FROM source_revisions r "
+            "JOIN ledger_events e ON e.event_id=r.authority_event_id "
+            "ORDER BY e.ledger_seq"
+        ).fetchall() == [
+            (first.revision_id, None),
+            (second.revision_id, first.revision_id),
+        ]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM object_admissions"
+        ).fetchone()[0] == 2
 
 
 def test_sealed_campaign_reopens_authority_and_runtime_after_process_exit(

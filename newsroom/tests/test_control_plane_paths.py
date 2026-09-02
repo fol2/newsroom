@@ -11,10 +11,11 @@ from newsroom.control_plane import paths
 
 
 def _canonical_paths(root: Path) -> tuple[Path, Path, Path]:
+    state = root / "increment4"
     return (
-        root / "increment4_authority.sqlite3",
-        root / "object_cas",
-        root / "graphiti_workspaces",
+        state / "authority.sqlite3",
+        state / "object_cas",
+        state / "graphiti_workspaces",
     )
 
 
@@ -24,6 +25,7 @@ def test_increment4_paths_are_one_private_state_set(
     root = tmp_path / "control-plane"
     authority, object_cas, workspaces = _canonical_paths(root)
     monkeypatch.setattr(paths, "HOST_CONTROL_PLANE_STATE_ROOT", root)
+    monkeypatch.setattr(paths, "CANONICAL_INCREMENT4_STATE_ROOT", root / "increment4")
     monkeypatch.setattr(paths, "CANONICAL_INCREMENT4_AUTHORITY_STORE", authority)
     monkeypatch.setattr(paths, "CANONICAL_OBJECT_CAS_ROOT", object_cas)
     monkeypatch.setattr(paths, "CANONICAL_GRAPHITI_WORKSPACE_ROOT", workspaces)
@@ -32,11 +34,33 @@ def test_increment4_paths_are_one_private_state_set(
 
     assert not authority.exists()
     assert root.is_dir()
+    assert stat.S_IMODE((root / "increment4").stat().st_mode) == 0o700
     assert stat.S_IMODE(object_cas.stat().st_mode) == 0o700
     assert stat.S_IMODE(workspaces.stat().st_mode) == 0o700
     paths.require_canonical_increment4_authority_store(authority)
     paths.require_canonical_object_cas_root(object_cas)
     paths.require_canonical_graphiti_workspace_root(workspaces)
+
+
+def test_increment4_state_remains_private_below_a_legacy_public_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "legacy-control-plane"
+    root.mkdir(mode=0o755)
+    state = root / "increment4"
+    authority, object_cas, workspaces = _canonical_paths(root)
+    monkeypatch.setattr(paths, "HOST_CONTROL_PLANE_STATE_ROOT", root)
+    monkeypatch.setattr(paths, "CANONICAL_INCREMENT4_STATE_ROOT", state)
+    monkeypatch.setattr(paths, "CANONICAL_INCREMENT4_AUTHORITY_STORE", authority)
+    monkeypatch.setattr(paths, "CANONICAL_OBJECT_CAS_ROOT", object_cas)
+    monkeypatch.setattr(paths, "CANONICAL_GRAPHITI_WORKSPACE_ROOT", workspaces)
+
+    paths.ensure_increment4_state_paths()
+
+    assert stat.S_IMODE(root.stat().st_mode) == 0o755
+    assert stat.S_IMODE(state.stat().st_mode) == 0o700
+    assert stat.S_IMODE(object_cas.stat().st_mode) == 0o700
+    assert stat.S_IMODE(workspaces.stat().st_mode) == 0o700
 
 
 @pytest.mark.parametrize(

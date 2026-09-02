@@ -11,6 +11,7 @@ from collections.abc import Callable
 from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Mapping
 
 from newsroom.authority.canonical import (
@@ -75,7 +76,7 @@ SCHEMA_VERSION = "newsroom.graphiti-steady-state-packet.v4"
 
 CAMPAIGN_SCHEMA_VERSION = "newsroom.graphiti-bounded-campaign-input.v3"
 
-_REQUIRED_STOP_CONDITIONS = frozenset(
+CAMPAIGN_REQUIRED_STOP_CONDITIONS = frozenset(
     {
         "CAP_REACHED",
         "CONFIG_DRIFT",
@@ -97,10 +98,10 @@ _REQUIRED_STOP_CONDITIONS = frozenset(
     }
 )
 
-_RAMP_ENTRY_BASE = frozenset(
+CAMPAIGN_RAMP_ENTRY_CONDITIONS = frozenset(
     {"EXACT_SNAPSHOT_AND_IDENTITY_RECONFIRMED", "OWNER_F4_GO_RETAINED"}
 )
-_RAMP_ADVANCE_BASE = frozenset(
+CAMPAIGN_RAMP_ADVANCE_CONDITIONS = frozenset(
     {
         "ALL_EXACT_RECEIPTS_RECONCILED",
         "CAPS_AND_ACCOUNTING_RECONCILED",
@@ -108,12 +109,14 @@ _RAMP_ADVANCE_BASE = frozenset(
     }
 )
 
-_CAMPAIGN_SUCCESS_OBJECTIVE_BASE = {
-    "watermark": "selected cohort terminal",
-    "backlog": 0,
-    "velocity": "service_at_least_arrival",
-    "reconciliation": "exact",
-}
+CAMPAIGN_SUCCESS_OBJECTIVE_BASE = MappingProxyType(
+    {
+        "watermark": "selected cohort terminal",
+        "backlog": 0,
+        "velocity": "service_at_least_arrival",
+        "reconciliation": "exact",
+    }
+)
 
 HISTORICAL_PARTITION_CATEGORIES = (
     "VERIFIED_TERMINAL",
@@ -2246,7 +2249,7 @@ def _campaign_evidence(
                 or not entry
                 or not all(isinstance(item, str) and item for item in entry)
                 or entry != sorted(set(entry))
-                or not _RAMP_ENTRY_BASE.issubset(entry)
+                or not CAMPAIGN_RAMP_ENTRY_CONDITIONS.issubset(entry)
             ):
                 blockers.append(f"RAMP_PHASE_{index + 1}_ENTRY_INVALID")
                 entry = []
@@ -2255,7 +2258,7 @@ def _campaign_evidence(
                 or not advance
                 or not all(isinstance(item, str) and item for item in advance)
                 or advance != sorted(set(advance))
-                or not _RAMP_ADVANCE_BASE.issubset(advance)
+                or not CAMPAIGN_RAMP_ADVANCE_CONDITIONS.issubset(advance)
             ):
                 blockers.append(f"RAMP_PHASE_{index + 1}_ADVANCE_INVALID")
                 advance = []
@@ -2288,7 +2291,7 @@ def _campaign_evidence(
         not isinstance(stops, list)
         or not all(isinstance(item, str) and item for item in stops)
         or len(stops) != len(set(item for item in stops if isinstance(item, str)))
-        or not _REQUIRED_STOP_CONDITIONS.issubset(
+        or not CAMPAIGN_REQUIRED_STOP_CONDITIONS.issubset(
             item for item in stops if isinstance(item, str)
         )
     ):
@@ -2303,16 +2306,16 @@ def _campaign_evidence(
         positive=True,
     )
     objectives_value = {
-        **_CAMPAIGN_SUCCESS_OBJECTIVE_BASE,
+        **CAMPAIGN_SUCCESS_OBJECTIVE_BASE,
         "lag": {
             "max_oldest_eligible_seconds": max_oldest_eligible_seconds,
         },
     }
     if (
-        set(objectives) != {*_CAMPAIGN_SUCCESS_OBJECTIVE_BASE, "lag"}
+        set(objectives) != {*CAMPAIGN_SUCCESS_OBJECTIVE_BASE, "lag"}
         or any(
             objectives.get(key) != expected
-            for key, expected in _CAMPAIGN_SUCCESS_OBJECTIVE_BASE.items()
+            for key, expected in CAMPAIGN_SUCCESS_OBJECTIVE_BASE.items()
         )
         or set(lag_objective) != {"max_oldest_eligible_seconds"}
     ):
@@ -2856,10 +2859,10 @@ def validate_graphiti_campaign_packet(
             or event_limit <= prior_limit
             or not isinstance(entry, list)
             or entry != sorted(set(entry))
-            or not _RAMP_ENTRY_BASE.issubset(entry)
+            or not CAMPAIGN_RAMP_ENTRY_CONDITIONS.issubset(entry)
             or not isinstance(advance, list)
             or advance != sorted(set(advance))
-            or not _RAMP_ADVANCE_BASE.issubset(advance)
+            or not CAMPAIGN_RAMP_ADVANCE_CONDITIONS.issubset(advance)
         ):
             raise ValueError("campaign packet ramp differs")
         prior_limit = event_limit
@@ -2881,17 +2884,17 @@ def validate_graphiti_campaign_packet(
         not isinstance(stops, list)
         or any(not isinstance(item, str) or not item for item in stops)
         or len(stops) != len(set(stops))
-        or not _REQUIRED_STOP_CONDITIONS.issubset(stops)
+        or not CAMPAIGN_REQUIRED_STOP_CONDITIONS.issubset(stops)
     ):
         raise ValueError("campaign packet stop conditions differ")
     objectives = campaign.get("success_objectives")
     lag_objective = objectives.get("lag") if isinstance(objectives, Mapping) else None
     if (
         not isinstance(objectives, Mapping)
-        or set(objectives) != {*_CAMPAIGN_SUCCESS_OBJECTIVE_BASE, "lag"}
+        or set(objectives) != {*CAMPAIGN_SUCCESS_OBJECTIVE_BASE, "lag"}
         or any(
             objectives.get(key) != expected
-            for key, expected in _CAMPAIGN_SUCCESS_OBJECTIVE_BASE.items()
+            for key, expected in CAMPAIGN_SUCCESS_OBJECTIVE_BASE.items()
         )
         or not isinstance(lag_objective, Mapping)
         or set(lag_objective) != {"max_oldest_eligible_seconds"}

@@ -37,8 +37,6 @@ from .neo4j_fulltext_reader import (
     Neo4jFullTextReader,
 )
 from newsroom.increment4.neo4j import Increment4Neo4jController
-from newsroom.increment4.contracts import INCREMENT4_ADMITTED_FAMILY_ID
-from newsroom.increment4.projection import build_increment4_admitted_batches
 from newsroom.projection.mapping import (
     ProjectionIdentitySource,
     StructuralIdentityContext,
@@ -1162,52 +1160,6 @@ class _Neo4jProjectionBoundary:
             )
             return StructuralReconciliationView(
                 family_id=request.family_id,
-                generation_id=metadata.generation.generation_id,
-                checkpoint_ledger_seq=metadata.contiguous_ledger_seq,
-                projection_state_digest=digest,
-                serving_time=metadata.serving_time,
-            )
-
-    def reconcile_increment4_active(
-        self,
-        proof: AuthenticationProof,
-    ) -> StructuralReconciliationView:
-        """Reconcile Increment 4 through its bounded public controller only."""
-
-        with self._operation_lock:
-            authenticated = self._projection_boundary._authenticate_read(proof)
-            self._projection_boundary._authorize_read(
-                family_id=INCREMENT4_ADMITTED_FAMILY_ID,
-                operation="increment4-active-reconcile",
-                semantic_value={"family_id": INCREMENT4_ADMITTED_FAMILY_ID},
-                authenticated=authenticated,
-            )
-            metadata = self._store.projection_active_generation_metadata(
-                INCREMENT4_ADMITTED_FAMILY_ID
-            )
-            expected = build_increment4_admitted_batches(
-                self._store.increment4_admitted_snapshot(),
-                generation_id=metadata.generation.generation_id,
-                family=metadata.family,
-            )
-            digest = self._adapter.reconcile_generation(
-                generation_id=str(metadata.generation.generation_id),
-                expected_batches=expected,
-            )
-            validation = self._store.projection_generation_validation(
-                metadata.generation.generation_id
-            )
-            if (
-                validation.checkpoint_ledger_seq != metadata.contiguous_ledger_seq
-                or validation.projection_state_digest != digest
-                or validation.service_compatibility_digest
-                != neo4j_compatibility_digest(self._adapter.verify_compatibility())
-            ):
-                raise Neo4jIdentityConflict(
-                    "Increment 4 ACTIVE graph differs from retained validation"
-                )
-            return StructuralReconciliationView(
-                family_id=INCREMENT4_ADMITTED_FAMILY_ID,
                 generation_id=metadata.generation.generation_id,
                 checkpoint_ledger_seq=metadata.contiguous_ledger_seq,
                 projection_state_digest=digest,

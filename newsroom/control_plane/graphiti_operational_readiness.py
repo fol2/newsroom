@@ -45,7 +45,11 @@ from newsroom.control_plane.cycle import (
     load_graphiti_units_from_connection,
 )
 from newsroom.control_plane.graphiti_steady_state import (
+    CAMPAIGN_RAMP_ADVANCE_CONDITIONS,
+    CAMPAIGN_RAMP_ENTRY_CONDITIONS,
+    CAMPAIGN_REQUIRED_STOP_CONDITIONS,
     CAMPAIGN_SCHEMA_VERSION,
+    CAMPAIGN_SUCCESS_OBJECTIVE_BASE,
     GraphitiCampaignRuntime,
     graphiti_graph_destination_readback,
     graphiti_operational_partition_snapshot,
@@ -127,8 +131,33 @@ from newsroom.sources.types import (
 OPERATOR_PRINCIPAL_ID = "newsroom.control-plane"
 OPERATOR_AUTHORITY_DOMAIN = "newsroom.evaluation"
 OPERATIONAL_ADMISSION_TYPE = "graphiti.evaluation.passage"
-OPERATIONAL_SELECTION_POLICY_ID = "issue-895-current-preflight"
+OPERATIONAL_SELECTION_POLICY_ID = "graphiti-operational-current-cohort"
 OPERATIONAL_SELECTION_POLICY_VERSION = "v1"
+
+# Source Registry requires immutable semantic version labels.  These v1 labels
+# describe the existing retained Control Plane transformation used here; they
+# grant no source execution authority and are not aliases for an Increment 9
+# authority store.
+_SOURCE_ADAPTER_POLICY = VersionedPolicyRef(
+    "control-plane-retained-source-adapter", "v1"
+)
+_SOURCE_BASELINE_POLICY = VersionedPolicyRef(
+    "operational-current-cohort-baseline", "v1"
+)
+_SOURCE_ITEM_IDENTITY_POLICY = VersionedPolicyRef(
+    "source-id-item-key-composite", "v1"
+)
+_SOURCE_REVISION_POLICY = VersionedPolicyRef(
+    "effective-revision-identity", "v1"
+)
+_SOURCE_CANONICALIZATION_POLICY = VersionedPolicyRef(
+    "graphiti-corpus-canonicalization", "v1"
+)
+_SOURCE_BASELINE_FRESHNESS_SECONDS = 7 * 24 * 60 * 60
+_SOURCE_ADAPTER_VERSION = "control-plane-retained-source-adapter-v1"
+_SOURCE_PARSER_VERSION = "control-plane-parse-observation-v1"
+_SOURCE_NORMALIZER_VERSION = "graphiti-corpus-canonicalization-v1"
+_SOURCE_EXTRACTION_SCOPE_VERSION = "operational-graphiti-passage-fields-v1"
 
 _RIGHTS_POLICY = RightsPolicyContract(
     policy_key="graphiti-current-proving-rights",
@@ -149,54 +178,13 @@ _SOURCE_RECORD_TYPES = frozenset(
     }
 )
 
-_STOP_CONDITIONS = tuple(
-    sorted(
-        {
-            "CAP_REACHED",
-            "CIRCUIT_OPEN",
-            "CONFIG_DRIFT",
-            "EXACT_RECEIPT_DRIFT",
-            "GRAPH_IDENTITY_DRIFT",
-            "IDENTITY_DRIFT",
-            "INTEGRITY_FAILURE",
-            "PROVIDER_FAILURE",
-            "PROVIDER_USAGE_DRIFT",
-            "PROJECTION_GENERATION_DRIFT",
-            "RATE_CAP_REACHED",
-            "RECONCILIATION_FAILURE",
-            "RECONCILIATION_DRIFT",
-            "RIGHTS_DRIFT",
-            "SNAPSHOT_DRIFT",
-            "SPEND_ACCOUNTING_DRIFT",
-            "WALL_TIME_CAP_REACHED",
-        }
-    )
-)
-_RAMP_ENTRY = tuple(
-    sorted(
-        {
-            "EXACT_SNAPSHOT_AND_IDENTITY_RECONFIRMED",
-            "OWNER_F4_GO_RETAINED",
-        }
-    )
-)
-_RAMP_ADVANCE = tuple(
-    sorted(
-        {
-            "ALL_EXACT_RECEIPTS_RECONCILED",
-            "CAPS_AND_ACCOUNTING_RECONCILED",
-            "NO_STOP_CONDITION_OBSERVED",
-        }
-    )
-)
-
-
 class GraphitiOperationalReadinessError(RuntimeError):
     """The exact provider-free operational readiness contract failed closed."""
 
 
 @dataclass(frozen=True, slots=True)
 class _AcceptedSourceContract:
+    name: str
     role: SourceRole
     function: PortfolioFunction
     purpose: str
@@ -210,10 +198,12 @@ class _AcceptedSourceContract:
     observation_model: ObservationModel
     baseline_kind: BaselinePolicyKind
     baseline_notes: str
+    lifecycle_stage: SourceLifecycleStage
 
 
 _ACCEPTED_SOURCE_CONTRACTS = {
     "UK-01": _AcceptedSourceContract(
+        name="UK-01 Home Office + UKVI Atom",
         role=SourceRole.ORIGINATING_AUTHORITY,
         function=PortfolioFunction.ANCHOR,
         purpose=(
@@ -240,8 +230,10 @@ _ACCEPTED_SOURCE_CONTRACTS = {
         baseline_notes=(
             "Bootstrap only feed entries inside the bounded freshness window."
         ),
+        lifecycle_stage=SourceLifecycleStage.SHADOW_SHORTLISTED,
     ),
     "UK-10": _AcceptedSourceContract(
+        name="UK-10 Met Office warnings",
         role=SourceRole.ORIGINATING_AUTHORITY,
         function=PortfolioFunction.ANCHOR,
         purpose="Observe current Met Office severe-weather warnings.",
@@ -258,8 +250,10 @@ _ACCEPTED_SOURCE_CONTRACTS = {
             "Existing warnings are first-observed active; baseline time does not "
             "establish their activation time."
         ),
+        lifecycle_stage=SourceLifecycleStage.SHADOW_SHORTLISTED,
     ),
     "HK-01": _AcceptedSourceContract(
+        name="HK-01 news.gov.hk top stories",
         role=SourceRole.SPECIALIST_OR_LOCAL_RADAR,
         function=PortfolioFunction.ANCHOR,
         purpose=(
@@ -285,8 +279,29 @@ _ACCEPTED_SOURCE_CONTRACTS = {
         baseline_notes=(
             "Bootstrap only feed entries inside the bounded freshness window."
         ),
+        lifecycle_stage=SourceLifecycleStage.SHADOW_SHORTLISTED,
+    ),
+    "HK-04": _AcceptedSourceContract(
+        name="HK-04 Education Bureau latest news",
+        role=SourceRole.ORIGINATING_AUTHORITY,
+        function=PortfolioFunction.ANCHOR,
+        purpose="Observe Hong Kong education and bureau-service updates.",
+        limitations=("No school-level completeness.",),
+        coverage_obligation_id="COV-012",
+        coverage_responsibility=CoverageResponsibility.ACTIVE,
+        coverage_contribution=CoverageContribution.DETECTION_PATH,
+        coverage_geographies=("Hong Kong",),
+        coverage_languages=("zh-HK",),
+        dependencies=(),
+        observation_model=ObservationModel.ROLLING_LIST,
+        baseline_kind=BaselinePolicyKind.BOUNDED_BACKFILL,
+        baseline_notes=(
+            "Bootstrap only feed entries inside the bounded freshness window."
+        ),
+        lifecycle_stage=SourceLifecycleStage.SHADOW_SHORTLISTED,
     ),
     "RAD-01": _AcceptedSourceContract(
+        name="RAD-01 RTHK local news",
         role=SourceRole.ESTABLISHED_MEDIA_RADAR,
         function=PortfolioFunction.COMPARATOR,
         purpose=(
@@ -314,8 +329,10 @@ _ACCEPTED_SOURCE_CONTRACTS = {
         baseline_notes=(
             "Bootstrap only feed entries inside the bounded freshness window."
         ),
+        lifecycle_stage=SourceLifecycleStage.COMPARATOR_ONLY,
     ),
     "RAD-02": _AcceptedSourceContract(
+        name="RAD-02 BBC UK news",
         role=SourceRole.ESTABLISHED_MEDIA_RADAR,
         function=PortfolioFunction.COMPARATOR,
         purpose="Observe UK major incidents and official-list blind-spot leads.",
@@ -340,6 +357,7 @@ _ACCEPTED_SOURCE_CONTRACTS = {
         baseline_notes=(
             "Bootstrap only feed entries inside the bounded freshness window."
         ),
+        lifecycle_stage=SourceLifecycleStage.COMPARATOR_ONLY,
     ),
 }
 
@@ -351,6 +369,7 @@ class OperationalAuthorityBootstrapPlan:
     candidate_events: tuple[Mapping[str, object], ...]
     units: tuple[CorpusIngestUnit, ...]
     rights_by_source: tuple[tuple[str, Mapping[str, object]], ...]
+    revision_predecessors: tuple[tuple[str, str | None], ...]
     cohort_digest: str
     plan_digest: str
 
@@ -361,6 +380,22 @@ class OperationalAuthorityBootstrapPlan:
             raise GraphitiOperationalReadinessError(
                 f"current rights are unavailable for {source_id}"
             ) from exc
+
+    def prior_revision_for(
+        self, unit: CorpusIngestUnit
+    ) -> SourceRevisionId | None:
+        authority = unit.authority
+        if authority is None:
+            raise GraphitiOperationalReadinessError(
+                "current corpus unit lacks its retained source identity"
+            )
+        predecessors = dict(self.revision_predecessors)
+        if authority.revision_id not in predecessors:
+            raise GraphitiOperationalReadinessError(
+                "current source revision lacks an exact predecessor binding"
+            )
+        prior = predecessors[authority.revision_id]
+        return None if prior is None else SourceRevisionId.parse(prior)
 
 
 @dataclass(frozen=True, slots=True)
@@ -420,6 +455,8 @@ def _accepted_source_contract(source_id: str) -> _AcceptedSourceContract:
 def _source_requests(
     unit: CorpusIngestUnit,
     rights: Mapping[str, object],
+    *,
+    prior_revision_id: SourceRevisionId | None = None,
 ) -> tuple[
     SourceDefinitionRequest,
     SourceDefinitionVersionRequest,
@@ -447,11 +484,8 @@ def _source_requests(
     representation_id = DiscoveryRepresentationId.parse(authority.representation_id)
     definition = SourceDefinitionRequest(
         definition_id=definition_id,
-        name=f"{unit.source_id} retained current source",
-        editorial_purpose=(
-            "Retain the current rights-permitted materially unique revision "
-            "cohort for governed Graphiti proposal extraction."
-        ),
+        name=contract.name,
+        editorial_purpose=contract.purpose,
         idempotency_key=f"issue895-source-definition:{unit.source_id}",
     )
     version = SourceDefinitionVersionRequest(
@@ -460,7 +494,7 @@ def _source_requests(
         version_number=1,
         expected_previous_version_id=None,
         locator=unit.source_definition_url,
-        adapter_contract=VersionedPolicyRef("increment9-retained-source-adapter", "v1"),
+        adapter_contract=_SOURCE_ADAPTER_POLICY,
         extraction_scope=(
             "body",
             "canonical_url",
@@ -478,7 +512,7 @@ def _source_requests(
                     packet_digest,
                 )
             ),
-            rights_policy_version="increment9-ai-rights-review-v1",
+            rights_policy_version=_RIGHTS_POLICY.implementation_version,
             allowed_use="proposal.extraction",
             retention_scope="disposable-workspace",
         ),
@@ -506,25 +540,19 @@ def _source_requests(
         explicit_gaps=(),
         observation_model=contract.observation_model,
         baseline_policy=BaselinePolicy(
-            reference=VersionedPolicyRef("increment9-current-retained-baseline", "v1"),
+            reference=_SOURCE_BASELINE_POLICY,
             kind=contract.baseline_kind,
             freshness_window_seconds=(
-                7 * 24 * 60 * 60
+                _SOURCE_BASELINE_FRESHNESS_SECONDS
                 if contract.baseline_kind is BaselinePolicyKind.BOUNDED_BACKFILL
                 else None
             ),
             notes=contract.baseline_notes,
         ),
-        item_identity_policy=VersionedPolicyRef(
-            "increment9-source-item-composite", "v1"
-        ),
-        revision_policy=VersionedPolicyRef(
-            "materially-unique-effective-revision", "v1"
-        ),
-        canonicalization_policy=VersionedPolicyRef(
-            "graphiti-corpus-canonicalization", "v1"
-        ),
-        lifecycle_stage=SourceLifecycleStage.SHADOW_SHORTLISTED,
+        item_identity_policy=_SOURCE_ITEM_IDENTITY_POLICY,
+        revision_policy=_SOURCE_REVISION_POLICY,
+        canonicalization_policy=_SOURCE_CANONICALIZATION_POLICY,
+        lifecycle_stage=contract.lifecycle_stage,
         change_reason="Initial canonical provider-free Graphiti readiness baseline.",
         idempotency_key=f"issue895-source-version:{unit.source_id}:{packet_digest}",
     )
@@ -546,11 +574,11 @@ def _source_requests(
         revision_id=revision_id,
         item_id=item_id,
         definition_version_id=version_id,
-        prior_revision_id=None,
+        prior_revision_id=prior_revision_id,
         source_native_revision_token=None,
         permitted_state_digest=unit.revision_digest,
         revision_policy=version.revision_policy,
-        canonicalizer_version="graphiti-corpus-canonicalization-v1",
+        canonicalizer_version=_SOURCE_NORMALIZER_VERSION,
         source_published_time=_source_time(unit.published_at),
         source_updated_time=_source_time(unit.updated_at),
         observed_at=UtcTimestamp.parse(unit.coverage_first_observed_at),
@@ -560,10 +588,10 @@ def _source_requests(
         representation_id=representation_id,
         revision_id=revision_id,
         definition_version_id=version_id,
-        adapter_version="increment9-retained-source-adapter-v1",
-        parser_version="increment9-proving-parser-v1",
-        normalizer_version="graphiti-corpus-canonicalization-v1",
-        extraction_scope_version="graphiti-proposal-extraction-v1",
+        adapter_version=_SOURCE_ADAPTER_VERSION,
+        parser_version=_SOURCE_PARSER_VERSION,
+        normalizer_version=_SOURCE_NORMALIZER_VERSION,
+        extraction_scope_version=_SOURCE_EXTRACTION_SCOPE_VERSION,
         permitted_fields_digest=digest_canonical(
             {
                 "headline": unit.headline,
@@ -578,6 +606,57 @@ def _source_requests(
         idempotency_key=f"issue895-representation:{representation_id}",
     )
     return definition, version, item, revision, representation
+
+
+def _revision_predecessor_bindings(
+    units: tuple[CorpusIngestUnit, ...],
+) -> tuple[tuple[str, str | None], ...]:
+    """Order each exact eligible item's retained revisions by first observation."""
+
+    by_item: dict[str, dict[str, CorpusIngestUnit]] = {}
+    for unit in units:
+        authority = unit.authority
+        if authority is None:
+            raise GraphitiOperationalReadinessError(
+                "current corpus unit lacks its retained source identity"
+            )
+        revisions = by_item.setdefault(authority.item_id, {})
+        retained = revisions.setdefault(authority.revision_id, unit)
+        if (
+            retained.source_id,
+            retained.item_key,
+            retained.revision_digest,
+            retained.published_at,
+            retained.updated_at,
+            retained.coverage_first_observed_at,
+        ) != (
+            unit.source_id,
+            unit.item_key,
+            unit.revision_digest,
+            unit.published_at,
+            unit.updated_at,
+            unit.coverage_first_observed_at,
+        ):
+            raise GraphitiOperationalReadinessError(
+                "one retained revision identity has conflicting source semantics"
+            )
+    bindings: dict[str, str | None] = {}
+    for revisions in by_item.values():
+        ordered = sorted(
+            revisions.values(),
+            key=lambda unit: (
+                UtcTimestamp.parse(unit.coverage_first_observed_at).to_text(),
+                unit.updated_at or "",
+                unit.published_at or "",
+                unit.authority.revision_id if unit.authority is not None else "",
+            ),
+        )
+        prior: str | None = None
+        for unit in ordered:
+            assert unit.authority is not None
+            bindings[unit.authority.revision_id] = prior
+            prior = unit.authority.revision_id
+    return tuple(sorted(bindings.items()))
 
 
 def plan_operational_authority_bootstrap(
@@ -633,6 +712,8 @@ def plan_operational_authority_bootstrap(
             "operational candidate units differ from current retained input"
         )
     units = tuple(by_ingest[ingest_id] for ingest_id in candidate_ingest_ids)
+    revision_predecessors = _revision_predecessor_bindings(units)
+    predecessor_map = dict(revision_predecessors)
     rights_by_source: list[tuple[str, Mapping[str, object]]] = []
     for source_id in sorted({unit.source_id for unit in units}):
         source_urls = {
@@ -656,7 +737,15 @@ def plan_operational_authority_bootstrap(
     rights_map = dict(rights_by_source)
     request_digests: list[dict[str, object]] = []
     for unit in units:
-        requests = _source_requests(unit, rights_map[unit.source_id])
+        assert unit.authority is not None
+        prior = predecessor_map[unit.authority.revision_id]
+        requests = _source_requests(
+            unit,
+            rights_map[unit.source_id],
+            prior_revision_id=(
+                None if prior is None else SourceRevisionId.parse(prior)
+            ),
+        )
         request_digests.append(
             {
                 "ingest_id": unit.ingest_id,
@@ -690,6 +779,7 @@ def plan_operational_authority_bootstrap(
         candidate_events=candidate_events,
         units=units,
         rights_by_source=tuple(rights_by_source),
+        revision_predecessors=revision_predecessors,
         cohort_digest=cohort_digest,
         plan_digest=digest_canonical(plan_value),
     )
@@ -729,7 +819,9 @@ class OperationalCorpusAuthorityBinder:
         representations: dict[str, DiscoveryRepresentationRequest] = {}
         for unit in self._plan.units:
             definition, version, item, revision, representation = _source_requests(
-                unit, self._plan.rights_for(unit.source_id)
+                unit,
+                self._plan.rights_for(unit.source_id),
+                prior_revision_id=self._plan.prior_revision_for(unit),
             )
             for target, identity, request in (
                 (definitions, str(definition.definition_id), definition),
@@ -754,7 +846,29 @@ class OperationalCorpusAuthorityBinder:
             sources.record_definition_version(request, proof=self._proof)
         for request in items.values():
             sources.register_item(request, proof=self._proof)
-        for request in revisions.values():
+        pending_revisions = dict(revisions)
+        committed_revision_ids: set[str] = set()
+        ordered_revisions: list[SourceRevisionRequest] = []
+        while pending_revisions:
+            ready = sorted(
+                (
+                    request
+                    for request in pending_revisions.values()
+                    if request.prior_revision_id is None
+                    or str(request.prior_revision_id) in committed_revision_ids
+                ),
+                key=lambda value: (str(value.item_id), str(value.revision_id)),
+            )
+            if not ready:
+                raise GraphitiOperationalReadinessError(
+                    "current source revision predecessor chain is incomplete"
+                )
+            for request in ready:
+                revision_id = str(request.revision_id)
+                ordered_revisions.append(request)
+                committed_revision_ids.add(revision_id)
+                pending_revisions.pop(revision_id)
+        for request in ordered_revisions:
             sources.record_revision(request, proof=self._proof)
         for request in representations.values():
             sources.record_representation(request, proof=self._proof)
@@ -1338,8 +1452,8 @@ def build_operational_campaign_input(
         {
             "phase_id": f"phase-{index}",
             "event_limit": limit,
-            "entry_conditions": list(_RAMP_ENTRY),
-            "advance_conditions": list(_RAMP_ADVANCE),
+            "entry_conditions": sorted(CAMPAIGN_RAMP_ENTRY_CONDITIONS),
+            "advance_conditions": sorted(CAMPAIGN_RAMP_ADVANCE_CONDITIONS),
         }
         for index, limit in enumerate(limits, start=1)
     ]
@@ -1395,13 +1509,10 @@ def build_operational_campaign_input(
             ),
             "reconciliation_procedure_id": "structural.reconcile_active-v1",
         },
-        "immediate_stop_conditions": list(_STOP_CONDITIONS),
+        "immediate_stop_conditions": sorted(CAMPAIGN_REQUIRED_STOP_CONDITIONS),
         "success_objectives": {
-            "watermark": "selected cohort terminal",
-            "backlog": 0,
-            "velocity": "service_at_least_arrival",
+            **CAMPAIGN_SUCCESS_OBJECTIVE_BASE,
             "lag": {"max_oldest_eligible_seconds": 300},
-            "reconciliation": "exact",
         },
         "campaign_authorised": False,
     }

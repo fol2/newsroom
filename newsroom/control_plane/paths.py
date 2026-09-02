@@ -50,12 +50,13 @@ CANONICAL_PROVING_STORE = HOST_CONTROL_PLANE_STATE_ROOT / "proving_store.sqlite3
 CANONICAL_UNPUBLISHED_STORE = (
     HOST_CONTROL_PLANE_STATE_ROOT / "unpublished_store.sqlite3"
 )
+CANONICAL_INCREMENT4_STATE_ROOT = HOST_CONTROL_PLANE_STATE_ROOT / "increment4"
 CANONICAL_INCREMENT4_AUTHORITY_STORE = (
-    HOST_CONTROL_PLANE_STATE_ROOT / "increment4_authority.sqlite3"
+    CANONICAL_INCREMENT4_STATE_ROOT / "authority.sqlite3"
 )
-CANONICAL_OBJECT_CAS_ROOT = HOST_CONTROL_PLANE_STATE_ROOT / "object_cas"
+CANONICAL_OBJECT_CAS_ROOT = CANONICAL_INCREMENT4_STATE_ROOT / "object_cas"
 CANONICAL_GRAPHITI_WORKSPACE_ROOT = (
-    HOST_CONTROL_PLANE_STATE_ROOT / "graphiti_workspaces"
+    CANONICAL_INCREMENT4_STATE_ROOT / "graphiti_workspaces"
 )
 
 
@@ -77,6 +78,7 @@ def ensure_increment4_state_paths() -> None:
     require_canonical_object_cas_root(CANONICAL_OBJECT_CAS_ROOT)
     require_canonical_graphiti_workspace_root(CANONICAL_GRAPHITI_WORKSPACE_ROOT)
     ensure_control_plane_state_root()
+    _ensure_private_directory(CANONICAL_INCREMENT4_STATE_ROOT)
     _ensure_private_directory(CANONICAL_OBJECT_CAS_ROOT)
     _ensure_private_directory(CANONICAL_GRAPHITI_WORKSPACE_ROOT)
 
@@ -160,6 +162,7 @@ def require_canonical_graphiti_workspace_root(path: str | Path) -> None:
 __all__ = [
     "CANONICAL_GRAPHITI_WORKSPACE_ROOT",
     "CANONICAL_INCREMENT4_AUTHORITY_STORE",
+    "CANONICAL_INCREMENT4_STATE_ROOT",
     "CANONICAL_OBJECT_CAS_ROOT",
     "CANONICAL_PROVING_STORE",
     "CANONICAL_UNPUBLISHED_STORE",
