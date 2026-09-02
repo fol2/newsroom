@@ -221,6 +221,7 @@ def _landed_rows(
         ORDER BY ledger.seq
         """
     )
+    excluded = graphiti_excluded_event_ids(connection)
     return [
         (
             int(row[0]),
@@ -238,10 +239,15 @@ def _landed_rows(
             row[12],
         )
         for row in raw_rows
+        if str(row[1]) not in excluded
     ]
 
 
-def _unit_refs(units: tuple[CorpusIngestUnit, ...]) -> list[dict[str, object]]:
+def graphiti_unit_refs(
+    units: tuple[CorpusIngestUnit, ...],
+) -> list[dict[str, object]]:
+    """Return the exact retained manifest inputs for resolved corpus units."""
+
     return [
         {
             "ingest_id": item.ingest_id,
@@ -310,7 +316,7 @@ def graphiti_unit_binding_reason(
     if event.landed_ingest_ids and resolved_ingest_ids != event.landed_ingest_ids:
         return "RESOLVED_INGEST_IDS_DIFFER_FROM_LANDED"
     if event.expected_unit_count > 0:
-        resolved_refs = _unit_refs(ordered)
+        resolved_refs = graphiti_unit_refs(ordered)
         if tuple(
             _stable_unit_ref(ref) for ref in event.unit_refs if isinstance(ref, dict)
         ) != tuple(_stable_unit_ref(ref) for ref in resolved_refs):
@@ -398,7 +404,7 @@ def reconcile_graphiti_events(
             expected = tuple(range(1, ordered[0].chunk_count + 1))
             if tuple(item.chunk_ordinal for item in ordered) != expected:
                 raise ValueError("effective-revision event chunks are incomplete")
-        resolved_refs = _unit_refs(ordered)
+        resolved_refs = graphiti_unit_refs(ordered)
         manifest: dict[str, object] = {
             "event_type": "EFFECTIVE_SOURCE_REVISION_LANDED",
             "ledger_seq": ledger_seq,
@@ -762,7 +768,7 @@ class GraphitiEventQueue:
         if reason is not None:
             raise ValueError(reason)
         ordered = tuple(sorted(units, key=lambda item: item.chunk_ordinal))
-        resolved_refs = _unit_refs(ordered)
+        resolved_refs = graphiti_unit_refs(ordered)
         connection = _connect(self._path)
         try:
             connection.execute("BEGIN IMMEDIATE")

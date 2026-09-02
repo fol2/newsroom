@@ -22,6 +22,9 @@ from newsroom.control_plane.store import (
 )
 from newsroom.control_plane.veto import assert_private_store
 from newsroom.graphiti_adapter.embedding_meter import is_exact_provider_reported_usage
+from newsroom.graphiti_adapter.usage_meter import (
+    is_exact_predispatch_no_provider_call,
+)
 
 
 class GraphitiSpendReconciliationError(RuntimeError):
@@ -239,6 +242,27 @@ class GraphitiSpendReconciliationReceipt:
     def from_dict(
         cls, value: Mapping[str, object]
     ) -> GraphitiSpendReconciliationReceipt:
+        expected_fields = {
+            "schema",
+            "idempotency_key",
+            "plan_digest",
+            "authenticated_principal",
+            "applied_at",
+            "applied_transition_count",
+            "disposition_counts",
+            "terminal_spend_disposition_count",
+            "terminal_attempt_count",
+            "live_reservation_count",
+            "provider_calls",
+            "ledger_digest",
+            "public_dispatch",
+            "graph_mutation",
+            "receipt_digest",
+        }
+        if set(value) != expected_fields:
+            raise GraphitiSpendReconciliationError(
+                "retained reconciliation receipt fields are invalid"
+            )
         counts = value.get("disposition_counts")
         if not isinstance(counts, Mapping):
             raise GraphitiSpendReconciliationError(
@@ -728,6 +752,103 @@ def _recovered_without_provider_dispatch(
         and _is_exact_zero(current_accounting.get("actual_usd_microunits"))
         and _is_exact_zero(current_accounting.get("actual_gbp_microunits"))
         and current_accounting.get("unused_reservation_released") is True
+    )
+
+
+def _recovered_immutable_complete_without_journal(
+    rows_by_identity: Mapping[tuple[str, int], sqlite3.Row],
+    row: sqlite3.Row,
+    journal: Mapping[str, object],
+    receipt: Mapping[str, object] | None,
+) -> bool:
+    """Recognise one historical recovery shape without inferring its effect.
+
+    Some retained recovery receipts predate the durable graph-journal export.
+    Exact zero/no-provider evidence can establish that their accounting is
+    internally consistent, but it cannot establish the missing graph effect.
+    Those rows are therefore eligible only for an immutable typed hold.
+    """
+
+    if journal or receipt is None:
+        return False
+    provider_attempt = receipt.get("provider_attempt_number")
+    if (
+        not _is_positive_int(provider_attempt)
+        or provider_attempt >= row["attempt_number"]
+    ):
+        return False
+    prior_row = rows_by_identity.get((str(row["ingest_id"]), int(provider_attempt)))
+    if prior_row is None:
+        return False
+    prior_receipt = _json_object(
+        prior_row["attempt_receipt_json"],
+        field=f"attempt receipt {prior_row['spend_id']}",
+    )
+    _validate_attempt_receipt(prior_row, prior_receipt)
+    if prior_receipt is None:
+        return False
+
+    accounting = receipt.get("accounting")
+    provider_accounting = (
+        accounting.get("provider_attempt") if isinstance(accounting, Mapping) else None
+    )
+    current_accounting = (
+        accounting.get("current_attempt") if isinstance(accounting, Mapping) else None
+    )
+    prior_accounting = prior_receipt.get("accounting")
+    current_usage = _json_object(
+        row["provider_usage_json"], field="recovered current zero usage"
+    )
+    prior_usage = _json_object(
+        prior_row["provider_usage_json"], field="recovered prior zero usage"
+    )
+    current_leaves = receipt.get("chat_invocations")
+    prior_leaves = prior_receipt.get("chat_invocations")
+
+    return (
+        isinstance(accounting, Mapping)
+        and accounting.get("recovery_classification")
+        == "RECOVERED_IMMUTABLE_COMPLETE"
+        and isinstance(provider_accounting, Mapping)
+        and provider_accounting.get("spend_id") == prior_row["spend_id"]
+        and provider_accounting.get("status") == prior_row["status"]
+        and provider_accounting.get("retained_attempt_receipt") is True
+        and provider_accounting.get("reconciled_again") is False
+        and isinstance(current_accounting, Mapping)
+        and current_accounting.get("spend_id") == row["spend_id"]
+        and current_accounting.get("status") == row["status"] == "RECONCILED"
+        and current_accounting.get("usage_basis")
+        == row["usage_basis"]
+        == "NO_EMBEDDING_CALL"
+        and _is_exact_zero(current_accounting.get("actual_usd_microunits"))
+        and _is_exact_zero(current_accounting.get("actual_gbp_microunits"))
+        and current_accounting.get("unused_reservation_released") is True
+        and _is_exact_zero(row["actual_usd_microunits"])
+        and _is_exact_zero(row["actual_gbp_microunits"])
+        and isinstance(current_usage, Mapping)
+        and is_exact_no_embedding_call(current_usage)
+        and isinstance(receipt.get("embedding_usage"), Mapping)
+        and is_exact_no_embedding_call(receipt["embedding_usage"])
+        and isinstance(prior_accounting, Mapping)
+        and prior_accounting.get("spend_id") == prior_row["spend_id"]
+        and prior_accounting.get("status") == prior_row["status"] == "RECONCILED"
+        and prior_accounting.get("usage_basis")
+        == prior_row["usage_basis"]
+        == "NO_EMBEDDING_CALL"
+        and _is_exact_zero(prior_accounting.get("actual_usd_microunits"))
+        and _is_exact_zero(prior_accounting.get("actual_gbp_microunits"))
+        and prior_accounting.get("unused_reservation_released") is True
+        and _is_exact_zero(prior_row["actual_usd_microunits"])
+        and _is_exact_zero(prior_row["actual_gbp_microunits"])
+        and isinstance(prior_usage, Mapping)
+        and is_exact_no_embedding_call(prior_usage)
+        and isinstance(prior_receipt.get("embedding_usage"), Mapping)
+        and is_exact_no_embedding_call(prior_receipt["embedding_usage"])
+        and prior_receipt.get("provider_attempt_number") == provider_attempt
+        and isinstance(current_leaves, list)
+        and isinstance(prior_leaves, list)
+        and canonical_json_bytes(current_leaves) == canonical_json_bytes(prior_leaves)
+        and all(is_exact_predispatch_no_provider_call(item) for item in current_leaves)
     )
 
 
@@ -1399,6 +1520,9 @@ def _plan_from_connection(
                 rows_by_identity, row, receipt
             )
         )
+        recovered_without_journal = _recovered_immutable_complete_without_journal(
+            rows_by_identity, row, journal, receipt
+        )
         if (
             receipt is not None
             and receipt.get("provider_attempt_number") is not None
@@ -1408,6 +1532,7 @@ def _plan_from_connection(
                 rows_by_identity, row, receipt
             )
             and not duplicate_current_attribution
+            and not recovered_without_journal
         ):
             raise GraphitiSpendReconciliationError(
                 "attempt receipt provider attempt differs from its spend join"
@@ -1500,6 +1625,20 @@ def _plan_from_connection(
             else:
                 provider_usage = prior_usage
         status = str(row["status"])
+        if recovered_without_journal:
+            transitions.append(
+                _transition(
+                    row,
+                    disposition=GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD,
+                    evidence_basis=(
+                        "RECOVERED_IMMUTABLE_COMPLETE_WITHOUT_GRAPH_JOURNAL"
+                    ),
+                    journal=journal,
+                    receipt=receipt,
+                    provider_usage=provider_usage,
+                )
+            )
+            continue
         if _receipt_proves_pre_provider_refusal(receipt, journal):
             transitions.append(
                 _transition(
@@ -1711,6 +1850,14 @@ def plan_graphiti_spend_reconciliation(
         )
     finally:
         connection.close()
+
+
+def validate_retained_graphiti_spend_dispositions(
+    connection: sqlite3.Connection,
+) -> None:
+    """Validate authenticated retained spend dispositions and receipts."""
+
+    _validate_retained_dispositions(connection)
 
 
 def _ensure_reconciliation_schema(connection: sqlite3.Connection) -> None:
@@ -2208,4 +2355,5 @@ __all__ = [
     "GraphitiSpendReconciliationReceipt",
     "GraphitiSpendTransition",
     "plan_graphiti_spend_reconciliation",
+    "validate_retained_graphiti_spend_dispositions",
 ]

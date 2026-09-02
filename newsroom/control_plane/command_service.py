@@ -13,6 +13,12 @@ from newsroom.authority.auth import AuthenticationProof
 from newsroom.authority.types import UtcTimestamp
 from newsroom.control_plane import backlog_reconciliation as backlog
 from newsroom.control_plane.command_auth import HERMES_COMMAND_PRINCIPAL
+from newsroom.control_plane.graphiti_event_reconciliation import (
+    GRAPHITI_EVENT_REPAIR_COMMAND_TYPE,
+    GraphitiEventReconciliationReceipt,
+    _GraphitiEventReconciliationCommand,
+    _apply_graphiti_event_reconciliation,
+)
 from newsroom.control_plane.graphiti_spend_reconciliation import (
     GRAPHITI_SPEND_RECONCILE_COMMAND_TYPE,
     GraphitiSpendReconciliationReceipt,
@@ -78,6 +84,39 @@ class ControlPlaneCommandService:
                 caller_principal=authentication.principal_id,
                 writer_principal=self.principal,
                 command_type=GRAPHITI_SPEND_RECONCILE_COMMAND_TYPE,
+                idempotency_key=idempotency_key,
+                expected_plan_digest=expected_plan_digest,
+            ),
+        )
+
+    def reconcile_graphiti_events(
+        self,
+        *,
+        proving_store: str,
+        unpublished_store: str,
+        dry_run_plan: Mapping[str, object],
+        evaluated_at: datetime,
+        idempotency_key: str,
+        expected_plan_digest: str,
+        proof: AuthenticationProof,
+    ) -> GraphitiEventReconciliationReceipt:
+        """Authenticate and apply one provider-free missing-event repair plan."""
+
+        now = self._clock()
+        authentication = self._authenticator.authenticate(proof, now=now)
+        authentication.require_current(now)
+        if authentication.principal_id != HERMES_COMMAND_PRINCIPAL:
+            raise PermissionError("Graphiti event repair requires the Hermes principal")
+        return _apply_graphiti_event_reconciliation(
+            proving_store,
+            unpublished_store,
+            dry_run_plan=dry_run_plan,
+            evaluated_at=evaluated_at,
+            applied_at=now.value,
+            command=_GraphitiEventReconciliationCommand(
+                caller_principal=authentication.principal_id,
+                writer_principal=self.principal,
+                command_type=GRAPHITI_EVENT_REPAIR_COMMAND_TYPE,
                 idempotency_key=idempotency_key,
                 expected_plan_digest=expected_plan_digest,
             ),

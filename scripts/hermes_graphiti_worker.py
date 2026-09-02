@@ -17,14 +17,9 @@ from pathlib import Path
 
 from newsroom.authority.auth import AuthenticationProof
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
-from newsroom.authority.editorial_relation_system import GovernedEditorialRelations
-from newsroom.authority.entity_system import GovernedEntityRecords
-from newsroom.authority.extraction_system import GovernedExtractionRecords
-from newsroom.authority.graphiti_adapter_system import (
-    GovernedGraphitiProposalAdapter,
+from newsroom.authority.graphiti_increment4_system import (
+    GovernedGraphitiIncrement4AuthoritySystem,
 )
-from newsroom.authority.object_system import GovernedObjects
-from newsroom.authority.neo4j_projection_system import Neo4jStructuralProjector
 from newsroom.control_plane.cycle import (
     GRAPHITI_UNIT_RESERVATION_GBP_MICROUNITS,
     consume_next_graphiti_event,
@@ -42,6 +37,7 @@ from newsroom.control_plane.graphiti_admission import (
 from newsroom.control_plane.graphiti_events import GraphitiProcessResult
 from newsroom.control_plane.graphiti_steady_state import (
     GraphitiCampaignRuntime,
+    _mint_graphiti_campaign_runtime,
     graphiti_graph_destination_readback,
     graphiti_store_snapshot_digests,
     validate_graphiti_campaign_packet,
@@ -53,7 +49,6 @@ from newsroom.control_plane.paths import (
     ensure_control_plane_state_root,
 )
 from newsroom.control_plane.store import connect
-from newsroom.increment4.neo4j import Increment4Neo4jController
 from newsroom.projection.neo4j import StructuralActiveReconciliationRequest
 
 
@@ -66,27 +61,35 @@ GovernedGraphitiWorkerRuntime = GraphitiCampaignRuntime
 
 def compose_governed_graphiti_worker_runtime(
     *,
-    adapter: GovernedGraphitiProposalAdapter,
-    extraction: GovernedExtractionRecords,
-    objects: GovernedObjects,
-    entities: GovernedEntityRecords,
-    relations: GovernedEditorialRelations,
-    increment4: Increment4Neo4jController,
-    structural: Neo4jStructuralProjector,
-    graph_destination_id: str,
-    authority_store_source_path: str,
+    authority_system: GovernedGraphitiIncrement4AuthoritySystem,
     authority_store_descriptor_digest: str,
     proof: AuthenticationProof,
+    expected_authority_store_path: str | None = None,
     max_attempts: int = 1,
 ) -> GovernedGraphitiWorkerRuntime:
-    """Wire 4A/4D extraction to the existing 4B/4C/4E authorities."""
+    """Wire one exact 4A-4E authority system into the bounded worker."""
 
+    if not isinstance(
+        authority_system, GovernedGraphitiIncrement4AuthoritySystem
+    ):
+        raise TypeError("combined Increment 4 authority system is required")
     if isinstance(max_attempts, bool) or not isinstance(max_attempts, int):
         raise TypeError("admission attempt cap must be an integer")
     if max_attempts <= 0:
         raise ValueError("admission attempt cap must be positive")
-    if not isinstance(graph_destination_id, str) or not graph_destination_id.strip():
-        raise ValueError("graph destination identity is invalid")
+    authority_store_path = authority_system.authority_store_path
+    graph_destination_id = authority_system.graph_destination_id
+    if expected_authority_store_path is not None and str(
+        Path(expected_authority_store_path).expanduser().resolve()
+    ) != authority_store_path:
+        raise ValueError("combined authority-store path differs from operator input")
+    adapter = authority_system.graphiti
+    extraction = authority_system.extraction
+    objects = authority_system.objects
+    entities = authority_system.entities
+    relations = authority_system.relations
+    increment4 = authority_system.increment4
+    structural = authority_system.structural
     graphiti = EvaluationGraphitiRunner(
         fallback_permitted=False,
         proposal_adapter=adapter,
@@ -132,12 +135,13 @@ def compose_governed_graphiti_worker_runtime(
             raise GraphitiCampaignStop("campaign graph identity drifted")
         return actual
 
-    return GovernedGraphitiWorkerRuntime(
+    return _mint_graphiti_campaign_runtime(
         graphiti=graphiti,
         admission_factory=admission_factory,
         graph_state_fence=graph_state_fence,
-        authority_store_source_path=authority_store_source_path,
+        authority_store_source_path=authority_store_path,
         authority_store_descriptor_digest=authority_store_descriptor_digest,
+        graph_destination_id=graph_destination_id,
     )
 
 
@@ -1252,6 +1256,9 @@ def run_bounded_campaign(
         or runtime.authority_store_descriptor_digest != authority_digest
     ):
         raise GraphitiCampaignStop("campaign runtime authority binding drifted")
+    graph = _mapping(campaign.get("graph"), field="campaign graph")
+    if graph.get("destination_id") != runtime.graph_destination_id:
+        raise GraphitiCampaignStop("campaign runtime graph destination drifted")
     expected_snapshot_digests = _mapping(
         campaign.get("source_snapshot_digests"),
         field="campaign source snapshot digests",

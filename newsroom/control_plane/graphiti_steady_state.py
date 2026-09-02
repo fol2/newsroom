@@ -9,7 +9,6 @@ import tempfile
 from collections import Counter
 from collections.abc import Callable
 from contextlib import ExitStack
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Mapping
@@ -32,6 +31,16 @@ from newsroom.control_plane.graphiti_events import (
     GRAPHITI_EVENT_STATES,
     GraphitiRevisionEvent,
     graphiti_unit_binding_reason,
+)
+from newsroom.control_plane.graphiti_event_reconciliation import (
+    GraphitiEventRepairDecision,
+    GraphitiEventRepairDisposition,
+    GraphitiEventReconciliationError,
+    classify_graphiti_event_gaps,
+)
+from newsroom.control_plane.graphiti_spend_reconciliation import (
+    GraphitiSpendReconciliationError,
+    validate_retained_graphiti_spend_dispositions,
 )
 from newsroom.control_plane.issue_790_canary import graphiti_excluded_event_ids
 from newsroom.control_plane.read_only_snapshot import read_only_snapshot
@@ -56,7 +65,7 @@ from newsroom.increment4.contracts import (
 from newsroom.projection import ProjectionGenerationId
 from newsroom.projection.neo4j import StructuralReconciliationView
 
-SCHEMA_VERSION = "newsroom.graphiti-steady-state-packet.v3"
+SCHEMA_VERSION = "newsroom.graphiti-steady-state-packet.v4"
 
 CAMPAIGN_SCHEMA_VERSION = "newsroom.graphiti-bounded-campaign-input.v2"
 
@@ -110,30 +119,116 @@ HISTORICAL_PARTITION_CATEGORIES = (
 )
 
 
-@dataclass(frozen=True, slots=True)
 class GraphitiCampaignRuntime:
     """Already-composed governed worker capabilities for a bounded campaign."""
 
-    graphiti: object
-    admission_factory: Callable[..., object]
-    graph_state_fence: Callable[[Mapping[str, object]], Mapping[str, object]]
-    authority_store_source_path: str
-    authority_store_descriptor_digest: str
+    __slots__ = (
+        "__graphiti",
+        "__admission_factory",
+        "__graph_state_fence",
+        "__authority_store_source_path",
+        "__authority_store_descriptor_digest",
+        "__graph_destination_id",
+        "__construction_token",
+    )
 
-    def __post_init__(self) -> None:
-        if not callable(self.admission_factory) or not callable(
-            self.graph_state_fence
-        ):
+    def __init__(
+        self,
+        *,
+        graphiti: object,
+        admission_factory: Callable[..., object],
+        graph_state_fence: Callable[[Mapping[str, object]], Mapping[str, object]],
+        authority_store_source_path: str,
+        authority_store_descriptor_digest: str,
+        graph_destination_id: str,
+        _construction_token: object,
+    ) -> None:
+        if _construction_token is not _CAMPAIGN_RUNTIME_CONSTRUCTION_TOKEN:
+            raise TypeError("campaign runtimes require the governed worker composer")
+        if not callable(admission_factory) or not callable(graph_state_fence):
             raise TypeError("campaign runtime capabilities must be callable")
         if (
-            not isinstance(self.authority_store_source_path, str)
-            or not self.authority_store_source_path
+            not isinstance(authority_store_source_path, str)
+            or not authority_store_source_path
         ):
             raise ValueError("campaign runtime authority path is invalid")
         validate_sha256_digest(
-            self.authority_store_descriptor_digest,
+            authority_store_descriptor_digest,
             field="campaign runtime authority descriptor digest",
         )
+        validate_sha256_digest(
+            graph_destination_id,
+            field="campaign runtime graph destination id",
+        )
+        self.__graphiti = graphiti
+        self.__admission_factory = admission_factory
+        self.__graph_state_fence = graph_state_fence
+        self.__authority_store_source_path = authority_store_source_path
+        self.__authority_store_descriptor_digest = authority_store_descriptor_digest
+        self.__graph_destination_id = graph_destination_id
+        self.__construction_token = _construction_token
+
+    @property
+    def graphiti(self) -> object:
+        return self.__graphiti
+
+    @property
+    def admission_factory(self) -> Callable[..., object]:
+        return self.__admission_factory
+
+    @property
+    def graph_state_fence(
+        self,
+    ) -> Callable[[Mapping[str, object]], Mapping[str, object]]:
+        return self.__graph_state_fence
+
+    @property
+    def authority_store_source_path(self) -> str:
+        return self.__authority_store_source_path
+
+    @property
+    def authority_store_descriptor_digest(self) -> str:
+        return self.__authority_store_descriptor_digest
+
+    @property
+    def graph_destination_id(self) -> str:
+        return self.__graph_destination_id
+
+
+_CAMPAIGN_RUNTIME_CONSTRUCTION_TOKEN = object()
+
+
+def _mint_graphiti_campaign_runtime(
+    *,
+    graphiti: object,
+    admission_factory: Callable[..., object],
+    graph_state_fence: Callable[[Mapping[str, object]], Mapping[str, object]],
+    authority_store_source_path: str,
+    authority_store_descriptor_digest: str,
+    graph_destination_id: str,
+) -> GraphitiCampaignRuntime:
+    """Mint one opaque runtime after the governed worker composer has wired it."""
+
+    return GraphitiCampaignRuntime(
+        graphiti=graphiti,
+        admission_factory=admission_factory,
+        graph_state_fence=graph_state_fence,
+        authority_store_source_path=authority_store_source_path,
+        authority_store_descriptor_digest=authority_store_descriptor_digest,
+        graph_destination_id=graph_destination_id,
+        _construction_token=_CAMPAIGN_RUNTIME_CONSTRUCTION_TOKEN,
+    )
+
+
+def _is_minted_graphiti_campaign_runtime(value: object) -> bool:
+    return isinstance(value, GraphitiCampaignRuntime) and (
+        getattr(
+            value,
+            "_GraphitiCampaignRuntime__construction_token",
+            None,
+        )
+        is _CAMPAIGN_RUNTIME_CONSTRUCTION_TOKEN
+    )
 
 
 def _tables(connection: sqlite3.Connection) -> set[str]:
@@ -657,6 +752,8 @@ def _proving_accounting(
 
 def _event_accounting(
     connection: sqlite3.Connection,
+    *,
+    gap_decisions: tuple[GraphitiEventRepairDecision, ...] = (),
 ) -> tuple[dict[str, object], list[str]]:
     blockers: list[str] = []
     required = {
@@ -700,8 +797,31 @@ def _event_accounting(
         for seq in set(landed) & set(events)
         if landed[seq] != events[seq]
     )
-    if missing:
+    decisions_by_seq = {item.ledger_seq: item for item in gap_decisions}
+    classified_sequences = set(decisions_by_seq)
+    missing_sequences = set(missing)
+    classification_complete = classified_sequences == missing_sequences
+    projection_candidates = sorted(
+        seq
+        for seq, item in decisions_by_seq.items()
+        if item.disposition is GraphitiEventRepairDisposition.PROJECT_EVENT
+    )
+    held = sorted(
+        seq
+        for seq, item in decisions_by_seq.items()
+        if item.disposition is GraphitiEventRepairDisposition.HOLD
+    )
+    unclassified = sorted(
+        seq
+        for seq, item in decisions_by_seq.items()
+        if item.disposition is GraphitiEventRepairDisposition.UNCLASSIFIED
+    )
+    if not classification_complete:
+        blockers.append("EVENT_GAP_CLASSIFICATION_INCOMPLETE")
+    if projection_candidates:
         blockers.append("LANDED_REVISION_EVENT_MISSING")
+    if unclassified:
+        blockers.append("LANDED_REVISION_EVENT_UNCLASSIFIED")
     if orphan:
         blockers.append("GRAPHITI_EVENT_ORPHANED")
     if contradictions:
@@ -710,9 +830,20 @@ def _event_accounting(
         "landed_revision_count": len(landed),
         "event_count": len(events),
         "missing_event_ledger_sequences": missing,
+        "projection_candidate_ledger_sequences": projection_candidates,
+        "held_missing_event_ledger_sequences": held,
+        "unclassified_missing_event_ledger_sequences": unclassified,
+        "gap_classification_complete": classification_complete,
         "orphan_event_ledger_sequences": orphan,
         "contradictory_ledger_sequences": contradictions,
         "one_to_one": not (missing or orphan or contradictions),
+        "eligible_one_to_one": not (
+            projection_candidates
+            or unclassified
+            or orphan
+            or contradictions
+            or not classification_complete
+        ),
     }, blockers
 
 
@@ -934,6 +1065,10 @@ def _historical_partition(
     observed_at: datetime,
     event_evidence: Mapping[str, object],
     receipt_evidence: Mapping[str, object],
+    event_gap_decisions: tuple[GraphitiEventRepairDecision, ...] = (),
+    resolved_units: tuple[CorpusIngestUnit, ...] = (),
+    unit_resolution_available: bool = True,
+    excluded_event_ids: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, object], list[str]]:
     """Partition every effective landed revision without provider effects."""
 
@@ -974,6 +1109,9 @@ def _historical_partition(
         "FROM unpublished_graphiti_revision_events ORDER BY ledger_seq"
     ).fetchall()
     events_by_ledger = {int(row[1]): row for row in event_rows}
+    gap_decisions_by_ledger = {
+        item.ledger_seq: item for item in event_gap_decisions
+    }
     terminal_receipt_schema_present = {
         "unpublished_graphiti_ingest",
         "unpublished_graphiti_receipts",
@@ -993,19 +1131,10 @@ def _historical_partition(
         if item.get(key) is not None
     }
 
-    unit_resolution_available = True
-    try:
-        units = load_graphiti_units_from_connection(
-            proving,
-            evaluated_at=observed_at,
-        )
-    except (sqlite3.Error, ValueError):
-        units = ()
-        unit_resolution_available = False
     units_by_revision: dict[
         tuple[str, str, str, str, str], list[CorpusIngestUnit]
     ] = {}
-    for unit in units:
+    for unit in resolved_units:
         key = (
             unit.source_id,
             unit.item_key,
@@ -1014,8 +1143,6 @@ def _historical_partition(
             unit.updated_at or "",
         )
         units_by_revision.setdefault(key, []).append(unit)
-
-    excluded_event_ids = graphiti_excluded_event_ids(unpublished)
 
     assignments: dict[str, list[int]] = {
         category: [] for category in HISTORICAL_PARTITION_CATEGORIES
@@ -1033,8 +1160,21 @@ def _historical_partition(
         category: str
         reason: str
         if event_row is None:
-            category = "RIGHTS_OR_INPUT_HELD"
-            reason = "EVENT_PROJECTION_MISSING"
+            gap = gap_decisions_by_ledger.get(ledger_seq)
+            if gap is None or gap.disposition is GraphitiEventRepairDisposition.UNCLASSIFIED:
+                category = "UNCLASSIFIED"
+                reason = (
+                    "EVENT_GAP_CLASSIFICATION_MISSING"
+                    if gap is None
+                    else str(gap.reason or "EVENT_GAP_UNCLASSIFIED")
+                )
+            else:
+                category = "RIGHTS_OR_INPUT_HELD"
+                reason = (
+                    "EVENT_PROJECTION_MISSING"
+                    if gap.disposition is GraphitiEventRepairDisposition.PROJECT_EVENT
+                    else str(gap.reason or "CURRENT_RIGHTS_OR_INPUT_HELD")
+                )
         else:
             event_id = str(event_row[0])
             try:
@@ -1239,6 +1379,11 @@ def _admission(
 def _spend(connection: sqlite3.Connection) -> tuple[dict[str, object], list[str]]:
     if "unpublished_graphiti_spend" not in _tables(connection):
         return {"schema_present": False}, ["GRAPHITI_SPEND_SCHEMA_MISSING"]
+    disposition_integrity_valid = True
+    try:
+        validate_retained_graphiti_spend_dispositions(connection)
+    except (GraphitiSpendReconciliationError, sqlite3.Error):
+        disposition_integrity_valid = False
     rows = connection.execute(
         "SELECT status,COUNT(*),COALESCE(SUM(reserved_gbp_microunits),0),"
         "COALESCE(SUM(actual_gbp_microunits),0),"
@@ -1247,7 +1392,42 @@ def _spend(connection: sqlite3.Connection) -> tuple[dict[str, object], list[str]
         "FROM unpublished_graphiti_spend GROUP BY status"
     ).fetchall()
     counts = {str(row[0]): int(row[1]) for row in rows}
-    unreconciled = counts.get("UNRECONCILED", 0) + counts.get("RESERVED", 0)
+    reserved_by_status = {str(row[0]): int(row[2]) for row in rows}
+    disposition_counts: dict[str, int] = {}
+    retained_typed_hold_count = 0
+    retained_typed_hold_reserved = 0
+    if (
+        disposition_integrity_valid
+        and "unpublished_graphiti_spend_dispositions" in _tables(connection)
+    ):
+        retained_rows = connection.execute(
+            "SELECT d.disposition,COUNT(*),"
+            "COALESCE(SUM(s.reserved_gbp_microunits),0) "
+            "FROM unpublished_graphiti_spend s "
+            "JOIN unpublished_graphiti_spend_dispositions d "
+            "ON d.spend_id=s.spend_id "
+            "WHERE s.status IN ('RESERVED','UNRECONCILED') "
+            "GROUP BY d.disposition"
+        ).fetchall()
+        disposition_counts = {str(row[0]): int(row[1]) for row in retained_rows}
+        retained_typed_hold_count = sum(int(row[1]) for row in retained_rows)
+        retained_typed_hold_reserved = sum(int(row[2]) for row in retained_rows)
+        undispositioned = connection.execute(
+            "SELECT COUNT(*),COALESCE(SUM(s.reserved_gbp_microunits),0) "
+            "FROM unpublished_graphiti_spend s "
+            "LEFT JOIN unpublished_graphiti_spend_dispositions d "
+            "ON d.spend_id=s.spend_id "
+            "WHERE s.status IN ('RESERVED','UNRECONCILED') "
+            "AND d.spend_id IS NULL"
+        ).fetchone()
+    else:
+        undispositioned = connection.execute(
+            "SELECT COUNT(*),COALESCE(SUM(reserved_gbp_microunits),0) "
+            "FROM unpublished_graphiti_spend "
+            "WHERE status IN ('RESERVED','UNRECONCILED')"
+        ).fetchone()
+    undispositioned_count = int(undispositioned[0])
+    undispositioned_reserved = int(undispositioned[1])
     return {
         "schema_present": True,
         "status_counts": {
@@ -1259,6 +1439,10 @@ def _spend(connection: sqlite3.Connection) -> tuple[dict[str, object], list[str]
             for row in rows
             if row[0] in {"RESERVED", "UNRECONCILED"}
         ),
+        "reserved_gbp_microunits_by_status": {
+            key: reserved_by_status.get(key, 0)
+            for key in ("RECONCILED", "RESERVED", "UNRECONCILED")
+        },
         "actual_gbp_microunits": sum(
             int(row[3]) for row in rows if row[0] == "RECONCILED"
         ),
@@ -1266,8 +1450,23 @@ def _spend(connection: sqlite3.Connection) -> tuple[dict[str, object], list[str]
             int(row[4]) for row in rows if row[0] == "RECONCILED"
         ),
         "provider_usage_record_count": sum(int(row[5]) for row in rows),
-        "unreconciled_attempt_count": unreconciled,
-    }, (["GRAPHITI_SPEND_UNRECONCILED"] if unreconciled else [])
+        "retained_disposition_integrity_valid": disposition_integrity_valid,
+        "unreconciled_attempt_count": (
+            counts.get("UNRECONCILED", 0) + counts.get("RESERVED", 0)
+        ),
+        "authenticated_retained_typed_hold_count": retained_typed_hold_count,
+        "authenticated_retained_typed_hold_reserved_gbp_microunits": (
+            retained_typed_hold_reserved
+        ),
+        "retained_typed_hold_disposition_counts": disposition_counts,
+        "undispositioned_unresolved_attempt_count": undispositioned_count,
+        "undispositioned_unresolved_reserved_gbp_microunits": (
+            undispositioned_reserved
+        ),
+    }, (
+        ([] if disposition_integrity_valid else ["GRAPHITI_SPEND_EVIDENCE_INTEGRITY_FAILURE"])
+        + (["GRAPHITI_SPEND_UNRECONCILED"] if undispositioned_count else [])
+    )
 
 
 def _campaign_evidence(
@@ -1281,6 +1480,7 @@ def _campaign_evidence(
     authority_evidence: Mapping[str, object],
     graph_destination_reconciliation: StructuralReconciliationView | None,
     runtime_composed: bool,
+    runtime_graph_destination_id: str | None,
 ) -> tuple[dict[str, object], list[str]]:
     if campaign is None:
         return {"configured": False, "campaign_authorised": False}, [
@@ -1401,6 +1601,11 @@ def _campaign_evidence(
     if set(graph) != {"destination_id"}:
         blockers.append("GRAPH_IDENTITY_FIELDS_INVALID")
     destination_id = token(graph.get("destination_id"), "GRAPH_DESTINATION_ID")
+    if (
+        runtime_graph_destination_id is not None
+        and destination_id != runtime_graph_destination_id
+    ):
+        blockers.append("GRAPH_DESTINATION_RUNTIME_BINDING_INVALID")
     graph_readback = authority_evidence.get("active_projection_authority")
     if not isinstance(graph_readback, Mapping):
         blockers.append("ACTIVE_GRAPH_GENERATION_READBACK_INVALID")
@@ -1653,7 +1858,47 @@ def build_graphiti_steady_state_packet(
         proving_accounting, proving_blockers = _proving_accounting(
             proving.connection
         )
-        accounting, accounting_blockers = _event_accounting(unpublished.connection)
+        try:
+            resolved_units = load_graphiti_units_from_connection(
+                proving.connection,
+                evaluated_at=observed_at,
+            )
+            unit_resolution_failure = None
+        except (sqlite3.Error, ValueError):
+            resolved_units = ()
+            unit_resolution_failure = "CURRENT_UNIT_RESOLUTION_UNAVAILABLE"
+        try:
+            event_gap_decisions = classify_graphiti_event_gaps(
+                proving.connection,
+                unpublished.connection,
+                evaluated_at=observed_at,
+                resolved_units=resolved_units,
+                unit_resolution_failure=unit_resolution_failure,
+            )
+        except (GraphitiEventReconciliationError, sqlite3.Error, ValueError):
+            event_gap_decisions = ()
+            event_gap_classification_valid = False
+        else:
+            event_gap_classification_valid = True
+        try:
+            # This validates every authenticated event-repair receipt and its
+            # retained queue/hold effects before any exclusion is trusted.
+            excluded_event_ids = graphiti_excluded_event_ids(
+                unpublished.connection
+            )
+        except (GraphitiEventReconciliationError, sqlite3.Error, ValueError):
+            excluded_event_ids = frozenset()
+            event_repair_evidence_valid = False
+        else:
+            event_repair_evidence_valid = True
+        accounting, accounting_blockers = _event_accounting(
+            unpublished.connection,
+            gap_decisions=event_gap_decisions,
+        )
+        if not event_gap_classification_valid:
+            accounting_blockers.append("EVENT_GAP_CLASSIFICATION_INVALID")
+        if not event_repair_evidence_valid:
+            accounting_blockers.append("EVENT_REPAIR_EVIDENCE_INTEGRITY_FAILURE")
         events, receipts, receipt_blockers = _events_and_receipts(
             unpublished.connection
         )
@@ -1664,6 +1909,10 @@ def build_graphiti_steady_state_packet(
             observed_at=observed_at,
             event_evidence=events,
             receipt_evidence=receipts,
+            event_gap_decisions=event_gap_decisions,
+            resolved_units=resolved_units,
+            unit_resolution_available=unit_resolution_failure is None,
+            excluded_event_ids=excluded_event_ids,
         )
         admission, admission_blockers = _admission(
             unpublished.connection, observed_at=observed_at
@@ -1683,7 +1932,7 @@ def build_graphiti_steady_state_packet(
                 authority.connection
             )
         authority_descriptor = store_descriptors.get("authority")
-        runtime_is_typed = isinstance(governed_runtime, GraphitiCampaignRuntime)
+        runtime_is_typed = _is_minted_graphiti_campaign_runtime(governed_runtime)
         runtime_authority_path = (
             governed_runtime.authority_store_source_path
             if runtime_is_typed
@@ -1693,6 +1942,9 @@ def build_graphiti_steady_state_packet(
             governed_runtime.authority_store_descriptor_digest
             if runtime_is_typed
             else None
+        )
+        runtime_graph_destination_id = (
+            governed_runtime.graph_destination_id if runtime_is_typed else None
         )
         runtime_composed = (
             runtime_is_typed
@@ -1713,6 +1965,14 @@ def build_graphiti_steady_state_packet(
                 graph_destination_reconciliation
             ),
             runtime_composed=runtime_composed,
+            runtime_graph_destination_id=runtime_graph_destination_id,
+        )
+        campaign_graph = campaign.get("graph")
+        runtime_campaign_graph_bound = (
+            runtime_composed
+            and isinstance(campaign_graph, Mapping)
+            and campaign_graph.get("destination_id")
+            == runtime_graph_destination_id
         )
         blockers = (
             proving_blockers
@@ -1742,11 +2002,12 @@ def build_graphiti_steady_state_packet(
                 "authority_store_configured": authority is not None,
                 "authority_store_source_path": runtime_authority_path,
                 "authority_store_descriptor_digest": runtime_authority_digest,
+                "graph_destination_id": runtime_graph_destination_id,
                 "durable_proposal_envelope_binding": runtime_composed,
                 "admission_policy_configured": runtime_composed,
                 "full_generation_projector_configured": runtime_composed,
                 "dormant_worker_path_wired": runtime_composed,
-                "campaign_packet_enforced": runtime_composed,
+                "campaign_packet_enforced": runtime_campaign_graph_bound,
                 "actual_graph_readback_observed": (
                     campaign.get("graph_destination_readback") is not None
                 ),
@@ -1804,6 +2065,7 @@ def validate_graphiti_campaign_packet(
             "authority_store_configured",
             "authority_store_source_path",
             "authority_store_descriptor_digest",
+            "graph_destination_id",
             "durable_proposal_envelope_binding",
             "admission_policy_configured",
             "full_generation_projector_configured",
@@ -1823,6 +2085,13 @@ def validate_graphiti_campaign_packet(
         or runtime.get("campaign_authorised") is not False
     ):
         raise ValueError("campaign packet runtime composition differs")
+    try:
+        validate_sha256_digest(
+            runtime.get("graph_destination_id"),
+            field="campaign runtime graph destination id",
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("campaign packet runtime composition differs") from exc
 
     campaign = value.get("bounded_campaign")
     if not isinstance(campaign, Mapping) or (
@@ -2117,6 +2386,7 @@ def validate_graphiti_campaign_packet(
         or graph.get("generation_cohort_schema_version")
         != GRAPHITI_ADMISSION_COHORT_SCHEMA_VERSION
         or not isinstance(readback, Mapping)
+        or runtime.get("graph_destination_id") != graph.get("destination_id")
     ):
         raise ValueError("campaign packet graph readback differs")
     if (
