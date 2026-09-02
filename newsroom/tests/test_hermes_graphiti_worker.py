@@ -57,6 +57,7 @@ def test_exact_event_is_preflighted_time_bounded_and_fallback_free(
     runtime = worker._mint_graphiti_campaign_runtime(
         graphiti=Runner(),
         admission_factory=lambda _connection: object(),
+        bind_unit_authority=lambda unit: unit,
         graph_state_fence=lambda _campaign: {},
         graph_destination_id=GRAPH_DESTINATION_ID,
         authority_store_source_path="/authority.sqlite3",
@@ -89,6 +90,7 @@ def test_exact_event_is_preflighted_time_bounded_and_fallback_free(
     assert consumed["max_reserved_gbp_microunits"] == 500000
     assert consumed["graphiti"] is runtime.graphiti
     assert consumed["graphiti_admission_factory"] is runtime.admission_factory
+    assert consumed["unit_authority_resolver"] is runtime.bind_unit_authority
     assert consumed["require_graphiti_admission"] is True
     bodies = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [body["event"] for body in bodies] == [
@@ -130,6 +132,7 @@ def test_runtime_composes_existing_4a_4d_4b_4c_4e_authorities(
     )
     authority_system = _open(tmp_path, TrackingMemoryNeo4jAdapter())
     authority_proof = proof()
+    bind_unit_authority = lambda unit: unit
     try:
         with pytest.raises(ValueError, match="path differs"):
             worker.compose_governed_graphiti_worker_runtime(
@@ -137,6 +140,7 @@ def test_runtime_composes_existing_4a_4d_4b_4c_4e_authorities(
                 expected_authority_store_path=str(tmp_path / "different.sqlite3"),
                 authority_store_descriptor_digest="sha256:" + "a" * 64,
                 proof=authority_proof,
+                bind_unit_authority=bind_unit_authority,
                 max_attempts=1,
             )
 
@@ -145,6 +149,7 @@ def test_runtime_composes_existing_4a_4d_4b_4c_4e_authorities(
             expected_authority_store_path=str(tmp_path / "authority.sqlite3"),
             authority_store_descriptor_digest="sha256:" + "a" * 64,
             proof=authority_proof,
+            bind_unit_authority=bind_unit_authority,
             max_attempts=1,
         )
         connection = sqlite3.connect(":memory:")
@@ -154,6 +159,7 @@ def test_runtime_composes_existing_4a_4d_4b_4c_4e_authorities(
         )
         assert runtime.authority_store_descriptor_digest == "sha256:" + "a" * 64
         assert runtime.graph_destination_id == authority_system.graph_destination_id
+        assert runtime.bind_unit_authority is bind_unit_authority
 
         assert captured["runner"] == {
             "fallback_permitted": False,
@@ -236,6 +242,7 @@ def test_preflight_refusal_has_no_runner_or_dispatch(
     runtime = worker._mint_graphiti_campaign_runtime(
         graphiti=object(),
         admission_factory=lambda _connection: object(),
+        bind_unit_authority=lambda unit: unit,
         graph_state_fence=lambda _campaign: {},
         graph_destination_id=GRAPH_DESTINATION_ID,
         authority_store_source_path="/authority.sqlite3",
@@ -267,6 +274,7 @@ def test_conservative_spend_bound_refuses_before_runner_or_dispatch(
     runtime = worker._mint_graphiti_campaign_runtime(
         graphiti=object(),
         admission_factory=lambda _connection: object(),
+        bind_unit_authority=lambda unit: unit,
         graph_state_fence=lambda _campaign: {},
         graph_destination_id=GRAPH_DESTINATION_ID,
         authority_store_source_path="/authority.sqlite3",
@@ -371,6 +379,7 @@ def test_campaign_cli_executes_exact_packet_through_injected_fence(
     runtime = worker._mint_graphiti_campaign_runtime(
         graphiti=object(),
         admission_factory=lambda _connection: object(),
+        bind_unit_authority=lambda unit: unit,
         graph_state_fence=lambda _campaign: {},
         graph_destination_id=GRAPH_DESTINATION_ID,
         authority_store_source_path="/authority.sqlite3",
@@ -523,6 +532,7 @@ def test_campaign_cli_stop_reports_durable_partial_progress(
     runtime = worker._mint_graphiti_campaign_runtime(
         graphiti=object(),
         admission_factory=lambda _connection: object(),
+        bind_unit_authority=lambda unit: unit,
         graph_state_fence=lambda _campaign: {},
         graph_destination_id=GRAPH_DESTINATION_ID,
         authority_store_source_path="/authority.sqlite3",
@@ -1810,6 +1820,7 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
         calls.append(("extract", event_id))
         assert kwargs["defer_graphiti_admission"] is True
         assert kwargs["require_graphiti_admission"] is True
+        assert kwargs["unit_authority_resolver"] is runtime.bind_unit_authority
         return GraphitiProcessResult(
             event_id,
             int(event_id.removeprefix("event-")),
@@ -1917,6 +1928,7 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
     runtime = worker._mint_graphiti_campaign_runtime(
         graphiti=object(),
         admission_factory=lambda _connection: Admission(),
+        bind_unit_authority=lambda unit: unit,
         graph_state_fence=lambda _campaign: (
             calls.append(("gate", "graph")) or {}
         ),
@@ -2038,6 +2050,7 @@ def test_bounded_campaign_checks_owner_f4_before_graph_readback(
     runtime = worker._mint_graphiti_campaign_runtime(
         graphiti=object(),
         admission_factory=lambda _connection: object(),
+        bind_unit_authority=lambda unit: unit,
         graph_state_fence=lambda _campaign: pytest.fail(
             "graph readback reached before F4"
         ),
@@ -2171,6 +2184,7 @@ def test_campaign_cap_stops_before_any_canonical_admission(
     runtime = worker._mint_graphiti_campaign_runtime(
         graphiti=object(),
         admission_factory=lambda _connection: Admission(),
+        bind_unit_authority=lambda unit: unit,
         graph_state_fence=lambda _campaign: {},
         graph_destination_id=GRAPH_DESTINATION_ID,
         authority_store_source_path="/authority.sqlite3",

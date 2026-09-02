@@ -8,10 +8,13 @@ import socket
 import subprocess
 import urllib.error
 import urllib.request
-from typing import Callable, Final, Protocol
+from typing import TYPE_CHECKING, Callable, Final, Protocol
 
 from newsroom.control_plane.child_environment import unprivileged_child_environment
 from newsroom.graphiti_adapter.evaluation_packet import OPENROUTER_BASE_URL
+
+if TYPE_CHECKING:
+    from newsroom.projection.neo4j.models import Neo4jProjectorConfig
 
 OPENROUTER_ACCOUNT = "OPENROUTER_API"
 OPENROUTER_SERVICE = "newsroom.shadow.v1"
@@ -19,10 +22,17 @@ NEO4J_ACCOUNT = "newsroom"
 NEO4J_SERVICE = "NEO4J_COMMUNITY_LOCAL"
 NEO4J_BOLT_HOST = "127.0.0.1"
 NEO4J_BOLT_PORT = 7687
+NEO4J_PROJECTOR_ACCOUNT = "newsroom_projector"
+NEO4J_PROJECTOR_SERVICE = "NEWSROOM_NEO4J_PROJECTOR_LOCAL"
+NEO4J_PROJECTOR_USERNAME = "newsroom_projector"
+NEO4J_DATABASE = "neo4j"
 _MIN_SECRET_CHARS = 20
 OPENROUTER_KEYCHAIN_SKIP: Final[str] = "OPENROUTER_API Keychain class not on this host"
 NEO4J_KEYCHAIN_SKIP: Final[str] = (
     "NEO4J_COMMUNITY_LOCAL Keychain class not on this host"
+)
+NEO4J_PROJECTOR_KEYCHAIN_SKIP: Final[str] = (
+    "NEWSROOM_NEO4J_PROJECTOR_LOCAL Keychain class not on this host"
 )
 
 
@@ -122,12 +132,38 @@ def neo4j_community_password() -> str:
     return _keychain_password(account=NEO4J_ACCOUNT, service=NEO4J_SERVICE)
 
 
+def neo4j_projector_password() -> str:
+    return _keychain_password(
+        account=NEO4J_PROJECTOR_ACCOUNT,
+        service=NEO4J_PROJECTOR_SERVICE,
+    )
+
+
 def openrouter_keychain_ready() -> bool:
     return keychain_present(account=OPENROUTER_ACCOUNT, service=OPENROUTER_SERVICE)
 
 
 def neo4j_keychain_ready() -> bool:
     return keychain_present(account=NEO4J_ACCOUNT, service=NEO4J_SERVICE)
+
+
+def neo4j_projector_keychain_ready() -> bool:
+    return keychain_present(
+        account=NEO4J_PROJECTOR_ACCOUNT,
+        service=NEO4J_PROJECTOR_SERVICE,
+    )
+
+
+def neo4j_projector_config() -> Neo4jProjectorConfig:
+    """Load the dedicated non-administrator projector configuration."""
+    from newsroom.projection.neo4j.models import Neo4jProjectorConfig
+
+    return Neo4jProjectorConfig(
+        uri=f"bolt://{NEO4J_BOLT_HOST}:{NEO4J_BOLT_PORT}",
+        database=NEO4J_DATABASE,
+        username=NEO4J_PROJECTOR_USERNAME,
+        password=neo4j_projector_password(),
+    )
 
 
 def prove_openrouter_keychain() -> None:

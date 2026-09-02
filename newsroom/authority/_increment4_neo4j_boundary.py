@@ -39,6 +39,7 @@ from newsroom.projection.neo4j.models import (
     StructuralActiveReadRequest,
     StructuralBatch,
     StructuralReadResponse,
+    StructuralReconciliationView,
 )
 from newsroom.projection.neo4j.qualification import neo4j_compatibility_digest
 
@@ -82,7 +83,6 @@ class _Increment4StructuralReader(Protocol):
         proof: AuthenticationProof,
     ) -> StructuralReadResponse:
         ...
-
 
 class _Increment4Neo4jBoundary:
     """Private controller implementation over checked authority and graph seams."""
@@ -922,6 +922,50 @@ class _Increment4Neo4jBoundary:
             ),
             serving_time=metadata.serving_time,
         )
+
+    def reconcile_active(
+        self,
+        proof: AuthenticationProof,
+    ) -> StructuralReconciliationView:
+        with self._operation_lock:
+            authenticated = self._projection_boundary._authenticate_read(proof)
+            self._projection_boundary._authorize_read(
+                family_id=INCREMENT4_ADMITTED_FAMILY_ID,
+                operation="increment4-active-reconcile",
+                semantic_value={"family_id": INCREMENT4_ADMITTED_FAMILY_ID},
+                authenticated=authenticated,
+            )
+            metadata = self._store.projection_active_generation_metadata(
+                INCREMENT4_ADMITTED_FAMILY_ID
+            )
+            expected = build_increment4_admitted_batches(
+                self._store.increment4_admitted_snapshot(),
+                generation_id=metadata.generation.generation_id,
+                family=metadata.family,
+            )
+            digest = self._adapter.reconcile_generation(
+                generation_id=str(metadata.generation.generation_id),
+                expected_batches=expected,
+            )
+            validation = self._store.projection_generation_validation(
+                metadata.generation.generation_id
+            )
+            if (
+                validation.checkpoint_ledger_seq != metadata.contiguous_ledger_seq
+                or validation.projection_state_digest != digest
+                or validation.service_compatibility_digest
+                != neo4j_compatibility_digest(self._adapter.verify_compatibility())
+            ):
+                raise Neo4jIdentityConflict(
+                    "Increment 4 ACTIVE graph differs from retained validation"
+                )
+            return StructuralReconciliationView(
+                family_id=INCREMENT4_ADMITTED_FAMILY_ID,
+                generation_id=metadata.generation.generation_id,
+                checkpoint_ledger_seq=metadata.contiguous_ledger_seq,
+                projection_state_digest=digest,
+                serving_time=metadata.serving_time,
+            )
 
     def read_active(
         self,

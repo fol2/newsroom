@@ -28,6 +28,7 @@ from newsroom.control_plane.cycle import (
     consume_next_graphiti_event,
     qualify_fresh_graphiti_event,
 )
+from newsroom.control_plane.corpus import CorpusIngestUnit
 from newsroom.control_plane.graphiti import EvaluationGraphitiRunner
 from newsroom.control_plane.graphiti_admission_integration import (
     compose_existing_graphiti_admission_consumer,
@@ -55,7 +56,6 @@ from newsroom.control_plane.paths import (
     ensure_control_plane_state_root,
 )
 from newsroom.control_plane.store import connect
-from newsroom.projection.neo4j import StructuralActiveReconciliationRequest
 
 
 class GraphitiCampaignStop(RuntimeError):
@@ -79,6 +79,7 @@ def compose_governed_graphiti_worker_runtime(
     authority_system: GovernedGraphitiIncrement4AuthoritySystem,
     authority_store_descriptor_digest: str,
     proof: AuthenticationProof,
+    bind_unit_authority: Callable[[CorpusIngestUnit], CorpusIngestUnit],
     expected_authority_store_path: str | None = None,
     max_attempts: int = 1,
 ) -> GovernedGraphitiWorkerRuntime:
@@ -104,7 +105,6 @@ def compose_governed_graphiti_worker_runtime(
     entities = authority_system.entities
     relations = authority_system.relations
     increment4 = authority_system.increment4
-    structural = authority_system.structural
     graphiti = EvaluationGraphitiRunner(
         fallback_permitted=False,
         proposal_adapter=adapter,
@@ -132,16 +132,7 @@ def compose_governed_graphiti_worker_runtime(
             campaign.get("graph_destination_readback"),
             field="campaign graph destination readback",
         )
-        reconciliation = structural.reconcile_active(
-            StructuralActiveReconciliationRequest(
-                family_id=str(
-                    _mapping(campaign.get("graph"), field="campaign graph").get(
-                        "family_id"
-                    )
-                )
-            ),
-            proof=proof,
-        )
+        reconciliation = increment4.reconcile_active(proof=proof)
         actual = graphiti_graph_destination_readback(
             destination_id=graph_destination_id,
             reconciliation=reconciliation,
@@ -153,6 +144,7 @@ def compose_governed_graphiti_worker_runtime(
     return _mint_graphiti_campaign_runtime(
         graphiti=graphiti,
         admission_factory=admission_factory,
+        bind_unit_authority=bind_unit_authority,
         graph_state_fence=graph_state_fence,
         authority_store_source_path=authority_store_path,
         authority_store_descriptor_digest=authority_store_descriptor_digest,
@@ -1766,6 +1758,7 @@ def run_bounded_campaign(
                 * GRAPHITI_UNIT_RESERVATION_GBP_MICROUNITS
             ),
             graphiti_admission_factory=runtime.admission_factory,
+            unit_authority_resolver=runtime.bind_unit_authority,
             max_graphiti_admissions=max(1, max_proposals),
             require_graphiti_admission=True,
             defer_graphiti_admission=True,
@@ -2183,6 +2176,7 @@ def main(
             prepared_event_preflight=preflight,
             max_reserved_gbp_microunits=args.max_reserved_gbp_microunits,
             graphiti_admission_factory=runtime.admission_factory,
+            unit_authority_resolver=runtime.bind_unit_authority,
             require_graphiti_admission=True,
         ),
     )

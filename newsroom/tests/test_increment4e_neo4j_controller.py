@@ -114,6 +114,25 @@ def test_increment4_current_build_rederives_complete_admitted_authority(
             ),
             proof=extraction_proof(),
         )
+        reconciliation = system.increment4.reconcile_active(
+            proof=extraction_proof()
+        )
+        system.commands.execute(
+            authority_command(
+                key="increment4-bounded-reconcile-source-advance-v1",
+                aggregate_id=AggregateId.parse(
+                    "00000000-0000-4000-8000-000000005101"
+                ),
+            ),
+            proof=extraction_proof(),
+        )
+        after_source_advance = system.increment4.reconcile_active(
+            proof=extraction_proof()
+        )
+        advanced_status = system.increment4.generation_status(
+            GENERATION_1,
+            proof=extraction_proof(),
+        )
 
     actual = tuple(
         batch
@@ -122,6 +141,14 @@ def test_increment4_current_build_rederives_complete_admitted_authority(
     )
     assert result.generation.state is ProjectionGenerationState.ACTIVE
     assert result.source_watermark_ledger_seq == snapshot.through_ledger_seq
+    assert reconciliation.generation_id == result.generation.generation_id
+    assert reconciliation.checkpoint_ledger_seq == result.checkpoint_ledger_seq
+    assert (
+        reconciliation.projection_state_digest
+        == result.projection_state_digest
+    )
+    assert after_source_advance == reconciliation
+    assert advanced_status.source_watermark_ledger_seq > result.checkpoint_ledger_seq
     assert tuple(item.batch_digest for item in actual) == tuple(
         item.batch_digest for item in expected
     )
@@ -582,6 +609,25 @@ def test_increment4_family_rejects_generic_structural_reconciliation(
                 ),
                 proof=extraction_proof(),
             )
+
+
+def test_increment4_bounded_reconciliation_rejects_graph_drift(
+    tmp_path: Path,
+) -> None:
+    state, snapshot = admitted_increment4_fixture(tmp_path)
+    adapter = MemoryNeo4jAdapter()
+
+    with open_increment4_neo4j_system(state, adapter) as system:
+        system.increment4.build_and_promote(
+            _request(GENERATION_1, snapshot, key="increment4-reconcile-v1"),
+            proof=extraction_proof(),
+        )
+        adapter.reconciliation_mismatch = True
+        with pytest.raises(
+            Neo4jIdentityConflict,
+            match="differs from retained authority",
+        ):
+            system.increment4.reconcile_active(proof=extraction_proof())
 
 
 def test_increment4_expected_batches_remain_exact_after_controller_build(

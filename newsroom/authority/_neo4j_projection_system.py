@@ -1670,6 +1670,7 @@ def _open_with_adapter(
                 build_current=increment4_boundary.build_current_and_promote,
                 status=increment4_boundary.generation_status,
                 read_active=increment4_boundary.read_active,
+                reconcile_active=increment4_boundary.reconcile_active,
             ),
             health=DiscoveryHealthAuthorityFacade(
                 source=graph_boundary.source_health,

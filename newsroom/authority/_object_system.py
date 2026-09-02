@@ -79,6 +79,7 @@ class GovernedObjects:
     __slots__ = (
         "__admit",
         "__hydrate",
+        "__latest_access_decision",
         "__revoke",
         "__request_deletion",
         "__tombstone",
@@ -93,6 +94,10 @@ class GovernedObjects:
         *,
         admit: Callable[[ObjectAdmissionRequest, _Source, AuthenticationProof], ObjectAdmissionResult],
         hydrate: Callable[[HydrationRequest, AuthenticationProof], HydratedObject],
+        latest_access_decision: Callable[
+            [ObjectAdmissionId, str, AuthenticationProof],
+            ObjectAccessDecisionView,
+        ],
         revoke: Callable[[ObjectAdmissionId, str, str, AuthenticationProof], AdmissionRevocationView],
         request_deletion: Callable[[str, str, str, AuthenticationProof], GovernedDeletionView],
         tombstone: Callable[[GovernedDeletionId, str, str, AuthenticationProof], GovernedDeletionView],
@@ -103,6 +108,7 @@ class GovernedObjects:
     ) -> None:
         self.__admit = admit
         self.__hydrate = hydrate
+        self.__latest_access_decision = latest_access_decision
         self.__revoke = revoke
         self.__request_deletion = request_deletion
         self.__tombstone = tombstone
@@ -124,6 +130,15 @@ class GovernedObjects:
         self, request: HydrationRequest, *, proof: AuthenticationProof
     ) -> HydratedObject:
         return self.__hydrate(request, proof)
+
+    def latest_access_decision(
+        self,
+        admission_id: ObjectAdmissionId,
+        *,
+        purpose: str,
+        proof: AuthenticationProof,
+    ) -> ObjectAccessDecisionView:
+        return self.__latest_access_decision(admission_id, purpose, proof)
 
     def revoke(
         self,
@@ -653,6 +668,47 @@ class _ObjectBoundary:
         data, decision = self._store.hydrate(grant)
         return HydratedObject(data=data, decision=decision)
 
+    def latest_access_decision(
+        self,
+        admission_id: ObjectAdmissionId,
+        purpose: str,
+        proof: AuthenticationProof,
+    ) -> ObjectAccessDecisionView:
+        """Authenticate a read-only replay of retained exact access authority."""
+
+        if not isinstance(admission_id, ObjectAdmissionId):
+            raise TypeError("admission identity must be ObjectAdmissionId")
+        authentication, now = self._authenticate(proof)
+        policy = self._hydration_policies.resolve_for_purpose(purpose)
+        semantic = digest_canonical(
+            {
+                "admission_id": str(admission_id),
+                "policy_contract_digest": policy.contract_digest,
+                "purpose": purpose,
+            }
+        )
+        self._authorize(
+            authentication=authentication,
+            now=now,
+            operation_type=f"object:access-decision:read:{purpose}",
+            required_scope=policy.required_scope,
+            stable_digest=semantic,
+            definition_digest=policy.contract_digest,
+            aggregate_type="governed_object_hydration",
+            aggregate_id=str(admission_id),
+            object_class=None,
+            allowed_use=None,
+            security_scope="authority.object_hydration",
+            retention_scope="authority.audit",
+        )
+        return self._store.latest_access_decision(
+            admission_id=admission_id,
+            policy_contract_digest=policy.contract_digest,
+            principal_id=authentication.principal_id,
+            authority_domain=authentication.authority_domain,
+            purpose=purpose,
+        )
+
     def _maintenance(
         self,
         *,
@@ -988,6 +1044,7 @@ def open_governed_object_authority_system(
             objects=GovernedObjects(
                 admit=boundary.admit,
                 hydrate=boundary.hydrate,
+                latest_access_decision=boundary.latest_access_decision,
                 revoke=boundary.revoke,
                 request_deletion=boundary.request_deletion,
                 tombstone=boundary.tombstone,

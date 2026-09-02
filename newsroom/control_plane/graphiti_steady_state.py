@@ -11,6 +11,7 @@ from collections.abc import Callable
 from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Mapping
 
 from newsroom.authority.canonical import (
@@ -75,7 +76,7 @@ SCHEMA_VERSION = "newsroom.graphiti-steady-state-packet.v4"
 
 CAMPAIGN_SCHEMA_VERSION = "newsroom.graphiti-bounded-campaign-input.v3"
 
-_REQUIRED_STOP_CONDITIONS = frozenset(
+CAMPAIGN_REQUIRED_STOP_CONDITIONS = frozenset(
     {
         "CAP_REACHED",
         "CONFIG_DRIFT",
@@ -97,10 +98,10 @@ _REQUIRED_STOP_CONDITIONS = frozenset(
     }
 )
 
-_RAMP_ENTRY_BASE = frozenset(
+CAMPAIGN_RAMP_ENTRY_CONDITIONS = frozenset(
     {"EXACT_SNAPSHOT_AND_IDENTITY_RECONFIRMED", "OWNER_F4_GO_RETAINED"}
 )
-_RAMP_ADVANCE_BASE = frozenset(
+CAMPAIGN_RAMP_ADVANCE_CONDITIONS = frozenset(
     {
         "ALL_EXACT_RECEIPTS_RECONCILED",
         "CAPS_AND_ACCOUNTING_RECONCILED",
@@ -108,12 +109,14 @@ _RAMP_ADVANCE_BASE = frozenset(
     }
 )
 
-_CAMPAIGN_SUCCESS_OBJECTIVE_BASE = {
-    "watermark": "selected cohort terminal",
-    "backlog": 0,
-    "velocity": "service_at_least_arrival",
-    "reconciliation": "exact",
-}
+CAMPAIGN_SUCCESS_OBJECTIVE_BASE = MappingProxyType(
+    {
+        "watermark": "selected cohort terminal",
+        "backlog": 0,
+        "velocity": "service_at_least_arrival",
+        "reconciliation": "exact",
+    }
+)
 
 HISTORICAL_PARTITION_CATEGORIES = (
     "VERIFIED_TERMINAL",
@@ -130,6 +133,7 @@ class GraphitiCampaignRuntime:
     __slots__ = (
         "__graphiti",
         "__admission_factory",
+        "__bind_unit_authority",
         "__graph_state_fence",
         "__authority_store_source_path",
         "__authority_store_descriptor_digest",
@@ -142,6 +146,7 @@ class GraphitiCampaignRuntime:
         *,
         graphiti: object,
         admission_factory: Callable[..., object],
+        bind_unit_authority: Callable[[CorpusIngestUnit], CorpusIngestUnit],
         graph_state_fence: Callable[[Mapping[str, object]], Mapping[str, object]],
         authority_store_source_path: str,
         authority_store_descriptor_digest: str,
@@ -150,7 +155,11 @@ class GraphitiCampaignRuntime:
     ) -> None:
         if _construction_token is not _CAMPAIGN_RUNTIME_CONSTRUCTION_TOKEN:
             raise TypeError("campaign runtimes require the governed worker composer")
-        if not callable(admission_factory) or not callable(graph_state_fence):
+        if (
+            not callable(admission_factory)
+            or not callable(bind_unit_authority)
+            or not callable(graph_state_fence)
+        ):
             raise TypeError("campaign runtime capabilities must be callable")
         if (
             not isinstance(authority_store_source_path, str)
@@ -167,6 +176,7 @@ class GraphitiCampaignRuntime:
         )
         self.__graphiti = graphiti
         self.__admission_factory = admission_factory
+        self.__bind_unit_authority = bind_unit_authority
         self.__graph_state_fence = graph_state_fence
         self.__authority_store_source_path = authority_store_source_path
         self.__authority_store_descriptor_digest = authority_store_descriptor_digest
@@ -180,6 +190,12 @@ class GraphitiCampaignRuntime:
     @property
     def admission_factory(self) -> Callable[..., object]:
         return self.__admission_factory
+
+    @property
+    def bind_unit_authority(
+        self,
+    ) -> Callable[[CorpusIngestUnit], CorpusIngestUnit]:
+        return self.__bind_unit_authority
 
     @property
     def graph_state_fence(
@@ -207,6 +223,7 @@ def _mint_graphiti_campaign_runtime(
     *,
     graphiti: object,
     admission_factory: Callable[..., object],
+    bind_unit_authority: Callable[[CorpusIngestUnit], CorpusIngestUnit],
     graph_state_fence: Callable[[Mapping[str, object]], Mapping[str, object]],
     authority_store_source_path: str,
     authority_store_descriptor_digest: str,
@@ -217,6 +234,7 @@ def _mint_graphiti_campaign_runtime(
     return GraphitiCampaignRuntime(
         graphiti=graphiti,
         admission_factory=admission_factory,
+        bind_unit_authority=bind_unit_authority,
         graph_state_fence=graph_state_fence,
         authority_store_source_path=authority_store_source_path,
         authority_store_descriptor_digest=authority_store_descriptor_digest,
@@ -266,6 +284,12 @@ def _schema_fingerprint(connection: sqlite3.Connection) -> str:
 def _store_descriptor(snapshot: object) -> dict[str, object]:
     connection = snapshot.connection
     tables = _tables(connection)
+    try:
+        logical_bytes = connection.serialize()
+    except sqlite3.OperationalError:
+        if tables or int(connection.execute("PRAGMA page_count").fetchone()[0]) != 0:
+            raise
+        logical_bytes = b""
     migrations = (
         [
             {"version": int(row[0]), "name": str(row[1]), "checksum": str(row[2])}
@@ -289,15 +313,24 @@ def _store_descriptor(snapshot: object) -> dict[str, object]:
             else 0
         )
     )
-    value: dict[str, object] = {
+    # SQLite WAL checkpointing changes physical files without changing the
+    # database.  Bind the authority identity to the exact logical image so a
+    # sealed packet remains usable after the preparation process closes and a
+    # later F4 process reopens the same store.  Physical file observations are
+    # retained as evidence, but are deliberately not authority inputs.
+    identity: dict[str, object] = {
         "source_path": snapshot.source_path,
-        "source_files": list(snapshot.source_files),
-        "snapshot_files": list(snapshot.snapshot_files),
+        "logical_content_digest": digest_bytes(logical_bytes),
         "schema_fingerprint": _schema_fingerprint(connection),
         "migration_identity": migrations,
         "watermark": watermark,
     }
-    return {**value, "descriptor_digest": digest_canonical(value)}
+    return {
+        **identity,
+        "source_files": list(snapshot.source_files),
+        "snapshot_files": list(snapshot.snapshot_files),
+        "descriptor_digest": digest_canonical(identity),
+    }
 
 
 def graphiti_store_snapshot_digests(
@@ -2216,7 +2249,7 @@ def _campaign_evidence(
                 or not entry
                 or not all(isinstance(item, str) and item for item in entry)
                 or entry != sorted(set(entry))
-                or not _RAMP_ENTRY_BASE.issubset(entry)
+                or not CAMPAIGN_RAMP_ENTRY_CONDITIONS.issubset(entry)
             ):
                 blockers.append(f"RAMP_PHASE_{index + 1}_ENTRY_INVALID")
                 entry = []
@@ -2225,7 +2258,7 @@ def _campaign_evidence(
                 or not advance
                 or not all(isinstance(item, str) and item for item in advance)
                 or advance != sorted(set(advance))
-                or not _RAMP_ADVANCE_BASE.issubset(advance)
+                or not CAMPAIGN_RAMP_ADVANCE_CONDITIONS.issubset(advance)
             ):
                 blockers.append(f"RAMP_PHASE_{index + 1}_ADVANCE_INVALID")
                 advance = []
@@ -2258,7 +2291,7 @@ def _campaign_evidence(
         not isinstance(stops, list)
         or not all(isinstance(item, str) and item for item in stops)
         or len(stops) != len(set(item for item in stops if isinstance(item, str)))
-        or not _REQUIRED_STOP_CONDITIONS.issubset(
+        or not CAMPAIGN_REQUIRED_STOP_CONDITIONS.issubset(
             item for item in stops if isinstance(item, str)
         )
     ):
@@ -2273,16 +2306,16 @@ def _campaign_evidence(
         positive=True,
     )
     objectives_value = {
-        **_CAMPAIGN_SUCCESS_OBJECTIVE_BASE,
+        **CAMPAIGN_SUCCESS_OBJECTIVE_BASE,
         "lag": {
             "max_oldest_eligible_seconds": max_oldest_eligible_seconds,
         },
     }
     if (
-        set(objectives) != {*_CAMPAIGN_SUCCESS_OBJECTIVE_BASE, "lag"}
+        set(objectives) != {*CAMPAIGN_SUCCESS_OBJECTIVE_BASE, "lag"}
         or any(
             objectives.get(key) != expected
-            for key, expected in _CAMPAIGN_SUCCESS_OBJECTIVE_BASE.items()
+            for key, expected in CAMPAIGN_SUCCESS_OBJECTIVE_BASE.items()
         )
         or set(lag_objective) != {"max_oldest_eligible_seconds"}
     ):
@@ -2826,10 +2859,10 @@ def validate_graphiti_campaign_packet(
             or event_limit <= prior_limit
             or not isinstance(entry, list)
             or entry != sorted(set(entry))
-            or not _RAMP_ENTRY_BASE.issubset(entry)
+            or not CAMPAIGN_RAMP_ENTRY_CONDITIONS.issubset(entry)
             or not isinstance(advance, list)
             or advance != sorted(set(advance))
-            or not _RAMP_ADVANCE_BASE.issubset(advance)
+            or not CAMPAIGN_RAMP_ADVANCE_CONDITIONS.issubset(advance)
         ):
             raise ValueError("campaign packet ramp differs")
         prior_limit = event_limit
@@ -2851,17 +2884,17 @@ def validate_graphiti_campaign_packet(
         not isinstance(stops, list)
         or any(not isinstance(item, str) or not item for item in stops)
         or len(stops) != len(set(stops))
-        or not _REQUIRED_STOP_CONDITIONS.issubset(stops)
+        or not CAMPAIGN_REQUIRED_STOP_CONDITIONS.issubset(stops)
     ):
         raise ValueError("campaign packet stop conditions differ")
     objectives = campaign.get("success_objectives")
     lag_objective = objectives.get("lag") if isinstance(objectives, Mapping) else None
     if (
         not isinstance(objectives, Mapping)
-        or set(objectives) != {*_CAMPAIGN_SUCCESS_OBJECTIVE_BASE, "lag"}
+        or set(objectives) != {*CAMPAIGN_SUCCESS_OBJECTIVE_BASE, "lag"}
         or any(
             objectives.get(key) != expected
-            for key, expected in _CAMPAIGN_SUCCESS_OBJECTIVE_BASE.items()
+            for key, expected in CAMPAIGN_SUCCESS_OBJECTIVE_BASE.items()
         )
         or not isinstance(lag_objective, Mapping)
         or set(lag_objective) != {"max_oldest_eligible_seconds"}
