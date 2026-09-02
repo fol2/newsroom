@@ -1,0 +1,145 @@
+{
+  "issue": 898,
+  "status": "PARTIAL_STATIC_INSPECTION",
+  "decision": "HOLD_FOR_MINI_MEASUREMENT",
+  "go_or_no_go": "UNOBSERVED",
+  "inspection_head": "6b1e525cd8333602f8dc72b573a7615ac8e7947e",
+  "inspection_date": "2026-09-02",
+  "intended_hardware": {
+    "host": "macm4",
+    "machine_model": "Mac16,10",
+    "chip": "Apple M4",
+    "physical_cores": 10,
+    "logical_cores": 10,
+    "memory_bytes_floor": 17179869184,
+    "capacity_probe": "probe_macm4_capacity",
+    "capacity_probe_observes_process_rss": false
+  },
+  "non_effects": [
+    "no Rust production code",
+    "no provider or model-catalogue call",
+    "no queue claim, consume, retry or release",
+    "no writable canonical-store access",
+    "no Neo4j or Graphiti mutation",
+    "no publication, deployment, activation or canary",
+    "no live daemon restart, signal or reconfiguration"
+  ],
+  "process_shape": {
+    "control_plane_launchagent": "com.jamesto.newsroom-control-plane",
+    "control_plane_idle": "EVALUATION post-cycle cooldown default and minimum 300s",
+    "control_plane_serve_graphiti": "injected graphiti=None and max_graphiti=0",
+    "graphiti_worker_cli": "scripts/hermes_graphiti_worker.py",
+    "graphiti_worker_mode": "one exact event or one campaign; not a sleep-idle serve loop",
+    "graphiti_worker_keepalive_in_repo": "UNOBSERVED",
+    "graphiti_core_import": "lazy inside newsroom.graphiti_adapter.real._load_graphiti at real execution",
+    "evaluation_graphiti_runner_constructs_without_graphiti_core": true,
+    "sqlite": "in-process in Python daemons",
+    "neo4j": "separate Community server; Mini install does not pin heap or pagecache",
+    "writer_grok_cli_children": "per-attempt; not Control Plane idle retained RSS"
+  },
+  "hypotheses": {
+    "H1": {
+      "name": "Graphiti worker idle/import footprint",
+      "status": "UNMEASURED",
+      "static_path": "scripts/hermes_graphiti_worker.py constructs EvaluationGraphitiRunner without importing graphiti-core"
+    },
+    "H2": {
+      "name": "One-event full-corpus reconstruction",
+      "status": "UNMEASURED",
+      "static_path": "_resolve_graphiti_event_units loads all rights-permitted corpus units then filters to the event identity",
+      "if_wins": "exact row selection plus bounded or streaming resolution; not a Rust translation of the full-corpus scan"
+    },
+    "H3": {
+      "name": "Control Plane cycle materialisation",
+      "status": "UNMEASURED",
+      "static_path": "run_cycle materialises latest observations, parsed items, all permitted corpus units, revisions, candidates and write-admission decisions in one process before the write loop"
+    },
+    "H4": {
+      "name": "Governed admission generation",
+      "status": "UNMEASURED",
+      "static_path": "not executed in this inspection"
+    }
+  },
+  "path_facts": {
+    "raw_http_retention_days": 7,
+    "one_event_applies_event_id_filter_before_corpus_load": false,
+    "permitted_rows_copies_usable_http_bodies": true,
+    "latest_bodies_parsed_more_than_once": true,
+    "parse_sites": [
+      "assess_content via _parsed_item_count -> parse_observation during _permitted_rows",
+      "_parsed_observations per corpus row during load_graphiti_units_from_connection and run_cycle unit materialisation",
+      "_parsed_observations(latest_rows) during run_cycle candidate formation"
+    ],
+    "isolated_stages_named_for_measurement": [
+      "_permitted_rows",
+      "_parsed_observations",
+      "units_from",
+      "unique_chunk_units",
+      "revisions_from",
+      "load_graphiti_units",
+      "_resolve_graphiti_event_units",
+      "governed admission generation on already-retained fixtures"
+    ]
+  },
+  "measurements": {
+    "method": {
+      "peak_rss_and_cpu": ["/usr/bin/time -l", "resource.getrusage"],
+      "current_or_retained_rss": ["ps -o rss"],
+      "python_allocation_supplement": "tracemalloc",
+      "fresh_process_per_case": true,
+      "warmup_plus_measured_runs": "1 warmup and at least 3 fresh-process executions",
+      "report": "median CPU and maximum observed peak RSS"
+    },
+    "live_process_tree": "UNOBSERVED",
+    "bare_interpreter_peak_rss": "UNOBSERVED",
+    "import_cycle_peak_rss": "UNOBSERVED",
+    "graphiti_worker_idle_peak_rss": "UNOBSERVED",
+    "graphiti_worker_idle_retained_rss": "UNOBSERVED",
+    "control_plane_idle_peak_rss": "UNOBSERVED",
+    "control_plane_idle_retained_rss": "UNOBSERVED",
+    "neo4j_rss": "UNOBSERVED",
+    "one_event_peak_rss": "UNOBSERVED",
+    "one_event_retained_rss": "UNOBSERVED",
+    "one_event_user_cpu": "UNOBSERVED",
+    "one_event_system_cpu": "UNOBSERVED",
+    "cycle_max_writes_0_peak_rss": "UNOBSERVED",
+    "cycle_max_writes_0_retained_rss": "UNOBSERVED",
+    "largest_removable_peak_rss_stage": "UNOBSERVED",
+    "largest_local_cpu_stage": "UNOBSERVED",
+    "python_vs_sqlite_vs_neo4j_vs_child_split": "UNOBSERVED",
+    "one_event_scales_with_unrelated_corpus_size": "UNOBSERVED"
+  },
+  "questions": {
+    "1_largest_idle_rss_process": "UNOBSERVED",
+    "2_rss_retained_before_useful_work": "UNOBSERVED",
+    "3_active_peak_resolving_one_graphiti_event": "UNOBSERVED",
+    "4_rss_after_one_event_or_cycle": "UNOBSERVED",
+    "5_stage_largest_removable_peak_rss": "UNOBSERVED",
+    "6_stage_most_local_cpu": "UNOBSERVED",
+    "7_one_event_scales_with_unrelated_corpus": "UNOBSERVED",
+    "8_latest_bodies_parsed_or_materialised_more_than_once": "YES_STATIC",
+    "9_dominant_memory_source": "UNOBSERVED",
+    "10_bounded_rust_process_would_remove_dominant_allocation": "UNOBSERVED"
+  },
+  "go_gate": {
+    "largest_removable_or_material_idle_reduction": "UNOBSERVED",
+    "removable_peak_at_least_20_percent_or_64_mib": "UNOBSERVED",
+    "bounded_deterministic_io": "UNOBSERVED",
+    "rust_gains_no_authority_write_credential_provider_neo4j_publication_or_activation": "UNOBSERVED",
+    "python_authoritative_shadow_without_dual_write": "UNOBSERVED",
+    "not_a_microbenchmark_hidden_by_unchanged_end_to_end_rss": "UNOBSERVED",
+    "all_six_conditions_hold": false,
+    "reason": "no Mini-bound RSS or CPU packet exists; HOLD is not a measured NO_GO"
+  },
+  "ranked_candidate_boundaries": [],
+  "next_non_rust_memory_correction": "UNOBSERVED",
+  "acceptance": {
+    "measurements_bound_to_mini_and_execution_head": false,
+    "fresh_process_per_active_case": false,
+    "peak_and_retained_rss_distinguished": false,
+    "parent_and_child_memory_not_silently_combined": false,
+    "local_computation_distinguished_from_external_wait": false,
+    "decision_follows_pre_registered_gate": true,
+    "rust_implementation_started": false
+  }
+}
