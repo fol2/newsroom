@@ -1,139 +1,94 @@
-# Attribute Newsroom RAM/CPU — static path packet (#898)
+# Attribute Newsroom RAM/CPU — Mini packet (#898)
 
 - Role: Dated provider-free research evidence
-- Status: Partial static inspection; Mini RSS/CPU remain `UNOBSERVED`
+- Status: Measured on the intended Mini; Rust first atom is `NO_GO`
 - Owner: fol2
 - Canonical language: English
 - Date: 2026-09-02
 - Ticket: [#898](https://github.com/fol2/newsroom/issues/898)
-- Inspection head: `6b1e525cd8333602f8dc72b573a7615ac8e7947e`
-- Companion: [`2026-09-02-issue-898-ram-cpu-static-path.json`](2026-09-02-issue-898-ram-cpu-static-path.json)
+- Run parent: `038a0c06db21d8424854e6992ca6ef98339e523f`
+- Canonical measurements: [`2026-09-02-issue-898-ram-cpu-measurements.json`](2026-09-02-issue-898-ram-cpu-measurements.json)
 
 This note is non-normative. It authorises no Rust production code, provider
 call, queue claim, writable canonical-store access, Neo4j mutation,
-publication or activation. It is not the accepted #898 measurement packet.
+publication or activation.
 
 ## Decision
 
-**`HOLD_FOR_MINI_MEASUREMENT`**
+**`NO_GO`**
 
-No `GO` or `NO_GO` is recorded. The pre-registered gate needs measured
-removable peak RSS, retained idle RSS and local CPU on the intended Mini.
-Unobserved values remain `UNOBSERVED` and are not rendered as zero. A `NO_GO`
-must name the next measured non-Rust memory correction; that name cannot be
-invented from this inspection.
+H2/H3 full-corpus reconstruction is the largest measured local-memory
+contributor. Removable peak RSS is about **1,908 MiB** on the Mini (D1
+2,000 MiB peak minus 92 MiB import baseline), which clears the 20% / 64 MiB
+floor. The pre-registered direction when H2 wins is **exact row selection plus
+bounded or streaming resolution**, not a Rust translation of the scan.
 
-## Intended hardware
+A Rust atom that reimplemented `load_graphiti_units` / `_resolve_graphiti_event_units`
+as they stand would preserve the full-corpus allocation. Python remains
+authoritative. Next correction is a Python query that loads only the target
+event’s rows.
 
-The intended Mini is macm4: Mac16,10, Apple M4, 10 cores, 16 GiB.
-`probe_macm4_capacity` checks that host identity and total RAM
-(≥ 17,179,869,184 bytes). It does not observe process RSS.
+## Hardware and method
 
-This inspection did not sample a live process tree. Issue #898 forbids
-restarting or signalling a live daemon merely to profile it.
+Host: Mac16,10, Apple M4, 10 cores, 16 GiB. Fresh child process per run. One
+warm-up and three measured runs except the read-only process-tree snapshot.
+Peak RSS from `resource.getrusage` and `/usr/bin/time -l` matched. Retained
+RSS from `ps -o rss` after `gc.collect()`. Canonical proving store was copied
+to a temp file (1,789,808,640 bytes) and never opened writable. No daemon was
+signalled.
 
-## Idle processes versus one-shot work
+## Ranked peaks
 
-The documented long-lived Python daemon is the Hermes Control Plane serve
-loop (`com.jamesto.newsroom-control-plane`). After a governed unit it waits
-the EVALUATION post-cycle cooldown (default and minimum 300 s). Current serve
-cycles inject `graphiti=None` and `max_graphiti=0`, so Graphiti work is not in
-that idle process.
+| Case | Peak RSS | Retained RSS | Median CPU | Removable vs import |
+|---|---:|---:|---:|---:|
+| D1 copied-store `max_writes=0` cycle | 2,000 MiB | 1,577 MiB | 251 s | 1,908 MiB |
+| B10 one-event resolve on copied store | 1,907 MiB | 1,495 MiB | 509 s | 1,816 MiB |
+| A4 idle Graphiti worker import | 109 MiB | 94 MiB | 14 s | 18 MiB |
+| A2 import `newsroom.control_plane.cycle` | 92 MiB | 86 MiB | 11 s | baseline |
+| A1 bare interpreter | 19 MiB | 19 MiB | 0 s | — |
+| Live Neo4j (read-only `ps`) | 19 MiB | 19 MiB | — | — |
 
-`scripts/hermes_graphiti_worker.py` requires `--event-id` or
-`--campaign-packet`. Exact-event mode is always one event. A LaunchAgent
-KeepAlive policy for that worker is not in this repository, so it is unknown
-whether the worker is long-lived idle or only transient when an event is
-claimed.
+Fixture one-event work does not explain production RAM: solo 91 MiB, 10×
+unrelated tiny observations 97 MiB. The copied 7-day corpus does: one event
+still materialised **1,337** units from **6,850** poll observations, then kept
+one. Cycle D1 formed **280** candidates, minted **0**, Graphiti **0**.
 
-`EvaluationGraphitiRunner` construction does not import `graphiti-core`.
-`graphiti-core` is imported only inside `newsroom.graphiti_adapter.real._load_graphiti`
-at real execution. Hypothesis H1 — that idle Python/import/native-library RSS
-of the Graphiti worker dominates before useful work — remains unmeasured.
+`graphiti-core` was not imported when `EvaluationGraphitiRunner` was
+constructed. H1 is rejected as the dominant idle cost.
 
-SQLite is in-process in the Python daemons (ADR 0002). Neo4j is a separate
-Community server. The Mini install script does not pin heap or pagecache.
-Writer Grok CLI children are per-attempt, not idle retained RSS of the Control
-Plane.
+Malformed and empty inputs returned zero units and did not claim a queue
+event.
 
-## One-event reconstruction (unmeasured H2)
+Latest observation bodies are parsed more than once on the static path
+(`YES_STATIC`).
 
-Provider-free one-event unit resolution does not look up that event first. It
-reconstructs every current rights-permitted corpus unit, then filters to the
-event identity:
+Stage splits C1–C7 were run on the 10× fixture so the 1.7 GiB copy was not
+rescanned 28 times. Production attribution is B10 versus D1 on that copy.
 
-```text
-_resolve_graphiti_event_units
-→ load_graphiti_units
-→ _permitted_rows
-→ _parsed_observations
-→ units_from
-→ unique_chunk_units
-```
+## Live process tree
 
-`_permitted_rows` iterates proving-run observations inside a 7-day
-`_RAW_HTTP_RETENTION` window, copies each usable HTTP body into memory, and
-applies no event-id or unit-ref filter. Full-corpus reconstruction is static
-hypothesis H2, not a measured RSS ranking.
+Hermes Control Plane and the Graphiti worker were not in the snapshot. Observed
+without signalling: newsroom-hub Python (~2 MiB), Neo4j helper (~4 MiB), Neo4j
+Community (~19 MiB). Those idle RSS values are far below one-event
+reconstruction.
 
-If H2 later wins on Mini evidence, the prescribed direction is exact row
-selection plus bounded or streaming resolution, not a Rust translation of the
-full-corpus scan.
+## GO gate
 
-## Repeated parse of retained bodies (path fact)
+1. Largest removable contributor: yes (H2/H3 corpus reconstruction).
+2. ≥ 20% of peak or ≥ 64 MiB: yes (~1,908 MiB).
+3. Bounded deterministic I/O: not for the current full-corpus scan.
+4. Rust needs no authority write: would hold for a later bounded resolver.
+5. Python authoritative without dual write: yes.
+6. Not a microbenchmark: yes — end-to-end B10/D1 RSS is the same cost.
 
-Latest observation bodies are parsed more than once.
+Gate 3 plus the H2 prescription keep the first Rust atom **`NO_GO`**.
 
-During `_permitted_rows`, `assess_content` already parses each retained body
-via `_parsed_item_count` → `parse_observation`. The same bodies are parsed
-again when units are materialised (`_parsed_observations` per corpus row).
-`run_cycle` also parses `latest_rows` for candidate formation, while those
-same latest rows are part of `corpus_rows`.
+## Next issue (draft only; not filed)
 
-That is a static duplication fact. How much RSS or CPU it costs is
-`UNOBSERVED`.
+Title: `Fix — Resolve one Graphiti event without reconstructing the retained corpus`
 
-A no-write Control Plane cycle still materialises latest observations, parsed
-items, all permitted corpus units, revisions, candidates and write-admission
-decisions in one process before the write loop (H3). Governed admission
-generation on already-retained fixtures (H4) was not executed.
-
-## Stages still to measure independently
-
-1. `_permitted_rows`
-2. `_parsed_observations`
-3. `units_from`
-4. `unique_chunk_units` and `revisions_from`
-5. full `load_graphiti_units`
-6. `_resolve_graphiti_event_units`
-7. governed admission generation on already-retained fixtures
-
-Peak RSS must be distinguished from retained RSS after idle or cleanup.
-Authoritative method: `/usr/bin/time -l` and `resource.getrusage` for maximum
-RSS and CPU; `ps -o rss` for current/retained snapshots. One warm-up and at
-least three fresh-process runs per case. Report median CPU and maximum
-observed peak RSS.
-
-## Pre-registered GO gate (unchanged)
-
-Recommend a first Rust atom only when all of the following hold:
-
-1. it is the largest measured removable local-memory contributor, or it
-   materially reduces the largest long-lived idle footprint;
-2. the removable peak is at least 20% of the relevant process peak RSS or at
-   least 64 MiB on the Mini;
-3. input/output can be bounded and replayed deterministically;
-4. Rust needs no authority-store write, credential, provider, Neo4j-mutation,
-   publication or activation capability;
-5. Python remains authoritative in shadow comparison without dual write;
-6. the reduction is not a microbenchmark hidden by unchanged end-to-end RSS.
-
-No candidate currently meets those thresholds because the metric packet does
-not exist.
-
-## What still closes #898
-
-Run the issue’s provider-free, read-only cases A–D on the Mini. Produce the
-canonical JSON profiling report, stage attribution, ranked boundaries, and an
-explicit `GO` or `NO_GO`. Do not start a Rust implementation until that
-measured decision.
+Implementation-complete body should: select proving rows by the event’s
+source/item/revision identity (or ingest refs) before parse/materialise;
+keep rights checks; prove solo vs copied-store peak RSS no longer scales
+with unrelated corpus size; forbid queue claims and canonical writes;
+leave Rust until a measured remainder still clears the #898 floor.

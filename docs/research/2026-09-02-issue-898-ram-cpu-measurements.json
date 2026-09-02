@@ -1,0 +1,3169 @@
+{
+  "cases": {
+    "A1_bare_interpreter": {
+      "case": "A1_bare_interpreter",
+      "max_peak_rss_bytes": 20414464,
+      "max_retained_rss_bytes": 20414464,
+      "measured_count": 3,
+      "median_cpu_seconds": 0.0006620000000000003,
+      "runs": [
+        {
+          "outcome": {
+            "imported": false
+          },
+          "pid": 1898,
+          "rss_after_bytes": 20398080,
+          "rss_before_bytes": 20365312,
+          "ru_maxrss_bytes": 20398080,
+          "status": "OK",
+          "system_cpu_seconds": 0.00021700000000000018,
+          "time_l_maxrss_bytes": 20496384,
+          "tracemalloc_peak_bytes": 24,
+          "user_cpu_seconds": 0.0006329999999999999,
+          "wall_seconds": 0.0034706249134615064
+        },
+        {
+          "outcome": {
+            "imported": false
+          },
+          "pid": 1902,
+          "rss_after_bytes": 20414464,
+          "rss_before_bytes": 20381696,
+          "ru_maxrss_bytes": 20414464,
+          "status": "OK",
+          "system_cpu_seconds": 0.00011299999999999939,
+          "time_l_maxrss_bytes": 20512768,
+          "tracemalloc_peak_bytes": 24,
+          "user_cpu_seconds": 0.0005529999999999997,
+          "wall_seconds": 0.0030348330037668347
+        },
+        {
+          "outcome": {
+            "imported": false
+          },
+          "pid": 1906,
+          "rss_after_bytes": 20365312,
+          "rss_before_bytes": 20332544,
+          "ru_maxrss_bytes": 20365312,
+          "status": "OK",
+          "system_cpu_seconds": 0.00016600000000000035,
+          "time_l_maxrss_bytes": 20463616,
+          "tracemalloc_peak_bytes": 24,
+          "user_cpu_seconds": 0.0004959999999999999,
+          "wall_seconds": 0.0028143749805167317
+        },
+        {
+          "outcome": {
+            "imported": false
+          },
+          "pid": 1910,
+          "rss_after_bytes": 20381696,
+          "rss_before_bytes": 20348928,
+          "ru_maxrss_bytes": 20381696,
+          "status": "OK",
+          "system_cpu_seconds": 9.49999999999996e-05,
+          "time_l_maxrss_bytes": 20480000,
+          "tracemalloc_peak_bytes": 24,
+          "user_cpu_seconds": 0.0005260000000000004,
+          "wall_seconds": 0.0035647499607875943
+        }
+      ],
+      "warmup_count": 1
+    },
+    "A2_import_cycle": {
+      "case": "A2_import_cycle",
+      "max_peak_rss_bytes": 95961088,
+      "max_retained_rss_bytes": 90505216,
+      "measured_count": 3,
+      "median_cpu_seconds": 11.162319,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "A2_import_cycle",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "module": "newsroom.control_plane.cycle"
+          },
+          "pid": 1914,
+          "returncode": 0,
+          "rss_after_bytes": 83525632,
+          "rss_before_bytes": 24166400,
+          "ru_maxrss_bytes": 94945280,
+          "status": "OK",
+          "system_cpu_seconds": 0.063519,
+          "time_l_maxrss_bytes": 94945280,
+          "tracemalloc_current_bytes": 34064577,
+          "tracemalloc_peak_bytes": 34319260,
+          "user_cpu_seconds": 11.258051,
+          "wall_seconds": 11.48007862502709
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "A2_import_cycle",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "module": "newsroom.control_plane.cycle"
+          },
+          "pid": 4605,
+          "returncode": 0,
+          "rss_after_bytes": 90505216,
+          "rss_before_bytes": 24248320,
+          "ru_maxrss_bytes": 95961088,
+          "status": "OK",
+          "system_cpu_seconds": 0.094947,
+          "time_l_maxrss_bytes": 95961088,
+          "tracemalloc_current_bytes": 34063795,
+          "tracemalloc_peak_bytes": 34318460,
+          "user_cpu_seconds": 11.321266,
+          "wall_seconds": 14.161289624986239
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "A2_import_cycle",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "module": "newsroom.control_plane.cycle"
+          },
+          "pid": 6098,
+          "returncode": 0,
+          "rss_after_bytes": 85901312,
+          "rss_before_bytes": 24313856,
+          "ru_maxrss_bytes": 95666176,
+          "status": "OK",
+          "system_cpu_seconds": 0.096463,
+          "time_l_maxrss_bytes": 95666176,
+          "tracemalloc_current_bytes": 34065313,
+          "tracemalloc_peak_bytes": 34320218,
+          "user_cpu_seconds": 11.065856,
+          "wall_seconds": 12.31423962500412
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "A2_import_cycle",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "module": "newsroom.control_plane.cycle"
+          },
+          "pid": 9087,
+          "returncode": 0,
+          "rss_after_bytes": 86523904,
+          "rss_before_bytes": 24461312,
+          "ru_maxrss_bytes": 95617024,
+          "status": "OK",
+          "system_cpu_seconds": 0.054098,
+          "time_l_maxrss_bytes": 95617024,
+          "tracemalloc_current_bytes": 34065234,
+          "tracemalloc_peak_bytes": 34319889,
+          "user_cpu_seconds": 10.912773999999999,
+          "wall_seconds": 11.429130124975927
+        }
+      ],
+      "warmup_count": 1
+    },
+    "A3_instantiate_runner": {
+      "case": "A3_instantiate_runner",
+      "max_peak_rss_bytes": 97910784,
+      "max_retained_rss_bytes": 83738624,
+      "measured_count": 3,
+      "median_cpu_seconds": 12.025558,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "A3_instantiate_runner",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "graphiti_core_imported": false,
+            "runner": "EvaluationGraphitiRunner"
+          },
+          "pid": 10582,
+          "returncode": 0,
+          "rss_after_bytes": 82542592,
+          "rss_before_bytes": 24330240,
+          "ru_maxrss_bytes": 95420416,
+          "status": "OK",
+          "system_cpu_seconds": 0.088369,
+          "time_l_maxrss_bytes": 95420416,
+          "tracemalloc_current_bytes": 34066769,
+          "tracemalloc_peak_bytes": 34319986,
+          "user_cpu_seconds": 11.349114,
+          "wall_seconds": 11.811086500063539
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "A3_instantiate_runner",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "graphiti_core_imported": false,
+            "runner": "EvaluationGraphitiRunner"
+          },
+          "pid": 11778,
+          "returncode": 0,
+          "rss_after_bytes": 83378176,
+          "rss_before_bytes": 24182784,
+          "ru_maxrss_bytes": 95322112,
+          "status": "OK",
+          "system_cpu_seconds": 0.099508,
+          "time_l_maxrss_bytes": 95322112,
+          "tracemalloc_current_bytes": 34067205,
+          "tracemalloc_peak_bytes": 34320220,
+          "user_cpu_seconds": 11.92605,
+          "wall_seconds": 13.09989987500012
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "A3_instantiate_runner",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "graphiti_core_imported": false,
+            "runner": "EvaluationGraphitiRunner"
+          },
+          "pid": 14060,
+          "returncode": 0,
+          "rss_after_bytes": 77955072,
+          "rss_before_bytes": 24150016,
+          "ru_maxrss_bytes": 97910784,
+          "status": "OK",
+          "system_cpu_seconds": 0.13753300000000002,
+          "time_l_maxrss_bytes": 97910784,
+          "tracemalloc_current_bytes": 34066831,
+          "tracemalloc_peak_bytes": 34319801,
+          "user_cpu_seconds": 11.890234,
+          "wall_seconds": 13.159966792096384
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "A3_instantiate_runner",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "graphiti_core_imported": false,
+            "runner": "EvaluationGraphitiRunner"
+          },
+          "pid": 18118,
+          "returncode": 0,
+          "rss_after_bytes": 83738624,
+          "rss_before_bytes": 24330240,
+          "ru_maxrss_bytes": 83574784,
+          "status": "OK",
+          "system_cpu_seconds": 0.09949799999999999,
+          "time_l_maxrss_bytes": 84508672,
+          "tracemalloc_current_bytes": 34066719,
+          "tracemalloc_peak_bytes": 34319784,
+          "user_cpu_seconds": 11.456427,
+          "wall_seconds": 11.822577207931317
+        }
+      ],
+      "warmup_count": 1
+    },
+    "A4_idle_worker": {
+      "case": "A4_idle_worker",
+      "max_peak_rss_bytes": 114360320,
+      "max_retained_rss_bytes": 98975744,
+      "measured_count": 3,
+      "median_cpu_seconds": 13.579329000000001,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "A4_idle_worker",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "graphiti_core_imported": false,
+            "runner": "EvaluationGraphitiRunner",
+            "worker_module": "scripts.hermes_graphiti_worker"
+          },
+          "pid": 19251,
+          "returncode": 0,
+          "rss_after_bytes": 99598336,
+          "rss_before_bytes": 24182784,
+          "ru_maxrss_bytes": 114081792,
+          "status": "OK",
+          "system_cpu_seconds": 0.088735,
+          "time_l_maxrss_bytes": 114081792,
+          "tracemalloc_current_bytes": 36303647,
+          "tracemalloc_peak_bytes": 43175932,
+          "user_cpu_seconds": 13.625738,
+          "wall_seconds": 14.16779829096049
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "A4_idle_worker",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "graphiti_core_imported": false,
+            "runner": "EvaluationGraphitiRunner",
+            "worker_module": "scripts.hermes_graphiti_worker"
+          },
+          "pid": 20577,
+          "returncode": 0,
+          "rss_after_bytes": 93421568,
+          "rss_before_bytes": 24330240,
+          "ru_maxrss_bytes": 114360320,
+          "status": "OK",
+          "system_cpu_seconds": 0.127981,
+          "time_l_maxrss_bytes": 114360320,
+          "tracemalloc_current_bytes": 36304492,
+          "tracemalloc_peak_bytes": 43176799,
+          "user_cpu_seconds": 13.806880999999999,
+          "wall_seconds": 14.37499675003346
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "A4_idle_worker",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "graphiti_core_imported": false,
+            "runner": "EvaluationGraphitiRunner",
+            "worker_module": "scripts.hermes_graphiti_worker"
+          },
+          "pid": 22827,
+          "returncode": 0,
+          "rss_after_bytes": 98975744,
+          "rss_before_bytes": 24297472,
+          "ru_maxrss_bytes": 114130944,
+          "status": "OK",
+          "system_cpu_seconds": 0.090643,
+          "time_l_maxrss_bytes": 114130944,
+          "tracemalloc_current_bytes": 36303529,
+          "tracemalloc_peak_bytes": 43176157,
+          "user_cpu_seconds": 13.486209,
+          "wall_seconds": 13.852824875037186
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "A4_idle_worker",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "graphiti_core_imported": false,
+            "runner": "EvaluationGraphitiRunner",
+            "worker_module": "scripts.hermes_graphiti_worker"
+          },
+          "pid": 24039,
+          "returncode": 0,
+          "rss_after_bytes": 93257728,
+          "rss_before_bytes": 24035328,
+          "ru_maxrss_bytes": 106708992,
+          "status": "OK",
+          "system_cpu_seconds": 0.108192,
+          "time_l_maxrss_bytes": 106708992,
+          "tracemalloc_current_bytes": 36305007,
+          "tracemalloc_peak_bytes": 43177723,
+          "user_cpu_seconds": 13.471137,
+          "wall_seconds": 14.028380791889504
+        }
+      ],
+      "warmup_count": 1
+    },
+    "A5_hermes_cycle_import": {
+      "case": "A5_hermes_cycle_import",
+      "max_peak_rss_bytes": 98484224,
+      "max_retained_rss_bytes": 84606976,
+      "measured_count": 3,
+      "median_cpu_seconds": 12.130151,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "A5_hermes_cycle_import",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "hermes_module": "scripts.hermes_control_plane",
+            "run_cycle": "run_cycle"
+          },
+          "pid": 25366,
+          "returncode": 0,
+          "rss_after_bytes": 80150528,
+          "rss_before_bytes": 24150016,
+          "ru_maxrss_bytes": 99483648,
+          "status": "OK",
+          "system_cpu_seconds": 0.08863399999999999,
+          "time_l_maxrss_bytes": 99483648,
+          "tracemalloc_current_bytes": 34398323,
+          "tracemalloc_peak_bytes": 35055429,
+          "user_cpu_seconds": 11.975057,
+          "wall_seconds": 12.368507875013165
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "A5_hermes_cycle_import",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "hermes_module": "scripts.hermes_control_plane",
+            "run_cycle": "run_cycle"
+          },
+          "pid": 27550,
+          "returncode": 0,
+          "rss_after_bytes": 84574208,
+          "rss_before_bytes": 24346624,
+          "ru_maxrss_bytes": 95911936,
+          "status": "OK",
+          "system_cpu_seconds": 0.090341,
+          "time_l_maxrss_bytes": 95911936,
+          "tracemalloc_current_bytes": 34398609,
+          "tracemalloc_peak_bytes": 35055902,
+          "user_cpu_seconds": 11.809491,
+          "wall_seconds": 12.130494249984622
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "A5_hermes_cycle_import",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "hermes_module": "scripts.hermes_control_plane",
+            "run_cycle": "run_cycle"
+          },
+          "pid": 28670,
+          "returncode": 0,
+          "rss_after_bytes": 80314368,
+          "rss_before_bytes": 24231936,
+          "ru_maxrss_bytes": 98484224,
+          "status": "OK",
+          "system_cpu_seconds": 0.09437499999999999,
+          "time_l_maxrss_bytes": 98484224,
+          "tracemalloc_current_bytes": 34398989,
+          "tracemalloc_peak_bytes": 35056133,
+          "user_cpu_seconds": 12.035776,
+          "wall_seconds": 12.612391082919203
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "A5_hermes_cycle_import",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "hermes_module": "scripts.hermes_control_plane",
+            "run_cycle": "run_cycle"
+          },
+          "pid": 30077,
+          "returncode": 0,
+          "rss_after_bytes": 84606976,
+          "rss_before_bytes": 24297472,
+          "ru_maxrss_bytes": 96059392,
+          "status": "OK",
+          "system_cpu_seconds": 0.113407,
+          "time_l_maxrss_bytes": 96059392,
+          "tracemalloc_current_bytes": 34398900,
+          "tracemalloc_peak_bytes": 35056059,
+          "user_cpu_seconds": 12.136889,
+          "wall_seconds": 12.960816459031776
+        }
+      ],
+      "warmup_count": 1
+    },
+    "A6_process_tree": {
+      "case": "A6_process_tree",
+      "max_peak_rss_bytes": "UNOBSERVED",
+      "max_retained_rss_bytes": "UNOBSERVED",
+      "measured_count": 0,
+      "median_cpu_seconds": "UNOBSERVED",
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "A6_process_tree",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "largest_rss_bytes": 19677184,
+          "process_count": 3,
+          "processes": [
+            {
+              "command": "/Volumes/Samsung970EBV+2TB/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python /Users/jamesto/Coding/newsroom-hub/she",
+              "pid": 1208,
+              "rss_bytes": 2228224
+            },
+            {
+              "command": "/Users/jamesto/.local/share/android-jbr/bin/java -Xmx128m -XX:+IgnoreUnrecognizedVMOptions --sun-misc-unsafe-memory-access=allow -classpath /Users/jamesto/Library/Application Support/newsroom/neo4j-co",
+              "pid": 26397,
+              "rss_bytes": 3686400
+            },
+            {
+              "command": "/Users/jamesto/.local/share/android-jbr/bin/java -cp /Users/jamesto/Library/Application Support/newsroom/neo4j-community-2026.06.0/plugins/*:/Users/jamesto/Library/Application Support/newsroom/neo4j-c",
+              "pid": 26632,
+              "rss_bytes": 19677184
+            }
+          ],
+          "returncode": 0,
+          "signalled": false,
+          "status": "OK",
+          "time_l_maxrss_bytes": 24920064
+        }
+      ],
+      "warmup_count": 1
+    },
+    "B10_copied_canonical": {
+      "case": "B10_copied_canonical",
+      "max_peak_rss_bytes": 1999552512,
+      "max_retained_rss_bytes": 1567522816,
+      "measured_count": 3,
+      "median_cpu_seconds": 508.953998,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B10_copied_canonical",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-04",
+            "unit_count": 1340
+          },
+          "pid": 91833,
+          "returncode": 0,
+          "rss_after_bytes": 997785600,
+          "rss_before_bytes": 24379392,
+          "ru_maxrss_bytes": 1857634304,
+          "status": "OK",
+          "system_cpu_seconds": 8.341239,
+          "time_l_maxrss_bytes": 1857634304,
+          "tracemalloc_current_bytes": 34704027,
+          "tracemalloc_peak_bytes": 1610231864,
+          "user_cpu_seconds": 505.503766,
+          "wall_seconds": 546.4446010839893
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B10_copied_canonical",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-04",
+            "unit_count": 1340
+          },
+          "pid": 61972,
+          "returncode": 0,
+          "rss_after_bytes": 1527857152,
+          "rss_before_bytes": 24199168,
+          "ru_maxrss_bytes": 1956118528,
+          "status": "OK",
+          "system_cpu_seconds": 6.675819,
+          "time_l_maxrss_bytes": 1956118528,
+          "tracemalloc_current_bytes": 34705429,
+          "tracemalloc_peak_bytes": 1607885943,
+          "user_cpu_seconds": 502.278179,
+          "wall_seconds": 553.6139332499588
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B10_copied_canonical",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-04",
+            "unit_count": 1340
+          },
+          "pid": 32361,
+          "returncode": 0,
+          "rss_after_bytes": 1535426560,
+          "rss_before_bytes": 24379392,
+          "ru_maxrss_bytes": 1966981120,
+          "status": "OK",
+          "system_cpu_seconds": 6.745173,
+          "time_l_maxrss_bytes": 1966981120,
+          "tracemalloc_current_bytes": 34704883,
+          "tracemalloc_peak_bytes": 1605538857,
+          "user_cpu_seconds": 502.27759199999997,
+          "wall_seconds": 530.9388390840031
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B10_copied_canonical",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-04",
+            "unit_count": 1337
+          },
+          "pid": 5199,
+          "returncode": 0,
+          "rss_after_bytes": 1567522816,
+          "rss_before_bytes": 24068096,
+          "ru_maxrss_bytes": 1999552512,
+          "status": "OK",
+          "system_cpu_seconds": 7.2635689999999995,
+          "time_l_maxrss_bytes": 1999552512,
+          "tracemalloc_current_bytes": 34703511,
+          "tracemalloc_peak_bytes": 1603173456,
+          "user_cpu_seconds": 494.01403,
+          "wall_seconds": 532.5340946669457
+        }
+      ],
+      "warmup_count": 1
+    },
+    "B1_one_event_solo": {
+      "case": "B1_one_event_solo",
+      "max_peak_rss_bytes": 95535104,
+      "max_retained_rss_bytes": 90030080,
+      "measured_count": 3,
+      "median_cpu_seconds": 11.271292,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B1_one_event_solo",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "UK-01",
+            "unit_count": 1
+          },
+          "pid": 33012,
+          "returncode": 0,
+          "rss_after_bytes": 90587136,
+          "rss_before_bytes": 24330240,
+          "ru_maxrss_bytes": 96124928,
+          "status": "OK",
+          "system_cpu_seconds": 0.081091,
+          "time_l_maxrss_bytes": 96124928,
+          "tracemalloc_current_bytes": 34282739,
+          "tracemalloc_peak_bytes": 34320249,
+          "user_cpu_seconds": 11.810551,
+          "wall_seconds": 12.414045957964845
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B1_one_event_solo",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "UK-01",
+            "unit_count": 1
+          },
+          "pid": 35551,
+          "returncode": 0,
+          "rss_after_bytes": 90030080,
+          "rss_before_bytes": 24264704,
+          "ru_maxrss_bytes": 95518720,
+          "status": "OK",
+          "system_cpu_seconds": 0.069366,
+          "time_l_maxrss_bytes": 95518720,
+          "tracemalloc_current_bytes": 34282440,
+          "tracemalloc_peak_bytes": 34320433,
+          "user_cpu_seconds": 11.201926,
+          "wall_seconds": 13.563522833981551
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B1_one_event_solo",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "UK-01",
+            "unit_count": 1
+          },
+          "pid": 37371,
+          "returncode": 0,
+          "rss_after_bytes": 86310912,
+          "rss_before_bytes": 24264704,
+          "ru_maxrss_bytes": 95535104,
+          "status": "OK",
+          "system_cpu_seconds": 0.09618299999999999,
+          "time_l_maxrss_bytes": 95535104,
+          "tracemalloc_current_bytes": 34281148,
+          "tracemalloc_peak_bytes": 34318813,
+          "user_cpu_seconds": 11.436528,
+          "wall_seconds": 25.77736616600305
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B1_one_event_solo",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "UK-01",
+            "unit_count": 1
+          },
+          "pid": 40930,
+          "returncode": 0,
+          "rss_after_bytes": 86179840,
+          "rss_before_bytes": 24313856,
+          "ru_maxrss_bytes": 95469568,
+          "status": "OK",
+          "system_cpu_seconds": 0.05104499999999999,
+          "time_l_maxrss_bytes": 95469568,
+          "tracemalloc_current_bytes": 34282244,
+          "tracemalloc_peak_bytes": 34320924,
+          "user_cpu_seconds": 11.104534999999998,
+          "wall_seconds": 11.792516625020653
+        }
+      ],
+      "warmup_count": 1
+    },
+    "B2_one_event_representative": {
+      "case": "B2_one_event_representative",
+      "max_peak_rss_bytes": 101498880,
+      "max_retained_rss_bytes": 95698944,
+      "measured_count": 3,
+      "median_cpu_seconds": 11.191117,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B2_one_event_representative",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-01",
+            "unit_count": 3
+          },
+          "pid": 42106,
+          "returncode": 0,
+          "rss_after_bytes": 81100800,
+          "rss_before_bytes": 24330240,
+          "ru_maxrss_bytes": 95436800,
+          "status": "OK",
+          "system_cpu_seconds": 0.10798799999999999,
+          "time_l_maxrss_bytes": 95436800,
+          "tracemalloc_current_bytes": 34288444,
+          "tracemalloc_peak_bytes": 34323621,
+          "user_cpu_seconds": 11.279749,
+          "wall_seconds": 33.8285975829931
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B2_one_event_representative",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-01",
+            "unit_count": 3
+          },
+          "pid": 45166,
+          "returncode": 0,
+          "rss_after_bytes": 88162304,
+          "rss_before_bytes": 24231936,
+          "ru_maxrss_bytes": 95420416,
+          "status": "OK",
+          "system_cpu_seconds": 0.056782000000000006,
+          "time_l_maxrss_bytes": 95420416,
+          "tracemalloc_current_bytes": 34289721,
+          "tracemalloc_peak_bytes": 34324898,
+          "user_cpu_seconds": 11.17577,
+          "wall_seconds": 11.600441624992527
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B2_one_event_representative",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-01",
+            "unit_count": 3
+          },
+          "pid": 46289,
+          "returncode": 0,
+          "rss_after_bytes": 95698944,
+          "rss_before_bytes": 24379392,
+          "ru_maxrss_bytes": 101498880,
+          "status": "OK",
+          "system_cpu_seconds": 0.047868999999999995,
+          "time_l_maxrss_bytes": 101498880,
+          "tracemalloc_current_bytes": 34289288,
+          "tracemalloc_peak_bytes": 34324465,
+          "user_cpu_seconds": 11.098875,
+          "wall_seconds": 11.463235666975379
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B2_one_event_representative",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-01",
+            "unit_count": 3
+          },
+          "pid": 47634,
+          "returncode": 0,
+          "rss_after_bytes": 85524480,
+          "rss_before_bytes": 24068096,
+          "ru_maxrss_bytes": 95404032,
+          "status": "OK",
+          "system_cpu_seconds": 0.05743499999999999,
+          "time_l_maxrss_bytes": 95404032,
+          "tracemalloc_current_bytes": 34288994,
+          "tracemalloc_peak_bytes": 34324217,
+          "user_cpu_seconds": 11.133682,
+          "wall_seconds": 11.653312875074334
+        }
+      ],
+      "warmup_count": 1
+    },
+    "B3_one_event_times10": {
+      "case": "B3_one_event_times10",
+      "max_peak_rss_bytes": 101236736,
+      "max_retained_rss_bytes": 95436800,
+      "measured_count": 3,
+      "median_cpu_seconds": 11.132783,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B3_one_event_times10",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-01",
+            "unit_count": 11
+          },
+          "pid": 48756,
+          "returncode": 0,
+          "rss_after_bytes": 85770240,
+          "rss_before_bytes": 24133632,
+          "ru_maxrss_bytes": 95191040,
+          "status": "OK",
+          "system_cpu_seconds": 0.058054999999999995,
+          "time_l_maxrss_bytes": 95191040,
+          "tracemalloc_current_bytes": 34309963,
+          "tracemalloc_peak_bytes": 34424192,
+          "user_cpu_seconds": 11.221257999999999,
+          "wall_seconds": 11.539881165954284
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B3_one_event_times10",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-01",
+            "unit_count": 11
+          },
+          "pid": 50027,
+          "returncode": 0,
+          "rss_after_bytes": 95436800,
+          "rss_before_bytes": 24199168,
+          "ru_maxrss_bytes": 101236736,
+          "status": "OK",
+          "system_cpu_seconds": 0.04373,
+          "time_l_maxrss_bytes": 101236736,
+          "tracemalloc_current_bytes": 34306951,
+          "tracemalloc_peak_bytes": 34421180,
+          "user_cpu_seconds": 11.023268,
+          "wall_seconds": 11.14712558395695
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B3_one_event_times10",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-01",
+            "unit_count": 11
+          },
+          "pid": 51162,
+          "returncode": 0,
+          "rss_after_bytes": 87818240,
+          "rss_before_bytes": 24166400,
+          "ru_maxrss_bytes": 94961664,
+          "status": "OK",
+          "system_cpu_seconds": 0.076446,
+          "time_l_maxrss_bytes": 94961664,
+          "tracemalloc_current_bytes": 34307716,
+          "tracemalloc_peak_bytes": 34421945,
+          "user_cpu_seconds": 11.359354,
+          "wall_seconds": 12.12163262499962
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B3_one_event_times10",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-01",
+            "unit_count": 11
+          },
+          "pid": 53406,
+          "returncode": 0,
+          "rss_after_bytes": 84443136,
+          "rss_before_bytes": 24346624,
+          "ru_maxrss_bytes": 95813632,
+          "status": "OK",
+          "system_cpu_seconds": 0.057446,
+          "time_l_maxrss_bytes": 95813632,
+          "tracemalloc_current_bytes": 34308917,
+          "tracemalloc_peak_bytes": 34423146,
+          "user_cpu_seconds": 11.075337,
+          "wall_seconds": 11.276981749921106
+        }
+      ],
+      "warmup_count": 1
+    },
+    "B4_shape_json": {
+      "case": "B4_shape_json",
+      "max_peak_rss_bytes": 95666176,
+      "max_retained_rss_bytes": 91783168,
+      "measured_count": 3,
+      "median_cpu_seconds": 11.262704,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B4_shape_json",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "UK-02",
+            "unit_count": 1
+          },
+          "pid": 54634,
+          "returncode": 0,
+          "rss_after_bytes": 84721664,
+          "rss_before_bytes": 24313856,
+          "ru_maxrss_bytes": 94666752,
+          "status": "OK",
+          "system_cpu_seconds": 0.100086,
+          "time_l_maxrss_bytes": 94666752,
+          "tracemalloc_current_bytes": 34279971,
+          "tracemalloc_peak_bytes": 34320090,
+          "user_cpu_seconds": 11.447049,
+          "wall_seconds": 12.440466707921587
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B4_shape_json",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "UK-02",
+            "unit_count": 1
+          },
+          "pid": 56930,
+          "returncode": 0,
+          "rss_after_bytes": 89702400,
+          "rss_before_bytes": 24248320,
+          "ru_maxrss_bytes": 95371264,
+          "status": "OK",
+          "system_cpu_seconds": 0.06217,
+          "time_l_maxrss_bytes": 95371264,
+          "tracemalloc_current_bytes": 34279358,
+          "tracemalloc_peak_bytes": 34319735,
+          "user_cpu_seconds": 11.200534,
+          "wall_seconds": 11.758123250096105
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B4_shape_json",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "UK-02",
+            "unit_count": 1
+          },
+          "pid": 59171,
+          "returncode": 0,
+          "rss_after_bytes": 87539712,
+          "rss_before_bytes": 24248320,
+          "ru_maxrss_bytes": 95666176,
+          "status": "OK",
+          "system_cpu_seconds": 0.058108999999999994,
+          "time_l_maxrss_bytes": 95666176,
+          "tracemalloc_current_bytes": 34280257,
+          "tracemalloc_peak_bytes": 34320066,
+          "user_cpu_seconds": 11.170678,
+          "wall_seconds": 11.691061874968
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B4_shape_json",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "UK-02",
+            "unit_count": 1
+          },
+          "pid": 60778,
+          "returncode": 0,
+          "rss_after_bytes": 91783168,
+          "rss_before_bytes": 24215552,
+          "ru_maxrss_bytes": 91668480,
+          "status": "OK",
+          "system_cpu_seconds": 0.099547,
+          "time_l_maxrss_bytes": 91914240,
+          "tracemalloc_current_bytes": 34280139,
+          "tracemalloc_peak_bytes": 34320138,
+          "user_cpu_seconds": 11.490425,
+          "wall_seconds": 12.079937665956095
+        }
+      ],
+      "warmup_count": 1
+    },
+    "B5_shape_rss": {
+      "case": "B5_shape_rss",
+      "max_peak_rss_bytes": 95305728,
+      "max_retained_rss_bytes": 87818240,
+      "measured_count": 3,
+      "median_cpu_seconds": 11.163003,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B5_shape_rss",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-01",
+            "unit_count": 1
+          },
+          "pid": 62870,
+          "returncode": 0,
+          "rss_after_bytes": 93110272,
+          "rss_before_bytes": 24248320,
+          "ru_maxrss_bytes": 95436800,
+          "status": "OK",
+          "system_cpu_seconds": 0.070519,
+          "time_l_maxrss_bytes": 95436800,
+          "tracemalloc_current_bytes": 34282000,
+          "tracemalloc_peak_bytes": 34320020,
+          "user_cpu_seconds": 11.222783999999999,
+          "wall_seconds": 11.815234916983172
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B5_shape_rss",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-01",
+            "unit_count": 1
+          },
+          "pid": 64257,
+          "returncode": 0,
+          "rss_after_bytes": 87769088,
+          "rss_before_bytes": 24182784,
+          "ru_maxrss_bytes": 95305728,
+          "status": "OK",
+          "system_cpu_seconds": 0.057078,
+          "time_l_maxrss_bytes": 95305728,
+          "tracemalloc_current_bytes": 34281614,
+          "tracemalloc_peak_bytes": 34319837,
+          "user_cpu_seconds": 11.070278,
+          "wall_seconds": 11.406013499945402
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B5_shape_rss",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-01",
+            "unit_count": 1
+          },
+          "pid": 65367,
+          "returncode": 0,
+          "rss_after_bytes": 85196800,
+          "rss_before_bytes": 24182784,
+          "ru_maxrss_bytes": 93044736,
+          "status": "OK",
+          "system_cpu_seconds": 0.09752699999999999,
+          "time_l_maxrss_bytes": 93044736,
+          "tracemalloc_current_bytes": 34281515,
+          "tracemalloc_peak_bytes": 34320183,
+          "user_cpu_seconds": 11.334049,
+          "wall_seconds": 11.856372917070985
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B5_shape_rss",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-01",
+            "unit_count": 1
+          },
+          "pid": 66689,
+          "returncode": 0,
+          "rss_after_bytes": 87818240,
+          "rss_before_bytes": 24166400,
+          "ru_maxrss_bytes": 94978048,
+          "status": "OK",
+          "system_cpu_seconds": 0.056122000000000005,
+          "time_l_maxrss_bytes": 94978048,
+          "tracemalloc_current_bytes": 34281177,
+          "tracemalloc_peak_bytes": 34319934,
+          "user_cpu_seconds": 11.106881,
+          "wall_seconds": 11.394960709032603
+        }
+      ],
+      "warmup_count": 1
+    },
+    "B6_shape_atom": {
+      "case": "B6_shape_atom",
+      "max_peak_rss_bytes": 95518720,
+      "max_retained_rss_bytes": 89210880,
+      "measured_count": 3,
+      "median_cpu_seconds": 11.109167999999999,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B6_shape_atom",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "UK-01",
+            "unit_count": 1
+          },
+          "pid": 67820,
+          "returncode": 0,
+          "rss_after_bytes": 88047616,
+          "rss_before_bytes": 24346624,
+          "ru_maxrss_bytes": 95322112,
+          "status": "OK",
+          "system_cpu_seconds": 0.076519,
+          "time_l_maxrss_bytes": 95322112,
+          "tracemalloc_current_bytes": 34281259,
+          "tracemalloc_peak_bytes": 34319615,
+          "user_cpu_seconds": 11.19179,
+          "wall_seconds": 11.711150167044252
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B6_shape_atom",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "UK-01",
+            "unit_count": 1
+          },
+          "pid": 69769,
+          "returncode": 0,
+          "rss_after_bytes": 89210880,
+          "rss_before_bytes": 24281088,
+          "ru_maxrss_bytes": 95518720,
+          "status": "OK",
+          "system_cpu_seconds": 0.063181,
+          "time_l_maxrss_bytes": 95518720,
+          "tracemalloc_current_bytes": 34283170,
+          "tracemalloc_peak_bytes": 34321279,
+          "user_cpu_seconds": 11.233899,
+          "wall_seconds": 11.470421458012424
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B6_shape_atom",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "UK-01",
+            "unit_count": 1
+          },
+          "pid": 71957,
+          "returncode": 0,
+          "rss_after_bytes": 87162880,
+          "rss_before_bytes": 24248320,
+          "ru_maxrss_bytes": 95387648,
+          "status": "OK",
+          "system_cpu_seconds": 0.046348999999999994,
+          "time_l_maxrss_bytes": 95387648,
+          "tracemalloc_current_bytes": 34280570,
+          "tracemalloc_peak_bytes": 34320301,
+          "user_cpu_seconds": 11.062819,
+          "wall_seconds": 11.477124957949854
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B6_shape_atom",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "UK-01",
+            "unit_count": 1
+          },
+          "pid": 73111,
+          "returncode": 0,
+          "rss_after_bytes": 88080384,
+          "rss_before_bytes": 24002560,
+          "ru_maxrss_bytes": 95092736,
+          "status": "OK",
+          "system_cpu_seconds": 0.053121999999999996,
+          "time_l_maxrss_bytes": 95092736,
+          "tracemalloc_current_bytes": 34281930,
+          "tracemalloc_peak_bytes": 34320282,
+          "user_cpu_seconds": 11.053118,
+          "wall_seconds": 11.354054874973372
+        }
+      ],
+      "warmup_count": 1
+    },
+    "B7_large_body": {
+      "case": "B7_large_body",
+      "max_peak_rss_bytes": 95420416,
+      "max_retained_rss_bytes": 87605248,
+      "measured_count": 3,
+      "median_cpu_seconds": 11.093888,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B7_large_body",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 2,
+            "source_id": "HK-01",
+            "unit_count": 2
+          },
+          "pid": 74345,
+          "returncode": 0,
+          "rss_after_bytes": 86851584,
+          "rss_before_bytes": 24035328,
+          "ru_maxrss_bytes": 94863360,
+          "status": "OK",
+          "system_cpu_seconds": 0.050196,
+          "time_l_maxrss_bytes": 94863360,
+          "tracemalloc_current_bytes": 34281424,
+          "tracemalloc_peak_bytes": 34357648,
+          "user_cpu_seconds": 11.085664,
+          "wall_seconds": 11.351185292005539
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B7_large_body",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 2,
+            "source_id": "HK-01",
+            "unit_count": 2
+          },
+          "pid": 75550,
+          "returncode": 0,
+          "rss_after_bytes": 85803008,
+          "rss_before_bytes": 24182784,
+          "ru_maxrss_bytes": 93700096,
+          "status": "OK",
+          "system_cpu_seconds": 0.051658,
+          "time_l_maxrss_bytes": 93700096,
+          "tracemalloc_current_bytes": 34281680,
+          "tracemalloc_peak_bytes": 34357948,
+          "user_cpu_seconds": 11.04223,
+          "wall_seconds": 11.310278999968432
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B7_large_body",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 2,
+            "source_id": "HK-01",
+            "unit_count": 2
+          },
+          "pid": 76776,
+          "returncode": 0,
+          "rss_after_bytes": 87605248,
+          "rss_before_bytes": 24248320,
+          "ru_maxrss_bytes": 95420416,
+          "status": "OK",
+          "system_cpu_seconds": 0.050643,
+          "time_l_maxrss_bytes": 95420416,
+          "tracemalloc_current_bytes": 34281587,
+          "tracemalloc_peak_bytes": 34357811,
+          "user_cpu_seconds": 10.990127000000001,
+          "wall_seconds": 11.363381916075014
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B7_large_body",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 2,
+            "source_id": "HK-01",
+            "unit_count": 2
+          },
+          "pid": 77888,
+          "returncode": 0,
+          "rss_after_bytes": 85573632,
+          "rss_before_bytes": 24231936,
+          "ru_maxrss_bytes": 94420992,
+          "status": "OK",
+          "system_cpu_seconds": 0.052549,
+          "time_l_maxrss_bytes": 94420992,
+          "tracemalloc_current_bytes": 34282470,
+          "tracemalloc_peak_bytes": 34358694,
+          "user_cpu_seconds": 11.099486,
+          "wall_seconds": 11.315353667014278
+        }
+      ],
+      "warmup_count": 1
+    },
+    "B8_malformed": {
+      "case": "B8_malformed",
+      "max_peak_rss_bytes": 95305728,
+      "max_retained_rss_bytes": 87031808,
+      "measured_count": 3,
+      "median_cpu_seconds": 11.295421000000001,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B8_malformed",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 0,
+            "unit_count": 0
+          },
+          "pid": 79132,
+          "returncode": 0,
+          "rss_after_bytes": 87490560,
+          "rss_before_bytes": 24346624,
+          "ru_maxrss_bytes": 95535104,
+          "status": "OK",
+          "system_cpu_seconds": 0.08108,
+          "time_l_maxrss_bytes": 95535104,
+          "tracemalloc_current_bytes": 34276379,
+          "tracemalloc_peak_bytes": 34321061,
+          "user_cpu_seconds": 11.317445,
+          "wall_seconds": 11.698728000046685
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B8_malformed",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 0,
+            "unit_count": 0
+          },
+          "pid": 81438,
+          "returncode": 0,
+          "rss_after_bytes": 87031808,
+          "rss_before_bytes": 24182784,
+          "ru_maxrss_bytes": 95010816,
+          "status": "OK",
+          "system_cpu_seconds": 0.054402,
+          "time_l_maxrss_bytes": 95010816,
+          "tracemalloc_current_bytes": 34275164,
+          "tracemalloc_peak_bytes": 34320040,
+          "user_cpu_seconds": 11.116145999999999,
+          "wall_seconds": 11.546182874939404
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B8_malformed",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 0,
+            "unit_count": 0
+          },
+          "pid": 82543,
+          "returncode": 0,
+          "rss_after_bytes": 84377600,
+          "rss_before_bytes": 24264704,
+          "ru_maxrss_bytes": 95305728,
+          "status": "OK",
+          "system_cpu_seconds": 0.102455,
+          "time_l_maxrss_bytes": 95305728,
+          "tracemalloc_current_bytes": 34274770,
+          "tracemalloc_peak_bytes": 34319442,
+          "user_cpu_seconds": 11.192966,
+          "wall_seconds": 11.629020333988592
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B8_malformed",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 0,
+            "unit_count": 0
+          },
+          "pid": 83824,
+          "returncode": 0,
+          "rss_after_bytes": 86933504,
+          "rss_before_bytes": 24281088,
+          "ru_maxrss_bytes": 90636288,
+          "status": "OK",
+          "system_cpu_seconds": 0.078084,
+          "time_l_maxrss_bytes": 90636288,
+          "tracemalloc_current_bytes": 34276747,
+          "tracemalloc_peak_bytes": 34320978,
+          "user_cpu_seconds": 11.394406,
+          "wall_seconds": 12.66715979098808
+        }
+      ],
+      "warmup_count": 1
+    },
+    "B9_empty": {
+      "case": "B9_empty",
+      "max_peak_rss_bytes": 95387648,
+      "max_retained_rss_bytes": 90324992,
+      "measured_count": 3,
+      "median_cpu_seconds": 11.194676000000001,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B9_empty",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 0,
+            "unit_count": 0
+          },
+          "pid": 86002,
+          "returncode": 0,
+          "rss_after_bytes": 85049344,
+          "rss_before_bytes": 24346624,
+          "ru_maxrss_bytes": 95518720,
+          "status": "OK",
+          "system_cpu_seconds": 0.045941,
+          "time_l_maxrss_bytes": 95518720,
+          "tracemalloc_current_bytes": 34275085,
+          "tracemalloc_peak_bytes": 34320089,
+          "user_cpu_seconds": 11.126676,
+          "wall_seconds": 11.32147837500088
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B9_empty",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 0,
+            "unit_count": 0
+          },
+          "pid": 87265,
+          "returncode": 0,
+          "rss_after_bytes": 90324992,
+          "rss_before_bytes": 24313856,
+          "ru_maxrss_bytes": 92045312,
+          "status": "OK",
+          "system_cpu_seconds": 0.06108299999999999,
+          "time_l_maxrss_bytes": 92045312,
+          "tracemalloc_current_bytes": 34275371,
+          "tracemalloc_peak_bytes": 34319787,
+          "user_cpu_seconds": 11.288378,
+          "wall_seconds": 11.673375166021287
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B9_empty",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 0,
+            "unit_count": 0
+          },
+          "pid": 89366,
+          "returncode": 0,
+          "rss_after_bytes": 86163456,
+          "rss_before_bytes": 24313856,
+          "ru_maxrss_bytes": 95387648,
+          "status": "OK",
+          "system_cpu_seconds": 0.051001,
+          "time_l_maxrss_bytes": 95387648,
+          "tracemalloc_current_bytes": 34274289,
+          "tracemalloc_peak_bytes": 34318877,
+          "user_cpu_seconds": 11.08048,
+          "wall_seconds": 11.373457708978094
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "B9_empty",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 0,
+            "unit_count": 0
+          },
+          "pid": 90597,
+          "returncode": 0,
+          "rss_after_bytes": 88096768,
+          "rss_before_bytes": 24051712,
+          "ru_maxrss_bytes": 93552640,
+          "status": "OK",
+          "system_cpu_seconds": 0.058626,
+          "time_l_maxrss_bytes": 93552640,
+          "tracemalloc_current_bytes": 34274969,
+          "tracemalloc_peak_bytes": 34318881,
+          "user_cpu_seconds": 11.136050000000001,
+          "wall_seconds": 11.410412958008237
+        }
+      ],
+      "warmup_count": 1
+    },
+    "C1_permitted_rows": {
+      "case": "C1_permitted_rows",
+      "max_peak_rss_bytes": 96681984,
+      "max_retained_rss_bytes": 87638016,
+      "measured_count": 3,
+      "median_cpu_seconds": 14.447893,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C1_permitted_rows",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "body_bytes": 2743,
+            "corpus_row_count": 11,
+            "latest_row_count": 11,
+            "run_id_present": true
+          },
+          "pid": 75326,
+          "returncode": 0,
+          "rss_after_bytes": 95780864,
+          "rss_before_bytes": 24363008,
+          "ru_maxrss_bytes": 101580800,
+          "status": "OK",
+          "system_cpu_seconds": 0.103435,
+          "time_l_maxrss_bytes": 101580800,
+          "tracemalloc_current_bytes": 34289625,
+          "tracemalloc_peak_bytes": 34326921,
+          "user_cpu_seconds": 12.061524,
+          "wall_seconds": 13.191583540989086
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C1_permitted_rows",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "body_bytes": 2743,
+            "corpus_row_count": 11,
+            "latest_row_count": 11,
+            "run_id_present": true
+          },
+          "pid": 76560,
+          "returncode": 0,
+          "rss_after_bytes": 87638016,
+          "rss_before_bytes": 24313856,
+          "ru_maxrss_bytes": 96681984,
+          "status": "OK",
+          "system_cpu_seconds": 0.116657,
+          "time_l_maxrss_bytes": 96681984,
+          "tracemalloc_current_bytes": 34290318,
+          "tracemalloc_peak_bytes": 34327657,
+          "user_cpu_seconds": 14.446609,
+          "wall_seconds": 15.389343208051287
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C1_permitted_rows",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "body_bytes": 2743,
+            "corpus_row_count": 11,
+            "latest_row_count": 11,
+            "run_id_present": true
+          },
+          "pid": 78794,
+          "returncode": 0,
+          "rss_after_bytes": 81149952,
+          "rss_before_bytes": 24281088,
+          "ru_maxrss_bytes": 93634560,
+          "status": "OK",
+          "system_cpu_seconds": 0.173786,
+          "time_l_maxrss_bytes": 93634560,
+          "tracemalloc_current_bytes": 34287552,
+          "tracemalloc_peak_bytes": 34324799,
+          "user_cpu_seconds": 14.02291,
+          "wall_seconds": 14.995436207973398
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C1_permitted_rows",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "body_bytes": 2743,
+            "corpus_row_count": 11,
+            "latest_row_count": 11,
+            "run_id_present": true
+          },
+          "pid": 80043,
+          "returncode": 0,
+          "rss_after_bytes": 81002496,
+          "rss_before_bytes": 24084480,
+          "ru_maxrss_bytes": 95354880,
+          "status": "OK",
+          "system_cpu_seconds": 0.19426,
+          "time_l_maxrss_bytes": 95354880,
+          "tracemalloc_current_bytes": 34286914,
+          "tracemalloc_peak_bytes": 34324161,
+          "user_cpu_seconds": 14.253633,
+          "wall_seconds": 15.403361374977976
+        }
+      ],
+      "warmup_count": 1
+    },
+    "C2_parsed_observations": {
+      "case": "C2_parsed_observations",
+      "max_peak_rss_bytes": 101564416,
+      "max_retained_rss_bytes": 95764480,
+      "measured_count": 3,
+      "median_cpu_seconds": 13.256597,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C2_parsed_observations",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "body_bytes": 2743,
+            "corpus_row_count": 11,
+            "parsed_item_count": 11
+          },
+          "pid": 82373,
+          "returncode": 0,
+          "rss_after_bytes": 91570176,
+          "rss_before_bytes": 24068096,
+          "ru_maxrss_bytes": 94896128,
+          "status": "OK",
+          "system_cpu_seconds": 0.18941999999999998,
+          "time_l_maxrss_bytes": 94896128,
+          "tracemalloc_current_bytes": 34290441,
+          "tracemalloc_peak_bytes": 34327559,
+          "user_cpu_seconds": 14.505021,
+          "wall_seconds": 15.535526833962649
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C2_parsed_observations",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "body_bytes": 2743,
+            "corpus_row_count": 11,
+            "parsed_item_count": 11
+          },
+          "pid": 84480,
+          "returncode": 0,
+          "rss_after_bytes": 83345408,
+          "rss_before_bytes": 24330240,
+          "ru_maxrss_bytes": 98172928,
+          "status": "OK",
+          "system_cpu_seconds": 0.163849,
+          "time_l_maxrss_bytes": 98172928,
+          "tracemalloc_current_bytes": 34288836,
+          "tracemalloc_peak_bytes": 34326047,
+          "user_cpu_seconds": 13.606489,
+          "wall_seconds": 14.406330249970779
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C2_parsed_observations",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "body_bytes": 2743,
+            "corpus_row_count": 11,
+            "parsed_item_count": 11
+          },
+          "pid": 85916,
+          "returncode": 0,
+          "rss_after_bytes": 95764480,
+          "rss_before_bytes": 24199168,
+          "ru_maxrss_bytes": 101564416,
+          "status": "OK",
+          "system_cpu_seconds": 0.12063999999999998,
+          "time_l_maxrss_bytes": 101564416,
+          "tracemalloc_current_bytes": 34291422,
+          "tracemalloc_peak_bytes": 34328319,
+          "user_cpu_seconds": 12.939845,
+          "wall_seconds": 13.66251087503042
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C2_parsed_observations",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "body_bytes": 2743,
+            "corpus_row_count": 11,
+            "parsed_item_count": 11
+          },
+          "pid": 87043,
+          "returncode": 0,
+          "rss_after_bytes": 84754432,
+          "rss_before_bytes": 24281088,
+          "ru_maxrss_bytes": 95846400,
+          "status": "OK",
+          "system_cpu_seconds": 0.20305399999999998,
+          "time_l_maxrss_bytes": 95846400,
+          "tracemalloc_current_bytes": 34290749,
+          "tracemalloc_peak_bytes": 34327868,
+          "user_cpu_seconds": 13.053543,
+          "wall_seconds": 16.754180083051324
+        }
+      ],
+      "warmup_count": 1
+    },
+    "C3_units_from": {
+      "case": "C3_units_from",
+      "max_peak_rss_bytes": 95797248,
+      "max_retained_rss_bytes": 89571328,
+      "measured_count": 3,
+      "median_cpu_seconds": 13.761384999999999,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C3_units_from",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "corpus_row_count": 11,
+            "unit_count": 11
+          },
+          "pid": 90299,
+          "returncode": 0,
+          "rss_after_bytes": 84049920,
+          "rss_before_bytes": 24018944,
+          "ru_maxrss_bytes": 94404608,
+          "status": "OK",
+          "system_cpu_seconds": 0.626721,
+          "time_l_maxrss_bytes": 94404608,
+          "tracemalloc_current_bytes": 34293014,
+          "tracemalloc_peak_bytes": 34354393,
+          "user_cpu_seconds": 16.716973999999997,
+          "wall_seconds": 29.07641587499529
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C3_units_from",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "corpus_row_count": 11,
+            "unit_count": 11
+          },
+          "pid": 95142,
+          "returncode": 0,
+          "rss_after_bytes": 89571328,
+          "rss_before_bytes": 24543232,
+          "ru_maxrss_bytes": 91111424,
+          "status": "OK",
+          "system_cpu_seconds": 0.552349,
+          "time_l_maxrss_bytes": 91111424,
+          "tracemalloc_current_bytes": 34294383,
+          "tracemalloc_peak_bytes": 34355762,
+          "user_cpu_seconds": 17.505181999999998,
+          "wall_seconds": 23.626772416988388
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C3_units_from",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "corpus_row_count": 11,
+            "unit_count": 11
+          },
+          "pid": 97542,
+          "returncode": 0,
+          "rss_after_bytes": 84115456,
+          "rss_before_bytes": 24330240,
+          "ru_maxrss_bytes": 95797248,
+          "status": "OK",
+          "system_cpu_seconds": 0.178867,
+          "time_l_maxrss_bytes": 95797248,
+          "tracemalloc_current_bytes": 34293719,
+          "tracemalloc_peak_bytes": 34355098,
+          "user_cpu_seconds": 13.237107,
+          "wall_seconds": 14.351447833003476
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C3_units_from",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "corpus_row_count": 11,
+            "unit_count": 11
+          },
+          "pid": 99852,
+          "returncode": 0,
+          "rss_after_bytes": 81002496,
+          "rss_before_bytes": 24002560,
+          "ru_maxrss_bytes": 95387648,
+          "status": "OK",
+          "system_cpu_seconds": 0.17750999999999997,
+          "time_l_maxrss_bytes": 95387648,
+          "tracemalloc_current_bytes": 34293167,
+          "tracemalloc_peak_bytes": 34354546,
+          "user_cpu_seconds": 13.583874999999999,
+          "wall_seconds": 14.397796500008553
+        }
+      ],
+      "warmup_count": 1
+    },
+    "C4_unique_and_revisions": {
+      "case": "C4_unique_and_revisions",
+      "max_peak_rss_bytes": 101564416,
+      "max_retained_rss_bytes": 95764480,
+      "measured_count": 3,
+      "median_cpu_seconds": 12.326391,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C4_unique_and_revisions",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "revision_count": 11,
+            "unique_unit_count": 11,
+            "unit_count": 11
+          },
+          "pid": 1339,
+          "returncode": 0,
+          "rss_after_bytes": 85426176,
+          "rss_before_bytes": 24281088,
+          "ru_maxrss_bytes": 93945856,
+          "status": "OK",
+          "system_cpu_seconds": 0.16749499999999998,
+          "time_l_maxrss_bytes": 93945856,
+          "tracemalloc_current_bytes": 34293412,
+          "tracemalloc_peak_bytes": 34352237,
+          "user_cpu_seconds": 13.66721,
+          "wall_seconds": 14.47607654100284
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C4_unique_and_revisions",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "revision_count": 11,
+            "unique_unit_count": 11,
+            "unit_count": 11
+          },
+          "pid": 3623,
+          "returncode": 0,
+          "rss_after_bytes": 86917120,
+          "rss_before_bytes": 24297472,
+          "ru_maxrss_bytes": 95567872,
+          "status": "OK",
+          "system_cpu_seconds": 0.09820999999999999,
+          "time_l_maxrss_bytes": 95567872,
+          "tracemalloc_current_bytes": 34295963,
+          "tracemalloc_peak_bytes": 34354939,
+          "user_cpu_seconds": 13.033226,
+          "wall_seconds": 13.593695040908642
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C4_unique_and_revisions",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "revision_count": 11,
+            "unique_unit_count": 11,
+            "unit_count": 11
+          },
+          "pid": 4913,
+          "returncode": 0,
+          "rss_after_bytes": 95633408,
+          "rss_before_bytes": 24297472,
+          "ru_maxrss_bytes": 101433344,
+          "status": "OK",
+          "system_cpu_seconds": 0.064322,
+          "time_l_maxrss_bytes": 101433344,
+          "tracemalloc_current_bytes": 34294395,
+          "tracemalloc_peak_bytes": 34353367,
+          "user_cpu_seconds": 12.198969,
+          "wall_seconds": 12.456720083020627
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C4_unique_and_revisions",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "revision_count": 11,
+            "unique_unit_count": 11,
+            "unit_count": 11
+          },
+          "pid": 6038,
+          "returncode": 0,
+          "rss_after_bytes": 95764480,
+          "rss_before_bytes": 24346624,
+          "ru_maxrss_bytes": 101564416,
+          "status": "OK",
+          "system_cpu_seconds": 0.075317,
+          "time_l_maxrss_bytes": 101564416,
+          "tracemalloc_current_bytes": 34295034,
+          "tracemalloc_peak_bytes": 34354138,
+          "user_cpu_seconds": 12.251074,
+          "wall_seconds": 12.672953541972674
+        }
+      ],
+      "warmup_count": 1
+    },
+    "C5_load_graphiti_units": {
+      "case": "C5_load_graphiti_units",
+      "max_peak_rss_bytes": 95338496,
+      "max_retained_rss_bytes": 85426176,
+      "measured_count": 3,
+      "median_cpu_seconds": 12.88677,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C5_load_graphiti_units",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "chunk_count": 11,
+            "source_count": 2,
+            "unit_count": 11
+          },
+          "pid": 8114,
+          "returncode": 0,
+          "rss_after_bytes": 85524480,
+          "rss_before_bytes": 24346624,
+          "ru_maxrss_bytes": 98992128,
+          "status": "OK",
+          "system_cpu_seconds": 0.146038,
+          "time_l_maxrss_bytes": 98992128,
+          "tracemalloc_current_bytes": 34297496,
+          "tracemalloc_peak_bytes": 34357715,
+          "user_cpu_seconds": 12.331992,
+          "wall_seconds": 13.092101749964058
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C5_load_graphiti_units",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "chunk_count": 11,
+            "source_count": 2,
+            "unit_count": 11
+          },
+          "pid": 9467,
+          "returncode": 0,
+          "rss_after_bytes": 80986112,
+          "rss_before_bytes": 24068096,
+          "ru_maxrss_bytes": 92569600,
+          "status": "OK",
+          "system_cpu_seconds": 0.18021399999999999,
+          "time_l_maxrss_bytes": 92569600,
+          "tracemalloc_current_bytes": 34297176,
+          "tracemalloc_peak_bytes": 34357395,
+          "user_cpu_seconds": 13.099563999999999,
+          "wall_seconds": 14.89962566702161
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C5_load_graphiti_units",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "chunk_count": 11,
+            "source_count": 2,
+            "unit_count": 11
+          },
+          "pid": 11716,
+          "returncode": 0,
+          "rss_after_bytes": 81248256,
+          "rss_before_bytes": 24182784,
+          "ru_maxrss_bytes": 93011968,
+          "status": "OK",
+          "system_cpu_seconds": 0.23514399999999996,
+          "time_l_maxrss_bytes": 93011968,
+          "tracemalloc_current_bytes": 34297651,
+          "tracemalloc_peak_bytes": 34357870,
+          "user_cpu_seconds": 12.651626,
+          "wall_seconds": 21.44244900008198
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C5_load_graphiti_units",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "chunk_count": 11,
+            "source_count": 2,
+            "unit_count": 11
+          },
+          "pid": 16890,
+          "returncode": 0,
+          "rss_after_bytes": 85426176,
+          "rss_before_bytes": 24199168,
+          "ru_maxrss_bytes": 95338496,
+          "status": "OK",
+          "system_cpu_seconds": 0.10581299999999999,
+          "time_l_maxrss_bytes": 95338496,
+          "tracemalloc_current_bytes": 34297132,
+          "tracemalloc_peak_bytes": 34357400,
+          "user_cpu_seconds": 12.518054999999999,
+          "wall_seconds": 13.251949249999598
+        }
+      ],
+      "warmup_count": 1
+    },
+    "C6_resolve_event_units": {
+      "case": "C6_resolve_event_units",
+      "max_peak_rss_bytes": 101646336,
+      "max_retained_rss_bytes": 95846400,
+      "measured_count": 3,
+      "median_cpu_seconds": 13.243246000000001,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C6_resolve_event_units",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-01",
+            "unit_count": 11
+          },
+          "pid": 18023,
+          "returncode": 0,
+          "rss_after_bytes": 80871424,
+          "rss_before_bytes": 24330240,
+          "ru_maxrss_bytes": 95551488,
+          "status": "OK",
+          "system_cpu_seconds": 0.15578,
+          "time_l_maxrss_bytes": 95551488,
+          "tracemalloc_current_bytes": 34310969,
+          "tracemalloc_peak_bytes": 34425242,
+          "user_cpu_seconds": 12.992113,
+          "wall_seconds": 13.840352541068569
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C6_resolve_event_units",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-01",
+            "unit_count": 11
+          },
+          "pid": 19344,
+          "returncode": 0,
+          "rss_after_bytes": 85688320,
+          "rss_before_bytes": 24330240,
+          "ru_maxrss_bytes": 92520448,
+          "status": "OK",
+          "system_cpu_seconds": 0.196012,
+          "time_l_maxrss_bytes": 92520448,
+          "tracemalloc_current_bytes": 34309533,
+          "tracemalloc_peak_bytes": 34423762,
+          "user_cpu_seconds": 13.420269000000001,
+          "wall_seconds": 14.50171083305031
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C6_resolve_event_units",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-01",
+            "unit_count": 11
+          },
+          "pid": 21602,
+          "returncode": 0,
+          "rss_after_bytes": 95813632,
+          "rss_before_bytes": 24182784,
+          "ru_maxrss_bytes": 101613568,
+          "status": "OK",
+          "system_cpu_seconds": 0.093143,
+          "time_l_maxrss_bytes": 101613568,
+          "tracemalloc_current_bytes": 34309611,
+          "tracemalloc_peak_bytes": 34423840,
+          "user_cpu_seconds": 13.150103000000001,
+          "wall_seconds": 13.728910250007175
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C6_resolve_event_units",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "queue_claimed": false,
+            "selected_unit_count": 1,
+            "source_id": "HK-01",
+            "unit_count": 11
+          },
+          "pid": 22815,
+          "returncode": 0,
+          "rss_after_bytes": 95846400,
+          "rss_before_bytes": 24182784,
+          "ru_maxrss_bytes": 101646336,
+          "status": "OK",
+          "system_cpu_seconds": 0.06739699999999998,
+          "time_l_maxrss_bytes": 101646336,
+          "tracemalloc_current_bytes": 34310506,
+          "tracemalloc_peak_bytes": 34424784,
+          "user_cpu_seconds": 11.959643,
+          "wall_seconds": 12.31978566700127
+        }
+      ],
+      "warmup_count": 1
+    },
+    "C7_admission_generation": {
+      "case": "C7_admission_generation",
+      "max_peak_rss_bytes": 100466688,
+      "max_retained_rss_bytes": 94666752,
+      "measured_count": 3,
+      "median_cpu_seconds": 12.052558,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C7_admission_generation",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "cohort_digest": "sha256:5fdddd2f3db1b2a29fc3864e4c5f152b8b49249bb8b8c6bec0a69ebca031be3d",
+            "generation_id_present": true,
+            "member_count": 2
+          },
+          "pid": 24056,
+          "returncode": 0,
+          "rss_after_bytes": 96501760,
+          "rss_before_bytes": 24182784,
+          "ru_maxrss_bytes": 102301696,
+          "status": "OK",
+          "system_cpu_seconds": 0.071796,
+          "time_l_maxrss_bytes": 102301696,
+          "tracemalloc_current_bytes": 34065865,
+          "tracemalloc_peak_bytes": 34320147,
+          "user_cpu_seconds": 12.205562,
+          "wall_seconds": 12.570809583063237
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C7_admission_generation",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "cohort_digest": "sha256:5fdddd2f3db1b2a29fc3864e4c5f152b8b49249bb8b8c6bec0a69ebca031be3d",
+            "generation_id_present": true,
+            "member_count": 2
+          },
+          "pid": 26123,
+          "returncode": 0,
+          "rss_after_bytes": 88866816,
+          "rss_before_bytes": 24018944,
+          "ru_maxrss_bytes": 95469568,
+          "status": "OK",
+          "system_cpu_seconds": 0.07910600000000001,
+          "time_l_maxrss_bytes": 95469568,
+          "tracemalloc_current_bytes": 34065204,
+          "tracemalloc_peak_bytes": 34319424,
+          "user_cpu_seconds": 11.945523999999999,
+          "wall_seconds": 12.356054457952268
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C7_admission_generation",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "cohort_digest": "sha256:5fdddd2f3db1b2a29fc3864e4c5f152b8b49249bb8b8c6bec0a69ebca031be3d",
+            "generation_id_present": true,
+            "member_count": 2
+          },
+          "pid": 27409,
+          "returncode": 0,
+          "rss_after_bytes": 94420992,
+          "rss_before_bytes": 24215552,
+          "ru_maxrss_bytes": 100220928,
+          "status": "OK",
+          "system_cpu_seconds": 0.112844,
+          "time_l_maxrss_bytes": 100220928,
+          "tracemalloc_current_bytes": 34066377,
+          "tracemalloc_peak_bytes": 34320519,
+          "user_cpu_seconds": 11.939713999999999,
+          "wall_seconds": 12.649166708928533
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "C7_admission_generation",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "cohort_digest": "sha256:5fdddd2f3db1b2a29fc3864e4c5f152b8b49249bb8b8c6bec0a69ebca031be3d",
+            "generation_id_present": true,
+            "member_count": 2
+          },
+          "pid": 28704,
+          "returncode": 0,
+          "rss_after_bytes": 94666752,
+          "rss_before_bytes": 24264704,
+          "ru_maxrss_bytes": 100466688,
+          "status": "OK",
+          "system_cpu_seconds": 0.099406,
+          "time_l_maxrss_bytes": 100466688,
+          "tracemalloc_current_bytes": 34065785,
+          "tracemalloc_peak_bytes": 34319795,
+          "user_cpu_seconds": 12.003695,
+          "wall_seconds": 12.48492704203818
+        }
+      ],
+      "warmup_count": 1
+    },
+    "D1_cycle_max_writes_0": {
+      "case": "D1_cycle_max_writes_0",
+      "max_peak_rss_bytes": 2096414720,
+      "max_retained_rss_bytes": 1653129216,
+      "measured_count": 3,
+      "median_cpu_seconds": 250.841695,
+      "runs": [
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "D1_cycle_max_writes_0",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "candidates": 280,
+            "graphiti": 0,
+            "minted": 0,
+            "poll_observation_count": 6870,
+            "write_ready": 0
+          },
+          "pid": 29814,
+          "returncode": 0,
+          "rss_after_bytes": 1492926464,
+          "rss_before_bytes": 80101376,
+          "ru_maxrss_bytes": 1901789184,
+          "status": "OK",
+          "system_cpu_seconds": 5.842357,
+          "time_l_maxrss_bytes": 1901789184,
+          "tracemalloc_current_bytes": 1355705,
+          "tracemalloc_peak_bytes": 1563859803,
+          "user_cpu_seconds": 260.14462799999995,
+          "wall_seconds": 283.6295580830192
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "D1_cycle_max_writes_0",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "candidates": 280,
+            "graphiti": 0,
+            "minted": 0,
+            "poll_observation_count": 6860,
+            "write_ready": 0
+          },
+          "pid": 70542,
+          "returncode": 0,
+          "rss_after_bytes": 1466318848,
+          "rss_before_bytes": 80134144,
+          "ru_maxrss_bytes": 1837711360,
+          "status": "OK",
+          "system_cpu_seconds": 6.025181,
+          "time_l_maxrss_bytes": 1837711360,
+          "tracemalloc_current_bytes": 1383424,
+          "tracemalloc_peak_bytes": 1561537459,
+          "user_cpu_seconds": 262.19782100000003,
+          "wall_seconds": 282.9023422090104
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "D1_cycle_max_writes_0",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "candidates": 280,
+            "graphiti": 0,
+            "minted": 0,
+            "poll_observation_count": 6850,
+            "write_ready": 0
+          },
+          "pid": 7947,
+          "returncode": 0,
+          "rss_after_bytes": 1653129216,
+          "rss_before_bytes": 80232448,
+          "ru_maxrss_bytes": 2096414720,
+          "status": "OK",
+          "system_cpu_seconds": 3.91474,
+          "time_l_maxrss_bytes": 2096414720,
+          "tracemalloc_current_bytes": 1379273,
+          "tracemalloc_peak_bytes": 1559201960,
+          "user_cpu_seconds": 246.926955,
+          "wall_seconds": 262.31019999994896
+        },
+        {
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+            "-m",
+            "newsroom.research.issue_898_ram_cpu",
+            "--case",
+            "D1_cycle_max_writes_0",
+            "--workspace",
+            "/tmp/newsroom-898-run"
+          ],
+          "outcome": {
+            "candidates": 280,
+            "graphiti": 0,
+            "minted": 0,
+            "poll_observation_count": 6850,
+            "write_ready": 0
+          },
+          "pid": 45115,
+          "returncode": 0,
+          "rss_after_bytes": 1498578944,
+          "rss_before_bytes": 80084992,
+          "ru_maxrss_bytes": 1911095296,
+          "status": "OK",
+          "system_cpu_seconds": 2.282113,
+          "time_l_maxrss_bytes": 1911095296,
+          "tracemalloc_current_bytes": 1381062,
+          "tracemalloc_peak_bytes": 1559203832,
+          "user_cpu_seconds": 233.312088,
+          "wall_seconds": 240.23903933400288
+        }
+      ],
+      "warmup_count": 1
+    }
+  },
+  "copy_meta": {
+    "copy_digest": "reuse:1789808640:1788226227599623786",
+    "reused_existing_copy": true,
+    "source_path_name": "proving_store.sqlite3",
+    "source_size_bytes": 1789808640,
+    "status": "COPIED",
+    "writable_canonical": false
+  },
+  "decision": "NO_GO",
+  "decision_reason": "H2 full-corpus reconstruction is the largest measured contributor; next correction is exact row selection plus bounded/streaming resolution in Python, not a Rust translation of the scan",
+  "go_gate": {
+    "go_or_no_go": "NO_GO",
+    "h2_leads": true,
+    "import_peak_rss_bytes": 95961088,
+    "leader": {
+      "case": "D1_cycle_max_writes_0",
+      "local_cpu_seconds": 250.841695,
+      "peak_rss_bytes": 2096414720,
+      "removable_peak_rss_bytes": 2000453632,
+      "retained_rss_bytes": 1653129216
+    },
+    "ranked_candidate_boundaries": [
+      {
+        "case": "D1_cycle_max_writes_0",
+        "local_cpu_seconds": 250.841695,
+        "peak_rss_bytes": 2096414720,
+        "removable_peak_rss_bytes": 2000453632,
+        "retained_rss_bytes": 1653129216
+      },
+      {
+        "case": "B10_copied_canonical",
+        "local_cpu_seconds": 508.953998,
+        "peak_rss_bytes": 1999552512,
+        "removable_peak_rss_bytes": 1903591424,
+        "retained_rss_bytes": 1567522816
+      },
+      {
+        "case": "A4_idle_worker",
+        "local_cpu_seconds": 13.579329000000001,
+        "peak_rss_bytes": 114360320,
+        "removable_peak_rss_bytes": 18399232,
+        "retained_rss_bytes": 98975744
+      },
+      {
+        "case": "C6_resolve_event_units",
+        "local_cpu_seconds": 13.243246000000001,
+        "peak_rss_bytes": 101646336,
+        "removable_peak_rss_bytes": 5685248,
+        "retained_rss_bytes": 95846400
+      },
+      {
+        "case": "C2_parsed_observations",
+        "local_cpu_seconds": 13.256597,
+        "peak_rss_bytes": 101564416,
+        "removable_peak_rss_bytes": 5603328,
+        "retained_rss_bytes": 95764480
+      },
+      {
+        "case": "C4_unique_and_revisions",
+        "local_cpu_seconds": 12.326391,
+        "peak_rss_bytes": 101564416,
+        "removable_peak_rss_bytes": 5603328,
+        "retained_rss_bytes": 95764480
+      },
+      {
+        "case": "B2_one_event_representative",
+        "local_cpu_seconds": 11.191117,
+        "peak_rss_bytes": 101498880,
+        "removable_peak_rss_bytes": 5537792,
+        "retained_rss_bytes": 95698944
+      },
+      {
+        "case": "B3_one_event_times10",
+        "local_cpu_seconds": 11.132783,
+        "peak_rss_bytes": 101236736,
+        "removable_peak_rss_bytes": 5275648,
+        "retained_rss_bytes": 95436800
+      },
+      {
+        "case": "C7_admission_generation",
+        "local_cpu_seconds": 12.052558,
+        "peak_rss_bytes": 100466688,
+        "removable_peak_rss_bytes": 4505600,
+        "retained_rss_bytes": 94666752
+      },
+      {
+        "case": "A5_hermes_cycle_import",
+        "local_cpu_seconds": 12.130151,
+        "peak_rss_bytes": 98484224,
+        "removable_peak_rss_bytes": 2523136,
+        "retained_rss_bytes": 84606976
+      },
+      {
+        "case": "A3_instantiate_runner",
+        "local_cpu_seconds": 12.025558,
+        "peak_rss_bytes": 97910784,
+        "removable_peak_rss_bytes": 1949696,
+        "retained_rss_bytes": 83738624
+      },
+      {
+        "case": "C1_permitted_rows",
+        "local_cpu_seconds": 14.447893,
+        "peak_rss_bytes": 96681984,
+        "removable_peak_rss_bytes": 720896,
+        "retained_rss_bytes": 87638016
+      }
+    ],
+    "reason": "H2 full-corpus reconstruction is the largest measured contributor; next correction is exact row selection plus bounded/streaming resolution in Python, not a Rust translation of the scan",
+    "threshold_ok": true
+  },
+  "inspection_date": "2026-09-02",
+  "inspection_head": "038a0c06db21d8424854e6992ca6ef98339e523f",
+  "intended_hardware": {
+    "chip": "Apple M4",
+    "executable": "/Users/jamesto/.grok/worktrees/coding-newsroom/2026-09-02-dfc8c3c1/.venv/bin/python3",
+    "logical_cores": 10,
+    "machine_model": "Mac16,10",
+    "memory_bytes": 17179869184,
+    "physical_cores": 10,
+    "platform": "darwin"
+  },
+  "issue": 898,
+  "method": {
+    "current_or_retained_rss": [
+      "ps -o rss"
+    ],
+    "fresh_process_per_case": true,
+    "peak_rss_and_cpu": [
+      "/usr/bin/time -l",
+      "resource.getrusage"
+    ],
+    "python_allocation_supplement": "tracemalloc",
+    "warmup_plus_measured_runs": "1 warmup and 3 fresh-process executions"
+  },
+  "non_effects": [
+    "no Rust production code",
+    "no provider or model-catalogue call",
+    "no queue claim, consume, retry or release",
+    "no writable canonical-store access",
+    "no Neo4j or Graphiti mutation",
+    "no publication, deployment, activation or canary",
+    "no live daemon restart, signal or reconfiguration"
+  ],
+  "questions": {
+    "10_bounded_rust_process_would_remove_dominant_allocation": false,
+    "1_largest_idle_rss_process": 19677184,
+    "2_rss_retained_before_useful_work": 98975744,
+    "3_active_peak_resolving_one_graphiti_event": 1999552512,
+    "4_rss_after_one_event_or_cycle": 1653129216,
+    "5_stage_largest_removable_peak_rss": "D1_cycle_max_writes_0",
+    "6_stage_most_local_cpu": "B10_copied_canonical",
+    "7_one_event_scales_with_unrelated_corpus": {
+      "copied_peak": 1999552512,
+      "solo_peak": 95535104,
+      "times10_peak": 101236736
+    },
+    "8_latest_bodies_parsed_or_materialised_more_than_once": "YES_STATIC",
+    "9_dominant_memory_source": "D1_cycle_max_writes_0"
+  },
+  "status": "MEASURED",
+  "workspace_digest": "sha256:66e550e3ae45250b6fdec134f4bee41dde15ec421923395e9119c5051b190bb1"
+}
