@@ -1745,11 +1745,12 @@ def run_bounded_campaign(
             if now - started + delay >= wall_cap:
                 raise GraphitiCampaignStop("wall time cap reached before rate delay")
             sleep(delay)
-        elapsed = monotonic() - started
+        event_map = _mapping(event, field="campaign event")
+        last_dispatch = monotonic()
+        elapsed = last_dispatch - started
         if elapsed >= wall_cap:
             raise GraphitiCampaignStop("wall time cap reached")
         remaining = wall_cap - elapsed
-        event_map = _mapping(event, field="campaign event")
         result = consume_next_graphiti_event(
             proving_store=proving_store,
             unpublished_store=unpublished_store,
@@ -1771,8 +1772,8 @@ def run_bounded_campaign(
             require_graphiti_admission=True,
             defer_graphiti_admission=True,
         )
-        last_dispatch = monotonic()
-        if last_dispatch - started >= wall_cap:
+        completed_at = monotonic()
+        if completed_at - started >= wall_cap:
             raise GraphitiCampaignStop("wall time cap reached after provider dispatch")
         if (
             result is None

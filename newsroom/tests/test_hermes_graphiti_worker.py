@@ -1786,13 +1786,25 @@ def _campaign() -> dict[str, object]:
 
 
 @pytest.mark.parametrize(
-    "extra_fresh_candidate",
-    [False, True],
-    ids=["exact-snapshot", "fresh-candidate-race"],
+    (
+        "extra_fresh_candidate",
+        "processing_seconds",
+        "expected_sleeps",
+        "expected_dispatch_budgets",
+    ),
+    [
+        (False, 0.25, [0.75], [120.0, 119.0]),
+        (False, 1.25, [], [120.0, 118.75]),
+        (True, 0.0, [], []),
+    ],
+    ids=["fast-events", "slow-events", "fresh-candidate-race"],
 )
 def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
     monkeypatch: pytest.MonkeyPatch,
     extra_fresh_candidate: bool,
+    processing_seconds: float,
+    expected_sleeps: list[float],
+    expected_dispatch_budgets: list[float],
 ) -> None:
     from scripts import hermes_graphiti_worker as worker
 
@@ -1818,6 +1830,24 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
         },
     }
     calls: list[tuple[str, object]] = []
+    dispatch_budgets: list[float] = []
+
+    class FakeMonotonic:
+        def __init__(self) -> None:
+            self.value = 0.0
+            self.sleeps: list[float] = []
+
+        def __call__(self) -> float:
+            return self.value
+
+        def advance(self, seconds: float) -> None:
+            self.value += seconds
+
+        def sleep(self, seconds: float) -> None:
+            self.sleeps.append(seconds)
+            self.advance(seconds)
+
+    monotonic = FakeMonotonic()
     monkeypatch.setattr(
         worker,
         "validate_graphiti_campaign_packet",
@@ -1837,9 +1867,11 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
     def consume(**kwargs: object) -> GraphitiProcessResult:
         event_id = str(kwargs["event_id"])
         calls.append(("extract", event_id))
+        dispatch_budgets.append(float(kwargs["max_dispatch_seconds"]))
         assert kwargs["defer_graphiti_admission"] is True
         assert kwargs["require_graphiti_admission"] is True
         assert kwargs["unit_authority_resolver"] is runtime.bind_unit_authority
+        monotonic.advance(processing_seconds)
         return GraphitiProcessResult(
             event_id,
             int(event_id.removeprefix("event-")),
@@ -1968,8 +2000,8 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
         "head_sha": "head",
         "tree_sha": "tree",
         "owner_f4_fence": owner_fence,
-        "monotonic": lambda: 0.0,
-        "sleep": lambda _delay: None,
+        "monotonic": monotonic,
+        "sleep": monotonic.sleep,
     }
     if extra_fresh_candidate:
         with pytest.raises(
@@ -1985,6 +2017,8 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
             "manifest_digest": "manifest-3",
             "ingest_ids": ["ingest-3"],
         }
+        assert monotonic.sleeps == expected_sleeps
+        assert dispatch_budgets == expected_dispatch_budgets
         connection.close()
         return
 
@@ -2008,6 +2042,8 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
     assert report["entity_admits"] == 1
     assert report["relation_admits"] == 1
     assert report["success_objectives"] == objective_evidence
+    assert monotonic.sleeps == expected_sleeps
+    assert dispatch_budgets == expected_dispatch_budgets
     assert [item["state"] for item in report["events"]] == [
         "EXTRACTION_TERMINAL_CAMPAIGN_PENDING",
         "EXTRACTION_TERMINAL_CAMPAIGN_PENDING",
