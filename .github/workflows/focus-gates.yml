@@ -20,7 +20,7 @@ jobs:
   focus:
     name: focus-gates
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 25
     env:
       NEO4J_IMAGE: neo4j:2026.06.0-community-trixie
       NEO4J_URI: bolt://localhost:7687

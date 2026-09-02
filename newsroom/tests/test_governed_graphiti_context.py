@@ -20,10 +20,12 @@ from newsroom.control_plane.governed_context import (
     GovernedContextStatus,
 )
 from newsroom.control_plane.graphiti_admission import (
+    GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION,
     GraphitiAdmissionRequest,
     GraphitiGovernedDecision,
     GraphitiProposalAuthorityBinding,
     GraphitiProjectionReceipt,
+    graphiti_admission_generation_identity,
 )
 from newsroom.control_plane.items import SourceItem
 from newsroom.control_plane.store import connect
@@ -119,7 +121,17 @@ def _seed_entity(
     *,
     action: GraphitiProposalAdmissionAction = GraphitiProposalAdmissionAction.ADMIT,
     reconcile: bool = True,
-) -> None:
+    exact_binding: bool = False,
+) -> str:
+    generation_id = GENERATION_ID
+    terminal_receipt = {
+        "ingest_id": DIGEST_A,
+        "outcome": "COMPLETE",
+        "proposal_count": 1,
+    }
+    terminal_receipt_digest = digest_canonical(terminal_receipt)
+    terminal_receipt["receipt_digest"] = terminal_receipt_digest
+    source_receipt_digest = terminal_receipt_digest if exact_binding else DIGEST_A
     proposal = ProposalDraft(
         local_id="entity.0001",
         kind=ExtractionProposalKind.ENTITY_MENTION,
@@ -143,7 +155,7 @@ def _seed_entity(
     request = GraphitiAdmissionRequest(
         queue_seq=1,
         proposal_key=DIGEST_B,
-        source_receipt_digest=DIGEST_A,
+        source_receipt_digest=source_receipt_digest,
         proposal_authority_binding=_binding(proposal),
         proposal=proposal,
         proposal_payload=proposal.canonical_value(),
@@ -209,10 +221,15 @@ def _seed_entity(
             "SOURCE_PUBLISHED",
             "2026-08-20T00:00:00Z",
             "newsroom-eval-generation-759",
-            DIGEST_A,
+            source_receipt_digest,
             "2026-08-24T11:59:00Z",
         ),
     )
+    if exact_binding:
+        connection.execute(
+            "INSERT INTO unpublished_graphiti_receipts VALUES(?,?)",
+            (DIGEST_A, canonical_json_bytes(terminal_receipt).decode()),
+        )
     connection.execute(
         """
         INSERT INTO unpublished_graphiti_admission_queue(
@@ -225,7 +242,7 @@ def _seed_entity(
             request.proposal_key,
             DIGEST_A,
             request.source_lineage["revision_id"],
-            DIGEST_A,
+            source_receipt_digest,
             proposal.digest,
             proposal.kind.value,
             request_json,
@@ -254,14 +271,54 @@ def _seed_entity(
         ),
     )
     if action is GraphitiProposalAdmissionAction.ADMIT:
+        cohort_digest = None
+        if exact_binding:
+            cohort_digest, generation_id = graphiti_admission_generation_identity(
+                ingest_ids=(DIGEST_A,),
+                source_receipts=(
+                    {
+                        "ingest_id": DIGEST_A,
+                        "receipt_digest": source_receipt_digest,
+                        "proposal_count": 1,
+                    },
+                ),
+                members=(
+                    {
+                        "ingest_id": DIGEST_A,
+                        "proposal_key": request.proposal_key,
+                        "proposal_envelope_id": str(
+                            request.proposal_authority_binding.proposal_envelope.proposal_id
+                        ),
+                        "decision_digest": digest_bytes(decision_json.encode()),
+                        "decision": decision.canonical_value(),
+                    },
+                ),
+            )
         projection = GraphitiProjectionReceipt(
             proposal_key=request.proposal_key,
             decision_id=decision.decision_id,
             effect_id="effect:entity.0001",
             authority_watermark=101,
             receipt_digest=DIGEST_B,
-            generation_id=GENERATION_ID,
+            generation_id=generation_id,
+            schema_version=(
+                "newsroom.increment4.admitted-generation-binding.v2"
+                if exact_binding
+                else "newsroom.increment4.admitted-projection.v1"
+            ),
+            cohort_digest=cohort_digest,
+            source_snapshot_digest=DIGEST_A if exact_binding else None,
+            validation_digest=DIGEST_B if exact_binding else None,
+            promotion_digest=DIGEST_C if exact_binding else None,
+            generation_result_digest=DIGEST_A if exact_binding else None,
         )
+        if exact_binding:
+            projection_material = projection.canonical_value()
+            projection_material.pop("receipt_digest")
+            projection = replace(
+                projection,
+                receipt_digest=digest_canonical(projection_material),
+            )
         projection_json = canonical_json_bytes(projection.canonical_value()).decode()
         connection.execute(
             "INSERT INTO unpublished_graphiti_projection_receipts "
@@ -280,7 +337,7 @@ def _seed_entity(
             ),
         )
         reconciliation = {
-            "generation_id": GENERATION_ID,
+            "generation_id": generation_id,
             "expected_effect_ids": [projection.effect_id],
             "actual_effect_ids": [projection.effect_id],
             "authority_watermark": 101,
@@ -289,19 +346,222 @@ def _seed_entity(
             "provider_model_calls": 0,
         }
         if reconcile:
+            reconciliation_value = (
+                {
+                    "schema_version": (
+                        GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION
+                    ),
+                    "cohort_digest": cohort_digest,
+                    "ingest_ids": [DIGEST_A],
+                    "raw_receipt": reconciliation,
+                }
+                if exact_binding
+                else reconciliation
+            )
             connection.execute(
                 "INSERT INTO unpublished_graphiti_projection_reconciliations "
                 "VALUES(?,?,?,?,?,?)",
                 (
                     DIGEST_A,
                     projection.projector_family_id,
-                    GENERATION_ID,
+                    generation_id,
                     101,
-                    canonical_json_bytes(reconciliation).decode(),
+                    canonical_json_bytes(reconciliation_value).decode(),
                     "2026-08-24T11:59:00Z",
                 ),
             )
     connection.commit()
+    return generation_id
+
+
+def _seed_exact_all_hold_cohort(connection) -> str:
+    ingest_id = "sha256:" + ("e5" * 32)
+    proposal_key = "sha256:" + ("d4" * 32)
+    terminal_receipt = {
+        "ingest_id": ingest_id,
+        "outcome": "COMPLETE",
+        "proposal_count": 1,
+    }
+    terminal_receipt_digest = digest_canonical(terminal_receipt)
+    terminal_receipt["receipt_digest"] = terminal_receipt_digest
+    proposal = ProposalDraft(
+        local_id="entity.0002",
+        kind=ExtractionProposalKind.ENTITY_MENTION,
+        subject_placeholder="Bob",
+        object_placeholder=None,
+        predicate_hint=None,
+        confidence_basis_points=None,
+        uncertainty_codes=(),
+        rationale_codes=("GRAPHITI_EVALUATION_SPAN",),
+        evidence=(
+            EvidenceRange(
+                passage_id=ExtractionPassageId.parse(
+                    "00000000-0000-4000-8000-000000007591"
+                ),
+                start_byte=0,
+                end_byte=3,
+                evidence_text_digest=DIGEST_C,
+            ),
+        ),
+    )
+    request = GraphitiAdmissionRequest(
+        queue_seq=2,
+        proposal_key=proposal_key,
+        source_receipt_digest=terminal_receipt_digest,
+        proposal_authority_binding=_binding(proposal),
+        proposal=proposal,
+        proposal_payload=proposal.canonical_value(),
+        evidence_passages=(
+            {
+                "passage_id": "00000000-0000-4000-8000-000000007591",
+                "admission_id": "00000000-0000-4000-8000-000000007592",
+                "access_decision_id": "00000000-0000-4000-8000-000000007593",
+                "byte_offset": 0,
+                "byte_length": 128,
+                "blob_digest": DIGEST_C,
+                "text_digest": DIGEST_C,
+            },
+        ),
+        proposed_endpoints=None,
+        relation_statement=None,
+        relation_temporal_bounds=None,
+        source_lineage={
+            "ingest_id": ingest_id,
+            "source_id": "UK-01",
+            "item_key": "item-760",
+            "revision_id": "00000000-0000-4000-8000-000000007590",
+            "authority_record_ids": [
+                "00000000-0000-4000-8000-000000007590",
+                "00000000-0000-4000-8000-000000007592",
+                "00000000-0000-4000-8000-000000007593",
+            ],
+            "generation_id": "newsroom-eval-generation-760",
+            "episode_uuid": DIGEST_C,
+            "reference_time": "2026-08-21T00:00:00Z",
+            "temporal_basis": "SOURCE_PUBLISHED",
+        },
+    )
+    decision = GraphitiGovernedDecision(
+        proposal_key=proposal_key,
+        proposal_digest=proposal.digest,
+        proposal_kind=proposal.kind,
+        proposal_local_id=proposal.local_id,
+        action=GraphitiProposalAdmissionAction.HOLD,
+        decision_id="decision:entity.0002",
+        authority_ledger_seq=102,
+        reason_code="AMBIGUOUS_ENTITY_IDENTITY",
+        authority_receipt_digest=DIGEST_C,
+    )
+    request_json = canonical_json_bytes(request.canonical_value()).decode()
+    decision_json = canonical_json_bytes(decision.canonical_value()).decode()
+    connection.execute(
+        "INSERT INTO unpublished_graphiti_ingest VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            ingest_id,
+            "UK-01",
+            "item-760",
+            "COMPLETE",
+            1,
+            0,
+            0,
+            "NONE",
+            "SOURCE_PUBLISHED",
+            "2026-08-21T00:00:00Z",
+            "newsroom-eval-generation-760",
+            terminal_receipt_digest,
+            "2026-08-24T11:59:30Z",
+        ),
+    )
+    connection.execute(
+        "INSERT INTO unpublished_graphiti_receipts VALUES(?,?)",
+        (ingest_id, canonical_json_bytes(terminal_receipt).decode()),
+    )
+    connection.execute(
+        """
+        INSERT INTO unpublished_graphiti_admission_queue(
+            queue_seq, proposal_key, ingest_id, source_revision_id,
+            source_receipt_digest, proposal_digest, proposal_kind, request_json,
+            request_digest, state, created_at, updated_at
+        ) VALUES(2,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            proposal_key,
+            ingest_id,
+            request.source_lineage["revision_id"],
+            terminal_receipt_digest,
+            proposal.digest,
+            proposal.kind.value,
+            request_json,
+            digest_bytes(request_json.encode()),
+            "TERMINAL",
+            "2026-08-24T11:59:30Z",
+            "2026-08-24T11:59:30Z",
+        ),
+    )
+    connection.execute(
+        "INSERT INTO unpublished_graphiti_admission_decisions VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            proposal_key,
+            decision.action.value,
+            decision.decision_id,
+            decision.authority_ledger_seq,
+            decision.reason_code,
+            decision.authority_receipt_digest,
+            decision_json,
+            digest_bytes(decision_json.encode()),
+            "2026-08-24T11:59:30Z",
+        ),
+    )
+    cohort_digest, generation_id = graphiti_admission_generation_identity(
+        ingest_ids=(ingest_id,),
+        source_receipts=(
+            {
+                "ingest_id": ingest_id,
+                "receipt_digest": terminal_receipt_digest,
+                "proposal_count": 1,
+            },
+        ),
+        members=(
+            {
+                "ingest_id": ingest_id,
+                "proposal_key": proposal_key,
+                "proposal_envelope_id": str(
+                    request.proposal_authority_binding.proposal_envelope.proposal_id
+                ),
+                "decision_digest": digest_bytes(decision_json.encode()),
+                "decision": decision.canonical_value(),
+            },
+        ),
+    )
+    reconciliation = {
+        "generation_id": generation_id,
+        "expected_effect_ids": [],
+        "actual_effect_ids": [],
+        "authority_watermark": 102,
+        "receipt_digest": DIGEST_C,
+        "projector_family_id": "graph.increment4.admitted",
+        "provider_model_calls": 0,
+    }
+    envelope = {
+        "schema_version": GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION,
+        "cohort_digest": cohort_digest,
+        "ingest_ids": [ingest_id],
+        "raw_receipt": reconciliation,
+    }
+    connection.execute(
+        "INSERT INTO unpublished_graphiti_projection_reconciliations "
+        "VALUES(?,?,?,?,?,?)",
+        (
+            DIGEST_C,
+            "graph.increment4.admitted",
+            generation_id,
+            102,
+            canonical_json_bytes(envelope).decode(),
+            "2026-08-24T11:59:30Z",
+        ),
+    )
+    connection.commit()
+    return generation_id
 
 
 def test_admitted_context_survives_hypothesis_candidate_evidence_and_cont(
@@ -377,6 +637,7 @@ def test_admitted_context_survives_hypothesis_candidate_evidence_and_cont(
     assert "Alice Example" in prompts[0]
     assert "graphiti_workspace" not in prompts[0]
 
+
     assert candidate.governed_context is not None
     object.__setattr__(
         candidate.governed_context,
@@ -430,6 +691,63 @@ def test_admitted_context_survives_hypothesis_candidate_evidence_and_cont(
         )
 
     assert len(prompts) == 1
+
+
+def test_latest_all_hold_generation_preserves_prior_exact_admitted_context(
+    tmp_path,
+) -> None:
+    connection = connect(str(tmp_path / "multi-cohort.sqlite3"))
+    admitted_generation_id = _seed_entity(connection, exact_binding=True)
+    latest_generation_id = _seed_exact_all_hold_cohort(connection)
+
+    context = GovernedContextHydrator(
+        connection,
+        authority=_CurrentAuthority(),
+        rights=_Rights(),
+        clock=lambda: NOW,
+    ).hydrate()
+
+    assert context.status is GovernedContextStatus.READY
+    assert context.projection_generation_id == latest_generation_id
+    assert context.contiguous_projection_watermark == 102
+    assert len(context.items) == 1
+    assert context.items[0].projection_generation_id == admitted_generation_id
+    assert context.items[0].projection_authority_watermark == 101
+
+
+def test_exact_all_hold_generation_is_the_empty_context_generation(tmp_path) -> None:
+    connection = connect(str(tmp_path / "all-hold-cohort.sqlite3"))
+    generation_id = _seed_exact_all_hold_cohort(connection)
+
+    context = GovernedContextHydrator(
+        connection,
+        authority=_CurrentAuthority(),
+        rights=_Rights(),
+        clock=lambda: NOW,
+    ).hydrate()
+
+    assert context.status is GovernedContextStatus.EMPTY
+    assert context.reason_code == "ZERO_ADMITTED_CONTEXT"
+    assert context.projection_generation_id == generation_id
+    assert context.contiguous_projection_watermark == 102
+    assert context.items == ()
+
+
+def test_multi_cohort_context_holds_without_every_exact_binding(tmp_path) -> None:
+    connection = connect(str(tmp_path / "multi-cohort-legacy.sqlite3"))
+    _seed_entity(connection)
+    _seed_exact_all_hold_cohort(connection)
+
+    context = GovernedContextHydrator(
+        connection,
+        authority=_CurrentAuthority(),
+        rights=_Rights(),
+        clock=lambda: NOW,
+    ).hydrate()
+
+    assert context.status is GovernedContextStatus.HOLD
+    assert context.reason_code == "ADMITTED_CONTEXT_RECEIPT_INVALID"
+    assert context.items == ()
 
 
 def test_held_and_rejected_proposals_produce_zero_context(tmp_path) -> None:

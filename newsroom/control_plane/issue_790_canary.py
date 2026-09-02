@@ -523,6 +523,10 @@ def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
 def graphiti_excluded_event_ids(connection: sqlite3.Connection) -> frozenset[str]:
     """Return exact events which a generic Graphiti worker must never claim."""
 
+    from newsroom.control_plane.graphiti_event_reconciliation import (
+        retained_graphiti_event_holds,
+    )
+
     values: set[str] = set()
     if _table_exists(connection, "issue_790_graphiti_retry_exclusions"):
         values.update(
@@ -538,6 +542,7 @@ def graphiti_excluded_event_ids(connection: sqlite3.Connection) -> frozenset[str
                 "SELECT event_id FROM issue_790_bounded_canary_consumptions"
             )
         )
+    values.update(retained_graphiti_event_holds(connection))
     return frozenset(values)
 
 
@@ -546,6 +551,10 @@ def graphiti_retry_excluded(
     *,
     event_id: str,
 ) -> bool:
+    from newsroom.control_plane.graphiti_event_reconciliation import (
+        retained_graphiti_event_holds,
+    )
+
     return bool(
         _table_exists(connection, "issue_790_graphiti_retry_exclusions")
         and connection.execute(
@@ -553,7 +562,7 @@ def graphiti_retry_excluded(
             (event_id,),
         ).fetchone()
         is not None
-    )
+    ) or event_id in retained_graphiti_event_holds(connection)
 
 
 def validate_graphiti_canary_claim(
