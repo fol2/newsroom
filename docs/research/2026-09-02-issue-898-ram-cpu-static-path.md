@@ -1,7 +1,11 @@
 # Attribute Newsroom RAM/CPU — Mini packet (#898)
 
+**Superseded.** This note recorded the first Mini packet and an invalid
+`NO_GO`. The authoritative corrected packet is
+[`2026-09-02-issue-898-ram-cpu.md`](2026-09-02-issue-898-ram-cpu.md).
+
 - Role: Dated provider-free research evidence
-- Status: Measured on the intended Mini; Rust first atom is `NO_GO`
+- Status: Superseded; do not treat the `NO_GO` below as a Rust decision
 - Owner: fol2
 - Canonical language: English
 - Date: 2026-09-02

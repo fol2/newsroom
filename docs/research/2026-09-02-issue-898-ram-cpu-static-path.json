@@ -1,6 +1,10 @@
 {
   "canonical_packet": "docs/research/2026-09-02-issue-898-ram-cpu-measurements.json",
-  "decision": "NO_GO",
+  "canonical_summary": "docs/research/2026-09-02-issue-898-ram-cpu.md",
+  "decision": "GO",
+  "decision_boundary": "retained_observation_body_scan",
   "issue": 898,
-  "status": "SUPERSEDED_BY_MEASURED_PACKET"
+  "previous_no_go_withdrawn": true,
+  "r2": "HOLD",
+  "status": "SUPERSEDED_BY_CORRECTED_MEASURED_PACKET"
 }

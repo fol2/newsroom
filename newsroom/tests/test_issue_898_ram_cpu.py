@@ -43,6 +43,25 @@ def test_unobserved_is_not_zero() -> None:
     assert summary["max_peak_rss_bytes"] != 0
 
 
+def test_summarise_uses_largest_rss_sample() -> None:
+    summary = summarise_case(
+        "rust",
+        [
+            {"status": "OK", "outcome": {}},
+            {
+                "rss_after_bytes": 50,
+                "rss_held_bytes": 100,
+                "ru_maxrss_bytes": 200,
+                "time_l_maxrss_bytes": 500,
+                "user_cpu_seconds": 1,
+                "system_cpu_seconds": 0,
+                "outcome": {"combined_peak_rss_bytes": 400},
+            },
+        ],
+    )
+    assert summary["max_peak_rss_bytes"] == 500
+
+
 def test_measure_primary_disables_tracemalloc() -> None:
     result = measure(lambda: {"ok": True})
     assert result["tracemalloc_enabled"] is False

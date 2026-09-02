@@ -1489,30 +1489,32 @@ def _median(values: list[float]) -> float:
     return (ordered[mid - 1] + ordered[mid]) / 2
 
 
+def _rss_samples(item: dict[str, object]) -> list[int]:
+    values: list[int] = []
+    for key in ("time_l_maxrss_bytes", "ru_maxrss_bytes", "rss_held_bytes"):
+        sample = item.get(key)
+        if isinstance(sample, int):
+            values.append(sample)
+    outcome = item.get("outcome") if isinstance(item.get("outcome"), dict) else {}
+    if isinstance(outcome, dict):
+        combined = outcome.get("combined_peak_rss_bytes")
+        if isinstance(combined, int):
+            values.append(combined)
+    return values
+
+
 def summarise_case(name: str, runs: list[dict[str, object]]) -> dict[str, object]:
     measured = runs[WARMUPS:] if len(runs) > WARMUPS else runs
     peaks: list[int] = []
     cpus: list[float] = []
     retained: list[int] = []
     for item in measured:
-        outcome = item.get("outcome") if isinstance(item.get("outcome"), dict) else {}
-        combined = outcome.get("combined_peak_rss_bytes") if isinstance(outcome, dict) else None
-        held = item.get("rss_held_bytes")
-        peak = combined if isinstance(combined, int) else None
-        if peak is None and isinstance(held, int):
-            peak = held
-        if peak is None:
-            time_l = item.get("time_l_maxrss_bytes")
-            ru = item.get("ru_maxrss_bytes")
-            if isinstance(time_l, int):
-                peak = time_l
-            elif isinstance(ru, int):
-                peak = ru
+        samples = _rss_samples(item)
+        if samples:
+            peaks.append(max(samples))
         after = item.get("rss_after_bytes")
         user = item.get("user_cpu_seconds")
         system = item.get("system_cpu_seconds")
-        if isinstance(peak, int):
-            peaks.append(peak)
         if isinstance(after, int):
             retained.append(after)
         if isinstance(user, (int, float)) and isinstance(system, (int, float)):
