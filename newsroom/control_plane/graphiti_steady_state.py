@@ -1297,12 +1297,19 @@ def _historical_partition(
                     if binding_reason is None:
                         category = "CURRENT_DISPATCH_PREFLIGHT_CANDIDATE"
                         reason = "CURRENT_RIGHTS_INPUT_AND_BINDING_VERIFIED"
+                        current_ingest_ids = [
+                            item.ingest_id
+                            for item in sorted(
+                                current_units,
+                                key=lambda item: item.chunk_ordinal,
+                            )
+                        ]
                         candidate_events.append(
                             {
                                 "event_id": event_id,
                                 "ledger_seq": ledger_seq,
                                 "manifest_digest": str(event_row[10]),
-                                "ingest_ids": list(resolved_ingest_ids),
+                                "ingest_ids": current_ingest_ids,
                             }
                         )
                     else:

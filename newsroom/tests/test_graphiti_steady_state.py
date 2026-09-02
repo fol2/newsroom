@@ -1166,6 +1166,22 @@ def test_historical_partition_is_total_disjoint_and_candidates_are_unauthorised(
         item_key="candidate",
         ingest_id="candidate-ingest",
     )
+    legacy_manifest = json.loads(
+        connection.execute(
+            "SELECT manifest_json FROM unpublished_graphiti_revision_events "
+            "WHERE ledger_seq=2"
+        ).fetchone()[0]
+    )
+    legacy_manifest["landed_ingest_ids"] = []
+    legacy_manifest["unit_refs"] = []
+    connection.execute(
+        "UPDATE unpublished_graphiti_revision_events "
+        "SET unit_count=0,manifest_json=?,manifest_digest=? WHERE ledger_seq=2",
+        (
+            json.dumps(legacy_manifest, sort_keys=True),
+            digest_canonical(legacy_manifest),
+        ),
+    )
     _nonterminal_obligation(
         connection,
         ledger_seq=3,
@@ -1203,7 +1219,7 @@ def test_historical_partition_is_total_disjoint_and_candidates_are_unauthorised(
         return (
             _current_unit(
                 item_key="candidate",
-                ingest_id="candidate-ingest",
+                ingest_id="hydrated-current-ingest",
             ),
             _current_unit(
                 item_key="changed",
@@ -1230,9 +1246,15 @@ def test_historical_partition_is_total_disjoint_and_candidates_are_unauthorised(
     ]
     assert candidate["ledger_sequences"] == [2]
     assert candidate["dispatch_authorised"] is False
+    assert partition["current_preflight_candidates"][0]["ingest_ids"] == [
+        "hydrated-current-ingest"
+    ]
     assert partition["categories"]["RIGHTS_OR_INPUT_HELD"][
         "ledger_sequences"
     ] == [3, 4, 5]
+    assert partition["categories"]["RIGHTS_OR_INPUT_HELD"]["reason_counts"][
+        "RESOLVED_INGEST_IDS_DIFFER_FROM_LANDED"
+    ] == 1
     assert partition["categories"][
         "NON_REPLAYABLE_OR_AMBIGUOUS_EFFECT_HOLD"
     ]["ledger_sequences"] == [6]
