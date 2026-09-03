@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import newsroom.control_plane.read_only_snapshot as snapshot_module
 from newsroom.authority.auth import (
     AuthenticationProof,
     StaticAuthenticator,
@@ -48,10 +47,7 @@ from newsroom.control_plane.graphiti_steady_state import (
 from newsroom.control_plane.graphiti_spend_reconciliation import (
     plan_graphiti_spend_reconciliation,
 )
-from newsroom.control_plane.read_only_snapshot import (
-    ReadOnlySnapshotError,
-    read_only_snapshot,
-)
+from newsroom.control_plane.read_only_snapshot import read_only_snapshot
 from newsroom.control_plane.store import (
     connect,
     effective_revision_landed_payload,
@@ -1147,23 +1143,20 @@ def test_campaign_runtime_rejects_non_governed_construction_token() -> None:
         )
 
 
-def test_wal_snapshot_does_not_change_source_files(tmp_path: Path) -> None:
+def test_wal_snapshot_is_logical_and_query_only(tmp_path: Path) -> None:
     path = tmp_path / "wal.sqlite3"
     connection = sqlite3.connect(path)
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("CREATE TABLE evidence(value TEXT)")
     connection.execute("INSERT INTO evidence VALUES('retained')")
     connection.commit()
-    paths = (path, Path(f"{path}-wal"), Path(f"{path}-shm"))
-    before = tuple(item.read_bytes() for item in paths)
-
     with read_only_snapshot(path) as snapshot:
         assert snapshot.connection.execute(
             "SELECT value FROM evidence"
         ).fetchone() == ("retained",)
         assert snapshot.connection.execute("PRAGMA query_only").fetchone() == (1,)
 
-    assert tuple(item.read_bytes() for item in paths) == before
+    assert connection.execute("SELECT value FROM evidence").fetchone() == ("retained",)
     connection.close()
 
 
@@ -1206,25 +1199,49 @@ def test_store_identity_survives_wal_checkpoint_but_detects_data_change(
     )["authority"] != after_checkpoint["authority"]
 
 
-def test_snapshot_rejects_wal_topology_created_during_copy(
+def test_snapshot_accepts_checkpoint_churn_without_logical_change(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    path = tmp_path / "plain.sqlite3"
-    sqlite3.connect(path).execute("CREATE TABLE evidence(value TEXT)").connection.close()
-    original_copy = snapshot_module._copy_with_digest
+    path = tmp_path / "wal.sqlite3"
+    writer = sqlite3.connect(path)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("CREATE TABLE evidence(value TEXT)")
+    writer.execute("INSERT INTO evidence VALUES('retained')")
+    writer.commit()
 
-    def copy_then_add_wal(source: Path, destination: Path) -> str:
-        digest = original_copy(source, destination)
-        Path(f"{path}-wal").touch()
-        Path(f"{path}-shm").touch()
-        return digest
+    with read_only_snapshot(path) as snapshot:
+        assert writer.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+        path.touch()
+        assert snapshot.connection.execute(
+            "SELECT value FROM evidence"
+        ).fetchone() == ("retained",)
 
-    monkeypatch.setattr(snapshot_module, "_copy_with_digest", copy_then_add_wal)
+    writer.close()
 
-    with pytest.raises(ReadOnlySnapshotError, match="changed while taking"):
-        with read_only_snapshot(path):
-            pytest.fail("changed WAL topology was accepted")
+
+def test_snapshot_is_transaction_consistent_across_logical_change(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "wal.sqlite3"
+    writer = sqlite3.connect(path)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("CREATE TABLE evidence(value TEXT)")
+    writer.execute("INSERT INTO evidence VALUES('retained')")
+    writer.commit()
+
+    with read_only_snapshot(path) as snapshot:
+        writer.execute("UPDATE evidence SET value='changed'")
+        writer.commit()
+        assert snapshot.connection.execute(
+            "SELECT value FROM evidence"
+        ).fetchone() == ("retained",)
+
+    with read_only_snapshot(path) as snapshot:
+        assert snapshot.connection.execute(
+            "SELECT value FROM evidence"
+        ).fetchone() == ("changed",)
+
+    writer.close()
 
 
 def test_missing_campaign_inputs_are_finite_no_go(tmp_path: Path) -> None:
