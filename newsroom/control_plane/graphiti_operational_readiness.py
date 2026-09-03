@@ -872,7 +872,12 @@ class OperationalCorpusAuthorityBinder:
 
     def _require_expected(self, unit: CorpusIngestUnit) -> CorpusIngestUnit:
         expected = self._expected.get(unit.ingest_id)
-        if expected is None or unit != expected:
+        if expected is None or replace(
+            unit,
+            observation_digest=expected.observation_digest,
+            observed_at=expected.observed_at,
+            proving_run_id=expected.proving_run_id,
+        ) != expected:
             raise GraphitiOperationalReadinessError(
                 "runtime unit differs from the bootstrapped exact cohort"
             )

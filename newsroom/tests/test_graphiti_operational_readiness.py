@@ -797,6 +797,42 @@ def test_bootstrap_uses_real_source_and_object_authority_and_replays(
     assert after[1] == 1
 
 
+def test_bootstrap_binder_preserves_current_occurrence_metadata(
+    tmp_path: Path,
+) -> None:
+    unit = _unit()
+    system = _open_operational_test_system(tmp_path)
+    try:
+        bootstrap, binder = bootstrap_operational_authority(
+            system, proof=_PROOF, plan=_plan(unit)
+        )
+        current = replace(
+            unit,
+            observation_digest=digest_canonical({"observation": "rolling"}),
+            observed_at="2026-09-02T12:15:00.000000Z",
+            proving_run_id="rights-run-2",
+        )
+
+        rebound = binder(current)
+
+        assert rebound.authority == bootstrap.bound_units[0].authority
+        assert rebound.observation_digest == current.observation_digest
+        assert rebound.observed_at == current.observed_at
+        assert rebound.proving_run_id == current.proving_run_id
+        with pytest.raises(
+            GraphitiOperationalReadinessError,
+            match="runtime unit differs from the bootstrapped exact cohort",
+        ):
+            binder(
+                replace(
+                    current,
+                    source_definition_url="https://example.test/drifted-feed",
+                )
+            )
+    finally:
+        system.close()
+
+
 def test_bootstrap_orders_multiple_revisions_and_resumes_after_first_revision(
     tmp_path: Path,
 ) -> None:
