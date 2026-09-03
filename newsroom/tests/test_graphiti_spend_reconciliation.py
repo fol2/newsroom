@@ -15,7 +15,11 @@ from newsroom.authority.auth import (
     StaticAuthenticator,
     StaticPrincipal,
 )
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+)
 from newsroom.control_plane.command_service import ControlPlaneCommandService
 from newsroom.control_plane.graphiti_spend_reconciliation import (
     GraphitiSpendDisposition,
@@ -292,6 +296,391 @@ def _retain_unreported_binding_failure(
     connection.commit()
     connection.close()
     return spend_id, receipt_digest
+
+
+def _retain_late_bound_complete_proof(
+    path: Path,
+    *,
+    ingest_id: str = "late-bound-ingest",
+) -> tuple[str, dict[str, object], str, bytes]:
+    ModelUsageService(str(path))
+    connection = connect(str(path))
+    spend_id = _reserve(connection, ingest_id=ingest_id, attempt=1)
+    accounting = reconcile_graphiti_spend(
+        connection, spend_id=spend_id, embedding_usage=None
+    )
+    receipt_digest = insert_graphiti_attempt_receipt(
+        connection,
+        ingest_id=ingest_id,
+        attempt_number=1,
+        outcome="FAILED",
+        receipt={
+            "ingest_id": ingest_id,
+            "attempt_number": 1,
+            "outcome": "FAILED",
+            "failure_code": "PRODUCER_INTERNAL_ERROR",
+            "binding_failure": "RESULT_CONTRACT_REJECTED",
+            "binding_failure_type": "ExtractionContractError",
+            "binding_failure_stage": "UNCLASSIFIED_RESULT_BOUNDARY",
+            "provider_attempt_number": None,
+            "returned_raw_receipt_digest": None,
+            "returned_validated_raw_digest": None,
+            "chat_invocation_count": 0,
+            "chat_invocations_digest": None,
+            "chat_invocations": [],
+            "embedding_usage_digest": None,
+            "embedding_usage": None,
+            "token_usage": None,
+            "accounting": accounting,
+        },
+    )
+    connection.commit()
+    original_receipt = bytes(
+        connection.execute(
+            "SELECT CAST(receipt_json AS BLOB) "
+            "FROM unpublished_graphiti_attempt_receipts WHERE ingest_id=?",
+            (ingest_id,),
+        ).fetchone()[0]
+    )
+    cycle_id = "late-bound-cycle"
+    schema = "newsroom.model-usage.v3"
+    envelope_identity = {
+        "schema_version": schema,
+        "cycle_id": cycle_id,
+        "workload_class": "GRAPHITI_CHAT_PRIMARY",
+        "admission_decision_id": None,
+        "candidate_id": None,
+        "hypothesis_digest": None,
+        "evidence_package_digest": None,
+        "ingest_id": ingest_id,
+        "graphiti_attempt_id": spend_id,
+    }
+    envelope_id = digest_canonical(envelope_identity)
+    envelope = {
+        **envelope_identity,
+        "envelope_id": envelope_id,
+        "admitted_at": "2026-09-03T12:31:22.000000Z",
+    }
+    envelope["canonical_digest"] = digest_canonical(envelope)
+    connection.execute(
+        "INSERT INTO model_work_envelopes VALUES(?,?,?,?,?,?)",
+        (
+            envelope_id,
+            cycle_id,
+            "GRAPHITI_CHAT_PRIMARY",
+            envelope["admitted_at"],
+            envelope["canonical_digest"],
+            canonical_json_bytes(envelope).decode(),
+        ),
+    )
+    policy = {
+        "schema_version": schema,
+        "policy_id": "late-bound-test",
+        "version": "v1",
+        "workload_class": "GRAPHITI_CHAT_PRIMARY",
+        "provider": "cursor-agent-cli",
+        "route": "GRAPHITI_CHAT_PRIMARY",
+        "model": "composer-2.5",
+        "qualified": True,
+        "allowed_config_identities": ["cursor-sdk-api-key-composer-floor-v2"],
+        "command_flags": [
+            "TRANSPORT=CURSOR_SDK",
+            "sdk=cursor-sdk>=1.0.29",
+            "auth=CURSOR_API_KEY",
+            "composer_floor>=2.5",
+            "max_retries=0",
+        ],
+    }
+    policy_digest = digest_canonical(policy)
+    policy["canonical_digest"] = policy_digest
+    connection.execute(
+        "INSERT INTO model_invocation_policies VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            policy_digest,
+            "late-bound-test",
+            "v1",
+            "GRAPHITI_CHAT_PRIMARY",
+            "cursor-agent-cli",
+            "GRAPHITI_CHAT_PRIMARY",
+            "composer-2.5",
+            1,
+            canonical_json_bytes(policy).decode(),
+        ),
+    )
+    request_digest = digest_canonical({"request": spend_id})
+    allocation_identity = {
+        "schema_version": schema,
+        "envelope_id": envelope_id,
+        "cycle_id": cycle_id,
+        "leaf_ordinal": 1,
+        "workload_class": "GRAPHITI_CHAT_PRIMARY",
+        "request_digest": request_digest,
+        "route": "GRAPHITI_CHAT_PRIMARY",
+        "parent_invocation_id": None,
+    }
+    invocation_id = digest_canonical(allocation_identity)
+    allocation = {
+        **allocation_identity,
+        "invocation_id": invocation_id,
+        "invocation_policy_digest": policy_digest,
+        "provider": "cursor-agent-cli",
+        "model": "composer-2.5",
+        "reasoning": "provider-default",
+        "prompt_contract_version": "v1",
+        "prompt_bytes": 100,
+        "prompt_digest": digest_canonical({"prompt": spend_id}),
+        "output_schema_digest": digest_canonical({"schema": "output"}),
+        "max_output_tokens": 16384,
+        "context_manifest_digest": digest_canonical({"context": spend_id}),
+        "context_identity": "graphiti-combined-temporal-hermetic-v1",
+        "config_identity": "cursor-sdk-api-key-composer-floor-v2",
+        "one_turn": True,
+        "exact_input": True,
+        "skills_enabled": False,
+        "tools_enabled": False,
+        "mcp_enabled": False,
+        "prior_message_count": 0,
+        "allocated_at": "2026-09-03T12:31:31.000000Z",
+        "recovery_deadline_at": "2026-09-03T12:47:31.000000Z",
+    }
+    allocation["canonical_digest"] = digest_canonical(allocation)
+    connection.execute(
+        "INSERT INTO model_invocation_allocations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            invocation_id,
+            envelope_id,
+            cycle_id,
+            1,
+            "GRAPHITI_CHAT_PRIMARY",
+            policy_digest,
+            "cursor-agent-cli",
+            "GRAPHITI_CHAT_PRIMARY",
+            "composer-2.5",
+            request_digest,
+            None,
+            allocation["allocated_at"],
+            allocation["canonical_digest"],
+            canonical_json_bytes(allocation).decode(),
+        ),
+    )
+    provider_attempt_id = f"{spend_id}:provider-attempt:1:leaf:1"
+    observation = {
+        "schema_version": schema,
+        "invocation_id": invocation_id,
+        "observed_at": "2026-09-03T12:31:31.500000Z",
+        "state": "DISPATCH_STARTED",
+        "evidence_digest": digest_canonical({"dispatch": spend_id}),
+    }
+    observation["observation_digest"] = digest_canonical(observation)
+    connection.execute(
+        "INSERT INTO model_transport_observations VALUES(?,?,?,?,?,?)",
+        (
+            observation["observation_digest"],
+            invocation_id,
+            observation["observed_at"],
+            observation["state"],
+            observation["evidence_digest"],
+            canonical_json_bytes(observation).decode(),
+        ),
+    )
+    link = {
+        "schema_version": schema,
+        "invocation_id": invocation_id,
+        "provider_attempt_id": provider_attempt_id,
+        "linked_at": allocation["allocated_at"],
+    }
+    link["link_digest"] = digest_canonical(link)
+    connection.execute(
+        "INSERT INTO model_invocation_provider_attempt_links VALUES(?,?,?,?,?)",
+        (
+            link["link_digest"],
+            invocation_id,
+            provider_attempt_id,
+            link["linked_at"],
+            canonical_json_bytes(link).decode(),
+        ),
+    )
+    leaf_usage = {
+        "input_tokens": 13299,
+        "output_tokens": 1745,
+        "cached_read_tokens": 1248,
+        "cached_write_tokens": 0,
+        "reasoning_tokens": None,
+        "total_tokens": 16292,
+        "usage_basis": "PROVIDER_REPORTED",
+    }
+    telemetry = {
+        "schema_version": schema,
+        "invocation_id": invocation_id,
+        "provider_telemetry_digest": digest_canonical(leaf_usage),
+        "provider_telemetry": leaf_usage,
+    }
+    telemetry_record_digest = digest_canonical(telemetry)
+    connection.execute(
+        "INSERT INTO model_provider_telemetry VALUES(?,?,?,?)",
+        (
+            telemetry_record_digest,
+            invocation_id,
+            telemetry["provider_telemetry_digest"],
+            canonical_json_bytes(telemetry).decode(),
+        ),
+    )
+    terminal = {
+        "schema_version": schema,
+        "terminal_digest": "",
+        "invocation_id": invocation_id,
+        "outcome": "COMPLETE",
+        "failure_class": None,
+        "usage_status": "REPORTED",
+        "components": {
+            **{key: value for key, value in leaf_usage.items() if key != "usage_basis"},
+            "context_tokens": None,
+            "provenance": "PROVIDER_REPORTED",
+        },
+        "dispatch_at": observation["observed_at"],
+        "completed_at": "2026-09-03T12:31:47.000000Z",
+        "observed_at": "2026-09-03T12:31:47.000000Z",
+        "provider_telemetry_digest": telemetry["provider_telemetry_digest"],
+        "raw_telemetry_pointer": (
+            f"sqlite-private://model_provider_telemetry/{invocation_id}"
+        ),
+        "estimate_policy_digest": None,
+        "estimate_calculation": None,
+        "pre_dispatch_zero_proved": False,
+        "od_011_reference": None,
+        "subscription_cli_chat_not_cash_debited": True,
+        "policy_breach": None,
+    }
+    terminal["terminal_digest"] = digest_canonical(terminal)
+    connection.execute(
+        "INSERT INTO model_invocation_terminals VALUES(?,?,?,?,?,?,?)",
+        (
+            terminal["terminal_digest"],
+            invocation_id,
+            "REPORTED",
+            "COMPLETE",
+            None,
+            terminal["completed_at"],
+            canonical_json_bytes(terminal).decode(),
+        ),
+    )
+    internal = {
+        "schema_version": "newsroom.graphiti-internal-request.v1",
+        "invocation_id": invocation_id,
+        "envelope_id": envelope_id,
+        "graphiti_attempt_id": spend_id,
+        "internal_ordinal": 1,
+        "semantic_state_digest": digest_canonical({"semantic": spend_id}),
+        "provider_attempt_id": provider_attempt_id,
+        "call_shape_policy_digest": digest_canonical({"shape": "v1"}),
+        "invocation_policy_digest": policy_digest,
+        "provider": "cursor-agent-cli",
+        "model": "composer-2.5",
+        "leaf_class": "PRIMARY",
+    }
+    internal["canonical_digest"] = ""
+    internal["canonical_digest"] = digest_canonical(internal)
+    connection.execute(
+        "INSERT INTO graphiti_internal_requests VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            internal["canonical_digest"],
+            invocation_id,
+            envelope_id,
+            spend_id,
+            1,
+            internal["semantic_state_digest"],
+            provider_attempt_id,
+            internal["call_shape_policy_digest"],
+            canonical_json_bytes(internal).decode(),
+        ),
+    )
+    outcome = {
+        "schema_version": schema,
+        "envelope_id": envelope_id,
+        "outcome": "GRAPHITI_REJECTED_BINDING",
+        "outcome_record_id": receipt_digest,
+        "payload_digest": None,
+        "terminal_at": "2026-09-03T12:31:47.700000Z",
+        "cycle_outcome": None,
+        "route_circuit_state": None,
+        "route_circuit_reason": None,
+        "retained_proposal_count": 0,
+        "accepted_provider_attempt_id": None,
+        "stable_reason_codes": [],
+    }
+    outcome["outcome_digest"] = digest_canonical(outcome)
+    connection.execute(
+        "INSERT INTO model_work_outcomes VALUES(?,?,?,?,?)",
+        (
+            outcome["outcome_digest"],
+            envelope_id,
+            outcome["outcome"],
+            outcome["terminal_at"],
+            canonical_json_bytes(outcome).decode(),
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    leaf = {
+        "provider": "cursor-agent-cli",
+        "model": "composer-2.5",
+        "outcome": "COMPLETE",
+        "model_work_envelope_id": envelope_id,
+        "model_invocation_id": invocation_id,
+        "model_invocation_allocation_digest": allocation["canonical_digest"],
+        "model_invocation_terminal_digest": terminal["terminal_digest"],
+        "usage": leaf_usage,
+        "transport_qualification": {
+            "schema_version": "newsroom.cursor-sdk-qualification.v2",
+            "transport": "CURSOR_SDK",
+            "model": "composer-2.5",
+            "selected_model": "composer-2.5",
+            "max_retries": 0,
+        },
+        "sdk_terminal": {
+            "schema_version": "newsroom.cursor-sdk-terminal.v1",
+            "status": "finished",
+            "cancelled": False,
+            "error_class": "NONE",
+            "error_code": "NONE",
+        },
+    }
+    embedding = _no_embedding_usage()
+    token_usage = summarise_graphiti_usage(
+        chat_invocations=(leaf,), embedding_usage=embedding
+    )
+    raw = {
+        "episode_uuid": ingest_id,
+        "workspace_group": f"newsroom-eval-proposal-{GRAPHITI_GENERATION_ID}",
+        "attempt_number": 1,
+        "provider_attempt_number": 1,
+        "chat_invocation_count": 1,
+        "chat_invocations": [leaf],
+        "embedding_usage": embedding,
+        "usage_basis": "NO_EMBEDDING_CALL",
+        "chat_subscription_not_debited": True,
+        "token_usage": token_usage,
+    }
+    journal = _journal(
+        spend_id,
+        ingest_id=ingest_id,
+        attempt_number=1,
+        state="COMPLETE",
+        provider_dispatch_state="DISPATCHED",
+        marker_attempt_number=1,
+        provider_attempt_number=1,
+        reconciliation_attempt_number=1,
+        recovery_classification="LATE_BOUND_COMPLETE_AFTER_OUTER_RECEIPT_LOSS",
+        attempt_receipt_digest=receipt_digest,
+        episode_uuid=ingest_id,
+        group_id=f"newsroom-eval-proposal-{GRAPHITI_GENERATION_ID}",
+        validated_raw_digest=digest_bytes(canonical_json_bytes(raw)),
+        validated_raw=raw,
+        provider_leaves=[leaf],
+        embedding_usage=embedding,
+    )
+    return spend_id, journal, receipt_digest, original_receipt
 
 
 def _apply_missing_reconciliation(
@@ -3750,6 +4139,275 @@ def test_unproved_or_unsupported_binding_failure_remains_typed_hold(
         str(path), evaluated_at=datetime(2026, 9, 3, tzinfo=UTC)
     )
     assert replay.transitions == ()
+
+
+def test_late_bound_cursor_sdk_completion_reconciles_without_rewriting_receipt(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    spend_id, journal, receipt_digest, original_receipt = (
+        _retain_late_bound_complete_proof(path)
+    )
+    evaluated_at = datetime(2026, 9, 3, 13, tzinfo=UTC)
+    evidence = {spend_id: journal}
+
+    plan = plan_graphiti_spend_reconciliation(
+        str(path),
+        evaluated_at=evaluated_at,
+        graph_journal_evidence=evidence,
+    )
+
+    transition = plan.transitions[0]
+    assert transition.disposition is GraphitiSpendDisposition.RECONCILED
+    assert transition.evidence_basis == (
+        "CURSOR_SDK_COMPLETE_WITH_NO_EMBEDDING_CALL"
+    )
+    assert transition.target_status == "RECONCILED"
+    assert transition.target_usage_basis == "NO_EMBEDDING_CALL"
+    assert transition.actual_usd_microunits == 0
+    assert transition.actual_gbp_microunits == 0
+    assert transition.unused_reservation_released is True
+    assert transition.attempt_receipt_digest == receipt_digest
+    assert transition.provider_leaf_count == 1
+    assert transition.model_usage_evidence is not None
+    assert transition.model_usage_evidence["transport"] == "CURSOR_SDK"
+    assert transition.model_usage_evidence["allocation_count"] == 1
+    assert transition.model_usage_evidence["dispatch_started_count"] == 1
+    assert transition.model_usage_evidence["terminal_count"] == 1
+    assert transition.model_usage_evidence["graphiti_internal_request_count"] == 1
+    assert transition.model_usage_evidence["token_usage"]["chat_total_tokens"] == (
+        16292
+    )
+
+    _command_service().reconcile_graphiti_spend(
+        unpublished_store=str(path),
+        dry_run_plan=plan.as_dict(),
+        evaluated_at=evaluated_at,
+        graph_journal_evidence=evidence,
+        idempotency_key="late-bound-cursor-sdk",
+        expected_plan_digest=plan.plan_digest,
+        proof=AuthenticationProof(method="STATIC_TOKEN", credential="operator-token"),
+    )
+
+    with sqlite3.connect(path) as connection:
+        retained = connection.execute(
+            "SELECT CAST(receipt_json AS BLOB),receipt_digest "
+            "FROM unpublished_graphiti_attempt_receipts WHERE ingest_id=?",
+            ("late-bound-ingest",),
+        ).fetchone()
+        spend = connection.execute(
+            "SELECT status,usage_basis,actual_usd_microunits,"
+            "actual_gbp_microunits,provider_usage_json "
+            "FROM unpublished_graphiti_spend WHERE spend_id=?",
+            (spend_id,),
+        ).fetchone()
+    assert bytes(retained[0]) == original_receipt
+    assert retained[1] == receipt_digest
+    assert tuple(spend[:4]) == ("RECONCILED", "NO_EMBEDDING_CALL", 0, 0)
+    assert json.loads(spend[4]) == _no_embedding_usage()
+    report = graphiti_usage_report(str(path))
+    assert report["measured_attempt_count"] == 1
+    assert report["unreported_attempt_count"] == 0
+    assert report["chat_request_count"] == 1
+    assert report["chat_total_tokens"] == 16292
+    assert report["embedding_request_count"] == 0
+    assert report["embedding_cost_usd_microunits"] == 0
+    assert report["cost_complete"] is True
+
+
+@pytest.mark.parametrize(
+    ("tamper", "value"),
+    (
+        ("attempt_receipt_digest", "sha256:" + ("f" * 64)),
+        ("episode_uuid", "different-ingest"),
+        ("group_id", "different-group"),
+        ("validated_raw_digest", "sha256:" + ("e" * 64)),
+        ("provider_attempt_number", 2),
+    ),
+)
+def test_late_bound_cursor_sdk_evidence_tamper_remains_hold(
+    tmp_path: Path,
+    tamper: str,
+    value: object,
+) -> None:
+    path = tmp_path / f"{tamper}.sqlite3"
+    spend_id, journal, _, _ = _retain_late_bound_complete_proof(path)
+    journal[tamper] = value
+    journal.pop("evidence_digest")
+    journal["evidence_digest"] = digest_bytes(canonical_json_bytes(journal))
+
+    plan = plan_graphiti_spend_reconciliation(
+        str(path),
+        evaluated_at=datetime(2026, 9, 3, 13, tzinfo=UTC),
+        graph_journal_evidence={spend_id: journal},
+    )
+
+    assert plan.transitions[0].disposition is (
+        GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD
+    )
+    assert plan.transitions[0].unused_reservation_released is False
+
+
+def test_late_bound_classification_does_not_exempt_non_target_receipt(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "non-target-receipt.sqlite3"
+    spend_id, journal, _, _ = _retain_late_bound_complete_proof(path)
+    with sqlite3.connect(path) as connection:
+        receipt = json.loads(
+            connection.execute(
+                "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts"
+            ).fetchone()[0]
+        )
+        receipt["binding_failure_type"] = "GraphitiResultStageError"
+        receipt.pop("receipt_digest")
+        receipt_digest = digest_bytes(canonical_json_bytes(receipt))
+        receipt["receipt_digest"] = receipt_digest
+        connection.execute(
+            "UPDATE unpublished_graphiti_attempt_receipts "
+            "SET receipt_digest=?,receipt_json=?",
+            (receipt_digest, canonical_json_bytes(receipt).decode()),
+        )
+
+    with pytest.raises(
+        GraphitiSpendReconciliationError,
+        match="provider leaves differ from the attempt receipt",
+    ):
+        plan_graphiti_spend_reconciliation(
+            str(path),
+            evaluated_at=datetime(2026, 9, 3, 13, tzinfo=UTC),
+            graph_journal_evidence={spend_id: journal},
+        )
+
+
+def test_late_bound_source_accounting_mismatch_remains_hold(tmp_path: Path) -> None:
+    path = tmp_path / "source-accounting-mismatch.sqlite3"
+    spend_id, journal, _, _ = _retain_late_bound_complete_proof(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE unpublished_graphiti_spend SET status='RESERVED' "
+            "WHERE spend_id=?",
+            (spend_id,),
+        )
+
+    plan = plan_graphiti_spend_reconciliation(
+        str(path),
+        evaluated_at=datetime(2026, 9, 3, 13, tzinfo=UTC),
+        graph_journal_evidence={spend_id: journal},
+    )
+
+    assert plan.transitions[0].disposition is (
+        GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD
+    )
+    assert plan.transitions[0].unused_reservation_released is False
+
+
+@pytest.mark.parametrize(
+    "table",
+    (
+        "model_invocation_allocations",
+        "model_invocation_policies",
+        "model_transport_observations",
+        "model_invocation_provider_attempt_links",
+        "model_invocation_terminals",
+        "model_provider_telemetry",
+        "graphiti_internal_requests",
+    ),
+)
+def test_late_bound_cursor_sdk_missing_model_row_remains_hold(
+    tmp_path: Path,
+    table: str,
+) -> None:
+    path = tmp_path / f"missing-{table}.sqlite3"
+    spend_id, journal, _, _ = _retain_late_bound_complete_proof(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute(f"DELETE FROM {table}")
+
+    plan = plan_graphiti_spend_reconciliation(
+        str(path),
+        evaluated_at=datetime(2026, 9, 3, 13, tzinfo=UTC),
+        graph_journal_evidence={spend_id: journal},
+    )
+
+    assert plan.transitions[0].disposition is (
+        GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD
+    )
+
+
+def test_late_bound_cursor_sdk_extra_allocation_remains_hold(tmp_path: Path) -> None:
+    path = tmp_path / "extra-allocation.sqlite3"
+    spend_id, journal, _, _ = _retain_late_bound_complete_proof(path)
+    with sqlite3.connect(path) as connection:
+        row = list(
+            connection.execute(
+                "SELECT * FROM model_invocation_allocations"
+            ).fetchone()
+        )
+        record = json.loads(row[-1])
+        record["leaf_ordinal"] = 2
+        record["request_digest"] = digest_canonical({"request": "extra"})
+        identity = {
+            key: record[key]
+            for key in (
+                "schema_version",
+                "envelope_id",
+                "cycle_id",
+                "leaf_ordinal",
+                "workload_class",
+                "request_digest",
+                "route",
+                "parent_invocation_id",
+            )
+        }
+        record["invocation_id"] = digest_canonical(identity)
+        unsigned = dict(record)
+        unsigned.pop("canonical_digest")
+        record["canonical_digest"] = digest_canonical(unsigned)
+        row[0] = record["invocation_id"]
+        row[3] = 2
+        row[9] = record["request_digest"]
+        row[12] = record["canonical_digest"]
+        row[13] = canonical_json_bytes(record).decode()
+        connection.execute(
+            "INSERT INTO model_invocation_allocations "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            row,
+        )
+
+    plan = plan_graphiti_spend_reconciliation(
+        str(path),
+        evaluated_at=datetime(2026, 9, 3, 13, tzinfo=UTC),
+        graph_journal_evidence={spend_id: journal},
+    )
+    assert plan.transitions[0].disposition is (
+        GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD
+    )
+
+
+def test_late_bound_cursor_sdk_tampered_policy_remains_hold(tmp_path: Path) -> None:
+    path = tmp_path / "tampered-policy.sqlite3"
+    spend_id, journal, _, _ = _retain_late_bound_complete_proof(path)
+    with sqlite3.connect(path) as connection:
+        policy = json.loads(
+            connection.execute(
+                "SELECT record_json FROM model_invocation_policies"
+            ).fetchone()[0]
+        )
+        policy["qualified"] = False
+        connection.execute(
+            "UPDATE model_invocation_policies SET record_json=?",
+            (canonical_json_bytes(policy).decode(),),
+        )
+
+    plan = plan_graphiti_spend_reconciliation(
+        str(path),
+        evaluated_at=datetime(2026, 9, 3, 13, tzinfo=UTC),
+        graph_journal_evidence={spend_id: journal},
+    )
+    assert plan.transitions[0].disposition is (
+        GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD
+    )
 
 
 def test_usage_does_not_dedupe_unreconciled_fabricated_recovery_receipt(

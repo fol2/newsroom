@@ -174,6 +174,13 @@ def _validated_receipt_token_usage(
 ) -> dict[str, object] | None:
     if not isinstance(receipt, Mapping):
         return None
+    late_bound_usage = _late_bound_complete_token_usage(
+        receipt,
+        disposition=disposition,
+        evidence=evidence,
+    )
+    if late_bound_usage is not None:
+        return late_bound_usage
     leaves = receipt.get("chat_invocations")
     if not isinstance(leaves, list) or any(
         not isinstance(item, Mapping) for item in leaves
@@ -218,6 +225,64 @@ def _validated_receipt_token_usage(
     if canonical_json_bytes(retained_for_comparison) != canonical_json_bytes(expected):
         return None
     return retained
+
+
+def _late_bound_complete_token_usage(
+    receipt: Mapping[str, object],
+    *,
+    disposition: object,
+    evidence: object,
+) -> dict[str, object] | None:
+    if (
+        disposition != GraphitiSpendDisposition.RECONCILED.value
+        or not isinstance(evidence, Mapping)
+        or evidence.get("evidence_basis")
+        != "CURSOR_SDK_COMPLETE_WITH_NO_EMBEDDING_CALL"
+        or evidence.get("target_status") != "RECONCILED"
+        or evidence.get("target_usage_basis") != "NO_EMBEDDING_CALL"
+        or evidence.get("actual_usd_microunits") != 0
+        or evidence.get("actual_gbp_microunits") != 0
+        or evidence.get("unused_reservation_released") is not True
+        or receipt.get("receipt_digest") != evidence.get("attempt_receipt_digest")
+        or receipt.get("provider_attempt_number") is not None
+        or receipt.get("chat_invocations") != []
+        or receipt.get("embedding_usage") is not None
+        or receipt.get("token_usage") is not None
+    ):
+        return None
+    model_evidence = evidence.get("model_usage_evidence")
+    if not isinstance(model_evidence, Mapping):
+        return None
+    unsigned = dict(model_evidence)
+    supplied_digest = unsigned.pop("evidence_digest", None)
+    leaves = model_evidence.get("chat_invocations")
+    embedding_usage = model_evidence.get("embedding_usage")
+    token_usage = model_evidence.get("token_usage")
+    if (
+        model_evidence.get("schema")
+        != "newsroom.graphiti-late-bound-complete-usage-evidence.v1"
+        or model_evidence.get("attempt_receipt_digest")
+        != receipt.get("receipt_digest")
+        or supplied_digest != digest_bytes(canonical_json_bytes(unsigned))
+        or not isinstance(leaves, list)
+        or len(leaves) != 1
+        or not isinstance(embedding_usage, Mapping)
+        or embedding_usage.get("usage_basis") != "NO_EMBEDDING_CALL"
+        or embedding_usage.get("requests") != []
+        or embedding_usage.get("request_count") != 0
+        or embedding_usage.get("embedding_tokens") != 0
+        or embedding_usage.get("cost_usd_microunits") != 0
+        or not isinstance(token_usage, dict)
+        or canonical_json_bytes(token_usage)
+        != canonical_json_bytes(
+            summarise_graphiti_usage(
+                chat_invocations=leaves,
+                embedding_usage=embedding_usage,
+            )
+        )
+    ):
+        return None
+    return token_usage
 
 
 def _is_legacy_pre_provider_usage_release(

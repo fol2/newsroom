@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from newsroom.authority import HydrationRequest
+from newsroom.authority.canonical import digest_canonical
 from newsroom.authority.object_policy import merge_authority_registries
 from newsroom.extraction import (
     DeterministicFixtureExtractor,
@@ -184,6 +185,59 @@ def test_extraction_authority_commits_reads_replays_and_reopens(
         assert conn.execute(
             "SELECT COUNT(*) FROM extraction_proposals"
         ).fetchone()[0] == 4
+
+
+def test_run_version_binds_proposal_set_presence_to_reported_proposals(
+    tmp_path: Path,
+) -> None:
+    state = seed_extraction_fixture(tmp_path)
+    with open_extraction_system(state) as system:
+        system.extraction.register_contract(
+            contract_request(), proof=extraction_proof()
+        )
+        result = system.extraction.execute(
+            run_request(state), proof=extraction_proof()
+        )
+        zero_usage = dataclasses.replace(
+            result.usage,
+            proposal_count=0,
+            evidence_range_count=0,
+        )
+        zero_digest = digest_canonical(
+            {
+                "request": result.request.canonical_value(),
+                "contract_canonical_digest": result.contract_canonical_digest,
+                "outcome": result.outcome.value,
+                "failure_code": result.failure_code.value,
+                "started_at": result.started_at.to_text(),
+                "ended_at": result.ended_at.to_text(),
+                "usage": zero_usage.canonical_value(),
+            }
+        )
+        empty_success = dataclasses.replace(
+            result,
+            usage=zero_usage,
+            proposal_set=None,
+            canonical_digest=zero_digest,
+        )
+
+        assert empty_success.outcome is ExtractionOutcome.SUCCESS
+        assert empty_success.output is result.output
+        assert empty_success.proposal_set is None
+        assert empty_success.usage.proposal_count == 0
+
+        for contradictory in (
+            {"usage": zero_usage},
+            {
+                "proposal_set": None,
+                "canonical_digest": zero_digest,
+            },
+        ):
+            with pytest.raises(
+                ExtractionContractError,
+                match="run proposal state differs from outcome",
+            ):
+                dataclasses.replace(result, **contradictory)
 
 
 def test_partial_failure_invalid_and_retry_version_semantics(
