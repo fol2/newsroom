@@ -26,6 +26,7 @@ from newsroom.authority.graphiti_increment4_system import (
 from newsroom.control_plane.cycle import (
     GRAPHITI_UNIT_RESERVATION_GBP_MICROUNITS,
     consume_next_graphiti_event,
+    load_graphiti_units,
     qualify_fresh_graphiti_event,
 )
 from newsroom.control_plane.corpus import CorpusIngestUnit
@@ -1588,8 +1589,17 @@ def run_bounded_campaign(
         raise GraphitiCampaignStop("campaign ramp does not end at exact cohort")
 
     preflights: list[dict[str, object]] = []
+    prepared_unit_groups: list[tuple[CorpusIngestUnit, ...]] = []
     all_ingest_ids: list[str] = []
     reserved_total = 0
+    preflight_at = clock().astimezone(UTC)
+    resolved_corpus = load_graphiti_units(
+        proving_store=proving_store,
+        evaluated_at=preflight_at,
+    )
+    units_by_ingest_id = {unit.ingest_id: unit for unit in resolved_corpus}
+    if len(units_by_ingest_id) != len(resolved_corpus):
+        raise GraphitiCampaignStop("campaign resolved duplicate ingest identities")
     for item in events:
         event = _mapping(item, field="campaign event")
         event_id = str(event.get("event_id") or "")
@@ -1601,20 +1611,22 @@ def run_bounded_campaign(
             unpublished_store=unpublished_store,
             event_id=event_id,
             ledger_seq=ledger_seq,
-            clock=clock,
+            clock=lambda: preflight_at,
+            resolved_corpus_units=resolved_corpus,
         )
         resolved = preflight.get("resolved_units")
         if not isinstance(resolved, list) or not resolved:
             raise GraphitiCampaignStop("campaign event resolved no units")
-        ingest_ids = tuple(
-            sorted(
-                str(value.get("ingest_id") or "")
-                for value in resolved
-                if isinstance(value, Mapping)
-            )
+        resolved_ingest_ids = tuple(
+            str(value.get("ingest_id") or "")
+            for value in resolved
+            if isinstance(value, Mapping)
         )
+        ingest_ids = tuple(sorted(resolved_ingest_ids))
         if (
             not ingest_ids
+            or len(resolved_ingest_ids) != len(resolved)
+            or len(set(resolved_ingest_ids)) != len(resolved_ingest_ids)
             or any(not value for value in ingest_ids)
             or list(ingest_ids) != sorted(event.get("ingest_ids") or [])
             or preflight.get("event_manifest_digest") != event.get("manifest_digest")
@@ -1625,6 +1637,17 @@ def run_bounded_campaign(
         all_ingest_ids.extend(ingest_ids)
         reserved_total += len(resolved) * GRAPHITI_UNIT_RESERVATION_GBP_MICROUNITS
         preflights.append(preflight)
+        try:
+            prepared_unit_groups.append(
+                tuple(
+                    units_by_ingest_id[ingest_id]
+                    for ingest_id in resolved_ingest_ids
+                )
+            )
+        except KeyError as exc:
+            raise GraphitiCampaignStop(
+                "campaign resolved unit identity drifted"
+            ) from exc
     exact_ingest_ids = tuple(sorted(all_ingest_ids))
     _assert_fresh_campaign_ingests(
         unpublished_store,
@@ -1657,7 +1680,9 @@ def run_bounded_campaign(
     fallback_total = 0
     retry_total = 0
     operational_before: dict[str, object] | None = None
-    for event, preflight in zip(events, preflights, strict=True):
+    for event, preflight, prepared_units in zip(
+        events, preflights, prepared_unit_groups, strict=True
+    ):
         completed_before = len(completed)
         phase = phase_starts.get(completed_before)
         if phase is not None:
@@ -1765,6 +1790,7 @@ def run_bounded_campaign(
             recover_model_usage=False,
             max_dispatch_seconds=remaining,
             prepared_event_preflight=preflight,
+            prepared_event_units=prepared_units,
             max_reserved_gbp_microunits=(
                 len(preflight["resolved_units"])
                 * GRAPHITI_UNIT_RESERVATION_GBP_MICROUNITS

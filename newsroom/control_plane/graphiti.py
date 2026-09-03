@@ -15,7 +15,7 @@ from newsroom.authority._extraction_facade import GovernedExtractionRecords
 from newsroom.authority._graphiti_adapter_facade import (
     GovernedGraphitiProposalAdapter,
 )
-from newsroom.authority.auth import AuthenticationProof
+from newsroom.authority.auth import AuthenticationProof, AuthorizationDenied
 from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
@@ -82,6 +82,12 @@ class GraphitiResultStageError(ValueError):
             raise ValueError("Graphiti result failure stage is not allow-listed")
         self.stage = stage
         super().__init__(f"Graphiti result boundary failed at {stage}")
+
+
+class GraphitiPreProviderAuthorizationDenied(PermissionError):
+    """Typed governed-adapter refusal before Graphiti provider execution."""
+
+    stage = GRAPHITI_RESULT_STAGE_ADAPTER_EXECUTION
 
 
 @dataclass(frozen=True, slots=True)
@@ -1062,6 +1068,15 @@ class EvaluationGraphitiRunner:
                     attempt.configuration,
                     proof=self._proof,
                 )
+            except AuthorizationDenied as exc:
+                raise GraphitiPreProviderAuthorizationDenied(
+                    "Graphiti adapter authorisation was denied"
+                ) from exc
+            except GraphitiAdapterContractError as exc:
+                raise GraphitiResultStageError(
+                    GRAPHITI_RESULT_STAGE_ADAPTER_EXECUTION
+                ) from exc
+            try:
                 retained_attempt = self._proposal_adapter.execute_attempt(
                     attempt,
                     proof=self._proof,
@@ -1069,6 +1084,10 @@ class EvaluationGraphitiRunner:
                     fallback_permitted=self._fallback_permitted,
                     invocation_observer=invocation_observer,
                 )
+            except AuthorizationDenied as exc:
+                raise GraphitiPreProviderAuthorizationDenied(
+                    "Graphiti adapter authorisation was denied"
+                ) from exc
             except GraphitiAdapterContractError as exc:
                 raise GraphitiResultStageError(
                     GRAPHITI_RESULT_STAGE_ADAPTER_EXECUTION
@@ -1379,6 +1398,7 @@ class EvaluationGraphitiRunner:
 __all__ = [
     "EvaluationGraphitiRunner",
     "GraphitiCycleResult",
+    "GraphitiPreProviderAuthorizationDenied",
     "GraphitiResultStageError",
     "GRAPHITI_RESULT_FAILURE_STAGES",
     "GRAPHITI_RESULT_STAGE_ADAPTER_EXECUTION",

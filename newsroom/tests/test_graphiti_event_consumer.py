@@ -393,10 +393,15 @@ def test_fresh_event_preflight_rejects_durable_retry_exclusion(
 
 def test_ready_qualification_cannot_fail_the_unchanged_live_gate(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
     proving, unpublished, event_id, ledger_seq = _projected_zero_ref_event(
         tmp_path, clock
+    )
+    resolved_corpus = cycle_module.load_graphiti_units(
+        proving_store=str(proving),
+        evaluated_at=clock(),
     )
     evidence = qualify_fresh_graphiti_event(
         proving_store=str(proving),
@@ -404,8 +409,19 @@ def test_ready_qualification_cannot_fail_the_unchanged_live_gate(
         event_id=event_id,
         ledger_seq=ledger_seq,
         clock=clock,
+        resolved_corpus_units=resolved_corpus,
     )
     assert evidence["resolved_units"]
+    units_by_ingest_id = {unit.ingest_id: unit for unit in resolved_corpus}
+    prepared_units = tuple(
+        units_by_ingest_id[str(item["ingest_id"])]
+        for item in evidence["resolved_units"]
+    )
+    monkeypatch.setattr(
+        cycle_module,
+        "_resolve_graphiti_event_units",
+        lambda **_kwargs: pytest.fail("prepared event reloaded the full corpus"),
+    )
 
     class FixtureGraphiti:
         def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
@@ -421,6 +437,7 @@ def test_ready_qualification_cannot_fail_the_unchanged_live_gate(
         require_fresh=True,
         recover_model_usage=False,
         prepared_event_preflight=evidence,
+        prepared_event_units=prepared_units,
     )
     assert result is not None and result.state == "TERMINAL"
 

@@ -11,7 +11,11 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+)
 from newsroom.control_plane.command_auth import HERMES_COMMAND_PRINCIPAL
 from newsroom.control_plane.store import (
     GRAPHITI_SPEND_FX_POLICY,
@@ -24,6 +28,7 @@ from newsroom.control_plane.veto import assert_private_store
 from newsroom.graphiti_adapter.embedding_meter import is_exact_provider_reported_usage
 from newsroom.graphiti_adapter.usage_meter import (
     is_exact_predispatch_no_provider_call,
+    summarise_graphiti_usage,
 )
 
 
@@ -78,6 +83,7 @@ class GraphitiSpendTransition:
     graph_journal_state: str
     graph_journal_digest: str
     graph_journal_evidence: dict[str, object]
+    model_usage_evidence: dict[str, object] | None
     reserved_gbp_microunits: int
     source_proving_run_id: str
     source_generation_id: str | None
@@ -97,7 +103,7 @@ class GraphitiSpendTransition:
     unused_reservation_released: bool
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "spend_id": self.spend_id,
             "ingest_id": self.ingest_id,
             "attempt_number": self.attempt_number,
@@ -129,6 +135,9 @@ class GraphitiSpendTransition:
             "target_usage_basis": self.target_usage_basis,
             "unused_reservation_released": self.unused_reservation_released,
         }
+        if self.model_usage_evidence is not None:
+            value["model_usage_evidence"] = self.model_usage_evidence
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -852,6 +861,237 @@ def _recovered_immutable_complete_without_journal(
     )
 
 
+def _legacy_authorisation_refusal_receipt(
+    receipt: Mapping[str, object] | None,
+) -> bool:
+    if receipt is None:
+        return False
+    accounting = receipt.get("accounting")
+    return (
+        receipt.get("outcome") == "FAILED"
+        and receipt.get("failure_code") == "PRODUCER_INTERNAL_ERROR"
+        and receipt.get("binding_failure") == "RESULT_CONTRACT_REJECTED"
+        and receipt.get("binding_failure_type") == "AuthorizationDenied"
+        and receipt.get("binding_failure_stage")
+        == "UNCLASSIFIED_RESULT_BOUNDARY"
+        and receipt.get("provider_attempt_number") is None
+        and receipt.get("returned_raw_receipt_digest") is None
+        and receipt.get("returned_validated_raw_digest") is None
+        and receipt.get("chat_invocation_count") == 0
+        and receipt.get("chat_invocations_digest") is None
+        and receipt.get("chat_invocations") == []
+        and receipt.get("embedding_usage") is None
+        and receipt.get("embedding_usage_digest") is None
+        and receipt.get("token_usage") is None
+        and isinstance(accounting, Mapping)
+        and accounting.get("status") == "UNRECONCILED"
+        and accounting.get("usage_basis") == "UNREPORTED"
+        and accounting.get("actual_usd_microunits") is None
+        and accounting.get("actual_gbp_microunits") is None
+        and accounting.get("unused_reservation_released") is False
+    )
+
+
+def _canonical_model_record(
+    raw: object,
+    *,
+    digest_field: str,
+    expected_digest: object,
+    field: str,
+) -> dict[str, object] | None:
+    record = _json_object(raw, field=field)
+    if record is None:
+        return None
+    unsigned = dict(record)
+    supplied_digest = unsigned.pop(digest_field, None)
+    if (
+        not isinstance(supplied_digest, str)
+        or supplied_digest != expected_digest
+        or digest_canonical(unsigned) != supplied_digest
+    ):
+        return None
+    return record
+
+
+def _legacy_pre_provider_model_usage_evidence(
+    connection: sqlite3.Connection,
+    *,
+    spend_id: str,
+    ingest_id: str,
+    receipt: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    """Bind one legacy refusal to the durable zero-dispatch usage authority."""
+
+    if not _legacy_authorisation_refusal_receipt(receipt):
+        return None
+    accounting = receipt.get("accounting") if receipt is not None else None
+    if not isinstance(accounting, Mapping) or accounting.get("spend_id") != spend_id:
+        return None
+    required_tables = {
+        "model_work_envelopes",
+        "model_work_outcomes",
+        "model_invocation_allocations",
+        "model_transport_observations",
+        "model_invocation_provider_attempt_links",
+        "model_provider_telemetry",
+        "graphiti_internal_requests",
+    }
+    if any(not _table_exists(connection, table) for table in required_tables):
+        return None
+    envelope_rows = connection.execute(
+        "SELECT envelope_id,cycle_id,workload_class,admitted_at,"
+        "canonical_digest,record_json FROM model_work_envelopes "
+        "WHERE json_extract(record_json,'$.graphiti_attempt_id')=?",
+        (spend_id,),
+    ).fetchall()
+    if len(envelope_rows) != 1:
+        return None
+    envelope_row = envelope_rows[0]
+    envelope = _canonical_model_record(
+        envelope_row[5],
+        digest_field="canonical_digest",
+        expected_digest=envelope_row[4],
+        field=f"model work envelope {spend_id}",
+    )
+    if envelope is None:
+        return None
+    envelope_id = str(envelope_row[0])
+    cycle_id = str(envelope_row[1])
+    if (
+        envelope.get("envelope_id") != envelope_id
+        or envelope.get("cycle_id") != cycle_id
+        or envelope.get("workload_class") != envelope_row[2]
+        or envelope.get("workload_class") != "GRAPHITI_CHAT_PRIMARY"
+        or envelope.get("admitted_at") != envelope_row[3]
+        or envelope.get("canonical_digest") != envelope_row[4]
+        or envelope.get("graphiti_attempt_id") != spend_id
+        or envelope.get("ingest_id") != ingest_id
+    ):
+        return None
+    envelope_identity = {
+        key: envelope.get(key)
+        for key in (
+            "schema_version",
+            "cycle_id",
+            "workload_class",
+            "admission_decision_id",
+            "candidate_id",
+            "hypothesis_digest",
+            "evidence_package_digest",
+            "ingest_id",
+            "graphiti_attempt_id",
+        )
+    }
+    if digest_canonical(envelope_identity) != envelope_id:
+        return None
+    if (
+        connection.execute(
+            "SELECT COUNT(*) FROM model_work_envelopes WHERE cycle_id=?",
+            (cycle_id,),
+        ).fetchone()[0]
+        != 1
+    ):
+        return None
+
+    outcome_rows = connection.execute(
+        "SELECT outcome_digest,envelope_id,outcome,terminal_at,record_json "
+        "FROM model_work_outcomes WHERE envelope_id=?",
+        (envelope_id,),
+    ).fetchall()
+    if len(outcome_rows) != 1:
+        return None
+    outcome_row = outcome_rows[0]
+    outcome = _canonical_model_record(
+        outcome_row[4],
+        digest_field="outcome_digest",
+        expected_digest=outcome_row[0],
+        field=f"model work outcome {spend_id}",
+    )
+    if outcome is None or receipt is None:
+        return None
+    receipt_digest = receipt.get("receipt_digest")
+    if (
+        outcome.get("outcome_digest") != outcome_row[0]
+        or outcome.get("envelope_id") != envelope_id
+        or outcome_row[1] != envelope_id
+        or outcome.get("outcome") != outcome_row[2]
+        or outcome.get("outcome") != "GRAPHITI_REJECTED_BINDING"
+        or outcome.get("terminal_at") != outcome_row[3]
+        or outcome.get("outcome_record_id") != receipt_digest
+        or outcome.get("accepted_provider_attempt_id") is not None
+        or outcome.get("retained_proposal_count") != 0
+    ):
+        return None
+
+    allocation_count = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM model_invocation_allocations a "
+            "JOIN model_work_envelopes e USING(envelope_id) WHERE e.cycle_id=?",
+            (cycle_id,),
+        ).fetchone()[0]
+    )
+    dispatch_started_count = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM model_transport_observations o "
+            "JOIN model_invocation_allocations a USING(invocation_id) "
+            "JOIN model_work_envelopes e USING(envelope_id) "
+            "WHERE e.cycle_id=? AND o.state='DISPATCH_STARTED'",
+            (cycle_id,),
+        ).fetchone()[0]
+    )
+    provider_attempt_link_count = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM model_invocation_provider_attempt_links p "
+            "JOIN model_invocation_allocations a USING(invocation_id) "
+            "JOIN model_work_envelopes e USING(envelope_id) WHERE e.cycle_id=?",
+            (cycle_id,),
+        ).fetchone()[0]
+    )
+    provider_telemetry_count = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM model_provider_telemetry p "
+            "JOIN model_invocation_allocations a USING(invocation_id) "
+            "JOIN model_work_envelopes e USING(envelope_id) WHERE e.cycle_id=?",
+            (cycle_id,),
+        ).fetchone()[0]
+    )
+    graphiti_internal_request_count = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM graphiti_internal_requests WHERE envelope_id=?",
+            (envelope_id,),
+        ).fetchone()[0]
+    )
+    if any(
+        (
+            allocation_count,
+            dispatch_started_count,
+            provider_attempt_link_count,
+            provider_telemetry_count,
+            graphiti_internal_request_count,
+        )
+    ):
+        return None
+    unsigned_evidence: dict[str, object] = {
+        "schema": "newsroom.graphiti-legacy-pre-provider-usage-evidence.v1",
+        "spend_id": spend_id,
+        "ingest_id": ingest_id,
+        "cycle_id": cycle_id,
+        "envelope_id": envelope_id,
+        "envelope_canonical_digest": str(envelope_row[4]),
+        "work_outcome_digest": str(outcome_row[0]),
+        "outcome_record_id": receipt_digest,
+        "allocation_count": allocation_count,
+        "dispatch_started_count": dispatch_started_count,
+        "provider_attempt_link_count": provider_attempt_link_count,
+        "provider_telemetry_count": provider_telemetry_count,
+        "graphiti_internal_request_count": graphiti_internal_request_count,
+    }
+    return {
+        **unsigned_evidence,
+        "evidence_digest": digest_canonical(unsigned_evidence),
+    }
+
+
 def _receipt_proves_pre_provider_refusal(
     receipt: Mapping[str, object] | None,
     journal: Mapping[str, object],
@@ -859,17 +1099,54 @@ def _receipt_proves_pre_provider_refusal(
     if receipt is None:
         return False
     embedding_usage = receipt.get("embedding_usage")
-    return (
+    token_usage = receipt.get("token_usage")
+    token_usage_is_absent_or_exact_zero = token_usage is None or (
+        isinstance(embedding_usage, Mapping)
+        and canonical_json_bytes(token_usage)
+        == canonical_json_bytes(
+            summarise_graphiti_usage(
+                chat_invocations=(),
+                embedding_usage=embedding_usage,
+            )
+        )
+    )
+    common = (
         receipt.get("outcome") in {"FAILED", "TIMEOUT", "CANCELLED", "REFUSED"}
         and receipt.get("provider_attempt_number") is None
         and receipt.get("chat_invocations") == []
-        and journal.get("state") in {"ABSENT", "CREATED"}
+        and receipt.get("chat_invocation_count", 0) == 0
+        and receipt.get("returned_raw_receipt_digest") is None
+        and receipt.get("returned_validated_raw_digest") is None
+        and token_usage_is_absent_or_exact_zero
+    )
+    if not common:
+        return False
+    if (
+        journal.get("state") in {"ABSENT", "CREATED"}
         and journal.get("provider_dispatch_state") == "NOT_DISPATCHED"
         and (
             isinstance(embedding_usage, Mapping)
             and is_exact_no_embedding_call(embedding_usage)
         )
-    )
+    ):
+        return True
+    if (
+        receipt.get("binding_failure") != "RESULT_CONTRACT_REJECTED"
+        or receipt.get("failure_code") != "PRODUCER_INTERNAL_ERROR"
+    ):
+        return False
+    if (
+        receipt.get("binding_failure_type")
+        == "GraphitiPreProviderAuthorizationDenied"
+        and receipt.get("binding_failure_stage") == "ADAPTER_EXECUTION"
+        and receipt.get("provider_dispatch_state") == "NOT_DISPATCHED"
+        and isinstance(embedding_usage, Mapping)
+        and is_exact_no_embedding_call(embedding_usage)
+        and receipt.get("embedding_usage_digest")
+        == digest_bytes(canonical_json_bytes(embedding_usage))
+    ):
+        return True
+    return False
 
 
 def _read_only(path: str) -> sqlite3.Connection:
@@ -893,6 +1170,7 @@ def _transition(
     journal: Mapping[str, object],
     receipt: Mapping[str, object] | None,
     provider_usage: Mapping[str, object] | None = None,
+    model_usage_evidence: Mapping[str, object] | None = None,
 ) -> GraphitiSpendTransition:
     raw_leaves = journal.get("provider_leaves")
     if raw_leaves is None:
@@ -966,6 +1244,9 @@ def _transition(
         graph_journal_state=graph_journal_state,
         graph_journal_digest=graph_journal_digest,
         graph_journal_evidence=journal_value,
+        model_usage_evidence=(
+            None if model_usage_evidence is None else dict(model_usage_evidence)
+        ),
         reserved_gbp_microunits=int(row["reserved_gbp_microunits"]),
         source_proving_run_id=str(row["proving_run_id"]),
         source_generation_id=(
@@ -1078,6 +1359,7 @@ _TRANSITION_EVIDENCE_FIELDS = set(_TRANSITION_EVIDENCE_COLUMNS) | {
     "unused_reservation_released",
     "source_provider_usage",
 }
+_MODEL_USAGE_EVIDENCE_FIELD = "model_usage_evidence"
 
 
 def _validate_retained_dispositions(connection: sqlite3.Connection) -> None:
@@ -1143,7 +1425,10 @@ def _validate_retained_dispositions(connection: sqlite3.Connection) -> None:
             raise GraphitiSpendReconciliationError(
                 f"retained disposition evidence {spend_id} is absent"
             )
-        if set(evidence) != _TRANSITION_EVIDENCE_FIELDS:
+        if set(evidence) not in {
+            frozenset(_TRANSITION_EVIDENCE_FIELDS),
+            frozenset(_TRANSITION_EVIDENCE_FIELDS | {_MODEL_USAGE_EVIDENCE_FIELD}),
+        }:
             raise GraphitiSpendReconciliationError(
                 f"retained disposition evidence {spend_id} fields differ"
             )
@@ -1233,6 +1518,57 @@ def _validate_retained_dispositions(connection: sqlite3.Connection) -> None:
             raise GraphitiSpendReconciliationError(
                 f"retained disposition {spend_id} attempt outcome differs"
             )
+        model_usage_evidence = evidence.get(_MODEL_USAGE_EVIDENCE_FIELD)
+        legacy_authorisation_refusal = _legacy_authorisation_refusal_receipt(receipt)
+        if legacy_authorisation_refusal:
+            retained_release = (
+                evidence.get("disposition")
+                == GraphitiSpendDisposition.RELEASED_BEFORE_PROVIDER_IO.value
+                and evidence.get("evidence_basis")
+                == "PROVIDER_DISPATCH_STRUCTURALLY_RULED_OUT"
+                and model_usage_evidence is not None
+            )
+            retained_hold = (
+                evidence.get("disposition")
+                == GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD.value
+                and evidence.get("evidence_basis")
+                == "LEGACY_AUTHORIZATION_REFUSAL_WITHOUT_EXACT_USAGE_PROOF"
+                and model_usage_evidence is None
+            )
+            if not retained_release and not retained_hold:
+                raise GraphitiSpendReconciliationError(
+                    f"retained disposition {spend_id} legacy refusal differs"
+                )
+            if retained_hold and _legacy_pre_provider_model_usage_evidence(
+                connection,
+                spend_id=spend_id,
+                ingest_id=str(row["ingest_id"]),
+                receipt=receipt,
+            ) is not None:
+                raise GraphitiSpendReconciliationError(
+                    f"retained disposition {spend_id} legacy hold differs"
+                )
+        if model_usage_evidence is not None:
+            expected_model_usage_evidence = (
+                _legacy_pre_provider_model_usage_evidence(
+                    connection,
+                    spend_id=spend_id,
+                    ingest_id=str(row["ingest_id"]),
+                    receipt=receipt,
+                )
+            )
+            if (
+                evidence.get("disposition")
+                != GraphitiSpendDisposition.RELEASED_BEFORE_PROVIDER_IO.value
+                or evidence.get("evidence_basis")
+                != "PROVIDER_DISPATCH_STRUCTURALLY_RULED_OUT"
+                or expected_model_usage_evidence is None
+                or canonical_json_bytes(model_usage_evidence)
+                != canonical_json_bytes(expected_model_usage_evidence)
+            ):
+                raise GraphitiSpendReconciliationError(
+                    f"retained disposition {spend_id} model usage evidence differs"
+                )
         journal = evidence.get("graph_journal_evidence")
         if not isinstance(journal, Mapping) or evidence.get(
             "graph_journal_digest"
@@ -1514,6 +1850,13 @@ def _plan_from_connection(
         _validate_attempt_receipt(row, receipt)
         journal = journals.get(spend_id, {})
         _validate_journal_evidence(row, journal, receipt)
+        legacy_authorisation_refusal = _legacy_authorisation_refusal_receipt(receipt)
+        legacy_model_usage_evidence = _legacy_pre_provider_model_usage_evidence(
+            connection,
+            spend_id=spend_id,
+            ingest_id=str(row["ingest_id"]),
+            receipt=receipt,
+        )
         duplicate_current_attribution = (
             receipt is not None
             and _current_attribution_duplicates_charged_provider_attempt(
@@ -1645,6 +1988,33 @@ def _plan_from_connection(
                     row,
                     disposition=GraphitiSpendDisposition.RELEASED_BEFORE_PROVIDER_IO,
                     evidence_basis="PROVIDER_DISPATCH_STRUCTURALLY_RULED_OUT",
+                    journal=journal,
+                    receipt=receipt,
+                    provider_usage=provider_usage,
+                )
+            )
+            continue
+        if legacy_model_usage_evidence is not None:
+            transitions.append(
+                _transition(
+                    row,
+                    disposition=GraphitiSpendDisposition.RELEASED_BEFORE_PROVIDER_IO,
+                    evidence_basis="PROVIDER_DISPATCH_STRUCTURALLY_RULED_OUT",
+                    journal=journal,
+                    receipt=receipt,
+                    provider_usage=provider_usage,
+                    model_usage_evidence=legacy_model_usage_evidence,
+                )
+            )
+            continue
+        if legacy_authorisation_refusal:
+            transitions.append(
+                _transition(
+                    row,
+                    disposition=GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD,
+                    evidence_basis=(
+                        "LEGACY_AUTHORIZATION_REFUSAL_WITHOUT_EXACT_USAGE_PROOF"
+                    ),
                     journal=journal,
                     receipt=receipt,
                     provider_usage=provider_usage,

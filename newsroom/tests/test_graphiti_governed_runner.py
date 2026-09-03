@@ -8,7 +8,7 @@ from newsroom.authority._extraction_facade import GovernedExtractionRecords
 from newsroom.authority._graphiti_adapter_facade import (
     GovernedGraphitiProposalAdapter,
 )
-from newsroom.authority.auth import AuthenticationProof
+from newsroom.authority.auth import AuthenticationProof, AuthorizationDenied
 from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
@@ -18,6 +18,7 @@ from newsroom.authority.types import EventId, UtcTimestamp
 from newsroom.control_plane.corpus import CorpusIngestUnit
 from newsroom.control_plane.graphiti import (
     EvaluationGraphitiRunner,
+    GraphitiPreProviderAuthorizationDenied,
     GraphitiResultStageError,
 )
 from newsroom.effective_revision import EffectiveRevisionIdentity
@@ -71,13 +72,21 @@ def _unit() -> CorpusIngestUnit:
     )
 
 
-def _governed_dependencies(*, malformed_raw_proposal: bool = False):
+def _governed_dependencies(
+    *,
+    malformed_raw_proposal: bool = False,
+    deny_registration: bool = False,
+):
     proof = AuthenticationProof(method="STATIC_TOKEN", credential="fixture")
     retained: dict[str, object] = {}
     calls: list[str] = []
 
     def register(configuration, _proof):
         calls.append("register")
+        if deny_registration:
+            denied = AuthorizationDenied.__new__(AuthorizationDenied)
+            PermissionError.__init__(denied, "scope missing")
+            raise denied
         retained["configuration"] = configuration
         return object()
 
@@ -297,6 +306,27 @@ def test_governed_runner_dependencies_are_all_or_none() -> None:
     adapter, _extraction, _proof, _calls, _retained = _governed_dependencies()
     with pytest.raises(ValueError, match="supplied together"):
         EvaluationGraphitiRunner(proposal_adapter=adapter)
+
+
+def test_governed_runner_types_authority_refusal_before_provider_execution() -> None:
+    adapter, extraction, proof, calls, _retained = _governed_dependencies(
+        deny_registration=True
+    )
+
+    with pytest.raises(GraphitiPreProviderAuthorizationDenied) as raised:
+        EvaluationGraphitiRunner(
+            proposal_adapter=adapter,
+            extraction_records=extraction,
+            proof=proof,
+            fallback_permitted=False,
+        )._ingest(
+            _unit(),
+            deadline=datetime(2026, 8, 20, 0, 1, tzinfo=UTC),
+            invocation_observer=object(),
+        )
+
+    assert raised.value.stage == "ADAPTER_EXECUTION"
+    assert calls == ["register"]
 
 
 @pytest.mark.parametrize("bounded_call", ["deadline", "fallback"])

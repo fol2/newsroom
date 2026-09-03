@@ -80,6 +80,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     OPENROUTER_EMBEDDING_SLUG,
 )
 from newsroom.graphiti_adapter.identity import MAX_EPISODE_BYTES, typed_id
+from newsroom.graphiti_adapter.policy import graphiti_adapter_command_definitions
 from newsroom.increment4 import increment4_admitted_contract_registry
 from newsroom.increment4.contracts import INCREMENT4_ADMITTED_FAMILY_ID
 from newsroom.increment4.neo4j import Increment4Neo4jCurrentBuildRequest
@@ -1169,6 +1170,13 @@ def operational_policy_components() -> dict[str, object]:
     }
 
 
+def _operational_graphiti_write_scopes() -> frozenset[str]:
+    return frozenset(
+        definition.required_scope
+        for definition in graphiti_adapter_command_definitions()
+    )
+
+
 def open_operational_graphiti_authority_system(
     *,
     credential: str,
@@ -1233,9 +1241,11 @@ def open_operational_graphiti_authority_system(
     command_scopes = {
         definition.required_scope for definition in registry.definitions()
     }
+    graphiti_write_scopes = _operational_graphiti_write_scopes()
     scopes = frozenset(
         {
             *command_scopes,
+            *graphiti_write_scopes,
             source_read.metadata_required_scope,
             source_read.sensitive_required_scope,
             extraction_read.metadata_required_scope,
@@ -1262,9 +1272,6 @@ def open_operational_graphiti_authority_system(
             "authority.entity.admit",
             "authority.relation.propose",
             "authority.relation.admit",
-            "authority.graphiti.configure",
-            "authority.graphiti.execute",
-            "authority.graphiti.replay",
             "authority.projection.manage",
             "authority.projection.write",
         }
