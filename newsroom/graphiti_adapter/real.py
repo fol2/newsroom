@@ -104,10 +104,13 @@ from .models import (
     adapter_outcome_for,
 )
 from .types import (
+    GRAPHITI_CORE_RELEASE_MISMATCH,
+    GRAPHITI_EXTRA_REQUIRED,
     GraphitiAdapterContractError,
     GraphitiCleanupReason,
     GraphitiExecutionProfile,
     GraphitiRuntimeMode,
+    graphiti_setup_failure_detail,
 )
 from .workspace import DisposableProposalWorkspace
 
@@ -257,11 +260,13 @@ def _load_graphiti() -> SimpleNamespace:
         )
     except ImportError as exc:
         raise GraphitiAdapterContractError(
-            "graphiti extra (graphiti-core 0.29.3) is required for real Graphiti execution"
+            "graphiti extra (graphiti-core 0.29.3) is required for real Graphiti execution",
+            reason_code=GRAPHITI_EXTRA_REQUIRED,
         ) from exc
     if importlib.metadata.version("graphiti-core") != _GRAPHITI_CORE_VERSION:
         raise GraphitiAdapterContractError(
-            "real Graphiti requires graphiti-core 0.29.3"
+            "real Graphiti requires graphiti-core 0.29.3",
+            reason_code=GRAPHITI_CORE_RELEASE_MISMATCH,
         )
 
     class IdentityCrossEncoder(CrossEncoderClient):
@@ -1306,6 +1311,9 @@ class RealGraphitiAdapter:
             raw.pop("raw_output_digest", None)
             raw["dispatch_state"] = "NOT_DISPATCHED"
             raw["setup_failure"] = type(exc).__name__
+            detail = graphiti_setup_failure_detail(exc)
+            if detail is not None:
+                raw["setup_failure_detail"] = detail
             raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
             return produced_extraction(
                 attempt,

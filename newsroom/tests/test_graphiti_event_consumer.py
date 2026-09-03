@@ -2289,6 +2289,121 @@ def test_result_shaped_cli_predispatch_refusal_becomes_configuration_hold(
     )
 
 
+def test_cycle_receipt_copies_allow_listed_setup_failure_detail() -> None:
+    from newsroom.control_plane.cycle import _receipt
+    from newsroom.graphiti_adapter.types import GRAPHITI_EXTRA_REQUIRED
+
+    unit = _unit(1)
+    result = replace(
+        _complete(unit),
+        outcome="RETRYABLE_FAILURE",
+        failure_code="PRODUCER_INTERNAL_ERROR",
+    )
+    raw = dict(result.raw_receipt or {})
+    raw["dispatch_state"] = "NOT_DISPATCHED"
+    raw["setup_failure"] = "GraphitiAdapterContractError"
+    raw["setup_failure_detail"] = GRAPHITI_EXTRA_REQUIRED
+    receipt = _receipt(
+        unit,
+        replace(result, raw_receipt=raw),
+        accounting={"status": "RECONCILED"},
+    )
+    assert receipt["setup_failure"] == "GraphitiAdapterContractError"
+    assert receipt["setup_failure_detail"] == GRAPHITI_EXTRA_REQUIRED
+
+
+def test_cycle_receipt_rejects_unlisted_setup_failure_detail() -> None:
+    from newsroom.control_plane.cycle import _receipt
+
+    unit = _unit(1)
+    result = replace(
+        _complete(unit),
+        outcome="RETRYABLE_FAILURE",
+        failure_code="PRODUCER_INTERNAL_ERROR",
+    )
+    raw = dict(result.raw_receipt or {})
+    raw["setup_failure"] = "GraphitiAdapterContractError"
+    raw["setup_failure_detail"] = "TOKEN=must-not-reach-the-store"
+    with pytest.raises(ValueError, match="setup failure detail is invalid"):
+        _receipt(
+            unit,
+            replace(result, raw_receipt=raw),
+            accounting={"status": "RECONCILED"},
+        )
+
+
+def test_result_shaped_adapter_contract_setup_failure_becomes_configuration_hold(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 20, 0, 1, tzinfo=UTC))
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "unpublished.sqlite3"
+    run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=None,
+        max_graphiti=0,
+        clock=clock,
+    )
+
+    class AdapterContractSetupFailureGraphiti:
+        def ingest(self, unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            result = replace(
+                _complete(unit),
+                outcome="RETRYABLE_FAILURE",
+                failure_code="PRODUCER_INTERNAL_ERROR",
+            )
+            raw = dict(result.raw_receipt or {})
+            raw["dispatch_state"] = "NOT_DISPATCHED"
+            raw["setup_failure"] = "GraphitiAdapterContractError"
+            raw["setup_failure_detail"] = "GRAPHITI_EXTRA_REQUIRED"
+            raw.pop("raw_output_digest", None)
+            raw["raw_output_digest"] = digest_bytes(canonical_json_bytes(raw))
+            return replace(
+                result,
+                receipt_digest=str(raw["raw_output_digest"]),
+                raw_receipt=raw,
+            )
+
+    result = consume_next_graphiti_event(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        graphiti=AdapterContractSetupFailureGraphiti(),
+        owner_id="fixture-worker",
+        clock=clock,
+    )
+
+    assert result is not None
+    assert result.state == "CONFIGURATION_HELD"
+    assert result.attempt_count == 1
+    retained = sqlite3.connect(unpublished)
+    row = retained.execute(
+        "SELECT state,attempt_count,provider_dispatched,last_failure_code "
+        "FROM unpublished_graphiti_revision_events WHERE event_id=?",
+        (result.event_id,),
+    ).fetchone()
+    receipt_row = retained.execute(
+        "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts"
+    ).fetchone()
+    failures = retained.execute(
+        "SELECT COUNT(*) FROM unpublished_graphiti_failures"
+    ).fetchone()
+    retained.close()
+    assert row == (
+        "CONFIGURATION_HELD",
+        1,
+        0,
+        "GraphitiAdapterContractError",
+    )
+    assert receipt_row is not None
+    receipt = json.loads(str(receipt_row[0]))
+    assert receipt["setup_failure"] == "GraphitiAdapterContractError"
+    assert receipt["setup_failure_detail"] == "GRAPHITI_EXTRA_REQUIRED"
+    assert failures == (0,)
+
+
 def test_committed_leaf_dispatch_marker_overrides_a_no_call_claim(
     tmp_path: Path,
 ) -> None:

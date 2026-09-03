@@ -157,6 +157,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
 from newsroom.graphiti_adapter.recovery_vocabulary import (
     GraphitiRecoveryClassification,
 )
+from newsroom.graphiti_adapter.types import GRAPHITI_SETUP_FAILURE_REASON_CODES
 from newsroom.graphiti_adapter.usage_meter import (
     is_exact_predispatch_no_provider_call,
     summarise_graphiti_usage,
@@ -393,6 +394,12 @@ def _validated_producer_failure(value: object) -> str:
         return require_token(value, field="graphiti producer failure")
     except ValueError as exc:
         raise ValueError("graphiti producer failure is invalid") from exc
+
+
+def _validated_setup_failure_detail(value: object) -> str:
+    if not isinstance(value, str) or value not in GRAPHITI_SETUP_FAILURE_REASON_CODES:
+        raise ValueError("graphiti setup failure detail is invalid")
+    return value
 
 
 def _validate_chat_invocation_diagnostics(
@@ -723,6 +730,10 @@ def _receipt(
         for key in ("dispatch_state", "setup_failure"):
             if key in raw:
                 receipt[key] = raw[key]
+        if "setup_failure_detail" in raw:
+            receipt["setup_failure_detail"] = _validated_setup_failure_detail(
+                raw["setup_failure_detail"]
+            )
         fine = raw.get("combined_temporal_failure_code")
         if isinstance(fine, str) and fine:
             receipt["combined_temporal_failure_code"] = fine
@@ -3515,7 +3526,9 @@ def consume_next_graphiti_event(
 
             def systemic_failure(code: str, _dispatched: bool) -> None:
                 dispatched = committed_provider_dispatch()
-                if code == "CLI_PREDISPATCH_CONFIGURATION_REFUSED":
+                if code == "CLI_PREDISPATCH_CONFIGURATION_REFUSED" or (
+                    code == "GraphitiAdapterContractError" and not dispatched
+                ):
                     raise ConfigurationGraphitiEventFailure(
                         code, provider_dispatched=dispatched
                     )

@@ -12,8 +12,38 @@ class GraphitiAdapterError(RuntimeError):
     """Base error for the isolated proposal-only adapter boundary."""
 
 
+GRAPHITI_EXTRA_REQUIRED = "GRAPHITI_EXTRA_REQUIRED"
+GRAPHITI_CORE_RELEASE_MISMATCH = "GRAPHITI_CORE_RELEASE_MISMATCH"
+GRAPHITI_SETUP_FAILURE_REASON_CODES = frozenset(
+    {
+        GRAPHITI_EXTRA_REQUIRED,
+        GRAPHITI_CORE_RELEASE_MISMATCH,
+    }
+)
+
+
 class GraphitiAdapterContractError(ValueError):
     """A configuration, request, replay record, or result is malformed."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        if reason_code is not None and (
+            reason_code not in GRAPHITI_SETUP_FAILURE_REASON_CODES
+        ):
+            raise ValueError("graphiti setup failure reason is not allow-listed")
+        self.reason_code = reason_code
+
+
+def graphiti_setup_failure_detail(exc: BaseException) -> str | None:
+    code = getattr(exc, "reason_code", None)
+    if code in GRAPHITI_SETUP_FAILURE_REASON_CODES:
+        return code
+    return None
 
 
 class GraphitiAdapterStateError(GraphitiAdapterError):
