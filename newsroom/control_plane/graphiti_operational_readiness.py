@@ -51,6 +51,7 @@ from newsroom.control_plane.graphiti_steady_state import (
     CAMPAIGN_SCHEMA_VERSION,
     CAMPAIGN_SUCCESS_OBJECTIVE_BASE,
     GraphitiCampaignRuntime,
+    graphiti_graph_destination_identity,
     graphiti_graph_destination_readback,
     graphiti_operational_partition_snapshot,
     graphiti_store_snapshot_digests,
@@ -1463,9 +1464,18 @@ def reopen_operational_campaign_runtime(
             destination_id=system.graph_destination_id,
             reconciliation=reconciliation,
         )
-        if graph_readback != operational.get(
-            "graph_readback"
-        ) or graph_readback != campaign.get("graph_destination_readback"):
+        graph_identity = graphiti_graph_destination_identity(graph_readback)
+        if graph_identity != graphiti_graph_destination_identity(
+            _require_mapping(
+                operational.get("graph_readback"),
+                field="operational graph readback",
+            )
+        ) or graph_identity != graphiti_graph_destination_identity(
+            _require_mapping(
+                campaign.get("graph_destination_readback"),
+                field="campaign graph readback",
+            )
+        ):
             raise GraphitiOperationalReadinessError(
                 "reopened ACTIVE graph differs from sealed readback"
             )

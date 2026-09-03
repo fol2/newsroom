@@ -38,6 +38,7 @@ from newsroom.control_plane.graphiti_steady_state import (
     _mint_graphiti_campaign_runtime,
     _spend,
     build_graphiti_steady_state_packet,
+    graphiti_graph_destination_identity,
     graphiti_operational_partition_snapshot,
     graphiti_store_snapshot_digests,
     validate_graphiti_campaign_packet,
@@ -74,6 +75,42 @@ from scripts import graphiti_steady_state_report
 
 GRAPH_DESTINATION_ID = "sha256:" + "9" * 64
 NOW = datetime(2026, 9, 1, 12, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("field", "drifted_value"),
+    (
+        ("destination_id", "sha256:" + "8" * 64),
+        ("family_id", "graph.increment4.other"),
+        ("generation_id", "00000000-0000-4000-8000-000000000896"),
+        ("checkpoint_ledger_seq", 8),
+        ("projection_state_digest", "sha256:" + "7" * 64),
+    ),
+)
+def test_graph_destination_identity_excludes_only_serving_time(
+    field: str,
+    drifted_value: object,
+) -> None:
+    sealed = {
+        "destination_id": GRAPH_DESTINATION_ID,
+        "family_id": "graph.increment4.admitted",
+        "generation_id": "00000000-0000-4000-8000-000000000895",
+        "checkpoint_ledger_seq": 7,
+        "projection_state_digest": "sha256:" + "6" * 64,
+        "serving_time": "2026-09-01T12:00:00.000000Z",
+    }
+    later_observation = {
+        **sealed,
+        "serving_time": "2026-09-01T12:05:00.000000Z",
+    }
+    assert graphiti_graph_destination_identity(
+        later_observation
+    ) == graphiti_graph_destination_identity(sealed)
+
+    later_observation[field] = drifted_value
+    assert graphiti_graph_destination_identity(
+        later_observation
+    ) != graphiti_graph_destination_identity(sealed)
 
 
 def _stores(tmp_path: Path) -> tuple[Path, Path, sqlite3.Connection]:

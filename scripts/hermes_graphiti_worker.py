@@ -44,6 +44,7 @@ from newsroom.control_plane.graphiti_steady_state import (
     GraphitiCampaignRuntime,
     _exact_admission_reconciliation,
     _mint_graphiti_campaign_runtime,
+    graphiti_graph_destination_identity,
     graphiti_graph_destination_readback,
     graphiti_operational_partition_snapshot,
     graphiti_store_snapshot_digests,
@@ -137,7 +138,9 @@ def compose_governed_graphiti_worker_runtime(
             destination_id=graph_destination_id,
             reconciliation=reconciliation,
         )
-        if actual != dict(expected):
+        if graphiti_graph_destination_identity(
+            actual
+        ) != graphiti_graph_destination_identity(expected):
             raise GraphitiCampaignStop("campaign graph identity drifted")
         return actual
 

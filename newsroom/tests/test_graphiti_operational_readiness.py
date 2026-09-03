@@ -60,6 +60,7 @@ from newsroom.sources.types import (
     SourceRole,
     SourceTime,
 )
+from scripts.hermes_graphiti_worker import GraphitiCampaignStop
 
 from .authority_event_helpers import payload_schemas, registry_v1
 from .editorial_relation_4c_helpers import relation_read_policy
@@ -72,6 +73,7 @@ from .source_3a_helpers import read_policy as source_read_policy
 from .source_3a_helpers import scopes as source_scopes
 
 _NOW = "2026-09-02T12:00:00.000000Z"
+_REOPENED_NOW = "2026-09-02T12:05:00.000000Z"
 _PROOF = AuthenticationProof(method="STATIC_TOKEN", credential="token-1")
 
 
@@ -265,6 +267,8 @@ def _plan(unit: CorpusIngestUnit) -> OperationalAuthorityBootstrapPlan:
 def _open_operational_test_system(
     root: Path,
     adapter: MemoryNeo4jAdapter | None = None,
+    *,
+    now: str = _NOW,
 ):
     policies = operational_policy_components()
     scopes = source_scopes() | frozenset(
@@ -337,7 +341,7 @@ def _open_operational_test_system(
         ),
         adapter=adapter or MemoryNeo4jAdapter(),
         graph_destination_id=digest_canonical({"graph": "test"}),
-        clock=lambda: UtcTimestamp.parse(_NOW),
+        clock=lambda: UtcTimestamp.parse(now),
     )
 
 
@@ -940,7 +944,14 @@ def test_sealed_campaign_reopens_authority_and_runtime_after_process_exit(
 
     def reopen(*, credential: str):
         assert credential == "restart-credential"
-        return _open_operational_test_system(tmp_path, adapter), _PROOF
+        return (
+            _open_operational_test_system(
+                tmp_path,
+                adapter,
+                now=_REOPENED_NOW,
+            ),
+            _PROOF,
+        )
 
     monkeypatch.setattr(f"{module}.plan_operational_authority_bootstrap", replay_plan)
     monkeypatch.setattr(f"{module}.open_operational_graphiti_authority_system", reopen)
@@ -954,10 +965,23 @@ def test_sealed_campaign_reopens_authority_and_runtime_after_process_exit(
         assert (
             runtime.authority_store_descriptor_digest == snapshot_digests["authority"]
         )
-        assert (
-            runtime.graph_state_fence({"graph_destination_readback": graph_readback})
-            == graph_readback
+        reopened_readback = runtime.graph_state_fence(
+            {"graph_destination_readback": graph_readback}
         )
+        assert reopened_readback["serving_time"] == _REOPENED_NOW
+        assert graph_readback["serving_time"] == _NOW
+
+        drifted_readback = {
+            **graph_readback,
+            "checkpoint_ledger_seq": graph_readback["checkpoint_ledger_seq"] + 1,
+        }
+        with pytest.raises(
+            GraphitiCampaignStop,
+            match="campaign graph identity drifted",
+        ):
+            runtime.graph_state_fence(
+                {"graph_destination_readback": drifted_readback}
+            )
 
     assert adapter.closed is True
 
