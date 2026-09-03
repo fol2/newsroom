@@ -73,6 +73,25 @@ class GraphitiCampaignStop(RuntimeError):
         self.evidence = None if evidence is None else dict(evidence)
 
 
+def qualify_campaign_adapter_runtime() -> None:
+    """Load the pinned Graphiti extra before any campaign event claim."""
+
+    from newsroom.graphiti_adapter.real import _load_graphiti
+    from newsroom.graphiti_adapter.types import GraphitiAdapterContractError
+
+    try:
+        _load_graphiti()
+    except GraphitiAdapterContractError as exc:
+        raise GraphitiCampaignStop(
+            "campaign Graphiti adapter runtime is unavailable",
+            evidence={
+                "stage": "PRE_DISPATCH_ADAPTER_RUNTIME",
+                "failure_type": type(exc).__name__,
+                "provider_dispatched": False,
+            },
+        ) from exc
+
+
 GovernedGraphitiWorkerRuntime = GraphitiCampaignRuntime
 
 
@@ -1588,6 +1607,8 @@ def run_bounded_campaign(
     if max(phase_limits) != len(events):
         raise GraphitiCampaignStop("campaign ramp does not end at exact cohort")
 
+    qualify_campaign_adapter_runtime()
+
     preflights: list[dict[str, object]] = []
     prepared_unit_groups: list[tuple[CorpusIngestUnit, ...]] = []
     all_ingest_ids: list[str] = []
@@ -1806,10 +1827,15 @@ def run_bounded_campaign(
             raise GraphitiCampaignStop("wall time cap reached after provider dispatch")
         if (
             result is None
-            or result.state != "TERMINAL"
             or result.event_id != event_map["event_id"]
             or result.ledger_seq != event_map["ledger_seq"]
         ):
+            raise GraphitiCampaignStop("campaign extraction event was non-terminal")
+        if result.state == "CONFIGURATION_HELD":
+            raise GraphitiCampaignStop(
+                "campaign extraction event was a pre-dispatch configuration refusal"
+            )
+        if result.state != "TERMINAL":
             raise GraphitiCampaignStop("campaign extraction event was non-terminal")
         if result.attempt_count != 1:
             raise GraphitiCampaignStop("campaign event retry count drifted")

@@ -1904,6 +1904,11 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
     monkeypatch.setattr(worker, "load_graphiti_units", load_corpus)
     monkeypatch.setattr(
         worker,
+        "qualify_campaign_adapter_runtime",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        worker,
         "graphiti_store_snapshot_digests",
         lambda **_kwargs: campaign["source_snapshot_digests"],
     )
@@ -2121,6 +2126,7 @@ def test_bounded_campaign_checks_owner_f4_before_graph_readback(
             ],
         },
     )
+    monkeypatch.setattr(worker, "qualify_campaign_adapter_runtime", lambda: None)
     monkeypatch.setattr(
         worker,
         "load_graphiti_units",
@@ -2220,6 +2226,7 @@ def test_campaign_cap_stops_before_any_canonical_admission(
             ],
         },
     )
+    monkeypatch.setattr(worker, "qualify_campaign_adapter_runtime", lambda: None)
     monkeypatch.setattr(
         worker,
         "load_graphiti_units",
@@ -2291,3 +2298,231 @@ def test_campaign_cap_stops_before_any_canonical_admission(
             monotonic=lambda: 0.0,
             sleep=lambda _delay: None,
         )
+
+
+def test_qualify_campaign_adapter_runtime_refuses_missing_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+    from newsroom.graphiti_adapter.types import GraphitiAdapterContractError
+    from scripts import hermes_graphiti_worker as worker
+
+    monkeypatch.setattr(
+        real,
+        "_load_graphiti",
+        lambda: (_ for _ in ()).throw(
+            GraphitiAdapterContractError(
+                "graphiti extra (graphiti-core 0.29.3) is required "
+                "for real Graphiti execution"
+            )
+        ),
+    )
+
+    with pytest.raises(
+        worker.GraphitiCampaignStop,
+        match="adapter runtime is unavailable",
+    ) as stopped:
+        worker.qualify_campaign_adapter_runtime()
+
+    assert stopped.value.evidence == {
+        "stage": "PRE_DISPATCH_ADAPTER_RUNTIME",
+        "failure_type": "GraphitiAdapterContractError",
+        "provider_dispatched": False,
+    }
+
+
+def test_bounded_campaign_refuses_missing_adapter_runtime_before_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+    from newsroom.graphiti_adapter.types import GraphitiAdapterContractError
+    from scripts import hermes_graphiti_worker as worker
+
+    campaign = _campaign()
+    packet = {
+        "packet_digest": "sha256:" + "a" * 64,
+        "code_identity": {"head_sha": "head", "tree_sha": "tree"},
+        "store_snapshots": {
+            "authority": {
+                "source_path": "/authority.sqlite3",
+                "descriptor_digest": "sha256:" + "a" * 64,
+            }
+        },
+    }
+    monkeypatch.setattr(
+        real,
+        "_load_graphiti",
+        lambda: (_ for _ in ()).throw(
+            GraphitiAdapterContractError(
+                "graphiti extra (graphiti-core 0.29.3) is required "
+                "for real Graphiti execution"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        worker, "validate_graphiti_campaign_packet", lambda _value: campaign
+    )
+    monkeypatch.setattr(
+        worker,
+        "graphiti_store_snapshot_digests",
+        lambda **_kwargs: campaign["source_snapshot_digests"],
+    )
+    monkeypatch.setattr(
+        worker,
+        "load_graphiti_units",
+        lambda **_kwargs: pytest.fail("corpus loaded after adapter runtime refusal"),
+    )
+    monkeypatch.setattr(
+        worker,
+        "qualify_fresh_graphiti_event",
+        lambda **_kwargs: pytest.fail("event preflight after adapter runtime refusal"),
+    )
+    monkeypatch.setattr(
+        worker,
+        "consume_next_graphiti_event",
+        lambda **_kwargs: pytest.fail("event claimed after adapter runtime refusal"),
+    )
+    runtime = worker._mint_graphiti_campaign_runtime(
+        graphiti=object(),
+        admission_factory=lambda _connection: object(),
+        bind_unit_authority=lambda unit: unit,
+        graph_state_fence=lambda _campaign: pytest.fail(
+            "graph fence after adapter runtime refusal"
+        ),
+        graph_destination_id=GRAPH_DESTINATION_ID,
+        authority_store_source_path="/authority.sqlite3",
+        authority_store_descriptor_digest="sha256:" + "a" * 64,
+    )
+
+    with pytest.raises(
+        worker.GraphitiCampaignStop,
+        match="adapter runtime is unavailable",
+    ) as stopped:
+        worker.run_bounded_campaign(
+            packet=packet,
+            proving_store="proving",
+            unpublished_store="unpublished",
+            runtime=runtime,
+            head_sha="head",
+            tree_sha="tree",
+            owner_f4_fence=lambda _packet: pytest.fail(
+                "owner F4 fence after adapter runtime refusal"
+            ),
+            monotonic=lambda: 0.0,
+            sleep=lambda _delay: None,
+        )
+
+    assert stopped.value.evidence == {
+        "stage": "PRE_DISPATCH_ADAPTER_RUNTIME",
+        "failure_type": "GraphitiAdapterContractError",
+        "provider_dispatched": False,
+    }
+
+
+def test_bounded_campaign_stops_on_pre_dispatch_configuration_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import hermes_graphiti_worker as worker
+
+    campaign = _campaign()
+    packet = {
+        "packet_digest": "sha256:" + "a" * 64,
+        "code_identity": {"head_sha": "head", "tree_sha": "tree"},
+        "store_snapshots": {
+            "authority": {
+                "source_path": "/authority.sqlite3",
+                "descriptor_digest": "sha256:" + "a" * 64,
+            }
+        },
+    }
+    claimed: list[str] = []
+    monkeypatch.setattr(
+        worker, "validate_graphiti_campaign_packet", lambda _value: campaign
+    )
+    monkeypatch.setattr(
+        worker,
+        "graphiti_store_snapshot_digests",
+        lambda **_kwargs: campaign["source_snapshot_digests"],
+    )
+    monkeypatch.setattr(
+        worker,
+        "_assert_fresh_campaign_ingests",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_campaign_operational_partition_snapshot",
+        lambda **_kwargs: _operational_snapshot(
+            observed_at=datetime(2026, 9, 1, 12, 0, tzinfo=UTC),
+            actionable=[
+                _fresh_actionable(
+                    event,
+                    landed_at=datetime(2026, 9, 1, 11, 59, tzinfo=UTC),
+                )
+                for event in campaign["cohort"]["events"]
+            ],
+        ),
+    )
+    monkeypatch.setattr(worker, "qualify_campaign_adapter_runtime", lambda: None)
+    monkeypatch.setattr(
+        worker,
+        "qualify_fresh_graphiti_event",
+        lambda **kwargs: {
+            "event_manifest_digest": (
+                f"manifest-{str(kwargs['event_id']).removeprefix('event-')}"
+            ),
+            "resolved_units": [
+                {
+                    "ingest_id": (
+                        f"ingest-{str(kwargs['event_id']).removeprefix('event-')}"
+                    )
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        worker,
+        "load_graphiti_units",
+        lambda **_kwargs: _campaign_resolved_units(campaign),
+    )
+
+    def consume(**kwargs: object) -> GraphitiProcessResult:
+        event_id = str(kwargs["event_id"])
+        claimed.append(event_id)
+        return GraphitiProcessResult(event_id, 1, "CONFIGURATION_HELD", 1)
+
+    monkeypatch.setattr(worker, "consume_next_graphiti_event", consume)
+    monkeypatch.setattr(
+        worker,
+        "_campaign_receipt_evidence",
+        lambda *_args, **_kwargs: pytest.fail(
+            "terminal receipt required after configuration hold"
+        ),
+    )
+    runtime = worker._mint_graphiti_campaign_runtime(
+        graphiti=object(),
+        admission_factory=lambda _connection: object(),
+        bind_unit_authority=lambda unit: unit,
+        graph_state_fence=lambda _campaign: {},
+        graph_destination_id=GRAPH_DESTINATION_ID,
+        authority_store_source_path="/authority.sqlite3",
+        authority_store_descriptor_digest="sha256:" + "a" * 64,
+    )
+
+    with pytest.raises(
+        worker.GraphitiCampaignStop,
+        match="pre-dispatch configuration refusal",
+    ):
+        worker.run_bounded_campaign(
+            packet=packet,
+            proving_store="proving",
+            unpublished_store="unpublished",
+            runtime=runtime,
+            head_sha="head",
+            tree_sha="tree",
+            owner_f4_fence=lambda _packet: None,
+            monotonic=lambda: 0.0,
+            sleep=lambda _delay: None,
+        )
+
+    assert claimed == ["event-1"]

@@ -3515,7 +3515,9 @@ def consume_next_graphiti_event(
 
             def systemic_failure(code: str, _dispatched: bool) -> None:
                 dispatched = committed_provider_dispatch()
-                if code == "CLI_PREDISPATCH_CONFIGURATION_REFUSED":
+                if code == "CLI_PREDISPATCH_CONFIGURATION_REFUSED" or (
+                    code == "GraphitiAdapterContractError" and not dispatched
+                ):
                     raise ConfigurationGraphitiEventFailure(
                         code, provider_dispatched=dispatched
                     )
