@@ -77,18 +77,25 @@ def qualify_campaign_adapter_runtime() -> None:
     """Load the pinned Graphiti extra before any campaign event claim."""
 
     from newsroom.graphiti_adapter.real import _load_graphiti
-    from newsroom.graphiti_adapter.types import GraphitiAdapterContractError
+    from newsroom.graphiti_adapter.types import (
+        GraphitiAdapterContractError,
+        graphiti_setup_failure_detail,
+    )
 
     try:
         _load_graphiti()
     except GraphitiAdapterContractError as exc:
+        evidence: dict[str, object] = {
+            "stage": "PRE_DISPATCH_ADAPTER_RUNTIME",
+            "failure_type": type(exc).__name__,
+            "provider_dispatched": False,
+        }
+        detail = graphiti_setup_failure_detail(exc)
+        if detail is not None:
+            evidence["setup_failure_detail"] = detail
         raise GraphitiCampaignStop(
             "campaign Graphiti adapter runtime is unavailable",
-            evidence={
-                "stage": "PRE_DISPATCH_ADAPTER_RUNTIME",
-                "failure_type": type(exc).__name__,
-                "provider_dispatched": False,
-            },
+            evidence=evidence,
         ) from exc
 
 

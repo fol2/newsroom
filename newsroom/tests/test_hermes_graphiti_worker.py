@@ -2313,7 +2313,8 @@ def test_qualify_campaign_adapter_runtime_refuses_missing_extra(
         lambda: (_ for _ in ()).throw(
             GraphitiAdapterContractError(
                 "graphiti extra (graphiti-core 0.29.3) is required "
-                "for real Graphiti execution"
+                "for real Graphiti execution",
+                reason_code="GRAPHITI_EXTRA_REQUIRED",
             )
         ),
     )
@@ -2327,6 +2328,7 @@ def test_qualify_campaign_adapter_runtime_refuses_missing_extra(
     assert stopped.value.evidence == {
         "stage": "PRE_DISPATCH_ADAPTER_RUNTIME",
         "failure_type": "GraphitiAdapterContractError",
+        "setup_failure_detail": "GRAPHITI_EXTRA_REQUIRED",
         "provider_dispatched": False,
     }
 
@@ -2355,7 +2357,8 @@ def test_bounded_campaign_refuses_missing_adapter_runtime_before_claim(
         lambda: (_ for _ in ()).throw(
             GraphitiAdapterContractError(
                 "graphiti extra (graphiti-core 0.29.3) is required "
-                "for real Graphiti execution"
+                "for real Graphiti execution",
+                reason_code="GRAPHITI_EXTRA_REQUIRED",
             )
         ),
     )
@@ -2415,6 +2418,7 @@ def test_bounded_campaign_refuses_missing_adapter_runtime_before_claim(
     assert stopped.value.evidence == {
         "stage": "PRE_DISPATCH_ADAPTER_RUNTIME",
         "failure_type": "GraphitiAdapterContractError",
+        "setup_failure_detail": "GRAPHITI_EXTRA_REQUIRED",
         "provider_dispatched": False,
     }
 

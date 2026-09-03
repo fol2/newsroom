@@ -3117,11 +3117,130 @@ def test_pre_dispatch_setup_failure_is_a_proved_no_call_receipt(
     assert receipt is not None
     assert receipt["dispatch_state"] == "NOT_DISPATCHED"
     assert receipt["setup_failure"] == "GraphitiAdapterContractError"
+    assert "setup_failure_detail" not in receipt
     assert receipt["chat_invocation_count"] == 0
     assert receipt["embedding_usage"]["request_count"] == 0
     assert receipt["embedding_usage"]["cost_usd_microunits"] == 0
     assert receipt["usage_basis"] == "NO_EMBEDDING_CALL"
     assert receipt["token_usage"]["usage_basis"] == "NO_PROVIDER_CALL"
+
+
+def test_adapter_contract_error_rejects_unlisted_reason_code() -> None:
+    with pytest.raises(ValueError, match="not allow-listed"):
+        GraphitiAdapterContractError(
+            "TOKEN=must-not-reach-the-store",
+            reason_code="TOKEN=must-not-reach-the-store",
+        )
+
+
+def test_load_graphiti_missing_extra_sets_typed_reason_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import builtins
+
+    import newsroom.graphiti_adapter.real as real
+    from newsroom.graphiti_adapter.types import GRAPHITI_EXTRA_REQUIRED
+
+    real_import = builtins.__import__
+
+    def refuse_graphiti(name: str, *args: object, **kwargs: object) -> object:
+        if name == "graphiti_core" or name.startswith("graphiti_core."):
+            raise ImportError("No module named 'graphiti_core'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse_graphiti)
+    with pytest.raises(GraphitiAdapterContractError) as caught:
+        real._load_graphiti()
+    assert caught.value.reason_code == GRAPHITI_EXTRA_REQUIRED
+
+
+def test_missing_graphiti_extra_receipt_retains_typed_reason_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import builtins
+    import json
+
+    import newsroom.graphiti_adapter.real as real
+    from newsroom.graphiti_adapter.types import GRAPHITI_EXTRA_REQUIRED
+
+    real_import = builtins.__import__
+    secret = "TOKEN=must-not-reach-the-store"
+
+    def refuse_graphiti(name: str, *args: object, **kwargs: object) -> object:
+        if name == "graphiti_core" or name.startswith("graphiti_core."):
+            raise ImportError(secret)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse_graphiti)
+    produced = RealGraphitiAdapter()._produce(
+        evaluation_attempt_for(("A retained source passage.",)),
+        UtcTimestamp.parse("2026-08-20T00:00:00.000000Z"),
+    )
+    receipt = produced.attempt_receipt_value
+    dumped = json.dumps(receipt)
+
+    assert produced.outcome is ExtractionOutcome.RETRYABLE_FAILURE
+    assert produced.failure_code is ExtractionFailureCode.PRODUCER_INTERNAL_ERROR
+    assert receipt is not None
+    assert receipt["dispatch_state"] == "NOT_DISPATCHED"
+    assert receipt["setup_failure"] == "GraphitiAdapterContractError"
+    assert receipt["setup_failure_detail"] == GRAPHITI_EXTRA_REQUIRED
+    assert receipt["chat_invocation_count"] == 0
+    assert receipt["embedding_usage"]["request_count"] == 0
+    assert receipt["usage_basis"] == "NO_EMBEDDING_CALL"
+    assert receipt["token_usage"]["usage_basis"] == "NO_PROVIDER_CALL"
+    assert receipt["proposal_count"] == 0
+    assert secret not in dumped
+    assert "graphiti extra" not in dumped
+
+
+def test_graphiti_core_release_mismatch_receipt_retains_typed_reason_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+    from newsroom.graphiti_adapter.types import GRAPHITI_CORE_RELEASE_MISMATCH
+
+    def mismatched_runtime() -> object:
+        raise GraphitiAdapterContractError(
+            "real Graphiti requires graphiti-core 0.29.3",
+            reason_code=GRAPHITI_CORE_RELEASE_MISMATCH,
+        )
+
+    monkeypatch.setattr(real, "_load_graphiti", mismatched_runtime)
+    produced = RealGraphitiAdapter()._produce(
+        evaluation_attempt_for(("A retained source passage.",)),
+        UtcTimestamp.parse("2026-08-20T00:00:00.000000Z"),
+    )
+    receipt = produced.attempt_receipt_value
+    assert receipt is not None
+    assert receipt["setup_failure"] == "GraphitiAdapterContractError"
+    assert receipt["setup_failure_detail"] == GRAPHITI_CORE_RELEASE_MISMATCH
+    assert receipt["dispatch_state"] == "NOT_DISPATCHED"
+
+
+def test_pre_dispatch_setup_failure_without_reason_code_omits_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    import newsroom.graphiti_adapter.real as real
+
+    secret = "TOKEN=must-not-reach-the-store"
+
+    def missing_runtime() -> object:
+        raise GraphitiAdapterContractError(secret)
+
+    monkeypatch.setattr(real, "_load_graphiti", missing_runtime)
+    produced = RealGraphitiAdapter()._produce(
+        evaluation_attempt_for(("A retained source passage.",)),
+        UtcTimestamp.parse("2026-08-20T00:00:00.000000Z"),
+    )
+    receipt = produced.attempt_receipt_value
+    dumped = json.dumps(receipt)
+    assert receipt is not None
+    assert receipt["setup_failure"] == "GraphitiAdapterContractError"
+    assert "setup_failure_detail" not in receipt
+    assert secret not in dumped
 
 
 def test_credential_time_is_deducted_from_absolute_extraction_deadline(
