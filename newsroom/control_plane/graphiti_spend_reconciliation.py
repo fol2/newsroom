@@ -44,6 +44,22 @@ class GraphitiSpendDisposition(StrEnum):
 
 
 GRAPHITI_SPEND_RECONCILE_COMMAND_TYPE = "RECONCILE_GRAPHITI_SPEND"
+_LATE_BOUND_COMPLETE_CLASSIFICATION = "LATE_BOUND_COMPLETE_AFTER_OUTER_RECEIPT_LOSS"
+_LATE_BOUND_COMPLETE_EVIDENCE_BASIS = "CURSOR_SDK_COMPLETE_WITH_NO_EMBEDDING_CALL"
+_LATE_BOUND_COMPLETE_EVIDENCE_SCHEMA = (
+    "newsroom.graphiti-late-bound-complete-usage-evidence.v1"
+)
+
+
+def _is_late_bound_outer_receipt_loss(
+    receipt: Mapping[str, object] | None,
+) -> bool:
+    return bool(
+        _legacy_unreported_binding_failure_receipt(receipt)
+        and receipt is not None
+        and receipt.get("binding_failure_type") == "ExtractionContractError"
+        and receipt.get("binding_failure_stage") == "UNCLASSIFIED_RESULT_BOUNDARY"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -679,6 +695,11 @@ def _validate_journal_evidence(
         and "provider_leaves" in journal
         and canonical_json_bytes(journal["provider_leaves"])
         != canonical_json_bytes(receipt.get("chat_invocations"))
+        and not (
+            journal.get("recovery_classification")
+            == _LATE_BOUND_COMPLETE_CLASSIFICATION
+            and _is_late_bound_outer_receipt_loss(receipt)
+        )
     ):
         raise GraphitiSpendReconciliationError(
             "graph journal provider leaves differ from the attempt receipt"
@@ -689,6 +710,11 @@ def _validate_journal_evidence(
         if (
             journal_provider_attempt is not None
             and journal_provider_attempt != receipt_provider_attempt
+            and not (
+                journal.get("recovery_classification")
+                == _LATE_BOUND_COMPLETE_CLASSIFICATION
+                and _is_late_bound_outer_receipt_loss(receipt)
+            )
         ):
             raise GraphitiSpendReconciliationError(
                 "graph journal provider attempt differs from the attempt receipt"
@@ -696,6 +722,11 @@ def _validate_journal_evidence(
         if (
             receipt_provider_attempt is None
             and journal.get("provider_dispatch_state") == "DISPATCHED"
+            and not (
+                journal.get("recovery_classification")
+                == _LATE_BOUND_COMPLETE_CLASSIFICATION
+                and _is_late_bound_outer_receipt_loss(receipt)
+            )
         ):
             raise GraphitiSpendReconciliationError(
                 "graph journal dispatch differs from the attempt receipt"
@@ -932,6 +963,534 @@ def _canonical_model_record(
     ):
         return None
     return record
+
+
+def _late_bound_complete_model_usage_evidence(
+    connection: sqlite3.Connection,
+    *,
+    row: sqlite3.Row,
+    journal: Mapping[str, object],
+    receipt: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    """Prove one lost outer result from exact graph and model receipts."""
+
+    if (
+        not _is_late_bound_outer_receipt_loss(receipt)
+        or receipt is None
+        or journal.get("recovery_classification")
+        != _LATE_BOUND_COMPLETE_CLASSIFICATION
+        or journal.get("state") != "COMPLETE"
+        or journal.get("provider_dispatch_state") != "DISPATCHED"
+        or journal.get("marker_attempt_number") != row["attempt_number"]
+        or journal.get("provider_attempt_number") != row["attempt_number"]
+        or journal.get("reconciliation_attempt_number") != row["attempt_number"]
+        or journal.get("episode_uuid") != row["ingest_id"]
+        or journal.get("attempt_receipt_digest")
+        != receipt.get("receipt_digest")
+        or journal.get("attempt_receipt_digest") != row["attempt_receipt_digest"]
+    ):
+        return None
+    retained_row = "source_status" in row.keys()
+    source_status = row["source_status" if retained_row else "status"]
+    source_usage_basis = row[
+        "source_usage_basis" if retained_row else "usage_basis"
+    ]
+    source_actual_usd = row[
+        "source_actual_usd_microunits"
+        if retained_row
+        else "actual_usd_microunits"
+    ]
+    source_actual_gbp = row[
+        "source_actual_gbp_microunits"
+        if retained_row
+        else "actual_gbp_microunits"
+    ]
+    source_provider_usage = _json_object(
+        row["source_provider_usage_json" if retained_row else "provider_usage_json"],
+        field=f"late-bound source provider usage {row['spend_id']}",
+    )
+    source_dispatch_owner = row[
+        "source_dispatch_owner" if retained_row else "dispatch_owner"
+    ]
+    source_dispatch_lease = row[
+        "source_dispatch_lease_expires_at"
+        if retained_row
+        else "dispatch_lease_expires_at"
+    ]
+    accounting = receipt.get("accounting")
+    if (
+        not isinstance(accounting, Mapping)
+        or accounting.get("spend_id") != row["spend_id"]
+        or accounting.get("status") != source_status
+        or source_status != "UNRECONCILED"
+        or accounting.get("usage_basis") != source_usage_basis
+        or source_usage_basis != "UNREPORTED"
+        or accounting.get("actual_usd_microunits") is not None
+        or source_actual_usd is not None
+        or accounting.get("actual_gbp_microunits") is not None
+        or source_actual_gbp is not None
+        or accounting.get("unused_reservation_released") is not False
+        or not isinstance(source_provider_usage, Mapping)
+        or canonical_json_bytes(source_provider_usage) != canonical_json_bytes({})
+        or source_dispatch_owner is not None
+        or source_dispatch_lease is not None
+    ):
+        return None
+    generation_id = row[
+        "generation_id" if "generation_id" in row.keys() else "source_generation_id"
+    ]
+    expected_group = (
+        None
+        if generation_id is None
+        else f"newsroom-eval-proposal-{generation_id}"
+    )
+    if journal.get("group_id") != expected_group:
+        return None
+    raw = journal.get("validated_raw")
+    raw_digest = journal.get("validated_raw_digest")
+    leaves = journal.get("provider_leaves")
+    embedding_usage = journal.get("embedding_usage")
+    if (
+        not isinstance(raw, Mapping)
+        or not isinstance(raw_digest, str)
+        or raw_digest != digest_bytes(canonical_json_bytes(raw))
+        or raw.get("episode_uuid") != row["ingest_id"]
+        or raw.get("workspace_group") != expected_group
+        or raw.get("attempt_number") != row["attempt_number"]
+        or raw.get("provider_attempt_number") != row["attempt_number"]
+        or not isinstance(leaves, list)
+        or len(leaves) != 1
+        or any(not isinstance(item, Mapping) for item in leaves)
+        or canonical_json_bytes(raw.get("chat_invocations"))
+        != canonical_json_bytes(leaves)
+        or raw.get("chat_invocation_count") != 1
+        or not isinstance(embedding_usage, Mapping)
+        or not is_exact_no_embedding_call(embedding_usage)
+        or canonical_json_bytes(raw.get("embedding_usage"))
+        != canonical_json_bytes(embedding_usage)
+        or raw.get("usage_basis") != "NO_EMBEDDING_CALL"
+        or raw.get("chat_subscription_not_debited") is not True
+    ):
+        return None
+    leaf = leaves[0]
+    usage = leaf.get("usage")
+    qualification = leaf.get("transport_qualification")
+    sdk_terminal = leaf.get("sdk_terminal")
+    if (
+        not isinstance(usage, Mapping)
+        or usage.get("usage_basis") != "PROVIDER_REPORTED"
+        or not all(
+            value is None
+            or (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and value >= 0
+            )
+            for value in usage.values()
+            if value != "PROVIDER_REPORTED"
+        )
+        or not isinstance(usage.get("total_tokens"), int)
+        or isinstance(usage.get("total_tokens"), bool)
+        or usage.get("total_tokens")
+        != sum(
+            int(usage.get(field) or 0)
+            for field in (
+                "input_tokens",
+                "output_tokens",
+                "cached_read_tokens",
+                "cached_write_tokens",
+            )
+        )
+        or not isinstance(qualification, Mapping)
+        or qualification.get("transport") != "CURSOR_SDK"
+        or qualification.get("schema_version")
+        != "newsroom.cursor-sdk-qualification.v2"
+        or qualification.get("max_retries") != 0
+        or qualification.get("model") != leaf.get("model")
+        or qualification.get("selected_model") != leaf.get("model")
+        or not isinstance(sdk_terminal, Mapping)
+        or sdk_terminal.get("schema_version") != "newsroom.cursor-sdk-terminal.v1"
+        or sdk_terminal.get("status") != "finished"
+        or sdk_terminal.get("cancelled") is not False
+        or sdk_terminal.get("error_class") != "NONE"
+        or sdk_terminal.get("error_code") != "NONE"
+        or leaf.get("outcome") != "COMPLETE"
+        or leaf.get("provider") != "cursor-agent-cli"
+    ):
+        return None
+    token_usage = summarise_graphiti_usage(
+        chat_invocations=leaves,
+        embedding_usage=embedding_usage,
+    )
+    if canonical_json_bytes(raw.get("token_usage")) != canonical_json_bytes(
+        token_usage
+    ):
+        return None
+    required_tables = {
+        "model_work_envelopes",
+        "model_work_outcomes",
+        "model_invocation_allocations",
+        "model_transport_observations",
+        "model_invocation_provider_attempt_links",
+        "model_invocation_terminals",
+        "model_provider_telemetry",
+        "graphiti_internal_requests",
+    }
+    if any(not _table_exists(connection, table) for table in required_tables):
+        return None
+    envelope_rows = connection.execute(
+        "SELECT envelope_id,cycle_id,workload_class,admitted_at,canonical_digest,"
+        "record_json FROM model_work_envelopes "
+        "WHERE json_extract(record_json,'$.graphiti_attempt_id')=?",
+        (row["spend_id"],),
+    ).fetchall()
+    if len(envelope_rows) != 1:
+        return None
+    envelope_row = envelope_rows[0]
+    envelope = _canonical_model_record(
+        envelope_row[5],
+        digest_field="canonical_digest",
+        expected_digest=envelope_row[4],
+        field=f"late-bound model envelope {row['spend_id']}",
+    )
+    if envelope is None:
+        return None
+    envelope_id = str(envelope_row[0])
+    cycle_id = str(envelope_row[1])
+    envelope_identity = {
+        key: envelope.get(key)
+        for key in (
+            "schema_version",
+            "cycle_id",
+            "workload_class",
+            "admission_decision_id",
+            "candidate_id",
+            "hypothesis_digest",
+            "evidence_package_digest",
+            "ingest_id",
+            "graphiti_attempt_id",
+        )
+    }
+    if (
+        envelope.get("envelope_id") != envelope_id
+        or digest_canonical(envelope_identity) != envelope_id
+        or envelope.get("cycle_id") != cycle_id
+        or envelope.get("workload_class") != "GRAPHITI_CHAT_PRIMARY"
+        or envelope.get("workload_class") != envelope_row[2]
+        or envelope.get("admitted_at") != envelope_row[3]
+        or envelope.get("ingest_id") != row["ingest_id"]
+        or envelope.get("graphiti_attempt_id") != row["spend_id"]
+        or leaf.get("model_work_envelope_id") != envelope_id
+        or connection.execute(
+            "SELECT COUNT(*) FROM model_work_envelopes WHERE cycle_id=?",
+            (cycle_id,),
+        ).fetchone()[0]
+        != 1
+    ):
+        return None
+
+    outcome_rows = connection.execute(
+        "SELECT outcome_digest,envelope_id,outcome,terminal_at,record_json "
+        "FROM model_work_outcomes WHERE envelope_id=?",
+        (envelope_id,),
+    ).fetchall()
+    allocation_rows = connection.execute(
+        "SELECT invocation_id,envelope_id,cycle_id,leaf_ordinal,workload_class,"
+        "policy_digest,provider,route,model,request_digest,parent_invocation_id,"
+        "allocated_at,canonical_digest,record_json "
+        "FROM model_invocation_allocations WHERE cycle_id=?",
+        (cycle_id,),
+    ).fetchall()
+    if len(outcome_rows) != 1 or len(allocation_rows) != 1:
+        return None
+    outcome_row = outcome_rows[0]
+    outcome = _canonical_model_record(
+        outcome_row[4],
+        digest_field="outcome_digest",
+        expected_digest=outcome_row[0],
+        field=f"late-bound model outcome {row['spend_id']}",
+    )
+    allocation_row = allocation_rows[0]
+    allocation = _canonical_model_record(
+        allocation_row[13],
+        digest_field="canonical_digest",
+        expected_digest=allocation_row[12],
+        field=f"late-bound model allocation {row['spend_id']}",
+    )
+    invocation_id = str(allocation_row[0])
+    policy_rows = connection.execute(
+        "SELECT canonical_digest,policy_id,version,workload_class,provider,route,"
+        "model,qualified,record_json FROM model_invocation_policies "
+        "WHERE canonical_digest=?",
+        (allocation_row[5],),
+    ).fetchall()
+    if len(policy_rows) != 1:
+        return None
+    policy_row = policy_rows[0]
+    policy = _canonical_model_record(
+        policy_row[8],
+        digest_field="canonical_digest",
+        expected_digest=policy_row[0],
+        field=f"late-bound invocation policy {row['spend_id']}",
+    )
+    allocation_identity = (
+        {
+            key: allocation.get(key)
+            for key in (
+                "schema_version",
+                "envelope_id",
+                "cycle_id",
+                "leaf_ordinal",
+                "workload_class",
+                "request_digest",
+                "route",
+                "parent_invocation_id",
+            )
+        }
+        if allocation is not None
+        else {}
+    )
+    if (
+        outcome is None
+        or outcome.get("envelope_id") != envelope_id
+        or outcome.get("envelope_id") != outcome_row[1]
+        or outcome.get("outcome_digest") != outcome_row[0]
+        or outcome.get("outcome") != outcome_row[2]
+        or outcome.get("outcome") != "GRAPHITI_REJECTED_BINDING"
+        or outcome.get("terminal_at") != outcome_row[3]
+        or outcome.get("outcome_record_id") != receipt.get("receipt_digest")
+        or outcome.get("accepted_provider_attempt_id") is not None
+        or outcome.get("retained_proposal_count") != 0
+        or allocation is None
+        or policy is None
+        or policy.get("canonical_digest") != policy_row[0]
+        or policy.get("policy_id") != policy_row[1]
+        or policy.get("version") != policy_row[2]
+        or policy.get("workload_class") != policy_row[3]
+        or policy.get("workload_class") != "GRAPHITI_CHAT_PRIMARY"
+        or policy.get("provider") != policy_row[4]
+        or policy.get("provider") != "cursor-agent-cli"
+        or policy.get("route") != policy_row[5]
+        or policy.get("route") != "GRAPHITI_CHAT_PRIMARY"
+        or policy.get("model") != policy_row[6]
+        or policy.get("model") != leaf.get("model")
+        or policy.get("qualified") is not True
+        or policy_row[7] != 1
+        or not isinstance(policy.get("allowed_config_identities"), list)
+        or allocation.get("config_identity")
+        not in policy.get("allowed_config_identities", [])
+        or allocation.get("config_identity")
+        != "cursor-sdk-api-key-composer-floor-v2"
+        or not isinstance(policy.get("command_flags"), list)
+        or not {
+            "TRANSPORT=CURSOR_SDK",
+            "sdk=cursor-sdk>=1.0.29",
+            "auth=CURSOR_API_KEY",
+            "composer_floor>=2.5",
+            "max_retries=0",
+        }.issubset(set(policy.get("command_flags", [])))
+        or allocation.get("invocation_id") != invocation_id
+        or digest_canonical(allocation_identity) != invocation_id
+        or allocation.get("envelope_id") != envelope_id
+        or allocation.get("envelope_id") != allocation_row[1]
+        or allocation.get("cycle_id") != cycle_id
+        or allocation.get("cycle_id") != allocation_row[2]
+        or allocation.get("leaf_ordinal") != 1
+        or allocation.get("leaf_ordinal") != allocation_row[3]
+        or allocation.get("workload_class") != "GRAPHITI_CHAT_PRIMARY"
+        or allocation.get("workload_class") != allocation_row[4]
+        or allocation.get("invocation_policy_digest") != allocation_row[5]
+        or allocation.get("provider") != "cursor-agent-cli"
+        or allocation.get("provider") != allocation_row[6]
+        or allocation.get("route") != "GRAPHITI_CHAT_PRIMARY"
+        or allocation.get("route") != allocation_row[7]
+        or allocation.get("model") != leaf.get("model")
+        or allocation.get("model") != allocation_row[8]
+        or allocation.get("request_digest") != allocation_row[9]
+        or allocation.get("parent_invocation_id") is not None
+        or allocation.get("parent_invocation_id") != allocation_row[10]
+        or allocation.get("allocated_at") != allocation_row[11]
+        or leaf.get("model_invocation_id") != invocation_id
+        or leaf.get("model_invocation_allocation_digest") != allocation_row[12]
+    ):
+        return None
+
+    expected_provider_attempt_id = (
+        f"{row['spend_id']}:provider-attempt:{row['attempt_number']}:leaf:1"
+    )
+    observations = connection.execute(
+        "SELECT observation_digest,invocation_id,observed_at,state,evidence_digest,"
+        "record_json FROM model_transport_observations WHERE invocation_id=?",
+        (invocation_id,),
+    ).fetchall()
+    links = connection.execute(
+        "SELECT link_digest,invocation_id,provider_attempt_id,linked_at,record_json "
+        "FROM model_invocation_provider_attempt_links WHERE invocation_id=?",
+        (invocation_id,),
+    ).fetchall()
+    terminals = connection.execute(
+        "SELECT terminal_digest,invocation_id,usage_status,outcome,failure_class,"
+        "completed_at,record_json FROM model_invocation_terminals "
+        "WHERE invocation_id=?",
+        (invocation_id,),
+    ).fetchall()
+    telemetry_rows = connection.execute(
+        "SELECT telemetry_record_digest,invocation_id,provider_telemetry_digest,"
+        "record_json FROM model_provider_telemetry WHERE invocation_id=?",
+        (invocation_id,),
+    ).fetchall()
+    internal_rows = connection.execute(
+        "SELECT canonical_digest,invocation_id,envelope_id,graphiti_attempt_id,"
+        "internal_ordinal,semantic_state_digest,provider_attempt_id,"
+        "call_shape_policy_digest,record_json FROM graphiti_internal_requests "
+        "WHERE graphiti_attempt_id=?",
+        (row["spend_id"],),
+    ).fetchall()
+    if not all(
+        len(items) == 1
+        for items in (observations, links, terminals, telemetry_rows, internal_rows)
+    ):
+        return None
+    observation_row, link_row, terminal_row, telemetry_row, internal_row = (
+        observations[0],
+        links[0],
+        terminals[0],
+        telemetry_rows[0],
+        internal_rows[0],
+    )
+    observation = _canonical_model_record(
+        observation_row[5],
+        digest_field="observation_digest",
+        expected_digest=observation_row[0],
+        field=f"late-bound transport observation {row['spend_id']}",
+    )
+    link = _canonical_model_record(
+        link_row[4],
+        digest_field="link_digest",
+        expected_digest=link_row[0],
+        field=f"late-bound provider link {row['spend_id']}",
+    )
+    internal = _json_object(
+        internal_row[8], field=f"late-bound internal request {row['spend_id']}"
+    )
+    if internal is not None:
+        internal_unsigned = dict(internal)
+        internal_unsigned["canonical_digest"] = ""
+    else:
+        internal_unsigned = {}
+    terminal = _json_object(
+        terminal_row[6], field=f"late-bound model terminal {row['spend_id']}"
+    )
+    telemetry = _json_object(
+        telemetry_row[3], field=f"late-bound provider telemetry {row['spend_id']}"
+    )
+    if terminal is not None:
+        terminal_unsigned = dict(terminal)
+        terminal_unsigned["terminal_digest"] = ""
+    else:
+        terminal_unsigned = {}
+    telemetry_payload = (
+        telemetry.get("provider_telemetry") if telemetry is not None else None
+    )
+    terminal_components = (
+        dict(terminal.get("components"))
+        if terminal is not None and isinstance(terminal.get("components"), Mapping)
+        else None
+    )
+    if terminal_components is not None and terminal_components.get(
+        "context_tokens"
+    ) is None:
+        terminal_components.pop("context_tokens", None)
+    if terminal_components is not None:
+        provenance = terminal_components.pop("provenance", None)
+        terminal_components["usage_basis"] = provenance
+    if (
+        observation is None
+        or observation.get("invocation_id") != invocation_id
+        or observation.get("state") != observation_row[3]
+        or observation.get("state") != "DISPATCH_STARTED"
+        or observation.get("observed_at") != observation_row[2]
+        or observation.get("evidence_digest") != observation_row[4]
+        or link is None
+        or link.get("invocation_id") != invocation_id
+        or link.get("provider_attempt_id") != expected_provider_attempt_id
+        or link.get("provider_attempt_id") != link_row[2]
+        or link.get("linked_at") != link_row[3]
+        or terminal is None
+        or digest_canonical(terminal_unsigned) != terminal_row[0]
+        or terminal.get("terminal_digest") != terminal_row[0]
+        or terminal.get("invocation_id") != invocation_id
+        or terminal.get("usage_status") != terminal_row[2]
+        or terminal.get("usage_status") != "REPORTED"
+        or terminal.get("outcome") != terminal_row[3]
+        or terminal.get("outcome") != "COMPLETE"
+        or terminal.get("failure_class") is not None
+        or terminal.get("completed_at") != terminal_row[5]
+        or terminal.get("subscription_cli_chat_not_cash_debited") is not True
+        or canonical_json_bytes(terminal_components) != canonical_json_bytes(usage)
+        or leaf.get("model_invocation_terminal_digest") != terminal_row[0]
+        or telemetry is None
+        or telemetry.get("invocation_id") != invocation_id
+        or telemetry.get("provider_telemetry_digest") != telemetry_row[2]
+        or digest_canonical(telemetry_payload) != telemetry_row[2]
+        or digest_canonical(telemetry) != telemetry_row[0]
+        or canonical_json_bytes(telemetry_payload) != canonical_json_bytes(usage)
+        or internal is None
+        or internal.get("canonical_digest") != internal_row[0]
+        or digest_canonical(internal_unsigned) != internal_row[0]
+        or internal.get("invocation_id") != invocation_id
+        or internal.get("invocation_id") != internal_row[1]
+        or internal.get("envelope_id") != envelope_id
+        or internal.get("envelope_id") != internal_row[2]
+        or internal.get("graphiti_attempt_id") != row["spend_id"]
+        or internal.get("graphiti_attempt_id") != internal_row[3]
+        or internal.get("internal_ordinal") != 1
+        or internal.get("internal_ordinal") != internal_row[4]
+        or internal.get("semantic_state_digest") != internal_row[5]
+        or internal.get("provider_attempt_id") != expected_provider_attempt_id
+        or internal.get("provider_attempt_id") != internal_row[6]
+        or internal.get("call_shape_policy_digest") != internal_row[7]
+        or internal.get("invocation_policy_digest") != allocation_row[5]
+        or internal.get("provider") != "cursor-agent-cli"
+        or internal.get("model") != leaf.get("model")
+        or internal.get("leaf_class") != "PRIMARY"
+    ):
+        return None
+
+    unsigned_evidence: dict[str, object] = {
+        "schema": _LATE_BOUND_COMPLETE_EVIDENCE_SCHEMA,
+        "spend_id": str(row["spend_id"]),
+        "ingest_id": str(row["ingest_id"]),
+        "attempt_number": int(row["attempt_number"]),
+        "attempt_receipt_digest": str(row["attempt_receipt_digest"]),
+        "validated_raw_digest": raw_digest,
+        "cycle_id": cycle_id,
+        "envelope_id": envelope_id,
+        "envelope_canonical_digest": str(envelope_row[4]),
+        "work_outcome_digest": str(outcome_row[0]),
+        "allocation_count": 1,
+        "allocation_digest": str(allocation_row[12]),
+        "transport_observation_count": 1,
+        "dispatch_started_count": 1,
+        "transport_observation_digest": str(observation_row[0]),
+        "provider_attempt_link_count": 1,
+        "provider_attempt_link_digest": str(link_row[0]),
+        "provider_attempt_id": expected_provider_attempt_id,
+        "terminal_count": 1,
+        "terminal_digest": str(terminal_row[0]),
+        "provider_telemetry_count": 1,
+        "provider_telemetry_record_digest": str(telemetry_row[0]),
+        "graphiti_internal_request_count": 1,
+        "graphiti_internal_request_digest": str(internal_row[0]),
+        "transport": "CURSOR_SDK",
+        "chat_invocations": [dict(leaf)],
+        "embedding_usage": dict(embedding_usage),
+        "token_usage": token_usage,
+    }
+    return {
+        **unsigned_evidence,
+        "evidence_digest": digest_canonical(unsigned_evidence),
+    }
 
 
 def _legacy_pre_provider_model_usage_evidence(
@@ -1240,7 +1799,22 @@ def _transition(
         actual_gbp, fx_policy = graphiti_usd_to_gbp_microunits(cost)
     source_status = str(row["status"])
     source_usage_basis = str(row["usage_basis"])
-    if disposition is GraphitiSpendDisposition.RECONCILED:
+    late_bound_complete = (
+        disposition is GraphitiSpendDisposition.RECONCILED
+        and evidence_basis == _LATE_BOUND_COMPLETE_EVIDENCE_BASIS
+        and isinstance(model_usage_evidence, Mapping)
+        and model_usage_evidence.get("schema")
+        == _LATE_BOUND_COMPLETE_EVIDENCE_SCHEMA
+        and isinstance(provider_usage, Mapping)
+        and is_exact_no_embedding_call(provider_usage)
+    )
+    if late_bound_complete:
+        actual_usd = 0
+        actual_gbp, fx_policy = graphiti_usd_to_gbp_microunits(0)
+        target_status = "RECONCILED"
+        target_usage_basis = "NO_EMBEDDING_CALL"
+        released = True
+    elif disposition is GraphitiSpendDisposition.RECONCILED:
         target_status = "RECONCILED"
         target_usage_basis = "PROVIDER_REPORTED"
         released = True
@@ -1568,6 +2142,15 @@ def _validate_retained_dispositions(connection: sqlite3.Connection) -> None:
         legacy_unreported_binding_failure = (
             _legacy_unreported_binding_failure_receipt(receipt)
         )
+        journal = evidence.get("graph_journal_evidence")
+        retained_late_bound = (
+            evidence.get("disposition")
+            == GraphitiSpendDisposition.RECONCILED.value
+            and evidence.get("evidence_basis")
+            == _LATE_BOUND_COMPLETE_EVIDENCE_BASIS
+            and isinstance(journal, Mapping)
+            and model_usage_evidence is not None
+        )
         if legacy_authorisation_refusal:
             retained_release = (
                 evidence.get("disposition")
@@ -1625,38 +2208,54 @@ def _validate_retained_dispositions(connection: sqlite3.Connection) -> None:
                     f"retained disposition {spend_id} extraction hold differs"
                 )
         elif legacy_unreported_binding_failure:
-            retained_typed_hold = (
-                evidence.get("disposition")
-                == GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD.value
-                and evidence.get("evidence_basis")
-                == "UNSUPPORTED_BINDING_FAILURE_TYPE_HOLD"
-                and model_usage_evidence is None
-            )
-            retained_preclassification_hold = (
-                evidence.get("disposition")
-                == GraphitiSpendDisposition.UNRECONCILED_REPORTED_MISSING.value
-                and evidence.get("evidence_basis")
-                == "TERMINAL_ATTEMPT_WITHOUT_PROVIDER_NATIVE_USAGE"
-                and model_usage_evidence is None
-            )
-            if not retained_typed_hold and not retained_preclassification_hold:
-                raise GraphitiSpendReconciliationError(
-                    f"retained disposition {spend_id} binding failure differs"
+            if retained_late_bound:
+                pass
+            else:
+                retained_typed_hold = (
+                    evidence.get("disposition")
+                    == GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD.value
+                    and evidence.get("evidence_basis")
+                    == "UNSUPPORTED_BINDING_FAILURE_TYPE_HOLD"
+                    and model_usage_evidence is None
                 )
+                retained_preclassification_hold = (
+                    evidence.get("disposition")
+                    == GraphitiSpendDisposition.UNRECONCILED_REPORTED_MISSING.value
+                    and evidence.get("evidence_basis")
+                    == "TERMINAL_ATTEMPT_WITHOUT_PROVIDER_NATIVE_USAGE"
+                    and model_usage_evidence is None
+                )
+                if not retained_typed_hold and not retained_preclassification_hold:
+                    raise GraphitiSpendReconciliationError(
+                        f"retained disposition {spend_id} binding failure differs"
+                    )
         if model_usage_evidence is not None:
-            expected_model_usage_evidence = (
-                _legacy_pre_provider_model_usage_evidence(
-                    connection,
-                    spend_id=spend_id,
-                    ingest_id=str(row["ingest_id"]),
-                    receipt=receipt,
+            if retained_late_bound and isinstance(journal, Mapping):
+                expected_model_usage_evidence = (
+                    _late_bound_complete_model_usage_evidence(
+                        connection,
+                        row=row,
+                        journal=journal,
+                        receipt=receipt,
+                    )
                 )
+            else:
+                expected_model_usage_evidence = (
+                    _legacy_pre_provider_model_usage_evidence(
+                        connection,
+                        spend_id=spend_id,
+                        ingest_id=str(row["ingest_id"]),
+                        receipt=receipt,
+                    )
+                )
+            valid_disposition = retained_late_bound or (
+                evidence.get("disposition")
+                == GraphitiSpendDisposition.RELEASED_BEFORE_PROVIDER_IO.value
+                and evidence.get("evidence_basis")
+                == "PROVIDER_DISPATCH_STRUCTURALLY_RULED_OUT"
             )
             if (
-                evidence.get("disposition")
-                != GraphitiSpendDisposition.RELEASED_BEFORE_PROVIDER_IO.value
-                or evidence.get("evidence_basis")
-                != "PROVIDER_DISPATCH_STRUCTURALLY_RULED_OUT"
+                not valid_disposition
                 or expected_model_usage_evidence is None
                 or canonical_json_bytes(model_usage_evidence)
                 != canonical_json_bytes(expected_model_usage_evidence)
@@ -1664,7 +2263,6 @@ def _validate_retained_dispositions(connection: sqlite3.Connection) -> None:
                 raise GraphitiSpendReconciliationError(
                     f"retained disposition {spend_id} model usage evidence differs"
                 )
-        journal = evidence.get("graph_journal_evidence")
         if not isinstance(journal, Mapping) or evidence.get(
             "graph_journal_digest"
         ) != digest_bytes(canonical_json_bytes(journal)):
@@ -1958,6 +2556,14 @@ def _plan_from_connection(
             ingest_id=str(row["ingest_id"]),
             receipt=receipt,
         )
+        late_bound_model_usage_evidence = (
+            _late_bound_complete_model_usage_evidence(
+                connection,
+                row=row,
+                journal=journal,
+                receipt=receipt,
+            )
+        )
         duplicate_current_attribution = (
             receipt is not None
             and _current_attribution_duplicates_charged_provider_attempt(
@@ -2105,6 +2711,21 @@ def _plan_from_connection(
                     receipt=receipt,
                     provider_usage=provider_usage,
                     model_usage_evidence=legacy_model_usage_evidence,
+                )
+            )
+            continue
+        if late_bound_model_usage_evidence is not None:
+            transitions.append(
+                _transition(
+                    row,
+                    disposition=GraphitiSpendDisposition.RECONCILED,
+                    evidence_basis=_LATE_BOUND_COMPLETE_EVIDENCE_BASIS,
+                    journal=journal,
+                    receipt=receipt,
+                    provider_usage=late_bound_model_usage_evidence[
+                        "embedding_usage"
+                    ],
+                    model_usage_evidence=late_bound_model_usage_evidence,
                 )
             )
             continue

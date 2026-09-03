@@ -934,12 +934,11 @@ class ExtractionRunVersion:
                 raise ExtractionContractError(
                     "proposal-set retention chronology differs"
                 )
-        if self.outcome.may_retain_proposals != (self.proposal_set is not None):
-            if not (
-                self.outcome is ExtractionOutcome.PARTIAL
-                and self.proposal_set is None
-            ):
-                raise ExtractionContractError("run proposal state differs from outcome")
+        has_proposal_set = self.proposal_set is not None
+        if (
+            has_proposal_set and not self.outcome.may_retain_proposals
+        ) or has_proposal_set != (self.usage.proposal_count > 0):
+            raise ExtractionContractError("run proposal state differs from outcome")
         canonical_digest(self.canonical_digest, field="run_version_digest")
         expected_digest = digest_canonical(
             {
