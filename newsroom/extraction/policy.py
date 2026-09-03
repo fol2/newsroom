@@ -126,8 +126,11 @@ def _contract_payload(value: Any) -> bytes:
         _component(item[field], field=field)
     if item["execution_profile"] != "FIXTURE_REPLAY_ONLY":
         raise PayloadSchemaValidationError("real extraction profile is not authorised")
-    if item["producer_kind"] != "DETERMINISTIC_FIXTURE":
-        raise PayloadSchemaValidationError("only deterministic fixture producer is authorised")
+    if item["producer_kind"] not in {
+        "DETERMINISTIC_FIXTURE",
+        "GRAPHITI_EVALUATION",
+    }:
+        raise PayloadSchemaValidationError("extractor producer is not authorised")
     return canonical_json_bytes(item)
 
 

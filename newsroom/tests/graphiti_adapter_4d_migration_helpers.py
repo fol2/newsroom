@@ -209,6 +209,7 @@ def _drop_empty_v31_operational_schema(connection: sqlite3.Connection) -> None:
 
 
 def _drop_empty_v32_recovery_schema(connection: sqlite3.Connection) -> None:
+    _drop_empty_v34_graphiti_evaluation_schema(connection)
     if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 32:
         return
     from newsroom.authority.increment8_recovery_migrations import (
@@ -253,6 +254,125 @@ def _drop_empty_v32_recovery_schema(connection: sqlite3.Connection) -> None:
     connection.execute("DELETE FROM authority_migrations WHERE version=32")
     connection.execute(guard)
     connection.execute("PRAGMA user_version=31")
+
+
+def _drop_empty_v34_graphiti_evaluation_schema(
+    connection: sqlite3.Connection,
+) -> None:
+    """Restore the exact v32 central schema; v33 belongs to an isolated store."""
+
+    if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 34:
+        return
+    from newsroom.authority.extraction_migrations import (
+        EXTRACTION_AUTHORITY_MIGRATION_STATEMENTS,
+    )
+    from newsroom.authority.graphiti_adapter_migrations import (
+        GRAPHITI_ADAPTER_MIGRATION_STATEMENTS,
+    )
+    from newsroom.authority.graphiti_evaluation_migrations import (
+        GRAPHITI_EVALUATION_MIGRATION_CHECKSUM,
+        GRAPHITI_EVALUATION_MIGRATION_NAME,
+    )
+
+    if connection.execute(
+        "SELECT name,checksum FROM authority_migrations WHERE version=34"
+    ).fetchone() != (
+        GRAPHITI_EVALUATION_MIGRATION_NAME,
+        GRAPHITI_EVALUATION_MIGRATION_CHECKSUM,
+    ):
+        raise sqlite3.DatabaseError("downgrade requires exact v34 Graphiti authority")
+    if connection.execute(
+        "SELECT COUNT(*) FROM graphiti_attempt_receipts"
+    ).fetchone() != (0,):
+        raise sqlite3.DatabaseError("v34 Graphiti attempt receipts must be empty")
+    if connection.execute(
+        "SELECT COUNT(*) FROM graphiti_adapter_configurations "
+        "WHERE runtime_mode='REAL_GRAPHITI'"
+    ).fetchone() != (0,):
+        raise sqlite3.DatabaseError("v34 real Graphiti configuration must be empty")
+    if connection.execute(
+        "SELECT COUNT(*) FROM extractor_contracts "
+        "WHERE producer_kind='GRAPHITI_EVALUATION'"
+    ).fetchone() != (0,):
+        raise sqlite3.DatabaseError("v34 Graphiti extraction contracts must be empty")
+
+    connection.execute("PRAGMA foreign_keys=OFF")
+    for trigger in (
+        "immutable_graphiti_attempt_receipt",
+        "retained_graphiti_attempt_receipt",
+        "immutable_graphiti_workspace_policies_update",
+        "immutable_graphiti_workspace_policies_delete",
+        "immutable_extractor_contract_update",
+        "immutable_extractor_contract_delete",
+        "extraction_run_version_chain_guard",
+        "extraction_run_version_predecessor_guard",
+        "immutable_extraction_run_version_update",
+        "immutable_extraction_run_version_delete",
+        "extraction_run_version_create_head",
+        "extraction_run_version_advance_head",
+    ):
+        connection.execute(f'DROP TRIGGER "{trigger}"')
+    connection.execute("DROP TABLE graphiti_attempt_receipts")
+    connection.execute(
+        "DELETE FROM graphiti_workspace_policies "
+        "WHERE policy_id='00000000-0000-4000-8000-000000004803'"
+    )
+
+    def statement(prefix: str) -> str:
+        return next(
+            item
+            for item in EXTRACTION_AUTHORITY_MIGRATION_STATEMENTS
+            if " ".join(item.split()).startswith(prefix)
+        )
+
+    connection.execute("DROP INDEX idx_extraction_versions_run")
+    connection.execute(
+        "CREATE TABLE extractor_contracts_v32 AS SELECT * FROM extractor_contracts"
+    )
+    connection.execute("DROP TABLE extractor_contracts")
+    connection.execute(statement("CREATE TABLE extractor_contracts("))
+    connection.execute("INSERT INTO extractor_contracts SELECT * FROM extractor_contracts_v32")
+    connection.execute("DROP TABLE extractor_contracts_v32")
+    connection.execute(
+        "CREATE TABLE extraction_run_versions_v32 AS SELECT * FROM extraction_run_versions"
+    )
+    connection.execute("DROP TABLE extraction_run_versions")
+    connection.execute(statement("CREATE TABLE extraction_run_versions("))
+    connection.execute(
+        "INSERT INTO extraction_run_versions SELECT * FROM extraction_run_versions_v32"
+    )
+    connection.execute("DROP TABLE extraction_run_versions_v32")
+    for prefix in (
+        "CREATE INDEX idx_extraction_versions_run ",
+        "CREATE TRIGGER immutable_extractor_contract_update ",
+        "CREATE TRIGGER immutable_extractor_contract_delete ",
+        "CREATE TRIGGER extraction_run_version_chain_guard ",
+        "CREATE TRIGGER extraction_run_version_predecessor_guard ",
+        "CREATE TRIGGER immutable_extraction_run_version_update ",
+        "CREATE TRIGGER immutable_extraction_run_version_delete ",
+        "CREATE TRIGGER extraction_run_version_create_head ",
+        "CREATE TRIGGER extraction_run_version_advance_head ",
+    ):
+        connection.execute(statement(prefix))
+    for prefix in (
+        "CREATE TRIGGER immutable_graphiti_workspace_policies_update ",
+        "CREATE TRIGGER immutable_graphiti_workspace_policies_delete ",
+    ):
+        connection.execute(
+            next(
+                item
+                for item in GRAPHITI_ADAPTER_MIGRATION_STATEMENTS
+                if " ".join(item.split()).startswith(prefix)
+            )
+        )
+    guard = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' "
+        "AND name='immutable_authority_migrations_delete'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+    connection.execute("DELETE FROM authority_migrations WHERE version=34")
+    connection.execute(guard)
+    connection.execute("PRAGMA user_version=32")
 
 
 def drop_empty_v28_coverage_schema(connection: sqlite3.Connection) -> None:

@@ -2,23 +2,39 @@ from __future__ import annotations
 
 from contextlib import closing
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+import json
 import sqlite3
 
 import pytest
 
-from newsroom.authority.canonical import digest_canonical
+from newsroom.authority.canonical import (
+    canonical_json_bytes,
+    digest_bytes,
+    digest_canonical,
+)
+from newsroom.authority.types import UtcTimestamp
+from newsroom.authority.persistence import AuthorityPersistenceError
 from newsroom.extraction import (
     ExtractionFailureCode,
     ExtractionOutcome,
+    ExtractionOutputValidation,
+    ExtractionProposalKind,
+    ExtractionUsage,
+    EvidenceRange,
     FixtureExtractionCase,
+    ProposalDraft,
+    ProducedExtraction,
     VersionedExtractionComponent,
 )
 from newsroom.graphiti_adapter import (
     DeterministicFakeGraphitiAdapter,
     GraphitiAdapterConfiguration,
     GraphitiAdapterConfigurationId,
+    GraphitiAdapterExecution,
     GraphitiAdapterOutcome,
     GraphitiCleanupReason,
+    GraphitiCleanupReceipt,
     GraphitiCredentialClass,
     GraphitiEgressPolicy,
     GraphitiExecutionProfile,
@@ -26,8 +42,12 @@ from newsroom.graphiti_adapter import (
     GraphitiAdapterStateError,
     GraphitiWorkspacePolicy,
     GraphitiWorkspacePolicyId,
+    GraphitiWorkspaceDescriptor,
+    GraphitiWorkspaceState,
     RealGraphitiRuntimeAuthority,
 )
+from newsroom.graphiti_adapter.evaluation_attempt import evaluation_attempt_for
+from newsroom.graphiti_adapter.real import RealGraphitiAdapter
 from newsroom.graphiti_adapter.contracts import (
     GRAPHITI_ADAPTER_CODE_COMPONENT,
     GRAPHITI_ADAPTER_NORMALISATION_COMPONENT,
@@ -37,12 +57,307 @@ from newsroom.graphiti_adapter.contracts import (
     GRAPHITI_PROMPT_COMPONENT,
 )
 
-from .extraction_4a_helpers import extraction_proof, open_extraction_system
+from .extraction_4a_helpers import (
+    extraction_proof,
+    open_extraction_system,
+    run_request,
+    seed_extraction_fixture,
+)
 from .graphiti_adapter_4d_authority_helpers import (
     fake_attempt,
     open_graphiti_system,
     seed_graphiti_authority_fixture,
 )
+
+
+def _evaluation_attempt(state):
+    base = evaluation_attempt_for(("Hong Kong Transport Department",))
+    request = run_request(
+        state,
+        contract_id=base.extraction_contract.contract_id,
+        key="graphiti-evaluation-run-v1",
+    )
+    manifest = base.manifest.from_run_request(
+        manifest_id=base.manifest.manifest_id,
+        configuration=base.configuration,
+        contract=base.extraction_contract,
+        request=request,
+    )
+    return replace(base, extraction_request=request, manifest=manifest)
+
+
+def _evaluation_proposal(attempt) -> ProposalDraft:
+    needle = b"Hong Kong Transport Department"
+    passage = next(
+        item
+        for item in attempt.extraction_request.input_binding.passages
+        if needle in item.require_text().encode("utf-8")
+    )
+    data = passage.require_text().encode("utf-8")
+    start = data.index(needle)
+    return ProposalDraft(
+        local_id="entity.0001",
+        kind=ExtractionProposalKind.ENTITY_MENTION,
+        subject_placeholder=needle.decode("utf-8"),
+        object_placeholder=None,
+        predicate_hint=None,
+        confidence_basis_points=None,
+        uncertainty_codes=(),
+        rationale_codes=("GRAPHITI_EVALUATION_SPAN",),
+        evidence=(
+            EvidenceRange(
+                passage_id=passage.passage_id,
+                start_byte=start,
+                end_byte=start + len(needle),
+                evidence_text_digest=digest_bytes(needle),
+            ),
+        ),
+    )
+
+
+def _terminal_receipt(
+    attempt, *, proposals: tuple[ProposalDraft, ...] = ()
+) -> dict[str, object]:
+    unsigned = {
+        "workspace_group": attempt.configuration.workspace_policy.namespace_prefix,
+        "generation_id": attempt.generation_id,
+        "episode_uuid": attempt.episode_uuid,
+        "attempt_number": attempt.attempt_number,
+        "predecessor_episode_uuid": attempt.predecessor_episode_uuid,
+        "temporal_basis": attempt.temporal_basis.value,
+        "reference_time": (
+            None
+            if attempt.reference_time is None
+            else attempt.reference_time.to_text()
+        ),
+        "passages": [item.canonical_value() for item in attempt.manifest.passages],
+        "proposals": [item.canonical_value() for item in proposals],
+    }
+    return {
+        **unsigned,
+        "raw_output_digest": digest_bytes(canonical_json_bytes(unsigned)),
+    }
+
+
+def _evaluation_execution(attempt, *, outcome: str) -> GraphitiAdapterExecution:
+    ended = datetime(2042, 3, 12, 9, 59, 59, tzinfo=UTC)
+    started = ended - timedelta(seconds=20 if outcome == "LATE" else 1)
+    complete = outcome in {"COMPLETE", "LATE"}
+    proposals = (
+        (_evaluation_proposal(attempt),)
+        if outcome in {"COMPLETE", "LATE"}
+        else ()
+    )
+    receipt = _terminal_receipt(attempt, proposals=proposals)
+    produced = ProducedExtraction(
+        outcome=(
+            ExtractionOutcome.SUCCESS
+            if complete
+            else ExtractionOutcome.RETRYABLE_FAILURE
+        ),
+        failure_code=(
+            ExtractionFailureCode.NONE
+            if complete
+            else ExtractionFailureCode.PRODUCER_INTERNAL_ERROR
+        ),
+        validation=(ExtractionOutputValidation.VALID if complete else None),
+        raw_output_value=(receipt if complete else None),
+        proposals=proposals,
+        usage=ExtractionUsage(
+            elapsed_ms=0,
+            input_bytes=attempt.extraction_request.input_binding.input_bytes,
+            output_bytes=(
+                len(canonical_json_bytes(receipt)) if complete else 0
+            ),
+            proposal_count=len(proposals),
+            evidence_range_count=sum(len(item.evidence) for item in proposals),
+            request_tokens=0,
+            response_tokens=0,
+            cost_microunits=0,
+        ),
+        attempt_receipt_value=(None if complete else receipt),
+    )
+    started_at = UtcTimestamp(started)
+    ended_at = UtcTimestamp(ended)
+    workspace = GraphitiWorkspaceDescriptor(
+        workspace_id=attempt.workspace_id,
+        configuration_id=attempt.configuration.configuration_id,
+        policy_id=attempt.configuration.workspace_policy.policy_id,
+        policy_digest=attempt.configuration.workspace_policy.canonical_digest,
+        namespace=(
+            f"{attempt.configuration.workspace_policy.namespace_prefix}-"
+            f"{attempt.workspace_id}"
+        ),
+        created_at=started_at,
+    )
+    adapter_outcome = (
+        GraphitiAdapterOutcome.COMPLETE
+        if complete
+        else GraphitiAdapterOutcome.FAILED
+    )
+    return GraphitiAdapterExecution(
+        attempt=attempt,
+        outcome=adapter_outcome,
+        failure_code=produced.failure_code.value,
+        produced=produced,
+        workspace=workspace,
+        cleanup_receipt=GraphitiCleanupReceipt(
+            receipt_id=attempt.cleanup_receipt_id,
+            workspace_id=attempt.workspace_id,
+            final_state=GraphitiWorkspaceState.CLEANED,
+            reason=(
+                GraphitiCleanupReason.NORMAL
+                if complete
+                else GraphitiCleanupReason.FAILED
+            ),
+            private_node_count=0,
+            private_relation_count=0,
+            file_count=0,
+            byte_count=0,
+            workspace_absent=True,
+            recorded_at=ended_at,
+        ),
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_outcome", "has_output"),
+    (
+        ("COMPLETE", GraphitiAdapterOutcome.COMPLETE, True),
+        ("FAILED", GraphitiAdapterOutcome.FAILED, False),
+        ("LATE", GraphitiAdapterOutcome.TIMEOUT, False),
+    ),
+)
+def test_evaluation_authority_atomically_retains_exact_terminal_receipt(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+    expected_outcome: GraphitiAdapterOutcome,
+    has_output: bool,
+) -> None:
+    state = seed_extraction_fixture(tmp_path / "authority")
+    attempt = _evaluation_attempt(state)
+    expected_receipt = _terminal_receipt(
+        attempt,
+        proposals=(
+            (_evaluation_proposal(attempt),)
+            if outcome in {"COMPLETE", "LATE"}
+            else ()
+        ),
+    )
+    workspace_root = (tmp_path / "workspace").resolve()
+    adapter_calls = 0
+
+    def provider_free_execution(_self, *, attempt, workspace_root):
+        del workspace_root
+        nonlocal adapter_calls
+        adapter_calls += 1
+        return _evaluation_execution(attempt, outcome=outcome)
+
+    monkeypatch.setattr(RealGraphitiAdapter, "execute", provider_free_execution)
+    with open_extraction_system(state) as extraction:
+        extraction.extraction.register_contract(
+            attempt.extraction_contract, proof=extraction_proof()
+        )
+    with open_graphiti_system(state, workspace_root=workspace_root) as system:
+        system.graphiti.register_configuration(
+            attempt.configuration, proof=extraction_proof()
+        )
+        retained = system.graphiti.execute_attempt(
+            attempt,
+            proof=extraction_proof(),
+            execution_deadline=datetime(2042, 3, 12, 10, 0, tzinfo=UTC),
+            fallback_permitted=False,
+            invocation_observer=object(),
+        )
+
+    assert adapter_calls == 1
+    assert retained.outcome is expected_outcome
+    assert (retained.output_id is not None) is has_output
+    assert retained.attempt_receipt == (None if has_output else expected_receipt)
+    with open_graphiti_system(state, workspace_root=workspace_root) as reopened:
+        assert reopened.graphiti.attempt(
+            attempt.attempt_id, proof=extraction_proof()
+        ) == retained
+    with closing(sqlite3.connect(state.database)) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM graphiti_adapter_attempts WHERE attempt_id=?",
+            (str(attempt.attempt_id),),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM graphiti_attempt_receipts WHERE attempt_id=?",
+            (str(attempt.attempt_id),),
+        ).fetchone()[0] == (0 if has_output else 1)
+        raw_bytes = (
+            None
+            if retained.output_id is None
+            else bytes(
+                connection.execute(
+                    "SELECT canonical_bytes FROM extraction_outputs "
+                    "WHERE output_id=?",
+                    (str(retained.output_id),),
+                ).fetchone()[0]
+            )
+        )
+    assert (
+        None if raw_bytes is None else json.loads(raw_bytes)
+    ) == (expected_receipt if has_output else None)
+
+
+def test_evaluation_receipt_binding_failure_rolls_back_both_authorities(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = seed_extraction_fixture(tmp_path / "authority")
+    attempt = _evaluation_attempt(state)
+    execution = _evaluation_execution(attempt, outcome="FAILED")
+    tampered = dict(execution.produced.attempt_receipt_value or {})
+    tampered["workspace_group"] = "different-workspace"
+    unsigned = dict(tampered)
+    unsigned.pop("raw_output_digest")
+    tampered["raw_output_digest"] = digest_bytes(canonical_json_bytes(unsigned))
+    execution = replace(
+        execution,
+        produced=replace(execution.produced, attempt_receipt_value=tampered),
+    )
+
+    monkeypatch.setattr(
+        RealGraphitiAdapter,
+        "execute",
+        lambda _self, **_values: execution,
+    )
+    with open_extraction_system(state) as extraction:
+        extraction.extraction.register_contract(
+            attempt.extraction_contract, proof=extraction_proof()
+        )
+    with open_graphiti_system(
+        state, workspace_root=(tmp_path / "workspace").resolve()
+    ) as system:
+        system.graphiti.register_configuration(
+            attempt.configuration, proof=extraction_proof()
+        )
+        with pytest.raises(
+            AuthorityPersistenceError,
+            match="terminal receipt differs from attempt authority",
+        ):
+            system.graphiti.execute_attempt(
+                attempt,
+                proof=extraction_proof(),
+                execution_deadline=datetime(2042, 3, 12, 10, 0, tzinfo=UTC),
+                fallback_permitted=False,
+                invocation_observer=object(),
+            )
+
+    with closing(sqlite3.connect(state.database)) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM extraction_run_versions WHERE run_version_id=?",
+            (str(attempt.extraction_request.run_version_id),),
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM graphiti_adapter_attempts WHERE attempt_id=?",
+            (str(attempt.attempt_id),),
+        ).fetchone()[0] == 0
 
 
 def _digest(label: str) -> str:

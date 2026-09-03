@@ -72,6 +72,7 @@ from newsroom.graphiti_adapter import GraphitiAdapterReadPolicy
 from newsroom.graphiti_adapter.cursor_transport import CURSOR_SDK_TRANSPORT
 from newsroom.graphiti_adapter.evaluation_attempt import (
     GRAPHITI_EVALUATION_HYDRATION_POLICY,
+    evaluation_attempt_for_body,
 )
 from newsroom.graphiti_adapter.evaluation_packet import (
     CURSOR_AGENT_MODEL_ID,
@@ -1080,6 +1081,46 @@ def bootstrap_operational_authority(
     )
     binder.commit_sources()
     bound_units = tuple(binder(unit) for unit in plan.units)
+    attempts = tuple(
+        evaluation_attempt_for_body(
+            episode_body=unit.episode_body,
+            ingest_id=unit.ingest_id,
+            proving_run_id=unit.proving_run_id,
+            source_id=unit.source_id,
+            item_key=unit.item_key,
+            observation_digest=unit.observation_digest,
+            published_at=unit.published_at,
+            updated_at=unit.updated_at,
+            effective_revision=unit.effective_revision,
+            canonical_url=unit.canonical_url,
+            revision_digest=unit.revision_digest,
+            representation_digest=unit.representation_digest,
+            authority_ids=(
+                unit.authority.admission_id,
+                unit.authority.access_decision_id,
+                unit.authority.definition_id,
+                unit.authority.definition_version_id,
+                unit.authority.item_id,
+                unit.authority.revision_id,
+                unit.authority.representation_id,
+            ),
+            attempt_number=unit.attempt_number,
+            predecessor_episode_uuid=unit.predecessor_ingest_id,
+        )
+        for unit in bound_units
+    )
+    contract = attempts[0].extraction_contract
+    configuration = attempts[0].configuration
+    if any(
+        attempt.extraction_contract != contract
+        or attempt.configuration != configuration
+        for attempt in attempts[1:]
+    ):
+        raise GraphitiOperationalReadinessError(
+            "operational cohort does not share exact Graphiti evaluation authority"
+        )
+    authority_system.extraction.register_contract(contract, proof=proof)
+    authority_system.graphiti.register_configuration(configuration, proof=proof)
     return (
         OperationalAuthorityBootstrapResult(
             observed_at=plan.observed_at,
@@ -1273,6 +1314,7 @@ def open_operational_graphiti_authority_system(
             "authority.observed.write",
             "authority.admitted.write",
             "authority.extraction.execute",
+            "authority.extraction.manage",
             "authority.entity.propose",
             "authority.entity.admit",
             "authority.relation.propose",

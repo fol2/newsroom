@@ -53,6 +53,7 @@ from newsroom.graphiti_adapter.policy import (
     GRAPHITI_CONFIGURATION_REGISTER_COMMAND,
     GRAPHITI_REPLAY_APPROVE_COMMAND,
 )
+from newsroom.graphiti_adapter.temporal_vocabulary import TemporalBasis
 from newsroom.graphiti_adapter.types import (
     GraphitiAdapterConfigurationId,
     GraphitiAdapterIdentifierReuse,
@@ -300,10 +301,18 @@ class _GraphitiAdapterStoreSupport:
     def _graphiti_workspace_policy_from_row(
         cls, row: Mapping[str, Any]
     ) -> GraphitiWorkspacePolicy:
+        from newsroom.graphiti_adapter.evaluation_packet import (
+            EVALUATION_WORKSPACE_POLICY,
+        )
+
         value = cls._graphiti_canonical_row_value(
             row, identity="Graphiti workspace policy"
         )
-        for policy in (QUALIFICATION_WORKSPACE_POLICY, REPLAY_WORKSPACE_POLICY):
+        for policy in (
+            QUALIFICATION_WORKSPACE_POLICY,
+            REPLAY_WORKSPACE_POLICY,
+            EVALUATION_WORKSPACE_POLICY,
+        ):
             if value == policy.canonical_value():
                 if str(row["canonical_digest"]) != policy.canonical_digest:
                     raise AuthorityPersistenceError(
@@ -343,9 +352,22 @@ class _GraphitiAdapterStoreSupport:
                 idempotency_key=str(event["idempotency_key"]),
             )
         else:
-            raise AuthorityPersistenceError(
-                "real Graphiti configuration is disabled and unqualified"
+            from newsroom.graphiti_adapter.evaluation_attempt import (
+                evaluation_attempt_for,
             )
+
+            configuration = evaluation_attempt_for(
+                ("retained Graphiti evaluation configuration",)
+            ).configuration
+            if (
+                configuration.configuration_id != configuration_id
+                or configuration.extractor_contract_id != contract.contract_id
+                or configuration.extractor_contract_digest != contract.digest
+                or configuration.idempotency_key != str(event["idempotency_key"])
+            ):
+                raise AuthorityPersistenceError(
+                    "real Graphiti configuration differs from exact evaluation authority"
+                )
         component_columns = {
             "framework": ("framework_id", "framework_version", "framework_digest"),
             "model": ("model_id", "model_version", "model_digest"),
@@ -617,6 +639,22 @@ class _GraphitiAdapterStoreSupport:
             response_tokens=int(row["response_tokens"]),
             cost_microunits=int(row["cost_microunits"]),
         )
+        receipt_row = conn.execute(
+            "SELECT canonical_bytes,canonical_digest FROM graphiti_attempt_receipts "
+            "WHERE attempt_id=?",
+            (str(row["attempt_id"]),),
+        ).fetchone()
+        attempt_receipt = None
+        if receipt_row is not None:
+            receipt_bytes = bytes(receipt_row["canonical_bytes"])
+            if str(receipt_row["canonical_digest"]) != digest_bytes(receipt_bytes):
+                raise AuthorityPersistenceError("Graphiti attempt receipt digest differs")
+            attempt_receipt = json.loads(receipt_bytes)
+            if (
+                not isinstance(attempt_receipt, dict)
+                or canonical_json_bytes(attempt_receipt) != receipt_bytes
+            ):
+                raise AuthorityPersistenceError("Graphiti attempt receipt is not canonical")
         record = GraphitiAttemptRecord(
             attempt_id=GraphitiAttemptId.parse(str(row["attempt_id"])),
             run_id=ExtractionRunId.parse(str(row["run_id"])),
@@ -648,6 +686,7 @@ class _GraphitiAdapterStoreSupport:
                 if row["proposal_set_id"] is None
                 else ProposalSetId.parse(str(row["proposal_set_id"]))
             ),
+            attempt_receipt=attempt_receipt,
             cleanup_receipt=cleanup,
             authority_event_id=EventId.parse(str(row["authority_event_id"])),
             recorded_at=UtcTimestamp.parse(str(row["recorded_at"])),
@@ -709,6 +748,14 @@ class _GraphitiAdapterStoreSupport:
             self._contract_row(conn, str(configuration.extractor_contract_id)),
             replayed=False,
         ).request
+        if (
+            contract.producer_kind == "GRAPHITI_EVALUATION"
+            and record.output_id is None
+            and record.attempt_receipt is None
+        ):
+            raise AuthorityPersistenceError(
+                "Graphiti evaluation attempt lacks its terminal receipt"
+            )
         replay_binding = conn.execute(
             "SELECT * FROM graphiti_adapter_attempt_replays WHERE attempt_id=?",
             (str(record.attempt_id),),
@@ -729,6 +776,11 @@ class _GraphitiAdapterStoreSupport:
         event = self._graphiti_record_context(
             conn, event_id=str(row["authority_event_id"])
         )
+        payload = json.loads(bytes(event["payload_bytes"]))
+        if not isinstance(payload, dict):
+            raise AuthorityPersistenceError(
+                "Graphiti attempt command payload is not canonical"
+            )
         request = GraphitiAttemptRequest(
             attempt_id=record.attempt_id,
             attempt_number=record.attempt_number,
@@ -741,6 +793,23 @@ class _GraphitiAdapterStoreSupport:
             extraction_request=version.request,
             replay_source=replay_source,
             idempotency_key=str(event["idempotency_key"]),
+            reference_time=(
+                None
+                if payload.get("reference_time") is None
+                else UtcTimestamp.parse(str(payload["reference_time"]))
+            ),
+            temporal_basis=TemporalBasis(str(payload["temporal_basis"])),
+            episode_uuid=(
+                None
+                if payload.get("episode_uuid") is None
+                else str(payload["episode_uuid"])
+            ),
+            generation_id=str(payload["generation_id"]),
+            predecessor_episode_uuid=(
+                None
+                if payload.get("predecessor_episode_uuid") is None
+                else str(payload["predecessor_episode_uuid"])
+            ),
         )
         self._validate_graphiti_record_envelope(
             conn,

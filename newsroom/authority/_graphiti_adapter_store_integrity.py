@@ -22,7 +22,7 @@ class _GraphitiAdapterIntegrityMixin:
                     "SELECT * FROM graphiti_workspace_policies ORDER BY policy_id"
                 ).fetchall()
             )
-            if len(policies) != 2:
+            if len(policies) != 3:
                 raise AuthoritySchemaError(
                     "Graphiti workspace policy seed is incomplete"
                 )

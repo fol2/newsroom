@@ -233,20 +233,45 @@ class _ExtractionCommitMixin:
                 require_text=not replay,
             )
             contract_row = self._contract_row(conn, str(request.contract_id))
-            if str(contract_row["producer_kind"]) != "DETERMINISTIC_FIXTURE":
+            producer_kind = str(contract_row["producer_kind"])
+            if producer_kind == "GRAPHITI_EVALUATION":
+                if _after_persist is None:
+                    raise AuthorityPersistenceError(
+                        "Graphiti evaluation extraction requires atomic 4D authority"
+                    )
+                configurations = conn.execute(
+                    "SELECT runtime_mode,execution_profile,extractor_contract_digest,"
+                    "fixture_case,real_runtime_authority_digest "
+                    "FROM graphiti_adapter_configurations WHERE extractor_contract_id=?",
+                    (str(request.contract_id),),
+                ).fetchall()
+                if (
+                    len(configurations) != 1
+                    or str(configurations[0]["runtime_mode"]) != "REAL_GRAPHITI"
+                    or str(configurations[0]["execution_profile"]) != "EVALUATION"
+                    or str(configurations[0]["extractor_contract_digest"])
+                    != str(contract_row["canonical_digest"])
+                    or configurations[0]["fixture_case"] is not None
+                    or configurations[0]["real_runtime_authority_digest"] is None
+                ):
+                    raise AuthorityPersistenceError(
+                        "Graphiti evaluation extraction lacks exact retained configuration"
+                    )
+            elif producer_kind != "DETERMINISTIC_FIXTURE":
                 raise AuthorityPersistenceError(
                     "unapproved extractor producer entered the authority store"
                 )
             if not replay:
                 assert production is not None
-                retained_contract = self._contract_from_row(
-                    conn, contract_row, replayed=False
-                )
-                validate_fixture_production(
-                    contract=retained_contract.request,
-                    request=request,
-                    production=production,
-                )
+                if producer_kind == "DETERMINISTIC_FIXTURE":
+                    retained_contract = self._contract_from_row(
+                        conn, contract_row, replayed=False
+                    )
+                    validate_fixture_production(
+                        contract=retained_contract.request,
+                        request=request,
+                        production=production,
+                    )
             if replay:
                 committed = self._commit_grant_in_transaction(
                     conn, grant, recorded_at=now.to_text()

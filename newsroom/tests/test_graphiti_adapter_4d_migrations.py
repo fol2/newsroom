@@ -22,6 +22,7 @@ from newsroom.graphiti_adapter import (
     QUALIFICATION_WORKSPACE_POLICY,
     REPLAY_WORKSPACE_POLICY,
 )
+from newsroom.graphiti_adapter.evaluation_packet import EVALUATION_WORKSPACE_POLICY
 
 from .extraction_4a_helpers import (
     contract_request,
@@ -35,6 +36,7 @@ from .graphiti_adapter_4d_migration_helpers import (
 )
 
 GRAPHITI_ADAPTER_TABLES = {
+    "graphiti_attempt_receipts",
     "graphiti_adapter_attempt_heads",
     "graphiti_adapter_attempt_replays",
     "graphiti_adapter_attempts",
@@ -48,6 +50,8 @@ GRAPHITI_ADAPTER_TABLES = {
     "graphiti_workspaces",
 }
 REQUIRED_GRAPHITI_ADAPTER_TRIGGERS = {
+    "immutable_graphiti_attempt_receipt",
+    "retained_graphiti_attempt_receipt",
     "graphiti_configuration_contract_guard",
     "graphiti_configuration_workspace_policy_guard",
     "graphiti_workspace_policy_guard",
@@ -118,6 +122,11 @@ def test_fresh_schema_v16_history_policies_tables_and_triggers_are_exact(
                 str(REPLAY_WORKSPACE_POLICY.policy_id),
                 REPLAY_WORKSPACE_POLICY.canonical_bytes,
                 REPLAY_WORKSPACE_POLICY.canonical_digest,
+            ),
+            (
+                str(EVALUATION_WORKSPACE_POLICY.policy_id),
+                EVALUATION_WORKSPACE_POLICY.canonical_bytes,
+                EVALUATION_WORKSPACE_POLICY.canonical_digest,
             ),
         ]
         columns = {

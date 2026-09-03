@@ -75,6 +75,14 @@ _PIN = digest_canonical(
         "embedding": GRAPHITI_EMBEDDING_MODEL,
     }
 )
+GRAPHITI_EVALUATION_CONTRACT_ID = typed_id(
+    ExtractorContractId, "contract", "evaluation-graphiti-contract-v2"
+)
+GRAPHITI_EVALUATION_CONFIGURATION_ID = typed_id(
+    GraphitiAdapterConfigurationId,
+    "config",
+    "evaluation-graphiti-configuration-v2",
+)
 GRAPHITI_EVALUATION_HYDRATION_POLICY = HydrationPolicyContract(
     policy_id="graphiti-evaluation-passage",
     contract_version="hydration-v2",
@@ -213,7 +221,7 @@ def evaluation_attempt_for_body(
         ),
     )
     contract = ExtractorContractRequest(
-        contract_id=typed_id(ExtractorContractId, "contract", ingest_id),
+        contract_id=GRAPHITI_EVALUATION_CONTRACT_ID,
         framework=_component("graphiti.framework", GRAPHITI_CORE_RELEASE),
         model=_component("graphiti.model", GRAPHITI_CHAT_MODEL),
         prompt=GRAPHITI_PROMPT_COMPONENT,
@@ -226,7 +234,7 @@ def evaluation_attempt_for_body(
         idempotency_key="evaluation-graphiti-contract-v2",
     )
     configuration = GraphitiAdapterConfiguration(
-        configuration_id=typed_id(GraphitiAdapterConfigurationId, "config", ingest_id),
+        configuration_id=GRAPHITI_EVALUATION_CONFIGURATION_ID,
         runtime_mode=GraphitiRuntimeMode.REAL_GRAPHITI,
         execution_profile=GraphitiExecutionProfile.EVALUATION,
         framework=contract.framework,
@@ -331,4 +339,9 @@ def evaluation_attempt_for(passages: tuple[str, ...]) -> GraphitiAttemptRequest:
     )
 
 
-__all__ = ["evaluation_attempt_for", "evaluation_attempt_for_body"]
+__all__ = [
+    "GRAPHITI_EVALUATION_CONFIGURATION_ID",
+    "GRAPHITI_EVALUATION_CONTRACT_ID",
+    "evaluation_attempt_for",
+    "evaluation_attempt_for_body",
+]

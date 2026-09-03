@@ -253,6 +253,47 @@ def _retain_legacy_pre_provider_usage_proof(
     )
 
 
+def _retain_unreported_binding_failure(
+    path: Path,
+    *,
+    ingest_id: str,
+    failure_type: str,
+) -> tuple[str, str]:
+    connection = connect(str(path))
+    spend_id = _reserve(connection, ingest_id=ingest_id, attempt=1)
+    accounting = reconcile_graphiti_spend(
+        connection, spend_id=spend_id, embedding_usage=None
+    )
+    receipt_digest = insert_graphiti_attempt_receipt(
+        connection,
+        ingest_id=ingest_id,
+        attempt_number=1,
+        outcome="FAILED",
+        receipt={
+            "ingest_id": ingest_id,
+            "attempt_number": 1,
+            "outcome": "FAILED",
+            "failure_code": "PRODUCER_INTERNAL_ERROR",
+            "binding_failure": "RESULT_CONTRACT_REJECTED",
+            "binding_failure_type": failure_type,
+            "binding_failure_stage": "UNCLASSIFIED_RESULT_BOUNDARY",
+            "provider_attempt_number": None,
+            "returned_raw_receipt_digest": None,
+            "returned_validated_raw_digest": None,
+            "chat_invocation_count": 0,
+            "chat_invocations_digest": None,
+            "chat_invocations": [],
+            "embedding_usage_digest": None,
+            "embedding_usage": None,
+            "token_usage": None,
+            "accounting": accounting,
+        },
+    )
+    connection.commit()
+    connection.close()
+    return spend_id, receipt_digest
+
+
 def _apply_missing_reconciliation(
     path: Path, *, idempotency_key: str
 ) -> tuple[
@@ -3588,6 +3629,127 @@ def test_legacy_authorisation_refusal_without_exact_usage_proof_remains_hold(
     assert report["spend_disposition_counts"]["AMBIGUOUS_EFFECT_HOLD"] == 1
     assert report["unresolved_spend_attempt_count"] == 1
     assert report["cost_complete"] is False
+
+
+def test_extraction_state_error_structurally_releases_before_provider_io(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    spend_id, receipt_digest = _retain_unreported_binding_failure(
+        path,
+        ingest_id="extraction-state-error",
+        failure_type="ExtractionStateError",
+    )
+    _retain_legacy_pre_provider_usage_proof(
+        path,
+        spend_id=spend_id,
+        ingest_id="extraction-state-error",
+        outcome_record_id=receipt_digest,
+    )
+
+    evaluated_at = datetime(2026, 9, 3, tzinfo=UTC)
+    plan = plan_graphiti_spend_reconciliation(str(path), evaluated_at=evaluated_at)
+
+    transition = plan.transitions[0]
+    assert transition.disposition is (
+        GraphitiSpendDisposition.RELEASED_BEFORE_PROVIDER_IO
+    )
+    assert transition.evidence_basis == "PROVIDER_DISPATCH_STRUCTURALLY_RULED_OUT"
+    assert transition.target_status == "RECONCILED"
+    assert transition.target_usage_basis == "NO_PROVIDER_IO"
+    assert transition.actual_usd_microunits == 0
+    assert transition.actual_gbp_microunits == 0
+    assert transition.unused_reservation_released is True
+    assert transition.model_usage_evidence is not None
+    assert transition.model_usage_evidence["allocation_count"] == 0
+    assert transition.model_usage_evidence["transport_observation_count"] == 0
+    assert transition.model_usage_evidence["provider_attempt_link_count"] == 0
+    assert transition.model_usage_evidence["provider_telemetry_count"] == 0
+    assert transition.model_usage_evidence["graphiti_internal_request_count"] == 0
+
+    _command_service().reconcile_graphiti_spend(
+        unpublished_store=str(path),
+        dry_run_plan=plan.as_dict(),
+        evaluated_at=evaluated_at,
+        idempotency_key="extraction-state-error",
+        expected_plan_digest=plan.plan_digest,
+        proof=AuthenticationProof(
+            method="STATIC_TOKEN", credential="operator-token"
+        ),
+    )
+    replay = plan_graphiti_spend_reconciliation(str(path), evaluated_at=evaluated_at)
+    assert replay.transitions == ()
+
+
+@pytest.mark.parametrize(
+    ("failure_type", "usage_proof", "expected_basis"),
+    (
+        (
+            "ExtractionStateError",
+            "ABSENT",
+            "EXTRACTION_STATE_ERROR_WITHOUT_EXACT_USAGE_PROOF",
+        ),
+        (
+            "ExtractionStateError",
+            "CONTRADICTORY",
+            "EXTRACTION_STATE_ERROR_WITHOUT_EXACT_USAGE_PROOF",
+        ),
+        (
+            "GraphitiResultStageError",
+            "EXACT",
+            "UNSUPPORTED_BINDING_FAILURE_TYPE_HOLD",
+        ),
+    ),
+)
+def test_unproved_or_unsupported_binding_failure_remains_typed_hold(
+    tmp_path: Path,
+    failure_type: str,
+    usage_proof: str,
+    expected_basis: str,
+) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    spend_id, receipt_digest = _retain_unreported_binding_failure(
+        path,
+        ingest_id="binding-failure-hold",
+        failure_type=failure_type,
+    )
+    if usage_proof != "ABSENT":
+        _retain_legacy_pre_provider_usage_proof(
+            path,
+            spend_id=spend_id,
+            ingest_id="binding-failure-hold",
+            outcome_record_id=(
+                receipt_digest
+                if usage_proof == "EXACT"
+                else f"different:{receipt_digest}"
+            ),
+        )
+
+    plan = plan_graphiti_spend_reconciliation(
+        str(path), evaluated_at=datetime(2026, 9, 3, tzinfo=UTC)
+    )
+
+    transition = plan.transitions[0]
+    assert transition.disposition is GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD
+    assert transition.evidence_basis == expected_basis
+    assert transition.model_usage_evidence is None
+    assert transition.target_status == "UNRECONCILED"
+    assert transition.unused_reservation_released is False
+
+    _command_service().reconcile_graphiti_spend(
+        unpublished_store=str(path),
+        dry_run_plan=plan.as_dict(),
+        evaluated_at=datetime(2026, 9, 3, tzinfo=UTC),
+        idempotency_key=f"binding-failure-hold:{failure_type}:{usage_proof}",
+        expected_plan_digest=plan.plan_digest,
+        proof=AuthenticationProof(
+            method="STATIC_TOKEN", credential="operator-token"
+        ),
+    )
+    replay = plan_graphiti_spend_reconciliation(
+        str(path), evaluated_at=datetime(2026, 9, 3, tzinfo=UTC)
+    )
+    assert replay.transitions == ()
 
 
 def test_usage_does_not_dedupe_unreconciled_fabricated_recovery_receipt(

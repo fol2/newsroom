@@ -979,6 +979,7 @@ class GraphitiAttemptRecord:
     cleanup_receipt: GraphitiCleanupReceipt
     authority_event_id: EventId
     recorded_at: UtcTimestamp
+    attempt_receipt: dict[str, Any] | None = None
     replayed: bool = False
 
     def __post_init__(self) -> None:
@@ -1034,6 +1035,15 @@ class GraphitiAttemptRecord:
             raise GraphitiAdapterContractError(
                 "retained proposal set identity must be typed"
             )
+        if self.attempt_receipt is not None:
+            if not isinstance(self.attempt_receipt, dict):
+                raise GraphitiAdapterContractError(
+                    "retained attempt receipt must be a canonical object"
+                )
+            if self.output_id is not None:
+                raise GraphitiAdapterContractError(
+                    "retained attempt receipt cannot duplicate structured output"
+                )
         if not isinstance(self.cleanup_receipt, GraphitiCleanupReceipt):
             raise GraphitiAdapterContractError(
                 "retained cleanup receipt must be typed"

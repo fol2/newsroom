@@ -76,6 +76,7 @@ def _governed_dependencies(
     *,
     malformed_raw_proposal: bool = False,
     deny_registration: bool = False,
+    late_timeout: bool = False,
 ):
     proof = AuthenticationProof(method="STATIC_TOKEN", credential="fixture")
     retained: dict[str, object] = {}
@@ -88,6 +89,11 @@ def _governed_dependencies(
             PermissionError.__init__(denied, "scope missing")
             raise denied
         retained["configuration"] = configuration
+        return object()
+
+    def register_contract(contract, _proof):
+        calls.append("register_contract")
+        retained["contract"] = contract
         return object()
 
     def execute(attempt, _proof, **controls):
@@ -183,12 +189,23 @@ def _governed_dependencies(
             canonical_digest=digest_canonical(envelope_value),
             retained_at=recorded_at,
         )
-        usage = ExtractionUsage(
+        successful_usage = ExtractionUsage(
             elapsed_ms=0,
             input_bytes=attempt.extraction_request.input_binding.input_bytes,
             output_bytes=len(raw_bytes),
             proposal_count=1,
             evidence_range_count=1,
+        )
+        usage = (
+            ExtractionUsage(
+                elapsed_ms=attempt.extraction_request.budget.timeout_ms + 1,
+                input_bytes=attempt.extraction_request.input_binding.input_bytes,
+                output_bytes=0,
+                proposal_count=0,
+                evidence_range_count=0,
+            )
+            if late_timeout
+            else successful_usage
         )
         metadata = ExtractionRunMetadata(
             run_id=attempt.extraction_request.run_id,
@@ -196,15 +213,23 @@ def _governed_dependencies(
             version_number=attempt.extraction_request.version_number,
             contract_id=attempt.extraction_request.contract_id,
             input_binding_digest=attempt.extraction_request.input_binding.digest,
-            outcome=ExtractionOutcome.SUCCESS,
-            failure_code=ExtractionFailureCode.NONE,
+            outcome=(
+                ExtractionOutcome.RETRYABLE_FAILURE
+                if late_timeout
+                else ExtractionOutcome.SUCCESS
+            ),
+            failure_code=(
+                ExtractionFailureCode.EXECUTION_TIMEOUT
+                if late_timeout
+                else ExtractionFailureCode.NONE
+            ),
             started_at=recorded_at,
             ended_at=recorded_at,
             recorded_at=recorded_at,
             usage=usage,
-            output=output,
-            proposal_count=1,
-            terminal=True,
+            output=None if late_timeout else output,
+            proposal_count=0 if late_timeout else 1,
+            terminal=not late_timeout,
         )
         record = GraphitiAttemptRecord(
             attempt_id=attempt.attempt_id,
@@ -216,18 +241,30 @@ def _governed_dependencies(
             configuration_digest=attempt.configuration.canonical_digest,
             workspace_id=attempt.workspace_id,
             manifest_id=attempt.manifest.manifest_id,
-            outcome=GraphitiAdapterOutcome.COMPLETE,
-            failure_code="NONE",
+            outcome=(
+                GraphitiAdapterOutcome.TIMEOUT
+                if late_timeout
+                else GraphitiAdapterOutcome.COMPLETE
+            ),
+            failure_code=(
+                ExtractionFailureCode.EXECUTION_TIMEOUT.value
+                if late_timeout
+                else ExtractionFailureCode.NONE.value
+            ),
             started_at=recorded_at,
             ended_at=recorded_at,
             usage=usage,
-            output_id=output_id,
-            proposal_set_id=proposal_set_id,
+            output_id=None if late_timeout else output_id,
+            proposal_set_id=None if late_timeout else proposal_set_id,
             cleanup_receipt=GraphitiCleanupReceipt(
                 receipt_id=attempt.cleanup_receipt_id,
                 workspace_id=attempt.workspace_id,
                 final_state=GraphitiWorkspaceState.CLEANED,
-                reason=GraphitiCleanupReason.NORMAL,
+                reason=(
+                    GraphitiCleanupReason.TIMEOUT
+                    if late_timeout
+                    else GraphitiCleanupReason.NORMAL
+                ),
                 private_node_count=1,
                 private_relation_count=0,
                 file_count=0,
@@ -237,11 +274,12 @@ def _governed_dependencies(
             ),
             authority_event_id=EventId.new(),
             recorded_at=recorded_at,
+            attempt_receipt=raw if late_timeout else None,
         )
         retained.update(
             raw=ExtractionRawOutput(view=output, canonical_bytes=raw_bytes),
             metadata=metadata,
-            proposals=(envelope,),
+            proposals=() if late_timeout else (envelope,),
         )
         return record
 
@@ -256,7 +294,7 @@ def _governed_dependencies(
         replay_source=lambda *_args: None,
     )
     extraction = GovernedExtractionRecords(
-        register_contract=lambda *_args: None,
+        register_contract=register_contract,
         execute=lambda *_args: None,
         contract=lambda *_args: None,
         metadata=lambda *_args: retained["metadata"],
@@ -290,7 +328,7 @@ def test_governed_runner_uses_exact_4d_and_4a_authority(monkeypatch) -> None:
     )._ingest(_unit(), deadline=deadline, invocation_observer=observer)
 
     raw = retained["raw"]
-    assert calls == ["register", "execute"]
+    assert calls == ["register_contract", "register", "execute"]
     assert result.receipt_digest == result.raw_receipt["raw_output_digest"]
     assert canonical_json_bytes(result.raw_receipt) == raw.canonical_bytes
     assert result.proposals == tuple(result.raw_receipt["proposals"])
@@ -326,7 +364,7 @@ def test_governed_runner_types_authority_refusal_before_provider_execution() -> 
         )
 
     assert raised.value.stage == "ADAPTER_EXECUTION"
-    assert calls == ["register"]
+    assert calls == ["register_contract", "register"]
 
 
 @pytest.mark.parametrize("bounded_call", ["deadline", "fallback"])
@@ -370,3 +408,27 @@ def test_governed_runner_rejects_raw_proposals_that_differ_from_authority() -> N
             invocation_observer=object(),
         )
     assert raised.value.stage == "CYCLE_RESULT_CONSTRUCTION"
+
+
+def test_governed_runner_keeps_late_receipt_proposals_outside_authority() -> None:
+    adapter, extraction, proof, _calls, retained = _governed_dependencies(
+        late_timeout=True
+    )
+
+    result = EvaluationGraphitiRunner(
+        proposal_adapter=adapter,
+        extraction_records=extraction,
+        proof=proof,
+        fallback_permitted=False,
+    )._ingest(
+        _unit(),
+        deadline=datetime(2026, 8, 20, 0, 1, tzinfo=UTC),
+        invocation_observer=object(),
+    )
+
+    assert result.outcome == GraphitiAdapterOutcome.TIMEOUT.value
+    assert result.proposals == ()
+    assert result.proposal_count == 0
+    assert result.raw_receipt is not None
+    assert len(result.raw_receipt["proposals"]) == 1
+    assert retained["proposals"] == ()

@@ -308,6 +308,52 @@ class _GraphitiAdapterCommitMixin:
             raise AuthorityPersistenceError(
                 "adapter execution differs from authorised attempt"
             )
+        receipt = execution.produced.attempt_receipt_value
+        if attempt.extraction_contract.producer_kind == "GRAPHITI_EVALUATION":
+            receipt = execution.produced.raw_output_value or receipt
+            if not isinstance(receipt, dict):
+                raise AuthorityPersistenceError(
+                    "Graphiti execution lacks exact terminal raw receipt"
+                )
+            unsigned_receipt = dict(receipt)
+            receipt_digest = unsigned_receipt.pop("raw_output_digest", None)
+            if receipt_digest != digest_bytes(canonical_json_bytes(unsigned_receipt)):
+                raise AuthorityPersistenceError("Graphiti terminal receipt digest differs")
+            expected_receipt_binding = {
+                "workspace_group": attempt.configuration.workspace_policy.namespace_prefix,
+                "generation_id": attempt.generation_id,
+                "episode_uuid": attempt.episode_uuid,
+                "attempt_number": attempt.attempt_number,
+                "predecessor_episode_uuid": attempt.predecessor_episode_uuid,
+                "temporal_basis": attempt.temporal_basis,
+                "reference_time": (
+                    None
+                    if attempt.reference_time is None
+                    else attempt.reference_time.to_text()
+                ),
+                "passages": [
+                    item.canonical_value() for item in attempt.manifest.passages
+                ],
+            }
+            if any(
+                receipt.get(key) != value
+                for key, value in expected_receipt_binding.items()
+            ):
+                raise AuthorityPersistenceError(
+                    "Graphiti terminal receipt differs from attempt authority"
+                )
+            receipt_proposals = receipt.get("proposals")
+            if not isinstance(receipt_proposals, list) or (
+                execution.produced.raw_output_value is not None
+                and receipt_proposals
+                != [
+                    item.canonical_value()
+                    for item in execution.produced.proposals
+                ]
+            ):
+                raise AuthorityPersistenceError(
+                    "Graphiti terminal receipt proposal evidence differs"
+                )
         if execution.cleanup_receipt.recorded_at != execution.ended_at:
             raise AuthorityPersistenceError(
                 "adapter cleanup chronology differs from execution"
@@ -588,6 +634,20 @@ class _GraphitiAdapterCommitMixin:
                 recorded_at.to_text(),
             ),
         )
+        if receipt is not None and execution.produced.raw_output_value is None:
+            receipt_bytes = canonical_json_bytes(receipt)
+            conn.execute(
+                "INSERT INTO graphiti_attempt_receipts("
+                "attempt_id,run_version_id,canonical_bytes,canonical_digest,retained_at) "
+                "VALUES(?,?,?,?,?)",
+                (
+                    str(attempt.attempt_id),
+                    str(result.request.run_version_id),
+                    receipt_bytes,
+                    digest_bytes(receipt_bytes),
+                    recorded_at.to_text(),
+                ),
+            )
         if attempt.replay_source is not None:
             retained_source_row = conn.execute(
                 "SELECT * FROM graphiti_replay_sources WHERE replay_source_id=?",
