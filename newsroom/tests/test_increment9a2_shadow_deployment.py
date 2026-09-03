@@ -9,7 +9,6 @@ from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
-from newsroom.authority import migrations as production_migrations
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.increment9.deployment import (
     ACTUAL_HOST_PROBES,
@@ -60,6 +59,7 @@ from newsroom.increment9.shadow_contracts import (
     ShadowScope,
     StopAndClosurePolicy,
 )
+from newsroom.tests.authority_migration_compatibility import build_exact_prefix
 
 D = lambda character: "sha256:" + character * 64
 
@@ -319,13 +319,7 @@ def test_sqlite_backup_restore_uses_exact_schema_identity() -> None:
 
 def _production_snapshot(tmp_path):
     path = tmp_path / "frozen-production-v32.sqlite3"
-    connection = sqlite3.connect(path, isolation_level=None)
-    try:
-        production_migrations.apply_pending_migrations(
-            connection, applied_at="2042-01-01T00:00:00.000000Z"
-        )
-    finally:
-        connection.close()
+    build_exact_prefix(path, 32)
     path.chmod(0o600)
     return path, digest_bytes(path.read_bytes())
 
