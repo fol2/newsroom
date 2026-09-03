@@ -1005,6 +1005,18 @@ def _late_bound_complete_model_usage_evidence(
         if retained_row
         else "actual_gbp_microunits"
     ]
+    source_provider_usage = _json_object(
+        row["source_provider_usage_json" if retained_row else "provider_usage_json"],
+        field=f"late-bound source provider usage {row['spend_id']}",
+    )
+    source_dispatch_owner = row[
+        "source_dispatch_owner" if retained_row else "dispatch_owner"
+    ]
+    source_dispatch_lease = row[
+        "source_dispatch_lease_expires_at"
+        if retained_row
+        else "dispatch_lease_expires_at"
+    ]
     accounting = receipt.get("accounting")
     if (
         not isinstance(accounting, Mapping)
@@ -1018,6 +1030,10 @@ def _late_bound_complete_model_usage_evidence(
         or accounting.get("actual_gbp_microunits") is not None
         or source_actual_gbp is not None
         or accounting.get("unused_reservation_released") is not False
+        or not isinstance(source_provider_usage, Mapping)
+        or canonical_json_bytes(source_provider_usage) != canonical_json_bytes({})
+        or source_dispatch_owner is not None
+        or source_dispatch_lease is not None
     ):
         return None
     generation_id = row[

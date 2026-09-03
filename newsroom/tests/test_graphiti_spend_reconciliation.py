@@ -4303,6 +4303,99 @@ def test_late_bound_source_accounting_mismatch_remains_hold(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
+    ("provider_usage", "dispatch_owner", "lease_expires_at"),
+    (
+        (
+            {"usage_basis": "PROVIDER_PARTIALLY_UNREPORTED", "request_count": 1},
+            None,
+            None,
+        ),
+        (None, "stale-worker", "2026-09-03T12:59:00.000000Z"),
+    ),
+)
+def test_late_bound_source_state_contradiction_remains_hold(
+    tmp_path: Path,
+    provider_usage: dict[str, object] | None,
+    dispatch_owner: str | None,
+    lease_expires_at: str | None,
+) -> None:
+    path = tmp_path / "source-state-contradiction.sqlite3"
+    spend_id, journal, _, _ = _retain_late_bound_complete_proof(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE unpublished_graphiti_spend SET provider_usage_json="
+            "COALESCE(?,provider_usage_json),"
+            "dispatch_owner=?,dispatch_lease_expires_at=? WHERE spend_id=?",
+            (
+                None
+                if provider_usage is None
+                else canonical_json_bytes(provider_usage).decode(),
+                dispatch_owner,
+                lease_expires_at,
+                spend_id,
+            ),
+        )
+
+    plan = plan_graphiti_spend_reconciliation(
+        str(path),
+        evaluated_at=datetime(2026, 9, 3, 13, tzinfo=UTC),
+        graph_journal_evidence={spend_id: journal},
+    )
+    assert plan.transitions[0].disposition is (
+        GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD
+    )
+    assert plan.transitions[0].unused_reservation_released is False
+
+
+def test_late_bound_nonempty_source_usage_remains_unchanged_hold(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "source-provider-usage.sqlite3"
+    spend_id, journal, _, _ = _retain_late_bound_complete_proof(path)
+    source_usage = {
+        "usage_basis": "PROVIDER_PARTIALLY_UNREPORTED",
+        "request_count": 1,
+    }
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE unpublished_graphiti_spend SET provider_usage_json=? "
+            "WHERE spend_id=?",
+            (canonical_json_bytes(source_usage).decode(), spend_id),
+        )
+
+    evaluated_at = datetime(2026, 9, 3, 13, tzinfo=UTC)
+    evidence = {spend_id: journal}
+    plan = plan_graphiti_spend_reconciliation(
+        str(path),
+        evaluated_at=evaluated_at,
+        graph_journal_evidence=evidence,
+    )
+    transition = plan.transitions[0]
+    assert transition.disposition is GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD
+    assert transition.source_provider_usage == source_usage
+    assert transition.provider_usage == source_usage
+    assert transition.unused_reservation_released is False
+
+    _command_service().reconcile_graphiti_spend(
+        unpublished_store=str(path),
+        dry_run_plan=plan.as_dict(),
+        evaluated_at=evaluated_at,
+        graph_journal_evidence=evidence,
+        idempotency_key="late-bound-nonempty-source-usage",
+        expected_plan_digest=plan.plan_digest,
+        proof=AuthenticationProof(method="STATIC_TOKEN", credential="operator-token"),
+    )
+    with sqlite3.connect(path) as connection:
+        retained = connection.execute(
+            "SELECT status,usage_basis,provider_usage_json "
+            "FROM unpublished_graphiti_spend WHERE spend_id=?",
+            (spend_id,),
+        ).fetchone()
+    assert retained[:2] == ("UNRECONCILED", "AMBIGUOUS_EFFECT_HOLD")
+    assert json.loads(retained[2]) == source_usage
+
+
+@pytest.mark.parametrize(
     "table",
     (
         "model_invocation_allocations",
