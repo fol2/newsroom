@@ -44,6 +44,7 @@ from newsroom.control_plane.evidence import EvidencePackage, package_for
 from newsroom.control_plane.graphiti import (
     EvaluationGraphitiRunner,
     GraphitiCycleResult,
+    GraphitiPreProviderAuthorizationDenied,
     GraphitiResultStageError,
 )
 from newsroom.control_plane.items import (
@@ -917,6 +918,82 @@ def test_graphiti_owner_stop_proof_reuses_the_active_rights_fence(
 
     assert report.graphiti == 1
     assert owner_stop_checks == 2
+
+
+def test_pre_provider_authority_refusal_releases_reservation_with_typed_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from newsroom.control_plane import paths as control_paths
+
+    proving = _proving(tmp_path)
+    unpublished = tmp_path / "pre-provider-authority-refusal.sqlite3"
+    monkeypatch.setattr(control_paths, "CANONICAL_PROVING_STORE", proving)
+    monkeypatch.setattr(control_paths, "CANONICAL_UNPUBLISHED_STORE", unpublished)
+
+    class AuthorityRefused:
+        requires_canonical_control_plane_stores = True
+
+        def ingest(self, _unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            raise AssertionError("governed usage path required")
+
+        def ingest_until(
+            self, _unit: CorpusIngestUnit, *, deadline: datetime
+        ) -> GraphitiCycleResult:
+            raise AssertionError(f"governed usage path required: {deadline}")
+
+        def ingest_with_usage(self, *_args: object, **_kwargs: object):
+            raise GraphitiPreProviderAuthorizationDenied(
+                "adapter command refused before provider execution"
+            )
+
+    report = run_cycle(
+        proving_store=str(proving),
+        unpublished_store=str(unpublished),
+        writer=FixtureWriter(),
+        max_writes=0,
+        graphiti=AuthorityRefused(),
+        max_graphiti=1,
+        model_usage=ModelUsageService(str(unpublished)),
+    )
+
+    connection = sqlite3.connect(unpublished)
+    spend = connection.execute(
+        "SELECT status,actual_usd_microunits,actual_gbp_microunits,"
+        "usage_basis,provider_usage_json FROM unpublished_graphiti_spend"
+    ).fetchone()
+    receipt = json.loads(
+        connection.execute(
+            "SELECT receipt_json FROM unpublished_graphiti_attempt_receipts"
+        ).fetchone()[0]
+    )
+    connection.close()
+
+    assert report.graphiti == 1
+    assert spend[:4] == (
+        "RECONCILED",
+        0,
+        0,
+        "NO_EMBEDDING_CALL",
+    )
+    assert json.loads(spend[4]) == {
+        "cost_usd_microunits": 0,
+        "embedding_tokens": 0,
+        "request_count": 0,
+        "requests": [],
+        "usage_basis": "NO_EMBEDDING_CALL",
+    }
+    assert receipt["binding_failure_type"] == (
+        "GraphitiPreProviderAuthorizationDenied"
+    )
+    assert receipt["binding_failure_stage"] == "ADAPTER_EXECUTION"
+    assert receipt["provider_dispatch_state"] == "NOT_DISPATCHED"
+    assert receipt["provider_attempt_number"] is None
+    assert receipt["chat_invocation_count"] == 0
+    assert receipt["embedding_usage"]["usage_basis"] == "NO_EMBEDDING_CALL"
+    assert receipt["token_usage"]["usage_basis"] == "NO_PROVIDER_CALL"
+    assert receipt["token_usage"]["observed_total_tokens"] == 0
+    assert receipt["accounting"]["unused_reservation_released"] is True
 
 
 def test_units_from_observations_cover_items_not_candidates() -> None:

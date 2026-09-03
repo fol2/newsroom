@@ -23,6 +23,11 @@ from newsroom.control_plane.graphiti_spend_reconciliation import (
     GraphitiSpendReconciliationPlan,
     plan_graphiti_spend_reconciliation,
 )
+from newsroom.control_plane.model_usage import (
+    ModelUsageService,
+    WorkEnvelope,
+    WorkloadClass,
+)
 from newsroom.control_plane.store import (
     append_ledger,
     claim_graphiti_attempt,
@@ -214,6 +219,37 @@ def _command_service(
             credentials={"operator-token": StaticPrincipal(principal_id=principal_id)},
             authority_domain="newsroom.control-plane",
         )
+    )
+
+
+def _retain_legacy_pre_provider_usage_proof(
+    path: Path,
+    *,
+    spend_id: str,
+    ingest_id: str,
+    outcome_record_id: str,
+) -> None:
+    usage = ModelUsageService(str(path))
+    terminal_at = datetime(2026, 9, 3, 4, 18, 7, tzinfo=UTC)
+    envelope = WorkEnvelope.create(
+        cycle_id="legacy-authorisation-refusal-event",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=terminal_at,
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id=ingest_id,
+        graphiti_attempt_id=spend_id,
+    )
+    usage.open_envelope(envelope)
+    usage.record_work_outcome(
+        envelope_id=envelope.envelope_id,
+        outcome="GRAPHITI_REJECTED_BINDING",
+        outcome_record_id=outcome_record_id,
+        payload_digest=None,
+        terminal_at=terminal_at,
+        retained_proposal_count=0,
     )
 
 
@@ -3407,6 +3443,151 @@ def test_unknown_provider_dispatch_is_not_released_by_journal_assertion(
         plan.transitions[0].disposition
         is GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD
     )
+
+
+def test_legacy_authorisation_refusal_structurally_releases_before_provider_io(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    connection = connect(str(path))
+    spend_id = _reserve(connection, ingest_id="authority-refused", attempt=1)
+    accounting = reconcile_graphiti_spend(
+        connection, spend_id=spend_id, embedding_usage=None
+    )
+    receipt_digest = insert_graphiti_attempt_receipt(
+        connection,
+        ingest_id="authority-refused",
+        attempt_number=1,
+        outcome="FAILED",
+        receipt={
+            "ingest_id": "authority-refused",
+            "attempt_number": 1,
+            "outcome": "FAILED",
+            "failure_code": "PRODUCER_INTERNAL_ERROR",
+            "binding_failure": "RESULT_CONTRACT_REJECTED",
+            "binding_failure_type": "AuthorizationDenied",
+            "binding_failure_stage": "UNCLASSIFIED_RESULT_BOUNDARY",
+            "provider_attempt_number": None,
+            "returned_raw_receipt_digest": None,
+            "returned_validated_raw_digest": None,
+            "chat_invocation_count": 0,
+            "chat_invocations_digest": None,
+            "chat_invocations": [],
+            "embedding_usage_digest": None,
+            "embedding_usage": None,
+            "token_usage": None,
+            "accounting": accounting,
+        },
+    )
+    connection.commit()
+    connection.close()
+    _retain_legacy_pre_provider_usage_proof(
+        path,
+        spend_id=spend_id,
+        ingest_id="authority-refused",
+        outcome_record_id=receipt_digest,
+    )
+
+    evaluated_at = datetime(2026, 9, 3, tzinfo=UTC)
+    plan = plan_graphiti_spend_reconciliation(str(path), evaluated_at=evaluated_at)
+
+    transition = plan.transitions[0]
+    assert transition.disposition is (
+        GraphitiSpendDisposition.RELEASED_BEFORE_PROVIDER_IO
+    )
+    assert transition.evidence_basis == "PROVIDER_DISPATCH_STRUCTURALLY_RULED_OUT"
+    assert transition.target_status == "RECONCILED"
+    assert transition.target_usage_basis == "NO_PROVIDER_IO"
+    assert transition.actual_usd_microunits == 0
+    assert transition.actual_gbp_microunits == 0
+    assert transition.unused_reservation_released is True
+    assert transition.model_usage_evidence is not None
+    assert transition.model_usage_evidence["allocation_count"] == 0
+    assert transition.model_usage_evidence["dispatch_started_count"] == 0
+
+    _command_service().reconcile_graphiti_spend(
+        unpublished_store=str(path),
+        dry_run_plan=plan.as_dict(),
+        evaluated_at=evaluated_at,
+        idempotency_key="legacy-authorisation-refusal",
+        expected_plan_digest=plan.plan_digest,
+        proof=AuthenticationProof(
+            method="STATIC_TOKEN", credential="operator-token"
+        ),
+    )
+    report = graphiti_usage_report(str(path))
+    assert report["measured_attempt_count"] == 1
+    assert report["unreported_attempt_count"] == 0
+    assert report["cost_complete"] is True
+
+
+def test_legacy_authorisation_refusal_without_exact_usage_proof_remains_hold(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    connection = connect(str(path))
+    spend_id = _reserve(connection, ingest_id="authority-refused", attempt=1)
+    accounting = reconcile_graphiti_spend(
+        connection, spend_id=spend_id, embedding_usage=None
+    )
+    receipt_digest = insert_graphiti_attempt_receipt(
+        connection,
+        ingest_id="authority-refused",
+        attempt_number=1,
+        outcome="FAILED",
+        receipt={
+            "ingest_id": "authority-refused",
+            "attempt_number": 1,
+            "outcome": "FAILED",
+            "failure_code": "PRODUCER_INTERNAL_ERROR",
+            "binding_failure": "RESULT_CONTRACT_REJECTED",
+            "binding_failure_type": "AuthorizationDenied",
+            "binding_failure_stage": "UNCLASSIFIED_RESULT_BOUNDARY",
+            "provider_attempt_number": None,
+            "returned_raw_receipt_digest": None,
+            "returned_validated_raw_digest": None,
+            "chat_invocation_count": 0,
+            "chat_invocations_digest": None,
+            "chat_invocations": [],
+            "embedding_usage_digest": None,
+            "embedding_usage": None,
+            "token_usage": None,
+            "accounting": accounting,
+        },
+    )
+    connection.commit()
+    connection.close()
+    _retain_legacy_pre_provider_usage_proof(
+        path,
+        spend_id=spend_id,
+        ingest_id="authority-refused",
+        outcome_record_id=f"different:{receipt_digest}",
+    )
+
+    evaluated_at = datetime(2026, 9, 3, tzinfo=UTC)
+    plan = plan_graphiti_spend_reconciliation(str(path), evaluated_at=evaluated_at)
+
+    transition = plan.transitions[0]
+    assert transition.disposition is GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD
+    assert transition.evidence_basis == (
+        "LEGACY_AUTHORIZATION_REFUSAL_WITHOUT_EXACT_USAGE_PROOF"
+    )
+    assert transition.model_usage_evidence is None
+
+    _command_service().reconcile_graphiti_spend(
+        unpublished_store=str(path),
+        dry_run_plan=plan.as_dict(),
+        evaluated_at=evaluated_at,
+        idempotency_key="legacy-authorisation-refusal-hold",
+        expected_plan_digest=plan.plan_digest,
+        proof=AuthenticationProof(
+            method="STATIC_TOKEN", credential="operator-token"
+        ),
+    )
+    report = graphiti_usage_report(str(path))
+    assert report["spend_disposition_counts"]["AMBIGUOUS_EFFECT_HOLD"] == 1
+    assert report["unresolved_spend_attempt_count"] == 1
+    assert report["cost_complete"] is False
 
 
 def test_usage_does_not_dedupe_unreconciled_fabricated_recovery_receipt(

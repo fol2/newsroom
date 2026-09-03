@@ -1785,6 +1785,18 @@ def _campaign() -> dict[str, object]:
     }
 
 
+def _campaign_resolved_units(campaign: Mapping[str, object]):
+    cohort = campaign["cohort"]
+    assert isinstance(cohort, Mapping)
+    events = cohort["events"]
+    assert isinstance(events, list)
+    return tuple(
+        SimpleNamespace(ingest_id=ingest_id)
+        for event in events
+        for ingest_id in event["ingest_ids"]
+    )
+
+
 @pytest.mark.parametrize(
     (
         "extra_fresh_candidate",
@@ -1831,6 +1843,7 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
     }
     calls: list[tuple[str, object]] = []
     dispatch_budgets: list[float] = []
+    corpus_loads = 0
 
     class FakeMonotonic:
         def __init__(self) -> None:
@@ -1864,6 +1877,11 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
             "resolved_units": [{"ingest_id": f"ingest-{suffix}"}],
         }
 
+    def load_corpus(**_kwargs: object):
+        nonlocal corpus_loads
+        corpus_loads += 1
+        return _campaign_resolved_units(campaign)
+
     def consume(**kwargs: object) -> GraphitiProcessResult:
         event_id = str(kwargs["event_id"])
         calls.append(("extract", event_id))
@@ -1871,6 +1889,9 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
         assert kwargs["defer_graphiti_admission"] is True
         assert kwargs["require_graphiti_admission"] is True
         assert kwargs["unit_authority_resolver"] is runtime.bind_unit_authority
+        assert [
+            unit.ingest_id for unit in kwargs["prepared_event_units"]
+        ] == [f"ingest-{event_id.removeprefix('event-')}"]
         monotonic.advance(processing_seconds)
         return GraphitiProcessResult(
             event_id,
@@ -1880,6 +1901,7 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
         )
 
     monkeypatch.setattr(worker, "qualify_fresh_graphiti_event", qualify)
+    monkeypatch.setattr(worker, "load_graphiti_units", load_corpus)
     monkeypatch.setattr(
         worker,
         "graphiti_store_snapshot_digests",
@@ -2019,6 +2041,7 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
         }
         assert monotonic.sleeps == expected_sleeps
         assert dispatch_budgets == expected_dispatch_budgets
+        assert corpus_loads == 1
         connection.close()
         return
 
@@ -2044,6 +2067,7 @@ def test_bounded_campaign_requires_exact_candidate_snapshot_before_dispatch(
     assert report["success_objectives"] == objective_evidence
     assert monotonic.sleeps == expected_sleeps
     assert dispatch_budgets == expected_dispatch_budgets
+    assert corpus_loads == 1
     assert [item["state"] for item in report["events"]] == [
         "EXTRACTION_TERMINAL_CAMPAIGN_PENDING",
         "EXTRACTION_TERMINAL_CAMPAIGN_PENDING",
@@ -2096,6 +2120,11 @@ def test_bounded_campaign_checks_owner_f4_before_graph_readback(
                 }
             ],
         },
+    )
+    monkeypatch.setattr(
+        worker,
+        "load_graphiti_units",
+        lambda **_kwargs: _campaign_resolved_units(campaign),
     )
     monkeypatch.setattr(
         worker,
@@ -2190,6 +2219,11 @@ def test_campaign_cap_stops_before_any_canonical_admission(
                 }
             ],
         },
+    )
+    monkeypatch.setattr(
+        worker,
+        "load_graphiti_units",
+        lambda **_kwargs: _campaign_resolved_units(campaign),
     )
     monkeypatch.setattr(
         worker,

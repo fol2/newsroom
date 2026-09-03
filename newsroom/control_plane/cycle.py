@@ -52,6 +52,7 @@ from newsroom.control_plane.graphiti import (
     GovernedRealGraphitiPort,
     GraphitiCycleResult,
     GraphitiPort,
+    GraphitiPreProviderAuthorizationDenied,
     GraphitiResultStageError,
 )
 from newsroom.control_plane.graphiti_events import (
@@ -806,19 +807,24 @@ def _fail(
 def _reconcile_no_embedding_spend(
     unpublished: sqlite3.Connection, *, spend_id: str
 ) -> dict[str, object]:
+    usage = _no_embedding_usage()
     accounting = reconcile_graphiti_spend(
         unpublished,
         spend_id=spend_id,
-        embedding_usage={
-            "requests": [],
-            "request_count": 0,
-            "embedding_tokens": 0,
-            "cost_usd_microunits": 0,
-            "usage_basis": "NO_EMBEDDING_CALL",
-        },
+        embedding_usage=usage,
     )
     append_ledger(unpublished, "GRAPHITI_SPEND_RECONCILE", accounting)
     return accounting
+
+
+def _no_embedding_usage() -> dict[str, object]:
+    return {
+        "requests": [],
+        "request_count": 0,
+        "embedding_tokens": 0,
+        "cost_usd_microunits": 0,
+        "usage_basis": "NO_EMBEDDING_CALL",
+    }
 
 
 def _reports_no_embedding_call(result: GraphitiCycleResult) -> bool:
@@ -1354,6 +1360,9 @@ def _ingest(
         except VetoError:
             raise
         except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as exc:
+            pre_provider_authorisation_refusal = isinstance(
+                exc, GraphitiPreProviderAuthorizationDenied
+            )
             preserve_unresolved = (
                 not reserved
                 and owner_id is not None
@@ -1390,10 +1399,17 @@ def _ingest(
                 unpublished.commit()
                 continue
             if returned_result is None:
-                accounting = reconcile_graphiti_spend(
-                    unpublished, spend_id=spend_id, embedding_usage=None
-                )
-                append_ledger(unpublished, "GRAPHITI_SPEND_RECONCILE", accounting)
+                if pre_provider_authorisation_refusal:
+                    accounting = _reconcile_no_embedding_spend(
+                        unpublished, spend_id=spend_id
+                    )
+                else:
+                    accounting = reconcile_graphiti_spend(
+                        unpublished, spend_id=spend_id, embedding_usage=None
+                    )
+                    append_ledger(
+                        unpublished, "GRAPHITI_SPEND_RECONCILE", accounting
+                    )
             else:
                 accounting = _reconcile_result_spend(
                     unpublished,
@@ -1412,6 +1428,22 @@ def _ingest(
                     outcome="FAILED",
                     failure_code="PRODUCER_INTERNAL_ERROR",
                 )
+            rejected_metadata = _rejected_result_metadata(returned_result)
+            if pre_provider_authorisation_refusal:
+                no_embedding_usage = _no_embedding_usage()
+                rejected_metadata.update(
+                    {
+                        "provider_dispatch_state": "NOT_DISPATCHED",
+                        "embedding_usage": no_embedding_usage,
+                        "embedding_usage_digest": digest_bytes(
+                            canonical_json_bytes(no_embedding_usage)
+                        ),
+                        "token_usage": summarise_graphiti_usage(
+                            chat_invocations=(),
+                            embedding_usage=no_embedding_usage,
+                        ),
+                    }
+                )
             failure_receipt = {
                 "ingest_id": unit.ingest_id,
                 "source_id": unit.source_id,
@@ -1424,10 +1456,16 @@ def _ingest(
                 "binding_failure_type": type(exc).__name__,
                 "binding_failure_stage": (
                     exc.stage
-                    if isinstance(exc, GraphitiResultStageError)
+                    if isinstance(
+                        exc,
+                        (
+                            GraphitiResultStageError,
+                            GraphitiPreProviderAuthorizationDenied,
+                        ),
+                    )
                     else result_failure_stage
                 ),
-                **_rejected_result_metadata(returned_result),
+                **rejected_metadata,
                 "provider_attempt_number": (
                     _rejected_provider_attempt_number(returned_result)
                 ),
@@ -2876,6 +2914,14 @@ def _resolve_graphiti_event_units(
         proving_store=proving_store,
         evaluated_at=evaluated_at,
     )
+    return _select_graphiti_event_units(event=event, units=units)
+
+
+def _select_graphiti_event_units(
+    *,
+    event: GraphitiRevisionEvent,
+    units: tuple[CorpusIngestUnit, ...],
+) -> tuple[CorpusIngestUnit, ...]:
     selected = tuple(
         unit
         for unit in units
@@ -2972,9 +3018,17 @@ def qualify_fresh_graphiti_event(
     event_id: str,
     ledger_seq: int,
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
+    resolved_corpus_units: tuple[CorpusIngestUnit, ...] | None = None,
 ) -> dict[str, object]:
     """Resolve current input and rights for one untouched event without writes."""
 
+    if resolved_corpus_units is not None and (
+        not isinstance(resolved_corpus_units, tuple)
+        or not all(
+            isinstance(unit, CorpusIngestUnit) for unit in resolved_corpus_units
+        )
+    ):
+        raise TypeError("resolved Graphiti corpus units must be typed")
     evaluated_at = clock().astimezone(UTC)
     unpublished = sqlite3.connect(
         f"{Path(unpublished_store).absolute().as_uri()}?mode=ro",
@@ -3046,10 +3100,17 @@ def qualify_fresh_graphiti_event(
         attempt_count=0,
         units=(),
     )
-    units = _resolve_graphiti_event_units(
-        proving_store=proving_store,
-        event=event,
-        evaluated_at=evaluated_at,
+    units = (
+        _resolve_graphiti_event_units(
+            proving_store=proving_store,
+            event=event,
+            evaluated_at=evaluated_at,
+        )
+        if resolved_corpus_units is None
+        else _select_graphiti_event_units(
+            event=event,
+            units=resolved_corpus_units,
+        )
     )
     if not units:
         raise ValueError("bounded Graphiti event canonical input is unavailable")
@@ -3240,6 +3301,7 @@ def consume_next_graphiti_event(
     canary_consumption_digest: str | None = None,
     max_dispatch_seconds: float | None = None,
     prepared_event_preflight: Mapping[str, object] | None = None,
+    prepared_event_units: tuple[CorpusIngestUnit, ...] | None = None,
     max_reserved_gbp_microunits: int | None = None,
     graphiti_admission_factory: GraphitiAdmissionFactory | None = None,
     max_graphiti_admissions: int = 100,
@@ -3273,6 +3335,8 @@ def consume_next_graphiti_event(
         unit_authority_resolver
     ):
         raise TypeError("Graphiti unit authority resolver must be callable")
+    if prepared_event_units is not None and prepared_event_preflight is None:
+        raise ValueError("prepared Graphiti units require a prepared preflight")
     if prepared_event_preflight is not None:
         if event_id is None or canary_consumption_digest is not None:
             raise ValueError("prepared Graphiti preflight requires one exact event")
@@ -3297,6 +3361,13 @@ def consume_next_graphiti_event(
             or not prepared["resolved_units"]
         ):
             raise ValueError("prepared Graphiti preflight differs")
+        if prepared_event_units is not None and (
+            not prepared_event_units
+            or not all(
+                isinstance(unit, CorpusIngestUnit) for unit in prepared_event_units
+            )
+        ):
+            raise ValueError("prepared Graphiti units differ")
 
     if isinstance(graphiti, GovernedRealGraphitiPort) and getattr(
         graphiti, "requires_canonical_control_plane_stores", True
@@ -3333,10 +3404,17 @@ def consume_next_graphiti_event(
         cached = resolved_units.get(event.event_id)
         if cached is not None:
             return cached
-        selected = _resolve_graphiti_event_units(
-            proving_store=proving_store,
-            event=event,
-            evaluated_at=clock().astimezone(UTC),
+        selected = (
+            _resolve_graphiti_event_units(
+                proving_store=proving_store,
+                event=event,
+                evaluated_at=clock().astimezone(UTC),
+            )
+            if prepared_event_units is None
+            else _select_graphiti_event_units(
+                event=event,
+                units=prepared_event_units,
+            )
         )
         resolved_units[event.event_id] = selected
         return selected

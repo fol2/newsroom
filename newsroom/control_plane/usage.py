@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import TypeGuard
 
-from newsroom.authority.canonical import canonical_json_bytes
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.graphiti_spend_reconciliation import (
     GraphitiSpendDisposition,
     _has_live_graphiti_dispatch_lease,
@@ -192,7 +192,22 @@ def _validated_receipt_token_usage(
         embedding_usage = evidence["provider_usage"]
     retained = receipt.get("token_usage")
     if not isinstance(retained, dict):
-        return None
+        if not _is_legacy_pre_provider_usage_release(
+            receipt,
+            disposition=disposition,
+            evidence=evidence,
+        ):
+            return None
+        return summarise_graphiti_usage(
+            chat_invocations=(),
+            embedding_usage={
+                "requests": [],
+                "request_count": 0,
+                "embedding_tokens": 0,
+                "cost_usd_microunits": 0,
+                "usage_basis": "NO_EMBEDDING_CALL",
+            },
+        )
     expected = summarise_graphiti_usage(
         chat_invocations=leaves,
         embedding_usage=embedding_usage,
@@ -203,6 +218,47 @@ def _validated_receipt_token_usage(
     if canonical_json_bytes(retained_for_comparison) != canonical_json_bytes(expected):
         return None
     return retained
+
+
+def _is_legacy_pre_provider_usage_release(
+    receipt: Mapping[str, object],
+    *,
+    disposition: object,
+    evidence: object,
+) -> bool:
+    if not isinstance(evidence, Mapping):
+        return False
+    model_usage = evidence.get("model_usage_evidence")
+    if not isinstance(model_usage, Mapping):
+        return False
+    unsigned = dict(model_usage)
+    supplied_digest = unsigned.pop("evidence_digest", None)
+    attempt_number = receipt.get("attempt_number")
+    ingest_id = receipt.get("ingest_id")
+    zero_fields = (
+        "allocation_count",
+        "dispatch_started_count",
+        "provider_attempt_link_count",
+        "provider_telemetry_count",
+        "graphiti_internal_request_count",
+    )
+    return (
+        disposition == GraphitiSpendDisposition.RELEASED_BEFORE_PROVIDER_IO.value
+        and evidence.get("disposition") == disposition
+        and evidence.get("evidence_basis")
+        == "PROVIDER_DISPATCH_STRUCTURALLY_RULED_OUT"
+        and model_usage.get("schema")
+        == "newsroom.graphiti-legacy-pre-provider-usage-evidence.v1"
+        and isinstance(supplied_digest, str)
+        and supplied_digest == digest_bytes(canonical_json_bytes(unsigned))
+        and isinstance(ingest_id, str)
+        and isinstance(attempt_number, int)
+        and not isinstance(attempt_number, bool)
+        and model_usage.get("spend_id") == f"{ingest_id}:{attempt_number}"
+        and model_usage.get("ingest_id") == ingest_id
+        and model_usage.get("outcome_record_id") == receipt.get("receipt_digest")
+        and all(_is_exact_zero(model_usage.get(field)) for field in zero_fields)
+    )
 
 
 def _usage_without_current_embedding(

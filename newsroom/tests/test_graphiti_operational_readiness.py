@@ -23,6 +23,7 @@ from newsroom.control_plane.graphiti_operational_readiness import (
     GraphitiOperationalReadinessError,
     OperationalAuthorityBootstrapPlan,
     _accepted_source_contract,
+    _operational_graphiti_write_scopes,
     _preflight_source_revision_semantics,
     _revision_predecessor_bindings,
     _source_contract_shape,
@@ -47,6 +48,7 @@ from newsroom.graphiti_adapter.identity import (
     observation_authority_ids,
     source_definition_version_id,
 )
+from newsroom.graphiti_adapter.policy import graphiti_adapter_command_definitions
 from newsroom.increment4 import increment4_admitted_contract_registry
 from newsroom.sources.types import (
     BaselinePolicyKind,
@@ -75,6 +77,20 @@ from .source_3a_helpers import scopes as source_scopes
 _NOW = "2026-09-02T12:00:00.000000Z"
 _REOPENED_NOW = "2026-09-02T12:05:00.000000Z"
 _PROOF = AuthenticationProof(method="STATIC_TOKEN", credential="token-1")
+
+
+def test_operational_graphiti_write_scopes_follow_canonical_commands() -> None:
+    expected = frozenset(
+        definition.required_scope
+        for definition in graphiti_adapter_command_definitions()
+    )
+
+    assert _operational_graphiti_write_scopes() == expected
+    assert expected == {
+        "authority.graphiti.configuration",
+        "authority.graphiti.execute",
+        "authority.graphiti.replay.approve",
+    }
 
 
 def _unit() -> CorpusIngestUnit:
@@ -271,7 +287,7 @@ def _open_operational_test_system(
     now: str = _NOW,
 ):
     policies = operational_policy_components()
-    scopes = source_scopes() | frozenset(
+    scopes = source_scopes() | _operational_graphiti_write_scopes() | frozenset(
         {
             "authority.objects.admit",
             "authority.objects.read",
@@ -293,9 +309,6 @@ def _open_operational_test_system(
             "authority.relation.proposal.read",
             "authority.relation.admitted.read",
             "authority.relation.projection.read",
-            "authority.graphiti.configure",
-            "authority.graphiti.execute",
-            "authority.graphiti.replay",
             "authority.graphiti.attempt.read",
             "authority.graphiti.configuration.read",
             "authority.graphiti.replay.read",
