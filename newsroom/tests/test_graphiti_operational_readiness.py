@@ -23,7 +23,10 @@ from newsroom.control_plane.graphiti_operational_readiness import (
     GraphitiOperationalReadinessError,
     OperationalAuthorityBootstrapPlan,
     _accepted_source_contract,
+    _evaluation_attempt_for_unit,
     _operational_graphiti_write_scopes,
+    _operational_generation_identity,
+    _operational_plan_semantic_digest,
     _preflight_source_revision_semantics,
     _revision_predecessor_bindings,
     _source_contract_shape,
@@ -259,13 +262,16 @@ def _rights() -> dict[str, object]:
         "gate_id": "RIGHTS_UK-01",
         "status": "PASS",
         "packet_digest": digest_canonical({"rights": "current"}),
+        "evaluated_at": _NOW,
     }
 
 
 def _plan(unit: CorpusIngestUnit) -> OperationalAuthorityBootstrapPlan:
     event = {
         "kind": "FRESH_EVENT",
+        "ledger_seq": 1,
         "event_id": digest_canonical({"event": "current"}),
+        "manifest_digest": digest_canonical({"manifest": "current"}),
         "ingest_ids": [unit.ingest_id],
     }
     return OperationalAuthorityBootstrapPlan(
@@ -863,12 +869,16 @@ def test_bootstrap_orders_multiple_revisions_and_resumes_after_first_revision(
         candidate_events=(
             {
                 "kind": "FRESH_EVENT",
+                "ledger_seq": 1,
                 "event_id": digest_canonical({"event": "first"}),
+                "manifest_digest": digest_canonical({"manifest": "first"}),
                 "ingest_ids": [first.ingest_id],
             },
             {
                 "kind": "FRESH_EVENT",
+                "ledger_seq": 2,
                 "event_id": digest_canonical({"event": "second"}),
+                "manifest_digest": digest_canonical({"manifest": "second"}),
                 "ingest_ids": [second.ingest_id],
             },
         ),
@@ -1060,3 +1070,167 @@ def test_sealed_campaign_reopens_authority_and_runtime_after_process_exit(
 
 def _utc_text(value: datetime) -> str:
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def test_operational_generation_identity_resumes_across_observation_times(
+    tmp_path: Path,
+) -> None:
+    unit = _unit()
+    plan = _plan(unit)
+    adapter = MemoryNeo4jAdapter()
+    system = _open_operational_test_system(tmp_path, adapter)
+    try:
+        bootstrap, _binder = bootstrap_operational_authority(
+            system, proof=_PROOF, plan=plan
+        )
+        first = build_and_reconcile_operational_generation(
+            system,
+            proof=_PROOF,
+            plan=plan,
+            bootstrap=bootstrap,
+        )
+
+        later_plan = replace(
+            plan,
+            observed_at=UtcTimestamp.parse(_REOPENED_NOW),
+            rights_by_source=(
+                (
+                    unit.source_id,
+                    {**_rights(), "evaluated_at": _REOPENED_NOW},
+                ),
+            ),
+            cohort_digest=digest_canonical({"cohort": "same-state-later"}),
+            plan_digest=digest_canonical({"plan": "same-state-later"}),
+        )
+        later_bootstrap = replace(
+            bootstrap,
+            observed_at=later_plan.observed_at,
+            cohort_digest=later_plan.cohort_digest,
+            plan_digest=later_plan.plan_digest,
+            bound_units=(
+                replace(bootstrap.bound_units[0], observed_at=_REOPENED_NOW),
+            ),
+        )
+        resumed = build_and_reconcile_operational_generation(
+            system,
+            proof=_PROOF,
+            plan=later_plan,
+            bootstrap=later_bootstrap,
+        )
+
+        configuration = _evaluation_attempt_for_unit(
+            bootstrap.bound_units[0]
+        ).configuration.canonical_value()
+        stable_id, stable_semantic_digest = _operational_generation_identity(
+            graph_destination_id=system.graph_destination_id,
+            plan_semantic_digest=bootstrap.plan_semantic_digest,
+            bootstrap=bootstrap,
+            configuration=configuration,
+        )
+        assert resumed.generation_id == first.generation_id == stable_id
+        assert _operational_generation_identity(
+            graph_destination_id=system.graph_destination_id,
+            plan_semantic_digest=later_bootstrap.plan_semantic_digest,
+            bootstrap=later_bootstrap,
+            configuration=configuration,
+        ) == (stable_id, stable_semantic_digest)
+
+        with pytest.raises(
+            GraphitiOperationalReadinessError,
+            match="build plan differs from its exact bound cohort",
+        ):
+            build_and_reconcile_operational_generation(
+                system,
+                proof=_PROOF,
+                plan=replace(
+                    later_plan,
+                    candidate_events=(
+                        {
+                            **later_plan.candidate_events[0],
+                            "ingest_ids": [
+                                digest_canonical({"ingest": "other"})
+                            ],
+                        },
+                    ),
+                ),
+                bootstrap=later_bootstrap,
+            )
+
+        changed_event_plan = replace(
+            later_plan,
+            candidate_events=(
+                {
+                    **later_plan.candidate_events[0],
+                    "event_id": digest_canonical({"event": "changed"}),
+                },
+            ),
+        )
+        with pytest.raises(
+            GraphitiOperationalReadinessError,
+            match="build plan semantics differ from its bootstrap",
+        ):
+            build_and_reconcile_operational_generation(
+                system,
+                proof=_PROOF,
+                plan=changed_event_plan,
+                bootstrap=later_bootstrap,
+            )
+        assert _operational_generation_identity(
+            graph_destination_id=system.graph_destination_id,
+            plan_semantic_digest=_operational_plan_semantic_digest(
+                candidate_events=changed_event_plan.candidate_events,
+                rights_by_source=changed_event_plan.rights_by_source,
+                revision_predecessors=changed_event_plan.revision_predecessors,
+            ),
+            bootstrap=bootstrap,
+            configuration=configuration,
+        )[0] != stable_id
+        assert _operational_generation_identity(
+            graph_destination_id=system.graph_destination_id,
+            plan_semantic_digest=bootstrap.plan_semantic_digest,
+            bootstrap=replace(
+                bootstrap,
+                bound_units=(_next_revision(bootstrap.bound_units[0]),),
+            ),
+            configuration=configuration,
+        )[0] != stable_id
+        assert _operational_generation_identity(
+            graph_destination_id=system.graph_destination_id,
+            plan_semantic_digest=bootstrap.plan_semantic_digest,
+            bootstrap=bootstrap,
+            configuration={**configuration, "runtime_mode": "APPROVED_REPLAY"},
+        )[0] != stable_id
+        changed_rights_plan = replace(
+            later_plan,
+            rights_by_source=(
+                (
+                    unit.source_id,
+                    {
+                        **_rights(),
+                        "packet_digest": digest_canonical({"rights": "changed"}),
+                    },
+                ),
+            ),
+        )
+        with pytest.raises(
+            GraphitiOperationalReadinessError,
+            match="build plan semantics differ from its bootstrap",
+        ):
+            build_and_reconcile_operational_generation(
+                system,
+                proof=_PROOF,
+                plan=changed_rights_plan,
+                bootstrap=later_bootstrap,
+            )
+        assert _operational_generation_identity(
+            graph_destination_id=system.graph_destination_id,
+            plan_semantic_digest=_operational_plan_semantic_digest(
+                candidate_events=changed_rights_plan.candidate_events,
+                rights_by_source=changed_rights_plan.rights_by_source,
+                revision_predecessors=changed_rights_plan.revision_predecessors,
+            ),
+            bootstrap=bootstrap,
+            configuration=configuration,
+        )[0] != stable_id
+    finally:
+        system.close()

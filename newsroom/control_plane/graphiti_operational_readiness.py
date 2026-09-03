@@ -81,6 +81,7 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     OPENROUTER_EMBEDDING_SLUG,
 )
 from newsroom.graphiti_adapter.identity import MAX_EPISODE_BYTES, typed_id
+from newsroom.graphiti_adapter.models import GraphitiAttemptRequest
 from newsroom.graphiti_adapter.policy import graphiti_adapter_command_definitions
 from newsroom.increment4 import increment4_admitted_contract_registry
 from newsroom.increment4.contracts import INCREMENT4_ADMITTED_FAMILY_ID
@@ -402,11 +403,58 @@ class OperationalAuthorityBootstrapPlan:
         return None if prior is None else SourceRevisionId.parse(prior)
 
 
+def _operational_plan_semantic_digest(
+    *,
+    candidate_events: tuple[Mapping[str, object], ...],
+    rights_by_source: tuple[tuple[str, Mapping[str, object]], ...],
+    revision_predecessors: tuple[tuple[str, str | None], ...],
+) -> str:
+    """Bind the durable plan semantics while excluding observation metadata."""
+
+    events = sorted(
+        (
+            {
+                "ledger_seq": event["ledger_seq"],
+                "event_id": event["event_id"],
+                "manifest_digest": event["manifest_digest"],
+                "ingest_ids": list(event["ingest_ids"]),
+            }
+            for event in candidate_events
+        ),
+        key=lambda event: (int(event["ledger_seq"]), str(event["event_id"])),
+    )
+    return digest_canonical(
+        {
+            "schema_version": "newsroom.graphiti-operational-plan-semantics.v1",
+            "candidate_events": events,
+            "rights": [
+                {
+                    "source_id": source_id,
+                    **{
+                        key: value
+                        for key, value in rights.items()
+                        if key != "evaluated_at"
+                    },
+                }
+                for source_id, rights in sorted(rights_by_source)
+            ],
+            "revision_predecessors": [
+                {
+                    "revision_id": revision_id,
+                    "prior_revision_id": prior_revision_id,
+                }
+                for revision_id, prior_revision_id in sorted(revision_predecessors)
+            ],
+        }
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class OperationalAuthorityBootstrapResult:
     observed_at: UtcTimestamp
     plan_digest: str
     cohort_digest: str
+    plan_semantic_digest: str
     candidate_event_count: int
     source_count: int
     unit_count: int
@@ -419,12 +467,98 @@ class OperationalAuthorityBootstrapResult:
             "observed_at": self.observed_at.to_text(),
             "plan_digest": self.plan_digest,
             "cohort_digest": self.cohort_digest,
+            "plan_semantic_digest": self.plan_semantic_digest,
             "candidate_event_count": self.candidate_event_count,
             "source_count": self.source_count,
             "unit_count": self.unit_count,
             "bound_ingest_ids": [item.ingest_id for item in self.bound_units],
             "provider_calls": self.provider_calls,
         }
+
+
+def _evaluation_attempt_for_unit(unit: CorpusIngestUnit) -> GraphitiAttemptRequest:
+    authority = unit.authority
+    if authority is None:
+        raise GraphitiOperationalReadinessError(
+            "current corpus unit lacks its retained source identity"
+        )
+    return evaluation_attempt_for_body(
+        episode_body=unit.episode_body,
+        ingest_id=unit.ingest_id,
+        proving_run_id=unit.proving_run_id,
+        source_id=unit.source_id,
+        item_key=unit.item_key,
+        observation_digest=unit.observation_digest,
+        published_at=unit.published_at,
+        updated_at=unit.updated_at,
+        effective_revision=unit.effective_revision,
+        canonical_url=unit.canonical_url,
+        revision_digest=unit.revision_digest,
+        representation_digest=unit.representation_digest,
+        authority_ids=(
+            authority.admission_id,
+            authority.access_decision_id,
+            authority.definition_id,
+            authority.definition_version_id,
+            authority.item_id,
+            authority.revision_id,
+            authority.representation_id,
+        ),
+        attempt_number=unit.attempt_number,
+        predecessor_episode_uuid=unit.predecessor_ingest_id,
+    )
+
+
+def _operational_generation_identity(
+    *,
+    graph_destination_id: str,
+    plan_semantic_digest: str,
+    bootstrap: OperationalAuthorityBootstrapResult,
+    configuration: Mapping[str, object],
+) -> tuple[ProjectionGenerationId, str]:
+    """Derive one resumable generation from durable semantic inputs only."""
+
+    bound_units: list[dict[str, object]] = []
+    for unit in sorted(bootstrap.bound_units, key=lambda item: item.ingest_id):
+        authority = unit.authority
+        if authority is None:
+            raise GraphitiOperationalReadinessError(
+                "current corpus unit lacks its retained source identity"
+            )
+        bound_units.append(
+            {
+                "ingest_id": unit.ingest_id,
+                "authority_ids": [
+                    authority.admission_id,
+                    authority.access_decision_id,
+                    authority.definition_id,
+                    authority.definition_version_id,
+                    authority.item_id,
+                    authority.revision_id,
+                    authority.representation_id,
+                ],
+            }
+        )
+    semantic_digest = digest_canonical(
+        {
+            "schema_version": "newsroom.graphiti-operational-generation-identity.v1",
+            "plan_semantic_digest": plan_semantic_digest,
+            "bound_units": bound_units,
+            "configuration": {
+                "configuration_id": configuration["configuration_id"],
+                "canonical_digest": digest_canonical(dict(configuration)),
+            },
+        }
+    )
+    generation_id = typed_id(
+        ProjectionGenerationId,
+        "canonical-operational-increment4-v2",
+        str(CANONICAL_INCREMENT4_AUTHORITY_STORE),
+        INCREMENT4_ADMITTED_FAMILY_ID,
+        graph_destination_id,
+        semantic_digest,
+    )
+    return generation_id, semantic_digest
 
 
 def _utc_text(value: datetime) -> str:
@@ -1081,34 +1215,7 @@ def bootstrap_operational_authority(
     )
     binder.commit_sources()
     bound_units = tuple(binder(unit) for unit in plan.units)
-    attempts = tuple(
-        evaluation_attempt_for_body(
-            episode_body=unit.episode_body,
-            ingest_id=unit.ingest_id,
-            proving_run_id=unit.proving_run_id,
-            source_id=unit.source_id,
-            item_key=unit.item_key,
-            observation_digest=unit.observation_digest,
-            published_at=unit.published_at,
-            updated_at=unit.updated_at,
-            effective_revision=unit.effective_revision,
-            canonical_url=unit.canonical_url,
-            revision_digest=unit.revision_digest,
-            representation_digest=unit.representation_digest,
-            authority_ids=(
-                unit.authority.admission_id,
-                unit.authority.access_decision_id,
-                unit.authority.definition_id,
-                unit.authority.definition_version_id,
-                unit.authority.item_id,
-                unit.authority.revision_id,
-                unit.authority.representation_id,
-            ),
-            attempt_number=unit.attempt_number,
-            predecessor_episode_uuid=unit.predecessor_ingest_id,
-        )
-        for unit in bound_units
-    )
+    attempts = tuple(_evaluation_attempt_for_unit(unit) for unit in bound_units)
     contract = attempts[0].extraction_contract
     configuration = attempts[0].configuration
     if any(
@@ -1126,6 +1233,11 @@ def bootstrap_operational_authority(
             observed_at=plan.observed_at,
             plan_digest=plan.plan_digest,
             cohort_digest=plan.cohort_digest,
+            plan_semantic_digest=_operational_plan_semantic_digest(
+                candidate_events=plan.candidate_events,
+                rights_by_source=plan.rights_by_source,
+                revision_predecessors=plan.revision_predecessors,
+            ),
             candidate_event_count=len(plan.candidate_events),
             source_count=len(plan.rights_by_source),
             unit_count=len(plan.units),
@@ -1144,18 +1256,55 @@ def build_and_reconcile_operational_generation(
 ) -> StructuralReconciliationView:
     """Build or idempotently recheck one complete current Increment 4 view."""
 
-    generation_id = typed_id(
-        ProjectionGenerationId,
-        "canonical-operational-increment4",
-        str(CANONICAL_INCREMENT4_AUTHORITY_STORE),
-        plan.cohort_digest,
-        digest_canonical(bootstrap.canonical_value()),
+    candidate_ingest_ids = tuple(
+        str(ingest_id)
+        for event in plan.candidate_events
+        for ingest_id in event.get("ingest_ids", ())
+    )
+    bound_ingest_ids = tuple(unit.ingest_id for unit in bootstrap.bound_units)
+    if (
+        not candidate_ingest_ids
+        or len(candidate_ingest_ids) != len(set(candidate_ingest_ids))
+        or candidate_ingest_ids != bound_ingest_ids
+    ):
+        raise GraphitiOperationalReadinessError(
+            "operational build plan differs from its exact bound cohort"
+        )
+    plan_semantic_digest = _operational_plan_semantic_digest(
+        candidate_events=plan.candidate_events,
+        rights_by_source=plan.rights_by_source,
+        revision_predecessors=plan.revision_predecessors,
+    )
+    if plan_semantic_digest != bootstrap.plan_semantic_digest:
+        raise GraphitiOperationalReadinessError(
+            "operational build plan semantics differ from its bootstrap"
+        )
+    attempts = tuple(
+        _evaluation_attempt_for_unit(unit) for unit in bootstrap.bound_units
+    )
+    if not attempts:
+        raise GraphitiOperationalReadinessError(
+            "operational generation requires at least one bound unit"
+        )
+    configuration = attempts[0].configuration.canonical_value()
+    if any(
+        attempt.configuration.canonical_value() != configuration
+        for attempt in attempts[1:]
+    ):
+        raise GraphitiOperationalReadinessError(
+            "operational cohort does not share exact Graphiti evaluation authority"
+        )
+    generation_id, semantic_digest = _operational_generation_identity(
+        graph_destination_id=authority_system.graph_destination_id,
+        plan_semantic_digest=plan_semantic_digest,
+        bootstrap=bootstrap,
+        configuration=configuration,
     )
     result = authority_system.increment4.build_current_and_promote(
         Increment4Neo4jCurrentBuildRequest(
             generation_id=generation_id,
             reason_code="ISSUE_895_CURRENT_ADMITTED",
-            idempotency_key=f"issue895-current-admitted:{plan.cohort_digest}",
+            idempotency_key=f"issue895-current-admitted:{semantic_digest}",
             purge_retired_generation=False,
         ),
         proof=proof,
