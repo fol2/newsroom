@@ -600,8 +600,16 @@ def _bind_result(
                 raise ValueError(
                     "retained Graphiti access decision does not bind this revision"
                 )
-    if tuple(cast(tuple[object, ...], raw.get("proposals", ()))) != result.proposals:
-        raise ValueError("graphiti proposal receipt differs from bound raw receipt")
+    raw_proposals = raw.get("proposals")
+    if not isinstance(raw_proposals, list) or any(
+        not isinstance(item, dict) for item in raw_proposals
+    ):
+        raise ValueError("graphiti raw proposals must be exact objects")
+    if result.outcome in {"COMPLETE", "PARTIAL"}:
+        if tuple(raw_proposals) != result.proposals:
+            raise ValueError("graphiti proposal receipt differs from bound raw receipt")
+    elif result.proposals and tuple(raw_proposals) != result.proposals:
+        raise ValueError("non-admissible Graphiti proposal evidence differs")
     if result.proposal_count != len(result.proposals):
         raise ValueError("graphiti proposal count differs from retained proposals")
     if (
@@ -614,7 +622,7 @@ def _bind_result(
         or raw.get("token_usage") != result.token_usage
         or raw.get("entity_count") != result.entity_count
         or raw.get("relation_count") != result.relation_count
-        or raw.get("proposal_count") != result.proposal_count
+        or raw.get("proposal_count") != len(raw_proposals)
         or raw.get("chat_invocation_count") != len(result.chat_invocations)
     ):
         raise ValueError("graphiti result fields differ from bound raw receipt")

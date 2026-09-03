@@ -132,6 +132,10 @@ class _GraphitiAdapterBoundary:
                     response_tokens=execution.produced.usage.response_tokens,
                     cost_microunits=execution.produced.usage.cost_microunits,
                 ),
+                attempt_receipt_value=(
+                    execution.produced.raw_output_value
+                    or execution.produced.attempt_receipt_value
+                ),
             )
             cleanup = replace(
                 execution.cleanup_receipt,

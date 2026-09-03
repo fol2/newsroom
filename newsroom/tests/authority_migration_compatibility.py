@@ -20,9 +20,14 @@ from newsroom.authority.canonical import digest_canonical
 
 RETAINED_MIN_VERSION = 13
 CURRENT_VERSION = authority_migrations.SCHEMA_VERSION
-PREDECESSOR_VERSION = CURRENT_VERSION - 1
+CENTRAL_SCHEMA_VERSIONS = tuple(
+    int(record.version) for record in authority_migrations.MIGRATIONS
+)
+PREDECESSOR_VERSION = CENTRAL_SCHEMA_VERSIONS[-2]
 NEWER_VERSION = CURRENT_VERSION + 1
-RETAINED_VERSIONS = tuple(range(RETAINED_MIN_VERSION, CURRENT_VERSION + 1))
+RETAINED_VERSIONS = tuple(
+    version for version in CENTRAL_SCHEMA_VERSIONS if version >= RETAINED_MIN_VERSION
+)
 UPGRADE_PREDECESSOR_VERSIONS = RETAINED_VERSIONS[:-1]
 BACKUP_PREDECESSOR_VERSIONS = tuple(
     version
@@ -208,6 +213,11 @@ PINNED_MIGRATION_HISTORY: tuple[HistoryRow, ...] = (
         "increment8_recovery_authority_v32",
         "sha256:513d983ce8f21f576c08b6a99337f3164025b73e588867d8dde4d500805f79ee",
     ),
+    (
+        34,
+        "graphiti_evaluation_extraction_authority_v34",
+        "sha256:ff4d4c7fdb3d9ebe8354002fe0c71739edd549f46f685782821038ab535f350f",
+    ),
 )
 
 
@@ -309,9 +319,9 @@ def _checked_registry() -> tuple[MigrationLike, ...]:
             "EXPECTED_MIGRATION_HISTORY differs from independent literal release pins"
         )
     versions = tuple(record[0] for record in record_history)
-    if versions != tuple(range(1, authority_migrations.SCHEMA_VERSION + 1)):
+    if versions != (*range(1, 33), 34):
         raise MigrationCompatibilityError(
-            "authority migration registry is not complete and consecutive"
+            "authority migration registry differs from the central release sequence"
         )
     names = tuple(record[1] for record in record_history)
     if len(names) != len(set(names)):

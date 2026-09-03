@@ -6639,6 +6639,41 @@ def test_result_binding_rejects_generation_and_receipt_digest_drift() -> None:
         )
 
 
+def test_result_binding_retains_late_raw_proposals_without_governing_them() -> None:
+    observation = GroupedObservation(
+        "UK-01",
+        "sha256:late-observation",
+        SourceItem("UK-01", "late-item", "Headline", "Body", "https://late-item"),
+        "2026-08-20T00:00:00.000000Z",
+    )
+    unit = units_from(
+        (observation,),
+        proving_run_id="run-1",
+        rights_authority_run_id="run-2",
+        rights_gate_reason="current PASS",
+        source_definition_url="https://source/feed",
+        effective_revision_resolver=_effective_revision_resolver((observation,)),
+    )[0]
+    complete = _complete(unit)
+    assert complete.raw_receipt is not None
+    assert complete.raw_receipt["proposal_count"] == 1
+
+    late = replace(
+        complete,
+        outcome="TIMEOUT",
+        failure_code="EXECUTION_TIMEOUT",
+        proposal_count=0,
+        proposals=(),
+    )
+
+    assert _bind_result(unit, late) == late
+    with pytest.raises(ValueError, match="non-admissible"):
+        _bind_result(
+            unit,
+            replace(late, proposals=({**complete.proposals[0], "local_id": "other"},)),
+        )
+
+
 def test_result_binding_accepts_retained_original_access_after_renewal(
     tmp_path: Path,
 ) -> None:

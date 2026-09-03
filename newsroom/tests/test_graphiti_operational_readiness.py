@@ -296,6 +296,7 @@ def _open_operational_test_system(
             "authority.observed.write",
             "authority.admitted.write",
             "authority.extraction.execute",
+            "authority.extraction.manage",
             "authority.extraction.metadata.read",
             "authority.extraction.proposal.read",
             "authority.extraction.raw.read",
@@ -793,6 +794,13 @@ def test_bootstrap_uses_real_source_and_object_authority_and_replays(
             connection.execute("SELECT COUNT(*) FROM object_admissions").fetchone()[0]
             == 1
         )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM extractor_contracts WHERE producer_kind='GRAPHITI_EVALUATION'"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM graphiti_adapter_configurations "
+            "WHERE runtime_mode='REAL_GRAPHITI' AND execution_profile='EVALUATION'"
+        ).fetchone()[0] == 1
     assert before == after
     assert after[1] == 1
 

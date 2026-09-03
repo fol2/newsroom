@@ -861,7 +861,7 @@ def _recovered_immutable_complete_without_journal(
     )
 
 
-def _legacy_authorisation_refusal_receipt(
+def _legacy_unreported_binding_failure_receipt(
     receipt: Mapping[str, object] | None,
 ) -> bool:
     if receipt is None:
@@ -871,9 +871,6 @@ def _legacy_authorisation_refusal_receipt(
         receipt.get("outcome") == "FAILED"
         and receipt.get("failure_code") == "PRODUCER_INTERNAL_ERROR"
         and receipt.get("binding_failure") == "RESULT_CONTRACT_REJECTED"
-        and receipt.get("binding_failure_type") == "AuthorizationDenied"
-        and receipt.get("binding_failure_stage")
-        == "UNCLASSIFIED_RESULT_BOUNDARY"
         and receipt.get("provider_attempt_number") is None
         and receipt.get("returned_raw_receipt_digest") is None
         and receipt.get("returned_validated_raw_digest") is None
@@ -889,6 +886,30 @@ def _legacy_authorisation_refusal_receipt(
         and accounting.get("actual_usd_microunits") is None
         and accounting.get("actual_gbp_microunits") is None
         and accounting.get("unused_reservation_released") is False
+    )
+
+
+def _legacy_authorisation_refusal_receipt(
+    receipt: Mapping[str, object] | None,
+) -> bool:
+    return bool(
+        _legacy_unreported_binding_failure_receipt(receipt)
+        and receipt is not None
+        and receipt.get("binding_failure_type") == "AuthorizationDenied"
+        and receipt.get("binding_failure_stage")
+        == "UNCLASSIFIED_RESULT_BOUNDARY"
+    )
+
+
+def _legacy_extraction_state_error_receipt(
+    receipt: Mapping[str, object] | None,
+) -> bool:
+    return bool(
+        _legacy_unreported_binding_failure_receipt(receipt)
+        and receipt is not None
+        and receipt.get("binding_failure_type") == "ExtractionStateError"
+        and receipt.get("binding_failure_stage")
+        == "UNCLASSIFIED_RESULT_BOUNDARY"
     )
 
 
@@ -920,9 +941,12 @@ def _legacy_pre_provider_model_usage_evidence(
     ingest_id: str,
     receipt: Mapping[str, object] | None,
 ) -> dict[str, object] | None:
-    """Bind one legacy refusal to the durable zero-dispatch usage authority."""
+    """Bind one recognised binding failure to durable zero-dispatch authority."""
 
-    if not _legacy_authorisation_refusal_receipt(receipt):
+    extraction_state_error = _legacy_extraction_state_error_receipt(receipt)
+    if not (
+        _legacy_authorisation_refusal_receipt(receipt) or extraction_state_error
+    ):
         return None
     accounting = receipt.get("accounting") if receipt is not None else None
     if not isinstance(accounting, Mapping) or accounting.get("spend_id") != spend_id:
@@ -1039,6 +1063,19 @@ def _legacy_pre_provider_model_usage_evidence(
             (cycle_id,),
         ).fetchone()[0]
     )
+    transport_observation_count = (
+        int(
+            connection.execute(
+                "SELECT COUNT(*) FROM model_transport_observations o "
+                "JOIN model_invocation_allocations a USING(invocation_id) "
+                "JOIN model_work_envelopes e USING(envelope_id) "
+                "WHERE e.cycle_id=?",
+                (cycle_id,),
+            ).fetchone()[0]
+        )
+        if extraction_state_error
+        else 0
+    )
     provider_attempt_link_count = int(
         connection.execute(
             "SELECT COUNT(*) FROM model_invocation_provider_attempt_links p "
@@ -1065,6 +1102,7 @@ def _legacy_pre_provider_model_usage_evidence(
         (
             allocation_count,
             dispatch_started_count,
+            transport_observation_count,
             provider_attempt_link_count,
             provider_telemetry_count,
             graphiti_internal_request_count,
@@ -1086,6 +1124,10 @@ def _legacy_pre_provider_model_usage_evidence(
         "provider_telemetry_count": provider_telemetry_count,
         "graphiti_internal_request_count": graphiti_internal_request_count,
     }
+    if extraction_state_error:
+        unsigned_evidence["transport_observation_count"] = (
+            transport_observation_count
+        )
     return {
         **unsigned_evidence,
         "evidence_digest": digest_canonical(unsigned_evidence),
@@ -1520,6 +1562,12 @@ def _validate_retained_dispositions(connection: sqlite3.Connection) -> None:
             )
         model_usage_evidence = evidence.get(_MODEL_USAGE_EVIDENCE_FIELD)
         legacy_authorisation_refusal = _legacy_authorisation_refusal_receipt(receipt)
+        legacy_extraction_state_error = _legacy_extraction_state_error_receipt(
+            receipt
+        )
+        legacy_unreported_binding_failure = (
+            _legacy_unreported_binding_failure_receipt(receipt)
+        )
         if legacy_authorisation_refusal:
             retained_release = (
                 evidence.get("disposition")
@@ -1547,6 +1595,53 @@ def _validate_retained_dispositions(connection: sqlite3.Connection) -> None:
             ) is not None:
                 raise GraphitiSpendReconciliationError(
                     f"retained disposition {spend_id} legacy hold differs"
+                )
+        elif legacy_extraction_state_error:
+            retained_release = (
+                evidence.get("disposition")
+                == GraphitiSpendDisposition.RELEASED_BEFORE_PROVIDER_IO.value
+                and evidence.get("evidence_basis")
+                == "PROVIDER_DISPATCH_STRUCTURALLY_RULED_OUT"
+                and model_usage_evidence is not None
+            )
+            retained_hold = (
+                evidence.get("disposition")
+                == GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD.value
+                and evidence.get("evidence_basis")
+                == "EXTRACTION_STATE_ERROR_WITHOUT_EXACT_USAGE_PROOF"
+                and model_usage_evidence is None
+            )
+            if not retained_release and not retained_hold:
+                raise GraphitiSpendReconciliationError(
+                    f"retained disposition {spend_id} extraction failure differs"
+                )
+            if retained_hold and _legacy_pre_provider_model_usage_evidence(
+                connection,
+                spend_id=spend_id,
+                ingest_id=str(row["ingest_id"]),
+                receipt=receipt,
+            ) is not None:
+                raise GraphitiSpendReconciliationError(
+                    f"retained disposition {spend_id} extraction hold differs"
+                )
+        elif legacy_unreported_binding_failure:
+            retained_typed_hold = (
+                evidence.get("disposition")
+                == GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD.value
+                and evidence.get("evidence_basis")
+                == "UNSUPPORTED_BINDING_FAILURE_TYPE_HOLD"
+                and model_usage_evidence is None
+            )
+            retained_preclassification_hold = (
+                evidence.get("disposition")
+                == GraphitiSpendDisposition.UNRECONCILED_REPORTED_MISSING.value
+                and evidence.get("evidence_basis")
+                == "TERMINAL_ATTEMPT_WITHOUT_PROVIDER_NATIVE_USAGE"
+                and model_usage_evidence is None
+            )
+            if not retained_typed_hold and not retained_preclassification_hold:
+                raise GraphitiSpendReconciliationError(
+                    f"retained disposition {spend_id} binding failure differs"
                 )
         if model_usage_evidence is not None:
             expected_model_usage_evidence = (
@@ -1851,6 +1946,12 @@ def _plan_from_connection(
         journal = journals.get(spend_id, {})
         _validate_journal_evidence(row, journal, receipt)
         legacy_authorisation_refusal = _legacy_authorisation_refusal_receipt(receipt)
+        legacy_extraction_state_error = _legacy_extraction_state_error_receipt(
+            receipt
+        )
+        legacy_unreported_binding_failure = (
+            _legacy_unreported_binding_failure_receipt(receipt)
+        )
         legacy_model_usage_evidence = _legacy_pre_provider_model_usage_evidence(
             connection,
             spend_id=spend_id,
@@ -2015,6 +2116,32 @@ def _plan_from_connection(
                     evidence_basis=(
                         "LEGACY_AUTHORIZATION_REFUSAL_WITHOUT_EXACT_USAGE_PROOF"
                     ),
+                    journal=journal,
+                    receipt=receipt,
+                    provider_usage=provider_usage,
+                )
+            )
+            continue
+        if legacy_extraction_state_error:
+            transitions.append(
+                _transition(
+                    row,
+                    disposition=GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD,
+                    evidence_basis=(
+                        "EXTRACTION_STATE_ERROR_WITHOUT_EXACT_USAGE_PROOF"
+                    ),
+                    journal=journal,
+                    receipt=receipt,
+                    provider_usage=provider_usage,
+                )
+            )
+            continue
+        if legacy_unreported_binding_failure:
+            transitions.append(
+                _transition(
+                    row,
+                    disposition=GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD,
+                    evidence_basis="UNSUPPORTED_BINDING_FAILURE_TYPE_HOLD",
                     journal=journal,
                     receipt=receipt,
                     provider_usage=provider_usage,

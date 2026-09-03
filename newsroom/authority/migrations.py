@@ -195,6 +195,17 @@ from .graphiti_adapter_migrations import (
     GRAPHITI_ADAPTER_MIGRATION_STATEMENTS,
     GRAPHITI_ADAPTER_SCHEMA_VERSION,
 )
+from .graphiti_evaluation_migrations import (
+    GRAPHITI_EVALUATION_MIGRATION,
+    GRAPHITI_EVALUATION_MIGRATION_CHECKSUM,
+    GRAPHITI_EVALUATION_MIGRATION_NAME,
+    GRAPHITI_EVALUATION_MIGRATION_STATEMENTS,
+    GRAPHITI_EVALUATION_SCHEMA_VERSION,
+    GraphitiEvaluationBackupReceipt,
+    graphiti_evaluation_backup_paths,
+    prepare_graphiti_evaluation_backup,
+    require_graphiti_evaluation_backup,
+)
 from .integrated_migrations import (
     INTEGRATED_FOUNDATION_MIGRATION,
     INTEGRATED_FOUNDATION_MIGRATION_CHECKSUM,
@@ -290,7 +301,7 @@ from .triage_work_item_migrations import (
 )
 
 BASE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = INCREMENT8_RECOVERY_SCHEMA_VERSION
+SCHEMA_VERSION = GRAPHITI_EVALUATION_SCHEMA_VERSION
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 
@@ -746,11 +757,12 @@ def prepare_pending_migration_backup(
     | Increment8EvaluationBackupReceipt
     | Increment8OperationalBackupReceipt
     | Increment8RecoveryBackupReceipt
+    | GraphitiEvaluationBackupReceipt
     | None
 ):
     """Prepare the exact retained backup required by a checked predecessor."""
     version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    if version not in {16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31}:
+    if version not in {16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32}:
         return None
     database_path = next(
         str(row[2])
@@ -806,8 +818,11 @@ def prepare_pending_migration_backup(
     if version == 30:
         backup_path, _ = increment8_operational_backup_paths(database_path)
         return prepare_increment8_operational_backup(conn, backup_path)
-    backup_path, _ = increment8_recovery_backup_paths(database_path)
-    return prepare_increment8_recovery_backup(conn, backup_path)
+    if version == 31:
+        backup_path, _ = increment8_recovery_backup_paths(database_path)
+        return prepare_increment8_recovery_backup(conn, backup_path)
+    backup_path, _ = graphiti_evaluation_backup_paths(database_path)
+    return prepare_graphiti_evaluation_backup(conn, backup_path)
 
 
 def apply_migration(
@@ -1536,6 +1551,28 @@ def apply_pending_migrations(conn: sqlite3.Connection, *, applied_at: str) -> No
                  INCREMENT8_RECOVERY_MIGRATION_CHECKSUM, applied_at),
             )
             current = INCREMENT8_RECOVERY_SCHEMA_VERSION
+        if current == INCREMENT8_RECOVERY_SCHEMA_VERSION:
+            if starting_version != 0:
+                conn.execute(f"PRAGMA user_version={INCREMENT8_RECOVERY_SCHEMA_VERSION}")
+                conn.execute("COMMIT")
+                database_path = next(str(row[2]) for row in conn.execute("PRAGMA database_list") if row[1] == "main")
+                if not database_path:
+                    raise sqlite3.DatabaseError("existing v32 upgrade requires a file-backed database")
+                backup_path, _ = graphiti_evaluation_backup_paths(database_path)
+                prepare_graphiti_evaluation_backup(conn, backup_path)
+                conn.execute("BEGIN EXCLUSIVE")
+                require_graphiti_evaluation_backup(
+                    conn, expected_history=tuple((r.version, r.name, r.checksum) for r in MIGRATIONS
+                                                 if r.version <= INCREMENT8_RECOVERY_SCHEMA_VERSION),
+                )
+            for statement in GRAPHITI_EVALUATION_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO authority_migrations(version,name,checksum,applied_at) VALUES(?,?,?,?)",
+                (GRAPHITI_EVALUATION_SCHEMA_VERSION, GRAPHITI_EVALUATION_MIGRATION_NAME,
+                 GRAPHITI_EVALUATION_MIGRATION_CHECKSUM, applied_at),
+            )
+            current = GRAPHITI_EVALUATION_SCHEMA_VERSION
         # fmt: on
         conn.execute(f"PRAGMA user_version={current}")
         conn.execute("COMMIT")
@@ -1578,6 +1615,7 @@ MIGRATIONS: tuple[MigrationRecord | object, ...] = (
     INCREMENT8_EVALUATION_MIGRATION,
     INCREMENT8_OPERATIONAL_MIGRATION,
     INCREMENT8_RECOVERY_MIGRATION,
+    GRAPHITI_EVALUATION_MIGRATION,
 )
 
 
@@ -1744,6 +1782,11 @@ EXPECTED_MIGRATION_HISTORY: tuple[tuple[int, str, str], ...] = (
         INCREMENT8_RECOVERY_SCHEMA_VERSION,
         INCREMENT8_RECOVERY_MIGRATION_NAME,
         INCREMENT8_RECOVERY_MIGRATION_CHECKSUM,
+    ),
+    (
+        GRAPHITI_EVALUATION_SCHEMA_VERSION,
+        GRAPHITI_EVALUATION_MIGRATION_NAME,
+        GRAPHITI_EVALUATION_MIGRATION_CHECKSUM,
     ),
 )
 # fmt: on

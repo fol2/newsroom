@@ -1064,6 +1064,10 @@ class EvaluationGraphitiRunner:
                     GRAPHITI_RESULT_STAGE_ADAPTER_EXECUTION
                 )
             try:
+                self._extraction_records.register_contract(
+                    attempt.extraction_contract,
+                    proof=self._proof,
+                )
                 self._proposal_adapter.register_configuration(
                     attempt.configuration,
                     proof=self._proof,
@@ -1231,18 +1235,19 @@ class EvaluationGraphitiRunner:
             or retained_attempt.manifest_id != attempt.manifest.manifest_id
         ):
             raise ValueError("governed Graphiti attempt differs from its request")
-        if retained_attempt.output_id is None:
-            raise ValueError("governed Graphiti attempt has no retained raw output")
-
         assert self._extraction_records is not None
         assert self._proof is not None
         metadata = self._extraction_records.metadata(
             retained_attempt.run_version_id,
             proof=self._proof,
         )
-        raw_output = self._extraction_records.raw_output(
-            retained_attempt.output_id,
-            proof=self._proof,
+        raw_output = (
+            None
+            if retained_attempt.output_id is None
+            else self._extraction_records.raw_output(
+                retained_attempt.output_id,
+                proof=self._proof,
+            )
         )
         proposals = self._extraction_records.proposals(
             retained_attempt.run_version_id,
@@ -1267,7 +1272,7 @@ class EvaluationGraphitiRunner:
         if (
             metadata.run_id != retained_attempt.run_id
             or metadata.run_version_id != retained_attempt.run_version_id
-            or metadata.output != raw_output.view
+            or metadata.output != (None if raw_output is None else raw_output.view)
             or metadata.outcome is not extraction_outcome
             or metadata.failure_code.value != retained_attempt.failure_code
             or metadata.usage != retained_attempt.usage
@@ -1283,11 +1288,16 @@ class EvaluationGraphitiRunner:
         ):
             raise ValueError("governed proposal lineage differs from the attempt")
 
-        decoded = json.loads(raw_output.canonical_bytes)
-        if not isinstance(decoded, dict):
-            raise TypeError("governed Graphiti raw output must be an object")
-        if canonical_json_bytes(decoded) != raw_output.canonical_bytes:
-            raise ValueError("governed Graphiti raw output is not canonical")
+        if raw_output is None:
+            decoded = retained_attempt.attempt_receipt
+            if decoded is None:
+                raise ValueError("governed Graphiti attempt has no terminal receipt")
+        else:
+            decoded = json.loads(raw_output.canonical_bytes)
+            if not isinstance(decoded, dict):
+                raise TypeError("governed Graphiti raw output must be an object")
+            if canonical_json_bytes(decoded) != raw_output.canonical_bytes:
+                raise ValueError("governed Graphiti raw output is not canonical")
         expected_receipt_binding = {
             "workspace_group": GRAPHITI_WORKSPACE_GROUP,
             "generation_id": attempt.generation_id,
@@ -1333,9 +1343,18 @@ class EvaluationGraphitiRunner:
             ).canonical_value()
             for item in proposals
         )
-        if tuple(proposal_values) != retained_drafts:
+        proposal_bearing_outcome = retained_attempt.outcome in {
+            GraphitiAdapterOutcome.COMPLETE,
+            GraphitiAdapterOutcome.PARTIAL,
+        }
+        if proposal_bearing_outcome:
+            if tuple(proposal_values) != retained_drafts:
+                raise ValueError(
+                    "governed raw proposals differ from ProposalEnvelope authority"
+                )
+        elif retained_drafts:
             raise ValueError(
-                "governed raw proposals differ from ProposalEnvelope authority"
+                "non-admissible Graphiti outcome retained ProposalEnvelope authority"
             )
 
         relations = decoded.get("relations")
@@ -1367,7 +1386,7 @@ class EvaluationGraphitiRunner:
             episode_uuid=str(decoded.get("episode_uuid") or ""),
             entities=tuple(entities),
             relations=tuple(relations),
-            proposals=tuple(proposal_values),
+            proposals=retained_drafts,
             passages=tuple(passages) if isinstance(passages, list) else (),
             chat_invocations=(
                 tuple(invocations) if isinstance(invocations, list) else ()
