@@ -681,43 +681,59 @@ def _validate_schema_prefix(
     ):
         errors.append("newsroom.authority.migrations: accepted history prefix differs")
     suffix = history[len(accepted) :] if isinstance(history, tuple) else ()
+    live_version = _authority_migrations.SCHEMA_VERSION
+    expected_versions = (
+        tuple(
+            version
+            for version in range(contract.accepted_schema_version + 1, live_version + 1)
+            if version
+            not in _authority_migrations.ISOLATED_SCHEMA_VERSION_RESERVATIONS
+        )
+        if isinstance(live_version, int) and not isinstance(live_version, bool)
+        else ()
+    )
+    actual_versions: list[int] = []
     expected_names = {
         item.migration_version: item.migration_name
         for item in contract.allocations
         if item.migration_version is not None
     }
-    for index, entry in enumerate(suffix, start=contract.accepted_schema_version + 1):
+    for entry in suffix:
         if not isinstance(entry, tuple) or len(entry) != 3:
             errors.append("newsroom.authority.migrations: suffix entry is malformed")
             continue
         version, name, checksum = entry
-        if version != index:
-            errors.append("newsroom.authority.migrations: suffix is not contiguous")
-        expected_name = expected_names.get(index)
+        if isinstance(version, bool) or not isinstance(version, int):
+            errors.append("newsroom.authority.migrations: suffix version is malformed")
+            continue
+        actual_versions.append(version)
+        expected_name = expected_names.get(version)
         if expected_name is not None and name != expected_name:
             errors.append(
-                f"newsroom.authority.migrations: reserved v{index} name differs"
+                f"newsroom.authority.migrations: reserved v{version} name differs"
             )
         try:
             validate_sha256_digest(checksum, field="migration checksum")
         except (TypeError, ValueError):
             errors.append(
-                f"newsroom.authority.migrations: v{index} checksum is malformed"
+                f"newsroom.authority.migrations: v{version} checksum is malformed"
             )
+    if tuple(actual_versions) != expected_versions:
+        errors.append("newsroom.authority.migrations: central suffix versions differ")
     if (
-        isinstance(_authority_migrations.SCHEMA_VERSION, bool)
-        or not isinstance(_authority_migrations.SCHEMA_VERSION, int)
-        or _authority_migrations.SCHEMA_VERSION < contract.accepted_schema_version
+        isinstance(live_version, bool)
+        or not isinstance(live_version, int)
+        or live_version < contract.accepted_schema_version
     ):
         errors.append("newsroom.authority.migrations: schema version regressed")
     elif (
         isinstance(history, tuple)
         and history
-        and history[-1][0] != _authority_migrations.SCHEMA_VERSION
+        and history[-1][0] != live_version
     ):
         errors.append("newsroom.authority.migrations: live history/version differ")
     if (
-        _authority_migrations.SCHEMA_VERSION == contract.accepted_schema_version
+        live_version == contract.accepted_schema_version
         and _authority_migrations.EXPECTED_SCHEMA_FINGERPRINT
         != contract.accepted_schema_fingerprint
     ):

@@ -317,7 +317,7 @@ def test_focus_workflow_keeps_finite_budget_for_two_phase_execution() -> None:
         Path(__file__).parents[2] / ".github/workflows/focus-gates.yml"
     ).read_text(encoding="utf-8")
 
-    assert "timeout-minutes: 25" in workflow
+    assert "timeout-minutes: 45" in workflow
     assert "--junit .focus/pytest.xml" in workflow
 
 

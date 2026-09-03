@@ -677,13 +677,25 @@ def _validate_schema_prefix(
     ):
         errors.append("newsroom.authority.migrations: accepted history prefix differs")
     suffix = history[len(accepted) :] if isinstance(history, tuple) else ()
+    live_version = getattr(_authority_migrations, "SCHEMA_VERSION", None)
+    expected_versions = (
+        tuple(
+            version
+            for version in range(contract.accepted_schema_version + 1, live_version + 1)
+            if version
+            not in _authority_migrations.ISOLATED_SCHEMA_VERSION_RESERVATIONS
+        )
+        if isinstance(live_version, int) and not isinstance(live_version, bool)
+        else ()
+    )
+    actual_versions: list[int] = []
     expected_names = {
         item.migration_version: item.migration_name
         for item in contract.allocations
         if item.migration_version is not None
     }
     final_allocated_version = max(expected_names, default=contract.accepted_schema_version)
-    for index, entry in enumerate(suffix, start=contract.accepted_schema_version + 1):
+    for entry in suffix:
         if not isinstance(entry, tuple) or len(entry) != 3:
             errors.append("newsroom.authority.migrations: suffix entry is malformed")
             continue
@@ -691,25 +703,27 @@ def _validate_schema_prefix(
         if (
             isinstance(version, bool)
             or not isinstance(version, int)
-            or version != index
         ):
-            errors.append("newsroom.authority.migrations: suffix is not contiguous")
-        expected_name = expected_names.get(index)
-        if expected_name is None and index <= final_allocated_version:
+            errors.append("newsroom.authority.migrations: suffix version is malformed")
+            continue
+        actual_versions.append(version)
+        expected_name = expected_names.get(version)
+        if expected_name is None and version <= final_allocated_version:
             errors.append(
-                f"newsroom.authority.migrations: v{index} is outside 7R allocation"
+                f"newsroom.authority.migrations: v{version} is outside 7R allocation"
             )
         elif expected_name is not None and name != expected_name:
             errors.append(
-                f"newsroom.authority.migrations: reserved v{index} name differs"
+                f"newsroom.authority.migrations: reserved v{version} name differs"
             )
         try:
             validate_sha256_digest(checksum, field="migration checksum")
         except (TypeError, ValueError):
             errors.append(
-                f"newsroom.authority.migrations: v{index} checksum is malformed"
+                f"newsroom.authority.migrations: v{version} checksum is malformed"
             )
-    live_version = getattr(_authority_migrations, "SCHEMA_VERSION", None)
+    if tuple(actual_versions) != expected_versions:
+        errors.append("newsroom.authority.migrations: central suffix versions differ")
     if (
         isinstance(live_version, bool)
         or not isinstance(live_version, int)

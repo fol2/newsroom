@@ -302,6 +302,7 @@ from .triage_work_item_migrations import (
 
 BASE_SCHEMA_VERSION = 1
 SCHEMA_VERSION = GRAPHITI_EVALUATION_SCHEMA_VERSION
+ISOLATED_SCHEMA_VERSION_RESERVATIONS = frozenset({33})
 MIGRATION_NAME = "authority_event_foundation_v1"
 
 

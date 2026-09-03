@@ -315,6 +315,7 @@ def test_inherited_symbol_shape_drift_fails_closed(
 def test_accepted_v16_history_is_a_prefix_not_a_future_migration_freeze(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    current_history = authority_migrations.EXPECTED_MIGRATION_HISTORY
     future_history = INCREMENT_6_READINESS.accepted_migration_history + (
         (17, "evaluation_handoff_authority_v17", "sha256:" + "f" * 64),
     )
@@ -340,7 +341,20 @@ def test_accepted_v16_history_is_a_prefix_not_a_future_migration_freeze(
         + ((18, "wrong_and_skipped_v17", "not-a-digest"),),
     )
     errors = validate_interface_inventory(INCREMENT_6_READINESS)
-    assert any("contiguous" in error for error in errors)
+    assert any("central suffix versions differ" in error for error in errors)
+
+    monkeypatch.setattr(authority_migrations, "SCHEMA_VERSION", 34)
+    monkeypatch.setattr(
+        authority_migrations,
+        "EXPECTED_MIGRATION_HISTORY",
+        (
+            *current_history[:-1],
+            (33, "unexpected_isolated_v33", "sha256:" + "f" * 64),
+            current_history[-1],
+        ),
+    )
+    errors = validate_interface_inventory(INCREMENT_6_READINESS)
+    assert any("central suffix versions differ" in error for error in errors)
 
 
 def test_6r_preserves_the_accepted_history_and_validates_the_live_schema() -> None:
