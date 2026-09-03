@@ -412,6 +412,9 @@ def test_v22_to_v23_preserves_retained_relationship_before_lineage_use(
     from newsroom.authority.increment8_recovery_migrations import (
         increment8_recovery_backup_paths,
     )
+    from newsroom.authority.graphiti_evaluation_migrations import (
+        graphiti_evaluation_backup_paths,
+    )
     from newsroom.authority.local_watch_migrations import local_watch_backup_paths
     from newsroom.authority.planned_agenda_migrations import (
         planned_agenda_backup_paths,
@@ -432,6 +435,8 @@ def test_v22_to_v23_preserves_retained_relationship_before_lineage_use(
     for path in increment8_operational_backup_paths(seed[1]):
         path.unlink(missing_ok=True)
     for path in increment8_recovery_backup_paths(seed[1]):
+        path.unlink(missing_ok=True)
+    for path in graphiti_evaluation_backup_paths(seed[1]):
         path.unlink(missing_ok=True)
     assert prepare_pending_migration_backup(connection) is not None
     apply_pending_migrations(connection, applied_at="2042-01-03T00:00:00.000000Z")

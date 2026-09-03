@@ -63,10 +63,18 @@ def test_v31_to_v32_requires_exact_backup_and_preserves_prefix(tmp_path) -> None
     receipt = migrations.prepare_pending_migration_backup(connection)
     assert receipt is not None
     migrations.apply_pending_migrations(connection, applied_at=_AT)
-    assert connection.execute("PRAGMA user_version").fetchone() == (32,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (
+        migrations.SCHEMA_VERSION,
+    )
     assert connection.execute(
-        "SELECT version,name FROM authority_migrations ORDER BY version DESC LIMIT 1"
+        "SELECT version,name FROM authority_migrations WHERE version=32"
     ).fetchone() == (32, "increment8_recovery_authority_v32")
+    assert tuple(
+        connection.execute(
+            "SELECT version,name,checksum FROM authority_migrations "
+            "WHERE version <= 32 ORDER BY version"
+        )
+    ) == migrations.EXPECTED_MIGRATION_HISTORY[:32]
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     connection.close()
 

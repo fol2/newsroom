@@ -271,7 +271,9 @@ def test_reserved_additive_schema_suffix_is_checked(
     )
     monkeypatch.setattr(authority_migrations, "SCHEMA_VERSION", 27)
     findings = validate_interface_inventory(INCREMENT_7_READINESS)
-    assert "newsroom.authority.migrations: suffix is not contiguous" in findings
+    assert (
+        "newsroom.authority.migrations: central suffix versions differ" in findings
+    )
 
     monkeypatch.setattr(
         authority_migrations,
