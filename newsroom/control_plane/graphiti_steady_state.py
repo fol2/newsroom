@@ -376,6 +376,18 @@ def graphiti_graph_destination_readback(
     }
 
 
+def graphiti_graph_destination_identity(
+    readback: Mapping[str, object],
+) -> dict[str, object]:
+    """Return durable graph identity without its observation timestamp."""
+
+    identity = dict(readback)
+    if "serving_time" not in identity:
+        raise ValueError("graph readback serving-time observation is missing")
+    del identity["serving_time"]
+    return identity
+
+
 def _authority_snapshot_evidence(
     connection: sqlite3.Connection,
 ) -> tuple[dict[str, object], list[str]]:
