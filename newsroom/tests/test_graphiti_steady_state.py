@@ -1857,6 +1857,252 @@ def test_bootstrap_overcount_narrows_to_selected_cohort_after_retry_held_exclusi
     assert validate_graphiti_campaign_packet(packet) == packet["bounded_campaign"]
 
 
+def _retry_held_overcount_packet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    selected_event_count: int,
+    campaign_event_count: int,
+    mutate_campaign: object = None,
+) -> tuple[dict[str, object], dict[str, object]]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    proving, unpublished, connection = _stores(tmp_path)
+    units = []
+    for seq in range(1, selected_event_count + 1):
+        item_key = f"candidate-{seq}"
+        ingest_id = f"{item_key}-ingest"
+        _nonterminal_obligation(
+            connection,
+            ledger_seq=seq,
+            item_key=item_key,
+            ingest_id=ingest_id,
+        )
+        units.append(_current_unit(item_key=item_key, ingest_id=ingest_id))
+    held_seq = selected_event_count + 1
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=held_seq,
+        item_key="retry-held",
+        ingest_id="retry-held-ingest",
+    )
+    held_event_id = "sha256:" + f"{held_seq:064x}"
+    connection.execute(
+        "UPDATE unpublished_graphiti_revision_events SET state='RETRY_HELD',"
+        "attempt_count=1 WHERE ledger_seq=?",
+        (held_seq,),
+    )
+    connection.execute(
+        "CREATE TABLE issue_790_graphiti_retry_exclusions(event_id TEXT PRIMARY KEY)"
+    )
+    connection.execute(
+        "INSERT INTO issue_790_graphiti_retry_exclusions(event_id) VALUES(?)",
+        (held_event_id,),
+    )
+    connection.commit()
+    connection.close()
+    _seed_proving_accountability(proving)
+    authority = _authority_store(tmp_path)
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti_steady_state."
+        "load_graphiti_units_from_connection",
+        lambda _connection, *, evaluated_at: tuple(units),
+    )
+    preparation = _packet(proving, unpublished, authority_store=authority)
+    campaign = build_operational_campaign_input(
+        head_sha="head",
+        tree_sha="tree",
+        focus_manifest_digest="sha256:" + "f" * 64,
+        graph_destination_id=GRAPH_DESTINATION_ID,
+        candidate_event_count=campaign_event_count,
+        recovery_identity="sha256:" + "a" * 64,
+    )
+    if mutate_campaign is not None:
+        mutate_campaign(campaign)
+    packet = _packet(
+        proving,
+        unpublished,
+        authority_store=authority,
+        campaign_input=campaign,
+        graph_destination_reconciliation=_graph_destination_reconciliation(
+            preparation
+        ),
+        governed_runtime=_governed_runtime(preparation),
+    )
+    return packet, campaign
+
+
+def test_narrowing_preserves_stricter_intermediate_checkpoint_and_later_phase_conditions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extra_entry = "PHASE_SPECIFIC_CHECKPOINT"
+
+    def mutate(campaign: dict[str, object]) -> None:
+        campaign["ramp"] = {
+            "phases": [
+                {
+                    "phase_id": "phase-1",
+                    "event_limit": 1,
+                    "entry_conditions": [
+                        "EXACT_SNAPSHOT_AND_IDENTITY_RECONFIRMED",
+                        "OWNER_F4_GO_RETAINED",
+                    ],
+                    "advance_conditions": [
+                        "ALL_EXACT_RECEIPTS_RECONCILED",
+                        "CAPS_AND_ACCOUNTING_RECONCILED",
+                        "NO_STOP_CONDITION_OBSERVED",
+                    ],
+                },
+                {
+                    "phase_id": "phase-2",
+                    "event_limit": 2,
+                    "entry_conditions": [
+                        "EXACT_SNAPSHOT_AND_IDENTITY_RECONFIRMED",
+                        "OWNER_F4_GO_RETAINED",
+                    ],
+                    "advance_conditions": [
+                        "ALL_EXACT_RECEIPTS_RECONCILED",
+                        "CAPS_AND_ACCOUNTING_RECONCILED",
+                        "NO_STOP_CONDITION_OBSERVED",
+                    ],
+                },
+                {
+                    "phase_id": "phase-3",
+                    "event_limit": 20,
+                    "entry_conditions": [
+                        "EXACT_SNAPSHOT_AND_IDENTITY_RECONFIRMED",
+                        "OWNER_F4_GO_RETAINED",
+                        extra_entry,
+                    ],
+                    "advance_conditions": [
+                        "ALL_EXACT_RECEIPTS_RECONCILED",
+                        "CAPS_AND_ACCOUNTING_RECONCILED",
+                        "NO_STOP_CONDITION_OBSERVED",
+                    ],
+                },
+            ]
+        }
+
+    packet, campaign = _retry_held_overcount_packet(
+        tmp_path,
+        monkeypatch,
+        selected_event_count=15,
+        campaign_event_count=20,
+        mutate_campaign=mutate,
+    )
+    phases = packet["bounded_campaign"]["ramp"]["phases"]
+    limits = [phase["event_limit"] for phase in phases]
+
+    assert packet["verdict"] == "READY_FOR_OWNER_DECISION"
+    assert packet["blockers"] == []
+    assert limits == [1, 2, 15]
+    assert extra_entry in phases[-1]["entry_conditions"]
+    assert campaign["ramp"]["phases"][1]["event_limit"] == 2
+    assert campaign["ramp"]["phases"][-1]["event_limit"] == 20
+    assert campaign["caps"]["total"]["events"] == 20
+    assert validate_graphiti_campaign_packet(packet) == packet["bounded_campaign"]
+
+
+def test_narrowing_preserves_default_213_to_212_ramp_checkpoints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    packet, campaign = _retry_held_overcount_packet(
+        tmp_path,
+        monkeypatch,
+        selected_event_count=212,
+        campaign_event_count=213,
+    )
+    limits = [
+        phase["event_limit"]
+        for phase in packet["bounded_campaign"]["ramp"]["phases"]
+    ]
+
+    assert packet["verdict"] == "READY_FOR_OWNER_DECISION"
+    assert packet["blockers"] == []
+    assert [
+        phase["event_limit"] for phase in campaign["ramp"]["phases"]
+    ] == [1, 10, 213]
+    assert limits == [1, 10, 212]
+    assert campaign["caps"]["total"]["events"] == 213
+    assert packet["bounded_campaign"]["caps"]["total"]["events"] == 212
+    assert validate_graphiti_campaign_packet(packet) == packet["bounded_campaign"]
+
+
+def test_narrowing_one_event_collapse_retains_later_phase_conditions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extra_advance = "PHASE_SPECIFIC_ADVANCE"
+
+    def mutate(campaign: dict[str, object]) -> None:
+        campaign["ramp"]["phases"][-1]["advance_conditions"] = sorted(
+            [
+                "ALL_EXACT_RECEIPTS_RECONCILED",
+                "CAPS_AND_ACCOUNTING_RECONCILED",
+                extra_advance,
+                "NO_STOP_CONDITION_OBSERVED",
+            ]
+        )
+
+    packet, campaign = _retry_held_overcount_packet(
+        tmp_path,
+        monkeypatch,
+        selected_event_count=1,
+        campaign_event_count=2,
+        mutate_campaign=mutate,
+    )
+    phases = packet["bounded_campaign"]["ramp"]["phases"]
+
+    assert packet["verdict"] == "READY_FOR_OWNER_DECISION"
+    assert packet["blockers"] == []
+    assert [phase["event_limit"] for phase in phases] == [1]
+    assert extra_advance in phases[0]["advance_conditions"]
+    assert extra_advance in campaign["ramp"]["phases"][-1]["advance_conditions"]
+    assert campaign["caps"]["total"]["events"] == 2
+    assert validate_graphiti_campaign_packet(packet) == packet["bounded_campaign"]
+
+
+def test_narrowing_does_not_heal_empty_or_invalid_ramp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty_packet, empty_campaign = _retry_held_overcount_packet(
+        tmp_path / "empty-ramp",
+        monkeypatch,
+        selected_event_count=2,
+        campaign_event_count=3,
+        mutate_campaign=lambda campaign: campaign["ramp"].update({"phases": []}),
+    )
+
+    assert empty_packet["verdict"] == "NO_GO"
+    assert "RAMP_PHASES_INVALID" in empty_packet["blockers"]
+    assert empty_packet["bounded_campaign"]["ramp"]["phases"] == []
+    assert empty_campaign["ramp"]["phases"] == []
+    assert empty_campaign["caps"]["total"]["events"] == 3
+
+    def invalidate_later_phase(campaign: dict[str, object]) -> None:
+        campaign["ramp"]["phases"][-1]["entry_conditions"] = ["OWNER_F4_GO_RETAINED"]
+        campaign["ramp"]["phases"][-1]["advance_conditions"] = ["not-a-contract"]
+
+    invalid_packet, invalid_campaign = _retry_held_overcount_packet(
+        tmp_path / "invalid-ramp",
+        monkeypatch,
+        selected_event_count=2,
+        campaign_event_count=3,
+        mutate_campaign=invalidate_later_phase,
+    )
+    invalid_phases = invalid_packet["bounded_campaign"]["ramp"]["phases"]
+
+    assert invalid_packet["verdict"] == "NO_GO"
+    assert "RAMP_PHASE_2_ENTRY_INVALID" in invalid_packet["blockers"]
+    assert "RAMP_PHASE_2_ADVANCE_INVALID" in invalid_packet["blockers"]
+    assert [phase["event_limit"] for phase in invalid_phases] != [1, 10, 2]
+    assert invalid_campaign["ramp"]["phases"][-1]["entry_conditions"] == [
+        "OWNER_F4_GO_RETAINED"
+    ]
+
+
 def test_undercounted_campaign_cap_does_not_widen_to_selected_cohort(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
