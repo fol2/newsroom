@@ -1016,6 +1016,10 @@ def build_candidate_governing_manifest(
             )
         ):
             raise _Error("invalid Candidate contract")
+        if len({item.disposition_id for item in version.source_bindings}) != len(
+            version.source_bindings
+        ):
+            raise _Error("duplicate disposition IDs")
         source_by_disposition = {
             item.disposition_id: item for item in version.source_bindings
         }

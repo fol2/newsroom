@@ -270,6 +270,124 @@ def _lineage_args(version: EventHypothesisVersion) -> dict[str, object]:
     }
 
 
+def _producer_valid_new_event_candidate(tmp_path, *, name: str):
+    _, _, _, _, _, _, disposition = _persisted_disposition_store(tmp_path, name=name)
+    base = exact_admission_request()
+    lead_request = replace(
+        base.lead,
+        lead_id=type(base.lead.lead_id).parse(disposition.lead_head.decision_lead_id),
+        promoting_gate_decision_id=type(base.lead.promoting_gate_decision_id).parse(
+            _id(101)
+        ),
+        definition_id=type(base.lead.definition_id).parse(_id(201)),
+        definition_version_id=type(base.lead.definition_version_id).parse(_id(301)),
+    )
+    signal_request = replace(
+        base.signal,
+        signal_id=lead_request.signal_id,
+        definition_id=lead_request.definition_id,
+        definition_version_id=lead_request.definition_version_id,
+        item_id=lead_request.item_id,
+        revision_id=lead_request.revision_id,
+        representation_id=lead_request.representation_id,
+        occurrence_id=lead_request.occurrence_id,
+        transition_id=lead_request.transition_id,
+    )
+    lead = NewsLead(
+        lead_request, EventId.new(), 1, lead_request.created_at, lead_request.digest
+    )
+    signal = DiscoverySignal(
+        signal_request,
+        EventId.new(),
+        1,
+        signal_request.admitted_at,
+        signal_request.digest,
+    )
+    gate_request = replace(
+        base.gate,
+        decision_id=lead_request.promoting_gate_decision_id,
+        signal_id=lead_request.signal_id,
+        evaluated_definition_version_id=lead_request.definition_version_id,
+        coverage=lead_request.coverage,
+    )
+    gate = GateDecision(
+        gate_request, EventId.new(), 1, gate_request.decided_at, gate_request.digest
+    )
+    proposed = disposition.route_binding.hypothesis
+    assert proposed is not None
+    hypothesis = EventHypothesis.allocate(
+        disposition.proposal_id, proposed.proposal_local_id
+    )
+    source = HypothesisSourceBinding(
+        disposition.disposition_id,
+        digest_bytes(disposition.canonical_bytes),
+        disposition.finding_set_digest,
+        disposition.route_binding_digest,
+        disposition.lead_head.decision_lead_id,
+        disposition.lead_head.decision_lead_digest,
+        disposition.lead_head.current_disposition_head_id,
+        disposition.lead_head.current_disposition_head_digest,
+    )
+    version = EventHypothesisVersion(
+        str(uuid.uuid5(uuid.UUID(hypothesis.hypothesis_id), "version:1")),
+        hypothesis.hypothesis_id,
+        1,
+        None,
+        None,
+        proposed.summary,
+        proposed.relationship_kind,
+        proposed.target_hypothesis_id,
+        None,
+        None,
+        disposition.proposal_id,
+        disposition.proposal_content_identity,
+        disposition.proposal_canonical_digest,
+        proposed.proposal_local_id,
+        disposition.work_item_id,
+        disposition.work_item_version_id,
+        disposition.work_item_version_digest,
+        disposition.retrieval_context_id,
+        disposition.retrieval_context_digest,
+        (source,),
+        disposition.validator_input.authenticated_context_identity,
+        str(EventId.new()),
+        "2042-01-01T00:00:00.000000Z",
+    )
+    collision_path = tmp_path / "collision"
+    collision_path.mkdir()
+    occupied = _eligible_current(collision_path, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+    binding = replace(
+        occupied.request.binding,
+        subject_id=version.hypothesis_id,
+        subject_version_id=version.version_id,
+        subject_version_digest=version.canonical_digest,
+        operation=CandidateUseOperation.ADMIT_NEW_CANDIDATE,
+        expected_candidate_id=None,
+    )
+    collision = replace(
+        occupied,
+        request=CurrentCollisionEligibilityRequest(
+            binding, occupied.request.named_request_digest
+        ),
+        reason=CollisionEligibilityReason.CURRENT_SLOT_UNOCCUPIED,
+        collision_state=CollisionState.UNOCCUPIED,
+        observed_candidate_id=None,
+    )
+    assessment, evidence = _relationship_decision(
+        version, (), CanonicalOutcome.REL_NO_ADEQUATE_PRIOR_MATCH
+    )
+    return (
+        version,
+        source,
+        disposition,
+        lead,
+        signal,
+        gate,
+        RetainedRelationshipDecisionReceipt(assessment, evidence),
+        collision,
+    )
+
+
 def test_candidate_contract_names_are_exact() -> None:
     assert STORY_CANDIDATE == "newsroom.increment6.story-candidate.v1"
     assert STORY_CANDIDATE_VERSION == "newsroom.increment6.story-candidate-version.v1"
@@ -1252,6 +1370,82 @@ def test_real_producers_build_exact_governing_manifest(tmp_path) -> None:
             gates=(gate,),
             relationship=relationship,
             collision=collision,
+        )
+
+
+def test_producer_valid_duplicate_disposition_source_bindings_are_rejected(
+    tmp_path,
+) -> None:
+    (
+        version,
+        source,
+        disposition,
+        lead,
+        signal,
+        gate,
+        relationship,
+        collision,
+    ) = _producer_valid_new_event_candidate(
+        tmp_path, name="candidate-duplicate-disposition"
+    )
+    unique = build_candidate_governing_manifest(
+        hypothesis_version=version,
+        **_lineage_args(version),
+        dispositions=(disposition,),
+        leads=(lead,),
+        signals=(signal,),
+        gates=(gate,),
+        relationship=relationship,
+        collision=collision,
+    )
+    assert len(unique.lead_signal_bindings) == 1
+    lost_lead_id = str(uuid.UUID(int=1))
+    assert lost_lead_id < source.decision_lead_id
+    lost_source = HypothesisSourceBinding(
+        source.disposition_id,
+        source.disposition_digest,
+        source.finding_set_digest,
+        source.route_binding_digest,
+        lost_lead_id,
+        "sha256:" + "2" * 64,
+        str(uuid.UUID(int=2)),
+        "sha256:" + "3" * 64,
+    )
+    lossy_bindings = (lost_source, source)
+    keys = tuple(
+        (item.decision_lead_id, item.disposition_id) for item in lossy_bindings
+    )
+    assert keys == tuple(sorted(set(keys)))
+    assert len({item.disposition_id for item in lossy_bindings}) == 1
+    surviving = {item.disposition_id: item for item in lossy_bindings}
+    assert surviving[disposition.disposition_id] == source
+    lossy_version = replace(version, source_bindings=lossy_bindings)
+    assert (
+        EventHypothesisVersion.from_canonical_bytes(lossy_version.canonical_bytes)
+        == lossy_version
+    )
+    assessment, evidence = _relationship_decision(
+        lossy_version, (), CanonicalOutcome.REL_NO_ADEQUATE_PRIOR_MATCH
+    )
+    rebound_binding = replace(
+        collision.request.binding,
+        subject_version_digest=lossy_version.canonical_digest,
+    )
+    with pytest.raises(CandidateContractError, match="duplicate disposition"):
+        build_candidate_governing_manifest(
+            hypothesis_version=lossy_version,
+            **_lineage_args(lossy_version),
+            dispositions=(disposition,),
+            leads=(lead,),
+            signals=(signal,),
+            gates=(gate,),
+            relationship=RetainedRelationshipDecisionReceipt(assessment, evidence),
+            collision=replace(
+                collision,
+                request=CurrentCollisionEligibilityRequest(
+                    rebound_binding, collision.request.named_request_digest
+                ),
+            ),
         )
 
 
