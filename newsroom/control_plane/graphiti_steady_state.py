@@ -57,6 +57,7 @@ from newsroom.increment9.proving import (
     SOURCE_IDS,
     SOURCE_URLS,
 )
+from newsroom.graphiti_adapter.evaluation_packet import GRAPHITI_EXTRACTION_TIMEOUT_MS
 from newsroom.graphiti_adapter.identity import attempt_ids
 from newsroom.increment4.contracts import (
     INCREMENT4_ADMITTED_FAMILY_ID,
@@ -117,6 +118,139 @@ CAMPAIGN_SUCCESS_OBJECTIVE_BASE = MappingProxyType(
         "reconciliation": "exact",
     }
 )
+
+CAMPAIGN_PER_EVENT_SPEND_GBP_MICROUNITS = 500_000
+_CAMPAIGN_COUNT_CAP_NAMES = (
+    "proposals",
+    "entity_admits",
+    "relation_admits",
+    "effects",
+)
+
+
+def campaign_event_limits(event_count: int) -> tuple[int, ...]:
+    """Return the automatic 1 → 10 → N ramp, collapsing duplicates."""
+
+    if event_count <= 0:
+        raise ValueError("campaign event count must be positive")
+    return tuple(
+        dict.fromkeys(
+            value
+            for value in (1, min(10, event_count), event_count)
+            if value > 0
+        )
+    )
+
+
+def _campaign_wall_time_seconds(event_count: int) -> int:
+    return max(600, event_count * (GRAPHITI_EXTRACTION_TIMEOUT_MS // 1000))
+
+
+def _campaign_ramp_for_event_count(
+    event_count: int,
+    *,
+    template_phases: object,
+) -> dict[str, object]:
+    entry = sorted(CAMPAIGN_RAMP_ENTRY_CONDITIONS)
+    advance = sorted(CAMPAIGN_RAMP_ADVANCE_CONDITIONS)
+    if isinstance(template_phases, list) and template_phases:
+        first = template_phases[0]
+        if isinstance(first, Mapping):
+            raw_entry = first.get("entry_conditions")
+            raw_advance = first.get("advance_conditions")
+            if isinstance(raw_entry, list) and raw_entry:
+                entry = list(raw_entry)
+            if isinstance(raw_advance, list) and raw_advance:
+                advance = list(raw_advance)
+    return {
+        "phases": [
+            {
+                "phase_id": f"phase-{index}",
+                "event_limit": limit,
+                "entry_conditions": entry,
+                "advance_conditions": advance,
+            }
+            for index, limit in enumerate(
+                campaign_event_limits(event_count), start=1
+            )
+        ]
+    }
+
+
+def _narrow_campaign_input_to_selected_cohort(
+    campaign: Mapping[str, object],
+    *,
+    selected_event_count: int,
+) -> dict[str, object]:
+    """Bind machine campaign totals to the sealed post-exclusion cohort.
+
+    Planning may freeze ``caps.total.events`` from an earlier bootstrap
+    count. The selected cohort is the later, exclusion-consistent dispatch
+    set. Narrowing never adds events, never retries excluded ``RETRY_HELD``
+    identities, and never raises a smaller supplied cap.
+    """
+
+    caps = campaign.get("caps")
+    if not isinstance(caps, Mapping):
+        return dict(campaign)
+    per_event = caps.get("per_event")
+    total = caps.get("total")
+    rate = caps.get("rate")
+    if not isinstance(per_event, Mapping) or not isinstance(total, Mapping):
+        return dict(campaign)
+    supplied_events = total.get("events")
+    if (
+        isinstance(supplied_events, bool)
+        or not isinstance(supplied_events, int)
+        or supplied_events <= selected_event_count
+    ):
+        return dict(campaign)
+
+    aligned_total = dict(total)
+    aligned_total["events"] = selected_event_count
+    for name in _CAMPAIGN_COUNT_CAP_NAMES:
+        per_event_cap = per_event.get(name)
+        total_cap = total.get(name)
+        if (
+            isinstance(per_event_cap, int)
+            and not isinstance(per_event_cap, bool)
+            and isinstance(total_cap, int)
+            and not isinstance(total_cap, bool)
+            and total_cap == supplied_events * per_event_cap
+        ):
+            aligned_total[name] = selected_event_count * per_event_cap
+    spend = total.get("spend_gbp_microunits")
+    if (
+        isinstance(spend, int)
+        and not isinstance(spend, bool)
+        and spend == supplied_events * CAMPAIGN_PER_EVENT_SPEND_GBP_MICROUNITS
+    ):
+        aligned_total["spend_gbp_microunits"] = (
+            selected_event_count * CAMPAIGN_PER_EVENT_SPEND_GBP_MICROUNITS
+        )
+    wall_time = total.get("wall_time_seconds")
+    if (
+        isinstance(wall_time, int)
+        and not isinstance(wall_time, bool)
+        and wall_time == _campaign_wall_time_seconds(supplied_events)
+    ):
+        aligned_total["wall_time_seconds"] = _campaign_wall_time_seconds(
+            selected_event_count
+        )
+    aligned_caps = {
+        "per_event": dict(per_event),
+        "total": aligned_total,
+        "rate": dict(rate) if isinstance(rate, Mapping) else rate,
+    }
+    ramp = campaign.get("ramp")
+    template_phases = ramp.get("phases") if isinstance(ramp, Mapping) else None
+    return {
+        **dict(campaign),
+        "caps": aligned_caps,
+        "ramp": _campaign_ramp_for_event_count(
+            selected_event_count, template_phases=template_phases
+        ),
+    }
 
 HISTORICAL_PARTITION_CATEGORIES = (
     "VERIFIED_TERMINAL",
@@ -2168,6 +2302,10 @@ def _campaign_evidence(
         for item in candidates
         if isinstance(item, Mapping)
     ]
+    if derived_event_ids:
+        campaign = _narrow_campaign_input_to_selected_cohort(
+            campaign, selected_event_count=len(derived_event_ids)
+        )
 
     selection = mapping(campaign.get("selection_policy"), "SELECTION_POLICY")
     if set(selection) != {"policy_id", "policy_version"}:

@@ -39,6 +39,7 @@ from newsroom.control_plane.graphiti_operational_readiness import (
     reopen_operational_campaign_runtime,
 )
 from newsroom.control_plane.graphiti_steady_state import (
+    campaign_event_limits,
     graphiti_graph_destination_readback,
     graphiti_store_snapshot_digests,
 )
@@ -419,6 +420,16 @@ def test_campaign_input_is_dormant_exact_bounded_machine_contract() -> None:
     ]
     assert campaign["recovery"]["backup_identity"].startswith("sha256:")
     assert "PROVIDER_FAILURE" in campaign["immediate_stop_conditions"]
+
+
+@pytest.mark.parametrize(
+    ("event_count", "limits"),
+    ((1, (1,)), (2, (1, 2)), (10, (1, 10)), (25, (1, 10, 25))),
+)
+def test_campaign_event_limits_collapse_to_unique_increasing_bounds(
+    event_count: int, limits: tuple[int, ...]
+) -> None:
+    assert campaign_event_limits(event_count) == limits
 
 
 def test_source_requests_bind_exact_retained_identity_and_rights() -> None:

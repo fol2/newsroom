@@ -21,16 +21,22 @@ from newsroom.authority.canonical import (
 from newsroom.authority.migrations import MIGRATIONS
 from newsroom.authority.types import UtcTimestamp
 from newsroom.control_plane.command_service import ControlPlaneCommandService
-from newsroom.control_plane.graphiti_events import (
-    GRAPHITI_EVENT_PROJECTION_GENERATION,
-    GRAPHITI_EVENT_PROJECTOR_VERSION,
-)
 from newsroom.control_plane.graphiti_admission import (
     GRAPHITI_ADMISSION_GENERATION_IDENTITY_VERSION,
     GRAPHITI_ADMISSION_RECONCILIATION_SCHEMA_VERSION,
     GraphitiAdmissionConsumerError,
     GraphitiGovernedDecision,
     GraphitiProjectionReconciliationReceipt,
+)
+from newsroom.control_plane.graphiti_events import (
+    GRAPHITI_EVENT_PROJECTION_GENERATION,
+    GRAPHITI_EVENT_PROJECTOR_VERSION,
+)
+from newsroom.control_plane.graphiti_operational_readiness import (
+    build_operational_campaign_input,
+)
+from newsroom.control_plane.graphiti_spend_reconciliation import (
+    plan_graphiti_spend_reconciliation,
 )
 from newsroom.control_plane.graphiti_steady_state import (
     GraphitiCampaignRuntime,
@@ -42,10 +48,6 @@ from newsroom.control_plane.graphiti_steady_state import (
     graphiti_store_snapshot_digests,
     validate_graphiti_campaign_packet,
     write_content_addressed_packet,
-)
-
-from newsroom.control_plane.graphiti_spend_reconciliation import (
-    plan_graphiti_spend_reconciliation,
 )
 from newsroom.control_plane.read_only_snapshot import read_only_snapshot
 from newsroom.control_plane.store import (
@@ -1757,6 +1759,156 @@ def test_authenticated_graph_readback_builds_valid_ready_packet(
     )
     with pytest.raises(ValueError, match="graph readback differs"):
         validate_graphiti_campaign_packet(runtime_graph_drift)
+
+
+def test_bootstrap_overcount_narrows_to_selected_cohort_after_retry_held_exclusion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=1,
+        item_key="candidate-a",
+        ingest_id="candidate-a-ingest",
+    )
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=2,
+        item_key="candidate-b",
+        ingest_id="candidate-b-ingest",
+    )
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=3,
+        item_key="retry-held",
+        ingest_id="retry-held-ingest",
+    )
+    held_event_id = "sha256:" + f"{3:064x}"
+    connection.execute(
+        "UPDATE unpublished_graphiti_revision_events SET state='RETRY_HELD',"
+        "attempt_count=1 WHERE ledger_seq=3"
+    )
+    connection.execute(
+        "CREATE TABLE issue_790_graphiti_retry_exclusions(event_id TEXT PRIMARY KEY)"
+    )
+    connection.execute(
+        "INSERT INTO issue_790_graphiti_retry_exclusions(event_id) VALUES(?)",
+        (held_event_id,),
+    )
+    connection.commit()
+    connection.close()
+    _seed_proving_accountability(proving)
+    authority = _authority_store(tmp_path)
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti_steady_state."
+        "load_graphiti_units_from_connection",
+        lambda _connection, *, evaluated_at: (
+            _current_unit(
+                item_key="candidate-a", ingest_id="candidate-a-ingest"
+            ),
+            _current_unit(
+                item_key="candidate-b", ingest_id="candidate-b-ingest"
+            ),
+        ),
+    )
+    preparation = _packet(proving, unpublished, authority_store=authority)
+    campaign = build_operational_campaign_input(
+        head_sha="head",
+        tree_sha="tree",
+        focus_manifest_digest="sha256:" + "f" * 64,
+        graph_destination_id=GRAPH_DESTINATION_ID,
+        candidate_event_count=3,
+        recovery_identity="sha256:" + "a" * 64,
+    )
+    assert campaign["caps"]["total"]["events"] == 3
+    packet = _packet(
+        proving,
+        unpublished,
+        authority_store=authority,
+        campaign_input=campaign,
+        graph_destination_reconciliation=_graph_destination_reconciliation(
+            preparation
+        ),
+        governed_runtime=_governed_runtime(preparation),
+    )
+
+    selected = packet["bounded_campaign"]["cohort"]["event_ids"]
+    assert packet["verdict"] == "READY_FOR_OWNER_DECISION"
+    assert packet["blockers"] == []
+    assert "TOTAL_EVENT_CAP_DIFFERS_FROM_SELECTED_COHORT" not in packet["blockers"]
+    assert held_event_id not in selected
+    assert packet["historical_partition"]["categories"][
+        "NON_REPLAYABLE_OR_AMBIGUOUS_EFFECT_HOLD"
+    ]["ledger_sequences"] == [3]
+    assert selected == [
+        "sha256:" + f"{1:064x}",
+        "sha256:" + f"{2:064x}",
+    ]
+    assert packet["bounded_campaign"]["caps"]["total"]["events"] == 2
+    assert packet["bounded_campaign"]["caps"]["total"]["spend_gbp_microunits"] == (
+        1_000_000
+    )
+    assert [
+        phase["event_limit"]
+        for phase in packet["bounded_campaign"]["ramp"]["phases"]
+    ] == [1, 2]
+    assert campaign["caps"]["total"]["events"] == 3
+    assert validate_graphiti_campaign_packet(packet) == packet["bounded_campaign"]
+
+
+def test_undercounted_campaign_cap_does_not_widen_to_selected_cohort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proving, unpublished, connection = _stores(tmp_path)
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=1,
+        item_key="candidate-a",
+        ingest_id="candidate-a-ingest",
+    )
+    _nonterminal_obligation(
+        connection,
+        ledger_seq=2,
+        item_key="candidate-b",
+        ingest_id="candidate-b-ingest",
+    )
+    connection.commit()
+    connection.close()
+    _seed_proving_accountability(proving)
+    authority = _authority_store(tmp_path)
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti_steady_state."
+        "load_graphiti_units_from_connection",
+        lambda _connection, *, evaluated_at: (
+            _current_unit(
+                item_key="candidate-a", ingest_id="candidate-a-ingest"
+            ),
+            _current_unit(
+                item_key="candidate-b", ingest_id="candidate-b-ingest"
+            ),
+        ),
+    )
+    preparation = _packet(proving, unpublished, authority_store=authority)
+    campaign = _campaign_input(preparation)
+    campaign["caps"]["total"]["events"] = 1
+    campaign["ramp"]["phases"][-1]["event_limit"] = 1
+    packet = _packet(
+        proving,
+        unpublished,
+        authority_store=authority,
+        campaign_input=campaign,
+        graph_destination_reconciliation=_graph_destination_reconciliation(
+            preparation
+        ),
+        governed_runtime=_governed_runtime(preparation),
+    )
+
+    assert packet["verdict"] == "NO_GO"
+    assert "TOTAL_EVENT_CAP_DIFFERS_FROM_SELECTED_COHORT" in packet["blockers"]
+    assert packet["bounded_campaign"]["caps"]["total"]["events"] == 1
+    assert len(packet["bounded_campaign"]["cohort"]["event_ids"]) == 2
 
 
 def test_admission_backlog_blocks_owner_decision_ready(
