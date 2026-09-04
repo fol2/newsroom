@@ -45,12 +45,14 @@ from newsroom.control_plane.cycle import (
     load_graphiti_units_from_connection,
 )
 from newsroom.control_plane.graphiti_steady_state import (
+    CAMPAIGN_PER_EVENT_SPEND_GBP_MICROUNITS,
     CAMPAIGN_RAMP_ADVANCE_CONDITIONS,
     CAMPAIGN_RAMP_ENTRY_CONDITIONS,
     CAMPAIGN_REQUIRED_STOP_CONDITIONS,
     CAMPAIGN_SCHEMA_VERSION,
     CAMPAIGN_SUCCESS_OBJECTIVE_BASE,
     GraphitiCampaignRuntime,
+    campaign_event_limits,
     graphiti_graph_destination_identity,
     graphiti_graph_destination_readback,
     graphiti_operational_partition_snapshot,
@@ -1722,12 +1724,6 @@ def build_operational_campaign_input(
 
     if candidate_event_count <= 0:
         raise ValueError("campaign candidate event count must be positive")
-    limits = tuple(
-        value
-        for value in (1, min(10, candidate_event_count), candidate_event_count)
-        if value > 0
-    )
-    limits = tuple(dict.fromkeys(limits))
     phases = [
         {
             "phase_id": f"phase-{index}",
@@ -1735,7 +1731,9 @@ def build_operational_campaign_input(
             "entry_conditions": sorted(CAMPAIGN_RAMP_ENTRY_CONDITIONS),
             "advance_conditions": sorted(CAMPAIGN_RAMP_ADVANCE_CONDITIONS),
         }
-        for index, limit in enumerate(limits, start=1)
+        for index, limit in enumerate(
+            campaign_event_limits(candidate_event_count), start=1
+        )
     ]
     return {
         "schema_version": CAMPAIGN_SCHEMA_VERSION,
@@ -1778,7 +1776,9 @@ def build_operational_campaign_input(
                     600,
                     candidate_event_count * (GRAPHITI_EXTRACTION_TIMEOUT_MS // 1000),
                 ),
-                "spend_gbp_microunits": candidate_event_count * 500_000,
+                "spend_gbp_microunits": (
+                    candidate_event_count * CAMPAIGN_PER_EVENT_SPEND_GBP_MICROUNITS
+                ),
             },
             "rate": {"events_per_minute": 1},
         },
