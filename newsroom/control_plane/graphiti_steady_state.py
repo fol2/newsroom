@@ -172,12 +172,17 @@ def _copy_ramp_phase(
     return phase
 
 
-def _campaign_ramp_is_closed(phases: object) -> bool:
+def _campaign_ramp_is_closed(
+    phases: object, *, original_event_cap: int
+) -> bool:
     if not isinstance(phases, list) or not phases:
         return False
     prior_limit = 0
     for raw in phases:
         if not isinstance(raw, Mapping):
+            return False
+        phase_id = raw.get("phase_id")
+        if not isinstance(phase_id, str) or not phase_id.strip():
             return False
         limit = raw.get("event_limit")
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
@@ -194,20 +199,23 @@ def _campaign_ramp_is_closed(phases: object) -> bool:
         ):
             return False
         prior_limit = limit
-    return True
+    return prior_limit == original_event_cap
 
 
 def _narrow_campaign_ramp_to_selected_cohort(
     ramp: object,
     *,
     selected_event_count: int,
+    original_event_cap: int,
 ) -> object:
     """Truncate a closed ramp; leave empty or malformed input unchanged."""
 
     if not isinstance(ramp, Mapping):
         return ramp
     phases = ramp.get("phases")
-    if not isinstance(phases, list) or not _campaign_ramp_is_closed(phases):
+    if not isinstance(phases, list) or not _campaign_ramp_is_closed(
+        phases, original_event_cap=original_event_cap
+    ):
         return dict(ramp)
     adapted: list[dict[str, object]] = []
     remaining: list[Mapping[str, object]] = []
@@ -312,7 +320,9 @@ def _narrow_campaign_input_to_selected_cohort(
         **dict(campaign),
         "caps": aligned_caps,
         "ramp": _narrow_campaign_ramp_to_selected_cohort(
-            campaign.get("ramp"), selected_event_count=selected_event_count
+            campaign.get("ramp"),
+            selected_event_count=selected_event_count,
+            original_event_cap=supplied_events,
         ),
     }
 
