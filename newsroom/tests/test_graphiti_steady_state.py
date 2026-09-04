@@ -2161,6 +2161,86 @@ def test_narrowing_preserves_duplicate_boundary_later_phase_conditions(
     assert validate_graphiti_campaign_packet(packet) == packet["bounded_campaign"]
 
 
+@pytest.mark.parametrize("invalid_phase_id", ["", " ", 1, None])
+def test_narrowing_keeps_invalid_discarded_phase_id_no_go(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_phase_id: object,
+) -> None:
+    def mutate(campaign: dict[str, object]) -> None:
+        if invalid_phase_id is None:
+            del campaign["ramp"]["phases"][-1]["phase_id"]
+        else:
+            campaign["ramp"]["phases"][-1]["phase_id"] = invalid_phase_id
+
+    packet, campaign = _retry_held_overcount_packet(
+        tmp_path,
+        monkeypatch,
+        selected_event_count=1,
+        campaign_event_count=2,
+        mutate_campaign=mutate,
+    )
+    phases = packet["bounded_campaign"]["ramp"]["phases"]
+
+    assert packet["verdict"] == "NO_GO"
+    assert "RAMP_PHASE_2_ID_INVALID" in packet["blockers"]
+    assert [phase["event_limit"] for phase in phases] == [1, 2]
+    assert len(campaign["ramp"]["phases"]) == 2
+    if invalid_phase_id is None:
+        assert "phase_id" not in campaign["ramp"]["phases"][-1]
+    else:
+        assert campaign["ramp"]["phases"][-1]["phase_id"] == invalid_phase_id
+    assert campaign["caps"]["total"]["events"] == 2
+
+
+def test_narrowing_keeps_original_final_limit_mismatch_no_go(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def mutate(campaign: dict[str, object]) -> None:
+        campaign["ramp"]["phases"][-1]["event_limit"] = 20
+
+    packet, campaign = _retry_held_overcount_packet(
+        tmp_path,
+        monkeypatch,
+        selected_event_count=2,
+        campaign_event_count=3,
+        mutate_campaign=mutate,
+    )
+    phases = packet["bounded_campaign"]["ramp"]["phases"]
+
+    assert packet["verdict"] == "NO_GO"
+    assert "RAMP_FINAL_PHASE_DIFFERS_FROM_EVENT_CAP" in packet["blockers"]
+    assert [phase["event_limit"] for phase in phases] != [1, 2]
+    assert [phase["event_limit"] for phase in campaign["ramp"]["phases"]] == [1, 20]
+    assert campaign["caps"]["total"]["events"] == 3
+    assert packet["bounded_campaign"]["caps"]["total"]["events"] == 3
+
+
+def test_narrowing_keeps_original_cap_mismatch_when_final_equals_selected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def mutate(campaign: dict[str, object]) -> None:
+        campaign["ramp"]["phases"][-1]["event_limit"] = 2
+
+    packet, campaign = _retry_held_overcount_packet(
+        tmp_path,
+        monkeypatch,
+        selected_event_count=2,
+        campaign_event_count=3,
+        mutate_campaign=mutate,
+    )
+    phases = packet["bounded_campaign"]["ramp"]["phases"]
+
+    assert packet["verdict"] == "NO_GO"
+    assert "RAMP_FINAL_PHASE_DIFFERS_FROM_EVENT_CAP" in packet["blockers"]
+    assert [phase["event_limit"] for phase in phases] == [1, 2]
+    assert campaign["caps"]["total"]["events"] == 3
+    assert packet["bounded_campaign"]["caps"]["total"]["events"] == 3
+    assert [phase["event_limit"] for phase in campaign["ramp"]["phases"]] == [1, 2]
+
+
 def test_undercounted_campaign_cap_does_not_widen_to_selected_cohort(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
