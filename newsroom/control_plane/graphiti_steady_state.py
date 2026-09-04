@@ -280,6 +280,13 @@ def _narrow_campaign_input_to_selected_cohort(
     ):
         return dict(campaign)
 
+    ramp = campaign.get("ramp")
+    if not _campaign_ramp_is_closed(
+        ramp.get("phases") if isinstance(ramp, Mapping) else None,
+        original_event_cap=supplied_events,
+    ):
+        return dict(campaign)
+
     aligned_total = dict(total)
     aligned_total["events"] = selected_event_count
     for name in _CAMPAIGN_COUNT_CAP_NAMES:
