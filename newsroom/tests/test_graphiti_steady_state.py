@@ -2103,6 +2103,64 @@ def test_narrowing_does_not_heal_empty_or_invalid_ramp(
     ]
 
 
+def test_narrowing_does_not_heal_invalid_remaining_on_collapse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def invalidate_later_phase(campaign: dict[str, object]) -> None:
+        campaign["ramp"]["phases"][-1]["entry_conditions"] = ["OWNER_F4_GO_RETAINED"]
+        campaign["ramp"]["phases"][-1]["advance_conditions"] = ["not-a-contract"]
+
+    packet, campaign = _retry_held_overcount_packet(
+        tmp_path,
+        monkeypatch,
+        selected_event_count=1,
+        campaign_event_count=2,
+        mutate_campaign=invalidate_later_phase,
+    )
+    phases = packet["bounded_campaign"]["ramp"]["phases"]
+
+    assert packet["verdict"] == "NO_GO"
+    assert "RAMP_PHASE_2_ENTRY_INVALID" in packet["blockers"]
+    assert "RAMP_PHASE_2_ADVANCE_INVALID" in packet["blockers"]
+    assert [phase["event_limit"] for phase in phases] == [1, 2]
+    assert campaign["caps"]["total"]["events"] == 2
+    assert campaign["ramp"]["phases"][-1]["advance_conditions"] == ["not-a-contract"]
+
+
+def test_narrowing_preserves_duplicate_boundary_later_phase_conditions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extra_entry = "PHASE_SPECIFIC_CHECKPOINT"
+
+    def mutate(campaign: dict[str, object]) -> None:
+        campaign["ramp"]["phases"][-1]["entry_conditions"] = [
+            "EXACT_SNAPSHOT_AND_IDENTITY_RECONFIRMED",
+            "OWNER_F4_GO_RETAINED",
+            extra_entry,
+        ]
+
+    packet, campaign = _retry_held_overcount_packet(
+        tmp_path,
+        monkeypatch,
+        selected_event_count=10,
+        campaign_event_count=20,
+        mutate_campaign=mutate,
+    )
+    phases = packet["bounded_campaign"]["ramp"]["phases"]
+
+    assert packet["verdict"] == "READY_FOR_OWNER_DECISION"
+    assert packet["blockers"] == []
+    assert [phase["event_limit"] for phase in phases] == [1, 10]
+    assert extra_entry in phases[-1]["entry_conditions"]
+    assert extra_entry in campaign["ramp"]["phases"][-1]["entry_conditions"]
+    assert [
+        phase["event_limit"] for phase in campaign["ramp"]["phases"]
+    ] == [1, 10, 20]
+    assert validate_graphiti_campaign_packet(packet) == packet["bounded_campaign"]
+
+
 def test_undercounted_campaign_cap_does_not_widen_to_selected_cohort(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
