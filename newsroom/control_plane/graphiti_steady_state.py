@@ -146,35 +146,101 @@ def _campaign_wall_time_seconds(event_count: int) -> int:
     return max(600, event_count * (GRAPHITI_EXTRACTION_TIMEOUT_MS // 1000))
 
 
-def _campaign_ramp_for_event_count(
-    event_count: int,
-    *,
-    template_phases: object,
+def _sorted_ramp_conditions(value: object) -> list[str] | None:
+    if not isinstance(value, list) or not value:
+        return None
+    if not all(isinstance(item, str) and item for item in value):
+        return None
+    unique = sorted(set(value))
+    if value != unique:
+        return None
+    return unique
+
+
+def _copy_ramp_phase(
+    raw: Mapping[str, object], *, event_limit: int | None = None
 ) -> dict[str, object]:
-    entry = sorted(CAMPAIGN_RAMP_ENTRY_CONDITIONS)
-    advance = sorted(CAMPAIGN_RAMP_ADVANCE_CONDITIONS)
-    if isinstance(template_phases, list) and template_phases:
-        first = template_phases[0]
-        if isinstance(first, Mapping):
-            raw_entry = first.get("entry_conditions")
-            raw_advance = first.get("advance_conditions")
-            if isinstance(raw_entry, list) and raw_entry:
-                entry = list(raw_entry)
-            if isinstance(raw_advance, list) and raw_advance:
-                advance = list(raw_advance)
-    return {
-        "phases": [
-            {
-                "phase_id": f"phase-{index}",
-                "event_limit": limit,
-                "entry_conditions": entry,
-                "advance_conditions": advance,
-            }
-            for index, limit in enumerate(
-                campaign_event_limits(event_count), start=1
-            )
-        ]
-    }
+    phase = dict(raw)
+    if event_limit is not None:
+        phase["event_limit"] = event_limit
+    entry = raw.get("entry_conditions")
+    advance = raw.get("advance_conditions")
+    if isinstance(entry, list):
+        phase["entry_conditions"] = list(entry)
+    if isinstance(advance, list):
+        phase["advance_conditions"] = list(advance)
+    return phase
+
+
+def _campaign_ramp_is_closed(phases: object) -> bool:
+    if not isinstance(phases, list) or not phases:
+        return False
+    prior_limit = 0
+    for raw in phases:
+        if not isinstance(raw, Mapping):
+            return False
+        limit = raw.get("event_limit")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            return False
+        if limit <= prior_limit:
+            return False
+        entry = _sorted_ramp_conditions(raw.get("entry_conditions"))
+        advance = _sorted_ramp_conditions(raw.get("advance_conditions"))
+        if (
+            entry is None
+            or advance is None
+            or not CAMPAIGN_RAMP_ENTRY_CONDITIONS.issubset(entry)
+            or not CAMPAIGN_RAMP_ADVANCE_CONDITIONS.issubset(advance)
+        ):
+            return False
+        prior_limit = limit
+    return True
+
+
+def _narrow_campaign_ramp_to_selected_cohort(
+    ramp: object,
+    *,
+    selected_event_count: int,
+) -> object:
+    """Truncate a closed ramp; leave empty or malformed input unchanged."""
+
+    if not isinstance(ramp, Mapping):
+        return ramp
+    phases = ramp.get("phases")
+    if not isinstance(phases, list) or not _campaign_ramp_is_closed(phases):
+        return dict(ramp)
+    adapted: list[dict[str, object]] = []
+    remaining: list[Mapping[str, object]] = []
+    truncated = False
+    for raw in phases:
+        if not isinstance(raw, Mapping):
+            return dict(ramp)
+        limit = int(raw["event_limit"])
+        if truncated:
+            remaining.append(raw)
+            continue
+        if limit < selected_event_count:
+            adapted.append(_copy_ramp_phase(raw))
+            continue
+        adapted.append(_copy_ramp_phase(raw, event_limit=selected_event_count))
+        truncated = True
+    if not truncated:
+        return dict(ramp)
+    if remaining:
+        final = dict(adapted[-1])
+        entry = list(final["entry_conditions"])
+        advance = list(final["advance_conditions"])
+        for raw in remaining:
+            extra_entry = raw.get("entry_conditions")
+            extra_advance = raw.get("advance_conditions")
+            if not isinstance(extra_entry, list) or not isinstance(extra_advance, list):
+                return dict(ramp)
+            entry = sorted(set(entry).union(extra_entry))
+            advance = sorted(set(advance).union(extra_advance))
+        final["entry_conditions"] = entry
+        final["advance_conditions"] = advance
+        adapted[-1] = final
+    return {**dict(ramp), "phases": adapted}
 
 
 def _narrow_campaign_input_to_selected_cohort(
@@ -242,15 +308,14 @@ def _narrow_campaign_input_to_selected_cohort(
         "total": aligned_total,
         "rate": dict(rate) if isinstance(rate, Mapping) else rate,
     }
-    ramp = campaign.get("ramp")
-    template_phases = ramp.get("phases") if isinstance(ramp, Mapping) else None
     return {
         **dict(campaign),
         "caps": aligned_caps,
-        "ramp": _campaign_ramp_for_event_count(
-            selected_event_count, template_phases=template_phases
+        "ramp": _narrow_campaign_ramp_to_selected_cohort(
+            campaign.get("ramp"), selected_event_count=selected_event_count
         ),
     }
+
 
 HISTORICAL_PARTITION_CATEGORIES = (
     "VERIFIED_TERMINAL",
