@@ -71,23 +71,29 @@ def prepare_graphiti_accounted_zero_backup(
         )
     )
     digest_path = backup_path.with_name(backup_path.name + ".sha256")
-    logical = _helpers._logical_database_digest(connection)
     if (
         not source
         or source.resolve() == backup_path.resolve()
         or backup_path.exists() != digest_path.exists()
     ):
         raise GraphitiAccountedZeroBackupError("backup boundary differs")
-    if not backup_path.exists():
-        backup_path.open("xb").close()
-        target = sqlite3.connect(backup_path, isolation_level=None)
-        try:
-            connection.backup(target)
-        finally:
-            target.close()
-        digest_path.write_text(
-            _helpers._file_digest(backup_path) + "\n", encoding="ascii"
-        )
+    source_conn = sqlite3.connect(
+        f"file:{source}?mode=ro", uri=True, isolation_level=None
+    )
+    try:
+        logical = _helpers._logical_database_digest(source_conn)
+        if not backup_path.exists():
+            backup_path.open("xb").close()
+            target = sqlite3.connect(backup_path, isolation_level=None)
+            try:
+                source_conn.backup(target)
+            finally:
+                target.close()
+            digest_path.write_text(
+                _helpers._file_digest(backup_path) + "\n", encoding="ascii"
+            )
+    finally:
+        source_conn.close()
     receipt = _checked_backup(backup_path, logical)
     connection.execute(
         "CREATE TEMP TABLE IF NOT EXISTS graphiti_accounted_zero_backup_gate("

@@ -11,8 +11,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Protocol, runtime_checkable
 
-from newsroom.authority._extraction_facade import GovernedExtractionRecords
-from newsroom.authority._graphiti_adapter_facade import (
+from newsroom.authority.extraction_facade import GovernedExtractionRecords
+from newsroom.authority.graphiti_adapter_facade import (
     GovernedGraphitiProposalAdapter,
 )
 from newsroom.authority.auth import AuthenticationProof, AuthorizationDenied

@@ -21,8 +21,8 @@ from newsroom.authority.canonical import (
 )
 from newsroom.authority.editorial_relation_system import GovernedEditorialRelations
 from newsroom.authority.entity_system import GovernedEntityRecords
-from newsroom.authority._extraction_facade import GovernedExtractionRecords
-from newsroom.authority._graphiti_adapter_facade import GovernedGraphitiProposalAdapter
+from newsroom.authority.extraction_facade import GovernedExtractionRecords
+from newsroom.authority.graphiti_adapter_facade import GovernedGraphitiProposalAdapter
 from newsroom.authority.object_system import GovernedObjects
 from newsroom.authority.objects import HydrationRequest
 from newsroom.authority.types import ObjectAdmissionId, UtcTimestamp
