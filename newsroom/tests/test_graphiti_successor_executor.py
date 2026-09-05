@@ -201,6 +201,7 @@ def test_spent_packet_digest_constants_include_historical_bindings() -> None:
         "sha256:e18f0abe3fe23950c102b9ba1de2fc8db0b2957729880c08a387752c415225cc",
         "sha256:a1798f664a26148480d842a738d1d7617b59e065f6a9853d4dab3d99dffd7435",
         "sha256:8fab380a519abfe7e9feceb5165afb1dd80edd2175841c508445af8f92fe6005",
+        "sha256:ac29d8d72d287b5642203c33aaff93bba0374057b3768fd4f7fa2d1c413b3f4e",
     }
 
 
@@ -657,6 +658,8 @@ def test_default_prior_consumption_keeps_classified_baseline(
 ) -> None:
     evidence = tmp_path / "evidence"
     evidence.mkdir()
+    assert executor.CLASSIFIED_PRIOR_STARTS == 6
+    assert executor.CLASSIFIED_PRIOR_RESERVED == 2_500_000
     assert executor.default_prior_consumption(evidence) == (
         executor.CLASSIFIED_PRIOR_STARTS,
         executor.CLASSIFIED_PRIOR_RESERVED,

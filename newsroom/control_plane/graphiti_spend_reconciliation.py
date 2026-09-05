@@ -944,6 +944,18 @@ def _legacy_extraction_state_error_receipt(
     )
 
 
+def _legacy_idempotency_identity_conflict_receipt(
+    receipt: Mapping[str, object] | None,
+) -> bool:
+    return bool(
+        _legacy_unreported_binding_failure_receipt(receipt)
+        and receipt is not None
+        and receipt.get("binding_failure_type") == "IdempotencyIdentityConflict"
+        and receipt.get("binding_failure_stage")
+        == "UNCLASSIFIED_RESULT_BOUNDARY"
+    )
+
+
 def _canonical_model_record(
     raw: object,
     *,
@@ -1504,7 +1516,9 @@ def _legacy_pre_provider_model_usage_evidence(
 
     extraction_state_error = _legacy_extraction_state_error_receipt(receipt)
     if not (
-        _legacy_authorisation_refusal_receipt(receipt) or extraction_state_error
+        _legacy_authorisation_refusal_receipt(receipt)
+        or extraction_state_error
+        or _legacy_idempotency_identity_conflict_receipt(receipt)
     ):
         return None
     accounting = receipt.get("accounting") if receipt is not None else None
@@ -2139,6 +2153,9 @@ def _validate_retained_dispositions(connection: sqlite3.Connection) -> None:
         legacy_extraction_state_error = _legacy_extraction_state_error_receipt(
             receipt
         )
+        legacy_idempotency_identity_conflict = (
+            _legacy_idempotency_identity_conflict_receipt(receipt)
+        )
         legacy_unreported_binding_failure = (
             _legacy_unreported_binding_failure_receipt(receipt)
         )
@@ -2206,6 +2223,34 @@ def _validate_retained_dispositions(connection: sqlite3.Connection) -> None:
             ) is not None:
                 raise GraphitiSpendReconciliationError(
                     f"retained disposition {spend_id} extraction hold differs"
+                )
+        elif legacy_idempotency_identity_conflict:
+            retained_release = (
+                evidence.get("disposition")
+                == GraphitiSpendDisposition.RELEASED_BEFORE_PROVIDER_IO.value
+                and evidence.get("evidence_basis")
+                == "PROVIDER_DISPATCH_STRUCTURALLY_RULED_OUT"
+                and model_usage_evidence is not None
+            )
+            retained_hold = (
+                evidence.get("disposition")
+                == GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD.value
+                and evidence.get("evidence_basis")
+                == "IDEMPOTENCY_IDENTITY_CONFLICT_WITHOUT_EXACT_USAGE_PROOF"
+                and model_usage_evidence is None
+            )
+            if not retained_release and not retained_hold:
+                raise GraphitiSpendReconciliationError(
+                    f"retained disposition {spend_id} idempotency failure differs"
+                )
+            if retained_hold and _legacy_pre_provider_model_usage_evidence(
+                connection,
+                spend_id=spend_id,
+                ingest_id=str(row["ingest_id"]),
+                receipt=receipt,
+            ) is not None:
+                raise GraphitiSpendReconciliationError(
+                    f"retained disposition {spend_id} idempotency hold differs"
                 )
         elif legacy_unreported_binding_failure:
             if retained_late_bound:
@@ -2547,6 +2592,9 @@ def _plan_from_connection(
         legacy_extraction_state_error = _legacy_extraction_state_error_receipt(
             receipt
         )
+        legacy_idempotency_identity_conflict = (
+            _legacy_idempotency_identity_conflict_receipt(receipt)
+        )
         legacy_unreported_binding_failure = (
             _legacy_unreported_binding_failure_receipt(receipt)
         )
@@ -2750,6 +2798,20 @@ def _plan_from_connection(
                     disposition=GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD,
                     evidence_basis=(
                         "EXTRACTION_STATE_ERROR_WITHOUT_EXACT_USAGE_PROOF"
+                    ),
+                    journal=journal,
+                    receipt=receipt,
+                    provider_usage=provider_usage,
+                )
+            )
+            continue
+        if legacy_idempotency_identity_conflict:
+            transitions.append(
+                _transition(
+                    row,
+                    disposition=GraphitiSpendDisposition.AMBIGUOUS_EFFECT_HOLD,
+                    evidence_basis=(
+                        "IDEMPOTENCY_IDENTITY_CONFLICT_WITHOUT_EXACT_USAGE_PROOF"
                     ),
                     journal=journal,
                     receipt=receipt,

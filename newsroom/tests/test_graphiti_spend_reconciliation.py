@@ -4070,6 +4070,82 @@ def test_extraction_state_error_structurally_releases_before_provider_io(
     assert replay.transitions == ()
 
 
+def test_legacy_idempotency_identity_conflict_structurally_releases_before_provider_io(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    connection = connect(str(path))
+    spend_id = _reserve(connection, ingest_id="idempotency-conflict", attempt=1)
+    accounting = reconcile_graphiti_spend(
+        connection, spend_id=spend_id, embedding_usage=None
+    )
+    receipt_digest = insert_graphiti_attempt_receipt(
+        connection,
+        ingest_id="idempotency-conflict",
+        attempt_number=1,
+        outcome="FAILED",
+        receipt={
+            "ingest_id": "idempotency-conflict",
+            "attempt_number": 1,
+            "outcome": "FAILED",
+            "failure_code": "PRODUCER_INTERNAL_ERROR",
+            "binding_failure": "RESULT_CONTRACT_REJECTED",
+            "binding_failure_type": "IdempotencyIdentityConflict",
+            "binding_failure_stage": "UNCLASSIFIED_RESULT_BOUNDARY",
+            "provider_attempt_number": None,
+            "returned_raw_receipt_digest": None,
+            "returned_validated_raw_digest": None,
+            "chat_invocation_count": 0,
+            "chat_invocations_digest": None,
+            "chat_invocations": [],
+            "embedding_usage_digest": None,
+            "embedding_usage": None,
+            "token_usage": None,
+            "accounting": accounting,
+        },
+    )
+    connection.commit()
+    connection.close()
+    _retain_legacy_pre_provider_usage_proof(
+        path,
+        spend_id=spend_id,
+        ingest_id="idempotency-conflict",
+        outcome_record_id=receipt_digest,
+    )
+
+    evaluated_at = datetime(2026, 9, 5, tzinfo=UTC)
+    plan = plan_graphiti_spend_reconciliation(str(path), evaluated_at=evaluated_at)
+
+    transition = plan.transitions[0]
+    assert transition.disposition is (
+        GraphitiSpendDisposition.RELEASED_BEFORE_PROVIDER_IO
+    )
+    assert transition.evidence_basis == "PROVIDER_DISPATCH_STRUCTURALLY_RULED_OUT"
+    assert transition.target_status == "RECONCILED"
+    assert transition.target_usage_basis == "NO_PROVIDER_IO"
+    assert transition.actual_usd_microunits == 0
+    assert transition.actual_gbp_microunits == 0
+    assert transition.unused_reservation_released is True
+    assert transition.model_usage_evidence is not None
+    assert transition.model_usage_evidence["allocation_count"] == 0
+    assert transition.model_usage_evidence["dispatch_started_count"] == 0
+
+    _command_service().reconcile_graphiti_spend(
+        unpublished_store=str(path),
+        dry_run_plan=plan.as_dict(),
+        evaluated_at=evaluated_at,
+        idempotency_key="legacy-idempotency-identity-conflict",
+        expected_plan_digest=plan.plan_digest,
+        proof=AuthenticationProof(
+            method="STATIC_TOKEN", credential="operator-token"
+        ),
+    )
+    report = graphiti_usage_report(str(path))
+    assert report["measured_attempt_count"] == 1
+    assert report["unreported_attempt_count"] == 0
+    assert report["cost_complete"] is True
+
+
 @pytest.mark.parametrize(
     ("failure_type", "usage_proof", "expected_basis"),
     (
@@ -4077,6 +4153,11 @@ def test_extraction_state_error_structurally_releases_before_provider_io(
             "ExtractionStateError",
             "ABSENT",
             "EXTRACTION_STATE_ERROR_WITHOUT_EXACT_USAGE_PROOF",
+        ),
+        (
+            "IdempotencyIdentityConflict",
+            "ABSENT",
+            "IDEMPOTENCY_IDENTITY_CONFLICT_WITHOUT_EXACT_USAGE_PROOF",
         ),
         (
             "ExtractionStateError",
