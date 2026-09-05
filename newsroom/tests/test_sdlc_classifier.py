@@ -62,7 +62,7 @@ def test_repository_globs_treat_double_star_as_zero_or_more_segments() -> None:
 def test_risk_routing_uses_maximum_triggered_tier() -> None:
     assert _route("README.md")["risk_tier"] == "R0_DOCUMENTATION"
     assert _route("newsroom/tests/test_unrelated.py")["risk_tier"] == ("R1_LOCAL_CODE")
-    assert _route("newsroom/authority/object_system.py")["risk_tier"] == (
+    assert _route("newsroom/tests/test_authority_a2a_integrity.py")["risk_tier"] == (
         "R2_STATEFUL_CONTRACT"
     )
     assert _route("newsroom/projection/policy.py")["risk_tier"] == (

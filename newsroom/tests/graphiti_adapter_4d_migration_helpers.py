@@ -256,11 +256,76 @@ def _drop_empty_v32_recovery_schema(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA user_version=31")
 
 
+def _drop_empty_v35_accounted_zero_schema(connection: sqlite3.Connection) -> None:
+    """Restore the exact v34 Graphiti attempt CHECK."""
+
+    if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 35:
+        return
+    from newsroom.authority.graphiti_accounted_zero_migrations import (
+        GRAPHITI_ACCOUNTED_ZERO_MIGRATION_CHECKSUM,
+        GRAPHITI_ACCOUNTED_ZERO_MIGRATION_NAME,
+    )
+    from newsroom.authority.graphiti_adapter_migrations import (
+        GRAPHITI_ADAPTER_MIGRATION_STATEMENTS,
+    )
+
+    if connection.execute(
+        "SELECT name,checksum FROM authority_migrations WHERE version=35"
+    ).fetchone() != (
+        GRAPHITI_ACCOUNTED_ZERO_MIGRATION_NAME,
+        GRAPHITI_ACCOUNTED_ZERO_MIGRATION_CHECKSUM,
+    ):
+        raise sqlite3.DatabaseError("downgrade requires exact v35 Graphiti authority")
+    if connection.execute(
+        "SELECT COUNT(*) FROM graphiti_adapter_attempts"
+    ).fetchone() != (0,):
+        raise sqlite3.DatabaseError("v35 Graphiti adapter attempts must be empty")
+
+    connection.execute("PRAGMA foreign_keys=OFF")
+    for trigger in (
+        "graphiti_attempt_chain_guard",
+        "graphiti_attempt_lineage_guard",
+        "graphiti_attempt_output_guard",
+        "immutable_graphiti_adapter_attempts_update",
+        "immutable_graphiti_adapter_attempts_delete",
+    ):
+        connection.execute(f'DROP TRIGGER "{trigger}"')
+    connection.execute("DROP INDEX idx_graphiti_attempts_run")
+    connection.execute("DROP TABLE graphiti_adapter_attempts")
+
+    def adapter_statement(prefix: str) -> str:
+        return next(
+            item
+            for item in GRAPHITI_ADAPTER_MIGRATION_STATEMENTS
+            if " ".join(item.split()).startswith(prefix)
+        )
+
+    connection.execute(adapter_statement("CREATE TABLE graphiti_adapter_attempts("))
+    connection.execute(adapter_statement("CREATE INDEX idx_graphiti_attempts_run "))
+    for prefix in (
+        "CREATE TRIGGER graphiti_attempt_chain_guard",
+        "CREATE TRIGGER graphiti_attempt_lineage_guard",
+        "CREATE TRIGGER graphiti_attempt_output_guard",
+        "CREATE TRIGGER immutable_graphiti_adapter_attempts_update ",
+        "CREATE TRIGGER immutable_graphiti_adapter_attempts_delete ",
+    ):
+        connection.execute(adapter_statement(prefix))
+    guard = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' "
+        "AND name='immutable_authority_migrations_delete'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER immutable_authority_migrations_delete")
+    connection.execute("DELETE FROM authority_migrations WHERE version=35")
+    connection.execute(guard)
+    connection.execute("PRAGMA user_version=34")
+
+
 def _drop_empty_v34_graphiti_evaluation_schema(
     connection: sqlite3.Connection,
 ) -> None:
     """Restore the exact v32 central schema; v33 belongs to an isolated store."""
 
+    _drop_empty_v35_accounted_zero_schema(connection)
     if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 34:
         return
     from newsroom.authority.extraction_migrations import (

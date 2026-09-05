@@ -1067,9 +1067,18 @@ class GraphitiAttemptRecord:
         if self.outcome.may_reference_proposals != (
             self.proposal_set_id is not None
         ):
-            if not (
-                self.outcome is GraphitiAdapterOutcome.PARTIAL
+            accounted_zero = (
+                self.outcome is GraphitiAdapterOutcome.COMPLETE
                 and self.proposal_set_id is None
+                and self.usage.proposal_count == 0
+                and self.output_id is not None
+            )
+            if not (
+                (
+                    self.outcome is GraphitiAdapterOutcome.PARTIAL
+                    and self.proposal_set_id is None
+                )
+                or accounted_zero
             ):
                 raise GraphitiAdapterContractError(
                     "retained adapter proposal authority differs from outcome"
