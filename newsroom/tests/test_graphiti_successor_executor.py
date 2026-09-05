@@ -196,6 +196,7 @@ def test_spent_packet_digest_constants_include_historical_bindings() -> None:
         "sha256:ecf8672ddf9cdd64c471ad68dca49d02eda673a59d86132c411632f9ec17dc04",
         "sha256:e9f5502d19c02eedbf15091eb0c3383a79006d626926cf00c1bdfa2c04229677",
         "sha256:af152f8e777b0deaf8d756d54442267577d5c902d7997f4def476c74a63be70c",
+        "sha256:ffcce3ff377c231540892939a9f3a104dea143006e54499395e0396b291f7a3d",
     }
     assert executor.DEFAULT_ATTEMPTED_EVENT_IDS >= {
         "sha256:1349b0c9f873c4da795732a974aab7db31b87cbeca50364f487f388093024cd1",
@@ -204,6 +205,7 @@ def test_spent_packet_digest_constants_include_historical_bindings() -> None:
         "sha256:a1798f664a26148480d842a738d1d7617b59e065f6a9853d4dab3d99dffd7435",
         "sha256:8fab380a519abfe7e9feceb5165afb1dd80edd2175841c508445af8f92fe6005",
         "sha256:ac29d8d72d287b5642203c33aaff93bba0374057b3768fd4f7fa2d1c413b3f4e",
+        "sha256:94c81bf8a5285df858eb0d766fe646c4c837e2c5be521a5c454fe23fea029d81",
     }
 
 
@@ -660,8 +662,8 @@ def test_default_prior_consumption_keeps_classified_baseline(
 ) -> None:
     evidence = tmp_path / "evidence"
     evidence.mkdir()
-    assert executor.CLASSIFIED_PRIOR_STARTS == 6
-    assert executor.CLASSIFIED_PRIOR_RESERVED == 2_500_000
+    assert executor.CLASSIFIED_PRIOR_STARTS == 7
+    assert executor.CLASSIFIED_PRIOR_RESERVED == 3_000_000
     assert executor.default_prior_consumption(evidence) == (
         executor.CLASSIFIED_PRIOR_STARTS,
         executor.CLASSIFIED_PRIOR_RESERVED,
@@ -687,6 +689,14 @@ def test_default_prior_consumption_keeps_classified_baseline(
         "af152f8e777b0deaf8d756d54442267577d5c902d7997f4def476c74a63be70c.json"
     )
     extra_required_spent.write_text(
+        json.dumps({"event_count": 211, "spend_gbp_microunits": 105500000}),
+        encoding="utf-8",
+    )
+    dispatched_spent = evidence / (
+        ".issue-895-f4-invocation-"
+        "ffcce3ff377c231540892939a9f3a104dea143006e54499395e0396b291f7a3d.json"
+    )
+    dispatched_spent.write_text(
         json.dumps({"event_count": 211, "spend_gbp_microunits": 105500000}),
         encoding="utf-8",
     )
