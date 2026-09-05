@@ -343,7 +343,7 @@ def test_accepted_v16_history_is_a_prefix_not_a_future_migration_freeze(
     errors = validate_interface_inventory(INCREMENT_6_READINESS)
     assert any("central suffix versions differ" in error for error in errors)
 
-    monkeypatch.setattr(authority_migrations, "SCHEMA_VERSION", 34)
+    monkeypatch.setattr(authority_migrations, "SCHEMA_VERSION", 35)
     monkeypatch.setattr(
         authority_migrations,
         "EXPECTED_MIGRATION_HISTORY",

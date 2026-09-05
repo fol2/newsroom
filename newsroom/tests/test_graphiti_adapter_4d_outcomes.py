@@ -47,7 +47,12 @@ from newsroom.graphiti_adapter import (
     RealGraphitiRuntimeAuthority,
 )
 from newsroom.graphiti_adapter.evaluation_attempt import evaluation_attempt_for
-from newsroom.graphiti_adapter.real import RealGraphitiAdapter
+from newsroom.graphiti_adapter.real import (
+    RealGraphitiAdapter,
+    _EpisodeTelemetry,
+    _raw_receipt,
+)
+from newsroom.graphiti_adapter.result_mapping import extraction_usage
 from newsroom.graphiti_adapter.contracts import (
     GRAPHITI_ADAPTER_CODE_COMPONENT,
     GRAPHITI_ADAPTER_NORMALISATION_COMPONENT,
@@ -358,6 +363,186 @@ def test_evaluation_receipt_binding_failure_rolls_back_both_authorities(
             "SELECT COUNT(*) FROM graphiti_adapter_attempts WHERE attempt_id=?",
             (str(attempt.attempt_id),),
         ).fetchone()[0] == 0
+
+
+def _production_shaped_execution(
+    attempt,
+    *,
+    proposals: tuple[ProposalDraft, ...] | None = None,
+) -> GraphitiAdapterExecution:
+    """Receipt shape emitted by RealGraphitiAdapter after a completed chat.
+
+    Live Graphiti chat often returns SUCCESS with zero exact-span proposals.
+    """
+
+    if proposals is None:
+        proposals = ()
+    started_at = UtcTimestamp(datetime(2042, 3, 12, 9, 59, 58, tzinfo=UTC))
+    ended_at = UtcTimestamp(datetime(2042, 3, 12, 9, 59, 59, tzinfo=UTC))
+    telemetry = _EpisodeTelemetry(
+        chat_invocations=[
+            {
+                "route": "cursor-agent-cli:composer-2.5",
+                "outcome": "COMPLETE",
+                "input_tokens": 4161,
+                "output_tokens": 2059,
+                "total_tokens": 6636,
+            }
+        ],
+        embedding_usage={
+            "requests": [],
+            "request_count": 0,
+            "embedding_tokens": 0,
+            "cost_usd_microunits": 0,
+            "usage_basis": "NO_EMBEDDING_CALL",
+        },
+        provider_attempt_number=1,
+    )
+    receipt = _raw_receipt(
+        attempt,
+        started_at=started_at,
+        telemetry=telemetry,
+        result=None,
+        proposals=proposals,
+    )
+    produced = ProducedExtraction(
+        outcome=ExtractionOutcome.SUCCESS,
+        failure_code=ExtractionFailureCode.NONE,
+        validation=ExtractionOutputValidation.VALID,
+        raw_output_value=receipt,
+        proposals=proposals,
+        usage=extraction_usage(
+            attempt,
+            receipt,
+            proposals,
+            embedding_usage=telemetry.embedding_usage,
+        ),
+    )
+    workspace = GraphitiWorkspaceDescriptor(
+        workspace_id=attempt.workspace_id,
+        configuration_id=attempt.configuration.configuration_id,
+        policy_id=attempt.configuration.workspace_policy.policy_id,
+        policy_digest=attempt.configuration.workspace_policy.canonical_digest,
+        namespace=(
+            f"{attempt.configuration.workspace_policy.namespace_prefix}-"
+            f"{attempt.workspace_id}"
+        ),
+        created_at=started_at,
+    )
+    return GraphitiAdapterExecution(
+        attempt=attempt,
+        outcome=GraphitiAdapterOutcome.COMPLETE,
+        failure_code=produced.failure_code.value,
+        produced=produced,
+        workspace=workspace,
+        cleanup_receipt=GraphitiCleanupReceipt(
+            receipt_id=attempt.cleanup_receipt_id,
+            workspace_id=attempt.workspace_id,
+            final_state=GraphitiWorkspaceState.CLEANED,
+            reason=GraphitiCleanupReason.NORMAL,
+            private_node_count=0,
+            private_relation_count=0,
+            file_count=0,
+            byte_count=0,
+            workspace_absent=True,
+            recorded_at=ended_at,
+        ),
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+
+
+def test_production_shaped_receipt_persists_after_provider_complete(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = seed_extraction_fixture(tmp_path / "authority")
+    attempt = _evaluation_attempt(state)
+    workspace_root = (tmp_path / "workspace").resolve()
+    workspace_root.mkdir()
+    (workspace_root / "donor_identities.sqlite3").write_bytes(b"")
+
+    monkeypatch.setattr(
+        RealGraphitiAdapter,
+        "execute",
+        lambda _self, **_values: _production_shaped_execution(
+            attempt, proposals=(_evaluation_proposal(attempt),)
+        ),
+    )
+    with open_extraction_system(state) as extraction:
+        extraction.extraction.register_contract(
+            attempt.extraction_contract, proof=extraction_proof()
+        )
+    with open_graphiti_system(state, workspace_root=workspace_root) as system:
+        system.graphiti.register_configuration(
+            attempt.configuration, proof=extraction_proof()
+        )
+        retained = system.graphiti.execute_attempt(
+            attempt,
+            proof=extraction_proof(),
+            execution_deadline=datetime(2042, 3, 12, 10, 0, tzinfo=UTC),
+            fallback_permitted=False,
+            invocation_observer=object(),
+        )
+
+    assert retained.outcome is GraphitiAdapterOutcome.COMPLETE
+    assert retained.output_id is not None
+    assert retained.proposal_set_id is not None
+    with closing(sqlite3.connect(state.database)) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM extraction_run_versions WHERE run_version_id=?",
+            (str(attempt.extraction_request.run_version_id),),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM graphiti_adapter_attempts WHERE attempt_id=?",
+            (str(attempt.attempt_id),),
+        ).fetchone()[0] == 1
+
+
+def test_production_shaped_zero_proposal_complete_persists(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Accounted-zero Graphiti SUCCESS must persist as COMPLETE."""
+
+    state = seed_extraction_fixture(tmp_path / "authority")
+    attempt = _evaluation_attempt(state)
+    workspace_root = (tmp_path / "workspace").resolve()
+    workspace_root.mkdir()
+    (workspace_root / "donor_identities.sqlite3").write_bytes(b"")
+
+    monkeypatch.setattr(
+        RealGraphitiAdapter,
+        "execute",
+        lambda _self, **_values: _production_shaped_execution(attempt),
+    )
+    with open_extraction_system(state) as extraction:
+        extraction.extraction.register_contract(
+            attempt.extraction_contract, proof=extraction_proof()
+        )
+    with open_graphiti_system(state, workspace_root=workspace_root) as system:
+        system.graphiti.register_configuration(
+            attempt.configuration, proof=extraction_proof()
+        )
+        retained = system.graphiti.execute_attempt(
+            attempt,
+            proof=extraction_proof(),
+            execution_deadline=datetime(2042, 3, 12, 10, 0, tzinfo=UTC),
+            fallback_permitted=False,
+            invocation_observer=object(),
+        )
+
+    assert retained.outcome is GraphitiAdapterOutcome.COMPLETE
+    assert retained.output_id is not None
+    assert retained.proposal_set_id is None
+    with closing(sqlite3.connect(state.database)) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM extraction_run_versions WHERE run_version_id=?",
+            (str(attempt.extraction_request.run_version_id),),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT outcome, proposal_count FROM graphiti_adapter_attempts "
+            "WHERE attempt_id=?",
+            (str(attempt.attempt_id),),
+        ).fetchone() == ("COMPLETE", 0)
 
 
 def _digest(label: str) -> str:
