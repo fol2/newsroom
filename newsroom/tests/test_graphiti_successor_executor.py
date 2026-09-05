@@ -195,6 +195,7 @@ def test_spent_packet_digest_constants_include_historical_bindings() -> None:
         "sha256:72f2f504ea465be3d7842515dd12a30828aa736f8205a920d885d8b45c90474d",
         "sha256:ecf8672ddf9cdd64c471ad68dca49d02eda673a59d86132c411632f9ec17dc04",
         "sha256:e9f5502d19c02eedbf15091eb0c3383a79006d626926cf00c1bdfa2c04229677",
+        "sha256:af152f8e777b0deaf8d756d54442267577d5c902d7997f4def476c74a63be70c",
     }
     assert executor.DEFAULT_ATTEMPTED_EVENT_IDS >= {
         "sha256:1349b0c9f873c4da795732a974aab7db31b87cbeca50364f487f388093024cd1",
@@ -679,6 +680,14 @@ def test_default_prior_consumption_keeps_classified_baseline(
     )
     successor_spent.write_text(
         json.dumps({"event_count": 212, "spend_gbp_microunits": 106000000}),
+        encoding="utf-8",
+    )
+    extra_required_spent = evidence / (
+        ".issue-895-f4-invocation-"
+        "af152f8e777b0deaf8d756d54442267577d5c902d7997f4def476c74a63be70c.json"
+    )
+    extra_required_spent.write_text(
+        json.dumps({"event_count": 211, "spend_gbp_microunits": 105500000}),
         encoding="utf-8",
     )
     assert executor.default_prior_consumption(evidence) == (
