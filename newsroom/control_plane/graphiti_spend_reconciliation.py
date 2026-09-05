@@ -2100,6 +2100,12 @@ def _validate_retained_dispositions(connection: sqlite3.Connection) -> None:
             raise GraphitiSpendReconciliationError(
                 f"retained disposition {spend_id} is unsupported"
             ) from exc
+        # Same-status RECONCILED backfill keeps spend.at at source_at.
+        retained_same_status_at = (
+            row["source_status"] == "RECONCILED"
+            and row["target_status"] == "RECONCILED"
+            and row["current_spend_at"] == row["source_at"]
+        )
         if (
             row["current_ingest_id"] != row["ingest_id"]
             or row["current_attempt_number"] != row["attempt_number"]
@@ -2112,7 +2118,9 @@ def _validate_retained_dispositions(connection: sqlite3.Connection) -> None:
             or row["current_actual_gbp_microunits"] != row["actual_gbp_microunits"]
             or row["current_dispatch_owner"] is not None
             or row["current_dispatch_lease_expires_at"] is not None
-            or row["current_spend_at"] != row["at"]
+            or (
+                row["current_spend_at"] != row["at"] and not retained_same_status_at
+            )
         ):
             raise GraphitiSpendReconciliationError(
                 f"retained disposition {spend_id} differs from current spend state"
@@ -3406,25 +3414,30 @@ def _apply_graphiti_spend_reconciliation(
                 )
                 else None
             )
-            connection.execute(
-                """
-                UPDATE unpublished_graphiti_spend
-                SET status=?, actual_usd_microunits=?,
-                    actual_gbp_microunits=?, usage_basis=?,
-                    provider_usage_json=COALESCE(?, provider_usage_json),
-                    dispatch_owner=NULL, dispatch_lease_expires_at=NULL, at=?
-                WHERE spend_id=?
-                """,
-                (
-                    transition.target_status,
-                    transition.actual_usd_microunits,
-                    transition.actual_gbp_microunits,
-                    transition.target_usage_basis,
-                    retained_usage,
-                    applied_at,
-                    transition.spend_id,
-                ),
+            rewrite_reconciled_row = not (
+                transition.source_status == "RECONCILED"
+                and transition.target_status == "RECONCILED"
             )
+            if rewrite_reconciled_row:
+                connection.execute(
+                    """
+                    UPDATE unpublished_graphiti_spend
+                    SET status=?, actual_usd_microunits=?,
+                        actual_gbp_microunits=?, usage_basis=?,
+                        provider_usage_json=COALESCE(?, provider_usage_json),
+                        dispatch_owner=NULL, dispatch_lease_expires_at=NULL, at=?
+                    WHERE spend_id=?
+                    """,
+                    (
+                        transition.target_status,
+                        transition.actual_usd_microunits,
+                        transition.actual_gbp_microunits,
+                        transition.target_usage_basis,
+                        retained_usage,
+                        applied_at,
+                        transition.spend_id,
+                    ),
+                )
             counts[transition.disposition.value] = (
                 counts.get(transition.disposition.value, 0) + 1
             )

@@ -4146,6 +4146,123 @@ def test_legacy_idempotency_identity_conflict_structurally_releases_before_provi
     assert report["cost_complete"] is True
 
 
+def test_apply_does_not_rewrite_already_reconciled_spend_when_releasing_another(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unpublished.sqlite3"
+    connection = connect(str(path))
+    live_spend = _reserve(connection, ingest_id="idempotency-conflict", attempt=1)
+    live_accounting = reconcile_graphiti_spend(
+        connection, spend_id=live_spend, embedding_usage=None
+    )
+    live_receipt = insert_graphiti_attempt_receipt(
+        connection,
+        ingest_id="idempotency-conflict",
+        attempt_number=1,
+        outcome="FAILED",
+        receipt={
+            "ingest_id": "idempotency-conflict",
+            "attempt_number": 1,
+            "outcome": "FAILED",
+            "failure_code": "PRODUCER_INTERNAL_ERROR",
+            "binding_failure": "RESULT_CONTRACT_REJECTED",
+            "binding_failure_type": "IdempotencyIdentityConflict",
+            "binding_failure_stage": "UNCLASSIFIED_RESULT_BOUNDARY",
+            "provider_attempt_number": None,
+            "returned_raw_receipt_digest": None,
+            "returned_validated_raw_digest": None,
+            "chat_invocation_count": 0,
+            "chat_invocations_digest": None,
+            "chat_invocations": [],
+            "embedding_usage_digest": None,
+            "embedding_usage": None,
+            "token_usage": None,
+            "accounting": live_accounting,
+        },
+    )
+    prior_spend = _reserve(connection, ingest_id="already-reconciled", attempt=1)
+    prior_accounting = reconcile_graphiti_spend(
+        connection,
+        spend_id=prior_spend,
+        embedding_usage=_no_embedding_usage(),
+    )
+    insert_graphiti_attempt_receipt(
+        connection,
+        ingest_id="already-reconciled",
+        attempt_number=1,
+        outcome="FAILED",
+        receipt={
+            "ingest_id": "already-reconciled",
+            "attempt_number": 1,
+            "outcome": "FAILED",
+            "provider_attempt_number": 1,
+            "chat_invocations": [],
+            "embedding_usage": _no_embedding_usage(),
+            "accounting": prior_accounting,
+        },
+    )
+    prior_before = connection.execute(
+        "SELECT status, actual_usd_microunits, actual_gbp_microunits, "
+        "usage_basis, at, provider_usage_json FROM unpublished_graphiti_spend "
+        "WHERE spend_id=?",
+        (prior_spend,),
+    ).fetchone()
+    connection.commit()
+    connection.close()
+    _retain_legacy_pre_provider_usage_proof(
+        path,
+        spend_id=live_spend,
+        ingest_id="idempotency-conflict",
+        outcome_record_id=live_receipt,
+    )
+
+    evaluated_at = datetime(2026, 9, 5, tzinfo=UTC)
+    plan = plan_graphiti_spend_reconciliation(str(path), evaluated_at=evaluated_at)
+    by_spend = {item.spend_id: item for item in plan.transitions}
+    assert by_spend[live_spend].disposition is (
+        GraphitiSpendDisposition.RELEASED_BEFORE_PROVIDER_IO
+    )
+    assert by_spend[prior_spend].source_status == "RECONCILED"
+    assert by_spend[prior_spend].target_status == "RECONCILED"
+
+    _command_service().reconcile_graphiti_spend(
+        unpublished_store=str(path),
+        dry_run_plan=plan.as_dict(),
+        evaluated_at=evaluated_at,
+        idempotency_key="mixed-reconciled-and-unreconciled",
+        expected_plan_digest=plan.plan_digest,
+        proof=AuthenticationProof(
+            method="STATIC_TOKEN", credential="operator-token"
+        ),
+    )
+    after = sqlite3.connect(path)
+    live_after = after.execute(
+        "SELECT status, actual_gbp_microunits, usage_basis FROM "
+        "unpublished_graphiti_spend WHERE spend_id=?",
+        (live_spend,),
+    ).fetchone()
+    prior_after = after.execute(
+        "SELECT status, actual_usd_microunits, actual_gbp_microunits, "
+        "usage_basis, at, provider_usage_json FROM unpublished_graphiti_spend "
+        "WHERE spend_id=?",
+        (prior_spend,),
+    ).fetchone()
+    dispositions = {
+        row[0]
+        for row in after.execute(
+            "SELECT spend_id FROM unpublished_graphiti_spend_dispositions"
+        )
+    }
+    after.close()
+    assert live_after == ("RECONCILED", 0, "NO_PROVIDER_IO")
+    assert prior_after == prior_before
+    assert dispositions == {live_spend, prior_spend}
+    follow_up = plan_graphiti_spend_reconciliation(
+        str(path), evaluated_at=evaluated_at
+    )
+    assert follow_up.transitions == ()
+
+
 @pytest.mark.parametrize(
     ("failure_type", "usage_proof", "expected_basis"),
     (
