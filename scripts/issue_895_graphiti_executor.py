@@ -506,8 +506,6 @@ def _production_dispatch(
             "--unpublished",
             unpublished,
         ]
-        if runtime is None:
-            return worker.main(argv)
         return worker.main(argv, runtime=runtime, owner_f4_fence=owner_f4_fence)
 
     return dispatch
@@ -572,6 +570,8 @@ def main(
                 out,
             )
             return 0
+        if dispatch is None and runtime is None:
+            stop("campaign authority is unconfigured")
 
         fence = make_owner_f4_fence(
             packet_digest=digest,

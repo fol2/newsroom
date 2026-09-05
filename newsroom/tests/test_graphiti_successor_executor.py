@@ -684,6 +684,95 @@ def test_default_prior_consumption_keeps_classified_baseline(
     )
 
 
+def test_production_dispatch_without_runtime_refuses_before_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    packet = _ready_packet(tmp_path / "stores", monkeypatch)
+    packet_path = _write_packet(tmp_path / "packet", packet)
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    comments = CommentView([_grant(), _owner_comment(PROGRESS_BODY)])
+    captured: dict[str, object] = {}
+
+    def fake_worker_main(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        pytest.fail("unconfigured production dispatch reached the worker")
+
+    monkeypatch.setattr(
+        "scripts.hermes_graphiti_worker.main",
+        fake_worker_main,
+    )
+    code, payload = _run(
+        [
+            "--packet",
+            str(packet_path),
+            "--evidence-root",
+            str(evidence),
+            "--dispatch",
+        ],
+        capsys,
+        list_comments=comments,
+        incomplete_view=lambda: False,
+        code_identity=lambda: ("head", "tree"),
+        prior_consumption=lambda: (0, 0),
+    )
+    marker = executor.invocation_marker_path(evidence, str(packet["packet_digest"]))
+    assert code == 2
+    assert payload["dispatch_reached"] is False
+    assert payload["invocation_marker_created"] is False
+    assert "campaign authority is unconfigured" in payload["message"]
+    assert not marker.exists()
+    assert "argv" not in captured
+
+
+def test_production_dispatch_injects_fence_into_worker_before_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    packet = _ready_packet(tmp_path / "stores", monkeypatch)
+    packet_path = _write_packet(tmp_path / "packet", packet)
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    comments = CommentView([_grant(), _owner_comment(PROGRESS_BODY)])
+    captured: dict[str, object] = {}
+    runtime = object()
+
+    def fake_worker_main(argv, **kwargs):
+        captured["argv"] = list(argv)
+        captured["kwargs"] = kwargs
+        fence = kwargs["owner_f4_fence"]
+        fence(packet)
+        return 0
+
+    import scripts.hermes_graphiti_worker as worker
+
+    monkeypatch.setattr(worker, "main", fake_worker_main)
+    code, payload = _run(
+        [
+            "--packet",
+            str(packet_path),
+            "--evidence-root",
+            str(evidence),
+            "--dispatch",
+        ],
+        capsys,
+        list_comments=comments,
+        incomplete_view=lambda: False,
+        code_identity=lambda: ("head", "tree"),
+        prior_consumption=lambda: (0, 0),
+        runtime=runtime,
+    )
+    assert code == 0
+    assert payload["dispatch_reached"] is True
+    assert captured["kwargs"]["runtime"] is runtime
+    assert callable(captured["kwargs"]["owner_f4_fence"])
+    assert captured["argv"][0] == "--campaign-packet"
+
+
 def test_lock_identity_drift_and_store_attempted_and_worker_stop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
