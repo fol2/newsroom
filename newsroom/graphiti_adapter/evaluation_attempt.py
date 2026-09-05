@@ -278,7 +278,7 @@ def evaluation_attempt_for_body(
             max_response_tokens=16_384,
             max_cost_microunits=500_000,
         ),
-        idempotency_key="evaluation-graphiti-run-v2",
+        idempotency_key=f"evaluation-graphiti-run-{ingest_id}",
     )
     return GraphitiAttemptRequest(
         attempt_id=attempt_id,
