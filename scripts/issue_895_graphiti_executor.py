@@ -32,12 +32,13 @@ PROGRAMME_LOCK_NAME = ".issue-895-f4-programme.lock"
 PROGRAMME_LOCK_IDENTITY = "newsroom.issue-895-standing-f4-programme-lock.v1\n"
 PROGRAMME_MAX_EVENTS = 218
 PROGRAMME_MAX_SPEND = 109_000_000
-CLASSIFIED_PRIOR_STARTS = 5
-CLASSIFIED_PRIOR_RESERVED = 2_000_000
+CLASSIFIED_PRIOR_STARTS = 6
+CLASSIFIED_PRIOR_RESERVED = 2_500_000
 SPENT_PACKET_DIGESTS = frozenset(
     {
         "sha256:72f2f504ea465be3d7842515dd12a30828aa736f8205a920d885d8b45c90474d",
         "sha256:ecf8672ddf9cdd64c471ad68dca49d02eda673a59d86132c411632f9ec17dc04",
+        "sha256:e9f5502d19c02eedbf15091eb0c3383a79006d626926cf00c1bdfa2c04229677",
     }
 )
 DEFAULT_ATTEMPTED_EVENT_IDS = frozenset(
@@ -47,6 +48,7 @@ DEFAULT_ATTEMPTED_EVENT_IDS = frozenset(
         "sha256:e18f0abe3fe23950c102b9ba1de2fc8db0b2957729880c08a387752c415225cc",
         "sha256:a1798f664a26148480d842a738d1d7617b59e065f6a9853d4dab3d99dffd7435",
         "sha256:8fab380a519abfe7e9feceb5165afb1dd80edd2175841c508445af8f92fe6005",
+        "sha256:ac29d8d72d287b5642203c33aaff93bba0374057b3768fd4f7fa2d1c413b3f4e",
     }
 )
 RESTRICTION_TOKENS = (
@@ -149,7 +151,7 @@ def _terminal_evidence_complete(output: Path) -> bool:
 
 
 def default_prior_consumption(evidence_root: Path) -> tuple[int, int]:
-    """Retained 5 starts / 2000000 reserved, plus non-spent successor markers."""
+    """Retained classified starts/reservations, plus non-spent successor markers."""
 
     starts = CLASSIFIED_PRIOR_STARTS
     reserved = CLASSIFIED_PRIOR_RESERVED

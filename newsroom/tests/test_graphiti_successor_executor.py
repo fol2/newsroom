@@ -194,6 +194,7 @@ def test_spent_packet_digest_constants_include_historical_bindings() -> None:
     assert executor.SPENT_PACKET_DIGESTS == {
         "sha256:72f2f504ea465be3d7842515dd12a30828aa736f8205a920d885d8b45c90474d",
         "sha256:ecf8672ddf9cdd64c471ad68dca49d02eda673a59d86132c411632f9ec17dc04",
+        "sha256:e9f5502d19c02eedbf15091eb0c3383a79006d626926cf00c1bdfa2c04229677",
     }
     assert executor.DEFAULT_ATTEMPTED_EVENT_IDS >= {
         "sha256:1349b0c9f873c4da795732a974aab7db31b87cbeca50364f487f388093024cd1",
@@ -201,6 +202,7 @@ def test_spent_packet_digest_constants_include_historical_bindings() -> None:
         "sha256:e18f0abe3fe23950c102b9ba1de2fc8db0b2957729880c08a387752c415225cc",
         "sha256:a1798f664a26148480d842a738d1d7617b59e065f6a9853d4dab3d99dffd7435",
         "sha256:8fab380a519abfe7e9feceb5165afb1dd80edd2175841c508445af8f92fe6005",
+        "sha256:ac29d8d72d287b5642203c33aaff93bba0374057b3768fd4f7fa2d1c413b3f4e",
     }
 
 
@@ -657,6 +659,8 @@ def test_default_prior_consumption_keeps_classified_baseline(
 ) -> None:
     evidence = tmp_path / "evidence"
     evidence.mkdir()
+    assert executor.CLASSIFIED_PRIOR_STARTS == 6
+    assert executor.CLASSIFIED_PRIOR_RESERVED == 2_500_000
     assert executor.default_prior_consumption(evidence) == (
         executor.CLASSIFIED_PRIOR_STARTS,
         executor.CLASSIFIED_PRIOR_RESERVED,
@@ -667,6 +671,14 @@ def test_default_prior_consumption_keeps_classified_baseline(
     )
     spent.write_text(
         json.dumps({"event_count": 214, "spend_gbp_microunits": 107000000}),
+        encoding="utf-8",
+    )
+    successor_spent = evidence / (
+        ".issue-895-f4-invocation-"
+        "e9f5502d19c02eedbf15091eb0c3383a79006d626926cf00c1bdfa2c04229677.json"
+    )
+    successor_spent.write_text(
+        json.dumps({"event_count": 212, "spend_gbp_microunits": 106000000}),
         encoding="utf-8",
     )
     assert executor.default_prior_consumption(evidence) == (
