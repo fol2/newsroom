@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
@@ -18,10 +19,27 @@ from newsroom.increment6.work_items import RetrievalBindingState, TriageWorkItem
 
 AUTONOMOUS_WORKER_VERSION = "newsroom-autonomous-triage-v1"
 AUTONOMOUS_TRIAGE_POLICY_VERSION = "deterministic-source-revision-no-match-v1"
+AUTONOMOUS_NATIVE_TRIAGE_POLICY_VERSION = (
+    "deterministic-source-revision-current-candidate-collision-v2"
+)
 
 
 class AutonomousWorkerError(ValueError):
     """The worker inputs do not form one exact, truthful proposal request."""
+
+
+def _policy_version(retrieval: object) -> str:
+    try:
+        request = json.loads(retrieval.request_bytes)
+    except (AttributeError, TypeError, UnicodeError, json.JSONDecodeError):
+        return AUTONOMOUS_TRIAGE_POLICY_VERSION
+    if (
+        type(request) is dict
+        and request.get("schema_identity")
+        == "newsroom.increment5.native-retrieval-context-request.v1"
+    ):
+        return AUTONOMOUS_NATIVE_TRIAGE_POLICY_VERSION
+    return AUTONOMOUS_TRIAGE_POLICY_VERSION
 
 
 def _exact_inputs(
@@ -71,7 +89,7 @@ def autonomous_worker_input_digest(
         canonical_json_bytes(
             {
                 "worker_version": AUTONOMOUS_WORKER_VERSION,
-                "policy_version": AUTONOMOUS_TRIAGE_POLICY_VERSION,
+                "policy_version": _policy_version(version.retrieval),
                 "work_item_version_digest": version.canonical_digest,
                 "decision_leads": [
                     {
@@ -130,10 +148,12 @@ def build_autonomous_proposal(
     ):
         raise AutonomousWorkerError("worker attempt differs from the exact inputs")
 
+    policy_version = _policy_version(retrieval)
+    native_context = policy_version == AUTONOMOUS_NATIVE_TRIAGE_POLICY_VERSION
     is_new = (
         retrieval.state is RetrievalBindingState.RECEIPT
         and retrieval.outcome == "COMPLETE"
-        and retrieval.no_match
+        and (retrieval.no_match or native_context)
     )
     action_kind, hold_condition = _operational_hold(retrieval)
     lead_ids = [str(lead.request.lead_id) for lead in leads]
@@ -145,7 +165,7 @@ def build_autonomous_proposal(
     ).value
     shared_governing_versions = sorted(
         {
-            AUTONOMOUS_TRIAGE_POLICY_VERSION,
+            policy_version,
             *(lead.request.lead_policy.policy_version for lead in leads),
         }
     )
@@ -156,9 +176,14 @@ def build_autonomous_proposal(
         if not lead_bytes or len(lead_bytes) > 262_144:
             raise AutonomousWorkerError("decision Lead exceeds the citation envelope")
         information = (
-            "The governed source revision has no adequate prior retrieval match."
-            if is_new
-            else "The governed source revision requires further deterministic triage."
+            "The governed source revision is a provisional new-event candidate "
+            "pending the current Story Candidate collision check."
+            if native_context and not retrieval.no_match
+            else (
+                "The governed source revision has no adequate prior retrieval match."
+                if is_new
+                else "The governed source revision requires further deterministic triage."
+            )
         )
         recommendation: dict[str, object] = {
             "decision_lead_id": lead_id,
@@ -190,7 +215,10 @@ def build_autonomous_proposal(
                 {
                     "proposal_local_id": f"hypothesis:{version.work_item_id}",
                     "summary": (
-                        "The governed source revision may describe a distinct new event."
+                        "The governed source revision may describe a distinct new event; "
+                        "current Candidate collision remains authoritative."
+                        if native_context
+                        else "The governed source revision may describe a distinct new event."
                     ),
                     "relationship_kind": "NO_ADEQUATE_PRIOR_MATCH",
                     "target_hypothesis_id": None,
@@ -289,6 +317,7 @@ def build_autonomous_proposal(
 
 
 __all__ = [
+    "AUTONOMOUS_NATIVE_TRIAGE_POLICY_VERSION",
     "AUTONOMOUS_TRIAGE_POLICY_VERSION",
     "AUTONOMOUS_WORKER_VERSION",
     "AutonomousWorkerError",

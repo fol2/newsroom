@@ -75,6 +75,7 @@ class NativePassageEmbedder:
             or not policy.qualified
         ):
             raise NativeRetrievalHold("NATIVE_EMBEDDING_POLICY_HOLD")
+        usage.register_policy(policy)
         self._key, self._objects, self._usage = api_key, objects, usage
         self._policy, self._fence, self._clock = policy, dispatch_fence, clock
 

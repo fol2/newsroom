@@ -14,6 +14,7 @@ from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
     digest_canonical,
+    validate_sha256_digest,
 )
 from newsroom.control_plane.corpus import EligibleCorpusRevision, RemappedIngestEffect
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
@@ -1382,8 +1383,12 @@ def reserve_graphiti_spend(
     proving_run_id: str,
     generation_id: str,
     reserved_gbp_microunits: int,
-    ceiling_gbp_microunits: int,
+    ceiling_gbp_microunits: int | None,
 ) -> bool:
+    if ceiling_gbp_microunits is None:
+        if not proving_run_id.startswith("native-source:"):
+            raise ValueError("uncapped Graphiti spend is restricted to native source work")
+        validate_sha256_digest(proving_run_id.removeprefix("native-source:"))
     existing = connection.execute(
         "SELECT 1 FROM unpublished_graphiti_spend WHERE spend_id=?", (spend_id,)
     ).fetchone()
@@ -1400,7 +1405,10 @@ def reserve_graphiti_spend(
         """
     ).fetchone()
     committed = int(row[0]) if row else 0
-    if committed + reserved_gbp_microunits > ceiling_gbp_microunits:
+    if (
+        ceiling_gbp_microunits is not None
+        and committed + reserved_gbp_microunits > ceiling_gbp_microunits
+    ):
         raise GraphitiSpendCeilingExceeded(
             "OD-011 Graphiti embedding cash ceiling would be exceeded"
         )

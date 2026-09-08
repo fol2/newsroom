@@ -74,6 +74,7 @@ class FullTextIndexState(StrEnum):
 class FullTextProfile(StrEnum):
     FIXTURE_REPLAY = "FIXTURE_REPLAY"
     PRODUCTION_SHAPED_QUALIFICATION = "PRODUCTION_SHAPED_QUALIFICATION"
+    NATIVE_RUNTIME = "NATIVE_RUNTIME"
 
 
 def _bounded_text(

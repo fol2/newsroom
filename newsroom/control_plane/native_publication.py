@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
@@ -22,6 +24,13 @@ from newsroom.authority.canonical import (
     digest_bytes,
     validate_sha256_digest,
 )
+from newsroom.authority.types import UtcTimestamp
+from newsroom.control_plane.native_evidence import (
+    NativeEvidenceController,
+    NativeEvidenceHold,
+    NativeEvidenceSource,
+)
+from newsroom.control_plane.native_progress import NativeRevisionJournal
 from newsroom.increment6.candidates import StoryCandidateReadPort
 from newsroom.increment10.editorial import (
     DECISION_ADMISSION_TYPE,
@@ -40,6 +49,7 @@ from newsroom.increment10.private_serving import (
     EvidenceReceipt,
     PrivateServingDelivery,
     PrivateServingReadProof,
+    open_private_serving_read_port,
     open_private_serving_delivery,
 )
 from newsroom.increment10.publication import (
@@ -48,10 +58,18 @@ from newsroom.increment10.publication import (
     PublicationReceipt,
     PublicationRequest,
 )
+from newsroom.increment10.ingress import NON_PUBLIC_EVIDENCE_INTAKE_BOUNDARY
 
 
 class NativePublicationError(ValueError):
     """Raised when the connected native publication transaction cannot advance."""
+
+
+@dataclass(frozen=True, slots=True)
+class NativePublicationContinuationResult:
+    state: str
+    reason: str | None
+    publication: NativePublicationResult | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,6 +398,178 @@ class NativePublicationController:
             proof=proof,
         )
         return DecisionReference(committed.event_id, admission.admission_id)
+
+
+class NativePublicationContinuation:
+    """Resume one Candidate through private evidence and ACK without redispatch."""
+
+    def __init__(
+        self,
+        *,
+        journal: NativeRevisionJournal,
+        runtime: object,
+        evidence_controller: NativeEvidenceController,
+        sources: Mapping[str, tuple[NativeEvidenceSource, ...]],
+        clock=UtcTimestamp.now,
+    ) -> None:
+        if (
+            type(journal) is not NativeRevisionJournal
+            or type(evidence_controller) is not NativeEvidenceController
+            or not callable(clock)
+            or not isinstance(sources, Mapping)
+            or not all(
+                type(key) is str
+                and type(value) is tuple
+                and value
+                and all(type(item) is NativeEvidenceSource for item in value)
+                for key, value in sources.items()
+            )
+        ):
+            raise NativePublicationError("native continuation composition differs")
+        for name in ("authority", "ingress", "publication", "policies", "proof"):
+            if not hasattr(runtime, name):
+                raise NativePublicationError("native continuation runtime differs")
+        self._journal = journal
+        self._runtime = runtime
+        self._evidence = evidence_controller
+        self._sources = dict(sources)
+        self._clock = clock
+
+    def advance(
+        self, *, revision_id: str, candidate_version_id: str
+    ) -> NativePublicationContinuationResult:
+        if revision_id not in self._journal.units or revision_id not in self._sources:
+            raise NativePublicationError("native continuation revision differs")
+        progress = self._journal.progress.get(revision_id, {})
+        facts = dict(progress.get("facts", {}))
+        if facts.get("candidate_version_id") not in (None, candidate_version_id):
+            raise NativePublicationError("native continuation Candidate differs")
+        facts["candidate_version_id"] = candidate_version_id
+        version = self._runtime.authority.candidate_version(candidate_version_id)
+
+        if "intake_receipt_id" not in facts:
+            request_id = facts.get("intake_request_id")
+            received = facts.get("intake_received_epoch_seconds")
+            if request_id is None or received is None:
+                received = int(self._clock().value.timestamp())
+                request_id = f"native-intake:{candidate_version_id}"
+                facts.update(
+                    intake_request_id=request_id,
+                    intake_received_epoch_seconds=received,
+                )
+                self._journal.advance(
+                    revision_id, stage="INTAKE_REQUESTED", facts=facts
+                )
+            acknowledgement = self._runtime.authority.receive_evidence_intake(
+                self._runtime.ingress,
+                candidate_version_id=candidate_version_id,
+                expected_governing_manifest_digest=(
+                    version.governing_manifest.canonical_digest
+                ),
+                boundary_id=NON_PUBLIC_EVIDENCE_INTAKE_BOUNDARY,
+                request_id=str(request_id),
+                received_epoch_seconds=int(received),
+            )
+            facts["intake_receipt_id"] = acknowledgement.receipt_id
+            self._journal.advance(
+                revision_id, stage="INTAKE_ACKNOWLEDGED", facts=facts
+            )
+
+        decision_value = facts.get("editorial_decision")
+        package_id = facts.get("package_admission_id")
+        if decision_value is None or package_id is None:
+            if progress.get("stage") in {
+                "ASSESSMENT_STARTED",
+                "ASSESSMENT_INTERRUPTED",
+            }:
+                facts["reason"] = "ACQUISITION_RESULT_NOT_RETAINED"
+                self._journal.advance(
+                    revision_id, stage="ASSESSMENT_INTERRUPTED", facts=facts
+                )
+                return NativePublicationContinuationResult(
+                    "ASSESSMENT_INTERRUPTED", facts["reason"], None
+                )
+            facts["assessment_started_at"] = self._clock().to_text()
+            self._journal.advance(
+                revision_id, stage="ASSESSMENT_STARTED", facts=facts
+            )
+            try:
+                evidence = self._evidence.acquire_and_retain(
+                    candidate_version_id=candidate_version_id,
+                    intake_receipt_id=str(facts["intake_receipt_id"]),
+                    sources=self._sources[revision_id],
+                    proof=self._runtime.proof,
+                )
+            except NativeEvidenceHold as exc:
+                facts["reason"] = exc.reason_code
+                self._journal.advance(
+                    revision_id, stage="EVIDENCE_HOLD", facts=facts
+                )
+                return NativePublicationContinuationResult(
+                    "EVIDENCE_HOLD", exc.reason_code, None
+                )
+            except Exception:
+                facts["reason"] = "ACQUISITION_RESULT_NOT_RETAINED"
+                self._journal.advance(
+                    revision_id, stage="ASSESSMENT_INTERRUPTED", facts=facts
+                )
+                return NativePublicationContinuationResult(
+                    "ASSESSMENT_INTERRUPTED", facts["reason"], None
+                )
+            decision = evidence.editorial_decision
+            package_id = str(evidence.retained.package_admission_id)
+            facts.update(
+                package_admission_id=package_id,
+                editorial_decision=json.loads(decision.canonical_bytes()),
+                acquisition_receipt_digests=list(
+                    evidence.acquisition_receipt_digests
+                ),
+            )
+            self._journal.advance(
+                revision_id, stage="EVIDENCE_RETAINED", facts=facts
+            )
+        else:
+            decision = EditorialPolicyDecision.from_bytes(
+                canonical_json_bytes(decision_value)
+            )
+
+        if "publication_applied_at" not in facts:
+            facts["publication_applied_at"] = self._clock().to_text()
+            facts["publication_observed_at"] = self._clock().to_text()
+            self._journal.advance(
+                revision_id, stage="PUBLICATION_STARTED", facts=facts
+            )
+        published = self._runtime.publication.advance(
+            ObjectAdmissionId.parse(str(package_id)),
+            decision,
+            expected_story_version=0,
+            expected_publication_version=0,
+            expected_delivery_evidence_version=0,
+            applied_at=str(facts["publication_applied_at"]),
+            observed_at=str(facts["publication_observed_at"]),
+            proof=self._runtime.proof,
+        )
+        bindings = self._runtime.policies.publication
+        reader = open_private_serving_read_port(
+            bindings.target_path,
+            target_id=bindings.target_id,
+            target_context_digest=bindings.target_context_digest,
+            proof=published.read_proof,
+        )
+        try:
+            acknowledged = reader.acknowledged_rows()
+            if acknowledged is None or not acknowledged.rows:
+                raise NativePublicationError("private delivery ACK is absent")
+        finally:
+            reader.close()
+        facts.update(
+            story_event_id=published.story_receipt.event_id,
+            publication_event_id=published.publication_receipt.event_id,
+            delivery_attempt_event_id=published.attempt_receipt.event_id,
+            delivery_evidence_event_id=published.evidence_receipt.event_id,
+        )
+        self._journal.advance(revision_id, stage="ACKNOWLEDGED", facts=facts)
+        return NativePublicationContinuationResult("ACKNOWLEDGED", None, published)
 
 
 def _aggregate(kind: str, identity: str) -> AggregateId:

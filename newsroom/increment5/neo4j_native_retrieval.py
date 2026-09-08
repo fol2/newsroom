@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import timedelta
 from typing import Any, Mapping
+
+from newsroom.authority.types import UtcTimestamp
+from newsroom.projection.models import ProjectionGenerationId, ProjectionGenerationState
 
 from .native_retrieval import (
     NATIVE_RESULT_LIMIT,
@@ -13,6 +17,17 @@ from .native_retrieval import (
     NativePassageDocument,
     NativeRetrievalError,
 )
+from .fulltext_contracts import (
+    FULLTEXT_ANALYZER,
+    FULLTEXT_COMPONENT_DIGEST,
+    FULLTEXT_INDEXED_FIELDS,
+    FULLTEXT_PROVIDER,
+    NORMALIZATION_COMPONENT_DIGEST,
+    FullTextIndexState,
+    FullTextProfile,
+    FullTextProjectionSnapshot,
+)
+from .fulltext_normalizer import _normalization_core
 
 _NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,127}\Z")
 class Neo4jNativeRetrievalProjection:
@@ -42,10 +57,74 @@ class Neo4jNativeRetrievalProjection:
     def fulltext_index(self) -> str:
         return self._fulltext
 
+    def snapshot(
+        self, *, generation_identity_digest: str, rights_manifest_digest: str,
+        contiguous_ledger_seq: int, expected_document_count: int, clock: Any,
+    ) -> FullTextProjectionSnapshot:
+        """Read and bind the actual native full-text index state."""
+        if not callable(clock):
+            raise TypeError("native retrieval snapshot clock must be callable")
+        recorded_at = clock()
+        if type(recorded_at) is not UtcTimestamp:
+            raise NativeRetrievalError("native retrieval snapshot clock differs")
+        index_query = """
+SHOW INDEXES YIELD name,type,state,entityType,labelsOrTypes,properties,indexProvider,options
+WHERE name=$index_name
+RETURN name,type,state,entityType,labelsOrTypes,properties,indexProvider,options
+""".strip()
+        count_query = f"MATCH (n:`{self._label}` {{generation_id:$generation_id}}) RETURN count(n) AS count"
+        component_query = "CALL dbms.components() YIELD name,versions,edition WHERE name='Neo4j Kernel' RETURN versions[0] AS version,toLower(edition) AS edition"
+        with self._session("READ") as session:
+            component, index, count = session.execute_read(lambda transaction: (
+                transaction.run(component_query).single(),
+                transaction.run(index_query, index_name=self._fulltext).single(),
+                transaction.run(count_query, generation_id=self._generation).single(),
+            ))
+        try:
+            import neo4j
+            document_count = int(count["count"])
+            index_state = FullTextIndexState(str(index["state"]))
+            valid = (
+                component["version"] == "2026.06.0"
+                and str(component["edition"]).lower() == "community"
+                and index["type"] == "FULLTEXT"
+                and index["entityType"] == "NODE"
+                and tuple(index["labelsOrTypes"]) == (self._label,)
+                and tuple(index["properties"]) == FULLTEXT_INDEXED_FIELDS
+                and index["indexProvider"] == FULLTEXT_PROVIDER
+                and index["options"]["indexConfig"]["fulltext.analyzer"] == FULLTEXT_ANALYZER
+                and index["options"]["indexConfig"]["fulltext.eventually_consistent"] is False
+                and document_count == expected_document_count
+            )
+        except Exception as exc:
+            raise NativeRetrievalError("native full-text metadata differs") from exc
+        if not valid:
+            raise NativeRetrievalError("native full-text metadata differs")
+        return FullTextProjectionSnapshot(
+            generation_id=ProjectionGenerationId.parse(self._generation),
+            generation_state=ProjectionGenerationState.ACTIVE,
+            generation_identity_digest=generation_identity_digest,
+            document_label=self._label,
+            index_name=self._fulltext,
+            index_state=index_state,
+            fulltext_component_digest=FULLTEXT_COMPONENT_DIGEST,
+            normalization_component_digest=NORMALIZATION_COMPONENT_DIGEST,
+            rights_manifest_digest=rights_manifest_digest,
+            profile=FullTextProfile.NATIVE_RUNTIME,
+            contiguous_ledger_seq=contiguous_ledger_seq,
+            open_gap_count=0,
+            dead_letter_count=0,
+            validation_recorded_at=recorded_at,
+            freshness_deadline=UtcTimestamp(recorded_at.value + timedelta(hours=1)),
+            index_document_count=document_count,
+            server_version=str(component["version"]),
+            driver_version=str(neo4j.__version__),
+        )
+
     def bootstrap(self) -> None:
         statements = (
             f"CREATE CONSTRAINT `{self._constraint}` IF NOT EXISTS FOR (n:`{self._label}`) REQUIRE n.passage_id IS UNIQUE",
-            f"CREATE FULLTEXT INDEX `{self._fulltext}` IF NOT EXISTS FOR (n:`{self._label}`) ON EACH [n.retrieval_text] OPTIONS {{indexConfig: {{`fulltext.analyzer`: 'standard-no-stop-words', `fulltext.eventually_consistent`: false}}}}",
+            f"CREATE FULLTEXT INDEX `{self._fulltext}` IF NOT EXISTS FOR (n:`{self._label}`) ON EACH [{','.join(f'n.{field}' for field in FULLTEXT_INDEXED_FIELDS)}] OPTIONS {{indexConfig: {{`fulltext.analyzer`: 'standard-no-stop-words', `fulltext.eventually_consistent`: false}}}}",
             f"CREATE VECTOR INDEX `{self._vector}` IF NOT EXISTS FOR (n:`{self._label}`) ON n.embedding OPTIONS {{indexConfig: {{`vector.dimensions`: {NATIVE_VECTOR_DIMENSIONS}, `vector.similarity_function`: 'cosine', `vector.quantization.type`: 'none'}}}}",
         )
         with self._session("WRITE") as session:
@@ -58,8 +137,11 @@ class Neo4jNativeRetrievalProjection:
         query = f"""
 MERGE (n:`{self._label}` {{passage_id:$passage_id}})
 ON CREATE SET n.dependency_root_id=$dependency_root_id, n.source_id=$source_id,
+ n.generation_id=$generation_id,
  n.revision_id=$revision_id, n.representation_id=$representation_id,
  n.language=$language, n.retrieval_text=$retrieval_text,
+ n.authority_aliases=$authority_aliases, n.formal_tokens=$formal_tokens,
+ n.han_bigrams=$han_bigrams, n.latin_terms=$latin_terms,
  n.text_digest=$text_digest, n.rights_digest=$rights_digest,
  n.provenance_digest=$provenance_digest, n.vector_digest=$vector_digest,
  n.vector_admission_id=$vector_admission_id,
@@ -70,27 +152,34 @@ ON CREATE SET n.dependency_root_id=$dependency_root_id, n.source_id=$source_id,
  n.aggregate_version=$aggregate_version, n.admission_id=$admission_id,
  n.document_digest=$document_digest
 ON MATCH SET n.passage_id=n.passage_id
-RETURN n.text_digest AS text_digest,n.vector_digest AS vector_digest,
- n.event_id AS event_id,n.command_id AS command_id,
- n.aggregate_id AS aggregate_id,n.aggregate_version AS aggregate_version,
- n.admission_id AS admission_id,n.document_digest AS document_digest,
- n.vector_admission_id AS vector_admission_id,
- n.embedding_receipt_admission_id AS embedding_receipt_admission_id
+RETURN properties(n) AS properties
 """.strip()
+        _, _, latin_terms, han_bigrams, formal_tokens = _normalization_core(
+            document.text
+        )
         parameters = {
             **{key: value for key, value in document.projection_value().items() if key != "text"},
             **receipt.projection_value(),
             "retrieval_text": document.text,
+            "authority_aliases": [],
+            "formal_tokens": list(formal_tokens),
+            "han_bigrams": list(han_bigrams),
+            "latin_terms": list(latin_terms),
             "embedding": list(vector),
         }
         with self._session("WRITE") as session:
-            rows = tuple(session.execute_write(lambda transaction: transaction.run(query, **parameters)))
-        expected = {
-            "text_digest": document.text_digest,
-            "vector_digest": document.vector_digest,
-            **receipt.projection_value(),
-        }
-        if len(rows) != 1 or any(rows[0][key] != value for key, value in expected.items()):
+            rows = session.execute_write(
+                lambda transaction: tuple(transaction.run(query, **parameters))
+            )
+        if len(rows) != 1:
+            raise NativeRetrievalError("native projection acknowledgement differs")
+        try:
+            retained = dict(rows[0]["properties"])
+        except Exception as exc:
+            raise NativeRetrievalError(
+                "native projection acknowledgement differs"
+            ) from exc
+        if retained != parameters:
             raise NativeRetrievalError("native projection acknowledgement differs")
 
     def retrieve(self, *, query_text: str, query_vector: tuple[float, ...]) -> tuple[tuple[Mapping[str, object], ...], tuple[Mapping[str, object], ...]]:
@@ -111,6 +200,26 @@ RETURN {receipt},score ORDER BY score DESC,node.passage_id LIMIT $limit
             fulltext_rows = tuple(session.execute_read(lambda transaction: tuple(transaction.run(fulltext, **common, index_name=self._fulltext, query_text=query_text))))
             vector_rows = tuple(session.execute_read(lambda transaction: tuple(transaction.run(vector, **common, index_name=self._vector, vector=list(query_vector)))))
         return fulltext_rows, vector_rows
+
+    def retrieve_vector(
+        self, *, query_vector: tuple[float, ...]
+    ) -> tuple[Mapping[str, object], ...]:
+        """Run only the native vector index; no Lucene text is evaluated."""
+        if len(query_vector) != NATIVE_VECTOR_DIMENSIONS:
+            raise NativeRetrievalError("native vector query differs")
+        limit = NATIVE_RESULT_LIMIT + 1
+        receipt = "node.event_id AS event_id,node.command_id AS command_id,node.aggregate_id AS aggregate_id,node.aggregate_version AS aggregate_version,node.admission_id AS admission_id,node.document_digest AS document_digest,node.vector_admission_id AS vector_admission_id,node.embedding_receipt_admission_id AS embedding_receipt_admission_id"
+        query = f"""
+CALL db.index.vector.queryNodes($index_name,$limit,$vector) YIELD node,score
+RETURN {receipt},score ORDER BY score DESC,node.passage_id LIMIT $limit
+""".strip()
+        with self._session("READ") as session:
+            return tuple(session.execute_read(
+                lambda transaction: tuple(transaction.run(
+                    query, index_name=self._vector, limit=limit,
+                    vector=list(query_vector),
+                ))
+            ))
 
     def _session(self, mode: str):
         values: dict[str, object] = {"default_access_mode": mode}

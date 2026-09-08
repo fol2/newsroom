@@ -114,15 +114,19 @@ def _require_digest(value: object, *, field: str) -> str:
 def _parse_utc(value: object, *, field: str) -> datetime:
     if not isinstance(value, str):
         raise CollisionEligibilityContractError(f"{field} must be a UTC timestamp")
+    # Preserve the exact native UtcTimestamp precision. Legacy retained
+    # second-resolution receipts remain byte-for-byte valid; never round a
+    # native authority cutoff to make it fit an older display format.
+    format_string = "%Y-%m-%dT%H:%M:%S.%fZ" if len(value) == 27 else "%Y-%m-%dT%H:%M:%SZ"
     try:
-        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+        parsed = datetime.strptime(value, format_string).replace(tzinfo=UTC)
     except ValueError as exc:
         raise CollisionEligibilityContractError(
-            f"{field} must be canonical second-resolution UTC"
+            f"{field} must be canonical second- or microsecond-resolution UTC"
         ) from exc
-    if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
+    if parsed.strftime(format_string) != value:
         raise CollisionEligibilityContractError(
-            f"{field} must be canonical second-resolution UTC"
+            f"{field} must be canonical second- or microsecond-resolution UTC"
         )
     return parsed
 

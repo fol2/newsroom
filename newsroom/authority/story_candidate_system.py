@@ -572,7 +572,8 @@ class _CandidateStore(_EventAuthorityStore):
             )
         )
         discovery = _create_discovery_governing_producer_read_port(
-            self._connection
+            self._connection,
+            object_admission_payload_validator=self._validate_object_admission_payload_record,
         ).require_current_governing_producers(lead_ids)
         return (
             snapshot,
@@ -1098,6 +1099,10 @@ def _create_story_candidate_read_port(
     clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
     command_service_version: str = "increment6-candidate-v1",
     bounded_version: Callable[[str], StoryCandidateVersion] | None = None,
+    object_admission_payload_validator: Callable[
+        [sqlite3.Connection, sqlite3.Row], None
+    ]
+    | None = None,
 ) -> StoryCandidateReadPort:
     """Bind complete Candidate reads to one caller-owned transaction."""
 
@@ -1128,6 +1133,7 @@ def _create_story_candidate_read_port(
             command_registry=commands,
             payload_schemas=schemas,
             clock=clock,
+            object_admission_payload_validator=object_admission_payload_validator,
         )
         verifier = object.__new__(_CandidateStore)
         verifier._conn = connection
@@ -1137,6 +1143,10 @@ def _create_story_candidate_read_port(
         verifier._payload_schemas = schemas
         verifier._command_service_version = command_service_version
         verifier._lineage = lineage
+        if object_admission_payload_validator is not None:
+            verifier._validate_object_admission_payload_record = (
+                object_admission_payload_validator
+            )
         verifier._dispositions = ProposalDispositionStore(
             connection, retrieval_authority, authenticator
         )

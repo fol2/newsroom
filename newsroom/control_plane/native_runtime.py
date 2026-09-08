@@ -16,8 +16,10 @@ from newsroom.authority import (
     StaticAuthenticator, StaticAuthorizer, StaticPrincipal, UtcTimestamp,
 )
 from newsroom.authority.hermes_native_system import (
-    HermesNativeAuthoritySystem, open_hermes_native_authority_system,
+    HermesNativeAuthoritySystem, NativeDependencyFactory,
+    open_hermes_native_authority_system,
 )
+from newsroom.authority.canonical import digest_canonical
 from newsroom.authority.persistence import EventReadPolicy, MetadataClass
 from newsroom.authority.types import TrustScope
 from newsroom.checks.policy import discovery_check_command_definitions
@@ -46,6 +48,9 @@ from newsroom.sources.types import SourceRegistryReadPolicy
 
 from .native_policies import MAX_OBJECT_BYTES, VERSION, NativePolicies, native_policy_components
 from .native_publication import NativePublicationController
+from .graphiti_operational_readiness import (
+    _operational_entity_write_scopes, _operational_graphiti_write_scopes,
+)
 
 
 @dataclass(slots=True)
@@ -56,6 +61,7 @@ class NativeRuntime:
     ingress: EvidenceIntakeIngress
     evidence: GovernedEvidencePackages
     publication: NativePublicationController
+    actor_identity_digest: str
 
     def close(self) -> None:
         try:
@@ -78,8 +84,9 @@ def open_native_runtime(
     intake_path: Path, target_path: Path, target_id: str,
     credential: str, principal_id: str, authority_domain: str,
     neo4j_config: Neo4jProjectorConfig,
-    retrieval_authority: RetrievalContextAuthority,
-    collision_enforcer: CurrentCollisionEffectEnforcer,
+    retrieval_authority: RetrievalContextAuthority | None = None,
+    collision_enforcer: CurrentCollisionEffectEnforcer | None = None,
+    native_dependency_factory: NativeDependencyFactory | None = None,
     clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
 ) -> NativeRuntime:
     """Bind the existing native boundaries to actual private runtime identities."""
@@ -152,11 +159,19 @@ def open_native_runtime(
         relationship_command_definition(), lineage_command_definition(),
         candidate_command_definition(), *policies.registry.definitions(),
     )
-    # Read and native editorial scopes are derived from their bound definitions.
-    # Provider, projection-management and source-execution grants remain separate.
+    # These are the daemon's internal capabilities, not provider or source I/O
+    # permission. Each actual dispatch still crosses current rights, accounting
+    # and stop controls. No per-revision human grant is introduced.
     reads = (source_read, check_read, discovery_read, extraction_read,
              entity_read, relation_read, graphiti_read, projection_read)
-    scopes = policies.required_scopes | {"authority.objects.lifecycle.write"} | frozenset(
+    scopes = policies.required_scopes | {
+        "authority.objects.admit", "authority.objects.manage",
+        "authority.objects.lifecycle.write", "authority.observed.write",
+        "authority.admitted.write", "authority.extraction.execute",
+        "authority.extraction.manage", "authority.relation.propose",
+        "authority.relation.admit", "authority.projection.manage",
+        "authority.projection.write",
+    } | _operational_graphiti_write_scopes() | _operational_entity_write_scopes() | frozenset(
         definition.required_scope for definition in native_definitions
     ) | frozenset(
         getattr(policy, name)
@@ -206,7 +221,8 @@ def open_native_runtime(
             max_range_bytes=MAX_OBJECT_BYTES, min_free_bytes=100 * 1024 * 1024,
         ),
         neo4j_config=neo4j_config, retrieval_authority=retrieval_authority,
-        collision_enforcer=collision_enforcer, clock=clock,
+        collision_enforcer=collision_enforcer,
+        native_dependency_factory=native_dependency_factory, clock=clock,
     )
     ingress = None
     try:
@@ -224,9 +240,16 @@ def open_native_runtime(
             events=authority.events, candidate_port=authority.candidate_read_port,
             evidence_packages=evidence, bindings=policies.publication,
         )
-        return NativeRuntime(authority, AuthenticationProof(
+        proof = AuthenticationProof(
             method="STATIC_TOKEN", credential=credential,
-        ), policies, ingress, evidence, publication)
+        )
+        authentication = authenticator.authenticate(proof, now=clock())
+        actor_identity_digest = digest_canonical({
+            "principal_id": authentication.principal_id,
+            "credential_binding_digest": authentication.credential_binding_digest,
+        })
+        return NativeRuntime(authority, proof, policies, ingress, evidence,
+                             publication, actor_identity_digest)
     except BaseException:
         if ingress is not None:
             ingress.close()

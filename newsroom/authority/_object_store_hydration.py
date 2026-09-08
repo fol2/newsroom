@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import nullcontext
 
 from ._object_capability import _HydrationGrant
 from .canonical import canonical_json_bytes, digest_bytes, digest_canonical
@@ -24,8 +25,14 @@ class _ObjectHydrationStoreMixin:
     """Authenticated, purpose-bound hydration with exact current-state cutoff."""
 
     def hydrate(
-        self, grant: _HydrationGrant
+        self, grant: _HydrationGrant, *, in_transaction: bool = False
     ) -> tuple[bytes, ObjectAccessDecisionView]:
+        if type(in_transaction) is not bool:
+            raise TypeError("in_transaction must be boolean")
+        if in_transaction and not self._connection.in_transaction:
+            raise AuthorityPersistenceError(
+                "transaction-bound hydration requires an active transaction"
+            )
         now = self._clock()
         self._object_issuer.verify_hydration(grant, now=now)
         policy = self._hydration_policies.resolve_exact(
@@ -33,8 +40,13 @@ class _ObjectHydrationStoreMixin:
             grant.policy.contract_version,
             grant.policy.contract_digest,
         )
+        transaction = (
+            nullcontext(self._connection)
+            if in_transaction
+            else self._transaction()
+        )
         with self._lock:
-            with self._transaction() as conn:
+            with transaction as conn:
                 decided_at = self._clock()
                 self._object_issuer.verify_hydration(
                     grant, now=decided_at

@@ -82,6 +82,7 @@ class GovernedSources:
         "__version_details",
         "__item",
         "__revision",
+        "__latest_revision",
         "__representation",
         "__occurrences",
     )
@@ -129,6 +130,9 @@ class GovernedSources:
         revision: Callable[
             [SourceRevisionId, AuthenticationProof], SourceRevision
         ],
+        latest_revision: Callable[
+            [SourceItemId, AuthenticationProof], SourceRevision | None
+        ],
         representation: Callable[
             [DiscoveryRepresentationId, AuthenticationProof],
             DiscoveryRepresentation,
@@ -150,6 +154,7 @@ class GovernedSources:
         self.__version_details = version_details
         self.__item = item
         self.__revision = revision
+        self.__latest_revision = latest_revision
         self.__representation = representation
         self.__occurrences = occurrences
 
@@ -248,6 +253,11 @@ class GovernedSources:
         proof: AuthenticationProof,
     ) -> SourceRevision:
         return self.__revision(revision_id, proof)
+
+    def latest_revision(
+        self, item_id: SourceItemId, *, proof: AuthenticationProof
+    ) -> SourceRevision | None:
+        return self.__latest_revision(item_id, proof)
 
     def representation(
         self,
@@ -627,6 +637,20 @@ class _SourceRegistryBoundary:
             raise LookupError("source revision is not retained")
         return value
 
+    def latest_revision(
+        self, item_id: SourceItemId, proof: AuthenticationProof
+    ) -> SourceRevision | None:
+        if not isinstance(item_id, SourceItemId):
+            raise TypeError("source item identity must be typed")
+        self._authorize_read(
+            proof,
+            operation="read:source_registry:latest_revision",
+            aggregate_type="source_item",
+            aggregate_id=str(item_id),
+            sensitive=True,
+        )
+        return self._store.latest_source_revision(item_id)
+
     def representation(
         self,
         representation_id: DiscoveryRepresentationId,
@@ -741,6 +765,7 @@ def open_governed_source_registry_authority_system(
                 version_details=boundary.version_details,
                 item=boundary.item,
                 revision=boundary.revision,
+                latest_revision=boundary.latest_revision,
                 representation=boundary.representation,
                 occurrences=boundary.occurrences,
             ),

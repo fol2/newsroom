@@ -760,11 +760,21 @@ class WorkEnvelope:
         }
         if (
             native_assessor
-            and not all(
-                (
-                    self.candidate_id,
-                    self.hypothesis_digest,
-                    self.evidence_package_digest,
+            and (
+                not all(
+                    (
+                        self.candidate_id,
+                        self.hypothesis_digest,
+                        self.evidence_package_digest,
+                    )
+                )
+                or any(
+                    value is not None
+                    for value in (
+                        self.admission_decision_id,
+                        self.ingest_id,
+                        self.graphiti_attempt_id,
+                    )
                 )
             )
         ):
@@ -786,7 +796,9 @@ class WorkEnvelope:
             raise ModelUsageIntegrityError("CONT envelope lacks editorial identities")
         if graphiti and not self.ingest_id:
             raise ModelUsageIntegrityError("Graphiti envelope lacks ingest identity")
-        if native_embedding and not self.ingest_id:
+        if native_embedding and (
+            not self.ingest_id or self.graphiti_attempt_id is not None
+        ):
             raise ModelUsageIntegrityError(
                 "native embedding envelope lacks passage identity"
             )
@@ -1259,6 +1271,10 @@ class ModelUsageService:
             for record in policy_records
             if str(record.get("reasoning")) == reasoning
         ]
+        if workload_class is WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING:
+            policies = [policy for policy in policies
+                        if implementation_revision is not None
+                        and policy.implementation_revision == implementation_revision]
         if config_identity is not None:
             policies = [
                 policy

@@ -666,6 +666,8 @@ class RetrievalContextAuthority:
         records: Mapping[
             str, tuple[RetrievalContextRequest, RetrievalContextReceipt | None]
         ],
+        *,
+        native_context_read_port: object | None = None,
     ) -> None:
         try:
             self._path = Path(journal_path)
@@ -694,6 +696,11 @@ class RetrievalContextAuthority:
         if not valid_records:
             raise WorkItemContractError("retrieval authority records differ")
         self._records = copied
+        if native_context_read_port is not None:
+            from newsroom.increment5.native_retrieval import NativeRetrievalContextReadPort
+            if type(native_context_read_port) is not NativeRetrievalContextReadPort:
+                raise WorkItemContractError("native retrieval authority port differs")
+        self._native_context_read_port = native_context_read_port
 
     def attach(self, connection: sqlite3.Connection) -> None:
         attached = {
@@ -754,6 +761,8 @@ class RetrievalContextAuthority:
     def verify(
         self, connection: sqlite3.Connection, binding: RetrievalInputBinding
     ) -> None:
+        if self._verify_native_binding(binding):
+            return
         self._verify_typed_binding(binding, historical=False)
         try:
             purges = connection.execute(
@@ -823,9 +832,47 @@ class RetrievalContextAuthority:
         ):
             raise WorkItemContractError("retrieval authority retained bytes differ")
 
+    def _verify_native_binding(self, binding: RetrievalInputBinding) -> bool:
+        try:
+            value = _decode(binding.request_bytes, maximum=32 * 1_024)
+        except WorkItemContractError:
+            return False
+        if value.get("schema_identity") != "newsroom.increment5.native-retrieval-context-request.v1":
+            return False
+        if self._native_context_read_port is None or binding.state is not RetrievalBindingState.RECEIPT or binding.receipt_bytes is None:
+            raise WorkItemContractError("native retrieval authority is unavailable")
+        try:
+            from newsroom.increment5.native_retrieval import (
+                NativeRetrievalContextReceipt,
+                NativeRetrievalContextRequest,
+            )
+            request = NativeRetrievalContextRequest.from_bytes(binding.request_bytes)
+            receipt = NativeRetrievalContextReceipt.from_bytes(binding.receipt_bytes)
+            context = self._native_context_read_port.require(receipt)
+        except Exception as exc:
+            raise WorkItemContractError("native retrieval authority differs") from exc
+        if (
+            request.request_digest != binding.request_digest
+            or request.request_id != binding.request_id
+            or request.idempotency_key != binding.idempotency_key
+            or receipt.request_digest != request.request_digest
+            or receipt.request_id != request.request_id
+            or receipt.context_id != binding.context_id
+            or receipt.receipt_digest != binding.context_digest
+            or receipt.outcome != binding.outcome
+            or receipt.reason != binding.reason
+            or receipt.no_match != binding.no_match
+            or context.context_id != receipt.context_id
+            or context.request_digest != receipt.request_digest
+        ):
+            raise WorkItemContractError("native retrieval authority binding differs")
+        return True
+
     def _verify_typed_binding(
         self, binding: RetrievalInputBinding, *, historical: bool
     ) -> None:
+        if self._verify_native_binding(binding):
+            return
         try:
             request, receipt = self._records[binding.request_digest]
         except Exception as exc:
@@ -888,6 +935,8 @@ class RetrievalContextAuthority:
     def verify_retained_integrity(
         self, connection: sqlite3.Connection, binding: RetrievalInputBinding
     ) -> None:
+        if self._verify_native_binding(binding):
+            return
         self._verify_typed_binding(binding, historical=True)
         try:
             purges = connection.execute(

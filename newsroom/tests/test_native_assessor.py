@@ -4,6 +4,7 @@ from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 
 import pytest
+from jsonschema import Draft202012Validator, ValidationError
 
 from newsroom.authority.canonical import canonical_json_bytes
 from newsroom.control_plane.evidence import evidence_package_value
@@ -14,13 +15,16 @@ from newsroom.control_plane.native_assessor import (
     CONTEXT_MANIFEST_SCHEMA_VERSION,
     NativeAssessmentExecution,
     NativeAssessmentUsage,
+    SCHEMA,
     SCHEMA_DIGEST,
     VERSION,
 )
 from newsroom.control_plane.native_evidence import NativeEvidenceError
 from newsroom.control_plane.model_usage import (
     InvocationEfficiencyPolicy,
+    ModelUsageIntegrityError,
     ModelUsageService,
+    WorkEnvelope,
     WorkloadClass,
 )
 from newsroom.increment10.evidence import _base_package
@@ -33,6 +37,22 @@ from newsroom.tests.test_increment10_ingress import _candidate
 
 
 REVISION = "1" * 40
+
+
+def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tmp_path) -> None:
+    connection, _port, candidate = _candidate(tmp_path)
+    base = _base_package(_ready_package(candidate)[1])
+    validator = Draft202012Validator(SCHEMA)
+    validator.validate({"package": evidence_package_value(base), "assessment_records": []})
+    invalid = evidence_package_value(base)
+    invalid["evidence_gate_evidence"] = [{
+        "gate": "CLAIM_TRACEABILITY", "result": "PASS",
+        "governed_claim_ids": ["claim-1"],
+        "policy_version": "newsroom.evidence-gates.v2", "invented": True,
+    }]
+    with pytest.raises(ValidationError):
+        validator.validate({"package": invalid, "assessment_records": []})
+    connection.close()
 
 
 def _usage(tmp_path, monkeypatch):
@@ -186,3 +206,34 @@ def test_native_assessor_retains_post_dispatch_failures(
             "SELECT state FROM model_transport_observations"
         ).fetchall() == [("DISPATCH_STARTED",)]
     connection.close()
+
+
+def test_native_work_envelopes_reject_unrelated_authority_ids() -> None:
+    common = {
+        "cycle_id": "cycle-1",
+        "admitted_at": datetime(2026, 9, 8, tzinfo=UTC),
+        "admission_decision_id": None,
+        "candidate_id": None,
+        "hypothesis_digest": None,
+        "evidence_package_digest": None,
+        "ingest_id": "passage-1",
+        "graphiti_attempt_id": "not-a-native-graphiti-attempt",
+    }
+    with pytest.raises(ModelUsageIntegrityError):
+        WorkEnvelope.create(
+            workload_class=WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING,
+            **common,
+        )
+    with pytest.raises(ModelUsageIntegrityError):
+        WorkEnvelope.create(
+            workload_class=WorkloadClass.NATIVE_EVIDENCE_ASSESSOR,
+            **{
+                **common,
+                "admission_decision_id": "not-an-assessor-admission",
+                "candidate_id": "candidate-1",
+                "hypothesis_digest": "sha256:" + "a" * 64,
+                "evidence_package_digest": "sha256:" + "b" * 64,
+                "ingest_id": None,
+                "graphiti_attempt_id": None,
+            },
+        )

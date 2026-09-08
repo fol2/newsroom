@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 from lxml import html
 
-from newsroom.authority import AuthenticationProof, GovernedObjects, ObjectAdmissionRequest
+from newsroom.authority import AuthenticationProof, GovernedObjects, HydrationRequest, ObjectAdmissionRequest
 from newsroom.authority.canonical import digest_bytes, digest_canonical
 from newsroom.authority.types import ObjectAdmissionId
 
@@ -47,6 +47,17 @@ class GovUkLicenceEvidence:
     raw_digests: tuple[str, str]
     observed_at: str
     policy_digest: str
+
+    def require_retained(self, *, objects: GovernedObjects, proof: AuthenticationProof) -> None:
+        """Validate actual retained terms, not merely a caller's policy string."""
+        if self.policy_digest != POLICY_DIGEST or len(self.admission_ids) != 2 or len(self.raw_digests) != 2:
+            raise NativeEvidenceHold("GOVUK_LICENCE_BINDING_HOLD", "UK-GOVUK")
+        for url, admission_id, raw_digest in zip(
+            (REUSE_URL, LICENCE_URL), self.admission_ids, self.raw_digests, strict=True,
+        ):
+            retained = objects.hydrate(HydrationRequest(admission_id, "evidence.source"), proof=proof)
+            if digest_bytes(retained.data) != raw_digest or licence_text_digest(retained.data) != REVIEWED_TEXT[url]:
+                raise NativeEvidenceHold("GOVUK_LICENCE_BINDING_HOLD", "UK-GOVUK")
 
     def for_source(self, *, source_id: str, definition_url: str) -> PublicationRightsAssessment:
         permitted = (

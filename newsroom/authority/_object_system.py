@@ -59,6 +59,7 @@ from .types import AggregateId, RightsDecisionId, UtcTimestamp, UUIDv4Id
 
 
 _Source = bytes | bytearray | memoryview | BinaryIO | Iterable[bytes]
+_OBJECT_COMPOSITION_TOKEN = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +131,17 @@ class GovernedObjects:
         self, request: HydrationRequest, *, proof: AuthenticationProof
     ) -> HydratedObject:
         return self.__hydrate(request, proof)
+
+    def _bind_composed_hydrate(
+        self,
+        hydrate: Callable[[HydrationRequest, AuthenticationProof], HydratedObject],
+        *,
+        _token: object,
+    ) -> None:
+        """Bind hydration to the private cumulative-store transaction seam."""
+        if _token is not _OBJECT_COMPOSITION_TOKEN or not callable(hydrate):
+            raise TypeError("governed object composition is private")
+        self.__hydrate = hydrate
 
     def latest_access_decision(
         self,
@@ -626,6 +638,21 @@ class _ObjectBoundary:
     def hydrate(
         self, request: HydrationRequest, proof: AuthenticationProof
     ) -> HydratedObject:
+        return self._hydrate(request, proof, in_transaction=False)
+
+    def hydrate_in_transaction(
+        self, request: HydrationRequest, proof: AuthenticationProof
+    ) -> HydratedObject:
+        """Hydrate inside the cumulative writer's existing transaction."""
+        return self._hydrate(request, proof, in_transaction=True)
+
+    def _hydrate(
+        self,
+        request: HydrationRequest,
+        proof: AuthenticationProof,
+        *,
+        in_transaction: bool,
+    ) -> HydratedObject:
         if not isinstance(request, HydrationRequest):
             raise TypeError("request must be HydrationRequest")
         authentication, now = self._authenticate(proof)
@@ -665,7 +692,9 @@ class _ObjectBoundary:
             stable_semantic_request_digest=semantic,
             decided_at=now,
         )
-        data, decision = self._store.hydrate(grant)
+        data, decision = self._store.hydrate(
+            grant, in_transaction=in_transaction
+        )
         return HydratedObject(data=data, decision=decision)
 
     def latest_access_decision(

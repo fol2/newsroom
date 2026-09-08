@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from newsroom.checks.policy import merge_discovery_check_authority_registries
 from newsroom.checks.read_policy import DiscoveryCheckReadPolicy
@@ -47,6 +48,12 @@ from ._graphiti_increment4_system import (
     _AUTHORITY_COMPOSITION_TOKEN,
     GovernedGraphitiIncrement4AuthoritySystem,
     open_governed_graphiti_increment4_authority_system,
+)
+from ._extraction_facade import GovernedExtractionRecords
+from ._object_system import (
+    _OBJECT_COMPOSITION_TOKEN,
+    _ObjectBoundary,
+    GovernedObjects,
 )
 from ._proposal_admission import _ProposalAdmissionBoundary
 from ._signal_lead_admission import _SignalLeadAdmissionBoundary
@@ -100,10 +107,27 @@ class _SharedCandidateStore(_CandidateStore):
 def _share_store(store_type: type, root: object) -> Any:
     store = object.__new__(store_type)
     store.__dict__.update(root.__dict__)
+    # Lineage/Candidate stores originate before object-admission payloads.
+    # They share the cumulative writer, so dispatch this validation to that
+    # writer's actual A2b implementation rather than the old A2a rejection.
+    store._validate_object_admission_payload_record = root._validate_object_admission_payload_record
     return store
 
 
 _SYSTEM_TOKEN = object()
+
+
+class NativeDependencyFactory(Protocol):
+    """Build native retrieval/collision dependencies from the opened base."""
+
+    def __call__(
+        self,
+        *,
+        objects: GovernedObjects,
+        extraction: GovernedExtractionRecords,
+        commands: AuthorityCommands,
+        events: AuthorityEvents,
+    ) -> tuple[RetrievalContextAuthority, CurrentCollisionEffectEnforcer]: ...
 
 
 class HermesNativeAuthoritySystem:
@@ -169,8 +193,9 @@ def open_hermes_native_authority_system(
     projection_read_policy: Any,
     object_limits: Any,
     neo4j_config: Neo4jProjectorConfig,
-    retrieval_authority: RetrievalContextAuthority,
-    collision_enforcer: CurrentCollisionEffectEnforcer,
+    retrieval_authority: RetrievalContextAuthority | None = None,
+    collision_enforcer: CurrentCollisionEffectEnforcer | None = None,
+    native_dependency_factory: NativeDependencyFactory | None = None,
     command_service_version: str = "hermes-native-authority-v1",
     busy_timeout_ms: int = 5_000,
     lease_ttl_seconds: int = 300,
@@ -179,6 +204,18 @@ def open_hermes_native_authority_system(
     disk_usage: Callable[[Path], Any] | None = None,
 ) -> HermesNativeAuthoritySystem:
     """Open the sole production writer used by one Hermes runtime."""
+
+    explicit_dependencies = (
+        retrieval_authority is not None or collision_enforcer is not None
+    )
+    if native_dependency_factory is None:
+        if (
+            type(retrieval_authority) is not RetrievalContextAuthority
+            or type(collision_enforcer) is not CurrentCollisionEffectEnforcer
+        ):
+            raise TypeError("native retrieval and collision dependencies are required")
+    elif explicit_dependencies or not callable(native_dependency_factory):
+        raise TypeError("native dependency factory conflicts with explicit dependencies")
 
     commands, schemas = merge_discovery_check_authority_registries(
         command_registry=registry, payload_schemas=payload_schemas
@@ -216,10 +253,82 @@ def open_hermes_native_authority_system(
         disk_usage=disk_usage,
     )
     try:
-        root, service, _, _, commands, schemas = base._authority_composition(
+        root, service, cas, _, commands, schemas = base._authority_composition(
             _AUTHORITY_COMPOSITION_TOKEN
         )
         connection, operation_lock = root._connection, root._lock
+        read_boundary = _ReadBoundary(
+            store=root, policy=event_read_policy, authenticator=authenticator,
+            authorizer=authorizer, clock=clock,
+        )
+
+        def execute(command: SemanticCommand, proof: AuthenticationProof) -> CommittedCommand:
+            grant = service._authorize_for_commit(command, proof=proof)
+            return root.commit(grant)
+
+        def with_native_rows(operation, *args, **kwargs):
+            with operation_lock:
+                prior = connection.row_factory
+                connection.row_factory = sqlite3.Row
+                try:
+                    return operation(*args, **kwargs)
+                finally:
+                    connection.row_factory = prior
+
+        authority_commands = AuthorityCommands(execute)
+        authority_events = AuthorityEvents(
+            policy_id=event_read_policy.policy_id,
+            read=lambda *args, **kwargs: with_native_rows(
+                read_boundary.events_after, *args, **kwargs
+            ),
+            provenance=lambda *args, **kwargs: with_native_rows(
+                read_boundary.provenance, *args, **kwargs
+            ),
+            result=lambda *args, **kwargs: with_native_rows(
+                read_boundary.command_result, *args, **kwargs
+            ),
+        )
+        if native_dependency_factory is not None:
+            object_boundary = _ObjectBoundary(
+                store=root,
+                cas=cas,
+                object_issuer=root._object_issuer,
+                admission_registry=root._admission_registry,
+                rights_policies=root._rights_policies,
+                hydration_policies=root._hydration_policies,
+                authenticator=authenticator,
+                authorizer=authorizer,
+                command_service=service,
+                command_registry=commands,
+                clock=clock,
+            )
+
+            def composed_hydrate(request, proof):
+                operation = (
+                    object_boundary.hydrate_in_transaction
+                    if connection.in_transaction
+                    else object_boundary.hydrate
+                )
+                return with_native_rows(operation, request, proof)
+
+            base.objects._bind_composed_hydrate(
+                composed_hydrate, _token=_OBJECT_COMPOSITION_TOKEN
+            )
+            dependencies = native_dependency_factory(
+                objects=base.objects,
+                extraction=base.extraction,
+                commands=authority_commands,
+                events=authority_events,
+            )
+            if (
+                type(dependencies) is not tuple
+                or len(dependencies) != 2
+                or type(dependencies[0]) is not RetrievalContextAuthority
+                or type(dependencies[1]) is not CurrentCollisionEffectEnforcer
+            ):
+                raise TypeError("native dependency factory result differs")
+            retrieval_authority, collision_enforcer = dependencies
+        assert retrieval_authority is not None and collision_enforcer is not None
 
         check_boundary = _CheckBoundary(
             store=root, command_service=service, authenticator=authenticator,
@@ -305,18 +414,11 @@ def open_hermes_native_authority_system(
             connection, retrieval_authority=retrieval_authority,
             authenticator=authenticator, command_registry=commands,
             payload_schemas=schemas, clock=clock,
+            object_admission_payload_validator=root._validate_object_admission_payload_record,
         )
         candidate_store._dispositions = dispositions
         candidate_store._service = service
         with operation_lock, candidate_store._transaction(): candidate_store._verify()
-
-        read_boundary = _ReadBoundary(
-            store=root, policy=event_read_policy, authenticator=authenticator,
-            authorizer=authorizer, clock=clock,
-        )
-        def execute(command: SemanticCommand, proof: AuthenticationProof) -> CommittedCommand:
-            grant = service._authorize_for_commit(command, proof=proof)
-            return root.commit(grant)
 
         transaction_candidate_port = _create_story_candidate_read_port(
             connection,
@@ -326,6 +428,7 @@ def open_hermes_native_authority_system(
             payload_schemas=schemas,
             clock=clock,
             command_service_version=command_service_version,
+            object_admission_payload_validator=root._validate_object_admission_payload_record,
         )
 
         def candidate_version(version_id: str):
@@ -346,6 +449,25 @@ def open_hermes_native_authority_system(
             candidate_version
         )
 
+        def receive_evidence_intake(ingress, **request):
+            from newsroom.increment10.ingress import EvidenceIntakeIngress
+            if type(ingress) is not EvidenceIntakeIngress:
+                raise TypeError("native Evidence Intake receiver must be typed")
+            # Keep the exact Candidate snapshot stable only for the local
+            # durable handoff, never across source/model I/O.
+            with operation_lock:
+                connection.execute("BEGIN")
+                try:
+                    acknowledgement = ingress.receive(
+                        transaction_candidate_port, **request
+                    )
+                    connection.execute("COMMIT")
+                    return acknowledgement
+                except BaseException:
+                    if connection.in_transaction:
+                        connection.execute("ROLLBACK")
+                    raise
+
         return HermesNativeAuthoritySystem(
             _SYSTEM_TOKEN, base=base, checks=checks, discovery=discovery,
             work_items=_SharedAuthority(work_items, operation_lock),
@@ -361,18 +483,18 @@ def open_hermes_native_authority_system(
             build_candidate_manifest=_SharedAuthority(candidate_store, operation_lock).build_manifest,
             candidate_read_port=candidate_read_port,
             candidate_version=candidate_version,
+            receive_evidence_intake=receive_evidence_intake,
             collision=collision_enforcer,
-            commands=AuthorityCommands(execute),
-            events=AuthorityEvents(
-                policy_id=event_read_policy.policy_id,
-                read=read_boundary.events_after,
-                provenance=read_boundary.provenance,
-                result=read_boundary.command_result,
-            ),
+            commands=authority_commands,
+            events=authority_events,
         )
     except BaseException:
         base.close()
         raise
 
 
-__all__ = ["HermesNativeAuthoritySystem", "open_hermes_native_authority_system"]
+__all__ = [
+    "HermesNativeAuthoritySystem",
+    "NativeDependencyFactory",
+    "open_hermes_native_authority_system",
+]

@@ -104,3 +104,19 @@ def test_native_embedding_requires_exact_qualified_implementation_before_effects
                 usage=ModelUsageService(str(tmp_path / "usage.sqlite3")),
                 policy=replace(_policy(), implementation_revision="different-code"),
                 dispatch_fence=nullcontext, implementation_worktree_clean=True)
+
+
+def test_native_embedding_policy_resolution_binds_the_actual_implementation(tmp_path):
+    from dataclasses import asdict
+    from newsroom.control_plane.model_usage import ModelUsageAdmissionError, InvocationEfficiencyPolicy
+    service = ModelUsageService(str(tmp_path / "usage.sqlite3"))
+    policy = _policy()
+    service.register_policy(policy)
+    old = InvocationEfficiencyPolicy.create(**{**asdict(policy), "implementation_revision": "retired-implementation", "version": "retired"})
+    service.register_policy(old)
+    query = dict(workload_class=policy.workload_class, provider=policy.provider,
+                 route=policy.route, model=policy.model, reasoning=policy.reasoning,
+                 output_schema_digest=policy.output_schema_digest)
+    assert service.qualified_policy(**query, implementation_revision=policy.implementation_revision) == policy
+    with pytest.raises(ModelUsageAdmissionError):
+        service.qualified_policy(**query)

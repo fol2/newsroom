@@ -8,6 +8,7 @@ the immutable document manifest.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -26,11 +27,27 @@ from newsroom.authority.types import AggregateId, ObjectAdmissionId, TrustScope,
 from newsroom.extraction.models import ExtractionRunRequest
 from newsroom.extraction.types import ExtractionOutcome, ExtractionPassageId
 from newsroom.authority._extraction_facade import GovernedExtractionRecords
-from .fulltext_contracts import FullTextAuthorityView, FullTextDocumentBinding, FullTextProjectionSnapshot
-from .branch_contracts import BranchMode, BranchOutcome
+from .fulltext_contracts import (
+    FULLTEXT_ACTOR_ID, FULLTEXT_COMPONENT_DIGEST, FULLTEXT_POLICY_ID,
+    FULLTEXT_PURPOSE, NORMALIZATION_COMPONENT_DIGEST, FullTextAuthorityView,
+    FullTextBranchRequest, FullTextDocumentBinding, FullTextLanguageMode,
+    FullTextProjectionSnapshot,
+)
+from .branch_contracts import (
+    BRANCH_RESULT_LIMIT, BRANCH_TIMEOUT_MS, EXACT_BRANCH_ACTOR_ID,
+    EXACT_BRANCH_POLICY_ID, EXACT_BRANCH_PURPOSE, BranchMode, BranchOutcome,
+    BranchRequestId, ExactBranchRequest, ExactLookupKind,
+)
 from .branch_receipts import ExactBranchReceipt
 from .fulltext_receipts import FullTextBranchReceipt
-from .admitted_graph_retriever import AdmittedGraphReceipt
+from .decision import INCREMENT_5A_CONTRACT_DIGEST
+from .fulltext_retriever import FullTextRetriever
+from .exact_retriever import SQLiteExactRetriever
+from newsroom.increment4.neo4j import Increment4Neo4jActiveReadRequest, Increment4Neo4jController
+from newsroom.projection.models import ProjectionGenerationState
+from newsroom.projection.neo4j.models import (
+    StructuralReadAuthoritySelection, StructuralReadResponse,
+)
 
 
 NATIVE_DOCUMENT_ADMISSION_TYPE = "retrieval.native-document"
@@ -55,17 +72,18 @@ NATIVE_DOCUMENT_SCHEMA = "newsroom.increment5.native-retrieval-document.v1"
 NATIVE_EMBEDDING_SCHEMA = "newsroom.increment5.native-embedding-receipt.v1"
 NATIVE_VECTOR_DIMENSIONS = 1_024
 NATIVE_RESULT_LIMIT = 8
+NATIVE_GRAPH_ROOT_LIMIT = 64
+NATIVE_CONTEXT_DOCUMENT_LIMIT = NATIVE_RESULT_LIMIT * 2 + 1
 NATIVE_VECTOR_PROFILE = "native-governed-vector-v1"
 NATIVE_VECTOR_RECEIPT_SCHEMA = "newsroom.increment5.native-vector-branch-receipt.v1"
 NATIVE_CONTEXT_SCHEMA = "newsroom.increment5.native-retrieval-context.v1"
 NATIVE_CONTEXT_RECEIPT_SCHEMA = "newsroom.increment5.native-retrieval-context-receipt.v1"
+NATIVE_GRAPH_RECEIPT_SCHEMA = "newsroom.increment5.native-graph-branch-receipt.v1"
 NATIVE_CONTEXT_ADMISSION_TYPE = "retrieval.native-context"
 NATIVE_CONTEXT_CLASS = "NATIVE_RETRIEVAL_CONTEXT"
 NATIVE_CONTEXT_USE = "TRIAGE_RETRIEVAL"
 NATIVE_CONTEXT_COMMAND = "retrieval.native_context.admit"
 NATIVE_CONTEXT_EVENT = "retrieval.native_context.admitted"
-NATIVE_CONTEXT_SCHEMA = "newsroom.increment5.native-retrieval-context.v1"
-NATIVE_CONTEXT_RECEIPT_SCHEMA = "newsroom.increment5.native-retrieval-context-receipt.v1"
 
 _INDEX = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,127}\Z")
 
@@ -512,6 +530,142 @@ class NativeVectorBranchReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeGraphBranchReceipt:
+    """Exact retained view of the authority-selected Increment 4 graph."""
+
+    receipt_id: str
+    request_digest: str
+    requested_ids: tuple[str, ...]
+    family_id: str
+    family_definition_version: str
+    projector_version: str
+    ontology_contract_digest: str
+    mapping_contract_digest: str
+    generation_id: str
+    authority_selection: str
+    watermark_seq: int
+    query_valid_time: str
+    serving_time: str
+    nodes: tuple[dict[str, object], ...]
+    relations: tuple[dict[str, object], ...]
+    outcome: str = "COMPLETE"
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        try:
+            if str(uuid.UUID(self.receipt_id)) != self.receipt_id:
+                raise ValueError
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise NativeRetrievalError("native graph receipt identity differs") from exc
+        _digest(self.request_digest, "native graph request digest")
+        for name in ("family_id", "family_definition_version", "projector_version", "generation_id"):
+            _text(getattr(self, name), name)
+        for name in ("ontology_contract_digest", "mapping_contract_digest"):
+            _digest(getattr(self, name), name)
+        if self.authority_selection != StructuralReadAuthoritySelection.AUTHORITY_SELECTED_ACTIVE.value:
+            raise NativeRetrievalError("native graph authority selection differs")
+        if type(self.watermark_seq) is not int or self.watermark_seq < 0:
+            raise NativeRetrievalError("native graph watermark differs")
+        if type(self.requested_ids) is not tuple or not self.requested_ids or len(self.requested_ids) > NATIVE_GRAPH_ROOT_LIMIT or len(set(self.requested_ids)) != len(self.requested_ids):
+            raise NativeRetrievalError("native graph request inventory differs")
+        for item in self.requested_ids:
+            _text(item, "native graph requested id")
+        if type(self.nodes) is not tuple or type(self.relations) is not tuple or any(type(item) is not dict for item in self.nodes + self.relations):
+            raise NativeRetrievalError("native graph evidence differs")
+        if UtcTimestamp.parse(self.query_valid_time).value > UtcTimestamp.parse(self.serving_time).value:
+            raise NativeRetrievalError("native graph time differs")
+        if self.outcome != "COMPLETE" or self.reason not in {None, "NO_MATCH"} or (not self.nodes and not self.relations) != (self.reason == "NO_MATCH"):
+            raise NativeRetrievalError("native graph outcome differs")
+
+    @property
+    def hits(self) -> tuple[dict[str, object], ...]:
+        return self.nodes + self.relations
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "schema_identity": NATIVE_GRAPH_RECEIPT_SCHEMA,
+            **{name: getattr(self, name) for name in (
+                "receipt_id", "request_digest", "family_id",
+                "family_definition_version", "projector_version",
+                "ontology_contract_digest", "mapping_contract_digest",
+                "generation_id", "authority_selection", "watermark_seq",
+                "query_valid_time", "serving_time", "outcome", "reason",
+            )},
+            "requested_ids": list(self.requested_ids),
+            "nodes": list(self.nodes), "relations": list(self.relations),
+        }
+
+    @property
+    def canonical_bytes(self) -> bytes:
+        return canonical_json_bytes(self.canonical_value())
+
+    @property
+    def receipt_digest(self) -> str:
+        return digest_bytes(self.canonical_bytes)
+
+    @classmethod
+    def from_response(cls, request_digest: str, requested_ids: tuple[str, ...], response: StructuralReadResponse) -> "NativeGraphBranchReceipt":
+        if type(response) is not StructuralReadResponse:
+            raise NativeRetrievalError("native graph response differs")
+        metadata = response.metadata
+        if metadata.generation_state is not ProjectionGenerationState.ACTIVE or metadata.trust_scope is not TrustScope.ADMITTED or metadata.open_gap_count or metadata.dead_letter_count:
+            raise NativeRetrievalHold("NATIVE_GRAPH_NOT_COMPLETE")
+        nodes = tuple({
+            "canonical_id": item.canonical_id, "node_type": item.node_type.value,
+            "identity_source": item.identity_source,
+            "identity_reference_digest": item.identity_reference_digest,
+            "first_ledger_seq": item.first_ledger_seq,
+            "first_source_event_id": item.first_source_event_id,
+            "first_source_event_digest": item.first_source_event_digest,
+        } for item in response.nodes)
+        relations = tuple({
+            "relation_key": item.relation_key, "relation_type": item.relation_type.value,
+            "source_canonical_id": item.source_canonical_id,
+            "target_canonical_id": item.target_canonical_id,
+            "ledger_seq": item.ledger_seq, "source_event_id": item.source_event_id,
+            "source_event_type": item.source_event_type,
+            "source_event_digest": item.source_event_digest,
+            "aggregate_type": item.aggregate_type, "aggregate_id": item.aggregate_id,
+            "aggregate_version": item.aggregate_version, "payload_id": item.payload_id,
+            "payload_digest": item.payload_digest,
+            "object_admission_id": item.object_admission_id,
+            "principal_id": item.principal_id, "trust_scope": item.trust_scope.value,
+            "security_scope": item.security_scope,
+            "retention_scope": item.retention_scope,
+            "recorded_at": item.recorded_at.to_text(),
+        } for item in response.relations)
+        semantic = canonical_json_bytes({
+            "request_digest": request_digest, "generation": str(metadata.generation_id),
+            "nodes": nodes, "relations": relations,
+        })
+        return cls(
+            str(uuid.uuid5(uuid.NAMESPACE_URL, digest_bytes(semantic))),
+            request_digest, requested_ids, metadata.family_id,
+            metadata.family_definition_version, metadata.projector_version,
+            metadata.ontology_contract_digest, metadata.mapping_contract_digest,
+            str(metadata.generation_id), metadata.authority_selection.value,
+            metadata.contiguous_ledger_seq, metadata.query_valid_time.to_text(),
+            metadata.serving_time.to_text(), nodes, relations,
+            reason=None if nodes or relations else "NO_MATCH",
+        )
+
+    @classmethod
+    def from_canonical_bytes(cls, raw: bytes) -> "NativeGraphBranchReceipt":
+        value = _json(raw, NATIVE_GRAPH_RECEIPT_SCHEMA)
+        value.pop("schema_identity")
+        try:
+            value["requested_ids"] = tuple(value["requested_ids"])
+            value["nodes"] = tuple(value["nodes"])
+            value["relations"] = tuple(value["relations"])
+            receipt = cls(**value)  # type: ignore[arg-type]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise NativeRetrievalError("native graph receipt fields differ") from exc
+        if receipt.canonical_bytes != raw:
+            raise NativeRetrievalError("native graph receipt is non-canonical")
+        return receipt
+
+
+@dataclass(frozen=True, slots=True)
 class NativeRetrievalContextRequest:
     """Stable server request joining the four mandatory native branches."""
 
@@ -521,6 +675,7 @@ class NativeRetrievalContextRequest:
     expected_aggregate_version: int
     lead_id: str
     lead_digest: str
+    authority_scope_id: str
     exact_receipt_bytes: bytes
     fulltext_receipt_bytes: bytes
     vector_receipt_bytes: bytes
@@ -538,23 +693,24 @@ class NativeRetrievalContextRequest:
             raise NativeRetrievalError("native context aggregate differs")
         _text(self.lead_id, "native context lead id")
         _digest(self.lead_digest, "native context lead digest")
+        _text(self.authority_scope_id, "native context authority scope")
         self.branch_receipts()
-        if type(self.selected_documents) is not tuple or not self.selected_documents or len(self.selected_documents) > NATIVE_RESULT_LIMIT or any(type(item) is not NativeDocumentReceipt for item in self.selected_documents):
+        if type(self.selected_documents) is not tuple or not self.selected_documents or len(self.selected_documents) > NATIVE_CONTEXT_DOCUMENT_LIMIT or any(type(item) is not NativeDocumentReceipt for item in self.selected_documents):
             raise NativeRetrievalError("native context selected documents differ")
         if len({item.event_id for item in self.selected_documents}) != len(self.selected_documents):
             raise NativeRetrievalError("native context selected documents repeat")
 
-    def branch_receipts(self) -> tuple[ExactBranchReceipt, FullTextBranchReceipt, NativeVectorBranchReceipt, AdmittedGraphReceipt]:
+    def branch_receipts(self) -> tuple[ExactBranchReceipt, FullTextBranchReceipt, NativeVectorBranchReceipt, NativeGraphBranchReceipt]:
         try:
             values = (
                 ExactBranchReceipt.from_canonical_bytes(self.exact_receipt_bytes),
                 FullTextBranchReceipt.from_canonical_bytes(self.fulltext_receipt_bytes),
                 NativeVectorBranchReceipt.from_canonical_bytes(self.vector_receipt_bytes),
-                AdmittedGraphReceipt.from_canonical_bytes(self.graph_receipt_bytes),
+                NativeGraphBranchReceipt.from_canonical_bytes(self.graph_receipt_bytes),
             )
         except Exception as exc:
             raise NativeRetrievalError("native context branch receipt differs") from exc
-        if any(receipt.outcome is not BranchOutcome.COMPLETE for receipt in values):
+        if any(receipt.outcome is not BranchOutcome.COMPLETE for receipt in values[:3]) or values[3].outcome != "COMPLETE":
             raise NativeRetrievalHold("MANDATORY_RETRIEVAL_BRANCH_NOT_COMPLETE")
         return values
 
@@ -568,6 +724,7 @@ class NativeRetrievalContextRequest:
             "expected_aggregate_version": self.expected_aggregate_version,
             "lead_id": self.lead_id,
             "lead_digest": self.lead_digest,
+            "authority_scope_id": self.authority_scope_id,
             "branch_receipts": {
                 "exact": json.loads(self.exact_receipt_bytes),
                 "fulltext": json.loads(self.fulltext_receipt_bytes),
@@ -581,6 +738,32 @@ class NativeRetrievalContextRequest:
     def request_digest(self) -> str:
         return digest_bytes(self.canonical_bytes)
 
+    @classmethod
+    def from_bytes(cls, raw: bytes) -> "NativeRetrievalContextRequest":
+        value = _json(raw, "newsroom.increment5.native-retrieval-context-request.v1")
+        try:
+            branches = value["branch_receipts"]
+            request = cls(
+                request_id=value["request_id"], idempotency_key=value["idempotency_key"],
+                aggregate_id=AggregateId.parse(value["aggregate_id"]),
+                expected_aggregate_version=value["expected_aggregate_version"],
+                lead_id=value["lead_id"], lead_digest=value["lead_digest"],
+                authority_scope_id=value["authority_scope_id"],
+                exact_receipt_bytes=canonical_json_bytes(branches["exact"]),
+                fulltext_receipt_bytes=canonical_json_bytes(branches["fulltext"]),
+                vector_receipt_bytes=canonical_json_bytes(branches["vector"]),
+                graph_receipt_bytes=canonical_json_bytes(branches["admitted_graph"]),
+                selected_documents=tuple(
+                    NativeDocumentReceipt.from_projection(item)
+                    for item in value["selected_documents"]
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise NativeRetrievalError("native context request fields differ") from exc
+        if request.canonical_bytes != raw:
+            raise NativeRetrievalError("native context request is non-canonical")
+        return request
+
 
 @dataclass(frozen=True, slots=True)
 class NativeRetrievalContext:
@@ -589,7 +772,12 @@ class NativeRetrievalContext:
     request_digest: str
     lead_id: str
     lead_digest: str
+    authority_scope_id: str
+    generation_id: str
+    query_valid_time: str
+    serving_time: str
     branch_digests: tuple[str, str, str, str]
+    branch_receipts: tuple[dict[str, object], dict[str, object], dict[str, object], dict[str, object]]
     selected_documents: tuple[dict[str, object], ...]
     outcome: str
     no_match: bool
@@ -603,11 +791,49 @@ class NativeRetrievalContext:
         _digest(self.request_digest, "native context request digest")
         _text(self.lead_id, "native context lead id")
         _digest(self.lead_digest, "native context lead digest")
+        _text(self.authority_scope_id, "native context authority scope")
+        _text(self.generation_id, "native context generation")
+        if UtcTimestamp.parse(self.query_valid_time).value > UtcTimestamp.parse(self.serving_time).value:
+            raise NativeRetrievalError("native context time differs")
         if type(self.branch_digests) is not tuple or len(self.branch_digests) != 4:
             raise NativeRetrievalError("native context branch inventory differs")
         for value in self.branch_digests:
             _digest(value, "native context branch digest")
+        if type(self.branch_receipts) is not tuple or len(self.branch_receipts) != 4 or any(type(item) is not dict for item in self.branch_receipts):
+            raise NativeRetrievalError("native context branch receipts differ")
+        raw = tuple(canonical_json_bytes(item) for item in self.branch_receipts)
+        if tuple(digest_bytes(item) for item in raw) != self.branch_digests:
+            raise NativeRetrievalError("native context branch receipt digest differs")
+        try:
+            exact = ExactBranchReceipt.from_canonical_bytes(raw[0])
+            fulltext = FullTextBranchReceipt.from_canonical_bytes(raw[1])
+            vector = NativeVectorBranchReceipt.from_canonical_bytes(raw[2])
+            graph = NativeGraphBranchReceipt.from_canonical_bytes(raw[3])
+        except Exception as exc:
+            raise NativeRetrievalError("native context branch receipt differs") from exc
+        if (
+            any(item.outcome is not BranchOutcome.COMPLETE for item in (exact, fulltext, vector))
+            or graph.outcome != "COMPLETE"
+            or fulltext.snapshot is None
+            or str(fulltext.snapshot.generation_id) != self.generation_id
+            or vector.generation_id != self.generation_id
+            or vector.query_valid_time != self.query_valid_time
+            or vector.serving_time != self.serving_time
+            or UtcTimestamp.parse(graph.query_valid_time).value != UtcTimestamp.parse(self.query_valid_time).value
+            or UtcTimestamp.parse(graph.serving_time).value != UtcTimestamp.parse(self.serving_time).value
+            or self.no_match != (not (exact.hits or fulltext.hits or vector.hits or graph.hits))
+        ):
+            raise NativeRetrievalError("native context branch semantics differ")
         if type(self.selected_documents) is not tuple or any(type(item) is not dict for item in self.selected_documents):
+            raise NativeRetrievalError("native context selected inventory differs")
+        try:
+            selected = tuple(NativeDocumentReceipt.from_projection(item) for item in self.selected_documents)
+        except (TypeError, ValueError) as exc:
+            raise NativeRetrievalError("native context selected inventory differs") from exc
+        if len({item.event_id for item in selected}) != len(selected):
+            raise NativeRetrievalError("native context selected inventory repeats")
+        selected_digests = {item.document_digest for item in selected}
+        if not selected or not {hit.document_digest for hit in vector.hits}.issubset(selected_digests):
             raise NativeRetrievalError("native context selected inventory differs")
         if self.outcome != "COMPLETE" or type(self.no_match) is not bool:
             raise NativeRetrievalError("native context outcome differs")
@@ -616,11 +842,24 @@ class NativeRetrievalContext:
     def canonical_bytes(self) -> bytes:
         return canonical_json_bytes({"schema_identity": NATIVE_CONTEXT_SCHEMA, **self.canonical_value()})
 
+    @property
+    def graph_generation_id(self) -> str:
+        """Return the independently governed Increment 4 generation."""
+        return NativeGraphBranchReceipt.from_canonical_bytes(
+            canonical_json_bytes(self.branch_receipts[3])
+        ).generation_id
+
     def canonical_value(self) -> dict[str, object]:
         return {
             "context_id": self.context_id, "request_id": self.request_id,
             "request_digest": self.request_digest, "lead_id": self.lead_id,
             "lead_digest": self.lead_digest, "branch_digests": list(self.branch_digests),
+            "authority_scope_id": self.authority_scope_id,
+            "generation_id": self.generation_id,
+            "graph_generation_id": self.graph_generation_id,
+            "query_valid_time": self.query_valid_time,
+            "serving_time": self.serving_time,
+            "branch_receipts": list(self.branch_receipts),
             "selected_documents": list(self.selected_documents), "outcome": self.outcome,
             "no_match": self.no_match,
         }
@@ -634,11 +873,16 @@ class NativeRetrievalContext:
         value = _json(raw, NATIVE_CONTEXT_SCHEMA)
         value.pop("schema_identity")
         try:
+            graph_generation_id = value.pop("graph_generation_id")
             value["branch_digests"] = tuple(value["branch_digests"])
+            value["branch_receipts"] = tuple(value["branch_receipts"])
             value["selected_documents"] = tuple(value["selected_documents"])
-            return cls(**value)  # type: ignore[arg-type]
+            context = cls(**value)  # type: ignore[arg-type]
         except (KeyError, TypeError, ValueError) as exc:
             raise NativeRetrievalError("native context fields differ") from exc
+        if context.graph_generation_id != graph_generation_id:
+            raise NativeRetrievalError("native graph generation differs")
+        return context
 
 
 @dataclass(frozen=True, slots=True)
@@ -652,6 +896,14 @@ class NativeRetrievalContextReceipt:
     command_id: str
     admission_id: ObjectAdmissionId
     context_object_digest: str
+    authority_scope_id: str
+    generation_id: str
+    query_valid_time: str
+    serving_time: str
+    exact_receipt_bytes: bytes
+    fulltext_receipt_bytes: bytes
+    vector_receipt_bytes: bytes
+    graph_receipt_bytes: bytes
     controller_principal_id: str
     authority_domain: str
     outcome: str = "COMPLETE"
@@ -659,16 +911,24 @@ class NativeRetrievalContextReceipt:
     no_match: bool = False
 
     def __post_init__(self) -> None:
-        NativeRetrievalContext(
-            self.context_id, self.request_id, self.request_digest, "validation",
-            "sha256:" + "0" * 64, tuple("sha256:" + "0" * 64 for _ in range(4)), (),
-            self.outcome, self.no_match,
-        )
+        try:
+            if str(uuid.UUID(self.context_id)) != self.context_id or str(uuid.UUID(self.request_id)) != self.request_id:
+                raise ValueError
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise NativeRetrievalError("native context receipt identity differs") from exc
+        _digest(self.request_digest, "native context receipt request digest")
         if type(self.aggregate_id) is not AggregateId or type(self.aggregate_version) is not int or self.aggregate_version <= 0 or type(self.admission_id) is not ObjectAdmissionId:
             raise NativeRetrievalError("native context authority receipt differs")
         for name in ("event_id", "command_id", "controller_principal_id", "authority_domain"):
             _text(getattr(self, name), name)
         _digest(self.context_object_digest, "native context object digest")
+        _text(self.authority_scope_id, "native context receipt authority scope")
+        _text(self.generation_id, "native context receipt generation")
+        if UtcTimestamp.parse(self.query_valid_time).value > UtcTimestamp.parse(self.serving_time).value:
+            raise NativeRetrievalError("native context receipt time differs")
+        branches = self.branch_receipts()
+        if any(item.outcome is not BranchOutcome.COMPLETE for item in branches[:3]) or branches[3].outcome != "COMPLETE":
+            raise NativeRetrievalError("native context receipt branch is incomplete")
         if self.reason is not None:
             raise NativeRetrievalError("complete native context has a reason")
 
@@ -680,6 +940,17 @@ class NativeRetrievalContextReceipt:
             "aggregate_version": self.aggregate_version, "event_id": self.event_id,
             "command_id": self.command_id, "admission_id": str(self.admission_id),
             "context_object_digest": self.context_object_digest,
+            "authority_scope_id": self.authority_scope_id,
+            "generation_id": self.generation_id,
+            "graph_generation_id": self.graph_generation_id,
+            "query_valid_time": self.query_valid_time,
+            "serving_time": self.serving_time,
+            "branch_receipts": {
+                "exact": json.loads(self.exact_receipt_bytes),
+                "fulltext": json.loads(self.fulltext_receipt_bytes),
+                "vector": json.loads(self.vector_receipt_bytes),
+                "admitted_graph": json.loads(self.graph_receipt_bytes),
+            },
             "controller_principal_id": self.controller_principal_id,
             "authority_domain": self.authority_domain, "outcome": self.outcome,
             "reason": self.reason, "no_match": self.no_match,
@@ -690,14 +961,36 @@ class NativeRetrievalContextReceipt:
         return canonical_json_bytes(self.canonical_value())
 
     @property
+    def graph_generation_id(self) -> str:
+        """Return the independently governed Increment 4 generation."""
+        return self.branch_receipts()[3].generation_id
+
+    @property
     def receipt_digest(self) -> str:
         return digest_bytes(self.canonical_bytes)
+
+    def branch_receipts(self) -> tuple[ExactBranchReceipt, FullTextBranchReceipt, NativeVectorBranchReceipt, NativeGraphBranchReceipt]:
+        try:
+            return (
+                ExactBranchReceipt.from_canonical_bytes(self.exact_receipt_bytes),
+                FullTextBranchReceipt.from_canonical_bytes(self.fulltext_receipt_bytes),
+                NativeVectorBranchReceipt.from_canonical_bytes(self.vector_receipt_bytes),
+                NativeGraphBranchReceipt.from_canonical_bytes(self.graph_receipt_bytes),
+            )
+        except Exception as exc:
+            raise NativeRetrievalError("native context receipt branch differs") from exc
 
     @classmethod
     def from_bytes(cls, raw: bytes) -> "NativeRetrievalContextReceipt":
         value = _json(raw, NATIVE_CONTEXT_RECEIPT_SCHEMA)
         value.pop("schema_identity")
         try:
+            branches = value.pop("branch_receipts")
+            graph_generation_id = value.pop("graph_generation_id")
+            value["exact_receipt_bytes"] = canonical_json_bytes(branches["exact"])
+            value["fulltext_receipt_bytes"] = canonical_json_bytes(branches["fulltext"])
+            value["vector_receipt_bytes"] = canonical_json_bytes(branches["vector"])
+            value["graph_receipt_bytes"] = canonical_json_bytes(branches["admitted_graph"])
             value["aggregate_id"] = AggregateId.parse(value["aggregate_id"])
             value["admission_id"] = ObjectAdmissionId.parse(value["admission_id"])
             receipt = cls(**value)  # type: ignore[arg-type]
@@ -705,32 +998,76 @@ class NativeRetrievalContextReceipt:
             raise NativeRetrievalError("native context receipt fields differ") from exc
         if receipt.canonical_bytes != raw:
             raise NativeRetrievalError("native context receipt is non-canonical")
+        if receipt.graph_generation_id != graph_generation_id:
+            raise NativeRetrievalError("native graph generation differs")
         return receipt
 
 
 class NativeDocumentProjection(Protocol):
     def upsert(self, receipt: NativeDocumentReceipt, document: NativePassageDocument, vector: tuple[float, ...]) -> None: ...
     def retrieve(self, *, query_text: str, query_vector: tuple[float, ...]) -> tuple[tuple[Mapping[str, object], ...], tuple[Mapping[str, object], ...]]: ...
+    def retrieve_vector(self, *, query_vector: tuple[float, ...]) -> tuple[Mapping[str, object], ...]: ...
+
+
+_CONTEXT_READ_PORT_TOKEN = object()
+
+
+class NativeRetrievalContextReadPort:
+    """Authenticated composed read seam; callers cannot supply raw contexts."""
+
+    __slots__ = ("_read",)
+
+    def __init__(self, read, *, _token: object) -> None:
+        if _token is not _CONTEXT_READ_PORT_TOKEN:
+            raise NativeRetrievalError("native context read port is factory-owned")
+        self._read = read
+
+    def require(self, receipt: NativeRetrievalContextReceipt) -> NativeRetrievalContext:
+        if type(receipt) is not NativeRetrievalContextReceipt:
+            raise NativeRetrievalError("native context read receipt differs")
+        context = self._read(receipt)
+        if type(context) is not NativeRetrievalContext:
+            raise NativeRetrievalError("native context read result differs")
+        return context
 
 
 class NativeRetrievalDocuments:
     """Trusted facade binding native extraction, embedding and projection state."""
 
-    def __init__(self, *, objects: GovernedObjects, extraction: GovernedExtractionRecords, commands: AuthorityCommands, events: AuthorityEvents, projector: NativeDocumentProjection, reader_principal_id: str, authority_domain: str, controller_principal_id: str, passage_hydration_policy_digest: str, vector_hydration_policy_digest: str, receipt_hydration_policy_digest: str, document_hydration_policy_digest: str, document_admission_definition_digest: str, command_definition_digest: str) -> None:
+    def __init__(self, *, objects: GovernedObjects, extraction: GovernedExtractionRecords, commands: AuthorityCommands, events: AuthorityEvents, projector: NativeDocumentProjection, reader_principal_id: str, authority_domain: str, controller_principal_id: str, passage_hydration_policy_digest: str, vector_hydration_policy_digest: str, receipt_hydration_policy_digest: str, document_hydration_policy_digest: str, document_admission_definition_digest: str, command_definition_digest: str, context_hydration_policy_digest: str, context_admission_definition_digest: str, context_command_definition_digest: str) -> None:
         if type(objects) is not GovernedObjects or type(extraction) is not GovernedExtractionRecords or type(commands) is not AuthorityCommands or type(events) is not AuthorityEvents:
             raise NativeRetrievalError("native retrieval requires exact authority facades")
-        if not callable(getattr(projector, "upsert", None)) or not callable(getattr(projector, "retrieve", None)):
+        if not callable(getattr(projector, "upsert", None)) or not callable(getattr(projector, "retrieve", None)) or not callable(getattr(projector, "retrieve_vector", None)):
             raise NativeRetrievalError("native retrieval projector differs")
         for value in (reader_principal_id, authority_domain, controller_principal_id): _text(value, "native retrieval identity")
-        for value in (passage_hydration_policy_digest, vector_hydration_policy_digest, receipt_hydration_policy_digest, document_hydration_policy_digest, document_admission_definition_digest, command_definition_digest): _digest(value, "native retrieval policy")
+        for value in (passage_hydration_policy_digest, vector_hydration_policy_digest, receipt_hydration_policy_digest, document_hydration_policy_digest, document_admission_definition_digest, command_definition_digest, context_hydration_policy_digest, context_admission_definition_digest, context_command_definition_digest): _digest(value, "native retrieval policy")
         self._objects, self._extraction, self._commands, self._events, self._projector = objects, extraction, commands, events, projector
         self._reader, self._domain, self._controller = reader_principal_id, authority_domain, controller_principal_id
         self._passage_policy, self._vector_policy, self._receipt_policy, self._document_policy = passage_hydration_policy_digest, vector_hydration_policy_digest, receipt_hydration_policy_digest, document_hydration_policy_digest
         self._document_definition, self._command_definition = document_admission_definition_digest, command_definition_digest
+        self._context_policy = context_hydration_policy_digest
+        self._context_definition = context_admission_definition_digest
+        self._context_command_definition = context_command_definition_digest
 
     @property
     def command_definition_digest(self) -> str:
         return self._command_definition
+
+    @property
+    def context_command_definition_digest(self) -> str:
+        return self._context_command_definition
+
+    def context_read_port(self, *, proof: AuthenticationProof) -> NativeRetrievalContextReadPort:
+        if type(proof) is not AuthenticationProof:
+            raise NativeRetrievalError("native context read proof differs")
+        return NativeRetrievalContextReadPort(
+            lambda receipt: self.read_context(receipt, proof=proof),
+            _token=_CONTEXT_READ_PORT_TOKEN,
+        )
+
+    def require_document(self, receipt: NativeDocumentReceipt, *, proof: AuthenticationProof) -> NativePassageDocument:
+        """Re-read one exact governed document and its embedding authority."""
+        return self._read(receipt, proof)[0]
 
     def admit(self, request: NativeDocumentRequest, *, proof: AuthenticationProof) -> tuple[NativeDocumentReceipt, NativePassageDocument]:
         metadata = self._extraction.metadata(request.extraction_request.run_version_id, proof=proof)
@@ -805,7 +1142,7 @@ class NativeRetrievalDocuments:
             or query_document.generation_id != request.generation_id
         ):
             raise NativeRetrievalError("native vector query authority differs")
-        _, rows = self._projector.retrieve(query_text=query_document.text, query_vector=query_vector)
+        rows = self._projector.retrieve_vector(query_vector=query_vector)
         documents = self._documents(rows, query_document.generation_id, proof)
         hits = tuple(
             NativeVectorBranchHit(
@@ -819,6 +1156,30 @@ class NativeRetrievalDocuments:
                 raw_score_ppm=max(0, min(1_000_000, int(round(score * 1_000_000)))),
             )
             for index, (document, score) in enumerate(documents, 1)
+        )
+        generation_digest = digest_bytes(canonical_json_bytes({
+            "generation_id": query_document.generation_id,
+            "document_command_definition": self._command_definition,
+            "embedding_model_digest": query_document.embedding_model_digest,
+        }))
+        semantic = canonical_json_bytes({
+            "request_digest": request.request_digest,
+            "generation_digest": generation_digest,
+            "hits": [hit.canonical_value() for hit in hits],
+        })
+        return NativeVectorBranchReceipt(
+            receipt_id=str(uuid.uuid5(uuid.NAMESPACE_URL, digest_bytes(semantic))),
+            request_digest=request.request_digest,
+            mode=BranchMode.VECTOR,
+            outcome=BranchOutcome.COMPLETE,
+            reason=None if hits else "NO_MATCH",
+            generation_id=query_document.generation_id,
+            generation_digest=generation_digest,
+            profile_id=NATIVE_VECTOR_PROFILE,
+            query_valid_time=request.query_valid_time,
+            serving_time=request.serving_time,
+            hits=hits,
+            authority_read_count=1 + len(documents),
         )
 
     def fulltext_authority_view(
@@ -849,7 +1210,11 @@ class NativeRetrievalDocuments:
                     dependency_root_id=document.dependency_root_id,
                     source_id=document.source_id,
                     source_identity=document.revision_id,
-                    provenance_digest=document.provenance_digest,
+                    # The reused full-text row contract calls this the
+                    # provenance digest; it is the exact indexed document
+                    # digest.  The document itself separately retains source
+                    # provenance and is rehydrated before this view is built.
+                    provenance_digest=document.digest,
                     language=document.language,
                     rights_current=True,
                     lifecycle="ACTIVE",
@@ -857,30 +1222,152 @@ class NativeRetrievalDocuments:
                 for document in documents
             ), key=lambda item: item.passage_id)),
         )
-        generation_digest = digest_bytes(canonical_json_bytes({
-            "generation_id": query_document.generation_id,
-            "document_command_definition": self._command_definition,
-            "embedding_model_digest": query_document.embedding_model_digest,
-        }))
-        semantic = canonical_json_bytes({
+    def retain_context(
+        self,
+        request: NativeRetrievalContextRequest,
+        *,
+        proof: AuthenticationProof,
+    ):
+        """Commit one typed four-branch context and return its work-item binding."""
+        if type(request) is not NativeRetrievalContextRequest:
+            raise NativeRetrievalError("native context request differs")
+        exact, fulltext, vector, graph = request.branch_receipts()
+        if (
+            fulltext.snapshot is None
+            or str(fulltext.snapshot.generation_id) != vector.generation_id
+            or UtcTimestamp.parse(graph.query_valid_time).value != UtcTimestamp.parse(vector.query_valid_time).value
+            or UtcTimestamp.parse(graph.serving_time).value != UtcTimestamp.parse(vector.serving_time).value
+        ):
+            raise NativeRetrievalError("native context generation/time differs")
+        documents = tuple(self._read(item, proof)[0] for item in request.selected_documents)
+        selected_ids = {item.passage_id for item in documents}
+        used_ids = {
+            *(str(hit.passage_id) for hit in fulltext.hits if hit.passage_id is not None),
+            *(hit.passage_id for hit in vector.hits),
+        }
+        if not used_ids.issubset(selected_ids):
+            raise NativeRetrievalError("native context selected passage authority differs")
+        branch_digests = tuple(digest_bytes(raw) for raw in (
+            request.exact_receipt_bytes, request.fulltext_receipt_bytes,
+            request.vector_receipt_bytes, request.graph_receipt_bytes,
+        ))
+        no_match = not (exact.hits or fulltext.hits or vector.hits or graph.hits)
+        identity = canonical_json_bytes({
             "request_digest": request.request_digest,
-            "generation_digest": generation_digest,
-            "hits": [hit.canonical_value() for hit in hits],
+            "branches": list(branch_digests),
+            "documents": [item.digest for item in documents],
         })
-        return NativeVectorBranchReceipt(
-            receipt_id=str(uuid.uuid5(uuid.NAMESPACE_URL, digest_bytes(semantic))),
-            request_digest=request.request_digest,
-            mode=BranchMode.VECTOR,
-            outcome=BranchOutcome.COMPLETE,
-            reason=None if hits else "NO_MATCH",
-            generation_id=query_document.generation_id,
-            generation_digest=generation_digest,
-            profile_id=NATIVE_VECTOR_PROFILE,
-            query_valid_time=request.query_valid_time,
-            serving_time=request.serving_time,
-            hits=hits,
-            authority_read_count=1 + len(documents),
+        branch_values = tuple(json.loads(raw) for raw in (
+            request.exact_receipt_bytes, request.fulltext_receipt_bytes,
+            request.vector_receipt_bytes, request.graph_receipt_bytes,
+        ))
+        context = NativeRetrievalContext(
+            context_id=str(uuid.uuid5(uuid.NAMESPACE_URL, digest_bytes(identity))),
+            request_id=request.request_id, request_digest=request.request_digest,
+            lead_id=request.lead_id, lead_digest=request.lead_digest,
+            authority_scope_id=request.authority_scope_id,
+            generation_id=vector.generation_id,
+            query_valid_time=vector.query_valid_time,
+            serving_time=vector.serving_time,
+            branch_digests=branch_digests,  # type: ignore[arg-type]
+            branch_receipts=branch_values,  # type: ignore[arg-type]
+            selected_documents=tuple(item.projection_value() for item in request.selected_documents),
+            outcome="COMPLETE", no_match=no_match,
         )
+        admitted = self._objects.admit(
+            ObjectAdmissionRequest(NATIVE_CONTEXT_ADMISSION_TYPE, request.idempotency_key),
+            context.canonical_bytes, proof=proof,
+        ).admission
+        if admitted.definition_digest != self._context_definition or admitted.object_class != NATIVE_CONTEXT_CLASS or admitted.allowed_use != NATIVE_CONTEXT_USE or not admitted.active:
+            raise NativeRetrievalError("native context admission differs")
+        if admitted.blob.blob_digest != context.digest:
+            retained = self._objects.hydrate(
+                HydrationRequest(admitted.admission_id, NATIVE_CONTEXT_USE),
+                proof=proof,
+            )
+            self._access(
+                retained.decision, self._context_policy,
+                NATIVE_CONTEXT_CLASS, NATIVE_CONTEXT_USE,
+            )
+            context = NativeRetrievalContext.from_bytes(retained.data)
+            if (
+                context.request_id != request.request_id
+                or context.lead_id != request.lead_id
+                or context.lead_digest != request.lead_digest
+                or context.authority_scope_id != request.authority_scope_id
+            ):
+                raise NativeRetrievalError("native context replay differs")
+        committed = self._commands.execute(
+            SemanticCommand(NATIVE_CONTEXT_COMMAND, request.aggregate_id,
+                            request.expected_aggregate_version,
+                            ObjectAdmissionPayload(admitted.admission_id),
+                            request.idempotency_key),
+            proof=proof,
+        )
+        receipt = NativeRetrievalContextReceipt(
+            context_id=context.context_id, request_id=context.request_id,
+            request_digest=context.request_digest, aggregate_id=request.aggregate_id,
+            aggregate_version=committed.aggregate_version,
+            event_id=str(committed.event_id), command_id=str(committed.command_id),
+            admission_id=admitted.admission_id, context_object_digest=context.digest,
+            authority_scope_id=context.authority_scope_id,
+            generation_id=context.generation_id,
+            query_valid_time=context.query_valid_time, serving_time=context.serving_time,
+            exact_receipt_bytes=canonical_json_bytes(context.branch_receipts[0]),
+            fulltext_receipt_bytes=canonical_json_bytes(context.branch_receipts[1]),
+            vector_receipt_bytes=canonical_json_bytes(context.branch_receipts[2]),
+            graph_receipt_bytes=canonical_json_bytes(context.branch_receipts[3]),
+            controller_principal_id=self._controller, authority_domain=self._domain,
+            no_match=context.no_match,
+        )
+        self.read_context(receipt, proof=proof)
+        retained_request = NativeRetrievalContextRequest(
+            context.request_id, request.idempotency_key, request.aggregate_id,
+            request.expected_aggregate_version, context.lead_id,
+            context.lead_digest, context.authority_scope_id,
+            receipt.exact_receipt_bytes, receipt.fulltext_receipt_bytes,
+            receipt.vector_receipt_bytes, receipt.graph_receipt_bytes,
+            tuple(
+                NativeDocumentReceipt.from_projection(item)
+                for item in context.selected_documents
+            ),
+        )
+        if retained_request.request_digest != context.request_digest:
+            raise NativeRetrievalError("native context replay request differs")
+        from newsroom.increment6.work_items import RetrievalBindingState, RetrievalInputBinding
+        return RetrievalInputBinding(
+            RetrievalBindingState.RECEIPT, retained_request.request_id,
+            retained_request.idempotency_key, retained_request.request_digest,
+            retained_request.canonical_bytes,
+            context.context_id, receipt.receipt_digest, receipt.outcome,
+            receipt.reason, receipt.no_match, receipt.canonical_bytes,
+        )
+
+    def read_context(self, receipt: NativeRetrievalContextReceipt, *, proof: AuthenticationProof) -> NativeRetrievalContext:
+        if type(receipt) is not NativeRetrievalContextReceipt:
+            raise NativeRetrievalError("native context receipt differs")
+        provenance = self._events.provenance(receipt.event_id, proof=proof)
+        event = provenance.event
+        if provenance.command_definition.command_type != NATIVE_CONTEXT_COMMAND or provenance.command_definition.definition_digest != self._context_command_definition or event.command_definition_digest != self._context_command_definition or event.event_type != NATIVE_CONTEXT_EVENT or event.object_admission_id != str(receipt.admission_id) or event.payload_digest != receipt.context_object_digest or event.command_id != receipt.command_id or event.aggregate_id != str(receipt.aggregate_id) or event.aggregate_version != receipt.aggregate_version or event.principal_id != self._controller or provenance.authentication.principal_id != self._controller or provenance.authentication.authority_domain != self._domain or event.trust_scope != TrustScope.ADMITTED.value or event.security_scope != NATIVE_SECURITY_SCOPE or event.retention_scope != NATIVE_RETENTION_SCOPE:
+            raise NativeRetrievalError("native context authority event differs")
+        hydrated = self._objects.hydrate(HydrationRequest(receipt.admission_id, NATIVE_CONTEXT_USE), proof=proof)
+        self._access(hydrated.decision, self._context_policy, NATIVE_CONTEXT_CLASS, NATIVE_CONTEXT_USE)
+        context = NativeRetrievalContext.from_bytes(hydrated.data)
+        if digest_bytes(hydrated.data) != receipt.context_object_digest or context.context_id != receipt.context_id or context.request_id != receipt.request_id or context.request_digest != receipt.request_digest or context.authority_scope_id != receipt.authority_scope_id or context.generation_id != receipt.generation_id or context.graph_generation_id != receipt.graph_generation_id or context.query_valid_time != receipt.query_valid_time or context.serving_time != receipt.serving_time or context.branch_digests != tuple(digest_bytes(raw) for raw in (receipt.exact_receipt_bytes, receipt.fulltext_receipt_bytes, receipt.vector_receipt_bytes, receipt.graph_receipt_bytes)) or context.outcome != receipt.outcome or context.no_match != receipt.no_match:
+            raise NativeRetrievalError("native context retained bytes differ")
+        selected_receipts = tuple(
+            NativeDocumentReceipt.from_projection(item)
+            for item in context.selected_documents
+        )
+        selected_documents = tuple(self._read(item, proof)[0] for item in selected_receipts)
+        _, fulltext, vector, _ = receipt.branch_receipts()
+        used_passages = {
+            *(str(hit.passage_id) for hit in fulltext.hits if hit.passage_id is not None),
+            *(hit.passage_id for hit in vector.hits),
+        }
+        if not used_passages.issubset({item.passage_id for item in selected_documents}):
+            raise NativeRetrievalError("native context selected passage authority differs")
+        return context
 
     def _read(self, receipt: NativeDocumentReceipt, proof: AuthenticationProof) -> tuple[NativePassageDocument, tuple[float, ...]]:
         self._verify_event(receipt, proof)
@@ -959,6 +1446,149 @@ class NativeRetrievalDocuments:
             seen.add(document.passage_id)
             result.append((document, float(score)))
         return tuple(result)
+
+
+@dataclass(frozen=True, slots=True)
+class NativeRetrievalSubject:
+    revision_id: str
+    graph_root_id: str
+    document_receipt: NativeDocumentReceipt
+
+    def __post_init__(self) -> None:
+        _text(self.revision_id, "native retrieval subject revision")
+        _text(self.graph_root_id, "native retrieval graph root")
+        if type(self.document_receipt) is not NativeDocumentReceipt:
+            raise NativeRetrievalError("native retrieval subject document differs")
+
+
+def _stable_uuid4(value: object) -> str:
+    raw = bytearray(hashlib.sha256(canonical_json_bytes(value)).digest()[:16])
+    raw[6] = (raw[6] & 0x0F) | 0x40
+    raw[8] = (raw[8] & 0x3F) | 0x80
+    return str(uuid.UUID(bytes=bytes(raw)))
+
+
+class NativeRetrievalPort:
+    """Concrete four-branch runtime port over current governed documents."""
+
+    def __init__(
+        self, *, documents: NativeRetrievalDocuments,
+        exact: SQLiteExactRetriever, fulltext: FullTextRetriever,
+        increment4: Increment4Neo4jController, fulltext_view: FullTextAuthorityView,
+        subjects: tuple[NativeRetrievalSubject, ...],
+        authority_scope_id: str, minimum_authority_watermark: int,
+    ) -> None:
+        if type(documents) is not NativeRetrievalDocuments or type(exact) is not SQLiteExactRetriever or type(fulltext) is not FullTextRetriever or type(increment4) is not Increment4Neo4jController:
+            raise NativeRetrievalError("native retrieval port requires exact branch facades")
+        if type(fulltext_view) is not FullTextAuthorityView:
+            raise NativeRetrievalError("native retrieval authority views differ")
+        if type(subjects) is not tuple or not subjects or any(type(item) is not NativeRetrievalSubject for item in subjects):
+            raise NativeRetrievalError("native retrieval subject inventory differs")
+        if len({item.document_receipt.event_id for item in subjects}) != len(subjects):
+            raise NativeRetrievalError("native retrieval subject documents repeat")
+        _text(authority_scope_id, "native retrieval authority scope")
+        if type(minimum_authority_watermark) is not int or minimum_authority_watermark < 0:
+            raise NativeRetrievalError("native retrieval authority watermark differs")
+        self._documents, self._exact, self._fulltext, self._increment4 = documents, exact, fulltext, increment4
+        self._fulltext_view = fulltext_view
+        grouped: dict[str, list[NativeRetrievalSubject]] = {}
+        for item in subjects:
+            grouped.setdefault(item.revision_id, []).append(item)
+        self._subjects = {
+            revision_id: tuple(sorted(items, key=lambda item: item.document_receipt.event_id))
+            for revision_id, items in grouped.items()
+        }
+        self._scope, self._minimum = authority_scope_id, minimum_authority_watermark
+
+    def retrieve(self, lead, *, proof: AuthenticationProof):
+        from newsroom.discovery import NewsLead
+        if type(lead) is not NewsLead:
+            raise NativeRetrievalError("native retrieval Lead differs")
+        revision_id = str(lead.request.revision_id)
+        subjects = self._subjects.get(revision_id)
+        if subjects is None:
+            raise NativeRetrievalHold("NATIVE_RETRIEVAL_DOCUMENT_MISSING")
+        retained_subjects = tuple(
+            (subject, self._documents.require_document(subject.document_receipt, proof=proof))
+            for subject in subjects
+        )
+        if any(document.revision_id != revision_id for _, document in retained_subjects):
+            raise NativeRetrievalError("native retrieval subject authority differs")
+        subject, document = min(retained_subjects, key=lambda item: item[1].passage_id)
+        seed = {"lead": str(lead.request.lead_id), "lead_digest": lead.canonical_digest}
+        graph_ids = tuple(sorted({item.graph_root_id for item in subjects}))
+        if len(graph_ids) > NATIVE_GRAPH_ROOT_LIMIT:
+            raise NativeRetrievalHold("NATIVE_GRAPH_ROOT_LIMIT_EXCEEDED")
+        graph_request_digest = digest_bytes(canonical_json_bytes({
+            "schema_identity": "newsroom.increment5.native-graph-request.v1",
+            "lead_digest": lead.canonical_digest, "canonical_ids": list(graph_ids),
+            "query_valid_time": lead.recorded_at.to_text(),
+        }))
+        graph_response = self._increment4.read_active(
+            Increment4Neo4jActiveReadRequest(graph_ids, lead.recorded_at, NATIVE_GRAPH_ROOT_LIMIT),
+            proof=proof,
+        )
+        serving = graph_response.metadata.serving_time
+        if serving.value < lead.recorded_at.value:
+            raise NativeRetrievalError("native graph serving time precedes Lead")
+        graph = NativeGraphBranchReceipt.from_response(
+            graph_request_digest, graph_ids, graph_response,
+        )
+        branch_seed = {**seed, "serving_time": serving.to_text()}
+        exact_request = ExactBranchRequest(
+            BranchRequestId.parse(_stable_uuid4({**branch_seed, "branch": "exact"})),
+            f"native-exact:{lead.request.lead_id}:{serving.to_text()}", EXACT_BRANCH_ACTOR_ID,
+            EXACT_BRANCH_PURPOSE, EXACT_BRANCH_POLICY_ID,
+            INCREMENT_5A_CONTRACT_DIGEST, ExactLookupKind.SOURCE_REVISION_ID,
+            revision_id, lead.recorded_at, serving,
+            minimum_ledger_seq=self._minimum,
+        )
+        exact = self._exact.retrieve(exact_request).receipt
+        snapshot = self._fulltext_view.snapshot
+        fulltext_request = FullTextBranchRequest(
+            BranchRequestId.parse(_stable_uuid4({**branch_seed, "branch": "fulltext"})),
+            f"native-fulltext:{lead.request.lead_id}:{serving.to_text()}", FULLTEXT_ACTOR_ID,
+            FULLTEXT_PURPOSE, FULLTEXT_POLICY_ID, INCREMENT_5A_CONTRACT_DIGEST,
+            FULLTEXT_COMPONENT_DIGEST, NORMALIZATION_COMPONENT_DIGEST,
+            snapshot.generation_id, snapshot.generation_identity_digest,
+            snapshot.rights_manifest_digest, document.text,
+            FullTextLanguageMode.MIXED_EN_GB_ZH_HANT_HK, (document.source_id,),
+            lead.recorded_at, serving, snapshot.contiguous_ledger_seq,
+        )
+        fulltext = self._fulltext.retrieve(fulltext_request).receipt
+        if fulltext.authority_view_digest != self._fulltext_view.view_digest:
+            raise NativeRetrievalError("native full-text authority view differs")
+        vector_request = NativeVectorRequest(
+            _stable_uuid4({**branch_seed, "branch": "vector"}),
+            f"native-vector:{lead.request.lead_id}:{serving.to_text()}", subject.document_receipt.event_id,
+            document.digest, document.generation_id,
+            lead.recorded_at.to_text(), serving.to_text(),
+        )
+        vector = self._documents.retrieve_vector(vector_request, proof=proof)
+        by_passage: dict[str, NativeDocumentReceipt] = {}
+        for items in self._subjects.values():
+            for item in items:
+                retained = self._documents.require_document(item.document_receipt, proof=proof)
+                by_passage[retained.passage_id] = item.document_receipt
+        used = {
+            *(str(hit.passage_id) for hit in fulltext.hits if hit.passage_id is not None),
+            *(hit.passage_id for hit in vector.hits),
+        }
+        if not used.issubset(by_passage):
+            raise NativeRetrievalError("native retrieval hit lacks governed document")
+        selected = tuple(dict.fromkeys((
+            subject.document_receipt,
+            *(by_passage[item] for item in sorted(used)),
+        )))
+        request = NativeRetrievalContextRequest(
+            _stable_uuid4({**seed, "kind": "native-context"}),
+            f"native-context:{lead.request.lead_id}",
+            AggregateId.parse(_stable_uuid4({**seed, "aggregate": "retrieval-context"})),
+            0, str(lead.request.lead_id), lead.canonical_digest, self._scope,
+            exact.canonical_bytes, fulltext.canonical_bytes,
+            vector.canonical_bytes, graph.canonical_bytes, selected,
+        )
+        return self._documents.retain_context(request, proof=proof)
 
 
 def _vector(raw: bytes) -> tuple[float, ...]:

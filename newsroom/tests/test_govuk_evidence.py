@@ -6,6 +6,7 @@ from email.message import Message
 
 import pytest
 
+from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane.govuk_evidence import (
     GovUkEvidenceAcquisition, MAX_BODY_BYTES, POLICY_DIGEST, _api_url,
 )
@@ -61,6 +62,20 @@ def _request(system, unit):
 def test_govuk_route_rejects_ambiguous_or_external_urls(url):
     with pytest.raises(ValueError):
         _api_url(url)
+
+
+def test_govuk_acquisition_binds_the_composed_transport_policy():
+    policy = digest_canonical({"transport": "composed"})
+    acquire = GovUkEvidenceAcquisition(
+        sources=None, proof=proof(), dispatch_fence=lambda _: None,
+        transport_policy_digest=policy,
+    )
+    assert acquire._transport_policy_digest == policy
+    with pytest.raises(ValueError):
+        GovUkEvidenceAcquisition(
+            sources=None, proof=proof(), dispatch_fence=lambda _: None,
+            transport_policy_digest="not-a-digest",
+        )
 
 
 def test_exact_native_source_fetches_bounded_independent_content(tmp_path, monkeypatch):
@@ -138,7 +153,7 @@ def test_acquisition_facts_are_in_the_exact_retained_receipt():
         request_digest=digest_bytes(b"request"), outcome="COMPLETE",
         canonical_url="https://www.gov.uk/government/news/update", body=b"Update",
         body_digest=digest_bytes(b"Update"), publisher="Home Office",
-        responsible_body="Home Office", source_type="OFFICIAL_PRIMARY",
+        responsible_body="Home Office", source_type="PRIMARY_OFFICIAL",
         publication_time="2026-09-01T10:00:00Z", source_updated_time="2026-09-01T10:00:00Z",
         retrieval_time="2026-09-01T11:00:00Z", geography="UK", language="en-GB",
         transport_evidence_digest=digest_bytes(b"transport"),
@@ -163,14 +178,53 @@ def test_native_evidence_origin_comparison_rejects_embedded_credentials():
 def test_maintained_guide_includes_every_part_and_rejects_partial_parts():
     from newsroom.control_plane.govuk_evidence import _document_text
     value = {"document_type": "guide", "details": {"parts": [
-        {"title": "Overview", "slug": "overview", "body": "<p>First part.</p>"},
-        {"title": "Changed deadline", "slug": "deadline", "body": "<p>Second part.</p>"},
+        {"title": f"Part {number}", "slug": f"part-{number}",
+         "body": f"<p>Exact text {number}.</p>"}
+        for number in range(1, 10)
     ]}}
-    assert _document_text(value) == "Overview\nFirst part.\n\nChanged deadline\nSecond part."
+    text = _document_text(value)
+    assert len(value["details"]["parts"]) == 9
+    assert all(f"Part {number}\nExact text {number}." in text for number in range(1, 10))
     value["details"]["parts"][1]["body"] = ""
     with pytest.raises(ValueError, match="absent"):
         _document_text(value)
     value["details"]["parts"][1]["body"] = "Text"
-    value["details"]["parts"][1]["slug"] = "overview"
+    value["details"]["parts"][1]["slug"] = "part-1"
     with pytest.raises(ValueError, match="identity"):
         _document_text(value)
+
+
+def test_manual_inventory_requires_every_unique_child_section():
+    from newsroom.control_plane.govuk_evidence import parse_govuk_manual_inventory
+
+    value = {
+        "base_path": "/guidance/immigration-rules", "locale": "en",
+        "document_type": "manual", "title": "Immigration Rules",
+        "first_published_at": "2020-01-01T00:00:00Z",
+        "public_updated_at": "2026-09-08T10:00:00Z",
+        "withdrawn_notice": None,
+        "details": {"child_section_groups": [
+            {"title": "Rules", "child_sections": [
+                {"base_path": "/guidance/immigration-rules/part-1", "title": "Part 1"},
+                {"base_path": "/guidance/immigration-rules/part-2", "title": "Part 2"},
+            ]},
+        ]},
+        "links": {"organisations": [{"title": "Home Office"}]},
+    }
+    raw = json.dumps(value).encode()
+    inventory = parse_govuk_manual_inventory(
+        "https://www.gov.uk/guidance/immigration-rules", raw,
+        retrieved_at=datetime(2026, 9, 8, 11, tzinfo=UTC),
+    )
+    assert inventory.sections == (
+        ("/guidance/immigration-rules/part-1", "Part 1"),
+        ("/guidance/immigration-rules/part-2", "Part 2"),
+    )
+    value["details"]["child_section_groups"][0]["child_sections"][1]["base_path"] = (
+        "/guidance/immigration-rules/part-1"
+    )
+    with pytest.raises(ValueError, match="incomplete"):
+        parse_govuk_manual_inventory(
+            "https://www.gov.uk/guidance/immigration-rules", json.dumps(value).encode(),
+            retrieved_at=datetime(2026, 9, 8, 11, tzinfo=UTC),
+        )

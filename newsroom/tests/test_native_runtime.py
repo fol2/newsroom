@@ -68,3 +68,62 @@ def test_native_runtime_rejects_overlapping_store_identity_before_open(tmp_path,
     with pytest.raises(ValueError, match="must be distinct"):
         open_native_runtime(**args)
     assert not args["authority_path"].exists()
+
+
+def test_native_runtime_builds_dependencies_from_opened_base_before_children(
+    tmp_path, monkeypatch,
+):
+    args = _args(tmp_path, monkeypatch)
+    retrieval = args.pop("retrieval_authority")
+    collision = args.pop("collision_enforcer")
+    captured = []
+
+    def build_dependencies(*, objects, extraction, commands, events):
+        assert args["authority_path"].exists()
+        captured.append((objects, extraction, commands, events))
+        return retrieval, collision
+
+    args["native_dependency_factory"] = build_dependencies
+    with open_native_runtime(**args) as runtime:
+        assert len(captured) == 1
+        objects, extraction, commands, events = captured[0]
+        assert objects is runtime.authority.objects
+        assert extraction is runtime.authority.extraction
+        assert commands is runtime.authority.commands
+        assert events is runtime.authority.events
+        seed_check_lineage(runtime.authority)
+
+    with open_native_runtime(**args) as reopened:
+        assert len(captured) == 2
+        assert captured[1][2] is reopened.authority.commands
+        assert captured[1][3] is reopened.authority.events
+
+
+def test_native_runtime_factory_failure_closes_base_writer(tmp_path, monkeypatch):
+    args = _args(tmp_path, monkeypatch)
+    retrieval = args.pop("retrieval_authority")
+    collision = args.pop("collision_enforcer")
+
+    def fail_factory(**_):
+        raise RuntimeError("dependency construction failed")
+
+    args["native_dependency_factory"] = fail_factory
+    with pytest.raises(RuntimeError, match="dependency construction failed"):
+        open_native_runtime(**args)
+
+    args.pop("native_dependency_factory")
+    args.update(retrieval_authority=retrieval, collision_enforcer=collision)
+    with open_native_runtime(**args):
+        pass
+
+
+def test_native_runtime_rejects_ambiguous_dependency_setup_before_open(
+    tmp_path, monkeypatch,
+):
+    args = _args(tmp_path, monkeypatch)
+    args["native_dependency_factory"] = lambda **_: (
+        args["retrieval_authority"], args["collision_enforcer"],
+    )
+    with pytest.raises(TypeError, match="conflicts with explicit"):
+        open_native_runtime(**args)
+    assert not args["authority_path"].exists()

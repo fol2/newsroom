@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -25,11 +26,14 @@ from newsroom.control_plane.corpus import (
 )
 from newsroom.control_plane.cycle import (
     CycleReport,
+    _DispatchAuthority,
     _bind_result,
     _dispatch_rights_decision,
     _graphiti_dispatch_controls,
+    _graphiti_usage_cycle_id,
     _latest_run_id,
     _latest_run_with_global_authority,
+    _ingest,
     _reconcile_result_spend,
 )
 from newsroom.control_plane.cycle import (
@@ -52,8 +56,13 @@ from newsroom.control_plane.items import (
     parse_observation,
     parse_source_time,
 )
-from newsroom.control_plane.model_usage import ModelUsageService
+from newsroom.control_plane.model_usage import (
+    ModelUsageService,
+    WorkEnvelope,
+    WorkloadClass,
+)
 from newsroom.control_plane.store import (
+    GraphitiSpendCeilingExceeded,
     claim_graphiti_attempt,
     connect,
     next_graphiti_attempt_number,
@@ -4289,6 +4298,158 @@ def test_expired_rights_are_rechecked_at_actual_dispatch_time(tmp_path: Path) ->
     )
     assert seen == []
     assert report.eligible == 0
+
+
+def test_native_attempt_versions_and_usage_cycle_follow_the_resolved_retry() -> None:
+    effective = _effective_revision(
+        source_id="UK-01", item_key="native-item", headline="Headline",
+        body="Body", canonical_url="https://www.gov.uk/native-item",
+        first_observed_at="2026-09-08T00:00:00.000000Z",
+    )
+    unit = CorpusIngestUnit(
+        source_id="UK-01", item_key="native-item", headline="Headline", body="Body",
+        canonical_url="https://www.gov.uk/native-item",
+        observation_digest=digest_bytes(b"native-observation"),
+        observed_at="2026-09-08T00:00:00.000000Z",
+        proving_run_id="native-source:" + digest_bytes(b"native-observation"),
+        effective_revision=effective,
+    )
+    first = evaluation_attempt_for_body(
+        episode_body=unit.episode_body, ingest_id=unit.ingest_id,
+        proving_run_id=unit.proving_run_id, source_id=unit.source_id,
+        item_key=unit.item_key, observation_digest=unit.observation_digest,
+        published_at=None, updated_at=None, effective_revision=effective,
+        canonical_url=unit.canonical_url, attempt_number=1,
+    )
+    second = evaluation_attempt_for_body(
+        episode_body=unit.episode_body, ingest_id=unit.ingest_id,
+        proving_run_id=unit.proving_run_id, source_id=unit.source_id,
+        item_key=unit.item_key, observation_digest=unit.observation_digest,
+        published_at=None, updated_at=None, effective_revision=effective,
+        canonical_url=unit.canonical_url, attempt_number=2,
+    )
+    assert first.extraction_request.version_number == 1
+    assert first.extraction_request.expected_previous_version_id is None
+    assert second.extraction_request.version_number == 2
+    assert (
+        second.extraction_request.expected_previous_version_id
+        == first.extraction_request.run_version_id
+    )
+    assert second.extraction_request.run_version_id != first.extraction_request.run_version_id
+    first_cycle = _graphiti_usage_cycle_id(
+        unit, attempt_number=1, requested_cycle_id="daemon-tick-one"
+    )
+    assert first_cycle == _graphiti_usage_cycle_id(
+        unit, attempt_number=1, requested_cycle_id="daemon-tick-two"
+    )
+    assert first_cycle != _graphiti_usage_cycle_id(
+        unit, attempt_number=2, requested_cycle_id="daemon-tick-two"
+    )
+    legacy = replace(unit, proving_run_id="legacy-campaign")
+    assert _graphiti_usage_cycle_id(
+        legacy, attempt_number=1, requested_cycle_id="legacy-cycle"
+    ) == "legacy-cycle"
+
+
+def test_native_unreceipted_attempt_resumes_one_usage_envelope_across_ticks(
+    tmp_path: Path,
+) -> None:
+    from newsroom.tests.test_graphiti_operational_readiness import _unit
+
+    connection = connect(str(tmp_path / "unpublished.sqlite3"))
+    usage = ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+    native = _unit()
+    native = replace(
+        native, proving_run_id="native-source:" + native.observation_digest
+    )
+    now = [datetime(2026, 9, 8, tzinfo=UTC)]
+    seen: list[tuple[str, str, datetime]] = []
+
+    class InterruptedGraphiti:
+        requires_canonical_control_plane_stores = True
+
+        def ingest(self, _unit: CorpusIngestUnit) -> GraphitiCycleResult:
+            raise AssertionError("governed usage path required")
+
+        def ingest_until(
+            self, _unit: CorpusIngestUnit, *, deadline: datetime
+        ) -> GraphitiCycleResult:
+            raise AssertionError(f"governed usage path required: {deadline}")
+
+        def ingest_with_usage(
+            self, unit: CorpusIngestUnit, *, model_usage: ModelUsageService,
+            cycle_id: str, **_kwargs: object,
+        ) -> GraphitiCycleResult:
+            requested = WorkEnvelope.create(
+                cycle_id=cycle_id,
+                workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+                admitted_at=now[0], admission_decision_id=None, candidate_id=None,
+                hypothesis_digest=None, evidence_package_digest=None,
+                ingest_id=unit.ingest_id,
+                graphiti_attempt_id=f"{unit.ingest_id}:{unit.attempt_number}",
+            )
+            retained = model_usage.resume_or_open_graphiti_envelope(requested)
+            seen.append((cycle_id, retained.envelope_id, retained.admitted_at))
+            raise KeyboardInterrupt("simulated process death after durable usage intent")
+
+    @contextmanager
+    def fence(_unit: CorpusIngestUnit):
+        yield _DispatchAuthority(
+            {"current": True}, now[0] + timedelta(minutes=15), lambda: None
+        )
+
+    for requested_cycle in ("daemon-tick-one", "daemon-tick-two"):
+        with pytest.raises(KeyboardInterrupt):
+            _ingest(
+                connection, graphiti=InterruptedGraphiti(), units=(native,),
+                max_graphiti=1, rights_check=lambda _unit: {"current": True},
+                rights_fence=fence, clock=lambda: now[0], model_usage=usage,
+                cycle_id=requested_cycle,
+            )
+        now[0] += timedelta(minutes=16)
+    assert len({item[0] for item in seen}) == 1
+    assert len({item[1] for item in seen}) == 1
+    assert len({item[2] for item in seen}) == 1
+    assert connection.execute(
+        "SELECT count(*) FROM model_work_envelopes"
+    ).fetchone()[0] == 1
+    reserve = json.loads(
+        connection.execute(
+            "SELECT payload_json FROM ledger WHERE kind='GRAPHITI_SPEND_RESERVE'"
+        ).fetchone()[0]
+    )
+    assert reserve["native_cash_ceiling"] == "OWNER_WAIVED_UNLIMITED"
+    assert "od_011_cash_ceiling_gbp" not in reserve
+    connection.close()
+
+
+def test_native_spend_reservation_has_no_legacy_od011_ceiling(tmp_path: Path) -> None:
+    connection = connect(str(tmp_path / "unpublished.sqlite3"))
+    assert reserve_graphiti_spend(
+        connection, spend_id="legacy:1", ingest_id="legacy", attempt_number=1,
+        proving_run_id="legacy-run", generation_id=GRAPHITI_GENERATION_ID,
+        reserved_gbp_microunits=500_000, ceiling_gbp_microunits=500_000,
+    )
+    with pytest.raises(GraphitiSpendCeilingExceeded):
+        reserve_graphiti_spend(
+            connection, spend_id="legacy:2", ingest_id="legacy", attempt_number=2,
+            proving_run_id="legacy-run", generation_id=GRAPHITI_GENERATION_ID,
+            reserved_gbp_microunits=500_000, ceiling_gbp_microunits=500_000,
+        )
+    with pytest.raises(ValueError, match="restricted to native source"):
+        reserve_graphiti_spend(
+            connection, spend_id="legacy:uncapped", ingest_id="legacy",
+            attempt_number=2, proving_run_id="legacy-run",
+            generation_id=GRAPHITI_GENERATION_ID,
+            reserved_gbp_microunits=500_000, ceiling_gbp_microunits=None,
+        )
+    assert reserve_graphiti_spend(
+        connection, spend_id="native:1", ingest_id="native", attempt_number=1,
+        proving_run_id="native-source:" + digest_bytes(b"observation"),
+        generation_id=GRAPHITI_GENERATION_ID, reserved_gbp_microunits=500_000,
+        ceiling_gbp_microunits=None,
+    )
+    connection.close()
 
 
 def test_process_death_reenters_unreceipted_reserved_attempt(tmp_path: Path) -> None:

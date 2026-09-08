@@ -32,10 +32,20 @@ from newsroom.increment5 import native_retrieval as r
 
 VERSION = "hermes-private-native-v1"
 MAX_OBJECT_BYTES = 1_048_576
+NATIVE_SOURCE_OBSERVATION_ADMISSION_TYPE = "source.native-observation"
+NATIVE_SOURCE_OBSERVATION_CLASS = "source.native-observation"
+NATIVE_SOURCE_OBSERVATION_USE = "native-source-parsing"
+NATIVE_SOURCE_OBSERVATION_PURPOSE = "native-source-intake-read"
 
 # class, allowed use, hydration purpose, security, retention, write scope
 _OBJECTS = {
+    NATIVE_SOURCE_OBSERVATION_ADMISSION_TYPE: (
+        NATIVE_SOURCE_OBSERVATION_CLASS, NATIVE_SOURCE_OBSERVATION_USE,
+        NATIVE_SOURCE_OBSERVATION_PURPOSE, "authority.protected",
+        "source.observation.retained", "authority.source.observe",
+    ),
     r.NATIVE_DOCUMENT_ADMISSION_TYPE: (r.NATIVE_DOCUMENT_CLASS, r.NATIVE_DOCUMENT_USE, r.NATIVE_DOCUMENT_USE, r.NATIVE_SECURITY_SCOPE, r.NATIVE_RETENTION_SCOPE, "authority.retrieval.project"),
+    r.NATIVE_CONTEXT_ADMISSION_TYPE: (r.NATIVE_CONTEXT_CLASS, r.NATIVE_CONTEXT_USE, r.NATIVE_CONTEXT_USE, r.NATIVE_SECURITY_SCOPE, r.NATIVE_RETENTION_SCOPE, "authority.retrieval.context"),
     "retrieval.native-vector": (r.NATIVE_VECTOR_CLASS, r.NATIVE_VECTOR_USE, r.NATIVE_VECTOR_USE, r.NATIVE_SECURITY_SCOPE, r.NATIVE_RETENTION_SCOPE, "authority.retrieval.project"),
     "retrieval.native-embedding-receipt": (r.NATIVE_EMBEDDING_RECEIPT_CLASS, r.NATIVE_EMBEDDING_RECEIPT_USE, r.NATIVE_EMBEDDING_RECEIPT_USE, r.NATIVE_SECURITY_SCOPE, r.NATIVE_RETENTION_SCOPE, "authority.retrieval.project"),
     "evidence.source": ("evidence_source", "publication_evidence", "evidence.source", "authority.protected", "evidence.retained", "authority.evidence.admit"),
@@ -50,6 +60,7 @@ _OBJECTS = {
 }
 _COMMANDS = (
     (r.NATIVE_DOCUMENT_COMMAND, r.NATIVE_DOCUMENT_EVENT, "native_retrieval_document", r.NATIVE_DOCUMENT_ADMISSION_TYPE, "authority.retrieval.project"),
+    (r.NATIVE_CONTEXT_COMMAND, r.NATIVE_CONTEXT_EVENT, "native_retrieval_context", r.NATIVE_CONTEXT_ADMISSION_TYPE, "authority.retrieval.context"),
     (e.DECISION_COMMAND, e.DECISION_EVENT, "editorial_package_decision", e.DECISION_ADMISSION_TYPE, "authority.editorial.decide"),
     (e.STORY_COMMAND, e.STORY_EVENT, "story", e.STORY_ADMISSION_TYPE, "authority.editorial.story.admit"),
     (p.PUBLICATION_COMMAND, p.PUBLICATION_EVENT, "publication", p.TRANSACTION_ADMISSION_TYPE, "authority.publication.decide"),
@@ -82,6 +93,9 @@ class NativePolicies:
     retrieval_hydration: tuple[str, str, str]
     retrieval_document_definition: str
     retrieval_command_definition: str
+    retrieval_context_hydration: str
+    retrieval_context_definition: str
+    retrieval_context_command_definition: str
 
 
 def native_policy_components(
@@ -163,16 +177,17 @@ def native_policy_components(
         "story_definition": commands[e.STORY_COMMAND].digest,
         "publication_rights_from_proposal": False,
     })
-    # The policy is tied to the actual reviewed GOV.UK/OGL terms. It is
+    # The policy is tied to the reviewed source terms. It is
     # publication metadata, never an editorial claim or permission exception.
     from .govuk_rights import ATTRIBUTION, LICENCE_URL, POLICY_DIGEST as GOVUK_RIGHTS_DIGEST
-    source_licence_policy = (("www.gov.uk", ATTRIBUTION, LICENCE_URL),)
+    from .native_source_rights import SOURCE_LICENCE_POLICY, POLICY_DIGEST as PORTFOLIO_RIGHTS_DIGEST
+    source_licence_policy = (("www.gov.uk", ATTRIBUTION, LICENCE_URL), *SOURCE_LICENCE_POLICY)
     target_policy = digest_canonical({
         "version": VERSION, "target_id": target_id,
         "surfaces": ["ARTICLE", "FEED_CARD"], "ack_required": True,
         "public_exposure": False,
         "source_licence_policy": source_licence_policy,
-        "source_licence_policy_digest": GOVUK_RIGHTS_DIGEST,
+        "source_licence_policy_digests": (GOVUK_RIGHTS_DIGEST, PORTFOLIO_RIGHTS_DIGEST),
     })
     target_context = digest_canonical({
         "target_policy": target_policy, "path": str(target_path.resolve()),
@@ -217,4 +232,6 @@ def native_policy_components(
         tuple(hd(key) for key in ("evidence.source", "evidence.record", "evidence.package")),
         ad("evidence.package"), scopes,
         tuple(hd(key) for key in (r.NATIVE_DOCUMENT_ADMISSION_TYPE, "retrieval.native-vector", "retrieval.native-embedding-receipt")),
-        ad(r.NATIVE_DOCUMENT_ADMISSION_TYPE), commands[r.NATIVE_DOCUMENT_COMMAND].digest)
+        ad(r.NATIVE_DOCUMENT_ADMISSION_TYPE), commands[r.NATIVE_DOCUMENT_COMMAND].digest,
+        hd(r.NATIVE_CONTEXT_ADMISSION_TYPE), ad(r.NATIVE_CONTEXT_ADMISSION_TYPE),
+        commands[r.NATIVE_CONTEXT_COMMAND].digest)

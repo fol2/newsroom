@@ -1457,31 +1457,48 @@ class ProposalDispositionStore:
         receipt = _decode(
             version.retrieval.receipt_bytes, field="retrieval citation receipt"
         )
-        raw_items = receipt.get("items")
-        if type(raw_items) is not list:
-            raise DispositionContractError("retrieval citation authority differs")
         retrieval_items: dict[str, tuple[str, bytes]] = {}
-        try:
-            for item in raw_items:
-                if type(item) is not dict or type(item.get("passage")) is not dict:
-                    raise DispositionContractError(
-                        "retrieval citation authority differs"
-                    )
-                passage = item["passage"]
-                passage_id = passage["passage_id"]
-                text_digest = passage["text_digest"]
-                text = item["text"].encode("utf-8")
-                if passage_id in retrieval_items:
-                    raise DispositionContractError(
-                        "retrieval citation authority differs"
-                    )
-                retrieval_items[passage_id] = (text_digest, text)
-        except DispositionContractError:
-            raise
-        except Exception as exc:
-            raise DispositionContractError(
-                "retrieval citation authority differs"
-            ) from exc
+        if (
+            receipt.get("schema_identity")
+            == "newsroom.increment5.native-retrieval-context-receipt.v1"
+        ):
+            try:
+                from newsroom.increment5.native_retrieval import (
+                    NativeRetrievalContextReceipt,
+                )
+
+                NativeRetrievalContextReceipt.from_bytes(
+                    version.retrieval.receipt_bytes
+                )
+            except Exception as exc:
+                raise DispositionContractError(
+                    "retrieval citation authority differs"
+                ) from exc
+        else:
+            raw_items = receipt.get("items")
+            if type(raw_items) is not list:
+                raise DispositionContractError("retrieval citation authority differs")
+            try:
+                for item in raw_items:
+                    if type(item) is not dict or type(item.get("passage")) is not dict:
+                        raise DispositionContractError(
+                            "retrieval citation authority differs"
+                        )
+                    passage = item["passage"]
+                    passage_id = passage["passage_id"]
+                    text_digest = passage["text_digest"]
+                    text = item["text"].encode("utf-8")
+                    if passage_id in retrieval_items:
+                        raise DispositionContractError(
+                            "retrieval citation authority differs"
+                        )
+                    retrieval_items[passage_id] = (text_digest, text)
+            except DispositionContractError:
+                raise
+            except Exception as exc:
+                raise DispositionContractError(
+                    "retrieval citation authority differs"
+                ) from exc
 
         for recommendation in recommendations:
             for citation in recommendation.input_citations:

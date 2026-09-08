@@ -260,6 +260,7 @@ def test_independent_source_evidence_holds_then_reaches_private_ack(tmp_path) ->
         assessor=EvidenceAssessor(assessor),
         policy_bundle_digest="sha256:" + "a" * 64,
         transport_policy_digest=transport_digest,
+        clock=lambda: UtcTimestamp.parse("2026-09-08T12:02:00Z"),
     )
     candidate_connection.commit()
     with pytest.raises(NativeEvidenceHold, match="PUBLICATION_RIGHTS_HOLD"):
@@ -278,7 +279,6 @@ def test_independent_source_evidence_holds_then_reaches_private_ack(tmp_path) ->
                     ),
                 ),
             ),
-            evaluated_at="2026-09-08T12:02:00Z",
             proof=proof(),
         )
     assert calls == []
@@ -286,10 +286,10 @@ def test_independent_source_evidence_holds_then_reaches_private_ack(tmp_path) ->
         candidate_version_id=version.version_id,
         intake_receipt_id=acknowledgement.receipt_id,
         sources=(source,),
-        evaluated_at="2026-09-08T12:02:00Z",
         proof=proof(),
     )
     assert len(calls) == 1
+    assert evidence.editorial_decision.evaluated_at == "2026-09-08T12:02:00.000000Z"
 
     bindings = _bindings(tmp_path, registries, hydration, definitions, commands)
     publisher = NativePublicationController(

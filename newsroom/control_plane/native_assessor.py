@@ -15,7 +15,13 @@ from newsroom.authority.canonical import (
 )
 from newsroom.control_plane.evidence import (
     ClaimAuthorityClass,
+    EVID_012_POLICY_VERSION,
+    EVIDENCE_GATE_POLICY_VERSION,
     EvidencePackage,
+    GOVERNED_CLAIM_POLICY_VERSION,
+    GovernedClaimStatus,
+    ORIGINALITY_POLICY_VERSION,
+    Evid012QualificationTest,
     evidence_package_value,
 )
 from newsroom.increment10.editorial import SourceCurrentness
@@ -63,13 +69,119 @@ SYSTEM = (
     "candidate and exact source bytes. Return JSON matching the schema. Never "
     "claim facts, translations or authority absent from an exact source excerpt."
 )
+_STRING = {"type": "string"}
+_STRINGS = {"type": "array", "items": _STRING}
+_PAIRS = {
+    "type": "array",
+    "items": {
+        "type": "array", "items": _STRING, "minItems": 2, "maxItems": 2,
+    },
+}
+_CLAIM_FIELDS = {
+    "claim_id": _STRING, "claim": _STRING, "passage_index": {"type": "integer"},
+    "supporting_excerpt": _STRING, "source_ids": _STRINGS,
+    "source_record_ids": _STRINGS, "source_authority_decision_ids": _STRINGS,
+    "rights_decision_ids": _STRINGS,
+    "dependency_evidence_ids": _STRINGS, "evidential_origin_ids": _STRINGS,
+    "authority_class": {"enum": ["RESPONSIBLE_PRIMARY", "INDEPENDENT_RELIABLE"]},
+    "authority_scope": _STRING,
+    "status": {"enum": [item.value for item in GovernedClaimStatus]},
+    "attribution": _STRING, "rendered_assertion_zh_hant_hk": _STRING,
+    "claim_role": {"enum": ["HEADLINE", "SUBSTANTIVE", "CONTEXT"]},
+    "semantic_relation_evidence_id": _STRING,
+    "localised_factual_expressions": _PAIRS,
+    "named_entity_evidence": {
+        "type": "array", "items": {
+            "type": "array", "items": _STRING, "minItems": 3, "maxItems": 3,
+        },
+    },
+    "named_entities": _STRINGS, "rendered_named_entities": _STRINGS,
+    "quotations": _STRINGS, "certainty": {"const": "CONFIRMED"},
+    "originality_basis": {"const": "FACTUAL_REWRITE_REQUIRED"},
+    "originality_policy_version": {"const": ORIGINALITY_POLICY_VERSION},
+    "admitted_use": {"const": "PUBLICATION_EVIDENCE"},
+    "policy_version": {"const": GOVERNED_CLAIM_POLICY_VERSION},
+}
+_PACKAGE_FIELDS = {
+    "candidate_id": _STRING, "hypothesis_id": _STRING, "signal_ids": _STRINGS,
+    "lead_ids": _STRINGS, "source_ids": _STRINGS, "observation_digests": _STRINGS,
+    "passages": _STRINGS, "substantive_new_information": _STRINGS,
+    "governed_claims": {"type": "array", "items": {
+        "type": "object", "properties": _CLAIM_FIELDS,
+        "required": list(_CLAIM_FIELDS), "additionalProperties": False,
+    }},
+    "qualification_evidence": {"type": "array", "items": {
+        "type": "object", "properties": {
+            "test": {"enum": [item.value for item in Evid012QualificationTest]},
+            "governed_claim_id": _STRING,
+            "qualification_record_id": _STRING, "test_evidence": _PAIRS,
+            "policy_version": {"const": EVID_012_POLICY_VERSION},
+        },
+        "required": [
+            "test", "governed_claim_id", "qualification_record_id",
+            "test_evidence", "policy_version",
+        ],
+        "additionalProperties": False,
+    }},
+    "selection_rationale": _STRING, "geography": _STRINGS, "categories": _STRINGS,
+    "evidence_gate_results": _PAIRS,
+    "evidence_gate_evidence": {"type": "array", "items": {
+        "type": "object",
+        "properties": {
+            "gate": {"enum": [
+                "CLAIM_TRACEABILITY", "EVIDENCE_SUFFICIENCY", "SOURCE_AUTHORITY",
+            ]},
+            "result": {"const": "PASS"},
+            "governed_claim_ids": _STRINGS,
+            "policy_version": {"const": EVIDENCE_GATE_POLICY_VERSION},
+        },
+        "required": ["gate", "result", "governed_claim_ids", "policy_version"],
+        "additionalProperties": False,
+    }},
+    "freshness_result": _STRING, "integrity_result": _STRING,
+    "explicit_exclusions": _STRINGS,
+    "resolved_evidence_records": _PAIRS,
+}
+def _record_schema(kind: str, fields: dict[str, object]) -> dict[str, object]:
+    properties = {
+        "record_id": _STRING, "record_type": {"const": kind},
+        "governed_claim_id": _STRING, **fields,
+    }
+    return {
+        "type": "object", "properties": properties,
+        "required": list(properties), "additionalProperties": False,
+    }
+
+
+_ASSESSMENT_RECORD = {"oneOf": [
+    _record_schema("SEMANTIC_RELATION_EVIDENCE", {
+        "source_modality": _STRING, "rendered_modality": _STRING,
+        "source_polarity": _STRING, "rendered_polarity": _STRING,
+        "relation": _STRING, "claim_digest": _STRING,
+        "rendered_assertion_digest": _STRING,
+    }),
+    _record_schema("QUALIFICATION_EVIDENCE", {
+        "test": _STRING,
+        "test_evidence": _PAIRS, "policy_version": _STRING,
+        "evidence_span_digest": _STRING, "source_record_ids": _STRINGS,
+    }),
+    _record_schema("NAMED_ENTITY_EVIDENCE", {
+        "text": _STRING, "rendered_text": _STRING, "entity_type": _STRING,
+        "canonical_entity_id": _STRING, "rendered_span_digest": _STRING,
+        "policy_version": _STRING, "evidence_span_digest": _STRING,
+        "source_record_ids": _STRINGS,
+    }),
+]}
 SCHEMA = {
     "type": "object",
     "required": ["package", "assessment_records"],
     "additionalProperties": False,
     "properties": {
-        "package": {"type": "object"},
-        "assessment_records": {"type": "array", "items": {"type": "object"}},
+        "package": {
+            "type": "object", "properties": _PACKAGE_FIELDS,
+            "required": list(_PACKAGE_FIELDS), "additionalProperties": False,
+        },
+        "assessment_records": {"type": "array", "items": _ASSESSMENT_RECORD},
     },
 }
 SCHEMA_DIGEST = digest_bytes(canonical_json_bytes(SCHEMA))

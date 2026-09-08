@@ -6,6 +6,7 @@ import pytest
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.increment6.autonomous_worker import (
+    AUTONOMOUS_NATIVE_TRIAGE_POLICY_VERSION,
     AUTONOMOUS_WORKER_VERSION,
     AutonomousWorkerError,
     autonomous_worker_input_digest,
@@ -41,11 +42,22 @@ def _native_lead(tmp_path):
         )
 
 
-def _retrieval(*, no_match: bool) -> RetrievalInputBinding:
+def _retrieval(*, no_match: bool, native: bool = False) -> RetrievalInputBinding:
     request_id = "00000000-0000-4000-8000-000000009001"
     context_id = "00000000-0000-4000-8000-000000009002"
     request = canonical_json_bytes(
-        {"idempotency_key": "autonomous-worker", "request_id": request_id}
+        {
+            **(
+                {
+                    "schema_identity":
+                    "newsroom.increment5.native-retrieval-context-request.v1"
+                }
+                if native
+                else {}
+            ),
+            "idempotency_key": "autonomous-worker",
+            "request_id": request_id,
+        }
     )
     request_digest = digest_bytes(request)
     receipt = canonical_json_bytes(
@@ -159,6 +171,25 @@ def test_match_holds_and_exact_native_bindings_fail_closed(tmp_path) -> None:
             attempt=_attempt(version, lead, worker_kind=WorkerKind.REPLAY),
             decision_leads=(lead,),
         )
+
+
+def test_native_factual_match_stays_provisional_until_candidate_collision(
+    tmp_path,
+) -> None:
+    lead, binding = _native_lead(tmp_path)
+    version = _version(binding, _retrieval(no_match=False, native=True))
+    proposal = build_autonomous_proposal(
+        work_item_version=version,
+        attempt=_attempt(version, lead),
+        decision_leads=(lead,),
+    )
+
+    recommendation = proposal.recommendations[0]
+    assert recommendation.route is ProposalRoute.NEW_EVENT_CANDIDATE
+    assert "provisional" in recommendation.likely_new_information
+    assert AUTONOMOUS_NATIVE_TRIAGE_POLICY_VERSION in (
+        recommendation.candidate_manifest.governing_versions
+    )
 
     pending = _version(binding, work_item_helpers._pending())
     pending_proposal = build_autonomous_proposal(

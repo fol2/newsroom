@@ -253,11 +253,26 @@ def evaluation_attempt_for_body(
         real_runtime_authority=EVALUATION_GRAPHITI_PACKET,
         idempotency_key="evaluation-graphiti-configuration-v2",
     )
+    native_attempt = proving_run_id == f"native-source:{observation_digest}"
+    run_version_id = typed_id(
+        ExtractionRunVersionId,
+        "run-version",
+        f"{ingest_id}:attempt:{attempt_number}" if native_attempt else ingest_id,
+    )
+    previous_run_version_id = (
+        typed_id(
+            ExtractionRunVersionId,
+            "run-version",
+            f"{ingest_id}:attempt:{attempt_number - 1}",
+        )
+        if native_attempt and attempt_number > 1
+        else None
+    )
     request = ExtractionRunRequest(
         run_id=typed_id(ExtractionRunId, "run", ingest_id),
-        run_version_id=typed_id(ExtractionRunVersionId, "run-version", ingest_id),
-        version_number=1,
-        expected_previous_version_id=None,
+        run_version_id=run_version_id,
+        version_number=attempt_number if native_attempt else 1,
+        expected_previous_version_id=previous_run_version_id,
         contract_id=contract.contract_id,
         input_binding=ExtractionInputBinding(
             definition_id=definition_id,
@@ -278,7 +293,11 @@ def evaluation_attempt_for_body(
             max_response_tokens=16_384,
             max_cost_microunits=500_000,
         ),
-        idempotency_key=f"evaluation-graphiti-run-{ingest_id}",
+        idempotency_key=(
+            f"evaluation-graphiti-run-{ingest_id}-{attempt_number}"
+            if native_attempt
+            else f"evaluation-graphiti-run-{ingest_id}"
+        ),
     )
     return GraphitiAttemptRequest(
         attempt_id=attempt_id,
@@ -288,7 +307,11 @@ def evaluation_attempt_for_body(
         workspace_id=workspace_id,
         cleanup_receipt_id=cleanup_id,
         manifest=GraphitiInputManifest.from_run_request(
-            manifest_id=typed_id(GraphitiInputManifestId, "manifest", ingest_id),
+            manifest_id=typed_id(
+                GraphitiInputManifestId,
+                "manifest",
+                f"{ingest_id}:attempt:{attempt_number}" if native_attempt else ingest_id,
+            ),
             configuration=configuration,
             contract=contract,
             request=request,
@@ -296,7 +319,11 @@ def evaluation_attempt_for_body(
         extraction_contract=contract,
         extraction_request=request,
         replay_source=None,
-        idempotency_key=f"evaluation-graphiti-attempt-{ingest_id}",
+        idempotency_key=(
+            f"evaluation-graphiti-attempt-{ingest_id}-{attempt_number}"
+            if native_attempt
+            else f"evaluation-graphiti-attempt-{ingest_id}"
+        ),
         reference_time=temporal.reference_time,
         temporal_basis=temporal.basis,
         episode_uuid=ingest_id,

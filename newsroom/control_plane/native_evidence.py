@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from typing import Callable, Literal
 from urllib.parse import urlsplit
 
-from newsroom.authority import AuthenticationProof, GovernedObjects, ObjectAdmissionRequest
+from newsroom.authority import AuthenticationProof, GovernedObjects, ObjectAdmissionRequest, UtcTimestamp
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, validate_sha256_digest
 from newsroom.control_plane.corpus import CorpusIngestUnit
 from newsroom.control_plane.evidence import (
@@ -340,6 +340,7 @@ class NativeEvidenceController:
         assessor: EvidenceAssessor,
         policy_bundle_digest: str,
         transport_policy_digest: str,
+        clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
     ) -> None:
         if not all(
             type(value) is expected
@@ -359,6 +360,7 @@ class NativeEvidenceController:
         self._assessor = assessor
         self._policy_bundle_digest = policy_bundle_digest
         self._transport_policy_digest = transport_policy_digest
+        self._clock = clock
 
     def acquire_and_retain(
         self,
@@ -366,7 +368,7 @@ class NativeEvidenceController:
         candidate_version_id: str,
         intake_receipt_id: str,
         sources: tuple[NativeEvidenceSource, ...],
-        evaluated_at: str,
+        evaluated_at: str | None = None,
         proof: AuthenticationProof,
     ) -> NativeEvidenceResult:
         if (
@@ -485,7 +487,9 @@ class NativeEvidenceController:
             package_admission_id=retained.package_admission_id,
             package_digest=retained.package.digest,
             policy_bundle_digest=self._policy_bundle_digest,
-            evaluated_at=evaluated_at,
+            # Live acquisition and assessment finish after entry to this
+            # method. Timestamp the decision now, not before its own evidence.
+            evaluated_at=evaluated_at or self._clock().to_text(),
             currentness=tuple(item.currentness for item in source_assessments),
             integrity=integrity,
             evidence_gate_results=tuple((gate, "PASS") for gate in _GATES),

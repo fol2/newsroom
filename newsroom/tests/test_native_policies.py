@@ -13,13 +13,18 @@ def test_private_policy_bindings_are_derived_and_have_no_source_or_public_grant(
     same = native_policy_components(**args)
     assert policies.publication == same.publication
     assert not target.exists()
-    assert len(policies.registry.definitions()) == 6
-    assert len(policies.admission_registry.definitions()) == 13
+    assert len(policies.registry.definitions()) == 7
+    assert len(policies.admission_registry.definitions()) == 15
+    context = policies.registry.resolve("retrieval.native_context.admit")
+    assert context.aggregate_type == "native_retrieval_context"
+    assert context.required_scope == "authority.retrieval.context"
     assert not any("fixture" in definition.definition_version for definition in policies.registry.definitions())
     assert policies.required_scopes.isdisjoint({"authority.objects.manage", "authority.sources.manage", "authority.graphiti.execute"})
     hyd = {contract.purpose: contract for contract in policies.hydration_policies.contracts()}
     assert hyd["evidence.source"].allowed_uses == frozenset({"publication_evidence"})
     assert hyd["evidence.source"].allowed_principal_ids == frozenset({"newsroom.hermes"})
+    assert hyd["native-source-intake-read"].allowed_object_classes == frozenset({"source.native-observation"})
+    assert hyd["native-source-intake-read"].allowed_uses == frozenset({"native-source-parsing"})
     assert "proposal.extraction" not in hyd["evidence.source"].allowed_uses
     moved = native_policy_components(**{**args, "target_path": tmp_path / "other.sqlite3"})
     assert moved.publication.target_context_digest != policies.publication.target_context_digest

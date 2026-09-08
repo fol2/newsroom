@@ -14,13 +14,16 @@ import ssl
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import unquote, urlsplit
 
 from lxml import etree, html
 
 from newsroom.authority import AuthenticationProof
-from newsroom.authority.canonical import digest_bytes, digest_canonical
+from newsroom.authority.canonical import (
+    digest_bytes, digest_canonical, validate_sha256_digest,
+)
 from newsroom.sources import SourceDefinitionVersionId, SourceRevisionId
 
 from .native_evidence import (
@@ -41,6 +44,26 @@ POLICY_DIGEST = digest_canonical({
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+@dataclass(frozen=True, slots=True)
+class GovUkContentDocument:
+    document_type: str
+    title: str
+    body_text: str
+    publication: datetime
+    updated: datetime
+    organisations: tuple[str, ...]
+    exclusion_signals: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GovUkManualInventory:
+    title: str
+    publication: datetime
+    updated: datetime
+    organisations: tuple[str, ...]
+    sections: tuple[tuple[str, str], ...]
 
 
 def _instant(value: object) -> datetime:
@@ -79,12 +102,15 @@ class GovUkEvidenceAcquisition:
         dispatch_fence: Callable[[EvidenceAcquisitionRequest], None],
         clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
         licence_evidence=None,
+        transport_policy_digest: str = POLICY_DIGEST,
     ) -> None:
+        validate_sha256_digest(transport_policy_digest)
         self._sources = sources
         self._proof = proof
         self._fence = dispatch_fence
         self._clock = clock
         self._licence = licence_evidence
+        self._transport_policy_digest = transport_policy_digest
 
     def __call__(self, request: EvidenceAcquisitionRequest) -> AcquiredEvidence:
         def hold(reason: str):
@@ -92,7 +118,7 @@ class GovUkEvidenceAcquisition:
 
         if type(request) is not EvidenceAcquisitionRequest:
             raise TypeError("exact independent acquisition request required")
-        if request.transport_policy_digest != POLICY_DIGEST:
+        if request.transport_policy_digest != self._transport_policy_digest:
             raise hold("TRANSPORT_POLICY_MISMATCH")
         try:
             url = _api_url(request.canonical_url)
@@ -138,31 +164,10 @@ class GovUkEvidenceAcquisition:
         ):
             raise hold("GOVUK_ACQUISITION_INCOMPLETE")
         try:
-            value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
-            if (
-                type(value) is not dict
-                or value.get("base_path") != urlsplit(request.canonical_url).path
-                or value.get("locale") != "en"
-                or value.get("document_type") not in {
-                    "news_story", "press_release", "guidance", "detailed_guide",
-                    "html_publication", "notice", "policy_paper", "written_statement", "guide",
-                }
-                or value.get("withdrawn_notice")
-            ):
-                raise ValueError("source schema or currentness differs")
-            publication = _instant(value.get("first_published_at"))
-            updated = _instant(value.get("public_updated_at"))
-            if publication > updated or updated > retrieved:
-                raise ValueError("source temporal order differs")
-            title = value["title"]
-            if type(title) is not str or not title.strip():
-                raise ValueError("source title is absent")
-            body_text = _document_text(value)
-            organisations = value["links"]["organisations"]
-            names = tuple(sorted({item["title"] for item in organisations}))
-            if not names or any(type(name) is not str or not name.strip() for name in names):
-                raise ValueError("responsible publisher is absent")
-            body = (title.strip() + "\n\n" + body_text).encode("utf-8")
+            document = parse_govuk_content_document(
+                request.canonical_url, raw, retrieved_at=retrieved
+            )
+            body = (document.title + "\n\n" + document.body_text).encode("utf-8")
         except (ValueError, TypeError, KeyError, UnicodeError, etree.ParserError):
             raise hold("GOVUK_EVIDENCE_METADATA_HOLD") from None
         transport_digest = digest_canonical({
@@ -170,12 +175,12 @@ class GovUkEvidenceAcquisition:
             "url": url, "response_url": response_url, "http_status": status,
             "content_type": content_type, "response_digest": digest_bytes(raw),
             "extracted_body_digest": digest_bytes(body),
-            "public_updated_at": _utc(updated), "retrieved_at": _utc(retrieved),
+            "public_updated_at": _utc(document.updated), "retrieved_at": _utc(retrieved),
         })
         # These are observed acquisition facts, not six invented semantic PASS
         # decisions. Editorial claim checks still decide what may be rewritten.
         # Image/logo bytes are never acquired or retained by this text route.
-        signals = _exclusion_signals(value, body_text)
+        signals = document.exclusion_signals
         rights_digest = ""
         attribution = ""
         if self._licence is not None:
@@ -194,8 +199,11 @@ class GovUkEvidenceAcquisition:
         return AcquiredEvidence.create(
             request_digest=request.digest, outcome="COMPLETE",
             canonical_url=request.canonical_url, body=body, body_digest=digest_bytes(body),
-            publisher="; ".join(names), responsible_body="; ".join(names),
-            source_type="OFFICIAL_PRIMARY", publication_time=_utc(publication), source_updated_time=_utc(updated),
+            publisher="; ".join(document.organisations),
+            responsible_body="; ".join(document.organisations),
+            source_type="PRIMARY_OFFICIAL",
+            publication_time=_utc(document.publication),
+            source_updated_time=_utc(document.updated),
             retrieval_time=_utc(retrieved), geography="UK", language="en-GB",
             transport_evidence_digest=transport_digest,
             currentness_basis="AUTHORITATIVE_CURRENT_CONTENT_ENDPOINT",
@@ -210,6 +218,101 @@ def _unique_object(pairs):
     if len(value) != len(pairs):
         raise ValueError("source JSON has duplicate fields")
     return value
+
+
+def parse_govuk_content_document(
+    canonical_url: str, raw: bytes, *, retrieved_at: datetime
+) -> GovUkContentDocument:
+    """Validate and extract one complete current GOV.UK Content API document."""
+
+    value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
+    if (
+        type(value) is not dict
+        or value.get("base_path") != urlsplit(canonical_url).path
+        or value.get("locale") != "en"
+        or value.get("document_type") not in {
+            "news_story", "press_release", "guidance", "detailed_guide",
+            "html_publication", "notice", "policy_paper", "written_statement", "guide",
+            "manual_section",
+        }
+        or value.get("withdrawn_notice")
+    ):
+        raise ValueError("source schema or currentness differs")
+    publication = _instant(value.get("first_published_at"))
+    updated = _instant(value.get("public_updated_at"))
+    if publication > updated or updated > retrieved_at:
+        raise ValueError("source temporal order differs")
+    title = value["title"]
+    if type(title) is not str or not title.strip():
+        raise ValueError("source title is absent")
+    body_text = _document_text(value)
+    names = _organisation_names(value)
+    return GovUkContentDocument(
+        value["document_type"], title.strip(), body_text, publication, updated, names,
+        _exclusion_signals(value, body_text),
+    )
+
+
+def parse_govuk_manual_inventory(
+    canonical_url: str, raw: bytes, *, retrieved_at: datetime,
+) -> GovUkManualInventory:
+    """Return every section declared by one current GOV.UK manual index."""
+
+    value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
+    root = urlsplit(canonical_url).path.rstrip("/")
+    if (
+        type(value) is not dict
+        or value.get("base_path") != root
+        or value.get("locale") != "en"
+        or value.get("document_type") != "manual"
+        or value.get("withdrawn_notice")
+    ):
+        raise ValueError("source manual schema or currentness differs")
+    publication = _instant(value.get("first_published_at"))
+    updated = _instant(value.get("public_updated_at"))
+    if publication > updated or updated > retrieved_at:
+        raise ValueError("source temporal order differs")
+    title = value.get("title")
+    groups = value.get("details", {}).get("child_section_groups")
+    if type(title) is not str or not title.strip() or type(groups) is not list or not groups:
+        raise ValueError("source manual inventory is absent")
+    sections = []
+    for group in groups:
+        if type(group) is not dict or type(group.get("title")) is not str:
+            raise ValueError("source manual group differs")
+        children = group.get("child_sections")
+        if type(children) is not list:
+            raise ValueError("source manual sections differ")
+        for child in children:
+            if type(child) is not dict:
+                raise ValueError("source manual section differs")
+            path, section_title = child.get("base_path"), child.get("title")
+            if (
+                type(path) is not str or not path.startswith(root + "/")
+                or type(section_title) is not str or not section_title.strip()
+            ):
+                raise ValueError("source manual section identity differs")
+            sections.append((path, section_title.strip()))
+    if not sections or len({path for path, _ in sections}) != len(sections):
+        raise ValueError("source manual inventory is incomplete")
+    return GovUkManualInventory(
+        title.strip(), publication, updated, _organisation_names(value), tuple(sections),
+    )
+
+
+def _organisation_names(value: dict) -> tuple[str, ...]:
+    organisations = value.get("links", {}).get("organisations")
+    if not organisations and value.get("document_type") in {"manual", "manual_section"}:
+        organisations = value.get("details", {}).get("manual", {}).get("organisations")
+    if type(organisations) is not list:
+        raise ValueError("responsible publisher is absent")
+    if any(type(item) is not dict or type(item.get("title")) is not str
+           or not item["title"].strip() for item in organisations):
+        raise ValueError("responsible publisher is absent")
+    names = tuple(sorted({item["title"].strip() for item in organisations}))
+    if not names:
+        raise ValueError("responsible publisher is absent")
+    return names
 
 
 def _exclusion_signals(value: dict, body_text: str) -> tuple[str, ...]:
