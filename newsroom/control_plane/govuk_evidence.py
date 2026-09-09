@@ -308,13 +308,14 @@ def _require_link_inventory(value: dict, *, key: str) -> None:
         if (
             type(path) is not str
             or not path.startswith("/")
-            or path.startswith("//")
-            or "\\" in path
-            or any(part in {".", ".."} for part in path.split("/"))
             or type(title) is not str
             or not title.strip()
         ):
             raise ValueError("source child identity differs")
+        try:
+            _api_url("https://www.gov.uk" + path)
+        except ValueError:
+            raise ValueError("source child identity differs") from None
         paths.append(path)
     if len(set(paths)) != len(paths):
         raise ValueError("source child inventory is incomplete")
@@ -353,21 +354,24 @@ def _require_attachment_inventory(value: dict) -> None:
 
 def _safe_attachment_location(value: str) -> bool:
     if value.startswith("/"):
-        path = value
-    else:
-        parsed = urlsplit(value)
-        if (
-            parsed.scheme != "https"
-            or parsed.netloc != "assets.publishing.service.gov.uk"
-            or parsed.query
-            or parsed.fragment
-        ):
+        try:
+            _api_url("https://www.gov.uk" + value)
+        except ValueError:
             return False
-        path = parsed.path
+        return True
+    if any(ord(character) < 32 for character in value):
+        return False
+    parsed = urlsplit(value)
+    path = unquote(parsed.path)
     return (
-        path.startswith("/")
+        parsed.scheme == "https"
+        and parsed.netloc == "assets.publishing.service.gov.uk"
+        and not parsed.query
+        and not parsed.fragment
+        and path.startswith("/")
         and not path.startswith("//")
         and "\\" not in path
+        and not any(ord(character) < 32 for character in path)
         and all(part not in {".", ".."} for part in path.split("/"))
     )
 
@@ -379,6 +383,10 @@ def parse_govuk_manual_inventory(
 
     value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
     root = urlsplit(canonical_url).path.rstrip("/")
+    try:
+        _api_url(canonical_url)
+    except ValueError:
+        raise ValueError("source manual schema or currentness differs") from None
     if (
         type(value) is not dict
         or value.get("base_path") != root
@@ -411,6 +419,10 @@ def parse_govuk_manual_inventory(
                 or type(section_title) is not str or not section_title.strip()
             ):
                 raise ValueError("source manual section identity differs")
+            try:
+                _api_url("https://www.gov.uk" + path)
+            except ValueError:
+                raise ValueError("source manual section identity differs") from None
             sections.append((path, section_title.strip()))
     if not sections or len({path for path, _ in sections}) != len(sections):
         raise ValueError("source manual inventory is incomplete")

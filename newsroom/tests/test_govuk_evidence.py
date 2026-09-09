@@ -150,6 +150,35 @@ def test_known_content_hold_never_masks_invalid_or_elapsed_content(
     assert type(caught.value) is ValueError
 
 
+@pytest.mark.parametrize(("document_type", "location"), [
+    ("manual", "/government/example/%2e%2e/other"),
+    ("document_collection", "/government/%2e%2e/other"),
+    ("document_collection", "/government/item?next=https://evil.test"),
+    ("document_collection", "/government/%0aitem"),
+    ("transparency", "/file?next=https://evil.test"),
+    ("transparency", "https://assets.publishing.service.gov.uk/%2e%2e/secret"),
+    ("transparency", "https://assets.publishing.service.gov.uk/media/%0aitem"),
+])
+def test_known_inventory_locations_reject_encoded_traversal_query_and_control(
+    document_type, location,
+):
+    value = _content_shape(document_type)
+    if document_type == "manual":
+        value["details"]["child_section_groups"][0]["child_sections"][0][
+            "base_path"
+        ] = location
+    elif document_type == "document_collection":
+        value["links"]["documents"][0]["base_path"] = location
+    else:
+        value["details"]["attachments"][0]["url"] = location
+    with pytest.raises(ValueError) as caught:
+        parse_govuk_content_document(
+            "https://www.gov.uk/government/example", json.dumps(value).encode(),
+            retrieved_at=datetime(2026, 9, 9, tzinfo=UTC),
+        )
+    assert type(caught.value) is ValueError
+
+
 def _request(system, unit):
     version = system.sources.version_details(
         SourceDefinitionVersionId.parse(unit.authority.definition_version_id), proof=proof(),
