@@ -18,7 +18,10 @@ from newsroom.authority.persistence import AuthoritySchemaError
 from newsroom.authority.policy import CommandRegistry, PayloadSchemaRegistry
 from newsroom.authority.service import CommandService
 from newsroom.authority.types import AggregateId, UtcTimestamp
-from newsroom.increment6.dispositions import ProposalDispositionStore
+from newsroom.increment6.dispositions import (
+    ProposalDisposition,
+    ProposalDispositionStore,
+)
 from newsroom.increment6.hypotheses import EventHypothesisVersion
 from newsroom.increment6.relationships import (
     RELATIONSHIP_AGGREGATE_TYPE,
@@ -826,6 +829,58 @@ class _EventHypothesisRelationshipReadAuthority:
                 raise RelationshipContractError(
                     "unknown retained relationship input"
                 ) from exc
+
+        return self.__read(value)
+
+    def require_candidate_inputs_in_transaction(
+        self,
+        assessment_digests: tuple[str, ...],
+        version_ids: tuple[str, ...],
+        current_version_ids: tuple[str, ...],
+        *,
+        proof: AuthenticationProof,
+    ) -> tuple[
+        tuple[RetainedRelationshipDecisionReceipt, ...],
+        tuple[EventHypothesisVersion, ...],
+        tuple[EventHypothesisVersion, ...],
+        tuple[ProposalDisposition, ...],
+    ]:
+        def value() -> tuple[
+            tuple[RetainedRelationshipDecisionReceipt, ...],
+            tuple[EventHypothesisVersion, ...],
+            tuple[EventHypothesisVersion, ...],
+            tuple[ProposalDisposition, ...],
+        ]:
+            versions, receipts = _verify_relationship_reads_in_transaction(
+                self.__connection,
+                self.__hypotheses,
+                *self.__registries,
+                self.__event_validator,
+            )
+            _verify_relationship_event_coverage(
+                self.__connection, aggregate_type=RELATIONSHIP_AGGREGATE_TYPE
+            )
+            try:
+                retained_receipts = tuple(
+                    receipts[item] for item in assessment_digests
+                )
+                retained_versions = tuple(versions[item] for item in version_ids)
+            except KeyError as exc:
+                raise RelationshipContractError(
+                    "unknown Candidate relationship input"
+                ) from exc
+            current_versions, dispositions = (
+                self.__hypotheses
+                ._require_current_versions_after_integrity_in_transaction(
+                    current_version_ids, versions, proof=proof
+                )
+            )
+            return (
+                retained_receipts,
+                retained_versions,
+                current_versions,
+                dispositions,
+            )
 
         return self.__read(value)
 

@@ -169,7 +169,7 @@ def deployed_native_service(args):
         CANONICAL_INCREMENT4_AUTHORITY_STORE, CANONICAL_OBJECT_CAS_ROOT,
         CANONICAL_GRAPHITI_WORKSPACE_ROOT, HOST_CONTROL_PLANE_STATE_ROOT,
     )
-    from .writer import cont_writer_implementation_identity, read_grok_command_semantic_version
+    from .writer import cont_writer_implementation_identity
     from newsroom.increment9.proving import SOURCE_URLS
 
     if _lexical_path(args.ledger) != _lexical_path(CANONICAL_UNPUBLISHED_STORE):
@@ -215,18 +215,15 @@ def deployed_native_service(args):
             workload_class=WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING,
             provider="openrouter", route=native_embeddings.ROUTE,
             model=native_embeddings.OPENROUTER_EMBEDDING_SLUG, reasoning="none",
-            implementation_revision=native_embeddings.implementation_digest(),
             output_schema_digest=native_embeddings.SCHEMA_DIGEST,
         )
         assessment = usage.qualified_policy(
             workload_class=WorkloadClass.NATIVE_EVIDENCE_ASSESSOR,
             provider=native_assessor.CONT_PRIMARY_PROVIDER, route=native_assessor.ROUTE,
             model=native_assessor.CONT_PRIMARY_MODEL, reasoning=native_assessor.CONT_PRIMARY_REASONING,
-            implementation_revision=revision, config_identity=native_assessor.CONFIG_IDENTITY,
+            config_identity=native_assessor.CONFIG_IDENTITY,
             output_schema_digest=native_assessor.SCHEMA_DIGEST,
         )
-        if assessment.command_semantic_version != read_grok_command_semantic_version():
-            raise ValueError("native assessor CLI differs from its qualified policy")
         tree = subprocess.check_output(
             ("/usr/bin/git", "rev-parse", f"{revision}^{{tree}}"),
             cwd=Path(__file__).resolve().parents[2], text=True, timeout=10,
@@ -634,6 +631,9 @@ def open_native_pipeline(
                     ),
                     assessment_contract_failure=(
                         assessment_usage.retained_output_contract_failure
+                    ),
+                    assessment_pre_dispatch_failure=(
+                        assessment_usage.retained_pre_dispatch_failure
                     ),
                     clock=now,
                 ).advance(revision_id=revision_id, candidate_version_id=candidate_version_id)

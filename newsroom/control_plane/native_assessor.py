@@ -300,6 +300,14 @@ class RetainedAssessorContractFailure:
     context_manifest_digest: str
 
 
+@dataclass(frozen=True, slots=True)
+class RetainedAssessorPreDispatchFailure:
+    candidate_id: str
+    candidate_version_id: str
+    governing_manifest_digest: str
+    envelope_inventory_digest: str
+
+
 class NativeAssessmentUsage:
     """Persist exact native-assessor intent, dispatch and terminal usage."""
 
@@ -356,12 +364,10 @@ class NativeAssessmentUsage:
             cont_writer_implementation_identity()
         )
         policy = self._policy
-        if (
-            command_version != policy.command_semantic_version
-            or implementation_revision != policy.implementation_revision
-            or implementation_clean is not True
-        ):
-            raise NativeEvidenceError("native assessment runner identity differs")
+        if implementation_clean is not True:
+            raise NativeEvidenceHold(
+                "ASSESSOR_IMPLEMENTATION_DIRTY_HOLD", candidate.candidate_id
+            )
         manifest = {
             "schema_version": CONTEXT_MANIFEST_SCHEMA_VERSION,
             "provider": policy.provider,
@@ -831,11 +837,7 @@ class NativeAssessmentUsage:
                     or context.get("route") != allocation.route
                     or context.get("model") != allocation.model
                     or context.get("reasoning") != allocation.reasoning
-                    or context.get("implementation_revision")
-                    != policy.implementation_revision
                     or context.get("implementation_worktree_clean") is not True
-                    or context.get("command_semantic_version")
-                    != policy.command_semantic_version
                     or context.get("command_flags") != list(policy.command_flags)
                     or context.get("disabled_capabilities")
                     != list(policy.disabled_capabilities)
@@ -920,6 +922,134 @@ class NativeAssessmentUsage:
             connection.close()
 
 
+    def retained_pre_dispatch_failure(
+        self, candidate: object
+    ) -> RetainedAssessorPreDispatchFailure | None:
+        """Prove that no assessor envelope existed for this exact Candidate."""
+
+        candidate_id = getattr(candidate, "candidate_id", None)
+        version_id = getattr(candidate, "version_id", None)
+        manifest = getattr(candidate, "governing_manifest", None)
+        manifest_digest = getattr(manifest, "canonical_digest", None)
+        if not all(type(value) is str and value for value in (
+            candidate_id, version_id, manifest_digest,
+        )):
+            return None
+        connection = sqlite3.connect(f"file:{self._service.path}?mode=ro", uri=True)
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("BEGIN")
+            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                return None
+            inventory = []
+            envelopes = {}
+            for row in connection.execute(
+                "SELECT envelope_id,cycle_id,workload_class,admitted_at,"
+                "canonical_digest,record_json FROM model_work_envelopes "
+                "ORDER BY envelope_id",
+            ):
+                try:
+                    record = json.loads(row[5])
+                    envelope = _envelope_from_record(record)
+                except (TypeError, ValueError, ModelUsageIntegrityError):
+                    return None
+                if canonical_json_bytes(record).decode() != row[5] or tuple(row[:5]) != (
+                    envelope.envelope_id,
+                    envelope.cycle_id,
+                    envelope.workload_class.value,
+                    record["admitted_at"],
+                    envelope.canonical_digest,
+                ) or envelope.as_record() != record:
+                    return None
+                envelopes[envelope.envelope_id] = envelope
+                if envelope.workload_class is not WorkloadClass.NATIVE_EVIDENCE_ASSESSOR:
+                    continue
+                inventory.append(envelope.canonical_digest)
+                if envelope.candidate_id == candidate_id:
+                    # The envelope is durably retained before any allocation.
+                    # Its presence makes a historical no-dispatch claim unsafe.
+                    return None
+            allocations = {}
+            for row in connection.execute(
+                "SELECT invocation_id,envelope_id,cycle_id,leaf_ordinal,"
+                "workload_class,policy_digest,provider,route,model,request_digest,"
+                "parent_invocation_id,allocated_at,canonical_digest,record_json "
+                "FROM model_invocation_allocations ORDER BY invocation_id",
+            ):
+                try:
+                    record = json.loads(row[13])
+                    allocation = _allocation_from_record(record)
+                except (TypeError, ValueError, ModelUsageIntegrityError):
+                    return None
+                if (
+                    allocation.envelope_id not in envelopes
+                    or canonical_json_bytes(record).decode() != row[13]
+                    or tuple(row[:13]) != (
+                        allocation.invocation_id,
+                        allocation.envelope_id,
+                        allocation.cycle_id,
+                        allocation.leaf_ordinal,
+                        allocation.workload_class.value,
+                        allocation.invocation_policy_digest,
+                        allocation.provider,
+                        allocation.route,
+                        allocation.model,
+                        allocation.request_digest,
+                        allocation.parent_invocation_id,
+                        record["allocated_at"],
+                        allocation.canonical_digest,
+                    )
+                    or allocation.as_record() != record
+                ):
+                    return None
+                allocations[allocation.invocation_id] = allocation
+                if allocation.workload_class is WorkloadClass.NATIVE_EVIDENCE_ASSESSOR:
+                    if (
+                        envelopes[allocation.envelope_id].workload_class
+                        is not WorkloadClass.NATIVE_EVIDENCE_ASSESSOR
+                    ):
+                        return None
+                    inventory.append(allocation.canonical_digest)
+            for row in connection.execute(
+                "SELECT observation_digest,invocation_id,observed_at,state,"
+                "evidence_digest,record_json FROM model_transport_observations "
+                "ORDER BY observation_digest",
+            ):
+                try:
+                    record = json.loads(row[5])
+                    unsigned = dict(record)
+                    retained_digest = unsigned.pop("observation_digest", None)
+                except (TypeError, ValueError):
+                    return None
+                if (
+                    row[1] not in allocations
+                    or canonical_json_bytes(record).decode() != row[5]
+                    or retained_digest != row[0]
+                    or digest_canonical(unsigned) != retained_digest
+                    or tuple(row[:5]) != (
+                        retained_digest,
+                        record.get("invocation_id"),
+                        record.get("observed_at"),
+                        record.get("state"),
+                        record.get("evidence_digest"),
+                    )
+                ):
+                    return None
+                if (
+                    allocations[row[1]].workload_class
+                    is WorkloadClass.NATIVE_EVIDENCE_ASSESSOR
+                ):
+                    inventory.append(retained_digest)
+            return RetainedAssessorPreDispatchFailure(
+                candidate_id,
+                version_id,
+                manifest_digest,
+                digest_canonical(tuple(inventory)),
+            )
+        finally:
+            connection.close()
+
+
 class AutonomousNativeEvidenceAssessor:
     """Dispatch one fixed-schema transform, then prove its output locally."""
 
@@ -945,6 +1075,13 @@ class AutonomousNativeEvidenceAssessor:
         self._dispatch_fence = dispatch_fence or nullcontext
 
     def __call__(self, candidate, base, sources, acquired):
+        return self.assess_with_boundary(
+            candidate, base, sources, acquired, before_dispatch=None,
+        )
+
+    def assess_with_boundary(
+        self, candidate, base, sources, acquired, *, before_dispatch,
+    ):
         for source, result in zip(sources, acquired, strict=True):
             if (
                 result.currentness_basis
@@ -996,6 +1133,8 @@ class AutonomousNativeEvidenceAssessor:
         dispatch_at = None
         try:
             with self._dispatch_fence():
+                if before_dispatch is not None:
+                    before_dispatch()
                 if allocation is not None:
                     dispatch_at = self._usage.mark_dispatch(allocation)
                 execution = self._dispatch(request)

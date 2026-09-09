@@ -573,11 +573,12 @@ class _CandidateStore(_EventAuthorityStore):
     def _producers_from_refs(
         self, hypothesis_version_id, relationship_assessment_digest, proof
     ):
-        snapshot = self._lineage.require_current_producers_in_transaction(
-            hypothesis_version_id, proof=proof
-        )
-        relationship = self._lineage.require_retained_relationship_in_transaction(
-            relationship_assessment_digest
+        snapshot, relationship, dispositions = (
+            self._lineage._require_candidate_inputs_in_transaction(
+                hypothesis_version_id,
+                relationship_assessment_digest,
+                proof=proof,
+            )
         )
         disposition_ids = tuple(
             sorted(
@@ -585,10 +586,10 @@ class _CandidateStore(_EventAuthorityStore):
                 for item in snapshot.subject.source_bindings
             )
         )
-        dispositions = tuple(
-            self._dispositions.require_current_in_transaction(item, proof=proof)
-            for item in disposition_ids
-        )
+        # The lineage batch has already replayed the full disposition authority
+        # in this same transaction, including the empty-digest relationship case.
+        if tuple(item.disposition_id for item in dispositions) != disposition_ids:
+            raise CandidateContractError("Candidate current dispositions differ")
         lead_ids = tuple(
             sorted(
                 {NewsLeadId.parse(item.decision_lead_id) for item in dispositions},

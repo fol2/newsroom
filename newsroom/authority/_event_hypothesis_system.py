@@ -659,16 +659,68 @@ class _HypothesisStore:
         self, version_id: str, *, proof: AuthenticationProof
     ) -> EventHypothesisVersion:
         """Recheck the exact Version head and its authenticated source chain."""
-        version = self.require_retained_version_in_transaction(version_id)
-        if self._head(version.hypothesis_id) != version:
-            raise HypothesisContractError("Hypothesis Version is not the current head")
-        for binding in version.source_bindings:
-            disposition = _REQUIRE_DISPOSITION(
-                self._dispositions, binding.disposition_id, proof=proof
+        if self._owner != get_ident() or not self._connection.in_transaction:
+            raise HypothesisContractError("transaction ownership differs")
+        verified = self._verify()
+        versions, _ = self._require_current_versions_after_integrity_in_transaction(
+            (version_id,), verified, proof=proof
+        )
+        return versions[0]
+
+    def _require_current_versions_after_integrity_in_transaction(
+        self,
+        version_ids: tuple[str, ...],
+        verified: dict[str, EventHypothesisVersion],
+        *,
+        proof: AuthenticationProof,
+    ) -> tuple[
+        tuple[EventHypothesisVersion, ...],
+        tuple[ProposalDisposition, ...],
+    ]:
+        """Check current heads after this transaction's full retained replay."""
+        if (
+            self._owner != get_ident()
+            or not self._connection.in_transaction
+            or type(version_ids) is not tuple
+            or type(verified) is not dict
+            or any(type(item) is not str for item in version_ids)
+            or any(
+                type(key) is not str
+                or type(value) is not EventHypothesisVersion
+                or key != value.version_id
+                for key, value in verified.items()
             )
-            if self._bindings((disposition,)) != (binding,):
-                raise HypothesisContractError("current source binding differs")
-        return version
+        ):
+            raise HypothesisContractError("verified current Version batch differs")
+        try:
+            versions = tuple(verified[item] for item in version_ids)
+        except KeyError as exc:
+            raise HypothesisContractError(
+                "unknown retained Hypothesis Version"
+            ) from exc
+        dispositions: dict[str, ProposalDisposition] = {}
+        for version in versions:
+            if self._head(version.hypothesis_id) != version:
+                raise HypothesisContractError(
+                    "Hypothesis Version is not the current head"
+                )
+            for binding in version.source_bindings:
+                disposition = (
+                    self._dispositions
+                    ._require_current_after_integrity_in_transaction(
+                        binding.disposition_id, proof=proof
+                    )
+                )
+                if self._bindings((disposition,)) != (binding,):
+                    raise HypothesisContractError("current source binding differs")
+                retained = dispositions.setdefault(
+                    disposition.disposition_id, disposition
+                )
+                if retained != disposition:
+                    raise HypothesisContractError(
+                        "current source disposition differs within batch"
+                    )
+        return versions, tuple(dispositions[item] for item in sorted(dispositions))
 
     def current(
         self, hypothesis_id: str, *, proof: AuthenticationProof

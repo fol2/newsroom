@@ -15,7 +15,10 @@ from newsroom.control_plane.native_evidence import (
 )
 from newsroom.control_plane.graphiti_operational_readiness import _source_requests
 from newsroom.control_plane.native_progress import NativeRevisionJournal
-from newsroom.control_plane.native_assessor import RetainedAssessorContractFailure
+from newsroom.control_plane.native_assessor import (
+    RetainedAssessorContractFailure,
+    RetainedAssessorPreDispatchFailure,
+)
 from newsroom.control_plane.native_publication import NativePublicationContinuation
 from newsroom.control_plane.store import connect
 from newsroom.increment10.editorial import (
@@ -463,6 +466,89 @@ def test_retained_assessor_contract_failure_becomes_typed_hold(tmp_path) -> None
     assert facts["assessment_failure_terminal_digest"] == _DIGEST
     assert facts["assessment_failure_context_manifest_digest"] == _DIGEST
     assert facts["acquisition_retryable"] is False
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    ("proof_candidate_id", "attempt_count", "expected_state", "retryable"),
+    (
+        ("candidate", 0, "EVIDENCE_HOLD", True),
+        ("candidate", 3, "EVIDENCE_HOLD", False),
+        ("other-candidate", 0, "ASSESSMENT_INTERRUPTED", False),
+    ),
+)
+def test_retained_zero_dispatch_assessor_failure_requires_exact_candidate(
+    tmp_path,
+    monkeypatch,
+    proof_candidate_id,
+    attempt_count,
+    expected_state,
+    retryable,
+) -> None:
+    unit = _native()
+    connection = connect(str(tmp_path / "private.sqlite3"))
+    journal = NativeRevisionJournal(connection)
+    journal.land((unit,))
+    journal.advance(unit.revision_id, stage="ASSESSMENT_INTERRUPTED", facts={
+        "candidate_id": "candidate",
+        "candidate_version_id": "candidate-version",
+        "failure_class": "NativeEvidenceError",
+        "reason": "ACQUISITION_RESULT_NOT_RETAINED",
+        "acquisition_attempt_count": attempt_count,
+    })
+    calls, acquisitions = [], []
+    retained = RetainedAssessorPreDispatchFailure(
+        proof_candidate_id, "candidate-version", _DIGEST, _DIGEST,
+    )
+
+    evidence = object.__new__(NativeEvidenceController)
+
+    def acquire(_self, **_request):
+        acquisitions.append("attempted")
+        raise NativeEvidenceHold("SOURCE_AUTHORITY_HOLD", "source")
+
+    monkeypatch.setattr(NativeEvidenceController, "acquire_and_retain", acquire)
+    continuation = NativePublicationContinuation(
+        journal=journal,
+        runtime=SimpleNamespace(
+            authority=_Authority(), ingress=object(), publication=_Publication(),
+            proof=proof(), policies=SimpleNamespace(publication=object()),
+        ),
+        evidence_controller=evidence,
+        sources={unit.revision_id: (_source(unit),)},
+        assessment_pre_dispatch_failure=lambda _version: (
+            calls.append("checked") or retained
+        ),
+    )
+    first = continuation.advance(
+        revision_id=unit.revision_id, candidate_version_id="candidate-version"
+    )
+    assert first.state == expected_state
+    if expected_state == "ASSESSMENT_INTERRUPTED":
+        assert journal.progress[unit.revision_id]["stage"] == "ASSESSMENT_INTERRUPTED"
+        assert calls == ["checked"]
+        connection.close()
+        return
+    assert first.reason == "ASSESSOR_PRE_DISPATCH_HOLD"
+    assert calls == ["checked"]
+    facts = journal.progress[unit.revision_id]["facts"]
+    assert facts["assessment_pre_dispatch_candidate_id"] == "candidate"
+    assert facts["assessment_pre_dispatch_candidate_version_id"] == "candidate-version"
+    assert facts["assessment_pre_dispatch_manifest_digest"] == _DIGEST
+    assert facts["assessment_pre_dispatch_inventory_digest"] == _DIGEST
+    assert facts["acquisition_retryable"] is retryable
+    second = continuation.advance(
+        revision_id=unit.revision_id, candidate_version_id="candidate-version"
+    )
+    assert second.state == "EVIDENCE_HOLD"
+    assert acquisitions == (["attempted"] if retryable else [])
+    if retryable:
+        assert second.reason == "SOURCE_AUTHORITY_HOLD"
+        assert journal.progress[unit.revision_id]["facts"][
+            "acquisition_attempt_count"
+        ] == 1
+    else:
+        assert second.reason == "ASSESSOR_PRE_DISPATCH_HOLD"
     connection.close()
 
 

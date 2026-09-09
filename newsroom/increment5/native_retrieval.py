@@ -30,7 +30,7 @@ from newsroom.authority.objects import HydrationRequest, ObjectAdmissionRequest
 from newsroom.authority.types import AggregateId, ObjectAdmissionId, TrustScope, UtcTimestamp
 from newsroom.extraction.models import ExtractionRunRequest
 from newsroom.extraction.types import ExtractionOutcome, ExtractionPassageId
-from newsroom.authority._extraction_facade import GovernedExtractionRecords
+from newsroom.authority.extraction_facade import GovernedExtractionRecords
 from .fulltext_contracts import (
     FULLTEXT_ACTOR_ID, FULLTEXT_COMPONENT_DIGEST, FULLTEXT_POLICY_ID,
     FULLTEXT_PURPOSE, NORMALIZATION_COMPONENT_DIGEST, FullTextAuthorityView,

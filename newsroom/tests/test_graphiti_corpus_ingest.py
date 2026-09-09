@@ -134,6 +134,15 @@ from newsroom.tests.test_control_plane_private_beta import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _graphiti_test_deployment_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These fake-provider observers model a deployed tree, not pytest artefacts.
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti._graphiti_implementation_identity",
+        lambda: ("a" * 40, True),
+    )
+
+
 def run_cycle(*args: Any, **kwargs: Any) -> CycleReport:
     kwargs.setdefault("clock", lambda: datetime(2026, 8, 20, tzinfo=UTC))
     kwargs.setdefault("evidence_package_builder", _fixture_evidence_package)

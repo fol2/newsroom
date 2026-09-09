@@ -315,7 +315,7 @@ def test_native_assessor_retains_precise_qualification_contract_hold(
 def _usage(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "newsroom.control_plane.native_assessor.read_grok_command_semantic_version",
-        lambda: "1.0.8",
+        lambda **_kwargs: "1.0.8",
     )
     monkeypatch.setattr(
         "newsroom.control_plane.native_assessor.cont_writer_implementation_identity",
@@ -400,12 +400,25 @@ def test_native_assessor_uses_exact_candidate_and_base_without_ambient_context(
         finally:
             fence_active = False
 
+    boundaries = []
+
+    def before_dispatch():
+        with sqlite3.connect(usage_service.path) as retained:
+            assert retained.execute(
+                "SELECT COUNT(*) FROM model_invocation_allocations"
+            ).fetchone() == (1,)
+            assert retained.execute(
+                "SELECT COUNT(*) FROM model_transport_observations"
+            ).fetchone() == (0,)
+        boundaries.append("ASSESSMENT_STARTED")
+
     result = AutonomousNativeEvidenceAssessor(
         dispatch, usage=usage, dispatch_fence=fence
-    )(
-        candidate, base, (), ()
+    ).assess_with_boundary(
+        candidate, base, (), (), before_dispatch=before_dispatch
     )
     assert fence_active is False
+    assert boundaries == ["ASSESSMENT_STARTED"]
     request = json.loads(calls[0])
     assert (
         request["candidate_version"]["version"]["version_id"]
@@ -424,6 +437,112 @@ def test_native_assessor_uses_exact_candidate_and_base_without_ambient_context(
     )
     with pytest.raises(EvidencePackageError):
         bad(candidate, base, (), ())
+    connection.close()
+
+
+def test_native_assessor_command_version_is_observed_without_becoming_a_gate(
+    tmp_path, monkeypatch,
+) -> None:
+    connection, _port, candidate = _candidate(tmp_path)
+    base = _base_package(_ready_package(candidate)[1])
+    service, usage = _usage(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "newsroom.control_plane.native_assessor.read_grok_command_semantic_version",
+        lambda: "1.0.9",
+    )
+    allocation = usage.begin(candidate, base, "retained assessor prompt")
+    with sqlite3.connect(service.path) as retained:
+        assert retained.execute(
+            "SELECT count(*) FROM model_work_envelopes"
+        ).fetchone() == (1,)
+        assert retained.execute(
+            "SELECT count(*) FROM model_invocation_allocations"
+        ).fetchone() == (1,)
+        assert retained.execute(
+            "SELECT count(*) FROM model_transport_observations"
+        ).fetchone() == (0,)
+        manifest = json.loads(retained.execute(
+            "SELECT record_json FROM model_invocation_context_manifests "
+            "WHERE context_manifest_digest=?",
+            (allocation.context_manifest_digest,),
+        ).fetchone()[0])
+        assert manifest["command_semantic_version"] == "1.0.9"
+    connection.close()
+
+
+def test_native_assessor_pre_dispatch_recovery_requires_zero_exact_envelopes(
+    tmp_path, monkeypatch,
+) -> None:
+    connection, _port, candidate = _candidate(tmp_path)
+    base = _base_package(_ready_package(candidate)[1])
+    _service, usage = _usage(tmp_path, monkeypatch)
+
+    proof = usage.retained_pre_dispatch_failure(candidate)
+    assert proof is not None
+    assert proof.candidate_id == candidate.candidate_id
+    assert proof.candidate_version_id == candidate.version_id
+    allocation = usage.begin(candidate, base, "retained assessor prompt")
+    assert usage.retained_pre_dispatch_failure(candidate) is None
+    other = SimpleNamespace(
+        candidate_id="other-candidate",
+        version_id="other-version",
+        governing_manifest=SimpleNamespace(
+            canonical_digest=candidate.governing_manifest.canonical_digest
+        ),
+    )
+    assert usage.retained_pre_dispatch_failure(other) is not None
+    with sqlite3.connect(_service.path) as usage_connection:
+        usage_connection.execute(
+            "UPDATE model_invocation_allocations SET envelope_id='orphan'"
+        )
+    assert usage.retained_pre_dispatch_failure(other) is None
+    with sqlite3.connect(_service.path) as usage_connection:
+        usage_connection.execute(
+            "UPDATE model_invocation_allocations SET envelope_id=?",
+            (allocation.envelope_id,),
+        )
+    assert usage.retained_pre_dispatch_failure(other) is not None
+    dispatch_at = usage.mark_dispatch(allocation)
+    with sqlite3.connect(_service.path) as usage_connection:
+        usage_connection.execute(
+            "UPDATE model_transport_observations SET invocation_id='orphan'"
+        )
+    assert usage.retained_pre_dispatch_failure(other) is None
+    with sqlite3.connect(_service.path) as usage_connection:
+        usage_connection.execute(
+            "UPDATE model_transport_observations SET invocation_id=?",
+            (allocation.invocation_id,),
+        )
+    usage.complete(
+        allocation,
+        outcome="ASSESSOR_PROVIDER_FAILED",
+        execution=NativeAssessmentExecution(
+            "provider response",
+            {
+                "usage_basis": "PROVIDER_REPORTED",
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "cached_read_tokens": 0,
+                "cached_write_tokens": 0,
+                "reasoning_tokens": 0,
+                "context_tokens": 1,
+                "total_tokens": 2,
+            },
+        ),
+        provider_dispatched=True,
+        dispatch_at=dispatch_at,
+        failure_class="SYSTEMIC",
+    )
+    assert usage.retained_pre_dispatch_failure(other) is not None
+    with sqlite3.connect(_service.path) as usage_connection:
+        usage_connection.execute("PRAGMA foreign_keys=OFF")
+        usage_connection.execute("DELETE FROM model_transport_observations")
+        usage_connection.execute("DELETE FROM model_invocation_allocations")
+        usage_connection.execute("DELETE FROM model_work_envelopes")
+        assert usage_connection.execute(
+            "SELECT COUNT(*) FROM model_invocation_terminals"
+        ).fetchone() == (1,)
+    assert usage.retained_pre_dispatch_failure(other) is None
     connection.close()
 
 

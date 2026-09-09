@@ -81,6 +81,15 @@ from newsroom.control_plane.store import (
 )
 from newsroom.tests.test_native_graphiti import _native
 
+@pytest.fixture(autouse=True)
+def _graphiti_test_deployment_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These fake-provider observers model a deployed tree, not pytest artefacts.
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti._graphiti_implementation_identity",
+        lambda: ("a" * 40, True),
+    )
+
+
 T0 = datetime(2026, 8, 24, 10, 0, tzinfo=UTC)
 FIXTURE_790_PLAN_DIGEST = digest_canonical(
     {"issue": 790, "authority": "fixture-only"}

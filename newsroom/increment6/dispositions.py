@@ -1850,8 +1850,21 @@ class ProposalDispositionStore:
             raise DispositionContractError(
                 "transaction-aware disposition use requires an active transaction"
             )
-        _, authenticated_identity = self._authenticate(proof)
         self._verify_integrity()
+        return self._require_current_after_integrity_in_transaction(
+            disposition_id, proof=proof
+        )
+
+    def _require_current_after_integrity_in_transaction(
+        self, disposition_id: str, *, proof: AuthenticationProof
+    ) -> ProposalDisposition:
+        """Recheck currentness after this transaction verified retained rows."""
+        _digest(disposition_id, "disposition_id")
+        if not self._connection.in_transaction:
+            raise DispositionContractError(
+                "transaction-aware disposition use requires an active transaction"
+            )
+        _, authenticated_identity = self._authenticate(proof)
         row = self._connection.execute(
             "SELECT canonical_bytes FROM triage_proposal_dispositions WHERE disposition_id=?",
             (disposition_id,),

@@ -46,6 +46,9 @@ from newsroom.control_plane.model_usage import (
     WorkloadClass,
 )
 from newsroom.control_plane.store import GRAPHITI_MAX_FAILURES
+from newsroom.control_plane.writer import (
+    cont_writer_implementation_identity as _graphiti_implementation_identity,
+)
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
 from newsroom.graphiti_adapter.cursor_transport import composer_model_meets_floor
 from newsroom.graphiti_adapter.evaluation_packet import (
@@ -235,6 +238,7 @@ class GraphitiModelUsageObserver:
         self._service = service
         self._envelope = envelope
         self._clock = clock
+        _, self._implementation_worktree_clean = _graphiti_implementation_identity()
         if envelope.graphiti_attempt_id is None:
             raise ValueError("Graphiti usage observer lacks an attempt identity")
         self._ordinal = (
@@ -351,10 +355,6 @@ class GraphitiModelUsageObserver:
         implementation_revision = _graphiti_transport_implementation_revision(
             leaf_class
         )
-        if implementation_revision != route_contract.implementation_revision:
-            raise ModelUsageAdmissionError(
-                "Graphiti transport implementation differs from the checked policy"
-            )
         self._shape.qualify_request(
             leaf_class=leaf_class,
             semantic_request_class=semantic_request_class,
@@ -528,10 +528,7 @@ class GraphitiModelUsageObserver:
             "command_semantic_version": route_contract.command_semantic_version,
             "command_flags": list(route_contract.command_flags),
             "implementation_revision": policy.implementation_revision,
-            "implementation_worktree_clean": (
-                policy.implementation_revision
-                == _graphiti_transport_implementation_revision(leaf_class)
-            ),
+            "implementation_worktree_clean": self._implementation_worktree_clean,
             "disabled_capabilities": list(route_contract.disabled_capabilities),
             "working_directory_inventory": [],
             "working_directory_inventory_digest": digest_canonical([]),

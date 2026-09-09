@@ -388,7 +388,7 @@ def test_bootstrap_policy_is_exact_head_and_candidate_scoped() -> None:
     assert policy.max_context_tokens == 15_000
 
 
-def test_bootstrap_policy_resolves_only_for_bound_candidate_and_revision(
+def test_bootstrap_policy_keeps_candidate_scope_without_revision_pin(
     tmp_path: Path,
 ) -> None:
     service = ModelUsageService(str(tmp_path / "usage.sqlite3"))
@@ -411,6 +411,13 @@ def test_bootstrap_policy_resolves_only_for_bound_candidate_and_revision(
         config_identity=CONT_PRIMARY_CONFIG_IDENTITY,
     )
     assert selected.canonical_digest == policy.canonical_digest
+    assert service.qualified_policy(
+        workload_class=WorkloadClass.CONT_WRITER_PRIMARY,
+        provider=CONT_PRIMARY_PROVIDER, route=CONT_PRIMARY_ROUTE,
+        model=CONT_PRIMARY_MODEL, reasoning=CONT_PRIMARY_REASONING,
+        candidate_id="short", implementation_revision="b" * 40,
+        config_identity=CONT_PRIMARY_CONFIG_IDENTITY,
+    ) == selected
 
     with pytest.raises(ModelUsageAdmissionError):
         service.qualified_policy(
@@ -553,6 +560,35 @@ def _hermetic_allocation(
     )
 
 
+@pytest.mark.parametrize("change", [
+    "software_versions", "command_flags", "disabled_capabilities", "output_schema",
+])
+def test_hermetic_allocation_uses_capabilities_not_software_version(tmp_path, change):
+    service, policy, envelope, manifest, _ = _hermetic_preflight_fixture(tmp_path)
+    manifest.update(command_semantic_version="1.0.25", implementation_revision="b" * 40)
+    if change == "command_flags":
+        manifest["command_flags"] = []
+    elif change == "disabled_capabilities":
+        manifest["disabled_capabilities"] = []
+    elif change == "output_schema":
+        manifest["output_schema_digest"] = digest_canonical({"different": "schema"})
+    manifest["request_digest"] = digest_canonical({
+        key: manifest[key] for key in (
+            "provider", "route", "model", "reasoning", "command_semantic_version",
+            "command_flags", "implementation_revision", "system_digest",
+            "prompt_digest", "output_schema_digest",
+        )
+    })
+    manifest_digest = digest_canonical(manifest)
+    service.retain_context_manifest({"context_manifest_digest": manifest_digest, **manifest})
+    allocation = _hermetic_allocation(policy, envelope, manifest, manifest_digest)
+    if change == "software_versions":
+        service.allocate(allocation, owner_emergency_stop=False)
+    else:
+        with pytest.raises(ModelUsageAdmissionError):
+            service.allocate(allocation, owner_emergency_stop=False)
+
+
 def test_hermetic_allocation_rejects_manifest_evidence_package_drift(
     tmp_path: Path,
 ) -> None:
@@ -602,7 +638,7 @@ def test_hermetic_allocation_cannot_reuse_manifest_with_new_request_digest(
         service.allocate(replay, owner_emergency_stop=False)
 
 
-def test_new_head_bootstrap_supersedes_old_final_and_later_final_tightening(
+def test_software_update_reuses_final_policy_and_later_contract_tightening(
     tmp_path: Path,
 ) -> None:
     service = ModelUsageService(str(tmp_path / "usage.sqlite3"))
@@ -634,7 +670,8 @@ def test_new_head_bootstrap_supersedes_old_final_and_later_final_tightening(
         implementation_revision=new_revision,
         config_identity=CONT_PRIMARY_CONFIG_IDENTITY,
     )
-    assert selected_bootstrap.canonical_digest == bootstrap.canonical_digest
+    # A software update does not invalidate the existing qualified contract.
+    assert selected_bootstrap.canonical_digest == old_final.canonical_digest
 
     newer_packet = assess_cont_calibration(
         [

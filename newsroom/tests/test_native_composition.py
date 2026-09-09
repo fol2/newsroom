@@ -56,9 +56,12 @@ def test_native_cursor_credential_loads_only_provisioned_key_and_restores_enviro
     assert os.environ["CURSOR_API_KEY"] == "already-provisioned"
 
 
-@pytest.mark.parametrize("cli_version", ["different", "1.0.8"])
-def test_deployed_startup_rejects_unqualified_identity_before_credentials_or_io(
-    tmp_path, monkeypatch, cli_version,
+@pytest.mark.parametrize(
+    "missing_workload",
+    (WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING, WorkloadClass.NATIVE_EVIDENCE_ASSESSOR),
+)
+def test_deployed_startup_rejects_unqualified_policy_before_credentials_or_io(
+    tmp_path, monkeypatch, missing_workload,
 ):
     from newsroom.control_plane import broker, cycle, paths, writer
 
@@ -81,14 +84,18 @@ def test_deployed_startup_rejects_unqualified_identity_before_credentials_or_io(
     monkeypatch.setattr(paths, "HOST_CONTROL_PLANE_STATE_ROOT", tmp_path)
     monkeypatch.setattr(cycle, "assert_no_owner_emergency_stop", lambda _: None)
     monkeypatch.setattr(writer, "cont_writer_implementation_identity", lambda: ("1" * 40, True))
-    monkeypatch.setattr(writer, "read_grok_command_semantic_version", lambda: cli_version)
     monkeypatch.setattr(native_composition.subprocess, "check_output", lambda *_a, **_k: "2" * 40)
     policies = {
         WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING: _embedding_policy(),
         WorkloadClass.NATIVE_EVIDENCE_ASSESSOR: _assessment_policy(),
     }
+    def qualified_policy(**request):
+        if request["workload_class"] is missing_workload:
+            raise ValueError("qualification is absent")
+        return policies[request["workload_class"]]
+
     monkeypatch.setattr(native_composition, "ModelUsageService", lambda _: SimpleNamespace(
-        qualified_policy=lambda **request: policies[request["workload_class"]],
+        qualified_policy=qualified_policy,
     ))
 
     def unexpected(*_args, **_kwargs):
@@ -101,7 +108,7 @@ def test_deployed_startup_rejects_unqualified_identity_before_credentials_or_io(
         ledger=str(paths.CANONICAL_UNPUBLISHED_STORE), lock=str(root / "hermes.lock"),
         once=False, interval=300, failure_backoff=60,
     ))
-    with pytest.raises(ValueError, match="CLI differs|qualification.*absent"):
+    with pytest.raises(ValueError, match="qualification is absent"):
         service.run()
 
 

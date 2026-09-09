@@ -31,6 +31,7 @@ from newsroom.authority.policy import (
     PayloadSchemaRegistry,
 )
 from newsroom.authority.types import PayloadMode, TrustScope, UtcTimestamp
+from newsroom.increment6.dispositions import ProposalDisposition
 from newsroom.increment6.hypotheses import EventHypothesisVersion
 from newsroom.increment6.outcomes import CanonicalOutcome
 from newsroom.increment6.relationships import (
@@ -1711,6 +1712,47 @@ class EventHypothesisLineageReadPort:
 
     def require_current_producers_in_transaction(self, version_id: str, *, proof: object) -> HypothesisLineageProducerSnapshot:
         return self._call("require_producers_in_transaction", version_id, proof=proof, expected=HypothesisLineageProducerSnapshot)
+
+    def _require_candidate_inputs_in_transaction(
+        self, version_id: str, assessment_digest: str, *, proof: object
+    ) -> tuple[
+        HypothesisLineageProducerSnapshot,
+        RetainedRelationshipDecisionReceipt,
+        tuple[ProposalDisposition, ...],
+    ]:
+        value = self._call(
+            "require_candidate_inputs_in_transaction",
+            version_id,
+            assessment_digest,
+            proof=proof,
+            expected=tuple,
+        )
+        try:
+            differs = (
+                len(value) != 3
+                or type(value[0]) is not HypothesisLineageProducerSnapshot
+                or type(value[1]) is not RetainedRelationshipDecisionReceipt
+                or value[0].subject.version_id != version_id
+                or value[1].assessment.canonical_digest != assessment_digest
+                or type(value[2]) is not tuple
+                or any(type(item) is not ProposalDisposition for item in value[2])
+                or tuple(item.disposition_id for item in value[2])
+                != tuple(
+                    sorted(
+                        item.disposition_id
+                        for item in value[0].subject.source_bindings
+                    )
+                )
+            )
+        except Exception as exc:
+            raise HypothesisLineageContractError(
+                "lineage Candidate input transaction read differs"
+            ) from exc
+        if differs:
+            raise HypothesisLineageContractError(
+                "lineage Candidate input transaction read differs"
+            )
+        return value
 
     def require_retained_relationship_in_transaction(self, assessment_digest: str) -> RetainedRelationshipDecisionReceipt:
         return self._call("require_retained_relationship_in_transaction", assessment_digest, expected=RetainedRelationshipDecisionReceipt)

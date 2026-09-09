@@ -821,6 +821,27 @@ def test_candidate_read_port_reconstructs_exact_producer_snapshot() -> None:
     ):
         port.require_current_producers_in_transaction("version", proof=object())
 
+    class CandidateRaw:
+        def require_candidate_inputs_in_transaction(
+            self, *_: object, **__: object
+        ) -> object:
+            return (
+                object.__new__(lineage.HypothesisLineageProducerSnapshot),
+                object(),
+                [],
+            )
+
+    candidate_port = lineage._compose_event_hypothesis_lineage_read_port(
+        CandidateRaw()
+    )
+    with pytest.raises(
+        lineage.HypothesisLineageContractError,
+        match="lineage Candidate input transaction read differs",
+    ):
+        candidate_port._require_candidate_inputs_in_transaction(
+            "version", "sha256:" + "0" * 64, proof=object()
+        )
+
 
 def test_candidate_relationship_batch_rejects_untyped_or_wrong_count_results(
 ) -> None:

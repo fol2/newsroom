@@ -49,6 +49,15 @@ from newsroom.graphiti_adapter.usage_meter import (
     unreported_cli_usage,
 )
 
+@pytest.fixture(autouse=True)
+def _graphiti_test_deployment_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These fake-provider observers model a deployed tree, not pytest artefacts.
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti._graphiti_implementation_identity",
+        lambda: ("a" * 40, True),
+    )
+
+
 _ADAPTER = Path(__file__).resolve().parents[1] / "graphiti_adapter"
 _GRAPHITI_JSON = '{"entities":[],"entity_resolutions":[],"edges":[]}'
 _TEST_IDEMPOTENCY_KEY = "sha256:" + ("a" * 64)

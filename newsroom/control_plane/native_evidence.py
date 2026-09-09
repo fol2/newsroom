@@ -329,8 +329,18 @@ class EvidenceAssessor:
         package: EvidencePackage,
         sources: tuple[NativeEvidenceSource, ...],
         acquired: tuple[AcquiredEvidence, ...],
+        before_assessment: Callable[[], None] | None = None,
     ) -> IndependentEvidenceAssessment:
-        result = self._assess(candidate, package, sources, acquired)
+        bounded = getattr(self._assess, "assess_with_boundary", None)
+        if callable(bounded):
+            result = bounded(
+                candidate, package, sources, acquired,
+                before_dispatch=before_assessment,
+            )
+        else:
+            if before_assessment is not None:
+                before_assessment()
+            result = self._assess(candidate, package, sources, acquired)
         if type(result) is not IndependentEvidenceAssessment:
             raise NativeEvidenceError("evidence assessment differs")
         return result
@@ -434,9 +444,10 @@ class NativeEvidenceController:
             observation_digests=tuple(item.body_digest for item in acquired),
             passages=tuple(self._passage(item) for item in acquired),
         )
-        if before_assessment is not None:
-            before_assessment()
-        assessment = self._assessor.assess(version, base, sources, acquired)
+        assessment = self._assessor.assess(
+            version, base, sources, acquired,
+            before_assessment=before_assessment,
+        )
         source_assessments = self._validated_source_assessments(
             sources, acquired, assessment.source_assessments
         )

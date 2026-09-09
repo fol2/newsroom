@@ -1602,7 +1602,7 @@ class ModelUsageService:
         config_identity: str | None = None,
         output_schema_digest: str | None = None,
     ) -> InvocationEfficiencyPolicy:
-        """Resolve one exact qualified route policy without fallback guessing."""
+        """Resolve a qualified route/contract policy; software versions are audit facts."""
 
         connection = self._connection()
         try:
@@ -1620,10 +1620,6 @@ class ModelUsageService:
             for record in policy_records
             if str(record.get("reasoning")) == reasoning
         ]
-        if workload_class is WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING:
-            policies = [policy for policy in policies
-                        if implementation_revision is not None
-                        and policy.implementation_revision == implementation_revision]
         if config_identity is not None:
             policies = [
                 policy
@@ -1639,30 +1635,22 @@ class ModelUsageService:
         policies = [
             policy
             for policy in policies
-            if not _is_hermetic_cont_policy(policy)
-            or (
-                policy.command_semantic_version != "UNSPECIFIED"
-                and policy.implementation_revision == implementation_revision
-            )
-        ]
-        policies = [
-            policy
-            for policy in policies
             if not policy.calibration_only
-            or (
-                candidate_id in policy.allowed_candidate_ids
-                and implementation_revision == policy.implementation_revision
-            )
+            or candidate_id in policy.allowed_candidate_ids
         ]
         general_policies = [policy for policy in policies if not policy.calibration_only]
         if general_policies:
             policies = (
                 general_policies[:1]
                 if all(_is_hermetic_cont_policy(policy) for policy in general_policies)
+                or (
+                    workload_class is WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING
+                    and output_schema_digest is not None
+                )
                 else general_policies
             )
         elif policies and all(_is_hermetic_cont_policy(policy) for policy in policies):
-            # A later exact-head restaging supersedes an older bootstrap for the
+            # A later compatible policy supersedes the older bootstrap for the
             # same bounded candidate without mutating retained policy history.
             policies = policies[:1]
         if len(policies) != 1:
@@ -2496,14 +2484,10 @@ class ModelUsageService:
             raise ModelUsageAdmissionError("allocation differs from invocation policy")
         if policy.command_semantic_version != "UNSPECIFIED" and (
             manifest.get("schema_version") != policy.context_manifest_schema_version
-            or manifest.get("command_semantic_version")
-            != policy.command_semantic_version
             or _record_string_tuple(manifest, "command_flags")
             != policy.command_flags
             or _record_string_tuple(manifest, "disabled_capabilities")
             != policy.disabled_capabilities
-            or manifest.get("implementation_revision")
-            != policy.implementation_revision
             or manifest.get("implementation_worktree_clean") is not True
         ):
             raise ModelUsageAdmissionError(
