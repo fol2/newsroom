@@ -636,6 +636,8 @@ def test_discovery_write_and_read_scopes_are_separate(tmp_path: Path) -> None:
         assert system.discovery.current_status(SIGNAL_ID, proof=proof()).lead is not None
         with pytest.raises(PermissionError):
             system.discovery.signal(SIGNAL_ID, proof=proof())
+        with pytest.raises(PermissionError):
+            system.discovery.latest_disposition(LEAD_ID, proof=proof())
 
     with open_discovery_system(
         database,
@@ -643,8 +645,6 @@ def test_discovery_write_and_read_scopes_are_separate(tmp_path: Path) -> None:
     ) as system:
         with pytest.raises(PermissionError):
             system.discovery.current_status(SIGNAL_ID, proof=proof())
-        with pytest.raises(PermissionError):
-            system.discovery.latest_disposition(LEAD_ID, proof=proof())
 
 
 def test_discovery_read_limits_are_policy_bounded(tmp_path: Path) -> None:

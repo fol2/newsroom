@@ -436,7 +436,7 @@ class _DiscoveryBoundary:
             operation="read:discovery:latest_disposition",
             aggregate_type="news_lead",
             aggregate_id=str(lead_id),
-            sensitive=False,
+            sensitive=True,
         )
         value = self._store.latest_lead_disposition(lead_id)
         if value is None:
