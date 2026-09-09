@@ -1161,9 +1161,13 @@ class AutonomousNativeEvidenceAssessor:
             supporting_excerpt = raw_claim.get("supporting_excerpt")
             if type(supporting_excerpt) is not str:
                 raise EvidencePackageError("assessment supporting excerpt differs")
-            named_entities = tuple(sorted(bounded_named_entities(
-                f"{claim_text}\n{supporting_excerpt}"
-            )))
+            claim_entities = bounded_named_entities(claim_text)
+            excerpt_entities = bounded_named_entities(supporting_excerpt)
+            if not claim_entities <= excerpt_entities:
+                raise EvidencePackageError(
+                    "assessment named entities differ from source evidence"
+                )
+            named_entities = tuple(sorted(claim_entities | excerpt_entities))
             if bounded_named_entities(rendered) != set(named_entities):
                 raise EvidencePackageError(
                     "assessment rendered named entities differ"

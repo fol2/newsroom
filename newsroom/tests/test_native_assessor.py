@@ -203,6 +203,15 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
         decided_at="2026-09-09T12:02:00.000000Z",
     )
     assert "INVALID_GOVERNED_CLAIM_EVIDENCE" not in decision.stable_reason_codes
+    unsupported = json.loads(canonical_json_bytes({"package": package}))
+    unsupported["package"]["governed_claims"][0][
+        "supporting_excerpt"
+    ] = "published changes to the Skilled Worker Visa."
+    with pytest.raises(EvidencePackageError, match="source evidence"):
+        AutonomousNativeEvidenceAssessor._validated_execution(
+            NativeAssessmentExecution(canonical_json_bytes(unsupported).decode(), {}),
+            candidate, base, (source,), (acquired,),
+        )
     changed = json.loads(canonical_json_bytes({"package": package}))
     changed["package"]["governed_claims"][0][
         "rendered_assertion_zh_hant_hk"
