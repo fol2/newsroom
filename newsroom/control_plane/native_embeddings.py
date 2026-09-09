@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import sqlite3
 import ssl
 import struct
 import urllib.request
@@ -29,9 +30,9 @@ from newsroom.increment5.native_retrieval import (
 from .govuk_evidence import _NoRedirect, _unique_object
 from .model_usage import (
     InvocationAllocation, InvocationEfficiencyPolicy, InvocationTerminal,
-    MODEL_USAGE_SCHEMA_VERSION, ModelUsageAdmissionError, ModelUsageService,
-    UsageComponents, UsageStatus,
-    WorkEnvelope, WorkloadClass,
+    MODEL_USAGE_SCHEMA_VERSION, ModelUsageAdmissionError,
+    ModelUsageIntegrityError, ModelUsageService, UsageComponents, UsageStatus,
+    WorkEnvelope, WorkloadClass, _allocation_from_record, _envelope_from_record,
 )
 from .veto import VetoError
 
@@ -81,15 +82,11 @@ class NativePassageEmbedder:
         self._key, self._objects, self._usage = api_key, objects, usage
         self._policy, self._fence, self._clock = policy, dispatch_fence, clock
 
-    def retryable_pre_dispatch(
+    def retryable_settled_attempt(
         self, *, text: str, passage_id: str, cycle_id: str,
     ) -> bool:
-        """Allow a new attempt only after exact retained zero-dispatch proof."""
-        request = canonical_json_bytes({
-            "input": text, "model": OPENROUTER_EMBEDDING_SLUG,
-            "dimensions": NATIVE_VECTOR_DIMENSIONS, "encoding_format": "float",
-        })
-        manifest = self._manifest(request, text)
+        """Allow retry only after one exact, settled and fully-accounted attempt."""
+        request = _request(text)
         envelope = WorkEnvelope.create(
             cycle_id=cycle_id, workload_class=self._policy.workload_class,
             admitted_at=self._clock(), admission_decision_id=None,
@@ -97,22 +94,38 @@ class NativePassageEmbedder:
             evidence_package_digest=digest_bytes(text.encode()),
             ingest_id=passage_id, graphiti_attempt_id=None,
         )
-        invocation_id = digest_canonical({
-            "schema_version": MODEL_USAGE_SCHEMA_VERSION,
-            "envelope_id": envelope.envelope_id,
-            "cycle_id": cycle_id, "leaf_ordinal": 1,
-            "workload_class": self._policy.workload_class.value,
-            "request_digest": manifest["request_digest"], "route": self._policy.route,
-            "parent_invocation_id": None,
-        })
-        terminal = self._usage.terminal(invocation_id)
-        return bool(
+        allocation = _retained_allocation(
+            self._usage, envelope=envelope, prompt_digest=digest_bytes(request),
+            policy=self._policy,
+        )
+        if allocation is None:
+            return False
+        terminal = self._usage.terminal(allocation.invocation_id)
+        if terminal is None or terminal.policy_breach is not None:
+            return False
+        pre_dispatch_zero = (
             terminal is not None
             and terminal.pre_dispatch_zero_proved
             and terminal.dispatch_at is None
             and terminal.usage_status is UsageStatus.REPORTED
             and terminal.components.total_tokens == 0
-            and terminal.policy_breach is None
+        )
+        settled_validation_failure = (
+            terminal.outcome == "NATIVE_EMBEDDING_FAILED"
+            and terminal.failure_class == "ValueError"
+            and terminal.usage_status is UsageStatus.REPORTED
+            and terminal.components.provenance == "PROVIDER_REPORTED"
+            and terminal.components.total_tokens is not None
+            and terminal.dispatch_at is not None
+            and terminal.provider_telemetry_digest is not None
+            and not terminal.pre_dispatch_zero_proved
+        )
+        return pre_dispatch_zero or (
+            settled_validation_failure
+            and _retained_provider_telemetry(
+                self._usage, allocation.invocation_id,
+                terminal.provider_telemetry_digest,
+            )
         )
 
     def retain(
@@ -120,10 +133,7 @@ class NativePassageEmbedder:
     ) -> NativeEmbeddingReference:
         if type(text) is not str or not text.strip() or not passage_id:
             raise NativeRetrievalHold("NATIVE_EMBEDDING_INPUT_HOLD")
-        request = canonical_json_bytes({
-            "input": text, "model": OPENROUTER_EMBEDDING_SLUG,
-            "dimensions": NATIVE_VECTOR_DIMENSIONS, "encoding_format": "float",
-        })
+        request = _request(text)
         policy, now = self._policy, self._clock()
         if len(request) > policy.max_prompt_bytes:
             raise NativeRetrievalHold("NATIVE_EMBEDDING_INPUT_BOUND")
@@ -262,7 +272,8 @@ def _telemetry(value: object) -> dict:
 
 
 def _response_vector(value: dict) -> bytes:
-    if (value.get("model") != OPENROUTER_EMBEDDING_SLUG or value.get("object") != "list"
+    if (value.get("model") not in {OPENROUTER_EMBEDDING_SLUG, "text-embedding-3-large"}
+            or value.get("object") != "list"
             or type(value.get("id")) is not str or not value["id"]):
         raise ValueError("embedding provider identity differs")
     rows = value.get("data")
@@ -275,3 +286,103 @@ def _response_vector(value: dict) -> bytes:
     result = struct.pack(f">{NATIVE_VECTOR_DIMENSIONS}f", *values)
     _vector(result)
     return result
+
+
+def _request(text: str) -> bytes:
+    return canonical_json_bytes({
+        "input": text, "model": OPENROUTER_EMBEDDING_SLUG,
+        "dimensions": NATIVE_VECTOR_DIMENSIONS, "encoding_format": "float",
+    })
+
+
+def _retained_allocation(
+    usage: ModelUsageService, *, envelope: WorkEnvelope, prompt_digest: str,
+    policy: InvocationEfficiencyPolicy,
+) -> InvocationAllocation | None:
+    """Read one exact prior allocation without binding recovery to new code."""
+    connection = sqlite3.connect(Path(usage.path).resolve().as_uri() + "?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            "SELECT a.*,a.record_json AS allocation_json,w.envelope_id AS "
+            "retained_envelope_id,w.cycle_id AS envelope_cycle_id,w.workload_class AS "
+            "envelope_workload_class,w.canonical_digest AS envelope_canonical_digest,"
+            "w.record_json AS envelope_json,w.admitted_at AS envelope_admitted_at FROM "
+            "model_invocation_allocations a JOIN "
+            "model_work_envelopes w ON w.envelope_id=a.envelope_id WHERE "
+            "a.envelope_id=?", (envelope.envelope_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise ModelUsageIntegrityError("native embedding allocation is ambiguous")
+    row = rows[0]
+    try:
+        envelope_record = json.loads(row["envelope_json"])
+        retained_envelope = _envelope_from_record(envelope_record)
+        allocation_record = json.loads(row["allocation_json"])
+        retained_allocation = _allocation_from_record(allocation_record)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError,
+            ModelUsageIntegrityError) as exc:
+        raise ModelUsageIntegrityError("native embedding allocation differs") from exc
+    column_bindings = (
+        ("invocation_id", "invocation_id"), ("envelope_id", "envelope_id"),
+        ("cycle_id", "cycle_id"), ("leaf_ordinal", "leaf_ordinal"),
+        ("workload_class", "workload_class"), ("policy_digest", "invocation_policy_digest"),
+        ("provider", "provider"), ("route", "route"), ("model", "model"),
+        ("request_digest", "request_digest"),
+        ("parent_invocation_id", "parent_invocation_id"),
+        ("allocated_at", "allocated_at"), ("canonical_digest", "canonical_digest"),
+    )
+    if (
+        retained_envelope.as_record() != envelope_record
+        or retained_envelope.envelope_id != envelope.envelope_id
+        or row["retained_envelope_id"] != retained_envelope.envelope_id
+        or row["envelope_cycle_id"] != retained_envelope.cycle_id
+        or row["envelope_workload_class"] != retained_envelope.workload_class.value
+        or row["envelope_canonical_digest"] != retained_envelope.canonical_digest
+        or row["envelope_admitted_at"] != retained_envelope.as_record()["admitted_at"]
+        or retained_allocation.as_record() != allocation_record
+        or any(row[column] != allocation_record[key] for column, key in column_bindings)
+        or retained_allocation.cycle_id != envelope.cycle_id
+        or retained_allocation.workload_class is not policy.workload_class
+        or retained_allocation.prompt_digest != prompt_digest
+        or retained_allocation.provider != policy.provider
+        or retained_allocation.route != policy.route
+        or retained_allocation.model != policy.model
+        or retained_allocation.leaf_ordinal != 1
+        or retained_allocation.parent_invocation_id is not None
+    ):
+        raise ModelUsageIntegrityError("native embedding allocation differs")
+    return retained_allocation
+
+
+def _retained_provider_telemetry(
+    usage: ModelUsageService, invocation_id: str, expected_digest: str | None,
+) -> bool:
+    connection = sqlite3.connect(Path(usage.path).resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        rows = connection.execute(
+            "SELECT telemetry_record_digest,provider_telemetry_digest,record_json "
+            "FROM model_provider_telemetry WHERE invocation_id=?", (invocation_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+    if len(rows) != 1 or expected_digest is None:
+        return False
+    try:
+        record = json.loads(rows[0][2])
+        telemetry = record["provider_telemetry"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return (
+        type(record) is dict
+        and record.get("schema_version") == MODEL_USAGE_SCHEMA_VERSION
+        and record.get("invocation_id") == invocation_id
+        and record.get("provider_telemetry_digest") == expected_digest
+        and rows[0][1] == expected_digest
+        and digest_canonical(telemetry) == expected_digest
+        and digest_canonical(record) == rows[0][0]
+    )

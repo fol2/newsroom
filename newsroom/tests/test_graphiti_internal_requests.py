@@ -392,6 +392,8 @@ def _bound_request(
     ordinal: int,
     semantic: str,
 ) -> tuple[InvocationAllocation, GraphitiInternalRequestIdentity]:
+    ingest_id = str(envelope.ingest_id)
+    graphiti_attempt_id = str(envelope.graphiti_attempt_id)
     prompt_digest = digest_canonical({"prompt": semantic})
     schema_digest = policy.output_schema_digest
     retry_state_digest = digest_canonical({"state": semantic})
@@ -421,7 +423,9 @@ def _bound_request(
             "output_schema_digest": schema_digest,
         }
     )
-    provider_attempt_id = f"ingest-769:1:provider-attempt:1:leaf:{ordinal}"
+    provider_attempt_id = (
+        f"{graphiti_attempt_id}:provider-attempt:1:leaf:{ordinal}"
+    )
     manifest = {
         "schema_version": policy.context_manifest_schema_version,
         "provider": policy.provider,
@@ -457,8 +461,8 @@ def _bound_request(
         "evidence_package_digest": effective_revision_digest,
         "evidence_package_bytes": 128,
         "effective_revision_digest": effective_revision_digest,
-        "ingest_obligation_id": "ingest-769",
-        "graphiti_attempt_id": "ingest-769:1",
+        "ingest_obligation_id": ingest_id,
+        "graphiti_attempt_id": graphiti_attempt_id,
         "provider_attempt_id": provider_attempt_id,
         "semantic_state_digest": semantic_state_digest,
         "request_digest": request_digest,
@@ -508,8 +512,8 @@ def _bound_request(
     )
     identity = GraphitiInternalRequestIdentity.create(
         effective_revision_digest=effective_revision_digest,
-        ingest_obligation_id="ingest-769",
-        graphiti_attempt_id="ingest-769:1",
+        ingest_obligation_id=ingest_id,
+        graphiti_attempt_id=graphiti_attempt_id,
         provider_attempt_id=provider_attempt_id,
         internal_ordinal=ordinal,
         semantic_request_class="ExtractedEntities",
@@ -2142,6 +2146,245 @@ def test_restart_distinguishes_pre_dispatch_zero_from_possible_io_uncertainty(
     assert io_leaf["invocation_outcome"] == "RECOVERED_UNRESOLVED"
     assert io_leaf["usage_status"] == "AMBIGUOUS"
     assert io_leaf["total_tokens"] is None
+
+
+def test_ingest_zero_proof_crosses_an_empty_recovered_attempt(
+    tmp_path: Path,
+) -> None:
+    service, first, policy, shape = _service_fixture(tmp_path)
+    allocation, identity = _bound_request(
+        service=service,
+        envelope=first,
+        policy=policy,
+        shape=shape,
+        ordinal=1,
+        semantic="dispatch-fence-refused",
+    )
+    service.allocate_graphiti_request(
+        allocation,
+        identity=identity,
+        max_distinct_internal_requests=shape.max_distinct_internal_requests,
+    )
+    service.complete(
+        InvocationTerminal.create(
+            invocation_id=allocation.invocation_id,
+            outcome="DISPATCH_FENCE_REFUSED",
+            failure_class="DISPATCH_FENCE_REFUSED",
+            usage_status=UsageStatus.REPORTED,
+            components=UsageComponents(total_tokens=0, provenance="CLI_DERIVED"),
+            dispatch_at=None,
+            completed_at=T0 + timedelta(seconds=1),
+            observed_at=T0 + timedelta(seconds=1),
+            pre_dispatch_zero_proved=True,
+            subscription_cli_chat_not_cash_debited=True,
+        )
+    )
+    for attempt_number in (2, 3):
+        service.open_envelope(
+            WorkEnvelope.create(
+                cycle_id=f"cycle-769-attempt-{attempt_number}",
+                workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+                admitted_at=T0 + timedelta(seconds=attempt_number),
+                admission_decision_id=None,
+                candidate_id=None,
+                hypothesis_digest=None,
+                evidence_package_digest=None,
+                ingest_id="ingest-769",
+                graphiti_attempt_id=f"ingest-769:{attempt_number}",
+            )
+        )
+    third = WorkEnvelope.create(
+        cycle_id="cycle-769-attempt-3",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0 + timedelta(seconds=3),
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-769",
+        graphiti_attempt_id="ingest-769:3",
+    )
+    observer = GraphitiModelUsageObserver(
+        service=service,
+        envelope=third,
+        clock=lambda: T0 + timedelta(seconds=4),
+        provider_attempt_number=3,
+        owner_stop_check=lambda: None,
+    )
+
+    assert service.graphiti_ingest_pre_dispatch_zero(ingest_id="ingest-769")
+    assert observer.allows_fresh_zero_dispatch_retry(
+        episode_uuid="ingest-769", attempt_number=3
+    )
+    assert not observer.allows_fresh_zero_dispatch_retry(
+        episode_uuid="another-ingest", attempt_number=3
+    )
+
+
+def test_ingest_zero_proof_rejects_unresolved_and_column_tamper(
+    tmp_path: Path,
+) -> None:
+    service, envelope, policy, shape = _service_fixture(tmp_path)
+    allocation, identity = _bound_request(
+        service=service,
+        envelope=envelope,
+        policy=policy,
+        shape=shape,
+        ordinal=1,
+        semantic="unresolved",
+    )
+    service.allocate_graphiti_request(
+        allocation,
+        identity=identity,
+        max_distinct_internal_requests=shape.max_distinct_internal_requests,
+    )
+    service.observe_transport(
+        invocation_id=allocation.invocation_id,
+        observed_at=T0 + timedelta(seconds=1),
+        state="DISPATCH_STARTED",
+        evidence_digest=digest_canonical({"dispatch": "possible"}),
+    )
+    assert not service.graphiti_ingest_pre_dispatch_zero(ingest_id="ingest-769")
+    service.recover_unresolved(observed_at=T0 + timedelta(minutes=21))
+    assert not service.graphiti_ingest_pre_dispatch_zero(ingest_id="ingest-769")
+
+    connection = service._connection()
+    connection.execute(
+        "UPDATE model_work_envelopes SET cycle_id='tampered' WHERE envelope_id=?",
+        (envelope.envelope_id,),
+    )
+    connection.commit()
+    connection.close()
+    with pytest.raises(
+        ModelUsageIntegrityError, match="Graphiti envelope binding differs"
+    ):
+        service.graphiti_ingest_pre_dispatch_zero(ingest_id="ingest-769")
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ("ingest", "attempt", "allocation_membership", "terminal_status"),
+)
+def test_ingest_zero_proof_validates_rows_excluded_by_tamper(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    service, first, policy, shape = _service_fixture(tmp_path)
+    second = WorkEnvelope.create(
+        cycle_id="cycle-769-attempt-2",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0 + timedelta(seconds=2),
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-769",
+        graphiti_attempt_id="ingest-769:2",
+    )
+    unrelated = WorkEnvelope.create(
+        cycle_id="cycle-unrelated",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0 + timedelta(seconds=3),
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="ingest-unrelated",
+        graphiti_attempt_id="ingest-unrelated:1",
+    )
+    service.open_envelope(second)
+    service.open_envelope(unrelated)
+    zero, zero_identity = _bound_request(
+        service=service,
+        envelope=first,
+        policy=policy,
+        shape=shape,
+        ordinal=1,
+        semantic="zero",
+    )
+    dispatched, dispatched_identity = _bound_request(
+        service=service,
+        envelope=second,
+        policy=policy,
+        shape=shape,
+        ordinal=1,
+        semantic="dispatched",
+    )
+    for allocation, identity in (
+        (zero, zero_identity),
+        (dispatched, dispatched_identity),
+    ):
+        service.allocate_graphiti_request(
+            allocation,
+            identity=identity,
+            max_distinct_internal_requests=shape.max_distinct_internal_requests,
+        )
+    service.complete(
+        InvocationTerminal.create(
+            invocation_id=zero.invocation_id,
+            outcome="DISPATCH_FENCE_REFUSED",
+            failure_class="DISPATCH_FENCE_REFUSED",
+            usage_status=UsageStatus.REPORTED,
+            components=UsageComponents(total_tokens=0, provenance="CLI_DERIVED"),
+            dispatch_at=None,
+            completed_at=T0 + timedelta(seconds=4),
+            observed_at=T0 + timedelta(seconds=4),
+            pre_dispatch_zero_proved=True,
+            subscription_cli_chat_not_cash_debited=True,
+        )
+    )
+    service.complete(
+        InvocationTerminal.create(
+            invocation_id=dispatched.invocation_id,
+            outcome="COMPLETE",
+            failure_class=None,
+            usage_status=UsageStatus.REPORTED,
+            components=UsageComponents(
+                input_tokens=1,
+                output_tokens=0,
+                total_tokens=1,
+                provenance="PROVIDER_REPORTED",
+            ),
+            dispatch_at=T0 + timedelta(seconds=4),
+            completed_at=T0 + timedelta(seconds=5),
+            observed_at=T0 + timedelta(seconds=5),
+            subscription_cli_chat_not_cash_debited=True,
+        )
+    )
+    assert not service.graphiti_ingest_pre_dispatch_zero(ingest_id="ingest-769")
+
+    connection = service._connection()
+    if tamper in {"ingest", "attempt"}:
+        row = connection.execute(
+            "SELECT record_json FROM model_work_envelopes WHERE envelope_id=?",
+            (second.envelope_id,),
+        ).fetchone()
+        record = json.loads(str(row[0]))
+        if tamper == "ingest":
+            record["ingest_id"] = "ingest-hidden"
+        else:
+            record.pop("graphiti_attempt_id")
+        connection.execute(
+            "UPDATE model_work_envelopes SET record_json=? WHERE envelope_id=?",
+            (json.dumps(record), second.envelope_id),
+        )
+    elif tamper == "allocation_membership":
+        connection.execute(
+            "UPDATE model_invocation_allocations SET envelope_id=? "
+            "WHERE invocation_id=?",
+            (unrelated.envelope_id, dispatched.invocation_id),
+        )
+    else:
+        connection.execute(
+            "UPDATE model_invocation_terminals SET usage_status='AMBIGUOUS' "
+            "WHERE invocation_id=?",
+            (dispatched.invocation_id,),
+        )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(ModelUsageIntegrityError):
+        service.graphiti_ingest_pre_dispatch_zero(ingest_id="ingest-769")
 
 
 def test_graphiti_attempt_cannot_complete_before_every_leaf_has_a_terminal(

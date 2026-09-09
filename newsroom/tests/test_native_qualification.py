@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace as NS
 
 import pytest
@@ -11,7 +12,9 @@ from newsroom.authority.canonical import (
 )
 from newsroom.control_plane.model_usage import (
     CONSERVATIVE_DISPOSITION_SCHEMA_VERSION,
+    InvocationAllocation,
     ModelUsageService,
+    WorkEnvelope,
     WorkloadClass,
 )
 from newsroom.control_plane.native_progress import NativeRevisionJournal
@@ -115,28 +118,72 @@ def _allocation(
 ):
     workload_value = workload.value
     policy = digest_canonical({"policy": workload_value})
-    envelope = digest_canonical({"envelope": workload_value})
-    invocation = digest_canonical({"invocation": workload_value})
-    policy_record = canonical_json_bytes({"policy": policy}).decode()
-    envelope_value = {
-        "envelope_id": envelope,
-        "cycle_id": "qualification-model-cycle",
-        "workload_class": workload_value,
-        "candidate_id": "candidate-1",
+    allocated_at = datetime(2026, 9, 9, tzinfo=UTC)
+    graphiti = workload in {
+        WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        WorkloadClass.GRAPHITI_CHAT_FALLBACK,
+        WorkloadClass.GRAPHITI_EMBEDDING,
     }
-    if ingest_id is not None:
-        envelope_value["ingest_id"] = ingest_id
+    native_embedding = workload is WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING
+    exact_ingest_id = ingest_id or (
+        digest_canonical({"ingest": workload_value})
+        if graphiti or native_embedding else None
+    )
+    envelope = WorkEnvelope.create(
+        cycle_id="qualification-model-cycle",
+        workload_class=workload,
+        admitted_at=allocated_at,
+        admission_decision_id=None,
+        candidate_id="candidate-1" if not graphiti and not native_embedding else None,
+        hypothesis_digest=(
+            digest_canonical({"hypothesis": 1})
+            if workload is WorkloadClass.NATIVE_EVIDENCE_ASSESSOR else None
+        ),
+        evidence_package_digest=(
+            digest_canonical({"evidence": 1})
+            if workload is WorkloadClass.NATIVE_EVIDENCE_ASSESSOR else None
+        ),
+        ingest_id=exact_ingest_id,
+        graphiti_attempt_id=(
+            f"{exact_ingest_id}:1" if graphiti else None
+        ),
+    )
+    allocation = InvocationAllocation.create(
+        envelope_id=envelope.envelope_id,
+        cycle_id=envelope.cycle_id,
+        leaf_ordinal=1,
+        workload_class=workload,
+        invocation_policy_digest=policy,
+        provider=provider,
+        route=route,
+        model="fixture",
+        reasoning="none",
+        prompt_contract_version="qualification-v1",
+        prompt_bytes=1,
+        prompt_digest=digest_canonical({"prompt": 1}),
+        request_digest=digest_canonical({"request": 1}),
+        output_schema_digest=digest_canonical({"schema": 1}),
+        max_output_tokens=1,
+        context_manifest_digest=digest_canonical({"context": 1}),
+        context_identity="qualification-context",
+        config_identity="qualification-config",
+        one_turn=True,
+        exact_input=True,
+        skills_enabled=False,
+        tools_enabled=False,
+        mcp_enabled=False,
+        prior_message_count=0,
+        allocated_at=allocated_at,
+        recovery_deadline_at=allocated_at + timedelta(minutes=1),
+        parent_invocation_id=None,
+    )
+    policy_record = canonical_json_bytes({"policy": policy}).decode()
+    envelope_value = envelope.as_record()
+    allocation_value = allocation.as_record()
+    assert allocation_value["invocation_policy_digest"] == policy
+    assert "policy_digest" not in allocation_value
     envelope_record = canonical_json_bytes(envelope_value).decode()
-    allocation_record = canonical_json_bytes({
-        "canonical_digest": invocation,
-        "invocation_id": invocation,
-        "envelope_id": envelope,
-        "cycle_id": "qualification-model-cycle",
-        "workload_class": workload_value,
-        "policy_digest": policy,
-        "provider": provider,
-        "route": route,
-    }).decode()
+    allocation_record = canonical_json_bytes(allocation_value).decode()
     connection.execute(
         "INSERT INTO model_invocation_policies VALUES(?,?,?,?,?,?,?,?,?)",
         (policy, "qualification-policy", "v1", workload_value,
@@ -144,21 +191,22 @@ def _allocation(
     )
     connection.execute(
         "INSERT INTO model_work_envelopes VALUES(?,?,?,?,?,?)",
-        (envelope, "qualification-model-cycle", workload_value,
-         "2026-09-09T00:00:00.000000Z", envelope, envelope_record),
+        (envelope.envelope_id, envelope.cycle_id, workload_value,
+         envelope_value["admitted_at"], envelope.canonical_digest, envelope_record),
     )
     connection.execute(
         "INSERT INTO model_invocation_allocations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (invocation, envelope, "qualification-model-cycle", 1,
+        (allocation.invocation_id, envelope.envelope_id, envelope.cycle_id, 1,
          workload_value, policy, provider, route,
-         "fixture", digest_canonical({"request": 1}), None,
-         "2026-09-09T00:00:00.000000Z", invocation, allocation_record),
+         "fixture", allocation.request_digest, None,
+         allocation_value["allocated_at"], allocation.canonical_digest,
+         allocation_record),
     )
     if usage_status is not None:
         terminal = {
             "schema_version": "newsroom.model-usage.v3",
             "terminal_digest": "",
-            "invocation_id": invocation,
+            "invocation_id": allocation.invocation_id,
             "outcome": "COMPLETE",
             "failure_class": (
                 "MISSING_PROVIDER_TELEMETRY"
@@ -184,12 +232,12 @@ def _allocation(
         terminal["terminal_digest"] = terminal_digest
         connection.execute(
             "INSERT INTO model_invocation_terminals VALUES(?,?,?,?,?,?,?)",
-            (terminal_digest, invocation, usage_status, "COMPLETE",
+            (terminal_digest, allocation.invocation_id, usage_status, "COMPLETE",
              terminal["failure_class"], "2026-09-09T00:00:02.000000Z",
              canonical_json_bytes(terminal).decode()),
         )
     connection.commit()
-    return invocation
+    return allocation.invocation_id
 
 
 def _conservative_disposition(connection, invocation):

@@ -2301,6 +2301,239 @@ def test_completed_pipeline_failure_snapshot_restores_as_retryable(
         restore_validated_snapshot(raw=malformed, attempt=attempt)
 
 
+def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newsroom.graphiti_adapter.real as real
+    from newsroom.graphiti_adapter.neo4j_guard import GuardMarker, GuardState
+
+    markers: dict[str, dict[str, object]] = {
+        "episode-id": {"failure": "attempt-1"}
+    }
+    provider_calls = 0
+    restored: list[dict[str, object]] = []
+
+    async def marker_exists(guard: object) -> bool:
+        return guard._marker_episode_uuid in markers
+
+    async def completed_raw_or_none(
+        guard: object,
+    ) -> dict[str, object] | None:
+        return markers.get(guard._marker_episode_uuid)
+
+    async def begin(guard: object) -> GuardMarker:
+        retained = markers.get(guard._marker_episode_uuid)
+        if retained is not None:
+            if retained.get("state") == "PENDING":
+                return GuardMarker(
+                    state=GuardState.PENDING,
+                    attempt_number=guard._attempt_number,
+                    input_digest=guard._input_digest,
+                )
+            if retained.get("state") == "RECOVERED_AMBIGUOUS":
+                return GuardMarker(
+                    state=GuardState.RECOVERED_AMBIGUOUS,
+                    attempt_number=guard._attempt_number,
+                    input_digest=guard._input_digest,
+                )
+            return GuardMarker(
+                state=GuardState.COMPLETE,
+                attempt_number=guard._attempt_number,
+                input_digest=guard._input_digest,
+            )
+        markers[guard._marker_episode_uuid] = {"pending": True}
+        return GuardMarker(
+            state=GuardState.CREATED,
+            attempt_number=guard._attempt_number,
+            input_digest=guard._input_digest,
+        )
+
+    async def complete(guard: object, raw: dict[str, object]) -> None:
+        markers[guard._marker_episode_uuid] = dict(raw)
+
+    monkeypatch.setattr(real.Neo4jMutationGuard, "marker_exists", marker_exists)
+    monkeypatch.setattr(
+        real.Neo4jMutationGuard, "completed_raw_or_none", completed_raw_or_none
+    )
+    monkeypatch.setattr(real.Neo4jMutationGuard, "begin", begin)
+    monkeypatch.setattr(real.Neo4jMutationGuard, "complete", complete)
+    monkeypatch.setattr(real, "_bootstrap_graphiti_schema", lambda _driver: asyncio.sleep(0))
+
+    class Graphiti:
+        def __init__(self, *_args: object, **_values: object) -> None:
+            self.driver = object()
+
+        async def close(self) -> None:
+            return None
+
+    class Embedder:
+        def __init__(self, *_args: object, **_values: object) -> None:
+            pass
+
+        def receipt(self) -> dict[str, object]:
+            return {
+                "requests": [],
+                "request_count": 0,
+                "embedding_tokens": 0,
+                "cost_usd_microunits": 0,
+                "usage_basis": "NO_EMBEDDING_CALL",
+            }
+
+    runtime = SimpleNamespace(
+        Graphiti=Graphiti,
+        OpenAIEmbedder=lambda **_values: object(),
+        OpenAIEmbedderConfig=lambda **values: SimpleNamespace(**values),
+        MeteredOpenAIEmbedder=Embedder,
+        IdentityCrossEncoder=lambda: object(),
+        EpisodeType=SimpleNamespace(text="text"),
+        EpisodicNode=lambda **values: SimpleNamespace(**values),
+        MutationGuard=real.Neo4jMutationGuard,
+    )
+    monkeypatch.setattr(real, "_load_graphiti", lambda: runtime)
+    monkeypatch.setattr(
+        real, "build_cli_llm_client", lambda **_values: SimpleNamespace(invocations=[])
+    )
+    monkeypatch.setattr(
+        real,
+        "_ensure_episode",
+        lambda **_values: asyncio.sleep(
+            0, result=(SimpleNamespace(uuid="episode-id"), "RETAINED")
+        ),
+    )
+
+    class Pipeline:
+        def __init__(self, guard: object) -> None:
+            self.guard = guard
+            self.recovery_marker = None
+            self.complete_receipt = None
+            self.complete_failure_receipt = None
+
+        async def _prepare_attempt(self) -> dict[str, object] | None:
+            marker = await self.guard.begin()
+            if marker.state in {
+                GuardState.PENDING,
+                GuardState.RECOVERED_AMBIGUOUS,
+            }:
+                self.recovery_marker = marker
+                raise real.CombinedTemporalPipelineError(
+                    "retained marker is unresolved",
+                    graph_effect_attempted=False,
+                    rollback_completed=False,
+                )
+            if marker.state is GuardState.COMPLETE:
+                return await self.guard.completed_raw_or_none()
+            return None
+
+    monkeypatch.setattr(
+        real,
+        "combined_temporal_pipeline_for",
+        lambda **values: Pipeline(values["guard"]),
+    )
+
+    async def extract(_revision: object, **values: object) -> SimpleNamespace:
+        nonlocal provider_calls
+        provider_calls += 1
+        pipeline = values["pipeline"]
+        await pipeline.guard.complete({"success": "attempt-3"})
+        return SimpleNamespace(
+            outcome=real.CombinedTemporalOutcome.TERMINAL_SUCCESS_ZERO_PROPOSALS,
+            nodes=(),
+            edges=(),
+        )
+
+    monkeypatch.setattr(real, "extract_combined_temporal_async", extract)
+    configuration, revision = _combined_runtime_inputs("Body", "episode-id")
+
+    class Proof:
+        def __init__(self, allowed: bool) -> None:
+            self.allowed = allowed
+
+        def allows_fresh_zero_dispatch_retry(
+            self, *, episode_uuid: str, attempt_number: int
+        ) -> bool:
+            return self.allowed and episode_uuid == "episode-id" and attempt_number == 3
+
+    async def run(attempt_number: int, *, allowed: bool) -> None:
+        await real._add_episode(
+            api_key="key",
+            password="password",
+            body="Body",
+            name="episode-id",
+            episode_id="episode-id",
+            reference_time=datetime(2026, 8, 20, tzinfo=UTC),
+            telemetry=real._EpisodeTelemetry(),
+            attempt_number=attempt_number,
+            validate_result=lambda *_args, **_values: {},
+            restore_result=lambda raw, _telemetry: restored.append(dict(raw)),
+            configuration=configuration,
+            revision=revision,
+            invocation_observer=Proof(allowed),
+            retry_snapshot_is_failed=lambda raw: raw == {"failure": "attempt-1"},
+        )
+
+    asyncio.run(run(2, allowed=False))
+    assert restored == [{"failure": "attempt-1"}]
+    asyncio.run(run(3, allowed=True))
+    assert provider_calls == 1
+    assert markers["episode-id"] == {"failure": "attempt-1"}
+    assert markers["episode-id:attempt:3"] == {"success": "attempt-3"}
+    asyncio.run(run(3, allowed=False))
+    assert provider_calls == 1
+    assert restored[-1] == {"success": "attempt-3"}
+    asyncio.run(run(4, allowed=False))
+    assert provider_calls == 1
+    assert restored[-1] == {"success": "attempt-3"}
+
+    for state in ("PENDING", "RECOVERED_AMBIGUOUS"):
+        markers["episode-id:attempt:3"] = {"state": state}
+        with pytest.raises(real.AmbiguousEpisodeEffect):
+            asyncio.run(run(4, allowed=False))
+        assert provider_calls == 1
+
+
+def test_attempt_marker_keeps_the_stable_source_episode_identity() -> None:
+    from newsroom.graphiti_adapter.neo4j_guard import GuardError, Neo4jMutationGuard
+
+    queried: list[str] = []
+
+    class Driver:
+        async def execute_query(
+            self,
+            _query: str,
+            *,
+            params: dict[str, object],
+            routing_: str,
+        ) -> tuple[list[object], None, None]:
+            assert routing_ == "w"
+            queried.append(str(params["episode_uuid"]))
+            return [], None, None
+
+    guard = Neo4jMutationGuard(
+        Driver(),
+        group_id=GRAPHITI_WORKSPACE_GROUP,
+        episode_uuid="episode-id",
+        marker_episode_uuid="episode-id:attempt:3",
+        attempt_number=3,
+        input_digest="sha256:" + "0" * 64,
+    )
+
+    assert guard.episode_uuid == "episode-id"
+    assert not asyncio.run(guard.marker_exists())
+    assert queried == ["episode-id:attempt:3"]
+    with pytest.raises(GuardError, match="attempt marker identity differs"):
+        guard._bind_marker(
+            {
+                "state": "COMPLETE",
+                "group_id": GRAPHITI_WORKSPACE_GROUP,
+                "attempt_number": 1,
+                "input_digest": "sha256:" + "0" * 64,
+                "snapshot_id": "episode-id:1",
+                "chat_invocations_json": "[]",
+                "embedding_usage_json": "null",
+            }
+        )
+
+
 def test_immutable_completion_preserves_original_access_after_rights_renewal(
     tmp_path: Path,
 ) -> None:

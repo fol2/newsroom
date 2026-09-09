@@ -79,6 +79,7 @@ class Neo4jMutationGuard:
         "_episode_uuid",
         "_group_id",
         "_input_digest",
+        "_marker_episode_uuid",
         "_snapshot_id",
     )
 
@@ -90,11 +91,15 @@ class Neo4jMutationGuard:
         episode_uuid: str,
         attempt_number: int,
         input_digest: str,
+        marker_episode_uuid: str | None = None,
     ) -> None:
         self._driver = driver
         self._claim_token: str | None = None
         self._group_id = group_id
         self._episode_uuid = episode_uuid
+        self._marker_episode_uuid = marker_episode_uuid or episode_uuid
+        if not self._marker_episode_uuid:
+            raise GuardError("Graphiti guard marker identity is absent")
         self._attempt_number = attempt_number
         self._input_digest = input_digest
         self._snapshot_id = f"{episode_uuid}:{attempt_number}"
@@ -141,12 +146,17 @@ class Neo4jMutationGuard:
             MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}})
             RETURN properties(m) AS marker
             """,
-            episode_uuid=self._episode_uuid,
+            episode_uuid=self._marker_episode_uuid,
         )
         if not records:
             return None
         marker = _record_value(records[0], "marker")
         return dict(marker) if isinstance(marker, dict) else None
+
+    async def marker_exists(self) -> bool:
+        """Report whether this exact internal attempt marker is retained."""
+
+        return await self._marker() is not None
 
     async def _claim_marker(
         self,
@@ -173,7 +183,7 @@ class Neo4jMutationGuard:
                        AND m.claim_token <> $claim_token
                        AND m.claim_expires_at > datetime() AS active
             """,
-            episode_uuid=self._episode_uuid,
+            episode_uuid=self._marker_episode_uuid,
             group_id=self._group_id,
             attempt_number=self._attempt_number,
             input_digest=self._input_digest,
@@ -219,7 +229,7 @@ class Neo4jMutationGuard:
                 m.claim_expires_at = datetime() + duration($claim_lease)
             RETURN properties(m) AS marker
             """,
-            episode_uuid=self._episode_uuid,
+            episode_uuid=self._marker_episode_uuid,
             retained_state=str(raw.get("state") or ""),
             snapshot_id=str(raw.get("snapshot_id") or ""),
             retained_claim_token=str(raw.get("claim_token") or ""),
@@ -245,7 +255,7 @@ class Neo4jMutationGuard:
             DELETE m
             RETURN episode_uuid
             """,
-            episode_uuid=self._episode_uuid,
+            episode_uuid=self._marker_episode_uuid,
             claim_token=self._claim_token,
         )
         if not records:
@@ -272,6 +282,11 @@ class Neo4jMutationGuard:
             attempt_number = int(raw["attempt_number"])
         except (KeyError, TypeError, ValueError) as exc:
             raise GuardError("Graphiti guard marker is malformed") from exc
+        if (
+            self._marker_episode_uuid != self._episode_uuid
+            and attempt_number != self._attempt_number
+        ):
+            raise GuardError("Graphiti attempt marker identity differs")
         self._adopt_retained_snapshot(raw, attempt_number=attempt_number)
         invocations: tuple[dict[str, object], ...] = ()
         embedding_usage: dict[str, object] | None = None
@@ -357,7 +372,7 @@ class Neo4jMutationGuard:
             SET m.state = 'PENDING'
             RETURN m.state AS state
             """,
-            episode_uuid=self._episode_uuid,
+            episode_uuid=self._marker_episode_uuid,
             claim_token=self._claim_token,
         )
         if not pending or _record_value(pending[0], "state") != "PENDING":
@@ -421,7 +436,7 @@ class Neo4jMutationGuard:
             """,
             group_id=self._group_id,
             snapshot_id=self._snapshot_id,
-            episode_uuid=self._episode_uuid,
+            episode_uuid=self._marker_episode_uuid,
             claim_token=self._claim_token,
             claim_lease=_MARKER_CLAIM_LEASE,
         )
@@ -445,7 +460,7 @@ class Neo4jMutationGuard:
             """,
             group_id=self._group_id,
             snapshot_id=self._snapshot_id,
-            episode_uuid=self._episode_uuid,
+            episode_uuid=self._marker_episode_uuid,
             claim_token=self._claim_token,
             claim_lease=_MARKER_CLAIM_LEASE,
         )
@@ -464,7 +479,7 @@ class Neo4jMutationGuard:
                 m.embedding_usage_json = $embedding_usage_json
             RETURN m.claim_token AS claim_token
             """,
-            episode_uuid=self._episode_uuid,
+            episode_uuid=self._marker_episode_uuid,
             claim_token=self._claim_token,
             chat_invocations_json=canonical_json_bytes(chat_invocations).decode("utf-8"),
             embedding_usage_json=canonical_json_bytes(embedding_usage).decode("utf-8"),
@@ -485,7 +500,7 @@ class Neo4jMutationGuard:
                     SET m.claim_expires_at = datetime() + duration($claim_lease)
                     RETURN m.claim_token AS claim_token
                     """,
-                    episode_uuid=self._episode_uuid,
+                    episode_uuid=self._marker_episode_uuid,
                     claim_token=self._claim_token,
                     claim_lease=_MARKER_CLAIM_LEASE,
                 )
@@ -500,7 +515,7 @@ class Neo4jMutationGuard:
                     WHERE m.state = 'PENDING' AND m.claim_token = $claim_token
                     SET m.claim_expires_at = datetime() + duration($claim_lease)
                     """,
-                    episode_uuid=self._episode_uuid,
+                    episode_uuid=self._marker_episode_uuid,
                     claim_token=self._claim_token,
                     claim_lease=_MARKER_CLAIM_LEASE,
                 )
@@ -532,7 +547,7 @@ class Neo4jMutationGuard:
             SET m.state = 'ROLLING_BACK'
             RETURN m.state AS state
             """,
-            episode_uuid=self._episode_uuid,
+            episode_uuid=self._marker_episode_uuid,
             claim_token=self._claim_token,
         )
         if not claimed:
@@ -592,7 +607,7 @@ class Neo4jMutationGuard:
                 m.embedding_usage_json = $embedding_usage_json
             RETURN m.state AS state
             """,
-            episode_uuid=self._episode_uuid,
+            episode_uuid=self._marker_episode_uuid,
             claim_token=self._claim_token,
             reason=reason,
             chat_invocations_json=canonical_json_bytes(chat_invocations).decode("utf-8"),
@@ -769,7 +784,7 @@ class Neo4jMutationGuard:
                 m.provider_attempt_number = $provider_attempt_number
             RETURN m.state AS state
             """,
-            episode_uuid=self._episode_uuid,
+            episode_uuid=self._marker_episode_uuid,
             claim_token=self._claim_token,
             validated_raw_json=raw_bytes.decode("utf-8"),
             validated_raw_digest=digest_bytes(raw_bytes),
@@ -821,7 +836,7 @@ class Neo4jMutationGuard:
     async def _delete_marker(self) -> None:
         await self._query(
             f"MATCH (m:{_MARKER} {{episode_uuid: $episode_uuid}}) DELETE m",
-            episode_uuid=self._episode_uuid,
+            episode_uuid=self._marker_episode_uuid,
         )
 
 

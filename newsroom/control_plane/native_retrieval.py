@@ -231,7 +231,7 @@ class NativeRetrievalContinuation:
                 if (
                     type(prior_cycle) is not str or type(attempt) is not int
                     or attempt < 1 or attempt >= MAX_EMBEDDING_ATTEMPTS
-                    or not self._embedder.retryable_pre_dispatch(
+                    or not self._embedder.retryable_settled_attempt(
                         text=text, passage_id=str(passage.passage_id),
                         cycle_id=prior_cycle,
                     )

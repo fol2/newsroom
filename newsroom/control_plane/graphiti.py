@@ -247,6 +247,12 @@ class GraphitiModelUsageObserver:
         if provider_attempt_number <= 0:
             raise ValueError("Graphiti provider attempt number must be positive")
         self._provider_attempt_number = provider_attempt_number
+        self._proved_pre_dispatch_zero_retry = (
+            provider_attempt_number > 1
+            and service.graphiti_ingest_pre_dispatch_zero(
+                ingest_id=self._ingest_obligation_id
+            )
+        )
         self._deadline = deadline
         self._dispatch_authority_digest = (
             dispatch_authority_digest
@@ -258,6 +264,19 @@ class GraphitiModelUsageObserver:
             )
         )
         self._owner_stop_check = owner_stop_check
+
+    def allows_fresh_zero_dispatch_retry(
+        self, *, episode_uuid: str, attempt_number: int
+    ) -> bool:
+        """Bind the internal usage proof to this exact ingest attempt."""
+
+        return (
+            self._proved_pre_dispatch_zero_retry
+            and episode_uuid == self._ingest_obligation_id
+            and attempt_number == self._provider_attempt_number
+            and self._envelope.graphiti_attempt_id
+            == f"{episode_uuid}:{attempt_number}"
+        )
 
     def _policy_for(
         self,

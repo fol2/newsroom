@@ -2,6 +2,7 @@ import io
 import json
 import sqlite3
 from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -10,7 +11,7 @@ from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane import native_embeddings as embedding
 from newsroom.control_plane.model_usage import (
     InvocationEfficiencyPolicy, ModelUsageIntegrityError, ModelUsageService,
-    WorkloadClass,
+    UsageStatus, WorkloadClass,
 )
 from newsroom.control_plane.native_runtime import open_native_runtime
 from newsroom.control_plane.veto import VetoError
@@ -42,7 +43,10 @@ def _response():
             "usage": {"prompt_tokens": 4, "total_tokens": 4, "cost": 0.00001}}
 
 
-@pytest.mark.parametrize("case", ["complete", "bad_vector", "missing_usage", "transport_failed", "signed_stop"])
+@pytest.mark.parametrize("case", [
+    "complete", "bare_model", "unrelated_model", "bad_vector", "missing_usage",
+    "transport_failed", "signed_stop",
+])
 def test_one_accounted_native_embedding_with_real_sqlite_and_governed_objects(tmp_path, monkeypatch, case):
     args = _args(tmp_path, monkeypatch)
     usage_path = str(tmp_path / "usage.sqlite3")
@@ -51,6 +55,8 @@ def test_one_accounted_native_embedding_with_real_sqlite_and_governed_objects(tm
     service.register_policy(policy)
     calls = []
     value = _response()
+    if case == "bare_model": value["model"] = "text-embedding-3-large"
+    if case == "unrelated_model": value["model"] = "text-embedding-3-small"
     if case == "bad_vector": value["data"][0]["embedding"] = [0.25]
     if case == "missing_usage": value.pop("usage")
     class Response(io.BytesIO):
@@ -72,7 +78,7 @@ def test_one_accounted_native_embedding_with_real_sqlite_and_governed_objects(tm
             policy=policy, dispatch_fence=fence, implementation_worktree_clean=True, clock=lambda: NOW,
         )
         params = dict(text="Exact source passage.", passage_id="actual-passage-id", cycle_id="native-cycle-1", proof=runtime.proof)
-        if case == "complete":
+        if case in {"complete", "bare_model"}:
             reference = engine.retain(**params)
             assert reference.vector_admission_id != reference.receipt_admission_id
         elif case == "signed_stop":
@@ -81,10 +87,10 @@ def test_one_accounted_native_embedding_with_real_sqlite_and_governed_objects(tm
         else:
             with pytest.raises(NativeRetrievalHold, match="RESULT_HOLD"):
                 engine.retain(**params)
-        assert engine.retryable_pre_dispatch(
+        assert engine.retryable_settled_attempt(
             text=params["text"], passage_id=params["passage_id"],
             cycle_id=params["cycle_id"],
-        ) is (case == "signed_stop")
+        ) is (case in {"signed_stop", "unrelated_model", "bad_vector"})
     with sqlite3.connect(usage_path) as database:
         assert database.execute("SELECT COUNT(*) FROM model_invocation_allocations").fetchone()[0] == 1
         raw = database.execute("SELECT record_json FROM model_invocation_terminals").fetchone()[0]
@@ -99,11 +105,18 @@ def test_one_accounted_native_embedding_with_real_sqlite_and_governed_objects(tm
             assert request == {"input": "Exact source passage.", "model": embedding.OPENROUTER_EMBEDDING_SLUG,
                                "dimensions": 1024, "encoding_format": "float"}
             assert "test-key" not in raw
-            assert terminal["components"]["total_tokens"] == (4 if case in {"complete", "bad_vector"} else None)
+            assert terminal["components"]["total_tokens"] == (
+                4 if case in {"complete", "bare_model", "unrelated_model", "bad_vector"} else None
+            )
             assert terminal["dispatch_at"] is not None
         assert terminal["od_011_reference"] == "OD-011:NATIVE_RETRIEVAL_EMBEDDING"
         assert terminal["policy_breach"] is None
         assert terminal["usage_status"] == ("UNREPORTED" if case in {"missing_usage", "transport_failed"} else "REPORTED")
+        telemetry = database.execute(
+            "SELECT record_json FROM model_provider_telemetry"
+        ).fetchone()
+        if case == "bare_model":
+            assert json.loads(telemetry[0])["provider_telemetry"]["model"] == "text-embedding-3-large"
         if case == "signed_stop":
             invocation_id = terminal["invocation_id"]
             terminal["invocation_id"] = "corrupt-invocation"
@@ -115,6 +128,84 @@ def test_one_accounted_native_embedding_with_real_sqlite_and_governed_objects(tm
     if case == "signed_stop":
         with pytest.raises(ModelUsageIntegrityError):
             service.terminal(invocation_id)
+
+
+def test_accounted_validation_failure_is_retryable_across_implementation_change(
+    tmp_path, monkeypatch,
+):
+    args = _args(tmp_path, monkeypatch)
+    service = ModelUsageService(str(tmp_path / "usage.sqlite3"))
+    old_policy = _policy()
+    value = _response()
+    value["model"] = "text-embedding-3-small"
+
+    class Response(io.BytesIO):
+        status = 200
+
+        def geturl(self):
+            return embedding.URL
+
+    class Opener:
+        def open(self, request, timeout):
+            return Response(json.dumps(value).encode())
+
+    monkeypatch.setattr("urllib.request.build_opener", lambda *_: Opener())
+    with open_native_runtime(**args) as runtime:
+        old = embedding.NativePassageEmbedder(
+            api_key="test-key", objects=runtime.authority.objects, usage=service,
+            policy=old_policy, dispatch_fence=nullcontext,
+            implementation_worktree_clean=True, clock=lambda: NOW,
+        )
+        with pytest.raises(NativeRetrievalHold, match="RESULT_HOLD"):
+            old.retain(
+                text="Exact source passage.", passage_id="actual-passage-id",
+                cycle_id="native-cycle-1", proof=runtime.proof,
+            )
+        monkeypatch.setattr(embedding, "implementation_digest", lambda: "new-implementation")
+        current = embedding.NativePassageEmbedder(
+            api_key="test-key", objects=runtime.authority.objects, usage=service,
+            policy=_policy(), dispatch_fence=nullcontext,
+            implementation_worktree_clean=True, clock=lambda: NOW,
+        )
+        assert current.retryable_settled_attempt(
+            text="Exact source passage.", passage_id="actual-passage-id",
+            cycle_id="native-cycle-1",
+        )
+        assert not current.retryable_settled_attempt(
+            text="Different passage.", passage_id="actual-passage-id",
+            cycle_id="native-cycle-1",
+        )
+
+        with sqlite3.connect(service.path) as database:
+            invocation_id = database.execute(
+                "SELECT invocation_id FROM model_invocation_allocations"
+            ).fetchone()[0]
+        retained = service.terminal(invocation_id)
+        monkeypatch.setattr(
+            service, "terminal", lambda _invocation_id: replace(
+                retained, usage_status=UsageStatus.AMBIGUOUS
+            )
+        )
+        assert not current.retryable_settled_attempt(
+            text="Exact source passage.", passage_id="actual-passage-id",
+            cycle_id="native-cycle-1",
+        )
+        monkeypatch.setattr(service, "terminal", lambda _invocation_id: retained)
+        with sqlite3.connect(service.path) as database:
+            database.execute("DELETE FROM model_provider_telemetry")
+        assert not current.retryable_settled_attempt(
+            text="Exact source passage.", passage_id="actual-passage-id",
+            cycle_id="native-cycle-1",
+        )
+        monkeypatch.setattr(
+            service, "terminal", lambda _invocation_id: replace(
+                retained, policy_breach="ACCOUNTING_POLICY_BREACH"
+            )
+        )
+        assert not current.retryable_settled_attempt(
+            text="Exact source passage.", passage_id="actual-passage-id",
+            cycle_id="native-cycle-1",
+        )
 
 
 def test_native_embedding_requires_exact_qualified_implementation_before_effects(tmp_path, monkeypatch):
