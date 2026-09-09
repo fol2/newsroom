@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import struct
 import uuid
+from dataclasses import replace
 
 import pytest
 
@@ -19,6 +20,7 @@ from newsroom.projection.neo4j.models import (
 )
 from newsroom.projection.ontology import ProjectionNodeType
 from newsroom.increment5.native_retrieval import (
+    NATIVE_RESULT_LIMIT,
     NATIVE_VECTOR_DIMENSIONS,
     NativeEmbeddingReceipt,
     NativeDocumentReceipt,
@@ -98,7 +100,8 @@ class _Transaction:
         if "fulltext.queryNodes" in query:
             return _Result(({**self.receipt, "score": 2.0},))
         if "vector.queryNodes" in query:
-            return _Result(({**self.receipt, "score": 0.75},))
+            receipts = self.receipt if isinstance(self.receipt, tuple) else (self.receipt,)
+            return _Result(tuple({**item, "score": 0.75} for item in receipts))
         return _Result()
 
 
@@ -199,6 +202,10 @@ def test_native_projection_executes_real_fulltext_and_vector_queries() -> None:
     assert "CREATE VECTOR INDEX" in queries
     assert "db.index.fulltext.queryNodes" in queries
     assert "db.index.vector.queryNodes" in queries
+    assert all(
+        parameters["limit"] == NATIVE_RESULT_LIMIT
+        for query, parameters in driver.calls if "vector.queryNodes" in query
+    )
     assert "WHERE NOT n.aggregate_id IN $aggregate_ids DELETE n" in queries
 
     corrupt = dict(receipt.projection_value())
@@ -213,6 +220,51 @@ def test_native_projection_executes_real_fulltext_and_vector_queries() -> None:
     assert "NewsroomNativeRetrievalDocument_" in queries
     assert any(parameters.get("generation_id") == "native-generation-1" for _, parameters in driver.calls)
     assert {item["default_access_mode"] for item in driver.sessions} == {"READ", "WRITE"}
+
+
+def test_native_projection_indexes_complete_passage_vocabulary() -> None:
+    original = _document()
+    text = " ".join(f"governedterm{index}" for index in range(65))
+    document = replace(original, text=text, text_digest=digest_bytes(text.encode()))
+    receipt = replace(_receipt(), document_digest=document.digest)
+    driver = _Driver(receipt.projection_value())
+    projection = Neo4jNativeRetrievalProjection(
+        driver, database="neo4j", generation_id="native-generation-1",
+        fulltext_index="native_fulltext_1", vector_index="native_vector_1",
+        driver_version=NEO4J_B2_DRIVER_VERSION,
+    )
+
+    projection.upsert(
+        receipt, document, (1.0,) + (0.0,) * (NATIVE_VECTOR_DIMENSIONS - 1)
+    )
+
+    parameters = next(values for query, values in driver.calls if "MERGE (n:" in query)
+    assert len(parameters["latin_terms"]) == 65
+
+
+def test_native_vector_projection_uses_exact_top_eight_and_rejects_overrun() -> None:
+    receipts = tuple(
+        replace(_receipt(), aggregate_id=AggregateId.new()).projection_value()
+        for _ in range(8)
+    )
+    driver = _Driver(receipts)
+    projection = Neo4jNativeRetrievalProjection(
+        driver, database="neo4j", generation_id="native-generation-1",
+        fulltext_index="native_fulltext_1", vector_index="native_vector_1",
+        driver_version=NEO4J_B2_DRIVER_VERSION,
+    )
+    vector = (1.0,) + (0.0,) * (NATIVE_VECTOR_DIMENSIONS - 1)
+
+    assert len(projection.retrieve_vector(query_vector=vector)) == 8
+    query = next(values for query, values in driver.calls if "vector.queryNodes" in query)
+    assert query["limit"] == 8
+    with pytest.raises(NativeRetrievalHold, match="RESULT_LIMIT_EXCEEDED"):
+        NativeRetrievalDocuments._documents(
+            object.__new__(NativeRetrievalDocuments),
+            tuple({**item, "score": 0.75} for item in (*receipts, receipts[0])),
+            "native-generation-1",
+            object(),
+        )
 
 
 def test_native_projection_snapshot_is_actual_native_metadata() -> None:

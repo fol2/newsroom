@@ -302,6 +302,12 @@ def test_native_rights_lookup_does_not_mint_or_consume_beta_fixture_packets(tmp_
             proof=proof(),
         )
         assert refreshed.current_gate.request.decision_ordinal == 2
+        assert refreshed.current_disposition is not None
+        assert (
+            refreshed.current_disposition.request.gate_decision_id
+            == refreshed.current_gate.request.decision_id
+        )
+        assert refreshed.current_disposition.request.decision_ordinal == 2
         assert refreshed.current_gate.request.supporting_reasons[0].references == (
             ReasonReference(
                 "RIGHTS_ASSESSMENT", RIGHTS_ADMISSION_ID, RIGHTS_BLOB_DIGEST
@@ -310,4 +316,108 @@ def test_native_rights_lookup_does_not_mint_or_consume_beta_fixture_packets(tmp_
                 "RIGHTS_OBSERVATION", refreshed_admission, refreshed_digest
             ),
         )
+        before_replay = system.discovery.dispositions(
+            refreshed.lead.request.lead_id, limit=10, proof=proof()
+        )
+        replay = controller.admit_lead(
+            controller.deliver(unit, now=LATER, proof=proof()),
+            now=LATER,
+            proof=proof(),
+        )
+        assert replay.current_disposition == refreshed.current_disposition
+        assert system.discovery.dispositions(
+            refreshed.lead.request.lead_id, limit=10, proof=proof()
+        ) == before_replay
+        rights_snapshot[0] = None
+        held = controller.admit_lead(
+            controller.deliver(unit, now=LATER, proof=proof()),
+            now=LATER,
+            proof=proof(),
+        )
+        assert held.current_gate.request.outcome is GateOutcome.OPERATIONAL_HOLD
+        assert system.discovery.dispositions(
+            refreshed.lead.request.lead_id, limit=10, proof=proof()
+        ) == before_replay
         assert proving.execute("SELECT name FROM sqlite_master").fetchall() == []
+
+
+def test_reopen_repairs_a_current_gate_missing_its_queued_disposition(tmp_path):
+    database = tmp_path / "authority.sqlite3"
+    unit = _unit()
+    rights = [_current_rights()]
+
+    class InterruptDisposition:
+        def __init__(self, discovery):
+            self._discovery = discovery
+
+        def __getattr__(self, name):
+            return getattr(self._discovery, name)
+
+        def record_lead_disposition(self, request, *, proof):
+            raise RuntimeError("crash after Gate authority")
+
+    with sqlite3.connect(":memory:") as proving:
+        with open_discovery_system(database, clock=lambda: NOW) as system:
+            _seed(system, unit)
+            controller = NativeDiscovery(
+                sources=system.sources,
+                checks=system.checks,
+                discovery=system.discovery,
+                proving=proving,
+                rights_for=lambda *_: rights[0],
+            )
+            delivered = controller.deliver(unit, now=NOW, proof=proof())
+            initial = controller.admit_lead(delivered, now=NOW, proof=proof())
+            assert initial.current_disposition is not None
+            rights[0] = {
+                **rights[0],
+                "observation_admission_id": (
+                    "121d3431-fbdd-49c9-aa69-67a59024da56"
+                ),
+                "observation_blob_digest": "sha256:" + "c" * 64,
+            }
+            interrupted = NativeDiscovery(
+                sources=system.sources,
+                checks=system.checks,
+                discovery=InterruptDisposition(system.discovery),
+                proving=proving,
+                rights_for=lambda *_: rights[0],
+            )
+            with pytest.raises(RuntimeError, match="crash after Gate"):
+                interrupted.admit_lead(delivered, now=LATER, proof=proof())
+            prefix = system.discovery.current_status(
+                initial.signal.request.signal_id, proof=proof()
+            )
+            assert prefix.current_gate.request.decision_ordinal == 2
+            assert prefix.current_disposition is None
+            assert system.discovery.latest_disposition(
+                initial.lead.request.lead_id, proof=proof()
+            ) == initial.current_disposition
+
+        with open_discovery_system(database, clock=lambda: LATER) as system:
+            controller = NativeDiscovery(
+                sources=system.sources,
+                checks=system.checks,
+                discovery=system.discovery,
+                proving=proving,
+                rights_for=lambda *_: rights[0],
+            )
+            delivered = controller.deliver(unit, now=LATER, proof=proof())
+            repaired = controller.admit_lead(
+                delivered, now=LATER, proof=proof()
+            )
+            assert repaired.current_disposition is not None
+            assert repaired.current_disposition.request.decision_ordinal == 2
+            assert (
+                repaired.current_disposition.request.previous_decision_id
+                == initial.current_disposition.request.decision_id
+            )
+            before_replay = system.discovery.dispositions(
+                repaired.lead.request.lead_id, limit=10, proof=proof()
+            )
+            assert controller.admit_lead(
+                delivered, now=LATER, proof=proof()
+            ).current_disposition == repaired.current_disposition
+            assert system.discovery.dispositions(
+                repaired.lead.request.lead_id, limit=10, proof=proof()
+            ) == before_replay

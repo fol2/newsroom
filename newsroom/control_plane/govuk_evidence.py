@@ -271,6 +271,12 @@ def parse_govuk_content_document(
     elif document_type == "transparency":
         _require_attachment_inventory(value)
         raise GovUkContentHold("SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE")
+    elif document_type == "correspondence":
+        if value.get("schema_name") != "publication":
+            raise ValueError("source correspondence schema differs")
+        _document_text(value)
+        _require_attachment_inventory(value)
+        raise GovUkContentHold("SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE")
     else:
         raise ValueError("source document type is unsupported")
     return GovUkContentDocument(

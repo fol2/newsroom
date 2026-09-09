@@ -636,6 +636,8 @@ def test_discovery_write_and_read_scopes_are_separate(tmp_path: Path) -> None:
         assert system.discovery.current_status(SIGNAL_ID, proof=proof()).lead is not None
         with pytest.raises(PermissionError):
             system.discovery.signal(SIGNAL_ID, proof=proof())
+        with pytest.raises(PermissionError):
+            system.discovery.latest_disposition(LEAD_ID, proof=proof())
 
     with open_discovery_system(
         database,
@@ -788,6 +790,9 @@ def test_repromotion_requires_a_new_gate_bound_disposition(tmp_path: Path) -> No
 
         with pytest.raises(LookupError, match="current Lead Disposition"):
             system.discovery.current_disposition(LEAD_ID, proof=proof())
+        assert system.discovery.latest_disposition(
+            LEAD_ID, proof=proof()
+        ) == created.initial_disposition
 
         prefix = system.discovery.current_status(SIGNAL_ID, proof=proof())
         assert prefix.lead == created.lead
@@ -803,6 +808,9 @@ def test_repromotion_requires_a_new_gate_bound_disposition(tmp_path: Path) -> No
         )
         completed = system.discovery.current_status(SIGNAL_ID, proof=proof())
         assert completed.current_disposition == retained
+        assert system.discovery.latest_disposition(
+            LEAD_ID, proof=proof()
+        ) == retained
         assert completed.action_source.value == "LEAD_DISPOSITION"
 
 def test_startup_rejects_signal_and_gate_head_tampering(tmp_path: Path) -> None:
@@ -923,6 +931,7 @@ def test_discovery_read_boundary_rejects_untyped_identities_before_lookup(
             lambda: system.discovery.watch_condition("watch", proof=proof()),
             lambda: system.discovery.disposition("disposition", proof=proof()),
             lambda: system.discovery.current_disposition("lead", proof=proof()),
+            lambda: system.discovery.latest_disposition("lead", proof=proof()),
             lambda: system.discovery.dispositions("lead", limit=1, proof=proof()),
             lambda: system.discovery.current_status("signal", proof=proof()),
         )
