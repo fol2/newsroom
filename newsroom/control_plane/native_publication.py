@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
@@ -30,6 +30,7 @@ from newsroom.control_plane.native_evidence import (
     NativeEvidenceHold,
     NativeEvidenceSource,
 )
+from newsroom.control_plane.native_assessor import RetainedAssessorContractFailure
 from newsroom.control_plane.native_progress import NativeRevisionJournal
 from newsroom.control_plane.veto import VetoError
 from newsroom.increment6.candidates import StoryCandidateReadPort
@@ -431,12 +432,19 @@ class NativePublicationContinuation:
         runtime: object,
         evidence_controller: NativeEvidenceController,
         sources: Mapping[str, tuple[NativeEvidenceSource, ...]],
+        assessment_contract_failure: (
+            Callable[[object], RetainedAssessorContractFailure | None] | None
+        ) = None,
         clock=UtcTimestamp.now,
     ) -> None:
         if (
             type(journal) is not NativeRevisionJournal
             or type(evidence_controller) is not NativeEvidenceController
             or not callable(clock)
+            or (
+                assessment_contract_failure is not None
+                and not callable(assessment_contract_failure)
+            )
             or not isinstance(sources, Mapping)
             or not all(
                 type(key) is str
@@ -454,14 +462,20 @@ class NativePublicationContinuation:
         self._runtime = runtime
         self._evidence = evidence_controller
         self._sources = dict(sources)
+        self._assessment_contract_failure = assessment_contract_failure
         self._clock = clock
 
     def advance(
         self, *, revision_id: str, candidate_version_id: str
     ) -> NativePublicationContinuationResult:
-        if revision_id not in self._journal.units or revision_id not in self._sources:
+        if revision_id not in self._journal.units:
             raise NativePublicationError("native continuation revision differs")
         progress = self._journal.progress.get(revision_id, {})
+        if (
+            progress.get("stage") != "ASSESSMENT_INTERRUPTED"
+            and revision_id not in self._sources
+        ):
+            raise NativePublicationError("native continuation revision differs")
         facts = dict(progress.get("facts", {}))
         if facts.get("candidate_version_id") not in (None, candidate_version_id):
             raise NativePublicationError("native continuation Candidate differs")
@@ -473,6 +487,41 @@ class NativePublicationContinuation:
         if facts.get("candidate_id") not in (None, candidate_id):
             raise NativePublicationError("native continuation stable Candidate differs")
         facts["candidate_id"] = candidate_id
+
+        if progress.get("stage") == "ASSESSMENT_INTERRUPTED":
+            retained_failure = None
+            if (
+                facts.get("failure_class") == "EvidencePackageError"
+                and self._assessment_contract_failure is not None
+            ):
+                retained_failure = self._assessment_contract_failure(version)
+            if type(retained_failure) is RetainedAssessorContractFailure:
+                facts.update(
+                    reason="ASSESSOR_OUTPUT_CONTRACT_HOLD",
+                    acquisition_retryable=False,
+                    assessment_failure_envelope_id=retained_failure.envelope_id,
+                    assessment_failure_invocation_id=retained_failure.invocation_id,
+                    assessment_failure_allocation_digest=(
+                        retained_failure.allocation_digest
+                    ),
+                    assessment_failure_terminal_digest=(
+                        retained_failure.terminal_digest
+                    ),
+                    assessment_failure_context_manifest_digest=(
+                        retained_failure.context_manifest_digest
+                    ),
+                )
+                self._journal.advance(
+                    revision_id, stage="EVIDENCE_HOLD", facts=facts
+                )
+                return NativePublicationContinuationResult(
+                    "EVIDENCE_HOLD", facts["reason"], None
+                )
+            return NativePublicationContinuationResult(
+                "ASSESSMENT_INTERRUPTED",
+                str(facts.get("reason", "ACQUISITION_RESULT_NOT_RETAINED")),
+                None,
+            )
 
         if "intake_receipt_id" not in facts:
             request_id = facts.get("intake_request_id")

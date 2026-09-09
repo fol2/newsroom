@@ -2,6 +2,7 @@ import json
 import sqlite3
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
@@ -27,7 +28,7 @@ from newsroom.control_plane.model_usage import (
     WorkEnvelope,
     WorkloadClass,
 )
-from newsroom.increment10.evidence import _base_package
+from newsroom.increment10.evidence import EvidencePackageError, _base_package
 from newsroom.control_plane.writer import (
     CONT_DISABLED_CAPABILITIES,
     CONT_PRIMARY_COMMAND_FLAGS,
@@ -39,19 +40,71 @@ from newsroom.tests.test_increment10_ingress import _candidate
 REVISION = "1" * 40
 
 
+def _model_package_value(package):
+    value = evidence_package_value(package)
+    return {
+        "substantive_new_information": value["substantive_new_information"],
+        "governed_claims": [
+            {
+                key: item[key]
+                for key in (
+                    "claim_id", "claim", "passage_index", "supporting_excerpt",
+                    "source_ids", "status",
+                    "rendered_assertion_zh_hant_hk", "claim_role",
+                    "localised_factual_expressions", "quotations", "certainty",
+                    "originality_basis", "originality_policy_version",
+                    "admitted_use", "policy_version",
+                )
+            } | {
+                "semantic_relation": {
+                    "source_modality": "ASSERTED",
+                    "rendered_modality": "ASSERTED",
+                    "source_polarity": "AFFIRMED",
+                    "rendered_polarity": "AFFIRMED",
+                    "relation": "SEMANTICALLY_EQUIVALENT",
+                },
+                "named_entities": [
+                    [
+                        entity[0],
+                        item["rendered_named_entities"][index],
+                        entity[1],
+                    ]
+                    for index, entity in enumerate(item["named_entity_evidence"])
+                ]
+            }
+            for item in value["governed_claims"]
+        ],
+        "qualification_evidence": [
+            {
+                key: item[key]
+                for key in (
+                    "test", "governed_claim_id", "test_evidence", "policy_version"
+                )
+            }
+            for item in value["qualification_evidence"]
+        ],
+        "selection_rationale": value["selection_rationale"],
+        "geography": value["geography"],
+        "categories": value["categories"],
+        "explicit_exclusions": value["explicit_exclusions"],
+    }
+
+
 def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tmp_path) -> None:
     connection, _port, candidate = _candidate(tmp_path)
     base = _base_package(_ready_package(candidate)[1])
+    assessed = _ready_package(candidate)[1]
     validator = Draft202012Validator(SCHEMA)
-    validator.validate({"package": evidence_package_value(base), "assessment_records": []})
-    invalid = evidence_package_value(base)
-    invalid["evidence_gate_evidence"] = [{
-        "gate": "CLAIM_TRACEABILITY", "result": "PASS",
-        "governed_claim_ids": ["claim-1"],
-        "policy_version": "newsroom.evidence-gates.v2", "invented": True,
-    }]
+    validator.validate({"package": _model_package_value(base)})
+    model_value = _model_package_value(assessed)
+    validator.validate({"package": model_value})
+    assert "source_authority_decision_ids" not in model_value["governed_claims"][0]
+    assert "semantic_relation_evidence_id" not in model_value["governed_claims"][0]
+    assert "qualification_record_id" not in model_value["qualification_evidence"][0]
+    invalid = _model_package_value(base)
+    invalid["invented"] = True
     with pytest.raises(ValidationError):
-        validator.validate({"package": invalid, "assessment_records": []})
+        validator.validate({"package": invalid})
     connection.close()
 
 
@@ -119,10 +172,7 @@ def test_native_assessor_uses_exact_candidate_and_base_without_ambient_context(
         calls.append(prompt)
         return NativeAssessmentExecution(
             canonical_json_bytes(
-                {
-                    "package": evidence_package_value(base),
-                    "assessment_records": [],
-                }
+                {"package": _model_package_value(base)}
             ).decode(),
             {
                 "usage_basis": "PROVIDER_REPORTED",
@@ -167,7 +217,7 @@ def test_native_assessor_uses_exact_candidate_and_base_without_ambient_context(
     bad = AutonomousNativeEvidenceAssessor(
         lambda _: NativeAssessmentExecution('{"package": {}}', {})
     )
-    with pytest.raises(NativeEvidenceError):
+    with pytest.raises(EvidencePackageError):
         bad(candidate, base, (), ())
     connection.close()
 
@@ -177,7 +227,17 @@ def test_native_assessor_uses_exact_candidate_and_base_without_ambient_context(
     (
         (lambda _: (_ for _ in ()).throw(RuntimeError("provider broke")),
          "ASSESSOR_PROVIDER_FAILED"),
-        (lambda _: NativeAssessmentExecution('{"package": {}}', {}),
+        (lambda _: NativeAssessmentExecution(
+            '{"package":{}}', {
+            "usage_basis": "PROVIDER_REPORTED",
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "cached_read_tokens": 0,
+            "cached_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_tokens": 1,
+            "total_tokens": 2,
+        }),
          "ASSESSOR_VALIDATION_FAILED"),
     ),
 )
@@ -205,6 +265,72 @@ def test_native_assessor_retains_post_dispatch_failures(
         assert retained.execute(
             "SELECT state FROM model_transport_observations"
         ).fetchall() == [("DISPATCH_STARTED",)]
+    proof = usage.retained_output_contract_failure(candidate)
+    if outcome == "ASSESSOR_VALIDATION_FAILED":
+        assert proof is not None
+        assert proof.invocation_id == terminal["invocation_id"]
+        assert proof.terminal_digest == terminal["terminal_digest"]
+        monkeypatch.setattr(
+            "newsroom.control_plane.native_assessor.SCHEMA_DIGEST",
+            "sha256:" + "9" * 64,
+        )
+        assert usage.retained_output_contract_failure(candidate) is not None
+        wrong_candidate = SimpleNamespace(
+            candidate_id="wrong-candidate",
+            version_id=candidate.version_id,
+            governing_manifest=candidate.governing_manifest,
+        )
+        assert usage.retained_output_contract_failure(wrong_candidate) is None
+        with sqlite3.connect(service.path) as retained:
+            retained.execute(
+                "UPDATE model_invocation_policies SET qualified=0"
+            )
+        assert usage.retained_output_contract_failure(candidate) is None
+        with sqlite3.connect(service.path) as retained:
+            retained.execute(
+                "UPDATE model_invocation_policies SET qualified=1"
+            )
+        assert usage.retained_output_contract_failure(candidate) is not None
+        with sqlite3.connect(service.path) as retained:
+            original_policy = retained.execute(
+                "SELECT record_json FROM model_invocation_policies"
+            ).fetchone()[0]
+            changed_policy = json.loads(original_policy)
+            changed_policy["max_total_tokens"] += 1
+            retained.execute(
+                "UPDATE model_invocation_policies SET record_json=?",
+                (json.dumps(changed_policy),),
+            )
+        assert usage.retained_output_contract_failure(candidate) is None
+        with sqlite3.connect(service.path) as retained:
+            retained.execute(
+                "UPDATE model_invocation_policies SET record_json=?",
+                (original_policy,),
+            )
+        assert usage.retained_output_contract_failure(candidate) is not None
+        with sqlite3.connect(service.path) as retained:
+            coerced_policy = json.loads(original_policy)
+            coerced_policy["qualified"] = 1
+            retained.execute(
+                "UPDATE model_invocation_policies SET record_json=?",
+                (json.dumps(coerced_policy),),
+            )
+        assert usage.retained_output_contract_failure(candidate) is None
+        with sqlite3.connect(service.path) as retained:
+            retained.execute(
+                "UPDATE model_invocation_policies SET record_json=?",
+                (original_policy,),
+            )
+        assert usage.retained_output_contract_failure(candidate) is not None
+        with sqlite3.connect(service.path) as retained:
+            retained.execute(
+                "UPDATE model_provider_telemetry "
+                "SET provider_telemetry_digest=?",
+                ("sha256:" + "f" * 64,),
+            )
+        assert usage.retained_output_contract_failure(candidate) is None
+    else:
+        assert proof is None
     connection.close()
 
 
@@ -237,3 +363,16 @@ def test_native_work_envelopes_reject_unrelated_authority_ids() -> None:
                 "graphiti_attempt_id": None,
             },
         )
+
+
+def test_inflight_native_assessor_is_not_a_retained_contract_failure(
+    tmp_path, monkeypatch,
+) -> None:
+    connection, _port, candidate = _candidate(tmp_path)
+    base = _base_package(_ready_package(candidate)[1])
+    _service, usage = _usage(tmp_path, monkeypatch)
+
+    usage.begin(candidate, base, "in-flight assessor request")
+
+    assert usage.retained_output_contract_failure(candidate) is None
+    connection.close()

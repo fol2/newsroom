@@ -112,7 +112,17 @@ class NativePipeline:
         for revision_id, units in tuple(self._journal.units.items()):
             self._check()
             previous = self._journal.progress.get(revision_id, {})
-            if previous.get("stage") in {"ACKNOWLEDGED", "ASSESSMENT_INTERRUPTED"}:
+            if previous.get("stage") == "ASSESSMENT_INTERRUPTED":
+                candidate_version_id = previous.get("facts", {}).get(
+                    "candidate_version_id"
+                )
+                if type(candidate_version_id) is str and candidate_version_id:
+                    self._publish.advance(
+                        revision_id=revision_id,
+                        candidate_version_id=candidate_version_id,
+                    )
+                continue
+            if previous.get("stage") == "ACKNOWLEDGED":
                 continue
             if (
                 previous.get("stage") == "EVIDENCE_HOLD"

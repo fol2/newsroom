@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -16,23 +17,34 @@ from newsroom.authority.canonical import (
 from newsroom.control_plane.evidence import (
     ClaimAuthorityClass,
     EVID_012_POLICY_VERSION,
-    EVIDENCE_GATE_POLICY_VERSION,
     EvidencePackage,
     GOVERNED_CLAIM_POLICY_VERSION,
     GovernedClaimStatus,
+    NAMED_ENTITY_POLICY_VERSION,
     ORIGINALITY_POLICY_VERSION,
     Evid012QualificationTest,
     evidence_package_value,
 )
 from newsroom.increment10.editorial import SourceCurrentness
-from newsroom.increment10.evidence import _base_package, _package_from_value
+from newsroom.increment10.evidence import (
+    EvidencePackageError,
+    _base_package,
+    _package_from_value,
+)
 
 from .model_usage import (
     InvocationAllocation,
     InvocationEfficiencyPolicy,
+    ModelUsageIntegrityError,
     ModelUsageService,
+    UsageStatus,
     WorkEnvelope,
     WorkloadClass,
+    _allocation_from_record,
+    _envelope_from_record,
+    _policy_for_allocation,
+    _require_reported_telemetry,
+    _terminal_from_record,
 )
 
 from .native_evidence import (
@@ -44,6 +56,7 @@ from .native_evidence import (
     rights_eligibility_digest,
     NativeEvidenceSource,
     SourceAuthorityAssessment,
+    _assessment_id,
 )
 from .writer import (
     CONT_DISABLED_CAPABILITIES,
@@ -58,7 +71,7 @@ from .writer import (
 )
 from .cycle import _complete_writer_usage
 
-VERSION = "newsroom.native-evidence-assessor.v1"
+VERSION = "newsroom.native-evidence-assessor.v2"
 ROUTE = "NATIVE_EVIDENCE_ASSESSOR"
 CONTEXT_IDENTITY = "native-evidence-exact-acquisition-v1"
 CONFIG_IDENTITY = "native-evidence-assessor-grok-hermetic-command-v1"
@@ -67,8 +80,9 @@ CONTEXT_MANIFEST_SCHEMA_VERSION = (
 )
 SYSTEM = (
     "You are a one-turn evidence extraction transform. Use only the supplied "
-    "candidate and exact source bytes. Return JSON matching the schema. Never "
-    "claim facts, translations or authority absent from an exact source excerpt."
+    "candidate and exact source bytes. Return JSON matching the schema. Translate "
+    "or localise only facts present in an exact source excerpt; never add facts or "
+    "authority absent from that evidence."
 )
 _STRING = {"type": "string"}
 _STRINGS = {"type": "array", "items": _STRING}
@@ -78,25 +92,29 @@ _PAIRS = {
         "type": "array", "items": _STRING, "minItems": 2, "maxItems": 2,
     },
 }
+_SEMANTIC_RELATION_FIELDS = {
+    "source_modality": _STRING,
+    "rendered_modality": _STRING,
+    "source_polarity": _STRING,
+    "rendered_polarity": _STRING,
+    "relation": _STRING,
+}
 _CLAIM_FIELDS = {
     "claim_id": _STRING, "claim": _STRING, "passage_index": {"type": "integer"},
     "supporting_excerpt": _STRING, "source_ids": _STRINGS,
-    "source_record_ids": _STRINGS, "source_authority_decision_ids": _STRINGS,
-    "rights_decision_ids": _STRINGS,
-    "dependency_evidence_ids": _STRINGS, "evidential_origin_ids": _STRINGS,
-    "authority_class": {"enum": ["RESPONSIBLE_PRIMARY", "INDEPENDENT_RELIABLE"]},
-    "authority_scope": _STRING,
     "status": {"enum": [item.value for item in GovernedClaimStatus]},
-    "attribution": _STRING, "rendered_assertion_zh_hant_hk": _STRING,
+    "rendered_assertion_zh_hant_hk": _STRING,
     "claim_role": {"enum": ["HEADLINE", "SUBSTANTIVE", "CONTEXT"]},
-    "semantic_relation_evidence_id": _STRING,
-    "localised_factual_expressions": _PAIRS,
-    "named_entity_evidence": {
-        "type": "array", "items": {
-            "type": "array", "items": _STRING, "minItems": 3, "maxItems": 3,
-        },
+    "semantic_relation": {
+        "type": "object",
+        "properties": _SEMANTIC_RELATION_FIELDS,
+        "required": list(_SEMANTIC_RELATION_FIELDS),
+        "additionalProperties": False,
     },
-    "named_entities": _STRINGS, "rendered_named_entities": _STRINGS,
+    "localised_factual_expressions": _PAIRS,
+    "named_entities": {"type": "array", "items": {
+        "type": "array", "items": _STRING, "minItems": 3, "maxItems": 3,
+    }},
     "quotations": _STRINGS, "certainty": {"const": "CONFIRMED"},
     "originality_basis": {"const": "FACTUAL_REWRITE_REQUIRED"},
     "originality_policy_version": {"const": ORIGINALITY_POLICY_VERSION},
@@ -104,9 +122,7 @@ _CLAIM_FIELDS = {
     "policy_version": {"const": GOVERNED_CLAIM_POLICY_VERSION},
 }
 _PACKAGE_FIELDS = {
-    "candidate_id": _STRING, "hypothesis_id": _STRING, "signal_ids": _STRINGS,
-    "lead_ids": _STRINGS, "source_ids": _STRINGS, "observation_digests": _STRINGS,
-    "passages": _STRINGS, "substantive_new_information": _STRINGS,
+    "substantive_new_information": _STRINGS,
     "governed_claims": {"type": "array", "items": {
         "type": "object", "properties": _CLAIM_FIELDS,
         "required": list(_CLAIM_FIELDS), "additionalProperties": False,
@@ -115,74 +131,26 @@ _PACKAGE_FIELDS = {
         "type": "object", "properties": {
             "test": {"enum": [item.value for item in Evid012QualificationTest]},
             "governed_claim_id": _STRING,
-            "qualification_record_id": _STRING, "test_evidence": _PAIRS,
+            "test_evidence": _PAIRS,
             "policy_version": {"const": EVID_012_POLICY_VERSION},
         },
         "required": [
-            "test", "governed_claim_id", "qualification_record_id",
-            "test_evidence", "policy_version",
+            "test", "governed_claim_id", "test_evidence", "policy_version",
         ],
         "additionalProperties": False,
     }},
     "selection_rationale": _STRING, "geography": _STRINGS, "categories": _STRINGS,
-    "evidence_gate_results": _PAIRS,
-    "evidence_gate_evidence": {"type": "array", "items": {
-        "type": "object",
-        "properties": {
-            "gate": {"enum": [
-                "CLAIM_TRACEABILITY", "EVIDENCE_SUFFICIENCY", "SOURCE_AUTHORITY",
-            ]},
-            "result": {"const": "PASS"},
-            "governed_claim_ids": _STRINGS,
-            "policy_version": {"const": EVIDENCE_GATE_POLICY_VERSION},
-        },
-        "required": ["gate", "result", "governed_claim_ids", "policy_version"],
-        "additionalProperties": False,
-    }},
-    "freshness_result": _STRING, "integrity_result": _STRING,
     "explicit_exclusions": _STRINGS,
-    "resolved_evidence_records": _PAIRS,
 }
-def _record_schema(kind: str, fields: dict[str, object]) -> dict[str, object]:
-    properties = {
-        "record_id": _STRING, "record_type": {"const": kind},
-        "governed_claim_id": _STRING, **fields,
-    }
-    return {
-        "type": "object", "properties": properties,
-        "required": list(properties), "additionalProperties": False,
-    }
-
-
-_ASSESSMENT_RECORD = {"oneOf": [
-    _record_schema("SEMANTIC_RELATION_EVIDENCE", {
-        "source_modality": _STRING, "rendered_modality": _STRING,
-        "source_polarity": _STRING, "rendered_polarity": _STRING,
-        "relation": _STRING, "claim_digest": _STRING,
-        "rendered_assertion_digest": _STRING,
-    }),
-    _record_schema("QUALIFICATION_EVIDENCE", {
-        "test": _STRING,
-        "test_evidence": _PAIRS, "policy_version": _STRING,
-        "evidence_span_digest": _STRING, "source_record_ids": _STRINGS,
-    }),
-    _record_schema("NAMED_ENTITY_EVIDENCE", {
-        "text": _STRING, "rendered_text": _STRING, "entity_type": _STRING,
-        "canonical_entity_id": _STRING, "rendered_span_digest": _STRING,
-        "policy_version": _STRING, "evidence_span_digest": _STRING,
-        "source_record_ids": _STRINGS,
-    }),
-]}
 SCHEMA = {
     "type": "object",
-    "required": ["package", "assessment_records"],
+    "required": ["package"],
     "additionalProperties": False,
     "properties": {
         "package": {
             "type": "object", "properties": _PACKAGE_FIELDS,
             "required": list(_PACKAGE_FIELDS), "additionalProperties": False,
         },
-        "assessment_records": {"type": "array", "items": _ASSESSMENT_RECORD},
     },
 }
 SCHEMA_DIGEST = digest_bytes(canonical_json_bytes(SCHEMA))
@@ -196,10 +164,37 @@ INTEGRITY = (
 )
 
 
+def _semantic_record_id(claim_id: str, claim: str, rendered: str) -> str:
+    return _assessment_id("SEMANTIC_RELATION", claim_id, claim, rendered)
+
+
+def _qualification_record_id(
+    claim_id: str, test: str, test_evidence: object
+) -> str:
+    return _assessment_id(
+        "QUALIFICATION", claim_id, test, digest_canonical(test_evidence)
+    )
+
+
+def _named_entity_record_id(
+    claim_id: str, text: str, entity_type: str, rendered: str
+) -> str:
+    return _assessment_id("NAMED_ENTITY", claim_id, text, entity_type, rendered)
+
+
 @dataclass(frozen=True, slots=True)
 class NativeAssessmentExecution:
     text: str
     usage: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class RetainedAssessorContractFailure:
+    envelope_id: str
+    invocation_id: str
+    allocation_digest: str
+    terminal_digest: str
+    context_manifest_digest: str
 
 
 class NativeAssessmentUsage:
@@ -385,6 +380,303 @@ class NativeAssessmentUsage:
             policy=self._policy,
         )
 
+    def retained_output_contract_failure(
+        self, candidate: object
+    ) -> RetainedAssessorContractFailure | None:
+        """Prove one settled, candidate-bound assessor contract failure."""
+
+        candidate_id = getattr(candidate, "candidate_id", None)
+        version_id = getattr(candidate, "version_id", None)
+        manifest = getattr(candidate, "governing_manifest", None)
+        hypothesis_digest = getattr(manifest, "canonical_digest", None)
+        if not all(type(value) is str and value for value in (
+            candidate_id, version_id, hypothesis_digest,
+        )):
+            return None
+        connection = sqlite3.connect(f"file:{self._service.path}?mode=ro", uri=True)
+        try:
+            rows = connection.execute(
+                "SELECT envelope_id,cycle_id,workload_class,admitted_at,"
+                "canonical_digest,record_json FROM model_work_envelopes "
+                "WHERE workload_class=?",
+                (WorkloadClass.NATIVE_EVIDENCE_ASSESSOR.value,),
+            ).fetchall()
+            matches: list[RetainedAssessorContractFailure] = []
+            for row in rows:
+                try:
+                    envelope_record = json.loads(row[5])
+                    envelope = _envelope_from_record(envelope_record)
+                except (TypeError, ValueError, ModelUsageIntegrityError):
+                    return None
+                if tuple(row[:5]) != (
+                    envelope.envelope_id,
+                    envelope.cycle_id,
+                    envelope.workload_class.value,
+                    envelope_record["admitted_at"],
+                    envelope.canonical_digest,
+                ) or envelope.as_record() != envelope_record:
+                    return None
+                if (
+                    envelope.candidate_id != candidate_id
+                    or envelope.hypothesis_digest != hypothesis_digest
+                ):
+                    continue
+                if envelope.evidence_package_digest is None or envelope.cycle_id != digest_bytes(
+                    canonical_json_bytes([version_id, envelope.evidence_package_digest])
+                ):
+                    continue
+                allocation_rows = connection.execute(
+                    "SELECT invocation_id,envelope_id,cycle_id,leaf_ordinal,"
+                    "workload_class,policy_digest,provider,route,model,request_digest,"
+                    "parent_invocation_id,allocated_at,canonical_digest,record_json "
+                    "FROM model_invocation_allocations WHERE envelope_id=?",
+                    (envelope.envelope_id,),
+                ).fetchall()
+                if len(allocation_rows) != 1:
+                    return None
+                allocation_row = allocation_rows[0]
+                try:
+                    allocation_record = json.loads(allocation_row[13])
+                    allocation = _allocation_from_record(allocation_record)
+                except (TypeError, ValueError, ModelUsageIntegrityError):
+                    return None
+                if tuple(allocation_row[:13]) != (
+                    allocation.invocation_id,
+                    allocation.envelope_id,
+                    allocation.cycle_id,
+                    allocation.leaf_ordinal,
+                    allocation.workload_class.value,
+                    allocation.invocation_policy_digest,
+                    allocation.provider,
+                    allocation.route,
+                    allocation.model,
+                    allocation.request_digest,
+                    allocation.parent_invocation_id,
+                    allocation_record["allocated_at"],
+                    allocation.canonical_digest,
+                ) or allocation.as_record() != allocation_record or (
+                    allocation.envelope_id != envelope.envelope_id
+                    or allocation.cycle_id != envelope.cycle_id
+                    or allocation.leaf_ordinal != 1
+                    or allocation.workload_class
+                    is not WorkloadClass.NATIVE_EVIDENCE_ASSESSOR
+                ):
+                    return None
+                context_row = connection.execute(
+                    "SELECT context_manifest_digest,provider,route,"
+                    "evidence_package_digest,record_json "
+                    "FROM model_invocation_context_manifests "
+                    "WHERE context_manifest_digest=?",
+                    (allocation.context_manifest_digest,),
+                ).fetchone()
+                terminal_row = connection.execute(
+                    "SELECT terminal_digest,invocation_id,usage_status,outcome,"
+                    "failure_class,completed_at,record_json "
+                    "FROM model_invocation_terminals WHERE invocation_id=?",
+                    (allocation.invocation_id,),
+                ).fetchone()
+                transport_rows = connection.execute(
+                    "SELECT observation_digest,invocation_id,observed_at,state,"
+                    "evidence_digest,record_json FROM model_transport_observations "
+                    "WHERE invocation_id=? ORDER BY observed_at,observation_digest",
+                    (allocation.invocation_id,),
+                ).fetchall()
+                if context_row is None or terminal_row is None:
+                    return None
+                try:
+                    policy = _policy_for_allocation(connection, allocation)
+                    policy_record_row = connection.execute(
+                        "SELECT record_json FROM model_invocation_policies "
+                        "WHERE canonical_digest=?",
+                        (allocation.invocation_policy_digest,),
+                    ).fetchone()
+                    if policy_record_row is None:
+                        return None
+                    policy_record = json.loads(policy_record_row[0])
+                    policy._validate()
+                    context = json.loads(context_row[4])
+                    terminal_record = json.loads(terminal_row[6])
+                    terminal = _terminal_from_record(terminal_record)
+                    transport_values = tuple(
+                        json.loads(item[5]) for item in transport_rows
+                    )
+                except (TypeError, ValueError, ModelUsageIntegrityError):
+                    return None
+                if type(policy_record) is not dict:
+                    return None
+                unsigned_policy = dict(policy_record)
+                retained_policy_digest = unsigned_policy.pop(
+                    "canonical_digest", None
+                )
+                if (
+                    policy_record != policy.as_record()
+                    or retained_policy_digest != policy.canonical_digest
+                    or digest_canonical(unsigned_policy) != policy.canonical_digest
+                ):
+                    return None
+                try:
+                    terminal_policy_breach = self._service._validate_terminal(
+                        terminal,
+                        allocation.workload_class,
+                        policy,
+                        requested_max_output_tokens=allocation.max_output_tokens,
+                    )
+                except ModelUsageIntegrityError:
+                    return None
+                unsigned_context = dict(context)
+                retained_context_digest = unsigned_context.pop(
+                    "context_manifest_digest", None
+                )
+                if (
+                    policy.canonical_digest
+                    != allocation.invocation_policy_digest
+                    or policy.workload_class
+                    is not WorkloadClass.NATIVE_EVIDENCE_ASSESSOR
+                    or not policy.qualified
+                    or (
+                        allocation.provider,
+                        allocation.route,
+                        allocation.model,
+                        allocation.reasoning,
+                        allocation.prompt_contract_version,
+                        allocation.output_schema_digest,
+                    )
+                    != (
+                        policy.provider,
+                        policy.route,
+                        policy.model,
+                        policy.reasoning,
+                        policy.prompt_contract_version,
+                        policy.output_schema_digest,
+                    )
+                    or (
+                        allocation.one_turn,
+                        allocation.exact_input,
+                        allocation.skills_enabled,
+                        allocation.tools_enabled,
+                        allocation.mcp_enabled,
+                        allocation.prior_message_count,
+                        allocation.context_identity,
+                        allocation.config_identity,
+                    )
+                    != (
+                        policy.one_turn,
+                        policy.exact_input,
+                        policy.skills_enabled,
+                        policy.tools_enabled,
+                        policy.mcp_enabled,
+                        policy.prior_message_count,
+                        CONTEXT_IDENTITY,
+                        CONFIG_IDENTITY,
+                    )
+                    or allocation.context_identity
+                    not in policy.allowed_context_identities
+                    or allocation.config_identity
+                    not in policy.allowed_config_identities
+                    or tuple(context_row[:4]) != (
+                        retained_context_digest,
+                        context.get("provider"),
+                        context.get("route"),
+                        context.get("evidence_package_digest"),
+                    )
+                    or retained_context_digest != allocation.context_manifest_digest
+                    or digest_canonical(unsigned_context) != retained_context_digest
+                    or context.get("evidence_package_digest")
+                    != envelope.evidence_package_digest
+                    or context.get("request_digest") != allocation.request_digest
+                    or context.get("prompt_digest") != allocation.prompt_digest
+                    or context.get("provider") != allocation.provider
+                    or context.get("route") != allocation.route
+                    or context.get("model") != allocation.model
+                    or context.get("reasoning") != allocation.reasoning
+                    or context.get("implementation_revision")
+                    != policy.implementation_revision
+                    or context.get("implementation_worktree_clean") is not True
+                    or context.get("command_semantic_version")
+                    != policy.command_semantic_version
+                    or context.get("command_flags") != list(policy.command_flags)
+                    or context.get("disabled_capabilities")
+                    != list(policy.disabled_capabilities)
+                    or context.get("prompt_contract_version")
+                    != policy.prompt_contract_version
+                    or context.get("context_identity")
+                    != allocation.context_identity
+                    or context.get("config_identity")
+                    != allocation.config_identity
+                    or context.get("one_turn") != allocation.one_turn
+                    or context.get("exact_input") != allocation.exact_input
+                    or context.get("skills_enabled") != allocation.skills_enabled
+                    or context.get("tools_enabled") != allocation.tools_enabled
+                    or context.get("mcp_enabled") != allocation.mcp_enabled
+                    or context.get("prior_message_count")
+                    != allocation.prior_message_count
+                    or context.get("output_schema_digest")
+                    != allocation.output_schema_digest
+                    or context.get("schema_digest") != policy.output_schema_digest
+                    or tuple(terminal_row[:6]) != (
+                        terminal.terminal_digest,
+                        terminal.invocation_id,
+                        terminal.usage_status.value,
+                        terminal.outcome,
+                        terminal.failure_class,
+                        terminal_record["completed_at"],
+                    )
+                    or terminal.as_record() != terminal_record
+                    or terminal.invocation_id != allocation.invocation_id
+                    or terminal.usage_status is not UsageStatus.REPORTED
+                    or terminal.outcome != "ASSESSOR_VALIDATION_FAILED"
+                    or terminal.failure_class != "ASSESSMENT_VALIDATION_FAILED"
+                    or terminal.dispatch_at is None
+                    or terminal.pre_dispatch_zero_proved
+                    or terminal.policy_breach is not None
+                    or terminal_policy_breach is not None
+                    or len(transport_rows) != 1
+                    or tuple(transport_rows[0][:5]) != (
+                        transport_values[0].get("observation_digest"),
+                        allocation.invocation_id,
+                        transport_values[0].get("observed_at"),
+                        "DISPATCH_STARTED",
+                        allocation.request_digest,
+                    )
+                    or transport_values[0].get("invocation_id")
+                    != allocation.invocation_id
+                    or transport_values[0].get("state") != "DISPATCH_STARTED"
+                    or transport_values[0].get("evidence_digest")
+                    != allocation.request_digest
+                    or transport_values[0].get("observed_at")
+                    != terminal_record.get("dispatch_at")
+                    or digest_canonical(
+                        {
+                            key: value
+                            for key, value in transport_values[0].items()
+                            if key != "observation_digest"
+                        }
+                    )
+                    != transport_values[0].get("observation_digest")
+                    or connection.execute(
+                        "SELECT 1 FROM model_usage_reconciliations "
+                        "WHERE invocation_id=? AND "
+                        "json_extract(record_json,'$.policy_breach') IS NOT NULL",
+                        (allocation.invocation_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    return None
+                try:
+                    _require_reported_telemetry(connection, terminal)
+                except ModelUsageIntegrityError:
+                    return None
+                matches.append(RetainedAssessorContractFailure(
+                    envelope.envelope_id,
+                    allocation.invocation_id,
+                    allocation.canonical_digest,
+                    terminal.terminal_digest,
+                    allocation.context_manifest_digest,
+                ))
+            return matches[0] if len(matches) == 1 else None
+        finally:
+            connection.close()
+
 
 class AutonomousNativeEvidenceAssessor:
     """Dispatch one fixed-schema transform, then prove its output locally."""
@@ -478,6 +770,27 @@ class AutonomousNativeEvidenceAssessor:
                     failure_class=exc.failure_class,
                 )
             raise
+        except EvidencePackageError as exc:
+            if allocation is None or execution is None:
+                raise
+            self._usage.complete(
+                allocation,
+                outcome="ASSESSOR_VALIDATION_FAILED",
+                execution=execution,
+                provider_dispatched=dispatch_at is not None,
+                dispatch_at=dispatch_at,
+                failure_class="ASSESSMENT_VALIDATION_FAILED",
+            )
+            if self._usage.retained_output_contract_failure(candidate) is None:
+                raise
+            raise NativeEvidenceHold(
+                "ASSESSOR_OUTPUT_CONTRACT_HOLD",
+                (
+                    sources[0].unit.source_id
+                    if sources
+                    else str(getattr(candidate, "candidate_id", "unknown-candidate"))
+                ),
+            ) from exc
         except BaseException:
             if allocation is not None:
                 self._usage.complete(
@@ -509,31 +822,41 @@ class AutonomousNativeEvidenceAssessor:
         if type(execution) is not NativeAssessmentExecution:
             raise NativeEvidenceHold("ASSESSOR_TRANSPORT_HOLD", sources[0].unit.source_id)
         value = _document(execution.text)
-        package = _package_from_value(value.get("package"))
-        if _base_package(package) != base:
-            raise NativeEvidenceHold("ASSESSOR_BASE_BINDING_HOLD", sources[0].unit.source_id)
         source_ids = {source.unit.source_id for source in sources}
         receipt_by_source = {
             source.unit.source_id: result.receipt_digest
             for source, result in zip(sources, acquired, strict=True)
         }
-        for claim in package.governed_claims:
+        acquired_by_source = {
+            source.unit.source_id: result
+            for source, result in zip(sources, acquired, strict=True)
+        }
+        source_by_id = {source.unit.source_id: source for source in sources}
+        raw_package = value.get("package")
+        if type(raw_package) is not dict or set(raw_package) != set(_PACKAGE_FIELDS):
+            raise EvidencePackageError("assessment package fields differ")
+        authority: list[SourceAuthorityAssessment] = []
+        governed_claims: list[dict[str, object]] = []
+        semantic_by_claim: dict[str, dict[str, object]] = {}
+        raw_claims = raw_package.get("governed_claims")
+        if type(raw_claims) is not list:
+            raise EvidencePackageError("assessment claims differ")
+        for raw_claim in raw_claims:
+            if type(raw_claim) is not dict or set(raw_claim) != set(_CLAIM_FIELDS):
+                raise EvidencePackageError("assessment claim fields differ")
+            claim_source_ids = raw_claim.get("source_ids")
             if (
-                claim.passage_index >= len(acquired)
-                or claim.supporting_excerpt
-                not in acquired[claim.passage_index].body.decode("utf-8")
-                or set(claim.source_ids) - source_ids
-                or set(claim.source_record_ids)
-                != {receipt_by_source[item] for item in claim.source_ids}
+                type(claim_source_ids) is not list
+                or not claim_source_ids
+                or any(
+                    type(item) is not str or item not in source_ids
+                    for item in claim_source_ids
+                )
             ):
                 raise NativeEvidenceHold(
                     "ASSESSOR_CLAIM_BINDING_HOLD", sources[0].unit.source_id
                 )
-        source_by_id = {source.unit.source_id: source for source in sources}
-        authority = []
-        governed_claims = []
-        for claim in package.governed_claims:
-            selected = tuple(source_by_id[item] for item in claim.source_ids)
+            selected = tuple(source_by_id[item] for item in claim_source_ids)
             source_roles = tuple(
                 tuple(
                     assignment
@@ -545,21 +868,34 @@ class AutonomousNativeEvidenceAssessor:
             )
             if any(len(roles) != 1 for roles in source_roles):
                 raise NativeEvidenceHold(
-                    "SOURCE_AUTHORITY_HOLD", claim.source_ids[0]
+                    "SOURCE_AUTHORITY_HOLD", claim_source_ids[0]
                 )
             roles = tuple(items[0] for items in source_roles)
             scope = "; ".join(sorted({item.purpose for item in roles}))
+            claim_id = raw_claim.get("claim_id")
+            claim_text = raw_claim.get("claim")
+            rendered = raw_claim.get("rendered_assertion_zh_hant_hk")
+            if not all(type(item) is str for item in (claim_id, claim_text, rendered)):
+                raise EvidencePackageError("assessment claim identity differs")
+            raw_semantic = raw_claim.get("semantic_relation")
+            if (
+                type(raw_semantic) is not dict
+                or set(raw_semantic) != set(_SEMANTIC_RELATION_FIELDS)
+                or any(type(item) is not str for item in raw_semantic.values())
+            ):
+                raise EvidencePackageError("assessment semantic relation differs")
+            semantic_by_claim[claim_id] = raw_semantic
             decisions = tuple(
                 SourceAuthorityAssessment.create(
                     source_id=source.unit.source_id,
-                    governed_claim_id=claim.claim_id,
+                    governed_claim_id=claim_id,
                     decision="ADMITTED",
                     authority_class="RESPONSIBLE_PRIMARY",
                     authority_scope=role.purpose,
                     evidence_digest=digest_bytes(
                         canonical_json_bytes(
                             {
-                                "claim_digest": digest_bytes(claim.claim.encode()),
+                                "claim_digest": digest_bytes(claim_text.encode()),
                                 "source_definition_version_digest": (
                                     source.source_version.canonical_digest
                                 ),
@@ -574,31 +910,93 @@ class AutonomousNativeEvidenceAssessor:
                 for source, role in zip(selected, roles, strict=True)
             )
             authority.extend(decisions)
-            governed_claims.append(
-                replace(
-                    claim,
-                    source_record_ids=tuple(
-                        receipt_by_source[item] for item in claim.source_ids
-                    ),
-                    source_authority_decision_ids=tuple(
-                        item.record_id for item in decisions
-                    ),
-                    rights_decision_ids=tuple(
-                        source_by_id[item].rights.record_id
-                        for item in claim.source_ids
-                    ),
-                    dependency_evidence_ids=tuple(
-                        source_by_id[item].dependency.record_id
-                        for item in claim.source_ids
-                    ),
-                    evidential_origin_ids=tuple(
-                        source_by_id[item].dependency.evidential_origin_id
-                        for item in claim.source_ids
-                    ),
-                    authority_class=ClaimAuthorityClass.RESPONSIBLE_PRIMARY,
-                    authority_scope=scope,
+            raw_entities = raw_claim.get("named_entities")
+            if type(raw_entities) is not list or any(
+                type(item) is not list
+                or len(item) != 3
+                or any(type(part) is not str for part in item)
+                for item in raw_entities
+            ):
+                raise EvidencePackageError("assessment named entities differ")
+            governed_claims.append({
+                **{
+                    key: item
+                    for key, item in raw_claim.items()
+                    if key != "semantic_relation"
+                },
+                "source_record_ids": [
+                    receipt_by_source[item] for item in claim_source_ids
+                ],
+                "source_authority_decision_ids": [
+                    item.record_id for item in decisions
+                ],
+                "rights_decision_ids": [
+                    source_by_id[item].rights.record_id for item in claim_source_ids
+                ],
+                "dependency_evidence_ids": [
+                    source_by_id[item].dependency.record_id
+                    for item in claim_source_ids
+                ],
+                "evidential_origin_ids": [
+                    source_by_id[item].dependency.evidential_origin_id
+                    for item in claim_source_ids
+                ],
+                "authority_class": ClaimAuthorityClass.RESPONSIBLE_PRIMARY.value,
+                "authority_scope": scope,
+                "attribution": "; ".join(
+                    sorted(
+                        {acquired_by_source[item].publisher for item in claim_source_ids}
+                    )
+                ),
+                "semantic_relation_evidence_id": _semantic_record_id(
+                    claim_id, claim_text, rendered
+                ),
+                "named_entity_evidence": [
+                    [
+                        text,
+                        entity_type,
+                        _named_entity_record_id(
+                            claim_id, text, entity_type, rendered_text
+                        ),
+                    ]
+                    for text, rendered_text, entity_type in raw_entities
+                ],
+                "named_entities": [item[0] for item in raw_entities],
+                "rendered_named_entities": [item[1] for item in raw_entities],
+            })
+        raw_qualifications = raw_package.get("qualification_evidence")
+        if type(raw_qualifications) is not list:
+            raise EvidencePackageError("assessment qualifications differ")
+        qualifications = []
+        for item in raw_qualifications:
+            if type(item) is not dict or set(item) != {
+                "test", "governed_claim_id", "test_evidence", "policy_version"
+            }:
+                raise EvidencePackageError("assessment qualification fields differ")
+            qualifications.append({
+                **item,
+                "qualification_record_id": _qualification_record_id(
+                    item.get("governed_claim_id"),
+                    item.get("test"),
+                    item.get("test_evidence"),
+                ),
+            })
+        package_value = evidence_package_value(base)
+        package_value.update(raw_package)
+        package_value["governed_claims"] = governed_claims
+        package_value["qualification_evidence"] = qualifications
+        package = _package_from_value(package_value)
+        if _base_package(package) != base:
+            raise NativeEvidenceHold("ASSESSOR_BASE_BINDING_HOLD", sources[0].unit.source_id)
+        for claim in package.governed_claims:
+            if (
+                claim.passage_index >= len(acquired)
+                or claim.supporting_excerpt
+                not in acquired[claim.passage_index].body.decode("utf-8")
+            ):
+                raise NativeEvidenceHold(
+                    "ASSESSOR_CLAIM_BINDING_HOLD", sources[0].unit.source_id
                 )
-            )
         assessments = tuple(
             AcquiredSourceAssessment(
                 source.unit.source_id,
@@ -620,34 +1018,68 @@ class AutonomousNativeEvidenceAssessor:
             )
             for source, result in zip(sources, acquired, strict=True)
         )
-        claims_by_id = {claim.claim_id: claim for claim in governed_claims}
-        assessment_records = []
-        for record in _objects(value.get("assessment_records")):
-            if record.get("record_type") in {
-                "SOURCE_RECORD",
-                "SOURCE_AUTHORITY_DECISION",
-                "RIGHTS_DECISION",
-                "DEPENDENCY_EVIDENCE",
-            }:
-                raise NativeEvidenceHold(
-                    "ASSESSOR_AUTHORITY_RECORD_HOLD", sources[0].unit.source_id
-                )
-            if "source_record_ids" in record:
-                claim = claims_by_id.get(record.get("governed_claim_id"))
-                if claim is None:
-                    raise NativeEvidenceHold(
-                        "ASSESSOR_CLAIM_BINDING_HOLD", sources[0].unit.source_id
-                    )
-                record = {
-                    **record,
-                    "source_record_ids": list(claim.source_record_ids),
-                }
-            assessment_records.append(record)
+        claims_by_id = {claim.claim_id: claim for claim in package.governed_claims}
+        if any(
+            item.governed_claim_id not in claims_by_id
+            for item in package.qualification_evidence
+        ):
+            raise EvidencePackageError("assessment qualification claim differs")
+        assessment_records = [
+            {
+                "record_id": claim.semantic_relation_evidence_id,
+                "record_type": "SEMANTIC_RELATION_EVIDENCE",
+                "governed_claim_id": claim.claim_id,
+                **semantic_by_claim[claim.claim_id],
+                "claim_digest": digest_bytes(claim.claim.encode()),
+                "rendered_assertion_digest": digest_bytes(
+                    claim.rendered_assertion_zh_hant_hk.encode()
+                ),
+            }
+            for claim in package.governed_claims
+        ]
+        assessment_records.extend(
+            {
+                "record_id": item.qualification_record_id,
+                "record_type": "QUALIFICATION_EVIDENCE",
+                "governed_claim_id": item.governed_claim_id,
+                "test": item.test.value,
+                "test_evidence": [list(value) for value in item.test_evidence],
+                "policy_version": item.policy_version,
+                "evidence_span_digest": digest_bytes(
+                    claims_by_id[item.governed_claim_id].supporting_excerpt.encode()
+                ),
+                "source_record_ids": list(
+                    claims_by_id[item.governed_claim_id].source_record_ids
+                ),
+            }
+            for item in package.qualification_evidence
+        )
+        assessment_records.extend(
+            {
+                "record_id": record_id,
+                "record_type": "NAMED_ENTITY_EVIDENCE",
+                "governed_claim_id": claim.claim_id,
+                "text": text,
+                "rendered_text": claim.rendered_named_entities[index],
+                "entity_type": entity_type,
+                "canonical_entity_id": digest_bytes(f"{entity_type}:{text}".encode()),
+                "rendered_span_digest": digest_bytes(
+                    claim.rendered_named_entities[index].encode()
+                ),
+                "policy_version": NAMED_ENTITY_POLICY_VERSION,
+                "evidence_span_digest": digest_bytes(text.encode()),
+                "source_record_ids": list(claim.source_record_ids),
+            }
+            for claim in package.governed_claims
+            for index, (text, entity_type, record_id) in enumerate(
+                claim.named_entity_evidence
+            )
+        )
         return IndependentEvidenceAssessment(
             assessments,
             tuple(authority),
             package.substantive_new_information,
-            tuple(governed_claims),
+            package.governed_claims,
             package.qualification_evidence,
             tuple(assessment_records),
             package.selection_rationale,
@@ -674,12 +1106,6 @@ def _document(text: str) -> dict[str, object]:
     if set(value) != set(SCHEMA["required"]):
         raise NativeEvidenceError("native assessment output fields differ")
     return value
-
-
-def _objects(value: object) -> tuple[dict[str, object], ...]:
-    if type(value) is not list or any(type(item) is not dict for item in value):
-        raise NativeEvidenceError("native assessment records differ")
-    return tuple(value)
 
 
 def _dispatch_grok(prompt: str) -> NativeAssessmentExecution:

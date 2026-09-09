@@ -463,8 +463,11 @@ def open_native_pipeline(
             policy=embedding_policy, dispatch_fence=stop_fence,
             implementation_worktree_clean=implementation_worktree_clean, clock=clock,
         )
+        assessment_usage = NativeAssessmentUsage(
+            usage, assessment_policy, clock=clock
+        )
         assessor = AutonomousNativeEvidenceAssessor(
-            usage=NativeAssessmentUsage(usage, assessment_policy, clock=clock),
+            usage=assessment_usage,
             dispatch_fence=stop_fence,
         )
         definitions = dict(source_definition_ids)
@@ -597,14 +600,28 @@ def open_native_pipeline(
 
         class Publication:
             def advance(self, *, revision_id, candidate_version_id):
-                sources = native_evidence_sources(
-                    units=journal.units[revision_id], sources=runtime.authority.sources,
-                    objects=runtime.authority.objects, licence=licence, proof=proof,
-                    observations=journal.observations,
-                )
+                progress = journal.progress.get(revision_id, {})
+                sources = ()
+                if progress.get("stage") != "ASSESSMENT_INTERRUPTED":
+                    sources = native_evidence_sources(
+                        units=journal.units[revision_id],
+                        sources=runtime.authority.sources,
+                        objects=runtime.authority.objects,
+                        licence=licence,
+                        proof=proof,
+                        observations=journal.observations,
+                    )
                 return NativePublicationContinuation(
                     journal=journal, runtime=runtime, evidence_controller=evidence,
-                    sources={revision_id: sources}, clock=now,
+                    sources=(
+                        {}
+                        if progress.get("stage") == "ASSESSMENT_INTERRUPTED"
+                        else {revision_id: sources}
+                    ),
+                    assessment_contract_failure=(
+                        assessment_usage.retained_output_contract_failure
+                    ),
+                    clock=now,
                 ).advance(revision_id=revision_id, candidate_version_id=candidate_version_id)
 
         intake = NativeSourceIntake(
