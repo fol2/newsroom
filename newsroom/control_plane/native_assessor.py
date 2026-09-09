@@ -92,15 +92,28 @@ _PAIRS = {
         "type": "array", "items": _STRING, "minItems": 2, "maxItems": 2,
     },
 }
+_SEMANTIC_RELATION_FIELDS = {
+    "source_modality": _STRING,
+    "rendered_modality": _STRING,
+    "source_polarity": _STRING,
+    "rendered_polarity": _STRING,
+    "relation": _STRING,
+}
 _CLAIM_FIELDS = {
     "claim_id": _STRING, "claim": _STRING, "passage_index": {"type": "integer"},
     "supporting_excerpt": _STRING, "source_ids": _STRINGS,
     "status": {"enum": [item.value for item in GovernedClaimStatus]},
     "rendered_assertion_zh_hant_hk": _STRING,
     "claim_role": {"enum": ["HEADLINE", "SUBSTANTIVE", "CONTEXT"]},
+    "semantic_relation": {
+        "type": "object",
+        "properties": _SEMANTIC_RELATION_FIELDS,
+        "required": list(_SEMANTIC_RELATION_FIELDS),
+        "additionalProperties": False,
+    },
     "localised_factual_expressions": _PAIRS,
     "named_entities": {"type": "array", "items": {
-        "type": "array", "items": _STRING, "minItems": 2, "maxItems": 2,
+        "type": "array", "items": _STRING, "minItems": 3, "maxItems": 3,
     }},
     "quotations": _STRINGS, "certainty": {"const": "CONFIRMED"},
     "originality_basis": {"const": "FACTUAL_REWRITE_REQUIRED"},
@@ -824,6 +837,7 @@ class AutonomousNativeEvidenceAssessor:
             raise EvidencePackageError("assessment package fields differ")
         authority: list[SourceAuthorityAssessment] = []
         governed_claims: list[dict[str, object]] = []
+        semantic_by_claim: dict[str, dict[str, object]] = {}
         raw_claims = raw_package.get("governed_claims")
         if type(raw_claims) is not list:
             raise EvidencePackageError("assessment claims differ")
@@ -863,13 +877,21 @@ class AutonomousNativeEvidenceAssessor:
             rendered = raw_claim.get("rendered_assertion_zh_hant_hk")
             if not all(type(item) is str for item in (claim_id, claim_text, rendered)):
                 raise EvidencePackageError("assessment claim identity differs")
+            raw_semantic = raw_claim.get("semantic_relation")
+            if (
+                type(raw_semantic) is not dict
+                or set(raw_semantic) != set(_SEMANTIC_RELATION_FIELDS)
+                or any(type(item) is not str for item in raw_semantic.values())
+            ):
+                raise EvidencePackageError("assessment semantic relation differs")
+            semantic_by_claim[claim_id] = raw_semantic
             decisions = tuple(
                 SourceAuthorityAssessment.create(
                     source_id=source.unit.source_id,
                     governed_claim_id=claim_id,
                     decision="ADMITTED",
                     authority_class="RESPONSIBLE_PRIMARY",
-                    authority_scope=scope,
+                    authority_scope=role.purpose,
                     evidence_digest=digest_bytes(
                         canonical_json_bytes(
                             {
@@ -885,19 +907,23 @@ class AutonomousNativeEvidenceAssessor:
                         )
                     ),
                 )
-                for source in selected
+                for source, role in zip(selected, roles, strict=True)
             )
             authority.extend(decisions)
             raw_entities = raw_claim.get("named_entities")
             if type(raw_entities) is not list or any(
                 type(item) is not list
-                or len(item) != 2
+                or len(item) != 3
                 or any(type(part) is not str for part in item)
                 for item in raw_entities
             ):
                 raise EvidencePackageError("assessment named entities differ")
             governed_claims.append({
-                **raw_claim,
+                **{
+                    key: item
+                    for key, item in raw_claim.items()
+                    if key != "semantic_relation"
+                },
                 "source_record_ids": [
                     receipt_by_source[item] for item in claim_source_ids
                 ],
@@ -929,12 +955,14 @@ class AutonomousNativeEvidenceAssessor:
                     [
                         text,
                         entity_type,
-                        _named_entity_record_id(claim_id, text, entity_type, text),
+                        _named_entity_record_id(
+                            claim_id, text, entity_type, rendered_text
+                        ),
                     ]
-                    for text, entity_type in raw_entities
+                    for text, rendered_text, entity_type in raw_entities
                 ],
                 "named_entities": [item[0] for item in raw_entities],
-                "rendered_named_entities": [item[0] for item in raw_entities],
+                "rendered_named_entities": [item[1] for item in raw_entities],
             })
         raw_qualifications = raw_package.get("qualification_evidence")
         if type(raw_qualifications) is not list:
@@ -991,16 +1019,17 @@ class AutonomousNativeEvidenceAssessor:
             for source, result in zip(sources, acquired, strict=True)
         )
         claims_by_id = {claim.claim_id: claim for claim in package.governed_claims}
+        if any(
+            item.governed_claim_id not in claims_by_id
+            for item in package.qualification_evidence
+        ):
+            raise EvidencePackageError("assessment qualification claim differs")
         assessment_records = [
             {
                 "record_id": claim.semantic_relation_evidence_id,
                 "record_type": "SEMANTIC_RELATION_EVIDENCE",
                 "governed_claim_id": claim.claim_id,
-                "source_modality": "ASSERTED",
-                "rendered_modality": "ASSERTED",
-                "source_polarity": "AFFIRMED",
-                "rendered_polarity": "AFFIRMED",
-                "relation": "SEMANTICALLY_EQUIVALENT",
+                **semantic_by_claim[claim.claim_id],
                 "claim_digest": digest_bytes(claim.claim.encode()),
                 "rendered_assertion_digest": digest_bytes(
                     claim.rendered_assertion_zh_hant_hk.encode()

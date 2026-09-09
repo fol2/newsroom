@@ -56,9 +56,20 @@ def _model_package_value(package):
                     "admitted_use", "policy_version",
                 )
             } | {
+                "semantic_relation": {
+                    "source_modality": "ASSERTED",
+                    "rendered_modality": "ASSERTED",
+                    "source_polarity": "AFFIRMED",
+                    "rendered_polarity": "AFFIRMED",
+                    "relation": "SEMANTICALLY_EQUIVALENT",
+                },
                 "named_entities": [
-                    [entity[0], entity[1]]
-                    for entity in item["named_entity_evidence"]
+                    [
+                        entity[0],
+                        item["rendered_named_entities"][index],
+                        entity[1],
+                    ]
+                    for index, entity in enumerate(item["named_entity_evidence"])
                 ]
             }
             for item in value["governed_claims"]
