@@ -288,13 +288,13 @@ def _install_boundaries(monkeypatch, counters):
         headline_id = f"native-headline:{identity}"
         claim_id = f"native-claim:{identity}"
         qualification_span = headline.split(".", 1)[0]
-        qualification_facts = [
-            ["action_class", "OFFICIAL_DEADLINE"],
-            ["event_polarity", "AFFIRMED"],
-            ["action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"],
-            ["material_relation_span", qualification_span],
-            ["reader_action", qualification_span],
-        ]
+        qualification_facts = {
+            "action_class": "OFFICIAL_DEADLINE",
+            "event_polarity": "AFFIRMED",
+            "action_relation": "NEW_OR_CHANGED_OFFICIAL_ACTION",
+            "material_relation_span": qualification_span,
+            "reader_action": qualification_span,
+        }
 
         def governed_claim(*, claim_id, text, rendered, role):
             return {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import uuid
 from contextlib import nullcontext
 from dataclasses import replace
@@ -275,7 +276,8 @@ def test_native_documents_admit_retain_context_and_reopen(
             lead_request.digest,
         )
         subject = NativeRetrievalSubject(
-            document.revision_id, graph_id, document_receipt
+            document.revision_id, graph_id, document_receipt,
+            "Official deadline changed",
         )
         first_port = NativeRetrievalPort(
             documents=documents,
@@ -289,6 +291,12 @@ def test_native_documents_admit_retain_context_and_reopen(
             minimum_authority_watermark=0,
         )
         first_binding = first_port.retrieve(lead, proof=runtime.proof)
+        with sqlite3.connect(tmp_path / "fulltext-receipts.sqlite3") as retained:
+            fulltext_request_value = json.loads(retained.execute(
+                "SELECT request_bytes FROM increment5_fulltext_receipts "
+                "WHERE idempotency_key LIKE 'native-fulltext:%'"
+            ).fetchone()[0])
+        assert fulltext_request_value["query_text"] == "Official deadline changed"
         assert first_port.retrieve(lead, proof=runtime.proof) == first_binding
         changed_port = NativeRetrievalPort(
             documents=documents,

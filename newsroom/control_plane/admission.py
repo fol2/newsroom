@@ -23,6 +23,7 @@ from newsroom.control_plane.evidence import (
     GovernedClaimEvidence,
     GovernedClaimStatus,
     QualificationEvidence,
+    _canonical_localised_fact,
     bounded_named_entities,
 )
 from newsroom.control_plane.zh_hant import (
@@ -80,6 +81,7 @@ _QUALIFICATION_CLASSIFIER_FIELDS = frozenset(
         "importance_class",
         "event_polarity",
         "duration_relation",
+        "duration_minutes",
         "change_relation",
         "effect_relation",
         "action_relation",
@@ -331,20 +333,53 @@ def _duration_is_exactly_supported(
         return False
     evidence_text = f"{claim.claim}\n{claim.supporting_excerpt}"
     minute_pattern = (
-        rf"(?<!\d){minutes}(?!\d)\s*(?:-|–|—)?\s*"
+        rf"(?<![\d.,/]){minutes}(?!\d)\s*(?:-|–|—)?\s*"
         r"(?:minutes?|mins?|分鐘|分钟)"
     )
     duration_patterns = [minute_pattern]
     if minutes % 60 == 0:
         hours = minutes // 60
         hour_values = {str(hours)}
+        for value in (
+            "one",
+            "two",
+            "three",
+            "four",
+            "five",
+            "six",
+            "seven",
+            "eight",
+            "nine",
+            "ten",
+            "一",
+            "二",
+            "三",
+            "四",
+            "五",
+            "六",
+            "七",
+            "八",
+            "九",
+            "十",
+            "兩",
+            "两",
+        ):
+            expression = f"{value} hours" if value.isascii() else f"{value}小時"
+            if _canonical_localised_fact(expression) == (
+                "DURATION_MINUTES",
+                minutes,
+            ):
+                hour_values.add(value)
         if hours == 1:
-            hour_values.update({"one", "an", "一"})
+            hour_values.add("an")
+        hour_value = "|".join(sorted(hour_values, key=len, reverse=True))
         duration_patterns.append(
-            rf"(?<![A-Za-z0-9])(?:{'|'.join(sorted(hour_values))})"
-            rf"(?![A-Za-z0-9])\s*(?:-|–|—)?\s*(?:hours?|hrs?|小時|小时)"
+            rf"(?<![A-Za-z0-9.,/零〇一二三四五六七八九十百千萬万億亿兩两])"
+            rf"(?:{hour_value})"
+            rf"(?![A-Za-z0-9零〇一二三四五六七八九十百千萬万億亿兩两])"
+            rf"\s*(?:-|–|—)?\s*(?:hours?|hrs?|小時|小时)"
         )
-    duration = rf"(?:{'|'.join(duration_patterns)})"
+    duration = rf"({'|'.join(duration_patterns)})"
     english_disruption = (
         r"(?:delays?|delayed|disruption|suspend(?:ed|sion)?|clos(?:ed|ure)|"
         r"outage|interrupt(?:ed|ion)?|unavailable)"
@@ -363,8 +398,24 @@ def _duration_is_exactly_supported(
         rf"{chinese_disruption})",
         re.IGNORECASE,
     )
-    for clause in re.split(r"[\n,，.;；。!?！？]+", evidence_text):
-        if not clause.strip() or not relation.search(clause):
+    compound_prefix = re.compile(
+        r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|"
+        r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
+        r"eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|"
+        r"eighty|ninety|hundred|thousand|million|billion)"
+        r"(?:[ -]+and)?[ -]+$|\d+\s*[.,/]\s*$",
+        re.IGNORECASE,
+    )
+    for clause in re.split(
+        r"[\n，;；。!?！？]+|(?<!\d)[.,]|[.,](?!\d)", evidence_text
+    ):
+        # Validate the matched quantity, not unrelated durations in the excerpt.
+        if not any(
+            not compound_prefix.search(clause[:match.start(index)])
+            for match in relation.finditer(clause)
+            for index in range(1, 5)
+            if match.start(index) != -1
+        ):
             continue
         polarity_text = re.sub(
             r"\b(?:no|not)\s+less\s+than\b|不少於|不少于",

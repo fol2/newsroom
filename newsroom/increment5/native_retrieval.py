@@ -1464,10 +1464,12 @@ class NativeRetrievalSubject:
     revision_id: str
     graph_root_id: str
     document_receipt: NativeDocumentReceipt
+    query_text: str
 
     def __post_init__(self) -> None:
         _text(self.revision_id, "native retrieval subject revision")
         _text(self.graph_root_id, "native retrieval graph root")
+        _text(self.query_text, "native retrieval subject query", 16_384)
         if type(self.document_receipt) is not NativeDocumentReceipt:
             raise NativeRetrievalError("native retrieval subject document differs")
 
@@ -1529,6 +1531,8 @@ class NativeRetrievalPort:
         )
         if any(document.revision_id != revision_id for _, document in retained_subjects):
             raise NativeRetrievalError("native retrieval subject authority differs")
+        if len({item.query_text for item, _document in retained_subjects}) != 1:
+            raise NativeRetrievalError("native retrieval subject query differs")
         subject, document = min(retained_subjects, key=lambda item: item[1].passage_id)
         ordered_subjects = sorted(
             (
@@ -1547,6 +1551,7 @@ class NativeRetrievalPort:
                 "revision_id": item.revision_id,
                 "graph_root_id": item.graph_root_id,
                 "document_receipt": item.document_receipt.projection_value(),
+                "query_text_digest": digest_bytes(item.query_text.encode()),
             }
             for item in ordered_subjects
         ))
@@ -1592,7 +1597,7 @@ class NativeRetrievalPort:
             FULLTEXT_PURPOSE, FULLTEXT_POLICY_ID, INCREMENT_5A_CONTRACT_DIGEST,
             FULLTEXT_COMPONENT_DIGEST, NORMALIZATION_COMPONENT_DIGEST,
             snapshot.generation_id, snapshot.generation_identity_digest,
-            snapshot.rights_manifest_digest, document.text,
+            snapshot.rights_manifest_digest, subject.query_text,
             FullTextLanguageMode.MIXED_EN_GB_ZH_HANT_HK, (document.source_id,),
             lead.recorded_at, serving, snapshot.contiguous_ledger_seq,
         )

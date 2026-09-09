@@ -21,6 +21,11 @@ from newsroom.authority.canonical import (
 from newsroom.entities.types import EntityResolutionProposalId
 from newsroom.extraction.types import ExtractionProposalKind
 from newsroom.graphiti_adapter.identity import typed_id
+from newsroom.increment5.fulltext_contracts import (
+    FullTextContractError,
+    FullTextLanguageMode,
+)
+from newsroom.increment5.fulltext_normalizer import BilingualSearchNormalizer
 from newsroom.increment5.native_retrieval import (
     NativeDocumentReceipt, NativeDocumentRequest, NativeEmbeddingReference,
     NativeRetrievalContextReceipt, NativeRetrievalContextRequest,
@@ -86,6 +91,17 @@ class NativeRetrievalContinuation:
         # subjects may be source-locally excluded below.
         for unit in units:
             self._rights(unit)
+        headlines = {unit.headline for unit in units}
+        if len(headlines) != 1:
+            raise NativeRetrievalHold("NATIVE_FULLTEXT_QUERY_AMBIGUOUS")
+        try:
+            BilingualSearchNormalizer().normalize(
+                surface_text=next(iter(headlines)),
+                language_mode=FullTextLanguageMode.MIXED_EN_GB_ZH_HANT_HK,
+                query_valid_time=lead.recorded_at,
+            )
+        except FullTextContractError as exc:
+            raise NativeRetrievalHold("NATIVE_FULLTEXT_QUERY_BOUND_HOLD") from exc
         retained = self._facts(revision_id).get("retrieval_binding")
         if retained is None:
             self._prepare(units, proof=proof)
@@ -166,6 +182,7 @@ class NativeRetrievalContinuation:
                     raise ValueError("native passage continuation identity changed")
                 subjects.append(NativeRetrievalSubject(
                     source_revision, record["graph_root_id"], receipt,
+                    unit.headline,
                 ))
                 inventory.append({
                     "revision_id": source_revision, "ingest_id": unit.ingest_id,
