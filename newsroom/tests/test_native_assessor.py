@@ -10,7 +10,7 @@ from jsonschema import Draft202012Validator, ValidationError
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.admission import DeterministicWriteAdmission
-from newsroom.control_plane.evidence import evidence_package_value
+from newsroom.control_plane.evidence import bounded_named_entities, evidence_package_value
 from newsroom.control_plane.native_assessor import (
     AutonomousNativeEvidenceAssessor,
     CONFIG_IDENTITY,
@@ -182,27 +182,63 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
     assert result.governed_claims[0].rendered_named_entities == (
         "Home Office", "Skilled Worker Visa",
     )
-    admitted_package = replace(
-        _ready_package(candidate)[1],
-        passages=(excerpt,),
-        substantive_new_information=(claim_text,),
-        governed_claims=result.governed_claims,
-        qualification_evidence=(),
-        resolved_evidence_records=tuple(
-            (
-                record["record_id"],
-                digest_bytes(canonical_json_bytes(record)),
-            )
-            for record in result.assessment_records
-        ),
-    )
-    decision = DeterministicWriteAdmission().decide_candidate_identity(
-        candidate_id=admitted_package.candidate_id,
-        hypothesis_id=admitted_package.hypothesis_id,
-        package=admitted_package,
-        decided_at="2026-09-09T12:02:00.000000Z",
-    )
+    def decide(assessment, passage, information):
+        admitted_package = replace(
+            _ready_package(candidate)[1],
+            passages=(passage,),
+            substantive_new_information=(information,),
+            governed_claims=assessment.governed_claims,
+            qualification_evidence=(),
+            resolved_evidence_records=tuple(
+                (
+                    record["record_id"],
+                    digest_bytes(canonical_json_bytes(record)),
+                )
+                for record in assessment.assessment_records
+            ),
+        )
+        return DeterministicWriteAdmission().decide_candidate_identity(
+            candidate_id=admitted_package.candidate_id,
+            hypothesis_id=admitted_package.hypothesis_id,
+            package=admitted_package,
+            decided_at="2026-09-09T12:02:00.000000Z",
+        )
+
+    decision = decide(result, excerpt, claim_text)
     assert "INVALID_GOVERNED_CLAIM_EVIDENCE" not in decision.stable_reason_codes
+
+    boundary_claim = "Changes were published by the Home Office"
+    boundary_excerpt = "Home Office announced changes."
+    boundary_body = f"{boundary_claim}. {boundary_excerpt}"
+    boundary_package = _model_package_value(_ready_package(candidate)[1])
+    boundary_package["governed_claims"][0].update({
+        "claim": boundary_claim,
+        "supporting_excerpt": boundary_excerpt,
+        "rendered_assertion_zh_hant_hk": "Home Office 已公布有關修訂。",
+    })
+    boundary_package.update({
+        "substantive_new_information": [boundary_claim],
+        "governed_claims": [boundary_package["governed_claims"][0]],
+        "qualification_evidence": [],
+    })
+    boundary_acquired = SimpleNamespace(**{
+        **vars(acquired), "body": boundary_body.encode(),
+    })
+    boundary_result = AutonomousNativeEvidenceAssessor._validated_execution(
+        NativeAssessmentExecution(
+            canonical_json_bytes({"package": boundary_package}).decode(), {}
+        ),
+        candidate, base, (source,), (boundary_acquired,),
+    )
+    assert bounded_named_entities(f"{boundary_claim}\n{boundary_excerpt}") != (
+        bounded_named_entities(boundary_claim)
+        | bounded_named_entities(boundary_excerpt)
+    )
+    boundary_decision = decide(boundary_result, boundary_body, boundary_claim)
+    assert (
+        "INVALID_GOVERNED_CLAIM_EVIDENCE"
+        not in boundary_decision.stable_reason_codes
+    )
     unsupported = json.loads(canonical_json_bytes({"package": package}))
     unsupported["package"]["governed_claims"][0][
         "supporting_excerpt"
