@@ -238,6 +238,37 @@ def test_native_assessor_retains_post_dispatch_failures(
             )
         assert usage.retained_output_contract_failure(candidate) is not None
         with sqlite3.connect(service.path) as retained:
+            original_policy = retained.execute(
+                "SELECT record_json FROM model_invocation_policies"
+            ).fetchone()[0]
+            changed_policy = json.loads(original_policy)
+            changed_policy["max_total_tokens"] += 1
+            retained.execute(
+                "UPDATE model_invocation_policies SET record_json=?",
+                (json.dumps(changed_policy),),
+            )
+        assert usage.retained_output_contract_failure(candidate) is None
+        with sqlite3.connect(service.path) as retained:
+            retained.execute(
+                "UPDATE model_invocation_policies SET record_json=?",
+                (original_policy,),
+            )
+        assert usage.retained_output_contract_failure(candidate) is not None
+        with sqlite3.connect(service.path) as retained:
+            coerced_policy = json.loads(original_policy)
+            coerced_policy["qualified"] = 1
+            retained.execute(
+                "UPDATE model_invocation_policies SET record_json=?",
+                (json.dumps(coerced_policy),),
+            )
+        assert usage.retained_output_contract_failure(candidate) is None
+        with sqlite3.connect(service.path) as retained:
+            retained.execute(
+                "UPDATE model_invocation_policies SET record_json=?",
+                (original_policy,),
+            )
+        assert usage.retained_output_contract_failure(candidate) is not None
+        with sqlite3.connect(service.path) as retained:
             retained.execute(
                 "UPDATE model_provider_telemetry "
                 "SET provider_telemetry_digest=?",

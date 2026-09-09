@@ -511,6 +511,14 @@ class NativeAssessmentUsage:
                     return None
                 try:
                     policy = _policy_for_allocation(connection, allocation)
+                    policy_record_row = connection.execute(
+                        "SELECT record_json FROM model_invocation_policies "
+                        "WHERE canonical_digest=?",
+                        (allocation.invocation_policy_digest,),
+                    ).fetchone()
+                    if policy_record_row is None:
+                        return None
+                    policy_record = json.loads(policy_record_row[0])
                     policy._validate()
                     context = json.loads(context_row[4])
                     terminal_record = json.loads(terminal_row[6])
@@ -519,6 +527,18 @@ class NativeAssessmentUsage:
                         json.loads(item[5]) for item in transport_rows
                     )
                 except (TypeError, ValueError, ModelUsageIntegrityError):
+                    return None
+                if type(policy_record) is not dict:
+                    return None
+                unsigned_policy = dict(policy_record)
+                retained_policy_digest = unsigned_policy.pop(
+                    "canonical_digest", None
+                )
+                if (
+                    policy_record != policy.as_record()
+                    or retained_policy_digest != policy.canonical_digest
+                    or digest_canonical(unsigned_policy) != policy.canonical_digest
+                ):
                     return None
                 try:
                     terminal_policy_breach = self._service._validate_terminal(
