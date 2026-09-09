@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import subprocess
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -177,35 +178,44 @@ def _defined_names(path: Path) -> set[str]:
     return public if declared_all is None else public & declared_all
 
 
-def _module_family(
-    repo_root: Path,
-    source_paths: Sequence[str],
-) -> tuple[set[str], set[str], set[str], bool]:
-    direct: set[str] = set()
-    dependents: set[str] = set()
-    reexports: set[str] = set()
-    unresolved = False
-    try:
-        graph = build_dependency_graph(repo_root)
-    except DependencyError:
-        graph = None
-        unresolved = True
-    for path in source_paths:
-        module = module_name_for_path(path)
-        if module is None:
-            continue
-        direct.add(module)
-        if graph is None:
-            continue
+def _changed_public_symbols(repo_root: Path, path: str, base_sha: str, head_sha: str) -> set[str] | None:
+    def source(revision: str) -> bytes | None:
         try:
-            for dependent in graph.dependent_paths(path):
-                selected = module_name_for_path(dependent)
-                if selected is None:
-                    continue
-                (reexports if dependent.endswith("/__init__.py") else dependents).add(selected)
-        except DependencyError:
-            unresolved = True
-    return direct, dependents, reexports, unresolved
+            result = subprocess.run(
+                ("git", "show", f"{revision}:{path}"), cwd=repo_root, capture_output=True,
+            )
+        except OSError:
+            return None
+        return result.stdout if result.returncode == 0 else None
+
+    before, after = source(base_sha), source(head_sha)
+    if before is None or after is None:
+        return None
+    try:
+        old_tree = ast.parse(before, filename=path)
+        new_tree = ast.parse(after, filename=path)
+    except (SyntaxError, UnicodeError):
+        return None
+
+    kinds = (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+    old_defs = {node.name: node for node in old_tree.body if isinstance(node, kinds)}
+    new_defs = {node.name: node for node in new_tree.body if isinstance(node, kinds)}
+    if old_defs.keys() != new_defs.keys() or [
+        ast.dump(node) for node in old_tree.body if not isinstance(node, kinds)
+    ] != [ast.dump(node) for node in new_tree.body if not isinstance(node, kinds)]:
+        return None
+    changed = {name for name in old_defs if ast.dump(old_defs[name]) != ast.dump(new_defs[name])}
+    if not changed or any(name.startswith("_") for name in changed):
+        return None
+    while True:
+        callers = {
+            name for name, node in new_defs.items()
+            if any(isinstance(item, ast.Name) and item.id in changed for item in ast.walk(node))
+        }
+        expanded = changed | callers
+        if expanded == changed:
+            return changed
+        changed = expanded
 
 
 def _imports_module(imported: str, selected: str) -> bool:
@@ -250,8 +260,92 @@ def _imports_public_symbol(tree: ast.AST, package: str, symbols: set[str]) -> bo
     return False
 
 
-def _discover_tests(repo_root: Path, source_paths: Sequence[str]) -> tuple[set[str], bool]:
-    direct, dependents, reexports, unresolved = _module_family(repo_root, source_paths)
+def _imports_changed_surface(
+    tree: ast.AST, module: str, symbols: set[str], importer: str | None = None
+) -> bool:
+    parent, _, leaf = module.rpartition(".")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and any(alias.name == module for alias in node.names):
+            return True
+        if isinstance(node, ast.ImportFrom):
+            if node.level:
+                if importer is None:
+                    return True
+                parts = importer.rpartition(".")[0].split(".")
+                base = parts[: len(parts) - node.level + 1]
+                imported_from = ".".join((*base, *(node.module.split(".") if node.module else ())))
+            else:
+                imported_from = node.module
+            if imported_from == parent and any(alias.name == leaf for alias in node.names):
+                return True
+            if imported_from == module and any(
+                alias.name == "*" or alias.name in symbols for alias in node.names
+            ):
+                return True
+    return False
+
+
+def _discover_tests(
+    repo_root: Path,
+    source_paths: Sequence[str],
+    *,
+    base_sha: str = "0" * 40,
+    head_sha: str = "1" * 40,
+) -> tuple[set[str], bool]:
+    direct: set[str] = set()
+    dependents: set[str] = set()
+    reexports: set[str] = set()
+    direct_symbols: dict[str, set[str] | None] = {}
+    unresolved = False
+    try:
+        graph = build_dependency_graph(repo_root)
+    except DependencyError:
+        graph = None
+        unresolved = True
+
+    def retain(relative: str) -> None:
+        selected = module_name_for_path(relative)
+        if selected is not None:
+            (reexports if relative.endswith("/__init__.py") else dependents).add(selected)
+
+    for relative in source_paths:
+        module = module_name_for_path(relative)
+        if module is None:
+            continue
+        direct.add(module)
+        symbols = _changed_public_symbols(repo_root, relative, base_sha, head_sha)
+        direct_symbols[module] = symbols
+        if graph is None:
+            continue
+        if symbols is None or not hasattr(graph, "reverse_importers"):
+            try:
+                for nested in graph.dependent_paths(relative):
+                    retain(nested)
+            except DependencyError:
+                unresolved = True
+            continue
+        importers = graph.reverse_importers.get(module, frozenset())
+        for importer in importers:
+            importer_path = graph.module_to_path.get(importer)
+            if importer_path is None:
+                continue
+            if symbols is not None:
+                try:
+                    tree = ast.parse((repo_root / importer_path).read_text(encoding="utf-8"))
+                except (OSError, SyntaxError, UnicodeError):
+                    unresolved = True
+                    continue
+                if not _imports_changed_surface(
+                    tree, module, symbols,
+                    importer=None if importer_path.endswith('/__init__.py') else importer,
+                ):
+                    continue
+            retain(importer_path)
+            try:
+                for nested in graph.dependent_paths(importer_path):
+                    retain(nested)
+            except DependencyError:
+                unresolved = True
     symbols: set[str] = set()
     for relative in source_paths:
         path = repo_root / relative
@@ -269,7 +363,14 @@ def _discover_tests(repo_root: Path, source_paths: Sequence[str]) -> tuple[set[s
             continue
         imports = legacy._imported_modules(tree)
         direct_hit = any(
-            _imports_module(imported, module) for imported in imports for module in direct
+            (
+                _imports_changed_surface(
+                    tree, module, direct_symbols[module], module_name_for_path(relative)
+                )
+                if direct_symbols.get(module) is not None
+                else any(_imports_module(imported, module) for imported in imports)
+            )
+            for module in direct
         )
         dependent_hit = any(
             _imports_module(imported, module)
@@ -344,7 +445,9 @@ def select_focus(
         tests.update(legacy._existing(root, CONTROL_TESTS))
 
     if source_paths and not research_only and root is not None:
-        discovered, unresolved = _discover_tests(root, source_paths)
+        discovered, unresolved = _discover_tests(
+            root, source_paths, base_sha=base_sha, head_sha=head_sha
+        )
         for path in discovered:
             (service_tests if _is_service_test(path) else tests).add(path)
         if discovered:
