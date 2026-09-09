@@ -1207,17 +1207,21 @@ def _document(text: str) -> dict[str, object]:
     def unique(pairs):
         value = dict(pairs)
         if len(value) != len(pairs):
-            raise NativeEvidenceError("native assessment output has duplicate fields")
+            raise EvidencePackageError(
+                "native assessment output has duplicate fields"
+            )
         return value
 
     try:
         value = json.loads(text, object_pairs_hook=unique)
     except (TypeError, json.JSONDecodeError) as exc:
-        raise NativeEvidenceError("native assessment output is malformed") from exc
+        raise EvidencePackageError(
+            "native assessment output is malformed"
+        ) from exc
     if type(value) is not dict:
-        raise NativeEvidenceError("native assessment output is malformed")
+        raise EvidencePackageError("native assessment output is malformed")
     if set(value) != set(SCHEMA["required"]):
-        raise NativeEvidenceError("native assessment output fields differ")
+        raise EvidencePackageError("native assessment output fields differ")
     return value
 
 

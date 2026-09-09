@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 from uuid import UUID
 
@@ -23,6 +24,7 @@ from newsroom.control_plane.admission import (
     WRITE_ADMISSION_POLICY_VERSION,
     DeterministicWriteAdmission,
     WriteSelectionRecord,
+    _duration_is_exactly_supported,
     select_write_ready,
 )
 from newsroom.control_plane.child_environment import unprivileged_child_environment
@@ -1538,6 +1540,77 @@ def test_material_disruption_duration_relation_is_admitted() -> None:
     )
 
     assert decision.decision == "WRITE_READY"
+
+
+@pytest.mark.parametrize(
+    ("fact", "duration_minutes", "expected"),
+    (
+        ("Train service was delayed for two hours.", "120", "WRITE_READY"),
+        ("列車服務延誤兩小時。", "120", "WRITE_READY"),
+        ("Train service was delayed for twenty two hours.", "120", "HOLD"),
+        ("列車服務延誤二十二小時。", "120", "HOLD"),
+        ("Train service was delayed for two hours.", "60", "HOLD"),
+        ("Train service was delayed for two minutes.", "120", "HOLD"),
+    ),
+)
+def test_localised_material_duration_is_exact(
+    fact: str, duration_minutes: str, expected: str
+) -> None:
+    candidate, package = _candidate_package()
+    headline, substantive = package.governed_claims
+    changed_substantive = replace(
+        substantive,
+        claim=fact,
+        supporting_excerpt=fact,
+        rendered_assertion_zh_hant_hk="列車服務證實出現達兩小時延誤",
+    )
+    checked = replace(
+        package,
+        passages=(f"HK-01: {headline.claim}\n{fact}",),
+        substantive_new_information=(headline.claim, fact),
+        governed_claims=(headline, changed_substantive),
+        qualification_evidence=(
+            package.qualification_evidence[0],
+            QualificationEvidence(
+                Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION,
+                changed_substantive.claim_id,
+                f"qualification:{changed_substantive.claim_id}",
+                (
+                    ("service_kind", "TRANSPORT"),
+                    ("event_polarity", "AFFIRMED"),
+                    ("duration_relation", "DISRUPTION_DURATION"),
+                    ("duration_minutes", duration_minutes),
+                    ("affected_group", fact),
+                ),
+            ),
+        ),
+    )
+
+    decision = DeterministicWriteAdmission().decide(
+        candidate, checked, decided_at="2026-08-20T00:00:00.000000Z"
+    )
+
+    assert decision.decision == expected
+
+
+@pytest.mark.parametrize(
+    ("fact", "duration_minutes", "expected"),
+    (
+        ("Train service had a twenty two hours delay.", "120", False),
+        ("Train service had a twenty-two-hour delay.", "120", False),
+        ("A 2.5-hour delay affected the train service.", "300", False),
+        ("A 1/2-hour delay affected the train service.", "120", False),
+        ("A 2,500-hour delay affected the train service.", "30000", False),
+        ("Train service had a two hours delay.", "120", True),
+        ("A two-hour delay followed a 0.5-hour inspection.", "120", True),
+        ("A twenty-two-hour delay ended before a two-hour delay began.", "120", True),
+    ),
+)
+def test_duration_does_not_slice_a_compound_number(
+    fact: str, duration_minutes: str, expected: bool
+) -> None:
+    claim = SimpleNamespace(claim=fact, supporting_excerpt=fact)
+    assert _duration_is_exactly_supported(claim, duration_minutes) is expected
 
 
 @pytest.mark.parametrize(

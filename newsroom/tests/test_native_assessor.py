@@ -278,30 +278,43 @@ def test_native_assessor_uses_exact_candidate_and_base_without_ambient_context(
 
 
 @pytest.mark.parametrize(
-    ("dispatch", "outcome"),
+    ("output", "outcome"),
     (
-        (lambda _: (_ for _ in ()).throw(RuntimeError("provider broke")),
-         "ASSESSOR_PROVIDER_FAILED"),
-        (lambda _: NativeAssessmentExecution(
-            '{"package":{}}', {
-            "usage_basis": "PROVIDER_REPORTED",
-            "input_tokens": 1,
-            "output_tokens": 1,
-            "cached_read_tokens": 0,
-            "cached_write_tokens": 0,
-            "reasoning_tokens": 0,
-            "context_tokens": 1,
-            "total_tokens": 2,
-        }),
-         "ASSESSOR_VALIDATION_FAILED"),
+        (None, "ASSESSOR_PROVIDER_FAILED"),
+        ('{"package":{}}', "ASSESSOR_VALIDATION_FAILED"),
+        ('{', "ASSESSOR_VALIDATION_FAILED"),
+        ('{"package":{},"package":{}}', "ASSESSOR_VALIDATION_FAILED"),
     ),
 )
 def test_native_assessor_retains_post_dispatch_failures(
-    tmp_path, monkeypatch, dispatch, outcome,
+    tmp_path,
+    monkeypatch,
+    output,
+    outcome,
 ) -> None:
     connection, _port, candidate = _candidate(tmp_path)
     base = _base_package(_ready_package(candidate)[1])
     service, usage = _usage(tmp_path, monkeypatch)
+    dispatches = 0
+
+    def dispatch(_request):
+        nonlocal dispatches
+        dispatches += 1
+        if output is None:
+            raise RuntimeError("provider broke")
+        return NativeAssessmentExecution(
+            output,
+            {
+                "usage_basis": "PROVIDER_REPORTED",
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "cached_read_tokens": 0,
+                "cached_write_tokens": 0,
+                "reasoning_tokens": 0,
+                "context_tokens": 1,
+                "total_tokens": 2,
+            },
+        )
 
     with pytest.raises((RuntimeError, NativeEvidenceError)) as caught:
         AutonomousNativeEvidenceAssessor(
@@ -312,6 +325,7 @@ def test_native_assessor_retains_post_dispatch_failures(
     if outcome == "ASSESSOR_VALIDATION_FAILED":
         assert isinstance(caught.value, NativeEvidenceHold)
         assert caught.value.reason_code == "ASSESSOR_OUTPUT_CONTRACT_HOLD"
+    assert dispatches == 1
 
     with sqlite3.connect(service.path) as retained:
         terminal = json.loads(retained.execute(
