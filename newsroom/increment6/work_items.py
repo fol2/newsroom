@@ -2093,7 +2093,7 @@ class TriageWorkItemStore:
                 self._verify_item_chain(item.work_item_id)
                 self._connection.execute("COMMIT")
                 return version
-            self._require_upstream(version, initial=True)
+            self._require_upstream(version)
             self._reject_overlap(item, version)
             self._reject_reused_causality(version)
             self._connection.execute(
@@ -2183,7 +2183,7 @@ class TriageWorkItemStore:
             ):
                 raise WorkItemContractError("stable decision Lead identity changed")
             self._require_disposition_transition(predecessor, version)
-            self._require_upstream(version, initial=False)
+            self._require_upstream(version)
             self._reject_overlap(item, version)
             self._reject_reused_causality(version)
             self._insert_version(version)
@@ -2714,18 +2714,11 @@ class TriageWorkItemStore:
                     reasons.append("supplemental_queued_disposition")
         return reasons
 
-    def _require_upstream(self, v: TriageWorkItemVersion, *, initial: bool) -> None:
+    def _require_upstream(self, v: TriageWorkItemVersion) -> None:
         reasons = self._upstream_reasons(v)
         if reasons:
             raise WorkItemContractError(
                 "upstream authority differs: " + ",".join(reasons)
-            )
-        if initial and any(
-            x.disposition_ordinal != 1 or x.previous_disposition_id is not None
-            for x in v.decision_leads
-        ):
-            raise WorkItemContractError(
-                "initial decision Leads require ordinal-one queue dispositions"
             )
 
     def _is_active_usable(self, version: TriageWorkItemVersion) -> bool:

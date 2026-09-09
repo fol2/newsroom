@@ -80,6 +80,24 @@ WITH [candidate IN candidates
 RETURN candidate_overflow, rows
 """
 
+_NATIVE_FULLTEXT_READ_QUERY = """
+CALL db.index.fulltext.queryNodes($index_name, $query)
+YIELD node, score
+WHERE node.generation_id = $generation_id
+  AND node.passage_id IN $eligible_passage_ids
+WITH node, score
+ORDER BY score DESC, node.passage_id
+LIMIT $limit
+WITH collect({
+  generation_id: node.generation_id,
+  passage_id: node.passage_id,
+  document_digest: node.document_digest,
+  language: node.language,
+  score: score
+}) AS rows
+RETURN false AS candidate_overflow, rows
+"""
+
 
 _SCHEMA_QUERIES = (
     """
@@ -402,6 +420,7 @@ class _Neo4jAdapter:
         source_ids: tuple[str, ...],
         limit: int,
         timeout_ns: int,
+        eligible_passage_ids: tuple[str, ...] | None = None,
     ) -> Any:
         """Execute one fixed phase of the Increment 5 full-text read port."""
 
@@ -505,25 +524,56 @@ class _Neo4jAdapter:
                     raise Neo4jReadError(
                         "Neo4j Increment 5 full-text source scope is invalid"
                     )
-                if isinstance(limit, bool) or limit != 9:
-                    raise Neo4jReadError(
-                        "Neo4j Increment 5 full-text overflow limit must equal nine"
+                if eligible_passage_ids is None:
+                    if isinstance(limit, bool) or limit != 9:
+                        raise Neo4jReadError(
+                            "Neo4j Increment 5 full-text overflow limit must equal nine"
+                        )
+                    candidate_limit = (
+                        FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
+                        if source_ids
+                        else limit
                     )
-                candidate_limit = (
-                    FULLTEXT_SOURCE_SCOPE_CANDIDATE_LIMIT
-                    if source_ids
-                    else limit
-                )
-                callback = lambda transaction: transaction.run(
-                    _FULLTEXT_READ_QUERY,
-                    {
-                        "index_name": index_name,
-                        "query": lucene_expression,
-                        "generation_id": generation_id,
-                        "candidate_limit": candidate_limit,
-                        "limit": limit,
-                    },
-                ).single()
+                    callback = lambda transaction: transaction.run(
+                        _FULLTEXT_READ_QUERY,
+                        {
+                            "index_name": index_name,
+                            "query": lucene_expression,
+                            "generation_id": generation_id,
+                            "candidate_limit": candidate_limit,
+                            "limit": limit,
+                        },
+                    ).single()
+                else:
+                    if (
+                        not isinstance(eligible_passage_ids, tuple)
+                        or len(eligible_passage_ids) > 4_096
+                        or eligible_passage_ids
+                        != tuple(sorted(set(eligible_passage_ids)))
+                        or any(
+                            not isinstance(item, str)
+                            or not item
+                            or item != item.strip()
+                            or len(item.encode("utf-8")) > 256
+                            or any(ord(character) < 0x20 for character in item)
+                            for item in eligible_passage_ids
+                        )
+                        or isinstance(limit, bool)
+                        or limit != 8
+                    ):
+                        raise Neo4jReadError(
+                            "Neo4j native full-text query controls are invalid"
+                        )
+                    callback = lambda transaction: transaction.run(
+                        _NATIVE_FULLTEXT_READ_QUERY,
+                        {
+                            "index_name": index_name,
+                            "query": lucene_expression,
+                            "generation_id": generation_id,
+                            "eligible_passage_ids": list(eligible_passage_ids),
+                            "limit": limit,
+                        },
+                    ).single()
                 operation = "increment5.fulltext.query"
 
         started_ns = self._monotonic_ns()

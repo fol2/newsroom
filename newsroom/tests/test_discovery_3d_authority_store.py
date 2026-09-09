@@ -115,6 +115,65 @@ def test_governing_producer_read_port_returns_exact_ordered_closure(
         connection.close()
 
 
+def test_governing_producer_read_port_preserves_original_promoting_gate(
+    tmp_path: Path,
+) -> None:
+    from newsroom.discovery import TimeValidity
+
+    from .discovery_3d_helpers import reason
+
+    database = tmp_path / "repromoted-governing-producer.sqlite3"
+    admitted = _seed_and_admit(database)
+    hold_id = GateDecisionId.parse("00000000-0000-4000-8000-000000007097")
+    promoted_id = GateDecisionId.parse("00000000-0000-4000-8000-000000007098")
+    with open_discovery_system(database) as system:
+        system.discovery.decide_gate(
+            replace(
+                exact_gate_request(),
+                decision_id=hold_id,
+                decision_ordinal=2,
+                previous_decision_id=GATE_ID,
+                basis=replace(
+                    exact_gate_request().basis,
+                    policy_current=False,
+                    operationally_executable=False,
+                    time_validity=TimeValidity.CURRENT,
+                ),
+                outcome=GateOutcome.OPERATIONAL_HOLD,
+                terminality=DecisionTerminality.PENDING_CONDITION,
+                primary_reason=reason("OPS.POLICY_STALE"),
+                next_action=NextAction(
+                    NextActionKind.REVIEW,
+                    "REVIEW_STALE_POLICY",
+                    owner="discovery-operator",
+                    instructions="Revalidate the current deterministic Gate policy.",
+                ),
+                idempotency_key="governing-port-repromotion-hold",
+            ),
+            proof=proof(),
+        )
+        system.discovery.decide_gate(
+            replace(
+                exact_gate_request(),
+                decision_id=promoted_id,
+                decision_ordinal=3,
+                previous_decision_id=hold_id,
+                idempotency_key="governing-port-repromotion-current",
+            ),
+            proof=proof(),
+        )
+
+    connection = _transaction_connection(database)
+    try:
+        port = _create_discovery_governing_producer_read_port(connection)
+        assert port.require_current_governing_producers((LEAD_ID,)) == (
+            (admitted.lead, admitted.signal, admitted.gate),
+        )
+    finally:
+        connection.execute("ROLLBACK")
+        connection.close()
+
+
 def test_governing_producer_read_port_uses_exact_scoped_event_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

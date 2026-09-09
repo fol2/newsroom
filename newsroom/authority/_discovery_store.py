@@ -160,35 +160,54 @@ class _DiscoveryGoverningProducerReader:
             signal = _DiscoveryAuthorityStore._signal_from_row(
                 connection, signal_row, replayed=False
             )
-            gate_row = connection.execute(
+            current_gate_row = connection.execute(
                 "SELECT d.* FROM discovery_gate_decision_heads h "
                 "JOIN discovery_gate_decisions d "
                 "ON d.decision_id=h.current_decision_id "
                 "WHERE h.signal_id=?",
                 (str(signal.request.signal_id),),
             ).fetchone()
-            if gate_row is None:
+            if current_gate_row is None:
                 raise DiscoveryStateError("current Gate Decision is not retained")
-            gate = _DiscoveryAuthorityStore._gate_from_row(connection, gate_row, replayed=False)
+            current_gate = _DiscoveryAuthorityStore._gate_from_row(
+                connection, current_gate_row, replayed=False
+            )
+            promoting_gate_row = _DiscoveryAuthorityStore._row(
+                connection,
+                "discovery_gate_decisions",
+                "decision_id",
+                str(lead.request.promoting_gate_decision_id),
+            )
+            promoting_gate = _DiscoveryAuthorityStore._gate_from_row(
+                connection, promoting_gate_row, replayed=False
+            )
             if (
                 lead.request.signal_id != signal.request.signal_id
-                or lead.request.promoting_gate_decision_id != gate.request.decision_id
-                or gate.request.signal_id != signal.request.signal_id
-                or gate.request.outcome is not GateOutcome.PROMOTED_TO_LEAD
+                or promoting_gate.request.signal_id != signal.request.signal_id
+                or promoting_gate.request.outcome is not GateOutcome.PROMOTED_TO_LEAD
+                or current_gate.request.signal_id != signal.request.signal_id
+                or current_gate.request.outcome is not GateOutcome.PROMOTED_TO_LEAD
                 or lead.request.definition_id != signal.request.definition_id
                 or lead.request.item_id != signal.request.item_id
                 or lead.request.revision_id != signal.request.revision_id
                 or lead.request.representation_id != signal.request.representation_id
                 or lead.request.occurrence_id != signal.request.occurrence_id
                 or lead.request.transition_id != signal.request.transition_id
-                or lead.request.coverage != gate.request.coverage
-                or gate.request.evaluated_definition_version_id
+                or lead.request.coverage != promoting_gate.request.coverage
+                or lead.request.coverage != current_gate.request.coverage
+                or promoting_gate.request.evaluated_definition_version_id
                 != signal.request.definition_version_id
-                or gate.request.evaluated_definition_version_id
+                or current_gate.request.evaluated_definition_version_id
+                != signal.request.definition_version_id
+                or promoting_gate.request.evaluated_definition_version_id
+                != lead.request.definition_version_id
+                or current_gate.request.evaluated_definition_version_id
                 != lead.request.definition_version_id
             ):
                 raise DiscoveryVersionConflict("Discovery closure differs from authority")
-            result.append((lead, signal, gate))
+            # Candidate lineage names the immutable Gate that promoted the Lead;
+            # current eligibility is independently established by current_gate.
+            result.append((lead, signal, promoting_gate))
         return tuple(result)
 
 

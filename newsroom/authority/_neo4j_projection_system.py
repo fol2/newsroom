@@ -152,6 +152,7 @@ class _StructuralGraphAdapter(Protocol):
         source_ids: tuple[str, ...],
         limit: int,
         timeout_ns: int,
+        eligible_passage_ids: tuple[str, ...] | None = None,
     ) -> Any:
         ...
 
@@ -214,6 +215,7 @@ def _open_neo4j_fulltext_reader_with_adapter(
                     else str(request.generation_id)
                 ),
                 source_ids=request.source_ids,
+                eligible_passage_ids=request.eligible_passage_ids,
                 limit=request.limit,
                 timeout_ns=request.timeout_ns,
             )

@@ -1716,6 +1716,89 @@ def test_repromoted_gate_binds_replacement_queue_without_rewriting_lead(
         connection.close()
 
 
+def test_repromoted_gate_queue_can_create_initial_work_item(tmp_path) -> None:
+    database = tmp_path / "repromoted-gate-initial-work-item.sqlite3"
+    with open_discovery_system(database) as system:
+        seed_check_lineage(system)
+        admitted = system.discovery.admit_signal_to_lead(
+            exact_admission_request(), proof=proof()
+        )
+        assert admitted.lead is not None and admitted.initial_disposition is not None
+
+        hold_id = GateDecisionId.parse(_id(8040))
+        promoted_id = GateDecisionId.parse(_id(8041))
+        system.discovery.decide_gate(
+            replace(
+                exact_gate_request(),
+                decision_id=hold_id,
+                decision_ordinal=2,
+                previous_decision_id=exact_gate_request().decision_id,
+                basis=replace(
+                    exact_gate_request().basis,
+                    policy_current=False,
+                    operationally_executable=False,
+                    time_validity=TimeValidity.CURRENT,
+                ),
+                outcome=GateOutcome.OPERATIONAL_HOLD,
+                terminality=DecisionTerminality.PENDING_CONDITION,
+                primary_reason=reason("OPS.POLICY_STALE"),
+                next_action=NextAction(
+                    NextActionKind.REVIEW,
+                    "REVIEW_STALE_POLICY",
+                    owner="discovery-operator",
+                    instructions="Revalidate the deterministic Gate policy.",
+                ),
+                idempotency_key="fixture-initial-work-item-gate-hold",
+            ),
+            proof=proof(),
+        )
+        system.discovery.decide_gate(
+            replace(
+                exact_gate_request(),
+                decision_id=promoted_id,
+                decision_ordinal=3,
+                previous_decision_id=hold_id,
+                idempotency_key="fixture-initial-work-item-gate-repromotion",
+            ),
+            proof=proof(),
+        )
+        replacement = system.discovery.record_lead_disposition(
+            replace(
+                disposition_request(),
+                decision_id=LeadDispositionDecisionId.parse(_id(8042)),
+                gate_decision_id=promoted_id,
+                decision_ordinal=2,
+                previous_decision_id=admitted.initial_disposition.request.decision_id,
+                idempotency_key="fixture-initial-work-item-replacement-queue",
+            ),
+            proof=proof(),
+        )
+
+        connection = sqlite3.connect(database, isolation_level=None)
+        store = TriageWorkItemStore(connection)
+        stale = DecisionLeadBinding.from_authority(
+            admitted.lead, admitted.initial_disposition
+        )
+        stale_item = TriageWorkItem.create((stale,))
+        with pytest.raises(WorkItemContractError, match="upstream authority"):
+            store.create_or_replay(stale_item, _version(stale_item))
+
+        current = DecisionLeadBinding.from_authority(admitted.lead, replacement)
+        assert current.disposition_ordinal == 2
+        assert current.previous_disposition_id == str(
+            admitted.initial_disposition.request.decision_id
+        )
+        item = TriageWorkItem.create((current,))
+        version = _version(item)
+        assert store.create_or_replay(item, version) == version
+        assert store.create_or_replay(item, version) == version
+        assert connection.execute(
+            "SELECT COUNT(*) FROM triage_work_items WHERE work_item_id=?",
+            (item.work_item_id,),
+        ).fetchone() == (1,)
+        connection.close()
+
+
 def test_immediate_queued_disposition_change_requires_watch_proof(tmp_path) -> None:
     database = tmp_path / "immediate-queue-without-watch.sqlite3"
     with open_discovery_system(database) as system:

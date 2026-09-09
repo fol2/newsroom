@@ -48,6 +48,7 @@ from .fulltext_contracts import (
     FullTextBranchRequest,
     FullTextContractError,
     FullTextIndexState,
+    FullTextProfile,
     NormalizedFullTextQuery,
 )
 from .fulltext_journal import FullTextJournalResult, FullTextReceiptJournal
@@ -241,13 +242,24 @@ class FullTextRetriever:
                     normalized_query=normalized,
                 )
 
+            eligible_passage_ids = None
+            query_limit = request.result_limit + 1
+            if snapshot.profile is FullTextProfile.NATIVE_RUNTIME:
+                eligible_passage_ids = tuple(
+                    item.passage_id
+                    for item in view.document_bindings
+                    if (not request.source_ids or item.source_id in request.source_ids)
+                    and item.exclusion_at(request.query_valid_time) is None
+                )
+                query_limit = request.result_limit
             query_result = self._graph_reader.read(
                 Neo4jFullTextReadRequest.query(
                     index_name=snapshot.index_name,
                     lucene_expression=normalized.lucene_query,
                     generation_id=snapshot.generation_id,
                     source_ids=request.source_ids,
-                    limit=request.result_limit + 1,
+                    eligible_passage_ids=eligible_passage_ids,
+                    limit=query_limit,
                     timeout_ns=self._remaining_timeout_ns(
                         start_ns=start_ns,
                         deadline_ns=deadline_ns,
