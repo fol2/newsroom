@@ -73,7 +73,30 @@ class NativePipeline:
                     outcomes = tuple(by_ingest[unit.ingest_id] for unit in self._journal.units[revision_id])
                     facts = dict(self._journal.progress.get(revision_id, {}).get("facts", {}))
                     complete = all(item.state == "GRAPHITI_COMPLETE" for item in outcomes)
-                    facts["graphiti_receipts" if complete else "graphiti_outcomes"] = [asdict(item) for item in outcomes]
+                    if complete:
+                        facts.pop("graphiti_outcomes", None)
+                        facts.pop("reason", None)
+                        facts["graphiti_receipts"] = [asdict(item) for item in outcomes]
+                    else:
+                        held = tuple(
+                            item for item in outcomes
+                            if item.state in {"GRAPHITI_HOLD", "ADMISSION_HOLD"}
+                        )
+                        if not held:
+                            raise ValueError("native Graphiti incomplete revision lacks a hold")
+                        reasons = {
+                            item.reason
+                            for item in held
+                        }
+                        if any(type(reason) is not str or not reason for reason in reasons):
+                            raise ValueError("native Graphiti hold reason differs")
+                        facts.pop("graphiti_receipts", None)
+                        facts["graphiti_outcomes"] = [asdict(item) for item in outcomes]
+                        facts["reason"] = (
+                            next(iter(reasons))
+                            if len(reasons) == 1
+                            else "MULTIPLE_GRAPHITI_HOLDS"
+                        )
                     self._journal.advance(revision_id, stage="GRAPHITI_COMPLETE" if complete else "GRAPHITI_HOLD", facts=facts)
             except VetoError:
                 raise

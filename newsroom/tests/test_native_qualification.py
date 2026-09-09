@@ -32,14 +32,14 @@ def _open(path):
     return connect(str(path))
 
 
-def _portfolio(journal, unit=None, *, first_reason=None):
+def _portfolio(journal, unit=None, *, first_reason=None, source_override=None):
     rights_holds = {
         "HK-01": "MEDIA_REUSE_PERMISSION_SCOPE_NOT_ESTABLISHED",
         "HK-04": "NON_COMMERCIAL_INTERNAL_USE_ONLY",
         "RAD-01": "AUTOMATED_REUSE_PERMISSION_NOT_RETAINED",
         "RAD-02": "COMPUTER_ANALYSIS_PERMISSION_NOT_RETAINED",
     }
-    journal.sources(tuple(
+    dispositions = tuple(
         NS(
             source_id=source_id, status="HOLD" if source_id in rights_holds else "READY",
             reason_code=(
@@ -59,7 +59,12 @@ def _portfolio(journal, unit=None, *, first_reason=None):
             item_holds=(),
         )
         for source_id in SOURCE_IDS
-    ))
+    )
+    if source_override is not None:
+        dispositions = (
+            NS(**{**vars(dispositions[0]), **source_override}), *dispositions[1:],
+        )
+    journal.sources(dispositions)
 
 
 def _cycle(
@@ -71,12 +76,13 @@ def _cycle(
     revision_state="EVIDENCE_HOLD",
     reason="SOURCE_LOCAL_EVIDENCE_HOLD",
     source_reason=None,
+    source_override=None,
 ):
     journal = NativeRevisionJournal(connection)
     unit = _native("qualification-hold")
     journal.land((unit,))
     journal.advance(unit.revision_id, stage=revision_state, facts={"reason": reason})
-    _portfolio(journal, unit, first_reason=source_reason)
+    _portfolio(journal, unit, first_reason=source_reason, source_override=source_override)
     append_ledger(connection, "NATIVE_SERVICE_CYCLE_STARTED", {
         "cycle_id": "qualification-cycle", "runtime_identity_digest": identity,
     })
@@ -301,6 +307,86 @@ def test_legacy_drift_failed_and_unfinished_cycles_never_qualify(tmp_path):
                 record_qualification(connection, IDENTITY)
         finally:
             connection.close()
+
+
+def _content_hold(reason="SOURCE_ITEM_NOT_YET_PUBLISHED"):
+    return {
+        "status": "HOLD", "reason_code": "SOURCE_ITEMS_HELD",
+        "item_holds": (("https://www.gov.uk/held-item", reason),),
+        "observations": ((
+            "https://www.gov.uk/api/content/held-item",
+            digest_canonical({"retained": "source content"}),
+            "00000000-0000-4000-8000-000000000101",
+            "00000000-0000-4000-8000-000000000102",
+        ),),
+    }
+
+
+@pytest.mark.parametrize("reason", [
+    "SOURCE_ITEM_NOT_YET_PUBLISHED",
+    "SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE",
+    "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE",
+])
+def test_observation_bound_content_hold_qualifies_without_hiding_sibling(tmp_path, reason):
+    path = tmp_path / "content-hold.sqlite3"
+    connection = _open(path)
+    try:
+        journal = _cycle(connection, source_override=_content_hold(reason))
+        retained = record_qualification(connection, IDENTITY)
+        source = journal.portfolio[0]
+        assert source["status"] == "HOLD"
+        assert source["item_holds"] == [["https://www.gov.uk/held-item", reason]]
+        assert source["revision_ids"] == sorted(journal.units)
+        assert validate_qualification(connection, IDENTITY) == retained
+    finally:
+        connection.close()
+    readonly = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        assert validate_qualification(readonly, IDENTITY) == retained
+    finally:
+        readonly.close()
+
+
+@pytest.mark.parametrize("case", [
+    "metadata", "transport", "invented", "missing_observation", "wrong_url",
+    "duplicate_observation", "bad_digest", "bad_admission", "bad_access",
+    "no_items", "duplicate_items", "ready", "rights_reason", "other_route",
+])
+def test_unclassified_or_unbound_content_hold_does_not_qualify(tmp_path, case):
+    value = _content_hold()
+    if case in {"metadata", "transport", "invented"}:
+        reason = {
+            "metadata": "SOURCE_ITEM_METADATA_HOLD",
+            "transport": "SOURCE_ITEM_FETCH_INCOMPLETE",
+            "invented": "INVENTED_HOLD",
+        }[case]
+        value = _content_hold(reason)
+    elif case == "missing_observation":
+        value["observations"] = ()
+    elif case in {"wrong_url", "bad_digest", "bad_admission", "bad_access"}:
+        parts = list(value["observations"][0])
+        index = {"wrong_url": 0, "bad_digest": 1, "bad_admission": 2, "bad_access": 3}[case]
+        parts[index] = "https://www.gov.uk/api/content/unrelated" if index == 0 else "invalid"
+        value["observations"] = (tuple(parts),)
+    elif case == "duplicate_observation":
+        value["observations"] *= 2
+    elif case == "no_items":
+        value["item_holds"] = ()
+    elif case == "duplicate_items":
+        value["item_holds"] *= 2
+    elif case == "ready":
+        value.update(status="READY", reason_code="GOVERNED_REVISIONS_RETAINED")
+    elif case == "rights_reason":
+        value["reason_code"] = "MEDIA_REUSE_PERMISSION_SCOPE_NOT_ESTABLISHED"
+    elif case == "other_route":
+        value["item_holds"] = (("https://example.org/held-item", value["item_holds"][0][1]),)
+    connection = _open(tmp_path / f"{case}.sqlite3")
+    try:
+        _cycle(connection, source_override=value)
+        with pytest.raises(NativeQualificationError):
+            record_qualification(connection, IDENTITY)
+    finally:
+        connection.close()
 
 
 def test_only_referenced_native_ledger_rows_enter_qualification(tmp_path):

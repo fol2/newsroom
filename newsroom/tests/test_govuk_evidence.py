@@ -10,7 +10,8 @@ import pytest
 
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane.govuk_evidence import (
-    GovUkEvidenceAcquisition, MAX_BODY_BYTES, POLICY_DIGEST, _api_url,
+    GovUkContentHold, GovUkEvidenceAcquisition, MAX_BODY_BYTES, POLICY_DIGEST,
+    _api_url, parse_govuk_content_document,
 )
 from newsroom.control_plane.native_evidence import EvidenceAcquisitionRequest, NativeEvidenceHold
 from newsroom.sources import SourceDefinitionVersionId
@@ -41,6 +42,141 @@ def _document(path):
         "public_updated_at": "2026-09-02T10:00:00Z",
         "links": {"organisations": [{"title": "Home Office"}]},
     }
+
+
+def _content_shape(document_type: str, *, release: str | None = None):
+    value = _document("/government/example")
+    value["document_type"] = document_type
+    if document_type == "official_statistics_announcement":
+        value["details"] = {
+            "display_date": "10 September 2026 9:30am",
+            "release_timestamp": release or "2026-09-10T09:30:00+01:00",
+            "state": "confirmed",
+        }
+    elif document_type == "manual":
+        value["details"] = {"child_section_groups": [{
+            "title": "Standards",
+            "child_sections": [{
+                "base_path": "/government/example/section-one",
+                "title": "Section one",
+            }],
+        }]}
+    elif document_type == "document_collection":
+        value["links"]["documents"] = [{
+            "base_path": "/government/publications/child",
+            "title": "Child document",
+        }]
+    elif document_type == "transparency":
+        value["details"]["attachments"] = [{
+            "url": (
+                "https://assets.publishing.service.gov.uk/media/example/report.ods"
+            ),
+            "title": "Attached report",
+        }]
+        value["links"]["children"] = [{
+            "base_path": "/government/example/child",
+            "title": "Child publication",
+        }]
+    return value
+
+
+@pytest.mark.parametrize("document_type", ["oral_statement", "statistics"])
+def test_content_parser_accepts_observed_complete_body_types(document_type):
+    document = parse_govuk_content_document(
+        "https://www.gov.uk/government/example",
+        json.dumps(_content_shape(document_type)).encode(),
+        retrieved_at=datetime(2026, 9, 9, tzinfo=UTC),
+    )
+    assert document.document_type == document_type
+    assert document.body_text == "Exact independent source text."
+
+
+@pytest.mark.parametrize(("document_type", "release", "variant", "reason_code"), [
+    ("official_statistics_announcement", "2026-09-10T09:30:00+01:00",
+     "confirmed", "SOURCE_ITEM_NOT_YET_PUBLISHED"),
+    ("official_statistics_announcement", "2026-12-17T09:30:00Z",
+     "provisional-one", "SOURCE_ITEM_NOT_YET_PUBLISHED"),
+    ("official_statistics_announcement", "2027-01-15T09:30:00Z",
+     "provisional-two", "SOURCE_ITEM_NOT_YET_PUBLISHED"),
+    ("manual", None, "inventory", "SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE"),
+    ("document_collection", None, "body", "SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE"),
+    ("document_collection", None, "empty", "SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE"),
+    ("transparency", None, "attachments",
+     "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE"),
+])
+def test_content_parser_retains_specific_known_coverage_holds(
+    document_type, release, variant, reason_code,
+):
+    value = _content_shape(document_type, release=release)
+    if variant.startswith("provisional"):
+        value["details"]["state"] = "provisional"
+    if variant == "empty":
+        value["details"]["body"] = "<div></div>"
+    with pytest.raises(GovUkContentHold) as caught:
+        parse_govuk_content_document(
+            "https://www.gov.uk/government/example", json.dumps(value).encode(),
+            retrieved_at=datetime(2026, 9, 9, tzinfo=UTC),
+        )
+    assert caught.value.reason_code == reason_code
+
+
+@pytest.mark.parametrize(("document_type", "mutation"), [
+    ("official_statistics_announcement", "elapsed"),
+    ("official_statistics_announcement", "malformed"),
+    ("manual", "missing"),
+    ("document_collection", "unsafe"),
+    ("transparency", "missing"),
+])
+def test_known_content_hold_never_masks_invalid_or_elapsed_content(
+    document_type, mutation,
+):
+    value = _content_shape(document_type)
+    if mutation == "elapsed":
+        value["details"]["release_timestamp"] = "2026-09-08T09:30:00Z"
+    elif mutation == "malformed":
+        value["details"]["release_timestamp"] = "not-a-time"
+    elif document_type == "manual":
+        value["details"]["child_section_groups"] = []
+    elif document_type == "document_collection":
+        value["links"]["documents"][0]["base_path"] = "//external.example/item"
+    else:
+        value["details"]["attachments"] = []
+        value["links"]["children"] = []
+    with pytest.raises(ValueError) as caught:
+        parse_govuk_content_document(
+            "https://www.gov.uk/government/example", json.dumps(value).encode(),
+            retrieved_at=datetime(2026, 9, 9, tzinfo=UTC),
+        )
+    assert type(caught.value) is ValueError
+
+
+@pytest.mark.parametrize(("document_type", "location"), [
+    ("manual", "/government/example/%2e%2e/other"),
+    ("document_collection", "/government/%2e%2e/other"),
+    ("document_collection", "/government/item?next=https://evil.test"),
+    ("document_collection", "/government/%0aitem"),
+    ("transparency", "/file?next=https://evil.test"),
+    ("transparency", "https://assets.publishing.service.gov.uk/%2e%2e/secret"),
+    ("transparency", "https://assets.publishing.service.gov.uk/media/%0aitem"),
+])
+def test_known_inventory_locations_reject_encoded_traversal_query_and_control(
+    document_type, location,
+):
+    value = _content_shape(document_type)
+    if document_type == "manual":
+        value["details"]["child_section_groups"][0]["child_sections"][0][
+            "base_path"
+        ] = location
+    elif document_type == "document_collection":
+        value["links"]["documents"][0]["base_path"] = location
+    else:
+        value["details"]["attachments"][0]["url"] = location
+    with pytest.raises(ValueError) as caught:
+        parse_govuk_content_document(
+            "https://www.gov.uk/government/example", json.dumps(value).encode(),
+            retrieved_at=datetime(2026, 9, 9, tzinfo=UTC),
+        )
+    assert type(caught.value) is ValueError
 
 
 def _request(system, unit):

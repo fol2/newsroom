@@ -43,7 +43,8 @@ from newsroom.sources import (
 
 from .govuk_rights import GovUkLicenceEvidence
 from .govuk_evidence import (
-    _api_url, _utc, parse_govuk_content_document, parse_govuk_manual_inventory,
+    GovUkContentHold, _api_url, _utc, parse_govuk_content_document,
+    parse_govuk_manual_inventory,
 )
 from .native_policies import (
     NATIVE_SOURCE_OBSERVATION_ADMISSION_TYPE,
@@ -352,6 +353,8 @@ class NativeSourceIntake:
             document = parse_govuk_content_document(
                 item.canonical_url, raw, retrieved_at=observed
             )
+        except GovUkContentHold as exc:
+            raise NativeSourceIntakeHold(exc.reason_code) from None
         except (ValueError, TypeError, KeyError, UnicodeError):
             raise NativeSourceIntakeHold("SOURCE_ITEM_METADATA_HOLD") from None
         return replace(

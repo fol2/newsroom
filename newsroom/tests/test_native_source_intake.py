@@ -42,6 +42,24 @@ def _document(*, body="The complete maintained-page text.", updated="2026-09-08T
     }, separators=(",", ":")).encode()
 
 
+def _future_announcement(*, path="/item-2"):
+    return json.dumps({
+        "base_path": path,
+        "locale": "en",
+        "document_type": "official_statistics_announcement",
+        "withdrawn_notice": None,
+        "first_published_at": "2026-09-08T10:00:00Z",
+        "public_updated_at": "2026-09-08T11:00:00Z",
+        "title": "Future official statistics",
+        "details": {
+            "display_date": "10 September 2026 9:30am",
+            "release_timestamp": "2026-09-10T09:30:00+01:00",
+            "state": "confirmed",
+        },
+        "links": {"organisations": [{"title": "Home Office"}]},
+    }, separators=(",", ":")).encode()
+
+
 def _licence():
     return GovUkLicenceEvidence(
         (
@@ -267,8 +285,12 @@ def test_native_source_poll_holds_oversize_and_duplicate_native_revision(tmp_pat
         assert oversized.observation_admission_id is None
 
 
+@pytest.mark.parametrize(("second_page", "reason_code"), [
+    (b"{}", "SOURCE_ITEM_METADATA_HOLD"),
+    (_future_announcement(), "SOURCE_ITEM_NOT_YET_PUBLISHED"),
+])
 def test_native_source_poll_preserves_completed_items_when_later_item_holds(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, second_page, reason_code,
 ):
     args = _args(tmp_path, monkeypatch)
     args["principal_id"] = OPERATOR_PRINCIPAL_ID
@@ -287,7 +309,7 @@ def test_native_source_poll_preserves_completed_items_when_later_item_holds(
             fetch=lambda url: (
                 (200, body[0]) if url == SOURCE_URLS["UK-01"]
                 else (200, _document()) if url.endswith("/item-1")
-                else (200, b'{}')
+                else (200, second_page)
             ),
             clock=lambda: datetime(2026, 9, 8, 12, tzinfo=UTC),
         )
@@ -295,7 +317,7 @@ def test_native_source_poll_preserves_completed_items_when_later_item_holds(
         assert held.status == "HOLD"
         assert held.reason_code == "SOURCE_ITEMS_HELD"
         assert held.item_holds == ((
-            "https://www.gov.uk/item-2", "SOURCE_ITEM_METADATA_HOLD",
+            "https://www.gov.uk/item-2", reason_code,
         ),)
         assert held.units
         assert len(held.observations) == 3
