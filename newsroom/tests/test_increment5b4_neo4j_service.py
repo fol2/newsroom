@@ -299,6 +299,13 @@ def test_native_projection_reconciles_actual_fulltext_and_vector_membership() ->
         receipt_a, document_a = _native_document(
             generation=generation, marker="alpha",
         )
+        text = "common " + " ".join(
+            f"governedterm{index}" for index in range(65)
+        )
+        document_a = replace(
+            document_a, text=text, text_digest=digest_bytes(text.encode())
+        )
+        receipt_a = replace(receipt_a, document_digest=document_a.digest)
         receipt_b, document_b = _native_document(
             generation=generation, marker="beta",
         )
@@ -322,6 +329,12 @@ def test_native_projection_reconciles_actual_fulltext_and_vector_membership() ->
             )
             assert _receipt_ids(fulltext) == expected
             assert _receipt_ids(vector_hits) == expected
+            with _session(driver, database) as session:
+                assert session.run(
+                    f"MATCH (n:`{projection.document_label}` "
+                    "{passage_id:$passage_id}) RETURN size(n.latin_terms) AS count",
+                    passage_id=document_a.passage_id,
+                ).single()["count"] == 66
 
             corrupt_b = replace(
                 receipt_b, document_digest=digest_bytes(b"corrupt-document"),
@@ -359,6 +372,12 @@ def test_native_projection_reconciles_actual_fulltext_and_vector_membership() ->
                     "{generation_id:$generation_id}) RETURN count(n) AS count",
                     generation_id=other_generation,
                 ).single()["count"] == 1
+            for index in range(7):
+                extra_receipt, extra_document = _native_document(
+                    generation=generation, marker=f"extra-{index}",
+                )
+                projection.upsert(extra_receipt, extra_document, vector)
+            assert len(projection.retrieve_vector(query_vector=vector)) == 8
         finally:
             _cleanup(driver, database, [generation, other_generation])
             with _session(driver, database) as session:

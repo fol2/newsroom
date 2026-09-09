@@ -87,6 +87,22 @@ def _alias_is_mentioned(
 def _normalization_core(
     surface_text: str,
 ) -> tuple[str, str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    collapsed, normalized, latin_terms, han_bigrams, formal_tokens = (
+        _normalization_inventory(surface_text)
+    )
+    return (
+        collapsed,
+        normalized,
+        _bounded_sorted(set(latin_terms), field="latin_terms"),
+        _bounded_sorted(set(han_bigrams), field="han_bigrams"),
+        _bounded_sorted(set(formal_tokens), field="formal_tokens"),
+    )
+
+
+def _normalization_inventory(
+    surface_text: str,
+) -> tuple[str, str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Return the complete deterministic document-index vocabulary."""
     collapsed = _collapse_nfkc(surface_text)
     normalized = _casefold_latin(collapsed)
     formal_tokens = {
@@ -111,9 +127,9 @@ def _normalization_core(
     return (
         collapsed,
         normalized,
-        _bounded_sorted(latin_terms, field="latin_terms"),
-        _bounded_sorted(han_bigrams, field="han_bigrams"),
-        _bounded_sorted(formal_tokens, field="formal_tokens"),
+        tuple(sorted(latin_terms)),
+        tuple(sorted(han_bigrams)),
+        tuple(sorted(formal_tokens)),
     )
 
 

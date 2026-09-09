@@ -80,6 +80,39 @@ def _content_shape(document_type: str, *, release: str | None = None):
     return value
 
 
+def _dfe_correspondence_shape():
+    path = "/government/publications/dfe-update-9-september-2026"
+    value = _document(path)
+    value.update({
+        "document_type": "correspondence",
+        "schema_name": "publication",
+        "title": "DfE Update 9 September 2026",
+        "first_published_at": "2026-09-09T12:41:12+01:00",
+        "public_updated_at": "2026-09-09T12:41:12+01:00",
+        "links": {"organisations": [{
+            "title": "Department for Education",
+            "base_path": "/government/organisations/department-for-education",
+        }]},
+    })
+    value["details"] = {
+        "body": "<p>Latest information and actions from the DfE.</p>",
+        "attachments": [
+            {
+                "attachment_type": "html",
+                "id": str(9460224 + index),
+                "title": f"DfE Update {audience}: 9 September 2026",
+                "url": f"{path}/dfe-update-{slug}-9-september-2026",
+            }
+            for index, (audience, slug) in enumerate((
+                ("further education", "further-education"),
+                ("academies", "academies"),
+                ("local authorities", "local-authorities"),
+            ))
+        ],
+    }
+    return value
+
+
 @pytest.mark.parametrize("document_type", ["oral_statement", "statistics"])
 def test_content_parser_accepts_observed_complete_body_types(document_type):
     document = parse_govuk_content_document(
@@ -118,6 +151,39 @@ def test_content_parser_retains_specific_known_coverage_holds(
             retrieved_at=datetime(2026, 9, 9, tzinfo=UTC),
         )
     assert caught.value.reason_code == reason_code
+
+
+def test_correspondence_with_declared_html_children_retains_coverage_hold():
+    value = _dfe_correspondence_shape()
+    with pytest.raises(GovUkContentHold) as caught:
+        parse_govuk_content_document(
+            "https://www.gov.uk" + value["base_path"],
+            json.dumps(value).encode(),
+            retrieved_at=datetime(2026, 9, 9, 12, tzinfo=UTC),
+        )
+    assert caught.value.reason_code == "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE"
+
+
+@pytest.mark.parametrize("mutation", ["schema", "body", "attachments", "duplicate"])
+def test_correspondence_hold_never_masks_invalid_metadata(mutation):
+    value = _dfe_correspondence_shape()
+    if mutation == "schema":
+        value["schema_name"] = "unknown"
+    elif mutation == "body":
+        value["details"]["body"] = ""
+    elif mutation == "attachments":
+        value["details"]["attachments"] = []
+    else:
+        value["details"]["attachments"][1]["url"] = value["details"][
+            "attachments"
+        ][0]["url"]
+    with pytest.raises(ValueError) as caught:
+        parse_govuk_content_document(
+            "https://www.gov.uk" + value["base_path"],
+            json.dumps(value).encode(),
+            retrieved_at=datetime(2026, 9, 9, 12, tzinfo=UTC),
+        )
+    assert type(caught.value) is ValueError
 
 
 @pytest.mark.parametrize(("document_type", "mutation"), [

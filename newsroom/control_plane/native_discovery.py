@@ -23,8 +23,9 @@ from newsroom.checks import (
 from newsroom.checks.record_models import CheckOutcome, ObservableTransition
 from newsroom.discovery import (
     DecisionTerminality, DiscoverySignalId, DiscoverySignalRequest, GateBasis,
-    GateDecisionId, GateDecisionRequest, GateOutcome, LeadDispositionDecisionId,
-    LeadDispositionDecisionRequest, LeadDispositionOutcome, NewsLeadId,
+    GateDecision, GateDecisionId, GateDecisionRequest, GateOutcome,
+    LeadDispositionDecision, LeadDispositionDecisionId,
+    LeadDispositionDecisionRequest, LeadDispositionOutcome, NewsLead, NewsLeadId,
     NewsLeadRequest, NextAction, NextActionKind, ObservableNewness,
     ReasonBasisClass, ReasonReference, ScopeDisposition, SignalLeadAdmissionRequest,
     StructuredReason, TimeValidity, UrgencyBasis, UrgencyRoute, DiscoveryStateError,
@@ -72,6 +73,69 @@ class NativeDiscovery:
         self.discovery = discovery
         self.proving = proving
         self._rights_for = rights_for
+
+    def _ensure_queued_disposition(
+        self,
+        lead: NewsLead,
+        gate: GateDecision,
+        *,
+        proof: AuthenticationProof,
+    ) -> LeadDispositionDecision | None:
+        basis = gate.request.basis
+        if (
+            gate.request.outcome is not GateOutcome.PROMOTED_TO_LEAD
+            or gate.request.next_action.kind is not NextActionKind.QUEUE_TRIAGE
+            or not basis.rights_current
+            or not basis.policy_current
+            or basis.time_validity is not TimeValidity.CURRENT
+            or not basis.operationally_executable
+        ):
+            return None
+        try:
+            return self.discovery.current_disposition(
+                lead.request.lead_id, proof=proof
+            )
+        except LookupError:
+            pass
+        try:
+            previous = self.discovery.latest_disposition(
+                lead.request.lead_id, proof=proof
+            )
+        except LookupError:
+            previous = None
+        identity = {
+            "lead_id": str(lead.request.lead_id),
+            "gate_decision_id": str(gate.request.decision_id),
+        }
+        decision_id = _identity(
+            LeadDispositionDecisionId, "queued", identity
+        )
+        return self.discovery.record_lead_disposition(
+            LeadDispositionDecisionRequest(
+                decision_id=decision_id,
+                lead_id=lead.request.lead_id,
+                gate_decision_id=gate.request.decision_id,
+                decision_ordinal=(
+                    1 if previous is None else previous.request.decision_ordinal + 1
+                ),
+                previous_decision_id=(
+                    None if previous is None else previous.request.decision_id
+                ),
+                outcome=LeadDispositionOutcome.QUEUED_FOR_TRIAGE,
+                terminality=DecisionTerminality.PENDING_CONDITION,
+                primary_reason=gate.request.primary_reason,
+                supporting_reasons=(),
+                watch_condition_id=None,
+                next_action=gate.request.next_action,
+                urgency_route=lead.request.urgency,
+                disposition_policy=policy("disposition"),
+                reason_taxonomy_version=gate.request.reason_taxonomy_version,
+                outcome_taxonomy_version=gate.request.outcome_taxonomy_version,
+                decided_at=gate.request.decided_at,
+                idempotency_key=f"native-queued:{decision_id}",
+            ),
+            proof=proof,
+        )
 
     @staticmethod
     def _time_validity(
@@ -354,6 +418,11 @@ class NativeDiscovery:
             and current.current_gate.request.basis.time_validity == time_validity
             and current.current_gate.request.supporting_reasons == supporting_reasons
         ):
+            if current.lead is not None and current.current_disposition is None:
+                self._ensure_queued_disposition(
+                    current.lead, current.current_gate, proof=proof
+                )
+                return self.discovery.current_status(signal_id, proof=proof)
             return current
         state_key["rights_packet"] = None if rights is None else rights["packet_digest"]
         state_key["ordinal"] = ordinal
@@ -434,7 +503,10 @@ class NativeDiscovery:
                 decided_at=now, idempotency_key=f"native-queued:{key}",
             )
         if existing_lead is not None:
-            self.discovery.decide_gate(gate, proof=proof)
+            retained_gate = self.discovery.decide_gate(gate, proof=proof)
+            self._ensure_queued_disposition(
+                existing_lead, retained_gate, proof=proof
+            )
         else:
             self.discovery.admit_signal_to_lead(
                 SignalLeadAdmissionRequest(signal, gate, lead, disposition), proof=proof,

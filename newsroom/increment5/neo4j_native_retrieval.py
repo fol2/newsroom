@@ -26,7 +26,7 @@ from .fulltext_contracts import (
     FullTextProfile,
     FullTextProjectionSnapshot,
 )
-from .fulltext_normalizer import _normalization_core
+from .fulltext_normalizer import _normalization_inventory
 
 _NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,127}\Z")
 _RECEIPT_FIELDS = (
@@ -173,7 +173,7 @@ ON CREATE SET n.dependency_root_id=$dependency_root_id, n.source_id=$source_id,
 ON MATCH SET n.passage_id=n.passage_id
 RETURN properties(n) AS properties
 """.strip()
-        _, _, latin_terms, han_bigrams, formal_tokens = _normalization_core(
+        _, _, latin_terms, han_bigrams, formal_tokens = _normalization_inventory(
             document.text
         )
         parameters = {
@@ -273,7 +273,10 @@ RETURN {receipt},score ORDER BY score DESC,node.passage_id LIMIT $limit
         common = {"limit": limit}
         with self._session("READ") as session:
             fulltext_rows = tuple(session.execute_read(lambda transaction: tuple(transaction.run(fulltext, **common, index_name=self._fulltext, query_text=query_text))))
-            vector_rows = tuple(session.execute_read(lambda transaction: tuple(transaction.run(vector, **common, index_name=self._vector, vector=list(query_vector)))))
+            vector_rows = tuple(session.execute_read(lambda transaction: tuple(transaction.run(
+                vector, limit=NATIVE_RESULT_LIMIT, index_name=self._vector,
+                vector=list(query_vector),
+            ))))
         return fulltext_rows, vector_rows
 
     def retrieve_vector(
@@ -282,7 +285,7 @@ RETURN {receipt},score ORDER BY score DESC,node.passage_id LIMIT $limit
         """Run only the native vector index; no Lucene text is evaluated."""
         if len(query_vector) != NATIVE_VECTOR_DIMENSIONS:
             raise NativeRetrievalError("native vector query differs")
-        limit = NATIVE_RESULT_LIMIT + 1
+        limit = NATIVE_RESULT_LIMIT
         receipt = _receipt_projection("node")
         query = f"""
 CALL db.index.vector.queryNodes($index_name,$limit,$vector) YIELD node,score

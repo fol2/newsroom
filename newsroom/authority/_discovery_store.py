@@ -879,6 +879,18 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
             ).fetchone()
             return None if row is None else self._disposition_from_row(self._connection, row, replayed=False)
 
+    def latest_lead_disposition(self, lead_id: NewsLeadId) -> LeadDispositionDecision | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT d.* FROM lead_disposition_heads h "
+                "JOIN lead_disposition_decisions d "
+                "ON d.decision_id=h.current_decision_id WHERE h.lead_id=?",
+                (str(lead_id),),
+            ).fetchone()
+            return None if row is None else self._disposition_from_row(
+                self._connection, row, replayed=False
+            )
+
     def lead_dispositions(self, lead_id: NewsLeadId, limit: int) -> tuple[LeadDispositionDecision, ...]:
         with self._lock:
             rows = self._connection.execute(

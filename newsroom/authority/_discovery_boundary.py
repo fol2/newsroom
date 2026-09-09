@@ -424,6 +424,25 @@ class _DiscoveryBoundary:
             raise LookupError("current Lead Disposition is not retained")
         return value
 
+    def latest_disposition(
+        self,
+        lead_id: NewsLeadId,
+        proof: AuthenticationProof,
+    ) -> LeadDispositionDecision:
+        if not isinstance(lead_id, NewsLeadId):
+            raise TypeError("News Lead identity must be typed")
+        self._authorize_read(
+            proof,
+            operation="read:discovery:latest_disposition",
+            aggregate_type="news_lead",
+            aggregate_id=str(lead_id),
+            sensitive=False,
+        )
+        value = self._store.latest_lead_disposition(lead_id)
+        if value is None:
+            raise LookupError("latest Lead Disposition is not retained")
+        return value
+
     def dispositions(
         self,
         lead_id: NewsLeadId,

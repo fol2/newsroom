@@ -51,6 +51,7 @@ class GovernedDiscovery:
         "__watch_condition",
         "__disposition",
         "__current_disposition",
+        "__latest_disposition",
         "__dispositions",
         "__signals_for_revision",
         "__current_status",
@@ -74,6 +75,7 @@ class GovernedDiscovery:
         watch_condition: Callable[[WatchConditionId, AuthenticationProof], WatchCondition],
         disposition: Callable[[LeadDispositionDecisionId, AuthenticationProof], LeadDispositionDecision],
         current_disposition: Callable[[NewsLeadId, AuthenticationProof], LeadDispositionDecision],
+        latest_disposition: Callable[[NewsLeadId, AuthenticationProof], LeadDispositionDecision],
         dispositions: Callable[[NewsLeadId, int, AuthenticationProof], tuple[LeadDispositionDecision, ...]],
         signals_for_revision: Callable[[SourceRevisionId, int, AuthenticationProof], tuple[DiscoverySignal, ...]],
         current_status: Callable[[DiscoverySignalId, AuthenticationProof], DiscoveryCurrentStatus],
@@ -93,6 +95,7 @@ class GovernedDiscovery:
         self.__watch_condition = watch_condition
         self.__disposition = disposition
         self.__current_disposition = current_disposition
+        self.__latest_disposition = latest_disposition
         self.__dispositions = dispositions
         self.__signals_for_revision = signals_for_revision
         self.__current_status = current_status
@@ -141,6 +144,9 @@ class GovernedDiscovery:
 
     def current_disposition(self, lead_id: NewsLeadId, *, proof: AuthenticationProof) -> LeadDispositionDecision:
         return self.__current_disposition(lead_id, proof)
+
+    def latest_disposition(self, lead_id: NewsLeadId, *, proof: AuthenticationProof) -> LeadDispositionDecision:
+        return self.__latest_disposition(lead_id, proof)
 
     def dispositions(self, lead_id: NewsLeadId, *, limit: int, proof: AuthenticationProof) -> tuple[LeadDispositionDecision, ...]:
         return self.__dispositions(lead_id, limit, proof)

@@ -379,6 +379,7 @@ def open_hermes_native_authority_system(
             watch_condition=discovery_boundary.watch_condition,
             disposition=discovery_boundary.disposition,
             current_disposition=discovery_boundary.current_disposition,
+            latest_disposition=discovery_boundary.latest_disposition,
             dispositions=discovery_boundary.dispositions,
             signals_for_revision=discovery_boundary.signals_for_revision,
             current_status=discovery_boundary.current_status,
