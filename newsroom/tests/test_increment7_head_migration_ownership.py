@@ -30,7 +30,7 @@ _BASE_FINGERPRINT = (
 # whole-module anchors as changed, while current CI checks the exact successors.
 _NATIVE_SUCCESSOR_DIGESTS = {
     "newsroom.increment6.candidates": "sha256:26a7b60922021d215a834417847f71cfa016d776b19a758fb487af891d83a6a6",
-    "newsroom.increment6.work_items": "sha256:063a31b7afbcfce354e2bcbc8e1f35dabcd743f853705f81cbeb581da92a01ff",
+    "newsroom.increment6.work_items": "sha256:17c0273894a92f565d0ebb32ebe3cc0440255c77a8319adae676b333877b63d4",
 }
 
 
