@@ -229,6 +229,16 @@ def test_native_assessor_retains_post_dispatch_failures(
         assert usage.retained_output_contract_failure(wrong_candidate) is None
         with sqlite3.connect(service.path) as retained:
             retained.execute(
+                "UPDATE model_invocation_policies SET qualified=0"
+            )
+        assert usage.retained_output_contract_failure(candidate) is None
+        with sqlite3.connect(service.path) as retained:
+            retained.execute(
+                "UPDATE model_invocation_policies SET qualified=1"
+            )
+        assert usage.retained_output_contract_failure(candidate) is not None
+        with sqlite3.connect(service.path) as retained:
+            retained.execute(
                 "UPDATE model_provider_telemetry "
                 "SET provider_telemetry_digest=?",
                 ("sha256:" + "f" * 64,),

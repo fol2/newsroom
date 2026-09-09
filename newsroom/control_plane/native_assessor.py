@@ -42,7 +42,7 @@ from .model_usage import (
     WorkloadClass,
     _allocation_from_record,
     _envelope_from_record,
-    _policy_from_record,
+    _policy_for_allocation,
     _require_reported_telemetry,
     _terminal_from_record,
 )
@@ -488,11 +488,6 @@ class NativeAssessmentUsage:
                     is not WorkloadClass.NATIVE_EVIDENCE_ASSESSOR
                 ):
                     return None
-                policy_row = connection.execute(
-                    "SELECT canonical_digest,record_json FROM model_invocation_policies "
-                    "WHERE canonical_digest=?",
-                    (allocation.invocation_policy_digest,),
-                ).fetchone()
                 context_row = connection.execute(
                     "SELECT context_manifest_digest,provider,route,"
                     "evidence_package_digest,record_json "
@@ -512,11 +507,10 @@ class NativeAssessmentUsage:
                     "WHERE invocation_id=? ORDER BY observed_at,observation_digest",
                     (allocation.invocation_id,),
                 ).fetchall()
-                if policy_row is None or context_row is None or terminal_row is None:
+                if context_row is None or terminal_row is None:
                     return None
                 try:
-                    policy_record = json.loads(policy_row[1])
-                    policy = _policy_from_record(policy_record)
+                    policy = _policy_for_allocation(connection, allocation)
                     policy._validate()
                     context = json.loads(context_row[4])
                     terminal_record = json.loads(terminal_row[6])
@@ -540,9 +534,7 @@ class NativeAssessmentUsage:
                     "context_manifest_digest", None
                 )
                 if (
-                    policy_row[0] != policy.canonical_digest
-                    or policy.as_record() != policy_record
-                    or policy.canonical_digest
+                    policy.canonical_digest
                     != allocation.invocation_policy_digest
                     or policy.workload_class
                     is not WorkloadClass.NATIVE_EVIDENCE_ASSESSOR
