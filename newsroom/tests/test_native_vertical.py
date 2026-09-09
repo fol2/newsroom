@@ -272,7 +272,6 @@ def _install_boundaries(monkeypatch, counters):
     def assess(prompt):
         counters["assessor"] += 1
         request = json.loads(prompt)
-        base = request["base_package"]
         source = request["sources"][0]
         headline = counters.get("document_body", "Official deadline changed.")
         assert headline in source["body"]
@@ -288,9 +287,6 @@ def _install_boundaries(monkeypatch, counters):
         ]))
         headline_id = f"native-headline:{identity}"
         claim_id = f"native-claim:{identity}"
-        headline_semantic_id = f"native-headline-semantic:{identity}"
-        semantic_id = f"native-semantic:{identity}"
-        qualification_id = f"native-qualification:{identity}"
         qualification_span = headline.split(".", 1)[0]
         qualification_facts = [
             ["action_class", "OFFICIAL_DEADLINE"],
@@ -300,29 +296,25 @@ def _install_boundaries(monkeypatch, counters):
             ["reader_action", qualification_span],
         ]
 
-        def governed_claim(*, claim_id, text, rendered, role, semantic_id):
+        def governed_claim(*, claim_id, text, rendered, role):
             return {
                 "claim_id": claim_id,
                 "claim": text,
                 "passage_index": 0,
                 "supporting_excerpt": text,
                 "source_ids": [source["source_id"]],
-                "source_record_ids": [source["acquisition_receipt_id"]],
-                "source_authority_decision_ids": ["model-authority-placeholder"],
-                "rights_decision_ids": ["model-rights-placeholder"],
-                "dependency_evidence_ids": ["model-dependency-placeholder"],
-                "evidential_origin_ids": ["model-origin-placeholder"],
-                "authority_class": "RESPONSIBLE_PRIMARY",
-                "authority_scope": "Official source update",
                 "status": "CONFIRMED_FACT",
-                "attribution": "Home Office",
                 "rendered_assertion_zh_hant_hk": rendered,
                 "claim_role": role,
-                "semantic_relation_evidence_id": semantic_id,
+                "semantic_relation": {
+                    "source_modality": "ASSERTED",
+                    "rendered_modality": "ASSERTED",
+                    "source_polarity": "AFFIRMED",
+                    "rendered_polarity": "AFFIRMED",
+                    "relation": "SEMANTICALLY_EQUIVALENT",
+                },
                 "localised_factual_expressions": [],
-                "named_entity_evidence": [],
                 "named_entities": [],
-                "rendered_named_entities": [],
                 "quotations": [],
                 "certainty": "CONFIRMED",
                 "originality_basis": "FACTUAL_REWRITE_REQUIRED",
@@ -331,68 +323,31 @@ def _install_boundaries(monkeypatch, counters):
                 "policy_version": GOVERNED_CLAIM_POLICY_VERSION,
             }
 
-        base.update(
-            substantive_new_information=[headline, claim],
-            governed_claims=[
+        package = {
+            "substantive_new_information": [headline, claim],
+            "governed_claims": [
                 governed_claim(
                     claim_id=headline_id, text=headline, rendered=rendered_headline,
-                    role="HEADLINE", semantic_id=headline_semantic_id,
+                    role="HEADLINE",
                 ),
                 governed_claim(
                     claim_id=claim_id, text=claim, rendered=rendered,
-                    role="SUBSTANTIVE", semantic_id=semantic_id,
+                    role="SUBSTANTIVE",
                 ),
             ],
-            qualification_evidence=[{
+            "qualification_evidence": [{
                 "test": "OFFICIAL_ACTION_OR_DEADLINE",
                 "governed_claim_id": headline_id,
-                "qualification_record_id": qualification_id,
                 "test_evidence": qualification_facts,
                 "policy_version": EVID_012_POLICY_VERSION,
             }],
-            selection_rationale="A verified official deadline changed.",
-            geography=["UK"],
-            categories=["Politics and law"],
-        )
-
-        def semantic_record(*, record_id, claim_id, text, rendered):
-            return {
-                "record_id": record_id,
-                "record_type": "SEMANTIC_RELATION_EVIDENCE",
-                "governed_claim_id": claim_id,
-                "source_modality": "ASSERTED",
-                "rendered_modality": "ASSERTED",
-                "source_polarity": "AFFIRMED",
-                "rendered_polarity": "AFFIRMED",
-                "relation": "SEMANTICALLY_EQUIVALENT",
-                "claim_digest": digest_bytes(text.encode()),
-                "rendered_assertion_digest": digest_bytes(rendered.encode()),
-            }
-
-        assessment_records = [
-            semantic_record(
-                record_id=headline_semantic_id, claim_id=headline_id,
-                text=headline, rendered=rendered_headline,
-            ),
-            semantic_record(
-                record_id=semantic_id, claim_id=claim_id,
-                text=claim, rendered=rendered,
-            ),
-            {
-                "record_id": qualification_id,
-                "record_type": "QUALIFICATION_EVIDENCE",
-                "governed_claim_id": headline_id,
-                "test": "OFFICIAL_ACTION_OR_DEADLINE",
-                "test_evidence": qualification_facts,
-                "policy_version": EVID_012_POLICY_VERSION,
-                "evidence_span_digest": digest_bytes(headline.encode()),
-                "source_record_ids": [source["acquisition_receipt_id"]],
-            },
-        ]
+            "selection_rationale": "A verified official deadline changed.",
+            "geography": ["UK"],
+            "categories": ["Politics and law"],
+            "explicit_exclusions": [],
+        }
         return NativeAssessmentExecution(
-            canonical_json_bytes(
-                {"package": base, "assessment_records": assessment_records}
-            ).decode(),
+            canonical_json_bytes({"package": package}).decode(),
             {
                 "usage_basis": "PROVIDER_REPORTED",
                 "input_tokens": 1,
