@@ -1,12 +1,16 @@
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
+import sqlite3
+import threading
 from types import SimpleNamespace
 
 import pytest
 
 from newsroom.control_plane import native_graphiti as n
+from newsroom.control_plane import cycle
 from newsroom.control_plane.store import connect, insert_graphiti_ingest
+from newsroom.control_plane.veto import VetoError
 from newsroom.tests.test_graphiti_operational_readiness import _unit
 from newsroom.projection.models import ProjectionGenerationState
 
@@ -276,6 +280,55 @@ def test_native_fence_passes_bounded_deadline_and_current_rights(tmp_path, monke
         assert calls == [("fence", {})]
     finally:
         connection.close()
+
+
+def test_native_fence_authorises_its_provider_callback_thread_only_while_held(
+    tmp_path, monkeypatch,
+):
+    proving = tmp_path / "proving.sqlite3"
+    with sqlite3.connect(proving) as database:
+        database.executescript(
+            """
+            CREATE TABLE proving_runs(run_id TEXT PRIMARY KEY);
+            CREATE TABLE proving_gates(
+                run_id TEXT NOT NULL, gate_id TEXT NOT NULL, status TEXT NOT NULL
+            );
+            INSERT INTO proving_runs VALUES('run-1');
+            INSERT INTO proving_gates VALUES(
+                'run-1', 'NO_ACTIVE_HUMAN_EMERGENCY_STOP', 'PASS'
+            );
+            """
+        )
+    monkeypatch.setattr(cycle, "_PROVING_FENCE_TIMEOUT_SECONDS", 0.05)
+    processor, connection, _ = _open(tmp_path, monkeypatch, ingest=lambda *a, **kw: None)
+    processor._dispatch_fence = lambda: cycle.owner_emergency_stop_fence(str(proving))
+    processor._stop_check = lambda: cycle.assert_no_owner_emergency_stop(str(proving))
+    errors = []
+    try:
+        with processor._fence(_native()) as authority:
+            worker = threading.Thread(
+                target=lambda: _capture_error(authority.owner_stop_check, errors)
+            )
+            worker.start()
+            worker.join(timeout=0.5)
+            assert not worker.is_alive()
+            assert errors == []
+            parent_pid = n.os.getpid()
+            with monkeypatch.context() as child:
+                child.setattr(n.os, "getpid", lambda: parent_pid + 1)
+                with pytest.raises(VetoError, match="belongs to another process"):
+                    authority.owner_stop_check()
+        with pytest.raises(VetoError, match="fence has expired"):
+            authority.owner_stop_check()
+    finally:
+        connection.close()
+
+
+def _capture_error(operation, errors):
+    try:
+        operation()
+    except Exception as exc:
+        errors.append(exc)
 
 
 def test_incomplete_chunk_prefix_does_not_poison_the_completed_revision(tmp_path, monkeypatch):

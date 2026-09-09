@@ -8,7 +8,9 @@ projection. This worker neither resumes a historical campaign nor mints READY.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import threading
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -29,6 +31,7 @@ from .graphiti_admission_integration import compose_existing_graphiti_admission_
 from .model_usage import ModelUsageService
 from .native_cycle import _uuid4_for
 from .store import append_ledger, graphiti_failure_state
+from .veto import VetoError
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,10 +93,23 @@ class NativeGraphitiProcessor:
     def _fence(self, unit: CorpusIngestUnit):
         with self._dispatch_fence():
             rights = self._rights(unit)
-            yield None if rights is None else _DispatchAuthority(
-                rights, self._clock().astimezone(UTC) + timedelta(minutes=15),
-                self._stop_check,
-            )
+            active = threading.Event()
+            fence_pid = os.getpid()
+            active.set()
+
+            def require_active_fence() -> None:
+                if os.getpid() != fence_pid:
+                    raise VetoError("owner emergency stop fence belongs to another process")
+                if not active.is_set():
+                    raise VetoError("owner emergency stop fence has expired")
+
+            try:
+                yield None if rights is None else _DispatchAuthority(
+                    rights, self._clock().astimezone(UTC) + timedelta(minutes=15),
+                    require_active_fence,
+                )
+            finally:
+                active.clear()
 
     def advance(
         self, units: tuple[CorpusIngestUnit, ...], *, cycle_id: str,
