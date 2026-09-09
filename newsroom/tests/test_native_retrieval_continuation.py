@@ -25,8 +25,11 @@ from newsroom.control_plane.store import (
 from newsroom.increment5.native_retrieval import (
     NativeDocumentReceipt,
     NativeEmbeddingReference,
+    NativeRetrievalContextReceipt,
+    NativeRetrievalContextRequest,
     NativeRetrievalHold,
 )
+from newsroom.increment6.work_items import RetrievalInputBinding
 from newsroom.tests.discovery_3d_authority_helpers import proof
 from newsroom.tests.test_native_collision import _native_binding
 from newsroom.tests.test_native_graphiti import _native
@@ -94,8 +97,12 @@ def _retain_complete(connection, unit, *, attempt_number=1):
 
 
 class _Embedder:
-    def __init__(self):
+    def __init__(self, *, retryable=False):
         self.calls = []
+        self.retryable = retryable
+
+    def retryable_pre_dispatch(self, **_arguments):
+        return self.retryable
 
     def retain(self, **arguments):
         self.calls.append(arguments)
@@ -150,18 +157,67 @@ def _continuation(
     subjects,
     *,
     interrupt_before_binding=False,
+    rights_check=lambda _unit: None,
+    rights_inventory_digests=None,
+    stale_result=False,
 ):
     class _Port:
         def retrieve(self, lead, *, proof):
             subjects.append(self.subjects)
             if interrupt_before_binding:
                 raise RuntimeError("context retention interrupted")
-            documents.contexts[binding.context_id] = context
-            return binding
+            if stale_result:
+                documents.contexts[binding.context_id] = context
+                return binding
+            request = replace(
+                NativeRetrievalContextRequest.from_bytes(binding.request_bytes),
+                rights_inventory_digest=self.rights_inventory_digest,
+                selected_documents=tuple(
+                    item.document_receipt for item in self.subjects
+                ),
+            )
+            retained_context = replace(
+                context,
+                context_id=str(uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"{context.context_id}:{self.rights_inventory_digest}",
+                )),
+                request_digest=request.request_digest,
+                rights_inventory_digest=self.rights_inventory_digest,
+                selected_documents=tuple(
+                    item.document_receipt.projection_value()
+                    for item in self.subjects
+                ),
+            )
+            receipt = replace(
+                NativeRetrievalContextReceipt.from_bytes(binding.receipt_bytes),
+                context_id=retained_context.context_id,
+                request_digest=request.request_digest,
+                context_object_digest=retained_context.digest,
+                rights_inventory_digest=self.rights_inventory_digest,
+            )
+            retained_binding = RetrievalInputBinding(
+                binding.state,
+                request.request_id,
+                request.idempotency_key,
+                request.request_digest,
+                request.canonical_bytes,
+                retained_context.context_id,
+                receipt.receipt_digest,
+                receipt.outcome,
+                receipt.reason,
+                receipt.no_match,
+                receipt.canonical_bytes,
+            )
+            documents.contexts[retained_context.context_id] = retained_context
+            return retained_binding
 
-    def port_for(items):
+    def port_for(items, rights_inventory_digest):
+        if rights_inventory_digests is not None:
+            rights_inventory_digests.append(rights_inventory_digest)
         port = _Port()
         port.subjects = items
+        port.rights_inventory_digest = rights_inventory_digest
         return port
 
     system = SimpleNamespace(
@@ -181,7 +237,7 @@ def _continuation(
         embedder=embedder,
         generation_id=GENERATION,
         port_for=port_for,
-        rights_check=lambda _unit: None,
+        rights_check=rights_check,
     )
 
 
@@ -267,10 +323,11 @@ def test_multi_chunk_embeddings_and_context_are_reused_across_restart(tmp_path):
             context,
             replay_subjects,
         )
-        assert replay_continuation.retrieve(lead, proof=proof()) == binding
+        replayed_binding = replay_continuation.retrieve(lead, proof=proof())
+        assert replayed_binding.usable
         assert len(embedder.calls) == len(documents.admit_calls) == 2
         assert len(replay_subjects) == 1 and len(replay_subjects[0]) == 2
-        assert documents.context_reads == []
+        assert len(documents.context_reads) == 1
         replay_facts = replay.progress[base.revision_id]["facts"]
         replay.advance(
             base.revision_id,
@@ -293,20 +350,23 @@ def test_multi_chunk_embeddings_and_context_are_reused_across_restart(tmp_path):
             context,
             fresh_requests,
         )
-        assert final_continuation.retrieve(lead, proof=proof()) == binding
+        assert final_continuation.retrieve(lead, proof=proof()) == replayed_binding
         assert fresh_requests == []
-        assert len(documents.context_reads) == 1
+        assert len(documents.context_reads) == 2
         replay_facts = final_journal.progress[base.revision_id]["facts"]
         assert replay_facts["candidate_version_id"] == "candidate-version-1"
         assert replay_facts["graphiti_receipts"] == [
             unit.ingest_id for unit in units
         ]
-        assert replay_facts["retrieval_binding"] == binding.canonical_value()
+        assert replay_facts["retrieval_binding"] == replayed_binding.canonical_value()
     finally:
         final_connection.close()
 
 
-def test_started_embedding_holds_without_redispatch(tmp_path):
+@pytest.mark.parametrize(("attempt_number", "retryable"), ((1, False), (3, True)))
+def test_started_embedding_holds_without_redispatch(
+    tmp_path, attempt_number, retryable,
+):
     unit = _native()
     connection = connect(str(tmp_path / "private.sqlite3"))
     try:
@@ -324,13 +384,15 @@ def test_started_embedding_holds_without_redispatch(tmp_path):
                     unit.ingest_id: {
                         "state": "STARTED",
                         "passage_id": str(passage.passage_id),
+                        "attempt_number": attempt_number,
+                        "cycle_id": f"native-passage:{unit.ingest_id}",
                     }
                 }
             },
         )
         lead = _lead(unit)
         binding, _receipt_value, context = _native_binding(tmp_path, lead)
-        documents, embedder = _Documents(), _Embedder()
+        documents, embedder = _Documents(), _Embedder(retryable=retryable)
         documents.contexts[binding.context_id] = context
         continuation = _continuation(
             connection, journal, documents, embedder, binding, context, []
@@ -343,6 +405,146 @@ def test_started_embedding_holds_without_redispatch(tmp_path):
         assert embedder.calls == []
         assert documents.admit_calls == []
         assert journal.progress[unit.revision_id]["stage"] == "EMBEDDING_STARTED"
+    finally:
+        connection.close()
+
+
+def test_exact_zero_dispatch_embedding_terminal_allows_one_new_attempt(tmp_path):
+    unit = _native()
+    connection = connect(str(tmp_path / "private.sqlite3"))
+    try:
+        journal = NativeRevisionJournal(connection)
+        journal.land((unit,))
+        _retain_complete(connection, unit, attempt_number=3)
+        passage = _evaluation_attempt_for_unit(
+            replace(unit, attempt_number=3)
+        ).extraction_request.input_binding.passages[0]
+        journal.advance(
+            unit.revision_id, stage="EMBEDDING_STARTED", facts={
+                "retrieval_embeddings": {unit.ingest_id: {
+                    "state": "STARTED", "passage_id": str(passage.passage_id),
+                    "attempt_number": 1,
+                    "cycle_id": f"native-passage:{unit.ingest_id}",
+                }},
+            },
+        )
+        lead = _lead(unit)
+        fixture = tmp_path / "binding"
+        fixture.mkdir()
+        binding, _receipt_value, context = _native_binding(fixture, lead)
+        documents, embedder = _Documents(), _Embedder(retryable=True)
+        continuation = _continuation(
+            connection, journal, documents, embedder, binding, context, [],
+        )
+
+        assert continuation.retrieve(lead, proof=proof()).usable
+        assert [call["cycle_id"] for call in embedder.calls] == [
+            f"native-passage:{unit.ingest_id}:retry:2"
+        ]
+        assert journal.progress[unit.revision_id]["facts"][
+            "retrieval_embeddings"
+        ][unit.ingest_id]["state"] == "RETAINED"
+    finally:
+        connection.close()
+
+
+def test_historical_rights_hold_is_excluded_and_invalidates_context_replay(tmp_path):
+    first, current = _native("historical-a"), _native("current-b")
+    connection = connect(str(tmp_path / "private.sqlite3"))
+    try:
+        journal = NativeRevisionJournal(connection)
+        documents, embedder = _Documents(), _Embedder()
+        for unit in (first, current):
+            journal.land((unit,))
+            journal.advance(
+                unit.revision_id, stage="GRAPHITI_COMPLETE",
+                facts={"graphiti_receipts": [unit.ingest_id]},
+            )
+            _retain_complete(connection, unit)
+        first_root, current_root = tmp_path / "first", tmp_path / "current"
+        first_root.mkdir()
+        current_root.mkdir()
+        first_lead, current_lead = _lead(first), _lead(current)
+        first_binding, _, first_context = _native_binding(first_root, first_lead)
+        current_binding, _, current_context = _native_binding(current_root, current_lead)
+        _continuation(
+            connection, journal, documents, embedder,
+            first_binding, first_context, [],
+        ).retrieve(first_lead, proof=proof())
+
+        held = {first.ingest_id}
+        rights_digests = {
+            first.ingest_id: "rights-a-v1", current.ingest_id: "rights-b-v1",
+        }
+
+        def rights_check(unit):
+            if unit.ingest_id in held:
+                raise NativeRetrievalHold("CURRENT_RIGHTS_HOLD")
+            return rights_digests[unit.ingest_id]
+
+        with pytest.raises(
+            ValueError, match="result differs from current request"
+        ):
+            _continuation(
+                connection, journal, documents, embedder,
+                current_binding, current_context, [],
+                rights_check=rights_check,
+                stale_result=True,
+            ).retrieve(current_lead, proof=proof())
+
+        subjects = []
+        inventory_digests = []
+        continuation = _continuation(
+            connection, journal, documents, embedder,
+            current_binding, current_context, subjects,
+            rights_check=rights_check,
+            rights_inventory_digests=inventory_digests,
+        )
+        assert continuation.retrieve(current_lead, proof=proof()).usable
+        assert [[item.revision_id for item in group] for group in subjects] == [
+            [current.revision_id]
+        ]
+        assert len(inventory_digests) == 1
+        exclusion = journal.progress[first.revision_id]["facts"][
+            "retrieval_exclusions"
+        ][first.ingest_id]
+        first_receipt = next(iter(journal.progress[first.revision_id]["facts"][
+            "retrieval_documents"
+        ].values()))["receipt"]
+        assert exclusion == {
+            "state": "EXCLUDED", "reason": "CURRENT_RIGHTS_HOLD",
+            "document_digest": first_receipt["document_digest"],
+        }
+
+        held.clear()
+        subjects.clear()
+        assert continuation.retrieve(current_lead, proof=proof()).usable
+        assert [[item.revision_id for item in group] for group in subjects] == [[
+            first.revision_id, current.revision_id,
+        ]]
+        assert len(set(inventory_digests)) == 2
+        assert journal.progress[first.revision_id]["facts"]["retrieval_exclusions"] == {}
+
+        rights_digests[current.ingest_id] = "rights-b-v2"
+        subjects.clear()
+        continuation.retrieve(current_lead, proof=proof())
+        assert [[item.revision_id for item in group] for group in subjects] == [[
+            first.revision_id, current.revision_id,
+        ]]
+        assert len(set(inventory_digests)) == 3
+
+        held.add(first.ingest_id)
+        subjects.clear()
+        continuation.retrieve(current_lead, proof=proof())
+        assert [[item.revision_id for item in group] for group in subjects] == [
+            [current.revision_id]
+        ]
+        assert len(set(inventory_digests)) == 4
+        held.add(current.ingest_id)
+        subjects.clear()
+        with pytest.raises(NativeRetrievalHold, match="CURRENT_RIGHTS_HOLD"):
+            continuation.retrieve(current_lead, proof=proof())
+        assert subjects == []
     finally:
         connection.close()
 

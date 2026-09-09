@@ -31,9 +31,10 @@ from newsroom.discovery import (
 )
 from newsroom.discovery_adapters import AdapterRequestId, ObservationProposalId
 from newsroom.sources import (
+    BaselinePolicyKind,
     DiscoveryOccurrenceId, DiscoveryOccurrenceKind, DiscoveryOccurrenceRequest,
     DiscoveryRepresentationId, SourceDefinitionVersionId, SourceItemId,
-    SourceRevisionId, VersionedPolicyRef,
+    SourceRevisionId, ObservationModel, VersionedPolicyRef,
 )
 
 from .corpus import CorpusIngestUnit
@@ -71,6 +72,42 @@ class NativeDiscovery:
         self.discovery = discovery
         self.proving = proving
         self._rights_for = rights_for
+
+    @staticmethod
+    def _time_validity(
+        *, version, revision, latest, outcome, now, current_definition_version
+    ) -> TimeValidity:
+        if (
+            now.value < revision.observed_at.value
+            or outcome.request.incomplete
+            or outcome.request.kind
+            not in {
+                CheckOutcomeKind.SUCCESS_CHANGED,
+                CheckOutcomeKind.SUCCESS_UNCHANGED,
+            }
+        ):
+            return TimeValidity.UNKNOWN
+        if not current_definition_version:
+            return TimeValidity.STALE
+        if latest is None or latest.request != revision:
+            return TimeValidity.STALE
+        window = version.baseline_policy.freshness_window_seconds
+        if window is not None:
+            age = (now.value - revision.observed_at.value).total_seconds()
+            return TimeValidity.CURRENT if age <= window else TimeValidity.STALE
+        current_state_contract = (
+            (
+                version.observation_model is ObservationModel.MUTABLE_ITEM
+                and version.baseline_policy.kind
+                is BaselinePolicyKind.MAINTAINED_DOCUMENT
+            )
+            or (
+                version.observation_model is ObservationModel.COMPLETE_CURRENT_STATE
+                and version.baseline_policy.kind
+                is BaselinePolicyKind.COMPLETE_STATE_FIRST_OBSERVED_ACTIVE
+            )
+        )
+        return TimeValidity.CURRENT if current_state_contract else TimeValidity.UNKNOWN
 
     def deliver(
         self, unit: CorpusIngestUnit, *, now: UtcTimestamp,
@@ -242,7 +279,14 @@ class NativeDiscovery:
         source_item = self.sources.item(transition.item_id, proof=proof).request
         source_revision = self.sources.revision(transition.current_revision_id, proof=proof).request
         source_id = dict((entry.name, entry.value) for entry in source_item.identity_components).get("source_id")
-        if source_id != unit.source_id or str(source_revision.revision_id) != binding.revision_id:
+        if (
+            source_id != unit.source_id
+            or str(source_revision.revision_id) != binding.revision_id
+            or source_item.definition_id != version.definition_id
+            or source_item.definition_version_id != version.version_id
+            or source_revision.item_id != source_item.item_id
+            or source_revision.definition_version_id != version.version_id
+        ):
             raise ValueError("delivered discovery source identity differs")
         key = str(transition.transition_id)
         signal_id = _identity(DiscoverySignalId, "signal", key)
@@ -254,12 +298,15 @@ class NativeDiscovery:
             current = None
         summary = self.sources.current_summary(version.definition_id, proof=proof)
         current_version = summary.version_id == version.version_id
-        age = (now.value - source_revision.observed_at.value).total_seconds()
-        window = version.baseline_policy.freshness_window_seconds
-        fresh = age >= 0 and window is not None and age <= window
-        # Maintained/current-state sources need source-specific currentness;
-        # elapsed time alone never invents it. Their retained Signal is visible.
-        time_validity = TimeValidity.CURRENT if fresh else (TimeValidity.STALE if window else TimeValidity.UNKNOWN)
+        latest = self.sources.latest_revision(source_item.item_id, proof=proof)
+        time_validity = self._time_validity(
+            version=version,
+            revision=source_revision,
+            latest=latest,
+            outcome=outcome,
+            now=now,
+            current_definition_version=current_version,
+        )
         if self._rights_for is None:
             from .cycle import _dispatch_rights_decision
             rights = _dispatch_rights_decision(
@@ -268,8 +315,36 @@ class NativeDiscovery:
             )
         else:
             rights = self._rights_for(unit.source_id, version.locator, now)
-        rights_current = current_version and rights is not None
-        ready = rights_current and fresh
+        rights_current = (
+            current_version
+            and rights is not None
+            and type(rights.get("assessment_admission_id")) is str
+            and type(rights.get("assessment_blob_digest")) is str
+            and type(rights.get("observation_admission_id")) is str
+            and type(rights.get("observation_blob_digest")) is str
+        )
+        supporting_reasons = ()
+        if rights_current:
+            supporting_reasons = (
+                StructuredReason(
+                    "RIGHTS.CURRENT_ASSESSMENT",
+                    ReasonBasisClass.DETERMINISTIC_OBSERVATION,
+                    (
+                        ReasonReference(
+                            "RIGHTS_ASSESSMENT",
+                            str(rights["assessment_admission_id"]),
+                            str(rights["assessment_blob_digest"]),
+                        ),
+                        ReasonReference(
+                            "RIGHTS_OBSERVATION",
+                            str(rights["observation_admission_id"]),
+                            str(rights["observation_blob_digest"]),
+                        ),
+                    ),
+                    "Exact rights assessment and current observation used by this Gate decision.",
+                ),
+            )
+        ready = rights_current and time_validity is TimeValidity.CURRENT
         repeated = transition.kind is ObservableTransitionKind.REOBSERVED
         ordinal = 1 if current is None else current.current_gate.request.decision_ordinal + 1
         state_key = {"transition": key, "current_version": str(summary.version_id), "time_validity": time_validity.value}
@@ -277,6 +352,7 @@ class NativeDiscovery:
             current.current_gate.request.basis.rights_current == rights_current
             and current.current_gate.request.basis.policy_current == current_version
             and current.current_gate.request.basis.time_validity == time_validity
+            and current.current_gate.request.supporting_reasons == supporting_reasons
         ):
             return current
         state_key["rights_packet"] = None if rights is None else rights["packet_digest"]
@@ -323,7 +399,7 @@ class NativeDiscovery:
             ),
             outcome=GateOutcome.SUPPRESSED_NON_CHANGE if ready and repeated else GateOutcome.PROMOTED_TO_LEAD if ready else GateOutcome.OPERATIONAL_HOLD,
             terminality=DecisionTerminality.TERMINAL_EXACT_VERSION if ready else DecisionTerminality.PENDING_CONDITION,
-            primary_reason=reason, supporting_reasons=(),
+            primary_reason=reason, supporting_reasons=supporting_reasons,
             reason_taxonomy_version=POLICY_VERSION, outcome_taxonomy_version=POLICY_VERSION,
             next_action=action, decided_at=now, idempotency_key=f"native-gate:{gate_id}",
         )

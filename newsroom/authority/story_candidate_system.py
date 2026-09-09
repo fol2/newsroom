@@ -488,15 +488,19 @@ class _CandidateStore(_EventAuthorityStore):
             admission.governing_manifest.relationship_assessment_digest
             for admission, *_ in verified.values()
         }
+        ordered_digests = tuple(sorted(digests))
+        # The lineage batch verifies its relationship, Hypothesis and disposition
+        # authority chain once, including when this Candidate history is empty.
         relationships = {
-            digest: self._lineage.require_retained_relationship_in_transaction(
-                digest
-            ).assessment
-            for digest in digests
+            digest: receipt.assessment
+            for digest, receipt in zip(
+                ordered_digests,
+                self._lineage.require_retained_relationships_in_transaction(
+                    ordered_digests
+                ),
+                strict=True,
+            )
         }
-        if not relationships:
-            self._lineage.verify_retained_integrity_in_transaction()
-        self._dispositions.verify_retained_integrity_in_transaction()
         for admission, *_ in verified.values():
             manifest = admission.governing_manifest
             assessment = relationships[manifest.relationship_assessment_digest]

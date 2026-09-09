@@ -17,6 +17,7 @@ def _open(tmp_path, monkeypatch, *, ingest, rights=lambda _: {"current": True}):
     admission = SimpleNamespace(
         enqueue_complete_receipts=lambda **kw: calls.append(("enqueue", kw)),
         drain=lambda **kw: calls.append(("drain", kw)),
+        preflight_decided_cohort=lambda **kw: calls.append(("preflight", kw)),
         finalise_decided_cohort=lambda **kw: calls.append(("finalise", kw)),
     )
     monkeypatch.setattr(n, "EvaluationGraphitiRunner", lambda **kw: object())
@@ -100,6 +101,168 @@ def test_native_rights_revocation_blocks_projection_after_extraction(tmp_path, m
         result = processor.advance((_native(),), cycle_id="native-cycle:1")
         assert result[0].state == "ADMISSION_HOLD"
         assert not any(name == "finalise" for name, _ in calls)
+    finally:
+        connection.close()
+
+
+def test_rights_hold_isolates_complete_revision_and_resumes_without_reprojection(
+    tmp_path, monkeypatch
+):
+    held = set()
+    revoked = [False]
+
+    def complete_then_revoke(connection, **kwargs):
+        assert all(kwargs["rights_check"](unit) for unit in kwargs["units"])
+        _complete(connection, units=kwargs["units"])
+        if not revoked[0]:
+            held.add("two")
+            revoked[0] = True
+
+    processor, connection, calls = _open(
+        tmp_path,
+        monkeypatch,
+        ingest=complete_then_revoke,
+        rights=lambda unit: None if unit.item_key in held else {"current": True},
+    )
+    units = (_native("one"), _native("two"))
+    try:
+        first = processor.advance(units, cycle_id="one")
+        assert [item.state for item in first] == [
+            "GRAPHITI_COMPLETE",
+            "ADMISSION_HOLD",
+        ]
+        assert [
+            kwargs["ingest_ids"]
+            for name, kwargs in calls
+            if name == "finalise"
+        ] == [(units[0].ingest_id,)]
+
+        held.clear()
+        second = processor.advance(units, cycle_id="two")
+        assert [item.state for item in second] == ["GRAPHITI_COMPLETE"] * 2
+        assert [
+            kwargs["ingest_ids"]
+            for name, kwargs in calls
+            if name == "finalise"
+        ] == [(units[0].ingest_id,), (units[1].ingest_id,)]
+    finally:
+        connection.close()
+
+
+def test_admission_preflight_isolates_bad_revision_then_projects_only_verified(
+    tmp_path, monkeypatch
+):
+    from newsroom.control_plane.graphiti_admission import (
+        GraphitiAdmissionConsumerError,
+    )
+
+    processor, connection, calls = _open(
+        tmp_path, monkeypatch, ingest=_complete
+    )
+    units = (_native("one"), _native("two"))
+    held = {units[1].ingest_id}
+
+    def preflight(*, ingest_ids):
+        calls.append(("preflight", {"ingest_ids": ingest_ids}))
+        if set(ingest_ids) & held:
+            raise GraphitiAdmissionConsumerError(
+                "exact Graphiti cohort contains non-terminal work"
+            )
+
+    processor._admission.preflight_decided_cohort = preflight
+    try:
+        first = processor.advance(units, cycle_id="one")
+        assert [item.state for item in first] == [
+            "GRAPHITI_COMPLETE",
+            "ADMISSION_HOLD",
+        ]
+        assert first[1].reason == (
+            "exact Graphiti cohort contains non-terminal work"
+        )
+        assert [
+            kwargs["ingest_ids"]
+            for name, kwargs in calls
+            if name == "finalise"
+        ] == [(units[0].ingest_id,)]
+        assert len([
+            entry for entry in calls if entry[0] == "empty-cohort-build"
+        ]) == 1
+
+        held.clear()
+        second = processor.advance(units, cycle_id="two")
+        assert [item.state for item in second] == ["GRAPHITI_COMPLETE"] * 2
+        assert [
+            kwargs["ingest_ids"]
+            for name, kwargs in calls
+            if name == "finalise"
+        ] == [(units[0].ingest_id,), (units[1].ingest_id,)]
+        assert len([
+            entry for entry in calls if entry[0] == "empty-cohort-build"
+        ]) == 2
+    finally:
+        connection.close()
+
+
+def test_actual_consumer_preflight_has_no_projection_and_reuses_finaliser_checks(
+    tmp_path
+):
+    from newsroom.control_plane.graphiti_admission import (
+        GraphitiAdmissionConsumerError,
+        GraphitiProposalAdmissionAction,
+    )
+    from newsroom.extraction.types import ExtractionProposalKind
+    from newsroom.tests.test_graphiti_admission_consumer import (
+        _Authority,
+        _Projector,
+        _Rights,
+        _consumer,
+        _draft,
+        _seed_receipt,
+    )
+
+    connection = connect(str(tmp_path / "actual-preflight.sqlite3"))
+    first_id = "00000000-0000-4000-8000-000000008101"
+    second_id = "00000000-0000-4000-8000-000000008102"
+    first = _draft("entity.8101", ExtractionProposalKind.ENTITY_MENTION)
+    second = _draft("entity.8102", ExtractionProposalKind.ENTITY_MENTION)
+    _seed_receipt(connection, first, ingest_id=first_id)
+    _seed_receipt(connection, second, ingest_id=second_id)
+    projector = _Projector()
+    consumer = _consumer(
+        connection,
+        _Authority({
+            first.local_id: GraphitiProposalAdmissionAction.ADMIT,
+            second.local_id: GraphitiProposalAdmissionAction.ADMIT,
+        }),
+        projector,
+        _Rights(),
+    )
+    try:
+        assert consumer.enqueue_complete_receipts(
+            ingest_ids=(first_id, second_id)
+        ) == 2
+        assert consumer.drain(
+            worker_id="first", limit=1, ingest_ids=(first_id,)
+        ).decided == 1
+
+        consumer.preflight_decided_cohort(ingest_ids=(first_id,))
+        with pytest.raises(
+            GraphitiAdmissionConsumerError, match="not completely decided"
+        ):
+            consumer.preflight_decided_cohort(ingest_ids=(second_id,))
+        assert projector.generation_calls == []
+
+        assert consumer.drain(
+            worker_id="second", limit=1, ingest_ids=(second_id,)
+        ).decided == 1
+        consumer.preflight_decided_cohort(ingest_ids=(second_id,))
+        result = consumer.finalise_decided_cohort(
+            ingest_ids=(first_id, second_id)
+        )
+        assert result.projected == 2
+        assert len(projector.generation_calls) == 1
+        consumer.preflight_decided_cohort(ingest_ids=(first_id,))
+        assert len(projector.generation_calls) == 1
     finally:
         connection.close()
 

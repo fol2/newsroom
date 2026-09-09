@@ -1715,6 +1715,40 @@ class EventHypothesisLineageReadPort:
     def require_retained_relationship_in_transaction(self, assessment_digest: str) -> RetainedRelationshipDecisionReceipt:
         return self._call("require_retained_relationship_in_transaction", assessment_digest, expected=RetainedRelationshipDecisionReceipt)
 
+    def require_retained_relationships_in_transaction(
+        self, assessment_digests: tuple[str, ...]
+    ) -> tuple[RetainedRelationshipDecisionReceipt, ...]:
+        if type(assessment_digests) is not tuple or any(
+            type(item) is not str for item in assessment_digests
+        ):
+            raise HypothesisLineageContractError(
+                "lineage relationship digest batch differs"
+            )
+        value = self._call(
+            "require_retained_relationships_in_transaction",
+            assessment_digests,
+            expected=tuple,
+        )
+        try:
+            differs = (
+                len(value) != len(assessment_digests)
+                or any(
+                    type(item) is not RetainedRelationshipDecisionReceipt
+                    for item in value
+                )
+                or tuple(item.assessment.canonical_digest for item in value)
+                != assessment_digests
+            )
+        except Exception as exc:
+            raise HypothesisLineageContractError(
+                "lineage relationship batch result differs"
+            ) from exc
+        if differs:
+            raise HypothesisLineageContractError(
+                "lineage relationship batch result differs"
+            )
+        return value
+
 
 def _compose_event_hypothesis_lineage_read_port(authority: object) -> EventHypothesisLineageReadPort:
     return EventHypothesisLineageReadPort(_PRODUCER_PORT_TOKEN, authority)

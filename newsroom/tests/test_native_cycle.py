@@ -20,8 +20,8 @@ from newsroom.tests.test_native_triage import (
     _no_match_retrieval,
     _shared_system,
 )
-from newsroom.tests.test_graphiti_operational_readiness import _rights, _unit
-from newsroom.tests.test_native_discovery import NOW, _seed
+from newsroom.tests.test_graphiti_operational_readiness import _unit
+from newsroom.tests.test_native_discovery import NOW, _current_rights, _seed
 
 
 class _Retrieval:
@@ -50,7 +50,7 @@ def test_revision_failure_is_visible_without_blocking_unrelated_native_work(
     retrieval_authority, binding = _no_match_retrieval(tmp_path)
     monkeypatch.setattr(
         "newsroom.control_plane.cycle._dispatch_rights_decision",
-        lambda *args, **kwargs: _rights(),
+        lambda *args, **kwargs: _current_rights(),
     )
     with sqlite3.connect(":memory:") as proving, _shared_system(
         tmp_path, monkeypatch, retrieval_authority

@@ -3,7 +3,8 @@
 RSS remains an RSS observation, never a claimed full maintained warning page.
 The HKO response is the complete current summary, not an inferred activation
 history. An empty, valid inventory is recorded explicitly rather than as a
-parser failure or a fabricated warning.
+parser failure or a fabricated warning. Complete HKO state revisions also
+preserve disappearances, separately from source-timestamped warning records.
 """
 from __future__ import annotations
 
@@ -39,6 +40,14 @@ def weather_items(source_id: str, raw: bytes, *, observed_at) -> tuple[SourceIte
             body = canonical_json_bytes({key: warning}).decode()
             items.append(SourceItem(source_id, key, warning["name"], body,
                                     SOURCE_URLS[source_id], _utc(issued), _utc(updated), body))
+        # A per-warning inventory alone drops disappearance/cancellation. Keep
+        # the complete state as one stable item, including {}, without inventing
+        # a source activation/update time from our observation clock.
+        body = canonical_json_bytes(value).decode()
+        items.append(SourceItem(
+            source_id, "current-warning-summary", "Hong Kong Observatory complete current warning summary",
+            body, SOURCE_URLS[source_id], None, None, body,
+        ))
         return tuple(items)
     if source_id != "UK-10":
         raise ValueError("source is outside the fixed weather portfolio")
@@ -76,8 +85,8 @@ def poll_other_source(intake, source_id, definition_id, version_id, version):
                                        observations=tuple(observations))
     if source_id not in {"HK-02", "UK-10"}:
         raise ValueError("observed source rights exceed the implemented transport")
-    intake._fence(source_id, url)
-    status, raw = intake._fetch(url)
+    with intake._fence(source_id, url):
+        status, raw = intake._fetch(url)
     if status != 200 or not raw or len(raw) > MAX_BODY_BYTES:
         return NativeSourceDisposition(source_id, "HOLD", "SOURCE_FETCH_INCOMPLETE", observations=tuple(observations))
     observed = intake._clock()

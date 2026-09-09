@@ -1,5 +1,7 @@
+from contextlib import contextmanager, nullcontext
 import io
 import json
+import urllib.error
 from dataclasses import replace
 from datetime import UTC, datetime
 from email.message import Message
@@ -67,13 +69,13 @@ def test_govuk_route_rejects_ambiguous_or_external_urls(url):
 def test_govuk_acquisition_binds_the_composed_transport_policy():
     policy = digest_canonical({"transport": "composed"})
     acquire = GovUkEvidenceAcquisition(
-        sources=None, proof=proof(), dispatch_fence=lambda _: None,
+        sources=None, proof=proof(), dispatch_fence=lambda _: nullcontext(),
         transport_policy_digest=policy,
     )
     assert acquire._transport_policy_digest == policy
     with pytest.raises(ValueError):
         GovUkEvidenceAcquisition(
-            sources=None, proof=proof(), dispatch_fence=lambda _: None,
+            sources=None, proof=proof(), dispatch_fence=lambda _: nullcontext(),
             transport_policy_digest="not-a-digest",
         )
 
@@ -83,20 +85,33 @@ def test_exact_native_source_fetches_bounded_independent_content(tmp_path, monke
         unit = replace(_unit(), source_definition_url="https://www.gov.uk/government/organisations/home-office.atom")
         _seed(system, unit)
         request = _request(system, unit)
-        calls = []
+        calls, held = [], []
         raw = json.dumps(_document("/government/news/official-update")).encode()
+        class FencedResponse(Response):
+            def read(self, *args):
+                assert held == [request]
+                return super().read(*args)
         class Opener:
             def open(self, http, timeout):
+                assert held == [request]
                 calls.append((http.full_url, timeout, http.get_method()))
-                return Response(raw, http.full_url)
+                return FencedResponse(raw, http.full_url)
         monkeypatch.setattr("urllib.request.build_opener", lambda *args: Opener())
         fenced = []
+        @contextmanager
+        def fence(request):
+            fenced.append(request)
+            held.append(request)
+            try:
+                yield
+            finally:
+                held.pop()
         acquire = GovUkEvidenceAcquisition(
-            sources=system.sources, proof=proof(), dispatch_fence=fenced.append,
+            sources=system.sources, proof=proof(), dispatch_fence=fence,
             clock=lambda: datetime(2026, 9, 2, 12, 2, tzinfo=UTC),
         )
         result = acquire(request)
-        assert fenced == [request]
+        assert fenced == [request] and held == []
         assert calls == [("https://www.gov.uk/api/content/government/news/official-update", 20, "GET")]
         assert result.body == b"Official update\n\nExact independent source text."
         assert result.request_digest == request.digest
@@ -110,6 +125,49 @@ def test_exact_native_source_fetches_bounded_independent_content(tmp_path, monke
         with pytest.raises(NativeEvidenceHold, match="POLICY_MISMATCH"):
             acquire(replace(request, transport_policy_digest="sha256:" + "0" * 64))
         assert len(calls) == 1
+
+
+def test_govuk_transport_unavailable_then_succeeds_without_changing_request(
+    tmp_path, monkeypatch
+):
+    with open_discovery_system(
+        tmp_path / "authority.sqlite3", clock=lambda: NOW
+    ) as system:
+        unit = replace(
+            _unit(),
+            source_definition_url=(
+                "https://www.gov.uk/government/organisations/home-office.atom"
+            ),
+        )
+        _seed(system, unit)
+        request = _request(system, unit)
+        raw = json.dumps(_document("/government/news/official-update")).encode()
+        calls = []
+
+        class Opener:
+            def open(self, http, timeout):
+                calls.append((http.full_url, timeout))
+                if len(calls) == 1:
+                    raise urllib.error.URLError("temporary source failure")
+                return Response(raw, http.full_url)
+
+        monkeypatch.setattr("urllib.request.build_opener", lambda *args: Opener())
+        acquire = GovUkEvidenceAcquisition(
+            sources=system.sources,
+            proof=proof(),
+            dispatch_fence=lambda _: nullcontext(),
+            clock=lambda: datetime(2026, 9, 2, 12, 2, tzinfo=UTC),
+        )
+
+        with pytest.raises(
+            NativeEvidenceHold, match="GOVUK_ACQUISITION_UNAVAILABLE"
+        ):
+            acquire(request)
+        result = acquire(request)
+
+        assert result.request_digest == request.digest
+        assert result.outcome == "COMPLETE"
+        assert len(calls) == 2
 
 
 @pytest.mark.parametrize("failure", ["too_large", "wrong_path", "missing_date", "future_date", "no_body", "redirect", "duplicate_json"])
@@ -131,7 +189,7 @@ def test_incomplete_source_response_is_never_complete(tmp_path, monkeypatch, fai
                 return Response(raw, "https://other.test" if failure == "redirect" else http.full_url)
         monkeypatch.setattr("urllib.request.build_opener", lambda *args: Opener())
         acquire = GovUkEvidenceAcquisition(
-            sources=system.sources, proof=proof(), dispatch_fence=lambda _: None,
+            sources=system.sources, proof=proof(), dispatch_fence=lambda _: nullcontext(),
             clock=lambda: datetime(2026, 9, 2, 12, 2, tzinfo=UTC),
         )
         with pytest.raises(NativeEvidenceHold):

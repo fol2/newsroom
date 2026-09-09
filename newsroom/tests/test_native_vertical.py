@@ -13,7 +13,7 @@ from newsroom.authority.neo4j_fulltext_reader import (
     Neo4jFullTextReadResult,
     Neo4jFullTextReader,
 )
-from newsroom.control_plane import govuk_rights, native_assessor, native_composition
+from newsroom.control_plane import govuk_rights, native_assessor, native_composition, native_source_rights
 from newsroom.control_plane.govuk_rights import GovUkLicenceEvidence, POLICY_DIGEST
 from newsroom.control_plane.native_assessor import NativeAssessmentExecution
 from newsroom.control_plane.evidence import (
@@ -67,7 +67,16 @@ class _Projection:
         return None
 
     def upsert(self, receipt, document, vector):
-        self.rows.append((receipt, document, vector))
+        existing = [row for row in self.rows if row[1].passage_id == document.passage_id]
+        if existing:
+            assert existing == [(receipt, document, vector)]
+        else:
+            self.rows.append((receipt, document, vector))
+
+    def reconcile_membership(self, receipts):
+        self.rows = [row for row in self.rows if row[0] in receipts]
+        retained = {row[0] for row in self.rows}
+        return tuple(receipt for receipt in receipts if receipt not in retained)
 
     def retrieve(self, *, query_text, query_vector):
         rows = tuple(
@@ -88,6 +97,7 @@ class _Projection:
         expected_document_count,
         clock,
     ):
+        assert len(self.rows) == expected_document_count
         recorded = clock()
         snapshot = FullTextProjectionSnapshot(
             generation_id=ProjectionGenerationId.parse(self.generation_id),
@@ -208,7 +218,7 @@ def _install_boundaries(monkeypatch, counters):
         return GovUkLicenceEvidence(
             tuple(item.admission_id for item in admissions),
             tuple(item.blob.blob_digest for item in admissions),
-            NOW.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            clock().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             POLICY_DIGEST,
         )
 
@@ -216,7 +226,11 @@ def _install_boundaries(monkeypatch, counters):
         native_composition, "retain_current_govuk_licence", retain_licence
     )
     monkeypatch.setattr(
-        native_composition, "observe_portfolio_terms", lambda **_kwargs: {}
+        native_composition, "observe_portfolio_terms", lambda **kwargs: {
+            source: native_source_rights.SourceTermsEvidence(
+                source, kwargs["clock"]().isoformat(), "SOURCE_TERMS_UNAVAILABLE", (),
+            ) for source in native_source_rights.TERMS
+        }
     )
 
     class _Opener:
@@ -268,7 +282,7 @@ def _install_boundaries(monkeypatch, counters):
         claim = "Visa rules updated"
         rendered_headline = (
             "官方限期已經更改。" if headline == "Official deadline changed."
-            else "官方限期再次更改，改為較後日期。"
+            else "官方限期已更改，截止日期延後。"
         )
         rendered = "簽證規則已更新"
         identity = digest_bytes(canonical_json_bytes([
@@ -280,12 +294,13 @@ def _install_boundaries(monkeypatch, counters):
         headline_semantic_id = f"native-headline-semantic:{identity}"
         semantic_id = f"native-semantic:{identity}"
         qualification_id = f"native-qualification:{identity}"
+        qualification_span = headline.split(".", 1)[0]
         qualification_facts = [
             ["action_class", "OFFICIAL_DEADLINE"],
             ["event_polarity", "AFFIRMED"],
             ["action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"],
-            ["material_relation_span", headline],
-            ["reader_action", headline],
+            ["material_relation_span", qualification_span],
+            ["reader_action", qualification_span],
         ]
 
         def governed_claim(*, claim_id, text, rendered, role, semantic_id):
@@ -433,15 +448,15 @@ def test_native_vertical_reaches_private_ack_and_reopens_without_provider_repeat
             if "candidate_version_id" in progress["facts"]
         }
         first_candidates = {
-            version.candidate_id:
-            pipeline._runtime.authority.candidates.versions(version.candidate_id)
-            for version in first_versions.values()
+            candidate_id: pipeline._runtime.authority.candidates.versions(candidate_id)
+            for candidate_id in {version.candidate_id for version in first_versions.values()}
         }
 
     clock[0] = NOW + timedelta(minutes=5)
     counters["document_body"] = "Official deadline changed. It now has a later date."
     with native_composition.open_native_pipeline(**arguments) as successor:
         report = successor.tick(cycle_id="native-vertical-successor")
+        assert report.revision_states == {"ACKNOWLEDGED": 4}, successor._journal.progress
         successor_versions = {
             progress["facts"]["candidate_version_id"]:
             successor._runtime.authority.candidates.load_version(
@@ -451,9 +466,8 @@ def test_native_vertical_reaches_private_ack_and_reopens_without_provider_repeat
             if "candidate_version_id" in progress["facts"]
         }
         successor_candidates = {
-            version.candidate_id:
-            successor._runtime.authority.candidates.versions(version.candidate_id)
-            for version in successor_versions.values()
+            candidate_id: successor._runtime.authority.candidates.versions(candidate_id)
+            for candidate_id in {version.candidate_id for version in successor_versions.values()}
         }
         assert successor_candidates.keys() == first_candidates.keys()
         assert all(
@@ -463,7 +477,6 @@ def test_native_vertical_reaches_private_ack_and_reopens_without_provider_repeat
             == first_candidates[candidate_id][-1].ordinal + 1
             for candidate_id in first_candidates
         )
-        assert report.revision_states == {"ACKNOWLEDGED": 4}, successor._journal.progress
 
     dispatched = dict(counters)
     with native_composition.open_native_pipeline(**arguments) as reopened:

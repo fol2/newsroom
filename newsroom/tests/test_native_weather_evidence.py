@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager, nullcontext
+
 import io
 import json
 from dataclasses import replace
@@ -249,7 +251,7 @@ def _acquisition(runtime, rights, fences):
         proof=runtime.proof,
         rights=rights,
         transport_policy_digest=CONTROLLER_POLICY_DIGEST,
-        dispatch_fence=fences.append,
+        dispatch_fence=lambda request: nullcontext(fences.append(request)),
         clock=lambda: NOW,
     )
 
@@ -263,16 +265,33 @@ def test_hko_acquires_exact_retained_warning_with_current_rights(
     calls = []
     with open_native_runtime(**args) as runtime:
         rights = _portfolio(runtime, monkeypatch)
-        _unit_value, request = _seed(runtime, "HK-02", rights)
+        unit_value, request = _seed(runtime, "HK-02", rights)
 
+        held = []
+        class FencedResponse(_Response):
+            def read(self, *args):
+                assert held == [request]
+                return super().read(*args)
         class _Opener:
             def open(self, http, timeout):
+                assert held == [request]
                 calls.append((http.full_url, timeout, http.get_method()))
-                return _Response(HKO_RAW, http.full_url, "application/json")
+                return FencedResponse(HKO_RAW, http.full_url, "application/json")
 
         monkeypatch.setattr("urllib.request.build_opener", lambda *_: _Opener())
         fences = []
-        result = _acquisition(runtime, rights, fences)(request)
+        @contextmanager
+        def fence(request):
+            held.append(request)
+            fences.append(request)
+            try:
+                yield
+            finally:
+                held.pop()
+        acquisition = _acquisition(runtime, rights, fences)
+        acquisition._fence = fence
+        result = acquisition(request)
+        assert held == []
         assert calls == [(SOURCE_URLS["HK-02"], 20, "GET")]
         assert fences == [request]
         assert json.loads(result.body) == {"WTS": HKO_WARNING}
@@ -282,6 +301,51 @@ def test_hko_acquires_exact_retained_warning_with_current_rights(
         assert result.licence_attribution == HK02_ATTRIBUTION
         assert result.currentness_basis == "AUTHORITATIVE_CURRENT_CONTENT_ENDPOINT"
         assert result.rights_eligibility_digest
+        # Exercise the actual assessor admission boundary with transport output,
+        # not an independently constructed digest fixture. No model is called.
+        from newsroom.control_plane.native_assessor import AutonomousNativeEvidenceAssessor
+        from newsroom.control_plane.native_evidence import (
+            DependencyAssessment, NativeEvidenceSource, PublicationRightsAssessment,
+        )
+        from newsroom.sources import SourceDefinitionVersionId
+        from newsroom.tests.test_increment10_ingress import _candidate
+        from newsroom.tests.test_increment10_editorial import _ready_package
+        from newsroom.increment10.evidence import _base_package
+
+        candidate_root = tmp_path / "assessor-candidate"
+        candidate_root.mkdir()
+        connection, _, candidate = _candidate(candidate_root)
+        try:
+            current_rights = rights.for_source(source_id="HK-02", definition_url=SOURCE_URLS["HK-02"])
+            source = NativeEvidenceSource(
+                unit_value,
+                runtime.authority.sources.version_details(SourceDefinitionVersionId.parse(request.source_definition_version_id), proof=runtime.proof),
+                current_rights,
+                DependencyAssessment.create(
+                    dependency_status="RESOLVED", evidential_origin_id="HKO",
+                    originating_report_id=request.source_revision_id,
+                    evidence_digest=result.transport_evidence_digest,
+                ),
+            )
+            class AssessmentReached(Exception):
+                pass
+            def dispatch(prompt):
+                assert json.loads(prompt)["sources"][0]["acquisition_receipt_id"] == result.receipt_digest
+                raise AssessmentReached
+            assessor = AutonomousNativeEvidenceAssessor(dispatch=dispatch)
+            base = _base_package(_ready_package(candidate)[1])
+            with pytest.raises(AssessmentReached):
+                assessor(candidate, base, (source,), (result,))
+            for changed in ("policy_digest", "evidence_digest"):
+                values = {name: getattr(current_rights, name) for name in (
+                    "decision", "permitted_use", "policy_digest", "evidence_digest",
+                )}
+                values[changed] = digest_canonical({"changed": changed})
+                altered = replace(source, rights=PublicationRightsAssessment.create(**values))
+                with pytest.raises(NativeEvidenceHold, match="SOURCE_POLICY_FACTS_HOLD"):
+                    assessor(candidate, base, (altered,), (result,))
+        finally:
+            connection.close()
 
 
 def test_met_office_pubdate_does_not_become_an_asserted_version_time(
@@ -343,5 +407,5 @@ def test_binding_mismatch_and_empty_inventory_fail_before_evidence_emission(
                 proof=runtime.proof,
                 rights=rights,
                 transport_policy_digest="not-a-digest",
-                dispatch_fence=lambda _: None,
+                dispatch_fence=lambda _: nullcontext(),
             )

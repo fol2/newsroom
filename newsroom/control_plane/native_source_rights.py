@@ -9,12 +9,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+from typing import ContextManager
+from threading import RLock
 import urllib.request
 
 from lxml import html
 
 from newsroom.authority import HydrationRequest, ObjectAdmissionId, ObjectAdmissionRequest
-from newsroom.authority.canonical import digest_bytes, digest_canonical
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, digest_canonical
 from newsroom.increment9.proving import SOURCE_URLS
 
 from .govuk_evidence import _NoRedirect
@@ -115,24 +118,141 @@ class SourceTermsEvidence:
     def digest(self) -> str:
         return digest_canonical({
             "policy": POLICY_DIGEST, "source_id": self.source_id,
-            "observed_at": self.observed_at, "reason": self.reason,
-            "observations": self.observations,
+            "reason": self.reason,
+            "observations": tuple(
+                (url, digest, admission) for url, digest, admission, _access in self.observations
+            ),
         })
 
 
+@dataclass(frozen=True, slots=True)
+class RightsSnapshotReference:
+    assessment_admission_id: str
+    assessment_blob_digest: str
+    observation_admission_id: str
+    observation_blob_digest: str
+
+    def __post_init__(self) -> None:
+        from newsroom.authority.canonical import validate_sha256_digest
+        ObjectAdmissionId.parse(self.assessment_admission_id)
+        ObjectAdmissionId.parse(self.observation_admission_id)
+        validate_sha256_digest(self.assessment_blob_digest)
+        validate_sha256_digest(self.observation_blob_digest)
+
+
+def retain_rights_snapshot(
+    *, objects, proof, source_id: str, definition_url: str,
+    assessment: PublicationRightsAssessment, observed_at: str,
+    reason: str, observations: tuple[tuple[str, str, str, str], ...],
+) -> RightsSnapshotReference:
+    """Retain the current observation and its stable semantic assessment."""
+    observation_bytes = canonical_json_bytes({
+        "schema": "hermes-native-rights-observation-v1",
+        "source_id": source_id, "definition_url": definition_url,
+        "observed_at": observed_at, "reason": reason,
+        "observations": observations,
+    })
+    observation = objects.admit(ObjectAdmissionRequest(
+        "evidence.source", f"native-rights-observation:{digest_bytes(observation_bytes)}",
+    ), observation_bytes, proof=proof).admission
+    assessment_bytes = canonical_json_bytes({
+        "schema": "hermes-native-rights-assessment-v1",
+        "source_id": source_id, "definition_url": definition_url,
+        "record_id": assessment.record_id, "decision": assessment.decision,
+        "permitted_use": assessment.permitted_use,
+        "policy_digest": assessment.policy_digest,
+        "evidence_digest": assessment.evidence_digest,
+        # Access/observation times are audit facts above, not semantic identity.
+        "evidence": tuple(
+            (url, digest, admission) for url, digest, admission, _access in observations
+        ),
+    })
+    retained = objects.admit(ObjectAdmissionRequest(
+        "evidence.source", f"native-rights-assessment:{assessment.record_id}",
+    ), assessment_bytes, proof=proof).admission
+    for admission, raw in ((observation, observation_bytes), (retained, assessment_bytes)):
+        hydrated = objects.hydrate(
+            HydrationRequest(admission.admission_id, "evidence.source"), proof=proof,
+        )
+        if hydrated.data != raw:
+            raise ValueError("retained source rights snapshot differs")
+    return RightsSnapshotReference(
+        str(retained.admission_id), retained.blob.blob_digest,
+        str(observation.admission_id), observation.blob.blob_digest,
+    )
+
+
 class NativePortfolioRights:
-    def __init__(self, govuk: GovUkLicenceEvidence, evidence: dict[str, SourceTermsEvidence]):
-        if type(govuk) is not GovUkLicenceEvidence or any(
+    def __init__(
+        self, govuk: GovUkLicenceEvidence | None,
+        evidence: dict[str, SourceTermsEvidence], *,
+        refresh_current: Callable[
+            [], tuple[
+                GovUkLicenceEvidence | None, str, dict[str, SourceTermsEvidence],
+                dict[str, RightsSnapshotReference],
+            ]
+        ] | None = None,
+        govuk_reason: str = "GOVUK_LICENCE_UNOBSERVED",
+        snapshots: dict[str, RightsSnapshotReference] | None = None,
+    ):
+        if (govuk is not None and type(govuk) is not GovUkLicenceEvidence) or any(
             type(value) is not SourceTermsEvidence or source_id != value.source_id
             for source_id, value in evidence.items()
-        ):
+        ) or not isinstance(govuk_reason, str) or not govuk_reason:
             raise ValueError("portfolio source terms binding differs")
+        if refresh_current is not None and not callable(refresh_current):
+            raise ValueError("portfolio source terms refresh differs")
         self.govuk, self.evidence = govuk, dict(evidence)
+        self._snapshots = dict(snapshots or {})
+        self._govuk_reason = "REVIEWED_REUSE_PERMITTED" if govuk else govuk_reason
+        self._refresh_current = refresh_current
+        self._lock = RLock()
+
+    def refresh(self) -> None:
+        """Replace the complete current snapshot once per bounded iteration."""
+        if self._refresh_current is None:
+            return
+        govuk, govuk_reason, evidence, snapshots = self._refresh_current()
+        if (
+            (govuk is not None and type(govuk) is not GovUkLicenceEvidence)
+            or not isinstance(govuk_reason, str) or not govuk_reason
+            or set(evidence) != set(TERMS)
+            or any(
+                type(value) is not SourceTermsEvidence or source_id != value.source_id
+                for source_id, value in evidence.items()
+            )
+            or set(snapshots) != set(SOURCE_URLS)
+            or any(type(value) is not RightsSnapshotReference for value in snapshots.values())
+        ):
+            raise ValueError("refreshed portfolio source terms binding differs")
+        with self._lock:
+            self.govuk = govuk
+            self._govuk_reason = (
+                "REVIEWED_REUSE_PERMITTED" if govuk is not None else govuk_reason
+            )
+            self.evidence = dict(evidence)
+            self._snapshots = dict(snapshots)
+
+    def snapshot_for(self, source_id: str) -> RightsSnapshotReference | None:
+        with self._lock:
+            return self._snapshots.get(source_id)
 
     def for_source(self, *, source_id: str, definition_url: str) -> PublicationRightsAssessment:
         if source_id not in TERMS:
-            return self.govuk.for_source(source_id=source_id, definition_url=definition_url)
-        evidence = self.evidence.get(source_id)
+            with self._lock:
+                govuk, reason = self.govuk, self._govuk_reason
+            if govuk is not None:
+                return govuk.for_source(source_id=source_id, definition_url=definition_url)
+            return PublicationRightsAssessment.create(
+                decision="HOLD", permitted_use="PUBLICATION_EVIDENCE",
+                policy_digest=POLICY_DIGEST,
+                evidence_digest=digest_canonical({
+                    "source_id": source_id, "definition_url": definition_url,
+                    "state": reason,
+                }),
+            )
+        with self._lock:
+            evidence = self.evidence.get(source_id)
         permitted = (evidence is not None and evidence.reason == "REVIEWED_REUSE_PERMITTED"
                      and definition_url == SOURCE_URLS[source_id])
         return PublicationRightsAssessment.create(
@@ -142,16 +262,26 @@ class NativePortfolioRights:
         )
 
     def reason_for(self, source_id: str) -> str:
-        evidence = self.evidence.get(source_id)
+        if source_id not in TERMS:
+            with self._lock:
+                return self._govuk_reason
+        with self._lock:
+            evidence = self.evidence.get(source_id)
         return "SOURCE_TERMS_UNOBSERVED" if evidence is None else evidence.reason
 
     def observations_for(self, source_id: str):
-        evidence = self.evidence.get(source_id)
+        if source_id not in TERMS:
+            return ()
+        with self._lock:
+            evidence = self.evidence.get(source_id)
         return () if evidence is None else evidence.observations
 
     def require_retained(self, *, objects, proof) -> None:
-        self.govuk.require_retained(objects=objects, proof=proof)
-        for source_id, evidence in self.evidence.items():
+        with self._lock:
+            govuk, evidence_snapshot = self.govuk, dict(self.evidence)
+        if govuk is not None:
+            govuk.require_retained(objects=objects, proof=proof)
+        for source_id, evidence in evidence_snapshot.items():
             for url, digest, admission_id, _access in evidence.observations:
                 retained = objects.hydrate(HydrationRequest(ObjectAdmissionId.parse(admission_id), "evidence.source"), proof=proof)
                 if digest_bytes(retained.data) != digest:
@@ -160,13 +290,13 @@ class NativePortfolioRights:
                     raise ValueError("retained permitted terms differ")
 
 
-def observe_portfolio_terms(*, objects, proof, stop_check, fetch=_fetch_terms,
+def observe_portfolio_terms(*, objects, proof, stop_check,
+                            stop_fence: Callable[[], ContextManager[None]], fetch=_fetch_terms,
                             clock=lambda: datetime.now(tz=UTC)) -> dict[str, SourceTermsEvidence]:
     """One bounded parallel observation, then serial governed retention."""
     def observe(source_id):
         bodies, reason = [], RESTRICTIONS.get(source_id, "REVIEWED_REUSE_PERMITTED")
         for url, expected in TERMS[source_id]:
-            stop_check()
             try:
                 raw = fetch(url)
                 bodies.append((url, raw))
@@ -177,8 +307,12 @@ def observe_portfolio_terms(*, objects, proof, stop_check, fetch=_fetch_terms,
             except Exception:
                 reason = "SOURCE_TERMS_UNAVAILABLE"
         return source_id, bodies, reason, clock().astimezone(UTC).isoformat()
-    with ThreadPoolExecutor(max_workers=len(TERMS)) as pool:
-        results = tuple(pool.map(observe, TERMS))
+    stop_check()
+    # One stable owner-stop decision covers the complete bounded network phase.
+    # Governed-object writes remain outside the fence and are serial below.
+    with stop_fence():
+        with ThreadPoolExecutor(max_workers=len(TERMS)) as pool:
+            results = tuple(pool.map(observe, TERMS))
     evidence = {}
     for source_id, bodies, reason, observed_at in results:
         stop_check()

@@ -41,6 +41,7 @@ from .native_evidence import (
     IndependentEvidenceAssessment,
     NativeEvidenceError,
     NativeEvidenceHold,
+    rights_eligibility_digest,
     NativeEvidenceSource,
     SourceAuthorityAssessment,
 )
@@ -416,14 +417,10 @@ class AutonomousNativeEvidenceAssessor:
                 != "AUTHORITATIVE_CURRENT_CONTENT_ENDPOINT"
                 or not result.text_only
                 or result.rights_eligibility_digest
-                != digest_canonical(
-                    {
-                        "rights_receipt": source.rights.record_id,
-                        "body_digest": result.body_digest,
-                        "transport": result.transport_evidence_digest,
-                        "exclusion_signals": result.exclusion_signals,
-                        "text_only": result.text_only,
-                    }
+                != rights_eligibility_digest(
+                    source.rights, body_digest=result.body_digest,
+                    transport_digest=result.transport_evidence_digest,
+                    exclusion_signals=result.exclusion_signals, text_only=result.text_only,
                 )
                 or not result.licence_attribution
                 or result.exclusion_signals

@@ -39,7 +39,9 @@ from newsroom.increment10.editorial import (
     DECISION_COMMAND,
     DECISION_USE,
     DecisionReference,
+    EditorialHold,
     EditorialPolicyDecision,
+    EditorialHold,
     NativeEditorial,
     STORY_COMMAND,
     STORY_EVENT,
@@ -68,6 +70,20 @@ from newsroom.increment10.ingress import NON_PUBLIC_EVIDENCE_INTAKE_BOUNDARY
 
 class NativePublicationError(ValueError):
     """Raised when the connected native publication transaction cannot advance."""
+
+
+_MAX_ACQUISITION_ATTEMPTS = 3
+_RETRYABLE_ACQUISITION_HOLDS = frozenset({
+    "GOVUK_ACQUISITION_UNAVAILABLE",
+    "WEATHER_ACQUISITION_UNAVAILABLE",
+})
+_REFRESHABLE_EVIDENCE_HOLDS = frozenset({
+    "CURRENT_RIGHTS_HOLD",
+    "GOVUK_LICENCE_BINDING_HOLD",
+    "GOVUK_LICENCE_REVIEW_HOLD",
+    "NATIVE_SOURCE_RIGHTS_HOLD",
+    "PUBLICATION_RIGHTS_HOLD",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,6 +504,15 @@ class NativePublicationContinuation:
 
         decision_value = facts.get("editorial_decision")
         package_id = facts.get("package_admission_id")
+        if (
+            decision_value is not None
+            and package_id is not None
+            and progress.get("stage") == "EVIDENCE_HOLD"
+            and facts.get("reason") not in _REFRESHABLE_EVIDENCE_HOLDS
+        ):
+            return NativePublicationContinuationResult(
+                "EVIDENCE_HOLD", str(facts.get("reason")), None
+            )
         if decision_value is None or package_id is None:
             if progress.get("stage") in {
                 "ASSESSMENT_STARTED",
@@ -500,35 +525,115 @@ class NativePublicationContinuation:
                 return NativePublicationContinuationResult(
                     "ASSESSMENT_INTERRUPTED", facts["reason"], None
                 )
-            facts["assessment_started_at"] = self._clock().to_text()
-            self._journal.advance(
-                revision_id, stage="ASSESSMENT_STARTED", facts=facts
+            if progress.get("stage") == "EVIDENCE_HOLD":
+                reason = facts.get("reason")
+                retryable_acquisition = (
+                    facts.get("acquisition_retryable") is True
+                    and facts.get("acquisition_attempt_count", 0)
+                    < _MAX_ACQUISITION_ATTEMPTS
+                )
+                if not retryable_acquisition and reason not in _REFRESHABLE_EVIDENCE_HOLDS:
+                    return NativePublicationContinuationResult(
+                        "EVIDENCE_HOLD", str(reason), None
+                    )
+            attempt_count = facts.get("acquisition_attempt_count", 0)
+            if type(attempt_count) is not int or attempt_count < 0:
+                raise NativePublicationError("native acquisition attempt differs")
+            attempt_count += 1
+            acquisition_started_at = self._clock().to_text()
+            facts.update(
+                acquisition_attempt_count=attempt_count,
+                acquisition_started_at=acquisition_started_at,
             )
+            facts.pop("acquisition_retryable", None)
+            self._journal.advance(
+                revision_id, stage="ACQUISITION_STARTED", facts=facts
+            )
+            assessment_started = False
+
+            def before_assessment() -> None:
+                nonlocal assessment_started
+                assessment_started = True
+                facts["assessment_started_at"] = acquisition_started_at
+                self._journal.advance(
+                    revision_id, stage="ASSESSMENT_STARTED", facts=facts
+                )
+
+            def retain_acquisition_failure(
+                failure_class: str,
+            ) -> NativePublicationContinuationResult:
+                retryable = attempt_count < _MAX_ACQUISITION_ATTEMPTS
+                facts.update(
+                    reason=(
+                        "ACQUISITION_TRANSPORT_RETRY"
+                        if retryable
+                        else "ACQUISITION_TRANSPORT_RETRY_EXHAUSTED"
+                    ),
+                    failure_class=failure_class,
+                    acquisition_retryable=retryable,
+                )
+                self._journal.advance(
+                    revision_id, stage="EVIDENCE_HOLD", facts=facts
+                )
+                return NativePublicationContinuationResult(
+                    "EVIDENCE_HOLD", str(facts["reason"]), None
+                )
+
             try:
                 evidence = self._evidence.acquire_and_retain(
                     candidate_version_id=candidate_version_id,
                     intake_receipt_id=str(facts["intake_receipt_id"]),
                     sources=self._sources[revision_id],
+                    before_assessment=before_assessment,
                     proof=self._runtime.proof,
                 )
             except VetoError:
                 raise
             except NativeEvidenceHold as exc:
+                if (
+                    not assessment_started
+                    and exc.reason_code in _RETRYABLE_ACQUISITION_HOLDS
+                ):
+                    return retain_acquisition_failure(type(exc).__name__)
                 facts["reason"] = exc.reason_code
+                facts["acquisition_retryable"] = False
                 self._journal.advance(
                     revision_id, stage="EVIDENCE_HOLD", facts=facts
                 )
                 return NativePublicationContinuationResult(
                     "EVIDENCE_HOLD", exc.reason_code, None
                 )
+            except OSError as exc:
+                if assessment_started:
+                    facts["reason"] = "ACQUISITION_RESULT_NOT_RETAINED"
+                    facts["failure_class"] = type(exc).__name__
+                    self._journal.advance(
+                        revision_id, stage="ASSESSMENT_INTERRUPTED", facts=facts
+                    )
+                    return NativePublicationContinuationResult(
+                        "ASSESSMENT_INTERRUPTED", facts["reason"], None
+                    )
+                return retain_acquisition_failure(type(exc).__name__)
             except Exception as exc:
                 facts["reason"] = "ACQUISITION_RESULT_NOT_RETAINED"
                 facts["failure_class"] = type(exc).__name__
                 self._journal.advance(
-                    revision_id, stage="ASSESSMENT_INTERRUPTED", facts=facts
+                    revision_id,
+                    stage=(
+                        "ASSESSMENT_INTERRUPTED"
+                        if assessment_started
+                        else "EVIDENCE_HOLD"
+                    ),
+                    facts=facts,
                 )
                 return NativePublicationContinuationResult(
-                    "ASSESSMENT_INTERRUPTED", facts["reason"], None
+                    (
+                        "ASSESSMENT_INTERRUPTED"
+                        if assessment_started
+                        else "EVIDENCE_HOLD"
+                    ),
+                    facts["reason"],
+                    None,
                 )
             decision = evidence.editorial_decision
             package_id = str(evidence.retained.package_admission_id)
@@ -580,18 +685,45 @@ class NativePublicationContinuation:
             self._journal.advance(
                 revision_id, stage="PUBLICATION_STARTED", facts=facts
             )
-        published = self._runtime.publication.advance(
-            ObjectAdmissionId.parse(str(package_id)),
-            decision,
-            expected_story_version=int(facts["expected_story_version"]),
-            expected_publication_version=int(facts["expected_publication_version"]),
-            expected_delivery_evidence_version=int(
-                facts["expected_delivery_evidence_version"]
-            ),
-            applied_at=str(facts["publication_applied_at"]),
-            observed_at=str(facts["publication_observed_at"]),
-            proof=self._runtime.proof,
-        )
+        try:
+            published = self._runtime.publication.advance(
+                ObjectAdmissionId.parse(str(package_id)),
+                decision,
+                expected_story_version=int(facts["expected_story_version"]),
+                expected_publication_version=int(facts["expected_publication_version"]),
+                expected_delivery_evidence_version=int(
+                    facts["expected_delivery_evidence_version"]
+                ),
+                applied_at=str(facts["publication_applied_at"]),
+                observed_at=str(facts["publication_observed_at"]),
+                proof=self._runtime.proof,
+            )
+        except EditorialHold as exc:
+            reason_codes = (
+                tuple(exc.decision.stable_reason_codes)
+                if exc.decision is not None
+                else (str(exc),)
+            )
+            if (
+                not reason_codes
+                or any(type(reason) is not str or not reason for reason in reason_codes)
+            ):
+                raise NativePublicationError("editorial HOLD reasons differ") from exc
+            facts.update(
+                reason=(
+                    reason_codes[0]
+                    if len(reason_codes) == 1
+                    else "EDITORIAL_ADMISSION_HOLD"
+                ),
+                editorial_hold_reason_codes=list(reason_codes),
+                acquisition_retryable=False,
+            )
+            self._journal.advance(
+                revision_id, stage="EVIDENCE_HOLD", facts=facts
+            )
+            return NativePublicationContinuationResult(
+                "EVIDENCE_HOLD", str(facts["reason"]), None
+            )
         bindings = self._runtime.policies.publication
         reader = open_private_serving_read_port(
             bindings.target_path,

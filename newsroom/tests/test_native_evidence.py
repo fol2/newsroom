@@ -12,6 +12,7 @@ from newsroom.authority.canonical import (
 )
 from newsroom.control_plane.graphiti_operational_readiness import _source_requests
 from newsroom.control_plane.native_evidence import (
+    _admit_record,
     AcquiredEvidence,
     AcquiredSourceAssessment,
     DependencyAssessment,
@@ -21,6 +22,7 @@ from newsroom.control_plane.native_evidence import (
     IndependentEvidenceAssessment,
     NativeEvidenceController,
     NativeEvidenceHold,
+    NativeEvidenceError,
     NativeEvidenceSource,
     PublicationRightsAssessment,
     SourceAuthorityAssessment,
@@ -108,6 +110,7 @@ def test_independent_source_evidence_holds_then_reaches_private_ack(tmp_path) ->
     transport_digest = "sha256:" + "7" * 64
     currentness_evidence = "sha256:" + "c" * 64
     calls = []
+    assessment_markers = []
 
     def acquired(request):
         body = passage.encode()
@@ -286,9 +289,11 @@ def test_independent_source_evidence_holds_then_reaches_private_ack(tmp_path) ->
         candidate_version_id=version.version_id,
         intake_receipt_id=acknowledgement.receipt_id,
         sources=(source,),
+        before_assessment=lambda: assessment_markers.append("started"),
         proof=proof(),
     )
     assert len(calls) == 1
+    assert assessment_markers == ["started"]
     assert evidence.editorial_decision.evaluated_at == "2026-09-08T12:02:00.000000Z"
 
     bindings = _bindings(tmp_path, registries, hydration, definitions, commands)
@@ -325,3 +330,31 @@ def test_independent_source_evidence_holds_then_reaches_private_ack(tmp_path) ->
     system.close()
     ingress.close()
     candidate_connection.close()
+
+
+def test_retained_record_replay_binds_exact_revision_bytes(tmp_path, monkeypatch):
+    system, *_ = _open(tmp_path / "records.sqlite3")
+    try:
+        first = canonical_json_bytes({
+            "record_id": "stable-rights-policy", "record_type": "RIGHTS_DECISION",
+            "base_package_digest": "sha256:" + "1" * 64,
+        })
+        second = canonical_json_bytes({
+            "record_id": "stable-rights-policy", "record_type": "RIGHTS_DECISION",
+            "base_package_digest": "sha256:" + "2" * 64,
+        })
+        first_id = _admit_record(system.objects, first, proof())
+        second_id = _admit_record(system.objects, second, proof())
+        assert first_id != second_id
+        assert _admit_record(system.objects, first, proof()) == first_id
+        assert _admit_record(system.objects, second, proof()) == second_id
+        from newsroom.authority import ObjectAdmissionRequest
+        stale = system.objects.admit(
+            ObjectAdmissionRequest("evidence.record", f"record:{digest_bytes(first)}"),
+            first, proof=proof(),
+        )
+        monkeypatch.setattr(type(system.objects), "admit", lambda *_args, **_kwargs: stale)
+        with pytest.raises(NativeEvidenceError, match="record content differs"):
+            _admit_record(system.objects, second, proof())
+    finally:
+        system.close()

@@ -29,7 +29,8 @@ from newsroom.increment5.native_retrieval import (
 from .govuk_evidence import _NoRedirect, _unique_object
 from .model_usage import (
     InvocationAllocation, InvocationEfficiencyPolicy, InvocationTerminal,
-    ModelUsageAdmissionError, ModelUsageService, UsageComponents, UsageStatus,
+    MODEL_USAGE_SCHEMA_VERSION, ModelUsageAdmissionError, ModelUsageService,
+    UsageComponents, UsageStatus,
     WorkEnvelope, WorkloadClass,
 )
 from .veto import VetoError
@@ -79,6 +80,40 @@ class NativePassageEmbedder:
         usage.register_policy(policy)
         self._key, self._objects, self._usage = api_key, objects, usage
         self._policy, self._fence, self._clock = policy, dispatch_fence, clock
+
+    def retryable_pre_dispatch(
+        self, *, text: str, passage_id: str, cycle_id: str,
+    ) -> bool:
+        """Allow a new attempt only after exact retained zero-dispatch proof."""
+        request = canonical_json_bytes({
+            "input": text, "model": OPENROUTER_EMBEDDING_SLUG,
+            "dimensions": NATIVE_VECTOR_DIMENSIONS, "encoding_format": "float",
+        })
+        manifest = self._manifest(request, text)
+        envelope = WorkEnvelope.create(
+            cycle_id=cycle_id, workload_class=self._policy.workload_class,
+            admitted_at=self._clock(), admission_decision_id=None,
+            candidate_id=None, hypothesis_digest=None,
+            evidence_package_digest=digest_bytes(text.encode()),
+            ingest_id=passage_id, graphiti_attempt_id=None,
+        )
+        invocation_id = digest_canonical({
+            "schema_version": MODEL_USAGE_SCHEMA_VERSION,
+            "envelope_id": envelope.envelope_id,
+            "cycle_id": cycle_id, "leaf_ordinal": 1,
+            "workload_class": self._policy.workload_class.value,
+            "request_digest": manifest["request_digest"], "route": self._policy.route,
+            "parent_invocation_id": None,
+        })
+        terminal = self._usage.terminal(invocation_id)
+        return bool(
+            terminal is not None
+            and terminal.pre_dispatch_zero_proved
+            and terminal.dispatch_at is None
+            and terminal.usage_status is UsageStatus.REPORTED
+            and terminal.components.total_tokens == 0
+            and terminal.policy_breach is None
+        )
 
     def retain(
         self, *, text: str, passage_id: str, cycle_id: str, proof: AuthenticationProof,

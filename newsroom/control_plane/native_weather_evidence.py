@@ -5,6 +5,7 @@ from __future__ import annotations
 import ssl
 import urllib.error
 import urllib.request
+from contextlib import AbstractContextManager
 from collections.abc import Callable
 from datetime import UTC, datetime
 
@@ -34,6 +35,7 @@ from .native_evidence import (
     AcquiredEvidence,
     EvidenceAcquisitionRequest,
     NativeEvidenceHold,
+    rights_eligibility_digest,
 )
 from . import native_source_rights
 from .native_source_rights import NativePortfolioRights
@@ -71,7 +73,7 @@ class NativeWeatherEvidenceAcquisition:
         proof: AuthenticationProof,
         rights: NativePortfolioRights,
         transport_policy_digest: str,
-        dispatch_fence: Callable[[EvidenceAcquisitionRequest], None],
+        dispatch_fence: Callable[[EvidenceAcquisitionRequest], AbstractContextManager[None]],
         clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
     ) -> None:
         if (
@@ -144,7 +146,6 @@ class NativeWeatherEvidenceAcquisition:
         except (LookupError, TypeError, ValueError):
             raise hold("WEATHER_SOURCE_BINDING_HOLD") from None
 
-        self._fence(request)
         http_request = urllib.request.Request(
             endpoint,
             method="GET",
@@ -164,7 +165,7 @@ class NativeWeatherEvidenceAcquisition:
             urllib.request.HTTPSHandler(context=ssl.create_default_context()),
         )
         try:
-            with opener.open(http_request, timeout=TIMEOUT_SECONDS) as response:
+            with self._fence(request), opener.open(http_request, timeout=TIMEOUT_SECONDS) as response:
                 status = response.status
                 response_url = response.geturl()
                 content_type = response.headers.get_content_type()
@@ -249,14 +250,9 @@ class NativeWeatherEvidenceAcquisition:
                 "retrieval_time": _utc(retrieved),
             }
         )
-        rights_digest = digest_canonical(
-            {
-                "rights_receipt": rights.record_id,
-                "rights_policy_digest": rights.policy_digest,
-                "rights_evidence_digest": rights.evidence_digest,
-                "body_digest": body_digest,
-                "transport_evidence_digest": transport_digest,
-            }
+        rights_digest = rights_eligibility_digest(
+            rights, body_digest=body_digest, transport_digest=transport_digest,
+            exclusion_signals=(), text_only=True,
         )
         return AcquiredEvidence.create(
             request_digest=request.digest,

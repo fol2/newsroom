@@ -8,7 +8,10 @@ import pytest
 
 from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane import native_embeddings as embedding
-from newsroom.control_plane.model_usage import InvocationEfficiencyPolicy, ModelUsageService, WorkloadClass
+from newsroom.control_plane.model_usage import (
+    InvocationEfficiencyPolicy, ModelUsageIntegrityError, ModelUsageService,
+    WorkloadClass,
+)
 from newsroom.control_plane.native_runtime import open_native_runtime
 from newsroom.control_plane.veto import VetoError
 from newsroom.increment5.native_retrieval import NativeRetrievalHold
@@ -78,6 +81,10 @@ def test_one_accounted_native_embedding_with_real_sqlite_and_governed_objects(tm
         else:
             with pytest.raises(NativeRetrievalHold, match="RESULT_HOLD"):
                 engine.retain(**params)
+        assert engine.retryable_pre_dispatch(
+            text=params["text"], passage_id=params["passage_id"],
+            cycle_id=params["cycle_id"],
+        ) is (case == "signed_stop")
     with sqlite3.connect(usage_path) as database:
         assert database.execute("SELECT COUNT(*) FROM model_invocation_allocations").fetchone()[0] == 1
         raw = database.execute("SELECT record_json FROM model_invocation_terminals").fetchone()[0]
@@ -97,6 +104,17 @@ def test_one_accounted_native_embedding_with_real_sqlite_and_governed_objects(tm
         assert terminal["od_011_reference"] == "OD-011:NATIVE_RETRIEVAL_EMBEDDING"
         assert terminal["policy_breach"] is None
         assert terminal["usage_status"] == ("UNREPORTED" if case in {"missing_usage", "transport_failed"} else "REPORTED")
+        if case == "signed_stop":
+            invocation_id = terminal["invocation_id"]
+            terminal["invocation_id"] = "corrupt-invocation"
+            database.execute(
+                "UPDATE model_invocation_terminals SET record_json=?",
+                (json.dumps(terminal, sort_keys=True, separators=(",", ":")),),
+            )
+            database.commit()
+    if case == "signed_stop":
+        with pytest.raises(ModelUsageIntegrityError):
+            service.terminal(invocation_id)
 
 
 def test_native_embedding_requires_exact_qualified_implementation_before_effects(tmp_path, monkeypatch):

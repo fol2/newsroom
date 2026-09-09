@@ -30,7 +30,9 @@ from newsroom.projection.neo4j.models import Neo4jProjectorConfig
 from newsroom.sources import SourceDefinitionId, SourceDefinitionVersionId
 
 from .govuk_evidence import GovUkEvidenceAcquisition, POLICY_DIGEST as GOVUK_TRANSPORT_POLICY
-from .govuk_rights import GovUkLicenceEvidence, retain_current_govuk_licence
+from .govuk_rights import (
+    LICENCE_URL, REUSE_URL, GovUkLicenceEvidence, retain_current_govuk_licence,
+)
 from .graphiti_operational_readiness import OPERATOR_AUTHORITY_DOMAIN, OPERATOR_PRINCIPAL_ID
 from .model_usage import InvocationEfficiencyPolicy, ModelUsageService
 from .native_assessor import AutonomousNativeEvidenceAssessor, NativeAssessmentUsage
@@ -38,7 +40,10 @@ from .native_collision import NativeCollisionAuthority, NativeCollisionIdentity
 from .native_cycle import _uuid4_for
 from .native_discovery import NativeDiscovery
 from .native_embeddings import NativePassageEmbedder
-from .native_evidence import EvidenceAssessor, EvidenceTransport, NativeEvidenceController
+from .native_evidence import (
+    EvidenceAssessor, EvidenceTransport, NativeEvidenceController,
+    NativeEvidenceHold,
+)
 from .native_graphiti import NativeGraphitiProcessor
 from .native_pipeline import NativePipeline
 from .native_policies import VERSION, native_policy_components
@@ -47,7 +52,9 @@ from .native_publication import NativePublicationContinuation
 from .native_retrieval import NativeRetrievalContinuation, compose_native_documents
 from .native_runtime import open_native_runtime
 from .native_source_intake import NativeSourceIntake, native_evidence_sources
-from .native_source_rights import NativePortfolioRights, observe_portfolio_terms
+from .native_source_rights import (
+    NativePortfolioRights, observe_portfolio_terms, retain_rights_snapshot,
+)
 from .native_source_definitions import MISSING_SOURCE_IDS, register_missing_native_source_definitions
 from .native_weather_sources import poll_other_source
 from .native_weather_evidence import NativeWeatherEvidenceAcquisition, POLICY_DIGEST as WEATHER_TRANSPORT_POLICY
@@ -57,6 +64,48 @@ TRANSPORT_POLICY = digest_canonical({
     "version": "hermes-native-independent-evidence-v1",
     "govuk": GOVUK_TRANSPORT_POLICY, "weather": WEATHER_TRANSPORT_POLICY,
 })
+
+
+def _lexical_path(path: str | Path) -> Path:
+    return Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+
+
+def _require_safe_deployment_path(
+    path: Path, *, label: str, required: bool, directory: bool,
+) -> None:
+    path = _lexical_path(path)
+    for candidate in (path, *path.parents):
+        if candidate.is_symlink():
+            raise ValueError(f"native deployment {label} path contains a symlink")
+    if required and not path.exists():
+        raise ValueError(f"native deployment {label} is absent")
+    if path.exists() and path.is_dir() != directory:
+        expected = "directory" if directory else "file"
+        raise ValueError(f"native deployment {label} is not a {expected}")
+
+
+def _native_deployment_preflight(
+    *, supplied_ledger: str | Path, supplied_lock: str | Path,
+    expected_ledger: Path, expected_lock: Path,
+    required_files: Mapping[str, Path], required_directories: Mapping[str, Path],
+    creatable_files: Mapping[str, Path],
+) -> None:
+    if _lexical_path(supplied_ledger) != _lexical_path(expected_ledger):
+        raise ValueError("native service must use the canonical private ledger")
+    if _lexical_path(supplied_lock) != _lexical_path(expected_lock):
+        raise ValueError("native service must use its canonical singleton lock")
+    for label, path in required_files.items():
+        _require_safe_deployment_path(
+            path, label=label, required=True, directory=False,
+        )
+    for label, path in required_directories.items():
+        _require_safe_deployment_path(
+            path, label=label, required=True, directory=True,
+        )
+    for label, path in creatable_files.items():
+        _require_safe_deployment_path(
+            path, label=label, required=False, directory=False,
+        )
 
 
 @contextmanager
@@ -124,13 +173,36 @@ def deployed_native_service(args):
     from .writer import cont_writer_implementation_identity, read_grok_command_semantic_version
     from newsroom.increment9.proving import SOURCE_URLS
 
-    if Path(args.ledger).resolve() != CANONICAL_UNPUBLISHED_STORE.resolve():
+    if _lexical_path(args.ledger) != _lexical_path(CANONICAL_UNPUBLISHED_STORE):
         raise ValueError("native service must use the canonical private ledger")
     private_root = HOST_CONTROL_PLANE_STATE_ROOT / "native"
-    if Path(args.lock).resolve() != (private_root / "hermes.lock").resolve():
+    expected_lock = private_root / "hermes.lock"
+    if _lexical_path(args.lock) != _lexical_path(expected_lock):
         raise ValueError("native service must use its canonical singleton lock")
     check = lambda: assert_no_owner_emergency_stop(str(CANONICAL_PROVING_STORE))
     fence = lambda: owner_emergency_stop_fence(str(CANONICAL_PROVING_STORE))
+
+    def preflight():
+        _native_deployment_preflight(
+            supplied_ledger=args.ledger, supplied_lock=args.lock,
+            expected_ledger=CANONICAL_UNPUBLISHED_STORE,
+            expected_lock=expected_lock,
+            required_files={
+                "authority": CANONICAL_INCREMENT4_AUTHORITY_STORE,
+                "private ledger": CANONICAL_UNPUBLISHED_STORE,
+                "proving": CANONICAL_PROVING_STORE,
+            },
+            required_directories={
+                "Object CAS": CANONICAL_OBJECT_CAS_ROOT,
+                "Graphiti workspace": CANONICAL_GRAPHITI_WORKSPACE_ROOT,
+            },
+            creatable_files={
+                "singleton lock": expected_lock,
+                "evidence intake": private_root / "evidence-intake.sqlite3",
+                "private serving": private_root / "private-serving.sqlite3",
+                "retrieval": private_root / "retrieval.sqlite3",
+            },
+        )
 
     @contextmanager
     def pipeline():
@@ -220,6 +292,7 @@ def deployed_native_service(args):
         lock_path=Path(args.lock), stop_check=check, interval_seconds=args.interval,
         failure_backoff_seconds=args.failure_backoff,
         qualify_once=record_qualification,
+        preflight=preflight,
     )
 
 
@@ -231,7 +304,7 @@ def open_native_pipeline(
     embedding_key: str, embedding_policy: InvocationEfficiencyPolicy,
     assessment_policy: InvocationEfficiencyPolicy,
     source_definition_ids: Mapping[str, SourceDefinitionId],
-    licence: GovUkLicenceEvidence | None,
+    licence: GovUkLicenceEvidence | NativePortfolioRights | None,
     stop_check: Callable[[], None], stop_fence: Callable,
     implementation_worktree_clean: bool,
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
@@ -314,17 +387,78 @@ def open_native_pipeline(
             neo4j_config=neo4j_config, native_dependency_factory=dependencies, clock=now,
         ))
         documents = components["documents"]
+        from newsroom.increment9.proving import SOURCE_URLS
         if licence is None:
-            govuk = retain_current_govuk_licence(
-                objects=runtime.authority.objects, proof=proof,
-                dispatch_fence=stop_check, clock=clock,
+            def refresh_current_rights():
+                try:
+                    govuk = retain_current_govuk_licence(
+                        objects=runtime.authority.objects, proof=proof,
+                        dispatch_fence=stop_fence, clock=clock,
+                    )
+                    govuk_reason = "REVIEWED_REUSE_PERMITTED"
+                except NativeEvidenceHold as exc:
+                    govuk = None
+                    govuk_reason = exc.reason_code
+                # GOV.UK failure does not suppress an independent weather or
+                # portfolio observation. VetoError still propagates from both.
+                evidence = observe_portfolio_terms(
+                    objects=runtime.authority.objects, proof=proof,
+                    stop_check=stop_check, stop_fence=stop_fence, clock=clock,
+                )
+                current = NativePortfolioRights(
+                    govuk, evidence, govuk_reason=govuk_reason,
+                )
+                snapshots = {}
+                for source_id, definition_url in SOURCE_URLS.items():
+                    source_evidence = evidence.get(source_id)
+                    if source_evidence is not None:
+                        observed_at = source_evidence.observed_at
+                        reason = source_evidence.reason
+                        observations = source_evidence.observations
+                    elif govuk is not None:
+                        observed_at = govuk.observed_at
+                        reason = "REVIEWED_REUSE_PERMITTED"
+                        observations = tuple(
+                            (url, digest, str(admission), "")
+                            for url, digest, admission in zip(
+                                (REUSE_URL, LICENCE_URL), govuk.raw_digests,
+                                govuk.admission_ids, strict=True,
+                            )
+                        )
+                    else:
+                        observed_at = clock().astimezone(UTC).isoformat()
+                        reason = govuk_reason
+                        observations = ()
+                    snapshots[source_id] = retain_rights_snapshot(
+                        objects=runtime.authority.objects, proof=proof,
+                        source_id=source_id, definition_url=definition_url,
+                        assessment=current.for_source(
+                            source_id=source_id, definition_url=definition_url,
+                        ),
+                        observed_at=observed_at, reason=reason,
+                        observations=observations,
+                    )
+                return govuk, govuk_reason, evidence, snapshots
+
+            licence = NativePortfolioRights(
+                None, {}, refresh_current=refresh_current_rights,
             )
-            licence = NativePortfolioRights(govuk, observe_portfolio_terms(
-                objects=runtime.authority.objects, proof=proof,
-                stop_check=stop_check, clock=clock,
-            ))
+            licence.refresh()
+            opening_snapshot_unused = True
+
+            def refresh_licence():
+                nonlocal opening_snapshot_unused
+                if opening_snapshot_unused:
+                    opening_snapshot_unused = False
+                    return
+                licence.refresh()
         elif type(licence) is GovUkLicenceEvidence:
             licence = NativePortfolioRights(licence, {})
+            refresh_licence = licence.refresh
+        elif type(licence) is NativePortfolioRights:
+            refresh_licence = licence.refresh
+        else:
+            raise ValueError("native source rights binding differs")
         licence.require_retained(objects=runtime.authority.objects, proof=proof)
         embedder = NativePassageEmbedder(
             api_key=embedding_key, objects=runtime.authority.objects, usage=usage,
@@ -335,20 +469,37 @@ def open_native_pipeline(
             usage=NativeAssessmentUsage(usage, assessment_policy, clock=clock),
             dispatch_fence=stop_fence,
         )
-        from newsroom.increment9.proving import SOURCE_URLS
         definitions = dict(source_definition_ids)
-        missing_rights = {
-            source_id: rights
-            for source_id in MISSING_SOURCE_IDS if source_id not in definitions
-            if (rights := licence.for_source(
-                source_id=source_id, definition_url=SOURCE_URLS[source_id],
-            )).decision == "PERMITTED"
-        }
+        intake = None
+
+        def register_current_definitions(*, fenced: bool = True) -> None:
+            missing_rights = {
+                source_id: rights
+                for source_id in MISSING_SOURCE_IDS if source_id not in definitions
+                if (rights := licence.for_source(
+                    source_id=source_id, definition_url=SOURCE_URLS[source_id],
+                )).decision == "PERMITTED"
+            }
+            if not missing_rights:
+                return
+            if fenced:
+                stop_check()
+                with stop_fence():
+                    retained = register_missing_native_source_definitions(
+                        sources=runtime.authority.sources, proof=proof,
+                        rights_by_source=missing_rights,
+                    )
+            else:
+                retained = register_missing_native_source_definitions(
+                    sources=runtime.authority.sources, proof=proof,
+                    rights_by_source=missing_rights,
+                )
+            if intake is not None:
+                intake.bind_definitions(retained)
+            definitions.update(retained)
+
         with stop_fence():
-            definitions.update(register_missing_native_source_definitions(
-                sources=runtime.authority.sources, proof=proof,
-                rights_by_source=missing_rights,
-            ))
+            register_current_definitions(fenced=False)
             projector.bootstrap()
 
         def source_rights(source_id, url, _at=None):
@@ -356,9 +507,16 @@ def open_native_pipeline(
             rights = licence.for_source(source_id=source_id, definition_url=url)
             if rights.decision != "PERMITTED":
                 return None
+            snapshot = licence.snapshot_for(source_id)
+            if snapshot is None:
+                return None
             return {"source_id": source_id, "source_url": url,
                     "packet_digest": rights.evidence_digest,
                     "rights_decision_id": rights.record_id,
+                    "assessment_admission_id": snapshot.assessment_admission_id,
+                    "assessment_blob_digest": snapshot.assessment_blob_digest,
+                    "observation_admission_id": snapshot.observation_admission_id,
+                    "observation_blob_digest": snapshot.observation_blob_digest,
                     "policy_digest": rights.policy_digest,
                     "scope": "NATIVE_RETAINED_SOURCE_TEXT"}
 
@@ -374,16 +532,22 @@ def open_native_pipeline(
             return source_rights(unit.source_id, version.request.locator)
 
         def require_rights(unit):
-            if rights_for_unit(unit) is None:
+            rights = rights_for_unit(unit)
+            if rights is None:
                 raise NativeRetrievalHold("NATIVE_CURRENT_SOURCE_RIGHTS_HOLD")
+            return rights["packet_digest"]
 
+        @contextmanager
         def source_fence(source_id, url):
             with stop_fence():
                 stop_check()
+                yield
 
-        def port_for(subjects):
+        def port_for(subjects, rights_inventory_digest):
             receipts = tuple(item.document_receipt for item in subjects)
             retained = tuple(documents.require_document(item, proof=proof) for item in receipts)
+            for missing in projector.reconcile_membership(receipts):
+                documents.reproject(missing, proof=proof)
             watermark = max(runtime.authority.events.provenance(item.event_id, proof=proof).event.ledger_seq for item in receipts)
             snapshot = projector.snapshot(
                 generation_identity_digest=generation_digest,
@@ -399,6 +563,7 @@ def open_native_pipeline(
                                           authority_view_provider=lambda _: view),
                 increment4=runtime.authority.increment4, fulltext_view=view,
                 subjects=subjects, authority_scope_id=scope,
+                rights_inventory_digest=rights_inventory_digest,
                 minimum_authority_watermark=watermark,
             )
 
@@ -450,6 +615,11 @@ def open_native_pipeline(
             dispatch_fence=source_fence, clock=clock,
             other_source_poll=lambda **request: poll_other_source(intake, **request),
         )
+
+        def refresh_rights() -> None:
+            refresh_licence()
+            register_current_definitions()
+
         yield NativePipeline(
             runtime=runtime, journal=journal, source_intake=intake,
             graphiti=NativeGraphitiProcessor(
@@ -463,4 +633,5 @@ def open_native_pipeline(
             ), retrieval_for=lambda _: retrieval, collision=components["collision"],
             publish=Publication(), actor_identity_digest=runtime.actor_identity_digest,
             stop_check=stop_check, stop_fence=stop_fence, clock=now,
+            refresh_rights=refresh_rights,
         )

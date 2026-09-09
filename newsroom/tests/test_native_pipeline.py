@@ -46,6 +46,7 @@ def _open(tmp_path, monkeypatch):
         discovery=Discovery(), retrieval_for=lambda units: object(), collision=object(),
         publish=Publisher(), actor_identity_digest="sha256:" + "a" * 64,
         stop_check=lambda: None, stop_fence=nullcontext,
+        refresh_rights=lambda: calls.append(("rights", "current")),
         clock=lambda: UtcTimestamp.parse("2026-09-08T12:00:00Z"),
     )
     return pipeline, journal, connection, units, calls, dispositions
@@ -61,7 +62,7 @@ def test_native_pipeline_continues_multiple_revisions_and_skips_acknowledged(tmp
         first_calls = tuple(calls)
         dispositions[0] = ()
         pipeline.tick(cycle_id="second")
-        assert tuple(calls) == first_calls
+        assert tuple(calls) == first_calls + (("rights", "current"),)
         assert len(journal.units) == 2
     finally:
         connection.close()
@@ -94,6 +95,42 @@ def test_native_pipeline_preserves_ambiguous_assessment_marker(tmp_path, monkeyp
     try:
         report = pipeline.tick(cycle_id="first")
         assert report.revision_states == {"ASSESSMENT_STARTED": 2}
+    finally:
+        connection.close()
+
+
+def test_native_pipeline_retries_only_a_rights_evidence_hold_after_refresh(tmp_path, monkeypatch):
+    pipeline, journal, connection, units, calls, dispositions = _open(tmp_path, monkeypatch)
+    try:
+        journal.land((units[0],))
+        journal.advance(units[0].revision_id, stage="EVIDENCE_HOLD", facts={
+            "graphiti_receipts": [{"retained": True}],
+            "candidate_version_id": "candidate:one",
+            "reason": "PUBLICATION_RIGHTS_HOLD",
+        })
+        dispositions[0] = ()
+        report = pipeline.tick(cycle_id="rights-restored")
+        assert report.revision_states == {"ACKNOWLEDGED": 1}
+        assert calls[:2] == [("rights", "current"), ("publish", units[0].revision_id)]
+    finally:
+        connection.close()
+
+
+def test_native_pipeline_retries_a_bounded_acquisition_hold_next_cycle(tmp_path, monkeypatch):
+    pipeline, journal, connection, units, calls, dispositions = _open(tmp_path, monkeypatch)
+    try:
+        journal.land((units[0],))
+        journal.advance(units[0].revision_id, stage="EVIDENCE_HOLD", facts={
+            "graphiti_receipts": [{"retained": True}],
+            "candidate_version_id": "candidate:one",
+            "reason": "ACQUISITION_TRANSPORT_RETRY",
+            "acquisition_attempt_count": 1,
+            "acquisition_retryable": True,
+        })
+        dispositions[0] = ()
+        report = pipeline.tick(cycle_id="next-cycle")
+        assert report.revision_states == {"ACKNOWLEDGED": 1}
+        assert calls[:2] == [("rights", "current"), ("publish", units[0].revision_id)]
     finally:
         connection.close()
 

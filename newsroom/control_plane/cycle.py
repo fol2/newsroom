@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sqlite3
+import threading
 import uuid
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
@@ -357,13 +359,25 @@ def _assert_owner_emergency_stop_clear(connection: sqlite3.Connection) -> None:
         raise VetoError("owner emergency stop is active or unproved")
 
 
+_OWNER_STOP_FENCES = threading.local()
+
+
 @contextmanager
 def owner_emergency_stop_fence(proving_store: str) -> Iterator[None]:
     """Hold the owner-stop authority stable across one provider dispatch."""
 
+    store = os.path.realpath(os.path.abspath(os.path.expanduser(proving_store)))
+    # A forked child does not inherit ownership of the parent's SQLite lock.
+    key = (os.getpid(), store)
+    active = getattr(_OWNER_STOP_FENCES, "active", None)
+    if active is None:
+        active = _OWNER_STOP_FENCES.active = set()
+    if key in active:
+        yield
+        return
     timeout_ms = max(1, int(_PROVING_FENCE_TIMEOUT_SECONDS * 1_000))
     connection = sqlite3.connect(
-        proving_store, timeout=_PROVING_FENCE_TIMEOUT_SECONDS
+        store, timeout=_PROVING_FENCE_TIMEOUT_SECONDS
     )
     apply_control_plane_sqlite_profile(
         connection, wal=None, busy_timeout_ms=timeout_ms
@@ -374,11 +388,15 @@ def owner_emergency_stop_fence(proving_store: str) -> Iterator[None]:
             _assert_owner_emergency_stop_clear(connection)
         except sqlite3.OperationalError as exc:
             raise VetoError("owner emergency stop authority is unavailable") from exc
+        active.add(key)
         yield
     finally:
-        if connection.in_transaction:
-            connection.rollback()
-        connection.close()
+        try:
+            if connection.in_transaction:
+                connection.rollback()
+            connection.close()
+        finally:
+            active.discard(key)
 
 
 def _dispatch_valid_until(evaluated_at: datetime) -> str:

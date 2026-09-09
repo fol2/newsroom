@@ -5,6 +5,7 @@ from __future__ import annotations
 import ssl
 import urllib.error
 import urllib.request
+from contextlib import AbstractContextManager
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -125,7 +126,7 @@ class NativeSourceIntake:
         self, *, sources, objects, proof: AuthenticationProof,
         definition_ids: Mapping[str, SourceDefinitionId],
         licence: GovUkLicenceEvidence,
-        dispatch_fence: Callable[[str, str], None],
+        dispatch_fence: Callable[[str, str], AbstractContextManager[None]],
         other_source_poll: Callable[..., NativeSourceDisposition] | None = None,
         fetch: Callable[[str], tuple[int, bytes]] = _fetch_exact,
         clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
@@ -135,9 +136,25 @@ class NativeSourceIntake:
         if not callable(dispatch_fence):
             raise ValueError("native observation authority and dispatch fence are required")
         self._sources, self._objects, self._proof = sources, objects, proof
-        self._definitions, self._licence = dict(definition_ids), licence
+        self._definitions, self._licence = {}, licence
+        self.bind_definitions(definition_ids)
         self._fence, self._fetch, self._clock = dispatch_fence, fetch, clock
         self._other_source_poll = other_source_poll
+
+    def bind_definitions(
+        self, definition_ids: Mapping[str, SourceDefinitionId],
+    ) -> None:
+        """Add newly retained portfolio definitions without rebinding existing ones."""
+        if set(definition_ids) - set(SOURCE_IDS) or any(
+            type(value) is not SourceDefinitionId
+            for value in definition_ids.values()
+        ):
+            raise ValueError("native source bindings exceed the approved portfolio")
+        for source_id, definition_id in definition_ids.items():
+            retained = self._definitions.get(source_id)
+            if retained is not None and retained != definition_id:
+                raise ValueError("native source binding differs")
+        self._definitions.update(definition_ids)
 
     def poll(self) -> tuple[NativeSourceDisposition, ...]:
         results = []
@@ -183,8 +200,8 @@ class NativeSourceIntake:
             return self._poll_direct_govuk(
                 source_id, definition_id, summary.version_id, version, rights,
             )
-        self._fence(source_id, expected_url)
-        status, raw = self._fetch(expected_url)
+        with self._fence(source_id, expected_url):
+            status, raw = self._fetch(expected_url)
         if len(raw) > MAX_BODY_BYTES:
             return NativeSourceDisposition(source_id, "HOLD", "SOURCE_BODY_TOO_LARGE")
         if status != 200 or not raw:
@@ -235,8 +252,8 @@ class NativeSourceIntake:
 
     def _poll_direct_govuk(self, source_id, definition_id, version_id, version, rights):
         endpoint = SOURCE_URLS[source_id]
-        self._fence(source_id, endpoint)
-        status, raw = self._fetch(endpoint)
+        with self._fence(source_id, endpoint):
+            status, raw = self._fetch(endpoint)
         if len(raw) > MAX_BODY_BYTES:
             return NativeSourceDisposition(source_id, "HOLD", "SOURCE_BODY_TOO_LARGE")
         if status != 200 or not raw:
@@ -321,8 +338,8 @@ class NativeSourceIntake:
             url = _api_url(item.canonical_url)
         except ValueError:
             raise NativeSourceIntakeHold("SOURCE_ITEM_CANONICAL_URL_HOLD") from None
-        self._fence(source_id, url)
-        status, raw = self._fetch(url)
+        with self._fence(source_id, url):
+            status, raw = self._fetch(url)
         if len(raw) > MAX_BODY_BYTES:
             raise NativeSourceIntakeHold("SOURCE_ITEM_BODY_TOO_LARGE")
         if status != 200 or not raw:

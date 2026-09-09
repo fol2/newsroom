@@ -11,7 +11,9 @@ import pytest
 
 from newsroom.authority import AuthorityCommands, AuthorityEvents, ObjectAdmissionRequest
 from newsroom.authority.canonical import digest_bytes, digest_canonical
-from newsroom.control_plane import native_assessor, native_composition, native_embeddings
+from newsroom.control_plane import (
+    native_assessor, native_composition, native_embeddings, native_source_rights,
+)
 from newsroom.control_plane import govuk_rights
 from newsroom.control_plane.govuk_rights import GovUkLicenceEvidence, POLICY_DIGEST
 from newsroom.control_plane.model_usage import InvocationEfficiencyPolicy, WorkloadClass
@@ -20,6 +22,8 @@ from newsroom.control_plane.native_pipeline import NativePipeline
 from newsroom.control_plane.native_retrieval import NativeRetrievalContinuation
 from newsroom.control_plane.writer import CONT_DISABLED_CAPABILITIES, CONT_PRIMARY_COMMAND_FLAGS
 from newsroom.increment5.native_retrieval import NativeRetrievalDocuments, NativeRetrievalHold
+from newsroom.increment9.proving import SOURCE_URLS
+from newsroom.sources import SourceDefinitionId
 from newsroom.tests.increment5b2_helpers import config
 from newsroom.tests.projection_b2_helpers import MemoryNeo4jAdapter
 
@@ -112,6 +116,71 @@ def test_native_deployment_identity_binds_store_instance_not_changing_contents(t
     replacement.write_bytes(store.read_bytes())
     replacement.replace(store)
     assert native_composition._deployment_identity(**arguments) != identity
+
+
+def test_deployed_service_rejects_symlink_store_before_any_mutation(tmp_path, monkeypatch):
+    from newsroom.control_plane import broker, cycle, paths
+
+    native_root = tmp_path / "native"
+    native_root.mkdir()
+    authority = tmp_path / "authority.sqlite3"
+    proving = tmp_path / "proving.sqlite3"
+    victim = tmp_path / "outside-private.sqlite3"
+    authority.touch()
+    proving.touch()
+    victim.write_bytes(b"do not mutate")
+    private = tmp_path / "private.sqlite3"
+    private.symlink_to(victim)
+    cas = tmp_path / "objects"
+    workspace = tmp_path / "workspaces"
+    cas.mkdir()
+    workspace.mkdir()
+    for name, value in {
+        "CANONICAL_INCREMENT4_AUTHORITY_STORE": authority,
+        "CANONICAL_UNPUBLISHED_STORE": private,
+        "CANONICAL_PROVING_STORE": proving,
+        "CANONICAL_OBJECT_CAS_ROOT": cas,
+        "CANONICAL_GRAPHITI_WORKSPACE_ROOT": workspace,
+        "HOST_CONTROL_PLANE_STATE_ROOT": tmp_path,
+    }.items():
+        monkeypatch.setattr(paths, name, value)
+    monkeypatch.setattr(cycle, "assert_no_owner_emergency_stop", lambda _: None)
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("failed preflight reached credentials or pipeline")
+
+    monkeypatch.setattr(native_composition, "_native_cursor_credential", unexpected)
+    monkeypatch.setattr(native_composition, "open_native_pipeline", unexpected)
+    monkeypatch.setattr(broker, "openrouter_api_key", unexpected)
+    lock = native_root / "hermes.lock"
+    service = native_composition.deployed_native_service(SimpleNamespace(
+        ledger=str(private), lock=str(lock), once=True,
+        interval=300, failure_backoff=60,
+    ))
+    with pytest.raises(ValueError, match="path contains a symlink"):
+        service.run(once=True)
+    assert victim.read_bytes() == b"do not mutate"
+    assert not lock.exists()
+
+
+def test_deployment_preflight_rejects_creatable_file_below_symlink_parent(tmp_path):
+    required_file = tmp_path / "authority.sqlite3"
+    required_directory = tmp_path / "objects"
+    actual_parent = tmp_path / "actual-native"
+    redirected_parent = tmp_path / "native"
+    required_file.touch()
+    required_directory.mkdir()
+    actual_parent.mkdir()
+    redirected_parent.symlink_to(actual_parent, target_is_directory=True)
+    with pytest.raises(ValueError, match="path contains a symlink"):
+        native_composition._native_deployment_preflight(
+            supplied_ledger=required_file, supplied_lock=redirected_parent / "lock",
+            expected_ledger=required_file, expected_lock=redirected_parent / "lock",
+            required_files={"authority": required_file},
+            required_directories={"Object CAS": required_directory},
+            creatable_files={"singleton lock": redirected_parent / "lock"},
+        )
+    assert tuple(actual_parent.iterdir()) == ()
 
 
 def _embedding_policy() -> InvocationEfficiencyPolicy:
@@ -218,7 +287,20 @@ def test_native_composition_opens_factory_once_reopens_and_has_no_pre_effect(
     tmp_path, monkeypatch,
 ) -> None:
     _RetrievalProjection.bootstraps = 0
-    monkeypatch.setattr(native_composition, "observe_portfolio_terms", lambda **_: {})
+    rights_observations = []
+
+    def observe_terms(**_):
+        rights_observations.append("observed")
+        return {
+            source: native_source_rights.SourceTermsEvidence(
+                source, NOW.isoformat(), "SOURCE_TERMS_UNAVAILABLE", (),
+            )
+            for source in native_source_rights.TERMS
+        }
+
+    monkeypatch.setattr(
+        native_composition, "observe_portfolio_terms", observe_terms,
+    )
     monkeypatch.setattr(
         "newsroom.authority._graphiti_increment4_system._open_structural_graph_adapter",
         lambda _: MemoryNeo4jAdapter(),
@@ -247,7 +329,9 @@ def test_native_composition_opens_factory_once_reopens_and_has_no_pre_effect(
     )
 
     def retain_licence(*, objects, proof, dispatch_fence, clock):
-        dispatch_fence()
+        for _ in terms:
+            with dispatch_fence():
+                pass
         admissions = tuple(
             objects.admit(
                 ObjectAdmissionRequest(
@@ -296,6 +380,8 @@ def test_native_composition_opens_factory_once_reopens_and_has_no_pre_effect(
             assert pipeline._runtime.ingress.receipt_count == 0
             assert pipeline._journal.units == {}
             assert _RetrievalProjection.bootstraps == expected_bootstraps
+            pipeline._refresh_rights()
+            assert len(rights_observations) == expected_bootstraps
             with sqlite3.connect(arguments["serving_path"]) as serving:
                 assert serving.execute(
                     "SELECT COUNT(*) FROM private_serving_payloads"
@@ -312,8 +398,84 @@ def test_native_composition_opens_factory_once_reopens_and_has_no_pre_effect(
         ):
             raise AssertionError("unqualified composition entered")
     assert _RetrievalProjection.bootstraps == 2
-    assert stops == ["checked"] * 6
-    assert fences == ["entered", "entered"]
+    assert stops == ["checked"] * 3
+    assert fences == ["entered"] * 8
+
+
+def test_rights_refresh_registers_and_binds_a_newly_permitted_source(
+    tmp_path, monkeypatch,
+) -> None:
+    unavailable = {
+        source_id: native_source_rights.SourceTermsEvidence(
+            source_id, NOW.isoformat(), "SOURCE_TERMS_UNAVAILABLE", (),
+        )
+        for source_id in native_source_rights.TERMS
+    }
+    hk02_terms_url = native_source_rights.TERMS["HK-02"][0][0]
+    permitted = dict(unavailable)
+    permitted["HK-02"] = native_source_rights.SourceTermsEvidence(
+        "HK-02", NOW.isoformat(), "REVIEWED_REUSE_PERMITTED",
+        ((hk02_terms_url, "sha256:" + "1" * 64,
+          "00000000-0000-4000-8000-000000000901", "access-hk02"),),
+    )
+    references = {
+        source_id: native_source_rights.RightsSnapshotReference(
+            f"00000000-0000-4000-8001-{index:012d}", "sha256:" + "2" * 64,
+            f"00000000-0000-4000-8002-{index:012d}", "sha256:" + "3" * 64,
+        )
+        for index, source_id in enumerate(SOURCE_URLS, 1)
+    }
+    portfolio = native_source_rights.NativePortfolioRights(
+        None, unavailable, refresh_current=lambda: (
+            None, "GOVUK_LICENCE_REVIEW_HOLD", permitted, references,
+        ),
+    )
+    monkeypatch.setattr(
+        "newsroom.authority._graphiti_increment4_system._open_structural_graph_adapter",
+        lambda _: MemoryNeo4jAdapter(),
+    )
+    monkeypatch.setattr(
+        native_composition.GraphDatabase, "driver", lambda *_a, **_k: _Driver(),
+    )
+    monkeypatch.setattr(
+        native_composition, "Neo4jNativeRetrievalProjection", _RetrievalProjection,
+    )
+    monkeypatch.setattr(
+        native_composition, "_open_neo4j_adapter", lambda _: MemoryNeo4jAdapter(),
+    )
+    monkeypatch.setattr(
+        native_composition, "_open_neo4j_fulltext_reader_with_adapter",
+        lambda _adapter: _Reader(),
+    )
+    registered = []
+    register = native_composition.register_missing_native_source_definitions
+
+    def counted_registration(**arguments):
+        registered.append(tuple(arguments["rights_by_source"]))
+        return register(**arguments)
+
+    monkeypatch.setattr(
+        native_composition, "register_missing_native_source_definitions",
+        counted_registration,
+    )
+    arguments = {
+        **_arguments(tmp_path), "licence": portfolio,
+        "stop_check": lambda: None, "stop_fence": nullcontext,
+    }
+    with native_composition.open_native_pipeline(**arguments) as pipeline:
+        held = pipeline._intake._poll_one("HK-02")
+        assert held.status == "HOLD"
+        assert held.reason_code == "SOURCE_TERMS_UNAVAILABLE"
+
+        pipeline._refresh_rights()
+        pipeline._intake._fetch = lambda _url: (200, b"{}")
+        ready = pipeline._intake._poll_one("HK-02")
+        assert ready.status == "READY"
+        assert ready.units
+        pipeline._refresh_rights()
+        assert registered == [("HK-02",)]
+        with pytest.raises(ValueError, match="binding differs"):
+            pipeline._intake.bind_definitions({"HK-02": SourceDefinitionId.new()})
 
 
 def test_native_composition_owner_stop_precedes_store_or_provider_effects(

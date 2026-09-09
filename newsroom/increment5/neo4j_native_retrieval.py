@@ -30,6 +30,17 @@ from .fulltext_contracts import (
 from .fulltext_normalizer import _normalization_core
 
 _NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,127}\Z")
+_RECEIPT_FIELDS = (
+    "event_id", "command_id", "aggregate_id", "aggregate_version",
+    "admission_id", "document_digest", "vector_admission_id",
+    "embedding_receipt_admission_id",
+)
+
+
+def _receipt_projection(alias: str) -> str:
+    return ",".join(f"{alias}.{field} AS {field}" for field in _RECEIPT_FIELDS)
+
+
 class Neo4jNativeRetrievalProjection:
     """Own all Cypher for one configured native retrieval generation."""
 
@@ -182,11 +193,67 @@ RETURN properties(n) AS properties
         if retained != parameters:
             raise NativeRetrievalError("native projection acknowledgement differs")
 
+    def reconcile_membership(
+        self, receipts: tuple[NativeDocumentReceipt, ...],
+    ) -> tuple[NativeDocumentReceipt, ...]:
+        """Remove revoked derived nodes and identify exact retained restores."""
+        if type(receipts) is not tuple or any(
+            type(receipt) is not NativeDocumentReceipt for receipt in receipts
+        ):
+            raise NativeRetrievalError("native projection membership differs")
+        expected = {str(item.aggregate_id): item for item in receipts}
+        if len(expected) != len(receipts):
+            raise NativeRetrievalError("native projection membership repeats")
+        read = (
+            f"MATCH (n:`{self._label}` {{generation_id:$generation_id}}) "
+            f"RETURN {_receipt_projection('n')}"
+        )
+        remove = (
+            f"MATCH (n:`{self._label}` {{generation_id:$generation_id}}) "
+            "WHERE NOT n.aggregate_id IN $aggregate_ids DELETE n"
+        )
+
+        def reconcile(transaction):
+            rows = tuple(transaction.run(read, generation_id=self._generation))
+            present = set()
+            for row in rows:
+                try:
+                    properties = dict(row)
+                    aggregate_id = str(properties["aggregate_id"])
+                except Exception as exc:
+                    raise NativeRetrievalError(
+                        "native projection membership differs"
+                    ) from exc
+                retained = expected.get(aggregate_id)
+                if retained is None:
+                    continue
+                if aggregate_id in present:
+                    raise NativeRetrievalError(
+                        "native projection membership repeats"
+                    )
+                binding = retained.projection_value()
+                if any(properties.get(name) != value for name, value in binding.items()):
+                    raise NativeRetrievalError(
+                        "native projection retained document differs"
+                    )
+                present.add(aggregate_id)
+            transaction.run(
+                remove, generation_id=self._generation,
+                aggregate_ids=sorted(expected),
+            ).consume()
+            return tuple(
+                receipt for receipt in receipts
+                if str(receipt.aggregate_id) not in present
+            )
+
+        with self._session("WRITE") as session:
+            return session.execute_write(reconcile)
+
     def retrieve(self, *, query_text: str, query_vector: tuple[float, ...]) -> tuple[tuple[Mapping[str, object], ...], tuple[Mapping[str, object], ...]]:
         if type(query_text) is not str or not query_text or len(query_vector) != NATIVE_VECTOR_DIMENSIONS:
             raise NativeRetrievalError("native retrieval query differs")
         limit = NATIVE_RESULT_LIMIT + 1
-        receipt = "node.event_id AS event_id,node.command_id AS command_id,node.aggregate_id AS aggregate_id,node.aggregate_version AS aggregate_version,node.admission_id AS admission_id,node.document_digest AS document_digest,node.vector_admission_id AS vector_admission_id,node.embedding_receipt_admission_id AS embedding_receipt_admission_id"
+        receipt = _receipt_projection("node")
         fulltext = f"""
 CALL db.index.fulltext.queryNodes($index_name,$query_text,{{limit:$limit}}) YIELD node,score
 RETURN {receipt},score ORDER BY score DESC,node.passage_id LIMIT $limit
@@ -208,7 +275,7 @@ RETURN {receipt},score ORDER BY score DESC,node.passage_id LIMIT $limit
         if len(query_vector) != NATIVE_VECTOR_DIMENSIONS:
             raise NativeRetrievalError("native vector query differs")
         limit = NATIVE_RESULT_LIMIT + 1
-        receipt = "node.event_id AS event_id,node.command_id AS command_id,node.aggregate_id AS aggregate_id,node.aggregate_version AS aggregate_version,node.admission_id AS admission_id,node.document_digest AS document_digest,node.vector_admission_id AS vector_admission_id,node.embedding_receipt_admission_id AS embedding_receipt_admission_id"
+        receipt = _receipt_projection("node")
         query = f"""
 CALL db.index.vector.queryNodes($index_name,$limit,$vector) YIELD node,score
 RETURN {receipt},score ORDER BY score DESC,node.passage_id LIMIT $limit

@@ -1,5 +1,6 @@
+from contextlib import contextmanager, nullcontext
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -10,7 +11,9 @@ RSS = b'<rss version="2.0"><channel><title>Met Office warnings for UK</title>{}<
 
 
 def test_complete_empty_weather_inventory_is_not_a_parse_error():
-    assert weather_items("HK-02", b'{}', observed_at=NOW) == ()
+    (state,) = weather_items("HK-02", b'{}', observed_at=NOW)
+    assert state.item_key == "current-warning-summary"
+    assert state.body == "{}" and state.published_at is None and state.updated_at is None
     assert weather_items("UK-10", RSS.replace(b'{}', b''), observed_at=NOW) == ()
 
 
@@ -19,7 +22,8 @@ def test_hko_retains_every_field_and_exact_source_times():
                "issueTime": "2026-09-08T11:00:00+08:00", "updateTime": "2026-09-08T12:00:00+08:00",
                "expireTime": "2026-09-08T23:00:00+08:00", "additional_field": "retained"}
     items = weather_items("HK-02", json.dumps({"WTS": warning}).encode(), observed_at=NOW)
-    assert len(items) == 1 and json.loads(items[0].retained_corpus_body) == {"WTS": warning}
+    assert len(items) == 2 and json.loads(items[0].retained_corpus_body) == {"WTS": warning}
+    assert json.loads(items[1].retained_corpus_body) == {"WTS": warning}
     assert items[0].updated_at == "2026-09-08T04:00:00.000000Z"
     assert items[0].published_at == "2026-09-08T03:00:00.000000Z"
     warning.pop("updateTime")
@@ -101,9 +105,9 @@ def _poll(runtime, source_id, raw, portfolio, fences):
         proof=runtime.proof,
         definition_ids={source_id: _definition(runtime, source_id, portfolio)},
         licence=portfolio,
-        dispatch_fence=lambda observed_source, url: fences.append(
+        dispatch_fence=lambda observed_source, url: nullcontext(fences.append(
             (observed_source, url)
-        ),
+        )),
         other_source_poll=other_source,
         fetch=lambda _url: (200, raw),
         clock=lambda: NOW,
@@ -143,7 +147,7 @@ def test_real_weather_poll_retains_canonical_evidence_source_and_replays(
         assert fences == [(source_id, SOURCE_URLS[source_id])]
         observations = {item[1]: item for item in disposition.observations}
         sources = native_evidence_sources(
-            units=disposition.units,
+            units=tuple(unit for unit in disposition.units if unit.revision_id == disposition.units[0].revision_id),
             sources=runtime.authority.sources,
             objects=runtime.authority.objects,
             observations=observations,
@@ -167,7 +171,7 @@ def test_real_weather_poll_retains_canonical_evidence_source_and_replays(
             ).fetchone()[0] == before
 
 
-def test_valid_empty_weather_inventories_retain_no_revision(tmp_path, monkeypatch):
+def test_valid_empty_weather_inventory_retains_complete_hko_state(tmp_path, monkeypatch):
     import sqlite3
 
     from newsroom.control_plane.native_runtime import open_native_runtime
@@ -187,12 +191,17 @@ def test_valid_empty_weather_inventories_retain_no_revision(tmp_path, monkeypatc
                 runtime, source_id, raw, portfolio, []
             )
             assert disposition.status == "READY"
-            assert disposition.reason_code == "NO_ACTIVE_WARNINGS_OBSERVED"
-            assert disposition.units == ()
+            if source_id == "HK-02":
+                assert disposition.reason_code == "GOVERNED_REVISIONS_RETAINED"
+                assert len(disposition.units) == 1
+                assert disposition.units[0].body == "{}"
+            else:
+                assert disposition.reason_code == "NO_ACTIVE_WARNINGS_OBSERVED"
+                assert disposition.units == ()
         with sqlite3.connect(runtime.authority.authority_store_path) as connection:
             assert connection.execute(
                 "SELECT COUNT(*) FROM source_revisions"
-            ).fetchone()[0] == 0
+            ).fetchone()[0] == 1
 
 
 def test_tampered_weather_observation_mapping_is_a_typed_hold(
@@ -225,3 +234,33 @@ def test_tampered_weather_observation_mapping_is_a_typed_hold(
                 licence=portfolio,
                 proof=runtime.proof,
             )
+
+
+def test_hko_complete_state_keeps_disappearance_and_exact_state_replay(tmp_path, monkeypatch):
+    from newsroom.control_plane.native_runtime import open_native_runtime
+    from newsroom.sources import SourceRevisionId
+    from newsroom.tests.test_native_weather_evidence import HKO_RAW, _portfolio
+
+    with open_native_runtime(**_runtime_arguments(tmp_path, monkeypatch)) as runtime:
+        portfolio = _portfolio(runtime, monkeypatch)
+        intake, first = _poll(runtime, "HK-02", HKO_RAW, portfolio, [])
+        active = next(unit for unit in first.units if unit.item_key == "current-warning-summary")
+        observed = NOW + timedelta(minutes=1)
+        intake._clock = lambda: observed
+        intake._fetch = lambda _url: (200, b"{}")
+        empty = intake._poll_one("HK-02")
+        assert empty.status == "READY", empty
+        (state,) = empty.units
+        assert state.item_key == active.item_key
+        assert state.body == "{}" and state.published_at is None and state.updated_at is None
+        assert state.revision_id != active.revision_id
+        assert state.ingest_id != active.ingest_id
+        receipt = runtime.authority.sources.revision(SourceRevisionId.parse(state.revision_id), proof=runtime.proof)
+        assert str(receipt.request.prior_revision_id) == active.revision_id
+        assert intake._poll_one("HK-02").units[0].revision_id == state.revision_id
+        # DREC-013/GING-002: a previously seen complete state reuses its exact
+        # revision/provider work, while the latest observation still records it.
+        intake._fetch = lambda _url: (200, HKO_RAW)
+        repeated = intake._poll_one("HK-02")
+        assert repeated.status == "READY", repeated
+        assert next(unit.revision_id for unit in repeated.units if unit.item_key == active.item_key) == active.revision_id

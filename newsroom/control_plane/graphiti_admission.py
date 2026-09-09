@@ -2401,6 +2401,17 @@ class GraphitiAdmissionConsumer:
             dead_lettered=dead_lettered,
         )
 
+    def preflight_decided_cohort(
+        self,
+        *,
+        ingest_ids: tuple[str, ...],
+    ) -> GraphitiAdmissionDrainReport:
+        """Validate one revision-local cohort without projecting it."""
+
+        return self._finalise_decided_cohort(
+            ingest_ids=ingest_ids, preflight_only=True
+        )
+
     def finalise_decided_cohort(
         self,
         *,
@@ -2413,6 +2424,17 @@ class GraphitiAdmissionConsumer:
         of the exact cohort binds the same complete Increment 4 snapshot
         generation and reconciliation receipt.
         """
+
+        return self._finalise_decided_cohort(
+            ingest_ids=ingest_ids, preflight_only=False
+        )
+
+    def _finalise_decided_cohort(
+        self,
+        *,
+        ingest_ids: tuple[str, ...],
+        preflight_only: bool,
+    ) -> GraphitiAdmissionDrainReport:
 
         exact = _exact_ingest_ids(ingest_ids)
         assert exact is not None
@@ -2612,6 +2634,12 @@ class GraphitiAdmissionConsumer:
             raise GraphitiAdmissionConsumerError(
                 "exact Graphiti cohort lost current rights or endpoint authority"
             )
+
+        # Per-revision native fault isolation stops here. Shared generation
+        # receipts and projector/store integrity remain finalisation-wide and
+        # therefore fail the complete verified subset together.
+        if preflight_only:
+            return GraphitiAdmissionDrainReport()
 
         cohort_digest, generation_id = graphiti_admission_generation_identity(
             ingest_ids=exact,

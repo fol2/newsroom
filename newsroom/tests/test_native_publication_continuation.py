@@ -9,6 +9,7 @@ from newsroom.authority import AuthorityEvents, EventId, ObjectAdmissionId, UtcT
 from newsroom.control_plane.native_evidence import (
     DependencyAssessment,
     NativeEvidenceController,
+    NativeEvidenceHold,
     NativeEvidenceSource,
     PublicationRightsAssessment,
 )
@@ -153,6 +154,7 @@ def test_continuation_retains_times_and_replays_without_evidence_redispatch(
 
     def acquire(_self, **_request):
         evidence_calls.append("acquired")
+        _request["before_assessment"]()
         return SimpleNamespace(
             retained=SimpleNamespace(package_admission_id=package_id),
             editorial_decision=decision,
@@ -217,6 +219,303 @@ def test_continuation_retains_times_and_replays_without_evidence_redispatch(
     assert retained["facts"]["publication_applied_at"] == "2026-09-08T12:04:00.000000Z"
     assert retained["facts"]["publication_observed_at"] == "2026-09-08T12:05:00.000000Z"
     assert retained["facts"]["graphiti_receipts"] == [{}]
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    "reason", ["GOVUK_ACQUISITION_UNAVAILABLE", "WEATHER_ACQUISITION_UNAVAILABLE"]
+)
+def test_wrapped_transport_failure_retries_before_assessment_then_acknowledges(
+    tmp_path, monkeypatch, reason
+) -> None:
+    unit = _native()
+    connection = connect(str(tmp_path / "private.sqlite3"))
+    journal = NativeRevisionJournal(connection)
+    journal.land((unit,))
+    journal.advance(unit.revision_id, stage="CANDIDATE_ADMITTED", facts={
+        "candidate_version_id": "candidate-version", "graphiti_receipts": [{}],
+    })
+    package_id = ObjectAdmissionId.new()
+    decision = _decision(package_id)
+    calls = []
+
+    def acquire(_self, **request):
+        calls.append("acquire")
+        if len(calls) == 1:
+            raise NativeEvidenceHold(reason, "source")
+        request["before_assessment"]()
+        return SimpleNamespace(
+            retained=SimpleNamespace(package_admission_id=package_id),
+            editorial_decision=decision,
+            acquisition_receipt_digests=(_DIGEST,),
+        )
+
+    monkeypatch.setattr(NativeEvidenceController, "acquire_and_retain", acquire)
+    monkeypatch.setattr(
+        "newsroom.control_plane.native_publication.open_private_serving_read_port",
+        lambda *_args, **_kwargs: _Reader(),
+    )
+    runtime = SimpleNamespace(
+        authority=_Authority(), ingress=object(), publication=_Publication(),
+        proof=proof(), policies=SimpleNamespace(publication=SimpleNamespace(
+            target_path=tmp_path / "serving.sqlite3", target_id="private",
+            target_context_digest=_DIGEST,
+        )),
+    )
+    continuation = NativePublicationContinuation(
+        journal=journal, runtime=runtime,
+        evidence_controller=object.__new__(NativeEvidenceController),
+        sources={unit.revision_id: (_source(unit),)},
+        clock=lambda: UtcTimestamp.parse("2026-09-08T12:00:00Z"),
+    )
+
+    first = continuation.advance(
+        revision_id=unit.revision_id, candidate_version_id="candidate-version"
+    )
+    second = continuation.advance(
+        revision_id=unit.revision_id, candidate_version_id="candidate-version"
+    )
+
+    assert first.state == "EVIDENCE_HOLD"
+    assert first.reason == "ACQUISITION_TRANSPORT_RETRY"
+    assert second.state == "ACKNOWLEDGED"
+    assert calls == ["acquire", "acquire"]
+    assert journal.progress[unit.revision_id]["facts"]["acquisition_attempt_count"] == 2
+    connection.close()
+
+
+def test_transport_retry_is_bounded_and_preserves_failed_attempt_count(
+    tmp_path, monkeypatch
+) -> None:
+    unit = _native()
+    connection = connect(str(tmp_path / "private.sqlite3"))
+    journal = NativeRevisionJournal(connection)
+    journal.land((unit,))
+    journal.advance(unit.revision_id, stage="CANDIDATE_ADMITTED", facts={
+        "candidate_version_id": "candidate-version", "graphiti_receipts": [{}],
+    })
+    calls = []
+
+    def acquire(_self, **_request):
+        calls.append("acquire")
+        raise OSError("source unavailable before model dispatch")
+
+    monkeypatch.setattr(NativeEvidenceController, "acquire_and_retain", acquire)
+    continuation = NativePublicationContinuation(
+        journal=journal,
+        runtime=SimpleNamespace(
+            authority=_Authority(), ingress=object(), publication=_Publication(),
+            proof=proof(), policies=SimpleNamespace(publication=object()),
+        ),
+        evidence_controller=object.__new__(NativeEvidenceController),
+        sources={unit.revision_id: (_source(unit),)},
+        clock=lambda: UtcTimestamp.parse("2026-09-08T12:00:00Z"),
+    )
+
+    results = tuple(
+        continuation.advance(
+            revision_id=unit.revision_id,
+            candidate_version_id="candidate-version",
+        )
+        for _ in range(4)
+    )
+
+    assert [item.state for item in results] == ["EVIDENCE_HOLD"] * 4
+    assert results[-1].reason == "ACQUISITION_TRANSPORT_RETRY_EXHAUSTED"
+    assert calls == ["acquire"] * 3
+    facts = journal.progress[unit.revision_id]["facts"]
+    assert facts["acquisition_attempt_count"] == 3
+    assert facts["acquisition_retryable"] is False
+    connection.close()
+
+
+def test_deterministic_acquisition_hold_is_not_retried(
+    tmp_path, monkeypatch
+) -> None:
+    unit = _native()
+    connection = connect(str(tmp_path / "private.sqlite3"))
+    journal = NativeRevisionJournal(connection)
+    journal.land((unit,))
+    journal.advance(unit.revision_id, stage="CANDIDATE_ADMITTED", facts={
+        "candidate_version_id": "candidate-version", "graphiti_receipts": [{}],
+    })
+    calls = []
+
+    def acquire(_self, **_request):
+        calls.append("acquire")
+        raise NativeEvidenceHold("GOVUK_EVIDENCE_METADATA_HOLD", "source")
+
+    monkeypatch.setattr(NativeEvidenceController, "acquire_and_retain", acquire)
+    continuation = NativePublicationContinuation(
+        journal=journal,
+        runtime=SimpleNamespace(
+            authority=_Authority(), ingress=object(), publication=_Publication(),
+            proof=proof(), policies=SimpleNamespace(publication=object()),
+        ),
+        evidence_controller=object.__new__(NativeEvidenceController),
+        sources={unit.revision_id: (_source(unit),)},
+        clock=lambda: UtcTimestamp.parse("2026-09-08T12:00:00Z"),
+    )
+
+    first = continuation.advance(
+        revision_id=unit.revision_id, candidate_version_id="candidate-version"
+    )
+    replay = continuation.advance(
+        revision_id=unit.revision_id, candidate_version_id="candidate-version"
+    )
+
+    assert first.state == replay.state == "EVIDENCE_HOLD"
+    assert first.reason == replay.reason == "GOVUK_EVIDENCE_METADATA_HOLD"
+    assert calls == ["acquire"]
+    assert journal.progress[unit.revision_id]["facts"]["acquisition_retryable"] is False
+    connection.close()
+
+
+def test_post_assessment_dispatch_ambiguity_is_not_redispatched(
+    tmp_path, monkeypatch
+) -> None:
+    unit = _native()
+    connection = connect(str(tmp_path / "private.sqlite3"))
+    journal = NativeRevisionJournal(connection)
+    journal.land((unit,))
+    journal.advance(unit.revision_id, stage="CANDIDATE_ADMITTED", facts={
+        "candidate_version_id": "candidate-version", "graphiti_receipts": [{}],
+    })
+    calls = []
+
+    def acquire(_self, **request):
+        calls.append("assessor-dispatch")
+        request["before_assessment"]()
+        raise OSError("provider outcome ambiguous")
+
+    monkeypatch.setattr(NativeEvidenceController, "acquire_and_retain", acquire)
+    continuation = NativePublicationContinuation(
+        journal=journal,
+        runtime=SimpleNamespace(
+            authority=_Authority(), ingress=object(), publication=_Publication(),
+            proof=proof(), policies=SimpleNamespace(publication=object()),
+        ),
+        evidence_controller=object.__new__(NativeEvidenceController),
+        sources={unit.revision_id: (_source(unit),)},
+        clock=lambda: UtcTimestamp.parse("2026-09-08T12:00:00Z"),
+    )
+
+    first = continuation.advance(
+        revision_id=unit.revision_id, candidate_version_id="candidate-version"
+    )
+    second = continuation.advance(
+        revision_id=unit.revision_id, candidate_version_id="candidate-version"
+    )
+
+    assert first.state == second.state == "ASSESSMENT_INTERRUPTED"
+    assert calls == ["assessor-dispatch"]
+    assert journal.progress[unit.revision_id]["stage"] == "ASSESSMENT_INTERRUPTED"
+    connection.close()
+
+
+def test_typed_editorial_hold_is_durable_and_not_repeated(
+    tmp_path
+) -> None:
+    from newsroom.increment10.editorial import EditorialHold
+
+    unit = _native()
+    connection = connect(str(tmp_path / "private.sqlite3"))
+    journal = NativeRevisionJournal(connection)
+    journal.land((unit,))
+    package_id = ObjectAdmissionId.new()
+    journal.advance(unit.revision_id, stage="EVIDENCE_RETAINED", facts={
+        "candidate_id": "candidate",
+        "candidate_version_id": "candidate-version",
+        "intake_receipt_id": "intake-receipt",
+        "package_admission_id": str(package_id),
+        "editorial_decision": json.loads(_decision(package_id).canonical_bytes()),
+    })
+
+    class HeldPublication:
+        calls = 0
+
+        def advance(self, *_args, **_kwargs):
+            self.calls += 1
+            raise EditorialHold(SimpleNamespace(
+                stable_reason_codes=("FRESHNESS_NOT_PASS",)
+            ))
+
+    publication = HeldPublication()
+    continuation = NativePublicationContinuation(
+        journal=journal,
+        runtime=SimpleNamespace(
+            authority=_Authority(), ingress=object(), publication=publication,
+            proof=proof(), policies=SimpleNamespace(publication=object()),
+        ),
+        evidence_controller=object.__new__(NativeEvidenceController),
+        sources={unit.revision_id: (_source(unit),)},
+        clock=lambda: UtcTimestamp.parse("2026-09-08T12:00:00Z"),
+    )
+
+    first = continuation.advance(
+        revision_id=unit.revision_id, candidate_version_id="candidate-version"
+    )
+    replay = continuation.advance(
+        revision_id=unit.revision_id, candidate_version_id="candidate-version"
+    )
+
+    assert first.state == replay.state == "EVIDENCE_HOLD"
+    assert first.reason == replay.reason == "FRESHNESS_NOT_PASS"
+    assert publication.calls == 1
+    retained = journal.progress[unit.revision_id]
+    assert retained["stage"] == "EVIDENCE_HOLD"
+    assert retained["facts"]["editorial_hold_reason_codes"] == [
+        "FRESHNESS_NOT_PASS"
+    ]
+    connection.close()
+
+
+def test_generic_editorial_error_preserves_publication_intent_for_replay(
+    tmp_path
+) -> None:
+    from newsroom.increment10.editorial import EditorialError
+
+    unit = _native()
+    connection = connect(str(tmp_path / "private.sqlite3"))
+    journal = NativeRevisionJournal(connection)
+    journal.land((unit,))
+    package_id = ObjectAdmissionId.new()
+    journal.advance(unit.revision_id, stage="EVIDENCE_RETAINED", facts={
+        "candidate_id": "candidate",
+        "candidate_version_id": "candidate-version",
+        "intake_receipt_id": "intake-receipt",
+        "package_admission_id": str(package_id),
+        "editorial_decision": json.loads(_decision(package_id).canonical_bytes()),
+    })
+
+    class AmbiguousPublication:
+        calls = 0
+
+        def advance(self, *_args, **_kwargs):
+            self.calls += 1
+            raise EditorialError("publication result ambiguous")
+
+    publication = AmbiguousPublication()
+    continuation = NativePublicationContinuation(
+        journal=journal,
+        runtime=SimpleNamespace(
+            authority=_Authority(), ingress=object(), publication=publication,
+            proof=proof(), policies=SimpleNamespace(publication=object()),
+        ),
+        evidence_controller=object.__new__(NativeEvidenceController),
+        sources={unit.revision_id: (_source(unit),)},
+        clock=lambda: UtcTimestamp.parse("2026-09-08T12:00:00Z"),
+    )
+
+    for _ in range(2):
+        with pytest.raises(EditorialError, match="publication result ambiguous"):
+            continuation.advance(
+                revision_id=unit.revision_id,
+                candidate_version_id="candidate-version",
+            )
+        assert journal.progress[unit.revision_id]["stage"] == "PUBLICATION_STARTED"
+
+    assert publication.calls == 2
     connection.close()
 
 
@@ -435,7 +734,7 @@ def test_started_acquisition_without_result_holds_without_redispatch(
     if owner_stop:
         with pytest.raises(VetoError, match="owner stop"):
             continuation.advance(revision_id=unit.revision_id, candidate_version_id="candidate-version")
-        assert journal.progress[unit.revision_id]["stage"] == "ASSESSMENT_STARTED"
+        assert journal.progress[unit.revision_id]["stage"] == "ACQUISITION_STARTED"
     else:
         result = continuation.advance(
             revision_id=unit.revision_id, candidate_version_id="candidate-version"

@@ -13,6 +13,7 @@ import re
 import ssl
 import urllib.error
 import urllib.request
+from contextlib import AbstractContextManager
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -28,6 +29,7 @@ from newsroom.sources import SourceDefinitionVersionId, SourceRevisionId
 
 from .native_evidence import (
     AcquiredEvidence, EvidenceAcquisitionRequest, NativeEvidenceHold,
+    rights_eligibility_digest,
 )
 
 VERSION = "hermes-govuk-evidence-v1"
@@ -99,7 +101,7 @@ class GovUkEvidenceAcquisition:
 
     def __init__(
         self, *, sources, proof: AuthenticationProof,
-        dispatch_fence: Callable[[EvidenceAcquisitionRequest], None],
+        dispatch_fence: Callable[[EvidenceAcquisitionRequest], AbstractContextManager[None]],
         clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
         licence_evidence=None,
         transport_policy_digest: str = POLICY_DIGEST,
@@ -140,7 +142,6 @@ class GovUkEvidenceAcquisition:
             raise hold("GOVUK_SOURCE_BINDING_HOLD") from None
         # The caller supplies the existing signed-stop/current-rights fence,
         # not a per-story human approval. No SQLite transaction spans this I/O.
-        self._fence(request)
         opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}), _NoRedirect(),
             urllib.request.HTTPSHandler(context=ssl.create_default_context()),
@@ -150,7 +151,7 @@ class GovUkEvidenceAcquisition:
             "Accept-Encoding": "identity",
         })
         try:
-            with opener.open(http_request, timeout=TIMEOUT_SECONDS) as response:
+            with self._fence(request), opener.open(http_request, timeout=TIMEOUT_SECONDS) as response:
                 status = response.status
                 content_type = response.headers.get_content_type()
                 response_url = response.geturl()
@@ -190,11 +191,10 @@ class GovUkEvidenceAcquisition:
                 source_id=request.source_id, definition_url=version.request.locator,
             )
             if rights.decision == "PERMITTED" and rights.policy_digest == RIGHTS_POLICY:
-                rights_digest = digest_canonical({
-                    "rights_receipt": rights.record_id,
-                    "body_digest": digest_bytes(body), "transport": transport_digest,
-                    "exclusion_signals": signals, "text_only": True,
-                })
+                rights_digest = rights_eligibility_digest(
+                    rights, body_digest=digest_bytes(body), transport_digest=transport_digest,
+                    exclusion_signals=signals, text_only=True,
+                )
                 attribution = ATTRIBUTION
         return AcquiredEvidence.create(
             request_digest=request.digest, outcome="COMPLETE",

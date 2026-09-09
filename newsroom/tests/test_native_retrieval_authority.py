@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from newsroom.authority import AggregateId, UtcTimestamp
+from newsroom.authority import AggregateId, EventId, UtcTimestamp
 from newsroom.authority._graphiti_increment4_system import (
     _AUTHORITY_COMPOSITION_TOKEN,
 )
@@ -25,6 +25,7 @@ from newsroom.control_plane.model_usage import ModelUsageService
 from newsroom.control_plane.native_embeddings import NativePassageEmbedder
 from newsroom.control_plane.native_retrieval import compose_native_documents
 from newsroom.control_plane.native_runtime import open_native_runtime
+from newsroom.discovery import NewsLead
 from newsroom.graphiti_adapter.real import RealGraphitiAdapter
 from newsroom.increment4.neo4j import Increment4Neo4jActiveReadRequest
 from newsroom.increment5.branch_contracts import (
@@ -44,9 +45,14 @@ from newsroom.increment5.native_retrieval import (
     NativeRetrievalContextRequest,
     NativeRetrievalDocuments,
     NativeRetrievalError,
+    NativeRetrievalPort,
+    NativeRetrievalSubject,
     NativeVectorRequest,
 )
 from newsroom.increment5.receipt_journal import BranchReceiptJournal
+from newsroom.increment6.dispositions import (
+    _create_current_candidate_citation_read_port,
+)
 from newsroom.projection.mapping import canonical_governed_node_id
 from newsroom.projection.ontology import ProjectionNodeType
 from newsroom.sources import SourceRevisionId
@@ -62,6 +68,7 @@ from newsroom.tests.test_graphiti_adapter_4d_outcomes import (
 )
 from newsroom.tests.test_graphiti_operational_readiness import _plan, _unit
 from newsroom.tests.test_native_embeddings import _policy, _response
+from newsroom.tests.discovery_3d_authority_helpers import exact_admission_request
 from newsroom.tests.test_native_runtime import _args
 
 
@@ -108,7 +115,12 @@ def test_native_documents_admit_retain_context_and_reopen(
     args["authority_domain"] = OPERATOR_AUTHORITY_DOMAIN
     retrieval = args.pop("retrieval_authority")
     collision = args.pop("collision_enforcer")
-    args["native_dependency_factory"] = lambda **_: (retrieval, collision)
+    citation_port = _create_current_candidate_citation_read_port(
+        lambda *_: (_ for _ in ()).throw(LookupError("no retained citation"))
+    )
+    args["native_dependency_factory"] = lambda **_: (
+        retrieval, collision, citation_port
+    )
     unit = _unit()
     plan = _plan(unit)
     generation_id = str(fulltext_snapshot().generation_id)
@@ -198,10 +210,11 @@ def test_native_documents_admit_retain_context_and_reopen(
             NOW,
             NOW,
         )
-        exact = SQLiteExactRetriever(
+        exact_retriever = SQLiteExactRetriever(
             authority_database=args["authority_path"],
             journal=BranchReceiptJournal(tmp_path / "exact.sqlite3"),
-        ).retrieve(exact_request).receipt
+        )
+        exact = exact_retriever.retrieve(exact_request).receipt
         snapshot = fulltext_snapshot(
             document_label=projection.document_label,
             index_name=projection.fulltext_index,
@@ -210,11 +223,12 @@ def test_native_documents_admit_retain_context_and_reopen(
         view = documents.fulltext_authority_view(
             (document_receipt,), snapshot, proof=runtime.proof
         )
-        fulltext = fulltext_system(
+        fulltext_retriever = fulltext_system(
             tmp_path,
             view=view,
             scenario=default_scenario(projection_snapshot=snapshot, rows=[]),
-        )[2].retrieve(
+        )[2]
+        fulltext = fulltext_retriever.retrieve(
             fulltext_request(
                 expected_generation_id=snapshot.generation_id,
                 expected_generation_identity_digest=snapshot.generation_identity_digest,
@@ -249,6 +263,49 @@ def test_native_documents_admit_retain_context_and_reopen(
         graph = NativeGraphBranchReceipt.from_response(
             digest_canonical({"graph": graph_id}), (graph_id,), graph_response
         )
+        lead_request = replace(
+            exact_admission_request().lead,
+            revision_id=SourceRevisionId.parse(document.revision_id),
+        )
+        lead = NewsLead(
+            lead_request,
+            EventId.new(),
+            1,
+            lead_request.created_at,
+            lead_request.digest,
+        )
+        subject = NativeRetrievalSubject(
+            document.revision_id, graph_id, document_receipt
+        )
+        first_port = NativeRetrievalPort(
+            documents=documents,
+            exact=exact_retriever,
+            fulltext=fulltext_retriever,
+            increment4=runtime.authority.increment4,
+            fulltext_view=view,
+            subjects=(subject,),
+            authority_scope_id="native-authority-scope",
+            rights_inventory_digest=digest_canonical({"rights": "first"}),
+            minimum_authority_watermark=0,
+        )
+        first_binding = first_port.retrieve(lead, proof=runtime.proof)
+        assert first_port.retrieve(lead, proof=runtime.proof) == first_binding
+        changed_port = NativeRetrievalPort(
+            documents=documents,
+            exact=exact_retriever,
+            fulltext=fulltext_retriever,
+            increment4=runtime.authority.increment4,
+            fulltext_view=view,
+            subjects=(subject,),
+            authority_scope_id="native-authority-scope",
+            rights_inventory_digest=digest_canonical({"rights": "second"}),
+            minimum_authority_watermark=0,
+        )
+        changed_binding = changed_port.retrieve(lead, proof=runtime.proof)
+        assert changed_binding != first_binding
+        assert NativeRetrievalContextReceipt.from_bytes(
+            changed_binding.receipt_bytes
+        ).rights_inventory_digest == digest_canonical({"rights": "second"})
         context_request = NativeRetrievalContextRequest(
             str(uuid.uuid4()),
             "native-context-authority-test",
@@ -257,6 +314,7 @@ def test_native_documents_admit_retain_context_and_reopen(
             "lead-one",
             "sha256:" + "3" * 64,
             "native-authority-scope",
+            digest_canonical({"rights": "current"}),
             exact.canonical_bytes,
             fulltext.canonical_bytes,
             vector.canonical_bytes,
@@ -283,9 +341,10 @@ def test_native_documents_admit_retain_context_and_reopen(
                 graph, serving_time=later.to_text()
             ).canonical_bytes,
         )
-        assert documents.retain_context(
-            changed_time_replay, proof=runtime.proof
-        ) == binding
+        with pytest.raises(
+            NativeRetrievalError, match="context admission replay differs"
+        ):
+            documents.retain_context(changed_time_replay, proof=runtime.proof)
         assert documents.read_context(
             receipt, proof=runtime.proof
         ).serving_time == context_request.branch_receipts()[2].serving_time

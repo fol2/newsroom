@@ -1,3 +1,4 @@
+from contextlib import contextmanager, nullcontext
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -129,7 +130,7 @@ def test_native_source_poll_retains_real_lineage_replay_and_all_dispositions(
         intake = NativeSourceIntake(
             sources=runtime.authority.sources, objects=runtime.authority.objects,
             proof=runtime.proof, definition_ids={"UK-01": definition_id},
-            licence=_licence(), dispatch_fence=lambda source, url: fences.append((source, url)),
+            licence=_licence(), dispatch_fence=lambda source, url: nullcontext(fences.append((source, url))),
             fetch=lambda url: (200, ATOM if url == SOURCE_URLS["UK-01"] else page[0]),
             clock=lambda: instant[0],
         )
@@ -238,7 +239,7 @@ def test_native_source_poll_holds_oversize_and_duplicate_native_revision(tmp_pat
         intake = NativeSourceIntake(
             sources=runtime.authority.sources, objects=runtime.authority.objects,
             proof=runtime.proof, definition_ids={"UK-01": definition_id},
-            licence=_licence(), dispatch_fence=lambda *_: None,
+            licence=_licence(), dispatch_fence=lambda *_: nullcontext(),
             fetch=lambda url: (200, feed[0] if url == SOURCE_URLS["UK-01"] else page[0]),
             clock=lambda: datetime(2026, 9, 8, 12, tzinfo=UTC),
         )
@@ -282,7 +283,7 @@ def test_native_source_poll_preserves_completed_items_when_later_item_holds(
         intake = NativeSourceIntake(
             sources=runtime.authority.sources, objects=runtime.authority.objects,
             proof=runtime.proof, definition_ids={"UK-01": definition_id},
-            licence=_licence(), dispatch_fence=lambda *_: None,
+            licence=_licence(), dispatch_fence=lambda *_: nullcontext(),
             fetch=lambda url: (
                 (200, body[0]) if url == SOURCE_URLS["UK-01"]
                 else (200, _document()) if url.endswith("/item-1")
@@ -328,7 +329,7 @@ def test_native_bno_guide_retains_all_nine_parts_as_one_revision(tmp_path, monke
         intake = NativeSourceIntake(
             sources=runtime.authority.sources, objects=runtime.authority.objects,
             proof=runtime.proof, definition_ids={"UK-02": definition_id},
-            licence=_licence(), dispatch_fence=lambda *_: None,
+            licence=_licence(), dispatch_fence=lambda *_: nullcontext(),
             fetch=lambda _: (200, _guide()),
             clock=lambda: datetime(2026, 9, 8, 12, tzinfo=UTC),
         )
@@ -355,7 +356,7 @@ def test_native_manual_retains_every_section_and_root_inventory(tmp_path, monkey
         intake = NativeSourceIntake(
             sources=runtime.authority.sources, objects=runtime.authority.objects,
             proof=runtime.proof, definition_ids={"UK-03": definition_id},
-            licence=_licence(), dispatch_fence=lambda *_: None,
+            licence=_licence(), dispatch_fence=lambda *_: nullcontext(),
             fetch=lambda url: (200, bodies[url]),
             clock=lambda: datetime(2026, 9, 8, 12, tzinfo=UTC),
         )
@@ -397,7 +398,7 @@ def test_native_manual_keeps_successful_sections_when_one_child_holds(tmp_path, 
         intake = NativeSourceIntake(
             sources=runtime.authority.sources, objects=runtime.authority.objects,
             proof=runtime.proof, definition_ids={"UK-03": definition_id},
-            licence=_licence(), dispatch_fence=lambda *_: None,
+            licence=_licence(), dispatch_fence=lambda *_: nullcontext(),
             fetch=lambda url: (
                 (200, _manual()) if url == SOURCE_URLS["UK-03"]
                 else (200, _manual_section(1)) if url.endswith("part-1")
@@ -420,12 +421,19 @@ def test_native_source_stop_propagates_at_feed_and_item_boundaries(tmp_path, mon
     args = _args(tmp_path, monkeypatch)
     args["principal_id"] = OPERATOR_PRINCIPAL_ID
     args["authority_domain"] = OPERATOR_AUTHORITY_DOMAIN
-    fences, fetches = [], []
+    fences, fetches, held = [], [], []
+    @contextmanager
     def fence(source_id, url):
         fences.append(url)
         if len(fences) == stop_at:
             raise VetoError("owner stop")
+        held.append(url)
+        try:
+            yield
+        finally:
+            held.pop()
     def fetch(url):
+        assert held == [url]
         fetches.append(url)
         return (200, ATOM if url == SOURCE_URLS["UK-01"] else _document())
     with open_native_runtime(**args) as runtime:
@@ -440,3 +448,4 @@ def test_native_source_stop_propagates_at_feed_and_item_boundaries(tmp_path, mon
             intake.poll()
     assert len(fences) == stop_at
     assert len(fetches) == stop_at - 1
+    assert held == []

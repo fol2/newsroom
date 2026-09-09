@@ -87,6 +87,8 @@ class _Transaction:
 
     def run(self, query, **parameters):
         self.calls.append((query, parameters))
+        if query.startswith("MATCH") and "n.event_id AS event_id" in query:
+            return _Result((self.receipt,))
         if "RETURN properties(n) AS properties" in query:
             return _Result(({"properties": parameters},))
         if "fulltext.queryNodes" in query:
@@ -158,6 +160,9 @@ def test_native_projection_executes_real_fulltext_and_vector_queries() -> None:
 
     projection.bootstrap()
     projection.upsert(receipt, document, vector)
+    assert projection.reconcile_membership((receipt,)) == ()
+    missing = _receipt()
+    assert projection.reconcile_membership((missing,)) == (missing,)
     fulltext, vector_hits = projection.retrieve(
         query_text="Hong Kong",
         query_vector=vector,
@@ -173,6 +178,16 @@ def test_native_projection_executes_real_fulltext_and_vector_queries() -> None:
     assert "CREATE VECTOR INDEX" in queries
     assert "db.index.fulltext.queryNodes" in queries
     assert "db.index.vector.queryNodes" in queries
+    assert "WHERE NOT n.aggregate_id IN $aggregate_ids DELETE n" in queries
+
+    corrupt = dict(receipt.projection_value())
+    corrupt["document_digest"] = _digest("f")
+    with pytest.raises(NativeRetrievalError, match="retained document differs"):
+        Neo4jNativeRetrievalProjection(
+            _Driver(corrupt), database="neo4j",
+            generation_id="native-generation-1",
+            fulltext_index="native_fulltext_1", vector_index="native_vector_1",
+        ).reconcile_membership((receipt,))
     assert "NewsroomNativeRetrievalDocument_" in queries
     assert any(parameters.get("generation_id") == "native-generation-1" for _, parameters in driver.calls)
     assert {item["default_access_mode"] for item in driver.sessions} == {"READ", "WRITE"}
@@ -289,7 +304,7 @@ def test_native_context_retains_four_real_branch_receipts_and_round_trips(tmp_pa
     )
     request = NativeRetrievalContextRequest(
         str(uuid.uuid4()), "context-one", AggregateId.new(), 0, "lead-one",
-        _digest("3"), "native-scope-one", exact.canonical_bytes,
+        _digest("3"), "native-scope-one", _digest("4"), exact.canonical_bytes,
         fulltext.canonical_bytes, vector.canonical_bytes, graph.canonical_bytes,
         (_receipt(),),
     )
@@ -299,6 +314,7 @@ def test_native_context_retains_four_real_branch_receipts_and_round_trips(tmp_pa
     context = NativeRetrievalContext(
         str(uuid.uuid4()), request.request_id, request.request_digest,
         request.lead_id, request.lead_digest, request.authority_scope_id,
+        request.rights_inventory_digest,
         str(GENERATION_ID), vector.query_valid_time, vector.serving_time,
         tuple(digest_bytes(raw) for raw in raws),
         tuple(__import__("json").loads(raw) for raw in raws),
@@ -308,7 +324,8 @@ def test_native_context_retains_four_real_branch_receipts_and_round_trips(tmp_pa
     receipt = NativeRetrievalContextReceipt(
         context.context_id, request.request_id, request.request_digest,
         request.aggregate_id, 1, "event", "command", ObjectAdmissionId.new(),
-        context.digest, request.authority_scope_id, str(GENERATION_ID),
+        context.digest, request.authority_scope_id,
+        request.rights_inventory_digest, str(GENERATION_ID),
         vector.query_valid_time, vector.serving_time, *raws,
         "newsroom.hermes", "newsroom.authority", no_match=False,
     )

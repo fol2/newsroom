@@ -724,7 +724,7 @@ class _HypothesisStore:
         finally:
             self._lock.release()
 
-    def _verify(self) -> None:
+    def _verify(self) -> dict[str, EventHypothesisVersion]:
         _VERIFY_DISPOSITION_INTEGRITY(self._dispositions)
         tables = {
             str(row[0])
@@ -961,6 +961,11 @@ class _HypothesisStore:
                 raise HypothesisContractError("Hypothesis head is not max Version")
         if self._connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
             raise HypothesisContractError("Hypothesis foreign keys differ")
+        return {
+            version.version_id: version
+            for versions in chains.values()
+            for version in versions
+        }
 
 
 _AUTHORITY_TOKEN = object()

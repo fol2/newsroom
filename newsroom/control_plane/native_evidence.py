@@ -6,8 +6,8 @@ from dataclasses import dataclass, replace
 from typing import Callable, Literal
 from urllib.parse import urlsplit
 
-from newsroom.authority import AuthenticationProof, GovernedObjects, ObjectAdmissionRequest, UtcTimestamp
-from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, validate_sha256_digest
+from newsroom.authority import AuthenticationProof, GovernedObjects, ObjectAdmissionId, ObjectAdmissionRequest, UtcTimestamp
+from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, digest_canonical, validate_sha256_digest
 from newsroom.control_plane.corpus import CorpusIngestUnit
 from newsroom.control_plane.evidence import (
     EvidencePackage,
@@ -188,6 +188,22 @@ class PublicationRightsAssessment:
         )
 
 
+def rights_eligibility_digest(
+    rights: PublicationRightsAssessment, *, body_digest: str,
+    transport_digest: str, exclusion_signals: tuple[str, ...], text_only: bool,
+) -> str:
+    # The typed receipt already binds decision, use, policy AND rights evidence.
+    # Both transports and the assessor add the same exact acquisition facts.
+    if type(rights) is not PublicationRightsAssessment:
+        raise NativeEvidenceError("publication rights authority differs")
+    rights.__post_init__()
+    return digest_canonical({
+        "rights_receipt": rights.record_id, "body_digest": body_digest,
+        "transport": transport_digest, "exclusion_signals": exclusion_signals,
+        "text_only": text_only,
+    })
+
+
 @dataclass(frozen=True, slots=True)
 class DependencyAssessment:
     record_id: str
@@ -327,6 +343,22 @@ class NativeEvidenceResult:
     acquisition_receipt_digests: tuple[str, ...]
 
 
+def _admit_record(
+    objects: GovernedObjects, body: bytes, proof: AuthenticationProof,
+) -> ObjectAdmissionId:
+    # Logical rights IDs survive revisions; governed bytes also bind the Candidate
+    # and base package. Replay must therefore use the exact record content.
+    digest = digest_bytes(body)
+    admission = objects.admit(
+        ObjectAdmissionRequest("evidence.record", f"record:{digest}"),
+        body,
+        proof=proof,
+    ).admission
+    if admission.blob.blob_digest != digest:
+        raise NativeEvidenceError("retained evidence record content differs")
+    return admission.admission_id
+
+
 class NativeEvidenceController:
     """Acquire independently, validate exact records, then retain one package."""
 
@@ -369,6 +401,7 @@ class NativeEvidenceController:
         intake_receipt_id: str,
         sources: tuple[NativeEvidenceSource, ...],
         evaluated_at: str | None = None,
+        before_assessment: Callable[[], None] | None = None,
         proof: AuthenticationProof,
     ) -> NativeEvidenceResult:
         if (
@@ -401,6 +434,8 @@ class NativeEvidenceController:
             observation_digests=tuple(item.body_digest for item in acquired),
             passages=tuple(self._passage(item) for item in acquired),
         )
+        if before_assessment is not None:
+            before_assessment()
         assessment = self._assessor.assess(version, base, sources, acquired)
         source_assessments = self._validated_source_assessments(
             sources, acquired, assessment.source_assessments
@@ -448,12 +483,8 @@ class NativeEvidenceController:
             for result in acquired
         )
         record_admissions = tuple(
-            self._objects.admit(
-                ObjectAdmissionRequest("evidence.record", str(record["record_id"])),
-                canonical_json_bytes(record),
-                proof=proof,
-            ).admission.admission_id
-            for record in records
+            _admit_record(self._objects, row[2].encode(), proof)
+            for row in retained_rows
         )
         retained = self._packages.retain(
             package,

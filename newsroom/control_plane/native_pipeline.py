@@ -33,15 +33,19 @@ class NativePipeline:
         graphiti, discovery, retrieval_for: Callable, collision, publish,
         actor_identity_digest: str, stop_check: Callable[[], None],
         stop_fence: Callable[[], ContextManager[None]],
+        refresh_rights: Callable[[], None] = lambda: None,
         clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
     ) -> None:
         self._runtime, self._journal = runtime, journal
         self._intake, self._graphiti, self._discovery = source_intake, graphiti, discovery
         self._retrieval_for, self._collision, self._publish = retrieval_for, collision, publish
         self._actor, self._check, self._fence, self._clock = actor_identity_digest, stop_check, stop_fence, clock
+        self._refresh_rights = refresh_rights
         self.runtime_identity_digest: str | None = None
 
     def tick(self, *, cycle_id: str) -> NativePipelineReport:
+        self._check()
+        self._refresh_rights()
         self._check()
         dispositions = self._intake.poll()
         self._journal.sources(dispositions)
@@ -85,9 +89,17 @@ class NativePipeline:
         for revision_id, units in tuple(self._journal.units.items()):
             self._check()
             previous = self._journal.progress.get(revision_id, {})
-            if previous.get("stage") in {
-                "ACKNOWLEDGED", "ASSESSMENT_INTERRUPTED", "EVIDENCE_HOLD",
-            }:
+            if previous.get("stage") in {"ACKNOWLEDGED", "ASSESSMENT_INTERRUPTED"}:
+                continue
+            if (
+                previous.get("stage") == "EVIDENCE_HOLD"
+                and previous.get("facts", {}).get("acquisition_retryable") is not True
+                and previous.get("facts", {}).get("reason") not in {
+                    "CURRENT_RIGHTS_HOLD", "GOVUK_LICENCE_BINDING_HOLD",
+                    "GOVUK_LICENCE_REVIEW_HOLD", "NATIVE_SOURCE_RIGHTS_HOLD",
+                    "PUBLICATION_RIGHTS_HOLD",
+                }
+            ):
                 continue
             facts = dict(previous.get("facts", {}))
             stage = "GRAPHITI"

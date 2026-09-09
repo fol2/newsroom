@@ -72,9 +72,15 @@ class NativeService:
         wait: Callable[[float], bool] | None = None,
         cycle_id_factory: Callable[[], str] = lambda: str(uuid.uuid4()),
         qualify_once: Callable[[sqlite3.Connection, str], object] | None = None,
+        preflight: Callable[[], None] = lambda: None,
     ) -> None:
-        if not callable(pipeline_factory) or not callable(stop_check):
-            raise TypeError("native service pipeline and stop check are required")
+        if (
+            not callable(pipeline_factory) or not callable(stop_check)
+            or not callable(preflight)
+        ):
+            raise TypeError(
+                "native service pipeline, stop check and preflight are required"
+            )
         if qualify_once is not None and not callable(qualify_once):
             raise TypeError("native qualification callback must be callable")
         if (
@@ -92,12 +98,16 @@ class NativeService:
         self._wait = wait or self._shutdown.wait
         self._cycle_id = cycle_id_factory
         self._qualify_once = qualify_once
+        self._preflight = preflight
 
     def request_shutdown(self) -> None:
         self._shutdown.set()
 
     def run(self, *, once: bool = False) -> NativeServiceReport | None:
         last = None
+        # This must precede lock-directory creation and ledger connect. The
+        # deployed preflight checks immutable path identity without opening I/O.
+        self._preflight()
         with _instance_lock(self._lock_path):
             self._stop_check()
             ledger = connect(self._ledger_path)
@@ -121,6 +131,13 @@ class NativeService:
                             if type(report) is not NativePipelineReport:
                                 raise TypeError("native pipeline report differs")
                         except VetoError:
+                            self._append(ledger, "NATIVE_SERVICE_CYCLE_TERMINAL", {
+                                **binding,
+                                "cycle_id": cycle_id,
+                                "outcome": "STOPPED",
+                                "failure_class": "VetoError",
+                                "pipeline": None,
+                            })
                             raise
                         except Exception as exc:
                             last = NativeServiceReport(

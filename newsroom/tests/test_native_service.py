@@ -112,10 +112,44 @@ def test_native_service_preserves_veto_and_singleton_lock(tmp_path, monkeypatch)
     with pytest.raises(VetoError, match="signed stop"):
         service.run(once=True)
     assert opened == ["open", "close"]
+    with sqlite3.connect(tmp_path / "unpublished.sqlite3") as connection:
+        records = [(kind, json.loads(payload)) for kind, payload in connection.execute(
+            "SELECT kind, payload_json FROM ledger ORDER BY seq"
+        )]
+    assert [kind for kind, _ in records] == [
+        "NATIVE_SERVICE_CYCLE_STARTED", "NATIVE_SERVICE_CYCLE_TERMINAL",
+    ]
+    assert all(payload["cycle_id"] == "stopped-cycle" for _, payload in records)
+    assert records[-1][1] == {
+        "cycle_id": "stopped-cycle", "outcome": "STOPPED",
+        "failure_class": "VetoError", "pipeline": None,
+    }
+    assert "signed stop" not in json.dumps(records)
 
     with _instance_lock(tmp_path / "hermes-native.lock"):
         with pytest.raises(NativeServiceAlreadyRunning):
             service.run(once=True)
+
+
+def test_native_service_preflight_precedes_lock_ledger_and_pipeline(tmp_path, monkeypatch):
+    factory, opened = _pipeline(
+        monkeypatch, lambda _: pytest.fail("pipeline tick after failed preflight"),
+    )
+    ledger = tmp_path / "unpublished.sqlite3"
+    lock = tmp_path / "locks" / "hermes-native.lock"
+
+    def reject():
+        raise ValueError("deployment path differs")
+
+    service = NativeService(
+        pipeline_factory=factory, ledger_path=str(ledger), lock_path=lock,
+        stop_check=lambda: None, preflight=reject,
+    )
+    with pytest.raises(ValueError, match="deployment path differs"):
+        service.run(once=True)
+    assert opened == []
+    assert not ledger.exists()
+    assert not lock.parent.exists()
 
 
 def test_native_service_binds_both_cycle_records_to_runtime_identity(tmp_path, monkeypatch):

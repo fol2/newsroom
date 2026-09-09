@@ -2259,6 +2259,45 @@ class ModelUsageService:
         finally:
             connection.close()
 
+    def terminal(self, invocation_id: str) -> InvocationTerminal | None:
+        """Read one exact retained terminal without weakening its validation."""
+        invocation_id = _token(invocation_id, field="invocation id")
+        connection = self._connection()
+        try:
+            row = connection.execute(
+                "SELECT terminal_digest,record_json FROM model_invocation_terminals "
+                "WHERE invocation_id=?", (invocation_id,),
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            return None
+        try:
+            record = _object(row[1])
+            values = dict(record)
+            schema = values.pop("schema_version")
+            retained_digest = values.pop("terminal_digest")
+            values["usage_status"] = UsageStatus(values["usage_status"])
+            values["components"] = UsageComponents(**values["components"])
+            values["dispatch_at"] = (
+                None if values["dispatch_at"] is None
+                else _instant(values["dispatch_at"])
+            )
+            values["completed_at"] = _instant(values["completed_at"])
+            values["observed_at"] = _instant(values["observed_at"])
+            terminal = InvocationTerminal.create(**values)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ModelUsageIntegrityError("invocation terminal record differs") from exc
+        if (
+            schema != MODEL_USAGE_SCHEMA_VERSION
+            or terminal.invocation_id != invocation_id
+            or retained_digest != row[0]
+            or terminal.terminal_digest != row[0]
+            or terminal.as_record() != record
+        ):
+            raise ModelUsageIntegrityError("invocation terminal record differs")
+        return terminal
+
     def _validate_terminal(
         self,
         terminal: InvocationTerminal,
