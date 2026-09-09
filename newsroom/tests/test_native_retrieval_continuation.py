@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from newsroom.authority import AggregateId, ObjectAdmissionId
+from newsroom.authority import AggregateId, ObjectAdmissionId, UtcTimestamp
 from newsroom.authority.canonical import digest_bytes
 from newsroom.control_plane.cycle import _receipt
 from newsroom.control_plane.corpus import MAX_EPISODE_BYTES
@@ -44,6 +44,7 @@ def _lead(unit):
             revision_id=unit.revision_id,
             lead_id=str(uuid.uuid4()),
         ),
+        recorded_at=UtcTimestamp.parse(unit.observed_at),
         canonical_digest=digest_bytes(f"lead:{unit.revision_id}".encode()),
     )
 
@@ -239,6 +240,41 @@ def _continuation(
         port_for=port_for,
         rights_check=rights_check,
     )
+
+
+@pytest.mark.parametrize(
+    ("query_case", "reason"),
+    (
+        ("bounded", "NATIVE_FULLTEXT_QUERY_BOUND_HOLD"),
+        ("ambiguous", "NATIVE_FULLTEXT_QUERY_AMBIGUOUS"),
+    ),
+)
+def test_fulltext_query_is_checked_before_embedding(
+    tmp_path, query_case, reason,
+):
+    unit = _native("query-boundary")
+    if query_case == "bounded":
+        units = (replace(
+            unit,
+            headline=" ".join(f"term{index}" for index in range(65)),
+        ),)
+    else:
+        units = (unit, replace(unit, headline="A different retained headline"))
+    journal = SimpleNamespace(
+        units={unit.revision_id: units},
+        progress={},
+    )
+    embedder = _Embedder()
+    continuation = NativeRetrievalContinuation(
+        system=object(), documents=object(), journal=journal,
+        connection=object(), embedder=embedder, generation_id=GENERATION,
+        port_for=lambda *_arguments: pytest.fail("query hold opened retrieval"),
+        rights_check=lambda _unit: None,
+    )
+
+    with pytest.raises(NativeRetrievalHold, match=reason):
+        continuation.retrieve(_lead(unit), proof=proof())
+    assert embedder.calls == []
 
 
 def test_multi_chunk_embeddings_and_context_are_reused_across_restart(tmp_path):

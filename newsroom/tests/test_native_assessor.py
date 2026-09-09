@@ -20,7 +20,7 @@ from newsroom.control_plane.native_assessor import (
     SCHEMA_DIGEST,
     VERSION,
 )
-from newsroom.control_plane.native_evidence import NativeEvidenceError
+from newsroom.control_plane.native_evidence import NativeEvidenceError, NativeEvidenceHold
 from newsroom.control_plane.model_usage import (
     InvocationEfficiencyPolicy,
     ModelUsageIntegrityError,
@@ -64,12 +64,8 @@ def _model_package_value(package):
                     "relation": "SEMANTICALLY_EQUIVALENT",
                 },
                 "named_entities": [
-                    [
-                        entity[0],
-                        item["rendered_named_entities"][index],
-                        entity[1],
-                    ]
-                    for index, entity in enumerate(item["named_entity_evidence"])
+                    {"source_text": entity[0], "entity_type": entity[1]}
+                    for entity in item["named_entity_evidence"]
                 ]
             }
             for item in value["governed_claims"]
@@ -78,9 +74,9 @@ def _model_package_value(package):
             {
                 key: item[key]
                 for key in (
-                    "test", "governed_claim_id", "test_evidence", "policy_version"
+                    "test", "governed_claim_id", "policy_version"
                 )
-            }
+            } | {"test_evidence": dict(item["test_evidence"])}
             for item in value["qualification_evidence"]
         ],
         "selection_rationale": value["selection_rationale"],
@@ -101,10 +97,69 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
     assert "source_authority_decision_ids" not in model_value["governed_claims"][0]
     assert "semantic_relation_evidence_id" not in model_value["governed_claims"][0]
     assert "qualification_record_id" not in model_value["qualification_evidence"][0]
+    named = json.loads(canonical_json_bytes({"package": model_value}))
+    named["package"]["governed_claims"][0]["named_entities"] = [{
+        "source_text": "Home Office", "entity_type": "ORGANISATION",
+    }]
+    validator.validate(named)
+    named["package"]["governed_claims"][0]["named_entities"][0][
+        "rendered_text"
+    ] = "英國內政部"
+    with pytest.raises(ValidationError):
+        validator.validate(named)
+    invalid_qualification = json.loads(canonical_json_bytes({"package": model_value}))
+    invalid_qualification["package"]["qualification_evidence"][0][
+        "test_evidence"
+    ]["invented"] = "value"
+    with pytest.raises(ValidationError):
+        validator.validate(invalid_qualification)
     invalid = _model_package_value(base)
     invalid["invented"] = True
     with pytest.raises(ValidationError):
         validator.validate({"package": invalid})
+    connection.close()
+
+
+def test_native_assessor_retains_precise_qualification_contract_hold(
+    tmp_path, monkeypatch,
+) -> None:
+    connection, _port, candidate = _candidate(tmp_path)
+    base = _base_package(_ready_package(candidate)[1])
+    package = _model_package_value(base)
+    package["qualification_evidence"] = [{
+        "test": "OFFICIAL_ACTION_OR_DEADLINE",
+        "governed_claim_id": "missing-claim",
+        "test_evidence": {
+            "action_class": "OFFICIAL_DEADLINE",
+            "event_polarity": "AFFIRMED",
+            "action_relation": "NEW_OR_CHANGED_OFFICIAL_ACTION",
+            "material_relation_span": "deadline",
+            "reader_action": "check deadline",
+        },
+        "policy_version": "newsroom.evid-012.v7",
+    }]
+    _service, usage = _usage(tmp_path, monkeypatch)
+
+    with pytest.raises(
+        NativeEvidenceHold, match="ASSESSOR_QUALIFICATION_CONTRACT_HOLD"
+    ):
+        AutonomousNativeEvidenceAssessor(
+            lambda _prompt: NativeAssessmentExecution(
+                canonical_json_bytes({"package": package}).decode(),
+                {
+                    "usage_basis": "PROVIDER_REPORTED",
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "cached_read_tokens": 0,
+                    "cached_write_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "context_tokens": 1,
+                    "total_tokens": 2,
+                },
+            ),
+            usage=usage,
+            dispatch_fence=nullcontext,
+        )(candidate, base, (), ())
     connection.close()
 
 
@@ -248,12 +303,15 @@ def test_native_assessor_retains_post_dispatch_failures(
     base = _base_package(_ready_package(candidate)[1])
     service, usage = _usage(tmp_path, monkeypatch)
 
-    with pytest.raises((RuntimeError, NativeEvidenceError)):
+    with pytest.raises((RuntimeError, NativeEvidenceError)) as caught:
         AutonomousNativeEvidenceAssessor(
             dispatch, usage=usage, dispatch_fence=nullcontext
         )(
             candidate, base, (), ()
         )
+    if outcome == "ASSESSOR_VALIDATION_FAILED":
+        assert isinstance(caught.value, NativeEvidenceHold)
+        assert caught.value.reason_code == "ASSESSOR_OUTPUT_CONTRACT_HOLD"
 
     with sqlite3.connect(service.path) as retained:
         terminal = json.loads(retained.execute(

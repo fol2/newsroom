@@ -71,7 +71,7 @@ from .writer import (
 )
 from .cycle import _complete_writer_usage
 
-VERSION = "newsroom.native-evidence-assessor.v2"
+VERSION = "newsroom.native-evidence-assessor.v3"
 ROUTE = "NATIVE_EVIDENCE_ASSESSOR"
 CONTEXT_IDENTITY = "native-evidence-exact-acquisition-v1"
 CONFIG_IDENTITY = "native-evidence-assessor-grok-hermetic-command-v1"
@@ -82,7 +82,15 @@ SYSTEM = (
     "You are a one-turn evidence extraction transform. Use only the supplied "
     "candidate and exact source bytes. Return JSON matching the schema. Translate "
     "or localise only facts present in an exact source excerpt; never add facts or "
-    "authority absent from that evidence."
+    "authority absent from that evidence. Preserve named-entity source spellings in "
+    "the rendered claim; named entities are not translated. Localised factual "
+    "expressions are limited to equivalent source/rendered pairs present in both "
+    "texts: D Month [YYYY] [at HH:MM] dates and equivalent Chinese dates; numeric "
+    "or one-to-ten word durations in hours/minutes and equivalent Chinese durations "
+    "with at least 60 minutes where used as qualification evidence; "
+    "or counts of schools, hospitals, clinics, buses or roads in those number forms. "
+    "Return no qualification_evidence when no supported qualification test applies; "
+    "never invent an AFFIRMED qualification merely to populate that array."
 )
 _STRING = {"type": "string"}
 _STRINGS = {"type": "array", "items": _STRING}
@@ -99,6 +107,92 @@ _SEMANTIC_RELATION_FIELDS = {
     "rendered_polarity": _STRING,
     "relation": _STRING,
 }
+
+
+def _qualification_schema(
+    test: Evid012QualificationTest, fields: dict[str, object]
+) -> dict[str, object]:
+    evidence = {
+        "type": "object",
+        "properties": fields,
+        "required": list(fields),
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "test": {"const": test.value},
+            "governed_claim_id": _STRING,
+            "test_evidence": evidence,
+            "policy_version": {"const": EVID_012_POLICY_VERSION},
+        },
+        "required": [
+            "test", "governed_claim_id", "test_evidence", "policy_version",
+        ],
+        "additionalProperties": False,
+    }
+
+
+_AFFIRMED = {"const": "AFFIRMED"}
+_MATERIAL_SPAN = _STRING
+_QUALIFICATION_SCHEMAS = (
+    _qualification_schema(Evid012QualificationTest.LAW_RIGHT_STATUS_POLICY, {
+        "change_kind": {"enum": [
+            "LAW", "RIGHT", "STATUS", "OFFICIAL_DEADLINE", "PUBLIC_POLICY",
+        ]},
+        "event_polarity": _AFFIRMED,
+        "change_relation": {"const": "NEW_OR_CHANGED_STATE"},
+        "material_relation_span": _MATERIAL_SPAN,
+        "new_state": _STRING,
+    }),
+    _qualification_schema(Evid012QualificationTest.SAFETY_OR_PUBLIC_HEALTH, {
+        "effect_class": {"enum": [
+            "INJURY_RISK", "PUBLIC_HEALTH_WARNING", "EVACUATION",
+            "MATERIAL_EXPOSURE",
+        ]},
+        "event_polarity": _AFFIRMED,
+        "effect_relation": {"const": "MATERIAL_EFFECT"},
+        "material_relation_span": _MATERIAL_SPAN,
+        "affected_group": _STRING,
+    }),
+    _qualification_schema(Evid012QualificationTest.ESSENTIAL_SERVICE_DISRUPTION, {
+        "service_kind": {"enum": [
+            "TRANSPORT", "UTILITY", "SCHOOL", "WORKPLACE", "LOCALITY",
+        ]},
+        "event_polarity": _AFFIRMED,
+        "duration_relation": {"const": "DISRUPTION_DURATION"},
+        "duration_minutes": _STRING,
+        "affected_group": _STRING,
+    }),
+    _qualification_schema(Evid012QualificationTest.HOUSEHOLD_PRACTICAL_EFFECT, {
+        "domain": {"enum": [
+            "MONEY", "WORK", "HOUSING", "EDUCATION", "HEALTHCARE",
+            "UK_HONG_KONG_TRAVEL",
+        ]},
+        "event_polarity": _AFFIRMED,
+        "effect_relation": {"const": "MATERIAL_PRACTICAL_EFFECT"},
+        "material_relation_span": _MATERIAL_SPAN,
+        "practical_effect": _STRING,
+    }),
+    _qualification_schema(Evid012QualificationTest.OFFICIAL_ACTION_OR_DEADLINE, {
+        "action_class": {"enum": [
+            "INSTRUCTION", "PROCESS", "OFFICIAL_DEADLINE",
+        ]},
+        "event_polarity": _AFFIRMED,
+        "action_relation": {"const": "NEW_OR_CHANGED_OFFICIAL_ACTION"},
+        "material_relation_span": _MATERIAL_SPAN,
+        "reader_action": _STRING,
+    }),
+    _qualification_schema(Evid012QualificationTest.EXCEPTIONAL_PUBLIC_IMPORTANCE, {
+        "importance_class": {"enum": [
+            "HONG_KONG_WIDE", "INTERNATIONAL_EMERGENCY", "CONSTITUTIONAL_CHANGE",
+        ]},
+        "event_polarity": _AFFIRMED,
+        "importance_relation": {"const": "CURRENT_EXCEPTIONAL_IMPORTANCE"},
+        "material_relation_span": _MATERIAL_SPAN,
+        "affected_group": _STRING,
+    }),
+)
 _CLAIM_FIELDS = {
     "claim_id": _STRING, "claim": _STRING, "passage_index": {"type": "integer"},
     "supporting_excerpt": _STRING, "source_ids": _STRINGS,
@@ -113,7 +207,13 @@ _CLAIM_FIELDS = {
     },
     "localised_factual_expressions": _PAIRS,
     "named_entities": {"type": "array", "items": {
-        "type": "array", "items": _STRING, "minItems": 3, "maxItems": 3,
+        "type": "object",
+        "properties": {"source_text": _STRING, "entity_type": {"enum": [
+            "PERSON", "ORGANISATION", "PLACE", "OFFICIAL_TITLE",
+            "OFFICIAL_TERM", "PRODUCT",
+        ]}},
+        "required": ["source_text", "entity_type"],
+        "additionalProperties": False,
     }},
     "quotations": _STRINGS, "certainty": {"const": "CONFIRMED"},
     "originality_basis": {"const": "FACTUAL_REWRITE_REQUIRED"},
@@ -128,16 +228,7 @@ _PACKAGE_FIELDS = {
         "required": list(_CLAIM_FIELDS), "additionalProperties": False,
     }},
     "qualification_evidence": {"type": "array", "items": {
-        "type": "object", "properties": {
-            "test": {"enum": [item.value for item in Evid012QualificationTest]},
-            "governed_claim_id": _STRING,
-            "test_evidence": _PAIRS,
-            "policy_version": {"const": EVID_012_POLICY_VERSION},
-        },
-        "required": [
-            "test", "governed_claim_id", "test_evidence", "policy_version",
-        ],
-        "additionalProperties": False,
+        "oneOf": list(_QUALIFICATION_SCHEMAS),
     }},
     "selection_rationale": _STRING, "geography": _STRINGS, "categories": _STRINGS,
     "explicit_exclusions": _STRINGS,
@@ -180,6 +271,20 @@ def _named_entity_record_id(
     claim_id: str, text: str, entity_type: str, rendered: str
 ) -> str:
     return _assessment_id("NAMED_ENTITY", claim_id, text, entity_type, rendered)
+
+
+def _contract_hold_reason(error: EvidencePackageError) -> str:
+    current: BaseException | None = error
+    while current is not None:
+        message = str(current)
+        if "named entit" in message:
+            return "ASSESSOR_NAMED_ENTITY_CONTRACT_HOLD"
+        if "localised factual expression" in message:
+            return "ASSESSOR_LOCALISATION_CONTRACT_HOLD"
+        if "qualification" in message:
+            return "ASSESSOR_QUALIFICATION_CONTRACT_HOLD"
+        current = current.__cause__
+    return "ASSESSOR_OUTPUT_CONTRACT_HOLD"
 
 
 @dataclass(frozen=True, slots=True)
@@ -784,7 +889,7 @@ class AutonomousNativeEvidenceAssessor:
             if self._usage.retained_output_contract_failure(candidate) is None:
                 raise
             raise NativeEvidenceHold(
-                "ASSESSOR_OUTPUT_CONTRACT_HOLD",
+                _contract_hold_reason(exc),
                 (
                     sources[0].unit.source_id
                     if sources
@@ -912,9 +1017,9 @@ class AutonomousNativeEvidenceAssessor:
             authority.extend(decisions)
             raw_entities = raw_claim.get("named_entities")
             if type(raw_entities) is not list or any(
-                type(item) is not list
-                or len(item) != 3
-                or any(type(part) is not str for part in item)
+                type(item) is not dict
+                or set(item) != {"source_text", "entity_type"}
+                or any(type(part) is not str for part in item.values())
                 for item in raw_entities
             ):
                 raise EvidencePackageError("assessment named entities differ")
@@ -955,14 +1060,17 @@ class AutonomousNativeEvidenceAssessor:
                     [
                         text,
                         entity_type,
-                        _named_entity_record_id(
-                            claim_id, text, entity_type, rendered_text
-                        ),
+                        _named_entity_record_id(claim_id, text, entity_type, text),
                     ]
-                    for text, rendered_text, entity_type in raw_entities
+                    for text, entity_type in (
+                        (item["source_text"], item["entity_type"])
+                        for item in raw_entities
+                    )
                 ],
-                "named_entities": [item[0] for item in raw_entities],
-                "rendered_named_entities": [item[1] for item in raw_entities],
+                "named_entities": [item["source_text"] for item in raw_entities],
+                "rendered_named_entities": [
+                    item["source_text"] for item in raw_entities
+                ],
             })
         raw_qualifications = raw_package.get("qualification_evidence")
         if type(raw_qualifications) is not list:
@@ -973,13 +1081,18 @@ class AutonomousNativeEvidenceAssessor:
                 "test", "governed_claim_id", "test_evidence", "policy_version"
             }:
                 raise EvidencePackageError("assessment qualification fields differ")
+            test_evidence = item.get("test_evidence")
+            if type(test_evidence) is not dict:
+                raise EvidencePackageError("assessment qualification evidence differs")
+            evidence_pairs = [[key, value] for key, value in test_evidence.items()]
             qualifications.append({
                 **item,
                 "qualification_record_id": _qualification_record_id(
                     item.get("governed_claim_id"),
                     item.get("test"),
-                    item.get("test_evidence"),
+                    evidence_pairs,
                 ),
+                "test_evidence": evidence_pairs,
             })
         package_value = evidence_package_value(base)
         package_value.update(raw_package)
