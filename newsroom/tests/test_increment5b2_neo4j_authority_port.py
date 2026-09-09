@@ -24,6 +24,7 @@ from newsroom.projection.neo4j._adapter import (
 from .increment5b2_helpers import (
     GENERATION_ID,
     FakeDriver,
+    FakeResult,
     RecordingUnitOfWorkFactory,
     SequenceClock,
     config,
@@ -383,6 +384,23 @@ def test_native_authority_port_filters_authenticated_passages_before_top_eight()
     eligible = tuple(f"p-native-{index:02d}" for index in range(10))
     clock = SequenceClock((0, 100_000_000, 200_000_000))
     driver = FakeDriver(default_scenario(rows=[]))
+
+    class NativeQueryTransaction:
+        def run(self, statement, parameters):
+            driver.calls.append((statement, dict(parameters)))
+            return FakeResult([{"candidate_overflow": False, "rows": []}])
+
+    class NativeQuerySession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute_read(self, work):
+            return work(NativeQueryTransaction())
+
+    driver.session = lambda *, database: NativeQuerySession()
     adapter = _Neo4jAdapter(
         driver=driver,
         config=config(),
