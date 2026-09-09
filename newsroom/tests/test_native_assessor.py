@@ -10,7 +10,11 @@ from jsonschema import Draft202012Validator, ValidationError
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.control_plane.admission import DeterministicWriteAdmission
-from newsroom.control_plane.evidence import bounded_named_entities, evidence_package_value
+from newsroom.control_plane.evidence import (
+    bounded_named_entities,
+    evidence_package_value,
+    validate_governed_evidence_records,
+)
 from newsroom.control_plane.native_assessor import (
     AutonomousNativeEvidenceAssessor,
     CONFIG_IDENTITY,
@@ -23,7 +27,11 @@ from newsroom.control_plane.native_assessor import (
     VERSION,
     _MAX_RETAINED_RESULT_BYTES,
 )
-from newsroom.control_plane.native_evidence import NativeEvidenceError, NativeEvidenceHold
+from newsroom.control_plane.native_evidence import (
+    NativeEvidenceController,
+    NativeEvidenceError,
+    NativeEvidenceHold,
+)
 from newsroom.control_plane.model_usage import (
     InvocationEfficiencyPolicy,
     ModelUsageIntegrityError,
@@ -111,6 +119,14 @@ def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tm
     invalid["invented"] = True
     with pytest.raises(ValidationError):
         validator.validate({"package": invalid})
+    invalid_semantic = _model_package_value(assessed)
+    invalid_semantic["governed_claims"][0]["semantic_relation"].update({
+        "source_modality": "ALLOWS",
+        "rendered_modality": "ALLOWS",
+        "relation": "EQUIVALENT",
+    })
+    with pytest.raises(ValidationError):
+        validator.validate({"package": invalid_semantic})
     connection.close()
 
 
@@ -151,20 +167,53 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
             canonical_digest="sha256:" + "a" * 64,
             request=SimpleNamespace(roles=(role,)),
         ),
-        rights=SimpleNamespace(record_id="rights-1"),
+        rights=SimpleNamespace(
+            record_id="rights-1",
+            decision="PERMITTED",
+            permitted_use="PUBLICATION_EVIDENCE",
+        ),
         dependency=SimpleNamespace(
-            record_id="dependency-1", evidential_origin_id="origin-1",
+            record_id="dependency-1",
+            dependency_status="RESOLVED",
+            evidential_origin_id="origin-1",
+            originating_report_id="report-1",
         ),
     )
+    body = excerpt.encode()
     acquired = SimpleNamespace(
         receipt_digest="sha256:" + "b" * 64,
+        canonical_url="https://www.gov.uk/example",
         publisher="Home Office",
+        responsible_body="Home Office",
+        source_type="PRIMARY_OFFICIAL",
         publication_time="2026-09-09T12:00:00.000000Z",
         retrieval_time="2026-09-09T12:01:00.000000Z",
         source_updated_time="2026-09-09T12:00:00.000000Z",
         transport_evidence_digest="sha256:" + "c" * 64,
-        body=excerpt.encode(),
+        geography="UK",
+        language="en-GB",
+        body=body,
+        body_digest=digest_bytes(body),
     )
+
+    invalid_semantic = json.loads(canonical_json_bytes({"package": package}))
+    invalid_semantic["package"]["governed_claims"][0][
+        "semantic_relation"
+    ].update({
+        "source_modality": "ALLOWS",
+        "rendered_modality": "ALLOWS",
+        "relation": "EQUIVALENT",
+    })
+    with pytest.raises(EvidencePackageError, match="semantic relation"):
+        AutonomousNativeEvidenceAssessor._validated_execution(
+            NativeAssessmentExecution(
+                canonical_json_bytes(invalid_semantic).decode(), {}
+            ),
+            candidate,
+            base,
+            (source,),
+            (acquired,),
+        )
 
     result = AutonomousNativeEvidenceAssessor._validated_execution(
         NativeAssessmentExecution(
@@ -182,6 +231,35 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
     assert result.governed_claims[0].rendered_named_entities == (
         "Home Office", "Skilled Worker Visa",
     )
+    governed = replace(
+        base,
+        substantive_new_information=result.substantive_new_information,
+        governed_claims=result.governed_claims,
+        qualification_evidence=result.qualification_evidence,
+        selection_rationale=result.selection_rationale,
+        geography=result.geography,
+        categories=result.categories,
+        explicit_exclusions=result.explicit_exclusions,
+    )
+    records = NativeEvidenceController._records(
+        base, governed, (source,), (acquired,), result
+    )
+    retained_rows = tuple(
+        (
+            record["record_id"],
+            record["record_type"],
+            canonical_json_bytes(record).decode(),
+            digest_bytes(canonical_json_bytes(record)),
+        )
+        for record in records
+    )
+    assert validate_governed_evidence_records(
+        candidate_id=candidate.candidate_id,
+        source_inventory=(("source-1", acquired.canonical_url),),
+        base_package_digest=base.digest,
+        package=governed,
+        retained_records=retained_rows,
+    ) is not None
     def decide(assessment, passage, information):
         admitted_package = replace(
             _ready_package(candidate)[1],

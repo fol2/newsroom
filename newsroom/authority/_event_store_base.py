@@ -311,28 +311,28 @@ class _EventStoreBase:
     ) -> None:
         for row in conn.execute(
             "SELECT * FROM payload_schema_contracts"
-        ).fetchall():
+        ):
             self._schema_record_from_row(row)
         for row in conn.execute(
             "SELECT * FROM command_definitions"
-        ).fetchall():
+        ):
             self._definition_record_from_row(row)
         for row in conn.execute(
             "SELECT * FROM authentication_contexts"
-        ).fetchall():
+        ):
             self._authentication_record_from_row(row)
         for row in conn.execute(
             "SELECT * FROM authorization_requests"
-        ).fetchall():
+        ):
             self._request_record_from_row(row)
         for row in conn.execute(
             "SELECT * FROM authorization_decisions"
-        ).fetchall():
+        ):
             self._decision_record_from_row(row)
         for row in conn.execute(
             "SELECT command_id,result_digest,result_bytes "
             "FROM authority_commands"
-        ).fetchall():
+        ):
             self._decode_result(
                 bytes(row["result_bytes"]),
                 str(row["result_digest"]),

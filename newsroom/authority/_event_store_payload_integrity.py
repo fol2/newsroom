@@ -34,12 +34,12 @@ class _PayloadAndEnvelopeIntegrity:
         super()._validate_immutable_records(conn)  # type: ignore[misc]
         for row in conn.execute(
             "SELECT * FROM authority_payloads"
-        ).fetchall():
+        ):
             self._validate_payload_record(conn, row)
 
         for row in conn.execute(
             "SELECT * FROM ledger_events ORDER BY ledger_seq"
-        ).fetchall():
+        ):
             self._validate_event_types(row)
 
     def _validate_payload_record(
