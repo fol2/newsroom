@@ -73,7 +73,10 @@ def test_deployed_startup_rejects_unqualified_identity_before_credentials_or_io(
         path = tmp_path / name
         path.touch()
         monkeypatch.setattr(paths, constant, path)
+    workspace = tmp_path / "graphiti-workspaces"
+    workspace.mkdir()
     monkeypatch.setattr(paths, "CANONICAL_OBJECT_CAS_ROOT", tmp_path)
+    monkeypatch.setattr(paths, "CANONICAL_GRAPHITI_WORKSPACE_ROOT", workspace)
     monkeypatch.setattr(paths, "HOST_CONTROL_PLANE_STATE_ROOT", tmp_path)
     monkeypatch.setattr(cycle, "assert_no_owner_emergency_stop", lambda _: None)
     monkeypatch.setattr(writer, "cont_writer_implementation_identity", lambda: ("1" * 40, True))
@@ -231,11 +234,6 @@ def _assessment_policy() -> InvocationEfficiencyPolicy:
     )
 
 
-class _Driver:
-    def close(self) -> None:
-        return None
-
-
 class _RetrievalProjection:
     bootstraps = 0
 
@@ -305,12 +303,14 @@ def test_native_composition_opens_factory_once_reopens_and_has_no_pre_effect(
         "newsroom.authority._graphiti_increment4_system._open_structural_graph_adapter",
         lambda _: MemoryNeo4jAdapter(),
     )
-    monkeypatch.setattr(native_composition.GraphDatabase, "driver", lambda *_a, **_k: _Driver())
-    monkeypatch.setattr(native_composition, "Neo4jNativeRetrievalProjection", _RetrievalProjection)
-    monkeypatch.setattr(native_composition, "_open_neo4j_adapter", lambda _: MemoryNeo4jAdapter())
     monkeypatch.setattr(
-        native_composition, "_open_neo4j_fulltext_reader_with_adapter",
-        lambda _adapter: _Reader(),
+        native_composition,
+        "open_native_retrieval_neo4j_resources",
+        lambda **_arguments: SimpleNamespace(
+            projector=_RetrievalProjection(),
+            fulltext=_Reader(),
+            close=lambda: None,
+        ),
     )
     terms = (
         b"<html><main>Reviewed GOV.UK reuse terms.</main></html>",
@@ -435,17 +435,13 @@ def test_rights_refresh_registers_and_binds_a_newly_permitted_source(
         lambda _: MemoryNeo4jAdapter(),
     )
     monkeypatch.setattr(
-        native_composition.GraphDatabase, "driver", lambda *_a, **_k: _Driver(),
-    )
-    monkeypatch.setattr(
-        native_composition, "Neo4jNativeRetrievalProjection", _RetrievalProjection,
-    )
-    monkeypatch.setattr(
-        native_composition, "_open_neo4j_adapter", lambda _: MemoryNeo4jAdapter(),
-    )
-    monkeypatch.setattr(
-        native_composition, "_open_neo4j_fulltext_reader_with_adapter",
-        lambda _adapter: _Reader(),
+        native_composition,
+        "open_native_retrieval_neo4j_resources",
+        lambda **_arguments: SimpleNamespace(
+            projector=_RetrievalProjection(),
+            fulltext=_Reader(),
+            close=lambda: None,
+        ),
     )
     registered = []
     register = native_composition.register_missing_native_source_definitions

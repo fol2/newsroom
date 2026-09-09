@@ -6,10 +6,14 @@ import uuid
 import pytest
 
 from newsroom.authority.canonical import digest_bytes
+from newsroom.authority.neo4j_projection_system import (
+    open_native_retrieval_neo4j_resources,
+)
 from newsroom.authority.types import AggregateId, ObjectAdmissionId
 from newsroom.authority.types import TrustScope, UtcTimestamp
 from newsroom.projection.models import ProjectionGenerationId, ProjectionGenerationState
 from newsroom.projection.neo4j.models import (
+    NEO4J_B2_DRIVER_VERSION,
     StructuralGraphNodeView, StructuralReadAuthoritySelection,
     StructuralReadMetadata, StructuralReadResponse,
 )
@@ -145,6 +149,22 @@ class _MetadataDriver:
     def session(self, **_config): return _MetadataSession(self)
 
 
+class _ResourceAdapter:
+    driver_version = NEO4J_B2_DRIVER_VERSION
+
+    def __init__(self) -> None:
+        self.closed = 0
+        self.arguments = None
+        self.projector = object()
+
+    def open_native_retrieval_projection(self, **arguments):
+        self.arguments = arguments
+        return self.projector
+
+    def close(self) -> None:
+        self.closed += 1
+
+
 def test_native_projection_executes_real_fulltext_and_vector_queries() -> None:
     receipt = _receipt()
     driver = _Driver(receipt.projection_value())
@@ -154,6 +174,7 @@ def test_native_projection_executes_real_fulltext_and_vector_queries() -> None:
         generation_id="native-generation-1",
         fulltext_index="native_fulltext_1",
         vector_index="native_vector_1",
+        driver_version=NEO4J_B2_DRIVER_VERSION,
     )
     vector = (1.0,) + (0.0,) * (NATIVE_VECTOR_DIMENSIONS - 1)
     document = _document()
@@ -187,6 +208,7 @@ def test_native_projection_executes_real_fulltext_and_vector_queries() -> None:
             _Driver(corrupt), database="neo4j",
             generation_id="native-generation-1",
             fulltext_index="native_fulltext_1", vector_index="native_vector_1",
+            driver_version=NEO4J_B2_DRIVER_VERSION,
         ).reconcile_membership((receipt,))
     assert "NewsroomNativeRetrievalDocument_" in queries
     assert any(parameters.get("generation_id") == "native-generation-1" for _, parameters in driver.calls)
@@ -199,6 +221,7 @@ def test_native_projection_snapshot_is_actual_native_metadata() -> None:
     projection = Neo4jNativeRetrievalProjection(
         driver, database="neo4j", generation_id=generation,
         fulltext_index="native_fulltext_10", vector_index="native_vector_10",
+        driver_version=NEO4J_B2_DRIVER_VERSION,
     )
     driver.label = projection.document_label
     now = UtcTimestamp.parse("2026-09-08T12:00:00.000000Z")
@@ -212,6 +235,34 @@ def test_native_projection_snapshot_is_actual_native_metadata() -> None:
     assert snapshot.document_label == projection.document_label
     assert snapshot.index_name == projection.fulltext_index
     assert snapshot.index_document_count == 1
+
+
+def test_native_projection_public_opener_shares_and_closes_private_adapter(
+    monkeypatch,
+) -> None:
+    adapter = _ResourceAdapter()
+    monkeypatch.setattr(
+        "newsroom.authority._neo4j_projection_system._open_structural_graph_adapter",
+        lambda _config: adapter,
+    )
+
+    resources = open_native_retrieval_neo4j_resources(
+        config=object(),
+        generation_id="native-generation-1",
+        fulltext_index="native_fulltext_1",
+        vector_index="native_vector_1",
+    )
+
+    assert resources.projector is adapter.projector
+    assert resources.fulltext.driver_version == NEO4J_B2_DRIVER_VERSION
+    assert adapter.arguments == {
+        "generation_id": "native-generation-1",
+        "fulltext_index": "native_fulltext_1",
+        "vector_index": "native_vector_1",
+    }
+    resources.close()
+    resources.close()
+    assert adapter.closed == 1
 
 
 def test_embedding_receipt_and_vector_are_exact_non_fixture_inputs() -> None:

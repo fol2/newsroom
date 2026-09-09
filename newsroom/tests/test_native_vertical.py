@@ -5,6 +5,7 @@ import json
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from email.message import Message
+from types import SimpleNamespace
 
 from newsroom.authority import ObjectAdmissionRequest, UtcTimestamp
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
@@ -45,11 +46,6 @@ from newsroom.tests.test_native_source_intake import ATOM, _document, _seed_uk01
 
 
 NOW = datetime(2042, 3, 12, 12, tzinfo=UTC)
-
-
-class _Driver:
-    def close(self):
-        return None
 
 
 class _Projection:
@@ -165,18 +161,19 @@ def _install_boundaries(monkeypatch, counters):
         lambda _: MemoryNeo4jAdapter(),
     )
     monkeypatch.setattr(
-        native_composition.GraphDatabase, "driver", lambda *_args, **_kwargs: _Driver()
-    )
-    monkeypatch.setattr(
-        native_composition, "Neo4jNativeRetrievalProjection", _Projection
-    )
-    monkeypatch.setattr(
-        native_composition, "_open_neo4j_adapter", lambda _: MemoryNeo4jAdapter()
-    )
-    monkeypatch.setattr(
         native_composition,
-        "_open_neo4j_fulltext_reader_with_adapter",
-        lambda _: _fulltext_reader(),
+        "open_native_retrieval_neo4j_resources",
+        lambda **arguments: SimpleNamespace(
+            projector=_Projection(
+                None,
+                database=arguments["config"].database,
+                generation_id=arguments["generation_id"],
+                fulltext_index=arguments["fulltext_index"],
+                vector_index=arguments["vector_index"],
+            ),
+            fulltext=_fulltext_reader(),
+            close=lambda: None,
+        ),
     )
     monkeypatch.setattr(
         RealGraphitiAdapter,

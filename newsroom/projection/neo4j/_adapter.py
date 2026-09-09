@@ -369,6 +369,29 @@ class _Neo4jAdapter:
     def driver_version(self) -> str:
         return self._driver_version
 
+    def open_native_retrieval_projection(
+        self,
+        *,
+        generation_id: str,
+        fulltext_index: str,
+        vector_index: str,
+    ) -> Any:
+        """Create the fixed native retrieval projection on this owned driver."""
+
+        self._require_open()
+        from newsroom.increment5.neo4j_native_retrieval import (
+            Neo4jNativeRetrievalProjection,
+        )
+
+        return Neo4jNativeRetrievalProjection(
+            self._driver,
+            database=self._config.database,
+            generation_id=generation_id,
+            fulltext_index=fulltext_index,
+            vector_index=vector_index,
+            driver_version=self._driver_version,
+        )
+
     def read_increment5_fulltext(
         self,
         *,

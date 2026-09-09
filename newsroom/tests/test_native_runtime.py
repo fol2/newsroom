@@ -9,6 +9,9 @@ from newsroom.increment5.retrieval_context import RetrievalContextJournal
 from newsroom.increment6.collision import (
     CurrentCollisionEffectEnforcer, TrustedCurrentCollisionAuthorityBoundary,
 )
+from newsroom.increment6.dispositions import (
+    _create_current_candidate_citation_read_port,
+)
 from newsroom.increment6.work_items import RetrievalContextAuthority
 from newsroom.tests.authority_helpers import FIXED_NOW
 from newsroom.tests.discovery_3d_authority_helpers import seed_check_lineage
@@ -76,12 +79,15 @@ def test_native_runtime_builds_dependencies_from_opened_base_before_children(
     args = _args(tmp_path, monkeypatch)
     retrieval = args.pop("retrieval_authority")
     collision = args.pop("collision_enforcer")
+    citations = _create_current_candidate_citation_read_port(
+        lambda *_: (_ for _ in ()).throw(LookupError("no retained citation"))
+    )
     captured = []
 
     def build_dependencies(*, objects, extraction, commands, events):
         assert args["authority_path"].exists()
         captured.append((objects, extraction, commands, events))
-        return retrieval, collision
+        return retrieval, collision, citations
 
     args["native_dependency_factory"] = build_dependencies
     with open_native_runtime(**args) as runtime:

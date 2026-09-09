@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
-from newsroom.authority import AuthenticationProof
+from newsroom.authority import AuthenticationProof, GovernedObjects
 from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
@@ -26,7 +26,6 @@ from newsroom.authority.canonical import (
 )
 from newsroom.authority.models import ObjectAdmissionPayload, SemanticCommand
 from newsroom.authority.persistence import AuthorityCommands, AuthorityEvents
-from newsroom.authority._object_system import GovernedObjects
 from newsroom.authority.objects import HydrationRequest, ObjectAdmissionRequest
 from newsroom.authority.types import AggregateId, ObjectAdmissionId, TrustScope, UtcTimestamp
 from newsroom.extraction.models import ExtractionRunRequest

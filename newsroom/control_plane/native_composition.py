@@ -12,20 +12,18 @@ from contextlib import ExitStack, closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from neo4j import GraphDatabase
-
 from newsroom.authority import AuthenticationProof, UtcTimestamp
 from newsroom.authority.canonical import digest_canonical
-from newsroom.authority._neo4j_projection_system import _open_neo4j_fulltext_reader_with_adapter
+from newsroom.authority.neo4j_projection_system import (
+    open_native_retrieval_neo4j_resources,
+)
 from newsroom.increment5.exact_retriever import SQLiteExactRetriever
 from newsroom.increment5.fulltext_journal import FullTextReceiptJournal
 from newsroom.increment5.fulltext_retriever import FullTextRetriever
 from newsroom.increment5.native_retrieval import NativeRetrievalHold, NativeRetrievalPort
-from newsroom.increment5.neo4j_native_retrieval import Neo4jNativeRetrievalProjection
 from newsroom.increment5.receipt_journal import BranchReceiptJournal
 from newsroom.increment5.retrieval_context import RetrievalContextJournal
 from newsroom.increment6.work_items import RetrievalContextAuthority
-from newsroom.projection.neo4j._adapter import _open_neo4j_adapter
 from newsroom.projection.neo4j.models import Neo4jProjectorConfig
 from newsroom.sources import SourceDefinitionId, SourceDefinitionVersionId
 
@@ -351,14 +349,14 @@ def open_native_pipeline(
             authority_database=authority_path, journal=BranchReceiptJournal(retrieval_path),
         )
         fulltext_journal = FullTextReceiptJournal(retrieval_path)
-        driver = GraphDatabase.driver(neo4j_config.uri, auth=(neo4j_config.username, neo4j_config.password))
-        resources.callback(driver.close)
-        projector = Neo4jNativeRetrievalProjection(
-            driver, database=neo4j_config.database, generation_id=generation_id,
+        neo4j_resources = open_native_retrieval_neo4j_resources(
+            config=neo4j_config,
+            generation_id=generation_id,
             fulltext_index=f"native_fulltext_{suffix}", vector_index=f"native_vector_{suffix}",
         )
-        reader = _open_neo4j_fulltext_reader_with_adapter(_open_neo4j_adapter(neo4j_config))
-        resources.callback(reader.close)
+        resources.callback(neo4j_resources.close)
+        projector = neo4j_resources.projector
+        reader = neo4j_resources.fulltext
         components = {}
 
         def dependencies(*, objects, extraction, commands, events):

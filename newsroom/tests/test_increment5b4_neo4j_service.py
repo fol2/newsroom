@@ -294,6 +294,7 @@ def test_native_projection_reconciles_actual_fulltext_and_vector_membership() ->
             generation_id=generation,
             fulltext_index=fulltext_index,
             vector_index=vector_index,
+            driver_version=neo4j.__version__,
         )
         receipt_a, document_a = _native_document(
             generation=generation, marker="alpha",

@@ -9,7 +9,6 @@ from typing import Any, Mapping
 
 from newsroom.authority.types import UtcTimestamp
 from newsroom.projection.models import ProjectionGenerationId, ProjectionGenerationState
-
 from .native_retrieval import (
     NATIVE_RESULT_LIMIT,
     NATIVE_VECTOR_DIMENSIONS,
@@ -44,7 +43,16 @@ def _receipt_projection(alias: str) -> str:
 class Neo4jNativeRetrievalProjection:
     """Own all Cypher for one configured native retrieval generation."""
 
-    def __init__(self, driver: Any, *, database: str | None, generation_id: str, fulltext_index: str, vector_index: str) -> None:
+    def __init__(
+        self,
+        driver: Any,
+        *,
+        database: str | None,
+        generation_id: str,
+        fulltext_index: str,
+        vector_index: str,
+        driver_version: str,
+    ) -> None:
         if driver is None or not callable(getattr(driver, "session", None)):
             raise TypeError("native retrieval requires a Neo4j driver")
         if any(_NAME.fullmatch(item) is None for item in (fulltext_index, vector_index)) or fulltext_index == vector_index:
@@ -53,6 +61,7 @@ class Neo4jNativeRetrievalProjection:
             raise NativeRetrievalError("native retrieval generation differs")
         suffix = hashlib.sha256(generation_id.encode()).hexdigest()[:16]
         self._driver = driver
+        self._driver_version = driver_version
         self._database = database
         self._generation = generation_id
         self._label = f"NewsroomNativeRetrievalDocument_{suffix}"
@@ -92,7 +101,6 @@ RETURN name,type,state,entityType,labelsOrTypes,properties,indexProvider,options
                 transaction.run(count_query, generation_id=self._generation).single(),
             ))
         try:
-            import neo4j
             document_count = int(count["count"])
             index_state = FullTextIndexState(str(index["state"]))
             valid = (
@@ -129,7 +137,7 @@ RETURN name,type,state,entityType,labelsOrTypes,properties,indexProvider,options
             freshness_deadline=UtcTimestamp(recorded_at.value + timedelta(hours=1)),
             index_document_count=document_count,
             server_version=str(component["version"]),
-            driver_version=str(neo4j.__version__),
+            driver_version=self._driver_version,
         )
 
     def bootstrap(self) -> None:
