@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 
 import pytest
@@ -11,6 +12,7 @@ from newsroom.authority.canonical import (
     digest_canonical,
 )
 from newsroom.control_plane.graphiti_operational_readiness import _source_requests
+from newsroom.control_plane.admission import DeterministicWriteAdmission
 from newsroom.control_plane.native_evidence import (
     _admit_record,
     AcquiredEvidence,
@@ -26,11 +28,20 @@ from newsroom.control_plane.native_evidence import (
     NativeEvidenceSource,
     PublicationRightsAssessment,
 )
+from newsroom.control_plane.evidence import (
+    EVIDENCE_GATE_POLICY_VERSION,
+    EvidenceGateEvidence,
+)
 from newsroom.control_plane.native_assessor import (
     AutonomousNativeEvidenceAssessor,
     NativeAssessmentExecution,
 )
 from newsroom.control_plane.native_publication import NativePublicationController
+from newsroom.control_plane.writer import (
+    WriterCopy,
+    required_surface_copy,
+    validate_writer_copy,
+)
 from newsroom.increment10.editorial import SourceCurrentness
 from newsroom.increment10.evidence import EvidencePackageError, _base_package
 from newsroom.increment10.ingress import open_evidence_intake_ingress
@@ -39,7 +50,6 @@ from newsroom.sources.record_models import SourceDefinitionVersion
 from newsroom.tests.authority_helpers import proof
 from newsroom.tests.test_graphiti_operational_readiness import _rights, _unit
 from newsroom.tests.test_increment10_editorial import _evidence_facade, _ready_package
-from newsroom.tests.test_native_assessor import _model_package_value
 from newsroom.tests.test_increment10_ingress import _candidate, _receive
 from newsroom.tests.test_increment10_private_serving import _open
 from newsroom.tests.test_native_assessor import _model_package_value
@@ -209,11 +219,37 @@ def test_independent_source_evidence_holds_then_reaches_private_ack(tmp_path) ->
             for claim in assessed_package.governed_claims
         ),
     )
+    model_package = _model_package_value(assessed_package)
+    model_claims = model_package["governed_claims"]
+    assert [item["claim"] for item in model_claims] == list(
+        model_package["substantive_new_information"]
+    )
+    assert sum(item["claim_role"] == "HEADLINE" for item in model_claims) == 1
+    assert {
+        item["governed_claim_id"]
+        for item in model_package["qualification_evidence"]
+    } == {
+        item["claim_id"] for item in model_claims if item["claim_role"] == "HEADLINE"
+    }
+    assert model_package["geography"] == ["UK"]
+    assert model_package["categories"] == ["Politics and law"]
+    assert all(
+        item["claim"] in item["supporting_excerpt"]
+        and item["supporting_excerpt"] in passage
+        for item in model_claims
+    )
+
+    def model_assessor(value):
+        return AutonomousNativeEvidenceAssessor(
+            lambda _prompt: NativeAssessmentExecution(
+                canonical_json_bytes({"package": value}).decode(),
+                {},
+            )
+        )
+
     assessor = AutonomousNativeEvidenceAssessor(
         lambda _prompt: NativeAssessmentExecution(
-            canonical_json_bytes(
-                {"package": _model_package_value(assessed_package)}
-            ).decode(),
+            canonical_json_bytes({"package": model_package}).decode(),
             {},
         )
     )
@@ -231,6 +267,25 @@ def test_independent_source_evidence_holds_then_reaches_private_ack(tmp_path) ->
         for record in assessed.assessment_records
         if record["record_type"] == "SEMANTIC_RELATION_EVIDENCE"
     )
+
+    def paraphrased_claim(value):
+        value["governed_claims"][0]["claim"] = "The deadline was revised."
+
+    def unrecognised_latin_term(value):
+        value["governed_claims"][0][
+            "rendered_assertion_zh_hant_hk"
+        ] = "UK限期安排已經更新。"
+
+    malformed = deepcopy(model_package)
+    paraphrased_claim(malformed)
+    with pytest.raises(NativeEvidenceHold, match="ASSESSOR_CLAIM_BINDING_HOLD"):
+        model_assessor(malformed)(
+            version,
+            _base_package(assessed_package),
+            (source,),
+            (acquisition,),
+        )
+
     wrong_source = replace(
         assessed_package,
         governed_claims=(
@@ -339,6 +394,121 @@ def test_independent_source_evidence_holds_then_reaches_private_ack(tmp_path) ->
         evidence_packages=packages,
         bindings=bindings,
     )
+
+    def free_slug_category(value):
+        value["categories"] = ["immigration"]
+
+    def invented_substantive_summary(value):
+        value["substantive_new_information"] = [
+            "A summary which is not an exact governed claim."
+        ]
+
+    def unqualified_headline(value):
+        value["qualification_evidence"] = []
+
+    def standing_information(value):
+        value["substantive_new_information"] = []
+        value["qualification_evidence"] = []
+
+    for mutation, expected_reason in (
+        (standing_information, "NO_SUBSTANTIVE_NEW_INFORMATION"),
+        (free_slug_category, "UNRECOGNISED_CATEGORY"),
+        (
+            invented_substantive_summary,
+            "INVALID_SUBSTANTIVE_CLAIM_INVENTORY",
+        ),
+        (unqualified_headline, "UNQUALIFIED_HEADLINE_CLAIM"),
+        (unrecognised_latin_term, "INVALID_GOVERNED_CLAIM_EVIDENCE"),
+    ):
+        malformed = deepcopy(model_package)
+        mutation(malformed)
+        malformed_assessment = model_assessor(malformed)(
+            version,
+            _base_package(assessed_package),
+            (source,),
+            (acquisition,),
+        )
+        resolved_records = dict(evidence.retained.package.resolved_evidence_records)
+        resolved_records.update(
+            (
+                record["record_id"],
+                digest_bytes(canonical_json_bytes(record)),
+            )
+            for record in malformed_assessment.assessment_records
+        )
+        malformed_package = replace(
+            evidence.retained.package,
+            substantive_new_information=(
+                malformed_assessment.substantive_new_information
+            ),
+            governed_claims=malformed_assessment.governed_claims,
+            qualification_evidence=malformed_assessment.qualification_evidence,
+            selection_rationale=malformed_assessment.selection_rationale,
+            geography=malformed_assessment.geography,
+            categories=malformed_assessment.categories,
+            explicit_exclusions=malformed_assessment.explicit_exclusions,
+            resolved_evidence_records=tuple(sorted(resolved_records.items())),
+            evidence_gate_results=evidence.editorial_decision.evidence_gate_results,
+            evidence_gate_evidence=tuple(
+                EvidenceGateEvidence(
+                    gate,
+                    result,
+                    tuple(
+                        claim.claim_id
+                        for claim in malformed_assessment.governed_claims
+                    ),
+                    EVIDENCE_GATE_POLICY_VERSION,
+                )
+                for gate, result in evidence.editorial_decision.evidence_gate_results
+            ),
+            freshness_result="PASS",
+            integrity_result="PASS",
+        )
+        decision = DeterministicWriteAdmission().decide_candidate_identity(
+            candidate_id=malformed_package.candidate_id,
+            hypothesis_id=malformed_package.hypothesis_id,
+            package=malformed_package,
+            decided_at=evidence.editorial_decision.evaluated_at,
+        )
+        assert decision.decision != "WRITE_READY"
+        assert expected_reason in decision.stable_reason_codes
+
+    month_source = "The deadline changed after 30 months."
+    month_claim = replace(
+        evidence.retained.package.governed_claims[0],
+        claim=month_source,
+        supporting_excerpt=month_source,
+        rendered_assertion_zh_hant_hk="限期安排在30個月後更新。",
+    )
+    month_package = replace(
+        evidence.retained.package,
+        passages=(f"{passage}\n{month_source}",),
+        substantive_new_information=(
+            month_claim.claim,
+            evidence.retained.package.governed_claims[1].claim,
+        ),
+        governed_claims=(
+            month_claim,
+            evidence.retained.package.governed_claims[1],
+        ),
+    )
+    title, body, links = required_surface_copy(month_package)
+    month_validators = validate_writer_copy(
+        WriterCopy(
+            title,
+            body,
+            "newsroom.offline-exact-copy.v1",
+            month_package.digest,
+            links,
+        ),
+        month_package,
+    )
+    assert next(
+        item
+        for item in month_validators
+        if item.validator == "NUMERIC_AND_DATE_FIDELITY"
+    ).result == "FAIL"
+
     published = publisher.advance(
         evidence.retained.package_admission_id,
         evidence.editorial_decision,
