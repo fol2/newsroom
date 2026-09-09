@@ -56,7 +56,7 @@ def main(
         {"service": None if report is None else asdict(report), "public_effect": False},
         sort_keys=True,
     ))
-    return 0 if report is None or report.outcome == "COMPLETE" else 2
+    return 0 if report is None or report.outcome in {"COMPLETE", "DRAINED"} else 2
 
 
 __all__ = ["main"]

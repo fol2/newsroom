@@ -1,14 +1,16 @@
 import json
 import sqlite3
+import threading
 from contextlib import contextmanager
 
 import pytest
 
 from newsroom.control_plane.native_pipeline import NativePipeline, NativePipelineReport
 from newsroom.control_plane.native_service import (
-    NativeService, NativeServiceAlreadyRunning, _instance_lock,
+    NativeService, NativeServiceAlreadyRunning, NativeServiceReport,
+    _instance_lock,
 )
-from newsroom.control_plane.veto import VetoError
+from newsroom.control_plane.veto import OperatorDrainRequested, VetoError
 from scripts.hermes_native import main
 from newsroom.authority.canonical import digest_canonical
 
@@ -131,6 +133,36 @@ def test_native_service_preserves_veto_and_singleton_lock(tmp_path, monkeypatch)
             service.run(once=True)
 
 
+def test_native_service_operator_drain_is_terminal_without_qualification(
+    tmp_path, monkeypatch,
+):
+    service_event = threading.Event()
+    qualified = []
+
+    def tick(_cycle_id):
+        service_event.set()
+        return NativePipelineReport((), {"QUEUED": 1}, 1)
+
+    factory, opened = _pipeline(monkeypatch, tick)
+    report = _service(
+        tmp_path, factory, service_event=service_event,
+        cycle_id_factory=lambda: "drained-cycle",
+        qualify_once=lambda *_: qualified.append(True),
+    ).run(once=True)
+    assert report == NativeServiceReport("drained-cycle", "DRAINED", None, None)
+    assert qualified == []
+    assert opened == ["open", "close"]
+    with sqlite3.connect(tmp_path / "unpublished.sqlite3") as connection:
+        terminal = json.loads(connection.execute(
+            "SELECT payload_json FROM ledger "
+            "WHERE kind='NATIVE_SERVICE_CYCLE_TERMINAL'"
+        ).fetchone()[0])
+    assert terminal == {
+        "cycle_id": "drained-cycle", "outcome": "DRAINED",
+        "failure_class": None, "pipeline": None,
+    }
+
+
 def test_native_service_preflight_precedes_lock_ledger_and_pipeline(tmp_path, monkeypatch):
     factory, opened = _pipeline(
         monkeypatch, lambda _: pytest.fail("pipeline tick after failed preflight"),
@@ -204,6 +236,38 @@ def test_hermes_native_once_cli_reports_exact_terminal(tmp_path, monkeypatch, ca
             "cycle_id": "cli-cycle", "failure_class": None,
             "outcome": "COMPLETE",
             "pipeline": {"revision_states": {}, "sources": [], "unclassified_revisions": 0},
+        },
+    }
+
+
+def test_hermes_native_operator_drain_is_clean_and_not_an_owner_stop(
+    tmp_path, monkeypatch, capsys,
+):
+    service_event = threading.Event()
+
+    def tick(_cycle_id):
+        service_event.set()
+        raise OperatorDrainRequested
+
+    factory, _ = _pipeline(monkeypatch, tick)
+
+    def service_factory(args):
+        return NativeService(
+            pipeline_factory=factory, ledger_path=args.ledger,
+            lock_path=tmp_path / "drain-cli.lock", stop_check=lambda: None,
+            cycle_id_factory=lambda: "drain-cli-cycle",
+            service_event=service_event,
+        )
+
+    assert main(service_factory, [
+        "--once", "--ledger", str(tmp_path / "drain-cli.sqlite3"),
+        "--lock", str(tmp_path / "ignored.lock"),
+    ]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "public_effect": False,
+        "service": {
+            "cycle_id": "drain-cli-cycle", "failure_class": None,
+            "outcome": "DRAINED", "pipeline": None,
         },
     }
 

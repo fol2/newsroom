@@ -7127,6 +7127,58 @@ def test_required_route_circuit_defers_units_without_spend_or_retry_consumption(
     connection.close()
 
 
+def test_operator_drain_stops_before_next_ingest_after_current_attempt_settles(
+    tmp_path,
+) -> None:
+    from newsroom.tests.test_graphiti_operational_readiness import _unit
+
+    connection = connect(str(tmp_path / "operator-drain.sqlite3"))
+    now = datetime(2026, 9, 9, tzinfo=UTC)
+    units = tuple(
+        replace(unit, proving_run_id="native-source:" + unit.observation_digest)
+        for unit in (_unit(item_key="one"), _unit(item_key="two"))
+    )
+    drain = threading.Event()
+    calls = []
+
+    class Graphiti:
+        def ingest(self, unit):
+            calls.append(unit.ingest_id)
+            drain.set()
+            return _complete(unit, proposal_count=0, entity_count=0)
+
+    @contextmanager
+    def fence(_unit):
+        yield _DispatchAuthority(
+            {"current": True}, now + timedelta(minutes=15), lambda: None,
+        )
+
+    def run() -> int:
+        return _ingest(
+            connection, graphiti=Graphiti(), units=units, max_graphiti=2,
+            rights_check=lambda _unit: {"current": True}, rights_fence=fence,
+            clock=lambda: now, operator_drain_requested=drain.is_set,
+        )
+
+    assert run() == 1
+    assert len(calls) == 1
+    completed = next(unit for unit in units if unit.ingest_id == calls[0])
+    deferred = next(unit for unit in units if unit.ingest_id != calls[0])
+    assert connection.execute(
+        "SELECT outcome FROM unpublished_graphiti_ingest WHERE ingest_id=?",
+        (completed.ingest_id,),
+    ).fetchone() == ("COMPLETE",)
+    assert next_graphiti_attempt_number(connection, deferred.ingest_id) == 1
+
+    drain.clear()
+    assert run() == 1
+    assert set(calls) == {unit.ingest_id for unit in units}
+    assert connection.execute(
+        "SELECT count(*) FROM unpublished_graphiti_ingest WHERE outcome='COMPLETE'"
+    ).fetchone() == (2,)
+    connection.close()
+
+
 @pytest.mark.parametrize(
     "native,zeros,providers,unresolved,failures,eligible",
     [

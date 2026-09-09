@@ -1,5 +1,6 @@
 from contextlib import nullcontext
 from dataclasses import replace
+import threading
 from types import SimpleNamespace as NS
 
 import pytest
@@ -9,7 +10,7 @@ from newsroom.control_plane import native_pipeline as n
 from newsroom.control_plane.native_graphiti import NativeGraphitiOutcome
 from newsroom.control_plane.native_progress import NativeRevisionJournal
 from newsroom.control_plane.store import connect
-from newsroom.control_plane.veto import VetoError
+from newsroom.control_plane.veto import OperatorDrainRequested, VetoError
 from newsroom.tests.test_native_graphiti import _native
 
 
@@ -65,6 +66,130 @@ def test_native_pipeline_continues_multiple_revisions_and_skips_acknowledged(tmp
         pipeline.tick(cycle_id="second")
         assert tuple(calls) == first_calls + (("rights", "current"),)
         assert len(journal.units) == 2
+    finally:
+        connection.close()
+
+
+def test_native_pipeline_drains_between_revisions_and_restart_reuses_settled_work(
+    tmp_path, monkeypatch,
+):
+    pipeline, journal, connection, units, calls, dispositions = _open(
+        tmp_path, monkeypatch,
+    )
+    service_event = threading.Event()
+    original = pipeline._publish
+
+    class DrainAfterFirstPublication:
+        def advance(self, *, revision_id, candidate_version_id):
+            original.advance(
+                revision_id=revision_id,
+                candidate_version_id=candidate_version_id,
+            )
+            service_event.set()
+
+    pipeline._publish = DrainAfterFirstPublication()
+    pipeline._operator_drain_requested = service_event.is_set
+    try:
+        with pytest.raises(OperatorDrainRequested):
+            pipeline.tick(cycle_id="draining")
+        assert len([call for call in calls if call[0] == "graphiti"]) == 1
+        assert [
+            journal.progress[unit.revision_id]["stage"] for unit in units
+        ] == ["ACKNOWLEDGED", "GRAPHITI_COMPLETE"]
+        assert len([call for call in calls if call[0] == "publish"]) == 1
+
+        service_event.clear()
+        pipeline._publish = original
+        dispositions[0] = ()
+        report = pipeline.tick(cycle_id="restart")
+        assert report.revision_states == {"ACKNOWLEDGED": 2}
+        assert len([call for call in calls if call[0] == "graphiti"]) == 1
+        assert len([call for call in calls if call[0] == "publish"]) == 2
+    finally:
+        connection.close()
+
+
+def test_native_pipeline_lands_polled_work_before_operator_drain(
+    tmp_path, monkeypatch,
+):
+    pipeline, journal, connection, units, calls, _, = _open(tmp_path, monkeypatch)
+    service_event = threading.Event()
+    original_poll = pipeline._intake.poll
+
+    def poll_then_drain():
+        result = original_poll()
+        service_event.set()
+        return result
+
+    pipeline._intake = NS(poll=poll_then_drain)
+    pipeline._operator_drain_requested = service_event.is_set
+    try:
+        with pytest.raises(OperatorDrainRequested):
+            pipeline.tick(cycle_id="drain-after-poll")
+        assert set(journal.units) == {unit.revision_id for unit in units}
+        assert not any(call[0] == "graphiti" for call in calls)
+    finally:
+        connection.close()
+
+
+def test_native_pipeline_checkpoints_graphiti_results_before_operator_drain(
+    tmp_path, monkeypatch,
+):
+    pipeline, journal, connection, units, calls, _ = _open(tmp_path, monkeypatch)
+    service_event = threading.Event()
+    original = pipeline._graphiti
+
+    class GraphitiThenDrain:
+        def advance(self, selected, *, cycle_id):
+            result = original.advance(selected, cycle_id=cycle_id)
+            service_event.set()
+            return result
+
+    pipeline._graphiti = GraphitiThenDrain()
+    pipeline._operator_drain_requested = service_event.is_set
+    try:
+        with pytest.raises(OperatorDrainRequested):
+            pipeline.tick(cycle_id="drain-after-graphiti")
+        assert all(
+            journal.progress[unit.revision_id]["stage"] == "GRAPHITI_COMPLETE"
+            for unit in units
+        )
+        assert not any(call[0] in {"discovery", "publish"} for call in calls)
+    finally:
+        connection.close()
+
+
+def test_native_pipeline_checkpoints_candidate_before_operator_drain(
+    tmp_path, monkeypatch,
+):
+    pipeline, journal, connection, units, calls, dispositions = _open(
+        tmp_path, monkeypatch,
+    )
+    service_event = threading.Event()
+    dispositions[0] = ()
+    unit = units[0]
+    journal.land((unit,))
+    journal.advance(unit.revision_id, stage="GRAPHITI_COMPLETE", facts={
+        "graphiti_receipts": [{}],
+    })
+
+    def advance_then_drain(**kw):
+        service_event.set()
+        lead = kw["statuses"][0].lead
+        return (NS(
+            revision_id=lead.revision_id, state="CANDIDATE_ADMITTED",
+            triage=NS(candidate=NS(version_id="candidate:" + lead.item_key)),
+        ),)
+
+    monkeypatch.setattr(n, "advance_native_cycle", advance_then_drain)
+    pipeline._operator_drain_requested = service_event.is_set
+    try:
+        with pytest.raises(OperatorDrainRequested):
+            pipeline.tick(cycle_id="drain-after-candidate")
+        progress = journal.progress[unit.revision_id]
+        assert progress["stage"] == "CANDIDATE_ADMITTED"
+        assert progress["facts"]["candidate_version_id"] == "candidate:one"
+        assert not any(call[0] == "publish" for call in calls)
     finally:
         connection.close()
 

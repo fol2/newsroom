@@ -11,7 +11,7 @@ from newsroom.authority import UtcTimestamp
 
 from .native_cycle import advance_native_cycle
 from .native_progress import NativeRevisionJournal
-from .veto import VetoError
+from .veto import OperatorDrainRequested, VetoError
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +34,7 @@ class NativePipeline:
         actor_identity_digest: str, stop_check: Callable[[], None],
         stop_fence: Callable[[], ContextManager[None]],
         refresh_rights: Callable[[], None] = lambda: None,
+        operator_drain_requested: Callable[[], bool] = lambda: False,
         clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
     ) -> None:
         self._runtime, self._journal = runtime, journal
@@ -41,12 +42,19 @@ class NativePipeline:
         self._retrieval_for, self._collision, self._publish = retrieval_for, collision, publish
         self._actor, self._check, self._fence, self._clock = actor_identity_digest, stop_check, stop_fence, clock
         self._refresh_rights = refresh_rights
+        self._operator_drain_requested = operator_drain_requested
         self.runtime_identity_digest: str | None = None
+
+    def _drain_between_work(self) -> None:
+        if self._operator_drain_requested():
+            raise OperatorDrainRequested
 
     def tick(self, *, cycle_id: str) -> NativePipelineReport:
         self._check()
+        self._drain_between_work()
         self._refresh_rights()
         self._check()
+        self._drain_between_work()
         dispositions = self._intake.poll()
         self._journal.sources(dispositions)
         grouped = defaultdict(list)
@@ -55,6 +63,7 @@ class NativePipeline:
                 grouped[unit.revision_id].append(unit)
         for revision_id, units in grouped.items():
             self._journal.land(tuple(units))
+        self._drain_between_work()
 
         # Fixed disjoint cohorts attempt each revision at most once per tick.
         # Retained downstream work must not wait behind fresh model requests.
@@ -64,11 +73,13 @@ class NativePipeline:
             cohort = ready if facts.get("graphiti_receipts") else pending_revisions
             cohort.append((revision_id, units))
         self._advance_revisions(tuple(ready))
+        self._drain_between_work()
         pending_revisions = tuple(pending_revisions)
 
         # Extraction stays per ingest; projection remains one complete cohort.
         pending = tuple(unit for _, units in pending_revisions for unit in units)
         if pending:
+            self._drain_between_work()
             self._check()
             try:
                 results = self._graphiti.advance(pending, cycle_id=cycle_id)
@@ -104,6 +115,9 @@ class NativePipeline:
                             else "MULTIPLE_GRAPHITI_HOLDS"
                         )
                     self._journal.advance(revision_id, stage="GRAPHITI_COMPLETE" if complete else "GRAPHITI_HOLD", facts=facts)
+                self._drain_between_work()
+            except OperatorDrainRequested:
+                raise
             except VetoError:
                 raise
             except Exception as exc:
@@ -114,6 +128,7 @@ class NativePipeline:
                     })
 
         self._advance_revisions(pending_revisions)
+        self._drain_between_work()
         states = Counter(
             self._journal.progress.get(revision_id, {}).get("stage", "QUEUED")
             for revision_id in self._journal.units
@@ -126,6 +141,7 @@ class NativePipeline:
         # Each revision remains in the journal even when it disappears from the
         # next feed page. This is work continuation, not a fresh provider retry.
         for revision_id, units in revisions:
+            self._drain_between_work()
             self._check()
             previous = self._journal.progress.get(revision_id, {})
             if previous.get("stage") == "ASSESSMENT_INTERRUPTED":
@@ -191,9 +207,12 @@ class NativePipeline:
                     facts["candidate_version_id"] = candidate_version_id
                     self._journal.advance(revision_id, stage="CANDIDATE_ADMITTED", facts=facts)
                 stage = "PUBLICATION"
+                self._drain_between_work()
                 self._publish.advance(
                     revision_id=revision_id, candidate_version_id=candidate_version_id,
                 )
+            except OperatorDrainRequested:
+                raise
             except VetoError:
                 raise
             except Exception as exc:
@@ -206,3 +225,4 @@ class NativePipeline:
                     **self._journal.progress.get(revision_id, {}).get("facts", facts),
                     "reason": getattr(exc, "reason", getattr(exc, "reason_code", type(exc).__name__)),
                 })
+        self._drain_between_work()

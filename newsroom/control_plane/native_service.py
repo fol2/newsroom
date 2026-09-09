@@ -16,7 +16,7 @@ from pathlib import Path
 from newsroom.control_plane.native_pipeline import NativePipeline, NativePipelineReport
 from newsroom.authority.canonical import validate_sha256_digest
 from newsroom.control_plane.store import append_ledger, connect
-from newsroom.control_plane.veto import VetoError
+from newsroom.control_plane.veto import OperatorDrainRequested, VetoError
 
 LOCK_IDENTITY = "newsroom-hermes-native-service-v1\n"
 
@@ -73,6 +73,7 @@ class NativeService:
         cycle_id_factory: Callable[[], str] = lambda: str(uuid.uuid4()),
         qualify_once: Callable[[sqlite3.Connection, str], object] | None = None,
         preflight: Callable[[], None] = lambda: None,
+        service_event: threading.Event | None = None,
     ) -> None:
         if (
             not callable(pipeline_factory) or not callable(stop_check)
@@ -94,7 +95,7 @@ class NativeService:
         self._ledger_path, self._lock_path = ledger_path, lock_path
         self._stop_check = stop_check
         self._interval, self._backoff = interval_seconds, failure_backoff_seconds
-        self._shutdown = threading.Event()
+        self._shutdown = service_event or threading.Event()
         self._wait = wait or self._shutdown.wait
         self._cycle_id = cycle_id_factory
         self._qualify_once = qualify_once
@@ -139,12 +140,22 @@ class NativeService:
                                 "pipeline": None,
                             })
                             raise
+                        except OperatorDrainRequested:
+                            last = NativeServiceReport(
+                                cycle_id, "DRAINED", None, None,
+                            )
                         except Exception as exc:
                             last = NativeServiceReport(
                                 cycle_id, "FAILED", type(exc).__name__, None,
                             )
                         else:
-                            last = NativeServiceReport(cycle_id, "COMPLETE", None, report)
+                            drained = self._shutdown.is_set()
+                            last = NativeServiceReport(
+                                cycle_id,
+                                "DRAINED" if drained else "COMPLETE",
+                                None,
+                                None if drained else report,
+                            )
                         self._append(ledger, "NATIVE_SERVICE_CYCLE_TERMINAL", {
                             **binding,
                             "cycle_id": last.cycle_id,
@@ -154,11 +165,15 @@ class NativeService:
                                 None if last.pipeline is None else asdict(last.pipeline)
                             ),
                         })
-                        if once and self._qualify_once is not None:
+                        if (
+                            once and last.outcome == "COMPLETE"
+                            and not self._shutdown.is_set()
+                            and self._qualify_once is not None
+                        ):
                             if identity is None:
                                 raise ValueError("native qualification requires a runtime identity")
                             self._qualify_once(ledger, identity)
-                        if once or self._wait(
+                        if last.outcome == "DRAINED" or once or self._wait(
                             self._interval if last.outcome == "COMPLETE" else self._backoff
                         ):
                             break
