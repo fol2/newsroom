@@ -78,10 +78,15 @@ class NativePipeline:
                         facts.pop("reason", None)
                         facts["graphiti_receipts"] = [asdict(item) for item in outcomes]
                     else:
+                        held = tuple(
+                            item for item in outcomes
+                            if item.state in {"GRAPHITI_HOLD", "ADMISSION_HOLD"}
+                        )
+                        if not held:
+                            raise ValueError("native Graphiti incomplete revision lacks a hold")
                         reasons = {
                             item.reason
-                            for item in outcomes
-                            if item.state != "GRAPHITI_COMPLETE"
+                            for item in held
                         }
                         if any(type(reason) is not str or not reason for reason in reasons):
                             raise ValueError("native Graphiti hold reason differs")

@@ -75,38 +75,60 @@ def test_native_pipeline_retains_hold_reason_then_clears_it_on_continuation(
     pipeline, journal, connection, units, calls, dispositions = _open(
         tmp_path, monkeypatch,
     )
+    prefix = replace(units[1], chunk_count=2)
+    predecessor_held = replace(
+        prefix, chunk_ordinal=2, predecessor_ingest_id=prefix.ingest_id,
+    )
+    dispositions[0] = (
+        NS(source_id=units[0].source_id, status="READY", reason_code="RETAINED", units=(units[0],)),
+        NS(source_id=prefix.source_id, status="READY", reason_code="RETAINED", units=(prefix, predecessor_held)),
+    )
     attempts = 0
 
     class Graphiti:
         def advance(self, selected, *, cycle_id):
             nonlocal attempts
             attempts += 1
-            return tuple(
-                NativeGraphitiOutcome(
-                    unit.ingest_id,
-                    "GRAPHITI_HOLD" if attempts == 1 and unit.item_key == "two" else "GRAPHITI_COMPLETE",
-                    None if attempts == 1 and unit.item_key == "two" else unit.digest,
-                    "RIGHTS_OR_PREDECESSOR_HOLD" if attempts == 1 and unit.item_key == "two" else None,
-                )
-                for unit in selected
-            )
+            outcomes = []
+            for unit in selected:
+                state = "GRAPHITI_COMPLETE"
+                reason = None
+                if attempts == 1 and unit.revision_id == prefix.revision_id:
+                    state = (
+                        "EXTRACTION_COMPLETE"
+                        if unit.chunk_ordinal == 1
+                        else "GRAPHITI_HOLD"
+                    )
+                    reason = (
+                        None
+                        if unit.chunk_ordinal == 1
+                        else "RIGHTS_OR_PREDECESSOR_HOLD"
+                    )
+                outcomes.append(NativeGraphitiOutcome(
+                    unit.ingest_id, state,
+                    None if state == "GRAPHITI_HOLD" else "sha256:" + "a" * 64,
+                    reason,
+                ))
+            return tuple(outcomes)
 
     pipeline._graphiti = Graphiti()
     try:
         first = pipeline.tick(cycle_id="first-frontier")
         assert first.revision_states == {"ACKNOWLEDGED": 1, "GRAPHITI_HOLD": 1}
-        held = journal.progress[units[1].revision_id]
+        held = journal.progress[prefix.revision_id]
         assert held["facts"]["reason"] == "RIGHTS_OR_PREDECESSOR_HOLD"
-        assert held["facts"]["graphiti_outcomes"][0]["state"] == "GRAPHITI_HOLD"
+        assert [item["state"] for item in held["facts"]["graphiti_outcomes"]] == [
+            "EXTRACTION_COMPLETE", "GRAPHITI_HOLD",
+        ]
         first_publish = [call for call in calls if call[0] == "publish"]
 
         dispositions[0] = ()
         second = pipeline.tick(cycle_id="second-frontier")
         assert second.revision_states == {"ACKNOWLEDGED": 2}
         assert [call for call in calls if call[0] == "publish"] == first_publish + [
-            ("publish", units[1].revision_id),
+            ("publish", prefix.revision_id),
         ]
-        completed = journal.progress[units[1].revision_id]["facts"]
+        completed = journal.progress[prefix.revision_id]["facts"]
         assert "reason" not in completed
         assert "graphiti_outcomes" not in completed
         assert completed["graphiti_receipts"][0]["state"] == "GRAPHITI_COMPLETE"
