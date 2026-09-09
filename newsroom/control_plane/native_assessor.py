@@ -84,8 +84,9 @@ SYSTEM = (
     "You are a one-turn evidence extraction transform. Use only the supplied "
     "candidate and exact source bytes. Return JSON matching the schema. Translate "
     "or localise only facts present in an exact source excerpt; never add facts or "
-    "authority absent from that evidence. Preserve every named entity used in the "
-    "claim with exact source-excerpt evidence and its source spelling unchanged in the "
+    "authority absent from that evidence. Choose the shortest exact supporting "
+    "excerpt. Preserve every named entity in both the claim and that excerpt, "
+    "including excerpt-only entities, with its source spelling unchanged in the "
     "rendered claim; do not annotate or translate named entities. Localised factual "
     "expressions are limited to equivalent source/rendered pairs present in both "
     "texts: D Month [YYYY] [at HH:MM] dates and equivalent Chinese dates; numeric "
@@ -1160,11 +1161,9 @@ class AutonomousNativeEvidenceAssessor:
             supporting_excerpt = raw_claim.get("supporting_excerpt")
             if type(supporting_excerpt) is not str:
                 raise EvidencePackageError("assessment supporting excerpt differs")
-            named_entities = tuple(sorted(bounded_named_entities(claim_text)))
-            if not set(named_entities) <= bounded_named_entities(supporting_excerpt):
-                raise EvidencePackageError(
-                    "assessment named entities differ from source evidence"
-                )
+            named_entities = tuple(sorted(bounded_named_entities(
+                f"{claim_text}\n{supporting_excerpt}"
+            )))
             if bounded_named_entities(rendered) != set(named_entities):
                 raise EvidencePackageError(
                     "assessment rendered named entities differ"

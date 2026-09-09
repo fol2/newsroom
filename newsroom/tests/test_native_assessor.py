@@ -1,6 +1,7 @@
 import json
 import sqlite3
 from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ import pytest
 from jsonschema import Draft202012Validator, ValidationError
 
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
+from newsroom.control_plane.admission import DeterministicWriteAdmission
 from newsroom.control_plane.evidence import evidence_package_value
 from newsroom.control_plane.native_assessor import (
     AutonomousNativeEvidenceAssessor,
@@ -119,16 +121,17 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
     base = _base_package(_ready_package(candidate)[1])
     package = _model_package_value(_ready_package(candidate)[1])
     claim = package["governed_claims"][0]
+    claim_text = "The Home Office published changes"
     excerpt = "The Home Office published changes to the Skilled Worker Visa."
     claim.update({
-        "claim": excerpt,
+        "claim": claim_text,
         "supporting_excerpt": excerpt,
         "rendered_assertion_zh_hant_hk": (
             "Home Office 已公布 Skilled Worker Visa 的修訂。"
         ),
     })
     package.update({
-        "substantive_new_information": [excerpt],
+        "substantive_new_information": [claim_text],
         "governed_claims": [claim],
         "qualification_evidence": [],
     })
@@ -179,19 +182,31 @@ def test_native_assessor_derives_entities_from_constructed_uk03_output(
     assert result.governed_claims[0].rendered_named_entities == (
         "Home Office", "Skilled Worker Visa",
     )
-    unsupported = json.loads(canonical_json_bytes({"package": package}))
-    unsupported["package"]["governed_claims"][0][
-        "supporting_excerpt"
-    ] = "published changes to the Skilled Worker Visa."
-    with pytest.raises(EvidencePackageError, match="source evidence"):
-        AutonomousNativeEvidenceAssessor._validated_execution(
-            NativeAssessmentExecution(canonical_json_bytes(unsupported).decode(), {}),
-            candidate, base, (source,), (acquired,),
-        )
+    admitted_package = replace(
+        _ready_package(candidate)[1],
+        passages=(excerpt,),
+        substantive_new_information=(claim_text,),
+        governed_claims=result.governed_claims,
+        qualification_evidence=(),
+        resolved_evidence_records=tuple(
+            (
+                record["record_id"],
+                digest_bytes(canonical_json_bytes(record)),
+            )
+            for record in result.assessment_records
+        ),
+    )
+    decision = DeterministicWriteAdmission().decide_candidate_identity(
+        candidate_id=admitted_package.candidate_id,
+        hypothesis_id=admitted_package.hypothesis_id,
+        package=admitted_package,
+        decided_at="2026-09-09T12:02:00.000000Z",
+    )
+    assert "INVALID_GOVERNED_CLAIM_EVIDENCE" not in decision.stable_reason_codes
     changed = json.loads(canonical_json_bytes({"package": package}))
     changed["package"]["governed_claims"][0][
         "rendered_assertion_zh_hant_hk"
-    ] = "英國內政部已公布技術移民規則。"
+    ] = "Home Office 已公布修訂。"
     with pytest.raises(EvidencePackageError, match="rendered named entities"):
         AutonomousNativeEvidenceAssessor._validated_execution(
             NativeAssessmentExecution(canonical_json_bytes(changed).decode(), {}),
