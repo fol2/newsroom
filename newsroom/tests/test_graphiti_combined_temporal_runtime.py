@@ -574,6 +574,188 @@ def test_exact_name_resolution_does_not_call_the_embedder() -> None:
     assert resolved[0].attributes["resolution"] == "DETERMINISTIC_EXISTING_NODE"
 
 
+def test_unresolved_mentions_use_one_ordered_embedding_batch() -> None:
+    from newsroom.graphiti_adapter.embedding_meter import MeteredOpenAIEmbedder
+
+    mentions = [
+        SimpleNamespace(
+            uuid=f"mention:{index}",
+            name=f"Agency\n{index}",
+            attributes={"entity_type_id": 2},
+        )
+        for index in range(7)
+    ]
+    canonical = SimpleNamespace(
+        uuid="canonical:agency",
+        name="Existing Agency",
+        name_embedding=[1.0, 0.0],
+        attributes={
+            "entity_type_id": 2,
+            "permitted_source_ids": ("source:legco",),
+        },
+    )
+    calls: list[list[str]] = []
+    observer_events: list[str] = []
+
+    class Embeddings:
+        async def create(self, **values: object) -> object:
+            names = list(values["input"])
+            calls.append(names)
+            observer_events.append("DISPATCH")
+            return SimpleNamespace(
+                id="mention-batch",
+                data=[
+                    SimpleNamespace(embedding=[1.0, 0.0])
+                    for _name in names
+                ],
+                usage={
+                    "prompt_tokens": len(names),
+                    "total_tokens": len(names),
+                    "cost": "0",
+                },
+            )
+
+    class Observer:
+        def before_embedding_invocation(self, **_values: object) -> object:
+            observer_events.append("ALLOCATE")
+            return "mention-batch"
+
+        def after_embedding_invocation(
+            self, token: object, *, outcome: str, usage: dict[str, object]
+        ) -> None:
+            assert token == "mention-batch"
+            assert usage["total_tokens"] == 7
+            observer_events.append(outcome)
+
+    meter = MeteredOpenAIEmbedder(
+        SimpleNamespace(
+            client=SimpleNamespace(embeddings=Embeddings()),
+            config=SimpleNamespace(
+                embedding_model="openai/text-embedding-3-large",
+                embedding_dim=2,
+            ),
+        ),
+        invocation_observer=Observer(),
+    )
+
+    resolved, uuid_map, _extra = asyncio.run(
+        resolve_nodes_with_optional_embeddings(
+            mentions,
+            (canonical,),
+            source_id="source:legco",
+            embed_names=meter.create_batch,
+        )
+    )
+
+    assert calls == [[f"Agency {index}" for index in range(7)]]
+    assert observer_events == ["ALLOCATE", "DISPATCH", "COMPLETE"]
+    assert meter.receipt()["request_count"] == 1
+    assert resolved == mentions
+    assert uuid_map == {
+        f"mention:{index}": "canonical:agency" for index in range(7)
+    }
+    assert all(
+        mention.attributes["resolution"] == "DETERMINISTIC_EXISTING_NODE"
+        for mention in mentions
+    )
+    assert canonical.name_embedding == [1.0, 0.0]
+    assert all(not hasattr(mention, "name_embedding") for mention in mentions)
+
+
+@pytest.mark.parametrize("canonical_embedding", ([1.0, 0.0], [0.0, 0.0]))
+def test_unresolved_new_mention_reuses_validated_name_embedding(
+    canonical_embedding: list[float],
+) -> None:
+    new = SimpleNamespace(
+        uuid="mention:new",
+        name="New Agency",
+        attributes={"entity_type_id": 2},
+    )
+    known = SimpleNamespace(
+        uuid="mention:known",
+        name="Existing Agency",
+        attributes={"entity_type_id": 2},
+    )
+    canonical = SimpleNamespace(
+        uuid="canonical:agency",
+        name="Existing Agency",
+        name_embedding=canonical_embedding,
+        attributes={
+            "entity_type_id": 2,
+            "permitted_source_ids": ("source:legco",),
+        },
+    )
+    calls: list[list[str]] = []
+
+    async def embed_names(names: list[str]) -> list[list[float]]:
+        calls.append(names)
+        return [[0.0, 1.0]]
+
+    resolved, uuid_map, _extra = asyncio.run(
+        resolve_nodes_with_optional_embeddings(
+            [new, known],
+            (canonical,),
+            source_id="source:legco",
+            embed_names=embed_names,
+        )
+    )
+
+    assert calls == [["New Agency"]]
+    assert resolved == [new, known]
+    assert uuid_map == {
+        "mention:new": "mention:new",
+        "mention:known": "canonical:agency",
+    }
+    assert new.attributes["resolution"] == "DETERMINISTIC_NEW_NODE"
+    assert new.name_embedding == [0.0, 1.0]
+    assert known.attributes["resolution"] == "DETERMINISTIC_EXISTING_NODE"
+    assert canonical.name_embedding == canonical_embedding
+    assert not hasattr(known, "name_embedding")
+
+
+@pytest.mark.parametrize(
+    "embeddings",
+    (
+        [[1.0, 0.0]],
+        [[1.0], [1.0]],
+    ),
+)
+def test_unresolved_mention_embedding_batch_rejects_malformed_output(
+    embeddings: list[list[float]],
+) -> None:
+    mentions = [
+        SimpleNamespace(
+            uuid=f"mention:{index}",
+            name=f"Agency {index}",
+            attributes={"entity_type_id": 2},
+        )
+        for index in range(2)
+    ]
+    canonical = SimpleNamespace(
+        uuid="canonical:agency",
+        name="Existing Agency",
+        name_embedding=[1.0, 0.0],
+        attributes={
+            "entity_type_id": 2,
+            "permitted_source_ids": ("source:legco",),
+        },
+    )
+
+    async def embed_names(_names: list[str]) -> list[list[float]]:
+        return embeddings
+
+    with pytest.raises(ValueError, match="embedding (batch cardinality|vector) differs"):
+        asyncio.run(
+            resolve_nodes_with_optional_embeddings(
+                mentions,
+                (canonical,),
+                source_id="source:legco",
+                embed_names=embed_names,
+            )
+        )
+    assert all(not hasattr(mention, "name_embedding") for mention in mentions)
+
+
 def test_similar_distinct_and_low_margin_mentions_are_not_forced_to_merge() -> None:
     distinct = SimpleNamespace(
         uuid="mention:distinct",
@@ -796,6 +978,8 @@ def test_ambiguous_hold_does_not_mint_or_guess_relation_endpoint() -> None:
     case = fixture("pair-current")
     completed: dict[str, object] = {}
     persisted: list[tuple[list[object], list[object]]] = []
+    resolved_mentions: list[object] = []
+    resolved_identities: dict[str, str] = {}
 
     class Guard:
         async def begin(self) -> object:
@@ -838,7 +1022,7 @@ def test_ambiguous_hold_does_not_mint_or_guess_relation_endpoint() -> None:
 
     async def resolve(nodes: list[object]):
         source = next(node for node in nodes if node.name == "Legislative Council")
-        return resolve_nodes_locally(
+        resolved, uuid_map, duplicates = resolve_nodes_locally(
             nodes,
             candidates,
             source_id=case.revision.source_id,
@@ -847,6 +1031,9 @@ def test_ambiguous_hold_does_not_mint_or_guess_relation_endpoint() -> None:
                 (str(source.uuid), "canonical:legco-b"): 910_000,
             },
         )
+        resolved_mentions.extend(resolved)
+        resolved_identities.update(uuid_map)
+        return resolved, uuid_map, duplicates
 
     async def persist(nodes: list[object], edges: list[object]) -> None:
         persisted.append((nodes, edges))
@@ -871,23 +1058,21 @@ def test_ambiguous_hold_does_not_mint_or_guess_relation_endpoint() -> None:
         )
     )
 
-    assert leaf.node_resolutions[0] == "AMBIGUOUS_HOLD"
-    assert persisted and [node.name for node in persisted[0][0]] == [
-        "Technology and Living curriculum"
+    held = resolved_mentions[0]
+    assert held.attributes["resolution"] == "AMBIGUOUS_HOLD"
+    assert held.attributes["resolution_basis"] == "LOW_CONFIDENCE_OR_MARGIN"
+    assert list(held.attributes["considered_canonical_entity_ids"]) == [
+        "canonical:legco-a", "canonical:legco-b",
     ]
-    assert persisted[0][1] == []
+    assert str(held.uuid) not in resolved_identities
+    # The accepted empty-effect contract does not persist a leftover entity
+    # when its only relation has an ambiguous endpoint.
+    assert leaf.nodes == leaf.edges == leaf.node_resolutions == ()
+    assert persisted == []
+    assert completed["zero_proposal_effect"] == "EXPLICIT"
     assert completed["invocation_count"] == 1
     proposal = completed["proposal_receipt"]
-    assert proposal["entity_mentions"][0]["canonical_identity"] is None
-    assert proposal["entity_mentions"][0]["entity_resolution_proposal"] == {
-        "outcome": "AMBIGUOUS_HOLD",
-        "basis": "LOW_CONFIDENCE_OR_MARGIN",
-        "considered_canonical_entity_ids": [
-            "canonical:legco-a",
-            "canonical:legco-b",
-        ],
-        "provider_leaf_count": 0,
-    }
-    assert proposal["relation_proposals"][0]["proposal_status"] == (
-        "AMBIGUOUS_HOLD_ENDPOINT"
-    )
+    assert proposal["entity_mentions"] == proposal["wire_payload"]["entities"]
+    assert proposal["relation_proposals"] == proposal["wire_payload"]["facts"]
+    assert all("canonical_identity" not in item for item in proposal["entity_mentions"])
+    assert all("source_identity" not in item for item in proposal["relation_proposals"])

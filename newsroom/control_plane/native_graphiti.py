@@ -25,7 +25,7 @@ from newsroom.projection.models import ProjectionGenerationId, ProjectionGenerat
 
 from .corpus import CorpusIngestUnit
 from .cycle import _DispatchAuthority, _ingest
-from .graphiti import EvaluationGraphitiRunner
+from .graphiti import EvaluationGraphitiRunner, graphiti_required_route_holds
 from .graphiti_admission import GraphitiAdmissionConsumerError
 from .graphiti_admission_integration import compose_existing_graphiti_admission_consumer
 from .model_usage import ModelUsageService
@@ -141,6 +141,8 @@ class NativeGraphitiProcessor:
             rights_fence=self._fence, clock=self._clock,
             model_usage=self._usage, cycle_id=cycle_id,
         )
+        self._settle_missing_subscription_usage(units)
+        route_held = bool(graphiti_required_route_holds(self._usage))
         outcomes = []
         complete = []
         for unit in units:
@@ -153,7 +155,12 @@ class NativeGraphitiProcessor:
                 outcomes.append(NativeGraphitiOutcome(unit.ingest_id, "EXTRACTION_COMPLETE", str(row[1]), None))
             else:
                 failures, dead = graphiti_failure_state(self._connection, unit.ingest_id)
-                reason = "PARTIAL_EXTRACTION" if row is not None else "DEAD_LETTER" if dead else "RETRY_PENDING" if failures else "RIGHTS_OR_PREDECESSOR_HOLD"
+                reason = (
+                    "REQUIRED_MODEL_ROUTE_CIRCUIT_OPEN" if route_held else
+                    "PARTIAL_EXTRACTION" if row is not None else
+                    "DEAD_LETTER" if dead else "RETRY_PENDING" if failures else
+                    "RIGHTS_OR_PREDECESSOR_HOLD"
+                )
                 outcomes.append(NativeGraphitiOutcome(unit.ingest_id, "GRAPHITI_HOLD", None, reason))
         # Never project a prefix of a multi-chunk revision. An independently
         # complete revision may still advance while another revision is held.
@@ -309,6 +316,36 @@ class NativeGraphitiProcessor:
                         None,
                     )
         return tuple(statuses[unit.ingest_id] for unit in units)
+
+    def _settle_missing_subscription_usage(
+        self, units: tuple[CorpusIngestUnit, ...],
+    ) -> None:
+        if self._usage is None:
+            return
+        ingest_ids = {unit.ingest_id for unit in units}
+        rows = self._connection.execute(
+            "SELECT a.invocation_id,a.canonical_digest,t.terminal_digest,e.record_json "
+            "FROM model_invocation_allocations a "
+            "JOIN model_invocation_terminals t ON t.invocation_id=a.invocation_id "
+            "JOIN model_work_envelopes e ON e.envelope_id=a.envelope_id "
+            "WHERE a.workload_class='GRAPHITI_CHAT_PRIMARY' "
+            "AND a.provider='cursor-agent-cli' AND t.usage_status='UNREPORTED' "
+            "AND t.failure_class='MISSING_PROVIDER_TELEMETRY' "
+            "AND NOT EXISTS (SELECT 1 FROM model_usage_conservative_dispositions d "
+            "WHERE d.invocation_id=a.invocation_id)"
+        ).fetchall()
+        for invocation_id, allocation_digest, terminal_digest, envelope_raw in rows:
+            if json.loads(envelope_raw).get("ingest_id") not in ingest_ids:
+                continue
+            # The usage service independently validates the exact native source,
+            # qualified policy and dispatch. This retains ESTIMATED accounting,
+            # never fabricated telemetry, and does not release a route circuit.
+            self._usage.disposition_native_unreported_subscription_usage(
+                invocation_id=invocation_id,
+                expected_terminal_digest=terminal_digest,
+                expected_allocation_digest=allocation_digest,
+                observed_at=self._clock(),
+            )
 
     def _cohort_state(self, exact: tuple[str, ...], state: str) -> None:
         cohort_id = digest_canonical(exact)

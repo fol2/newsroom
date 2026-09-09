@@ -246,6 +246,60 @@ def test_retain_replay_reopen_and_guarded_heads(tmp_path) -> None:
         open_event_hypothesis_lineage_authority(**args)
 
 
+def test_lineage_read_rejects_exact_authority_provenance_tamper(tmp_path) -> None:
+    seed, args, receipt = _seed(tmp_path)
+    authority = open_event_hypothesis_lineage_authority(**args)
+    authority.retain(receipt.canonical_bytes, proof=seed[0][3])
+    connection = sqlite3.connect(seed[1], isolation_level=None)
+    try:
+        connection.execute("DROP TRIGGER immutable_authorization_requests_update")
+        connection.execute(
+            "UPDATE authorization_requests SET canonical_bytes=? WHERE "
+            "request_digest=(SELECT e.authorization_request_digest FROM "
+            "event_hypothesis_lineage l JOIN ledger_events e "
+            "ON e.event_id=l.authority_event_id WHERE l.lineage_id=?)",
+            (b"{}", receipt.lineage_id),
+        )
+    finally:
+        connection.close()
+    try:
+        with pytest.raises(ValueError, match="lineage load failed"):
+            authority.load(receipt.lineage_id)
+    finally:
+        authority.close()
+
+
+def test_lineage_reopen_rejects_unrelated_authority_corruption(tmp_path) -> None:
+    seed, args, receipt = _seed(tmp_path)
+    authority = open_event_hypothesis_lineage_authority(**args)
+    authority.retain(receipt.canonical_bytes, proof=seed[0][3])
+    authority.close()
+    connection = sqlite3.connect(seed[1], isolation_level=None)
+    try:
+        trigger_sql = str(
+            connection.execute(
+                "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?",
+                ("immutable_authority_payloads_update",),
+            ).fetchone()[0]
+        )
+        connection.execute("DROP TRIGGER immutable_authority_payloads_update")
+        connection.execute(
+            "UPDATE authority_payloads SET payload_bytes=? WHERE payload_id=("
+            "SELECT p.payload_id FROM authority_payloads p "
+            "WHERE p.payload_bytes IS NOT NULL AND NOT EXISTS("
+            "SELECT 1 FROM event_hypothesis_lineage l JOIN ledger_events e "
+            "ON e.event_id=l.authority_event_id WHERE e.payload_id=p.payload_id) "
+            "LIMIT 1)",
+            (b"{}",),
+        )
+        connection.execute(trigger_sql)
+    finally:
+        connection.close()
+
+    with pytest.raises(ValueError, match="lineage authority open failed"):
+        open_event_hypothesis_lineage_authority(**args)
+
+
 def test_trigger_preserving_fk_clean_aggregate_rewrite_fails_closed(
     tmp_path,
 ) -> None:

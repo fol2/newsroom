@@ -27,7 +27,10 @@ from newsroom.authority.migrations import (
     apply_pending_migrations,
     prepare_pending_migration_backup,
 )
-from newsroom.authority.persistence import AuthoritySchemaError
+from newsroom.authority.persistence import (
+    AuthorityPersistenceError,
+    AuthoritySchemaError,
+)
 from newsroom.authority.story_candidate_system import (
     _open_unlocked_story_candidate_authority_for_test,
 )
@@ -1285,6 +1288,62 @@ def test_real_successor_commits_then_history_current_and_reopen_retain_both_vers
         )
     finally:
         reopened.close()
+
+
+def test_candidate_read_rejects_exact_authority_payload_tamper(tmp_path: Path) -> None:
+    adapter = _Adapter(tmp_path)
+    location = adapter.create_location()
+    handle = adapter.open_handle(location)
+    try:
+        handle.submit(_generic("record-1"))
+        row = handle._row("record-1")
+        assert row is not None
+        version_id = str(row[1])
+        store = handle._opened()._store
+        store._execute_test_sql("DROP TRIGGER immutable_authority_payloads_update")
+        store._execute_test_sql(
+            "UPDATE authority_payloads SET payload_bytes=? WHERE payload_id=("
+            "SELECT e.payload_id FROM story_candidate_admission_receipts_v2 r "
+            "JOIN ledger_events e ON e.event_id=r.authority_event_id "
+            "WHERE r.version_id=?)",
+            (b"{}", version_id),
+        )
+
+        with pytest.raises(AuthorityPersistenceError, match="payload digest"):
+            handle._opened().load_version(version_id)
+    finally:
+        handle.close()
+
+
+def test_candidate_reopen_rejects_unrelated_authority_corruption(
+    tmp_path: Path,
+) -> None:
+    adapter = _Adapter(tmp_path)
+    location = adapter.create_location()
+    handle = adapter.open_handle(location)
+    handle.submit(_generic("record-1"))
+    store = handle._opened()._store
+    trigger_sql = str(
+        store._connection.execute(
+            "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?",
+            ("immutable_authority_payloads_update",),
+        ).fetchone()[0]
+    )
+    store._execute_test_sql("DROP TRIGGER immutable_authority_payloads_update")
+    store._execute_test_sql(
+        "UPDATE authority_payloads SET payload_bytes=? WHERE payload_id=("
+        "SELECT p.payload_id FROM authority_payloads p "
+        "WHERE p.payload_bytes IS NOT NULL AND NOT EXISTS("
+        "SELECT 1 FROM story_candidate_admission_receipts_v2 r "
+        "JOIN ledger_events e ON e.event_id=r.authority_event_id "
+        "WHERE e.payload_id=p.payload_id) LIMIT 1)",
+        (b"{}",),
+    )
+    store._execute_test_sql(trigger_sql)
+    handle.close()
+
+    with pytest.raises(AuthorityPersistenceError, match="payload digest"):
+        adapter.open_handle(location)._opened()
 
 
 def test_candidate_read_verifies_shared_upstream_once_for_all_relationships(

@@ -201,6 +201,7 @@ class _CandidateStore(_EventAuthorityStore):
                 _issuer=issuer,
             )
             with self._lock, self._transaction():
+                self._verify_global_event_coverage()
                 self._verify()
         except BaseException:
             try:
@@ -277,6 +278,7 @@ class _CandidateStore(_EventAuthorityStore):
         row = self._row(digest)
         if row is None:
             raise CandidateContractError("Candidate receipt coverage differs")
+        self._validate_retained_event(str(row["authority_event_id"]))
         admission, candidate, version, collision, comparator, disposition_ids = (
             self._receipt(row)
         )
@@ -420,13 +422,12 @@ class _CandidateStore(_EventAuthorityStore):
         }
 
     def _verify_local(self):
-        self._validate_relational_invariants(self._connection)
-        self._validate_immutable_records(self._connection)
-        self._validate_registry_coverage(self._connection)
+        # The opener validates the whole shared store. Runtime reads retain
+        # this complete domain history and each event's exact authority closure.
         verified = self._all_receipts()
         event_count = self._connection.execute(
-            "SELECT COUNT(*) FROM ledger_events WHERE event_type=?",
-            (candidate_command_definition().event_type,),
+            "SELECT COUNT(*) FROM ledger_events WHERE aggregate_type=?",
+            (candidate_command_definition().aggregate_type,),
         ).fetchone()[0]
         if event_count != len(verified):
             raise CandidateContractError("Candidate event coverage differs")
@@ -474,9 +475,25 @@ class _CandidateStore(_EventAuthorityStore):
             validate_candidate_first_version(first[1], first[2])
             for previous, successor in zip(values, values[1:], strict=False):  # noqa: RUF007
                 validate_candidate_version_successor(previous[2], successor[2])
-        if self._connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
-            raise CandidateContractError("Candidate foreign keys differ")
+        for table in (
+            "story_candidate_admission_receipts_v2",
+            "story_candidate_collision_bindings", "story_candidate_heads",
+        ):
+            if self._connection.execute(
+                f'PRAGMA foreign_key_check("{table}")'
+            ).fetchone() is not None:
+                raise CandidateContractError("Candidate foreign keys differ")
         return verified
+
+    def _verify_global_event_coverage(self):
+        # Opening still detects orphan events even with a forged aggregate tag.
+        counts = self._connection.execute(
+            "SELECT (SELECT count(*) FROM ledger_events WHERE event_type=?),"
+            "(SELECT count(*) FROM story_candidate_admission_receipts_v2)",
+            (candidate_command_definition().event_type,),
+        ).fetchone()
+        if counts[0] != counts[1]:
+            raise CandidateContractError("Candidate event coverage differs")
 
     def _verify(self):
         verified = self._verify_local()
@@ -581,6 +598,7 @@ class _CandidateStore(_EventAuthorityStore):
         discovery = _create_discovery_governing_producer_read_port(
             self._connection,
             object_admission_payload_validator=self._validate_object_admission_payload_record,
+            validate_retained_event=self._validate_retained_event,
         ).require_current_governing_producers(lead_ids)
         return (
             snapshot,

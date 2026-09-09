@@ -169,6 +169,7 @@ class _LineageStore(_EventAuthorityStore):
                 _issuer=issuer,
             )
             with self._lock, self._transaction():
+                self._verify_global_event_coverage()
                 self._verify()
         except BaseException:
             try:
@@ -225,6 +226,7 @@ class _LineageStore(_EventAuthorityStore):
 
     def _load_row(self, lineage_id: str) -> HypothesisLineageReceipt:
         row = self._row(lineage_id)
+        self._validate_retained_event(str(row["authority_event_id"]))
         receipt = HypothesisLineageReceipt.from_canonical_bytes(
             bytes(row["receipt_bytes"])
         )
@@ -372,13 +374,22 @@ class _LineageStore(_EventAuthorityStore):
             )
         )
 
-    def _verify(self, required_relationship_digests: tuple[str, ...] = ()):
-        self._validate_relational_invariants(self._connection)
-        self._validate_immutable_records(self._connection)
-        self._validate_registry_coverage(self._connection)
+    def _verify_global_event_coverage(self) -> None:
         orphan = self._connection.execute(
-            "SELECT l.lineage_id FROM event_hypothesis_lineage l LEFT JOIN ledger_events e ON e.event_id=l.authority_event_id WHERE e.event_id IS NULL OR e.event_type!=? UNION ALL SELECT e.event_id FROM ledger_events e LEFT JOIN event_hypothesis_lineage l ON l.authority_event_id=e.event_id WHERE e.event_type=? AND l.lineage_id IS NULL LIMIT 1",
-            (LINEAGE_EVENT_TYPE, LINEAGE_EVENT_TYPE),
+            "SELECT e.event_id FROM ledger_events e LEFT JOIN "
+            "event_hypothesis_lineage l ON l.authority_event_id=e.event_id "
+            "WHERE e.event_type=? AND l.lineage_id IS NULL LIMIT 1",
+            (LINEAGE_EVENT_TYPE,),
+        ).fetchone()
+        if orphan is not None:
+            raise AuthoritySchemaError("lineage event coverage differs")
+
+    def _verify(self, required_relationship_digests: tuple[str, ...] = ()):
+        # Preserve domain replay and exact per-event authority checks without
+        # rescanning unrelated source/Graphiti history on every native read.
+        orphan = self._connection.execute(
+            "SELECT l.lineage_id FROM event_hypothesis_lineage l LEFT JOIN ledger_events e ON e.event_id=l.authority_event_id WHERE e.event_id IS NULL OR e.event_type!=? UNION ALL SELECT e.event_id FROM ledger_events e LEFT JOIN event_hypothesis_lineage l ON l.authority_event_id=e.event_id WHERE e.aggregate_type=? AND (e.event_type!=? OR l.lineage_id IS NULL) LIMIT 1",
+            (LINEAGE_EVENT_TYPE, LINEAGE_AGGREGATE_TYPE, LINEAGE_EVENT_TYPE),
         ).fetchone()
         if orphan is not None:
             raise AuthoritySchemaError("lineage event coverage differs")

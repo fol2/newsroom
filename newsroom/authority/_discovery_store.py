@@ -113,12 +113,13 @@ _DISCOVERY_RECORD_SPECS: dict[str, tuple[str, str, TrustScope]] = {
 }
 
 class _DiscoveryGoverningProducerReader:
-    __slots__ = ("_connection", "_owner", "_object_payload_validator")
+    __slots__ = ("_connection", "_owner", "_object_payload_validator", "_validate_retained_event")
 
-    def __init__(self, connection: sqlite3.Connection, object_payload_validator=None) -> None:
+    def __init__(self, connection: sqlite3.Connection, object_payload_validator=None, validate_retained_event=None) -> None:
         self._connection = connection
         self._owner = get_ident()
         self._object_payload_validator = object_payload_validator
+        self._validate_retained_event = validate_retained_event
 
     def _require_transaction(self) -> None:
         if (
@@ -142,7 +143,11 @@ class _DiscoveryGoverningProducerReader:
         ):
             raise DiscoveryContractError("Lead IDs must be exact ordered unique values")
         connection = self._connection
-        _validate_discovery_reads_in_transaction(connection, self._object_payload_validator)
+        _validate_discovery_reads_in_transaction(
+            connection,
+            self._object_payload_validator,
+            self._validate_retained_event,
+        )
         result: list[tuple[NewsLead, DiscoverySignal, GateDecision]] = []
         for lead_id in lead_ids:
             lead_row = _DiscoveryAuthorityStore._row(
@@ -187,7 +192,54 @@ class _DiscoveryGoverningProducerReader:
         return tuple(result)
 
 
-def _validate_discovery_reads_in_transaction(connection: sqlite3.Connection, object_payload_validator=None) -> None:
+def _validate_discovery_domain_reads(
+    connection: sqlite3.Connection,
+    validate_retained_event: Callable[[str], None],
+) -> None:
+    domain_rows = (
+        ("discovery_signals", _DiscoveryAuthorityStore._signal_from_row),
+        ("discovery_gate_decisions", _DiscoveryAuthorityStore._gate_from_row),
+        ("news_leads", _DiscoveryAuthorityStore._lead_from_row),
+        ("discovery_watch_conditions", _DiscoveryAuthorityStore._watch_from_row),
+        ("lead_disposition_decisions", _DiscoveryAuthorityStore._disposition_from_row),
+    )
+    for table, decoder in domain_rows:
+        for row in connection.execute(f"SELECT * FROM {table}"):
+            validate_retained_event(str(row["authority_event_id"]))
+            record = decoder(connection, row, replayed=False)
+            if table == "discovery_signals":
+                _DiscoveryAuthorityStore._require_exact_signal_lineage(
+                    connection, record.request
+                )
+            elif table == "news_leads":
+                _DiscoveryAuthorityStore._require_source_contract_matches_lead(
+                    connection, record.request
+                )
+    _DiscoveryAuthorityStore._validate_discovery_heads(connection)
+    _DiscoveryAuthorityStore._validate_discovery_event_coverage(
+        connection,
+        aggregate_types=tuple(spec[0] for spec in _DISCOVERY_RECORD_SPECS.values()),
+    )
+    for table, _ in domain_rows:
+        if connection.execute(
+            f'PRAGMA foreign_key_check("{table}")'
+        ).fetchone() is not None:
+            raise AuthoritySchemaError("Discovery foreign-key integrity differs")
+    for table in ("discovery_gate_decision_heads", "lead_disposition_heads"):
+        if connection.execute(
+            f'PRAGMA foreign_key_check("{table}")'
+        ).fetchone() is not None:
+            raise AuthoritySchemaError("Discovery foreign-key integrity differs")
+
+
+def _validate_discovery_reads_in_transaction(
+    connection: sqlite3.Connection,
+    object_payload_validator=None,
+    validate_retained_event: Callable[[str], None] | None = None,
+) -> None:
+    if validate_retained_event is not None:
+        _validate_discovery_domain_reads(connection, validate_retained_event)
+        return
     _DiscoveryAuthorityStore._validate_relational_invariants(connection)
     verifier = object.__new__(_DiscoveryAuthorityStore)
     if object_payload_validator is not None:
@@ -293,6 +345,7 @@ def _create_discovery_governing_producer_read_port(
     connection: sqlite3.Connection,
     *,
     object_admission_payload_validator: Callable[[sqlite3.Connection, sqlite3.Row], None] | None = None,
+    validate_retained_event: Callable[[str], None] | None = None,
 ):
     try:
         if (
@@ -304,11 +357,19 @@ def _create_discovery_governing_producer_read_port(
             or str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
             != "wal"
             or connection.execute("PRAGMA synchronous").fetchone()[0] != 2
+            or (
+                validate_retained_event is not None
+                and not callable(validate_retained_event)
+            )
         ):
             raise DiscoveryContractError(
                 "Discovery read-port factory requires an exact active checked connection"
             )
-        reader = _DiscoveryGoverningProducerReader(connection, object_admission_payload_validator)
+        reader = _DiscoveryGoverningProducerReader(
+            connection,
+            object_admission_payload_validator,
+            validate_retained_event,
+        )
         return _compose_discovery_governing_producer_read_port(
             reader.require_current_governing_producers
         )
@@ -1652,21 +1713,46 @@ class _DiscoveryAuthorityStore(_CheckAuthorityStore):
         del missing_gate
 
     @staticmethod
-    def _validate_discovery_event_coverage(conn: sqlite3.Connection) -> None:
+    def _validate_discovery_event_coverage(
+        conn: sqlite3.Connection,
+        *,
+        aggregate_types: tuple[str, ...] | None = None,
+    ) -> None:
         specs = (
-            ("discovery.signal.admitted", "discovery_signals"),
-            ("discovery.gate.decided", "discovery_gate_decisions"),
-            ("discovery.lead.opened", "news_leads"),
-            ("discovery.watch_condition.recorded", "discovery_watch_conditions"),
-            ("discovery.lead.disposition.recorded", "lead_disposition_decisions"),
+            ("discovery.signal.admitted", "discovery_signals", "discovery_signal"),
+            ("discovery.gate.decided", "discovery_gate_decisions", "gate_decision"),
+            ("discovery.lead.opened", "news_leads", "news_lead"),
+            ("discovery.watch_condition.recorded", "discovery_watch_conditions", "watch_condition"),
+            ("discovery.lead.disposition.recorded", "lead_disposition_decisions", "lead_disposition_decision"),
         )
-        for event_type, table in specs:
-            missing = conn.execute(
-                f"SELECT e.event_id FROM ledger_events e LEFT JOIN {table} r "
-                "ON r.authority_event_id=e.event_id WHERE e.event_type=? "
-                "AND r.authority_event_id IS NULL LIMIT 1",
-                (event_type,),
-            ).fetchone()
+        if aggregate_types is not None and aggregate_types != tuple(
+            spec[2] for spec in specs
+        ):
+            raise AuthoritySchemaError("Discovery aggregate coverage differs")
+        for event_type, table, aggregate_type in specs:
+            if aggregate_types is None:
+                missing = conn.execute(
+                    f"SELECT e.event_id FROM ledger_events e LEFT JOIN {table} r "
+                    "ON r.authority_event_id=e.event_id WHERE e.event_type=? "
+                    "AND r.authority_event_id IS NULL LIMIT 1",
+                    (event_type,),
+                ).fetchone()
+            else:
+                domain_mismatch = conn.execute(
+                    f"SELECT r.authority_event_id FROM {table} r LEFT JOIN "
+                    "ledger_events e ON e.event_id=r.authority_event_id "
+                    "WHERE e.event_id IS NULL OR e.aggregate_type!=? "
+                    "OR e.event_type!=? LIMIT 1",
+                    (aggregate_type, event_type),
+                ).fetchone()
+                missing = conn.execute(
+                    f"SELECT e.event_id FROM ledger_events e LEFT JOIN {table} r "
+                    "ON r.authority_event_id=e.event_id WHERE e.aggregate_type=? "
+                    "AND (e.event_type!=? OR r.authority_event_id IS NULL) LIMIT 1",
+                    (aggregate_type, event_type),
+                ).fetchone()
+                if domain_mismatch is not None:
+                    missing = domain_mismatch
             if missing is not None:
                 raise AuthoritySchemaError(f"{event_type} has no exact domain record")
 

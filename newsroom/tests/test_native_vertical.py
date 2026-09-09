@@ -408,6 +408,41 @@ def _install_boundaries(monkeypatch, counters):
     monkeypatch.setattr(native_assessor, "_dispatch_grok", assess)
 
 
+def _tick_without_shared_history_rescans(pipeline, *, cycle_id, monkeypatch):
+    from newsroom.authority._discovery_store import _DiscoveryAuthorityStore
+    from newsroom.authority._event_hypothesis_lineage_system import _LineageStore
+    from newsroom.authority._event_hypothesis_relationship_system import _RelationshipEventStore
+    from newsroom.authority.story_candidate_system import _CandidateStore
+
+    connection = pipeline._runtime.authority.work_items._authority._connection
+    global_foreign_keys = []
+
+    def trace(statement):
+        if statement.strip().rstrip(";").upper() == "PRAGMA FOREIGN_KEY_CHECK":
+            global_foreign_keys.append(statement)
+
+    def global_scan(*_args, **_kwargs):
+        raise AssertionError("native domain operation rescanned shared authority history")
+
+    # The real opener has already run. Domain operations must retain their
+    # complete exact-event checks, not repeat the full shared-store verifier.
+    with monkeypatch.context() as scoped:
+        for store in (_CandidateStore, _LineageStore, _DiscoveryAuthorityStore):
+            for method in (
+                "_validate_relational_invariants", "_validate_immutable_records",
+                "_validate_registry_coverage",
+            ):
+                scoped.setattr(store, method, global_scan)
+        scoped.setattr(_RelationshipEventStore, "_validate_relational_invariants", global_scan)
+        connection.set_trace_callback(trace)
+        try:
+            report = pipeline.tick(cycle_id=cycle_id)
+        finally:
+            connection.set_trace_callback(None)
+    assert global_foreign_keys == []
+    return report
+
+
 def test_native_vertical_reaches_private_ack_and_reopens_without_provider_repeat(
     tmp_path, monkeypatch
 ):
@@ -431,7 +466,9 @@ def test_native_vertical_reaches_private_ack_and_reopens_without_provider_repeat
     arguments["source_definition_ids"] = {"UK-01": definition_id}
 
     with native_composition.open_native_pipeline(**arguments) as pipeline:
-        report = pipeline.tick(cycle_id="native-vertical-1")
+        report = _tick_without_shared_history_rescans(
+            pipeline, cycle_id="native-vertical-1", monkeypatch=monkeypatch,
+        )
         assert report.revision_states == {"ACKNOWLEDGED": 2}, pipeline._journal.progress
         assert pipeline._collision._journal == arguments["private_path"]
         assert pipeline._runtime.ingress.receipt_count == 2
@@ -452,7 +489,9 @@ def test_native_vertical_reaches_private_ack_and_reopens_without_provider_repeat
     clock[0] = NOW + timedelta(minutes=5)
     counters["document_body"] = "Official deadline changed. It now has a later date."
     with native_composition.open_native_pipeline(**arguments) as successor:
-        report = successor.tick(cycle_id="native-vertical-successor")
+        report = _tick_without_shared_history_rescans(
+            successor, cycle_id="native-vertical-successor", monkeypatch=monkeypatch,
+        )
         assert report.revision_states == {"ACKNOWLEDGED": 4}, successor._journal.progress
         successor_versions = {
             progress["facts"]["candidate_version_id"]:
@@ -477,7 +516,9 @@ def test_native_vertical_reaches_private_ack_and_reopens_without_provider_repeat
 
     dispatched = dict(counters)
     with native_composition.open_native_pipeline(**arguments) as reopened:
-        report = reopened.tick(cycle_id="native-vertical-replay")
+        report = _tick_without_shared_history_rescans(
+            reopened, cycle_id="native-vertical-replay", monkeypatch=monkeypatch,
+        )
         assert report.revision_states == {"ACKNOWLEDGED": 4}
         assert reopened._runtime.ingress.receipt_count == 4
     assert counters["graphiti"] == dispatched["graphiti"]

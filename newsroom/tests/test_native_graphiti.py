@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
+import json
 import sqlite3
 import threading
 from types import SimpleNamespace
@@ -372,3 +373,83 @@ def test_native_worker_rejects_another_observation_before_dispatch(tmp_path, mon
         assert not calls
     finally:
         connection.close()
+
+
+def test_native_required_route_hold_is_not_reported_as_a_rights_failure(tmp_path, monkeypatch):
+    from newsroom.control_plane.model_usage import ModelUsageService
+
+    processor, connection, calls = _open(tmp_path, monkeypatch, ingest=lambda *a, **kw: None)
+    usage = ModelUsageService(str(tmp_path / "private.sqlite3"))
+    usage.open_route_circuit(
+        route="GRAPHITI_EMBEDDING", reason="CALL_SHAPE_DRIFT",
+        invocation_id=None, recorded_at=datetime(2026, 9, 9, tzinfo=UTC),
+    )
+    processor._usage = usage
+    try:
+        outcome, = processor.advance((_native(),), cycle_id="native-route-held")
+        assert outcome.state == "GRAPHITI_HOLD"
+        assert outcome.reason == "REQUIRED_MODEL_ROUTE_CIRCUIT_OPEN"
+        assert not any(name == "finalise" for name, _ in calls)
+    finally:
+        connection.close()
+
+
+def test_native_advance_settles_only_its_missing_subscription_usage_after_dispatch(
+    tmp_path, monkeypatch,
+):
+    from newsroom.control_plane.model_usage import ModelUsageService
+
+    unit = _native()
+    order = []
+    processor, connection, _ = _open(
+        tmp_path, monkeypatch, ingest=lambda *a, **kw: order.append("ingest"),
+    )
+    usage = ModelUsageService(str(tmp_path / "private.sqlite3"))
+    settled = []
+    from newsroom.tests.test_model_usage_receipts import _policy
+    policy = _policy()
+    usage.register_policy(policy)
+    # These rows test selection/wiring only. The usage-service tests separately
+    # prove authority, canonical bindings, dispatch and policy-derived estimates.
+    for number, ingest_id, workload, provider, status, failure in (
+        (1, unit.ingest_id, "GRAPHITI_CHAT_PRIMARY", "cursor-agent-cli", "UNREPORTED", "MISSING_PROVIDER_TELEMETRY"),
+        (2, "other-ingest", "GRAPHITI_CHAT_PRIMARY", "cursor-agent-cli", "UNREPORTED", "MISSING_PROVIDER_TELEMETRY"),
+        (3, unit.ingest_id, "GRAPHITI_EMBEDDING", "openrouter", "UNREPORTED", "MISSING_PROVIDER_TELEMETRY"),
+        (4, unit.ingest_id, "GRAPHITI_CHAT_PRIMARY", "cursor-agent-cli", "REPORTED", "NONE"),
+    ):
+        identity = str(number)
+        connection.execute(
+            "INSERT INTO model_work_envelopes VALUES(?,?,?,?,?,?)",
+            (identity, "cycle", workload, "now", identity,
+             json.dumps({"ingest_id": ingest_id})),
+        )
+        connection.execute(
+            "INSERT INTO model_invocation_allocations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (identity, identity, "cycle", 1, workload, policy.canonical_digest, provider,
+             workload, "model", identity, None, "now", identity, "{}"),
+        )
+        connection.execute(
+            "INSERT INTO model_invocation_terminals VALUES(?,?,?,?,?,?,?)",
+            ("terminal-" + identity, identity, status, "FAILED", failure, "now", "{}"),
+        )
+    connection.commit()
+
+    def settle(**kwargs):
+        order.append("settle")
+        settled.append(kwargs)
+
+    monkeypatch.setattr(usage, "disposition_native_unreported_subscription_usage", settle, raising=False)
+    monkeypatch.setattr(n, "graphiti_required_route_holds", lambda _: ())
+    processor._usage = usage
+    outcomes = processor.advance((unit,), cycle_id="native-settlement")
+    assert order == ["ingest", "settle"]
+    assert settled == [{
+        "invocation_id": "1", "expected_allocation_digest": "1",
+        "expected_terminal_digest": "terminal-1",
+        "observed_at": datetime(2026, 9, 8, tzinfo=UTC),
+    }]
+    assert outcomes[0].state == "GRAPHITI_HOLD"
+    assert connection.execute(
+        "SELECT usage_status FROM model_invocation_terminals WHERE invocation_id='1'"
+    ).fetchone()[0] == "UNREPORTED"
+    connection.close()

@@ -381,12 +381,18 @@ def combined_temporal_pipeline_for(
                 key=lambda item: str(item.uuid),
             )
         )
+        create_batch = getattr(graphiti.clients.embedder, "create_batch", None)
         create = getattr(graphiti.clients.embedder, "create", None)
         return await resolve_nodes_with_optional_embeddings(
             typed_nodes,
             existing,
             source_id=source_id,
-            embed_name=create if callable(create) else None,
+            embed_name=(
+                create
+                if not callable(create_batch) and callable(create)
+                else None
+            ),
+            embed_names=create_batch if callable(create_batch) else None,
         )
 
     def resolve_pointers(edges: list[Any], uuid_map: dict[str, str]) -> list[Any]:
@@ -657,7 +663,7 @@ async def _add_episode(
         attempt_number=attempt_number,
         input_digest=input_digest,
     )
-    fresh_zero_dispatch_retry = False
+    fresh_retry = False
     cancellation_cleanup_active = False
     failure_completed = False
     try:
@@ -674,7 +680,7 @@ async def _add_episode(
                 )
                 if await retry_guard.marker_exists():
                     guard = retry_guard
-                    fresh_zero_dispatch_retry = True
+                    fresh_retry = True
                 else:
                     prior_guard = guard
                     for prior_attempt in range(attempt_number - 1, 1, -1):
@@ -692,23 +698,62 @@ async def _add_episode(
                             prior_guard = candidate
                             break
                     guard = prior_guard
-                    retry_proof = getattr(
+                    zero_retry_proof = getattr(
                         invocation_observer,
                         "allows_fresh_zero_dispatch_retry",
                         None,
                     )
-                    if callable(retry_proof) and retry_proof(
-                        episode_uuid=episode_id,
-                        attempt_number=attempt_number,
-                    ):
-                        prior_raw = await prior_guard.completed_raw_or_none()
+                    zero_retry_allowed = (
+                        callable(zero_retry_proof)
+                        and zero_retry_proof(
+                            episode_uuid=episode_id,
+                            attempt_number=attempt_number,
+                        )
+                    )
+                    settled_retry_proof = getattr(
+                        invocation_observer,
+                        "allows_fresh_completed_rollback_retry",
+                        None,
+                    )
+                    prior_raw = await prior_guard.completed_raw_or_none()
+                    if prior_raw is not None:
+                        try:
+                            prior_attempt_number = int(
+                                prior_raw["provider_attempt_number"]
+                            )
+                        except (KeyError, TypeError, ValueError):
+                            prior_attempt_number = 0
+                        settled_retry_allowed = (
+                            callable(settled_retry_proof)
+                            and prior_attempt_number > 0
+                            and settled_retry_proof(
+                                episode_uuid=episode_id,
+                                attempt_number=attempt_number,
+                                prior_attempt_number=prior_attempt_number,
+                            )
+                        )
                         if (
-                            prior_raw is not None
+                            (zero_retry_allowed or settled_retry_allowed)
                             and retry_snapshot_is_failed is not None
                             and retry_snapshot_is_failed(prior_raw)
                         ):
                             guard = retry_guard
-                            fresh_zero_dispatch_retry = True
+                            fresh_retry = True
+                    else:
+                        recovered = (
+                            await prior_guard.recovered_ambiguous_marker_or_none()
+                        )
+                        if (
+                            recovered is not None
+                            and callable(settled_retry_proof)
+                            and settled_retry_proof(
+                                episode_uuid=episode_id,
+                                attempt_number=attempt_number,
+                                prior_attempt_number=recovered.attempt_number,
+                            )
+                        ):
+                            guard = retry_guard
+                            fresh_retry = True
         if configuration is None or revision is None:
             raise GraphitiAdapterContractError(
                 "combined-temporal runtime requires typed attempt authority"
@@ -787,7 +832,7 @@ async def _add_episode(
             reference_time=reference_time,
         )
         if state != "CREATED" and not (
-            fresh_zero_dispatch_retry and state == "RETAINED"
+            fresh_retry and state == "RETAINED"
         ):
             raise GraphitiAdapterContractError(
                 "deterministic episode predates its durable mutation marker"

@@ -45,6 +45,7 @@ from newsroom.control_plane.model_usage import (
     WorkEnvelope,
     WorkloadClass,
 )
+from newsroom.control_plane.store import GRAPHITI_MAX_FAILURES
 from newsroom.graphiti_adapter.contracts import GRAPHITI_PROMPT_COMPONENT
 from newsroom.graphiti_adapter.cursor_transport import composer_model_meets_floor
 from newsroom.graphiti_adapter.evaluation_packet import (
@@ -163,6 +164,20 @@ GRAPHITI_CONTEXT_MANIFEST_SCHEMA_VERSION = (
 GRAPHITI_CHAT_PRIMARY_ROUTE = "GRAPHITI_CHAT_PRIMARY"
 GRAPHITI_CHAT_FALLBACK_ROUTE = "GRAPHITI_CHAT_FALLBACK"
 GRAPHITI_EMBEDDING_ROUTE = "GRAPHITI_EMBEDDING"
+
+
+def graphiti_required_route_holds(
+    service: ModelUsageService | None,
+) -> tuple[dict[str, object], ...]:
+    """Check required downstream routes before spending on an upstream chat."""
+    if service is None:
+        return ()
+    return tuple(
+        state
+        for route in (GRAPHITI_CHAT_PRIMARY_ROUTE, GRAPHITI_EMBEDDING_ROUTE)
+        if (state := service.route_state(route))["state"] == "OPEN"
+    )
+
 _GRAPHITI_ADAPTER_DIRECTORY = Path(__file__).parent.parent / "graphiti_adapter"
 _GRAPHITI_HERMETIC_ENVIRONMENT_KEYS = (
     "HOME",
@@ -247,11 +262,20 @@ class GraphitiModelUsageObserver:
         if provider_attempt_number <= 0:
             raise ValueError("Graphiti provider attempt number must be positive")
         self._provider_attempt_number = provider_attempt_number
-        self._proved_pre_dispatch_zero_retry = (
-            provider_attempt_number > 1
-            and service.graphiti_ingest_pre_dispatch_zero(
-                ingest_id=self._ingest_obligation_id
+        retry_evidence = getattr(service, "graphiti_ingest_retry_evidence", None)
+        self._retry_evidence = (
+            retry_evidence(
+                ingest_id=self._ingest_obligation_id,
+                before_attempt_number=provider_attempt_number,
             )
+            if provider_attempt_number > 1 and callable(retry_evidence)
+            else None
+        )
+        self._proved_pre_dispatch_zero_retry = bool(
+            self._retry_evidence is not None
+            and getattr(self._retry_evidence, "zero_dispatch_attempts", ())
+            and not getattr(self._retry_evidence, "settled_provider_attempts", ())
+            and not getattr(self._retry_evidence, "unresolved_attempts", ())
         )
         self._deadline = deadline
         self._dispatch_authority_digest = (
@@ -276,6 +300,32 @@ class GraphitiModelUsageObserver:
             and attempt_number == self._provider_attempt_number
             and self._envelope.graphiti_attempt_id
             == f"{episode_uuid}:{attempt_number}"
+        )
+
+    def allows_fresh_completed_rollback_retry(
+        self,
+        *,
+        episode_uuid: str,
+        attempt_number: int,
+        prior_attempt_number: int,
+    ) -> bool:
+        """Permit a bounded retry after an exactly settled provider attempt."""
+
+        evidence = self._retry_evidence
+        if evidence is None:
+            return False
+        settled = tuple(getattr(evidence, "settled_provider_attempts", ()))
+        unresolved = tuple(getattr(evidence, "unresolved_attempts", ()))
+        return (
+            episode_uuid == self._ingest_obligation_id
+            and attempt_number == self._provider_attempt_number
+            and self._envelope.graphiti_attempt_id
+            == f"{episode_uuid}:{attempt_number}"
+            and not unresolved
+            and prior_attempt_number in settled
+            and prior_attempt_number
+            == getattr(evidence, "latest_settled_provider_attempt", None)
+            and len(settled) < GRAPHITI_MAX_FAILURES
         )
 
     def _policy_for(

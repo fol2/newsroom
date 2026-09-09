@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from math import sqrt
+from math import isfinite, sqrt
 from types import SimpleNamespace
 from typing import Any, Protocol
 
@@ -234,13 +234,14 @@ async def resolve_nodes_with_optional_embeddings(
     *,
     source_id: str,
     embed_name: Callable[[str], Awaitable[list[float]]] | None = None,
+    embed_names: Callable[[list[str]], Awaitable[list[list[float]]]] | None = None,
 ) -> tuple[list[Any], dict[str, str], list[tuple[Any, Any]]]:
     """Embed mention names only when exact/alias/normalised resolution is insufficient."""
 
     resolved, uuid_map, extra = resolve_nodes_locally(
         nodes, existing_nodes, source_id=source_id
     )
-    if not existing_nodes or embed_name is None:
+    if not existing_nodes or (embed_name is None and embed_names is None):
         return resolved, uuid_map, extra
     retry_ids = {
         str(node.uuid)
@@ -250,12 +251,49 @@ async def resolve_nodes_with_optional_embeddings(
     }
     if not retry_ids:
         return resolved, uuid_map, extra
+    retry_nodes = [node for node in nodes if str(node.uuid) in retry_ids]
+    candidate_dimensions = {
+        len(embedding)
+        for candidate in existing_nodes
+        if isinstance(
+            embedding := getattr(candidate, "name_embedding", None),
+            (list, tuple),
+        )
+        and embedding
+    }
+    if not candidate_dimensions:
+        return resolved, uuid_map, extra
+    if len(candidate_dimensions) != 1:
+        raise ValueError("canonical name embedding dimensions differ")
+    expected_dimension = next(iter(candidate_dimensions))
+    if embed_names is not None:
+        mention_embeddings = await embed_names(
+            [str(node.name).replace("\n", " ") for node in retry_nodes]
+        )
+    else:
+        assert embed_name is not None
+        mention_embeddings = [
+            await embed_name(str(node.name)) for node in retry_nodes
+        ]
+    if len(mention_embeddings) != len(retry_nodes):
+        raise ValueError("mention embedding batch cardinality differs")
+    for embedding in mention_embeddings:
+        if (
+            not isinstance(embedding, list)
+            or len(embedding) != expected_dimension
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not isfinite(value)
+                for value in embedding
+            )
+        ):
+            raise ValueError("mention embedding vector differs")
     similarities: dict[tuple[str, str], int] = {}
-    for node in nodes:
+    for node, mention_embedding in zip(
+        retry_nodes, mention_embeddings, strict=True
+    ):
         local_id = str(node.uuid)
-        if local_id not in retry_ids:
-            continue
-        mention_embedding = await embed_name(str(node.name))
         for candidate in existing_nodes:
             ppm = _cosine_ppm(
                 mention_embedding, getattr(candidate, "name_embedding", None)
@@ -263,14 +301,27 @@ async def resolve_nodes_with_optional_embeddings(
             if ppm is None:
                 continue
             similarities[(local_id, str(candidate.uuid))] = ppm
-    if not similarities:
-        return resolved, uuid_map, extra
-    return resolve_nodes_locally(
-        nodes,
-        existing_nodes,
-        source_id=source_id,
-        similarities_ppm=similarities,
-    )
+    if similarities:
+        resolved, uuid_map, extra = resolve_nodes_locally(
+            nodes,
+            existing_nodes,
+            source_id=source_id,
+            similarities_ppm=similarities,
+        )
+    embeddings_by_id = {
+        str(node.uuid): embedding
+        for node, embedding in zip(retry_nodes, mention_embeddings, strict=True)
+    }
+    for node in resolved:
+        attributes = getattr(node, "attributes", {}) or {}
+        embedding = embeddings_by_id.get(str(node.uuid))
+        if (
+            attributes.get("resolution") == "DETERMINISTIC_NEW_NODE"
+            and embedding is not None
+            and getattr(node, "name_embedding", None) is None
+        ):
+            node.name_embedding = embedding
+    return resolved, uuid_map, extra
 
 
 async def _complete_failure(

@@ -74,10 +74,12 @@ from newsroom.graphiti_adapter.evaluation_packet import (
     CURSOR_AGENT_MODEL_ID,
     OPENROUTER_EMBEDDING_SLUG,
 )
+from newsroom.control_plane.native_progress import NativeRevisionJournal
 from newsroom.control_plane.store import (
     connect as connect_unpublished_store,
     insert_graphiti_attempt_receipt,
 )
+from newsroom.tests.test_native_graphiti import _native
 
 T0 = datetime(2026, 8, 24, 10, 0, tzinfo=UTC)
 FIXTURE_790_PLAN_DIGEST = digest_canonical(
@@ -115,6 +117,15 @@ def _digest(value: object) -> str:
 
 def _service(tmp_path: Path) -> ModelUsageService:
     return ModelUsageService(str(tmp_path / "unpublished.sqlite3"))
+
+
+def _land_native_ingest(tmp_path: Path):
+    path = tmp_path / "unpublished.sqlite3"
+    connection = connect_unpublished_store(str(path))
+    unit = _native()
+    NativeRevisionJournal(connection).land((unit,))
+    connection.close()
+    return unit
 
 
 def _unique_consumption_columns(path: Path) -> set[tuple[str, ...]]:
@@ -404,12 +415,13 @@ def _open_unreported_graphiti_subscription_leaf(
     observe_dispatch: bool = True,
     subscription_not_cash_debited: bool = True,
     elapsed_ms: int = 999,
+    ingest_id: str | None = None,
 ) -> tuple[InvocationEfficiencyPolicy, InvocationAllocation, InvocationTerminal]:
     envelope = _envelope(
         cycle_id=cycle_id,
         workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
         candidate_id=None,
-        ingest_id=f"ingest-{cycle_id}",
+        ingest_id=ingest_id or f"ingest-{cycle_id}",
     )
     policy = _policy(
         workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
@@ -1941,6 +1953,283 @@ def test_later_provider_telemetry_appends_reconciliation_without_editing_history
         service_row_count(tmp_path / "unpublished.sqlite3", "model_provider_telemetry")
         == 1
     )
+
+
+def test_graphiti_retry_evidence_classifies_zero_settled_and_active_attempts(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    policy = _policy(
+        workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        provider="cursor-agent-cli",
+        route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+        model="composer-2.5",
+        hard_estimate_ceiling_tokens=None,
+    )
+    service.register_policy(policy)
+
+    first = _envelope(
+        cycle_id="retry-evidence-1",
+        workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        candidate_id=None,
+        ingest_id="retry-evidence-ingest",
+    )
+    service.open_envelope(first)
+    first_allocation = _allocation(first, policy, request="retry-evidence-1")
+    service.allocate(first_allocation, owner_emergency_stop=False)
+    first_terminal = service.complete(
+        InvocationTerminal.create(
+            invocation_id=first_allocation.invocation_id,
+            outcome="DISPATCH_FENCE_REFUSED",
+            failure_class="DISPATCH_FENCE_REFUSED",
+            usage_status=UsageStatus.REPORTED,
+            components=UsageComponents(total_tokens=0, provenance="CLI_DERIVED"),
+            dispatch_at=None,
+            completed_at=T0 + timedelta(seconds=2),
+            observed_at=T0 + timedelta(seconds=2),
+            pre_dispatch_zero_proved=True,
+            subscription_cli_chat_not_cash_debited=True,
+        )
+    )
+    service.record_work_outcome(
+        envelope_id=first.envelope_id,
+        outcome="GRAPHITI_FAILED",
+        outcome_record_id="retry-evidence-outcome-1",
+        payload_digest=None,
+        terminal_at=first_terminal.completed_at,
+    )
+
+    second = WorkEnvelope.create(
+        cycle_id="retry-evidence-2",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0 + timedelta(seconds=3),
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="retry-evidence-ingest",
+        graphiti_attempt_id="retry-evidence-ingest:2",
+    )
+    service.open_envelope(second)
+    second_allocation = _allocation(second, policy, request="retry-evidence-2")
+    service.allocate(second_allocation, owner_emergency_stop=False)
+    service.observe_transport(
+        invocation_id=second_allocation.invocation_id,
+        observed_at=second_allocation.allocated_at + timedelta(milliseconds=1),
+        state="DISPATCH_STARTED",
+        evidence_digest=_digest({"dispatch": second_allocation.invocation_id}),
+    )
+    second_terminal = _reported(second_allocation)
+    service.complete(
+        second_terminal,
+        provider_telemetry={"invocation": second_allocation.invocation_id},
+    )
+    service.record_work_outcome(
+        envelope_id=second.envelope_id,
+        outcome="GRAPHITI_FAILED",
+        outcome_record_id="retry-evidence-outcome-2",
+        payload_digest=None,
+        terminal_at=second_terminal.completed_at,
+    )
+
+    third = WorkEnvelope.create(
+        cycle_id="retry-evidence-3",
+        workload_class=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+        admitted_at=T0 + timedelta(seconds=4),
+        admission_decision_id=None,
+        candidate_id=None,
+        hypothesis_digest=None,
+        evidence_package_digest=None,
+        ingest_id="retry-evidence-ingest",
+        graphiti_attempt_id="retry-evidence-ingest:3",
+    )
+    service.open_envelope(third)
+
+    prior = service.graphiti_ingest_retry_evidence(
+        ingest_id="retry-evidence-ingest", before_attempt_number=3
+    )
+    assert prior.attempt_numbers == (1, 2)
+    assert prior.zero_dispatch_attempts == (1,)
+    assert prior.settled_provider_attempts == (2,)
+    assert prior.latest_settled_provider_attempt == 2
+    assert prior.unresolved_attempts == ()
+    assert service.graphiti_ingest_retry_evidence(
+        ingest_id="retry-evidence-ingest"
+    ).unresolved_attempts == (3,)
+
+
+def test_native_conservative_disposition_uses_qualified_policy_bound(
+    tmp_path: Path,
+) -> None:
+    unit = _land_native_ingest(tmp_path)
+    service = _service(tmp_path)
+    policy, allocation, terminal = _open_unreported_graphiti_subscription_leaf(
+        service, ingest_id=unit.ingest_id
+    )
+
+    disposition = service.disposition_native_unreported_subscription_usage(
+        invocation_id=allocation.invocation_id,
+        expected_terminal_digest=terminal.terminal_digest,
+        expected_allocation_digest=allocation.canonical_digest,
+        observed_at=T0 + timedelta(seconds=10),
+    )
+
+    assert disposition["authority_scope"] == "NATIVE_AUTONOMOUS_INTERNAL_PIPELINE"
+    assert disposition["usage_status"] == "ESTIMATED"
+    assert disposition["components"] == UsageComponents(
+        total_tokens=policy.max_total_tokens,
+        provenance="BOUNDED_ESTIMATE",
+    ).as_record()
+    assert disposition["exact_usage_remains_unknown"] is True
+    assert disposition["provider_dispatch_preserved"] is True
+    assert disposition["unknown_spend_released"] is False
+    assert service.terminal(allocation.invocation_id) == terminal
+    assert service.disposition_native_unreported_subscription_usage(
+        invocation_id=allocation.invocation_id,
+        expected_terminal_digest=terminal.terminal_digest,
+        expected_allocation_digest=allocation.canonical_digest,
+        observed_at=T0 + timedelta(seconds=20),
+    ) == disposition
+    service.record_work_outcome(
+        envelope_id=allocation.envelope_id,
+        outcome="GRAPHITI_REJECTED_BINDING",
+        outcome_record_id="native-conservative-outcome",
+        payload_digest=None,
+        terminal_at=T0 + timedelta(seconds=20),
+    )
+    evidence = service.graphiti_ingest_retry_evidence(ingest_id=unit.ingest_id)
+    assert evidence.settled_provider_attempts == (1,)
+    assert evidence.unresolved_attempts == ()
+
+    current = service.query(start=T0, end=T0 + timedelta(minutes=1))["leaves"][0]
+    assert current["usage_status"] == "ESTIMATED"
+    assert current["terminal_usage_status"] == "UNREPORTED"
+    assert current["total_tokens"] == policy.max_total_tokens
+    assert current["provider_telemetry_digest"] is None
+    state = service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)
+    service.release_route_circuit(
+        route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+        release_kind="AUTHORISED_OPERATOR_RESET",
+        bound_failure_reason=str(state["reason"]),
+        evidence_digest=str(disposition["disposition_digest"]),
+        recorded_at=T0 + timedelta(seconds=21),
+    )
+    assert service.route_state(GRAPHITI_CHAT_PRIMARY_ROUTE)["state"] == "CLOSED"
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    (
+        ("wrong_terminal", "terminal differs"),
+        ("wrong_allocation", "allocation differs"),
+        ("missing_dispatch", "lacks committed dispatch"),
+        ("not_native", "landed source observation"),
+        ("reported", "target is ineligible"),
+        ("wrong_provider", "target is ineligible"),
+    ),
+)
+def test_native_conservative_disposition_rejects_unqualified_targets(
+    tmp_path: Path,
+    case: str,
+    message: str,
+) -> None:
+    unit = _native() if case == "not_native" else _land_native_ingest(tmp_path)
+    service = _service(tmp_path)
+    if case == "wrong_provider":
+        envelope = _envelope(
+            cycle_id="native-wrong-provider",
+            workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+            candidate_id=None,
+            ingest_id=unit.ingest_id,
+        )
+        policy = _policy(
+            workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+            provider="another-cli",
+            route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+            model="composer-2.5",
+            hard_estimate_ceiling_tokens=None,
+        )
+        service.register_policy(policy)
+        service.open_envelope(envelope)
+        allocation = _allocation(envelope, policy)
+        service.allocate(allocation, owner_emergency_stop=False)
+        dispatch_at = allocation.allocated_at + timedelta(milliseconds=1)
+        service.observe_transport(
+            invocation_id=allocation.invocation_id,
+            observed_at=dispatch_at,
+            state="DISPATCH_STARTED",
+            evidence_digest=_digest({"dispatch": allocation.invocation_id}),
+        )
+        terminal = service.complete(
+            InvocationTerminal.create(
+                invocation_id=allocation.invocation_id,
+                outcome="FAILED",
+                failure_class="MISSING_PROVIDER_TELEMETRY",
+                usage_status=UsageStatus.UNREPORTED,
+                components=UsageComponents(provenance="UNAVAILABLE"),
+                dispatch_at=dispatch_at,
+                completed_at=T0 + timedelta(seconds=3),
+                observed_at=T0 + timedelta(seconds=3),
+                subscription_cli_chat_not_cash_debited=True,
+            )
+        )
+    elif case == "reported":
+        envelope = _envelope(
+            cycle_id="native-reported",
+            workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+            candidate_id=None,
+            ingest_id=unit.ingest_id,
+        )
+        policy = _policy(
+            workload=WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+            provider="cursor-agent-cli",
+            route=GRAPHITI_CHAT_PRIMARY_ROUTE,
+            model="composer-2.5",
+            hard_estimate_ceiling_tokens=None,
+        )
+        service.register_policy(policy)
+        service.open_envelope(envelope)
+        allocation = _allocation(envelope, policy)
+        service.allocate(allocation, owner_emergency_stop=False)
+        service.observe_transport(
+            invocation_id=allocation.invocation_id,
+            observed_at=allocation.allocated_at + timedelta(milliseconds=1),
+            state="DISPATCH_STARTED",
+            evidence_digest=_digest({"dispatch": allocation.invocation_id}),
+        )
+        terminal = _reported(allocation)
+        service.complete(
+            terminal,
+            provider_telemetry={"invocation": allocation.invocation_id},
+        )
+    else:
+        _policy_value, allocation, terminal = (
+            _open_unreported_graphiti_subscription_leaf(
+                service,
+                ingest_id=unit.ingest_id,
+                observe_dispatch=case != "missing_dispatch",
+            )
+        )
+
+    with pytest.raises(ModelUsageIntegrityError, match=message):
+        service.disposition_native_unreported_subscription_usage(
+            invocation_id=allocation.invocation_id,
+            expected_terminal_digest=(
+                _digest({"wrong": "terminal"})
+                if case == "wrong_terminal"
+                else terminal.terminal_digest
+            ),
+            expected_allocation_digest=(
+                _digest({"wrong": "allocation"})
+                if case == "wrong_allocation"
+                else allocation.canonical_digest
+            ),
+            observed_at=T0 + timedelta(seconds=10),
+        )
+    assert service_row_count(
+        tmp_path / "unpublished.sqlite3",
+        "model_usage_conservative_dispositions",
+    ) == 0
 
 
 def test_authorised_conservative_disposition_preserves_unknown_terminal(

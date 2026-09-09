@@ -28,7 +28,10 @@ from newsroom.authority.migrations import (
     prepare_pending_migration_backup,
     schema_fingerprint,
 )
-from newsroom.authority.persistence import AuthoritySchemaError
+from newsroom.authority.persistence import (
+    AuthorityPersistenceError,
+    AuthoritySchemaError,
+)
 from newsroom.authority.types import UtcTimestamp
 from newsroom.checks.policy import merge_discovery_check_authority_registries
 from newsroom.discovery.policy import merge_discovery_signal_lead_registries
@@ -487,6 +490,86 @@ def _read_port(seed):
     return connection, port
 
 
+def _relationship_command_id(store, decision_id: str) -> str:
+    row = store._connection.execute(
+        "SELECT e.command_id FROM event_hypothesis_relationship_decisions r "
+        "JOIN ledger_events e ON e.event_id=r.authority_event_id "
+        "WHERE r.decision_id=?",
+        (decision_id,),
+    ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def _relationship_store(authority):
+    private = authority._EventHypothesisRelationshipAuthority__authority
+    return private._EventHypothesisRelationshipAuthority__store
+
+
+def _tamper_relationship_authentication(store, decision_id: str) -> None:
+    command_id = _relationship_command_id(store, decision_id)
+    store._execute_test_sql("DROP TRIGGER immutable_authentication_contexts_update")
+    store._execute_test_sql(
+        "UPDATE authentication_contexts SET canonical_bytes=? WHERE "
+        "authentication_context_id=(SELECT authentication_context_id FROM "
+        "authority_commands WHERE command_id=?)",
+        (b"{}", command_id),
+    )
+
+
+def _tamper_relationship_decision(store, decision_id: str) -> None:
+    command_id = _relationship_command_id(store, decision_id)
+    store._execute_test_sql("DROP TRIGGER immutable_authorization_decisions_update")
+    store._execute_test_sql(
+        "UPDATE authorization_decisions SET canonical_bytes=? WHERE "
+        "authorization_decision_id=(SELECT authorization_decision_id FROM "
+        "authority_commands WHERE command_id=?)",
+        (b"{}", command_id),
+    )
+
+
+def _tamper_relationship_audit(store, decision_id: str) -> None:
+    command_id = _relationship_command_id(store, decision_id)
+    store._execute_test_sql("DROP TRIGGER immutable_authority_audit_events_update")
+    store._execute_test_sql(
+        "UPDATE authority_audit_events SET detail_digest=? WHERE command_id=?",
+        ("sha256:" + "0" * 64, command_id),
+    )
+
+
+def _tamper_relationship_payload(store, decision_id: str) -> None:
+    command_id = _relationship_command_id(store, decision_id)
+    store._execute_test_sql("DROP TRIGGER immutable_authority_payloads_update")
+    store._execute_test_sql(
+        "UPDATE authority_payloads SET payload_bytes=? WHERE payload_id="
+        "(SELECT payload_id FROM authority_commands WHERE command_id=?)",
+        (b"{}", command_id),
+    )
+
+
+def _tamper_relationship_head(store, decision_id: str) -> None:
+    command_id = _relationship_command_id(store, decision_id)
+    store._execute_test_sql("PRAGMA foreign_keys=OFF")
+    store._execute_test_sql("DROP TRIGGER authority_aggregates_update_guard")
+    store._execute_test_sql(
+        "UPDATE authority_aggregates SET current_version=999 WHERE "
+        "(aggregate_type,aggregate_id)=(SELECT aggregate_type,aggregate_id "
+        "FROM authority_commands WHERE command_id=?)",
+        (command_id,),
+    )
+
+
+def _tamper_relationship_domain_row(store, decision_id: str) -> None:
+    store._execute_test_sql(
+        "DROP TRIGGER immutable_event_hypothesis_relationship_update"
+    )
+    store._execute_test_sql(
+        "UPDATE event_hypothesis_relationship_decisions "
+        "SET actor_identity_digest=? WHERE decision_id=?",
+        ("sha256:" + "0" * 64, decision_id),
+    )
+
+
 def _advance_relationship_subject(seed):
     connection = sqlite3.connect(seed[1], isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
@@ -804,6 +887,99 @@ def test_read_port_rejects_self_consistent_retained_evidence_rewrite(
         checked.execute("ROLLBACK")
     finally:
         checked.close()
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        _tamper_relationship_authentication,
+        _tamper_relationship_decision,
+        _tamper_relationship_audit,
+        _tamper_relationship_payload,
+        _tamper_relationship_head,
+        _tamper_relationship_domain_row,
+    ),
+)
+def test_runtime_relationship_read_rejects_exact_retained_closure_tamper(
+    tmp_path: Path,
+    tamper: Callable[[object, str], None],
+) -> None:
+    seed = _seed_location(tmp_path / tamper.__name__)
+    assessment, evidence = _assessment(seed[3][0], seed[2])
+    authority = _open(seed)
+    retained = authority.retain(
+        assessment.canonical_bytes, evidence, proof=seed[0][3]
+    )
+    store = _relationship_store(authority)
+    tamper(store, retained.canonical_digest)
+
+    with pytest.raises((AuthorityPersistenceError, RelationshipContractError)):
+        authority.load(retained.canonical_digest)
+    authority.close()
+
+
+def test_runtime_relationship_read_uses_scoped_event_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.authority import _event_hypothesis_relationship_system as private
+
+    seed = _seed_location(tmp_path / "scoped-runtime-verification")
+    assessment, evidence = _assessment(seed[3][0], seed[2])
+    authority = _open(seed)
+    retained = authority.retain(
+        assessment.canonical_bytes, evidence, proof=seed[0][3]
+    )
+    store = _relationship_store(authority)
+    statements: list[str] = []
+    store._connection.set_trace_callback(statements.append)
+    monkeypatch.setattr(
+        private._RelationshipEventStore,
+        "_validate_relational_invariants",
+        lambda *_: pytest.fail("runtime relationship read used the opener scan"),
+    )
+
+    assert authority.load(retained.canonical_digest) == retained
+    store._connection.set_trace_callback(None)
+    authority.close()
+
+    traced = " ".join(statements).lower()
+    assert "where e.aggregate_type=" in traced
+    assert "where e.event_type=" not in traced
+
+
+def test_transaction_bound_read_port_checks_exact_event_closure(
+    tmp_path: Path,
+) -> None:
+    seed = _seed_location(tmp_path / "read-port-event-closure")
+    assessment, evidence = _assessment(seed[3][0], seed[2])
+    authority = _open(seed)
+    retained = authority.retain(
+        assessment.canonical_bytes, evidence, proof=seed[0][3]
+    )
+    authority.close()
+
+    connection, port = _read_port(seed)
+    try:
+        command_id = connection.execute(
+            "SELECT e.command_id FROM event_hypothesis_relationship_decisions r "
+            "JOIN ledger_events e ON e.event_id=r.authority_event_id "
+            "WHERE r.decision_id=?",
+            (retained.canonical_digest,),
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER immutable_authority_audit_events_update")
+        connection.execute(
+            "UPDATE authority_audit_events SET detail_digest=? WHERE command_id=?",
+            ("sha256:" + "0" * 64, command_id),
+        )
+        connection.execute("BEGIN IMMEDIATE")
+        with pytest.raises(RelationshipContractError):
+            port.require_retained_receipt_in_transaction(
+                retained.canonical_digest
+            )
+        assert connection.in_transaction
+        connection.execute("ROLLBACK")
+    finally:
+        connection.close()
 
 
 def test_public_relationship_system_closes_raw_when_facade_wrapping_fails(

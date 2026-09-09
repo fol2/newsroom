@@ -56,6 +56,7 @@ from newsroom.control_plane.graphiti import (
     GraphitiPort,
     GraphitiPreProviderAuthorizationDenied,
     GraphitiResultStageError,
+    graphiti_required_route_holds,
 )
 from newsroom.control_plane.graphiti_events import (
     ConfigurationGraphitiEventFailure,
@@ -90,6 +91,7 @@ from newsroom.control_plane.paths import (
 )
 from newsroom.control_plane.sqlite_profile import apply_control_plane_sqlite_profile
 from newsroom.control_plane.store import (
+    GRAPHITI_MAX_FAILURES,
     GraphitiSpendCeilingExceeded,
     append_ledger,
     claim_graphiti_attempt,
@@ -796,6 +798,8 @@ def _retain_attempt_receipt(
 def _queue(
     unpublished: sqlite3.Connection,
     units: tuple[CorpusIngestUnit, ...],
+    *,
+    model_usage: ModelUsageService | None = None,
 ) -> list[tuple[int, str, str, int, int, str, CorpusIngestUnit]]:
     queued: list[tuple[int, str, str, int, int, str, CorpusIngestUnit]] = []
     for unit in units:
@@ -803,7 +807,30 @@ def _queue(
             continue
         retries, dead = graphiti_failure_state(unpublished, unit.ingest_id)
         if dead:
-            continue
+            if (
+                model_usage is None
+                or unit.authority is None
+                or unit.proving_run_id != f"native-source:{unit.observation_digest}"
+            ):
+                continue
+            evidence = model_usage.graphiti_ingest_retry_evidence(
+                ingest_id=unit.ingest_id,
+            )
+            # Credit only proved local refusals in the original allowance.
+            # Later failures cannot mint further credits: at most three useful
+            # provider attempts and six total attempts, with history intact.
+            credits = sum(
+                number <= GRAPHITI_MAX_FAILURES
+                for number in evidence.zero_dispatch_attempts
+            )
+            limit = GRAPHITI_MAX_FAILURES + credits
+            if (
+                evidence.unresolved_attempts
+                or len(evidence.settled_provider_attempts) >= GRAPHITI_MAX_FAILURES
+                or retries >= limit
+                or next_graphiti_attempt_number(unpublished, unit.ingest_id) > limit
+            ):
+                continue
         if (
             unit.predecessor_ingest_id is not None
             and not has_graphiti_ingest(unpublished, unit.predecessor_ingest_id)
@@ -1205,8 +1232,20 @@ def _ingest(
         _retries,
         _ingest_id,
         unit,
-    ) in _queue(unpublished, units):
+    ) in _queue(unpublished, units, model_usage=model_usage):
         if attempted >= max_graphiti:
+            break
+        if isinstance(graphiti, GovernedRealGraphitiPort) and (
+            holds := graphiti_required_route_holds(model_usage)
+        ):
+            # Recheck between units: a downstream failure must not spend the
+            # next primary call or consume another unit's retry allowance.
+            append_ledger(unpublished, "GRAPHITI_REQUIRED_ROUTE_HOLD", {
+                "ingest_id": unit.ingest_id,
+                "blocked_routes": list(holds),
+                "provider_dispatched": False,
+            })
+            unpublished.commit()
             break
         dispatch_rights = rights_check(unit)
         if dispatch_rights is None:

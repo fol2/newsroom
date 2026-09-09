@@ -7051,3 +7051,131 @@ def test_evaluation_runner_labels_cycle_result_construction_failure(
     with pytest.raises(GraphitiResultStageError) as raised:
         EvaluationGraphitiRunner().ingest(unit)
     assert raised.value.stage == "CYCLE_RESULT_CONSTRUCTION"
+
+
+@pytest.mark.parametrize("route", ["GRAPHITI_CHAT_PRIMARY", "GRAPHITI_EMBEDDING"])
+@pytest.mark.parametrize("trip_between_units", [False, True])
+def test_required_route_circuit_defers_units_without_spend_or_retry_consumption(
+    tmp_path: Path, route: str, trip_between_units: bool,
+) -> None:
+    from newsroom.tests.test_graphiti_operational_readiness import _unit
+
+    connection = connect(str(tmp_path / "required-routes.sqlite3"))
+    usage = ModelUsageService(str(tmp_path / "required-routes.sqlite3"))
+    now = datetime(2026, 9, 9, tzinfo=UTC)
+    units = tuple(
+        replace(unit, proving_run_id="native-source:" + unit.observation_digest)
+        for unit in (_unit(item_key="one"), _unit(item_key="two"))
+    )
+    calls: list[str] = []
+    trip = [trip_between_units]
+
+    def open_circuit() -> None:
+        usage.open_route_circuit(
+            route=route, reason="TEST_DOWNSTREAM_UNAVAILABLE",
+            invocation_id=None, recorded_at=now,
+        )
+
+    class Graphiti:
+        requires_canonical_control_plane_stores = True
+
+        def ingest(self, _unit):
+            raise AssertionError("usage path required")
+
+        def ingest_until(self, _unit, *, deadline):
+            raise AssertionError("usage path required")
+
+        def ingest_with_usage(self, unit, **_kwargs):
+            calls.append(unit.ingest_id)
+            if trip[0]:
+                trip[0] = False
+                open_circuit()
+            return _complete(unit, proposal_count=0, entity_count=0)
+
+    @contextmanager
+    def fence(_unit):
+        yield _DispatchAuthority({"current": True}, now + timedelta(minutes=15), lambda: None)
+
+    def run() -> int:
+        return _ingest(
+            connection, graphiti=Graphiti(), units=units, max_graphiti=2,
+            rights_check=lambda _unit: {"current": True}, rights_fence=fence,
+            clock=lambda: now, model_usage=usage, cycle_id="native-route-test",
+        )
+
+    if not trip_between_units:
+        open_circuit()
+    assert run() == int(trip_between_units)
+    assert len(calls) == int(trip_between_units)
+    deferred = tuple(unit for unit in units if unit.ingest_id not in calls)
+    assert all(next_graphiti_attempt_number(connection, unit.ingest_id) == 1 for unit in deferred)
+    assert connection.execute("SELECT count(*) FROM unpublished_graphiti_spend").fetchone()[0] == int(trip_between_units)
+    holds = connection.execute(
+        "SELECT payload_json FROM ledger WHERE kind='GRAPHITI_REQUIRED_ROUTE_HOLD'"
+    ).fetchall()
+    assert len(holds) == 1
+    hold = json.loads(holds[0][0])
+    assert hold["provider_dispatched"] is False
+    assert hold["blocked_routes"][0]["route"] == route
+    usage.release_route_circuit(
+        route=route, release_kind="DETERMINISTIC_HEALTH_PROBE",
+        bound_failure_reason="TEST_DOWNSTREAM_UNAVAILABLE",
+        evidence_digest=digest_bytes(b"disposable recovery proof"), recorded_at=now,
+    )
+    assert run() == 2 - int(trip_between_units)
+    assert len(calls) == len(set(calls)) == 2
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    "native,zeros,providers,unresolved,failures,eligible",
+    [
+        (True, (1, 2), (3,), (), 3, True),
+        (True, (1, 2), (3, 4), (), 4, True),
+        (True, (1, 2), (3, 4, 5), (), 5, False),
+        (True, (1, 2, 4), (3,), (), 5, False),
+        (True, (1, 2, 3), (4, 5), (), 5, True),
+        (True, (1, 2, 3), (4, 5), (), 6, False),
+        (True, (), (1, 2, 3), (), 3, False),
+        (True, (1, 2), (), (3,), 3, False),
+        (True, (), (), (), 3, False),
+        (False, (1, 2), (3,), (), 3, False),
+    ],
+)
+def test_native_retry_credits_only_original_proved_local_refusals(
+    tmp_path, monkeypatch, native, zeros, providers, unresolved, failures, eligible,
+) -> None:
+    from newsroom.control_plane import cycle
+    from newsroom.control_plane.store import graphiti_failure_state, record_graphiti_failure
+    from newsroom.tests.test_graphiti_operational_readiness import _unit
+
+    connection = connect(str(tmp_path / "retry-credits.sqlite3"))
+    unit = _unit(item_key="bounded-native-recovery")
+    if native:
+        unit = replace(unit, proving_run_id="native-source:" + unit.observation_digest)
+    for _ in range(failures):
+        record_graphiti_failure(
+            connection, ingest_id=unit.ingest_id, source_id=unit.source_id,
+            item_key=unit.item_key, outcome="FAILED", failure_code="TEST_FAILURE",
+        )
+    connection.commit()
+    evidence = SimpleNamespace(
+        zero_dispatch_attempts=zeros, settled_provider_attempts=providers,
+        unresolved_attempts=unresolved,
+    )
+    requested = []
+
+    def prove(*, ingest_id):
+        requested.append(ingest_id)
+        return evidence
+
+    usage = SimpleNamespace(graphiti_ingest_retry_evidence=prove)
+    monkeypatch.setattr(cycle, "next_graphiti_attempt_number", lambda *_: failures + 1)
+    before = tuple(connection.execute("SELECT * FROM unpublished_graphiti_failures"))
+    assert bool(cycle._queue(connection, (unit,), model_usage=usage)) is eligible
+    assert requested == ([unit.ingest_id] if native else [])
+    assert tuple(connection.execute("SELECT * FROM unpublished_graphiti_failures")) == before
+    assert graphiti_failure_state(connection, unit.ingest_id) == (failures, True)
+    # No usage proof means no exception to the retained dead-letter boundary.
+    assert cycle._queue(connection, (unit,)) == []
+    connection.close()
