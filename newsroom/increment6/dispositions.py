@@ -92,6 +92,125 @@ class DispositionContractError(ValueError):
     """Proposal validation or a pending disposition failed closed."""
 
 
+@dataclass(frozen=True, slots=True)
+class CurrentCandidateCitation:
+    """Immutable authenticated observation of one retained Candidate head."""
+
+    citation_id: str
+    candidate_id: str
+    candidate_version_id: str
+    candidate_version_digest: str
+    hypothesis_id: str
+    hypothesis_version_id: str
+    hypothesis_version_digest: str
+    collision_namespace: str
+    collision_key_digest: str
+    source_definition_id: str
+    source_item_id: str
+    retrieval_context_digest: str
+    authorization_receipt_digest: str
+    authorization_decision_id: str
+
+    def __post_init__(self) -> None:
+        if type(self) is not CurrentCandidateCitation:
+            raise DispositionContractError("Candidate citation must be exact typed")
+        for field in (
+            "citation_id", "candidate_id", "candidate_version_id", "hypothesis_id",
+            "hypothesis_version_id", "collision_namespace", "source_definition_id",
+            "source_item_id", "authorization_decision_id",
+        ):
+            value = getattr(self, field)
+            if type(value) is not str or not value:
+                raise DispositionContractError(f"Candidate citation {field} is required")
+        for field in (
+            "candidate_version_digest", "hypothesis_version_digest",
+            "collision_key_digest", "retrieval_context_digest",
+            "authorization_receipt_digest",
+        ):
+            try:
+                validate_sha256_digest(getattr(self, field), field=field)
+            except (TypeError, ValueError) as exc:
+                raise DispositionContractError(
+                    f"Candidate citation {field} differs"
+                ) from exc
+        if self.citation_id != f"current-candidate:{self.canonical_digest}":
+            raise DispositionContractError("Candidate citation identity differs")
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "schema_version": "newsroom.increment6.current-candidate-citation.v1",
+            **{
+                field: getattr(self, field)
+                for field in self.__dataclass_fields__
+                if field != "citation_id"
+            },
+        }
+
+    @property
+    def canonical_bytes(self) -> bytes:
+        return canonical_json_bytes(self.canonical_value())
+
+    @property
+    def canonical_digest(self) -> str:
+        return digest_bytes(self.canonical_bytes)
+
+    @classmethod
+    def create(cls, **values: str) -> "CurrentCandidateCitation":
+        raw = canonical_json_bytes({
+            "schema_version": "newsroom.increment6.current-candidate-citation.v1",
+            **values,
+        })
+        return cls(f"current-candidate:{digest_bytes(raw)}", **values)
+
+    @classmethod
+    def from_canonical_bytes(cls, raw: bytes) -> "CurrentCandidateCitation":
+        value = _decode(raw, field="current Candidate citation")
+        fields = set(cls.__dataclass_fields__) - {"citation_id"}
+        if (
+            set(value) != {"schema_version", *fields}
+            or value.pop("schema_version")
+            != "newsroom.increment6.current-candidate-citation.v1"
+        ):
+            raise DispositionContractError("current Candidate citation fields differ")
+        return cls.create(**value)  # type: ignore[arg-type]
+
+
+_CURRENT_CANDIDATE_CITATION_PORT_TOKEN = object()
+
+
+class CurrentCandidateCitationReadPort:
+    """Read exact retained historical Candidate observations without recursion."""
+
+    __slots__ = ("__require",)
+
+    def __init__(
+        self,
+        token: object,
+        require: Callable[[str, str], CurrentCandidateCitation],
+    ) -> None:
+        if token is not _CURRENT_CANDIDATE_CITATION_PORT_TOKEN or not callable(require):
+            raise DispositionContractError("Candidate citation port is private")
+        self.__require = require
+
+    def require(self, citation_id: str, citation_digest: str) -> CurrentCandidateCitation:
+        value = self.__require(citation_id, citation_digest)
+        if (
+            type(value) is not CurrentCandidateCitation
+            or value.citation_id != citation_id
+            or value.canonical_digest != citation_digest
+        ):
+            raise DispositionContractError("current Candidate citation differs")
+        return value
+
+
+def _create_current_candidate_citation_read_port(
+    require: Callable[[str, str], CurrentCandidateCitation],
+) -> CurrentCandidateCitationReadPort:
+    return CurrentCandidateCitationReadPort(
+        _CURRENT_CANDIDATE_CITATION_PORT_TOKEN, require
+    )
+
+
 class DispositionAuthority(StrEnum):
     """Phase-one authority states; neither state permits an effect."""
 
@@ -1305,12 +1424,18 @@ class ProposalDispositionStore:
         connection: sqlite3.Connection,
         retrieval_authority: RetrievalContextAuthority,
         authenticator: StaticAuthenticator,
+        current_candidate_citations: "CurrentCandidateCitationReadPort | None" = None,
     ) -> None:
         if (
             type(connection) is not sqlite3.Connection
             or connection.in_transaction
             or type(retrieval_authority) is not RetrievalContextAuthority
             or type(authenticator) is not StaticAuthenticator
+            or (
+                current_candidate_citations is not None
+                and type(current_candidate_citations)
+                is not CurrentCandidateCitationReadPort
+            )
         ):
             raise DispositionContractError(
                 "disposition store requires exact trusted collaborators"
@@ -1318,6 +1443,7 @@ class ProposalDispositionStore:
         self._connection = connection
         self._retrieval_authority = retrieval_authority
         self._authenticator = authenticator
+        self._current_candidate_citations = current_candidate_citations
         try:
             connection.execute("PRAGMA foreign_keys=ON")
             if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
@@ -1512,6 +1638,25 @@ class ProposalDispositionStore:
                     if context_leads.get(citation.source_id) != citation.source_digest:
                         raise DispositionContractError(
                             "context Lead citation differs from the exact Version"
+                        )
+                    continue
+                if citation.source_kind is CitationSourceKind.CURRENT_CANDIDATE:
+                    if self._current_candidate_citations is None:
+                        raise DispositionContractError(
+                            "current Candidate citation authority is unavailable"
+                        )
+                    observed = self._current_candidate_citations.require(
+                        citation.source_id, citation.source_digest
+                    )
+                    if (
+                        citation.target_hypothesis_id != observed.hypothesis_id
+                        or citation.field_path != "$"
+                        or citation.byte_start != 0
+                        or citation.byte_end != len(observed.canonical_bytes)
+                        or citation.quote_digest != observed.canonical_digest
+                    ):
+                        raise DispositionContractError(
+                            "current Candidate citation differs from retained authority"
                         )
                     continue
                 item = retrieval_items.get(citation.source_id)
@@ -1932,7 +2077,9 @@ __all__ = [
     "DISPOSITION_AUTHORITY", "MAX_DISPOSITION_CANONICAL_BYTES",
     "PROPOSAL_DISPOSITION", "PROPOSAL_DISPOSITION_SCHEMA_VERSION",
     "PROPOSAL_VALIDATION_FINDING", "PROPOSAL_VALIDATION_FINDING_SCHEMA_VERSION",
-    "VALIDATED_PROPOSAL_LEAD_DISPOSITION_BINDING", "DispositionAuthority",
+    "VALIDATED_PROPOSAL_LEAD_DISPOSITION_BINDING", "CurrentCandidateCitation",
+    "CurrentCandidateCitationReadPort", "DispositionAuthority",
+    "CurrentCandidateCitation", "CurrentCandidateCitationReadPort",
     "DispositionContractError", "DispositionJudgement", "FindingCode", "FindingSeverity",
     "LeadDispositionHeadBinding", "ProposalDisposition", "ProposalValidationFinding",
     "ProposalDispositionStore", "ProposalValidationResult", "ValidatorInputBinding", "build_pending_dispositions",

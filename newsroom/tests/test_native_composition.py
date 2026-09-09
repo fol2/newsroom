@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import sqlite3
+import os
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,6 +25,93 @@ from newsroom.tests.projection_b2_helpers import MemoryNeo4jAdapter
 
 
 NOW = datetime(2026, 9, 8, 14, tzinfo=UTC)
+
+
+def test_native_cursor_credential_loads_only_provisioned_key_and_restores_environment(
+    tmp_path, monkeypatch,
+):
+    from pathlib import Path
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+    path = tmp_path / "Coding/newsroom/.env"
+    path.parent.mkdir(parents=True)
+    path.write_text("CURSOR_API_KEY='fixture-sdk-key'\nUNRELATED_SECRET=not-loaded\n")
+    path.chmod(0o600)
+    with native_composition._native_cursor_credential():
+        assert os.environ["CURSOR_API_KEY"] == "fixture-sdk-key"
+        assert "UNRELATED_SECRET" not in os.environ
+    assert "CURSOR_API_KEY" not in os.environ
+    path.write_text("CURSOR_API_KEY=\n")
+    with pytest.raises(ValueError, match="credential is absent"):
+        with native_composition._native_cursor_credential():
+            pytest.fail("empty credential entered")
+    monkeypatch.setenv("CURSOR_API_KEY", "already-provisioned")
+    with native_composition._native_cursor_credential():
+        assert os.environ["CURSOR_API_KEY"] == "already-provisioned"
+    assert os.environ["CURSOR_API_KEY"] == "already-provisioned"
+
+
+@pytest.mark.parametrize("cli_version", ["different", "1.0.8"])
+def test_deployed_startup_rejects_unqualified_identity_before_credentials_or_io(
+    tmp_path, monkeypatch, cli_version,
+):
+    from newsroom.control_plane import broker, cycle, paths, writer
+
+    root = tmp_path / "native"
+    root.mkdir()
+    for name in ("evidence-intake", "private-serving", "retrieval"):
+        (root / f"{name}.sqlite3").touch()
+    for constant, name in (
+        ("CANONICAL_INCREMENT4_AUTHORITY_STORE", "authority.sqlite3"),
+        ("CANONICAL_UNPUBLISHED_STORE", "private.sqlite3"),
+        ("CANONICAL_PROVING_STORE", "proving.sqlite3"),
+    ):
+        path = tmp_path / name
+        path.touch()
+        monkeypatch.setattr(paths, constant, path)
+    monkeypatch.setattr(paths, "CANONICAL_OBJECT_CAS_ROOT", tmp_path)
+    monkeypatch.setattr(paths, "HOST_CONTROL_PLANE_STATE_ROOT", tmp_path)
+    monkeypatch.setattr(cycle, "assert_no_owner_emergency_stop", lambda _: None)
+    monkeypatch.setattr(writer, "cont_writer_implementation_identity", lambda: ("1" * 40, True))
+    monkeypatch.setattr(writer, "read_grok_command_semantic_version", lambda: cli_version)
+    monkeypatch.setattr(native_composition.subprocess, "check_output", lambda *_a, **_k: "2" * 40)
+    policies = {
+        WorkloadClass.NATIVE_RETRIEVAL_EMBEDDING: _embedding_policy(),
+        WorkloadClass.NATIVE_EVIDENCE_ASSESSOR: _assessment_policy(),
+    }
+    monkeypatch.setattr(native_composition, "ModelUsageService", lambda _: SimpleNamespace(
+        qualified_policy=lambda **request: policies[request["workload_class"]],
+    ))
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("unqualified startup reached credentials or source/provider I/O")
+
+    monkeypatch.setattr(broker, "neo4j_projector_config", unexpected)
+    monkeypatch.setattr(broker, "openrouter_api_key", unexpected)
+    monkeypatch.setattr(native_composition, "open_native_pipeline", unexpected)
+    service = native_composition.deployed_native_service(SimpleNamespace(
+        ledger=str(paths.CANONICAL_UNPUBLISHED_STORE), lock=str(root / "hermes.lock"),
+        once=False, interval=300, failure_backoff=60,
+    ))
+    with pytest.raises(ValueError, match="CLI differs|qualification.*absent"):
+        service.run()
+
+
+def test_native_deployment_identity_binds_store_instance_not_changing_contents(tmp_path):
+    store = tmp_path / "authority.sqlite3"
+    store.write_bytes(b"first retained state")
+    arguments = dict(
+        revision="1" * 40, tree="2" * 40, paths={"authority": store},
+        embedding_policy=_embedding_policy(), assessment_policy=_assessment_policy(),
+    )
+    identity = native_composition._deployment_identity(**arguments)
+    store.write_bytes(b"next retained state")
+    assert native_composition._deployment_identity(**arguments) == identity
+    assert native_composition._deployment_identity(**{**arguments, "revision": "3" * 40}) != identity
+    replacement = tmp_path / "replacement.sqlite3"
+    replacement.write_bytes(store.read_bytes())
+    replacement.replace(store)
+    assert native_composition._deployment_identity(**arguments) != identity
 
 
 def _embedding_policy() -> InvocationEfficiencyPolicy:

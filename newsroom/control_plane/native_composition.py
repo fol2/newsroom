@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import secrets
+import shlex
 import sqlite3
+import subprocess
 from collections.abc import Callable, Mapping
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -56,18 +59,69 @@ TRANSPORT_POLICY = digest_canonical({
 })
 
 
+@contextmanager
+def _native_cursor_credential():
+    """Bind only the existing purpose-provisioned SDK key, never the whole .env."""
+    name = "CURSOR_API_KEY"
+    if os.environ.get(name):
+        yield
+        return
+    path = Path.home() / "Coding/newsroom/.env"
+    metadata = path.stat()
+    if metadata.st_uid != os.getuid() or metadata.st_mode & 0o022:
+        raise ValueError("native Cursor credential file ownership differs")
+    values = [
+        shlex.split(line.split("=", 1)[1], comments=True)
+        for line in path.read_text().splitlines()
+        if line.startswith(name + "=")
+    ]
+    if len(values) != 1 or len(values[0]) != 1 or not values[0][0].strip():
+        raise ValueError("native purpose-provisioned Cursor credential is absent")
+    previous = os.environ.get(name)
+    os.environ[name] = values[0][0]
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = previous
+
+
+def _deployment_identity(*, revision, tree, paths, embedding_policy, assessment_policy):
+    from . import broker
+    from .native_source_rights import POLICY_DIGEST as RIGHTS_POLICY
+    identities = {}
+    for name, path in sorted(paths.items()):
+        path = Path(path)
+        if path.is_symlink():
+            raise ValueError("native deployment store is a symlink")
+        stat = path.stat()
+        identities[name] = {"path": str(path.resolve()), "device": stat.st_dev, "inode": stat.st_ino}
+    return digest_canonical({
+        "version": VERSION, "revision": revision, "tree": tree,
+        "stores": identities, "target": "hermes-private-serving", "public_effect": False,
+        "embedding_policy": embedding_policy.canonical_digest,
+        "assessment_policy": assessment_policy.canonical_digest,
+        "rights_policy": RIGHTS_POLICY, "transport_policy": TRANSPORT_POLICY,
+        "neo4j": {"host": broker.NEO4J_BOLT_HOST, "port": broker.NEO4J_BOLT_PORT,
+                  "database": broker.NEO4J_DATABASE, "principal": broker.NEO4J_PROJECTOR_USERNAME},
+    })
+
+
 def deployed_native_service(args):
     """Compose the installed canonical private route, after the singleton lock."""
     from . import broker, native_assessor, native_embeddings
     from .cycle import assert_no_owner_emergency_stop, owner_emergency_stop_fence
     from .model_usage import WorkloadClass
     from .native_service import NativeService
+    from .native_qualification import record_qualification
     from .paths import (
         CANONICAL_PROVING_STORE, CANONICAL_UNPUBLISHED_STORE,
         CANONICAL_INCREMENT4_AUTHORITY_STORE, CANONICAL_OBJECT_CAS_ROOT,
         CANONICAL_GRAPHITI_WORKSPACE_ROOT, HOST_CONTROL_PLANE_STATE_ROOT,
     )
-    from .writer import cont_writer_implementation_identity
+    from .writer import cont_writer_implementation_identity, read_grok_command_semantic_version
     from newsroom.increment9.proving import SOURCE_URLS
 
     if Path(args.ledger).resolve() != CANONICAL_UNPUBLISHED_STORE.resolve():
@@ -99,6 +153,34 @@ def deployed_native_service(args):
             implementation_revision=revision, config_identity=native_assessor.CONFIG_IDENTITY,
             output_schema_digest=native_assessor.SCHEMA_DIGEST,
         )
+        if assessment.command_semantic_version != read_grok_command_semantic_version():
+            raise ValueError("native assessor CLI differs from its qualified policy")
+        tree = subprocess.check_output(
+            ("/usr/bin/git", "rev-parse", f"{revision}^{{tree}}"),
+            cwd=Path(__file__).resolve().parents[2], text=True, timeout=10,
+        ).strip()
+        identity_paths = {
+            "authority": CANONICAL_INCREMENT4_AUTHORITY_STORE,
+            "cas": CANONICAL_OBJECT_CAS_ROOT, "private_ledger": CANONICAL_UNPUBLISHED_STORE,
+            "proving": CANONICAL_PROVING_STORE,
+            "intake": private_root / "evidence-intake.sqlite3",
+            "serving": private_root / "private-serving.sqlite3",
+            "retrieval": private_root / "retrieval.sqlite3",
+        }
+
+        def identity():
+            return _deployment_identity(
+                revision=revision, tree=tree, paths=identity_paths,
+                embedding_policy=embedding, assessment_policy=assessment,
+            )
+
+        qualified_identity = None
+        if not args.once:
+            from .native_qualification import validate_qualification
+            qualified_identity = identity()
+            with closing(sqlite3.connect(CANONICAL_UNPUBLISHED_STORE.as_uri() + "?mode=ro", uri=True)) as retained:
+                retained.execute("PRAGMA query_only=ON")
+                validate_qualification(retained, qualified_identity)
         # Discovery only: each selected identity is authenticated again by the
         # Source facade before an observation. No Source Definition is invented.
         connection = sqlite3.connect(CANONICAL_INCREMENT4_AUTHORITY_STORE.as_uri() + "?mode=ro", uri=True)
@@ -117,7 +199,7 @@ def deployed_native_service(args):
                 raise ValueError("current native source definition identity is ambiguous")
             if matching:
                 bindings[source_id] = SourceDefinitionId.parse(matching[0])
-        with open_native_pipeline(
+        with _native_cursor_credential(), open_native_pipeline(
             authority_path=CANONICAL_INCREMENT4_AUTHORITY_STORE,
             object_root=CANONICAL_OBJECT_CAS_ROOT, workspace_root=CANONICAL_GRAPHITI_WORKSPACE_ROOT,
             private_path=CANONICAL_UNPUBLISHED_STORE, proving_path=CANONICAL_PROVING_STORE,
@@ -128,12 +210,16 @@ def deployed_native_service(args):
             embedding_policy=embedding, assessment_policy=assessment, source_definition_ids=bindings,
             licence=None, stop_check=check, stop_fence=fence, implementation_worktree_clean=clean,
         ) as composed:
+            composed.runtime_identity_digest = identity()
+            if qualified_identity is not None and composed.runtime_identity_digest != qualified_identity:
+                raise ValueError("native deployment identity changed during open")
             yield composed
 
     return NativeService(
         pipeline_factory=pipeline, ledger_path=str(CANONICAL_UNPUBLISHED_STORE),
         lock_path=Path(args.lock), stop_check=check, interval_seconds=args.interval,
         failure_backoff_seconds=args.failure_backoff,
+        qualify_once=record_qualification,
     )
 
 
@@ -219,7 +305,7 @@ def open_native_pipeline(
             components.update(documents=documents, collision=collision)
             return RetrievalContextAuthority(
                 retrieval_path, {}, native_context_read_port=documents.context_read_port(proof=proof),
-            ), collision.enforcer
+            ), collision.enforcer, collision.candidate_citation_read_port()
 
         runtime = resources.enter_context(open_native_runtime(
             authority_path=authority_path, object_root=object_root, workspace_root=workspace_root,

@@ -17,7 +17,10 @@ from newsroom.increment6.candidates import (
     merge_candidate_authority_registries,
 )
 from newsroom.increment6.collision import CurrentCollisionEffectEnforcer
-from newsroom.increment6.dispositions import ProposalDispositionStore
+from newsroom.increment6.dispositions import (
+    CurrentCandidateCitationReadPort,
+    ProposalDispositionStore,
+)
 from newsroom.increment6.hypotheses import _compose_event_hypothesis_authority
 from newsroom.increment6.lineage import (
     _compose_event_hypothesis_lineage_authority,
@@ -127,7 +130,11 @@ class NativeDependencyFactory(Protocol):
         extraction: GovernedExtractionRecords,
         commands: AuthorityCommands,
         events: AuthorityEvents,
-    ) -> tuple[RetrievalContextAuthority, CurrentCollisionEffectEnforcer]: ...
+    ) -> tuple[
+        RetrievalContextAuthority,
+        CurrentCollisionEffectEnforcer,
+        CurrentCandidateCitationReadPort,
+    ]: ...
 
 
 class HermesNativeAuthoritySystem:
@@ -208,6 +215,7 @@ def open_hermes_native_authority_system(
     explicit_dependencies = (
         retrieval_authority is not None or collision_enforcer is not None
     )
+    current_candidate_citations = None
     if native_dependency_factory is None:
         if (
             type(retrieval_authority) is not RetrievalContextAuthority
@@ -322,12 +330,13 @@ def open_hermes_native_authority_system(
             )
             if (
                 type(dependencies) is not tuple
-                or len(dependencies) != 2
+                or len(dependencies) != 3
                 or type(dependencies[0]) is not RetrievalContextAuthority
                 or type(dependencies[1]) is not CurrentCollisionEffectEnforcer
+                or type(dependencies[2]) is not CurrentCandidateCitationReadPort
             ):
                 raise TypeError("native dependency factory result differs")
-            retrieval_authority, collision_enforcer = dependencies
+            retrieval_authority, collision_enforcer, current_candidate_citations = dependencies
         assert retrieval_authority is not None and collision_enforcer is not None
 
         check_boundary = _CheckBoundary(
@@ -381,14 +390,23 @@ def open_hermes_native_authority_system(
             lease_ttl_seconds=lease_ttl_seconds,
         )
         executions._TriageExecutionAuthority__store._transaction_lock = operation_lock
-        dispositions = ProposalDispositionStore(connection, retrieval_authority, authenticator)
-        hypothesis_store = _HypothesisStore(connection, retrieval_authority, authenticator, clock)
+        dispositions = ProposalDispositionStore(
+            connection,
+            retrieval_authority,
+            authenticator,
+            current_candidate_citations,
+        )
+        hypothesis_store = _HypothesisStore(
+            connection, retrieval_authority, authenticator, clock,
+            current_candidate_citations,
+        )
         hypothesis_store._lock = operation_lock
 
         relationship_store = _share_store(_SharedRelationshipStore, root)
         with relationship_store._hypothesis_rows():
             relationship_store._hypotheses = _HypothesisStore(
-                connection, retrieval_authority, authenticator, clock
+                connection, retrieval_authority, authenticator, clock,
+                current_candidate_citations,
             )
         relationship_store._hypotheses._lock = operation_lock
         relationship_store._command_service = service
@@ -402,6 +420,7 @@ def open_hermes_native_authority_system(
             connection, retrieval_authority=retrieval_authority,
             authenticator=authenticator, command_registry=commands,
             payload_schemas=schemas, clock=clock,
+            current_candidate_citations=current_candidate_citations,
         )
         lineage_store._service = service
         with operation_lock, lineage_store._transaction(): lineage_store._verify()
@@ -415,6 +434,7 @@ def open_hermes_native_authority_system(
             authenticator=authenticator, command_registry=commands,
             payload_schemas=schemas, clock=clock,
             object_admission_payload_validator=root._validate_object_admission_payload_record,
+            current_candidate_citations=current_candidate_citations,
         )
         candidate_store._dispositions = dispositions
         candidate_store._service = service
@@ -428,6 +448,7 @@ def open_hermes_native_authority_system(
             payload_schemas=schemas,
             clock=clock,
             command_service_version=command_service_version,
+            current_candidate_citations=current_candidate_citations,
             object_admission_payload_validator=root._validate_object_admission_payload_record,
         )
 

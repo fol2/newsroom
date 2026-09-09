@@ -155,6 +155,14 @@ class NativeSourceIntake:
     def _poll_one(self, source_id: str) -> NativeSourceDisposition:
         definition_id = self._definitions.get(source_id)
         if definition_id is None:
+            from .native_source_rights import NativePortfolioRights
+            if type(self._licence) is NativePortfolioRights and self._licence.for_source(
+                source_id=source_id, definition_url=SOURCE_URLS[source_id],
+            ).decision != "PERMITTED":
+                return NativeSourceDisposition(
+                    source_id, "HOLD", self._licence.reason_for(source_id),
+                    observations=self._licence.observations_for(source_id),
+                )
             return NativeSourceDisposition(source_id, "HOLD", "SOURCE_DEFINITION_MISSING")
         summary = self._sources.current_summary(definition_id, proof=self._proof)
         version = self._sources.version_details(summary.version_id, proof=self._proof).request

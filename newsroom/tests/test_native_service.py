@@ -10,6 +10,7 @@ from newsroom.control_plane.native_service import (
 )
 from newsroom.control_plane.veto import VetoError
 from scripts.hermes_native import main
+from newsroom.authority.canonical import digest_canonical
 
 
 def _pipeline(monkeypatch, tick):
@@ -117,6 +118,32 @@ def test_native_service_preserves_veto_and_singleton_lock(tmp_path, monkeypatch)
             service.run(once=True)
 
 
+def test_native_service_binds_both_cycle_records_to_runtime_identity(tmp_path, monkeypatch):
+    factory, _ = _pipeline(monkeypatch, lambda _: NativePipelineReport((), {}, 0))
+    identity = digest_canonical({"actual_test_deployment": str(tmp_path)})
+
+    @contextmanager
+    def bound():
+        with factory() as pipeline:
+            pipeline.runtime_identity_digest = identity
+            yield pipeline
+
+    qualified = []
+
+    def qualify(connection, digest):
+        assert connection.execute("SELECT kind FROM ledger ORDER BY seq DESC LIMIT 1").fetchone()[0] == "NATIVE_SERVICE_CYCLE_TERMINAL"
+        qualified.append(digest)
+
+    _service(tmp_path, bound, qualify_once=qualify).run(once=True)
+    assert qualified == [identity]
+    with sqlite3.connect(tmp_path / "unpublished.sqlite3") as connection:
+        records = tuple(json.loads(row[0]) for row in connection.execute(
+            "SELECT payload_json FROM ledger WHERE kind LIKE 'NATIVE_SERVICE_%' ORDER BY seq"
+        ))
+    assert len(records) == 2
+    assert all(record["runtime_identity_digest"] == identity for record in records)
+
+
 def test_hermes_native_once_cli_reports_exact_terminal(tmp_path, monkeypatch, capsys):
     factory, _ = _pipeline(
         monkeypatch, lambda _cycle_id: NativePipelineReport((), {}, 0),
@@ -144,4 +171,21 @@ def test_hermes_native_once_cli_reports_exact_terminal(tmp_path, monkeypatch, ca
             "outcome": "COMPLETE",
             "pipeline": {"revision_states": {}, "sources": [], "unclassified_revisions": 0},
         },
+    }
+
+
+def test_hermes_native_owner_stop_is_not_a_supervisor_crash(tmp_path, monkeypatch, capsys):
+    factory, opened = _pipeline(monkeypatch, lambda _: None)
+
+    def stopped():
+        raise VetoError("private stop details")
+
+    assert main(lambda args: _service(tmp_path, factory, stop_check=stopped), [
+        "--once", "--ledger", str(tmp_path / "unpublished.sqlite3"),
+        "--lock", str(tmp_path / "hermes-native.lock"),
+    ]) == 0
+    assert not opened
+    assert not (tmp_path / "unpublished.sqlite3").exists()
+    assert json.loads(capsys.readouterr().out) == {
+        "service": None, "owner_stop": True, "public_effect": False,
     }

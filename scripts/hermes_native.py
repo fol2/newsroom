@@ -10,6 +10,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict
 
 from newsroom.control_plane.native_service import NativeService
+from newsroom.control_plane.veto import VetoError
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -43,6 +44,11 @@ def main(
     }
     try:
         report = service.run(once=args.once)
+    except VetoError:
+        # A deliberate owner stop is a successful shutdown, not a crash for
+        # LaunchAgent's unsuccessful-exit restart policy to retry indefinitely.
+        print(json.dumps({"service": None, "owner_stop": True, "public_effect": False}))
+        return 0
     finally:
         for number, handler in previous.items():
             signal.signal(number, handler)

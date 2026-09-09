@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from newsroom.authority.auth import AuthenticationProof
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.discovery import LeadDispositionDecision, NewsLead
-from newsroom.increment6.dispositions import ProposalDisposition
+from newsroom.increment6.dispositions import CurrentCandidateCitation, ProposalDisposition
 from newsroom.increment6.autonomous_worker import (
     AUTONOMOUS_WORKER_VERSION,
     autonomous_worker_input_digest,
@@ -46,8 +46,14 @@ from newsroom.increment6.outcomes import (
     ReasonReference,
     StructuredReason,
 )
-from newsroom.increment6.proposals import ProposalRoute, TriageProposal, WorkerKind
+from newsroom.increment6.proposals import (
+    HypothesisRelationship,
+    ProposalRoute,
+    TriageProposal,
+    WorkerKind,
+)
 from newsroom.increment6.relationships import (
+    ComparatorEvidence,
     ComparatorSetManifest,
     HypothesisVersionBinding,
     RelationshipAssessment,
@@ -288,6 +294,40 @@ def _selection(proposal: TriageProposal, lead_id: str) -> OutcomeSelection:
                 None,
             ),
         )
+    if recommendation.route is ProposalRoute.DEVELOPMENT_CANDIDATE:
+        return OutcomeSelection(
+            outcome=CanonicalOutcome.LEAD_ADMIT_DEVELOPMENT_CANDIDATE,
+            terminality=DecisionTerminality.TERMINAL_EXACT_VERSION,
+            primary_reason=StructuredReason(
+                ReasonCode.REL_DEVELOPMENT,
+                ReasonBasisClass.DETERMINISTIC_POLICY,
+                (reference,),
+                "The direct retained source revision develops the current Candidate Hypothesis.",
+            ),
+            supporting_reasons=(),
+            next_action=NextAction(
+                CanonicalNextAction.HANDOFF_FOR_EVALUATION.kind,
+                CanonicalNextAction.HANDOFF_FOR_EVALUATION,
+                None,
+            ),
+        )
+    if recommendation.route is ProposalRoute.ASSOCIATE_WITHOUT_CANDIDATE:
+        return OutcomeSelection(
+            outcome=CanonicalOutcome.LEAD_ASSOCIATE_WITHOUT_CANDIDATE,
+            terminality=DecisionTerminality.TERMINAL_EXACT_VERSION,
+            primary_reason=StructuredReason(
+                ReasonCode.REL_SAME_STATE,
+                ReasonBasisClass.DETERMINISTIC_POLICY,
+                (reference,),
+                "The direct retained source revision preserves the current Candidate state.",
+            ),
+            supporting_reasons=(),
+            next_action=NextAction(
+                CanonicalNextAction.CLOSE_DECISION.kind,
+                CanonicalNextAction.CLOSE_DECISION,
+                None,
+            ),
+        )
     action = recommendation.operational_action
     if action is None:
         raise NativeTriageError("operational hold lacks its exact action")
@@ -324,6 +364,10 @@ def advance_native_triage(
     collision_request: CurrentCollisionEligibilityRequest | None = None,
     collision_decision: CurrentCollisionEligibilityDecision | None = None,
     candidate_request: CandidateAdmissionRequest | None = None,
+    current_candidate: CurrentCandidateCitation | None = None,
+    revision_relationship: HypothesisRelationship | None = None,
+    expected_target_version: EventHypothesisVersion | None = None,
+    current_candidate_version: StoryCandidateVersion | None = None,
 ) -> NativeTriageResult:
     """Persist one Work Item and advance every currently available native stage."""
 
@@ -338,6 +382,18 @@ def advance_native_triage(
         and type(candidate_request) is CandidateAdmissionRequest
     ):
         raise NativeTriageError("Candidate admission requires all exact typed inputs")
+    if (current_candidate is None) != (revision_relationship is None):
+        raise NativeTriageError("revision relationship requires its Candidate citation")
+    if current_candidate is not None and type(current_candidate) is not CurrentCandidateCitation:
+        raise NativeTriageError("current Candidate citation must be exact typed")
+    if revision_relationship not in {
+        None,
+        HypothesisRelationship.DEVELOPMENT_OF,
+        HypothesisRelationship.SAME_STATE,
+    }:
+        raise NativeTriageError("revision relationship is unsupported")
+    if (expected_target_version is None) != (current_candidate is None):
+        raise NativeTriageError("revision relationship requires the exact target head")
     version = system.work_items.create_or_replay(work.item, work.version)
     if version != work.version:
         raise NativeTriageError("retained Work Item Version differs")
@@ -367,7 +423,12 @@ def advance_native_triage(
         ordinal=1,
         worker_kind=WorkerKind.AUTONOMOUS_DETERMINISTIC,
         worker_version=AUTONOMOUS_WORKER_VERSION,
-        input_digest=autonomous_worker_input_digest(version, work.leads),
+        input_digest=autonomous_worker_input_digest(
+            version,
+            work.leads,
+            current_candidate=current_candidate,
+            revision_relationship=revision_relationship,
+        ),
     )
     attempt = system.executions.register_attempt(batch.batch_id, attempt, proof=proof)
     lease = system.executions.claim(attempt.attempt_id, proof=proof)
@@ -375,6 +436,8 @@ def advance_native_triage(
         work_item_version=version,
         attempt=attempt,
         decision_leads=work.leads,
+        current_candidate=current_candidate,
+        revision_relationship=revision_relationship,
     )
     lease = system.executions.complete(
         lease.lease_id, digest_bytes(proposal.canonical_bytes), proof=proof
@@ -402,19 +465,41 @@ def advance_native_triage(
             None,
         )
     hypothesis = system.hypotheses.retain(
-        proposal.canonical_bytes, dispositions, proof=proof
+        proposal.canonical_bytes,
+        dispositions,
+        proof=proof,
+        expected_target_version=expected_target_version,
     )
-    assessment = assess_relationships(
-        HypothesisVersionBinding.from_version(hypothesis),
-        ComparatorSetManifest.complete(()),
-        (),
-    )
+    subject = HypothesisVersionBinding.from_version(hypothesis)
+    if expected_target_version is None:
+        comparators = ComparatorSetManifest.complete(())
+        evidence = ()
+    else:
+        comparator = HypothesisVersionBinding.from_version(expected_target_version)
+        comparators = ComparatorSetManifest.complete((comparator,))
+        evidence = (ComparatorEvidence(
+            subject,
+            comparator,
+            100,
+            0,
+            100 if revision_relationship is HypothesisRelationship.DEVELOPMENT_OF else 0,
+            100 if revision_relationship is HypothesisRelationship.SAME_STATE else 0,
+            0,
+        ),)
+    assessment = assess_relationships(subject, comparators, evidence)
     relationship = system.relationships.retain(
-        assessment.canonical_bytes, (), proof=proof
+        assessment.canonical_bytes,
+        tuple(item.canonical_bytes for item in evidence),
+        proof=proof,
+    )
+    state = (
+        "SAME_STATE_ASSOCIATED"
+        if revision_relationship is HypothesisRelationship.SAME_STATE
+        else "CANDIDATE_READY"
     )
     result = NativeTriageResult(
         work,
-        "CANDIDATE_READY",
+        state,
         batch,
         attempt,
         lease,
@@ -437,7 +522,7 @@ def advance_native_triage(
         request=candidate_request,
         manifest=manifest,
         collision=collision_decision,
-        current_version=None,
+        current_version=current_candidate_version,
         governing_state=CandidateGoverningState(
             CandidateGoverningStateStatus.COMPLETE,
             manifest.governing_state_binding,

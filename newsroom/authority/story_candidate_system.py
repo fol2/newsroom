@@ -58,7 +58,10 @@ from newsroom.increment6.collision import (
     CurrentCollisionEligibilityDecision,
     CurrentCollisionEligibilityRequest,
 )
-from newsroom.increment6.dispositions import ProposalDispositionStore
+from newsroom.increment6.dispositions import (
+    CurrentCandidateCitationReadPort,
+    ProposalDispositionStore,
+)
 from newsroom.increment6.lineage import merge_lineage_authority_registries
 from newsroom.increment6.relationships import merge_relationship_authority_registries
 from newsroom.increment6.work_items import RetrievalContextAuthority
@@ -1103,6 +1106,7 @@ def _create_story_candidate_read_port(
         [sqlite3.Connection, sqlite3.Row], None
     ]
     | None = None,
+    current_candidate_citations: CurrentCandidateCitationReadPort | None = None,
 ) -> StoryCandidateReadPort:
     """Bind complete Candidate reads to one caller-owned transaction."""
 
@@ -1134,6 +1138,7 @@ def _create_story_candidate_read_port(
             payload_schemas=schemas,
             clock=clock,
             object_admission_payload_validator=object_admission_payload_validator,
+            current_candidate_citations=current_candidate_citations,
         )
         verifier = object.__new__(_CandidateStore)
         verifier._conn = connection
@@ -1148,7 +1153,10 @@ def _create_story_candidate_read_port(
                 object_admission_payload_validator
             )
         verifier._dispositions = ProposalDispositionStore(
-            connection, retrieval_authority, authenticator
+            connection,
+            retrieval_authority,
+            authenticator,
+            current_candidate_citations,
         )
         private = _StoryCandidateReadAuthority(
             _READ_AUTHORITY_TOKEN, connection, verifier

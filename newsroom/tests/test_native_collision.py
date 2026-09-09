@@ -17,7 +17,7 @@ from newsroom.control_plane.native_collision import (
     NativeCollisionHold,
     NativeCollisionIdentity,
 )
-from newsroom.control_plane.native_cycle import advance_native_cycle
+from newsroom.control_plane.native_cycle import _revision_successor, advance_native_cycle
 from newsroom.increment5.branch_contracts import BranchMode, BranchOutcome
 from newsroom.increment5.native_retrieval import (
     NATIVE_VECTOR_PROFILE,
@@ -34,6 +34,7 @@ from newsroom.increment6.collision import (
     CurrentCollisionEligibilityBlocked,
 )
 from newsroom.increment6.hypotheses import EventHypothesis
+from newsroom.increment6.dispositions import CurrentCandidateCitation
 from newsroom.increment6.work_items import RetrievalBindingState, RetrievalInputBinding
 from newsroom.tests.discovery_3d_authority_helpers import (
     exact_admission_request,
@@ -324,6 +325,24 @@ def test_native_collision_reads_current_candidate_and_replays_after_restart(
         )[0]
         assert replay.state == "CANDIDATE_ADMITTED"
         assert replay.triage.candidate == candidate
+
+        citation = reopened_collision.current_candidate_citation(
+            status.lead, retrieval, proof=proof()
+        )
+        assert citation is not None
+        stale_values = {
+            field: getattr(citation, field)
+            for field in citation.__dataclass_fields__
+            if field != "citation_id"
+        }
+        stale_values["candidate_version_digest"] = "sha256:" + "0" * 64
+        with pytest.raises(NativeCollisionHold, match="CURRENT_CANDIDATE_CITATION_STALE"):
+            _revision_successor(
+                reopened,
+                status.lead,
+                CurrentCandidateCitation.create(**stale_values),
+                proof=proof(),
+            )
 
         proposal_id = str(uuid.uuid4())
         hypothesis_id = EventHypothesis.allocate(

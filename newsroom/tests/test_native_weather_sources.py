@@ -34,6 +34,7 @@ def test_metoffice_retains_full_entry_without_inventing_updated_time():
     assert '<extra>Not discarded</extra>' in items[0].retained_corpus_body
     with pytest.raises(ValueError): weather_items("UK-10", RSS.replace(b'{}', entry + entry), observed_at=NOW)
     with pytest.raises(ValueError): weather_items("UK-10", RSS.replace(b'{}', entry.replace(b'weather.metoffice.gov.uk', b'example.org')), observed_at=NOW)
+    with pytest.raises(ValueError): weather_items("UK-10", RSS.replace(b'{}', entry.replace(b'https://', b'http://')), observed_at=NOW)
     with pytest.raises(ValueError): weather_items("UK-10", RSS.replace(b'Met Office warnings for UK', b'Another feed'), observed_at=NOW)
 
 

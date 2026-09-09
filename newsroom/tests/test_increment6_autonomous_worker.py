@@ -13,7 +13,12 @@ from newsroom.increment6.autonomous_worker import (
     build_autonomous_proposal,
 )
 from newsroom.increment6.execution import ExecutionBatchMember, WorkerAttempt
-from newsroom.increment6.proposals import ProposalRoute, WorkerKind
+from newsroom.increment6.dispositions import CurrentCandidateCitation
+from newsroom.increment6.proposals import (
+    HypothesisRelationship,
+    ProposalRoute,
+    WorkerKind,
+)
 from newsroom.increment6.work_items import (
     DecisionLeadBinding,
     RetrievalBindingState,
@@ -95,6 +100,8 @@ def _attempt(
     lead,
     *,
     worker_kind: WorkerKind = WorkerKind.AUTONOMOUS_DETERMINISTIC,
+    current_candidate=None,
+    revision_relationship=None,
 ) -> WorkerAttempt:
     retrieval_id = version.retrieval.context_id or version.retrieval.request_id
     retrieval_digest = (
@@ -118,7 +125,30 @@ def _attempt(
         ordinal=1,
         worker_kind=worker_kind,
         worker_version=AUTONOMOUS_WORKER_VERSION,
-        input_digest=autonomous_worker_input_digest(version, (lead,)),
+        input_digest=autonomous_worker_input_digest(
+            version,
+            (lead,),
+            current_candidate=current_candidate,
+            revision_relationship=revision_relationship,
+        ),
+    )
+
+
+def _current_candidate():
+    return CurrentCandidateCitation.create(
+        candidate_id="00000000-0000-4000-8000-000000009101",
+        candidate_version_id="00000000-0000-4000-8000-000000009102",
+        candidate_version_digest="sha256:" + "1" * 64,
+        hypothesis_id="00000000-0000-4000-8000-000000009103",
+        hypothesis_version_id="00000000-0000-4000-8000-000000009104",
+        hypothesis_version_digest="sha256:" + "2" * 64,
+        collision_namespace="native-story-candidate",
+        collision_key_digest="sha256:" + "3" * 64,
+        source_definition_id="00000000-0000-4000-8000-000000009105",
+        source_item_id="00000000-0000-4000-8000-000000009106",
+        retrieval_context_digest="sha256:" + "4" * 64,
+        authorization_receipt_digest="sha256:" + "5" * 64,
+        authorization_decision_id="00000000-0000-4000-8000-000000009107",
     )
 
 
@@ -200,3 +230,41 @@ def test_native_factual_match_stays_provisional_until_candidate_collision(
     pending_action = pending_proposal.recommendations[0].operational_action
     assert pending_action is not None
     assert pending_action.action_kind == "RETRY_RETRIEVAL"
+
+
+@pytest.mark.parametrize(
+    ("relationship", "route"),
+    (
+        (HypothesisRelationship.DEVELOPMENT_OF, ProposalRoute.DEVELOPMENT_CANDIDATE),
+        (HypothesisRelationship.SAME_STATE, ProposalRoute.ASSOCIATE_WITHOUT_CANDIDATE),
+    ),
+)
+def test_native_direct_revision_uses_authenticated_current_candidate_citation(
+    tmp_path, relationship, route
+) -> None:
+    lead, binding = _native_lead(tmp_path)
+    version = _version(binding, _retrieval(no_match=False, native=True))
+    citation = _current_candidate()
+    attempt = _attempt(
+        version,
+        lead,
+        current_candidate=citation,
+        revision_relationship=relationship,
+    )
+
+    proposal = build_autonomous_proposal(
+        work_item_version=version,
+        attempt=attempt,
+        decision_leads=(lead,),
+        current_candidate=citation,
+        revision_relationship=relationship,
+    )
+
+    recommendation = proposal.recommendations[0]
+    assert recommendation.route is route
+    assert recommendation.hypothesis.target_hypothesis_id == citation.hypothesis_id
+    assert any(
+        item.source_id == citation.citation_id
+        and item.source_digest == citation.canonical_digest
+        for item in recommendation.input_citations
+    )

@@ -32,6 +32,7 @@ from .model_usage import (
     ModelUsageAdmissionError, ModelUsageService, UsageComponents, UsageStatus,
     WorkEnvelope, WorkloadClass,
 )
+from .veto import VetoError
 
 VERSION = "hermes-native-passage-embedding-v1"
 ROUTE = "NATIVE_RETRIEVAL_EMBEDDING"
@@ -166,6 +167,8 @@ class NativePassageEmbedder:
             od_011_reference="OD-011:NATIVE_RETRIEVAL_EMBEDDING",
             subscription_cli_chat_not_cash_debited=False,
         ), provider_telemetry=telemetry)
+        if isinstance(error, VetoError):
+            raise error
         if (error is not None or vector is None or telemetry is None
                 or terminal.usage_status is not UsageStatus.REPORTED or terminal.policy_breach):
             raise NativeRetrievalHold("NATIVE_EMBEDDING_RESULT_HOLD") from error

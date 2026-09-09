@@ -54,7 +54,8 @@ def weather_items(source_id: str, raw: bytes, *, observed_at) -> tuple[SourceIte
         key = entry.findtext("guid") or link
         published = parse_source_time(entry.findtext("pubDate") or "")
         if (not title or not link or not key or key in keys or not published
-                or urlsplit(link).hostname not in {"www.metoffice.gov.uk", "weather.metoffice.gov.uk"}
+                or urlsplit(link).scheme != "https"
+                or urlsplit(link).netloc not in {"www.metoffice.gov.uk", "weather.metoffice.gov.uk"}
                 or _instant(published) > observed_at):
             raise ValueError("Met Office warning record is incomplete")
         keys.add(key)

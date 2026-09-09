@@ -39,6 +39,7 @@ class NativePipeline:
         self._intake, self._graphiti, self._discovery = source_intake, graphiti, discovery
         self._retrieval_for, self._collision, self._publish = retrieval_for, collision, publish
         self._actor, self._check, self._fence, self._clock = actor_identity_digest, stop_check, stop_fence, clock
+        self.runtime_identity_digest: str | None = None
 
     def tick(self, *, cycle_id: str) -> NativePipelineReport:
         self._check()

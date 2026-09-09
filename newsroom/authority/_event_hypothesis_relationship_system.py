@@ -35,6 +35,7 @@ from newsroom.increment6.relationships import (
     verify_relationship_assessment_replay,
 )
 from newsroom.increment6.work_items import RetrievalContextAuthority
+from newsroom.increment6.dispositions import CurrentCandidateCitationReadPort
 
 from ._capability import _CapabilityIssuer
 from ._event_hypothesis_system import _HypothesisStore
@@ -752,6 +753,7 @@ def _create_event_hypothesis_relationship_read_port(
     command_registry: CommandRegistry,
     payload_schemas: PayloadSchemaRegistry,
     clock: Callable[[], UtcTimestamp] = UtcTimestamp.now,
+    current_candidate_citations: CurrentCandidateCitationReadPort | None = None,
 ) -> EventHypothesisRelationshipReadPort:
     """Bind the private owner reads to one exact idle checked connection."""
 
@@ -771,7 +773,11 @@ def _create_event_hypothesis_relationship_read_port(
         )
         with _transaction_hypothesis_rows(connection):
             hypotheses = _HypothesisStore(
-                connection, retrieval_authority, authenticator, clock
+                connection,
+                retrieval_authority,
+                authenticator,
+                clock,
+                current_candidate_citations,
             )
         _require_checked_connection(connection, active=False)
         private = _EventHypothesisRelationshipReadAuthority(

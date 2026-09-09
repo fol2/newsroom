@@ -24,6 +24,7 @@ from newsroom.authority.migrations import (
 )
 from newsroom.authority.types import UtcTimestamp
 from newsroom.increment6.dispositions import (
+    CurrentCandidateCitationReadPort,
     DispositionJudgement,
     ProposalDisposition,
     ProposalDispositionStore,
@@ -180,6 +181,7 @@ class _HypothesisStore:
         retrieval_authority: RetrievalContextAuthority,
         authenticator: StaticAuthenticator,
         clock: Callable[[], UtcTimestamp],
+        current_candidate_citations: CurrentCandidateCitationReadPort | None = None,
     ) -> None:
         if (
             type(connection) is not sqlite3.Connection
@@ -198,7 +200,10 @@ class _HypothesisStore:
             connection.execute("PRAGMA foreign_keys=ON")
             retrieval_authority.attach(connection)
             self._dispositions = ProposalDispositionStore(
-                connection, retrieval_authority, authenticator
+                connection,
+                retrieval_authority,
+                authenticator,
+                current_candidate_citations,
             )
             self._begin()
             self._verify()
@@ -892,7 +897,7 @@ class _HypothesisStore:
                     "SELECT hypothesis_id,canonical_digest FROM event_hypothesis_versions_v2 WHERE version_id=?",
                     (value.target_version_id,),
                 ).fetchone()
-                if target_row is None or target_row != (
+                if target_row is None or tuple(target_row) != (
                     value.proposed_target_hypothesis_id,
                     value.target_version_digest,
                 ):

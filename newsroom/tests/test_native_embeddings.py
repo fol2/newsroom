@@ -10,6 +10,7 @@ from newsroom.authority.canonical import digest_canonical
 from newsroom.control_plane import native_embeddings as embedding
 from newsroom.control_plane.model_usage import InvocationEfficiencyPolicy, ModelUsageService, WorkloadClass
 from newsroom.control_plane.native_runtime import open_native_runtime
+from newsroom.control_plane.veto import VetoError
 from newsroom.increment5.native_retrieval import NativeRetrievalHold
 from newsroom.tests.test_native_runtime import _args
 
@@ -60,7 +61,7 @@ def test_one_accounted_native_embedding_with_real_sqlite_and_governed_objects(tm
     monkeypatch.setattr("urllib.request.build_opener", lambda *args: Opener())
     @contextmanager
     def fence():
-        if case == "signed_stop": raise RuntimeError("signed owner stop")
+        if case == "signed_stop": raise VetoError("signed owner stop")
         yield
     with open_native_runtime(**args) as runtime:
         engine = embedding.NativePassageEmbedder(
@@ -71,6 +72,9 @@ def test_one_accounted_native_embedding_with_real_sqlite_and_governed_objects(tm
         if case == "complete":
             reference = engine.retain(**params)
             assert reference.vector_admission_id != reference.receipt_admission_id
+        elif case == "signed_stop":
+            with pytest.raises(VetoError, match="signed owner stop"):
+                engine.retain(**params)
         else:
             with pytest.raises(NativeRetrievalHold, match="RESULT_HOLD"):
                 engine.retain(**params)

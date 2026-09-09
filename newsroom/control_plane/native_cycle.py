@@ -11,9 +11,12 @@ from typing import ContextManager, Protocol
 
 from newsroom.authority import AuthenticationProof, UtcTimestamp
 from newsroom.authority.canonical import canonical_json_bytes, validate_sha256_digest
-from newsroom.discovery import NewsLead
+from newsroom.discovery import NewsLead, NewsLeadId
+from newsroom.sources import SourceRevisionId
 from newsroom.discovery.read_models import DiscoveryCurrentStatus
 from newsroom.increment6.candidates import CandidateAdmissionRequest
+from newsroom.increment6.dispositions import CurrentCandidateCitation
+from newsroom.increment6.proposals import HypothesisRelationship
 from newsroom.increment6.collision import (
     CandidateUseOperation,
     CurrentCollisionEligibilityBlocked,
@@ -40,6 +43,14 @@ class NativeRetrievalPort(Protocol):
 
 
 class NativeCollisionRequestPort(Protocol):
+    def current_candidate_citation(
+        self,
+        lead: NewsLead,
+        retrieval: RetrievalInputBinding,
+        *,
+        proof: AuthenticationProof,
+    ) -> CurrentCandidateCitation | None: ...
+
     def request(
         self,
         triage: NativeTriageResult,
@@ -55,6 +66,58 @@ class NativeCycleOutcome:
     state: str
     triage: NativeTriageResult | None
     reason: str | None
+
+
+def _revision_successor(
+    system: object,
+    lead: NewsLead,
+    citation: CurrentCandidateCitation,
+    *,
+    proof: AuthenticationProof,
+):
+    versions = system.candidates.versions(citation.candidate_id)
+    current = versions[-1] if versions else None
+    if (
+        current is None
+        or current.version_id != citation.candidate_version_id
+        or current.canonical_digest != citation.candidate_version_digest
+        or current.governing_manifest.hypothesis_id != citation.hypothesis_id
+        or current.governing_manifest.hypothesis_version_id
+        != citation.hypothesis_version_id
+        or current.governing_manifest.hypothesis_version_digest
+        != citation.hypothesis_version_digest
+    ):
+        raise NativeCollisionHold("CURRENT_CANDIDATE_CITATION_STALE")
+    target = system.hypotheses.current(citation.hypothesis_id, proof=proof)
+    if (
+        target.version_id != citation.hypothesis_version_id
+        or target.canonical_digest != citation.hypothesis_version_digest
+    ):
+        raise NativeCollisionHold("CURRENT_HYPOTHESIS_CITATION_STALE")
+    bindings = current.governing_manifest.lead_signal_bindings
+    if len(bindings) != 1:
+        raise NativeCollisionHold("SOURCE_REVISION_RELATIONSHIP_AMBIGUOUS")
+    prior_lead = system.discovery.lead(
+        NewsLeadId.parse(bindings[0].lead_id), proof=proof
+    )
+    previous = system.sources.revision(
+        SourceRevisionId.parse(str(prior_lead.request.revision_id)), proof=proof
+    ).request
+    proposed = system.sources.revision(lead.request.revision_id, proof=proof).request
+    if (
+        str(lead.request.definition_id) != citation.source_definition_id
+        or str(lead.request.item_id) != citation.source_item_id
+        or prior_lead.request.definition_id != lead.request.definition_id
+        or prior_lead.request.item_id != lead.request.item_id
+        or proposed.prior_revision_id != previous.revision_id
+    ):
+        raise NativeCollisionHold("SOURCE_REVISION_RELATIONSHIP_AMBIGUOUS")
+    relationship = (
+        HypothesisRelationship.SAME_STATE
+        if proposed.permitted_state_digest == previous.permitted_state_digest
+        else HypothesisRelationship.DEVELOPMENT_OF
+    )
+    return current, target, relationship
 
 
 def _uuid4_for(value: object) -> str:
@@ -118,12 +181,54 @@ def advance_native_cycle(
                 )
             )
             continue
+        try:
+            citation_reader = getattr(
+                collision_requests, "current_candidate_citation", None
+            )
+            citation = (
+                None
+                if citation_reader is None
+                else citation_reader(lead, binding, proof=proof)
+            )
+            exact_replay = False
+            if citation is None:
+                current_candidate = target_hypothesis = relationship = None
+            else:
+                cited_versions = system.candidates.versions(citation.candidate_id)
+                cited_current = cited_versions[-1] if cited_versions else None
+                bindings = (
+                    () if cited_current is None
+                    else cited_current.governing_manifest.lead_signal_bindings
+                )
+                exact_replay = any(
+                    item.lead_id == str(lead.request.lead_id)
+                    and item.lead_digest == lead.canonical_digest
+                    for item in bindings
+                )
+                if exact_replay:
+                    current_candidate = cited_current
+                    citation = target_hypothesis = relationship = None
+                else:
+                    current_candidate, target_hypothesis, relationship = _revision_successor(
+                        system, lead, citation, proof=proof
+                    )
+        except NativeCollisionHold as exc:
+            outcomes.append(
+                NativeCycleOutcome(revision_id, "COLLISION_HOLD", None, exc.reason)
+            )
+            continue
         triage = advance_native_triage(
             system,
             work=work,
             scheduling_decision=schedule.decision,
             proof=proof,
+            current_candidate=citation,
+            revision_relationship=relationship,
+            expected_target_version=target_hypothesis,
         )
+        if triage.state == "SAME_STATE_ASSOCIATED":
+            outcomes.append(NativeCycleOutcome(revision_id, triage.state, triage, None))
+            continue
         if triage.state != "CANDIDATE_READY":
             outcomes.append(
                 NativeCycleOutcome(revision_id, triage.state, triage, None)
@@ -185,26 +290,40 @@ def advance_native_cycle(
             assert candidate_id is not None
             versions = system.candidates.versions(candidate_id)
             current = versions[-1] if versions else None
-            if (
+            if exact_replay:
+                if (
+                    current is None
+                    or current.governing_manifest.hypothesis_id
+                    != triage.hypothesis.hypothesis_id
+                    or current.governing_manifest.hypothesis_version_id
+                    != triage.hypothesis.version_id
+                ):
+                    outcomes.append(NativeCycleOutcome(
+                        revision_id, "COLLISION_HOLD", triage,
+                        "CURRENT_SLOT_OCCUPIED_BY_OTHER_HYPOTHESIS",
+                    ))
+                    continue
+                outcomes.append(NativeCycleOutcome(
+                    revision_id, "CANDIDATE_ADMITTED",
+                    replace(triage, state="CANDIDATE_ADMITTED", candidate=current),
+                    None,
+                ))
+                continue
+            if citation is None or (
                 current is None
-                or current.governing_manifest.hypothesis_id
-                != triage.hypothesis.hypothesis_id
+                or current.version_id != citation.candidate_version_id
+                or current.canonical_digest != citation.candidate_version_digest
+                or current.governing_manifest.hypothesis_id != triage.hypothesis.hypothesis_id
                 or current.governing_manifest.hypothesis_version_id
-                != triage.hypothesis.version_id
-                or current.governing_manifest.hypothesis_version_digest
-                != triage.hypothesis.canonical_digest
+                != triage.hypothesis.previous_version_id
             ):
                 outcomes.append(NativeCycleOutcome(
                     revision_id, "COLLISION_HOLD", triage,
                     "CURRENT_SLOT_OCCUPIED_BY_OTHER_HYPOTHESIS",
                 ))
                 continue
-            outcomes.append(NativeCycleOutcome(
-                revision_id, "CANDIDATE_ADMITTED",
-                replace(triage, state="CANDIDATE_ADMITTED", candidate=current),
-                None,
-            ))
-            continue
+        else:
+            current = None
         owner_stop_check()
         manifest = system.build_candidate_manifest(
             triage.hypothesis.version_id,
@@ -222,9 +341,9 @@ def advance_native_cycle(
             ),
             actor_identity_digest,
             f"native-candidate:{triage.hypothesis.version_id}",
-            None,
-            None,
-            0,
+            None if current is None else current.version_id,
+            None if current is None else current.canonical_digest,
+            0 if current is None else current.ordinal,
             manifest.semantic_scope_digest,
             collision_request.request_digest,
             manifest.governing_state_binding.canonical_digest,
@@ -239,6 +358,10 @@ def advance_native_cycle(
                 collision_request=collision_request,
                 collision_decision=collision,
                 candidate_request=candidate_request,
+                current_candidate=citation,
+                revision_relationship=relationship,
+                expected_target_version=target_hypothesis,
+                current_candidate_version=current,
             )
         outcomes.append(
             NativeCycleOutcome(revision_id, admitted.state, admitted, None)

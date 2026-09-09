@@ -31,6 +31,7 @@ from newsroom.control_plane.native_evidence import (
     NativeEvidenceSource,
 )
 from newsroom.control_plane.native_progress import NativeRevisionJournal
+from newsroom.control_plane.veto import VetoError
 from newsroom.increment6.candidates import StoryCandidateReadPort
 from newsroom.increment10.editorial import (
     DECISION_ADMISSION_TYPE,
@@ -40,11 +41,15 @@ from newsroom.increment10.editorial import (
     DecisionReference,
     EditorialPolicyDecision,
     NativeEditorial,
+    STORY_COMMAND,
+    STORY_EVENT,
     StoryVersionReceipt,
     StoryVersionRequest,
 )
 from newsroom.increment10.evidence import GovernedEvidencePackages
 from newsroom.increment10.private_serving import (
+    ATTEMPT_COMMAND,
+    ATTEMPT_EVENT,
     AttemptReceipt,
     EvidenceReceipt,
     PrivateServingDelivery,
@@ -446,6 +451,12 @@ class NativePublicationContinuation:
             raise NativePublicationError("native continuation Candidate differs")
         facts["candidate_version_id"] = candidate_version_id
         version = self._runtime.authority.candidate_version(candidate_version_id)
+        candidate_id = getattr(version, "candidate_id", None)
+        if type(candidate_id) is not str or not candidate_id.strip():
+            raise NativePublicationError("native continuation Candidate identity differs")
+        if facts.get("candidate_id") not in (None, candidate_id):
+            raise NativePublicationError("native continuation stable Candidate differs")
+        facts["candidate_id"] = candidate_id
 
         if "intake_receipt_id" not in facts:
             request_id = facts.get("intake_request_id")
@@ -500,6 +511,8 @@ class NativePublicationContinuation:
                     sources=self._sources[revision_id],
                     proof=self._runtime.proof,
                 )
+            except VetoError:
+                raise
             except NativeEvidenceHold as exc:
                 facts["reason"] = exc.reason_code
                 self._journal.advance(
@@ -508,8 +521,9 @@ class NativePublicationContinuation:
                 return NativePublicationContinuationResult(
                     "EVIDENCE_HOLD", exc.reason_code, None
                 )
-            except Exception:
+            except Exception as exc:
                 facts["reason"] = "ACQUISITION_RESULT_NOT_RETAINED"
+                facts["failure_class"] = type(exc).__name__
                 self._journal.advance(
                     revision_id, stage="ASSESSMENT_INTERRUPTED", facts=facts
                 )
@@ -533,6 +547,33 @@ class NativePublicationContinuation:
                 canonical_json_bytes(decision_value)
             )
 
+        expected_keys = (
+            "expected_story_version",
+            "expected_publication_version",
+            "expected_delivery_evidence_version",
+        )
+        retained_expected = tuple(key in facts for key in expected_keys)
+        if any(retained_expected) and not all(retained_expected):
+            raise NativePublicationError("native publication expected versions differ")
+        if all(retained_expected) and (
+            any(type(facts[key]) is not int or facts[key] < 0 for key in expected_keys)
+            or facts["expected_delivery_evidence_version"] != 0
+        ):
+            raise NativePublicationError("native publication expected versions differ")
+        if not all(retained_expected):
+            story_version, publication_version = self._prior_acknowledged_versions(
+                revision_id=revision_id, candidate_id=candidate_id
+            )
+            facts.update(
+                expected_story_version=story_version,
+                expected_publication_version=publication_version,
+                # Each serving attempt owns a distinct evidence aggregate.
+                expected_delivery_evidence_version=0,
+            )
+            self._journal.advance(
+                revision_id, stage="PUBLICATION_PREPARED", facts=facts
+            )
+
         if "publication_applied_at" not in facts:
             facts["publication_applied_at"] = self._clock().to_text()
             facts["publication_observed_at"] = self._clock().to_text()
@@ -542,9 +583,11 @@ class NativePublicationContinuation:
         published = self._runtime.publication.advance(
             ObjectAdmissionId.parse(str(package_id)),
             decision,
-            expected_story_version=0,
-            expected_publication_version=0,
-            expected_delivery_evidence_version=0,
+            expected_story_version=int(facts["expected_story_version"]),
+            expected_publication_version=int(facts["expected_publication_version"]),
+            expected_delivery_evidence_version=int(
+                facts["expected_delivery_evidence_version"]
+            ),
             applied_at=str(facts["publication_applied_at"]),
             observed_at=str(facts["publication_observed_at"]),
             proof=self._runtime.proof,
@@ -558,7 +601,9 @@ class NativePublicationContinuation:
         )
         try:
             acknowledged = reader.acknowledged_rows()
-            if acknowledged is None or not acknowledged.rows:
+            if acknowledged is None or tuple(
+                row.surface_kind for row in acknowledged.rows
+            ) != ("ARTICLE", "FEED_CARD"):
                 raise NativePublicationError("private delivery ACK is absent")
         finally:
             reader.close()
@@ -570,6 +615,79 @@ class NativePublicationContinuation:
         )
         self._journal.advance(revision_id, stage="ACKNOWLEDGED", facts=facts)
         return NativePublicationContinuationResult("ACKNOWLEDGED", None, published)
+
+    def _prior_acknowledged_versions(
+        self, *, revision_id: str, candidate_id: str
+    ) -> tuple[int, int]:
+        prior: list[tuple[int, int]] = []
+        for other_revision_id, progress in self._journal.progress.items():
+            if other_revision_id == revision_id or progress.get("stage") != "ACKNOWLEDGED":
+                continue
+            retained = progress.get("facts", {})
+            if retained.get("candidate_id") != candidate_id:
+                continue
+            story = self._prior_event(
+                retained.get("story_event_id"),
+                command=STORY_COMMAND,
+                event_type=STORY_EVENT,
+                aggregate_type="story",
+                aggregate_id=str(_aggregate("story", candidate_id)),
+                definition_digest=(
+                    self._runtime.policies.publication
+                    .editorial_story_command_definition_digest
+                ),
+                reason="prior Story authority differs",
+            )
+            attempt = self._prior_event(
+                retained.get("delivery_attempt_event_id"),
+                command=ATTEMPT_COMMAND,
+                event_type=ATTEMPT_EVENT,
+                aggregate_type="publication",
+                aggregate_id=str(_aggregate("publication", candidate_id)),
+                definition_digest=(
+                    self._runtime.policies.publication
+                    .serving_attempt_command_definition_digest
+                ),
+                reason="prior publication authority differs",
+            )
+            prior.append((story.aggregate_version, attempt.aggregate_version))
+        if not prior:
+            return 0, 0
+        return max(item[0] for item in prior), max(item[1] for item in prior)
+
+    def _prior_event(
+        self,
+        event_id: object,
+        *,
+        command: str,
+        event_type: str,
+        aggregate_type: str,
+        aggregate_id: str,
+        definition_digest: str,
+        reason: str,
+    ):
+        if type(event_id) is not str or not event_id:
+            raise NativePublicationError(reason)
+        try:
+            provenance = self._runtime.authority.events.provenance(
+                event_id, proof=self._runtime.proof
+            )
+        except Exception as exc:
+            raise NativePublicationError(reason) from exc
+        event = provenance.event
+        if (
+            provenance.command_definition.command_type != command
+            or provenance.command_definition.definition_digest != definition_digest
+            or event.command_definition_digest != definition_digest
+            or event.event_type != event_type
+            or event.aggregate_type != aggregate_type
+            or event.aggregate_id != aggregate_id
+            or type(event.aggregate_version) is not int
+            or event.aggregate_version <= 0
+            or (command == ATTEMPT_COMMAND and event.aggregate_version < 2)
+        ):
+            raise NativePublicationError(reason)
+        return event
 
 
 def _aggregate(kind: str, identity: str) -> AggregateId:

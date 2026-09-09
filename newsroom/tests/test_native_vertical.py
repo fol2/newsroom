@@ -226,10 +226,22 @@ def _install_boundaries(monkeypatch, counters):
                 counters["embedding"] += 1
                 return _Response(json.dumps(embedding_response()).encode(), url=url)
             counters["source"] += 1
+            successor = counters.get("document_body") != "Official deadline changed."
             return _Response(
-                ATOM
+                (
+                    ATOM.replace(
+                        b"2026-09-08T11:00:00Z", b"2026-09-08T11:05:00Z"
+                    )
+                    if successor else ATOM
+                )
                 if ".atom" in url
-                else _document(body="The official deadline changed."),
+                else _document(
+                    body=counters.get("document_body", "Official deadline changed."),
+                    updated=(
+                        "2026-09-08T11:05:00Z"
+                        if successor else "2026-09-08T11:00:00Z"
+                    ),
+                ),
                 url=url,
                 content_type=("application/atom+xml" if ".atom" in url else "application/json"),
             )
@@ -251,25 +263,37 @@ def _install_boundaries(monkeypatch, counters):
         request = json.loads(prompt)
         base = request["base_package"]
         source = request["sources"][0]
-        claim = "The official deadline changed."
-        rendered = "官方限期已經更改。"
-        claim_id = "native-claim-1"
-        semantic_id = "native-semantic-1"
-        qualification_id = "native-qualification-1"
+        headline = counters.get("document_body", "Official deadline changed.")
+        assert headline in source["body"]
+        claim = "Visa rules updated"
+        rendered_headline = (
+            "官方限期已經更改。" if headline == "Official deadline changed."
+            else "官方限期再次更改，改為較後日期。"
+        )
+        rendered = "簽證規則已更新"
+        identity = digest_bytes(canonical_json_bytes([
+            request["candidate_version"], source["source_id"],
+            source["acquisition_receipt_id"],
+        ]))
+        headline_id = f"native-headline:{identity}"
+        claim_id = f"native-claim:{identity}"
+        headline_semantic_id = f"native-headline-semantic:{identity}"
+        semantic_id = f"native-semantic:{identity}"
+        qualification_id = f"native-qualification:{identity}"
         qualification_facts = [
             ["action_class", "OFFICIAL_DEADLINE"],
             ["event_polarity", "AFFIRMED"],
             ["action_relation", "NEW_OR_CHANGED_OFFICIAL_ACTION"],
-            ["material_relation_span", claim],
-            ["reader_action", claim],
+            ["material_relation_span", headline],
+            ["reader_action", headline],
         ]
-        base.update(
-            substantive_new_information=[claim],
-            governed_claims=[{
+
+        def governed_claim(*, claim_id, text, rendered, role, semantic_id):
+            return {
                 "claim_id": claim_id,
-                "claim": claim,
+                "claim": text,
                 "passage_index": 0,
-                "supporting_excerpt": claim,
+                "supporting_excerpt": text,
                 "source_ids": [source["source_id"]],
                 "source_record_ids": [source["acquisition_receipt_id"]],
                 "source_authority_decision_ids": ["model-authority-placeholder"],
@@ -277,11 +301,11 @@ def _install_boundaries(monkeypatch, counters):
                 "dependency_evidence_ids": ["model-dependency-placeholder"],
                 "evidential_origin_ids": ["model-origin-placeholder"],
                 "authority_class": "RESPONSIBLE_PRIMARY",
-                "authority_scope": "Official deadline",
+                "authority_scope": "Official source update",
                 "status": "CONFIRMED_FACT",
                 "attribution": "Home Office",
                 "rendered_assertion_zh_hant_hk": rendered,
-                "claim_role": "HEADLINE",
+                "claim_role": role,
                 "semantic_relation_evidence_id": semantic_id,
                 "localised_factual_expressions": [],
                 "named_entity_evidence": [],
@@ -293,10 +317,23 @@ def _install_boundaries(monkeypatch, counters):
                 "originality_policy_version": ORIGINALITY_POLICY_VERSION,
                 "admitted_use": "PUBLICATION_EVIDENCE",
                 "policy_version": GOVERNED_CLAIM_POLICY_VERSION,
-            }],
+            }
+
+        base.update(
+            substantive_new_information=[headline, claim],
+            governed_claims=[
+                governed_claim(
+                    claim_id=headline_id, text=headline, rendered=rendered_headline,
+                    role="HEADLINE", semantic_id=headline_semantic_id,
+                ),
+                governed_claim(
+                    claim_id=claim_id, text=claim, rendered=rendered,
+                    role="SUBSTANTIVE", semantic_id=semantic_id,
+                ),
+            ],
             qualification_evidence=[{
                 "test": "OFFICIAL_ACTION_OR_DEADLINE",
-                "governed_claim_id": claim_id,
+                "governed_claim_id": headline_id,
                 "qualification_record_id": qualification_id,
                 "test_evidence": qualification_facts,
                 "policy_version": EVID_012_POLICY_VERSION,
@@ -305,9 +342,10 @@ def _install_boundaries(monkeypatch, counters):
             geography=["UK"],
             categories=["Politics and law"],
         )
-        assessment_records = [
-            {
-                "record_id": semantic_id,
+
+        def semantic_record(*, record_id, claim_id, text, rendered):
+            return {
+                "record_id": record_id,
                 "record_type": "SEMANTIC_RELATION_EVIDENCE",
                 "governed_claim_id": claim_id,
                 "source_modality": "ASSERTED",
@@ -315,17 +353,27 @@ def _install_boundaries(monkeypatch, counters):
                 "source_polarity": "AFFIRMED",
                 "rendered_polarity": "AFFIRMED",
                 "relation": "SEMANTICALLY_EQUIVALENT",
-                "claim_digest": digest_bytes(claim.encode()),
+                "claim_digest": digest_bytes(text.encode()),
                 "rendered_assertion_digest": digest_bytes(rendered.encode()),
-            },
+            }
+
+        assessment_records = [
+            semantic_record(
+                record_id=headline_semantic_id, claim_id=headline_id,
+                text=headline, rendered=rendered_headline,
+            ),
+            semantic_record(
+                record_id=semantic_id, claim_id=claim_id,
+                text=claim, rendered=rendered,
+            ),
             {
                 "record_id": qualification_id,
                 "record_type": "QUALIFICATION_EVIDENCE",
-                "governed_claim_id": claim_id,
+                "governed_claim_id": headline_id,
                 "test": "OFFICIAL_ACTION_OR_DEADLINE",
                 "test_evidence": qualification_facts,
                 "policy_version": EVID_012_POLICY_VERSION,
-                "evidence_span_digest": digest_bytes(claim.encode()),
+                "evidence_span_digest": digest_bytes(headline.encode()),
                 "source_record_ids": [source["acquisition_receipt_id"]],
             },
         ]
@@ -351,11 +399,18 @@ def _install_boundaries(monkeypatch, counters):
 def test_native_vertical_reaches_private_ack_and_reopens_without_provider_repeat(
     tmp_path, monkeypatch
 ):
-    counters = {"source": 0, "graphiti": 0, "embedding": 0, "assessor": 0}
+    counters = {
+        "source": 0,
+        "graphiti": 0,
+        "embedding": 0,
+        "assessor": 0,
+        "document_body": "Official deadline changed.",
+    }
     _install_boundaries(monkeypatch, counters)
+    clock = [NOW]
     arguments = {
         **_arguments(tmp_path),
-        "clock": lambda: NOW,
+        "clock": lambda: clock[0],
         "stop_check": lambda: None,
         "stop_fence": nullcontext,
     }
@@ -365,19 +420,56 @@ def test_native_vertical_reaches_private_ack_and_reopens_without_provider_repeat
 
     with native_composition.open_native_pipeline(**arguments) as pipeline:
         report = pipeline.tick(cycle_id="native-vertical-1")
-        print({key: (value["stage"], value["facts"].get("reason"), sorted(value["facts"])) for key, value in pipeline._journal.progress.items()})
-        for key, value in pipeline._journal.progress.items():
-            if value["stage"] == "PUBLICATION_STARTED":
-                pipeline._publication.advance(revision_id=key, candidate_version_id=value["facts"]["candidate_version_id"])
         assert report.revision_states == {"ACKNOWLEDGED": 2}, pipeline._journal.progress
         assert pipeline._collision._journal == arguments["private_path"]
-        assert pipeline._runtime.ingress.receipt_count == 1
+        assert pipeline._runtime.ingress.receipt_count == 2
+
+        first_versions = {
+            progress["facts"]["candidate_version_id"]:
+            pipeline._runtime.authority.candidates.load_version(
+                progress["facts"]["candidate_version_id"]
+            )
+            for progress in pipeline._journal.progress.values()
+            if "candidate_version_id" in progress["facts"]
+        }
+        first_candidates = {
+            version.candidate_id:
+            pipeline._runtime.authority.candidates.versions(version.candidate_id)
+            for version in first_versions.values()
+        }
+
+    clock[0] = NOW + timedelta(minutes=5)
+    counters["document_body"] = "Official deadline changed. It now has a later date."
+    with native_composition.open_native_pipeline(**arguments) as successor:
+        report = successor.tick(cycle_id="native-vertical-successor")
+        successor_versions = {
+            progress["facts"]["candidate_version_id"]:
+            successor._runtime.authority.candidates.load_version(
+                progress["facts"]["candidate_version_id"]
+            )
+            for progress in successor._journal.progress.values()
+            if "candidate_version_id" in progress["facts"]
+        }
+        successor_candidates = {
+            version.candidate_id:
+            successor._runtime.authority.candidates.versions(version.candidate_id)
+            for version in successor_versions.values()
+        }
+        assert successor_candidates.keys() == first_candidates.keys()
+        assert all(
+            len(successor_candidates[candidate_id])
+            == len(first_candidates[candidate_id]) + 1
+            and successor_candidates[candidate_id][-1].ordinal
+            == first_candidates[candidate_id][-1].ordinal + 1
+            for candidate_id in first_candidates
+        )
+        assert report.revision_states == {"ACKNOWLEDGED": 4}, successor._journal.progress
 
     dispatched = dict(counters)
     with native_composition.open_native_pipeline(**arguments) as reopened:
         report = reopened.tick(cycle_id="native-vertical-replay")
-        assert report.revision_states == {"ACKNOWLEDGED": 2}
-        assert reopened._runtime.ingress.receipt_count == 2
+        assert report.revision_states == {"ACKNOWLEDGED": 4}
+        assert reopened._runtime.ingress.receipt_count == 4
     assert counters["graphiti"] == dispatched["graphiti"]
     assert counters["embedding"] == dispatched["embedding"]
     assert counters["assessor"] == dispatched["assessor"]

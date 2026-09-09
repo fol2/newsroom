@@ -12,6 +12,7 @@ from pathlib import Path
 
 from newsroom.authority import AuthorityEvents, AuthenticationProof
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes, validate_sha256_digest
+from newsroom.discovery import NewsLead
 from newsroom.increment5.native_retrieval import (
     NATIVE_CONTEXT_COMMAND,
     NativeRetrievalContext,
@@ -27,6 +28,12 @@ from newsroom.increment6.collision import (
     NativeCurrentCollisionReceiptEvidence,
     TrustedCurrentCollisionAuthorityBoundary,
     TrustedCurrentCollisionAuthorityContext,
+)
+from newsroom.increment6.candidates import StoryCandidateVersion
+from newsroom.increment6.dispositions import (
+    CurrentCandidateCitation,
+    CurrentCandidateCitationReadPort,
+    _create_current_candidate_citation_read_port,
 )
 from newsroom.increment6.work_items import RetrievalInputBinding
 
@@ -114,6 +121,11 @@ class NativeCollisionAuthority:
                 "candidate_id TEXT,execution_receipt_bytes BLOB NOT NULL,"
                 "authority_receipt_bytes BLOB NOT NULL) STRICT"
             )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS native_current_candidate_citations("
+                "citation_id TEXT PRIMARY KEY,citation_digest TEXT NOT NULL UNIQUE,"
+                "citation_bytes BLOB NOT NULL) STRICT"
+            )
         self.enforcer = CurrentCollisionEffectEnforcer(
             current_authority_provider=self,
             trusted_boundary=TrustedCurrentCollisionAuthorityBoundary(
@@ -125,6 +137,62 @@ class NativeCollisionAuthority:
             ),
         )
 
+    def current_candidate_citation(
+        self,
+        lead: NewsLead,
+        retrieval: RetrievalInputBinding,
+        *,
+        proof: AuthenticationProof,
+    ) -> CurrentCandidateCitation | None:
+        """Retain the actual current stable source-item Candidate head, if any."""
+
+        if type(lead) is not NewsLead:
+            raise TypeError("native collision citation requires an exact Lead")
+        receipt, context = self._validated_context(retrieval, lead, proof=proof)
+        authorization_receipt_digest, authorization_decision_id = (
+            self._context_authorization(receipt, proof=proof)
+        )
+        namespace, key = self._collision_slot(lead)
+        _, candidate_id, version_id, version_digest, semantic_scope_digest = (
+            self._read(namespace, key)
+        )
+        if candidate_id is None:
+            return None
+        if None in (version_id, version_digest, semantic_scope_digest):
+            raise NativeCollisionHold("CURRENT_COLLISION_AUTHORITY_AMBIGUOUS")
+        version = self._read_candidate_version(version_id)
+        manifest = version.governing_manifest
+        if (
+            version.candidate_id != candidate_id
+            or version.canonical_digest != version_digest
+            or manifest.semantic_scope_digest != semantic_scope_digest
+            or manifest.collision_namespace != namespace
+            or manifest.collision_key_digest != key
+        ):
+            raise NativeCollisionHold("CURRENT_COLLISION_AUTHORITY_DIFFERS")
+        citation = CurrentCandidateCitation.create(
+            candidate_id=candidate_id,
+            candidate_version_id=version.version_id,
+            candidate_version_digest=version.canonical_digest,
+            hypothesis_id=manifest.hypothesis_id,
+            hypothesis_version_id=manifest.hypothesis_version_id,
+            hypothesis_version_digest=manifest.hypothesis_version_digest,
+            collision_namespace=namespace,
+            collision_key_digest=key,
+            source_definition_id=str(lead.request.definition_id),
+            source_item_id=str(lead.request.item_id),
+            retrieval_context_digest=context.digest,
+            authorization_receipt_digest=authorization_receipt_digest,
+            authorization_decision_id=authorization_decision_id,
+        )
+        self._retain_candidate_citation(citation)
+        return citation
+
+    def candidate_citation_read_port(self) -> CurrentCandidateCitationReadPort:
+        return _create_current_candidate_citation_read_port(
+            self._require_candidate_citation
+        )
+
     def request(
         self,
         triage: NativeTriageResult,
@@ -134,55 +202,16 @@ class NativeCollisionAuthority:
     ) -> CurrentCollisionEligibilityRequest:
         if type(triage) is not NativeTriageResult or triage.hypothesis is None:
             raise TypeError("native collision requires a retained Hypothesis")
-        if type(retrieval) is not RetrievalInputBinding or retrieval.receipt_bytes is None:
-            raise TypeError("native collision requires a retained retrieval receipt")
         if triage.work.version.retrieval != retrieval:
             raise NativeCollisionHold("RETRIEVAL_COLLISION_AUTHORITY_DIFFERS")
-        if digest_bytes(retrieval.receipt_bytes) != retrieval.context_digest:
-            raise ValueError("native collision retrieval receipt differs")
-        try:
-            receipt = NativeRetrievalContextReceipt.from_bytes(
-                retrieval.receipt_bytes
-            )
-            context = self._read_context(receipt, proof=proof)
-        except Exception as exc:
-            raise NativeCollisionHold(
-                "RETRIEVAL_COLLISION_AUTHORITY_INCOMPLETE"
-            ) from exc
         leads = triage.work.leads
-        if (
-            receipt.receipt_digest != retrieval.context_digest
-            or receipt.request_id != retrieval.request_id
-            or receipt.request_digest != retrieval.request_digest
-            or receipt.context_id != retrieval.context_id
-            or receipt.controller_principal_id
-            != self._identity.controller_principal_id
-            or receipt.authority_domain != self._identity.authority_domain
-            or receipt.authority_scope_id != self._identity.authority_scope_id
-            or receipt.outcome != "COMPLETE"
-            or context.context_id != receipt.context_id
-            or context.digest != receipt.context_object_digest
-            or context.authority_scope_id != receipt.authority_scope_id
-            or context.generation_id != receipt.generation_id
-            or context.query_valid_time != receipt.query_valid_time
-            or context.serving_time != receipt.serving_time
-            or context.outcome != "COMPLETE"
-            or context.no_match is not receipt.no_match
-            or not context.selected_documents
-            or len(leads) != 1
-            or context.lead_id != str(leads[0].request.lead_id)
-            or context.lead_digest != leads[0].canonical_digest
-        ):
+        if len(leads) != 1:
             raise NativeCollisionHold("RETRIEVAL_COLLISION_AUTHORITY_DIFFERS")
+        receipt, context = self._validated_context(retrieval, leads[0], proof=proof)
         authorization_receipt_digest, authorization_decision_id = (
             self._context_authorization(receipt, proof=proof)
         )
-        collision_namespace = "native-story-candidate"
-        collision_key_digest = digest_bytes(canonical_json_bytes({
-            "schema_version": "newsroom.increment6.native-collision-key.v2",
-            "source_definition_id": str(leads[0].request.definition_id),
-            "source_item_id": str(leads[0].request.item_id),
-        }))
+        collision_namespace, collision_key_digest = self._collision_slot(leads[0])
         watermark, candidate_id, _, _, _ = self._read(
             collision_namespace, collision_key_digest
         )
@@ -216,6 +245,104 @@ class NativeCollisionAuthority:
         request_digest = digest_bytes(request_evidence)
         self._retain_request(request_digest, request_evidence)
         return CurrentCollisionEligibilityRequest(binding, request_digest)
+
+    def _validated_context(
+        self,
+        retrieval: RetrievalInputBinding,
+        lead: NewsLead,
+        *,
+        proof: AuthenticationProof,
+    ) -> tuple[NativeRetrievalContextReceipt, NativeRetrievalContext]:
+        if type(retrieval) is not RetrievalInputBinding or retrieval.receipt_bytes is None:
+            raise TypeError("native collision requires a retained retrieval receipt")
+        if digest_bytes(retrieval.receipt_bytes) != retrieval.context_digest:
+            raise ValueError("native collision retrieval receipt differs")
+        try:
+            receipt = NativeRetrievalContextReceipt.from_bytes(retrieval.receipt_bytes)
+            context = self._read_context(receipt, proof=proof)
+        except Exception as exc:
+            raise NativeCollisionHold(
+                "RETRIEVAL_COLLISION_AUTHORITY_INCOMPLETE"
+            ) from exc
+        if (
+            receipt.receipt_digest != retrieval.context_digest
+            or receipt.request_id != retrieval.request_id
+            or receipt.request_digest != retrieval.request_digest
+            or receipt.context_id != retrieval.context_id
+            or receipt.controller_principal_id != self._identity.controller_principal_id
+            or receipt.authority_domain != self._identity.authority_domain
+            or receipt.authority_scope_id != self._identity.authority_scope_id
+            or receipt.outcome != "COMPLETE"
+            or context.context_id != receipt.context_id
+            or context.digest != receipt.context_object_digest
+            or context.authority_scope_id != receipt.authority_scope_id
+            or context.generation_id != receipt.generation_id
+            or context.query_valid_time != receipt.query_valid_time
+            or context.serving_time != receipt.serving_time
+            or context.outcome != "COMPLETE"
+            or context.no_match is not receipt.no_match
+            or not context.selected_documents
+            or context.lead_id != str(lead.request.lead_id)
+            or context.lead_digest != lead.canonical_digest
+        ):
+            raise NativeCollisionHold("RETRIEVAL_COLLISION_AUTHORITY_DIFFERS")
+        return receipt, context
+
+    @staticmethod
+    def _collision_slot(lead: NewsLead) -> tuple[str, str]:
+        return "native-story-candidate", digest_bytes(canonical_json_bytes({
+            "schema_version": "newsroom.increment6.native-collision-key.v2",
+            "source_definition_id": str(lead.request.definition_id),
+            "source_item_id": str(lead.request.item_id),
+        }))
+
+    def _read_candidate_version(self, version_id: str) -> StoryCandidateVersion:
+        uri = f"file:{self._path.resolve()}?mode=ro"
+        try:
+            with closing(sqlite3.connect(uri, uri=True, isolation_level=None)) as connection:
+                row = connection.execute(
+                    "SELECT version_bytes FROM story_candidate_admission_receipts_v2 "
+                    "WHERE version_id=?",
+                    (version_id,),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise NativeCollisionHold("CURRENT_COLLISION_AUTHORITY_UNAVAILABLE") from exc
+        if row is None:
+            raise NativeCollisionHold("CURRENT_COLLISION_AUTHORITY_DIFFERS")
+        try:
+            return StoryCandidateVersion.from_canonical_bytes(bytes(row[0]))
+        except Exception as exc:
+            raise NativeCollisionHold("CURRENT_COLLISION_AUTHORITY_DIFFERS") from exc
+
+    def _retain_candidate_citation(self, citation: CurrentCandidateCitation) -> None:
+        with self._lock, self._journal_connection() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO native_current_candidate_citations VALUES(?,?,?)",
+                (citation.citation_id, citation.canonical_digest, citation.canonical_bytes),
+            )
+            row = connection.execute(
+                "SELECT citation_digest,citation_bytes FROM native_current_candidate_citations "
+                "WHERE citation_id=?",
+                (citation.citation_id,),
+            ).fetchone()
+        if row is None or str(row[0]) != citation.canonical_digest or bytes(row[1]) != citation.canonical_bytes:
+            raise NativeCollisionHold("CURRENT_COLLISION_CITATION_DIFFERS")
+
+    def _require_candidate_citation(
+        self, citation_id: str, citation_digest: str
+    ) -> CurrentCandidateCitation:
+        with self._lock, self._journal_connection() as connection:
+            row = connection.execute(
+                "SELECT citation_digest,citation_bytes FROM native_current_candidate_citations "
+                "WHERE citation_id=?",
+                (citation_id,),
+            ).fetchone()
+        if row is None or str(row[0]) != citation_digest:
+            raise NativeCollisionHold("CURRENT_COLLISION_CITATION_DIFFERS")
+        citation = CurrentCandidateCitation.from_canonical_bytes(bytes(row[1]))
+        if citation.citation_id != citation_id or citation.canonical_digest != citation_digest:
+            raise NativeCollisionHold("CURRENT_COLLISION_CITATION_DIFFERS")
+        return citation
 
     def __call__(
         self, request: CurrentCollisionEligibilityRequest

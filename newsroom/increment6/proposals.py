@@ -75,6 +75,7 @@ class CitationSourceKind(StrEnum):
     CONTEXT_LEAD = "CONTEXT_LEAD"
     RETRIEVAL_MATCH = "RETRIEVAL_MATCH"
     RETRIEVAL_CONTRADICTION = "RETRIEVAL_CONTRADICTION"
+    CURRENT_CANDIDATE = "CURRENT_CANDIDATE"
 
 
 class HypothesisRelationship(StrEnum):
@@ -1069,6 +1070,7 @@ class TriageProposal:
                 in {
                     CitationSourceKind.RETRIEVAL_MATCH,
                     CitationSourceKind.RETRIEVAL_CONTRADICTION,
+                    CitationSourceKind.CURRENT_CANDIDATE,
                 }
                 and citation.target_hypothesis_id
                 == hypothesis.target_hypothesis_id
