@@ -25,23 +25,24 @@ from newsroom.control_plane.native_evidence import (
     NativeEvidenceError,
     NativeEvidenceSource,
     PublicationRightsAssessment,
-    SourceAuthorityAssessment,
 )
 from newsroom.control_plane.native_assessor import (
     AutonomousNativeEvidenceAssessor,
     NativeAssessmentExecution,
 )
-from newsroom.control_plane.evidence import evidence_package_value
 from newsroom.control_plane.native_publication import NativePublicationController
 from newsroom.increment10.editorial import SourceCurrentness
+from newsroom.increment10.evidence import _base_package
 from newsroom.increment10.ingress import open_evidence_intake_ingress
 from newsroom.increment10.private_serving import open_private_serving_read_port
 from newsroom.sources.record_models import SourceDefinitionVersion
 from newsroom.tests.authority_helpers import proof
 from newsroom.tests.test_graphiti_operational_readiness import _rights, _unit
 from newsroom.tests.test_increment10_editorial import _evidence_facade, _ready_package
+from newsroom.tests.test_native_assessor import _model_package_value
 from newsroom.tests.test_increment10_ingress import _candidate, _receive
 from newsroom.tests.test_increment10_private_serving import _open
+from newsroom.tests.test_native_assessor import _model_package_value
 from newsroom.tests.test_native_publication import _bindings
 
 NOW = UtcTimestamp.parse("2026-09-02T12:02:00.000000Z")
@@ -177,18 +178,6 @@ def test_independent_source_evidence_holds_then_reaches_private_ack(tmp_path) ->
         originating_report_id="origin-1",
         evidence_digest="sha256:" + "3" * 64,
     )
-    authority = tuple(
-        SourceAuthorityAssessment.create(
-            source_id=source_id,
-            governed_claim_id=item["governed_claim_id"],
-            decision="ADMITTED",
-            authority_class=item["authority_class"],
-            authority_scope=item["authority_scope"],
-            evidence_digest=digest_bytes(str(item).encode()),
-        )
-        for item in records
-        if item["record_type"] == "SOURCE_AUTHORITY_DECISION"
-    )
     currentness = SourceCurrentness(
         source_id,
         str(version_request.definition_id),
@@ -209,7 +198,6 @@ def test_independent_source_evidence_holds_then_reaches_private_ack(tmp_path) ->
         rights,
         dependency,
     )
-    authority_ids = {item.governed_claim_id: item.record_id for item in authority}
     assessed_package = replace(
         assessed_package,
         source_ids=(source_id,),
@@ -217,43 +205,44 @@ def test_independent_source_evidence_holds_then_reaches_private_ack(tmp_path) ->
             replace(
                 claim,
                 source_ids=(source_id,),
-                source_record_ids=(acquisition.receipt_digest,),
-                source_authority_decision_ids=(authority_ids[claim.claim_id],),
-                rights_decision_ids=(rights.record_id,),
-                dependency_evidence_ids=(dependency.record_id,),
             )
             for claim in assessed_package.governed_claims
         ),
     )
-    assessment_records = tuple(
-        {
-            **item,
-            **(
-                {"source_record_ids": [acquisition.receipt_digest]}
-                if "source_record_ids" in item
-                else {}
-            ),
-        }
-        for item in records
-        if item["record_type"]
-        not in {
-            "SOURCE_RECORD",
-            "SOURCE_AUTHORITY_DECISION",
-            "RIGHTS_DECISION",
-            "DEPENDENCY_EVIDENCE",
-        }
-    )
     assessor = AutonomousNativeEvidenceAssessor(
         lambda _prompt: NativeAssessmentExecution(
             canonical_json_bytes(
-                {
-                    "package": evidence_package_value(assessed_package),
-                    "assessment_records": assessment_records,
-                }
+                {"package": _model_package_value(assessed_package)}
             ).decode(),
             {},
         )
     )
+    assessed = assessor(
+        version, _base_package(assessed_package), (source,), (acquisition,)
+    )
+    assert assessed.governed_claims
+    assert all(claim.source_authority_decision_ids for claim in assessed.governed_claims)
+    assert all(
+        record["record_id"] and record.get("claim_digest")
+        for record in assessed.assessment_records
+        if record["record_type"] == "SEMANTIC_RELATION_EVIDENCE"
+    )
+    wrong_source = replace(
+        assessed_package,
+        governed_claims=(
+            replace(assessed_package.governed_claims[0], source_ids=("wrong-source",)),
+            *assessed_package.governed_claims[1:],
+        ),
+    )
+    with pytest.raises(NativeEvidenceHold, match="ASSESSOR_CLAIM_BINDING_HOLD"):
+        AutonomousNativeEvidenceAssessor(
+            lambda _prompt: NativeAssessmentExecution(
+                canonical_json_bytes(
+                    {"package": _model_package_value(wrong_source)}
+                ).decode(),
+                {},
+            )
+        )(version, _base_package(assessed_package), (source,), (acquisition,))
 
     controller = NativeEvidenceController(
         objects=system.objects,

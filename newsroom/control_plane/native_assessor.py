@@ -17,10 +17,10 @@ from newsroom.authority.canonical import (
 from newsroom.control_plane.evidence import (
     ClaimAuthorityClass,
     EVID_012_POLICY_VERSION,
-    EVIDENCE_GATE_POLICY_VERSION,
     EvidencePackage,
     GOVERNED_CLAIM_POLICY_VERSION,
     GovernedClaimStatus,
+    NAMED_ENTITY_POLICY_VERSION,
     ORIGINALITY_POLICY_VERSION,
     Evid012QualificationTest,
     evidence_package_value,
@@ -56,6 +56,7 @@ from .native_evidence import (
     rights_eligibility_digest,
     NativeEvidenceSource,
     SourceAuthorityAssessment,
+    _assessment_id,
 )
 from .writer import (
     CONT_DISABLED_CAPABILITIES,
@@ -70,7 +71,7 @@ from .writer import (
 )
 from .cycle import _complete_writer_usage
 
-VERSION = "newsroom.native-evidence-assessor.v1"
+VERSION = "newsroom.native-evidence-assessor.v2"
 ROUTE = "NATIVE_EVIDENCE_ASSESSOR"
 CONTEXT_IDENTITY = "native-evidence-exact-acquisition-v1"
 CONFIG_IDENTITY = "native-evidence-assessor-grok-hermetic-command-v1"
@@ -79,8 +80,9 @@ CONTEXT_MANIFEST_SCHEMA_VERSION = (
 )
 SYSTEM = (
     "You are a one-turn evidence extraction transform. Use only the supplied "
-    "candidate and exact source bytes. Return JSON matching the schema. Never "
-    "claim facts, translations or authority absent from an exact source excerpt."
+    "candidate and exact source bytes. Return JSON matching the schema. Translate "
+    "or localise only facts present in an exact source excerpt; never add facts or "
+    "authority absent from that evidence."
 )
 _STRING = {"type": "string"}
 _STRINGS = {"type": "array", "items": _STRING}
@@ -93,22 +95,13 @@ _PAIRS = {
 _CLAIM_FIELDS = {
     "claim_id": _STRING, "claim": _STRING, "passage_index": {"type": "integer"},
     "supporting_excerpt": _STRING, "source_ids": _STRINGS,
-    "source_record_ids": _STRINGS, "source_authority_decision_ids": _STRINGS,
-    "rights_decision_ids": _STRINGS,
-    "dependency_evidence_ids": _STRINGS, "evidential_origin_ids": _STRINGS,
-    "authority_class": {"enum": ["RESPONSIBLE_PRIMARY", "INDEPENDENT_RELIABLE"]},
-    "authority_scope": _STRING,
     "status": {"enum": [item.value for item in GovernedClaimStatus]},
-    "attribution": _STRING, "rendered_assertion_zh_hant_hk": _STRING,
+    "rendered_assertion_zh_hant_hk": _STRING,
     "claim_role": {"enum": ["HEADLINE", "SUBSTANTIVE", "CONTEXT"]},
-    "semantic_relation_evidence_id": _STRING,
     "localised_factual_expressions": _PAIRS,
-    "named_entity_evidence": {
-        "type": "array", "items": {
-            "type": "array", "items": _STRING, "minItems": 3, "maxItems": 3,
-        },
-    },
-    "named_entities": _STRINGS, "rendered_named_entities": _STRINGS,
+    "named_entities": {"type": "array", "items": {
+        "type": "array", "items": _STRING, "minItems": 2, "maxItems": 2,
+    }},
     "quotations": _STRINGS, "certainty": {"const": "CONFIRMED"},
     "originality_basis": {"const": "FACTUAL_REWRITE_REQUIRED"},
     "originality_policy_version": {"const": ORIGINALITY_POLICY_VERSION},
@@ -116,9 +109,7 @@ _CLAIM_FIELDS = {
     "policy_version": {"const": GOVERNED_CLAIM_POLICY_VERSION},
 }
 _PACKAGE_FIELDS = {
-    "candidate_id": _STRING, "hypothesis_id": _STRING, "signal_ids": _STRINGS,
-    "lead_ids": _STRINGS, "source_ids": _STRINGS, "observation_digests": _STRINGS,
-    "passages": _STRINGS, "substantive_new_information": _STRINGS,
+    "substantive_new_information": _STRINGS,
     "governed_claims": {"type": "array", "items": {
         "type": "object", "properties": _CLAIM_FIELDS,
         "required": list(_CLAIM_FIELDS), "additionalProperties": False,
@@ -127,74 +118,26 @@ _PACKAGE_FIELDS = {
         "type": "object", "properties": {
             "test": {"enum": [item.value for item in Evid012QualificationTest]},
             "governed_claim_id": _STRING,
-            "qualification_record_id": _STRING, "test_evidence": _PAIRS,
+            "test_evidence": _PAIRS,
             "policy_version": {"const": EVID_012_POLICY_VERSION},
         },
         "required": [
-            "test", "governed_claim_id", "qualification_record_id",
-            "test_evidence", "policy_version",
+            "test", "governed_claim_id", "test_evidence", "policy_version",
         ],
         "additionalProperties": False,
     }},
     "selection_rationale": _STRING, "geography": _STRINGS, "categories": _STRINGS,
-    "evidence_gate_results": _PAIRS,
-    "evidence_gate_evidence": {"type": "array", "items": {
-        "type": "object",
-        "properties": {
-            "gate": {"enum": [
-                "CLAIM_TRACEABILITY", "EVIDENCE_SUFFICIENCY", "SOURCE_AUTHORITY",
-            ]},
-            "result": {"const": "PASS"},
-            "governed_claim_ids": _STRINGS,
-            "policy_version": {"const": EVIDENCE_GATE_POLICY_VERSION},
-        },
-        "required": ["gate", "result", "governed_claim_ids", "policy_version"],
-        "additionalProperties": False,
-    }},
-    "freshness_result": _STRING, "integrity_result": _STRING,
     "explicit_exclusions": _STRINGS,
-    "resolved_evidence_records": _PAIRS,
 }
-def _record_schema(kind: str, fields: dict[str, object]) -> dict[str, object]:
-    properties = {
-        "record_id": _STRING, "record_type": {"const": kind},
-        "governed_claim_id": _STRING, **fields,
-    }
-    return {
-        "type": "object", "properties": properties,
-        "required": list(properties), "additionalProperties": False,
-    }
-
-
-_ASSESSMENT_RECORD = {"oneOf": [
-    _record_schema("SEMANTIC_RELATION_EVIDENCE", {
-        "source_modality": _STRING, "rendered_modality": _STRING,
-        "source_polarity": _STRING, "rendered_polarity": _STRING,
-        "relation": _STRING, "claim_digest": _STRING,
-        "rendered_assertion_digest": _STRING,
-    }),
-    _record_schema("QUALIFICATION_EVIDENCE", {
-        "test": _STRING,
-        "test_evidence": _PAIRS, "policy_version": _STRING,
-        "evidence_span_digest": _STRING, "source_record_ids": _STRINGS,
-    }),
-    _record_schema("NAMED_ENTITY_EVIDENCE", {
-        "text": _STRING, "rendered_text": _STRING, "entity_type": _STRING,
-        "canonical_entity_id": _STRING, "rendered_span_digest": _STRING,
-        "policy_version": _STRING, "evidence_span_digest": _STRING,
-        "source_record_ids": _STRINGS,
-    }),
-]}
 SCHEMA = {
     "type": "object",
-    "required": ["package", "assessment_records"],
+    "required": ["package"],
     "additionalProperties": False,
     "properties": {
         "package": {
             "type": "object", "properties": _PACKAGE_FIELDS,
             "required": list(_PACKAGE_FIELDS), "additionalProperties": False,
         },
-        "assessment_records": {"type": "array", "items": _ASSESSMENT_RECORD},
     },
 }
 SCHEMA_DIGEST = digest_bytes(canonical_json_bytes(SCHEMA))
@@ -206,6 +149,24 @@ INTEGRITY = (
     "NOT_TRUNCATED",
     "VERSION_UNAMBIGUOUS",
 )
+
+
+def _semantic_record_id(claim_id: str, claim: str, rendered: str) -> str:
+    return _assessment_id("SEMANTIC_RELATION", claim_id, claim, rendered)
+
+
+def _qualification_record_id(
+    claim_id: str, test: str, test_evidence: object
+) -> str:
+    return _assessment_id(
+        "QUALIFICATION", claim_id, test, digest_canonical(test_evidence)
+    )
+
+
+def _named_entity_record_id(
+    claim_id: str, text: str, entity_type: str, rendered: str
+) -> str:
+    return _assessment_id("NAMED_ENTITY", claim_id, text, entity_type, rendered)
 
 
 @dataclass(frozen=True, slots=True)
@@ -636,7 +597,8 @@ class NativeAssessmentUsage:
                     or context.get("mcp_enabled") != allocation.mcp_enabled
                     or context.get("prior_message_count")
                     != allocation.prior_message_count
-                    or context.get("output_schema_digest") != SCHEMA_DIGEST
+                    or context.get("output_schema_digest")
+                    != allocation.output_schema_digest
                     or context.get("schema_digest") != policy.output_schema_digest
                     or tuple(terminal_row[:6]) != (
                         terminal.terminal_digest,
@@ -847,31 +809,40 @@ class AutonomousNativeEvidenceAssessor:
         if type(execution) is not NativeAssessmentExecution:
             raise NativeEvidenceHold("ASSESSOR_TRANSPORT_HOLD", sources[0].unit.source_id)
         value = _document(execution.text)
-        package = _package_from_value(value.get("package"))
-        if _base_package(package) != base:
-            raise NativeEvidenceHold("ASSESSOR_BASE_BINDING_HOLD", sources[0].unit.source_id)
         source_ids = {source.unit.source_id for source in sources}
         receipt_by_source = {
             source.unit.source_id: result.receipt_digest
             for source, result in zip(sources, acquired, strict=True)
         }
-        for claim in package.governed_claims:
+        acquired_by_source = {
+            source.unit.source_id: result
+            for source, result in zip(sources, acquired, strict=True)
+        }
+        source_by_id = {source.unit.source_id: source for source in sources}
+        raw_package = value.get("package")
+        if type(raw_package) is not dict or set(raw_package) != set(_PACKAGE_FIELDS):
+            raise EvidencePackageError("assessment package fields differ")
+        authority: list[SourceAuthorityAssessment] = []
+        governed_claims: list[dict[str, object]] = []
+        raw_claims = raw_package.get("governed_claims")
+        if type(raw_claims) is not list:
+            raise EvidencePackageError("assessment claims differ")
+        for raw_claim in raw_claims:
+            if type(raw_claim) is not dict or set(raw_claim) != set(_CLAIM_FIELDS):
+                raise EvidencePackageError("assessment claim fields differ")
+            claim_source_ids = raw_claim.get("source_ids")
             if (
-                claim.passage_index >= len(acquired)
-                or claim.supporting_excerpt
-                not in acquired[claim.passage_index].body.decode("utf-8")
-                or set(claim.source_ids) - source_ids
-                or set(claim.source_record_ids)
-                != {receipt_by_source[item] for item in claim.source_ids}
+                type(claim_source_ids) is not list
+                or not claim_source_ids
+                or any(
+                    type(item) is not str or item not in source_ids
+                    for item in claim_source_ids
+                )
             ):
                 raise NativeEvidenceHold(
                     "ASSESSOR_CLAIM_BINDING_HOLD", sources[0].unit.source_id
                 )
-        source_by_id = {source.unit.source_id: source for source in sources}
-        authority = []
-        governed_claims = []
-        for claim in package.governed_claims:
-            selected = tuple(source_by_id[item] for item in claim.source_ids)
+            selected = tuple(source_by_id[item] for item in claim_source_ids)
             source_roles = tuple(
                 tuple(
                     assignment
@@ -883,21 +854,26 @@ class AutonomousNativeEvidenceAssessor:
             )
             if any(len(roles) != 1 for roles in source_roles):
                 raise NativeEvidenceHold(
-                    "SOURCE_AUTHORITY_HOLD", claim.source_ids[0]
+                    "SOURCE_AUTHORITY_HOLD", claim_source_ids[0]
                 )
             roles = tuple(items[0] for items in source_roles)
             scope = "; ".join(sorted({item.purpose for item in roles}))
+            claim_id = raw_claim.get("claim_id")
+            claim_text = raw_claim.get("claim")
+            rendered = raw_claim.get("rendered_assertion_zh_hant_hk")
+            if not all(type(item) is str for item in (claim_id, claim_text, rendered)):
+                raise EvidencePackageError("assessment claim identity differs")
             decisions = tuple(
                 SourceAuthorityAssessment.create(
                     source_id=source.unit.source_id,
-                    governed_claim_id=claim.claim_id,
+                    governed_claim_id=claim_id,
                     decision="ADMITTED",
                     authority_class="RESPONSIBLE_PRIMARY",
-                    authority_scope=role.purpose,
+                    authority_scope=scope,
                     evidence_digest=digest_bytes(
                         canonical_json_bytes(
                             {
-                                "claim_digest": digest_bytes(claim.claim.encode()),
+                                "claim_digest": digest_bytes(claim_text.encode()),
                                 "source_definition_version_digest": (
                                     source.source_version.canonical_digest
                                 ),
@@ -909,34 +885,90 @@ class AutonomousNativeEvidenceAssessor:
                         )
                     ),
                 )
-                for source, role in zip(selected, roles, strict=True)
+                for source in selected
             )
             authority.extend(decisions)
-            governed_claims.append(
-                replace(
-                    claim,
-                    source_record_ids=tuple(
-                        receipt_by_source[item] for item in claim.source_ids
-                    ),
-                    source_authority_decision_ids=tuple(
-                        item.record_id for item in decisions
-                    ),
-                    rights_decision_ids=tuple(
-                        source_by_id[item].rights.record_id
-                        for item in claim.source_ids
-                    ),
-                    dependency_evidence_ids=tuple(
-                        source_by_id[item].dependency.record_id
-                        for item in claim.source_ids
-                    ),
-                    evidential_origin_ids=tuple(
-                        source_by_id[item].dependency.evidential_origin_id
-                        for item in claim.source_ids
-                    ),
-                    authority_class=ClaimAuthorityClass.RESPONSIBLE_PRIMARY,
-                    authority_scope=scope,
+            raw_entities = raw_claim.get("named_entities")
+            if type(raw_entities) is not list or any(
+                type(item) is not list
+                or len(item) != 2
+                or any(type(part) is not str for part in item)
+                for item in raw_entities
+            ):
+                raise EvidencePackageError("assessment named entities differ")
+            governed_claims.append({
+                **raw_claim,
+                "source_record_ids": [
+                    receipt_by_source[item] for item in claim_source_ids
+                ],
+                "source_authority_decision_ids": [
+                    item.record_id for item in decisions
+                ],
+                "rights_decision_ids": [
+                    source_by_id[item].rights.record_id for item in claim_source_ids
+                ],
+                "dependency_evidence_ids": [
+                    source_by_id[item].dependency.record_id
+                    for item in claim_source_ids
+                ],
+                "evidential_origin_ids": [
+                    source_by_id[item].dependency.evidential_origin_id
+                    for item in claim_source_ids
+                ],
+                "authority_class": ClaimAuthorityClass.RESPONSIBLE_PRIMARY.value,
+                "authority_scope": scope,
+                "attribution": "; ".join(
+                    sorted(
+                        {acquired_by_source[item].publisher for item in claim_source_ids}
+                    )
+                ),
+                "semantic_relation_evidence_id": _semantic_record_id(
+                    claim_id, claim_text, rendered
+                ),
+                "named_entity_evidence": [
+                    [
+                        text,
+                        entity_type,
+                        _named_entity_record_id(claim_id, text, entity_type, text),
+                    ]
+                    for text, entity_type in raw_entities
+                ],
+                "named_entities": [item[0] for item in raw_entities],
+                "rendered_named_entities": [item[0] for item in raw_entities],
+            })
+        raw_qualifications = raw_package.get("qualification_evidence")
+        if type(raw_qualifications) is not list:
+            raise EvidencePackageError("assessment qualifications differ")
+        qualifications = []
+        for item in raw_qualifications:
+            if type(item) is not dict or set(item) != {
+                "test", "governed_claim_id", "test_evidence", "policy_version"
+            }:
+                raise EvidencePackageError("assessment qualification fields differ")
+            qualifications.append({
+                **item,
+                "qualification_record_id": _qualification_record_id(
+                    item.get("governed_claim_id"),
+                    item.get("test"),
+                    item.get("test_evidence"),
+                ),
+            })
+        package_value = evidence_package_value(base)
+        package_value.update(raw_package)
+        package_value["governed_claims"] = governed_claims
+        package_value["qualification_evidence"] = qualifications
+        package = _package_from_value(package_value)
+        if _base_package(package) != base:
+            raise NativeEvidenceHold("ASSESSOR_BASE_BINDING_HOLD", sources[0].unit.source_id)
+        for claim in package.governed_claims:
+            if (
+                claim.passage_index >= len(acquired)
+                or claim.supporting_excerpt
+                not in acquired[claim.passage_index].body.decode("utf-8")
+            ):
+                raise NativeEvidenceHold(
+                    "ASSESSOR_CLAIM_BINDING_HOLD", sources[0].unit.source_id
                 )
-            )
         assessments = tuple(
             AcquiredSourceAssessment(
                 source.unit.source_id,
@@ -958,34 +990,67 @@ class AutonomousNativeEvidenceAssessor:
             )
             for source, result in zip(sources, acquired, strict=True)
         )
-        claims_by_id = {claim.claim_id: claim for claim in governed_claims}
-        assessment_records = []
-        for record in _objects(value.get("assessment_records")):
-            if record.get("record_type") in {
-                "SOURCE_RECORD",
-                "SOURCE_AUTHORITY_DECISION",
-                "RIGHTS_DECISION",
-                "DEPENDENCY_EVIDENCE",
-            }:
-                raise NativeEvidenceHold(
-                    "ASSESSOR_AUTHORITY_RECORD_HOLD", sources[0].unit.source_id
-                )
-            if "source_record_ids" in record:
-                claim = claims_by_id.get(record.get("governed_claim_id"))
-                if claim is None:
-                    raise NativeEvidenceHold(
-                        "ASSESSOR_CLAIM_BINDING_HOLD", sources[0].unit.source_id
-                    )
-                record = {
-                    **record,
-                    "source_record_ids": list(claim.source_record_ids),
-                }
-            assessment_records.append(record)
+        claims_by_id = {claim.claim_id: claim for claim in package.governed_claims}
+        assessment_records = [
+            {
+                "record_id": claim.semantic_relation_evidence_id,
+                "record_type": "SEMANTIC_RELATION_EVIDENCE",
+                "governed_claim_id": claim.claim_id,
+                "source_modality": "ASSERTED",
+                "rendered_modality": "ASSERTED",
+                "source_polarity": "AFFIRMED",
+                "rendered_polarity": "AFFIRMED",
+                "relation": "SEMANTICALLY_EQUIVALENT",
+                "claim_digest": digest_bytes(claim.claim.encode()),
+                "rendered_assertion_digest": digest_bytes(
+                    claim.rendered_assertion_zh_hant_hk.encode()
+                ),
+            }
+            for claim in package.governed_claims
+        ]
+        assessment_records.extend(
+            {
+                "record_id": item.qualification_record_id,
+                "record_type": "QUALIFICATION_EVIDENCE",
+                "governed_claim_id": item.governed_claim_id,
+                "test": item.test.value,
+                "test_evidence": [list(value) for value in item.test_evidence],
+                "policy_version": item.policy_version,
+                "evidence_span_digest": digest_bytes(
+                    claims_by_id[item.governed_claim_id].supporting_excerpt.encode()
+                ),
+                "source_record_ids": list(
+                    claims_by_id[item.governed_claim_id].source_record_ids
+                ),
+            }
+            for item in package.qualification_evidence
+        )
+        assessment_records.extend(
+            {
+                "record_id": record_id,
+                "record_type": "NAMED_ENTITY_EVIDENCE",
+                "governed_claim_id": claim.claim_id,
+                "text": text,
+                "rendered_text": claim.rendered_named_entities[index],
+                "entity_type": entity_type,
+                "canonical_entity_id": digest_bytes(f"{entity_type}:{text}".encode()),
+                "rendered_span_digest": digest_bytes(
+                    claim.rendered_named_entities[index].encode()
+                ),
+                "policy_version": NAMED_ENTITY_POLICY_VERSION,
+                "evidence_span_digest": digest_bytes(text.encode()),
+                "source_record_ids": list(claim.source_record_ids),
+            }
+            for claim in package.governed_claims
+            for index, (text, entity_type, record_id) in enumerate(
+                claim.named_entity_evidence
+            )
+        )
         return IndependentEvidenceAssessment(
             assessments,
             tuple(authority),
             package.substantive_new_information,
-            tuple(governed_claims),
+            package.governed_claims,
             package.qualification_evidence,
             tuple(assessment_records),
             package.selection_rationale,
@@ -1012,12 +1077,6 @@ def _document(text: str) -> dict[str, object]:
     if set(value) != set(SCHEMA["required"]):
         raise NativeEvidenceError("native assessment output fields differ")
     return value
-
-
-def _objects(value: object) -> tuple[dict[str, object], ...]:
-    if type(value) is not list or any(type(item) is not dict for item in value):
-        raise NativeEvidenceError("native assessment records differ")
-    return tuple(value)
 
 
 def _dispatch_grok(prompt: str) -> NativeAssessmentExecution:

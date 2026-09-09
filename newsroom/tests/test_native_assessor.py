@@ -28,7 +28,7 @@ from newsroom.control_plane.model_usage import (
     WorkEnvelope,
     WorkloadClass,
 )
-from newsroom.increment10.evidence import _base_package
+from newsroom.increment10.evidence import EvidencePackageError, _base_package
 from newsroom.control_plane.writer import (
     CONT_DISABLED_CAPABILITIES,
     CONT_PRIMARY_COMMAND_FLAGS,
@@ -40,19 +40,60 @@ from newsroom.tests.test_increment10_ingress import _candidate
 REVISION = "1" * 40
 
 
+def _model_package_value(package):
+    value = evidence_package_value(package)
+    return {
+        "substantive_new_information": value["substantive_new_information"],
+        "governed_claims": [
+            {
+                key: item[key]
+                for key in (
+                    "claim_id", "claim", "passage_index", "supporting_excerpt",
+                    "source_ids", "status",
+                    "rendered_assertion_zh_hant_hk", "claim_role",
+                    "localised_factual_expressions", "quotations", "certainty",
+                    "originality_basis", "originality_policy_version",
+                    "admitted_use", "policy_version",
+                )
+            } | {
+                "named_entities": [
+                    [entity[0], entity[1]]
+                    for entity in item["named_entity_evidence"]
+                ]
+            }
+            for item in value["governed_claims"]
+        ],
+        "qualification_evidence": [
+            {
+                key: item[key]
+                for key in (
+                    "test", "governed_claim_id", "test_evidence", "policy_version"
+                )
+            }
+            for item in value["qualification_evidence"]
+        ],
+        "selection_rationale": value["selection_rationale"],
+        "geography": value["geography"],
+        "categories": value["categories"],
+        "explicit_exclusions": value["explicit_exclusions"],
+    }
+
+
 def test_native_assessor_schema_is_closed_and_accepts_the_exact_package_shape(tmp_path) -> None:
     connection, _port, candidate = _candidate(tmp_path)
     base = _base_package(_ready_package(candidate)[1])
+    assessed = _ready_package(candidate)[1]
     validator = Draft202012Validator(SCHEMA)
-    validator.validate({"package": evidence_package_value(base), "assessment_records": []})
-    invalid = evidence_package_value(base)
-    invalid["evidence_gate_evidence"] = [{
-        "gate": "CLAIM_TRACEABILITY", "result": "PASS",
-        "governed_claim_ids": ["claim-1"],
-        "policy_version": "newsroom.evidence-gates.v2", "invented": True,
-    }]
+    validator.validate({"package": _model_package_value(base)})
+    model_value = _model_package_value(assessed)
+    validator.validate({"package": model_value})
+    assert "source_authority_decision_ids" not in model_value["governed_claims"][0]
+    assert "semantic_relation_evidence_id" not in model_value["governed_claims"][0]
+    assert "qualification_record_id" not in model_value["qualification_evidence"][0]
+    invalid = _model_package_value(base)
+    invalid["invented"] = True
     with pytest.raises(ValidationError):
-        validator.validate({"package": invalid, "assessment_records": []})
+        validator.validate({"package": invalid})
     connection.close()
 
 
@@ -120,10 +161,7 @@ def test_native_assessor_uses_exact_candidate_and_base_without_ambient_context(
         calls.append(prompt)
         return NativeAssessmentExecution(
             canonical_json_bytes(
-                {
-                    "package": evidence_package_value(base),
-                    "assessment_records": [],
-                }
+                {"package": _model_package_value(base)}
             ).decode(),
             {
                 "usage_basis": "PROVIDER_REPORTED",
@@ -168,7 +206,7 @@ def test_native_assessor_uses_exact_candidate_and_base_without_ambient_context(
     bad = AutonomousNativeEvidenceAssessor(
         lambda _: NativeAssessmentExecution('{"package": {}}', {})
     )
-    with pytest.raises(NativeEvidenceError):
+    with pytest.raises(EvidencePackageError):
         bad(candidate, base, (), ())
     connection.close()
 
@@ -179,7 +217,7 @@ def test_native_assessor_uses_exact_candidate_and_base_without_ambient_context(
         (lambda _: (_ for _ in ()).throw(RuntimeError("provider broke")),
          "ASSESSOR_PROVIDER_FAILED"),
         (lambda _: NativeAssessmentExecution(
-            '{"assessment_records":[],"package":{}}', {
+            '{"package":{}}', {
             "usage_basis": "PROVIDER_REPORTED",
             "input_tokens": 1,
             "output_tokens": 1,
@@ -221,6 +259,11 @@ def test_native_assessor_retains_post_dispatch_failures(
         assert proof is not None
         assert proof.invocation_id == terminal["invocation_id"]
         assert proof.terminal_digest == terminal["terminal_digest"]
+        monkeypatch.setattr(
+            "newsroom.control_plane.native_assessor.SCHEMA_DIGEST",
+            "sha256:" + "9" * 64,
+        )
+        assert usage.retained_output_contract_failure(candidate) is not None
         wrong_candidate = SimpleNamespace(
             candidate_id="wrong-candidate",
             version_id=candidate.version_id,
