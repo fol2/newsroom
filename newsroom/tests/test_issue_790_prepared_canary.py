@@ -103,6 +103,15 @@ _LIVE_OBSERVED_AT = datetime(2026, 8, 31, 17, 39, 23, 783082, tzinfo=UTC)
 _PRODUCTION_DISPOSITION = "sha256:" + "cd" * 32
 
 
+@pytest.fixture(autouse=True)
+def _graphiti_test_deployment_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These fake-provider observers model a deployed tree, not pytest artefacts.
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti._graphiti_implementation_identity",
+        lambda: ("a" * 40, True),
+    )
+
+
 def _prepare(stores, *, store=None, role="preflight", **kwargs):
     return prepare_issue_790_canary(
         store=store or stores.work_unpublished,

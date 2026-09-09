@@ -7,6 +7,8 @@ from datetime import UTC, datetime, timedelta
 from email.message import Message
 from types import SimpleNamespace
 
+import pytest
+
 from newsroom.authority import ObjectAdmissionRequest, UtcTimestamp
 from newsroom.authority.canonical import canonical_json_bytes, digest_bytes
 from newsroom.authority.neo4j_fulltext_reader import (
@@ -43,6 +45,15 @@ from newsroom.tests.test_graphiti_adapter_4d_outcomes import (
 from newsroom.tests.test_native_composition import _arguments
 from newsroom.tests.test_native_embeddings import _response as embedding_response
 from newsroom.tests.test_native_source_intake import ATOM, _document, _seed_uk01
+
+
+@pytest.fixture(autouse=True)
+def _graphiti_test_deployment_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These fake-provider observers model a deployed tree, not pytest artefacts.
+    monkeypatch.setattr(
+        "newsroom.control_plane.graphiti._graphiti_implementation_identity",
+        lambda: ("a" * 40, True),
+    )
 
 
 NOW = datetime(2042, 3, 12, 12, tzinfo=UTC)
