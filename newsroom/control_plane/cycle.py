@@ -2544,7 +2544,6 @@ def _run_write_loop(
                         model=manifest.model,
                         reasoning=manifest.reasoning,
                         candidate_id=candidate.candidate_id,
-                        implementation_revision=manifest.implementation_revision,
                         config_identity=manifest.config_identity,
                     )
                     manifest_controls = (
@@ -2570,13 +2569,9 @@ def _run_write_loop(
                     if usage_policy.command_semantic_version != "UNSPECIFIED" and (
                         manifest.schema_version
                         != usage_policy.context_manifest_schema_version
-                        or manifest.command_semantic_version
-                        != usage_policy.command_semantic_version
                         or manifest.command_flags != usage_policy.command_flags
                         or manifest.disabled_capabilities
                         != usage_policy.disabled_capabilities
-                        or manifest.implementation_revision
-                        != usage_policy.implementation_revision
                         or manifest.implementation_worktree_clean is not True
                     ):
                         raise ModelUsageAdmissionError(

@@ -29,6 +29,7 @@ from newsroom.authority.policy import (
     PayloadSchemaRegistry,
 )
 from newsroom.authority.types import PayloadMode, TrustScope, UtcTimestamp
+from newsroom.increment6.dispositions import ProposalDisposition
 from newsroom.increment6.hypotheses import (
     EventHypothesisVersion,
     HypothesisSourceBinding,
@@ -927,6 +928,64 @@ class EventHypothesisRelationshipReadPort:
                 "retained relationship inputs transaction read differs"
             )
         return value
+
+    def _require_candidate_inputs_in_transaction(
+        self,
+        assessment_digests: tuple[str, ...],
+        version_ids: tuple[str, ...],
+        current_version_ids: tuple[str, ...],
+        *,
+        proof: object,
+    ) -> tuple[
+        tuple[RetainedRelationshipDecisionReceipt, ...],
+        tuple[EventHypothesisVersion, ...],
+        tuple[EventHypothesisVersion, ...],
+        tuple[ProposalDisposition, ...],
+    ]:
+        values = (assessment_digests, version_ids, current_version_ids)
+        if any(
+            type(value) is not tuple
+            or any(type(item) is not str for item in value)
+            for value in values
+        ):
+            raise RelationshipContractError(
+                "Candidate relationship input batch differs"
+            )
+        result = self.__authority.require_candidate_inputs_in_transaction(
+            *values, proof=proof
+        )
+        try:
+            differs = (
+                type(result) is not tuple
+                or len(result) != 4
+                or any(type(value) is not tuple for value in result)
+                or tuple(
+                    item.assessment.canonical_digest for item in result[0]
+                ) != assessment_digests
+                or tuple(item.version_id for item in result[1]) != version_ids
+                or tuple(item.version_id for item in result[2])
+                != current_version_ids
+                or any(
+                    type(item) is not RetainedRelationshipDecisionReceipt
+                    for item in result[0]
+                )
+                or any(
+                    type(item) is not EventHypothesisVersion
+                    for item in (*result[1], *result[2])
+                )
+                or any(type(item) is not ProposalDisposition for item in result[3])
+                or tuple(item.disposition_id for item in result[3])
+                != tuple(sorted(item.disposition_id for item in result[3]))
+            )
+        except Exception as exc:
+            raise RelationshipContractError(
+                "Candidate relationship inputs transaction read differs"
+            ) from exc
+        if differs:
+            raise RelationshipContractError(
+                "Candidate relationship inputs transaction read differs"
+            )
+        return result
 
     def require_retained_version_in_transaction(
         self, version_id: str

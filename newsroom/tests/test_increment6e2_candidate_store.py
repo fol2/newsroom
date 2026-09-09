@@ -1394,6 +1394,52 @@ def test_candidate_read_verifies_shared_upstream_once_for_all_relationships(
         handle.close()
 
 
+def test_candidate_admission_verifies_hypothesis_and_dispositions_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from newsroom.authority import _event_hypothesis_system as system
+
+    adapter = _Adapter(tmp_path)
+    location = adapter.create_location()
+    handle = adapter.open_handle(location)
+    try:
+        command = _generic("record-a")
+        admission, collision = _admission(location, command)
+        hypothesis_calls = 0
+        disposition_calls = 0
+        original_hypotheses = system._HypothesisStore._verify
+        original_dispositions = system._VERIFY_DISPOSITION_INTEGRITY
+
+        def counted_hypotheses(store):
+            nonlocal hypothesis_calls
+            hypothesis_calls += 1
+            return original_hypotheses(store)
+
+        def counted_dispositions(store) -> None:
+            nonlocal disposition_calls
+            disposition_calls += 1
+            original_dispositions(store)
+
+        monkeypatch.setattr(system._HypothesisStore, "_verify", counted_hypotheses)
+        monkeypatch.setattr(
+            system, "_VERIFY_DISPOSITION_INTEGRITY", counted_dispositions
+        )
+        retained = handle._opened().admit(
+            admission.canonical_bytes,
+            collision_request=collision,
+            proof=_ACTOR_PROOFS[command.actor],
+        )
+
+        assert (
+            retained.governing_manifest.hypothesis_version_id
+            == location.subjects["record-a"].version_id
+        )
+        assert hypothesis_calls == 1
+        assert disposition_calls == 1
+    finally:
+        handle.close()
+
+
 class _DefectiveAdapter(_Adapter):
     def __init__(self, root: Path, defect: str, case: CaseId) -> None:
         super().__init__(root)

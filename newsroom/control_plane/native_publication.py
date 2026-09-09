@@ -30,7 +30,10 @@ from newsroom.control_plane.native_evidence import (
     NativeEvidenceHold,
     NativeEvidenceSource,
 )
-from newsroom.control_plane.native_assessor import RetainedAssessorContractFailure
+from newsroom.control_plane.native_assessor import (
+    RetainedAssessorContractFailure,
+    RetainedAssessorPreDispatchFailure,
+)
 from newsroom.control_plane.native_progress import NativeRevisionJournal
 from newsroom.control_plane.veto import VetoError
 from newsroom.increment6.candidates import StoryCandidateReadPort
@@ -435,6 +438,9 @@ class NativePublicationContinuation:
         assessment_contract_failure: (
             Callable[[object], RetainedAssessorContractFailure | None] | None
         ) = None,
+        assessment_pre_dispatch_failure: (
+            Callable[[object], RetainedAssessorPreDispatchFailure | None] | None
+        ) = None,
         clock=UtcTimestamp.now,
     ) -> None:
         if (
@@ -444,6 +450,10 @@ class NativePublicationContinuation:
             or (
                 assessment_contract_failure is not None
                 and not callable(assessment_contract_failure)
+            )
+            or (
+                assessment_pre_dispatch_failure is not None
+                and not callable(assessment_pre_dispatch_failure)
             )
             or not isinstance(sources, Mapping)
             or not all(
@@ -463,6 +473,7 @@ class NativePublicationContinuation:
         self._evidence = evidence_controller
         self._sources = dict(sources)
         self._assessment_contract_failure = assessment_contract_failure
+        self._assessment_pre_dispatch_failure = assessment_pre_dispatch_failure
         self._clock = clock
 
     def advance(
@@ -509,6 +520,41 @@ class NativePublicationContinuation:
                     ),
                     assessment_failure_context_manifest_digest=(
                         retained_failure.context_manifest_digest
+                    ),
+                )
+                self._journal.advance(
+                    revision_id, stage="EVIDENCE_HOLD", facts=facts
+                )
+                return NativePublicationContinuationResult(
+                    "EVIDENCE_HOLD", facts["reason"], None
+                )
+            pre_dispatch = None
+            if (
+                facts.get("failure_class") == "NativeEvidenceError"
+                and self._assessment_pre_dispatch_failure is not None
+            ):
+                pre_dispatch = self._assessment_pre_dispatch_failure(version)
+            if (
+                type(pre_dispatch) is RetainedAssessorPreDispatchFailure
+                and pre_dispatch.candidate_id == candidate_id
+                and pre_dispatch.candidate_version_id == candidate_version_id
+                and pre_dispatch.governing_manifest_digest
+                == version.governing_manifest.canonical_digest
+            ):
+                facts.update(
+                    reason="ASSESSOR_PRE_DISPATCH_HOLD",
+                    acquisition_retryable=False,
+                    assessment_pre_dispatch_candidate_id=(
+                        pre_dispatch.candidate_id
+                    ),
+                    assessment_pre_dispatch_candidate_version_id=(
+                        pre_dispatch.candidate_version_id
+                    ),
+                    assessment_pre_dispatch_manifest_digest=(
+                        pre_dispatch.governing_manifest_digest
+                    ),
+                    assessment_pre_dispatch_inventory_digest=(
+                        pre_dispatch.envelope_inventory_digest
                     ),
                 )
                 self._journal.advance(

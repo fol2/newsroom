@@ -2,7 +2,7 @@ import io
 import json
 import sqlite3
 from contextlib import contextmanager, nullcontext
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 
 import pytest
@@ -44,7 +44,7 @@ def _response():
 
 
 @pytest.mark.parametrize("case", [
-    "complete", "bare_model", "unrelated_model", "bad_vector", "missing_usage",
+    "complete", "bare_model", "software_update", "unrelated_model", "bad_vector", "missing_usage",
     "transport_failed", "signed_stop",
 ])
 def test_one_accounted_native_embedding_with_real_sqlite_and_governed_objects(tmp_path, monkeypatch, case):
@@ -52,6 +52,11 @@ def test_one_accounted_native_embedding_with_real_sqlite_and_governed_objects(tm
     usage_path = str(tmp_path / "usage.sqlite3")
     service = ModelUsageService(usage_path)
     policy = _policy()
+    if case == "software_update":
+        policy = InvocationEfficiencyPolicy.create(**{
+            **asdict(policy), "implementation_revision": "previous-code",
+            "command_semantic_version": "previous-command",
+        })
     service.register_policy(policy)
     calls = []
     value = _response()
@@ -78,7 +83,7 @@ def test_one_accounted_native_embedding_with_real_sqlite_and_governed_objects(tm
             policy=policy, dispatch_fence=fence, implementation_worktree_clean=True, clock=lambda: NOW,
         )
         params = dict(text="Exact source passage.", passage_id="actual-passage-id", cycle_id="native-cycle-1", proof=runtime.proof)
-        if case in {"complete", "bare_model"}:
+        if case in {"complete", "bare_model", "software_update"}:
             reference = engine.retain(**params)
             assert reference.vector_admission_id != reference.receipt_admission_id
         elif case == "signed_stop":
@@ -106,7 +111,7 @@ def test_one_accounted_native_embedding_with_real_sqlite_and_governed_objects(tm
                                "dimensions": 1024, "encoding_format": "float"}
             assert "test-key" not in raw
             assert terminal["components"]["total_tokens"] == (
-                4 if case in {"complete", "bare_model", "unrelated_model", "bad_vector"} else None
+                4 if case in {"complete", "bare_model", "software_update", "unrelated_model", "bad_vector"} else None
             )
             assert terminal["dispatch_at"] is not None
         assert terminal["od_011_reference"] == "OD-011:NATIVE_RETRIEVAL_EMBEDDING"
@@ -208,28 +213,30 @@ def test_accounted_validation_failure_is_retryable_across_implementation_change(
         )
 
 
-def test_native_embedding_requires_exact_qualified_implementation_before_effects(tmp_path, monkeypatch):
-    from dataclasses import replace
+def test_native_embedding_requires_qualified_output_contract_before_effects(tmp_path, monkeypatch):
+    from dataclasses import asdict, replace
     args = _args(tmp_path, monkeypatch)
     with open_native_runtime(**args) as runtime:
         with pytest.raises(NativeRetrievalHold, match="POLICY_HOLD"):
             embedding.NativePassageEmbedder(api_key="test-key", objects=runtime.authority.objects,
                 usage=ModelUsageService(str(tmp_path / "usage.sqlite3")),
-                policy=replace(_policy(), implementation_revision="different-code"),
+                policy=replace(_policy(), output_schema_digest=digest_canonical({"different": "contract"})),
                 dispatch_fence=nullcontext, implementation_worktree_clean=True)
 
 
-def test_native_embedding_policy_resolution_binds_the_actual_implementation(tmp_path):
+def test_native_embedding_policy_resolution_uses_contract_not_software_revision(tmp_path):
     from dataclasses import asdict
     from newsroom.control_plane.model_usage import ModelUsageAdmissionError, InvocationEfficiencyPolicy
     service = ModelUsageService(str(tmp_path / "usage.sqlite3"))
     policy = _policy()
-    service.register_policy(policy)
     old = InvocationEfficiencyPolicy.create(**{**asdict(policy), "implementation_revision": "retired-implementation", "version": "retired"})
     service.register_policy(old)
+    service.register_policy(policy)
     query = dict(workload_class=policy.workload_class, provider=policy.provider,
                  route=policy.route, model=policy.model, reasoning=policy.reasoning,
                  output_schema_digest=policy.output_schema_digest)
     assert service.qualified_policy(**query, implementation_revision=policy.implementation_revision) == policy
+    assert service.qualified_policy(**query) == policy
+    assert service.qualified_policy(**query, implementation_revision="new-code") == policy
     with pytest.raises(ModelUsageAdmissionError):
-        service.qualified_policy(**query)
+        service.qualified_policy(**{**query, "output_schema_digest": digest_canonical({"wrong": "schema"})})

@@ -72,8 +72,6 @@ class NativePassageEmbedder:
             != ("openrouter", ROUTE, OPENROUTER_EMBEDDING_SLUG, "none")
             or policy.output_schema_digest != SCHEMA_DIGEST
             or policy.prompt_contract_version != VERSION
-            or policy.command_semantic_version != VERSION
-            or policy.implementation_revision != implementation_digest()
             or implementation_worktree_clean is not True
             or not policy.qualified
         ):

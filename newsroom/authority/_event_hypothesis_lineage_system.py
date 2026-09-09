@@ -305,6 +305,9 @@ class _LineageStore(_EventAuthorityStore):
         self,
         receipts: tuple[HypothesisLineageReceipt, ...],
         required_relationship_digests: tuple[str, ...] = (),
+        current_version_ids: tuple[str, ...] = (),
+        *,
+        proof: object | None = None,
     ):
         nodes = {
             node.version_id: node
@@ -321,11 +324,30 @@ class _LineageStore(_EventAuthorityStore):
                 | set(required_relationship_digests)
             )
         )
-        retained_relationships, retained_versions = (
-            self._port._require_retained_inputs_in_transaction(
-                relationship_digests, tuple(sorted(nodes))
+        if current_version_ids:
+            if proof is None:
+                raise HypothesisLineageContractError(
+                    "Candidate currentness proof is absent"
+                )
+            (
+                retained_relationships,
+                retained_versions,
+                current_versions,
+                current_dispositions,
+            ) = self._port._require_candidate_inputs_in_transaction(
+                relationship_digests,
+                tuple(sorted(nodes)),
+                current_version_ids,
+                proof=proof,
             )
-        )
+        else:
+            retained_relationships, retained_versions = (
+                self._port._require_retained_inputs_in_transaction(
+                    relationship_digests, tuple(sorted(nodes))
+                )
+            )
+            current_versions = ()
+            current_dispositions = ()
         versions = []
         for version_id, version in zip(
             sorted(nodes), retained_versions, strict=True
@@ -358,10 +380,17 @@ class _LineageStore(_EventAuthorityStore):
                 - output_ids
             )
         )
-        return roots, tuple(versions), tuple(proofs), relationships
+        return (
+            roots,
+            tuple(versions),
+            tuple(proofs),
+            relationships,
+            current_versions,
+            current_dispositions,
+        )
 
     def _full_replay(self, receipts: tuple[HypothesisLineageReceipt, ...]):
-        roots, versions, proofs, _ = self._replay_inputs(receipts)
+        roots, versions, proofs, _, _, _ = self._replay_inputs(receipts)
         return replay_hypothesis_lineage(
             receipts, initial_heads=roots, versions=versions, relationship_proofs=proofs
         )
@@ -384,7 +413,13 @@ class _LineageStore(_EventAuthorityStore):
         if orphan is not None:
             raise AuthoritySchemaError("lineage event coverage differs")
 
-    def _verify(self, required_relationship_digests: tuple[str, ...] = ()):
+    def _verify(
+        self,
+        required_relationship_digests: tuple[str, ...] = (),
+        current_version_ids: tuple[str, ...] = (),
+        *,
+        proof: object | None = None,
+    ):
         # Preserve domain replay and exact per-event authority checks without
         # rescanning unrelated source/Graphiti history on every native read.
         orphan = self._connection.execute(
@@ -394,8 +429,18 @@ class _LineageStore(_EventAuthorityStore):
         if orphan is not None:
             raise AuthoritySchemaError("lineage event coverage differs")
         history = self._history_rows()
-        roots, versions, proofs, relationships = self._replay_inputs(
-            history, required_relationship_digests
+        (
+            roots,
+            versions,
+            proofs,
+            relationships,
+            current_versions,
+            current_dispositions,
+        ) = self._replay_inputs(
+            history,
+            required_relationship_digests,
+            current_version_ids,
+            proof=proof,
         )
         replay = replay_hypothesis_lineage(
             history,
@@ -440,7 +485,16 @@ class _LineageStore(_EventAuthorityStore):
         )
         if actual != expected:
             raise AuthoritySchemaError("lineage materialised heads differ")
-        return history, roots, versions, proofs, replay, relationships
+        return (
+            history,
+            roots,
+            versions,
+            proofs,
+            replay,
+            relationships,
+            current_versions,
+            current_dispositions,
+        )
 
     def _rebuild_heads(self, replay: object) -> None:
         from newsroom.increment6.lineage import HypothesisLineageReplay
@@ -733,9 +787,67 @@ def _create_event_hypothesis_lineage_read_port(connection: sqlite3.Connection, *
     relationship_commands, relationship_schemas = merge_relationship_authority_registries(command_registry, payload_schemas)
     verifier._command_registry, verifier._payload_schemas = merge_lineage_authority_registries(relationship_commands, relationship_schemas)
 
-    def verified(required_relationship_digests: tuple[str, ...] = ()):
+    def verified(
+        required_relationship_digests: tuple[str, ...] = (),
+        current_version_ids: tuple[str, ...] = (),
+        *,
+        proof: object | None = None,
+    ):
         if not connection.in_transaction: raise HypothesisLineageContractError("lineage producer transaction is absent")
-        return verifier._verify(required_relationship_digests)
+        return verifier._verify(
+            required_relationship_digests,
+            current_version_ids,
+            proof=proof,
+        )
+
+    def candidate_inputs(version_id: str, digests: tuple[str, ...], proof: object):
+        current_ids = tuple(sorted({
+                version_id,
+                *(
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT version_id FROM event_hypothesis_lineage_heads"
+                    )
+                ),
+            }))
+        (
+            receipts,
+            roots,
+            versions,
+            proofs,
+            replay,
+            relationships,
+            current_versions,
+            current_dispositions,
+        ) = verified(digests, current_ids, proof=proof)
+        current_by_id = {item.version_id: item for item in current_versions}
+        current = current_by_id[version_id]
+        if current.version_id not in {item.version_id for item in versions}:
+            versions += (current,); roots += (HypothesisLineageHead.from_version(current),)
+            replay = replay_hypothesis_lineage(receipts, initial_heads=roots, versions=versions, relationship_proofs=proofs)
+        heads = {head.node.version_id: head for head in replay.active_heads}
+        for head in replay.active_heads:
+            retained = current_by_id[head.node.version_id]
+            if retained.canonical_digest != head.node.version_digest: raise HypothesisLineageContractError("Candidate D3 head is stale")
+        subject_head = heads.get(current.version_id)
+        if subject_head is None or subject_head.node.version_digest != current.canonical_digest:
+            raise HypothesisLineageContractError("Candidate D3 head is stale")
+        dispositions = {item.disposition_id: item for item in current_dispositions}
+        required_disposition_ids = tuple(sorted(
+            item.disposition_id for item in current.source_bindings
+        ))
+        try:
+            subject_dispositions = tuple(
+                dispositions[item] for item in required_disposition_ids
+            )
+        except KeyError as exc:
+            raise HypothesisLineageContractError(
+                "Candidate current source disposition is absent"
+            ) from exc
+        snapshot = HypothesisLineageProducerSnapshot(
+            current, receipts, roots, versions, proofs, replay, subject_head
+        )
+        return snapshot, relationships, subject_dispositions
 
     class _ReadAuthority:
         def verify_retained_integrity_in_transaction(self) -> None: verified()
@@ -744,23 +856,20 @@ def _create_event_hypothesis_lineage_read_port(connection: sqlite3.Connection, *
             return self.require_retained_relationships_in_transaction((digest,))[0]
 
         def require_retained_relationships_in_transaction(self, digests: tuple[str, ...]):
-            *_, relationships = verified(digests)
+            *_, relationships, _, _ = verified(digests)
             return tuple(relationships[digest] for digest in digests)
 
+        def require_candidate_inputs_in_transaction(
+            self, version_id: str, assessment_digest: str, *, proof: object
+        ):
+            snapshot, relationships, dispositions = candidate_inputs(
+                version_id, (assessment_digest,), proof
+            )
+            return snapshot, relationships[assessment_digest], dispositions
+
         def require_producers_in_transaction(self, version_id: str, *, proof: object):
-            receipts, roots, versions, proofs, replay, _ = verified()
-            current = port.require_current_version_in_transaction(version_id, proof=proof)
-            if current.version_id not in {item.version_id for item in versions}:
-                versions += (current,); roots += (HypothesisLineageHead.from_version(current),)
-                replay = replay_hypothesis_lineage(receipts, initial_heads=roots, versions=versions, relationship_proofs=proofs)
-            heads = {head.node.version_id: head for head in replay.active_heads}
-            for head in replay.active_heads:
-                retained = port.require_current_version_in_transaction(head.node.version_id, proof=proof)
-                if retained.canonical_digest != head.node.version_digest: raise HypothesisLineageContractError("Candidate D3 head is stale")
-            subject_head = heads.get(current.version_id)
-            if subject_head is None or subject_head.node.version_digest != current.canonical_digest:
-                raise HypothesisLineageContractError("Candidate D3 head is stale")
-            return HypothesisLineageProducerSnapshot(current, receipts, roots, versions, proofs, replay, subject_head)
+            snapshot, _, _ = candidate_inputs(version_id, (), proof)
+            return snapshot
 
     try:
         result = _compose_event_hypothesis_lineage_read_port(_ReadAuthority())
