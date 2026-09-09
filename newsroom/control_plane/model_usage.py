@@ -1850,60 +1850,57 @@ class ModelUsageService:
             envelope_rows = connection.execute(
                 "SELECT envelope_id,cycle_id,workload_class,admitted_at,"
                 "canonical_digest,record_json FROM model_work_envelopes "
-                "WHERE json_extract(record_json,'$.ingest_id')=? "
-                "AND json_type(record_json,'$.graphiti_attempt_id')='text' "
                 "ORDER BY envelope_id",
-                (ingest_id,),
             ).fetchall()
-            envelope_ids: list[str] = []
+            envelopes: dict[str, WorkEnvelope] = {}
+            envelope_ids: set[str] = set()
             for row in envelope_rows:
                 record = _object(row[5])
                 envelope = _envelope_from_record(record)
-                attempt_prefix, separator, attempt_suffix = str(
-                    envelope.graphiti_attempt_id or ""
-                ).rpartition(":")
-                if (
-                    tuple(row[index] for index in range(5))
-                    != (
-                        envelope.envelope_id,
-                        envelope.cycle_id,
-                        envelope.workload_class.value,
-                        _utc_text(envelope.admitted_at),
-                        envelope.canonical_digest,
-                    )
-                    or envelope.ingest_id != ingest_id
-                    or envelope.workload_class
-                    not in {
-                        WorkloadClass.GRAPHITI_CHAT_PRIMARY,
-                        WorkloadClass.GRAPHITI_CHAT_FALLBACK,
-                        WorkloadClass.GRAPHITI_EMBEDDING,
-                    }
-                    or separator != ":"
-                    or attempt_prefix != ingest_id
-                    or not attempt_suffix.isdigit()
-                    or int(attempt_suffix) <= 0
+                if tuple(row[index] for index in range(5)) != (
+                    envelope.envelope_id,
+                    envelope.cycle_id,
+                    envelope.workload_class.value,
+                    _utc_text(envelope.admitted_at),
+                    envelope.canonical_digest,
                 ):
                     raise ModelUsageIntegrityError(
                         "retained Graphiti envelope binding differs"
                     )
-                envelope_ids.append(envelope.envelope_id)
-            if not envelope_ids:
-                return False
-            placeholders = ",".join("?" for _ in envelope_ids)
+                envelopes[envelope.envelope_id] = envelope
+                if envelope.ingest_id == ingest_id:
+                    attempt_prefix, separator, attempt_suffix = str(
+                        envelope.graphiti_attempt_id or ""
+                    ).rpartition(":")
+                    if (
+                        envelope.workload_class
+                        not in {
+                            WorkloadClass.GRAPHITI_CHAT_PRIMARY,
+                            WorkloadClass.GRAPHITI_CHAT_FALLBACK,
+                            WorkloadClass.GRAPHITI_EMBEDDING,
+                        }
+                        or separator != ":"
+                        or attempt_prefix != ingest_id
+                        or not attempt_suffix.isdigit()
+                        or int(attempt_suffix) <= 0
+                    ):
+                        raise ModelUsageIntegrityError(
+                            "retained Graphiti envelope binding differs"
+                        )
+                    envelope_ids.add(envelope.envelope_id)
             allocation_rows = connection.execute(
                 "SELECT a.invocation_id,a.envelope_id,a.cycle_id,a.leaf_ordinal,"
                 "a.workload_class,a.policy_digest,a.provider,a.route,a.model,"
                 "a.request_digest,a.parent_invocation_id,a.allocated_at,"
-                "a.canonical_digest,a.record_json,t.terminal_digest,t.record_json "
+                "a.canonical_digest,a.record_json,t.invocation_id,t.usage_status,"
+                "t.outcome,t.failure_class,t.completed_at,t.terminal_digest,"
+                "t.record_json "
                 "FROM model_invocation_allocations a "
                 "LEFT JOIN model_invocation_terminals t "
                 "ON t.invocation_id=a.invocation_id "
-                f"WHERE a.envelope_id IN ({placeholders}) "
                 "ORDER BY a.envelope_id,a.leaf_ordinal",
-                tuple(envelope_ids),
             ).fetchall()
-            if not allocation_rows:
-                return False
+            ingest_allocation_rows: list[sqlite3.Row | tuple[object, ...]] = []
             for row in allocation_rows:
                 allocation = _allocation_from_record(_object(row[13]))
                 if tuple(row[index] for index in range(13)) != (
@@ -1924,6 +1921,22 @@ class ModelUsageService:
                     raise ModelUsageIntegrityError(
                         "retained Graphiti allocation binding differs"
                     )
+                envelope = envelopes.get(allocation.envelope_id)
+                if (
+                    envelope is None
+                    or allocation.cycle_id != envelope.cycle_id
+                ):
+                    raise ModelUsageIntegrityError(
+                        "retained Graphiti allocation envelope differs"
+                    )
+                if allocation.envelope_id in envelope_ids:
+                    ingest_allocation_rows.append(row)
+            if not envelope_ids:
+                return False
+            if not ingest_allocation_rows:
+                return False
+            for row in ingest_allocation_rows:
+                allocation = _allocation_from_record(_object(row[13]))
                 if allocation.workload_class not in {
                     WorkloadClass.GRAPHITI_CHAT_PRIMARY,
                     WorkloadClass.GRAPHITI_CHAT_FALLBACK,
@@ -1932,13 +1945,23 @@ class ModelUsageService:
                     raise ModelUsageIntegrityError(
                         "retained Graphiti allocation workload differs"
                     )
-                if row[14] is None or row[15] is None:
+                if row[14] is None or row[20] is None:
                     return False
-                terminal = _terminal_from_record(_object(row[15]))
+                terminal = _terminal_from_record(_object(row[20]))
                 components = terminal.components
+                if tuple(row[index] for index in range(14, 20)) != (
+                    terminal.invocation_id,
+                    terminal.usage_status.value,
+                    terminal.outcome,
+                    terminal.failure_class,
+                    _utc_text(terminal.completed_at),
+                    terminal.terminal_digest,
+                ):
+                    raise ModelUsageIntegrityError(
+                        "retained Graphiti terminal binding differs"
+                    )
                 if (
-                    str(row[14]) != terminal.terminal_digest
-                    or terminal.invocation_id != allocation.invocation_id
+                    terminal.invocation_id != allocation.invocation_id
                     or terminal.usage_status is not UsageStatus.REPORTED
                     or terminal.pre_dispatch_zero_proved is not True
                     or terminal.dispatch_at is not None

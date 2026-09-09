@@ -2324,6 +2324,18 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
     async def begin(guard: object) -> GuardMarker:
         retained = markers.get(guard._marker_episode_uuid)
         if retained is not None:
+            if retained.get("state") == "PENDING":
+                return GuardMarker(
+                    state=GuardState.PENDING,
+                    attempt_number=guard._attempt_number,
+                    input_digest=guard._input_digest,
+                )
+            if retained.get("state") == "RECOVERED_AMBIGUOUS":
+                return GuardMarker(
+                    state=GuardState.RECOVERED_AMBIGUOUS,
+                    attempt_number=guard._attempt_number,
+                    input_digest=guard._input_digest,
+                )
             return GuardMarker(
                 state=GuardState.COMPLETE,
                 attempt_number=guard._attempt_number,
@@ -2398,6 +2410,16 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
 
         async def _prepare_attempt(self) -> dict[str, object] | None:
             marker = await self.guard.begin()
+            if marker.state in {
+                GuardState.PENDING,
+                GuardState.RECOVERED_AMBIGUOUS,
+            }:
+                self.recovery_marker = marker
+                raise real.CombinedTemporalPipelineError(
+                    "retained marker is unresolved",
+                    graph_effect_attempted=False,
+                    rollback_completed=False,
+                )
             if marker.state is GuardState.COMPLETE:
                 return await self.guard.completed_raw_or_none()
             return None
@@ -2458,6 +2480,15 @@ def test_zero_dispatch_failure_opens_attempt_marker_and_replays_it(
     asyncio.run(run(3, allowed=False))
     assert provider_calls == 1
     assert restored[-1] == {"success": "attempt-3"}
+    asyncio.run(run(4, allowed=False))
+    assert provider_calls == 1
+    assert restored[-1] == {"success": "attempt-3"}
+
+    for state in ("PENDING", "RECOVERED_AMBIGUOUS"):
+        markers["episode-id:attempt:3"] = {"state": state}
+        with pytest.raises(real.AmbiguousEpisodeEffect):
+            asyncio.run(run(4, allowed=False))
+        assert provider_calls == 1
 
 
 def test_attempt_marker_keeps_the_stable_source_episode_identity() -> None:

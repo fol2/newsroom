@@ -676,6 +676,22 @@ async def _add_episode(
                     guard = retry_guard
                     fresh_zero_dispatch_retry = True
                 else:
+                    prior_guard = guard
+                    for prior_attempt in range(attempt_number - 1, 1, -1):
+                        candidate = runtime.MutationGuard(
+                            graphiti.driver,
+                            group_id=GRAPHITI_WORKSPACE_GROUP,
+                            episode_uuid=episode_id,
+                            marker_episode_uuid=(
+                                f"{episode_id}:attempt:{prior_attempt}"
+                            ),
+                            attempt_number=prior_attempt,
+                            input_digest=input_digest,
+                        )
+                        if await candidate.marker_exists():
+                            prior_guard = candidate
+                            break
+                    guard = prior_guard
                     retry_proof = getattr(
                         invocation_observer,
                         "allows_fresh_zero_dispatch_retry",
@@ -685,21 +701,6 @@ async def _add_episode(
                         episode_uuid=episode_id,
                         attempt_number=attempt_number,
                     ):
-                        prior_guard = guard
-                        for prior_attempt in range(attempt_number - 1, 1, -1):
-                            candidate = runtime.MutationGuard(
-                                graphiti.driver,
-                                group_id=GRAPHITI_WORKSPACE_GROUP,
-                                episode_uuid=episode_id,
-                                marker_episode_uuid=(
-                                    f"{episode_id}:attempt:{prior_attempt}"
-                                ),
-                                attempt_number=prior_attempt,
-                                input_digest=input_digest,
-                            )
-                            if await candidate.marker_exists():
-                                prior_guard = candidate
-                                break
                         prior_raw = await prior_guard.completed_raw_or_none()
                         if (
                             prior_raw is not None
