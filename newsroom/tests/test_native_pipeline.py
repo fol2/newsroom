@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+from dataclasses import replace
 from types import SimpleNamespace as NS
 
 import pytest
@@ -64,6 +65,97 @@ def test_native_pipeline_continues_multiple_revisions_and_skips_acknowledged(tmp
         pipeline.tick(cycle_id="second")
         assert tuple(calls) == first_calls + (("rights", "current"),)
         assert len(journal.units) == 2
+    finally:
+        connection.close()
+
+
+def test_native_pipeline_retains_hold_reason_then_clears_it_on_continuation(
+    tmp_path, monkeypatch,
+):
+    pipeline, journal, connection, units, calls, dispositions = _open(
+        tmp_path, monkeypatch,
+    )
+    attempts = 0
+
+    class Graphiti:
+        def advance(self, selected, *, cycle_id):
+            nonlocal attempts
+            attempts += 1
+            return tuple(
+                NativeGraphitiOutcome(
+                    unit.ingest_id,
+                    "GRAPHITI_HOLD" if attempts == 1 and unit.item_key == "two" else "GRAPHITI_COMPLETE",
+                    None if attempts == 1 and unit.item_key == "two" else unit.digest,
+                    "RIGHTS_OR_PREDECESSOR_HOLD" if attempts == 1 and unit.item_key == "two" else None,
+                )
+                for unit in selected
+            )
+
+    pipeline._graphiti = Graphiti()
+    try:
+        first = pipeline.tick(cycle_id="first-frontier")
+        assert first.revision_states == {"ACKNOWLEDGED": 1, "GRAPHITI_HOLD": 1}
+        held = journal.progress[units[1].revision_id]
+        assert held["facts"]["reason"] == "RIGHTS_OR_PREDECESSOR_HOLD"
+        assert held["facts"]["graphiti_outcomes"][0]["state"] == "GRAPHITI_HOLD"
+        first_publish = [call for call in calls if call[0] == "publish"]
+
+        dispositions[0] = ()
+        second = pipeline.tick(cycle_id="second-frontier")
+        assert second.revision_states == {"ACKNOWLEDGED": 2}
+        assert [call for call in calls if call[0] == "publish"] == first_publish + [
+            ("publish", units[1].revision_id),
+        ]
+        completed = journal.progress[units[1].revision_id]["facts"]
+        assert "reason" not in completed
+        assert "graphiti_outcomes" not in completed
+        assert completed["graphiti_receipts"][0]["state"] == "GRAPHITI_COMPLETE"
+    finally:
+        connection.close()
+
+
+def test_native_pipeline_rolls_up_multiple_holds_and_rejects_a_missing_reason(
+    tmp_path, monkeypatch,
+):
+    pipeline, journal, connection, _, _, dispositions = _open(tmp_path, monkeypatch)
+    first = replace(_native("multi"), chunk_count=2)
+    second = replace(
+        first, chunk_ordinal=2, predecessor_ingest_id=first.ingest_id,
+    )
+    dispositions[0] = (
+        NS(source_id=first.source_id, status="READY", reason_code="RETAINED", units=(first, second)),
+    )
+
+    class Graphiti:
+        missing = False
+
+        def advance(self, selected, *, cycle_id):
+            return (
+                NativeGraphitiOutcome(
+                    selected[0].ingest_id, "GRAPHITI_HOLD", None,
+                    None if self.missing else "RETRY_PENDING",
+                ),
+                NativeGraphitiOutcome(
+                    selected[1].ingest_id, "GRAPHITI_HOLD", None,
+                    "RIGHTS_OR_PREDECESSOR_HOLD",
+                ),
+            )
+
+    graphiti = Graphiti()
+    pipeline._graphiti = graphiti
+    try:
+        pipeline.tick(cycle_id="multiple-holds")
+        retained = journal.progress[first.revision_id]
+        assert retained["facts"]["reason"] == "MULTIPLE_GRAPHITI_HOLDS"
+        assert {item["reason"] for item in retained["facts"]["graphiti_outcomes"]} == {
+            "RETRY_PENDING", "RIGHTS_OR_PREDECESSOR_HOLD",
+        }
+
+        dispositions[0] = ()
+        graphiti.missing = True
+        pipeline.tick(cycle_id="missing-reason")
+        assert journal.progress[first.revision_id]["facts"]["reason"] == "ValueError"
+        assert "graphiti_receipts" not in journal.progress[first.revision_id]["facts"]
     finally:
         connection.close()
 

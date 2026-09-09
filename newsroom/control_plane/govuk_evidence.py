@@ -68,6 +68,14 @@ class GovUkManualInventory:
     sections: tuple[tuple[str, str], ...]
 
 
+class GovUkContentHold(ValueError):
+    """A valid known GOV.UK content shape needing a different coverage path."""
+
+    def __init__(self, reason_code: str) -> None:
+        self.reason_code = reason_code
+        super().__init__(reason_code)
+
+
 def _instant(value: object) -> datetime:
     if type(value) is not str:
         raise ValueError("source publication time is missing")
@@ -230,11 +238,7 @@ def parse_govuk_content_document(
         type(value) is not dict
         or value.get("base_path") != urlsplit(canonical_url).path
         or value.get("locale") != "en"
-        or value.get("document_type") not in {
-            "news_story", "press_release", "guidance", "detailed_guide",
-            "html_publication", "notice", "policy_paper", "written_statement", "guide",
-            "manual_section",
-        }
+        or type(value.get("document_type")) is not str
         or value.get("withdrawn_notice")
     ):
         raise ValueError("source schema or currentness differs")
@@ -245,11 +249,126 @@ def parse_govuk_content_document(
     title = value["title"]
     if type(title) is not str or not title.strip():
         raise ValueError("source title is absent")
-    body_text = _document_text(value)
     names = _organisation_names(value)
+    document_type = value["document_type"]
+    if document_type in {
+        "news_story", "press_release", "guidance", "detailed_guide",
+        "html_publication", "notice", "policy_paper", "written_statement",
+        "guide", "manual_section", "oral_statement", "statistics",
+    }:
+        body_text = _document_text(value)
+    elif document_type == "official_statistics_announcement":
+        _require_future_statistics_announcement(value, retrieved_at=retrieved_at)
+        raise GovUkContentHold("SOURCE_ITEM_NOT_YET_PUBLISHED")
+    elif document_type == "manual":
+        parse_govuk_manual_inventory(
+            canonical_url, raw, retrieved_at=retrieved_at,
+        )
+        raise GovUkContentHold("SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE")
+    elif document_type == "document_collection":
+        _require_link_inventory(value, key="documents")
+        raise GovUkContentHold("SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE")
+    elif document_type == "transparency":
+        _require_attachment_inventory(value)
+        raise GovUkContentHold("SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE")
+    else:
+        raise ValueError("source document type is unsupported")
     return GovUkContentDocument(
-        value["document_type"], title.strip(), body_text, publication, updated, names,
+        document_type, title.strip(), body_text, publication, updated, names,
         _exclusion_signals(value, body_text),
+    )
+
+
+def _require_future_statistics_announcement(
+    value: dict, *, retrieved_at: datetime,
+) -> None:
+    details = value.get("details")
+    if type(details) is not dict:
+        raise ValueError("source announcement details are absent")
+    release = _instant(details.get("release_timestamp"))
+    if (
+        details.get("state") not in {"confirmed", "provisional"}
+        or type(details.get("display_date")) is not str
+        or not details["display_date"].strip()
+        or release <= retrieved_at
+    ):
+        raise ValueError("source announcement is not a future release")
+
+
+def _require_link_inventory(value: dict, *, key: str) -> None:
+    links = value.get("links")
+    entries = links.get(key) if type(links) is dict else None
+    if type(entries) is not list or not entries:
+        raise ValueError("source child inventory is absent")
+    paths = []
+    for entry in entries:
+        if type(entry) is not dict:
+            raise ValueError("source child inventory differs")
+        path, title = entry.get("base_path"), entry.get("title")
+        if (
+            type(path) is not str
+            or not path.startswith("/")
+            or path.startswith("//")
+            or "\\" in path
+            or any(part in {".", ".."} for part in path.split("/"))
+            or type(title) is not str
+            or not title.strip()
+        ):
+            raise ValueError("source child identity differs")
+        paths.append(path)
+    if len(set(paths)) != len(paths):
+        raise ValueError("source child inventory is incomplete")
+
+
+def _require_attachment_inventory(value: dict) -> None:
+    details = value.get("details")
+    links = value.get("links")
+    attachments = details.get("attachments") if type(details) is dict else None
+    children = links.get("children") if type(links) is dict else None
+    inventories = []
+    if type(attachments) is list and attachments:
+        inventories.append(attachments)
+    if type(children) is list and children:
+        inventories.append(children)
+    if not inventories:
+        raise ValueError("source attachment inventory is absent")
+    for entries in inventories:
+        paths = []
+        for entry in entries:
+            if type(entry) is not dict:
+                raise ValueError("source attachment inventory differs")
+            path = entry.get("url") or entry.get("base_path")
+            title = entry.get("title")
+            if (
+                type(path) is not str
+                or not _safe_attachment_location(path)
+                or type(title) is not str
+                or not title.strip()
+            ):
+                raise ValueError("source attachment identity differs")
+            paths.append(path)
+        if len(set(paths)) != len(paths):
+            raise ValueError("source attachment inventory is incomplete")
+
+
+def _safe_attachment_location(value: str) -> bool:
+    if value.startswith("/"):
+        path = value
+    else:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc != "assets.publishing.service.gov.uk"
+            or parsed.query
+            or parsed.fragment
+        ):
+            return False
+        path = parsed.path
+    return (
+        path.startswith("/")
+        and not path.startswith("//")
+        and "\\" not in path
+        and all(part not in {".", ".."} for part in path.split("/"))
     )
 
 

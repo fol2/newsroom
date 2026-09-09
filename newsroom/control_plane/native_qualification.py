@@ -7,6 +7,7 @@ import sqlite3
 from collections import Counter
 from dataclasses import dataclass
 
+from newsroom.authority import ObjectAccessDecisionId, ObjectAdmissionId
 from newsroom.authority.canonical import (
     canonical_json_bytes,
     digest_bytes,
@@ -15,6 +16,7 @@ from newsroom.authority.canonical import (
 )
 from newsroom.increment9.proving import SOURCE_IDS
 
+from .govuk_evidence import _api_url
 from .model_usage import CONSERVATIVE_DISPOSITION_SCHEMA_VERSION, WorkloadClass
 from .native_progress import LAND, PORTFOLIO, STATE, NativeRevisionJournal
 from .store import LEDGER_GENESIS, append_ledger
@@ -50,6 +52,11 @@ _RETAINED_RIGHTS_HOLDS = frozenset({
     "COMPUTER_ANALYSIS_PERMISSION_NOT_RETAINED",
     "MEDIA_REUSE_PERMISSION_SCOPE_NOT_ESTABLISHED",
     "NON_COMMERCIAL_INTERNAL_USE_ONLY",
+})
+_RETAINED_CONTENT_HOLDS = frozenset({
+    "SOURCE_ITEM_NOT_YET_PUBLISHED",
+    "SOURCE_ITEM_CHILD_COVERAGE_INCOMPLETE",
+    "SOURCE_ITEM_ATTACHMENT_COVERAGE_INCOMPLETE",
 })
 
 
@@ -184,6 +191,7 @@ def _portfolio(pipeline: dict) -> tuple[tuple[dict, ...], dict[str, int]]:
             or (
                 item["status"] == "HOLD"
                 and item["reason_code"] not in _RETAINED_RIGHTS_HOLDS
+                and item["reason_code"] != "SOURCE_ITEMS_HELD"
             )
             or type(item["reason_code"]) is not str
             or not item["reason_code"]
@@ -208,6 +216,7 @@ def _portfolio(pipeline: dict) -> tuple[tuple[dict, ...], dict[str, int]]:
             )
         ):
             raise NativeQualificationError("native source disposition differs")
+        _source_item_holds(item)
         by_source[source_id] = item
     if tuple(item["source_id"] for item in sources) != SOURCE_IDS:
         raise NativeQualificationError("native source disposition order differs")
@@ -227,6 +236,36 @@ def _portfolio(pipeline: dict) -> tuple[tuple[dict, ...], dict[str, int]]:
     ):
         raise NativeQualificationError("native revision terminal inventory differs")
     return tuple(sources), states
+
+
+def _source_item_holds(item: dict) -> None:
+    """Keep evidenced content holds local; never relabel them as ready revisions."""
+    holds = item["item_holds"]
+    if item["reason_code"] != "SOURCE_ITEMS_HELD":
+        if holds:
+            raise NativeQualificationError("native source item hold disposition differs")
+        return
+    if (
+        item["status"] != "HOLD"
+        or item["source_id"] not in {"UK-01", "UK-02", "UK-03", "UK-05"}
+        or not holds
+        or len({url for url, _ in holds}) != len(holds)
+    ):
+        raise NativeQualificationError("native source item hold inventory differs")
+    for url, reason in holds:
+        try:
+            if reason not in _RETAINED_CONTENT_HOLDS:
+                raise ValueError("unclassified content hold")
+            endpoint = _api_url(url)
+            observations = [value for value in item["observations"] if value[0] == endpoint]
+            if len(observations) != 1:
+                raise ValueError("exact source observation is absent")
+            _, digest, admission, access = observations[0]
+            validate_sha256_digest(digest)
+            ObjectAdmissionId.parse(admission)
+            ObjectAccessDecisionId.parse(access)
+        except (TypeError, ValueError) as exc:
+            raise NativeQualificationError("native source item hold evidence differs") from exc
 
 
 def _revision_inventory(
